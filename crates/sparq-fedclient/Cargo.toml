@@ -101,3 +101,14 @@ ureq = { version = "3", default-features = false, features = ["rustls", "platfor
 [dev-dependencies]
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine", features = ["service"] }
+# [OPUS-4.8] sq-my8wd.2: stand up a REAL in-process `sparq-server` loopback endpoint on
+# `127.0.0.1:0` in `tests/endpoint_loopback_result_equals_local.rs` (gated on `fedclient`), so
+# the `Endpoint` SRJ adapter + `discovery` are driven over the crate's own native `ureq` HTTP
+# transport — closing the honest gap that the other result-equals-local tests only exercise the
+# in-memory `Transport` seam. TEST-ONLY: dev-deps add NO edge to the shipped crate and are
+# EXCLUDED from the boundary guard (`cargo tree -e no-dev`), so the one-way
+# core <- engine <- client arrow is unaffected (`sparq-server` never depends on `sparq-fedclient`).
+# `server` (not `service`) is all the loopback needs — it just answers `/sparql`; the fedclient
+# does its own outbound HTTP. `tokio` runs the loopback accept loop on a background thread.
+sparq-server = { path = "../sparq-server", default-features = false, features = ["server"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }

@@ -95,7 +95,7 @@ cargo run --release -p sparq-hdt --example bench_load -- --json /tmp/hdt.json
 ## 📚 Learn more
 
 - Skill: `skills/hdt-format/SKILL.md`
-- Perf dashboard: <https://jeswr.github.io/sparq/dev/bench>
+- Perf dashboard: <https://sparq.jeswr.org/dev/bench>
 - Not yet supported / open work: `bd list -l area:sparq-hdt` (the decode-only ingest fast
   path; upstream notes in `UPSTREAM.md`).
 

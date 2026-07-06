@@ -7,7 +7,7 @@
 // interning fresh names back into the Dict) means normalization never pollutes the store's
 // dictionary, and the saturation runs over dense `u32` keys.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::Id;
 
 /// A `Concept` is a node in the internal classification index space. It is NOT a dict id —
@@ -45,12 +45,31 @@ pub enum RoleAxiom {
 pub struct Names {
     /// `dict Id -> internal Concept` for named classes.
     by_dict: FxHashMap<Id, Concept>,
-    /// `internal Concept -> dict Id` for named classes (None for ⊤/⊥/fresh names).
+    /// `internal Concept -> dict Id` for named classes (None for ⊤/⊥/fresh names/nominals).
     to_dict: Vec<Option<Id>>,
     /// `dict Id -> internal Role` for named object properties.
     role_by_dict: FxHashMap<Id, Role>,
     /// `internal Role -> dict Id`.
     role_to_dict: Vec<Id>,
+    /// [FABLE-5] sq-pbz04.2.1: `individual dict Id -> internal Concept` for nominals `{a}`
+    /// (`owl:oneOf` singletons / `owl:hasValue` values). SEPARATE from `by_dict` so a punned
+    /// id (used both as a class and as an individual) yields two distinct concepts, matching
+    /// OWL 2 direct-semantics punning. A nominal concept has NO dict id in `to_dict` (it must
+    /// never be emitted as a named class in the subsumption lattice).
+    nominal_by_dict: FxHashMap<Id, Concept>,
+    /// The set of concepts that are nominals (for the CR6 saturation pass), plus the mint-order
+    /// list used as the roots of the "reachable from a nominal" non-emptiness search.
+    nominal_set: FxHashSet<Concept>,
+    nominal_list: Vec<Concept>,
+    /// [OPUS-4.8] sq-pbz04.2.6: `role -> ∃role.Self` self-restriction concept (`owl:hasSelf`).
+    /// A self-concept is a basic atom with NO dict id (like a nominal, it must never surface as a
+    /// named class); the completion rules CR-Self-1/CR-Self-2 (see `classify.rs`) connect its
+    /// membership `∃r.Self ∈ S(X)` to the reflexive role link `(X,X) ∈ R(r)`.
+    self_by_role: FxHashMap<Role, Concept>,
+    /// `self-concept -> its role` — the inverse of `self_by_role`, driving the CR-Self-1 worklist
+    /// trigger (a derived `∃r.Self ∈ S(X)` must add the self-loop link) and the ABox self-loop
+    /// realisation readoff.
+    self_of_concept: FxHashMap<Concept, Role>,
 }
 
 /// The internal concept index for ⊤ (`owl:Thing`).
@@ -62,10 +81,8 @@ impl Names {
     /// A fresh table pre-seeded with ⊤ at [`TOP`] and ⊥ at [`BOTTOM`].
     pub fn new() -> Names {
         Names {
-            by_dict: FxHashMap::default(),
             to_dict: vec![None, None],
-            role_by_dict: FxHashMap::default(),
-            role_to_dict: Vec::new(),
+            ..Names::default()
         }
     }
 
@@ -119,9 +136,108 @@ impl Names {
         c
     }
 
+    /// [FABLE-5] sq-pbz04.2.1: maps an individual's dict id to its NOMINAL concept `{a}`,
+    /// minting one on first sight. The same individual (dict id) always yields the same
+    /// concept, so `owl:hasValue :a` and `owl:someValuesFrom [owl:oneOf (:a)]` unify on one
+    /// filler. The concept carries NO dict id (`dict_of` returns `None`): a nominal is not a
+    /// named class and must never surface in the emitted `rdfs:subClassOf` lattice.
+    pub fn nominal(&mut self, dict_id: Id) -> Concept {
+        if let Some(&c) = self.nominal_by_dict.get(&dict_id) {
+            return c;
+        }
+        let c = self.to_dict.len() as Concept;
+        self.to_dict.push(None);
+        self.nominal_by_dict.insert(dict_id, c);
+        self.nominal_set.insert(c);
+        self.nominal_list.push(c);
+        c
+    }
+
+    /// Whether `c` is a nominal concept `{a}` (the CR6 trigger test).
+    pub fn is_nominal(&self, c: Concept) -> bool {
+        self.nominal_set.contains(&c)
+    }
+
+    /// Whether ANY nominal was minted — the O(1) fast-path guard that keeps the CR6 pass a
+    /// no-op (zero scans) on nominal-free ontologies, so the SNOMED/GO-shaped scaling bound
+    /// is unaffected by this rule.
+    pub fn has_nominals(&self) -> bool {
+        !self.nominal_list.is_empty()
+    }
+
+    /// The minted nominal concepts, in mint order — the roots of CR6's "reachable from a
+    /// nominal ⇒ provably non-empty" search (a nominal `{a}` always denotes the non-empty
+    /// set containing `a`).
+    pub fn nominal_concepts(&self) -> &[Concept] {
+        &self.nominal_list
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.6: maps a role to its self-restriction concept `∃r.Self`
+    /// (`owl:hasSelf`), minting one on first sight. Carries NO dict id (`dict_of` returns
+    /// `None`): a self-concept is a basic atom in the EL++ normal form, never a named class in
+    /// the emitted lattice. The same role always yields the same concept, so `∃r.Self` on both
+    /// sides of a `⊑` unifies on one atom (CR1 then threads `∃r.Self ⊑ D`, i.e. CR-Self-2).
+    pub fn self_concept(&mut self, role: Role) -> Concept {
+        if let Some(&c) = self.self_by_role.get(&role) {
+            return c;
+        }
+        let c = self.to_dict.len() as Concept;
+        self.to_dict.push(None);
+        self.self_by_role.insert(role, c);
+        self.self_of_concept.insert(c, role);
+        c
+    }
+
+    /// The role `r` iff `c` is the self-restriction concept `∃r.Self` — the CR-Self-1 trigger
+    /// test (a derived `∃r.Self ∈ S(X)` fires the reflexive link `(X,X) ∈ R(r)`); `None`
+    /// otherwise. Also drives the ABox self-loop realisation readoff (`a r a`).
+    pub fn self_role(&self, c: Concept) -> Option<Role> {
+        self.self_of_concept.get(&c).copied()
+    }
+
+    /// Whether ANY self-restriction was minted — the O(1) fast-path guard that keeps the CR-Self
+    /// rules a no-op (zero cost) on `owl:hasSelf`-free ontologies, so hasSelf-free classification
+    /// is byte-identical in behaviour AND cost to the pre-CR-Self path.
+    pub fn has_self_restrictions(&self) -> bool {
+        !self.self_by_role.is_empty()
+    }
+
     /// The dict id of a concept, if it is a NAMED class (⊤/⊥/fresh names return `None`).
     pub fn dict_of(&self, c: Concept) -> Option<Id> {
         self.to_dict.get(c as usize).copied().flatten()
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): every minted nominal as `(individual dict id, concept)`.
+    /// The bijection `nominal_by_dict` drives the ABox realisation readoff (per-individual typing
+    /// plus the concept→individual reverse map for `owl:sameAs`); it spans BOTH the
+    /// assertion-minted individuals (`abox`) and any TBox `owl:hasValue`/singleton-`owl:oneOf`
+    /// nominals.
+    #[cfg(feature = "abox")]
+    pub fn nominals(&self) -> impl Iterator<Item = (Id, Concept)> + '_ {
+        self.nominal_by_dict.iter().map(|(&id, &c)| (id, c))
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): the internal role for `dict_id` IF one was already
+    /// minted, WITHOUT minting a new one (unlike [`Names::role`]). Used to append the
+    /// `owl:bottomObjectProperty` empty-role axiom only when that property actually occurs.
+    #[cfg(feature = "abox")]
+    pub fn role_of(&self, dict_id: Id) -> Option<Role> {
+        self.role_by_dict.get(&dict_id).copied()
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.6 (`abox`): the source dict id of a role, if it is a NAMED object
+    /// property. Used by the self-loop realisation readoff (`abox`) to name the predicate of a
+    /// derived `a r a` assertion, and by the role-lattice readoff (`rbox`, sq-pbz04.2.7) to map
+    /// role-index pairs back to dict ids for `rdfs:subPropertyOf` emission. A fresh anonymous
+    /// chain role (`rbox`, sentinel `Id::MAX`) has no dict id and returns `None`; a
+    /// self-restriction's role is always a named property, so this resolves for every self-loop
+    /// the `abox` readoff emits.
+    #[cfg(any(feature = "abox", feature = "rbox"))]
+    pub fn role_dict_of(&self, r: Role) -> Option<Id> {
+        match self.role_to_dict.get(r as usize).copied() {
+            Some(id) if id != Id::MAX => Some(id),
+            _ => None,
+        }
     }
 
     /// The number of concepts minted so far (the dense index upper bound).

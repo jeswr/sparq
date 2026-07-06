@@ -35,6 +35,16 @@
       "had_integration_dir": true,
       "min_tests": 238
     },
+    "sparq-engine-serialize": {
+      "had_integration_dir": false,
+      "min_tests": 103,
+      "note": "[OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix moved here with its 105 inline #[test]s (all in the src `serialize` module `mod tests`; the crate has no tests/ integration dir). Floor 103 leaves a small margin (mirrors the sparq-substrate style). Brought under the presence gate so the moved writer tests cannot silently vanish."
+    },
+    "sparq-engine-service": {
+      "had_integration_dir": false,
+      "min_tests": 62,
+      "note": "[OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 SERVICE client moved here with its 64 inline #[test]s (all in the src `service` module `mod tests`; the crate has no tests/ integration dir). Floor 62 leaves a small margin (mirrors the sibling sparq-engine-serialize style). Brought under the presence gate so the moved SRJ/SRX-parse / egress-policy / bound-join / transport-timeout tests cannot silently vanish. The end-to-end federation integration tests (tests/federation_features/*) stayed in sparq-engine."
+    },
     "sparq-fedclient": {
       "had_integration_dir": true,
       "min_tests": 150
@@ -123,6 +133,11 @@
     "sparq-solid": {
       "had_integration_dir": true,
       "min_tests": 15
+    },
+    "sparq-substrate": {
+      "had_integration_dir": false,
+      "min_tests": 33,
+      "note": "[OPUS-4.8] sq-qcnn.3: 35 inline #[test]s measured across the rows/numeric/join/compare modules (all tests live in the src `mod tests` — the crate has no tests/ integration dir); floor 33 leaves a small margin (mirrors the sparq-algos/-canon style). Brought under the presence gate so the correctness core cannot silently lose its tests."
     },
     "sparq-text": {
       "had_integration_dir": true,

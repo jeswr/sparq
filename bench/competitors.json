@@ -85,6 +85,7 @@
       "version_env_metadata": "the gather script records (a) the resolved image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — and (b) the host env block. compare.py reports only timings + correctness, no server build string, so there is no separate 'server-reported version' to capture; `--run` refuses a live qlever gather when the digest cannot be resolved (no Docker / image not pulled) rather than writing an unversioned result. Stored QLever reference numbers + machine spec live in bench/qlever-baselines.md.",
       "stored_baselines": "bench/qlever-baselines.md (we do NOT re-run QLever every sparq iteration — re-measure only when its version or the dataset changes; record date + version there).",
       "quiet_box_sensitive": true,
+      "same_box_runner": "scripts/qlever-same-box.sh (bounded, orphan-safe index->serve->query->teardown; Docker-only; now preflights the Docker daemon up front — the fix for the Wave-0 fast-fail where the binary was present but the daemon was down).",
       "dashboard_engine_id": "qlever"
     },
     {
@@ -110,7 +111,34 @@
       ],
       "version_env_metadata": "gather records the Fuseki Docker image DIGEST (or the distribution version / `fuseki --version`) + java -version + the host env block. Results land git-ignored in bench/competitor-results/fuseki-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
       "quiet_box_sensitive": true,
+      "same_box_runner": "scripts/fuseki-same-box.sh (bounded, orphan-safe load->serve->query->teardown; jena-tarball OR docker backend; drives the endpoint through scripts/bench-adapters/http_sparql_adapter.py).",
       "dashboard_engine_id": "fuseki"
+    },
+    {
+      "id": "virtuoso",
+      "name": "OpenLink Virtuoso OSS 7",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-vw3ax.12.1] Tier-1 mainstream SPARQL store baseline — the engine behind the public DBpedia endpoint and one of the most widely-deployed/cited RDF stores, so reviewers expect it in any competitor matrix. GPLv2 (Open-Source Edition) -> eval numbers are publishable (no benchmark-publication clause). Compared as a SPARQL-1.1 HTTP server + CORRECTNESS ORACLE (cross-check COUNT/result-size before any timing). Adapter kind `http-sparql` (POST a SELECT/COUNT query -> parse SPARQL-results-JSON -> count) reusing scripts/bench-adapters/http_sparql_adapter.py — the SAME shared unit the QLever + Fuseki paths use. The isql bulk loader (ld_dir + rdf_loader_run) loads NT/TTL and the /sparql endpoint serves SPARQL 1.1, so it runs every existing sparq suite unmodified.",
+      "pinned_version": "openlink/virtuoso-opensource-7 (pin the Docker image DIGEST at gather time; the /sparql endpoint reports the Virtuoso build in `SELECT * WHERE {}` server headers / the /sparql landing page)",
+      "version_source": "the resolved Docker image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — or `isql ... exec='status();'` (reports the Virtuoso server version). Recorded in the gather results file at run time.",
+      "install_recipe": "use the official openlink/virtuoso-opensource-7 Docker image (GPLv2; Open-Source Edition). Docker-based -> gather-only on a box with a running Docker daemon (no Docker on the dev box; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md). Virtuoso OSS has no pure-Java/tarball drop-in the way Fuseki does, so unlike Fuseki this competitor is Docker-only.",
+      "run_recipe": "PREP (gather box, automated by scripts/virtuoso-same-box.sh): start the container (HTTP :8890 + isql :1111, corpus dir bind-mounted read-only under /data with DirsAllowed including /data), bulk-load with `isql 1111 dba dba exec=\"ld_dir('/data','<corpus>','<graph>'); rdf_loader_run(); checkpoint;\"`, then for each suite .rq drive http://host:8890/sparql via scripts/bench-adapters/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count). COLD + min-of-N; COUNT(*) compute-mode headline. Cross-check COUNT/result-size against sparq BEFORE trusting any timing.",
+      "adapter": {
+        "endpoint_env": "SPARQL_ENDPOINT",
+        "query_file_env": "SPARQL_QUERY_FILE",
+        "note": "POST each suite query (or its `SELECT (COUNT(*) AS ?n)` compute-mode wrap) to the Virtuoso /sparql endpoint; parse SPARQL-results-JSON, count solutions (or read ?n). Methodology extends bench/CATALOG.md QUIET-BOX: gather ONCE on an otherwise-idle box, same machine+suite+scale back-to-back vs sparq, COLD + min-of-N. Cross-check COUNT/result-size first. CAVEAT: Virtuoso's default ResultSetMaxRows caps a SELECT at 10000 rows — a large-result query (e.g. SP2Bench q04) is TRUNCATED by default, which shows up as a COUNT/result-size MISMATCH vs sparq (not a silent pass); raise ResultSetMaxRows in the Virtuoso config, or scope the perf headline to the COUNT(*) compute wrap, when comparing full-result suites."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "sp2b",   "note": "SP2Bench corpus; isql bulk-load the .ttl, run queries/*.rq against /sparql. COUNT(*) compute-mode headline; cross-check result-size vs sparq first (mind the 10000-row default cap on full-result forms)." },
+        { "sparq_suite": "watdiv", "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph/Fuseki WatDiv comparison)." },
+        { "sparq_suite": "lubm",   "note": "LUBM EXTENSIONAL tier ONLY — Virtuoso does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever/Fuseki)." },
+        { "sparq_suite": "bsbm",   "note": "BSBM Explore corpus via the endpoint; BSBM is the benchmark Virtuoso is most-reported on in the literature. CONSTRUCT/DESCRIBE forms compare produced-triple counts." },
+        { "sparq_suite": "dbpsb",  "note": "DBPSB/FEASIBLE DBpedia cut; the DBpedia endpoint IS Virtuoso, so this is its home turf." }
+      ],
+      "version_env_metadata": "gather records the Virtuoso Docker image DIGEST (or `isql ... status()` server version) + the host env block. Results land git-ignored in bench/competitor-results/virtuoso-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
+      "quiet_box_sensitive": true,
+      "same_box_runner": "scripts/virtuoso-same-box.sh (bounded, orphan-safe start->bulk-load->query->teardown; Docker-only; drives the endpoint through scripts/bench-adapters/http_sparql_adapter.py; verifies the loaded triple count is non-zero before comparing).",
+      "dashboard_engine_id": "virtuoso"
     },
     {
       "id": "eye",

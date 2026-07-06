@@ -1,7 +1,0 @@
-[package]
-name = "xpath_test_opadd_daytimeduration_to_date"
-type = "lib"
-authors = ["auto-generated"]
-
-[dependencies]
-xpath = { path = "../../xpath" }

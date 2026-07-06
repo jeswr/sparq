@@ -56,7 +56,11 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   per OGC requirement ([`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs))
   scores **30 / 30** of the standard's R1–R30 taxonomy — OGC never shipped an executable
   ETS, and the GPL academic compliance benchmark cannot be vendored into this MIT tree,
-  so this is sparq's own probe, not a TEAM-Engine run.
+  so this is sparq's own probe, not a TEAM-Engine run. A sibling hand-curated DE-9IM
+  topology ratchet ([`tests/ogc_compliance_ratchet.rs`](tests/ogc_compliance_ratchet.rs))
+  pins the exact truth value of every `sf*`/`eh*`/`rcc8*` relation over point/line/
+  polygon/MULTI\* operands in both orders; its floor only rises with genuinely-passing,
+  hand-derived assertions.
 - **WKT + GML, two serializations** — `geo:wktLiteral` and the GML Simple-Features
   profile of `geo:gmlLiteral` parse to the same `geo_types` + CRS and interoperate in
   one `geof:` call. Beyond the GML-SF profile, a few real-world (non-SF) forms are
@@ -71,19 +75,28 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection for a
   curated EPSG set via the `reproject` feature (pure-Rust proj4rs).
 - **RDFS/OWL entailment + query rewrite** — GeoSPARQL ontology entailment runs through
-  the GENERIC `sparq-reason` closure (no geo-specific reasoner); a dedicated
-  [`geosparql_rewrite`](src/rewrite.rs) entry point expands topology property forms
-  (the standard entry points stay W3C-conformant, untouched).
+  the GENERIC `sparq-reason` closure (no geo-specific reasoner). The OGC query-rewrite
+  extension (`/conf/query-rewrite-extension`) — topology PROPERTY forms like
+  `?f geo:sfWithin ?region` — is the **opt-in `geosparql_rewrite` feature** (OFF by
+  default): a dedicated [`geosparql_rewrite`](src/rewrite.rs) entry point expands them to
+  a default-geometry resolution + matching `geof:` FILTER. The standard `sparq_engine`
+  entry points stay W3C-conformant and untouched (a `geo:sfWithin` triple matches only
+  asserted triples there), so default SPARQL semantics never change. A conformance
+  ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
 - **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
   graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
 
-**Distance accuracy caveat.** Metric units measure great-circle distance on the GRS80
-mean sphere; point↔point is exact haversine, but extended↔extended geometry uses a
-**local equirectangular approximation** about mean latitude — accurate at local scale,
-degrading for continent-spanning pairs. `uom:degree`/`radian` measure coordinate-space
-distance. Line/polygon set-subtraction is rolled in-crate over `i_overlay` (`geo`'s
-`BooleanOps` overlays only polygons); a `LineString` difference is proposed upstream to
-[georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
+**Distance accuracy.** Metric units measure great-circle distance on the GRS80 mean
+sphere; point↔point and point↔extended geometry are exact haversine (spherical
+closest-point). Extended↔extended geometry uses **vertex-HaversineClosestPoint
+iteration** (sq-lk3aw.3): for each vertex of each geometry the haversine distance to
+the nearest point on the other geometry is computed, resolving the prior equirectangular
+projection distortion. Remaining approximation: interior-of-segment↔interior-of-segment
+pairs (bounded by vertex arc spacing; uncommon for typical GeoSPARQL geometries).
+`uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` in metric units
+still uses a local equirectangular frame (no exact sphere-buffer equivalent). Line/polygon
+set-subtraction is rolled in-crate over `i_overlay`; a `LineString` difference is proposed
+upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 
 ## 📚 Learn more
 

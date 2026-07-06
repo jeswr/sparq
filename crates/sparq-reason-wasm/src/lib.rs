@@ -29,16 +29,25 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "explain")]
 mod explain;
 
+// [FABLE-5] sq-ohnj1 — the eye-js `--query` compat translator (pure, native-tested).
+mod n3query;
+
 /// A CONSTRUCT that copies the whole default graph, used to serialise a closure to
 /// N-Triples via the engine's tested CONSTRUCT path (no hand-rolled term serialiser here).
 const ECHO_CONSTRUCT: &str = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }";
 
-/// Parses `profile` (`"rdfs"` | `"owl"` / `"owl-rl"`) or returns a JS error naming the
-/// accepted values — the single place the JS-facing profile string is validated.
+/// Parses `profile` (`"rdfs"` | `"owl"` / `"owl-rl"`; with the `d-entail` feature also `"d"`)
+/// or returns a JS error naming the accepted values — the single place the JS-facing profile
+/// string is validated.
 fn parse_profile(profile: &str) -> Result<Profile, JsError> {
     Profile::parse(profile).ok_or_else(|| {
+        // The accepted set widens to include "d" when the bundle is built with `d-entail`.
+        #[cfg(feature = "d-entail")]
+        let expected = "\"rdfs\", \"owl-rl\" or \"d\"";
+        #[cfg(not(feature = "d-entail"))]
+        let expected = "\"rdfs\" or \"owl-rl\"";
         JsError::new(&format!(
-            "unknown reasoning profile {profile:?}; expected \"rdfs\" or \"owl-rl\""
+            "unknown reasoning profile {profile:?}; expected {expected}"
         ))
     })
 }
@@ -48,6 +57,48 @@ fn parse_profile(profile: &str) -> Result<Profile, JsError> {
 /// owns no term-serialisation code of its own.
 fn graph_to_ntriples(graph: &Graph) -> Result<String, JsError> {
     sparq_engine::construct_ntriples(graph, ECHO_CONSTRUCT).map_err(|e| JsError::new(&e))
+}
+
+/// [FABLE-5] sq-ohnj1 — the eye-js `--pass-only-new` (DERIVATIONS) delta for an N3 document:
+/// the NEWLY-DERIVED ground triples only (closure minus the asserted base). This is exactly the
+/// set of `reason_n3_proof` step conclusions: the semi-naive chainer records a derivation step
+/// ONLY for a fact it produces that was not already present, so an asserted-and-re-derivable
+/// fact is never a step (and is correctly excluded, matching EYE `--pass-only-new`). Native —
+/// returns a `String` error — so it is exercised by the crate's native unit tests; the
+/// `#[wasm_bindgen]` wrapper below is a trivial error-mapping shim.
+fn n3_new_ntriples(n3: &str) -> Result<String, String> {
+    let mut dict = sparq_core::dict::Dict::default();
+    let (_closure, steps) = sparq_reason::reason_n3_proof(&mut dict, n3)?;
+    let mut seen = std::collections::HashSet::new();
+    let derived: Vec<[sparq_core::dict::Id; 3]> =
+        steps.into_iter().map(|s| s.conclusion).filter(|c| seen.insert(*c)).collect();
+    let graph = Graph::from_parts(dict, derived);
+    sparq_engine::construct_ntriples(&graph, ECHO_CONSTRUCT)
+}
+
+/// [FABLE-5] sq-ohnj1 — the eye-js `--query` filter: materialise the deductive closure of
+/// `data`, then evaluate the N3 query rule(s) as SPARQL `CONSTRUCT`s over that closure and
+/// return the (deduplicated) instantiated conclusions as N-Triples. FAIL-CLOSED on any query
+/// the BGP path cannot faithfully express (see the `n3query` module). Native (returns a `String` error)
+/// so the native unit tests drive it end to end.
+fn n3_query_ntriples(data: &str, query: &str) -> Result<String, String> {
+    let mut dict = sparq_core::dict::Dict::default();
+    let closure = sparq_reason::reason_n3(&mut dict, data)?;
+    let graph = Graph::from_parts(dict, closure);
+    let constructs = n3query::n3_query_to_constructs(query)?;
+    // Deduplicate result lines across multiple query rules (a single-rule query never dups).
+    let mut seen = std::collections::HashSet::new();
+    let mut out = String::new();
+    for c in &constructs {
+        let nt = sparq_engine::construct_ntriples(&graph, c)?;
+        for line in nt.lines() {
+            if !line.is_empty() && seen.insert(line.to_string()) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The minimal in-tab reasoning entry point: forward-chaining materialization of an RDF
@@ -136,6 +187,26 @@ impl Reasoner {
         let derived = sparq_reason::reason_n3(&mut dict, n3).map_err(|e| JsError::new(&e))?;
         let graph = Graph::from_parts(dict, derived);
         graph_to_ntriples(&graph)
+    }
+
+    /// [FABLE-5] sq-ohnj1 — the eye-js `--pass-only-new` **derivations** delta: the
+    /// NEWLY-DERIVED ground triples only (closure minus the asserted base), as N-Triples. This
+    /// backs `n3reasoner`'s DEFAULT `output` mode (`undefined` / `'derivations'`) in the
+    /// `@sparq-org/eyereasoner-compat` package. A thin shim over `n3_new_ntriples`.
+    #[wasm_bindgen(js_name = reasonN3New)]
+    pub fn reason_n3_new(n3: &str) -> Result<String, JsError> {
+        n3_new_ntriples(n3).map_err(|e| JsError::new(&e))
+    }
+
+    /// [FABLE-5] sq-ohnj1 — the eye-js `--query` filter: materialise the closure of `data`,
+    /// then return every instantiated conclusion of the N3 query rule(s) over that closure as
+    /// N-Triples (a `CONSTRUCT { conclusion } WHERE { premise }` per rule). Backs
+    /// `n3reasoner(data, query)` in the `@sparq-org/eyereasoner-compat` package. FAIL-CLOSED on
+    /// builtins / formulae / lists in the query (see the package README). A thin shim over
+    /// `n3_query_ntriples`.
+    #[wasm_bindgen(js_name = reasonN3Query)]
+    pub fn reason_n3_query(data: &str, query: &str) -> Result<String, JsError> {
+        n3_query_ntriples(data, query).map_err(|e| JsError::new(&e))
     }
 }
 
@@ -274,5 +345,57 @@ mod tests {
         );
         // base = 2 distinct asserted triples (the subClassOf axiom + the typing).
         assert_eq!(base_n, 2, "expected two distinct asserted base triples");
+    }
+
+    // [FABLE-5] sq-ohnj1 — the eye-js README socrates example, VERBATIM (data + query).
+    const SOCRATES_N3_DATA: &str = r#"@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix : <http://example.org/socrates#>.
+
+:Socrates a :Human.
+:Human rdfs:subClassOf :Mortal.
+
+{?A rdfs:subClassOf ?B. ?S a ?A} => {?S a ?B}."#;
+    const SOCRATES_N3_QUERY: &str = r#"@prefix : <http://example.org/socrates#>.
+
+{:Socrates a ?WHAT} => {:Socrates a ?WHAT}."#;
+    const SOC_MORTAL: &str = "<http://example.org/socrates#Socrates> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/socrates#Mortal> .";
+    const SOC_HUMAN: &str = "<http://example.org/socrates#Socrates> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/socrates#Human> .";
+
+    /// The eye-js `--pass-only-new` DERIVATIONS delta: only the newly-derived `Socrates a
+    /// Mortal` is emitted; the asserted base (`Socrates a Human`, the subClassOf axiom) is not.
+    #[test]
+    fn n3_new_is_the_derivations_delta() {
+        let nt = n3_new_ntriples(SOCRATES_N3_DATA).expect("derivations delta");
+        assert!(nt.contains(SOC_MORTAL), "derived Mortal typing present: {nt}");
+        assert!(
+            !nt.contains(SOC_HUMAN),
+            "asserted `Socrates a Human` must NOT be in the derivations delta: {nt}"
+        );
+        assert!(
+            !nt.contains("subClassOf"),
+            "asserted subClassOf axiom must NOT be in the derivations delta: {nt}"
+        );
+    }
+
+    /// The eye-js `--query` filter: `{:Socrates a ?WHAT} => {:Socrates a ?WHAT}` over the
+    /// closure emits every `:Socrates a ?WHAT` — BOTH the asserted `Human` and the entailed
+    /// `Mortal` (a SELECT over the closure, not a "new facts" delta).
+    #[test]
+    fn n3_query_selects_over_closure() {
+        let nt = n3_query_ntriples(SOCRATES_N3_DATA, SOCRATES_N3_QUERY).expect("query filter");
+        assert!(nt.contains(SOC_MORTAL), "entailed Mortal typing selected: {nt}");
+        assert!(nt.contains(SOC_HUMAN), "asserted Human typing selected: {nt}");
+        // The subClassOf axiom does NOT match the query pattern `:Socrates a ?WHAT`.
+        assert!(!nt.contains("subClassOf"), "non-matching axiom excluded: {nt}");
+    }
+
+    /// A query using an unsupported builtin fails closed (an error, never a wrong answer).
+    #[test]
+    fn n3_query_builtin_fails_closed() {
+        let data = "@prefix : <http://ex/>. :a :age 21 .";
+        let query = r#"@prefix math: <http://www.w3.org/2000/10/swap/math#>.
+@prefix : <http://ex/>.
+{ ?x :age ?a. ?a math:greaterThan 18 } => { ?x a :Adult }."#;
+        assert!(n3_query_ntriples(data, query).is_err());
     }
 }

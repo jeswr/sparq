@@ -28,5 +28,10 @@ pub mod issuer;
 pub mod holder;
 // [OPUS-4.8] sq-bwwl (hidden-join sq-8mwz): in-circuit hidden cross-credential JOIN.
 pub mod join;
+// [FABLE-5] sq-3kd2g.2 (#1591): bounded-depth path reachability -- property
+// paths `p+`/`p*` under the bounded existence-only statement of
+// research/zksparql-fragment-extension.md sec 4 (depth D a compile-time constant
+// per member, disclosed by the VK identity; mechanism (a) on #1591).
+pub mod path;
 
 mod tests;

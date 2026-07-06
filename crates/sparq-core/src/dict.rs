@@ -956,25 +956,155 @@ fn validate_dict_bytes(
 // bounded symbolic byte domain — it always returns `Ok`/`Err`, never panics, never reads out
 // of bounds, never hits UB — for EVERY hostile input in that domain.
 //
-// UNTESTED-HERE: Kani is not installed in the authoring environment, so this harness has NOT
-// been run; it is written against Kani's documented API (`kani::any()`, `kani::assume()`,
-// `#[kani::proof]`, `#[kani::unwind]`) and is VALIDATED ON THE FIRST CI RUN of the `kani`
-// lane. It is `#[cfg(kani)]`, so the normal `cargo build`/`clippy`/`test` never compile it.
+// [SONNET-4.6] sq-sqtk2.2 — extended with PROVED (complete-domain) Kani harnesses for the
+// inline-id round-trip and four-region id-partition disjointness properties (§3.3 C-1 of
+// research/mechanized-proof-program.md). These prove purely numeric invariants of the `u32`
+// id space; CBMC models each type as a bit-vector and explores the full symbolic domain, so
+// "complete-domain" is a machine-verified claim (not just a bound). Unlike the mmap validator
+// harnesses below, these do NOT require the `mmap` feature and run under both
+// `cargo kani -p sparq-core` and `cargo kani -p sparq-core --features mmap`.
+//
+// TESTED in-worktree during sq-sqtk2.2 (see PR body for run log + mutation spot-check).
 // The `kani` cfg is registered in crates/sparq-core/Cargo.toml [lints.rust] so `-D warnings`
 // (unexpected_cfgs) is happy on the normal build.
-#[cfg(all(kani, feature = "mmap"))]
+#[cfg(kani)]
 mod kani_proofs {
     use super::*;
+
+    // ---- [SONNET-4.6] sq-sqtk2.2 — inline-id round-trip + id-partition disjointness ----
+    //
+    // Both harnesses are pure integer arithmetic — no loops, no heap, no strings. CBMC
+    // models `u32` and `i64` as bit-vectors and exhausts the full symbolic domain; no
+    // `#[kani::unwind]` annotation is needed (there is nothing to unroll).
+
+    /// PROPERTY — encode half of the inline-id round-trip: `inline_id_of_int(v)` encodes
+    /// every in-range value to a distinct inline id from which the value is exactly
+    /// recoverable by subtracting `INLINE_BASE`.
+    ///
+    /// Domain coverage: **complete** — `v` is any `u32`; the `assume` restricts to the
+    /// inline sub-domain `[0, INLINE_MAX]`, so CBMC exhausts the whole 30-bit value space.
+    /// Together with `inline_id_out_of_domain_is_none` this covers the full `Option` spec.
+    #[kani::proof]
+    fn inline_id_round_trip() {
+        let v: u32 = kani::any();
+        kani::assume(v <= INLINE_MAX);
+        let id = inline_id_of_int(v as i64)
+            .expect("inline_id_of_int must return Some for every v in [0, INLINE_MAX]");
+        assert!(is_inline(id), "inline_id_of_int result must satisfy is_inline");
+        assert_eq!(
+            id - INLINE_BASE,
+            v,
+            "id minus INLINE_BASE must recover the original value"
+        );
+    }
+
+    /// PROPERTY — complement half of the inline-id spec: `inline_id_of_int(v)` returns
+    /// `None` for every value outside `[0, INLINE_MAX]`.
+    ///
+    /// Domain coverage: **complete** — `v` is any `i64`; the `assume` restricts to the
+    /// complement of the inline domain (negative values and values above `INLINE_MAX`).
+    #[kani::proof]
+    fn inline_id_out_of_domain_is_none() {
+        let v: i64 = kani::any();
+        kani::assume(v < 0 || v > INLINE_MAX as i64);
+        assert!(
+            inline_id_of_int(v).is_none(),
+            "inline_id_of_int must return None for values outside [0, INLINE_MAX]"
+        );
+    }
+
+    /// PROPERTY — four-region id-partition disjointness: the four named regions of the
+    /// `u32` id space are pairwise disjoint and together exhaustive over all `u32` values.
+    ///
+    /// Regions (per the `INLINE_BASE` / `INLINE_MAX` partition constants):
+    ///   - `NO_ID`:      `{0}`
+    ///   - dict:         `[1, INLINE_BASE)` — non-inline dictionary ids
+    ///   - inline:       `[INLINE_BASE, INLINE_BASE + INLINE_MAX]` — `is_inline` ids
+    ///   - local-vocab:  `(INLINE_BASE + INLINE_MAX, u32::MAX]` — engine-private ids
+    ///
+    /// Domain coverage: **complete** — `id` is any `u32` bit-vector; CBMC exhausts the
+    /// full 2^32 symbolic value space. Each `in_*` predicate is stated INDEPENDENTLY
+    /// (not as a complement), so disjointness and exhaustiveness are non-trivial checks.
+    #[kani::proof]
+    fn id_partition_disjoint() {
+        let id: u32 = kani::any();
+        let in_no_id       = id == NO_ID;
+        let in_dict        = id > NO_ID && id < INLINE_BASE;
+        let in_inline      = is_inline(id);
+        let in_local_vocab = id > INLINE_BASE + INLINE_MAX;
+        // Disjointness: every pair is mutually exclusive.
+        assert!(!(in_no_id && in_dict),         "NO_ID region overlaps dict region");
+        assert!(!(in_no_id && in_inline),       "NO_ID region overlaps inline region");
+        assert!(!(in_no_id && in_local_vocab),  "NO_ID region overlaps local-vocab region");
+        assert!(!(in_dict && in_inline),        "dict region overlaps inline region");
+        assert!(!(in_dict && in_local_vocab),   "dict region overlaps local-vocab region");
+        assert!(!(in_inline && in_local_vocab), "inline region overlaps local-vocab region");
+        // Exhaustiveness: every id belongs to at least one region (combined with
+        // disjointness this gives exactly one).
+        assert!(
+            in_no_id || in_dict || in_inline || in_local_vocab,
+            "id does not belong to any region (partition is not exhaustive)"
+        );
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern). Lesson of sq-sqtk2.1
+    /// (2026-07-04): a bound can SILENTLY prune the very inputs a harness means to cover, so
+    /// it passes VACUOUSLY. The three id harnesses above `assume`-restrict a symbolic id/value
+    /// to ONE partition sub-domain; a disjointness or round-trip proof over a sub-domain that
+    /// turned out EMPTY (or collapsed to fewer than four regions) would be vacuously true. This
+    /// self-check pins that every region is genuinely NON-EMPTY and the boundaries are sharp —
+    /// concrete arithmetic over the partition constants (no loop, no unwind, so nothing here
+    /// can itself be pruned) — plus two `kani::cover!`s proving the `inline_id_round_trip`
+    /// assume-domain (`v <= INLINE_MAX`) actually REACHES both its adversarial boundary
+    /// (`INLINE_MAX`) and zero. Runs in BOTH feature states (no `mmap`). [OPUS-4.8] sq-og8u8
+    #[kani::proof]
+    fn domain_id_partition_regions_are_all_nonempty() {
+        // Every one of the four regions has at least one member — else a "four-region"
+        // disjointness/exhaustiveness proof is secretly a three- or two-region one.
+        assert!(NO_ID == 0, "the NO_ID region is the singleton {0}");
+        assert!(INLINE_BASE > 1, "the dict region [1, INLINE_BASE) is non-empty");
+        assert!(INLINE_MAX > 0, "the inline region [INLINE_BASE, INLINE_BASE + INLINE_MAX] is non-empty");
+        // The local-vocab region (INLINE_BASE + INLINE_MAX, u32::MAX] is non-empty: its low
+        // bound is strictly below u32::MAX. Widen to u64 so the sum cannot wrap.
+        assert!(
+            u64::from(INLINE_BASE) + u64::from(INLINE_MAX) < u64::from(u32::MAX),
+            "the local-vocab region above the inline range is non-empty"
+        );
+        // Sharp boundaries: the ends of the inline region are inline; the ids just outside
+        // it (the last dict id, the first local-vocab id) are NOT.
+        assert!(is_inline(INLINE_BASE) && is_inline(INLINE_BASE + INLINE_MAX));
+        assert!(!is_inline(INLINE_BASE - 1), "the last dict id must not be classed inline");
+        assert!(
+            !is_inline(INLINE_BASE + INLINE_MAX + 1),
+            "the first local-vocab id must not be classed inline"
+        );
+
+        // The `inline_id_round_trip` assume-domain reaches BOTH ends — its adversarial
+        // boundary `INLINE_MAX` is not silently excluded by the `assume`.
+        let v: u32 = kani::any();
+        kani::assume(v <= INLINE_MAX);
+        kani::cover!(v == INLINE_MAX, "the round-trip domain reaches its inline boundary");
+        kani::cover!(v == 0, "the round-trip domain reaches zero");
+    }
+
+    // ---- [OPUS-4.8] sq-ueuk — mmap dict validator bounded proofs ----
+    //
+    // These harnesses require the `mmap` feature (they call `validate_dict_bytes`, which
+    // is `#[cfg(feature = "mmap")]`). They run only when both `kani` AND `mmap` are active,
+    // i.e. under `cargo kani -p sparq-core --features mmap`.
 
     /// Symbolic buffer ceiling. The four byte regions are independently symbolic but length-
     /// coupled to `len` by the early size checks, so a small `len` plus a small blob exercises
     /// every branch — the size-arithmetic rejections, the record parse + table-index range
     /// checks, the triple-term component/kind checks, and the hashid range loop — while
     /// keeping the bounded exploration tractable.
+    #[cfg(feature = "mmap")]
     const MAX_LEN: usize = 2; // up to 2 terms
+    #[cfg(feature = "mmap")]
     const MAX_BLOB: usize = 24; // a couple of small records / one triple term (1+12) + slack
 
     /// Fills a `Vec<u8>` of a symbolic length `<= cap` with symbolic bytes.
+    #[cfg(feature = "mmap")]
     fn symbolic_bytes(cap: usize) -> Vec<u8> {
         let n: usize = kani::any();
         kani::assume(n <= cap);
@@ -989,6 +1119,7 @@ mod kani_proofs {
     /// term count up to the bounds, with empty prefix/datatype tables. Empty tables make every
     /// non-zero IRI-prefix / literal-datatype index out of range (so that rejection branch is
     /// exercised) and keep the symbolic surface minimal.
+    #[cfg(feature = "mmap")]
     #[kani::proof]
     #[kani::unwind(28)] // > MAX_BLOB so every bounded record/slice loop fully unrolls.
     fn validate_dict_bytes_never_panics() {
@@ -1009,6 +1140,7 @@ mod kani_proofs {
     /// the size checks spends Kani's budget on the loop/arithmetic logic the corpus is least
     /// likely to have exhausted, with one prefix + one datatype so the in-range index branch
     /// is also taken.
+    #[cfg(feature = "mmap")]
     #[kani::proof]
     #[kani::unwind(28)]
     fn validate_dict_bytes_sized_tail_never_panics() {
@@ -1029,6 +1161,29 @@ mod kani_proofs {
         let prefixes: [Box<str>; 1] = [Box::from("p")];
         let datatypes = [NamedNode::new_unchecked("http://example.org/dt")];
         let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes);
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern) for the two mmap
+    /// validator totality harnesses above. `..._never_panics` proves `validate_dict_bytes`
+    /// is TOTAL (returns `Ok`/`Err`, never panics/OOB/UB) over the bounded symbolic domain —
+    /// but that is worthless if the ACCEPT path is never reachable within the bounds and every
+    /// symbolic input trips a size check before any record is parsed (a VACUOUS "never panics
+    /// on the tail"). This pins that the bounded domain genuinely CONTAINS an accepted dict:
+    /// the empty dict (`len == 0`, empty tables — in the harnesses' `len <= MAX_LEN` domain)
+    /// validates `Ok`. Concrete, so it cannot itself be pruned. The DEEPER accept path (a
+    /// `>= 1`-record dict that exercises the record-parse / triple-kind / hashid-range loops
+    /// to an `Ok`) is pinned by the unit test
+    /// [`validate_dict_bytes_seam_accepts_valid_and_rejects_corruption`], which builds a REAL
+    /// valid dict and asserts `Ok` — so the symbolic totality proof is non-vacuous on both the
+    /// shallow (here) and the deep (that unit test) accept paths. [OPUS-4.8] sq-og8u8
+    #[cfg(feature = "mmap")]
+    #[kani::proof]
+    fn domain_dict_validator_accepts_the_empty_dict() {
+        // len == 0 lies in the harnesses' `len <= MAX_LEN` domain and every table is empty.
+        assert!(
+            validate_dict_bytes(&[], &[], &[], &[], 0, &[], &[]).is_ok(),
+            "the empty dict must validate — else the accept path is vacuous"
+        );
     }
 }
 

@@ -84,7 +84,12 @@ name: feature-matrix
 on:
   push:
     branches: [main]
+  # [FABLE-5] sq-fmx4u.5: react to labeled/unlabeled too so toggling the `ci-full`
+  # label re-evaluates change-based selection for the opt-in leg set as well (the
+  # `setup` assembler filters legs by the selection outputs). Default types are
+  # listed explicitly so adding the label events does not drop `synchronize`.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required
   # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
   merge_group:
@@ -99,6 +104,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # [SONNET-4.6] sq-6vshe.1: CI build-profile speedup (mirrors ci.yml). See ci.yml's
+  # global env comment for the full rationale. lld is pre-installed on ubuntu-24.04
+  # runners and also provided via the Rust toolchain's rust-lld, so no per-job install
+  # step is needed.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate (same pattern as ci.yml's `changes`).
@@ -117,7 +129,7 @@ jobs:
       rust_changed: ${{ steps.decide.outputs.rust_changed }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         if: github.event_name == 'pull_request'
         with:
@@ -145,6 +157,27 @@ jobs:
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
           fi
 
+  # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — doctrine
+  # in .github/workflows/ci-select.yml; same instance shape as ci.yml's). The
+  # `setup` job below consumes its outputs to FILTER the assembled leg list when
+  # selection is ENFORCED (mode == 'selected'); shadow/full/missing outputs
+  # fail-close to the full leg set inside scripts/assemble-feature-matrix.py.
+  # UNCONDITIONAL (no needs/if): the ci-summary gate requires every selection
+  # check-run to conclude success before any skipped sibling counts as satisfied.
+  # NOTE (why assembly-time filtering, not the per-leg job-level `if:` guard the
+  # design sketched): the `matrix` context is NOT available in jobs.<job_id>.if
+  # (GitHub contexts-availability), where a `matrix.crate` reference silently
+  # evaluates EMPTY — under enforcement that would skip EVERY leg unconditionally.
+  # Filtering in the (unit-tested) assembler keeps the per-leg decision in Python;
+  # an unassembled leg spawns no check-run, which the polling aggregator simply
+  # never waits on (requiredness flows through `ci-summary / gate`, not per-leg
+  # names — bead sq-fmx4u.4 verifies this against live branch protection).
+  select:
+    name: select
+    uses: ./.github/workflows/ci-select.yml
+    permissions:
+      contents: read
+
   # [OPUS-4.8] sq-ibrze: assemble the dynamic matrix from the per-crate fragment files.
   # This decouples adding a leg (edit one `.github/feature-matrix.d/<crate>.yml`) from
   # this shared workflow file, killing the recurring adjacent-append merge conflict. The
@@ -155,7 +188,7 @@ jobs:
   # behind the same `changes` gate as the legs, so a non-Rust PR skips it (and the legs
   # below `need` it, so they skip too — the aggregator treats both as non-failing).
   setup:
-    needs: changes
+    needs: [changes, select]
     if: needs.changes.outputs.rust_changed == 'true'
     name: assemble feature matrix
     runs-on: ubuntu-latest
@@ -163,11 +196,14 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.assemble.outputs.matrix }}
+      # [FABLE-5] sq-fmx4u.3: leg COUNT, so `opt-in-features` can skip (instead of
+      # exploding on an empty matrix) when enforced selection filters every leg out.
+      legs: ${{ steps.assemble.outputs.legs }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -182,22 +218,46 @@ jobs:
         # leg "advisory"/"informational") fails THIS gating job — i.e. the gate-critical
         # invariant is enforced on every PR that touches a fragment, not just by review.
         run: python3 scripts/tests/test_feature_matrix_assemble.py
+      - name: Enforce tier ratchet + sq-vya1 guard (feature-matrix-tiers.py --enforce)
+        # [SONNET-4.6] sq-ldg8c (design §4): mechanizes the sq-vya1 GUARD as a HARD gate.
+        # Reds THIS gating job if a leg carries `tier: check` while the detector still finds
+        # feature-gated test code / a `cfg(not(feature))` brace (and no reviewed
+        # `tier-reason:` override), OR if any sensitive feature has no `test: true` leg. So a
+        # future feature-gated test added under a demoted feature re-promotes it at the next
+        # PR — the ratchet. Fail-closed: a detector/IO error classifies a leg SENSITIVE (keep
+        # the full leg), never a silent demotion. Stdlib + the PyYAML installed above; it
+        # scans crates/ (checked out above). At ZERO annotations this is a no-op green.
+        run: python3 scripts/feature-matrix-tiers.py --enforce
       - name: Assemble matrix from .github/feature-matrix.d/*.yml
         id: assemble
         # Emit the leg set as a one-line JSON object on the `matrix` output. The
         # assembler validates every fragment (required keys, non-empty features, no
         # duplicate leg names) and exits non-zero on any malformed fragment, so a bad
         # fragment fails THIS gating job instead of producing a silently-truncated matrix.
+        # [FABLE-5] sq-fmx4u.3: --select-mode/--affected filter the legs to the
+        # affected closure ONLY when the selection pre-job says mode == 'selected';
+        # shadow/full/empty/malformed inputs fail-close to the FULL leg set inside
+        # the assembler (unit-tested). `legs` is the post-filter count.
+        env:
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
         run: |
           set -euo pipefail
-          MATRIX="$(python3 scripts/assemble-feature-matrix.py)"
+          MATRIX="$(python3 scripts/assemble-feature-matrix.py --event "${{ github.event_name }}" --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "Assembled $(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))') opt-in leg(s):"
+          LEGS="$(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
+          echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
+          echo "Assembled $LEGS opt-in leg(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
 
   opt-in-features:
     needs: [changes, setup]
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: `legs != '0'` skips this job when enforced selection
+    # filtered EVERY leg out (an empty `include` would otherwise be a matrix
+    # error, i.e. a false RED). Fail-closed: a missing/empty `legs` output is
+    # != '0' => run; and if `setup` itself failed, this job skips via `needs`
+    # while the gate REDs on setup's failure.
+    if: needs.changes.outputs.rust_changed == 'true' && needs.setup.outputs.legs != '0'
     # One matrix leg per crate + opt-in feature(group). Coexisting opt-in features of a
     # single crate are combined into ONE `--features a,b,c` leg (e.g. the sparq-server
     # federation/persistence/test seams) so the crate is compiled once per leg, not once
@@ -224,9 +284,24 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Per-leg cache key so each crate+feature combination keeps its own warm
-          # target dir (the feature set changes the compiled artifacts).
-          shared-key: feature-matrix-${{ matrix.crate }}-${{ matrix.features }}
+          # [OPUS-4.8] sq-3sbrr — PER-CRATE (not per-leg) cache key + save-only-on-main.
+          # WHY: rust-cache stores the DEPENDENCY build only (never sparq's own crates —
+          # they recompile per leg regardless, see ci.yml's build-once note), so the prior
+          # per-leg `…-${{ matrix.crate }}-${{ matrix.features }}` key produced 68
+          # near-identical dependency caches (one per matrix leg). At ~0.2 GB each that is
+          # ~14 GB of demand against the repo's 10 GB Actions-cache budget, so GitHub
+          # LRU-evicted them AND the ci.yml caches (test-workspace / coverage / lint /
+          # wasm) on essentially every run — caching was present but self-defeating and
+          # most jobs restored COLD (recompiling the ~131 s dep floor from scratch).
+          # Keying by CRATE collapses the 68 legs to ONE dependency cache per crate (the
+          # 15 sparq-engine legs now share a single warm dep dir); cargo fingerprinting
+          # still recompiles each feature-varying crate itself, so there is no
+          # stale-artifact risk (the rust-cache key already embeds Cargo.lock + the rustc
+          # version + Cargo.toml hashes). `save-if` makes PR and ephemeral merge_group
+          # runs RESTORE-ONLY so they stop writing branch-scoped caches that churn the
+          # shared budget; the post-merge push-to-main run is what seeds/refreshes them.
+          shared-key: feature-matrix-${{ matrix.crate }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch dependencies (retry transient crates.io fetch)
         # [OPUS-4.8] sq-hhxc: these `opt-in <crate>` legs were failing ~8s in with exit 101
         # — i.e. in EARLY SETUP (registry resolve/fetch), BEFORE any real compile (8s is far
@@ -269,6 +344,114 @@ jobs:
       - name: Clippy (--all-targets -D warnings)
         run: cargo clippy -p ${{ matrix.crate }} --features ${{ matrix.features }} --all-targets -- -D warnings
 
+  # [SONNET-4.6] sq-ldg8c: T1 CHECK TIER — compile+clippy (NO test run) for the opt-in legs a
+  # fragment has DEMOTED with `tier: check`. Design: research/feature-matrix-pyramid.md §3/§5.
+  # The assembler (`--tier check`) emits ONLY the demoted legs on pull_request/merge_group;
+  # on push/schedule/workflow_dispatch it emits NONE — those events run the FULL `opt-in`
+  # matrix above as the per-merge backstop, so the check tier is empty there. TWO shards
+  # (sparq-engine legs vs the rest) each reuse ONE target dir, so a shard's crate+dependency
+  # stack compiles once across its legs (engine's per-feature-state frontend recompile is the
+  # dominant cost — design §3). No `--all-targets`: a demoted leg has, by the demotion
+  # criterion, no feature-gated test code, so the class-A signal is the lib/bin compile+lint.
+  #
+  # BEHAVIOUR-PRESERVING AT MERGE: with ZERO fragments annotated (the state this bead lands
+  # in — the demotion flip is the separate bead sq-s5dvo), the assembler emits an EMPTY leg
+  # set for BOTH shards, so every Rust step is skipped and the job is GREEN-EMPTY (proven by
+  # scripts/tests/test_feature_matrix_assemble.py's behaviour-preservation tests). The job
+  # NAME ("feature-matrix check-tier (<shard>)") is free of the words "advisory"/
+  # "informational", so the single required `ci-summary / gate` aggregator auto-discovers
+  # each shard as a REQUIRED check — once a leg is demoted, its compile/clippy break still
+  # blocks the merge via T1 instead of its old `opt-in <name>` leg. Same assembly-time-
+  # filtering mechanism as the matrix above (sq-fmx4u.4): no ci-summary edit, no ruleset
+  # change. Selection is applied INSIDE the assemble step (env), never the job-level `if:`.
+  check-tier:
+    needs: [changes, select]
+    if: needs.changes.outputs.rust_changed == 'true'
+    name: feature-matrix check-tier (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [engine, rest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        # [OPUS-4.8] HASH-pinned (Scorecard PinnedDependenciesID): same full-closure PyYAML
+        # 6.0.2 hash set the setup job pins; --require-hashes verifies every artifact.
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Assemble demoted (tier:check) legs for this shard
+        id: legs
+        # [SONNET-4.6] sq-ldg8c: --tier check emits the demoted legs for this shard, further
+        # filtered by the SAME change-based selection the setup job applies (fail-closed to
+        # the full set inside the assembler). GREEN-EMPTY today: legs=0 => the Rust steps
+        # below all skip.
+        env:
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
+        run: |
+          set -euo pipefail
+          CHECK="$(python3 scripts/assemble-feature-matrix.py \
+            --event "${{ github.event_name }}" --tier check --shard "${{ matrix.shard }}" \
+            --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
+          echo "matrix=$CHECK" >> "$GITHUB_OUTPUT"
+          N="$(echo "$CHECK" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
+          echo "legs=$N" >> "$GITHUB_OUTPUT"
+          echo "check-tier shard '${{ matrix.shard }}': $N demoted leg(s) (event ${{ github.event_name }}, select ${SELECT_MODE:-<unset>})"
+      - name: Install Rust (stable)
+        if: steps.legs.outputs.legs != '0'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.legs.outputs.legs != '0'
+        with:
+          shared-key: feature-matrix-check-tier-${{ matrix.shard }}
+          # [OPUS-4.8] sq-3sbrr: restore-only off main (see the opt-in-features note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch dependencies (retry transient crates.io fetch)
+        if: steps.legs.outputs.legs != '0'
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo fetch --locked; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo fetch failed after $n attempts (registry outage?)" >&2
+              exit 1
+            fi
+            echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
+      - name: Clippy each demoted leg (shared target dir, -D warnings)
+        if: steps.legs.outputs.legs != '0'
+        env:
+          CHECK_MATRIX: ${{ steps.legs.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          # One clippy per demoted leg, sequentially, sharing the single target dir so the
+          # crate + dependency stack compiles once across the shard's legs. mapfile keeps the
+          # loop in the MAIN shell so `set -e` fails the step on the first clippy error.
+          mapfile -t LEGS < <(printf '%s' "$CHECK_MATRIX" | python3 -c '
+          import json, sys
+          for leg in json.load(sys.stdin)["include"]:
+              print("{}\t{}".format(leg["crate"], leg["features"]))
+          ')
+          for line in "${LEGS[@]:-}"; do
+            [ -z "$line" ] && continue
+            crate="${line%%$'\t'*}"
+            features="${line#*$'\t'}"
+            echo "::group::clippy -p ${crate} --features ${features}"
+            cargo clippy -p "${crate}" --features "${features}" -- -D warnings
+            echo "::endgroup::"
+          done
+
   # [OPUS-4.8] sq-1b390: THE pure-serialiser-library build of sparq-server — i.e. the crate
   # with `--no-default-features` (the `server` async HTTP stack OFF), the contract a consumer
   # relies on when it wants only the XML/CSV/TSV/graph serialisers without dragging in
@@ -284,8 +467,14 @@ jobs:
   # required `ci-summary / gate` aggregator auto-discovers it as REQUIRED (no edit to
   # ci-summary.yml).
   server-no-default-features:
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: single-crate lane (`-p sparq-server` only) — skip when
+    # ENFORCED selection proves sparq-server unaffected (fail-closed guard: empty/
+    # missing outputs or shadow/full mode => run).
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-server"'))
     name: sparq-server pure-serialiser (--no-default-features)
     runs-on: ubuntu-latest
     permissions:
@@ -299,6 +488,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-server-no-default-features
+          # [OPUS-4.8] sq-3sbrr: restore-only off main so PR/merge_group runs don't
+          # write branch-scoped caches that churn the shared 10 GB budget.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch dependencies (retry transient crates.io fetch)
         run: |
           set -euo pipefail
@@ -340,5 +532,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: fedclient-boundary
+          # [OPUS-4.8] sq-3sbrr: restore-only off main (see the opt-in-features note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Assert sparq-core/sparq-engine have no edge to sparq-fedclient
         run: scripts/fedclient-boundary-guard.sh

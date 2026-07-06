@@ -17,3 +17,45 @@
   crate: "sparq-reason"
   features: "explain"
   test: true
+
+# [SONNET-4.6] sq-pbz04.5.3: RIF/XML presentation-syntax importer. rif-xml is opt-in
+# (off by default); enables `sparq_reason::rif_xml::import` and pulls in quick-xml.
+# Wired here post-Opus adversarial-verify so CI covers capture-avoidance + fail-closed
+# + xsd:string whitespace tests in the feature-ON state.
+- name: "sparq-reason (rif-xml)"
+  crate: "sparq-reason"
+  features: "rif-xml"
+  test: true
+
+# [FABLE-5] sq-pbz04.1.1: the shared substrate-join sweep (the rdfs2/3/7 predicate join,
+# sq-yk6or, + the rdfs9 type join). DISCOVERED GAP closed here: sq-yk6or (#1301) landed the
+# feature and its behaviour-neutrality equivalence tests but wired NO matrix leg, so
+# `substrate_join_emits_identical_plain_branch` ran in NO CI lane. This leg builds + tests +
+# clippies the feature-ON state (the per-branch equivalence tests + the whole-closure
+# byte-identity pin).
+- name: "sparq-reason (substrate-join)"
+  crate: "sparq-reason"
+  features: "substrate-join"
+  test: true
+
+# [FABLE-5] sq-pbz04.1.2: the shared substrate-compare seam (substrate seam 3 — the
+# reasoner-side CompareTerm adoption for dictionary ids). This leg builds + tests +
+# clippies the feature-ON state: the comparator unit tests AND tests/compare_parity.rs
+# (the REAL-engine `ORDER BY` byte-identity oracle — a `required-features` target that
+# would otherwise run in NO CI lane, the exact gap the substrate-join leg above closed).
+- name: "sparq-reason (substrate-compare)"
+  crate: "sparq-reason"
+  features: "substrate-compare"
+  test: true
+
+# [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): the id-level COMPILED-rule
+# evaluator for the scoped access-control N3 subset (n3::compiled — rule IR with
+# pre-interned symbols over the shared sparq-substrate join kernels). This leg builds +
+# tests + clippies the feature-ON state: the compile/eval unit suite AND
+# tests/compiled_equivalence.rs (the closure set-equality oracle vs reason_n3 over the
+# sparq-solid WAC/ACP/ODRL-spike rule corpus — a `required-features` target that would
+# otherwise run in NO CI lane).
+- name: "sparq-reason (compiled-rules)"
+  crate: "sparq-reason"
+  features: "compiled-rules"
+  test: true

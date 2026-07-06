@@ -20,10 +20,29 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # registry — a yanked crate is an unbuildable / pulled release.
 yanked = "deny"
 # Advisory IDs to tolerate — each MUST carry a justification. The policy here is
-# strict on what matters: a real VULNERABILITY or a YANKED crate FAILS the gate.
-# There are currently NO ignored advisories — the list is empty so the gate
-# re-flags anything new.
+# strict on what matters: a YANKED crate ALWAYS fails the gate, and every
+# vulnerability fails UNLESS it is one of the explicitly justified `ignore` ids
+# listed below. Exactly TWO advisories are tolerated (below), BOTH the same root
+# cause — a quick-xml < 0.41 DoS still present ONLY in a transitive copy; the gate
+# re-flags anything else (any new advisory, or a yanked crate).
 #
+# RUSTSEC-2026-0194 (quick-xml < 0.41: quadratic run time checking a start tag for
+# duplicate attribute names — a CPU/availability DoS, NOT memory-unsafety) and
+# RUSTSEC-2026-0195 (quick-xml < 0.41: unbounded namespace-declaration allocation in
+# `NsReader` — a memory-exhaustion/availability DoS, again NOT memory-unsafety). Both
+# are fixed by the same upgrade (quick-xml >= 0.41.0) and both are reachable when
+# parsing untrusted RDF/XML or SPARQL-Results-XML. Our OWN crates were bumped
+# 0.40 -> the patched 0.41 (sparq-conformance / sparq-engine `service` / sparq-geo),
+# so those parse paths are fixed for BOTH advisories. These two ignores tolerate ONLY
+# the transitive `quick-xml 0.37.5` still pinned by the oxigraph 0.5.x stack
+# (oxrdfxml 0.2.3 / sparesults 0.3.3 / spareval 0.2.6): oxigraph has published NO
+# release that moves off quick-xml 0.37, so this transitive copy cannot be upgraded
+# without an upstream oxigraph bump. Remove BOTH ignores once oxigraph ships a
+# quick-xml >= 0.41 release (the gate then surfaces them as unmatched ignores).
+# Announcements: https://github.com/tafia/quick-xml/issues/969 (0194) and
+#                https://github.com/tafia/quick-xml/issues/970 (0195)
+#
+# --- history: advisories that WERE ignored, removed once the crate left the tree ---
 # RUSTSEC-2024-0436 (unmaintained `paste` proc-macro, bead sq-l8bv) was dropped:
 # the GPU stack (wgpu et al.) no longer pulls `paste` transitively, so the crate
 # is absent from Cargo.lock and the advisory no longer matches any crate. The
@@ -36,7 +55,11 @@ yanked = "deny"
 # (its code moved into `rustls-pki-types`' `PemObject`). The crate is now absent
 # from Cargo.lock, so the ignore is removed and the gate re-flags any regression
 # that reintroduces it.
-ignore = []
+ignore = [
+  # quick-xml 0.37.5 (oxigraph 0.5.x transitive) — see the justification above.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml <0.41 quadratic-time duplicate-attribute DoS. Our own crates are on the patched 0.41; this tolerates ONLY the transitive quick-xml 0.37.5 pinned by the oxigraph 0.5.x stack (oxrdfxml/sparesults/spareval), for which no fixed upstream release exists yet. Availability-only, not memory-unsafety. Remove when oxigraph bumps quick-xml >=0.41. https://github.com/tafia/quick-xml/issues/969" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml <0.41 unbounded namespace-declaration allocation in NsReader — memory-exhaustion DoS. Same fix (>=0.41.0) and same scope as RUSTSEC-2026-0194: our own crates are on the patched 0.41; this tolerates ONLY the transitive quick-xml 0.37.5 pinned by the oxigraph 0.5.x stack (oxrdfxml/sparesults/spareval), for which no fixed upstream release exists yet. Availability-only, not memory-unsafety. Remove when oxigraph bumps quick-xml >=0.41. https://github.com/tafia/quick-xml/issues/970" },
+]
 
 [licenses]
 # Confidence floor for SPDX detection from license text (cargo-deny default).

@@ -1,0 +1,128 @@
+# [FABLE-5] sq-ymr2e.10 — ADVISORY CI lane: visual-regression key layouts in the pinned container.
+#
+# Runs the Playwright toHaveScreenshot suite (site/e2e/visual/**) against the committed
+# Linux-only baselines. The renderer is the DIGEST-PINNED official Playwright container —
+# site/scripts/vr.sh wraps `docker run` on that image, so this job, `npm run vr` on a dev box,
+# and the baselines themselves all rasterize in the byte-identical environment
+# (research/web-gui-test-program.md §4). The wasm build runs on the HOST (normal toolchain +
+# cargo cache); only the browser/render step is containerised.
+#
+# ADVISORY (continue-on-error on the visual step; the whole word `advisory` in the job NAME also
+# excludes it from the `ci-summary` aggregator). Per the checked-in gating/probation policy
+# `.github/E2E-GATING-POLICY.md` (bead sq-ymr2e.12; design §6.3) the visual subset promotes
+# SEPARATELY and LAST — pixel snapshots are the most brittleness-prone lane, so it earns its own
+# probation window (50 consecutive green runs spanning ≥10 distinct PRs, or two weeks — whichever
+# is longer) AFTER the functional lanes are stable. It is NOT in the ci-summary required set and
+# never enters the merge queue. Promotion is the one-line flip in §4 of that policy. On failure it
+# uploads the readable *-actual/*-expected/*-diff artifacts.
+#
+# SCOPE: path-scoped to site/** + the root workspace lock inputs (same reasoning as
+# site-e2e.yml — `npm ci` resolves from the root lockfile) + this workflow. A Rust-/docs-only
+# PR never triggers this lane.
+name: site-visual
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/site-visual.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/site-visual.yml"
+
+# Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
+permissions:
+  contents: read
+
+# One in-flight run per PR/branch; cancel a superseded run.
+concurrency:
+  group: site-visual-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  site-visual:
+    name: visual key layouts (container-pinned, advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Node 22 — npm cache keys off the REPO-ROOT lockfile (site/ is a workspace member).
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies (from the repo-root workspace lock)
+        run: npm ci
+
+      # Rust stable + wasm32 + wasm-pack: the /try workbench capture waits on the REAL
+      # engine-ready state, so the lean wasm bundle is built from source (mirrors
+      # site-e2e-hero.yml, sharing its cargo cache key family for a warm rebuild).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/target
+          key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
+
+      - name: Build lean wasm bundle
+        run: cd ../js && npm run build:wasm:lean
+
+      - name: Sync wasm bundle into site/public/wasm/
+        run: npm run sync-wasm
+
+      # Determinism gate over the whole e2e/ tree, visual specs included (HARD — must pass).
+      - name: Determinism grep gate (no waitForTimeout calls)
+        run: npm run test:e2e:grep-gate
+
+      # The visual suite, rendered inside the digest-pinned Playwright container (vr.sh pulls
+      # the image by digest; the run fails fast if the locked @playwright/test version drifted
+      # from the pin). ADVISORY: continue-on-error per §6.3 until the lane earns gating.
+      - name: Visual key layouts vs committed baselines (digest-pinned container)
+        id: vr
+        run: npm run vr
+        continue-on-error: true
+
+      # Readable failure artifacts: Playwright writes *-actual/*-expected/*-diff PNGs + traces
+      # under test-results/ when a comparison fails.
+      - name: Upload visual diff artifacts
+        if: steps.vr.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: visual-regression-diffs
+          path: |
+            site/test-results/
+            site/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Surface the advisory verdict in the job summary (the job itself stays green — §6.3).
+      - name: Advisory verdict
+        if: always()
+        run: |
+          if [ "${{ steps.vr.outcome }}" = "failure" ]; then
+            echo "::warning::site-visual (ADVISORY) failed — inspect the visual-regression-diffs artifact. Intentional change? Refresh baselines in this PR: npm run vr:update"
+            echo "## site-visual: ADVISORY FAIL — see the visual-regression-diffs artifact" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## site-visual: baselines match" >> "$GITHUB_STEP_SUMMARY"
+          fi

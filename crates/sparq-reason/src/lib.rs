@@ -5,11 +5,39 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod incremental;
+// [FABLE-5] sq-pbz04.1.2 (epic sq-pbz04.1) — the opt-in substrate seam-3 adoption: the
+// SHARED SPARQL term total order (`sparq_substrate::compare`) implemented for the
+// reasoner's dictionary-id term representation, so entailed-solution ordering is
+// parity-identical to the engine's ORDER BY. Behind the `substrate-compare` feature; when
+// off the whole module is cfg'd out (the lean-core posture, like `substrate_join`/`dtype`).
+#[cfg(feature = "substrate-compare")]
+pub mod compare;
+#[cfg(feature = "substrate-join")]
+pub(crate) mod substrate_join;
+// [SONNET-4.6] sq-qonbz.2 — delta-aware adjacency tables for the OWL-RL semi-naive fixpoint,
+// gated behind `substrate-join` (same feature, no new dep).
+#[cfg(feature = "substrate-join")]
+mod owl_delta_adj;
+#[cfg(feature = "d-entail")]
+pub mod dtype;
 #[cfg(feature = "explain")]
 pub mod explain;
 pub mod n3;
 mod owl;
 mod rdfs;
+// [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the opt-in RIF-Core (monotone Horn) rule
+// front-end over the N3 chainer. Behind the `rif-core` feature; when off the whole
+// module is cfg'd out (the lean-core posture, like `dtype` / `explain`).
+#[cfg(feature = "rif-core")]
+pub mod rif;
+// [SONNET-4.6] sq-pbz04.5.3 — OPT-IN RIF/XML importer: parse the W3C RIF-Core
+// XML presentation syntax into `rif::Document` with Or-split / Exists-flatten
+// desugaring and a fail-closed taxonomy. Requires the `rif-core` feature (wired by
+// the `rif-xml` feature below). When off, zero rif_xml code is compiled.
+#[cfg(feature = "rif-xml")]
+pub mod rif_xml;
+#[cfg(feature = "d-entail")]
+pub use dtype::{d_value_eq, d_value_key, materialize_d, DValue, Recognized};
 #[cfg(feature = "explain")]
 pub use explain::{ExplainOpts, ProofNode, ProofTree};
 pub use incremental::{
@@ -29,14 +57,26 @@ pub enum Profile {
     /// OWL 2 RL (a useful subset: equality/sameAs, inverseOf, Symmetric/Transitive/
     /// Functional/InverseFunctional properties, equivalentClass/Property) — includes RDFS.
     OwlRl,
+    /// D-entailment (datatype / value-space, RDF 1.1 Semantics §7-8): the rdfD1
+    /// datatype-typing rule under a recognized datatype map, with CORRECT TYPED
+    /// (value-space) literal equality — `"1"^^xsd:integer` is the SAME value as
+    /// `"1.0"^^xsd:decimal`. OPT-IN, behind the `d-entail` feature; see the
+    /// [`dtype`] module. [OPUS-4.8] sq-e5atd. (`materialize` uses the conservative
+    /// STANDARD datatype map for this profile; for a custom map call
+    /// [`dtype::materialize_d`] with a [`dtype::Recognized`] directly.)
+    #[cfg(feature = "d-entail")]
+    D,
 }
 
 impl Profile {
-    /// Parse a CLI/profile name (`"rdfs"`, `"owl"`/`"owl-rl"`).
+    /// Parse a CLI/profile name (`"rdfs"`, `"owl"`/`"owl-rl"`; with the `d-entail`
+    /// feature also `"d"`).
     pub fn parse(s: &str) -> Option<Profile> {
         match s.to_ascii_lowercase().as_str() {
             "rdfs" => Some(Profile::Rdfs),
             "owl" | "owl-rl" | "owlrl" => Some(Profile::OwlRl),
+            #[cfg(feature = "d-entail")]
+            "d" => Some(Profile::D),
             _ => None,
         }
     }
@@ -49,6 +89,8 @@ pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id; 3]>
     match profile {
         Profile::Rdfs => materialize_rdfs(dict, triples),
         Profile::OwlRl => materialize_owl_rl(dict, triples),
+        #[cfg(feature = "d-entail")]
+        Profile::D => dtype::materialize_d(&dtype::Recognized::standard(), dict, triples),
     }
 }
 

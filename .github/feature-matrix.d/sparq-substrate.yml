@@ -1,0 +1,30 @@
+# Feature-matrix fragment for `sparq-substrate`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py.
+# Adding a leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs
+# for DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+
+# [OPUS-4.8] sq-fmprw (epic sq-qonbz): the shared-eval-substrate KEYSTONE crate. Its
+# entire surface lives behind DEFAULT-OFF features, so the workspace `cargo
+# {build,test,clippy} --workspace` lane (which passes NO `--features`) compiles NONE of it
+# and the feature-ON state would otherwise be UNgated. This single leg builds + tests +
+# `clippy --all-targets -D warnings` the MAXIMAL feature set so the WHOLE correctness core
+# is exercised.
+# [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn): EXPANDED the feature set from `rows,numeric` to the
+# full `rows,numeric,join,compare`. The `join` (four id-tuple join kernels — merge / hash /
+# bind / leapfrog-trie WCOJ) and `compare` (SPARQL term total order) modules have now
+# LANDED (Phases 3/4) but their unit tests were run by NOTHING: nothing in the workspace
+# depends on this `publish = false` crate, and the leg only enabled `rows,numeric`, so
+# `join.rs` / `compare.rs` were never compiled or tested in CI. Naming all four features
+# here builds + tests + clippies the real join-probe + term-ordering paths (and matches the
+# `--features numeric,join,compare,rows` set the coverage + mutation ratchets measure). The
+# DEFAULT (feature-OFF) build is still covered by the workspace lane.
+- name: "sparq-substrate (rows, numeric, join, compare — shared eval-substrate correctness core)"
+  crate: "sparq-substrate"
+  features: "rows,numeric,join,compare"
+  test: true

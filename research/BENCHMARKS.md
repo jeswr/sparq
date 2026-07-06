@@ -6,7 +6,7 @@
 > QLever-gap narrative, the negative results, the methodology); they drift and are
 > not maintained by hand. For current figures:
 > - **Per-commit CI metrics** (deterministic: wasm bundle bytes, store B/triple,
->   dict B/term) → the perf dashboard <https://jeswr.github.io/sparq/dev/bench>
+>   dict B/term) → the perf dashboard <https://sparq.jeswr.org/dev/bench>
 >   (orphan `benchmark-data` branch).
 > - **The benchmark registry + exact invocations** → `bench/benchmarks.toml`
 >   and `bench/CATALOG.md`. Regenerate any figure by running the named harness.

@@ -6,7 +6,7 @@ triplestore + SPARQL engine compiled to WebAssembly. One compact wasm artifact,
 one tiny runtime npm dependency ([`fzstd`](https://www.npmjs.com/package/fzstd),
 dynamically imported only when ingesting zstd); works in Node ≥ 18 and the
 browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
-<https://jeswr.github.io/sparq/dev/bench>.)
+<https://sparq.jeswr.org/dev/bench>.)
 
 - Dictionary-encoded in-memory store (optionally block-compressed: substantially
   less index memory for a bounded scan cost).

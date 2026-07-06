@@ -700,6 +700,43 @@ pub enum CircuitId {
     /// binding) is step 4 (sq-sfsi) and is NOT wired here.
     // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN member.
     JoinEq { n_a: u32, n_b: u32 },
+    /// `path_reach_d{d}_k{k}_n{n}` — BOUNDED-DEPTH property-path reachability
+    /// member (sq-3kd2g.6, the compose-side of the sq-3kd2g.2 circuit family).
+    /// Proves the EXISTENCE-ONLY statement of
+    /// `research/zksparql-fragment-extension.md` §4: "a chain of `1..=d`
+    /// (`0..=d` when the zero-length case is admitted) committed triples, each
+    /// carrying the disclosed path predicate, chained object-to-subject, connects
+    /// the disclosed source to the disclosed destination in the union of `k`
+    /// committed graphs".
+    ///
+    /// # The three bucket parameters (they name the compiled member)
+    /// - `d` = the compile-time DEPTH BOUND (the design record's normative "path
+    ///   depth `k`" of §4 requirement 1 — renamed `d` HERE only to avoid colliding
+    ///   with `k` = graph count, and to match the `path_reach_d{d}_…` package
+    ///   directory). `d` is ALSO surfaced as the circuit's public `depth_bound`
+    ///   input, constant-constrained to `D` in-circuit, so a manifest cannot
+    ///   disclose a different bound than the member it binds (soundness req 1).
+    /// - `k` = number of committed graphs (the `[Field; K]` commitments arity,
+    ///   exactly like `Scan { k, .. }`).
+    /// - `n` = triple slots per graph (the `N` membership-probe width, like
+    ///   `Scan { n, .. }`).
+    ///
+    /// The four compiled members today are `(d,k,n)` in {(2,1,16), (4,1,16),
+    /// (4,2,16), (8,1,16)} — [`crate::build::derive_path_reach_id`] is the single
+    /// source of that family list; an `(d,k,n)` outside it derives `None`
+    /// (fail-closed, no wrong-bucket fallback).
+    ///
+    /// # SOUNDNESS (load-bearing, NOT a security claim)
+    /// A bounded path proof is EXISTENCE-ONLY and MONOTONE — it never asserts a
+    /// longer path does not exist nor that the reachable set is complete (req 2).
+    /// This member registers the id + public-input serialization + fail-closed
+    /// dispatch routing; it does NOT make the composition verifier sound. The
+    /// verifier is internally re-audited but NOT externally audited (sq-qhy4
+    /// pending); no soundness / ZK-privacy property is asserted as achieved.
+    // [OPUS-4.8] sq-3kd2g.6: bounded-depth path-reachability member. Opt-in
+    // (`extended-fragment` feature), research-grade, NOT externally audited.
+    #[cfg(feature = "extended-fragment")]
+    PathReach { d: u32, k: u32, n: u32 },
 }
 
 impl CircuitId {
@@ -734,6 +771,10 @@ impl CircuitId {
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): the `n_a`/`n_b` graph-size
             // buckets name the compiled join member, e.g. `join_eq_na16_nb16`.
             CircuitId::JoinEq { n_a, n_b } => format!("join_eq_na{n_a}_nb{n_b}"),
+            // [OPUS-4.8] sq-3kd2g.6: the `(d, k, n)` buckets name the compiled
+            // bounded-depth path member, e.g. `path_reach_d4_k2_n16`.
+            #[cfg(feature = "extended-fragment")]
+            CircuitId::PathReach { d, k, n } => format!("path_reach_d{d}_k{k}_n{n}"),
         }
     }
 }
@@ -997,6 +1038,59 @@ pub enum ProofInputs {
         /// Graph-B join slot in `{0,1,2}` — query-bound to pattern B's slot.
         slot_b: u32,
     },
+    /// `path_reach_d{d}_k{k}_n{n}`: BOUNDED-DEPTH property-path reachability
+    /// public inputs (sq-3kd2g.6). These fields are EXACTLY the `pub` parameters
+    /// of the member `main` (`zk/compose/path_reach_d{d}_k{k}_n{n}/src/main.nr`),
+    /// in declaration order AFTER the prepended `challenge` (which `binding`
+    /// carries for every member):
+    ///
+    /// ```text
+    /// [challenge, commitments[k], pred_enc, src_enc, dst_enc, allow_zero,
+    ///  depth_bound, attribution[k]]
+    /// ```
+    ///
+    /// The path chain nodes, the actual (hidden) chain length `l <= d`, and the
+    /// per-graph triple encodings are PRIVATE witnesses. `depth_bound` is the
+    /// PUBLIC, constant-constrained depth bound the manifest discloses (soundness
+    /// req 1): the verifier's `reconstruct_public_inputs` emits it and
+    /// `dispatch_fragment` requires it to equal the member's compiled `d`, so a
+    /// consumer always sees the bound the proof was produced at.
+    ///
+    /// # SOUNDNESS (load-bearing, NOT a security claim)
+    /// EXISTENCE-ONLY: a passing proof witnesses one bounded chain; it says
+    /// NOTHING about longer paths or reachable-set completeness. NOT externally
+    /// audited (sq-qhy4); no soundness / privacy claim.
+    // [OPUS-4.8] sq-3kd2g.6: bounded-depth path-reachability inputs. Opt-in
+    // (`extended-fragment`), research-grade, NOT-yet-sound.
+    #[cfg(feature = "extended-fragment")]
+    #[serde(rename = "path_reach")]
+    PathReach {
+        id: CircuitId,
+        /// Per-graph flat Poseidon2 commitments (length `k`) — the committed
+        /// graph union the chain is drawn from (same role as `Scan.commitments`).
+        commitments: Vec<FieldHex>,
+        /// Term encoding of the single path predicate every chain triple carries
+        /// (a constant NamedNode, salt-independent).
+        pred_enc: FieldHex,
+        /// Term encoding of the disclosed chain SOURCE `μ(s)`.
+        src_enc: FieldHex,
+        /// Term encoding of the disclosed chain DESTINATION `μ(o)`.
+        dst_enc: FieldHex,
+        /// Whether the operator admits the ZERO-LENGTH path (`p*` / `p?`). `true`
+        /// for `*`/`?`, `false` for `+`. `dispatch_fragment` cross-checks this
+        /// against the query-re-derived closure (`false` iff `closure.min_len ==
+        /// 1`) so a manifest cannot silently upgrade `+` to `*`.
+        allow_zero: bool,
+        /// The PUBLIC depth bound (`= d`, constant-constrained in-circuit). The
+        /// verifier surfaces it and rejects a manifest whose `depth_bound` differs
+        /// from the member's compiled `d` (soundness req 1 — depth-overflow /
+        /// mismatch is fail-closed).
+        depth_bound: u32,
+        /// Per-graph source attribution (length `k`): `attribution[g]` is true iff
+        /// the chain draws a triple from committed graph `g` (chain-relative,
+        /// constrained in-circuit — same proof-bound provenance as `Scan.attribution`).
+        attribution: Vec<bool>,
+    },
 }
 
 impl ProofInputs {
@@ -1018,6 +1112,9 @@ impl ProofInputs {
             ProofInputs::FilterValueDlDecimal { id, .. } => id,
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
             ProofInputs::JoinEq { id, .. } => id,
+            // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability.
+            #[cfg(feature = "extended-fragment")]
+            ProofInputs::PathReach { id, .. } => id,
         }
     }
 }
@@ -1110,6 +1207,197 @@ pub struct JoinEdge {
     /// Index into `sub_proofs` of the `join_eq` sub-proof
     /// ([`ProofInputs::JoinEq`]) that proves the hidden equality.
     pub join_proof: usize,
+}
+
+/// One DISCLOSED term of an extended-fragment solution (sq-1zf94): an IRI or a
+/// literal the relying party reads off the presented solution. Blank nodes are
+/// NOT expressible (they are existential in the committed model, so a disclosed
+/// solution never names one) — an endpoint that binds to a blank node stays
+/// existential/undisclosed and is not term-bound by this layer.
+///
+/// The verifier RE-ENCODES the term itself (`sparq_zk::encode::encode_term`,
+/// salt-independent for IRIs/literals) and byte-matches the recomputed encoding
+/// against the proof-bound `PathReach` `src_enc`/`dst_enc` / the query's `VALUES`
+/// cell — it never trusts a prover-supplied encoding. So this carries the
+/// PREIMAGE the relying party reads, and the gate proves that preimage is the one
+/// the proof attests.
+// [OPUS-4.8] sq-1zf94: disclosed-solution term. Opt-in (`extended-fragment`),
+// research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DisclosedTerm {
+    /// An IRI (a `NamedNode`). `value` is the raw IRI (no `<>`).
+    Iri {
+        /// The IRI string.
+        value: String,
+    },
+    /// A literal. Exactly one shape is well-formed: a plain literal (`value`
+    /// only), a language-tagged literal (`value` + `language`, datatype implicitly
+    /// `rdf:langString`), or a typed literal (`value` + `datatype`). A literal
+    /// carrying BOTH a `language` and a non-`rdf:langString` `datatype` is
+    /// malformed and rejected fail-closed (`to_term` returns `None`).
+    Literal {
+        /// The lexical value.
+        value: String,
+        /// The datatype IRI (typed literals; mutually exclusive with `language`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        datatype: Option<String>,
+        /// The BCP-47 language tag (language-tagged literals).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl DisclosedTerm {
+    /// Rebuild the `oxrdf::Term` (verifier-side) so the encoding can be
+    /// recomputed. Returns `None` (fail-closed) on an unparseable IRI / datatype
+    /// / language tag, or a literal that carries both a language and a
+    /// non-`rdf:langString` datatype.
+    pub fn to_term(&self) -> Option<oxrdf::Term> {
+        const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+        match self {
+            DisclosedTerm::Iri { value } => {
+                oxrdf::NamedNode::new(value).ok().map(oxrdf::Term::NamedNode)
+            }
+            DisclosedTerm::Literal { value, datatype, language } => {
+                let lit = match (datatype.as_deref(), language.as_deref()) {
+                    (Some(dt), Some(_)) if dt != RDF_LANG_STRING => return None,
+                    (_, Some(lang)) => {
+                        oxrdf::Literal::new_language_tagged_literal(value, lang).ok()?
+                    }
+                    (Some(dt), None) => {
+                        oxrdf::Literal::new_typed_literal(value, oxrdf::NamedNode::new(dt).ok()?)
+                    }
+                    (None, None) => oxrdf::Literal::new_simple_literal(value),
+                };
+                Some(oxrdf::Term::Literal(lit))
+            }
+        }
+    }
+}
+
+/// One disclosed variable binding of an extended-fragment solution (sq-1zf94):
+/// `var` (a query variable name, no leading `?`) is bound to the disclosed
+/// [`DisclosedTerm`]. The verifier binds this to the proof-bound term encodings
+/// (see [`crate::verifier::bind_fragment_solution`]).
+// [OPUS-4.8] sq-1zf94: disclosed-solution binding. Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolutionBinding {
+    /// The query variable name (no leading `?`).
+    pub var: String,
+    /// The disclosed term the variable is bound to in this solution.
+    pub term: DisclosedTerm,
+}
+
+/// The PER-SOLUTION UNION branch attribution + obligation binding (sq-3kd2g.6).
+///
+/// `UNION` semantics under the extended fragment is PER-SOLUTION branch
+/// attribution (`research/zksparql-fragment-extension.md` §3.2): each disclosed
+/// solution is attributed to exactly ONE `UNION` branch, and the verifier checks
+/// THAT branch's obligations. A `BranchWitness` records, for one disclosed
+/// solution, (a) which branch it witnesses and (b) the `sub_proofs` indices that
+/// discharge the branch's obligations, in the branch's obligation order.
+///
+/// The [`crate::verifier::dispatch_fragment`] gate re-derives the branches from
+/// the query text alone (via `sparq_zk::verify::fragment_query` — never trusting
+/// the manifest) and checks, FAIL-CLOSED, that:
+/// - `branch` indexes a real branch (out-of-range => rejected: wrong branch);
+/// - `scan_proofs` / `path_proofs` / `values_rows` have EXACTLY the branch's
+///   obligation arity;
+/// - each `scan_proofs[i]` is a bound BGP-scan sub-proof, and each
+///   `path_proofs[i]` is a bound [`ProofInputs::PathReach`] sub-proof of the
+///   member the closure requires (with a matching disclosed `depth_bound` /
+///   `allow_zero`) — a path obligation with no bound path sub-proof of the right
+///   member is rejected;
+/// - each `values_rows[i]` indexes a real re-derived VALUES row of block `i`.
+///
+/// A query WITHOUT `UNION` has exactly one branch, so a plain path/VALUES
+/// manifest carries a single `BranchWitness { branch: 0, .. }` per disclosed
+/// solution.
+///
+/// # Honest scope (the disclosed-solution term binding — sq-1zf94)
+/// `dispatch_fragment` is the STRUCTURAL ROUTING layer: it binds each construct to
+/// a bound sub-proof of the correct circuit member (and surfaces the depth bound).
+/// The TERM-encoding binding of a path's `pred_enc`/`src_enc`/`dst_enc` and a
+/// `VALUES` row's cell terms to the disclosed SOLUTION bindings (the [`solution`]
+/// field) — the composition analogue of the flat scan-slot binding /
+/// `bind_joins` commitment binding — is done by
+/// [`crate::verifier::bind_fragment_solution`] (run by
+/// [`crate::verifier::verify_fragment_manifest`]). The BGP-scan-slot binding of a
+/// disclosed solution's variables to a scan sub-proof's disclosed rows (a scan
+/// discloses `r` rows; the per-solution row-selection model is the [`scan_rows`]
+/// field) is done by [`crate::verifier::bind_fragment_scans`] (sq-qyfth, also run
+/// by [`crate::verifier::verify_fragment_manifest`]). The flat cross-graph Q6
+/// non-bnode obligation per branch AND the existential coherence of a variable
+/// shared between a scan slot and a `PathReach` endpoint (`src_enc`/`dst_enc`) are
+/// enforced by [`crate::verifier::bind_fragment_join_coherence`] (sq-ygk6x, also run
+/// by [`crate::verifier::verify_fragment_manifest`]). What those gates STILL DEFER is
+/// explicit: the salt-uniqueness gate covers only SCAN-referenced committed graphs
+/// (so a cross-graph join through a single-graph PATH graph is an agreement check
+/// pending path-graph salt coverage; a multi-graph path is refused fail-closed), and
+/// an EXISTENTIAL (non-projected) path endpoint's VALUE (hidden by design). Like
+/// every gate here, they assert NO soundness / privacy property (sq-qhy4).
+///
+/// [`solution`]: BranchWitness::solution
+/// [`scan_rows`]: BranchWitness::scan_rows
+// [OPUS-4.8] sq-3kd2g.6: per-solution UNION branch attribution + obligation
+// binding schema. Opt-in (`extended-fragment`), NOT-yet-sound.
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchWitness {
+    /// Which `UNION` branch (index into the query-re-derived
+    /// `fragment_query.branches`) this disclosed solution witnesses. Out-of-range
+    /// => fail-closed (the "wrong branch" rejection).
+    pub branch: usize,
+    /// The `sub_proofs` indices discharging this branch's BGP-scan obligations,
+    /// one per `branch.patterns`, in query-text order. Each must be a bound
+    /// [`ProofInputs::Scan`] sub-proof.
+    #[serde(default)]
+    pub scan_proofs: Vec<usize>,
+    /// The `sub_proofs` indices discharging this branch's bounded-path
+    /// obligations, one per `branch.path_reach`, in query-text order. Each must be
+    /// a bound [`ProofInputs::PathReach`] sub-proof of the member the closure
+    /// requires (matching `depth_bound` / `allow_zero`).
+    #[serde(default)]
+    pub path_proofs: Vec<usize>,
+    /// The chosen row index into each VALUES block, one per `branch.values`, in
+    /// query-text order. Each must index a real re-derived row of that block
+    /// (out-of-range => fail-closed).
+    #[serde(default)]
+    pub values_rows: Vec<usize>,
+    /// The PER-SOLUTION BGP-scan ROW SELECTION (sq-qyfth): for each BGP-scan
+    /// obligation (one per `branch.patterns`, parallel to [`scan_proofs`]), the
+    /// index of the DISCLOSED matched row of that scan sub-proof
+    /// ([`ProofInputs::Scan::rows`]) that supports THIS solution. The verifier
+    /// ([`crate::verifier::bind_fragment_scans`]) binds each solution variable
+    /// occurring in the scan pattern to the selected row's slot value (re-derived
+    /// from the disclosed solution + query text, never a prover encoding) and
+    /// checks join coherence across atoms sharing a variable. Empty (or shorter
+    /// than [`scan_proofs`]) is back-compatible for a branch whose scan patterns
+    /// are all-constant; a scan pattern that carries ANY variable with no selected
+    /// row is refused fail-closed. An index outside the scan's ACTIVE disclosed
+    /// rows is refused fail-closed.
+    ///
+    /// [`scan_proofs`]: BranchWitness::scan_proofs
+    // [OPUS-4.8] sq-qyfth: per-solution BGP scan-slot row selection.
+    #[serde(default)]
+    pub scan_rows: Vec<usize>,
+    /// The DISCLOSED solution bindings (sq-1zf94): the variable→term assignment
+    /// the relying party reads for THIS solution. The verifier re-encodes each
+    /// term itself and binds it to the proof-bound `PathReach`
+    /// `src_enc`/`dst_enc` and the query's `VALUES` cells
+    /// ([`crate::verifier::bind_fragment_solution`]) — so an accepted proof's
+    /// disclosed path endpoints / VALUES-constrained variables are tied to the
+    /// specific terms here (fail-closed on any mismatch). Every PROJECTED path
+    /// endpoint variable MUST appear here; an EXISTENTIAL (non-projected) endpoint
+    /// stays hidden and is not term-bound. Empty => no disclosed-term binding
+    /// (only the query-CONSTANT path predicate/endpoints are bound).
+    // [OPUS-4.8] sq-1zf94: disclosed-solution term binding.
+    #[serde(default)]
+    pub solution: Vec<SolutionBinding>,
 }
 
 /// The full query-result proof manifest.
@@ -1540,6 +1828,76 @@ impl ProofManifest {
         let mut canonical = self.clone();
         canonical.canonicalize();
         serde_json::to_string_pretty(&canonical).expect("manifest is serializable")
+    }
+
+    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
+}
+
+/// A WAVE-1 EXTENDED-FRAGMENT presentation (sq-3kd2g.6): a stage-1
+/// [`ProofManifest`] PLUS the per-solution UNION branch attribution
+/// ([`BranchWitness`]) the extended fragment (property paths / `UNION` / `VALUES`
+/// / subquery) needs.
+///
+/// It is a distinct WRAPPER — not a new [`ProofManifest`] field — so the stage-1
+/// manifest schema and its (many) construction sites are byte-unchanged, and the
+/// whole extended surface stays behind the opt-in `extended-fragment` feature
+/// (the default verifier surface is untouched). A relying party verifying an
+/// extended-fragment presentation runs [`crate::verifier::dispatch_fragment`]
+/// over this wrapper (the fail-closed routing gate) AND
+/// [`crate::verifier::verify_manifest`] over the embedded [`Self::manifest`] (the
+/// crypto binding of each sub-proof).
+///
+/// # Honest scope
+/// `dispatch_fragment` is the STRUCTURAL routing gate. Its integration into the
+/// `verify_manifest` crypto flow for an end-to-end path/`UNION`/`VALUES` accept
+/// (which additionally needs the disclosed-solution term binding) is a documented
+/// follow-up bead. NOT externally audited (sq-qhy4); no soundness/privacy claim.
+// [OPUS-4.8] sq-3kd2g.6: extended-fragment presentation wrapper. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FragmentManifest {
+    /// Schema marker (URN registry convention, mirrors `ProofManifest`'s `type`).
+    #[serde(default = "default_fragment_type")]
+    pub r#type: String,
+    /// The embedded stage-1 proof manifest (sub-proofs, attestations, binding,
+    /// revocation — everything [`crate::verifier::verify_manifest`] consumes).
+    pub manifest: ProofManifest,
+    /// One [`BranchWitness`] per disclosed solution, attributing it to a `UNION`
+    /// branch and naming the embedded manifest's `sub_proofs` that discharge that
+    /// branch's obligations. Empty => no extended-fragment attribution (the gate
+    /// then only re-derives the query fragment and checks the embedded sub-proofs
+    /// carry known circuit ids).
+    #[serde(default)]
+    pub branch_witnesses: Vec<BranchWitness>,
+}
+
+#[cfg(feature = "extended-fragment")]
+fn default_fragment_type() -> String {
+    "urn:sparq:zk:FragmentManifest".to_string()
+}
+
+#[cfg(feature = "extended-fragment")]
+impl FragmentManifest {
+    /// Wrap a stage-1 [`ProofManifest`] with its branch attribution.
+    pub fn new(manifest: ProofManifest, branch_witnesses: Vec<BranchWitness>) -> Self {
+        FragmentManifest {
+            r#type: default_fragment_type(),
+            manifest,
+            branch_witnesses,
+        }
+    }
+
+    /// Serialise to pretty JSON (the embedded manifest is canonicalised via
+    /// [`ProofManifest::to_json`]'s edge-ordering discipline on serialise).
+    pub fn to_json(&self) -> String {
+        // Canonicalise the embedded manifest's edge vectors, mirroring
+        // `ProofManifest::to_json`, without mutating `self`.
+        let mut canonical = self.clone();
+        canonical.manifest.canonicalize();
+        serde_json::to_string_pretty(&canonical).expect("fragment manifest is serializable")
     }
 
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
@@ -2105,5 +2463,193 @@ mod canonical_edge_tests {
             vec![join_edge(0, 0, 1, 0, 4), join_edge(1, 0, 2, 0, 6)],
             "parsed canonical manifest carries sorted join_edges"
         );
+    }
+}
+
+// [OPUS-4.8] sq-3kd2g.6: schema tests for the bounded-depth path member id,
+// the PathReach public inputs, and the extended-fragment FragmentManifest wrapper.
+#[cfg(all(test, feature = "extended-fragment"))]
+mod path_schema_tests {
+    use super::*;
+
+    fn fh(s: &str) -> FieldHex {
+        FieldHex(s.to_string())
+    }
+
+    fn path_inputs() -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1"), fh("0x2")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: true,
+            depth_bound: 4,
+            attribution: vec![true, false],
+        }
+    }
+
+    #[test]
+    fn path_reach_circuit_id_packages_like_the_other_members() {
+        assert_eq!(
+            CircuitId::PathReach { d: 4, k: 2, n: 16 }.package(),
+            "path_reach_d4_k2_n16"
+        );
+        assert_eq!(
+            CircuitId::PathReach { d: 8, k: 1, n: 16 }.package(),
+            "path_reach_d8_k1_n16"
+        );
+    }
+
+    #[test]
+    fn path_reach_inputs_round_trip_and_expose_the_id() {
+        let inputs = path_inputs();
+        assert_eq!(inputs.circuit_id(), &CircuitId::PathReach { d: 4, k: 2, n: 16 });
+        let json = serde_json::to_string(&inputs).expect("serializes");
+        let back: ProofInputs = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, inputs, "ProofInputs::PathReach round-trips");
+        assert!(json.contains("\"circuit\":\"path_reach\""));
+    }
+
+    #[test]
+    fn branch_witness_round_trips() {
+        let bw = BranchWitness {
+            branch: 1,
+            scan_proofs: vec![0, 2],
+            path_proofs: vec![1],
+            values_rows: vec![3],
+            scan_rows: vec![0, 1],
+            solution: vec![SolutionBinding {
+                var: "o".to_string(),
+                term: DisclosedTerm::Iri { value: "http://ex/b".to_string() },
+            }],
+        };
+        let json = serde_json::to_string(&bw).expect("serializes");
+        let back: BranchWitness = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, bw);
+    }
+
+    #[test]
+    fn branch_witness_scan_rows_is_serde_default_back_compatible() {
+        // [OPUS-4.8] sq-qyfth: a pre-scan_rows manifest (no `scan_rows` key) still
+        // deserializes, defaulting the row-selection to empty — additive back-compat.
+        let json = r#"{"branch":0,"scan_proofs":[0],"path_proofs":[],"values_rows":[]}"#;
+        let back: BranchWitness = serde_json::from_str(json).expect("deserializes");
+        assert!(back.scan_rows.is_empty());
+        assert_eq!(back.scan_proofs, vec![0]);
+    }
+
+    #[test]
+    fn disclosed_term_to_term_builds_iris_and_literal_shapes() {
+        // IRI.
+        assert_eq!(
+            DisclosedTerm::Iri { value: "http://ex/a".into() }.to_term(),
+            Some(oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/a").unwrap()))
+        );
+        // Plain literal.
+        assert_eq!(
+            DisclosedTerm::Literal { value: "x".into(), datatype: None, language: None }.to_term(),
+            Some(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal("x")))
+        );
+        // Typed literal.
+        assert_eq!(
+            DisclosedTerm::Literal {
+                value: "1".into(),
+                datatype: Some("http://www.w3.org/2001/XMLSchema#integer".into()),
+                language: None,
+            }
+            .to_term(),
+            Some(oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+                "1",
+                oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            )))
+        );
+        // Language-tagged literal.
+        assert_eq!(
+            DisclosedTerm::Literal { value: "x".into(), datatype: None, language: Some("en".into()) }
+                .to_term(),
+            Some(oxrdf::Term::Literal(
+                oxrdf::Literal::new_language_tagged_literal("x", "en").unwrap()
+            ))
+        );
+        // Fail-closed: an unparseable IRI, a bad datatype, a bad language tag, and
+        // a language + non-langString datatype all return None.
+        assert_eq!(DisclosedTerm::Iri { value: "not an iri".into() }.to_term(), None);
+        assert_eq!(
+            DisclosedTerm::Literal {
+                value: "x".into(),
+                datatype: Some("not an iri".into()),
+                language: None,
+            }
+            .to_term(),
+            None
+        );
+        assert_eq!(
+            DisclosedTerm::Literal {
+                value: "x".into(),
+                datatype: Some("http://www.w3.org/2001/XMLSchema#string".into()),
+                language: Some("en".into()),
+            }
+            .to_term(),
+            None
+        );
+    }
+
+    #[test]
+    fn fragment_manifest_wraps_and_round_trips() {
+        let manifest = ProofManifest {
+            r#type: default_type(),
+            query: "SELECT * WHERE { <http://ex/a> <http://ex/p>+ ?o }".to_string(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs: vec![SubProof { inputs: path_inputs(), proof_hex: String::new() }],
+            binding_edges: vec![],
+            join_edges: vec![],
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+        };
+        let fm = FragmentManifest::new(
+            manifest.clone(),
+            vec![BranchWitness {
+                branch: 0,
+                scan_proofs: vec![],
+                path_proofs: vec![0],
+                values_rows: vec![],
+                scan_rows: vec![],
+                solution: vec![],
+            }],
+        );
+        assert_eq!(fm.r#type, "urn:sparq:zk:FragmentManifest");
+        let json = fm.to_json();
+        let back = FragmentManifest::from_json(&json).expect("fragment manifest round-trips");
+        assert_eq!(back, fm);
+        assert_eq!(back.manifest, manifest);
+        assert_eq!(back.branch_witnesses.len(), 1);
+    }
+
+    #[test]
+    fn fragment_manifest_parses_without_a_type_marker() {
+        let inner = r#"{
+            "type": "urn:sparq:zk:ProofManifest",
+            "query": "ASK {}",
+            "attributions": [],
+            "entailment_regime": "simple",
+            "binding": { "mode": "challenge", "challenge": "0x2a" },
+            "sub_proofs": []
+        }"#;
+        let json = format!("{{ \"manifest\": {}, \"branch_witnesses\": [] }}", inner);
+        let fm = FragmentManifest::from_json(&json).expect("parses without a type marker");
+        assert_eq!(fm.r#type, "urn:sparq:zk:FragmentManifest");
+        assert!(fm.branch_witnesses.is_empty());
     }
 }

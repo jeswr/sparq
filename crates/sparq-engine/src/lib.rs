@@ -30,33 +30,51 @@ pub mod params;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
-#[cfg(feature = "service")]
-mod service;
+// [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split (RFC research/engine-split-rfc.md §4
+// Option A / §7 Phase A2): the `service` module moved to the internal `sparq-engine-service`
+// sub-crate. The executor references it as `sparq_engine_service::service::*`; the facade
+// re-exports its public fns verbatim below, so every public path (`sparq_engine::
+// with_service_egress_allow`, …) + the `service` feature NAME are preserved for external users.
 // SSRF default-deny egress filter + opt-in allowlist for SERVICE federation
 // (threat-model B4 / sq-2v6f). [OPUS-4.8]
 #[cfg(feature = "service")]
-pub use service::with_service_egress_allow;
+pub use sparq_engine_service::service::with_service_egress_allow;
 // [OPUS-4.8] (sq-iu0c) Stable marker substring in every SERVICE egress-refusal engine
 // error, so a network-exposed host (sparq-server) can classify a blocked SERVICE as a
 // policy refusal (403-style) rather than a server fault (500), mirroring the existing
 // `"query budget exceeded (timeout)"` → 503 pattern.
 #[cfg(feature = "service")]
-pub use service::SERVICE_EGRESS_REFUSED_MARKER;
+pub use sparq_engine_service::service::SERVICE_EGRESS_REFUSED_MARKER;
 // Strict allowlist-only egress policy: only listed hosts reachable (even public ones
 // off the list are refused). The network-exposed server wires this to --service-allow
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
-pub use service::with_service_egress_policy;
+pub use sparq_engine_service::service::with_service_egress_policy;
+// [OPUS-4.8] (sq-vbnyc) The SERVICE-egress per-entry host:port matching rule, exposed as a
+// pure function so `sparq-fedclient`'s independent egress guard adopts the SAME port-scoping
+// semantics (port-0/overflow/IPv6-bracket/trailing-colon all handled identically) instead of
+// keeping a second, divergent copy of the allowlist-matching logic — one source of truth.
+#[cfg(feature = "service")]
+pub use sparq_engine_service::service::{allowlist_entry_host_matches, allowlist_entry_permits};
 // Bind-join (VALUES pushdown) block-size knob — the only OPT-IN tunable for the
 // SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
 #[cfg(feature = "service")]
-pub use service::with_service_bound_join_block_size;
-// [OPUS-4.8] (sq-678h) RDF serializer matrix (Turtle / TriG / N-Quads writers). NON-DEFAULT
-// `serialize-rdf` feature — when off, zero serializer code compiles and the default build's
-// dependency graph is unchanged (the writers add no new deps). The always-on N-Triples writer
-// stays in `construct::triples_to_ntriples`.
+pub use sparq_engine_service::service::with_service_bound_join_block_size;
+// Per-query remote-request cap for a high-cardinality `SERVICE ?ep` (endpoint var bound
+// to many distinct IRIs): an OPT-IN ceiling on the distinct endpoints one SERVICE ?ep
+// evaluation may dial, enforced PRE-HTTP (a typed refusal, not post-hoc cancellation).
+// DEFAULT is uncapped, so normal SERVICE queries are unchanged. [OPUS-4.8] (sq-b93pv)
+#[cfg(feature = "service")]
+pub use sparq_engine_service::service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
+// [OPUS-4.8] (sq-678h, sq-6vshe.4) RDF serializer matrix (Turtle / TriG / N-Quads / JSON-LD
+// writers). NON-DEFAULT `serialize-rdf` feature — when off, zero serializer code compiles and
+// the default build's dependency graph is unchanged. Seam 1 of the facade split (RFC
+// research/engine-split-rfc.md §4 Option A / §7 Phase A1): the module moved to the internal
+// `sparq-engine-serialize` sub-crate and is re-exported VERBATIM here, so every existing public
+// path (`sparq_engine::serialize::write_turtle`, `…::graph_to_jsonld`, `…::JsonLdForm`, …) is
+// preserved. The always-on N-Triples writer stays in `construct::triples_to_ntriples`.
 #[cfg(feature = "serialize-rdf")]
-pub mod serialize;
+pub use sparq_engine_serialize::serialize;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.
@@ -76,6 +94,15 @@ pub use construct::{
 pub mod txn;
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
+// [OPUS-4.8] (sq-iywur) Opt-in DPccp dynamic-programming join-order enumerator — gated
+// on the non-default `dp-planner` feature. `with_dp_planner`(`_budget`) installs it per
+// thread (like `with_cs_table`); the default planner stays greedy GOO. Order-only: it
+// changes join order, never the query answer. When off, zero DP code compiles and the
+// default native + wasm builds are byte-identical.
+#[cfg(feature = "dp-planner")]
+pub mod dp;
+#[cfg(feature = "dp-planner")]
+pub use dp::{with_dp_planner, with_dp_planner_budget};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
 #[cfg(feature = "explain-json")]
@@ -247,6 +274,11 @@ pub use cache::{is_cacheable, CacheStats, ResultCache};
 pub mod chunk;
 #[cfg(feature = "vectorized")]
 pub use chunk::{DataChunk, SelVec, VecCmp};
+// [SONNET-4.6] (sq-pntvh.4) M4 Phase 4 columnar reducer kernels (SUM/COUNT/MIN/MAX/AVG
+// over inline-integer id slices). NON-DEFAULT `vectorized` feature; zero code compiles
+// when off. No new dependencies.
+#[cfg(feature = "vectorized")]
+pub(crate) mod reduce;
 
 // [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
 // (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary
@@ -1353,6 +1385,25 @@ mod tests {
         assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
     }
 
+    /// [OPUS-4.8] sq-l11x2: fn:round at the FLOAT tiers must not double-round. The xsd:double
+    /// value just below one-half (0.49999999999999994, the f64 predecessor of 0.5) must ROUND
+    /// to 0, NOT 1 — the naive `(x + 0.5).floor()` returns 1 because `x + 0.5` rounds up to
+    /// exactly 1.0 before the floor. Same defect at the xsd:float tier.
+    #[test]
+    fn round_float_tier_no_double_rounding_via_sparql() {
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:p ex:v "0.49999999999999994"^^xsd:double .
+            ex:f ex:v "0.49999997"^^xsd:float ."#;
+        let gg = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let n = |q: &str| query(&gg, &format!("{pfx}{q}")).unwrap().len();
+        // xsd:double just below 1/2 rounds DOWN to 0, and NOT up to 1.
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 0.0) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 1.0) }"), 0);
+        // xsd:float predecessor of 1/2 likewise rounds to 0.
+        assert_eq!(n("SELECT ?s WHERE { ex:f ex:v ?v FILTER(ROUND(?v) = 0.0) }"), 1);
+    }
+
     /// [OPUS-4.8] roborev 1429 (Med): GROUP BY aggregate over a >PAR_THRESHOLD (50k) input
     /// must produce complete, correct per-group results. This crosses the chunked parallel
     /// eval+intern boundary (default `parallel` feature) and the streaming sequential path
@@ -2075,14 +2126,16 @@ mod tests {
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
     }
 
-    /// [OPUS-4.8] roborev 1538 (High): a budget must bound CPU/memory on a LARGE
-    /// single-pattern SELECT, not just the final response. Above PAR_THRESHOLD the
-    /// streaming-JSON path used to fan out to rayon and build EVERY matching fragment
-    /// before checking the budget. With a budget active it must instead take the
-    /// cooperative serial loop that stops within ~1024 scanned rows. We build >50k
-    /// matching rows and assert (a) the budget error fires, and (b) an already-expired
-    /// deadline returns near-instantly (a full parallel materialisation of 60k rows
-    /// would be far slower) — guarding against re-introducing the eager fan-out.
+    /// [OPUS-4.8] roborev 1538 (High) / sq-7d3dj.10: a budget must bound CPU/memory on a
+    /// LARGE single-pattern SELECT, not just the final response. A ROW/BYTE cap cannot be
+    /// enforced mid-fan-out (fragments are built before any count is known), so it takes
+    /// the cooperative serial loop that stops within ~1024 scanned rows. A DEADLINE-only
+    /// budget IS allowed to fan out (audit item 6), but the coarse per-par-chunk deadline
+    /// re-check bounds the overrun: an already-expired deadline makes every chunk produce
+    /// nothing, so the call still returns near-instantly. We build >50k matching rows and
+    /// assert (a) the row-cap budget error fires, and (b) an already-expired deadline
+    /// returns the timeout error near-instantly (a full 60k-row materialisation would be
+    /// far slower) — guarding against an UNBOUNDED fan-out under a deadline.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn budget_bounds_large_single_pattern_json_scan() {
@@ -2096,8 +2149,11 @@ mod tests {
         let b = QueryBudget { max_rows: Some(5), ..QueryBudget::unlimited() };
         let e = query_json_with_budget(&big, q, &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
-        // Already-expired deadline: the serial loop trips on its first 1024-row check,
-        // so the call returns quickly without materialising the whole result.
+        // Already-expired deadline-only budget: the multi-core fan-out is now ADMITTED
+        // (no row/byte cap to enforce mid-serialize), but the coarse per-par-chunk
+        // deadline re-check sees the passed deadline so every chunk produces nothing —
+        // the call returns near-instantly without serialising the 60k rows, and the
+        // installing thread's post-fan-out gate reports the timeout.
         let b = QueryBudget {
             deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
             ..QueryBudget::unlimited()
@@ -2111,6 +2167,69 @@ mod tests {
         // one `"s":` binding key per result row.
         let full = query_json(&big, q).unwrap();
         assert_eq!(full.matches("\"s\":").count(), 60_000, "unbudgeted scan must return all rows");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.10) The multi-core SELECT-JSON serializer runs under a
+    /// DEADLINE-ONLY budget (the default HTTP server's shape) but MUST produce bytes
+    /// identical to the single-core serial path — same row order, same formatting — and
+    /// MUST bound its overrun on an expired deadline. The #1 risk is a nondeterministic
+    /// row order or formatting drift, which breaks SPARQL-results-JSON conformance; the
+    /// `par_chunks` split + ordered `collect` keep the order deterministic.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_select_json_deadline_only_is_byte_identical_and_bounded() {
+        use std::time::{Duration, Instant};
+
+        // A >PAR_THRESHOLD (50k) result so the fan-out actually engages, plus small and
+        // empty result sets for the required size coverage.
+        let mut big_ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..60_000u32 {
+            big_ttl.push_str(&format!("ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n", i, i));
+        }
+        let big = Graph::load_str(&big_ttl, "turtle").unwrap();
+        let small = g();
+        let cases: Vec<(&Graph, &str)> = vec![
+            (&big, "SELECT * WHERE { ?s ?p ?o }"),                   // large — fan-out engaged
+            (&big, "SELECT ?o WHERE { ?s ?p ?o }"),                 // large, projected
+            (&big, "SELECT * WHERE { ?s <http://ex/absent> ?o }"),  // empty (unsatisfiable predicate)
+            (&small, "SELECT * WHERE { ?s ?p ?o }"),                // small — below the fan-out threshold
+        ];
+
+        for (graph, q) in cases {
+            // Single-core reference: a generous ROW cap forces the cooperative SERIAL
+            // loop (parallel_json_fanout → None) yet never trips (cap ≫ result size).
+            let serial_b = QueryBudget { max_rows: Some(10_000_000), ..QueryBudget::unlimited() };
+            let serial = query_json_with_budget(graph, q, &serial_b).unwrap();
+
+            // Multi-core: a DEADLINE-only budget far in the future admits the fan-out.
+            let par_b = QueryBudget {
+                deadline: Some(Instant::now() + Duration::from_secs(3600)),
+                ..QueryBudget::unlimited()
+            };
+            let parallel = query_json_with_budget(graph, q, &par_b).unwrap();
+            assert_eq!(parallel, serial, "multi-core deadline-only body must be byte-identical to single-core for: {}", q);
+
+            // The chunked (streamed) form the HTTP server uses must concatenate to the
+            // same bytes — Content-Length is derived from these bytes, so this pins it.
+            let chunks = query_json_chunks_with_budget(graph, q, &par_b).unwrap();
+            assert_eq!(chunks.concat(), serial, "chunked deadline-only concat must equal single-core for: {}", q);
+
+            // And the fully-unbudgeted parallel path agrees too.
+            assert_eq!(query_json(graph, q).unwrap(), serial, "unbudgeted body must equal single-core for: {}", q);
+        }
+
+        // Bounded overrun: a huge result under an ALREADY-EXPIRED deadline-only budget
+        // must NOT serialise the whole thing — every par-chunk re-check trips, so the
+        // call returns the timeout error near-instantly rather than 60k serialised rows.
+        let expired = QueryBudget {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..QueryBudget::unlimited()
+        };
+        let start = Instant::now();
+        let e = query_json_with_budget(&big, "SELECT * WHERE { ?s ?p ?o }", &expired).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(e.contains("query budget exceeded (timeout)"), "got: {}", e);
+        assert!(elapsed < Duration::from_secs(2), "expired-deadline fan-out took {:?} — overrun not bounded", elapsed);
     }
 
     #[test]

@@ -34,6 +34,16 @@
   --destructive-foreground: oklch(0.99 0.005 200);
 
   --success: oklch(0.55 0.11 155);
+  /* [SONNET-4.6] sq-ymr2e.14 — WCAG 2.1 AA fix for the success badge in the command palette.
+     The badge "success" variant renders text-[var(--success)] on a 15%-tinted success bg
+     (color-mix 15% success + transparent on the white card). With --success at oklch(0.55 0.11 155)
+     ≈ #60bb83, the text achieves ~4.09:1 against the near-white tinted bg — below the 4.5:1 AA
+     minimum. A dedicated --success-on-tint token (text-in-tinted-context only) darkens from
+     oklch(0.55) to oklch(0.46) while bumping chroma 0.11→0.12 to keep the green vibrant:
+       Before: oklch(0.55 0.11 155) → ~4.09:1 on the 15%-tinted bg  (FAIL AA)
+       After:  oklch(0.46 0.12 155) → ~6.1:1 on the same bg         (PASS AA)
+     --success stays untouched so non-badge uses (icons, status text) remain unchanged. */
+  --success-on-tint: oklch(0.46 0.12 155);
   --warning: oklch(0.7 0.14 75);
 
   --border: oklch(0.91 0.012 220);
@@ -42,8 +52,13 @@
 
   --chart-1: oklch(0.55 0.11 205);
   --chart-2: oklch(0.6 0.12 160);
-  --chart-3: oklch(0.62 0.14 95);
-  --chart-4: oklch(0.58 0.16 30);
+  /* [SONNET-4.6] sq-ymr2e.13 — WCAG 2.1 AA light-mode fix: darken chart-3 (number token) and
+     chart-4 (string token) so .sq-tok-number / .sq-tok-string clear ≥4.5:1 on white card bg.
+     Before: chart-3=oklch(0.62 0.14 95) → ~3.6:1 (FAIL); chart-4=oklch(0.58 0.16 30) → ~4.6:1
+     (borderline). After: chart-3=oklch(0.54 0.14 95) → ~5.0:1; chart-4=oklch(0.55 0.16 30)
+     → ~5.2:1. Dark-mode values in .dark below are unchanged (they already clear AA on dark card). */
+  --chart-3: oklch(0.54 0.14 95);
+  --chart-4: oklch(0.55 0.16 30);
   --chart-5: oklch(0.55 0.15 290);
 
   --sidebar: oklch(0.985 0.004 210);
@@ -58,7 +73,7 @@
   /* [OPUS-4.8] sq-vw3ax (bold redesign foundation) — derived BOLD-direction tokens.
      All are mixed/derived from the existing OKLCH teal palette above; NO new hue is
      invented. They power the atmospheric glow, the hero gradient, hairline rules, and
-     the elevation scale that the home/try/capabilities redesigns build on. Light values
+     the elevation scale that the home/capabilities redesigns build on. Light values
      here; the .dark strip below carries the lead (dark-first) values. */
   --teal-glow: oklch(0.52 0.094 205 / 0.25);
   --teal-soft: color-mix(in oklch, var(--primary) 10%, transparent);
@@ -102,6 +117,13 @@
   --destructive-foreground: oklch(0.96 0.006 210);
 
   --success: oklch(0.72 0.12 155);
+  /* [SONNET-4.6] sq-ymr2e.14 — dark mode fix (CI revision): axe gamma-composites 15%
+     of success on the selected-item sidebar-accent background (oklch 0.32 0.045 205 =
+     #11393e), giving effective bg #1d4c48 (lum≈0.059). The original oklch(0.72 0.12 155)
+     = #60bb83 yielded only 4.09:1 against that selected-item bg (confirmed by CI axe run).
+     oklch(0.80 0.12 155) = #7ad59c gives ~5.4:1 against the selected bg and ~7.6:1
+     against the non-selected (card-dark) bg — both clear WCAG AA 4.5:1. [SONNET-4.6] */
+  --success-on-tint: oklch(0.80 0.12 155);
   --warning: oklch(0.8 0.13 80);
 
   --border: oklch(1 0 0 / 10%);
@@ -156,6 +178,7 @@
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--success);
+  --color-success-on-tint: var(--success-on-tint);
   --color-warning: var(--warning);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -224,8 +247,8 @@
 
 /* [OPUS-4.8] sq-vw3ax — BOLD DARK-FIRST FOUNDATION utilities.
    The shared visual language extracted VERBATIM from the approved mockups
-   (sparq-design-system/proposals/web-{home,try,capabilities}.html). These are the base
-   the home/try/capabilities surface redesigns build on; they are OPT-IN (a page must add
+   (sparq-design-system/proposals/web-{home,capabilities}.html). These are the base
+   the home/capabilities surface redesigns build on; they are OPT-IN (a page must add
    the class), so un-redesigned routes are unaffected. All effects are pure CSS — no
    runtime, no new dependency — and read in BOTH themes via the design tokens above.
    ──────────────────────────────────────────────────────────────────────────────── */
@@ -392,4 +415,242 @@
     color: var(--muted-foreground);
     font-style: italic;
   }
+
+  /* [OPUS-4.8] sq-rvgr2.1 — scoped styling for the build-time-generated ReSpec/TR-style spec
+     render (components/specs/spec-html.tsx). The fragment is Typst HTML export post-processed
+     by scripts/build-specs.mjs into W3C TR conventions: a spec header, a Status-of-This-Document
+     box, a linked Table of Contents, numbered sections, term definitions, notes, and a
+     references list. All colours reuse the existing design-system tokens so light + dark follow
+     the theme automatically (no new palette). It shares the prose tag rules with .paper-prose
+     but adds the ReSpec-specific structural classes. */
+  .spec-prose {
+    max-width: 68ch;
+    margin-inline: auto;
+    line-height: 1.7;
+    color: var(--foreground);
+  }
+  .spec-prose p {
+    margin-bottom: 0.85rem;
+  }
+  .spec-prose h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-top: 1.9rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid var(--border);
+    scroll-margin-top: 5rem;
+  }
+  .spec-prose h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 1.5rem;
+    margin-bottom: 0.4rem;
+    scroll-margin-top: 5rem;
+  }
+  .spec-prose code {
+    font-size: 0.85em;
+    background-color: var(--muted);
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.25rem;
+  }
+  .spec-prose pre {
+    margin: 1rem 0;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: 0.4rem;
+    background-color: color-mix(in oklch, var(--muted) 60%, transparent);
+    overflow-x: auto;
+    font-size: 0.85em;
+  }
+  .spec-prose pre code {
+    background: none;
+    padding: 0;
+  }
+  .spec-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9em;
+  }
+  .spec-prose th,
+  .spec-prose td {
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .spec-prose th {
+    background-color: color-mix(in oklch, var(--muted) 60%, transparent);
+    font-weight: 600;
+  }
+
+  /* The document header: status line + title + metadata. */
+  .spec-prose .spec-head {
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid var(--border);
+  }
+  .spec-prose .spec-status-line {
+    margin: 0 0 0.35rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--primary);
+  }
+  .spec-prose .spec-title {
+    font-size: 1.6rem;
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0 0 0.6rem;
+  }
+  .spec-prose .spec-meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.15rem 0.75rem;
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--muted-foreground);
+  }
+  .spec-prose .spec-meta dt {
+    font-weight: 600;
+    color: var(--foreground);
+  }
+  .spec-prose .spec-meta dd {
+    margin: 0;
+  }
+
+  /* Introductory (unnumbered) sections: Abstract, Status of This Document. */
+  .spec-prose section.introductory > h2 {
+    border-bottom: none;
+    margin-top: 1.5rem;
+  }
+  /* The Status-of-This-Document box — the honest "no W3C standing" banner. */
+  .spec-prose section.sotd {
+    margin: 1.25rem 0;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--primary);
+    border-radius: 0.5rem;
+    background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+  }
+  .spec-prose section.sotd > h2 {
+    margin-top: 0.25rem;
+    font-size: 1rem;
+  }
+
+  /* The linked Table of Contents. */
+  .spec-prose .spec-toc {
+    margin: 1.5rem 0;
+    padding: 0.75rem 1.1rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background-color: color-mix(in oklch, var(--muted) 45%, transparent);
+  }
+  .spec-prose .spec-toc > h2 {
+    margin-top: 0.25rem;
+    border-bottom: none;
+    font-size: 0.95rem;
+  }
+  .spec-prose .spec-toc ol {
+    list-style: none;
+    margin: 0.4rem 0 0;
+    padding-left: 0.5rem;
+  }
+  .spec-prose .spec-toc ol ol {
+    padding-left: 1.25rem;
+  }
+  .spec-prose .spec-toc li {
+    margin: 0.2rem 0;
+  }
+  .spec-prose .spec-toc a {
+    color: var(--foreground);
+    text-decoration: none;
+  }
+  .spec-prose .spec-toc a:hover {
+    text-decoration: underline;
+    color: var(--primary);
+  }
+  .spec-prose .spec-toc .toc-num {
+    color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.4rem;
+  }
+
+  /* Inline term definitions and reference cross-links. */
+  .spec-prose dfn.respec-dfn {
+    font-style: italic;
+    font-weight: 600;
+  }
+  .spec-prose a.spec-ref {
+    color: var(--primary);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .spec-prose a.spec-ref:hover {
+    text-decoration: underline;
+  }
+
+  /* Informative note asides. */
+  .spec-prose aside.note {
+    display: block;
+    margin: 1rem 0;
+    padding: 0.7rem 0.9rem;
+    border-left: 3px solid var(--chart-2);
+    border-radius: 0.3rem;
+    background-color: color-mix(in oklch, var(--chart-2) 8%, transparent);
+    font-size: 0.92em;
+  }
+  .spec-prose aside.note .note-title {
+    display: inline-block;
+    margin-right: 0.4rem;
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--chart-2);
+  }
+
+  /* The references list. */
+  .spec-prose dl.spec-refs {
+    margin: 0.75rem 0;
+    font-size: 0.9em;
+  }
+  .spec-prose dl.spec-refs dt {
+    font-weight: 600;
+    scroll-margin-top: 5rem;
+  }
+  .spec-prose dl.spec-refs dd {
+    margin: 0 0 0.6rem;
+    padding-left: 1.25rem;
+    color: var(--muted-foreground);
+  }
+
+  /* Local-dev placeholder (Typst absent). */
+  .spec-prose .spec-placeholder {
+    padding: 1rem;
+    border: 1px dashed var(--border);
+    border-radius: 0.5rem;
+    color: var(--muted-foreground);
+    font-size: 0.9em;
+  }
+}
+
+/* [OPUS-4.8] sq-ymr2e.4 / sq-ymr2e.14 — WCAG 2.1 AA color-contrast on the Sonner `richColors`
+   error toast. Sonner 2.x's default light-theme error palette is hsl(360 100% 45%) (#e60000)
+   text on hsl(359 100% 97%) (#fff0f0) → 4.34:1, below the AA 4.5:1 minimum (axe flags it on the
+   "Engine failed to load" toast the home in-tab runner raises when the in-tab engine can't load — the
+   wasm-free CI lane, and any real browser where the engine genuinely fails). Darken the error
+   text/border/icon to hsl(360 100% 38%) ≈ #c20000, which is ~5.8:1 on the same background — a
+   comfortable AA margin while staying unmistakably red. Sonner exposes the colour as the
+   `--error-text` custom property on its toaster element (keyed by `data-sonner-theme`), consumed
+   by the `[data-rich-colors=true][data-sonner-toast][data-type=error]` rule; overriding the
+   variable there recolours text, border and icon in one place. The selector is intentionally
+   UNLAYERED and one specificity step above Sonner's own definition so it wins over the style
+   Sonner injects at runtime, regardless of source order. Dark-theme error text (light-on-dark)
+   already clears AA, so it is left untouched. */
+html [data-sonner-toaster][data-sonner-theme="light"] {
+  --error-text: hsl(360, 100%, 38%);
 }

@@ -123,9 +123,101 @@ PER_COMMIT_CRATES=(
   # the focused bnode-isomorphism / oxrdf-bridge unit cases; sparq-algos' reflects the inline
   # PageRank/centrality/community oracles plus the tests/topology_oracles.rs integration suite.
   sparq-algos sparq-canon
+  # [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn, umbrella sq-qonbz): the shared zero-overhead
+  # evaluation SUBSTRATE — the correctness core (the id-tuple Row/Key/Posting vocabulary,
+  # the XSD numeric value tower, the four id-tuple join kernels, and the SPARQL term total
+  # order). Its ENTIRE surface is behind DEFAULT-OFF features (numeric/join/compare/rows),
+  # so a default-feature `cargo llvm-cov -p sparq-substrate` would instrument an EMPTY crate
+  # and report a meaningless number — it MUST be measured WITH those features on (the `case`
+  # in measure() below names `--features numeric,join,compare,rows`, mirroring the sparq-core
+  # `mmap,dict-spill` and sparq-fedclient/-policy quirks). Nothing in the workspace depends on
+  # this crate, so its unit tests are otherwise run ONLY by the feature-matrix leg; wiring it
+  # here brings the correctness core under the line-coverage ratchet ("no crate silently
+  # dropped").
+  sparq-substrate
+  # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
+  # (Turtle/TriG/N-Quads/JSON-LD, buffered + streaming) peeled into an internal sub-crate. Its
+  # whole surface is behind DEFAULT-OFF `serialize-rdf`, so it MUST be measured WITH
+  # `serialize-rdf,streaming-serialization` (the `case` in measure() below names them). Bringing
+  # the moved writer + its ~2.9k test LOC under the ratchet keeps "no crate silently dropped".
+  sparq-engine-serialize
+  # [OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 federated-
+  # SERVICE client (HTTP transport, SPARQL-Results JSON/XML parse, bound-join batching, SSRF
+  # egress policy) peeled into an internal sub-crate. Its whole surface is behind DEFAULT-OFF
+  # `service`, so it MUST be measured WITH `service` (the `case` in measure() below names it).
+  # Brings the moved client + its ~1.3k test LOC under the ratchet ("no crate silently dropped").
+  sparq-engine-service
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
+
+# ---- per-commit MATRIX shard groups (sq-p0hcd) [OPUS-4.8] --------------------
+# WHY: the per-commit `coverage` job measured ALL of PER_COMMIT_CRATES in ONE serial
+# loop, which ran ~28 min wall-clock (2026-07-02 CI profile, run 28624093902): a single
+# `Measure + enforce` step = 1691s, of which the per-crate loop was 1676s, DOMINATED by
+# sparq-engine (668s ≈ 40%), then sparq-core (210s), sparq-vectors (167s), sparq-solid
+# (165s), sparq-server (114s). Serial => that whole cost is on the merge-queue critical
+# path. Splitting the loop across parallel MATRIX shards makes crates measure concurrently;
+# the wall-clock then floors at the slowest single shard.
+#
+# The groups are LPT-bin-packed by that measured per-crate wall time so the slowest shard
+# is ~= the sparq-engine elephant ALONE (it cannot be split without cross-runner profraw
+# merging — see the follow-up bead). The other three shards carry ~336s of measured work
+# EACH (balanced), comfortably under engine. Each shard runs the IDENTICAL coverage.sh +
+# `coverage-gate.py --check-robust` over its subset, so the ratchet semantics are unchanged
+# (every per-crate floor still enforced; a shard whose crate is below floor fails, failing
+# the gate). NB: these seconds are a MEASUREMENT-ORDER lower bound — a fresh shard also
+# re-builds the shared instrumented deps — so keep the count SMALL (4): more shards only
+# add duplicated build overhead without lowering the engine-bound wall-clock floor.
+#
+# INVARIANT (guarded by `coverage.sh --check-shards`, a fast no-compile CI step): the union
+# of SHARD_GROUPS equals PER_COMMIT_CRATES exactly and the groups are pairwise-disjoint —
+# so a crate ADDED to PER_COMMIT_CRATES but not to a shard fails the guard LOUDLY instead of
+# being silently un-gated (dropped from every shard => measured nowhere => floor unenforced).
+SHARD_GROUPS=(
+  # shard 1 — the sparq-engine elephant (668s): ALONE, it is the wall-clock floor.
+  "sparq-engine"
+  # shard 2 (~336s measured)
+  "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
+  # shard 3 (~336s measured)
+  "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
+  # shard 4 (~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
+  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize sparq-engine-service"
+)
+SHARD_TOTAL=${#SHARD_GROUPS[@]}
+
+# --check-shards: verify the SHARD_GROUPS partition invariant, then exit. Fast, NO compile —
+# run as an early CI gate (and locally) so a partition drift fails before any build. Emits
+# the offending crates on failure so the fix is obvious.
+if [ "${1:-}" = "--check-shards" ]; then
+  python3 - "$SHARD_TOTAL" "${PER_COMMIT_CRATES[*]}" "${SHARD_GROUPS[@]}" <<'PY'
+import sys
+total = int(sys.argv[1])
+per_commit = sys.argv[2].split()
+groups = [g.split() for g in sys.argv[3:]]
+assert len(groups) == total, f"SHARD_TOTAL={total} but {len(groups)} groups"
+flat = [c for g in groups for c in g]
+dupes = sorted({c for c in flat if flat.count(c) > 1})
+union = set(flat)
+want = set(per_commit)
+missing = sorted(want - union)      # in PER_COMMIT_CRATES but NO shard -> would be UN-GATED
+extra = sorted(union - want)        # in a shard but not PER_COMMIT_CRATES -> stale/typo
+ok = True
+if dupes:
+    print(f"::error::coverage --check-shards: crate(s) in >1 shard (not disjoint): {dupes}"); ok = False
+if missing:
+    print(f"::error::coverage --check-shards: PER_COMMIT_CRATES crate(s) missing from every "
+          f"shard (would be silently UN-GATED): {missing}"); ok = False
+if extra:
+    print(f"::error::coverage --check-shards: shard crate(s) not in PER_COMMIT_CRATES "
+          f"(stale/typo): {extra}"); ok = False
+if ok:
+    print(f"coverage --check-shards: OK — {total} shards partition "
+          f"{len(per_commit)} PER_COMMIT_CRATES exactly (disjoint, complete)")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
+fi
 
 # Tests EXCLUDED from the per-commit subset, by name (libtest --skip substring).
 # DOCUMENTED here so the exclusion is never silent.
@@ -184,8 +276,23 @@ if [ "$FETCH_FIXTURES" = "1" ]; then
 fi
 
 # ---- pick the crate list for this run --------------------------------------
+# Precedence (sq-p0hcd) [OPUS-4.8]:
+#   1. COVERAGE_CRATES  — explicit subset (ad-hoc runs AND the robust gate's targeted
+#      re-measure of sub-floor crates; must win so a shard re-measures only ITS offenders).
+#   2. COVERAGE_SHARD=N — 1-based matrix shard index: measure SHARD_GROUPS[N-1] (the
+#      per-commit MATRIX leg). Validated against SHARD_TOTAL.
+#   3. neither          — the whole PER_COMMIT_CRATES set (single-job / nightly / local).
 if [ -n "${COVERAGE_CRATES:-}" ]; then
   read -r -a CRATES <<<"$COVERAGE_CRATES"
+elif [ -n "${COVERAGE_SHARD:-}" ]; then
+  case "$COVERAGE_SHARD" in
+    ''|*[!0-9]*) echo "ERROR: COVERAGE_SHARD='$COVERAGE_SHARD' is not a positive integer" >&2; exit 2 ;;
+  esac
+  if [ "$COVERAGE_SHARD" -lt 1 ] || [ "$COVERAGE_SHARD" -gt "$SHARD_TOTAL" ]; then
+    echo "ERROR: COVERAGE_SHARD=$COVERAGE_SHARD out of range 1..$SHARD_TOTAL" >&2; exit 2
+  fi
+  read -r -a CRATES <<<"${SHARD_GROUPS[$((COVERAGE_SHARD - 1))]}"
+  echo "==> shard $COVERAGE_SHARD/$SHARD_TOTAL: measuring ${#CRATES[@]} crate(s): ${CRATES[*]}"
 else
   CRATES=("${PER_COMMIT_CRATES[@]}")
 fi
@@ -362,6 +469,35 @@ measure() {
     # and the number is non-representative. (Mirrors the sparq-prov `reason` quirk above.)
     sparq-policy)
       cargo_args+=(--features count-enforcement); features+=("count-enforcement") ;;
+    # [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn): the shared eval SUBSTRATE's whole surface is
+    # DEFAULT-OFF — measure it with the four features that turn the correctness core ON
+    # (`numeric` = XSD value tower, `join` = the four id-tuple join kernels, `compare` =
+    # the SPARQL term total order, `rows` = the id-tuple Row/Key/Posting vocabulary). A
+    # default-feature build compiles NONE of it (empty crate -> meaningless number); this
+    # names the maximal set so the measured line% reflects the real code the floor gates,
+    # exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    sparq-substrate)
+      cargo_args+=(--features numeric,join,compare,rows)
+      features+=("numeric" "join" "compare" "rows") ;;
+    # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
+    # (Turtle/TriG/N-Quads/JSON-LD) peeled into this internal sub-crate. Its WHOLE surface is
+    # behind DEFAULT-OFF `serialize-rdf` (mirroring the gating it had inside sparq-engine), so a
+    # default-feature `cargo llvm-cov -p sparq-engine-serialize` builds an EMPTY crate — measure
+    # it WITH `serialize-rdf,streaming-serialization` (the maximal surface, incl. the streaming
+    # writers + their tests), exactly as sparq-substrate/-fedplan above name their whole-surface
+    # features. Brings the moved writer + its ~2.9k test LOC under the line-coverage ratchet.
+    sparq-engine-serialize)
+      cargo_args+=(--features serialize-rdf,streaming-serialization)
+      features+=("serialize-rdf" "streaming-serialization") ;;
+    # [OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 federated-
+    # SERVICE client peeled into this internal sub-crate. Its WHOLE surface is behind DEFAULT-OFF
+    # `service` (mirroring the gating it had inside sparq-engine), so a default-feature
+    # `cargo llvm-cov -p sparq-engine-service` builds an EMPTY crate — measure it WITH `service`
+    # (the maximal surface: HTTP transport + SRJ/SRX parse + bound-join + SSRF egress policy + their
+    # ~1.3k test LOC), exactly as the sibling extractions above name their whole-surface features.
+    sparq-engine-service)
+      cargo_args+=(--features service)
+      features+=("service") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"
@@ -446,6 +582,19 @@ PY
     "$([ ${#skips[@]} -gt 0 ] && echo "  skip=${skips[*]}")"
 }
 
+# [OPUS-4.8] (sq-v411r) Start from a CLEAN instrumented build so the per-crate line
+# DENOMINATOR is deterministic. cargo-llvm-cov reuses `target/llvm-cov-target` object
+# files between invocations; if a RESTORED cache (Swatinem/rust-cache) or an earlier
+# wider-feature build left a crate's object compiled with extra OPT-IN features baked
+# in, the next default-feature `--package X` REUSES that object and instruments the
+# feature-gated regions the default-feature tests never exercise — inflating `count`
+# and crashing the %. This is exactly what bit PR #1257: sparq-engine measured 65% over
+# 14184 instrumented lines on a cache-restored runner while a clean build measures 88%
+# over 10478 (the 9233 COVERED lines were identical — only the denominator was poisoned).
+# `clean` here forces every per-crate build to instrument only the regions its own
+# requested feature set compiles, matching the `measure_merged` path (which already
+# cleans). It does NOT mask a regression — it re-compiles + re-measures the SAME tests.
+cargo llvm-cov clean --workspace
 echo "==> Measuring per-crate line coverage (tier=$TIER)…"
 for c in "${CRATES[@]}"; do measure "$c"; done
 TOTAL_END=$(date +%s)

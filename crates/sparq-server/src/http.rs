@@ -1,7 +1,9 @@
 //! The axum HTTP surface: routing, extraction, status/error semantics.
 //!
 //! Two route groups:
-//!   * `/sparql` — the SPARQL 1.1 Protocol `query` operation (GET + the two POST forms).
+//!   * `/sparql` — the SPARQL 1.1 Protocol `query` operation (GET + the two POST forms, plus
+//!     the query-only HTTP `QUERY` method — w3c/sparql-protocol#40, sq-b3df9, for Oxigraph
+//!     interop) and the `update` operation (POST).
 //!   * Graph Store HTTP Protocol — `GET`/`HEAD` (read) and, since sq-gxsj, `PUT`/`POST`/
 //!     `DELETE` (write) on `/graphs/*path` (direct) and on `/sparql/graph` via
 //!     `?graph=<uri>` / `?default` (indirect). [OPUS-4.8] The write verbs translate into a
@@ -53,7 +55,9 @@ use crate::exec::{
     apply_update_dataset, prepare_with_dataset, DatasetOverride, PrepareError, QueryForm,
     UpdateDatasetError, UsingOverride,
 };
-use crate::negotiate::{negotiate, negotiate_graph, Format, GraphFormat};
+use crate::negotiate::{
+    negotiate_graph, negotiate_graph_or_406, negotiate_or_406, Format, GraphFormat,
+};
 use crate::results;
 
 // ---------------------------------------------------------------------------
@@ -4015,26 +4019,41 @@ fn explain_mode(
 }
 
 // ---------------------------------------------------------------------------
-// Time-travel pinning (opt-in `time-travel` cargo feature)
+// Generation pinning: the `Sparq-Generation` response header + the `?generation=N`
+// request pin. DEFAULT build (sq-ci2d6): the mechanics are unconditional, bounded
+// to the generation ring's EXISTING concurrency-retention window (`RingConfig::retain`
+// = the last K generations older than current, always kept — see
+// `sparq_serve::ring`). The opt-in `time-travel` feature only WIDENS how far back a
+// pin can reach (its extended-retention config + `--time-travel-*` CLI flags stay
+// feature-gated); the header/pin surface here is byte-identical in both feature
+// states. [SONNET-4.6] (sq-ci2d6)
 // ---------------------------------------------------------------------------
 
-/// Resolves the generation a query request is pinned to (opt-in `time-travel`
-/// feature). `generation=N` — URL query string, or the url-encoded POST body,
-/// the body winning (same precedence as `explain`) — pins the retained
-/// generation N for the whole request: the response is the store *as of* that
-/// generation. Chosen over an `As-Of` timestamp header because it fits the
-/// endpoint's existing parameter contract (`query=`, `explain=`) and the number
-/// is the exact token the server itself hands out in `Sparq-Generation` (the
-/// read-your-writes / shard_seq concept — no clock resolution or skew
-/// ambiguity); callers that track timestamps resolve them via the library's
-/// `GenerationRing::as_of`.
+/// Resolves the generation a query request is pinned to. `generation=N` — URL query
+/// string, or the url-encoded POST body, the body winning (same precedence as
+/// `explain`) — pins the retained generation N for the whole request: the response is
+/// the store *as of* that generation (an immutable snapshot — the load-bearing property
+/// for snapshot-consistent multi-request `LIMIT`/`OFFSET` pagination). N is the exact
+/// token the server itself hands out in `Sparq-Generation` (the read-your-writes /
+/// shard_seq concept — no clock resolution or skew ambiguity); callers that track
+/// timestamps resolve them via the library's `GenerationRing::as_of`.
+///
+/// **Retention window (the honest bound).** The ring ALWAYS retains the last K
+/// generations older than current (the concurrency-retention floor `RingConfig::retain`,
+/// default K = 4 — `sparq_serve::ring::DEFAULT_RETAIN`), so a pin within
+/// `[current - K, current]` resolves in the DEFAULT build with no feature enabled. The
+/// opt-in `time-travel` feature EXTENDS that window (count/age bounds via
+/// `--time-travel-generations` / `--time-travel-max-age`); it does not change the
+/// pin/header mechanics here. Retention is publish-driven and never extended by this
+/// function — a pin outside the window is a clean typed error, never a silent fallback
+/// to a different generation.
 ///
 /// Errors per the endpoint's status semantics: unparsable number → 400; not yet
-/// published → 400 (the client cannot have obtained that token from this
-/// server); published but no longer retained → **410 Gone** (it aged out of the
-/// retention window — gone permanently, retrying cannot help).
-#[cfg(feature = "time-travel")]
-#[allow(clippy::result_large_err)] // Err is axum's Response; boxing would desync the cfg variants
+/// published → 400 (the client cannot have obtained that token from this server);
+/// published but no longer retained → **410 Gone** (it aged out of the retention window —
+/// gone permanently, retrying that pin cannot help; re-read the current generation and
+/// restart pagination).
+#[allow(clippy::result_large_err)] // Err is axum's Response; boxing would desync the call-site match
 fn resolve_pin(
     state: &AppState,
     url_params: &HashMap<String, String>,
@@ -4047,15 +4066,19 @@ fn resolve_pin(
         Some(raw) => raw,
         None => return Ok(state.current()),
     };
+    // [SONNET-4.6] (sq-ci2d6) Positional format args throughout (CodeQL `rust/unused-variable`
+    // false-positive on inline captures — this path is now compiled into the DEFAULT build).
     let number: u64 = raw.parse().map_err(|_| {
         bad_request(&format!(
-            "invalid 'generation' parameter '{raw}': expected a generation number"
+            "invalid 'generation' parameter '{}': expected a generation number",
+            raw
         ))
     })?;
     let current = state.current();
     if number > current.number() {
         return Err(bad_request(&format!(
-            "generation {number} has not been published yet (current generation: {})",
+            "generation {} has not been published yet (current generation: {})",
+            number,
             current.number()
         )));
     }
@@ -4067,53 +4090,42 @@ fn resolve_pin(
     // the swappable serving core. Binding it locally keeps `at` + `oldest_retained` on one ring.
     let ring = state.ring();
     ring.at(number).ok_or_else(|| {
+        // [SONNET-4.6] (sq-ci2d6) The 410 + "aged out … oldest retained" prefix is byte-identical
+        // in both feature states (the `time-travel` suite is unchanged); only the closing HINT
+        // differs — the default build's window is the ring's concurrency-retention floor, the
+        // `time-travel` build's is the extended retention the CLI flags size.
+        let hint = if cfg!(feature = "time-travel") {
+            "raise --time-travel-generations / --time-travel-max-age to keep more history"
+        } else {
+            "only the ring's concurrency-retention window (the last K generations older than \
+             current) is kept in the default build; re-read the current generation and restart, \
+             or build with the `time-travel` feature to widen the window"
+        };
         json_error(
             StatusCode::GONE,
             &format!(
-                "generation {number} has aged out of the retention window (oldest retained: {}, current: {}); \
-                 raise --time-travel-generations / --time-travel-max-age to keep more history",
+                "generation {} has aged out of the retention window (oldest retained: {}, current: {}); {}",
+                number,
                 ring.oldest_retained(),
-                current.number()
+                current.number(),
+                hint
             ),
         )
     })
 }
 
-/// Without the `time-travel` feature the parameter handling is compiled out:
-/// every query runs against the current generation and a `generation` parameter
-/// is just an ignored unknown parameter (like any other).
-#[cfg(not(feature = "time-travel"))]
-#[inline(always)]
-// clippy: Err is axum's `Response` (the idiomatic handler error); boxing it would
-// only desync this signature from the `time-travel` variant and every call-site match.
-#[allow(clippy::result_large_err)]
-fn resolve_pin(
-    state: &AppState,
-    _url_params: &HashMap<String, String>,
-    _body_params: Option<&HashMap<String, String>>,
-) -> Result<PinnedGen, Response> {
-    Ok(state.current())
-}
-
-/// Stamps the `Sparq-Generation` response header (opt-in `time-travel` feature):
-/// the generation number the response was produced against — the current
-/// generation for unpinned queries (capture it as the time-travel /
-/// read-your-writes token; the same generation-number concept as the
-/// horizontal-scaling ADR's `shard_seq`), the pin for pinned queries, and the
-/// generation containing the update for a 204 update ack.
-#[cfg(feature = "time-travel")]
+/// Stamps the `Sparq-Generation` response header: the generation number the response was
+/// produced against — the current generation for unpinned queries (capture it as the
+/// read-your-writes / snapshot-pin token; the same generation-number concept as the
+/// horizontal-scaling ADR's `shard_seq`), the pin for pinned queries, and the generation
+/// containing the update for a 204 update ack. [SONNET-4.6] (sq-ci2d6) Present in the
+/// DEFAULT build — the pin/header mechanics are bounded to the ring's concurrency-retention
+/// window; the opt-in `time-travel` feature only widens how far back `?generation=N` reaches.
 fn with_generation_header(mut resp: Response, number: u64) -> Response {
     resp.headers_mut().insert(
         header::HeaderName::from_static("sparq-generation"),
         header::HeaderValue::from(number),
     );
-    resp
-}
-
-/// Without the `time-travel` feature there is no generation header (identity).
-#[cfg(not(feature = "time-travel"))]
-#[inline(always)]
-fn with_generation_header(resp: Response, _number: u64) -> Response {
     resp
 }
 
@@ -4221,6 +4233,29 @@ async fn sparql_endpoint(
                 &url_params,
                 &url_dataset,
                 &url_using,
+                false,
+            )
+            .await
+        }
+        // [OPUS-4.8] sq-b3df9 (epic sq-my8wd, w3c/sparql-protocol#40): the HTTP `QUERY` method.
+        // Oxigraph's CLI server already serves this verb (route arm
+        // `("/sparql", "POST" | "QUERY")` with `let is_query = method == "QUERY"`). It behaves
+        // EXACTLY like a POST query EXCEPT it is query-ONLY: an `application/sparql-update` body
+        // falls through to 415, and an `update=` form field is an explicit 400. `QUERY` is not a
+        // const in `http::Method`, so it arrives via `Method::from_bytes(b"QUERY")` and is matched
+        // on its literal token (the same passthrough oxhttp gives Oxigraph). The query input path
+        // (raw body / merged `query` form param) and the URL-query-string dataset overrides feed
+        // the SAME `handle_post` downstream — query execution, Accept negotiation and the auth /
+        // egress gates are shared, so QUERY cannot bypass them.
+        ref m if m.as_str() == "QUERY" => {
+            handle_post(
+                &state,
+                &headers,
+                &body,
+                &url_params,
+                &url_dataset,
+                &url_using,
+                true,
             )
             .await
         }
@@ -4241,6 +4276,13 @@ async fn handle_post(
     // string (applies to the direct `application/sparql-update` POST; the form-POST `update=` path
     // reads it from the form BODY).
     url_using: &UsingOverride,
+    // [OPUS-4.8] sq-b3df9 (epic sq-my8wd, w3c/sparql-protocol#40): `true` when this is the HTTP
+    // `QUERY` method, which is QUERY-ONLY. It mirrors Oxigraph's `is_query` flag: an
+    // `application/sparql-update` body is NOT accepted (it falls through to 415) and a `update=`
+    // form field is rejected with an explicit 400 — a `POST` (`is_query == false`) accepts both.
+    // Per the protocol, the `default-graph-uri` / `named-graph-uri` dataset override for a `QUERY`
+    // always comes from the URL query string (`url_dataset`), even for the url-encoded form body.
+    is_query: bool,
 ) -> Response {
     let ct = content_type(headers);
     if ct.starts_with(SPARQL_QUERY_CT) {
@@ -4318,6 +4360,16 @@ async fn handle_post(
             Err(_) => return bad_request("request body is not valid UTF-8"),
         };
         let params = parse_form(s);
+        // [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the HTTP `QUERY` method is query-ONLY, so
+        // an `update=` form field is rejected with an explicit 400 BEFORE any auth/work (matching
+        // Oxigraph's "SPARQL updates are not compatible with the QUERY HTTP method"). A normal
+        // `POST` (`is_query == false`) keeps accepting `update=` as a write below.
+        if is_query && params.contains_key("update") {
+            return bad_request(
+                "SPARQL updates are not compatible with the QUERY HTTP method; use POST for an \
+                 'update=' form field",
+            );
+        }
         // [OPUS-4.8] sq-zcby (Copilot PR#71 SECURITY fix): the `update=` form field IS an
         // update operation BY DEFINITION (SPARQL 1.1 Protocol §2.2), so it is a WRITE
         // UNCONDITIONALLY — regardless of whether its value happens to parse as a read-only
@@ -4373,7 +4425,9 @@ async fn handle_post(
         // The SPARQL 1.1 Protocol url-encoded UPDATE operation (`update=` form) submits through
         // the same sequenced writer as `application/sparql-update`.
         if let Some(u) = params.get("update") {
-            #[cfg(feature = "time-travel")]
+            // [SONNET-4.6] (sq-ci2d6) `?generation` is a READ pin (default build, bounded to the
+            // ring's concurrency-retention window); an update always applies to the current
+            // generation, so pinning one is an HONEST refusal, never a silent ignore.
             if url_params.contains_key("generation") {
                 let resp = bad_request(
                     "the 'generation' parameter pins queries to a retained generation; \
@@ -4416,19 +4470,19 @@ async fn handle_post(
                     }
                 };
                 let explain = explain_mode(url_params, Some(&params), headers);
-                // [OPUS-4.8] sq-z33x: per the SPARQL 1.1 Protocol url-encoded encoding, the dataset
-                // override (`default-graph-uri` / `named-graph-uri`) is carried in the FORM BODY for
-                // this content type, not the URL query string.
-                run_query(
-                    state,
-                    q,
-                    headers,
-                    false,
-                    explain,
-                    pin,
-                    &query_dataset_override(s),
-                )
-                .await
+                // [OPUS-4.8] sq-z33x: per the SPARQL 1.1 Protocol url-encoded encoding, a `POST`
+                // form carries the dataset override (`default-graph-uri` / `named-graph-uri`) in the
+                // FORM BODY. [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the HTTP `QUERY` method
+                // instead always reads the dataset override from the URL query string (Oxigraph's
+                // `url_query_parameters(request)` — body graph params are not consulted on QUERY).
+                let form_dataset;
+                let dataset = if is_query {
+                    url_dataset
+                } else {
+                    form_dataset = query_dataset_override(s);
+                    &form_dataset
+                };
+                run_query(state, q, headers, false, explain, pin, dataset).await
             }
             None => bad_request("missing 'query' or 'update' parameter in url-encoded body"),
         };
@@ -4439,8 +4493,12 @@ async fn handle_post(
         #[cfg(feature = "access-audit")]
         audit_access_finish(state, aa, &resp);
         resp
-    } else if ct.starts_with("application/sparql-update") {
+    } else if ct.starts_with("application/sparql-update") && !is_query {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
+        // [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the `&& !is_query` guard mirrors Oxigraph
+        // — under the HTTP `QUERY` method an `application/sparql-update` body is NOT a valid update
+        // operation, so it falls through to the 415 branch below (NOT a 400/403); only a `POST`
+        // reaches this update path.
         // [OPUS-4.8] sq-zcby: an UPDATE is always a write — gate it before doing any work.
         // [OPUS-4.8] sq-0bxp: audit the update (fingerprint the body if it is valid UTF-8).
         #[cfg(feature = "audit-log")]
@@ -4471,10 +4529,9 @@ async fn handle_post(
         }
         // `apply_update` blocks for the writer's group-commit ack (window + batch
         // application, which includes an O(graph) fork), so it runs off the async workers.
-        // Time travel is a READ concept: an update can only apply to the current
-        // generation, so a `generation` pin on an update is an honest refusal, not
-        // a silent ignore.
-        #[cfg(feature = "time-travel")]
+        // [SONNET-4.6] (sq-ci2d6) A `generation` pin is a READ concept (default build, bounded to
+        // the ring's concurrency-retention window): an update can only apply to the current
+        // generation, so a `generation` pin on an update is an honest refusal, not a silent ignore.
         if url_params.contains_key("generation") {
             let resp = bad_request(
                 "the 'generation' parameter pins queries to a retained generation; \
@@ -4505,10 +4562,20 @@ async fn handle_post(
         audit_access_finish(state, aa, &resp);
         resp
     } else {
-        // Unsupported media type for the POST query operation.
+        // Unsupported media type for the query/update operation. [OPUS-4.8] sq-b3df9
+        // (w3c/sparql-protocol#40): under the HTTP `QUERY` method `application/sparql-update`
+        // is NOT accepted (the `&& !is_query` guard above sent it here) — Oxigraph parity is a
+        // 415, not a 400/403, since QUERY is query-only.
         json_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "POST requires Content-Type 'application/sparql-query' or 'application/x-www-form-urlencoded'",
+            if is_query {
+                "the QUERY method requires Content-Type 'application/sparql-query' or \
+                 'application/x-www-form-urlencoded' (it is query-only; \
+                 'application/sparql-update' is not accepted — use POST)"
+            } else {
+                "POST requires Content-Type 'application/sparql-query' or \
+                 'application/x-www-form-urlencoded'"
+            },
         )
     }
 }
@@ -4907,7 +4974,6 @@ async fn run_query_pinned(
         return await_worker(task, &config).await;
     }
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
-    let fmt = negotiate(accept);
     let config = state.config.clone();
     // [OPUS-4.8] sq-9xoh: the per-request SERVICE egress allowlist for this read (the static
     // `service_allow` unless a per-request override hook is installed). Resolved here while the
@@ -4916,6 +4982,14 @@ async fn run_query_pinned(
 
     match prepared.form {
         QueryForm::Select | QueryForm::Ask => {
+            // [OPUS-4.8] sq-406acc: Oxigraph-parity content negotiation — a PRESENT-but-unsatisfiable
+            // `Accept` (naming no supported SELECT/ASK result format and no wildcard) is `406 Not
+            // Acceptable` rather than the old silent JSON fallback. An absent / empty / `*/*` Accept
+            // still defaults to SPARQL-results JSON (W3C-permitted default representation).
+            let fmt = match negotiate_or_406(accept) {
+                Ok(f) => f,
+                Err(_) => return not_acceptable_response(head_only),
+            };
             let is_ask = prepared.form == QueryForm::Ask;
             let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
@@ -4950,8 +5024,14 @@ async fn run_query_pinned(
         // The engine's row budget applies to the WHERE-pattern solutions, the deadline
         // to the whole evaluation — same guard semantics as SELECT.
         QueryForm::Construct | QueryForm::Describe => {
+            // [OPUS-4.8] sq-406acc: same Oxigraph-parity strictness for the RDF-graph result — a
+            // PRESENT-but-unsatisfiable `Accept` (no supported RDF media type and no wildcard) is
+            // 406; absent / empty / `*/*` keeps the N-Triples default.
+            let gfmt = match negotiate_graph_or_406(accept) {
+                Ok(f) => f,
+                Err(_) => return not_acceptable_response(head_only),
+            };
             let query = prepared.runnable;
-            let gfmt = negotiate_graph(accept);
             let budget = make_budget(&config, true);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
@@ -6453,6 +6533,26 @@ fn bad_request(msg: &str) -> Response {
     json_error(StatusCode::BAD_REQUEST, msg)
 }
 
+/// [OPUS-4.8] sq-406acc: a `406 Not Acceptable` for a present-but-unsatisfiable `Accept` header
+/// on a SPARQL query — the `Accept` named no result/RDF media type the server can produce and no
+/// wildcard, matching Oxigraph (w3c/sparql-protocol#40). The body is the structured
+/// `{"error":"..."}` envelope the rest of the surface uses (so a programmatic client need not
+/// scrape prose); `head_only` mirrors the GET headers with an empty body.
+fn not_acceptable_response(head_only: bool) -> Response {
+    let resp = json_error(
+        StatusCode::NOT_ACCEPTABLE,
+        "no acceptable result format for the request Accept header",
+    );
+    if head_only {
+        // Preserve the status + headers but drop the body, mirroring the HEAD contract used by
+        // `text_response`. `json_error` always builds a valid header set, so this never panics.
+        let (parts, _body) = resp.into_parts();
+        Response::from_parts(parts, axum::body::Body::empty())
+    } else {
+        resp
+    }
+}
+
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-cmvh (ASVS-G1, cert remediation #237) — security response headers
 //
@@ -6545,9 +6645,11 @@ async fn security_headers(mut resp: Response) -> Response {
 
 /// The methods advertised in a CORS preflight response. The HTTP surface accepts GET /
 /// HEAD / POST (SPARQL query + the GSP read/write verbs) plus OPTIONS itself; PUT /
-/// DELETE are the GSP write verbs. A browser's actual request is still subject to every
-/// other guard (auth, body limit, …) — advertising a method here does not bypass them.
-const CORS_ALLOW_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, OPTIONS";
+/// DELETE are the GSP write verbs; QUERY is the SPARQL Protocol query verb
+/// (w3c/sparql-protocol#40, sq-b3df9) so a browser can preflight a `fetch(…, {method:
+/// 'QUERY'})`. A browser's actual request is still subject to every other guard (auth,
+/// body limit, …) — advertising a method here does not bypass them. [OPUS-4.8]
+const CORS_ALLOW_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, QUERY, OPTIONS";
 
 /// The request headers advertised as allowed in a preflight when the browser does not
 /// send its own `Access-Control-Request-Headers` (we otherwise reflect that list). Covers
@@ -7865,5 +7967,539 @@ mod egress_refusal_status_tests {
         let cfg = ServerConfig::default();
         let resp = engine_error_response("some evaluation blew up", &cfg, true);
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) Direct unit tests for `engine_error_response` budget-envelope
+/// branches that are not reached by the loopback integration tests:
+///   * the byte-cap (max-bytes) path naming `--max-query-bytes`
+///   * the row-cap which-knob logic:
+///       - both caps set, max_query_rows is tighter → `--max-query-rows (memory cap)`
+///       - both caps set, max_results is tighter → `--max-results`
+///       - only max_results present → `--max-results`
+///       - only max_query_rows present (apply_max_results=false) → `--max-query-rows (memory cap)`
+///   * the timeout relay (engine_error_response delegates to timeout_response → 503)
+#[cfg(test)]
+mod budget_envelope_tests {
+    use super::{engine_error_response, timeout_response, ServerConfig};
+    use axum::http::StatusCode;
+
+    async fn body_of(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn max_bytes_cap_produces_413_naming_byte_knob() {
+        let cfg = ServerConfig {
+            max_query_bytes: Some(1000),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-bytes)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("1000 bytes"), "expected '1000 bytes' in: {}", body);
+        assert!(body.contains("--max-query-bytes"), "expected '--max-query-bytes' in: {}", body);
+    }
+
+    #[tokio::test]
+    async fn row_cap_both_set_rows_tighter_names_memory_cap_knob() {
+        // max_query_rows=50 <= results_cap=100 → which = "--max-query-rows (memory cap)"
+        // tighter(50, 100) = 50, so the message says "50 rows".
+        let cfg = ServerConfig {
+            max_query_rows: Some(50),
+            max_results: Some(100),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("50 rows"), "expected '50 rows' in: {}", body);
+        assert!(
+            body.contains("--max-query-rows (memory cap)"),
+            "expected '--max-query-rows (memory cap)' in: {}",
+            body
+        );
+    }
+
+    #[tokio::test]
+    async fn row_cap_both_set_results_tighter_names_results_knob() {
+        // max_query_rows=100 > results_cap=50 → which = "--max-results"
+        // tighter(100, 50) = 50, so the message says "50 rows".
+        let cfg = ServerConfig {
+            max_query_rows: Some(100),
+            max_results: Some(50),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("50 rows"), "expected '50 rows' in: {}", body);
+        assert!(body.contains("--max-results"), "expected '--max-results' in: {}", body);
+    }
+
+    #[tokio::test]
+    async fn row_cap_only_max_results_set_names_results_knob() {
+        // max_query_rows=None, apply_max_results=true, max_results=Some(42)
+        // → results_cap=Some(42); match (None, Some(42)) → `_` → "--max-results"
+        let cfg = ServerConfig {
+            max_query_rows: None,
+            max_results: Some(42),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("42 rows"), "expected '42 rows' in: {}", body);
+        assert!(body.contains("--max-results"), "expected '--max-results' in: {}", body);
+    }
+
+    #[tokio::test]
+    async fn row_cap_only_max_query_rows_names_memory_cap_knob() {
+        // max_query_rows=Some(7), apply_max_results=false → results_cap=None
+        // → match (Some(7), None) → "--max-query-rows (memory cap)"
+        let cfg = ServerConfig {
+            max_query_rows: Some(7),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, false);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("7 rows"), "expected '7 rows' in: {}", body);
+        assert!(
+            body.contains("--max-query-rows (memory cap)"),
+            "expected '--max-query-rows (memory cap)' in: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn timeout_in_engine_error_delegates_to_timeout_response_503() {
+        // engine_error_response shortcuts to timeout_response when it sees "timeout",
+        // which returns 503 SERVICE_UNAVAILABLE.
+        let cfg = ServerConfig::default();
+        let resp = engine_error_response("query budget exceeded (timeout)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn timeout_response_with_explicit_timeout_embeds_the_seconds() {
+        use std::time::Duration;
+        let cfg = ServerConfig {
+            query_timeout: Some(Duration::from_secs(42)),
+            ..ServerConfig::default()
+        };
+        let resp = timeout_response(&cfg);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(resp).await;
+        assert!(body.contains("42s"), "expected '42s' in: {}", body);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `timeout_response` with `query_timeout = None` uses
+/// `unwrap_or(0)` → the body says "0s". Pins the None arm of the timeout formatter,
+/// which is dead under the default config (`query_timeout` defaults to `Some(30s)`).
+#[cfg(test)]
+mod timeout_none_tests {
+    use super::{timeout_response, ServerConfig};
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn timeout_none_produces_zero_seconds_in_body() {
+        let cfg = ServerConfig {
+            query_timeout: None,
+            ..ServerConfig::default()
+        };
+        let resp = timeout_response(&cfg);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("0s"), "expected '0s' (no timeout configured) in: {}", body);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `not_acceptable_response` HEAD vs GET branch: `head_only=true`
+/// must preserve the 406 status + headers but emit an EMPTY body (HEAD contract);
+/// `head_only=false` must carry the structured `{"error":"…"}` envelope.
+#[cfg(test)]
+mod not_acceptable_head_tests {
+    use super::not_acceptable_response;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn not_acceptable_get_carries_json_error_body() {
+        let resp = not_acceptable_response(false);
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!body.is_empty(), "GET 406 must carry a non-empty JSON error body");
+        assert!(body.contains("error"), "body must contain the 'error' key: {}", body);
+    }
+
+    #[tokio::test]
+    async fn not_acceptable_head_has_empty_body_and_406_status() {
+        // head_only=true: the status is preserved but the body MUST be empty (HEAD contract).
+        let resp = not_acceptable_response(true);
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_ACCEPTABLE,
+            "HEAD 406 must still be 406",
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes.is_empty(), "HEAD 406 must have an empty body; got: {:?}", bytes);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `json_error_bodies` async middleware — three distinct code
+/// paths that the unit tests here pin directly (the integration tests only exercise the
+/// middleware indirectly via the full stack and do not exercise every branch):
+///
+///   1. A 200 (non-error) response passes through UNCHANGED.
+///   2. An error response that already carries `application/json` passes through UNCHANGED.
+///   3. An error response with a plain-text body is REWRITTEN to `{"error":"…"}` with
+///      `Content-Type: application/json`, while other headers (e.g. `Allow` on a 405)
+///      are PRESERVED.
+#[cfg(test)]
+mod json_error_bodies_middleware_tests {
+    use super::json_error_bodies;
+    use axum::http::{header, StatusCode};
+    use axum::response::Response;
+
+    async fn body_str(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn non_error_200_passes_through_unchanged() {
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .body(axum::body::Body::from("hello"))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::OK);
+        assert_eq!(body_str(out).await, "hello");
+    }
+
+    #[tokio::test]
+    async fn already_json_error_passes_through_unchanged() {
+        let payload = "{\"error\":\"already json\"}";
+        let resp = Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_str(out).await, payload);
+    }
+
+    #[tokio::test]
+    async fn plain_text_error_is_rewritten_to_json_envelope() {
+        let resp = Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(axum::body::Body::from("something went wrong"))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::BAD_REQUEST);
+        let ct = out
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("application/json"),
+            "rewritten Content-Type must be application/json, got: {}",
+            ct
+        );
+        let body = body_str(out).await;
+        assert!(
+            body.contains("something went wrong"),
+            "rewritten body must carry the original message: {}",
+            body
+        );
+        assert!(body.starts_with('{'), "rewritten body must be a JSON object: {}", body);
+    }
+
+    #[tokio::test]
+    async fn allow_header_is_preserved_after_plain_text_rewrite() {
+        // A 405 from `method_not_allowed` carries a plain-text body AND an Allow header;
+        // the middleware must rewrite the body to JSON while keeping the Allow header.
+        let resp = Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(header::ALLOW, "GET, POST")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(axum::body::Body::from("method not allowed"))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = out
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow.contains("GET"),
+            "Allow header must be preserved after rewrite: {}",
+            allow
+        );
+        let body = body_str(out).await;
+        assert!(body.contains("error"), "rewritten body must be a JSON error envelope: {}", body);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `method_not_allowed` helper: must build a 405 with a correctly
+/// formatted `Allow` header listing every supplied method.
+#[cfg(test)]
+mod method_not_allowed_tests {
+    use super::method_not_allowed;
+    use axum::http::{header, Method, StatusCode};
+
+    #[test]
+    fn two_methods_produces_405_with_both_in_allow_header() {
+        let resp = method_not_allowed(&[Method::GET, Method::POST]);
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = resp
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(allow.contains("GET"), "Allow must list GET: {}", allow);
+        assert!(allow.contains("POST"), "Allow must list POST: {}", allow);
+    }
+
+    #[test]
+    fn single_method_allow_header_is_that_method_verbatim() {
+        let resp = method_not_allowed(&[Method::GET]);
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = resp
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(allow, "GET");
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `gsp_post` empty-body early-return paths (lines ~5774-5788).
+///
+/// An empty body after decode means no triples to merge. The three cases are:
+///
+/// - Default graph + empty body → 204 (always a no-op; spec §5.5).
+/// - Named graph + empty body + graph absent → 201 (CREATE SILENT GRAPH).
+/// - Named graph + empty body + graph exists → 204 (no-op).
+///
+/// The integration tests only exercise non-empty bodies, so these branches sat at 0%.
+/// These direct tests pin them.
+#[cfg(test)]
+mod gsp_empty_body_paths_tests {
+    use super::{gsp_post, AppState, GraphRef};
+    use axum::body::Bytes;
+    use axum::http::{header, HeaderMap, StatusCode};
+    use sparq_core::Graph;
+
+    #[tokio::test]
+    async fn default_graph_empty_body_is_204_noop() {
+        let state = AppState::new(Graph::default());
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let resp = gsp_post(&state, GraphRef::Default, &headers, &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "empty body on the default graph must be a 204 no-op",
+        );
+    }
+
+    #[tokio::test]
+    async fn named_graph_absent_empty_body_creates_graph_201() {
+        // The named graph has never been written → graph_exists() returns false
+        // → `gsp_post` issues `CREATE SILENT GRAPH <g>` → 201 Created.
+        let state = AppState::new(Graph::default());
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let resp = gsp_post(
+            &state,
+            GraphRef::Named("http://example.org/new-graph".into()),
+            &headers,
+            &body,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "empty body on an absent named graph must issue CREATE SILENT GRAPH (201)",
+        );
+    }
+
+    #[tokio::test]
+    async fn named_graph_exists_empty_body_is_204_noop() {
+        // Set up: POST a real N-Triples triple into the named graph so graph_exists() → true.
+        let state = AppState::new(Graph::default());
+        let iri = "http://example.org/existing-graph";
+        let nt_body = Bytes::from_static(b"<http://ex/s> <http://ex/p> <http://ex/o> .\n");
+        let mut setup_headers = HeaderMap::new();
+        setup_headers.insert(
+            header::CONTENT_TYPE,
+            "application/n-triples".parse().unwrap(),
+        );
+        let setup_resp =
+            gsp_post(&state, GraphRef::Named(iri.into()), &setup_headers, &nt_body).await;
+        assert_eq!(
+            setup_resp.status(),
+            StatusCode::CREATED,
+            "setup POST must write the triple and return 201",
+        );
+        // Now POST an empty body — graph_exists() returns true → 204 no-op.
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let resp = gsp_post(&state, GraphRef::Named(iri.into()), &headers, &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "empty body on an existing named graph must be a 204 no-op",
+        );
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `AppState::apply_update` MVCC sequencing: a successful INSERT
+/// DATA returns a positive generation number; a malformed update returns Err; two sequential
+/// updates advance the generation monotonically. Pins the `Ok(number)` / `Err(Rejected(_))`
+/// arms of the `submit` result mapping.
+#[cfg(test)]
+mod apply_update_mvcc_tests {
+    use super::AppState;
+    use sparq_core::Graph;
+
+    #[tokio::test]
+    async fn successful_insert_data_returns_positive_generation() {
+        let state = AppState::new(Graph::default());
+        let s = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            s.apply_update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }")
+        })
+        .await
+        .unwrap();
+        let gen = result.expect("INSERT DATA must succeed");
+        assert!(gen > 0, "published generation must be positive, got {}", gen);
+    }
+
+    #[tokio::test]
+    async fn malformed_update_returns_err() {
+        let state = AppState::new(Graph::default());
+        let s = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            s.apply_update("NOT VALID SPARQL UPDATE !!!!")
+        })
+        .await
+        .unwrap();
+        assert!(result.is_err(), "a malformed update must return Err");
+    }
+
+    #[tokio::test]
+    async fn sequential_updates_advance_generation_monotonically() {
+        let state = AppState::new(Graph::default());
+        let s1 = state.clone();
+        let gen1 = tokio::task::spawn_blocking(move || {
+            s1.apply_update(
+                "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/1> }",
+            )
+        })
+        .await
+        .unwrap()
+        .expect("first update must succeed");
+        let s2 = state.clone();
+        let gen2 = tokio::task::spawn_blocking(move || {
+            s2.apply_update(
+                "INSERT DATA { <http://ex/b> <http://ex/p> <http://ex/2> }",
+            )
+        })
+        .await
+        .unwrap()
+        .expect("second update must succeed");
+        assert!(
+            gen2 >= gen1,
+            "generation must be non-decreasing: gen1={}, gen2={}",
+            gen1,
+            gen2
+        );
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `ServerConfig::from_env()` and `env_parse` coverage.
+///
+/// `from_env()` is the production entry point for reading all `SPARQ_*` environment
+/// variables into the config. These tests pin the function's scaffolding (the path
+/// that runs when no relevant env vars are set) and one env-var body (covering the
+/// inner assignment branches that are otherwise dead when the env vars are absent).
+///
+/// ISOLATION: each test uses a distinct, process-internal env var name unlikely to
+/// collide with real deployment vars or other tests. Tests clean up after themselves
+/// via `std::env::remove_var`. Running in a single-threaded test binary means the
+/// set/remove sequence is not racy with other tests in this module.
+#[cfg(test)]
+mod from_env_tests {
+    use super::{env_parse, ServerConfig};
+
+    #[test]
+    fn from_env_with_no_sparq_vars_set_returns_ok_with_default_values() {
+        // Call from_env() in an environment where none of the SPARQ_* vars are set.
+        // This covers the function's scaffolding (all `if let` condition sites) and
+        // the `env_parse` function body (the fast-path that short-circuits on None).
+        // The returned config must equal the default (no env var overrides the defaults).
+        let cfg = ServerConfig::from_env()
+            .expect("from_env must succeed when no SPARQ_* vars are set");
+        let def = ServerConfig::default();
+        assert_eq!(
+            cfg.max_concurrent,
+            def.max_concurrent,
+            "from_env with no overrides must equal the default max_concurrent",
+        );
+    }
+
+    #[test]
+    fn from_env_reads_sparq_max_results_env_var() {
+        // Set a single env var and verify from_env() picks it up.
+        // This covers the `if let Some(n) = env_parse("SPARQ_MAX_RESULTS")` body branch
+        // (line ~887: `cfg.max_results = (n > 0).then_some(n)`).
+        // Use a scoped set/remove so other tests are not affected.
+        std::env::set_var("SPARQ_MAX_RESULTS", "77");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_MAX_RESULTS");
+        let cfg = result.expect("from_env must succeed with SPARQ_MAX_RESULTS=77");
+        assert_eq!(
+            cfg.max_results,
+            Some(77),
+            "SPARQ_MAX_RESULTS=77 must set max_results to Some(77)",
+        );
+    }
+
+    #[test]
+    fn env_parse_returns_none_for_an_unset_var() {
+        // `env_parse` returns None when the named env var is not set.
+        // Using an implausible key so we don't accidentally hit a real var.
+        let result: Option<u64> = env_parse("_SPARQ_QCNN19_NONEXISTENT_TEST_VAR_");
+        assert!(result.is_none(), "unset env var must yield None from env_parse");
+    }
+
+    #[test]
+    fn env_parse_returns_some_when_var_is_set_to_a_valid_value() {
+        // `env_parse` returns Some(T) when the env var is set to a parseable value.
+        let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_U64_";
+        std::env::set_var(key, "123");
+        let result: Option<u64> = env_parse(key);
+        std::env::remove_var(key);
+        assert_eq!(result, Some(123u64), "env var set to '123' must parse to Some(123)");
+    }
+
+    #[test]
+    fn env_parse_returns_none_when_var_has_unparseable_value() {
+        // `env_parse::<u64>("…")` returns None when the env var value cannot be parsed.
+        let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_BAD_";
+        std::env::set_var(key, "not-a-number");
+        let result: Option<u64> = env_parse(key);
+        std::env::remove_var(key);
+        assert!(result.is_none(), "unparseable env var value must yield None from env_parse");
     }
 }

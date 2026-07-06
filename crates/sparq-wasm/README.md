@@ -14,8 +14,8 @@ SPARQL 1.1 JSON).
 ## 🚀 Quickstart
 
 ```sh
-wasm-pack build --target web --release            # browser (ES modules)
-wasm-pack build --target nodejs --release --out-dir pkg-node   # Node (CommonJS)
+wasm-pack build --target web --profile release-wasm            # browser (ES modules)
+wasm-pack build --target nodejs --profile release-wasm --out-dir pkg-node   # Node (CommonJS)
 ```
 
 ```js
@@ -106,7 +106,7 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
   and the standalone showcase bundle [`sparq-shacl-wasm`](../sparq-shacl-wasm/README.md).
 - **Performance** — bundle size (`wasm_bundle_*`) and store/dict footprint
   (`store_bytes_per_triple` / `dict_bytes_per_term`) are tracked per-commit on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
   The `test/perf.cjs`, `test/mem.cjs`, and `test/smoke.cjs` harnesses reproduce them.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 

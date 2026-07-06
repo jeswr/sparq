@@ -9,15 +9,18 @@
 //!   * ACCEPT — a Graph-Store-Protocol `PUT` of an `application/ld+json` body, then a `GET`,
 //!     returns exactly the triples that were loaded.
 //!   * the q-value-aware negotiation contract: a JSON-LD `Accept` beats a lower-q sibling, a
-//!     `q=0` rejects it, an unknown `Accept` does not 406 (the server has a default), and an
-//!     unsupported write `Content-Type` is a `415`.
+//!     `q=0` rejects it, an `Accept` that is satisfiable (a supported type or a `*/*` wildcard)
+//!     gets the negotiated/default representation, and an unsupported write `Content-Type` is a
+//!     `415`. [OPUS-4.8] sq-406acc: a PRESENT Accept naming ONLY an unproducible type and no
+//!     wildcard is now `406 Not Acceptable` (Oxigraph parity), not a silent fallback.
 //!
 //! The positive tests compile with the `jsonld` feature — which, as of sq-oy1f.4, is in the
 //! server's DEFAULT set (a maintainer-directed exception to opt-in-by-default), so the plain
 //! `cargo test -p sparq-server` runs them. A separate block under `#[cfg(not(feature =
 //! "jsonld"))]` asserts the feature-OFF contract (`--no-default-features --features server`): an
-//! `application/ld+json` write body is a plain `415`, and an `Accept: application/ld+json` query
-//! falls back to a supported graph format (NOT a 406) — so a JSON-LD-disabled build is unchanged.
+//! `application/ld+json` write body is a plain `415`, and (sq-406acc) an `Accept:
+//! application/ld+json` query — naming a type the build cannot produce, with no wildcard — is a
+//! `406 Not Acceptable` (Oxigraph parity), while `application/ld+json, */*` still falls back.
 //!
 //! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
 //! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
@@ -278,17 +281,42 @@ async fn gsp_put_jsonld_is_415_without_feature() {
     );
 }
 
-/// Without the feature, an `Accept: application/ld+json` CONSTRUCT does NOT 406 — content
-/// negotiation falls back to a supported graph format (N-Triples, the default). The endpoint
-/// always has a representation, so it answers 200 with that fallback, never a 406.
+/// [OPUS-4.8] sq-406acc: without the `jsonld` feature, an `Accept: application/ld+json` CONSTRUCT
+/// is now `406 Not Acceptable` — the build genuinely cannot produce JSON-LD, so a request that
+/// accepts ONLY `application/ld+json` (no wildcard) is unsatisfiable, exactly as Oxigraph would
+/// 406 it (w3c/sparql-protocol#40). Previously sparq silently fell back to N-Triples; the
+/// stricter behaviour is the documented Oxigraph-parity change. (A `*/*` alongside the JSON-LD
+/// range would still be satisfiable and fall back — see the companion test below.)
 #[cfg(not(feature = "jsonld"))]
 #[tokio::test]
-async fn construct_accept_jsonld_falls_back_without_feature() {
+async fn construct_accept_jsonld_is_406_without_feature() {
     let base = spawn().await;
     let resp = client()
         .get(format!("{base}/sparql"))
         .query(&[("query", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")])
         .header("accept", "application/ld+json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        406,
+        "feature-OFF build cannot produce JSON-LD; an Accept naming only it is unsatisfiable → 406"
+    );
+}
+
+/// [OPUS-4.8] sq-406acc: the converse — without the feature, `Accept: application/ld+json, */*`
+/// is STILL satisfiable (the wildcard is matchable), so the CONSTRUCT falls back to the
+/// N-Triples default with 200, never a 406. Confirms the strictness only bites a wholly
+/// unsatisfiable Accept, not one that also names a wildcard.
+#[cfg(not(feature = "jsonld"))]
+#[tokio::test]
+async fn construct_accept_jsonld_with_wildcard_falls_back_without_feature() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")])
+        .header("accept", "application/ld+json, */*")
         .send()
         .await
         .unwrap();

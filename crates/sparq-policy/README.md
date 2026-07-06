@@ -9,7 +9,7 @@ parses a [W3C ODRL 2.2](https://www.w3.org/TR/odrl-model/) policy from RDF into 
 typed model (Permission / Prohibition / Duty / Action / Constraint) and **evaluates**
 a request to a **fail-closed** ALLOW/DENY `Decision`. The full public-API surface —
 the fail-closed evaluator, every constraint dimension (purpose / recipient /
-dateTime / spatial / count), the deny-overrides conflict semantics, the static
+dateTime / spatial / count), the deny-overrides conflict semantics (with a fail-closed refusal of unimplementable `odrl:conflict` strategies, sq-ihqbl), the static
 conflict/containment lints, the stateful `count-enforcement` counter stores, and the
 opt-in `secprop-leftoperands` security-property ODRL profile (research-grade; sq-qhy4) —
 lives in [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md).

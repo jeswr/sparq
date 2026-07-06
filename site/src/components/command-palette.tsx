@@ -102,7 +102,19 @@ const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   { href: "/capabilities", title: "Capabilities", blurb: "Every surface in one gallery, by theme." },
   { href: "/app", title: "App", blurb: "The live operational GUI (hosted web app coming soon)." },
   { href: "/benchmarks", title: "Benchmarks", blurb: "Per-commit, same-box benchmark dashboard." },
+  // [OPUS-4.8] sq-1scgk — /papers is now a top-bar destination (maintainer 2026-07-04 item
+  // 9b); it stays indexed here too, exactly like the other bar pages above.
   { href: "/papers", title: "Papers", blurb: "The research papers behind sparq." },
+  // [OPUS-4.8] sq-rvgr2.1 — the /specs section: W3C ReSpec-style Unofficial Proposal Drafts.
+  // Cmd-K only (unlike /papers, which is now in the bar) so the slim top bar stays lean.
+  { href: "/specs", title: "Specs", blurb: "W3C ReSpec-style Unofficial Proposal Drafts (no W3C standing)." },
+  // (sq-gk9lq) [SONNET-4.6] — how sparq stores and queries its own project knowledge as RDF.
+  // Cmd-K only (like /papers, /specs) so the slim top bar stays at 6 destinations.
+  { href: "/dogfooding", title: "Dogfooding sparq", blurb: "How sparq uses itself as a knowledge-management system — the PKG loop, ingest workflow, NL query tool, and measured cost benefit." },
+  // (sq-0hv3o) [SONNET-4.6] — the web front door to the proof + testing estate (root
+  // ASSURANCE.md, PR #1562). Cmd-K only (like /papers, /specs, /dogfooding) so the slim
+  // top bar stays at 6 destinations; the maintainer asked to surface it, not to grow the bar.
+  { href: "/assurance", title: "Assurance", blurb: "How to check that sparq works in 15 minutes — the 5-minute health check, the layer-by-layer proof + testing estate, and what green does not mean." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
@@ -212,9 +224,28 @@ function PaletteItem({
 }
 
 export function CommandPalette({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpenState] = React.useState(false);
   const router = useRouter();
   const { theme, setTheme, resolvedTheme } = useTheme();
+
+  // [FABLE-5] sq-ymr2e.9 — ESC must RESTORE focus to the INVOKER (WAI-ARIA dialog focus
+  // contract; asserted by e2e/a11y-keyboard.spec.ts). The palette has no Radix
+  // <Dialog.Trigger> (it opens from a global ⌘K/Ctrl-K listener or the header button), and
+  // without one the close left focus on <body> — invisible to a keyboard/AT user. So every
+  // open path records document.activeElement and onCloseAutoFocus returns focus there.
+  const invokerRef = React.useRef<HTMLElement | null>(null);
+  const setOpen = React.useCallback((next: boolean | ((v: boolean) => boolean)) => {
+    setOpenState((v) => {
+      const n = typeof next === "function" ? next(v) : next;
+      if (n && !v) {
+        // Capturing inside the updater keeps the ⌘K toggle race-free; it is idempotent, so a
+        // StrictMode double-invoke is harmless.
+        invokerRef.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      }
+      return n;
+    });
+  }, []);
 
   // [OPUS-4.8] sq-ixc3.10 — the live operational commands the mounted workbench contributes,
   // bucketed into their fixed-order groups. Empty off the workbench (pure navigation then).
@@ -224,7 +255,7 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
     [operationalCommands],
   );
 
-  const ctx = React.useMemo(() => ({ open, setOpen }), [open]);
+  const ctx = React.useMemo(() => ({ open, setOpen }), [open, setOpen]);
 
   // Global ⌘K (macOS) / Ctrl-K (Windows/Linux) toggles the palette. We also let the platform
   // browser-search shortcut stay free: only K with the platform modifier is intercepted.
@@ -237,7 +268,7 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [setOpen]);
 
   // Navigate (or run an action), then close. next/navigation's router.push respects the
   // configured basePath, so "/surface/zk" resolves under /sparq on Pages and at root under
@@ -247,13 +278,16 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
       setOpen(false);
       router.push(href);
     },
-    [router],
+    [router, setOpen],
   );
 
-  const runAction = React.useCallback((fn: () => void) => {
-    setOpen(false);
-    fn();
-  }, []);
+  const runAction = React.useCallback(
+    (fn: () => void) => {
+      setOpen(false);
+      fn();
+    },
+    [setOpen],
+  );
 
   const isDark = (resolvedTheme ?? theme) === "dark";
 
@@ -269,6 +303,16 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
           )}
         />
         <DialogPrimitive.Content
+          // [FABLE-5] sq-ymr2e.9 — return focus to the recorded invoker (fall back to the
+          // Radix default only when it is gone, e.g. after a palette navigation unmounted it).
+          onCloseAutoFocus={(event) => {
+            const invoker = invokerRef.current;
+            invokerRef.current = null;
+            if (invoker?.isConnected) {
+              event.preventDefault();
+              invoker.focus();
+            }
+          }}
           className={cn(
             "bg-card text-card-foreground fixed left-1/2 top-[12vh] z-50 w-[min(38rem,calc(100vw-2rem))] -translate-x-1/2",
             "overflow-hidden rounded-xl p-0 shadow-2xl ring-1 ring-foreground/10",

@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { MonitorPlay, Download, PlayCircle } from "lucide-react";
+import { MonitorPlay, PlayCircle, Download } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { withBasePath } from "@/lib/base-path";
 import {
   Card,
   CardContent,
@@ -12,21 +13,25 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-// [OPUS-4.8] sq-vw3ax.7 / sq-rclb8 — the "App" top-bar destination: the live operational GUI.
+// [OPUS-4.8] sq-vw3ax.11 / sq-vnd0i — the "App" destination: the LIVE operational GUI.
 //
-// OPTION-B RECONCILIATION (the maintainer's decision after #1004 opened). The website's /try
-// page STAYS the lightweight in-browser SPARQL REPL playground. The live operational GUI is a
-// SEPARATE destination here at /app (the hosted web app will live at /sparq/app/). This is a
-// deliberate, honest PLACEHOLDER so the slim top bar's "App" slot is a real, stable route today
-// (not a 404) and the GUI track (epic sq-ixc3) has a clean handoff point — it fills in THIS page
-// when the hosted web GUI lands. Until then it routes a visitor to the way to operate sparq that
-// DOES exist today: the desktop GUI download (the in-tab REPL is a separate, linked destination
-// for quick experiments, not the operational app). A bead (sq-rclb8) tracks repointing this /app
-// placeholder at the hosted web GUI once that route is ready.
+// WHAT ACTUALLY SERVES /app IN PRODUCTION. The hosted web GUI is a SEPARATE Next.js app
+// (gui/app — a workbench, not this site) that the Pages deploy builds with `build:web` and
+// OVERLAYS at /app/, deliberately replacing this source page (pages.yml, sq-vnd0i /
+// maintainer's Option B). So in the deployed site, /app IS the real hosted GUI.
+//
+// WHY THIS SOURCE STILL EXISTS. It is (1) the link-check target for the deploy's lychee pass,
+// which runs over site/out BEFORE the gui/app overlay, so /app must resolve to an out/app/
+// index.html at that point; (2) the destination the site-only build + `next dev` (and the e2e
+// suite) render, since the overlay only happens in the Pages pipeline; and (3) a graceful
+// fallback. Because the navigation to /app is a HARD, full-page link (app-shell NavLink
+// `external`) — not a next/link soft nav across the two distinct Next builds — the browser loads
+// the overlaid GUI's own HTML in production and this fallback never shows there. This copy is
+// therefore written honestly for the local/preview context where it DOES render.
 export const metadata: Metadata = {
   title: "App — the sparq GUI",
   description:
-    "The sparq operational GUI — a workbench over a persistent local store. The hosted web app is being built and will live here at /sparq/app/; for now, download the desktop GUI.",
+    "The sparq operational GUI — a workbench over a persistent local store, hosted in your browser at /app. Run a quick query in the live REPL, or install the desktop GUI.",
 };
 
 export default function AppPage() {
@@ -45,26 +50,43 @@ export default function AppPage() {
             </p>
           </div>
         </div>
-        <Badge variant="warning">Hosted web app — coming soon</Badge>
+        <Badge variant="success">Hosted web GUI — live at /app</Badge>
       </header>
 
       <Card>
         <CardHeader>
           <CardTitle className="text-base">
-            The hosted web app is being built
+            The operational GUI, in your browser
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <CardDescription className="leading-relaxed">
             sparq ships two frontends that do different jobs: this site (which
             persuades and proves with live demos) and the GUI (a workbench you use
-            to do real RDF/SPARQL work over your own data). A hosted, run-it-in-your
-            browser version of the GUI is on the way and will live here at{" "}
-            <code className="font-mono text-[0.9em]">/sparq/app/</code>. In the
-            meantime, the desktop GUI is the way to operate sparq today — and the
-            live REPL is here for a quick query without installing anything.
+            to do real RDF/SPARQL work over your own data). The hosted,
+            run-it-in-your-browser GUI is served here at{" "}
+            <code className="font-mono text-[0.9em]">/app/</code> — the same
+            Rust engine compiled to wasm, nothing sent to a server. Want a quick
+            query without leaving this tab, or a native build with no wasm ceiling?
+            Both paths are below.
           </CardDescription>
           <div className="grid gap-4 sm:grid-cols-2">
+            <div className="rounded-xl border bg-muted/30 p-4">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <PlayCircle className="size-4 text-primary" aria-hidden />
+                In your browser — no install
+              </h2>
+              <p className="mt-1.5 text-sm text-muted-foreground">
+                Just want to run a query? The web workbench runs real queries
+                against a sample graph right now, in this tab — the same Rust
+                engine compiled to wasm, nothing sent to a server.
+              </p>
+              {/* [OPUS-4.8] sq-4hiqe — /app IS the single in-tab workbench (the /try REPL was
+                  removed). Hard anchor: /app is a separate overlaid Next app. */}
+              <Button asChild size="sm" className="mt-3">
+                <a href={withBasePath("/app/")}>Open the workbench</a>
+              </Button>
+            </div>
             <div className="rounded-xl border bg-muted/30 p-4">
               <h2 className="flex items-center gap-2 text-sm font-semibold">
                 <Download className="size-4 text-primary" aria-hidden />
@@ -75,22 +97,8 @@ export default function AppPage() {
                 linked directly — threads, mmap, and persistence with no wasm
                 ceiling. Builds are unsigned developer builds today.
               </p>
-              <Button asChild size="sm" className="mt-3">
-                <Link href="/download">Download the desktop GUI</Link>
-              </Button>
-            </div>
-            <div className="rounded-xl border bg-muted/30 p-4">
-              <h2 className="flex items-center gap-2 text-sm font-semibold">
-                <PlayCircle className="size-4 text-primary" aria-hidden />
-                The live REPL — no install
-              </h2>
-              <p className="mt-1.5 text-sm text-muted-foreground">
-                Just want to run a query? The live SPARQL REPL runs real queries
-                against a sample graph right now, in this tab — the same Rust
-                engine compiled to wasm, nothing sent to a server.
-              </p>
               <Button asChild size="sm" variant="outline" className="mt-3">
-                <Link href="/try">Open the live REPL</Link>
+                <Link href="/download">Install the desktop GUI</Link>
               </Button>
             </div>
           </div>

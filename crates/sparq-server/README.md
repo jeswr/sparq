@@ -11,7 +11,7 @@ A **W3C-conformant HTTP server** exposing the [sparq](../../README.md) query eng
 **SPARQL 1.1 Protocol** (`query` + `update` at `/sparql`) and the **Graph Store HTTP Protocol**
 over a `Graph`. **In-memory by default** (updates lost on restart) or **durable** with
 `--persist <DIR>`. Adds content negotiation, EXPLAIN, `/metrics`, WebSocket/SSE subscriptions, and
-opt-in time-travel. Reads and writes never share a lock, so queries never wait on the writer.
+generation-pinned snapshot reads. Reads and writes never share a lock, so queries never wait on the writer.
 
 ## 🚀 Quickstart
 
@@ -27,8 +27,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 
 ## ✨ Features
 
-- **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and `update`
-  (`application/sparql-update` → `204`, atomic), including the protocol dataset-override params.
+- **SPARQL 1.1 Protocol** — `query` (GET / POST / HEAD / the query-only HTTP `QUERY` method, for
+  Oxigraph interop) and `update` (`application/sparql-update` → `204`, atomic) + dataset overrides.
 - **Named graphs + Graph Store Protocol** — a full RDF dataset (`GRAPH` patterns, cross-graph
   joins, `FROM`/`FROM NAMED`, graph-scoped updates through the same writer) plus GSP `GET`/`HEAD`
   read and `PUT`/`POST`/`DELETE`/`PATCH` write (indirect `?graph=`/`?default` or direct request-URI).
@@ -39,8 +39,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
   GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
   `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
-  SELECT bodies. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style
-  **WebSocket + SSE** live SELECT diffs.
+  SELECT bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
+  keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**, and a **`Sparq-Generation`** header + **`?generation=N`** snapshot pin (default build, bounded to the ring's concurrency-retention window; aged-out → `410`).
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors
@@ -50,7 +50,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   read timeouts, row/byte memory caps, gzip zip-bomb ratio cap, and the SERVICE egress allowlist,
   each with a `SPARQ_*` env override (honest per-cap semantics in the SKILL's "Server hardening").
 - **Opt-in features** (a build without a feature carries zero code for it) — `time-travel`
-  (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
+  (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
   (`POST /shacl/validate`), `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic
@@ -106,13 +106,13 @@ every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, n
   status code, the full auth × bind matrix, each hardening cap's honest semantics, CORS, audit
   sinks, TPF/brTPF, SHACL, federation discovery, the container image) and
   [`SUBSCRIPTIONS.md`](SUBSCRIPTIONS.md) (the subscription protocol).
-- **API reference** — [docs.rs/sparq-server](https://docs.rs/sparq-server) (incl. the versioned
-  `status_contract` retry doc).
+- **Wire contract** — [`docs/http-wire-contract.md`](../../docs/http-wire-contract.md): the versioned v1
+  HTTP surface + wire-semver policy, pinned by `tests/wire_contract.rs` (ratification pending, gh-1416). **API reference** — [docs.rs/sparq-server](https://docs.rs/sparq-server).
 - **Design** — [`research/concurrent-serving.md`](../../research/concurrent-serving.md)
   (generation-ring + sequenced-writer) and
   [`research/adr-horizontal-scaling.md`](../../research/adr-horizontal-scaling.md) (the non-goal).
 - **Performance** — not baked into docs; see the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

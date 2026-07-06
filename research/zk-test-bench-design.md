@@ -1,6 +1,8 @@
 <!-- [OPUS-4.8] authored by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns -->
 # ZK test-suite & benchmark design — first-pass hand-off
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` and `zk/xpath` Noir trees were externalized to the `sparq-org/noir_IEEE754` (v0.10.0) and `sparq-org/noir_XPath` (v0.2.0) face repos and REMOVED from this repo; their test suites, oracle harnesses, and benches (`zk/ieee754/bench`, `zk/ieee754/scripts/*`, `zk/xpath/test_packages`, `zk/xpath/VENDOR.md`, `numeric_types.nr`) now live in the face repos. `zk/compose` remains in-tree and consumes the released `sparq_ieee754` as a pinned Nargo git dependency. Any `zk/xpath/…` / `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the corresponding face repo. -->
+
 A structured summary of how the test suites and benchmarks across the sparq ZK
 estate are **designed** and what they **derive from**, plus an honest,
 audit-driven gap analysis and a recommended go-forward plan.

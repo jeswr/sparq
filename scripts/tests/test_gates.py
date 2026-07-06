@@ -40,6 +40,9 @@ def _load(name: str, filename: str):
 g1 = _load("gate_new_crate", "gate-new-crate.py")
 g2 = _load("gate_api_skill", "gate-api-skill.py")
 g6 = _load("check_config_documented", "check-config-documented.py")
+# [SONNET-4.6] (sq-5owmc) the merge_group PR-number resolver used by the G2/G6
+# "Read PR labels" steps to honour the escape-hatch label in the merge queue.
+resolve_mg = _load("resolve_merge_group_pr", "resolve-merge-group-pr.py")
 
 
 def _statused(added: list[str], modified: list[str] | None = None) -> list[str]:
@@ -637,6 +640,69 @@ class G6Test(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(undoc, [])
+
+
+# --------------------------------------------------------------------------- #
+# merge_group PR-number resolution — G2/G6 escape-hatch label in the queue
+# [SONNET-4.6] (sq-5owmc)
+# --------------------------------------------------------------------------- #
+class MergeGroupPrResolveTest(unittest.TestCase):
+    # [SONNET-4.6] (sq-5owmc) The G2/G6 "Read PR labels" steps must resolve the PR
+    # number in merge_group context so the `skill-not-needed` / `config-internal`
+    # escape-hatch labels are honoured in the merge queue. Before the fix the step
+    # resolved the PR via `commits/<merge_group.head_sha>/pulls`; that returned
+    # empty (synthetic merge commit / empty head_sha), pr-labels.txt was empty, the
+    # label never suppressed, the gate failed the GROUP and the queue silently
+    # ejected the PR (hit #1542 twice). The fix parses the PR number
+    # DETERMINISTICALLY from the gh-readonly-queue head ref; these tests exercise
+    # that pure parse (the network fallback + loud warn live in the workflow).
+
+    def test_parses_pr_from_observed_ref_format(self):
+        # The exact ref shape GitHub sets on github.event.merge_group.head_ref for
+        # the single-PR merge group that ejected #1542.
+        ref = "refs/heads/gh-readonly-queue/main/pr-1542-" + "0" * 40
+        self.assertEqual(resolve_mg.parse_pr_number_from_ref(ref), 1542)
+
+    def test_parses_ref_without_refs_heads_prefix(self):
+        # head_ref may arrive with or without the leading refs/heads/.
+        ref = "gh-readonly-queue/main/pr-42-" + "d" * 40
+        self.assertEqual(resolve_mg.parse_pr_number_from_ref(ref), 42)
+
+    def test_parses_ref_with_slashed_base_branch(self):
+        # A base branch that itself contains a slash must not break the parse.
+        ref = "refs/heads/gh-readonly-queue/release/v1/pr-7-" + "a" * 40
+        self.assertEqual(resolve_mg.parse_pr_number_from_ref(ref), 7)
+
+    def test_empty_ref_returns_none(self):
+        # The fail-closed path: an empty/absent head_ref yields None so the workflow
+        # warns LOUDLY and runs the gate unsuppressed (never silently passes).
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref(""))
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref(None))
+
+    def test_non_queue_ref_returns_none(self):
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref("refs/heads/feature/x"))
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref("refs/heads/main"))
+
+    def test_cli_entry_point(self):
+        # The workflow invokes the module as a CLI: prints the number + exit 0 on a
+        # successful parse; exit 1 with no output when unparseable.
+        import contextlib
+        import io
+
+        ref = "refs/heads/gh-readonly-queue/main/pr-99-" + "f" * 40
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_ok = resolve_mg.main(["prog", ref])
+        self.assertEqual(rc_ok, 0)
+        self.assertEqual(buf.getvalue().strip(), "99")
+
+        buf_empty = io.StringIO()
+        with contextlib.redirect_stdout(buf_empty):
+            rc_empty = resolve_mg.main(["prog", ""])
+        self.assertEqual(rc_empty, 1)
+        self.assertEqual(buf_empty.getvalue().strip(), "")
+
+        self.assertEqual(resolve_mg.main(["prog"]), 1)  # missing arg → exit 1
 
 
 # --------------------------------------------------------------------------- #

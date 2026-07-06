@@ -155,6 +155,11 @@ impl<'a> SourceResolver<'a> {
 /// pushable FILTERs, VALUES bind-join blocks, ORDER/LIMIT) is Phase 4's `pushdown` module;
 /// `lower_leaf` is the seam it narrows. [OPUS-4.8] sq-j27p.
 pub fn lower_leaf(tp: &TriplePattern) -> SubQuery {
+    debug_assert!(
+        !matches!(tp.subject, Term::Literal(_)),
+        "lower_leaf: literal in subject position is not valid RDF/SPARQL 1.1; \
+         sparq-fedplan must never produce such a pattern"
+    );
     let project = pattern_vars(tp);
     let s = render_term(&tp.subject);
     let p = render_term(&tp.predicate);
@@ -405,5 +410,81 @@ mod tests {
             lower_leaf(&rendered).sparql,
             "SELECT ?s WHERE { ?s <http://ex/label> \"hi\"@en }"
         );
+    }
+
+    // [OPUS-4.8] sq-qcnn.22: Additional direct unit tests for coverage ratchet
+    #[test]
+    fn pattern_vars_all_distinct() {
+        // All three positions hold distinct variables.
+        let tp = TriplePattern::new(var("s"), var("p"), var("o"));
+        assert_eq!(pattern_vars(&tp), vec!["s", "p", "o"]);
+    }
+
+    #[test]
+    fn pattern_vars_predicate_bound() {
+        // Only subject and object are variables; predicate is bound.
+        let tp = TriplePattern::new(var("s"), iri("http://ex/type"), var("o"));
+        assert_eq!(pattern_vars(&tp), vec!["s", "o"]);
+    }
+
+    #[test]
+    fn pattern_vars_repeated_variable() {
+        // ?s :p ?s — subject and object are the same variable.
+        let tp = TriplePattern::new(var("s"), iri("http://ex/relates"), var("s"));
+        assert_eq!(pattern_vars(&tp), vec!["s"]);
+    }
+
+    #[test]
+    fn lower_leaf_all_bound_existence_probe() {
+        // Fully bound pattern: all three positions are IRIs → existence probe with LIMIT 1.
+        let tp = TriplePattern::new(
+            iri("http://ex/alice"),
+            iri("http://ex/knows"),
+            iri("http://ex/bob"),
+        );
+        let sub = lower_leaf(&tp);
+        assert!(sub.project.is_empty(), "fully bound pattern projects nothing");
+        assert_eq!(
+            sub.sparql,
+            "SELECT * WHERE { <http://ex/alice> <http://ex/knows> <http://ex/bob> } LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn lower_leaf_subject_and_object_vars() {
+        // Subject and object are variables; predicate is bound. Projects s, o in that order.
+        let tp = TriplePattern::new(var("s"), iri("http://ex/type"), var("o"));
+        let sub = lower_leaf(&tp);
+        assert_eq!(sub.project, vec!["s".to_string(), "o".to_string()]);
+        assert_eq!(sub.sparql, "SELECT ?s ?o WHERE { ?s <http://ex/type> ?o }");
+    }
+
+    #[test]
+    #[should_panic(expected = "literal in subject position is not valid RDF/SPARQL 1.1")]
+    fn lower_leaf_literal_in_subject() {
+        // A literal in subject position is invalid in RDF/SPARQL 1.1; lower_leaf debug-asserts
+        // this never happens. sparq-fedplan must never produce such a pattern — this test
+        // documents the rejection path. [OPUS-4.8] sq-qcnn.22
+        lower_leaf(&TriplePattern::new(
+            Term::Literal("hello".to_string()),
+            iri("http://ex/prop"),
+            var("o"),
+        ));
+    }
+
+    #[test]
+    fn lower_leaf_fragment_all_positions_bound() {
+        // Fully bound fragment pattern: all bound → all positions map to FragTerm::Iri/Literal.
+        use crate::source::{FragTerm, PatternTerm};
+        let tp = TriplePattern::new(
+            iri("http://ex/alice"),
+            iri("http://ex/knows"),
+            iri("http://ex/bob"),
+        );
+        let pat = lower_leaf_fragment(&tp);
+        assert_eq!(pat.subject, PatternTerm::Bound(FragTerm::Iri("http://ex/alice".into())));
+        assert_eq!(pat.predicate, PatternTerm::Bound(FragTerm::Iri("http://ex/knows".into())));
+        assert_eq!(pat.object, PatternTerm::Bound(FragTerm::Iri("http://ex/bob".into())));
+        assert_eq!(pat.vars(), Vec::<String>::new(), "fully bound pattern has no variables");
     }
 }

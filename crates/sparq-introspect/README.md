@@ -112,7 +112,7 @@ cargo run -p sparq-introspect --example olympics_introspect --release
 - Design records: [`research/genai-design.md`](../../research/genai-design.md),
   [`research/genai-ontology-introspection.md`](../../research/genai-ontology-introspection.md)
 - W3C VoID: <https://www.w3.org/TR/void/>
-- Perf dashboard: <https://jeswr.github.io/sparq/dev/bench>
+- Perf dashboard: <https://sparq.jeswr.org/dev/bench>
 - Open work for this crate: `bd list -l area:sparq-introspect`
 
 ## License

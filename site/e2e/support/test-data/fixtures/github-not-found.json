@@ -1,0 +1,6 @@
+{
+  "_fixture": "[OPUS-4.8] sq-ymr2e.1 — FAKE GitHub releases/latest 404 body (the 'no release yet' variant, the current live reality). Served with HTTP 404 by the hermetic fixture so /download deterministically renders its 'No release yet — watch releases' degraded state.",
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest/releases/releases#get-the-latest-release",
+  "status": "404"
+}

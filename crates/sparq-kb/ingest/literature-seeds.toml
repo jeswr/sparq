@@ -1,0 +1,227 @@
+# Literature seed-query registry for sparq knowledge base
+# Maps research topics to sparq attributes: performance | correctness | genai-self-improvement
+# Each seed: CORE API v3 search syntax for automated harvesting
+
+[[seeds]]
+id = "llm-knowledge-graph-semantic-reasoning"
+topic = "LLM x knowledge-representation"
+attribute = "genai-self-improvement"
+query = "knowledge graph semantic reasoning language model"
+max_records = 50
+rationale = "LLMs over structured knowledge representations enable sparq's genAI features to reason about query intent and schema"
+
+[[seeds]]
+id = "neurosymbolic-knowledge-integration"
+topic = "neurosymbolic AI"
+attribute = "genai-self-improvement"
+query = "neurosymbolic integration neural symbolic hybrid AI"
+max_records = 40
+rationale = "Hybrid neural-symbolic systems improve both accuracy and explainability for knowledge base querying and reasoning"
+
+[[seeds]]
+id = "sparql-query-optimization-join-ordering"
+topic = "query optimization / database systems"
+attribute = "performance"
+query = "SPARQL query optimization join ordering cost estimation"
+max_records = 35
+rationale = "Join ordering and cardinality estimation directly impact sparq engine performance on federated endpoints"
+
+[[seeds]]
+id = "rdf-semantic-web-systems"
+topic = "RDF / SPARQL systems"
+attribute = "feature-usefulness"
+query = "RDF semantic web knowledge base SPARQL"
+max_records = 45
+rationale = "Core research on RDF and SPARQL systems is foundational for sparq as an RDF query engine"
+
+[[seeds]]
+id = "database-correctness-logic-bugs"
+topic = "engine correctness + logic-bug testing"
+attribute = "correctness"
+query = "database correctness testing logic bugs metamorphic"
+max_records = 40
+rationale = "Metamorphic testing and logic-bug detection techniques feed sparq's existing query correctness test suite"
+
+[[seeds]]
+id = "retrieval-augmented-generation-rag-memory"
+topic = "agentic memory + self-improvement"
+attribute = "genai-self-improvement"
+query = "retrieval augmented generation RAG agent memory provenance"
+max_records = 45
+rationale = "RAG systems and provenance tracking enable sparq agents to learn from retrieved query results"
+
+[[seeds]]
+id = "graph-embeddings-semantic-similarity"
+topic = "LLM x knowledge-representation"
+attribute = "genai-self-improvement"
+query = "graph embeddings semantic similarity knowledge representation"
+max_records = 35
+rationale = "Embedding-based similarity over RDF graphs helps LLMs navigate schema and find relevant query patterns"
+
+[[seeds]]
+id = "cardinality-estimation-database-optimization"
+topic = "query optimization / database systems"
+attribute = "performance"
+query = "cardinality estimation database query optimization machine learning"
+max_records = 40
+rationale = "Learned cardinality estimators improve federated SPARQL engine performance over heterogeneous endpoints"
+
+[[seeds]]
+id = "semantic-query-intent-understanding"
+topic = "LLM x knowledge-representation"
+attribute = "genai-self-improvement"
+query = "semantic query intent understanding natural language SPARQL"
+max_records = 45
+rationale = "Intent recognition and query rewriting enhance sparq's ability to map user queries to SPARQL"
+
+[[seeds]]
+id = "metamorphic-testing-relational-databases"
+topic = "engine correctness + logic-bug testing"
+attribute = "correctness"
+query = "metamorphic testing relational databases query engine"
+max_records = 30
+rationale = "Metamorphic relations on SPARQL queries detect semantic bugs without requiring expected outputs"
+
+[[seeds]]
+id = "rdf-query-federation-distributed-systems"
+topic = "RDF / SPARQL systems"
+attribute = "performance"
+query = "RDF query federation distributed SPARQL endpoint"
+max_records = 40
+rationale = "Federation techniques for distributed SPARQL endpoints improve performance under heterogeneous data sources"
+
+[[seeds]]
+id = "ontology-alignment-knowledge-integration"
+topic = "LLM x knowledge-representation"
+attribute = "feature-usefulness"
+query = "ontology alignment knowledge integration schema mapping"
+max_records = 35
+rationale = "Automated ontology alignment enables sparq to integrate queries across heterogeneous knowledge representations"
+
+[[seeds]]
+id = "uncertainty-quantification-nlp-reasoning"
+topic = "neurosymbolic AI"
+attribute = "correctness"
+query = "uncertainty quantification reasoning natural language processing"
+max_records = 40
+rationale = "Confidence and uncertainty estimation improve sparq agent decision-making on noisy or ambiguous queries"
+
+[[seeds]]
+id = "vector-semantic-search-knowledge-graphs"
+topic = "LLM x knowledge-representation"
+attribute = "performance"
+query = "vector search semantic similarity knowledge graph embedding"
+max_records = 45
+rationale = "Vector-based semantic search accelerates finding relevant subgraphs for query expansion and rewriting"
+
+[[seeds]]
+id = "query-relaxation-missing-answers"
+topic = "RDF / SPARQL systems"
+attribute = "feature-usefulness"
+query = "query relaxation approximate matching SPARQL no answers"
+max_records = 35
+rationale = "Relaxation techniques help sparq agents handle incomplete data and provide approximate results gracefully"
+
+[[seeds]]
+id = "neural-cost-model-query-optimization"
+topic = "query optimization / database systems"
+attribute = "performance"
+query = "neural cost model database query optimization planning"
+max_records = 40
+rationale = "Learned cost models for join selectivity improve sparq's query plan selection on unknown federations"
+
+[[seeds]]
+id = "knowledge-distillation-agent-reasoning"
+topic = "agentic memory + self-improvement"
+attribute = "genai-self-improvement"
+query = "knowledge distillation agent reasoning compact models"
+max_records = 35
+rationale = "Distillation techniques enable sparq agents to improve reasoning efficiency through learned shortcuts"
+
+[[seeds]]
+id = "property-based-testing-database-systems"
+topic = "engine correctness + logic-bug testing"
+attribute = "correctness"
+query = "property based testing database systems SPARQL correctness"
+max_records = 30
+rationale = "Property-based testing frameworks catch subtle SPARQL semantics violations in query execution"
+
+[[seeds]]
+id = "contextualized-embeddings-schema-understanding"
+topic = "neurosymbolic AI"
+attribute = "genai-self-improvement"
+query = "contextualized embeddings transformer schema understanding"
+max_records = 40
+rationale = "Contextualized word embeddings improve sparq agents' understanding of entity relationships and RDF schema"
+
+[[seeds]]
+id = "incremental-view-maintenance-rdf"
+topic = "RDF / SPARQL systems"
+attribute = "performance"
+query = "incremental view maintenance RDF SPARQL updates"
+max_records = 30
+rationale = "Efficient view maintenance over RDF graphs reduces update propagation cost in sparq's query results"
+
+[[seeds]]
+id = "semantic-web-ontologies-schema-org"
+topic = "LLM x knowledge-representation"
+attribute = "feature-usefulness"
+query = "semantic web ontologies schema.org linked data"
+max_records = 40
+rationale = "Schema.org and other public ontologies provide reference knowledge for sparq's schema understanding"
+
+[[seeds]]
+id = "query-result-explanation-debugging"
+topic = "RDF / SPARQL systems"
+attribute = "feature-usefulness"
+query = "query result explanation why provenance debugging SPARQL"
+max_records = 35
+rationale = "Explanation and provenance tracking help sparq agents and users understand query results"
+
+[[seeds]]
+id = "active-learning-data-annotation"
+topic = "agentic memory + self-improvement"
+attribute = "genai-self-improvement"
+query = "active learning query selection human annotation data labeling"
+max_records = 35
+rationale = "Active learning strategies enable sparq agents to prioritize training data collection for self-improvement"
+
+[[seeds]]
+id = "zk-adjacent-verifiable-computation"
+topic = "zk-adjacent"
+attribute = "correctness"
+query = "zero knowledge proof verifiable computation SPARQL provenance"
+max_records = 25
+rationale = "Literature about verifiable computation is knowledge about the field; external audit pending for sparq verifier"
+
+[[seeds]]
+id = "llm-question-answering-rdf"
+topic = "LLM x knowledge-representation"
+attribute = "genai-self-improvement"
+query = "question answering RDF knowledge base semantic parsing"
+max_records = 45
+rationale = "QA systems over RDF enable sparq's genAI features to answer user questions by translating to SPARQL"
+
+[[seeds]]
+id = "distributed-cardinality-estimation"
+topic = "query optimization / database systems"
+attribute = "performance"
+query = "cardinality statistics distributed query optimization federated"
+max_records = 35
+rationale = "Distributed cardinality statistics improve sparq's join planning across heterogeneous endpoints"
+
+[[seeds]]
+id = "graph-neural-networks-reasoning"
+topic = "neurosymbolic AI"
+attribute = "genai-self-improvement"
+query = "graph neural networks reasoning knowledge graph representation learning"
+max_records = 40
+rationale = "Graph neural networks improve sparq agents' ability to reason over multi-hop RDF paths"
+
+[[seeds]]
+id = "differential-testing-query-engines"
+topic = "engine correctness + logic-bug testing"
+attribute = "correctness"
+query = "differential testing query engines SPARQL cross-validation"
+max_records = 30
+rationale = "Differential testing against reference engines detects SPARQL semantic bugs in sparq's implementation"

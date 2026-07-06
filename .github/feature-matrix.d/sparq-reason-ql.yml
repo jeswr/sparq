@@ -1,0 +1,29 @@
+# Feature-matrix fragment for `sparq-reason-ql`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-t5bne (epic sq-pbz04, Phase Q1): sparq-reason-ql's `experimental` feature —
+# the OWL 2 QL (DL-Lite_R) PerfectRef query rewriter. The crate ships the (cheap, always-present)
+# CQ-shape gate with NO feature; the rewriter itself is behind the OFF-by-default `experimental`
+# feature. Without the feature, the rewriter modules (perfectref.rs, emit.rs) and the
+# tests/oracle.rs hand-checked DL-Lite oracle (`#![cfg(feature = "experimental")]`, 12 cases) are
+# compiled EMPTY, so the default build (and ci.yml's `--workspace --all-targets` archive, which
+# passes NO `--features`) runs ZERO of them — this leg is the ONLY thing that executes the
+# rewriter + oracle in CI. No new dependency (`experimental = []`, reuses spargebra + oxrdf +
+# rustc-hash; oxttl is a dev-dep for the Turtle fixtures). Verified locally: `cargo test -p
+# sparq-reason-ql --features experimental` runs the 20 lib + 12 oracle tests green, and `clippy
+# --all-targets -D warnings` is clean with it on.
+- name: "sparq-reason-ql (experimental — OWL 2 QL PerfectRef rewriter + DL-Lite oracle)"
+  crate: "sparq-reason-ql"
+  features: "experimental"
+  test: true

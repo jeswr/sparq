@@ -59,7 +59,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: G1 — new crate ships bench + README (+ SKILL if public)
@@ -79,7 +79,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Read PR labels (for the skill-not-needed escape hatch)
@@ -88,19 +88,56 @@ jobs:
         # label is honoured in the merge queue too (otherwise a PR that legitimately
         # carried `skill-not-needed` would pass the PR gate but fail the identical
         # merge_group gate, blocking the queue). On merge_group the PR number is not
-        # in the event payload, so resolve it from the head commit's associated PR.
+        # in the event payload.
+        #
+        # [SONNET-4.6] (sq-5owmc) FIX — the merge_group PR resolution was SILENTLY
+        # failing: it resolved the PR via `commits/<merge_group.head_sha>/pulls`, but
+        # the merge-queue head is a SYNTHETIC merge commit not reliably associated
+        # with the PR (and in the observed run the head_sha env came back empty too),
+        # so pr-labels.txt was empty, `skill-not-needed` never suppressed, G2 failed
+        # the GROUP and the queue ejected the PR with no failed run on the PR itself
+        # (hit #1542 twice). Now the PR number is parsed DETERMINISTICALLY from the
+        # merge-queue head ref (refs/heads/gh-readonly-queue/<base>/pr-<N>-<sha>) via
+        # scripts/resolve-merge-group-pr.py; the commits/<sha>/pulls API is only a
+        # secondary fallback; and if BOTH fail the step warns LOUDLY (never silently)
+        # while the gate still runs UNSUPPRESSED (fail-closed is correct, silence is
+        # not).
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          MERGE_SHA: ${{ github.event.merge_group.head_sha }}
+          MERGE_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           : > pr-labels.txt
           num="${PR_NUMBER:-}"
-          if [ -z "$num" ] && [ -n "${MERGE_SHA:-}" ]; then
-            # Resolve the PR associated with the merge-queue head commit.
-            num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_SHA}/pulls" \
-                     --jq '.[0].number' 2>/dev/null || true)"
+          if [ -z "$num" ] && [ "${EVENT_NAME:-}" = "merge_group" ]; then
+            # Primary (deterministic, no network): parse the PR number from the
+            # gh-readonly-queue head ref.
+            num="$(python3 scripts/resolve-merge-group-pr.py "${MERGE_HEAD_REF:-}" || true)"
+            # Secondary fallback: the head commit's associated PR (best-effort).
+            if [ -z "$num" ] && [ -n "${MERGE_HEAD_SHA:-}" ]; then
+              num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_HEAD_SHA}/pulls" \
+                       --jq '.[0].number' 2>/dev/null || true)"
+            fi
+            if [ -z "$num" ]; then
+              # LOUD fail-closed: do NOT silently skip the label lookup. The gate
+              # below still runs UNSUPPRESSED, but make the unresolved association
+              # visible in the annotations + job summary so it is never invisible
+              # the way it was for #1542.
+              echo "::warning title=flow-on-gates G2::merge_group PR could not be resolved (head_ref='${MERGE_HEAD_REF:-}' head_sha='${MERGE_HEAD_SHA:-}'); the skill-not-needed escape-hatch label will NOT suppress G2 here — gate runs unsuppressed (fail-closed)."
+              {
+                echo "### ⚠️ flow-on-gates G2: merge_group PR unresolved"
+                echo ""
+                echo "Could not resolve the PR number for this merge-queue commit, so the"
+                echo "\`skill-not-needed\` escape-hatch label cannot be honoured here."
+                echo "The gate runs **unsuppressed** (fail-closed)."
+                echo ""
+                echo "- head_ref: \`${MERGE_HEAD_REF:-<empty>}\`"
+                echo "- head_sha: \`${MERGE_HEAD_SHA:-<empty>}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           if [ -n "$num" ]; then
             gh pr view "$num" \
@@ -135,7 +172,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: G3 — new bench suite is registered + featured (or featured=false)
@@ -159,30 +196,78 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Self-test the proactive merge-gates (G1/G2/G3/G6)
         # Runs the hermetic gate unit tests so a regression in any gate script is
         # caught at PR time (the suite is stdlib-only; no git/network).
         run: python3 scripts/tests/test_gates.py
+      # [SONNET-4.6] sq-1cb6l: hermetic self-test of the G3 gate's pure logic —
+      # evaluate() + parse_status_lines() + registry_blocks() + dashboard_featured_text()
+      # + added_bench_suites() + suite_family(). Placed in G6 (the HARD config-documented
+      # job) so a regression in the gate's detection logic actually blocks the merge,
+      # mirroring the test_gates.py pattern. Stdlib-only, no git/network. [SONNET-4.6]
+      - name: Self-test the new-bench-registered gate (G3, sq-1cb6l)
+        run: python3 scripts/tests/test_check_new_bench_registered.py
+      # [SONNET-4.6] sq-8hfhi: wire the reactive flow-on engine tests into CI so a
+      # rule/engine regression (like the #1655 false-positive fnmatch/{suite} defect
+      # fixed in #1664) is caught pre-merge, not post-merge. 31 tests covering: rule
+      # loading + well-formedness, evaluate() rule firing (new-crate / changed-surface /
+      # pub-API diff plumbing / competitor-label / new-bench / ZK circuit gate-count),
+      # idempotency-key stability, dry-run output correctness, and the CI guard that
+      # refuses to mint issues outside CI. Stdlib-only, no network, no git. Gating: the
+      # job name carries no advisory/informational token, so ci-summary gates on it.
+      - name: Self-test the flow-on reactive engine (rule loading + evaluate + dry-run — sq-8hfhi)
+        run: python3 scripts/tests/test_flow_on.py
       - name: Read PR labels (for the config-internal escape hatch)
         id: labels
         # [OPUS-4.8] Mirror G2: run on BOTH pull_request AND merge_group so the
         # escape-hatch label is honoured in the merge queue too. On merge_group the
-        # PR number is not in the event payload, so resolve it from the head
-        # commit's associated PR.
+        # PR number is not in the event payload.
+        #
+        # [SONNET-4.6] (sq-5owmc) FIX — mirrors the G2 fix: the merge_group PR
+        # resolution silently failed via `commits/<head_sha>/pulls` (synthetic merge
+        # commit / empty head_sha), so the `config-internal` label never suppressed
+        # G6 in the queue. Now parse the PR number DETERMINISTICALLY from the
+        # gh-readonly-queue head ref via scripts/resolve-merge-group-pr.py, keep the
+        # API only as a secondary fallback, and warn LOUDLY (never silently) if both
+        # fail — the gate then runs UNSUPPRESSED (fail-closed).
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          MERGE_SHA: ${{ github.event.merge_group.head_sha }}
+          MERGE_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           : > pr-labels.txt
           num="${PR_NUMBER:-}"
-          if [ -z "$num" ] && [ -n "${MERGE_SHA:-}" ]; then
-            num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_SHA}/pulls" \
-                     --jq '.[0].number' 2>/dev/null || true)"
+          if [ -z "$num" ] && [ "${EVENT_NAME:-}" = "merge_group" ]; then
+            # Primary (deterministic, no network): parse the PR number from the
+            # gh-readonly-queue head ref.
+            num="$(python3 scripts/resolve-merge-group-pr.py "${MERGE_HEAD_REF:-}" || true)"
+            # Secondary fallback: the head commit's associated PR (best-effort).
+            if [ -z "$num" ] && [ -n "${MERGE_HEAD_SHA:-}" ]; then
+              num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_HEAD_SHA}/pulls" \
+                       --jq '.[0].number' 2>/dev/null || true)"
+            fi
+            if [ -z "$num" ]; then
+              # LOUD fail-closed (see the G2 step): make the unresolved association
+              # visible instead of silently dropping the escape-hatch label. The
+              # gate below still runs UNSUPPRESSED.
+              echo "::warning title=flow-on-gates G6::merge_group PR could not be resolved (head_ref='${MERGE_HEAD_REF:-}' head_sha='${MERGE_HEAD_SHA:-}'); the config-internal escape-hatch label will NOT suppress G6 here — gate runs unsuppressed (fail-closed)."
+              {
+                echo "### ⚠️ flow-on-gates G6: merge_group PR unresolved"
+                echo ""
+                echo "Could not resolve the PR number for this merge-queue commit, so the"
+                echo "\`config-internal\` escape-hatch label cannot be honoured here."
+                echo "The gate runs **unsuppressed** (fail-closed)."
+                echo ""
+                echo "- head_ref: \`${MERGE_HEAD_REF:-<empty>}\`"
+                echo "- head_sha: \`${MERGE_HEAD_SHA:-<empty>}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           if [ -n "$num" ]; then
             gh pr view "$num" \

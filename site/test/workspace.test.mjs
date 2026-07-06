@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 
 import {
   WORKSPACE_SCHEMA,
+  WORKSPACE_INFERENCE_MODES,
   WebWorkspaceStore,
   MemoryWorkspaceStore,
   TauriWorkspaceStore,
@@ -20,6 +21,7 @@ import {
   detectWebStorage,
   isTauriRuntime,
   newWorkspace,
+  parseInferenceMode,
   parseWorkspace,
   workspaceId,
   workspaceSummary,
@@ -258,4 +260,55 @@ test("createWorkspaceStore ignores a Tauri fs loader outside a Tauri runtime", a
   // Not in a Tauri webview → the loader is never invoked, and it degrades to memory.
   assert.equal(called, false);
   assert.equal(store.backend, "memory");
+});
+
+// --- sq-glo5r: N3 inference mode + rulesDocs --------------------------------
+
+test("parseInferenceMode recognises 'n3'", () => {
+  assert.equal(parseInferenceMode("n3"), "n3");
+});
+
+test("WORKSPACE_INFERENCE_MODES includes 'n3'", () => {
+  assert.ok(WORKSPACE_INFERENCE_MODES.includes("n3"));
+});
+
+test("parseWorkspace round-trips a workspace with rulesDocs", () => {
+  const ws = newWorkspace("N3-test", "SELECT 1");
+  ws.inference = "n3";
+  ws.rulesDocs = [
+    { name: "my-rule", text: "{ ?s a ex:A } => { ?s a ex:B . }", addedAt: 123456 },
+    { name: "disabled-rule", text: "{ ?x a ex:C } => { ?x a ex:D . }", addedAt: 123457, enabled: false },
+  ];
+  const parsed = parseWorkspace(JSON.parse(JSON.stringify(ws)));
+  assert.ok(parsed);
+  assert.equal(parsed.inference, "n3");
+  assert.equal(parsed.rulesDocs.length, 2);
+  assert.equal(parsed.rulesDocs[0].name, "my-rule");
+  assert.equal(parsed.rulesDocs[0].addedAt, 123456);
+  assert.equal(parsed.rulesDocs[0].enabled, undefined); // enabled=true is stored as absent
+  assert.equal(parsed.rulesDocs[1].enabled, false);
+});
+
+test("parseWorkspace defaults to empty rulesDocs when the field is absent (old record)", () => {
+  const ws = newWorkspace("old-record", "SELECT 1");
+  const raw = JSON.parse(JSON.stringify(ws));
+  delete raw.rulesDocs; // simulate a record from before sq-glo5r
+  const parsed = parseWorkspace(raw);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.rulesDocs, []);
+});
+
+test("parseWorkspace skips malformed rulesDocs entries but keeps valid ones", () => {
+  const ws = newWorkspace("M", "SELECT 1");
+  const raw = JSON.parse(JSON.stringify(ws));
+  raw.rulesDocs = [
+    { name: "good", text: "...", addedAt: 1 },
+    { name: "no-text", addedAt: 2 }, // missing text → skipped
+    null, // null → skipped
+    { name: "no-addedAt", text: "..." }, // missing addedAt → skipped
+  ];
+  const parsed = parseWorkspace(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.rulesDocs.length, 1);
+  assert.equal(parsed.rulesDocs[0].name, "good");
 });

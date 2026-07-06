@@ -1,0 +1,218 @@
+# [FABLE-5] sq-gum8.7 — bibliography for the SPARQL logic-bug testing paper (Hayagriva).
+#
+# Every entry was verified against its publisher/author page or the project's
+# search-verified paper-selection record (research/paper-selection.md §3.3/§3.7) on
+# 2026-07-04. Bug counts cited in the paper come from these papers' own abstracts.
+
+sparql11-query:
+  type: reference
+  title: "SPARQL 1.1 Query Language"
+  author:
+    - Harris, Steve
+    - Seaborne, Andy
+  date: 2013-03-21
+  publisher: W3C
+  url: https://www.w3.org/TR/sparql11-query/
+  note: "W3C Recommendation"
+
+sparql12-query:
+  type: reference
+  title: "SPARQL 1.2 Query Language"
+  date: 2025
+  publisher: W3C
+  url: https://www.w3.org/TR/sparql12-query/
+  note: "W3C RDF & SPARQL Working Group, standards-track revision of SPARQL 1.1; addresses the EXISTS errata of SPARQL 1.1"
+
+perez-tods:
+  type: article
+  title: "Semantics and Complexity of SPARQL"
+  author:
+    - Pérez, Jorge
+    - Arenas, Marcelo
+    - Gutierrez, Claudio
+  date: 2009
+  parent:
+    type: periodical
+    title: "ACM Transactions on Database Systems"
+    volume: 34
+    issue: 3
+
+pqs:
+  type: article
+  title: "Testing Database Engines via Pivoted Query Synthesis"
+  author:
+    - Rigger, Manuel
+    - Su, Zhendong
+  date: 2020
+  parent:
+    type: proceedings
+    title: "14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20)"
+
+tlp:
+  type: article
+  title: "Finding Bugs in Database Systems via Query Partitioning"
+  author:
+    - Rigger, Manuel
+    - Su, Zhendong
+  date: 2020
+  parent:
+    type: periodical
+    title: "Proceedings of the ACM on Programming Languages"
+    volume: 4
+  note: "OOPSLA, article 211"
+
+norec:
+  type: article
+  title: "Detecting Optimization Bugs in Database Engines via Non-optimizing Reference Engine Construction"
+  author:
+    - Rigger, Manuel
+    - Su, Zhendong
+  date: 2020
+  parent:
+    type: proceedings
+    title: "Proceedings of the 28th ACM Joint Meeting on European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE 2020)"
+
+queryfuzz:
+  type: article
+  title: "Metamorphic Testing of Datalog Engines"
+  author:
+    - Mansur, Muhammad Numair
+    - Christakis, Maria
+    - Wüstholz, Valentin
+  date: 2021
+  parent:
+    type: proceedings
+    title: "Proceedings of the 29th ACM Joint Meeting on European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE 2021)"
+
+dlsmith:
+  type: article
+  title: "Dependency-Aware Metamorphic Testing of Datalog Engines"
+  author:
+    - Mansur, Muhammad Numair
+    - Wüstholz, Valentin
+    - Christakis, Maria
+  date: 2023
+  parent:
+    type: proceedings
+    title: "Proceedings of the 32nd ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA 2023)"
+
+gremlin-diff:
+  type: article
+  title: "Finding Bugs in Gremlin-Based Graph Database Systems via Randomized Differential Testing"
+  author:
+    - Zheng, Yingying
+    - Dou, Wensheng
+    - Wang, Yicheng
+    - Qin, Zheng
+    - Tang, Lei
+    - Gao, Yu
+    - Wang, Dong
+    - Wang, Wei
+    - Wei, Jun
+  date: 2022
+  parent:
+    type: proceedings
+    title: "Proceedings of the 31st ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA 2022)"
+
+gdsmith:
+  type: article
+  title: "GDsmith: Detecting Bugs in Cypher Graph Database Engines"
+  author:
+    - Hua, Ziyue
+    - Lin, Wei
+    - Ren, Luyao
+    - Li, Zongyang
+    - Zhang, Lu
+    - Jiao, Wenpin
+    - Xie, Tao
+  date: 2023
+  parent:
+    type: proceedings
+    title: "Proceedings of the 32nd ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA 2023)"
+
+gamera:
+  type: article
+  title: "Testing Graph Database Systems via Graph-Aware Metamorphic Relations"
+  author:
+    - Zhuang, Zeyang
+    - Li, Penghui
+    - Ma, Pingchuan
+    - Meng, Wei
+    - Wang, Shuai
+  date: 2023
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 17
+    issue: 4
+
+gdbmeter:
+  type: article
+  title: "Testing Graph Database Engines via Query Partitioning"
+  author:
+    - Kamm, Matteo
+    - Rigger, Manuel
+    - Zhang, Chengyu
+    - Su, Zhendong
+  date: 2023
+  parent:
+    type: proceedings
+    title: "Proceedings of the 32nd ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA 2023)"
+
+sparqlog:
+  type: article
+  title: "SparqLog: A System for Efficient Evaluation of SPARQL 1.1 Queries via Datalog"
+  author:
+    - Angles, Renzo
+    - Gottlob, Georg
+    - Pavlović, Aleksandar
+    - Pichler, Reinhard
+    - Sallinger, Emanuel
+  date: 2023
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 16
+    issue: 13
+
+splitmix:
+  type: article
+  title: "Fast Splittable Pseudorandom Number Generators"
+  author:
+    - Steele Jr., Guy L.
+    - Lea, Doug
+    - Flood, Christine H.
+  date: 2014
+  parent:
+    type: proceedings
+    title: "Proceedings of the 2014 ACM International Conference on Object Oriented Programming Systems Languages and Applications (OOPSLA 2014)"
+
+mckeeman:
+  type: article
+  title: "Differential Testing for Software"
+  author:
+    - McKeeman, William M.
+  date: 1998
+  parent:
+    type: periodical
+    title: "Digital Technical Journal"
+    volume: 10
+    issue: 1
+
+mt-survey:
+  type: article
+  title: "Metamorphic Testing: A Review of Challenges and Opportunities"
+  author:
+    - Chen, Tsong Yueh
+    - Kuo, Fei-Ching
+    - Liu, Huai
+    - Poon, P.-L.
+    - Towey, Dave
+    - Tse, T. H.
+    - Zhou, Zhi Quan
+  date: 2018
+  parent:
+    type: periodical
+    title: "ACM Computing Surveys"
+    volume: 51
+    issue: 1

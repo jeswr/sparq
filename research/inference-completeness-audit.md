@@ -136,6 +136,56 @@ Out-of-scope: 30 non-Approved cases (22 status-absent + 8 Proposed), 3 functiona
 2 owl:imports, 1 selection-summary row. Export totals: 124 RL∧RDF-based reasoning cases of
 ~441 reasoning cases (251 not RL-profiled, 66 direct-semantics-only).
 
+### 2b. sq-350ms re-verification — the OWL-RL row is at the genuine RL ceiling (no sound raise) [OPUS-4.8]
+
+The **owl-rl-completeness-hardening** bead (`sq-350ms`, epic `sq-pbz04`) asked whether
+any of the 13 documented OWL-RL divergences can be converted to a TRUE pass by adding
+SOUND, IN-PROFILE rule coverage. The answer, after re-checking every divergence's exact
+premise→conclusion against the W3C OWL 2 Profiles REC §4.1 (profile grammar) + §4.3
+(the RL/RDF rules tables), is **NO — all 13 are PROVABLY outside the RL profile**, so
+the OWL-RL row (78 pass + 13 divergence) is at the RL ceiling and the inference ratchet
+**HOLDS at 1967** (raising it would require faking a pass, forbidden):
+
+| divergence(s) | needs | why non-RL |
+|---|---|---|
+| chain2trans1 | `?p a owl:TransitiveProperty` from a self-chain | a TBox-AXIOM conclusion; no RL/RDF rule has an axiom in its head (PR1 completeness is assertion-only) |
+| DisjointClasses-001/003, ObjectQCR-002, I5.5-005 | `?x a [owl:complementOf/unionOf …]` | invents an anonymous CLASS EXPRESSION; the RL rules derive no new class expressions |
+| DisjointDataProperties-002 | a reified `owl:AllDifferent` structure | the RL rules DETECT inconsistency from AllDifferent (eq-diff2/3) but never CONSTRUCT one |
+| DisjointObjectProperties-001/002 | `owl:differentFrom` of the disjoint-property fillers (prp-pdw contrapositive) | **no RL/RDF rule produces `owl:differentFrom` between INDIVIDUALS** — the sole differentFrom-head rule is dt-diff (Table 8, unequal-value LITERAL pairs); otherwise it appears only in rule BODIES (eq-diff*); prp-pdw/adp only emit `false` (verified against Table 5) |
+| owl2-rl-rules-fp/ifp-differentFrom | `owl:differentFrom` of subjects (prp-fp/ifp contrapositive) | same — no individual-differentFrom-producing rule; prp-fp/ifp need the SAME subject/object and only derive `sameAs` |
+| ReflexiveProperty-001 | a reflexive edge for an individual NOT participating in the property | **`owl:ReflexiveObjectProperty` is EXCLUDED from OWL 2 RL** (Profiles §4.1: "all axioms … apart from disjoint unions of classes and reflexive object property axioms"); there is no `prp-rfx` rule |
+| I5.8-008/009 | datatype-range INTERSECTION (`xsd:short ∩ xsd:unsignedInt ⊑ xsd:unsignedShort`) | beyond the RL `dt-*` datatype rules — RL has no datatype-subsumption-via-intersection rule (range propagates only UP `rdfs:subClassOf`, never narrows) |
+
+The contrapositive-`differentFrom` cases are SOUND OWL RDF-Based entailments, but RL
+deliberately omits the contrapositives to stay polynomial — adding them would be a
+beyond-RL extension, NOT in-profile RL completeness, so per the bead's hard rule they
+**remain documented divergences**. (If a complete-classification / beyond-RL surface is
+ever wanted, that is the EL/QL classifier territory — `sparq-reason-el`/`-ql` — not more
+RL rules.)
+
+**sq-pbz04.1.3 disposition pass (2026-07) [FABLE-5]:** an independent re-audit from the
+raw export premises/conclusions (all 13 extracted and checked term-by-term against the
+Profiles §4.3 rule HEADS, the §4.1 grammar, and PR1's scope) CONFIRMS the verdict above —
+**13/13 PERMANENT, zero in-profile fixes, ratchet unchanged at 1967** — and carries the
+disposition into the report-facing rationales: each `owl_suite.rs::DOCUMENTED_DIVERGENCES`
+entry now opens `PERMANENT — …` with its specific rule-level grounding, pinned by an
+in-crate disposition test (count, uniqueness, tag, and a checkable spec anchor per entry).
+Two precision corrections to the earlier wording: (a) `dt-diff` (Table 8) DOES have
+`owl:differentFrom` in its head — but only between LITERALS with different data values;
+the accurate claim is that no rule derives `differentFrom` between INDIVIDUALS (table row
+fixed above); (b) theorem PR1's conclusion scope is ClassAssertion /
+ObjectPropertyAssertion / DataPropertyAssertion / SameIndividual — DifferentIndividuals
+conclusions sit outside PR1 entirely, independently of the missing contrapositive rules.
+
+What sq-350ms DID land (sound, behaviour-neutral): six in-crate guards in
+`owl.rs::tests` — four COMPLETENESS guards pinning the harder MULTI-ROUND assertion-rule
+compositions the conformance suite cannot reach a regression in (`cls-svf1` over a
+DERIVED filler type; `prp-spo1`⊕`prp-trp` on a transitive super-property; `cls-int1`⊕
+`cax-eqc1`; a 2-link `prp-eqp` equivalence chain) and two SOUNDNESS guards proving the
+materializer does NOT derive the forbidden `differentFrom`/`sameAs` of the prp-pdw and
+prp-fp contrapositive cases. They keep the divergence rationale and the code locked
+together; the suite counts and the ratchet are byte-for-byte unchanged.
+
 ## 3. N3 — engine and builtin inventory vs EYE/cwm
 
 Reasoner manifest: **83 pass + 2 documented divergences of 86 run** (98.8%); parser

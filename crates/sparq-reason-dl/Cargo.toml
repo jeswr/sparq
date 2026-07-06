@@ -1,0 +1,55 @@
+[package]
+name = "sparq-reason-dl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in OWL 2 Direct-Semantics support for the sparq RDF engine — a layered FAIL-CLOSED checker for the scoped ALCH fragment (structural model + reverse RDF mapping, profile checker, tableau, and the opt-in `dispatch` fragment-dispatch checker); NOT full OWL 2 DL"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# [FABLE-5] sq-pbz04.4.1: crate-local README rendered as the lib front page
+# (lib.rs include_str!("../README.md")).
+readme = "README.md"
+# [FABLE-5] sq-pbz04.4.1: publish=false while the workstream is layered in (design record
+# research/owl2-direct-semantics-scoping.md §6). It graduates to publishable once the
+# conformance arm (L5) pins a floor.
+publish = false
+
+# [FABLE-5] sq-pbz04.4.1: NEW opt-in Direct-Semantics crate (epic sq-pbz04.4, design record
+# research/owl2-direct-semantics-scoping.md). A SEPARATE crate — same isolation rationale as
+# sparq-reason-el / sparq-reason-ql: sparq-core and sparq-engine (and the lean wasm build)
+# carry ZERO Direct-Semantics code, deps, or cost by default; DL is engaged only by depending
+# on this crate. HONEST SCOPE: this is a SCOPED ALCH-fragment structural layer — NOT full
+# OWL 2 DL, and no reasoning at all in L1 (it is the structural model + fail-closed reverse RDF
+# mapping only; the profile checker, tableau, and dispatch land in beads sq-pbz04.4.2/.3/.4).
+
+[features]
+# Default = nothing. Depending on this crate IS the opt-in surface (as with sparq-reason-el's
+# E1 default): the L1 structural model + reverse mapping are always present and dependency-light.
+# The L4 `dispatch` feature (which pulls the profile reasoners) is added by bead sq-pbz04.4.4,
+# the sole bead in its wave, so its Cargo.toml edits do not collide with the L2/L3 beads.
+default = []
+
+# [FABLE-5] sq-pbz04.4.4: the L4 fragment-dispatch Direct-Semantics checker (`check` module,
+# design record §4/§6) — OFF by default so the L1–L3 layers stay dependency-light. Pulls the
+# EXISTING profile reasoners as optional deps: sparq-reason (OWL 2 RL materialization + clash
+# scan) and sparq-reason-el (EL consequence-based classification). sparq-reason-el is used
+# with its DEFAULT features (no rbox/cdomain); the dispatch guards conservatively treat
+# rdfs:subPropertyOf as unapplied by the EL classifier either way (fail-closed under
+# workspace feature unification).
+dispatch = ["dep:sparq-reason", "dep:sparq-reason-el"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io.
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# oxrdf: only to build IRI lookup keys for the fixed OWL/RDFS/rdf vocabulary in extract.rs
+# (the same use as sparq-reason-el). rustc-hash: the structural index maps/sets.
+oxrdf.workspace = true
+rustc-hash.workspace = true
+# [FABLE-5] sq-pbz04.4.4: optional profile-reasoner deps, pulled ONLY by the `dispatch`
+# feature (L4). `version` alongside `path`: cargo uses the path locally, the version on
+# crates.io.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
+sparq-reason-el = { path = "../sparq-reason-el", version = "0.1.0", optional = true }

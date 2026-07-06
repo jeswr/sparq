@@ -49,7 +49,7 @@ jobs:
       rust_changed: ${{ steps.decide.outputs.rust_changed }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         if: github.event_name == 'pull_request'
         with:
@@ -92,7 +92,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-deny
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-deny
       # [OPUS-4.8] GATING: integrity checks that don't read the RustSec advisory DB.
@@ -146,7 +146,7 @@ jobs:
       # the GATING parse is reproducible. Bump this in lock-step with any new imports.lock
       # schema feature. (bead sq-miwt)
       - name: Install cargo-vet
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-vet@0.10.2
       # [OPUS-4.8] `--locked` pins evaluation to the committed Cargo.lock. `--frozen`
@@ -216,7 +216,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-cyclonedx
       - name: Warm registry cache (retry transient crates.io fetch)
@@ -312,7 +312,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-cyclonedx
       - name: purl-canonicality check self-test
@@ -389,7 +389,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-cyclonedx
       - name: supplier-name check self-test

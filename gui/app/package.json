@@ -15,7 +15,8 @@
     "build:web": "cross-env NEXT_PUBLIC_GUI_TARGET=web npm run build",
     "start": "npx --yes serve out",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --import ./test-support/register-ts.mjs --test src/lib/editor-keys.test.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

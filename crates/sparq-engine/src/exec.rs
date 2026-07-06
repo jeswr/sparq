@@ -13,6 +13,30 @@ use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::temporal::{Temporal, Timeline};
 use sparq_core::Graph;
+// [OPUS-4.8] sq-ev41x (epic sq-qonbz): the id-level numeric value tower (`Num` / `Dec` /
+// `ArithOp` / `RoundMode` and the XSD lexical helpers) now lives in the `sparq-substrate`
+// leaf crate so the engine AND the reasoners share ONE definition with no `Box<dyn>` on the
+// hot path (research/shared-eval-substrate.md, Option C, Phase 2). This is a behaviour-neutral
+// code-move: the engine re-imports the same items here under the same names, so every call
+// site below is unchanged and the W3C conformance / ORDER BY / numeric tests are bit-identical.
+use sparq_substrate::numeric::{f64_exact_decimal, parse_xsd_f32, parse_xsd_f64, split_decimal, ArithOp, Dec, Num};
+// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the four id-tuple join kernels live in the
+// shared substrate now (merge / hash / bind / leapfrog-trie). The engine's planner, `Bindings`,
+// `LocalVocab` interning and `ScanCmp` pushdown stay private here; the thin adapters below build
+// the `JoinKeys` column layout from a `Bindings` variable layout and supply the engine's
+// thread-local query budget as the generic `Budget` hook — no `Box<dyn>` on the probe loop.
+use sparq_substrate::join as sjoin;
+// [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the SPARQL term TOTAL ORDER —
+// `compare_values` (`ORDER BY` / `<` ordering: error < blank < IRI < literal < triple,
+// numeric-aware + strict typed/temporal + string fallback + recursive triple-term order) — now
+// lives in the shared substrate as the generic `compare::compare_terms`. The engine implements
+// the substrate's `CompareTerm` trait for its `Value` (zero-cost wrappers over `value_str` /
+// `as_num` / `value_compare_strict`) and `compare_values` is now a thin call into it, so the
+// engine AND the reasoners share ONE total-order body with no `Box<dyn>` on the compare path.
+// `Value` / `LitKind` / `value_compare_strict` stay engine-private (they also drive the
+// relational operators); only the algorithm moved. Behaviour-neutral: the W3C SPARQL / ORDER BY
+// / FILTER conformance is bit-identical.
+use sparq_substrate::compare::{compare_terms, CompareTerm, LiteralKind, TermClass};
 use rustc_hash::FxHashSet;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression, PropertyPathExpression,
@@ -206,15 +230,37 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get())
     }
 
-    /// `true` while a deadline / row-cap / byte-cap budget is installed. [OPUS-4.8]
-    /// roborev 1538: the streaming-JSON fast path uses this to take the cooperative
-    /// SERIAL loop (which breaks every 1024 rows) instead of the parallel fan-out that
-    /// materialises every matching fragment before any budget check — so `--max-results`
-    /// / timeouts / the byte cap bound CPU and memory, not just the final response.
-    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    /// Decides whether the multi-core SELECT-JSON serializer may fan out under the
+    /// CURRENTLY installed budget, returning the limit snapshot its workers re-check at
+    /// each par-chunk boundary. [OPUS-4.8] (sq-7d3dj.10, roborev 1538, audit item 6)
+    ///
+    /// The parallel path builds every matching JSON fragment before it can know a row or
+    /// byte count, so it cannot enforce a ROW / BYTE cap mid-serialize:
+    ///
+    /// * `Some(limits)` — fan out. Either NO budget is installed (`limits.on == false`,
+    ///   making the per-chunk `hit` re-check a no-op) OR the budget is DEADLINE-ONLY
+    ///   (both row and byte caps at their `usize::MAX` sentinel). Under a deadline-only
+    ///   budget the per-chunk `limits.hit(0)` re-check stops launching new chunks once
+    ///   the wall-clock deadline has passed, so the worst-case CPU overrun is bounded to
+    ///   the chunks already in flight — approximately one per worker, a bounded constant
+    ///   — not the unbounded burn an uncheckable fan-out under a row/byte cap would allow.
+    /// * `None` — a row and/or byte cap is installed; the caller must take the
+    ///   cooperative SERIAL loop, which cannot over-produce (it checks the sticky flag
+    ///   every 1024 rows and stops early). A blanket "fan out whenever a budget is
+    ///   installed" was REJECTED for exactly this reason (roborev 1538 / audit item 6).
+    ///
+    /// Compiled only for the `parallel` feature — the wasm/serial build never fans out.
+    #[cfg(feature = "parallel")]
     #[inline]
-    pub(crate) fn active() -> bool {
-        ACTIVE.with(|a| a.get().on)
+    pub(crate) fn parallel_json_fanout() -> Option<Limits> {
+        ACTIVE.with(|a| {
+            let l = a.get();
+            if l.on && (l.max_rows != usize::MAX || l.max_bytes != usize::MAX) {
+                None // a row/byte cap the fan-out cannot enforce mid-serialize → serial loop
+            } else {
+                Some(l)
+            }
+        })
     }
 
     /// Time remaining until the installed wall-clock deadline, if any. [OPUS-4.8] (sq-d4p)
@@ -238,6 +284,49 @@ pub(crate) mod budget {
             let lim = a.get();
             lim.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()))
         })
+    }
+
+    /// A savepoint of the local-vocab byte accumulator + the sticky exhaustion flag,
+    /// taken BEFORE a speculative interning burst — a streaming SERVICE block whose
+    /// rows a SILENT error must discard. [`restore_bytes`] rewinds to it so the
+    /// discarded interns leave the byte budget EXACTLY as if they never happened,
+    /// keeping SILENT SERVICE behaviour-neutral with the pre-streaming
+    /// collect-then-intern-on-success path (which charged nothing on a swallowed
+    /// remote error). [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    #[derive(Clone, Copy)]
+    pub(crate) struct ByteSavepoint {
+        extra_bytes: usize,
+        exceeded: Option<&'static str>,
+    }
+
+    /// Capture the current byte accumulator + exhaustion flag. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    #[inline]
+    pub(crate) fn byte_savepoint() -> ByteSavepoint {
+        ByteSavepoint {
+            extra_bytes: ACTIVE.with(|c| c.get().extra_bytes),
+            exceeded: EXCEEDED.with(|e| e.get()),
+        }
+    }
+
+    /// Rewind the byte accumulator + exhaustion flag to a [`ByteSavepoint`]. Only the
+    /// bytes charged (and any max-bytes exhaustion tripped) SINCE the savepoint are
+    /// undone; an exhaustion that fired for an independent reason before it is
+    /// preserved. Sound because the interning burst it brackets is synchronous and
+    /// single-threaded — the SERVICE sink is the only writer between the savepoint and
+    /// here — so the pre-burst snapshot is exactly the current state minus this burst.
+    /// A deadline that elapsed during the burst is not masked: the next `exhausted`
+    /// re-derives it from the wall clock. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    #[inline]
+    pub(crate) fn restore_bytes(sp: ByteSavepoint) {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            a.extra_bytes = sp.extra_bytes;
+            c.set(a);
+        });
+        EXCEEDED.with(|e| e.set(sp.exceeded));
     }
 
     /// `true` once the budget is exhausted (sticky) — row-producing loops break
@@ -534,6 +623,53 @@ pub(crate) mod aggregates {
     }
 }
 
+// ---- MULTIPLICITY() context (sq-v411r, survey §B2) -----------------------------
+//
+// [OPUS-4.8] The SPARQL 1.2 algebra's `multiplicity` device, exposed as a
+// zero-arg extension builtin. When an aggregate folds a group's member multiset,
+// the evaluator sets this thread-local to the bag cardinality of the member
+// solution currently being evaluated (how many byte-identical solution rows the
+// group collapses into that member), then clears it. `MULTIPLICITY()` reads it;
+// OUTSIDE an aggregate argument the thread-local is `None`, so the builtin is an
+// expression error (it is only meaningful within a Set Function over a multiset).
+//
+// Each rayon group-eval worker has its OWN thread-local and sets it on-thread
+// immediately before `eval_expr`, so — unlike the registries above — no
+// cross-thread snapshot/re-install is needed: the value never has to outlive the
+// single `eval_expr` call on the thread that set it. A `Cell<Option<u64>>` read
+// is the same cost class as the budget check; the common (no-aggregate) path
+// never writes it. The RAII `Guard` restores the previous value so a nested
+// aggregate or an `EXISTS`/sub-query re-entry inside an aggregate argument cannot
+// observe a stale outer multiplicity.
+pub(crate) mod multiplicity {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CURRENT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Sets the current group member's multiplicity for the duration of the
+    /// returned guard, restoring the previous value on drop (also on unwind).
+    pub(crate) struct Guard(Option<u64>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT.with(|c| c.set(self.0.take()));
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set(card: u64) -> Guard {
+        let prev = CURRENT.with(|c| c.replace(Some(card)));
+        Guard(prev)
+    }
+
+    /// The current member multiplicity, or `None` outside an aggregate argument.
+    #[inline]
+    pub(crate) fn current() -> Option<u64> {
+        CURRENT.with(Cell::get)
+    }
+}
+
 // ---- Spatial index (sq-mg9) ----------------------------------------------------
 //
 // The thread-local [`SpatialProvider`] installed by `with_spatial_index`. The
@@ -736,6 +872,38 @@ type Key = SmallVec<[Id; 2]>;
 /// build allocates nothing per bucket in the common case.
 type Posting = SmallVec<[usize; 2]>;
 
+/// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the engine's cooperative-cancel hook for the
+/// shared substrate join kernels. A zero-sized type whose [`exhausted`](sjoin::Budget::exhausted)
+/// reads the engine's thread-local [`budget`] (the per-WHERE-solution `QueryBudget`), so a
+/// capped/timed-out query truncates a join cleanly at a key-group / probe-row boundary — exactly
+/// the engine's pre-move per-group `budget::exhausted(...)` check. Generic, not a trait object,
+/// so the substrate kernel monomorphises the call into the same direct check it was before the
+/// move (no vtable on the probe loop).
+struct EngineBudget;
+
+impl sjoin::Budget for EngineBudget {
+    #[inline]
+    fn exhausted(&self, rows: usize) -> bool {
+        budget::exhausted(rows)
+    }
+}
+
+/// [OPUS-4.8] sq-hknqs: the parallel hash-join's per-worker exhaustion snapshot. Wraps the
+/// flattened [`budget::Limits`] (the installing thread's sticky flag is invisible to rayon
+/// workers) so a worker that hits the limits stops adding to its accumulator; the caller's next
+/// on-thread check raises the actual error. Generic ([`sjoin::BudgetSnapshot`]), so the rayon
+/// fold carries no vtable.
+#[cfg(feature = "parallel")]
+struct EngineSnapshot(budget::Limits);
+
+#[cfg(feature = "parallel")]
+impl sjoin::BudgetSnapshot for EngineSnapshot {
+    #[inline]
+    fn hit(&self, rows: usize) -> bool {
+        self.0.hit(rows)
+    }
+}
+
 /// Ids at or above this base index into the per-query [`LocalVocab`] instead of the graph
 /// dictionary. It sits ABOVE the dictionary range `[1, INLINE_BASE)` and the inline-integer
 /// range `[INLINE_BASE, INLINE_BASE + 2^30)`, i.e. at `INLINE_BASE + 2^30 = 3·2^30`, leaving
@@ -789,7 +957,11 @@ impl LocalVocab {
         }
         let id = LOCAL_BASE + self.terms.len() as Id;
         self.nums.push(match &t {
-            Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+            // [OPUS-4.8] sq-rkzhr: parse through `parse_xsd_f64` — the SAME acceptance set
+            // as `as_num` / `as_numeric` — so the local-vocab numeric cache agrees with the
+            // lenient/exact compare seams on the XSD spelling rules (INF/+INF/-INF/NaN yes;
+            // Rust-only inf/infinity/nan no). A rejected spelling folds to the NaN sentinel.
+            Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()).unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
         // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
@@ -801,11 +973,35 @@ impl LocalVocab {
         self.ids.insert(t, id);
         id
     }
+    /// The append cursor into the local vocab, paired with [`LocalVocab::rollback_to`]
+    /// to discard a speculative interning burst. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    fn savepoint(&self) -> usize {
+        self.terms.len()
+    }
+    /// Drop every term interned since `mark`, so the rows a SILENT SERVICE error
+    /// discards leave the local vocab EXACTLY as if they were never interned — no
+    /// retained memory. Pairs with a `budget::ByteSavepoint` (which refunds the bytes
+    /// those terms charged); together they are the resource twin of dropping the
+    /// discarded id rows, keeping SILENT SERVICE behaviour-neutral with the pre-streaming
+    /// path. Interns BEFORE `mark` — and re-interns that returned an existing id, which
+    /// pushed nothing — are untouched. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    fn rollback_to(&mut self, mark: usize) {
+        for t in self.terms.drain(mark..) {
+            self.ids.remove(&t);
+        }
+        self.nums.truncate(mark);
+    }
     fn term(&self, id: Id) -> &Term {
         &self.terms[(id - LOCAL_BASE) as usize]
     }
-    /// The cached numeric value of a local id (`None` for non-numeric terms) —
-    /// exactly what `as_num` of the materialised term would return.
+    /// The cached numeric value of a local id (`None` for a non-numeric term).
+    /// For every non-NaN numeric term this is exactly what `as_num` of the
+    /// materialised term returns — both parse through `parse_xsd_f64`. A genuine
+    /// `xsd:double`/`float` `NaN` is the one case they differ: the cache uses NaN as
+    /// its not-a-number sentinel, so it reports `None` where `as_num` returns
+    /// `Some(NaN)` (a pre-existing sentinel limitation, not a parse-set disagreement).
     #[inline]
     fn numeric(&self, id: Id) -> Option<f64> {
         let v = self.nums[(id - LOCAL_BASE) as usize];
@@ -1056,52 +1252,72 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     };
 
     let mut s = head;
-    // [OPUS-4.8] roborev 1538: only take the parallel fan-out when NO budget is active. The
-    // parallel path builds every matching JSON fragment before it can check the budget, so a
-    // row cap / deadline would not bound CPU or memory — it would serialise the full result and
-    // only then fail. With a budget installed we fall through to the cooperative serial loop
-    // below, which checks `budget::exhausted` every 1024 rows and stops early.
+    // [OPUS-4.8] roborev 1538 / sq-7d3dj.10 (audit item 6): fan the JSON serialize out
+    // across cores when the installed budget cannot be violated by doing so — NO budget,
+    // or a DEADLINE-ONLY budget (the default HTTP server's 30s timeout, which has no
+    // row/byte cap). The fan-out builds every matching fragment before it can know a row
+    // or byte count, so a ROW / BYTE cap stays on the cooperative serial loop below
+    // (which checks `budget::exhausted` every 1024 rows and stops early). A deadline-only
+    // budget is admitted because the coarse `limits.hit(0)` re-check at each par-chunk
+    // boundary stops launching new chunks once the wall-clock deadline passes, bounding
+    // the overrun to ~one chunk per worker. A blanket !budget-active → true flip is
+    // REJECTED (see `parallel_json_fanout`).
     #[cfg(feature = "parallel")]
-    if scan_rows.len() >= PAR_THRESHOLD && !budget::active() {
-        use rayon::prelude::*;
-        // One string per chunk (≈ per worker), not per row — avoids one heap allocation per
-        // result cell. Chunks stay in order, so the bytes are identical to the serial path.
-        let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
-        let frags: Vec<(usize, String)> = scan_rows
-            .par_chunks(chunk)
-            .map(|rows| {
-                let mut n = 0usize;
-                let mut f = String::new();
-                for row in rows {
-                    if !passes(row) {
-                        continue;
+    if scan_rows.len() >= PAR_THRESHOLD {
+        if let Some(limits) = budget::parallel_json_fanout() {
+            use rayon::prelude::*;
+            // One string per chunk (≈ per worker), not per row — avoids one heap
+            // allocation per result cell. Chunks stay in order, so on the success path
+            // the bytes are identical to the serial path.
+            let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
+            let frags: Vec<(usize, String)> = scan_rows
+                .par_chunks(chunk)
+                .map(|rows| {
+                    // Coarse deadline re-check at the chunk boundary: once the wall-clock
+                    // deadline has passed, every later chunk produces nothing, so at most
+                    // the chunks already in flight (~one per worker) run to completion.
+                    // The installing thread's post-fan-out gate turns the passed deadline
+                    // into the timeout error, discarding this (now partial) result — so a
+                    // skipped chunk NEVER escapes as a truncated body. Under no budget / an
+                    // unexpired deadline this is one non-tripping `Instant` read per chunk.
+                    if limits.hit(0) {
+                        return (0usize, String::new());
                     }
-                    if !f.is_empty() {
-                        f.push(',');
+                    let mut n = 0usize;
+                    let mut f = String::new();
+                    for row in rows {
+                        if !passes(row) {
+                            continue;
+                        }
+                        if !f.is_empty() {
+                            f.push(',');
+                        }
+                        n += 1;
+                        write_row(row, &mut f);
                     }
-                    n += 1;
-                    write_row(row, &mut f);
+                    (n, f)
+                })
+                .collect();
+            // Budget gate on the installing thread over the total row count — and, for a
+            // deadline-only budget, the now-past wall clock: sets the sticky flag the
+            // caller's `budget::check(0)` converts into the budget error (a chunk skipped
+            // above means the deadline is globally past, so this fires deterministically).
+            let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
+            let mut chunks = vec![s];
+            let mut wrote = false;
+            for (_, f) in frags {
+                if f.is_empty() {
+                    continue;
                 }
-                (n, f)
-            })
-            .collect();
-        // Budget gate on the total row count (sets the sticky flag; the caller's
-        // check converts it into the budget error).
-        let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
-        let mut chunks = vec![s];
-        let mut wrote = false;
-        for (_, f) in frags {
-            if f.is_empty() {
-                continue;
+                if wrote {
+                    chunks.last_mut().expect("chunks start non-empty").push(',');
+                }
+                wrote = true;
+                emit_chunk(&mut chunks, f, flush);
             }
-            if wrote {
-                chunks.last_mut().expect("chunks start non-empty").push(',');
-            }
-            wrote = true;
-            emit_chunk(&mut chunks, f, flush);
+            chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
+            return Some(chunks);
         }
-        chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
-        return Some(chunks);
     }
     let mut chunks: Vec<String> = Vec::new();
     let mut written = 0usize;
@@ -2244,7 +2460,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
 /// SPARQL 1.1 federated query (`SERVICE`) — the VERBATIM path. [OPUS-4.8]
 ///
 /// Forwards `SELECT * WHERE { <inner> }` to the remote `endpoint`, parses the
-/// SPARQL-Results-JSON response (see [`crate::service`]) and turns it into a
+/// SPARQL-Results-JSON response (see the `sparq-engine-service` crate) and turns it into a
 /// [`Bindings`] relation interned against this query's dictionaries — exactly as
 /// `VALUES` does — so the caller joins it with the surrounding group via the normal
 /// `join_bindings` path.
@@ -2300,46 +2516,65 @@ fn eval_service(
     // inside the SERVICE block are all forwarded verbatim.
     let query = format!("SELECT * WHERE {{ {inner} }}");
 
-    let fetched = service_transport::with(|t| crate::service::eval_remote(t, &endpoint, &query));
-    let rel = match fetched {
-        Ok(rel) => rel,
+    // [FABLE-5] (sq-my8wd.4) STREAMING consumption: each remote row is interned to a
+    // compact id-level `Row` AS IT IS PARSED (the owned terms are dropped immediately)
+    // instead of collecting the whole remote relation as `Term`s first. Result-identical
+    // to the collect-then-intern path — same rows, multiplicity and order (pinned by the
+    // service.rs `streaming_equivalence` tests) — but the per-response peak memory is
+    // the response body plus the id-level relation the join needs anyway, not a
+    // whole-document DOM plus a second term-level copy.
+    //
+    // [OPUS-4.8] (sq-my8wd.5) READER-SEAM: use `eval_remote_into_read` so the HTTP body
+    // is consumed as a STREAM (never buffered as a full `String`). Peak memory now stays
+    // BELOW the response body size (not just O(body)) — the body String is eliminated.
+    // Test transports are wrapped via `TransportAsReader` so all existing tests pass.
+    let mut id_rows: Vec<Row> = Vec::new();
+    // [OPUS-4.8] (sq-my8wd.4) Savepoint the local vocab + byte budget BEFORE streaming so
+    // a SILENT error can roll the partially-interned rows back out — see the SILENT arm.
+    let vocab_mark = local.savepoint();
+    let byte_mark = budget::byte_savepoint();
+    let fetched = service_reader_transport::with(|t| {
+        sparq_engine_service::service::eval_remote_into_read(t, &endpoint, &query, &mut |row| {
+            id_rows.push(intern_remote_row(graph, local, &row));
+            Ok(())
+        })
+    });
+    match fetched {
+        Ok(vars) => Ok(Bindings::unsorted(vars, id_rows)),
         Err(e) if silent => {
-            // SILENT: swallow the error, keep the surrounding bindings.
+            // SILENT: swallow the error, keep the surrounding bindings. Rows already
+            // interned from a partially-parsed response are discarded with `id_rows` —
+            // and, so the discard is behaviour-NEUTRAL with the pre-streaming
+            // collect-then-intern-on-success path (which interned nothing on a swallowed
+            // error), we ROLL the interned terms out of the local vocab and REFUND the
+            // byte budget they charged. Without this a partial stream would retain memory
+            // and could trip `max_bytes`, turning a query the old path answered into a
+            // "query budget exceeded" error. [OPUS-4.8] (sq-my8wd.4)
             let _ = e;
-            return Ok(identity());
+            id_rows.clear();
+            local.rollback_to(vocab_mark);
+            budget::restore_bytes(byte_mark);
+            Ok(identity())
         }
-        Err(e) => return Err(e),
-    };
-
-    Ok(service_relation_to_bindings(graph, local, rel))
+        Err(e) => Err(e),
+    }
 }
 
-/// Intern a remote [`ServiceRelation`](crate::service::ServiceRelation) into id-level
-/// [`Bindings`] against this query's dictionaries — exactly as `VALUES` does — so it
-/// joins with local BGP results. Shared by the verbatim and bound-join paths.
-/// [OPUS-4.8] (sq-sjkj)
+/// Intern ONE remote solution row into an id-level [`Row`] against this query's
+/// dictionaries — exactly as `VALUES` does — so it joins with local BGP results: each
+/// term resolves against the graph dictionary first, else the query-local vocab.
+/// Shared by the verbatim and bound-join paths, which feed it row-by-row from the
+/// streaming SERVICE parser rather than materialising the remote relation first.
+/// [FABLE-5] (sq-my8wd.4; formerly the whole-relation `service_relation_to_bindings`,
+/// sq-sjkj)
 #[cfg(feature = "service")]
-fn service_relation_to_bindings(
-    graph: &Graph,
-    local: &mut LocalVocab,
-    rel: crate::service::ServiceRelation,
-) -> Bindings {
-    // Intern each remote term against the graph dictionary (so it joins with local
-    // BGP results) or the local vocab (terms absent from the data can still match
-    // other remote/VALUES rows) — identical to `values_bindings`.
-    let rows: Vec<Row> = rel
-        .rows
-        .iter()
-        .map(|r| {
-            r.iter()
-                .map(|cell| match cell {
-                    None => NO_ID,
-                    Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
-                })
-                .collect()
+fn intern_remote_row(graph: &Graph, local: &mut LocalVocab, row: &[Option<Term>]) -> Row {
+    row.iter()
+        .map(|cell| match cell {
+            None => NO_ID,
+            Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
         })
-        .collect();
-    Bindings::unsorted(rel.vars, rows)
+        .collect()
 }
 
 /// Attempt a bind-join (`VALUES` pushdown) of a SERVICE sub-query against the
@@ -2456,7 +2691,7 @@ fn bound_join_to_endpoint(
         let mut terms: Vec<Term> = Vec::with_capacity(key.len());
         for &id in &key {
             match term_of(graph, local, id) {
-                Some(t) if crate::service::pushable_term(&t) => terms.push(t),
+                Some(t) if sparq_engine_service::service::pushable_term(&t) => terms.push(t),
                 _ => return Ok(None), // blank node / triple term / missing — fall back.
             }
         }
@@ -2468,23 +2703,41 @@ fn bound_join_to_endpoint(
 
     // Render the inner pattern once; each block re-uses it with a fresh VALUES head.
     let inner_sparql = format!("{inner}");
-    let block = crate::service::bind_block_size();
+    let block = sparq_engine_service::service::bind_block_size();
 
-    // Accumulate the union of the per-block remote relations. All blocks share the
-    // remote `head.vars`, so we keep the first block's var list and concatenate rows.
+    // Accumulate the union of the per-block remote relations, interning each row to the
+    // id level AS IT ARRIVES from the streaming parser ([FABLE-5] sq-my8wd.4) — no
+    // block's relation is ever held as owned `Term` rows. All blocks share the remote
+    // `head.vars`, so we keep the first block's var list and concatenate rows
+    // positionally: the same accumulation, and the same row order, as the previous
+    // collect-then-intern path.
     let mut acc_vars: Option<Vec<Variable>> = None;
-    let mut acc_rows: Vec<Vec<Option<oxrdf::Term>>> = Vec::new();
+    let mut acc_rows: Vec<Row> = Vec::new();
+    // [OPUS-4.8] (sq-my8wd.4) Savepoint the local vocab + byte budget BEFORE the first
+    // block so a SILENT failure in ANY block can roll EVERY block's interns back out —
+    // a SILENT failure discards all blocks' rows together (see the SILENT arm), so the
+    // interns must all be rolled back too, or the discarded stream would retain memory
+    // and charge `max_bytes`.
+    let vocab_mark = local.savepoint();
+    let byte_mark = budget::byte_savepoint();
 
     for chunk in tuples.chunks(block) {
-        let values = crate::service::render_values_block(&join_vars, chunk);
+        let values = sparq_engine_service::service::render_values_block(&join_vars, chunk);
         // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
         // the remote inner-joins the pushed bindings with its pattern.
         let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
-        match service_transport::with(|t| crate::service::eval_remote(t, endpoint, &query)) {
-            Ok(rel) => {
-                acc_rows.extend(rel.rows);
+        // [OPUS-4.8] (sq-my8wd.5) Use the reader seam here too: the bound-join path
+        // fetches one block per VALUES chunk; each block's body is streamed, not buffered.
+        let fetched = service_reader_transport::with(|t| {
+            sparq_engine_service::service::eval_remote_into_read(t, endpoint, &query, &mut |row| {
+                acc_rows.push(intern_remote_row(graph, local, &row));
+                Ok(())
+            })
+        });
+        match fetched {
+            Ok(vars) => {
                 if acc_vars.is_none() {
-                    acc_vars = Some(rel.vars);
+                    acc_vars = Some(vars);
                 }
             }
             // SILENT: a failed block means the SERVICE as a whole must behave EXACTLY
@@ -2494,7 +2747,14 @@ fn bound_join_to_endpoint(
             // caller the identity relation (one zero-column row); joining / left-outer
             // joining `left` with it leaves `left` exactly as it was. This matches the
             // unbound-then-local-join path's SILENT semantics precisely. [OPUS-4.8]
+            // (Rows already interned from earlier blocks — or a partially-parsed
+            // failing block — are ROLLED BACK out of the local vocab below, and their
+            // byte-budget charge refunded, so no stray entry or `max_bytes` charge
+            // survives the discard. [OPUS-4.8] sq-my8wd.4)
             Err(_) if silent => {
+                acc_rows.clear();
+                local.rollback_to(vocab_mark);
+                budget::restore_bytes(byte_mark);
                 return Ok(Some(Bindings::unsorted(Vec::new(), vec![Row::new()])));
             }
             Err(e) => return Err(e),
@@ -2507,8 +2767,7 @@ fn bound_join_to_endpoint(
     // relation has zero rows, so the var list only names columns that, being the join
     // keys, always exist on both sides). [OPUS-4.8]
     let vars = acc_vars.unwrap_or_else(|| join_vars.clone());
-    let rel = crate::service::ServiceRelation { vars, rows: acc_rows };
-    Ok(Some(service_relation_to_bindings(graph, local, rel)))
+    Ok(Some(Bindings::unsorted(vars, acc_rows)))
 }
 
 /// Evaluate `SERVICE ?ep { inner }` — a VARIABLE endpoint — against the `left`
@@ -2585,6 +2844,26 @@ fn bound_join_variable_endpoint(
         return Ok(None);
     }
 
+    // [OPUS-4.8] (sq-b93pv) PRE-DISPATCH remote-request cap. `order` is the set of
+    // DISTINCT endpoint IRIs this `SERVICE ?ep` would dial — known now, before any
+    // socket is opened — so a high-cardinality `?ep` (an endpoint var bound to many
+    // distinct IRIs) is BOUNDED HERE rather than after the requests have gone out. The
+    // refusal is a hard, typed error (the `SERVICE_REMOTE_CAP_MARKER` substring) and is
+    // NOT swallowed by SILENT: SILENT masks an endpoint being unreachable, not a
+    // deliberate resource-policy refusal (the same stance `budget::check` takes). When no
+    // cap is installed (the default) this is a single thread-local read and a no-op.
+    if let Some(cap) = sparq_engine_service::service::remote_request_cap() {
+        if order.len() > cap {
+            return Err(format!(
+                "{}: SERVICE ?{} would dispatch to {} distinct endpoints (cap {})",
+                sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER,
+                ep_var.as_str(),
+                order.len(),
+                cap,
+            ));
+        }
+    }
+
     // Resolve the endpoint IRI strings once (id -> "http://…").
     let mut acc_vars: Vec<Variable> = vec![ep_var.clone()];
     let mut acc_rows: Vec<Row> = Vec::new();
@@ -2653,12 +2932,12 @@ fn bound_join_variable_endpoint(
 }
 
 /// Test/embedder seam for the SERVICE HTTP transport. By default `with` runs the
-/// closure against the production [`crate::service::HttpTransport`]; tests install a
+/// closure against the production `sparq_engine_service::service::HttpTransport`; tests install a
 /// fake (loopback / canned) transport for the duration of a scope so SERVICE can be
 /// exercised without a public-network dependency. [OPUS-4.8]
 #[cfg(feature = "service")]
 pub(crate) mod service_transport {
-    use crate::service::Transport;
+    use sparq_engine_service::service::Transport;
     use std::cell::RefCell;
 
     thread_local! {
@@ -2681,33 +2960,42 @@ pub(crate) mod service_transport {
         Guard(ACTIVE.with(|a| a.borrow_mut().replace(t)))
     }
 
-    /// Run `f` with the active transport — the installed test transport if any, else
-    /// the production HTTP client (native-only; on wasm there is no client, which is
-    /// moot because the `service` feature never reaches a wasm build).
-    pub(crate) fn with<R>(f: impl FnOnce(&dyn Transport) -> R) -> R {
-        ACTIVE.with(|a| {
-            let borrow = a.borrow();
-            match borrow.as_ref() {
-                Some(t) => f(t.as_ref()),
-                None => {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        // [OPUS-4.8] (sq-d4p) Bound the remote round-trip by the active
-                        // QueryBudget deadline: a query under a 5s budget must not block
-                        // for the transport's fixed 30s default on an unresponsive
-                        // endpoint. `remaining_timeout()` is `None` when no deadline is
-                        // installed, in which case the transport keeps its own default.
-                        f(&crate::service::HttpTransport::with_budget(
-                            super::budget::remaining_timeout(),
-                        ))
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        // Unreachable in practice (service is gated off wasm); keep the
-                        // module compilable if someone force-enables the feature.
-                        let _ = &f;
-                        unreachable!("SERVICE has no HTTP transport on wasm")
-                    }
+    /// Run `f` with the optional installed test transport (`None` = no override, use
+    /// the production HTTP client). Used by `service_reader_transport` to share the
+    /// same `ACTIVE` cell without re-exposing its private `RefCell`. [OPUS-4.8]
+    pub(crate) fn with_opt<R>(f: impl FnOnce(Option<&dyn Transport>) -> R) -> R {
+        ACTIVE.with(|a| f(a.borrow().as_deref()))
+    }
+}
+
+/// Reader-seam transport dispatcher: analogous to `service_transport` but uses the
+/// `ReaderTransport` seam so the HTTP body is NEVER buffered into a full `String`.
+/// (bead sq-my8wd.5) [OPUS-4.8]
+///
+/// When a test `Transport` is installed via `service_transport::install`, it is
+/// wrapped in `TransportAsReader` so it satisfies `ReaderTransport` — tests continue
+/// to work unchanged. The production path (`None` installed) uses `HttpTransport`
+/// directly as `ReaderTransport`, which streams the body via ureq's `into_reader()`.
+#[cfg(feature = "service")]
+pub(crate) mod service_reader_transport {
+    use sparq_engine_service::service::{ReaderTransport, TransportAsReader};
+
+    /// Run `f` with the active reader transport — wrapping any installed test
+    /// `Transport` as a `ReaderTransport`, or using `HttpTransport` directly.
+    pub(crate) fn with<R>(f: impl FnOnce(&dyn ReaderTransport) -> R) -> R {
+        super::service_transport::with_opt(|opt| match opt {
+            Some(t) => f(&TransportAsReader(t)),
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    f(&sparq_engine_service::service::HttpTransport::with_budget(
+                        super::budget::remaining_timeout(),
+                    ))
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = f;
+                    unreachable!("SERVICE has no HTTP transport on wasm")
                 }
             }
         })
@@ -2932,7 +3220,7 @@ fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
-                let v: f64 = l.value().parse().ok()?;
+                let v: f64 = parse_xsd_f64(l.value())?;
                 // A threshold f64 can't represent precisely (> 15 significant digits —
                 // large integers or high-precision decimals) makes the sargable f64 scan
                 // unsafe; decline so the filter takes the exact general comparison path.
@@ -4028,6 +4316,22 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
 
+    // [OPUS-4.8] (sq-iywur) Optional DP join-order planner path. When the `dp-planner`
+    // feature is compiled AND a planner is installed on this thread (`with_dp_planner`*),
+    // enumerate connected-subgraph-complement pairs (DPccp) for a Cout-optimal BUSHY join
+    // tree and evaluate that, instead of the greedy GOO order below. Falls back to greedy
+    // (returns `None`) when no planner is installed, the BGP join graph is disconnected /
+    // has an all-constant pattern (no single connected plan), or the connected-subgraph
+    // count exceeds the budget. A BGP is a commutative/associative natural join, so the DP
+    // tree yields the SAME rows as greedy (differentially tested); the default build
+    // (feature off) is byte-identical — this whole block compiles away.
+    #[cfg(feature = "dp-planner")]
+    if let Some(cfg) = crate::dp::active() {
+        if let Some(bindings) = eval_bgp_dp(graph, &prepared, pat_filters, cfg) {
+            return Ok(bindings);
+        }
+    }
+
     let var_pos = |i: usize, v: &Variable| -> Option<usize> { prepared[i].var_pos(v) };
 
     // Cost-based greedy (GOO): seed with the smallest single-pattern cardinality,
@@ -4690,6 +4994,93 @@ fn pattern_var_ndv(graph: &Graph, id_pat: &IdPattern, pos: usize, est: usize) ->
     }
 }
 
+// ---- [OPUS-4.8] (sq-iywur) DP join-order planner bridge -----------------------
+//
+// Builds the DP planner's `crate::dp::QueryGraph` from the prepared BGP patterns
+// (reusing the SAME `pattern_var_ndv` estimator the greedy planner consumes), runs
+// the DPccp enumerator, and evaluates the chosen bushy join tree. Both functions are
+// only compiled under the opt-in `dp-planner` feature and are reached only when a
+// planner is installed with `with_dp_planner`; the default build never sees them.
+
+/// Plans and evaluates a BGP with the DP enumerator, or returns `None` to fall back
+/// to greedy GOO (see `crate::dp::plan` for the fall-back conditions). The prepared
+/// patterns are assumed already satisfiable (the caller short-circuits an
+/// unsatisfiable BGP before this point).
+#[cfg(feature = "dp-planner")]
+fn eval_bgp_dp(
+    graph: &Graph,
+    prepared: &[Prepared],
+    pat_filters: &[Option<(usize, ScanCmp)>],
+    cfg: crate::dp::DpConfig,
+) -> Option<Bindings> {
+    let n = prepared.len();
+    if !(2..=63).contains(&n) {
+        return None;
+    }
+    // Dense-index every variable; record its pattern bitmask and per-pattern
+    // distinct-value estimate (the join-selectivity input the greedy planner uses).
+    let mut var_idx: FxHashMap<Variable, usize> = FxHashMap::default();
+    let mut var_pats: Vec<u64> = Vec::new();
+    let mut var_ndv: Vec<Vec<(usize, f64)>> = Vec::new();
+    for (p, prep) in prepared.iter().enumerate() {
+        for (pos, ov) in prep.pos_vars.iter().enumerate() {
+            if let Some(v) = ov {
+                let ndv = pattern_var_ndv(graph, &prep.id_pat, pos, prep.est);
+                let k = *var_idx.entry(v.clone()).or_insert_with(|| {
+                    var_pats.push(0);
+                    var_ndv.push(Vec::new());
+                    var_pats.len() - 1
+                });
+                var_pats[k] |= 1u64 << p;
+                // A variable can appear at several positions of one pattern — keep its
+                // most selective (smallest) per-pattern estimate.
+                if let Some(e) = var_ndv[k].iter_mut().find(|(pp, _)| *pp == p) {
+                    e.1 = e.1.min(ndv);
+                } else {
+                    var_ndv[k].push((p, ndv));
+                }
+            }
+        }
+    }
+    let est: Vec<f64> = prepared.iter().map(|p| p.est as f64).collect();
+    let qg = crate::dp::QueryGraph::build(est, var_pats, var_ndv);
+    let tree = crate::dp::plan(&qg, cfg.max_subgraphs)?;
+    Some(eval_join_tree(graph, prepared, &tree, pat_filters))
+}
+
+/// Evaluates a DP `JoinTree`: a `Leaf` scans its pattern (applying any pushed-down
+/// sargable filter, exactly like the greedy seed scan), a `Join` natural-joins the
+/// two sub-results with the shared `join_bindings` (merge / hash / compatibility
+/// nested-loop). The tree is bushy; `join_bindings` builds on the smaller side.
+#[cfg(feature = "dp-planner")]
+fn eval_join_tree(
+    graph: &Graph,
+    prepared: &[Prepared],
+    tree: &crate::dp::JoinTree,
+    pat_filters: &[Option<(usize, ScanCmp)>],
+) -> Bindings {
+    match tree {
+        crate::dp::JoinTree::Leaf(i) => {
+            let p = &prepared[*i];
+            scan_to_bindings(
+                graph,
+                &p.id_pat,
+                &p.pos_vars,
+                None,
+                pat_filters.get(*i).copied().flatten(),
+                None,
+                #[cfg(feature = "semijoin-bitmap")]
+                None,
+            )
+        }
+        crate::dp::JoinTree::Join(l, r) => {
+            let left = eval_join_tree(graph, prepared, l, pat_filters);
+            let right = eval_join_tree(graph, prepared, r, pat_filters);
+            join_bindings(left, right)
+        }
+    }
+}
+
 pub(crate) fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
     let mut vars = Vec::new();
     for tp in patterns {
@@ -4713,181 +5104,13 @@ pub(crate) fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
 // queries it cannot produce the asymptotically-large intermediates a binary plan
 // would. See research/ARCHITECTURE.md §4.
 
-/// A pattern's relation projected onto its variables (in global order) as sorted,
-/// deduplicated tuples — the trie that LFTJ navigates level by level.
-struct Trie {
-    tuples: Vec<Vec<Id>>,
-}
-
-/// One open level of a [`TrieIter`]: `hi` bounds the current key's subtree (rows
-/// sharing all already-fixed columns), `cur` is the cursor within it.
-struct Frame {
-    hi: usize,
-    cur: usize,
-}
-
-/// A cursor over a [`Trie`], using Veldhuizen's open-on-entry semantics: it starts
-/// *above* the root, and `open()` descends one column, resetting the cursor to the
-/// start of that subtree. This reset is what makes non-contiguous variable
-/// participation correct — re-entering a level re-opens (rewinds) the iterator.
-struct TrieIter<'a> {
-    trie: &'a Trie,
-    frames: Vec<Frame>,
-}
-
-impl<'a> TrieIter<'a> {
-    fn new(trie: &'a Trie) -> Self {
-        TrieIter { trie, frames: Vec::new() }
-    }
-    /// The column currently being iterated (valid once at least one `open`).
-    #[inline]
-    fn col(&self) -> usize {
-        self.frames.len() - 1
-    }
-    #[inline]
-    fn at_end(&self) -> bool {
-        let f = self.frames.last().unwrap();
-        f.cur >= f.hi
-    }
-    #[inline]
-    fn key(&self) -> Id {
-        let col = self.col();
-        let f = self.frames.last().unwrap();
-        self.trie.tuples[f.cur][col]
-    }
-    /// End (exclusive) of the run of rows in `[start, hi)` whose `col` equals the
-    /// value at `start`. The slice is sorted, so this is a binary search — O(log n)
-    /// rather than a linear scan of the (possibly large) run.
-    #[inline]
-    fn run_end(&self, col: usize, start: usize, hi: usize, val: Id) -> usize {
-        start + self.trie.tuples[start..hi].partition_point(|row| row[col] <= val)
-    }
-    /// Advances to the next distinct value in the current column.
-    fn next(&mut self) {
-        let col = self.col();
-        let (cur, hi) = {
-            let f = self.frames.last().unwrap();
-            (f.cur, f.hi)
-        };
-        let val = self.trie.tuples[cur][col];
-        self.frames.last_mut().unwrap().cur = self.run_end(col, cur, hi, val);
-    }
-    /// Galloping seek: first value `>= x` in the current column.
-    fn seek(&mut self, x: Id) {
-        let col = self.col();
-        let f = self.frames.last_mut().unwrap();
-        let (mut a, mut b) = (f.cur, f.hi);
-        while a < b {
-            let m = a + (b - a) / 2;
-            if self.trie.tuples[m][col] < x {
-                a = m + 1;
-            } else {
-                b = m;
-            }
-        }
-        f.cur = a;
-    }
-    /// Descends one column: into the subtree of the parent's current key (or, at
-    /// the root, the whole relation), with the cursor reset to its start.
-    fn open(&mut self) {
-        match self.frames.last() {
-            None => {
-                self.frames.push(Frame { hi: self.trie.tuples.len(), cur: 0 });
-            }
-            Some(&Frame { cur: plo, hi: phi }) => {
-                let pcol = self.frames.len() - 1;
-                let val = self.trie.tuples[plo][pcol];
-                let end = self.run_end(pcol, plo, phi, val);
-                self.frames.push(Frame { hi: end, cur: plo });
-            }
-        }
-    }
-    fn up(&mut self) {
-        self.frames.pop();
-    }
-}
-
-/// Leapfrog intersection of the participating iterators at one level.
-struct Leapfrog {
-    order: Vec<usize>, // participant indices, kept in cyclic key order
-    p: usize,
-    ended: bool,
-    key: Id,
-}
-
-impl Leapfrog {
-    fn init(iters: &mut [TrieIter], parts: &[usize]) -> Self {
-        let mut lf = Leapfrog { order: parts.to_vec(), p: 0, ended: false, key: 0 };
-        if parts.iter().any(|&i| iters[i].at_end()) {
-            lf.ended = true;
-            return lf;
-        }
-        lf.order.sort_by_key(|&i| iters[i].key());
-        lf.search(iters);
-        lf
-    }
-    fn search(&mut self, iters: &mut [TrieIter]) {
-        let k = self.order.len();
-        loop {
-            let max = iters[self.order[(self.p + k - 1) % k]].key();
-            let min = iters[self.order[self.p]].key();
-            if min == max {
-                self.key = min;
-                return;
-            }
-            iters[self.order[self.p]].seek(max);
-            if iters[self.order[self.p]].at_end() {
-                self.ended = true;
-                return;
-            }
-            self.p = (self.p + 1) % k;
-        }
-    }
-    fn next(&mut self, iters: &mut [TrieIter]) {
-        let k = self.order.len();
-        iters[self.order[self.p]].next();
-        if iters[self.order[self.p]].at_end() {
-            self.ended = true;
-            return;
-        }
-        self.p = (self.p + 1) % k;
-        self.search(iters);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lftj_recurse(
-    iters: &mut [TrieIter],
-    parts_at_level: &[Vec<usize>],
-    level: usize,
-    n_levels: usize,
-    current: &mut [Id],
-    out: &mut Vec<Row>,
-) {
-    if level == n_levels {
-        out.push(Row::from_slice(current));
-        return;
-    }
-    let parts = &parts_at_level[level];
-    // Open-on-entry: descend each relevant iterator into this level (rewinding it).
-    for &i in parts {
-        iters[i].open();
-    }
-    let mut lf = Leapfrog::init(iters, parts);
-    while !lf.ended {
-        // Coarse budget check once per leapfrog key (sticky, so it also unwinds
-        // the enclosing recursion levels).
-        if budget::exhausted(out.len()) {
-            break;
-        }
-        current[level] = lf.key;
-        lftj_recurse(iters, parts_at_level, level + 1, n_levels, current, out);
-        lf.next(iters);
-    }
-    for &i in parts {
-        iters[i].up();
-    }
-}
+// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the LFTJ NAVIGATION — the `Trie`/`TrieIter`
+// cursor (open-on-entry, galloping `seek`, binary-search `run_end`), the `Leapfrog`
+// intersection and `lftj_recurse` — now lives in the shared substrate
+// (`sparq_substrate::join::{Trie, TrieIter, lftj_recurse}`). The engine keeps only
+// `build_trie` below (which OWNS the store scan + the zk-trace hook + the global-order
+// projection) and `eval_bgp_wcoj`, which drives the substrate cursor with the engine's
+// budget. The probe loop is monomorphic over `Id`/`Row` with no `Box<dyn>`.
 
 /// Builds a pattern's trie of projected variable tuples, plus the global levels
 /// of those variables (sorted ascending). Repeated-variable patterns keep only
@@ -4897,7 +5120,7 @@ fn build_trie(
     id_pat: &IdPattern,
     pos_vars: &[Option<Variable>; 3],
     var_levels: &FxHashMap<Variable, usize>,
-) -> (Trie, Vec<usize>) {
+) -> (sjoin::Trie, Vec<usize>) {
     let mut var_positions: Vec<(Variable, Vec<usize>)> = Vec::new();
     for (pos, ov) in pos_vars.iter().enumerate() {
         if let Some(v) = ov {
@@ -4943,7 +5166,7 @@ fn build_trie(
     }
     tuples.sort_unstable();
     tuples.dedup();
-    (Trie { tuples }, levels)
+    (sjoin::Trie { tuples }, levels)
 }
 
 fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
@@ -4974,7 +5197,7 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
 
     // Build a trie per pattern that has variables; check constant-only patterns
     // for existence (empty range => empty BGP).
-    let mut tries: Vec<Trie> = Vec::new();
+    let mut tries: Vec<sjoin::Trie> = Vec::new();
     let mut trie_levels: Vec<Vec<usize>> = Vec::new();
     for (id_pat, pos_vars) in &prepared {
         if pos_vars.iter().all(|v| v.is_none()) {
@@ -5004,10 +5227,13 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
         }
     }
 
-    let mut iters: Vec<TrieIter> = tries.iter().map(TrieIter::new).collect();
+    // The LFTJ navigation (cursor + leapfrog intersection + recursion) is the shared substrate's
+    // (sq-hknqs); the engine supplies the built tries, the per-level participation, and its
+    // thread-local budget as the generic cooperative-cancel hook.
+    let mut iters: Vec<sjoin::TrieIter> = tries.iter().map(sjoin::TrieIter::new).collect();
     let mut out: Vec<Row> = Vec::new();
     let mut current = vec![NO_ID; n_levels];
-    lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &mut out);
+    sjoin::lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &EngineBudget, &mut out);
 
     // Output rows are produced in global-order lexicographic order.
     let sorted_by = order_vars.first().cloned();
@@ -5286,43 +5512,10 @@ fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
             }
         }
     }
-    let (l, r) = (&left.rows, &right.rows);
+    // The sorted-merge probe loop lives in the shared substrate (sq-hknqs); the engine supplies
+    // the `Bindings`-derived key columns + its thread-local query budget, monomorphically.
     let mut rows = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < l.len() && j < r.len() {
-        // Coarse budget check once per key group.
-        if budget::exhausted(rows.len()) {
-            break;
-        }
-        let (lv, rv) = (l[i][lk], r[j][rk]);
-        match lv.cmp(&rv) {
-            Ordering::Less => i += 1,
-            Ordering::Greater => j += 1,
-            Ordering::Equal => {
-                let mut i2 = i;
-                while i2 < l.len() && l[i2][lk] == lv {
-                    i2 += 1;
-                }
-                let mut j2 = j;
-                while j2 < r.len() && r[j2][rk] == rv {
-                    j2 += 1;
-                }
-                for lrow in l.iter().take(i2).skip(i) {
-                    for rrow in r.iter().take(j2).skip(j) {
-                        if extra_shared.iter().all(|&(lc, rc)| lrow[lc] == rrow[rc]) {
-                            let mut row = lrow.clone();
-                            for &rc in &right_only {
-                                row.push(rrow[rc]);
-                            }
-                            rows.push(row);
-                        }
-                    }
-                }
-                i = i2;
-                j = j2;
-            }
-        }
-    }
+    sjoin::merge_join(&left.rows, lk, &right.rows, rk, &extra_shared, &right_only, &EngineBudget, &mut rows);
     Bindings { vars: out_vars, rows, sorted_by: Some(jv.clone()) }
 }
 
@@ -5344,46 +5537,16 @@ fn join_layout(left: &Bindings, right: &Bindings) -> (Vec<Variable>, Vec<(usize,
     (out_vars, shared, right_only)
 }
 
-/// SPARQL solution compatibility on the shared columns: an unbound (`NO_ID`)
-/// value never conflicts; two bound values must be equal.
-fn compatible(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)]) -> bool {
-    shared.iter().all(|&(lc, rc)| {
-        let (a, b) = (lrow[lc], rrow[rc]);
-        a == NO_ID || b == NO_ID || a == b
-    })
-}
-
-/// Combines two compatible rows: left's row extended with the right-only columns,
-/// filling any shared column that was unbound on the left from the right side.
-fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &[usize]) -> Row {
-    let mut row = Row::from_slice(lrow);
-    for &(lc, rc) in shared {
-        if row[lc] == NO_ID {
-            row[lc] = rrow[rc];
-        }
-    }
-    for &rc in right_only {
-        row.push(rrow[rc]);
-    }
-    row
-}
-
-/// Whether any row leaves any of the given columns unbound.
-fn any_unbound(rows: &[Row], cols: &[usize]) -> bool {
-    rows.iter().any(|r| cols.iter().any(|&c| r[c] == NO_ID))
-}
-
-/// Number of radix partitions for the parallel hash-join build. 64 spreads well at high thread
-/// counts while keeping the per-partition tag-scan cheap.
-const JOIN_PARTS: usize = 64;
-
-/// The partition/lookup hash for a join key — build and probe must agree on it.
-fn key_hash(key: &Key) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    key.hash(&mut h);
-    h.finish()
-}
+// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the id-tuple combine/compatibility helpers
+// (`compatible` / `merge_rows` / `any_unbound`) now live in the shared substrate
+// (`sparq_substrate::join`). The engine's OPTIONAL / UNION / MINUS / VALUES-UNDEF nested-loop
+// fallbacks and the hash-join build/probe call them under these private aliases, so every
+// existing `Bindings`-side call site is unchanged.
+use sjoin::{any_unbound, compatible, merge_rows};
+// The join hash (`key_hash` / `JOIN_PARTS`) is only reached by the radix-partitioned PARALLEL
+// hash-join build (native only); the wasm / serial build computes the table without them.
+#[cfg(feature = "parallel")]
+use sjoin::{key_hash, JOIN_PARTS};
 
 fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // Build the hash table on the smaller side.
@@ -5410,63 +5573,30 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             i
         })
         .collect();
+    // The join column layout for the shared substrate kernel: `key_cols` are the (build, probe)
+    // shared-variable index pairs (the equi-join key); the probe-only columns are appended after
+    // the build row. The build/probe phases below are the substrate's `build_*` / `probe_emit`
+    // (sq-hknqs) — the engine only supplies this `Bindings`-derived layout and its budget.
+    let keys = sjoin::JoinKeys { key_cols: shared.clone(), right_only: Vec::new() };
     // Build phase. Above PAR_THRESHOLD the build is radix-partitioned (Tier-1 #5 of
     // research/parallelism-scaling.md): rows are tagged with their key-hash partition in
     // parallel, then each partition builds its private map lock-free. Within a partition rows
     // are scanned in ascending index, so each posting list stays in ascending build-row order —
     // exactly the serial build — and the probe output is byte-identical.
-    let build_key = |row: &Row| -> Key { shared.iter().map(|&(bi, _)| row[bi]).collect() };
     #[cfg(feature = "parallel")]
     let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let parts: Vec<u8> = build
             .rows
             .par_iter()
-            .map(|row| (key_hash(&build_key(row)) % JOIN_PARTS as u64) as u8)
+            .map(|row| (key_hash(&keys.left_key(row)) % JOIN_PARTS as u64) as u8)
             .collect();
-        (0..JOIN_PARTS)
-            .into_par_iter()
-            .map(|p| {
-                let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-                for (ri, row) in build.rows.iter().enumerate() {
-                    if parts[ri] as usize == p {
-                        t.entry(build_key(row)).or_default().push(ri);
-                    }
-                }
-                t
-            })
-            .collect()
+        sjoin::build_partitioned(&build.rows, &keys, &parts)
     } else {
-        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-        for (ri, row) in build.rows.iter().enumerate() {
-            t.entry(build_key(row)).or_default().push(ri);
-        }
-        vec![t]
+        vec![sjoin::build_table(&build.rows, &keys)]
     };
     #[cfg(not(feature = "parallel"))]
-    let tables: Vec<FxHashMap<Key, Posting>> = {
-        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-        for (ri, row) in build.rows.iter().enumerate() {
-            t.entry(build_key(row)).or_default().push(ri);
-        }
-        vec![t]
-    };
-    // Emit the output rows for one probe row (its matches, each combined with the
-    // probe-only columns).
-    let emit = |prow: &Row, out: &mut Vec<Row>| {
-        let key: Key = shared.iter().map(|&(_, pi)| prow[pi]).collect();
-        let table =
-            if tables.len() == 1 { &tables[0] } else { &tables[(key_hash(&key) % JOIN_PARTS as u64) as usize] };
-        if let Some(matches) = table.get(&key) {
-            for &bi in matches {
-                let mut combined = build.rows[bi].clone();
-                for &pi in &probe_only {
-                    combined.push(prow[pi]);
-                }
-                out.push(combined);
-            }
-        }
-    };
+    let tables: Vec<FxHashMap<Key, Posting>> = vec![sjoin::build_table(&build.rows, &keys)];
     // The probe is read-only over the (partitioned) table, so for a large probe side build the
     // output in parallel on native.
     #[cfg(feature = "parallel")]
@@ -5475,13 +5605,13 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         // Budget snapshot for the workers (the installing thread's thread-local is
         // invisible to them): a worker that hits the limits stops adding to its own
         // accumulator; the caller's next on-thread check raises the actual error.
-        let limits = budget::snapshot();
+        let snap = EngineSnapshot(budget::snapshot());
         let rows: Vec<Row> = probe
             .rows
             .par_iter()
             .fold(Vec::new, |mut acc, prow| {
-                if !limits.hit(acc.len()) {
-                    emit(prow, &mut acc);
+                if !sjoin::BudgetSnapshot::hit(&snap, acc.len()) {
+                    sjoin::probe_emit(prow, &keys, &build.rows, &tables, &probe_only, &mut acc);
                 }
                 acc
             })
@@ -5493,13 +5623,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         return Bindings::unsorted(out_vars, rows);
     }
     let mut rows = Vec::new();
-    for prow in &probe.rows {
-        // Coarse budget check once per probe row.
-        if budget::exhausted(rows.len()) {
-            break;
-        }
-        emit(prow, &mut rows);
-    }
+    sjoin::hash_probe_serial(&probe.rows, &keys, &build.rows, &tables, &probe_only, &EngineBudget, &mut rows);
     Bindings::unsorted(out_vars, rows)
 }
 
@@ -5557,11 +5681,10 @@ fn bind_join(
                 zk_matched.push(pspo);
             }
             let new_vals: SmallVec<[Id; 4]> = new_positions.iter().map(|&p| pspo[p]).collect();
-            for &ri in &ris {
-                let mut combined = result.rows[ri].clone();
-                combined.extend(new_vals.iter().copied());
-                out_rows.push(combined);
-            }
+            // The per-(result-row, match) combine is the shared substrate's `bind_combine`
+            // (sq-hknqs): the scan + filter pushdown above stay engine-private (they own the
+            // store + `ScanCmp`); only the id-tuple combine is shared.
+            sjoin::bind_combine(&result.rows, &ris, &new_vals, &mut out_rows);
         }
     }
     #[cfg(feature = "zk")]
@@ -6031,6 +6154,16 @@ fn group_aggregate(
         out_vars.push(v.clone());
     }
 
+    // [SONNET-4.6] (sq-pntvh.4) M4 Phase 4 columnar reducer seam (Seam B): for an eligible
+    // aggregate (no DISTINCT, bare-variable argument, all-inline-integer column, supported
+    // function), fold each group's ids with a tight integer reducer — no `eval_expr` dispatch
+    // per member, no term materialisation, byte-identical output to the scalar path.
+    // Declines (→ scalar path below) for anything not provably identical.
+    #[cfg(feature = "vectorized")]
+    if let Some(rows) = columnar_aggregate(graph, local, &b, group_vars, aggregates, &order, &members, &out_vars) {
+        return Ok(Bindings::unsorted(out_vars, rows));
+    }
+
     // Evaluate each group's aggregates (the expensive part — `eval_expr` over every member of
     // every group), then intern the result and build the output row, in first-seen `order`.
     // Interning needs `&mut LocalVocab` and so stays SERIAL and in order, making the ids
@@ -6110,6 +6243,83 @@ fn group_aggregate(
     Ok(Bindings::unsorted(out_vars, rows))
 }
 
+/// [OPUS-4.8] (sq-v411r, survey §B2) Reserved IRI the vendored spargebra parser emits for the
+/// zero-arg `MULTIPLICITY()` extension builtin (as a `Function::Custom`, to keep the shared
+/// `Function` enum byte-compatible with downstream exhaustive matchers). The engine recognises
+/// it in aggregate evaluation and function dispatch; it is never a user-registrable IRI.
+pub(crate) const MULTIPLICITY_FN_IRI: &str = "urn:sparq:fn:multiplicity";
+
+/// [OPUS-4.8] (sq-v411r, survey §B2) The DISTINCT solutions of a group paired with each
+/// one's bag cardinality (`multiplicity(μ|Ω)`): `(ri, card)` is a representative row index
+/// for a distinct solution mapping and how many rows in `members` are byte-identical to it,
+/// in first-seen order. Returns `None` (and does NO work) unless `expr` actually calls
+/// `MULTIPLICITY()`, so an aggregate that never references it pays nothing and folds the
+/// full bag exactly as before.
+///
+/// The collapse to distinct members is load-bearing for correctness, NOT an optimisation:
+/// the SPARQL algebra's Set Functions are defined over the multiset by iterating its
+/// DISTINCT elements weighted by `multiplicity`, so `SUM(?x * MULTIPLICITY())` must visit
+/// `?x=10` once (with multiplicity 3), not three times — otherwise a value occurring `k`
+/// times would contribute `k²·x` instead of `k·x`. With this collapse the standard identity
+/// `SUM(?x * MULTIPLICITY()) == SUM(?x)` (over the bag) holds. Solution identity is the
+/// whole row, matching `COUNT(DISTINCT *)`; BGP matching is bag semantics, so duplicate
+/// solutions are preserved as repeated rows up to this point.
+fn group_multiplicities(b: &Bindings, members: &[usize], expr: &Expression) -> Option<Vec<(usize, u64)>> {
+    if !expr_uses_multiplicity(expr) {
+        return None;
+    }
+    // Count identical rows, keeping a first-seen representative index for each distinct row.
+    let mut counts: FxHashMap<&Row, (usize, u64)> = FxHashMap::default();
+    let mut order: Vec<&Row> = Vec::new();
+    for &ri in members {
+        match counts.get_mut(&b.rows[ri]) {
+            Some(entry) => entry.1 += 1,
+            None => {
+                counts.insert(&b.rows[ri], (ri, 1));
+                order.push(&b.rows[ri]);
+            }
+        }
+    }
+    Some(order.into_iter().map(|row| counts[row]).collect())
+}
+
+/// Whether `expr` contains a `MULTIPLICITY()` call anywhere in its tree. An `Exists`
+/// sub-pattern is NOT descended into: a `MULTIPLICITY()` there belongs to that
+/// (un-aggregated) sub-query's scope, not this aggregate's member — and would
+/// correctly evaluate against the thread-local's restored (absent) context.
+fn expr_uses_multiplicity(expr: &Expression) -> bool {
+    use Expression as E;
+    match expr {
+        // `MULTIPLICITY()` is parsed as a `Function::Custom` with the reserved IRI
+        // (see `MULTIPLICITY_FN_IRI`) so the shared `Function` enum stays byte-compatible
+        // with downstream exhaustive matchers (sparopt/spareval).
+        E::FunctionCall(spargebra::algebra::Function::Custom(nn), args)
+            if args.is_empty() && nn.as_str() == MULTIPLICITY_FN_IRI =>
+        {
+            true
+        }
+        E::NamedNode(_) | E::Literal(_) | E::Variable(_) | E::Bound(_) | E::Exists(_) => false,
+        E::Or(a, c)
+        | E::And(a, c)
+        | E::Equal(a, c)
+        | E::SameTerm(a, c)
+        | E::Greater(a, c)
+        | E::GreaterOrEqual(a, c)
+        | E::Less(a, c)
+        | E::LessOrEqual(a, c)
+        | E::Add(a, c)
+        | E::Subtract(a, c)
+        | E::Multiply(a, c)
+        | E::Divide(a, c) => expr_uses_multiplicity(a) || expr_uses_multiplicity(c),
+        E::UnaryPlus(a) | E::UnaryMinus(a) | E::Not(a) => expr_uses_multiplicity(a),
+        E::If(a, c, d) => {
+            expr_uses_multiplicity(a) || expr_uses_multiplicity(c) || expr_uses_multiplicity(d)
+        }
+        E::In(a, list) => expr_uses_multiplicity(a) || list.iter().any(expr_uses_multiplicity),
+        E::Coalesce(list) | E::FunctionCall(_, list) => list.iter().any(expr_uses_multiplicity),
+    }
+}
+
 fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[usize], agg: &AggregateExpression) -> Result<Value, String> {
     match agg {
         AggregateExpression::CountSolutions { distinct } => {
@@ -6151,12 +6361,33 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
             // into a type error downstream (`as_numeric` -> None), per agg-err-01.
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
             let mut errored = false;
-            for &ri in members {
-                let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                match v {
-                    Value::Unbound => {}             // skip: aggregate ignores unbound rows
-                    Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
-                    _ => vals.push(v),
+            // [OPUS-4.8] (sq-v411r, §B2) Only build the multiplicity table when the argument
+            // actually calls `MULTIPLICITY()` — the overwhelmingly common aggregate pays
+            // nothing (no table, no thread-local write) and folds the full bag below. When
+            // present, fold the DISTINCT solutions instead, each weighted by its bag
+            // cardinality via the thread-local, per the Set-Function algebra (see
+            // `group_multiplicities`).
+            match group_multiplicities(b, members, expr) {
+                None => {
+                    for &ri in members {
+                        let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+                        match v {
+                            Value::Unbound => {}             // skip: aggregate ignores unbound rows
+                            Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
+                            _ => vals.push(v),
+                        }
+                    }
+                }
+                Some(distinct) => {
+                    for (ri, card) in distinct {
+                        let _mg = multiplicity::set(card);
+                        let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+                        match v {
+                            Value::Unbound => {}
+                            Value::Error => errored = true,
+                            _ => vals.push(v),
+                        }
+                    }
                 }
             }
             if *distinct {
@@ -6167,7 +6398,7 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 // SUM/AVG with operand-type promotion: int+int stays integer, decimals
                 // stay decimal (exact), floats/doubles promote. Any non-numeric or
                 // errored member makes the whole aggregate a type error (-> unbound).
-                AggregateFunction::Sum => Ok(sum_values(&vals, errored).map(Num::canonical_term).unwrap_or(Value::Error)),
+                AggregateFunction::Sum => Ok(sum_values(&vals, errored).map(num_canonical_term).unwrap_or(Value::Error)),
                 AggregateFunction::Avg => {
                     if vals.is_empty() && !errored {
                         return Ok(Value::Num(Num::Int(0))); // AVG({}) = 0 per SPARQL
@@ -6215,7 +6446,16 @@ fn eval_custom_aggregate(
         return Err(format!("unsupported SPARQL function: no custom aggregate registered for <{iri}>"));
     };
     let mut args: Vec<Option<Term>> = Vec::with_capacity(members.len());
-    for &ri in members {
+    // [OPUS-4.8] (sq-v411r) `MULTIPLICITY()` works inside a custom aggregate's argument too:
+    // when it appears, fold the DISTINCT solutions weighted by each one's bag cardinality
+    // (same algebra as the builtins); otherwise fold the full bag exactly as before.
+    let mults = group_multiplicities(b, members, expr);
+    let iter: Vec<(usize, Option<u64>)> = match &mults {
+        None => members.iter().map(|&ri| (ri, None)).collect(),
+        Some(distinct) => distinct.iter().map(|&(ri, card)| (ri, Some(card))).collect(),
+    };
+    for (ri, card) in iter {
+        let _mg = card.map(multiplicity::set);
         let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
         // A genuine expression error inside the argument makes the aggregate a
         // SPARQL error (→ unbound), mirroring SUM/AVG; an unbound member is a
@@ -6265,7 +6505,7 @@ fn minmax_values(vals: Vec<Value>, keep: Ordering) -> Value {
                     best = n;
                 }
             }
-            best.canonical_term()
+            num_canonical_term(best)
         }
         None => {
             let cmp = |a: &Value, c: &Value| compare_values(a, c).unwrap_or(Ordering::Equal);
@@ -6324,7 +6564,19 @@ fn minmax_temporal(
         best = Some(match best {
             None => (t, id),
             Some((bt, bid)) => {
-                let ord = Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)));
+                // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a
+                // cross-kind (dateTime vs date) pair ranks by `LiteralKind`
+                // (DateTime < Date), never lexically; the timeline order (with the
+                // lexical fallback for the indeterminate window) applies within a kind.
+                let ord = if t.kind != bt.kind {
+                    if t.kind == sparq_core::temporal::TemporalKind::DateTime {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                } else {
+                    Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)))
+                };
                 let replace = if is_min { ord == Ordering::Less } else { ord != Ordering::Less };
                 if replace {
                     (t, id)
@@ -6398,6 +6650,13 @@ fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
 /// comparison of the sort). Everything else keeps the identity-preserving `Value`.
 enum SortCell {
     Temp { t: Temporal, id: Id },
+    /// A numeric GRAPH term: the cached f64 for the fast compare PLUS its dictionary id, so
+    /// an f64 TIE can be rechecked EXACTLY from the id's exact lexical — distinct integers
+    /// beyond 2^53 / high-precision decimals that share one f64 (the numerics cache stores
+    /// only f64, so the fast path alone collapses them). This makes `ORDER BY ?v` over a
+    /// numeric column agree with the relational `<` (`cmp_expr`) and MIN/MAX, which already
+    /// recheck. [OPUS-4.8] sq-rikm7
+    Num { f: f64, id: Id },
     Val(Value),
 }
 
@@ -6411,10 +6670,26 @@ enum SortCell {
 fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell) -> Ordering {
     match (a, c) {
         (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
+            // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a dateTime
+            // never value-compares against a date (`LiteralKind::DateTime < Date`); the
+            // timeline comparison (then the lexical fallback for the indeterminate
+            // mixed-timezone window) applies only within one temporal kind. Ill-formed
+            // temporals never enter the cache, so both cells here are well-formed.
+            if ta.kind != tb.kind {
+                return if ta.kind == sparq_core::temporal::TemporalKind::DateTime {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
             match Temporal::cmp_t(*ta, *tb) {
                 Some(o) => o,
                 None => cmp_sort_cells_lex(graph, *ia, *ib),
             }
+        }
+        // Two numeric graph terms: f64 fast compare, with the EXACT tie recheck below.
+        (SortCell::Num { f: fa, id: ia }, SortCell::Num { f: fb, id: ib }) => {
+            cmp_sort_num(graph, *fa, *ia, *fb, *ib)
         }
         (SortCell::Temp { id, .. }, SortCell::Val(v)) => {
             compare_values(&sort_cell_term(graph, local, *id), v).unwrap_or(Ordering::Equal)
@@ -6422,7 +6697,83 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         (SortCell::Val(v), SortCell::Temp { id, .. }) => {
             compare_values(v, &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
         }
+        // A numeric cell against a temporal or a general Value (a MIXED-type column, cold):
+        // reconstruct the pre-change `Val(Num::Double)` representation and defer to the shared
+        // `compare_values`, so the mixed-column order stays byte-identical to pre-change — only
+        // the same-numeric-column (`Num`, `Num`) arm above adds the exact f64-tie recheck.
+        (SortCell::Num { f, .. }, SortCell::Temp { id, .. }) => {
+            compare_values(&Value::Num(Num::Double(*f)), &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Temp { id, .. }, SortCell::Num { f, .. }) => {
+            compare_values(&sort_cell_term(graph, local, *id), &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Num { f, .. }, SortCell::Val(v)) => {
+            compare_values(&Value::Num(Num::Double(*f)), v).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Val(v), SortCell::Num { f, .. }) => {
+            compare_values(v, &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
+        }
         (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
+    }
+}
+
+/// Compares two numeric ORDER BY sort cells by f64, rechecking EXACTLY on an f64 tie.
+/// [OPUS-4.8] sq-rikm7: f64 rounding is MONOTONIC, so it only ever collapses distinct
+/// numeric values to Equal — so on (and only on) an f64 tie, disambiguate via the ids'
+/// exact lexicals (`exact_numeric_lexical` + `cmp_decimal_str`, the SAME exact path the
+/// relational `cmp_expr` uses). [FABLE-5] sq-wjl8i extends the recheck to the MIXED
+/// exact/inexact tie: a float/double id has no exact lexical but its VALUE is exactly
+/// the tied f64, so the exact side compares against the f64's exact decimal expansion —
+/// mirroring `compare_values`' `Num::cmp_total` recheck, so the numeric fast path and
+/// the general path order identically. Perf-neutral: the allocations happen only on a
+/// tie, never on the fast path.
+#[inline]
+fn cmp_sort_num(graph: &Graph, fa: f64, ia: Id, fb: f64, ib: Id) -> Ordering {
+    match fa.partial_cmp(&fb) {
+        Some(Ordering::Equal) => {
+            // Same dictionary id ⇒ identical value: skip the two lexical allocations.
+            // In a numeric ORDER BY column with repeated values this is the common f64
+            // tie (a sort compares equal-id rows often). [OPUS-4.8] sq-rikm7
+            if ia == ib {
+                return Ordering::Equal;
+            }
+            match (graph.exact_numeric_lexical(ia), graph.exact_numeric_lexical(ib)) {
+                (Some(la), Some(lb)) => cmp_decimal_str(&la, &lb).unwrap_or(Ordering::Equal),
+                (Some(la), None) => cmp_exact_lex_f64(&la, fb),
+                (None, Some(lb)) => cmp_exact_lex_f64(&lb, fa).reverse(),
+                // Both float/double: the value IS the tied f64 — a true tie.
+                (None, None) => Ordering::Equal,
+            }
+        }
+        Some(o) => o,
+        // NaN. Unreachable from ORDER BY sort cells today (the numerics cache uses NaN
+        // as its "not numeric" sentinel, so a NaN literal never becomes a `SortCell::Num`
+        // and routes through `compare_values` instead) — kept in lock-step with the
+        // total order's NaN-first rule so the fast path can never diverge. [FABLE-5] sq-wjl8i
+        None => match (fa.is_nan(), fb.is_nan()) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => Ordering::Equal,
+        },
+    }
+}
+
+/// The mixed exact/inexact leg of the f64-tie recheck: an exact int/decimal LEXICAL
+/// against a (finite, non-NaN) f64's exact decimal expansion — string arithmetic
+/// throughout, arbitrary precision. An infinite f64 image (a numeric lexical beyond
+/// f64's finite range collapsed onto ±INF) bounds every finite exact value directly.
+/// [FABLE-5] sq-wjl8i
+#[cold]
+fn cmp_exact_lex_f64(lex: &str, f: f64) -> Ordering {
+    if f == f64::INFINITY {
+        return Ordering::Less;
+    }
+    if f == f64::NEG_INFINITY {
+        return Ordering::Greater;
+    }
+    match f64_exact_decimal(f) {
+        Some(exp) => cmp_decimal_str(lex, &exp).unwrap_or(Ordering::Equal),
+        None => Ordering::Equal, // NaN: handled by the caller's NaN rule
     }
 }
 
@@ -6458,7 +6809,9 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 let id = row[c];
                 if id != NO_ID && !is_local(id) {
                     if let Some(n) = graph.numeric_value(id) {
-                        return Ok(SortCell::Val(Value::Num(Num::Double(n))));
+                        // [OPUS-4.8] sq-rikm7: keep the id so an f64 TIE can be rechecked
+                        // exactly (integers > 2^53 / high-precision decimals sharing one f64).
+                        return Ok(SortCell::Num { f: n, id });
                     }
                     if let Some(t) = graph.temporal_value(id) {
                         return Ok(SortCell::Temp { t, id });
@@ -6536,7 +6889,261 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
 
 // ---- FILTER + expression evaluation ------------------------------------------
 
+/// FILTER application. When the opt-in `vectorized` feature is on and the residual filter is
+/// eligible (see `columnar_filter`), a columnar vector-at-a-time path runs and the row loop is
+/// skipped; otherwise the scalar row path (`apply_filter_scalar`) runs verbatim. When the
+/// feature is OFF this compiles to exactly the scalar body — byte-identical, zero overhead.
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
+    // [OPUS-4.8] (sq-pntvh.3, M4 Phase 3) Columnar residual-FILTER seam (Seam A): for an
+    // eligible single sargable numeric residual over an all-inline-integer column, transpose to
+    // a `DataChunk`, decode the column ONCE (the Phase-2 primitive), compare over the decoded
+    // column, gather the survivors, and materialise back — byte-identical to the scalar row
+    // path but as one branchless, auto-vectorising compare loop instead of per-row `eval_expr`
+    // dispatch. Declines (→ scalar path) for anything not provably byte-identical.
+    #[cfg(feature = "vectorized")]
+    if let Some(rows) = columnar_filter(graph, b, expr) {
+        b.rows = rows;
+        return Ok(());
+    }
+    apply_filter_scalar(graph, local, b, expr)
+}
+
+/// The columnar residual-FILTER attempt. Returns `Some(new_rows)` (the surviving rows, in the
+/// scalar path's order) when it handled the filter, or `None` to fall back to the scalar row
+/// path. The returned rows are **byte-identical** to `apply_filter_scalar`'s output.
+///
+/// Eligibility is deliberately narrow so the result is *provably* identical to the scalar
+/// `cmp_expr`/`equal_expr` path, not merely "close":
+/// * a **single sargable numeric** residual `?v OP const` (`extract_sargable` → `ScanCmp::Num`);
+///   temporal comparisons decline (there is no temporal vector kernel yet);
+/// * the compared variable is a present column;
+/// * **every** id in that column is an inline integer (`dict::is_inline`). Inline integers are
+///   f64-exact small non-negative integers, so the kernel's f64 comparison agrees with
+///   `cmp_expr` on every value — including the operator's f64-tie exact-lexical recheck, which
+///   for an exact small integer and a ≤15-significant-digit sargable threshold can only agree.
+///   The all-inline gate ALSO excludes local-vocab (computed) numerics — resolved by
+///   `eval_numeric` via `local.numeric`, not `graph.numeric_value` — and any unbound (`NO_ID`,
+///   which is not inline), both of which would otherwise diverge from the row path.
+///
+/// **ZK coupling (soundness-relevant):** when the `zk` trace is armed the seam declines
+/// unconditionally, so the row path records the identical per-row `FILTER` obligation set
+/// (`split_sargable` already keeps every filter residual under `zk`). See
+/// `research/vector-at-a-time-m4.md` §3.2.
+#[cfg(feature = "vectorized")]
+fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec<Row>> {
+    use crate::chunk::{DataChunk, VecCmp};
+
+    // ZK trace armed ⇒ decline so the scalar path records the FILTER obligation set.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
+
+    // Only a single sargable NUMERIC comparison `?v OP const` is columnar-eligible.
+    let num = match extract_sargable(expr)? {
+        (var, ScanCmp::Num(c)) => (var, c),
+        (_, ScanCmp::Temp(..)) => return None,
+    };
+    let (var, cmp) = num;
+    let c = b.col(&var)?;
+
+    // Provable byte-identity gate: the whole filtered column must be inline integers.
+    if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
+        return None;
+    }
+
+    let veccmp = match cmp {
+        NumCmp::Gt(t) => VecCmp::Gt(t),
+        NumCmp::Ge(t) => VecCmp::Ge(t),
+        NumCmp::Lt(t) => VecCmp::Lt(t),
+        NumCmp::Le(t) => VecCmp::Le(t),
+        NumCmp::Eq(t) => VecCmp::Eq(t),
+    };
+
+    // transpose → decode column ONCE → compare over the decoded column → gather → materialise.
+    let width = b.vars.len();
+    let chunk = DataChunk::from_rows(&b.rows, width)?;
+    let decoded = chunk.decode_numeric_column(graph, c);
+    let sel = DataChunk::select_decoded(&decoded, veccmp);
+    let filtered = chunk.apply_selection(&sel);
+    Some(filtered.to_rows().iter().map(|r| Row::from_slice(r.as_slice())).collect())
+}
+
+/// The columnar per-group aggregate attempt (M4 Phase 4, `sq-pntvh.4`). Returns `Some(rows)`
+/// (the output rows, byte-identical to the scalar path in first-seen group order) when ALL
+/// aggregates are columnar-eligible, or `None` to fall back to the scalar group fold.
+///
+/// **Eligibility (conservative — decline is always safe, I1):**
+/// - `vectorized` feature ON (compile-gate only, not checked here)
+/// - ZK trace NOT armed (I2, checked below)
+/// - No DISTINCT aggregate
+/// - Only `SUM / COUNT / AVG / MIN / MAX` aggregate functions and `COUNT(*)`
+/// - Aggregate argument is a bare variable `?v` (not an expression)
+/// - The variable `?v` is a present column in `b`
+/// - Every row in `b` has an inline-integer id in that column (all-inline gate)
+///   This ensures byte-identity: see `research/vector-at-a-time-m4-completion-design.md` §2.
+///
+/// When there are multiple aggregates, ALL must be eligible and use the SAME column (or
+/// `COUNT(*)` which needs no column). If any aggregate uses a different column, decline.
+/// [SONNET-4.6]
+#[cfg(feature = "vectorized")]
+#[allow(clippy::too_many_arguments)]
+fn columnar_aggregate(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    b: &Bindings,
+    _group_vars: &[Variable],
+    aggregates: &[(Variable, AggregateExpression)],
+    order: &[Key],
+    members: &[Vec<usize>],
+    _out_vars: &[Variable],
+) -> Option<Vec<Row>> {
+    use crate::reduce::{reduce_count, reduce_max_id, reduce_min_id, reduce_sum};
+
+    // I2: ZK trace armed → decline so the scalar path records the aggregate obligations.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
+
+    // ── Eligibility pass ──────────────────────────────────────────────────────────────────
+    // Walk all aggregates to determine whether they are columnar-eligible and which
+    // column (if any) the non-COUNT(*) aggregates operate on.
+    let mut agg_col: Option<usize> = None; // the single eligible column index
+
+    for (_, agg) in aggregates {
+        match agg {
+            AggregateExpression::CountSolutions { distinct } => {
+                if *distinct {
+                    return None; // DISTINCT COUNT(*) requires full row dedup
+                }
+                // CountSolutions needs no column — always eligible.
+            }
+            AggregateExpression::FunctionCall { name, expr, distinct } => {
+                if *distinct {
+                    return None; // DISTINCT requires per-group value dedup
+                }
+                // Only the five standard numeric aggregates are supported.
+                match name {
+                    AggregateFunction::Sum
+                    | AggregateFunction::Count
+                    | AggregateFunction::Avg
+                    | AggregateFunction::Min
+                    | AggregateFunction::Max => {}
+                    _ => return None,
+                }
+                // Argument must be a bare variable (not an expression).
+                let v = match expr {
+                    Expression::Variable(v) => v,
+                    _ => return None,
+                };
+                // The variable must have a column in the input bindings.
+                let c = b.col(v)?;
+                // All column-dependent aggregates must reference the SAME column.
+                match agg_col {
+                    None => agg_col = Some(c),
+                    Some(existing) if existing == c => {}
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    // ── All-inline gate ───────────────────────────────────────────────────────────────────
+    // For every row in `b`, the aggregate column must hold an inline-integer id.
+    // This is the byte-identity invariant: inline-int ids encode their value directly,
+    // so the reducer sees the exact same integer the scalar eval_expr would materialise.
+    if let Some(c) = agg_col {
+        if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
+            return None;
+        }
+    }
+
+    // ── Per-group reduction ───────────────────────────────────────────────────────────────
+    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
+
+    for (key, member_indices) in order.iter().zip(members.iter()) {
+        // Gather the per-group inline ids for the aggregate column (if any).
+        let group_ids: Vec<Id> = if let Some(c) = agg_col {
+            member_indices.iter().map(|&ri| b.rows[ri][c]).collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut row = Row::from_slice(key);
+
+        for (_, agg) in aggregates {
+            let id: Id = match agg {
+                AggregateExpression::CountSolutions { .. } => {
+                    // Non-distinct COUNT(*) = number of solutions in this group.
+                    // Mirrors scalar: Value::Num(Num::Int(members.len() as i64)).
+                    let n = member_indices.len() as i64;
+                    value_to_id(graph, local, &Value::Num(Num::Int(n)))
+                }
+                AggregateExpression::FunctionCall { name, .. } => {
+                    match name {
+                        AggregateFunction::Count => {
+                            // COUNT(?v) over an all-inline group = group size (no NULLs).
+                            let n = reduce_count(&group_ids) as i64;
+                            value_to_id(graph, local, &Value::Num(Num::Int(n)))
+                        }
+                        AggregateFunction::Sum => {
+                            // SUM({}) = 0 per SPARQL; for non-empty, reduce_sum is exact i128.
+                            let sum_i128 = reduce_sum(&group_ids)?;
+                            // Guard the i128→i64 narrowing: group cardinality is unbounded so
+                            // the sum CAN exceed i64::MAX. Decline to scalar on overflow; the
+                            // scalar path promotes via Num::Double, matching scalar semantics.
+                            // [SONNET-4.6] (C1-fix sq-pntvh.4 adversarial review)
+                            let sum_i64 = crate::reduce::narrow_sum_to_i64(sum_i128)?;
+                            // Mirrors scalar: sum_values → num_canonical_term → value_to_id.
+                            value_to_id(graph, local, &Value::Num(Num::Int(sum_i64)))
+                        }
+                        AggregateFunction::Avg => {
+                            if group_ids.is_empty() {
+                                // AVG({}) = 0 per SPARQL (mirrors scalar path line ~6378).
+                                value_to_id(graph, local, &Value::Num(Num::Int(0)))
+                            } else {
+                                let sum_i128 = reduce_sum(&group_ids)?;
+                                let count_i64 = group_ids.len() as i64;
+                                // Guard the i128→i64 narrowing (same as SUM).
+                                // [SONNET-4.6] (C1-fix sq-pntvh.4 adversarial review)
+                                let sum_i64 = crate::reduce::narrow_sum_to_i64(sum_i128)?;
+                                // integer / integer → Decimal (SPARQL §17.4.4.3).
+                                // Mirrors: sum_values → binop(Div) → value_to_id.
+                                let result = Num::Int(sum_i64).binop(Num::Int(count_i64), ArithOp::Div)?;
+                                value_to_id(graph, local, &Value::Num(result))
+                            }
+                        }
+                        AggregateFunction::Min => {
+                            if group_ids.is_empty() {
+                                NO_ID // unbound — mirrors scalar minmax_values([]) = Value::Unbound
+                            } else {
+                                // reduce_min_id returns None only if a non-inline id slipped
+                                // through the all-inline gate (should not happen; decline safely).
+                                reduce_min_id(&group_ids)?
+                            }
+                        }
+                        AggregateFunction::Max => {
+                            if group_ids.is_empty() {
+                                NO_ID // unbound
+                            } else {
+                                reduce_max_id(&group_ids)?
+                            }
+                        }
+                        _ => return None, // unreachable given the eligibility check above
+                    }
+                }
+            };
+            row.push(id);
+        }
+
+        rows.push(row);
+    }
+
+    Some(rows)
+}
+
+fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
     // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
@@ -6624,334 +7231,18 @@ enum Value {
     Error,
 }
 
-/// A COMPUTED numeric value carrying its XSD type, implementing the SPARQL/XPath
-/// operand-type-promotion tower: integer < decimal < float < double. Arithmetic
-/// promotes both operands to the greater type; integer and decimal arithmetic is
-/// EXACT (i64 / fixed-point [`Dec`]), falling back to double only on overflow.
-/// Serialisation (see [`Num::lexical`]) is the XSD canonical form of the type.
-#[derive(Clone, Copy, Debug)]
-enum Num {
-    Int(i64),
-    Dec(Dec),
-    Float(f32),
-    Double(f64),
-}
+// [OPUS-4.8] sq-ev41x: `Num` / `Dec` / `ArithOp` / `RoundMode` and the XSD lexical helpers
+// (`apply_f64`, `parse_xsd_f64`, `parse_xsd_f32`, `fmt_xsd_double`) MOVED to
+// `sparq_substrate::numeric` (imported at the top of this file). The only `Num` operation
+// that produced an engine-private `Value` — `canonical_term` — stays here as a free helper,
+// since the substrate must not know about the engine's `Value`/`Term`. Everything else is
+// the substrate's `Num` verbatim, so behaviour is unchanged.
 
-#[derive(Clone, Copy, PartialEq)]
-enum ArithOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-impl Num {
-    /// Promotion rank in the XPath numeric tower.
-    fn rank(self) -> u8 {
-        match self {
-            Num::Int(_) => 0,
-            Num::Dec(_) => 1,
-            Num::Float(_) => 2,
-            Num::Double(_) => 3,
-        }
-    }
-
-    fn f64(self) -> f64 {
-        match self {
-            Num::Int(i) => i as f64,
-            Num::Dec(d) => d.f64(),
-            Num::Float(f) => f as f64,
-            Num::Double(d) => d,
-        }
-    }
-
-    fn to_dec(self) -> Option<Dec> {
-        match self {
-            Num::Int(i) => Some(Dec { mant: i as i128, scale: 0 }),
-            Num::Dec(d) => Some(d),
-            _ => None,
-        }
-    }
-
-    /// The typed numeric value of a literal, or `None` if the literal is not a
-    /// well-formed numeric (an ill-formed numeric operand is a SPARQL type error).
-    fn of_literal(l: &Literal) -> Option<Num> {
-        if l.language().is_some() {
-            return None;
-        }
-        let dt = l.datatype();
-        let v = l.value().trim();
-        if sparq_core::is_integer_datatype(dt.as_str()) {
-            if let Ok(i) = v.parse::<i64>() {
-                return Some(Num::Int(i));
-            }
-            // Integer beyond i64: exact i128 mantissa if it fits (scale 0 = integer
-            // lexical), else not representable -> double.
-            return match Dec::parse(v) {
-                Some(d) if d.scale == 0 => Some(Num::Dec(d)),
-                Some(_) => None, // "1.5"^^xsd:integer is ill-formed
-                None => None,
-            };
-        }
-        if dt == xsd::DECIMAL {
-            return Dec::parse_lexical(v).map(Num::Dec);
-        }
-        if dt == xsd::FLOAT {
-            return parse_xsd_f32(v).map(Num::Float);
-        }
-        if dt == xsd::DOUBLE {
-            return parse_xsd_f64(v).map(Num::Double);
-        }
-        None
-    }
-
-    /// `op` under XPath operand promotion. `None` is a SPARQL type error (exact-type
-    /// division by zero); exact-arithmetic overflow falls back to double, mirroring
-    /// the engine's previous f64 behaviour.
-    fn binop(self, o: Num, op: ArithOp) -> Option<Num> {
-        let rank = self.rank().max(o.rank());
-        if rank == 3 {
-            return Some(Num::Double(apply_f64(self.f64(), o.f64(), op)));
-        }
-        if rank == 2 {
-            let (a, b) = (self.f64() as f32, o.f64() as f32);
-            return Some(Num::Float(apply_f64(a as f64, b as f64, op) as f32));
-        }
-        // Exact tier: integer / decimal.
-        let (a, b) = (self.to_dec()?, o.to_dec()?);
-        if op == ArithOp::Div {
-            // xsd:integer / xsd:integer is DECIMAL division per SPARQL; exact-type
-            // division by zero is a type error (not INF/NaN).
-            if b.mant == 0 {
-                return None;
-            }
-            return match a.checked_div(b) {
-                Some(d) => Some(Num::Dec(d)),
-                None => Some(Num::Double(self.f64() / o.f64())),
-            };
-        }
-        if rank == 0 {
-            // integer op integer -> integer (i64; on overflow fall back to double).
-            let (x, y) = (match self { Num::Int(i) => i, _ => unreachable!() }, match o { Num::Int(i) => i, _ => unreachable!() });
-            let r = match op {
-                ArithOp::Add => x.checked_add(y),
-                ArithOp::Sub => x.checked_sub(y),
-                ArithOp::Mul => x.checked_mul(y),
-                ArithOp::Div => unreachable!(),
-            };
-            return Some(match r {
-                Some(i) => Num::Int(i),
-                None => Num::Double(apply_f64(x as f64, y as f64, op)),
-            });
-        }
-        let r = match op {
-            ArithOp::Add => a.checked_add(b),
-            ArithOp::Sub => a.checked_sub(b),
-            ArithOp::Mul => a.checked_mul(b),
-            ArithOp::Div => unreachable!(),
-        };
-        Some(match r {
-            Some(d) => Num::Dec(d),
-            None => Num::Double(apply_f64(self.f64(), o.f64(), op)),
-        })
-    }
-
-    fn neg(self) -> Num {
-        match self {
-            Num::Int(i) => i.checked_neg().map(Num::Int).unwrap_or(Num::Double(-(i as f64))),
-            Num::Dec(d) => d.mant.checked_neg().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(-d.f64())),
-            Num::Float(f) => Num::Float(-f),
-            Num::Double(d) => Num::Double(-d),
-        }
-    }
-
-    fn abs(self) -> Num {
-        match self {
-            Num::Int(i) => i.checked_abs().map(Num::Int).unwrap_or(Num::Double((i as f64).abs())),
-            Num::Dec(d) => d.mant.checked_abs().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(d.f64().abs())),
-            Num::Float(f) => Num::Float(f.abs()),
-            Num::Double(d) => Num::Double(d.abs()),
-        }
-    }
-
-    fn ceil(self) -> Num {
-        match self {
-            Num::Int(_) => self,
-            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::Ceil)),
-            Num::Float(f) => Num::Float(f.ceil()),
-            Num::Double(d) => Num::Double(d.ceil()),
-        }
-    }
-
-    fn floor(self) -> Num {
-        match self {
-            Num::Int(_) => self,
-            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::Floor)),
-            Num::Float(f) => Num::Float(f.floor()),
-            Num::Double(d) => Num::Double(d.floor()),
-        }
-    }
-
-    /// XPath fn:round — round half towards POSITIVE INFINITY (so round(-2.5) = -2),
-    /// preserving the argument's datatype.
-    fn round(self) -> Num {
-        match self {
-            Num::Int(_) => self,
-            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::HalfUp)),
-            Num::Float(f) => Num::Float((f + 0.5).floor()),
-            Num::Double(d) => Num::Double((d + 0.5).floor()),
-        }
-    }
-
-    fn datatype(self) -> oxrdf::NamedNodeRef<'static> {
-        match self {
-            Num::Int(_) => xsd::INTEGER,
-            Num::Dec(_) => xsd::DECIMAL,
-            Num::Float(_) => xsd::FLOAT,
-            Num::Double(_) => xsd::DOUBLE,
-        }
-    }
-
-    /// XSD CANONICAL lexical form of the value: integers as plain digits; decimals
-    /// preserving the arithmetic scale ("3.0" for 1.0+2, "3" for CEIL(2.5)); float /
-    /// double in mantissa-E-exponent form with a mandatory fractional digit ("3.21E4",
-    /// "2.0E-1") and NaN / INF / -INF spelled per XSD.
-    fn lexical(self) -> String {
-        match self {
-            Num::Int(i) => i.to_string(),
-            Num::Dec(d) => d.lexical(),
-            // f32 must be formatted as f32 (shortest round-trip); via f64 it would
-            // grow spurious digits ("2.0000000298023224E-1" for 0.2f32).
-            Num::Float(f) => {
-                if f.is_nan() {
-                    "NaN".to_string()
-                } else if f == f32::INFINITY {
-                    "INF".to_string()
-                } else if f == f32::NEG_INFINITY {
-                    "-INF".to_string()
-                } else if f.fract() == 0.0 && f.abs() < 1e15 {
-                    format!("{}", f as i64)
-                } else {
-                    let s = format!("{f:E}");
-                    match s.split_once('E') {
-                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
-                        _ => s,
-                    }
-                }
-            }
-            Num::Double(d) => fmt_xsd_double(d),
-        }
-    }
-
-    /// STRICT XSD-canonical lexical: float/double ALWAYS in mantissa-E-exponent form
-    /// ("3.21E4", "1.0E2"), never plain. The W3C aggregate expected results use this
-    /// for MIN/MAX/SUM, while arithmetic results use the plain-integral convention of
-    /// [`Num::lexical`] — the suites were generated by different engines.
-    fn canonical_lexical(self) -> String {
-        match self {
-            Num::Int(_) | Num::Dec(_) => self.lexical(),
-            Num::Float(f) => {
-                if f.is_nan() || f.is_infinite() {
-                    self.lexical()
-                } else {
-                    let s = format!("{f:E}");
-                    match s.split_once('E') {
-                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
-                        _ => s,
-                    }
-                }
-            }
-            Num::Double(d) => {
-                if d.is_nan() || d.is_infinite() {
-                    self.lexical()
-                } else {
-                    let s = format!("{d:E}");
-                    match s.split_once('E') {
-                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
-                        _ => s,
-                    }
-                }
-            }
-        }
-    }
-
-    /// The value as a TERM in strict canonical form (see [`Num::canonical_lexical`]).
-    fn canonical_term(self) -> Value {
-        Value::Term(Term::Literal(Literal::new_typed_literal(self.canonical_lexical(), self.datatype())))
-    }
-
-    fn is_nan(self) -> bool {
-        match self {
-            Num::Float(f) => f.is_nan(),
-            Num::Double(d) => d.is_nan(),
-            _ => false,
-        }
-    }
-
-    fn is_zero(self) -> bool {
-        match self {
-            Num::Int(i) => i == 0,
-            Num::Dec(d) => d.mant == 0,
-            Num::Float(f) => f == 0.0,
-            Num::Double(d) => d == 0.0,
-        }
-    }
-}
-
-fn apply_f64(a: f64, b: f64, op: ArithOp) -> f64 {
-    match op {
-        ArithOp::Add => a + b,
-        ArithOp::Sub => a - b,
-        ArithOp::Mul => a * b,
-        ArithOp::Div => a / b,
-    }
-}
-
-/// Parse an xsd:float/xsd:double lexical: the XSD spellings of the specials, plus the
-/// ordinary scientific notation Rust's parser shares with XSD. `None` = ill-formed.
-fn parse_xsd_f64(v: &str) -> Option<f64> {
-    match v {
-        "NaN" => Some(f64::NAN),
-        "INF" | "+INF" => Some(f64::INFINITY),
-        "-INF" => Some(f64::NEG_INFINITY),
-        // Rust accepts "inf"/"infinity"/"nan" spellings XSD does not; exclude them.
-        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-fn parse_xsd_f32(v: &str) -> Option<f32> {
-    parse_xsd_f64(v).map(|d| d as f32)
-}
-
-/// Float/double serialisation: an INTEGRAL value prints as a plain integer ("6",
-/// "1050" — matching the dominant convention across the W3C expected results, which
-/// mix plain and scientific forms); anything else uses the XSD canonical
-/// mantissa-E-exponent form with a mandatory fractional digit ("2.0E-1", "1.5E1").
-fn fmt_xsd_double(v: f64) -> String {
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v == f64::INFINITY {
-        return "INF".to_string();
-    }
-    if v == f64::NEG_INFINITY {
-        return "-INF".to_string();
-    }
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        return format!("{}", v as i64);
-    }
-    let s = format!("{v:E}"); // shortest round-trip mantissa, e.g. "2E-1"
-    match s.split_once('E') {
-        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
-        _ => s,
-    }
-}
-
-enum RoundMode {
-    Ceil,
-    Floor,
-    HalfUp,
+/// The numeric value as a TERM in strict canonical form (see [`Num::canonical_lexical`]).
+/// Engine-side because it constructs the engine's `Value`; the value/lexical logic lives in
+/// the shared substrate.
+fn num_canonical_term(n: Num) -> Value {
+    Value::Term(Term::Literal(Literal::new_typed_literal(n.canonical_lexical(), n.datatype())))
 }
 
 fn effective_boolean(v: &Value) -> bool {
@@ -6980,10 +7271,10 @@ fn ebv(v: &Value) -> Option<bool> {
                     _ => None,
                 }
             } else if is_numeric_dt(l) {
-                match l.value().parse::<f64>() {
-                    Ok(n) => Some(n != 0.0 && !n.is_nan()),
-                    Err(_) => None,
-                }
+                // [OPUS-4.8] sq-rkzhr: XSD acceptance set (via `parse_xsd_f64`) — a
+                // numeric-typed literal with an ill-formed lexical is a type error (`None`),
+                // matching `as_num` rather than silently swallowing Rust-only spellings.
+                parse_xsd_f64(l.value()).map(|n| n != 0.0 && !n.is_nan())
             } else if dt == xsd::STRING.as_str() {
                 Some(!l.value().is_empty())
             } else {
@@ -7198,7 +7489,7 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
                 graph.numeric_value(id)
             }
         }
-        Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
         Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
         Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
         Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
@@ -7329,22 +7620,6 @@ fn nb_is_zero(int: &str, frac: &str) -> bool {
     int.is_empty() && frac.is_empty()
 }
 
-/// Splits a decimal lexical into (negative, integer-digits, fraction-digits), normalised
-/// (no leading zeros on the integer part, no trailing zeros on the fraction). `None` if
-/// the lexical is not digits with at most one `.`.
-fn split_decimal(s: &str) -> Option<(bool, &str, &str)> {
-    let s = s.trim();
-    let (neg, s) = match s.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
-    };
-    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-    if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some((neg, int.trim_start_matches('0'), frac.trim_end_matches('0')))
-}
-
 /// Significant decimal digits in a numeric lexical — used to decide whether the f64
 /// sargable path is precision-safe (<= 15 digits round-trips through f64 unambiguously).
 fn sig_digits(s: &str) -> usize {
@@ -7357,174 +7632,6 @@ fn sig_digits(s: &str) -> usize {
         frac.trim_start_matches('0').len()
     } else {
         int.len() + frac.len()
-    }
-}
-
-/// An EXACT fixed-point decimal: `mant * 10^-scale`. Used to evaluate `+ - *` on
-/// integer / `xsd:decimal` operands without f64 rounding (`0.1 + 0.2` is exactly `0.3`),
-/// which the f64 arithmetic path gets wrong. Within `i128` range; overflow → `None` →
-/// the caller falls back to f64. Division and `xsd:double`/`float` stay f64.
-#[derive(Clone, Copy, Debug)]
-struct Dec {
-    mant: i128,
-    scale: u32,
-}
-
-impl Dec {
-    /// Parses an integer / decimal lexical (`[+-]?digits(.digits)?`), `None` otherwise.
-    fn parse(s: &str) -> Option<Dec> {
-        let (neg, int, frac) = split_decimal(s)?;
-        let scale = frac.len() as u32;
-        let mut mag: i128 = 0;
-        for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
-            mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
-        }
-        Some(Dec { mant: if neg { -mag } else { mag }, scale })
-    }
-
-    /// Both mantissas scaled to the common (max) scale, or `None` on overflow.
-    fn align(self, o: Dec) -> Option<(i128, i128)> {
-        let scale = self.scale.max(o.scale);
-        let a = self.mant.checked_mul(10i128.checked_pow(scale - self.scale)?)?;
-        let b = o.mant.checked_mul(10i128.checked_pow(scale - o.scale)?)?;
-        Some((a, b))
-    }
-
-    fn checked_add(self, o: Dec) -> Option<Dec> {
-        let (a, b) = self.align(o)?;
-        Some(Dec { mant: a.checked_add(b)?, scale: self.scale.max(o.scale) })
-    }
-    fn checked_sub(self, o: Dec) -> Option<Dec> {
-        let (a, b) = self.align(o)?;
-        Some(Dec { mant: a.checked_sub(b)?, scale: self.scale.max(o.scale) })
-    }
-    fn checked_mul(self, o: Dec) -> Option<Dec> {
-        Some(Dec { mant: self.mant.checked_mul(o.mant)?, scale: self.scale.checked_add(o.scale)? })
-    }
-    fn cmp(self, o: Dec) -> Option<Ordering> {
-        let (a, b) = self.align(o)?;
-        Some(a.cmp(&b))
-    }
-
-    /// Parses an integer / decimal lexical PRESERVING the written scale ("1.0" keeps
-    /// scale 1), unlike [`Dec::parse`] which normalises trailing fraction zeros away.
-    /// The scale is what XSD-canonical serialisation of decimal arithmetic preserves
-    /// (`1.0 + 2` is `"3.0"`), so typed values must carry it.
-    fn parse_lexical(s: &str) -> Option<Dec> {
-        let s = s.trim();
-        let (neg, s) = match s.strip_prefix('-') {
-            Some(r) => (true, r),
-            None => (false, s.strip_prefix('+').unwrap_or(s)),
-        };
-        let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-        if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        let mut mag: i128 = 0;
-        for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
-            mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
-        }
-        Some(Dec { mant: if neg { -mag } else { mag }, scale: frac.len() as u32 })
-    }
-
-    /// EXACT decimal division. The result's scale is the SMALLEST `s >= 1` at which the
-    /// quotient terminates (`0 / 2 = "0.0"`, `11.1 / 5 = "2.22"`); a non-terminating
-    /// quotient is rounded half-up at scale 18. `None` on overflow (caller falls back
-    /// to double); the caller must reject a zero divisor first (type error).
-    fn checked_div(self, o: Dec) -> Option<Dec> {
-        debug_assert!(o.mant != 0);
-        let neg = (self.mant < 0) != (o.mant < 0);
-        let n0 = self.mant.unsigned_abs();
-        let d = o.mant.unsigned_abs();
-        // mant(s) = n0 * 10^(s + o.scale - self.scale) / d
-        let num_den = |s: u32| -> Option<(u128, u128)> {
-            let e = s as i32 + o.scale as i32 - self.scale as i32;
-            if e >= 0 {
-                Some((n0.checked_mul(10u128.checked_pow(e as u32)?)?, d))
-            } else {
-                Some((n0, d.checked_mul(10u128.checked_pow((-e) as u32)?)?))
-            }
-        };
-        const MAX_SCALE: u32 = 18;
-        for s in 1..=MAX_SCALE {
-            let (num, den) = num_den(s)?;
-            if num % den == 0 {
-                let mant = i128::try_from(num / den).ok()?;
-                return Some(Dec { mant: if neg { -mant } else { mant }, scale: s });
-            }
-        }
-        // Non-terminating: round half-up at the max scale.
-        let (num, den) = num_den(MAX_SCALE)?;
-        let q = num / den + u128::from(num % den * 2 >= den);
-        let mant = i128::try_from(q).ok()?;
-        Some(Dec { mant: if neg { -mant } else { mant }, scale: MAX_SCALE })
-    }
-
-    /// Rounds to an integer-valued decimal (scale 0), preserving the decimal TYPE
-    /// (`CEIL("2.5"^^xsd:decimal)` is `"3"^^xsd:decimal`).
-    fn round_to_int(self, mode: RoundMode) -> Dec {
-        if self.scale == 0 || self.mant == 0 {
-            return Dec { mant: self.mant, scale: 0 };
-        }
-        // [OPUS-4.8] `10i128.pow(self.scale)` overflows (debug panic / release wrap) for any
-        // valid decimal whose scale is >= 39 (10^39 > i128::MAX). When the power exceeds i128
-        // the integer part is necessarily 0 (|mant| < i128::MAX < 10^scale), so |value| < 1 and
-        // also < 0.5 (2*i128::MAX < 10^39 <= 10^scale), making the rounded result obvious from
-        // the sign alone — derive it directly instead of constructing the overflowing power.
-        let mant = match 10i128.checked_pow(self.scale) {
-            Some(p) => {
-                let q = self.mant.div_euclid(p);
-                let r = self.mant.rem_euclid(p); // 0..p
-                match mode {
-                    RoundMode::Floor => q,
-                    RoundMode::Ceil => q + i128::from(r > 0),
-                    RoundMode::HalfUp => q + i128::from(r * 2 >= p),
-                }
-            }
-            None => match mode {
-                // |value| < 1: floor of a tiny positive is 0, of a tiny negative is -1.
-                RoundMode::Floor => -i128::from(self.mant < 0),
-                // ceil of a tiny positive is 1, of a tiny negative is 0.
-                RoundMode::Ceil => i128::from(self.mant > 0),
-                // |value| < 0.5 always at this scale, so half-up rounds to 0.
-                RoundMode::HalfUp => 0,
-            },
-        };
-        Dec { mant, scale: 0 }
-    }
-
-    fn f64(self) -> f64 {
-        self.mant as f64 / 10f64.powi(self.scale as i32)
-    }
-
-    /// The plain (never exponent) decimal lexical at this value's scale: scale 0 prints
-    /// as an integer ("3"); otherwise exactly `scale` fraction digits ("3.0", "0.05").
-    fn lexical(self) -> String {
-        let mag = self.mant.unsigned_abs().to_string();
-        let s = self.scale as usize;
-        let mut out = String::with_capacity(mag.len() + s + 2);
-        if self.mant < 0 {
-            out.push('-');
-        }
-        if s == 0 {
-            out.push_str(&mag);
-            return out;
-        }
-        if mag.len() > s {
-            out.push_str(&mag[..mag.len() - s]);
-        } else {
-            out.push('0');
-        }
-        out.push('.');
-        for _ in mag.len()..s {
-            out.push('0');
-        }
-        if mag.len() > s {
-            out.push_str(&mag[mag.len() - s..]);
-        } else {
-            out.push_str(&mag);
-        }
-        out
     }
 }
 
@@ -7849,7 +7956,16 @@ fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+        // [OPUS-4.8] sq-rkzhr: route the lexical→f64 arm through `parse_xsd_f64` (the SAME
+        // parser the exact/typed `as_numeric` path uses) instead of Rust's `str::parse::<f64>`.
+        // Two reasons, both about keeping this LENIENT `as_f64` seam in lock-step with the
+        // exact `as_numeric` one that the sq-rikm7 `exact_cmp` recheck drives: (a) it accepts
+        // the XSD specials `INF`/`+INF`/`-INF`/`NaN`; (b) it REJECTS the non-XSD spellings
+        // Rust's parser also swallows (`inf`/`infinity`/`nan`), which `as_numeric` already
+        // rejects. Before this the two paths disagreed on those spellings, so a numeric compare
+        // could succeed via `as_f64` yet find no exact recheck value — the f64-collapse
+        // asymmetry sq-rikm7 set out to remove.
+        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
         _ => None,
     }
 }
@@ -7862,61 +7978,112 @@ fn is_numeric_dt(l: &Literal) -> bool {
         || dt == xsd::FLOAT.as_str()
 }
 
-/// LENIENT total order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
-/// unbound < blank nodes < IRIs < literals, then by value within each class
-/// (numerics by value; everything else by string form, which keeps the order
-/// deterministic across mixed literal types).
-fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
-    fn class(v: &Value) -> u8 {
-        match v {
-            Value::Unbound | Value::Error => 0,
-            Value::Term(Term::BlankNode(_)) => 1,
-            Value::Term(Term::NamedNode(_)) => 2,
+// [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the engine implements the substrate's
+// `CompareTerm` trait for its `Value` — a set of ZERO-COST wrappers over the existing
+// `value_str` / `as_num` / `value_compare_strict` helpers — so the shared
+// `compare::compare_terms` total-order algorithm can drive the engine's `Value` with no vtable.
+// The class ranks, the within-class string / numeric / strict arms, and the recursive
+// triple-term order all live in the substrate now; this impl only surfaces the observations.
+impl CompareTerm for Value {
+    #[inline]
+    fn term_class(&self) -> TermClass {
+        match self {
+            Value::Unbound | Value::Error => TermClass::ErrorOrUnbound,
+            Value::Term(Term::BlankNode(_)) => TermClass::Blank,
+            Value::Term(Term::NamedNode(_)) => TermClass::Iri,
             // SPARQL 1.2 total-order extension: triple terms sort AFTER literals.
-            Value::Term(Term::Triple(_)) => 4,
-            _ => 3, // literals, incl. computed numerics / booleans
+            Value::Term(Term::Triple(_)) => TermClass::Triple,
+            _ => TermClass::Literal, // literals, incl. computed numerics / booleans
         }
     }
-    let (ca, cb) = (class(x), class(y));
-    if ca != cb {
-        return Some(ca.cmp(&cb));
-    }
-    match ca {
-        0 => Some(Ordering::Equal),
-        1 | 2 => Some(value_str(x)?.cmp(&value_str(y)?)),
-        // Triple terms order componentwise (subject, predicate, then object under
-        // this same total order, recursing through nesting).
-        4 => {
-            let (Value::Term(Term::Triple(a)), Value::Term(Term::Triple(b))) = (x, y) else {
-                return None;
-            };
-            let nob = |n: &NamedOrBlankNode| {
-                Value::Term(match n {
-                    NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
-                    NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
-                })
-            };
-            let s = compare_values(&nob(&a.subject), &nob(&b.subject))?;
-            if s != Ordering::Equal {
-                return Some(s);
-            }
-            let p = a.predicate.as_str().cmp(b.predicate.as_str());
-            if p != Ordering::Equal {
-                return Some(p);
-            }
-            compare_values(&Value::Term(a.object.clone()), &Value::Term(b.object.clone()))
-        }
-        _ => {
-            if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
-                return a.partial_cmp(&b);
-            }
-            // dateTime/date order by timeline when comparable.
-            if let Some(o) = value_compare_strict(x, y) {
-                return Some(o);
-            }
-            Some(value_str(x)?.cmp(&value_str(y)?))
+    #[inline]
+    fn literal_kind(&self) -> LiteralKind {
+        // [FABLE-5] sq-wjl8i: the kind-first rank of the total order. Numeric tracks the
+        // LENIENT `as_num` membership (the same set the numeric arm compares), so a
+        // lexical the exact classifier rejects but `parse_xsd_f64` accepts (e.g.
+        // "1.5"^^xsd:integer) still sorts numerically, exactly as it did pre-fix — with
+        // one exception: a computed boolean (whose lenient f64 view is 0.0/1.0)
+        // classifies as Boolean, keeping it in one kind with boolean LITERALS (both
+        // order `false < true` via `strict_cmp`). ILL-FORMED numeric/temporal lexicals
+        // classify as Other (lexical order): a kind mixing value-ordered and
+        // lexical-fallback pairs is intransitive — the very bug this rank removes.
+        match lit_kind(self) {
+            LitKind::Bool(_) => LiteralKind::Boolean,
+            LitKind::Num(_) if as_num(self).is_some() => LiteralKind::Numeric,
+            LitKind::Str(_) => LiteralKind::String,
+            LitKind::Lang(..) => LiteralKind::Lang,
+            LitKind::DateTime(Some(_)) => LiteralKind::DateTime,
+            LitKind::Date(Some(_)) => LiteralKind::Date,
+            // Ill-formed numerics/temporals, other-XSD, unknown datatypes (and the
+            // unreachable non-literal case — `compare_terms` gates on the class).
+            _ => LiteralKind::Other,
         }
     }
+    #[inline]
+    fn value_str(&self) -> Option<String> {
+        value_str(self)
+    }
+    #[inline]
+    fn as_f64(&self) -> Option<f64> {
+        as_num(self)
+    }
+    #[inline]
+    fn exact_cmp(&self, other: &Self) -> Option<Ordering> {
+        // [OPUS-4.8] sq-rikm7 / [FABLE-5] sq-wjl8i: f64-collapse recheck — when the
+        // lenient `as_num` arm reports two numeric literals EQUAL, the pair rechecks
+        // under `Num::cmp_total`, the EXACT-RATIONAL total order: exact via the decimal
+        // tower for int/decimal pairs, exact against the double's exact decimal
+        // expansion for the MIXED exact/inexact pair (the pre-fix `num_compare`
+        // fallback kept the collapsed f64 verdict there, which made the order
+        // intransitive at the 2^53 collapse — witness 1 of sq-wjl8i). The relational
+        // `<`/`=` (`cmp_expr`) and MIN/MAX (`minmax_values`) deliberately KEEP the
+        // XPath promoted semantics via `num_compare`; this total order refines only
+        // their ties. `None` (a lexical beyond the exact tower) keeps the tie.
+        match (as_numeric(self), as_numeric(other)) {
+            (Some(a), Some(b)) => Some(a.cmp_total(b)),
+            _ => None,
+        }
+    }
+    #[inline]
+    fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
+        // dateTime/date by timeline, same-tag / same-other-XSD lexically — when comparable.
+        value_compare_strict(self, other)
+    }
+    #[inline]
+    fn triple_parts(&self) -> Option<[Self; 3]> {
+        let Value::Term(Term::Triple(t)) = self else {
+            return None;
+        };
+        // The subject (named-or-blank) and predicate (always an IRI) are lifted to `Value`s so
+        // the generic recursion classifies + compares them by exactly the rules `compare_values`
+        // applied inline: the subject by blank/IRI string, the predicate by IRI string (== its
+        // `as_str().cmp(..)`), the object under the full order.
+        let subject = Value::Term(match &t.subject {
+            NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
+            NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
+        });
+        let predicate = Value::Term(Term::NamedNode(t.predicate.clone()));
+        let object = Value::Term(t.object.clone());
+        Some([subject, predicate, object])
+    }
+}
+
+/// The TOTAL order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
+/// unbound < blank nodes < IRIs < literals (< triple terms), then literals KIND-FIRST —
+/// a fixed `LiteralKind` rank between literal kinds (numeric < boolean < dateTime <
+/// date < string < language-tagged < other), value order only WITHIN a kind (numerics
+/// by exact value with NaN first, dateTimes by timeline, else lexically).
+///
+/// [OPUS-4.8] sq-vezew: the algorithm lives in `sparq_substrate::compare::compare_terms`,
+/// generic over the `CompareTerm` trait the engine implements for `Value` above — a thin
+/// monomorphised call into the shared substrate. [FABLE-5] sq-wjl8i: the order is
+/// deliberately NOT the pre-move lexical-fallback body — cross-kind lexical fallback,
+/// collapsed mixed-tier f64 ties and NaN partiality made it intransitive (three
+/// machine-checked witnesses; see the substrate module docs for what is spec-mandated
+/// vs a documented extension). Relational `<` / `=` semantics are UNTOUCHED.
+#[inline]
+fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
+    compare_terms(x, y)
 }
 
 /// SPARQL built-in function calls (`STR`, `LANG`, `CONCAT`, `SUBSTR`, type tests, numeric, …).
@@ -8265,6 +8432,22 @@ fn eval_function(
         // `query_with_functions` / `with_functions` in lib.rs). An IRI that is
         // neither stays the same hard query error as before the registry existed.
         F::Custom(nn) => {
+            // [OPUS-4.8] (sq-v411r, survey §B2) MULTIPLICITY(): the SPARQL 1.2 algebra's
+            // `multiplicity` device, parsed as the reserved-IRI `Function::Custom` so the
+            // shared enum stays byte-compatible downstream. Inside an aggregate argument it
+            // is the bag cardinality (`xsd:integer`) of the current group member's solution
+            // within its group multiset, so `SUM(?x * MULTIPLICITY())` is the multiset-
+            // weighted sum. The evaluator installs the per-member value before each
+            // `eval_expr`; OUTSIDE an aggregate the context is absent and the call is an
+            // expression error (only meaningful over a multiset). Checked BEFORE the cast /
+            // registry so the reserved IRI can never be shadowed. NOT a W3C-standard
+            // callable builtin — see the README.
+            if args.is_empty() && nn.as_str() == MULTIPLICITY_FN_IRI {
+                return Ok(match multiplicity::current() {
+                    Some(card) => Value::Num(Num::Int(card as i64)),
+                    None => Value::Error,
+                });
+            }
             let mut vals = Vec::with_capacity(args.len());
             for i in 0..args.len() {
                 vals.push(ev(i)?);
@@ -10731,7 +10914,7 @@ mod path_pushdown_tests {
 #[cfg(all(test, feature = "service"))]
 mod service_exec_tests {
     use super::*;
-    use crate::service::Transport;
+    use sparq_engine_service::service::Transport;
 
     /// Parse a query to its top-level `GraphPattern` (Select), ready for `eval_select`.
     fn pattern(sparql: &str) -> spargebra::algebra::GraphPattern {
@@ -10746,6 +10929,26 @@ mod service_exec_tests {
         fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
             Ok(self.0.to_string())
         }
+    }
+    /// Returns an owned body, so a test can build a valid-rows-then-malformed document
+    /// at runtime to drive the SILENT-error-mid-stream path. [OPUS-4.8] (sq-my8wd.4)
+    struct CannedOwned(String);
+    impl Transport for CannedOwned {
+        fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+    }
+    /// An SRJ document that streams ONE valid binding for `vars` (a long literal on the
+    /// last var, so interning it charges the byte budget) then a MALFORMED second
+    /// binding, so the streaming parser delivers row 0 to the sink and then errors —
+    /// the exact adversarial shape the SILENT-rollback fix must neutralise. [OPUS-4.8]
+    fn valid_then_malformed_srj(head_and_first_row: &str, big_literal: &str) -> String {
+        let mut body = String::from(head_and_first_row);
+        body.push_str(big_literal);
+        // Close the first (valid) binding, comma, then a malformed second binding whose
+        // value is an invalid JSON token (`%`), then close results.
+        body.push_str(r#""}},{"o":{"type":"literal","value":%}}]}}"#);
+        body
     }
     struct Boom;
     impl Transport for Boom {
@@ -10784,6 +10987,67 @@ mod service_exec_tests {
         );
         let res = eval_select(&g, &p).unwrap();
         assert_eq!(res.rows.len(), 1, "SILENT -> identity -> local row survives");
+    }
+
+    // -------------------------------------------------------------------------
+    // [OPUS-4.8] (sq-my8wd.4) SILENT-error-MID-STREAM behaviour-neutrality (Copilot
+    // review of PR #1424, threads on eval_service + bound_join_to_endpoint).
+    //
+    // The streaming path interns each remote row AS IT PARSES, which charges the
+    // `LocalVocab` byte budget (`intern` -> `budget::add_bytes`). The pre-streaming
+    // collect-then-intern-on-success path interned NOTHING on a swallowed (SILENT)
+    // error, so it charged 0 bytes. Without the rollback these tests pin, a SILENT
+    // SERVICE whose response streams a row then errors would RETAIN that row's intern
+    // and its byte charge — tripping a `max_bytes` budget the SILENT fallback (join
+    // identity) otherwise fits, turning a query the old path ANSWERED into a
+    // "query budget exceeded" error. That is an observable, non-neutral result
+    // difference — hence a fix, not just documentation. The budget is deliberately
+    // tight so the single discarded remote row's charge alone would trip it.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn service_silent_midstream_rollback_verbatim_neutral_under_byte_budget() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        let big = "A".repeat(120);
+        let body = valid_then_malformed_srj(
+            r#"{"head":{"vars":["o"]},"results":{"bindings":[{"o":{"type":"literal","value":""#,
+            &big,
+        );
+        let _t = service_transport::install(Box::new(CannedOwned(body)));
+        // Standalone SERVICE (no left bindings to push) -> verbatim `eval_service`.
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?o WHERE \
+             { SERVICE SILENT <http://remote/> { ?o ex:p ?x } }",
+        );
+        // A cap the ONE discarded remote literal (interned twice) blows, but the SILENT
+        // fallback's own working set (one identity row) fits well under.
+        let b = crate::QueryBudget { max_bytes: Some(64), ..crate::QueryBudget::unlimited() };
+        let _bg = budget::install(&b);
+        let res = eval_select(&g, &p)
+            .expect("SILENT mid-stream error must roll back the discarded row's byte charge");
+        assert_eq!(res.rows.len(), 1, "SILENT verbatim -> identity -> one (unbound ?o) row");
+    }
+
+    #[test]
+    fn service_silent_midstream_rollback_boundjoin_neutral_under_byte_budget() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        let big = "A".repeat(120);
+        let body = valid_then_malformed_srj(
+            r#"{"head":{"vars":["s","o"]},"results":{"bindings":[{"s":{"type":"uri","value":"http://ex/a"},"o":{"type":"literal","value":""#,
+            &big,
+        );
+        let _t = service_transport::install(Box::new(CannedOwned(body)));
+        // `?s` is bound by the left BGP and shared with the SERVICE -> bind-join pushdown,
+        // so this exercises the `bound_join_to_endpoint` SILENT arm.
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE \
+             { ?s a ex:T . SERVICE SILENT <http://remote/> { ?s ex:p ?o } }",
+        );
+        let b = crate::QueryBudget { max_bytes: Some(64), ..crate::QueryBudget::unlimited() };
+        let _bg = budget::install(&b);
+        let res = eval_select(&g, &p)
+            .expect("bind-join SILENT mid-stream error must roll back the discarded row's byte charge");
+        assert_eq!(res.rows.len(), 1, "SILENT block failure -> identity -> local ?s=ex:a row survives");
     }
 
     #[test]
@@ -10896,7 +11160,7 @@ mod service_exec_tests {
         }));
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
-        let res = crate::service::with_service_bound_join_block_size(1, || {
+        let res = sparq_engine_service::service::with_service_bound_join_block_size(1, || {
             eval_select(&three_persons(), &pattern(q)).unwrap()
         });
         assert_eq!(res.rows.len(), 2);
@@ -11121,30 +11385,168 @@ mod service_exec_tests {
     }
 
     // ---------------------------------------------------------------------
-    // Per-query timeout wired to the QueryBudget deadline. [OPUS-4.8] (sq-d4p)
+    // Per-query remote-request cap for high-cardinality SERVICE ?ep. [OPUS-4.8]
+    // (sq-b93pv). The cap bounds the number of DISTINCT endpoints a single
+    // `SERVICE ?ep` may dial, enforced PRE-HTTP: when the cap fires, the mock
+    // transport must record ZERO requests (proof the bound is before dispatch, not
+    // a post-HTTP cancellation).
     // ---------------------------------------------------------------------
 
+    /// `local` data binding `n` distinct persons each to a DISTINCT endpoint IRI
+    /// (`http://r0/`, `http://r1/`, …) — i.e. a high-cardinality `?ep`.
+    fn persons_with_distinct_endpoints(n: usize) -> Graph {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..n {
+            ttl.push_str(&format!("ex:p{i} ex:ep <http://r{i}/> .\n"));
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
     #[test]
-    fn http_transport_timeout_tracks_budget() {
-        use crate::service::{HttpTransport, DEFAULT_SERVICE_TIMEOUT, MIN_SERVICE_TIMEOUT};
-        use std::time::Duration;
-        // No deadline -> the built-in default in full.
-        assert_eq!(HttpTransport::with_budget(None).timeout_for_test(), DEFAULT_SERVICE_TIMEOUT);
-        // A deadline tighter than the default caps the round-trip to the remaining time.
-        let tight = Duration::from_secs(5);
-        assert_eq!(HttpTransport::with_budget(Some(tight)).timeout_for_test(), tight);
-        // A deadline looser than the default never RAISES the timeout above the default.
-        let loose = Duration::from_secs(120);
-        assert_eq!(
-            HttpTransport::with_budget(Some(loose)).timeout_for_test(),
-            DEFAULT_SERVICE_TIMEOUT
+    fn remote_request_cap_fires_before_dispatch() {
+        // 5 distinct endpoints, cap 3 => the query is REFUSED, and the mock records
+        // NO requests (the bound is enforced pre-HTTP, before any socket is opened).
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs: std::collections::HashMap::new(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let p = pattern(q);
+        let err = sparq_engine_service::service::with_service_remote_request_cap(3, || {
+            eval_select(&persons_with_distinct_endpoints(5), &p)
+        })
+        .unwrap_err();
+        // Typed refusal: carries the stable marker the server classifies on.
+        assert!(
+            err.contains(sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER),
+            "cap error must carry the marker, got: {err}"
         );
-        // An already-expired (zero) deadline still gets the small non-zero floor.
-        assert_eq!(
-            HttpTransport::with_budget(Some(Duration::ZERO)).timeout_for_test(),
-            MIN_SERVICE_TIMEOUT
+        // PRE-DISPATCH: not one remote request was made.
+        assert!(
+            seen.borrow().is_empty(),
+            "cap must fire BEFORE any HTTP dispatch; mock saw: {:?}",
+            seen.borrow()
         );
     }
+
+    #[test]
+    fn remote_request_cap_not_swallowed_by_silent() {
+        // The cap is a resource-policy refusal, not a remote failure: SERVICE SILENT
+        // must NOT mask it (SILENT only masks an endpoint being unreachable).
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs: std::collections::HashMap::new(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:name ?name } }";
+        let p = pattern(q);
+        let err = sparq_engine_service::service::with_service_remote_request_cap(2, || {
+            eval_select(&persons_with_distinct_endpoints(5), &p)
+        })
+        .unwrap_err();
+        assert!(
+            err.contains(sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER),
+            "SILENT must not swallow the cap refusal, got: {err}"
+        );
+        assert!(seen.borrow().is_empty(), "cap fires before dispatch even under SILENT");
+    }
+
+    #[test]
+    fn remote_request_cap_at_or_under_limit_passes() {
+        // 2 distinct endpoints, cap 2 (the boundary: > cap fires, == cap is allowed).
+        // Each endpoint knows its own person's name; the query must succeed normally.
+        let r0 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:p0 ex:name \"P0\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:p1 ex:name \"P1\" .",
+            "turtle",
+        )
+        .unwrap();
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r0/".to_string(), r0);
+        graphs.insert("http://r1/".to_string(), r1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let p = pattern(q);
+        let res = sparq_engine_service::service::with_service_remote_request_cap(2, || {
+            eval_select(&persons_with_distinct_endpoints(2), &p)
+        })
+        .expect("at-cap query is allowed");
+        assert_eq!(res.rows.len(), 2, "both persons resolved against their own endpoint");
+        // Exactly the two distinct endpoints were dialled.
+        let dialled: std::collections::HashSet<String> =
+            seen.borrow().iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(dialled.len(), 2, "dialled exactly the two permitted endpoints");
+    }
+
+    #[test]
+    fn remote_request_cap_default_off_is_unchanged() {
+        // DEFAULT (no cap installed): a high-cardinality SERVICE ?ep dispatches to ALL
+        // distinct endpoints exactly as before — the cap adds nothing to normal queries.
+        let mut graphs = std::collections::HashMap::new();
+        for i in 0..5 {
+            graphs.insert(
+                format!("http://r{i}/"),
+                Graph::load_str(
+                    &format!("@prefix ex: <http://ex/> . ex:p{i} ex:name \"P{i}\" ."),
+                    "turtle",
+                )
+                .unwrap(),
+            );
+        }
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        // No `with_service_remote_request_cap` scope => uncapped (the default).
+        let res = eval_select(&persons_with_distinct_endpoints(5), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 5, "all five persons resolved (no cap by default)");
+        let dialled: std::collections::HashSet<String> =
+            seen.borrow().iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(dialled.len(), 5, "all five distinct endpoints dialled by default");
+    }
+
+    #[test]
+    fn remote_request_cap_does_not_bound_concrete_endpoint() {
+        // A concrete-IRI SERVICE is a SINGLE endpoint; even cap 0 (refuse any variable
+        // dispatch) must not touch it — the cap is scoped to the variable-endpoint
+        // fan-out, not the per-block request count of a single endpoint.
+        let g = three_persons();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteGraph {
+            remote: remote_names(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
+        let res = sparq_engine_service::service::with_service_remote_request_cap(0, || {
+            eval_select(&g, &pattern(q))
+        })
+        .expect("concrete-IRI SERVICE is unaffected by the variable-endpoint cap");
+        assert_eq!(res.rows.len(), 2, "alice + bob matched, cap did not interfere");
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-query timeout wired to the QueryBudget deadline. [OPUS-4.8] (sq-d4p)
+    // (The HttpTransport timeout-math test `http_transport_timeout_tracks_budget`
+    // MOVED with the transport to `sparq-engine-service`, seam A2 / sq-6vshe.4 — its
+    // `timeout_for_test` accessor is `#[cfg(test)]` there. The caller side —
+    // `budget::remaining_timeout` feeding `with_budget` — stays tested below.)
+    // ---------------------------------------------------------------------
 
     #[test]
     fn budget_remaining_timeout_reflects_deadline() {
@@ -11407,5 +11809,1535 @@ mod group_by_unbound_var {
         assert_eq!(r.rows[0][0], None, "?kind unbound");
         // SUM over an all-unbound column is "0"^^xsd:integer (Sum({}) = 0).
         assert_eq!(r.rows[0][1], Some(int_lit(0)));
+    }
+}
+
+/// [OPUS-4.8] (sq-v411r, survey §B2) The SPARQL 1.2 algebra's `multiplicity` device exposed
+/// as a zero-argument extension builtin `MULTIPLICITY()`. These tests drive the REAL query
+/// path (`crate::query`) end-to-end — parse (vendored spargebra) → plan → aggregate eval →
+/// the `F::Multiplicity` dispatch arm reading the per-member thread-local set by
+/// `group_multiplicities` — so the new lines are covered by the coverage ratchet.
+///
+/// The multiset is built with a sub-SELECT that projects away the per-row subject, so several
+/// subjects sharing a value collapse to byte-identical solutions (bag semantics, no implicit
+/// DISTINCT). That gives a group whose distinct members carry a multiplicity > 1, which is the
+/// only configuration in which `MULTIPLICITY()` is observable.
+#[cfg(test)]
+mod multiplicity_builtin {
+    use super::*;
+
+    /// `?x` over `{10×3, 20×2}`: three subjects with value 10, two with value 20. The
+    /// sub-SELECT projects only `?x`, so the outer aggregate sees the bag {10,10,10,20,20}.
+    fn g() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:a ex:v 10 . ex:b ex:v 10 . ex:c ex:v 10 . \
+             ex:d ex:v 20 . ex:e ex:v 20 .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn run(q: &str) -> QueryResult {
+        crate::query(&g(), &format!("PREFIX ex: <http://ex/> {q}")).unwrap()
+    }
+
+    fn int_lit(n: i64) -> Term {
+        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+    }
+
+    /// The headline identity: over the DISTINCT solutions weighted by `MULTIPLICITY()`,
+    /// `SUM(?x * MULTIPLICITY())` equals plain `SUM(?x)` over the bag. 10·3 + 20·2 = 70,
+    /// and 10+10+10+20+20 = 70. This is exactly the `SUM(?x * multiplicity())` example from
+    /// the survey §B2 / `research/sparql12-engine.md` §1.4.
+    #[test]
+    fn weighted_sum_equals_bag_sum() {
+        let r = run(
+            "SELECT (SUM(?x) AS ?bag) (SUM(?x * MULTIPLICITY()) AS ?w) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        );
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Some(int_lit(70)), "plain SUM over the bag");
+        assert_eq!(r.rows[0][1], Some(int_lit(70)), "MULTIPLICITY-weighted SUM must match");
+    }
+
+    /// Bare `SUM(MULTIPLICITY())` over the distinct members sums the bag cardinalities, i.e.
+    /// recovers the total bag size: 3 + 2 = 5 = `COUNT(*)`.
+    #[test]
+    fn sum_of_multiplicities_is_bag_size() {
+        let r = run(
+            "SELECT (SUM(MULTIPLICITY()) AS ?n) (COUNT(*) AS ?c) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        );
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Some(int_lit(5)), "Σ multiplicity = bag size");
+        assert_eq!(r.rows[0][1], Some(int_lit(5)), "COUNT(*) = bag size");
+    }
+
+    /// Per-GROUP multiplicity: grouping by `?x` gives one group per distinct value, each a
+    /// single distinct member whose multiplicity is the group's bag count (3 for x=10, 2 for
+    /// x=20). `MAX(MULTIPLICITY())` surfaces that count directly per group.
+    #[test]
+    fn per_group_multiplicity_in_grouped_select() {
+        let r = run(
+            "SELECT ?x (MAX(MULTIPLICITY()) AS ?m) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } } GROUP BY ?x ORDER BY ?x",
+        );
+        assert_eq!(r.rows.len(), 2, "two distinct values ⇒ two groups");
+        // ORDER BY ?x: 10 then 20.
+        assert_eq!(r.rows[0], vec![Some(int_lit(10)), Some(int_lit(3))]);
+        assert_eq!(r.rows[1], vec![Some(int_lit(20)), Some(int_lit(2))]);
+    }
+
+    /// A group with NO duplicates: every distinct member has multiplicity 1, so
+    /// `SUM(?x * MULTIPLICITY())` is just `SUM(?x)` and `MULTIPLICITY()` is uniformly 1.
+    #[test]
+    fn all_unique_solutions_have_multiplicity_one() {
+        let graph = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:v 1 . ex:b ex:v 2 . ex:c ex:v 3 .",
+            "turtle",
+        )
+        .unwrap();
+        let r = crate::query(
+            &graph,
+            "PREFIX ex: <http://ex/> SELECT (SUM(?x * MULTIPLICITY()) AS ?w) (SUM(MULTIPLICITY()) AS ?n) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0][0], Some(int_lit(6)), "1+2+3, each ×1");
+        assert_eq!(r.rows[0][1], Some(int_lit(3)), "three distinct members, each multiplicity 1");
+    }
+
+    /// `MULTIPLICITY()` is only meaningful inside an aggregate argument. Used in a plain BIND
+    /// (no aggregate context), the thread-local context is absent, so it is an expression
+    /// error → the BIND leaves `?m` UNBOUND (SPARQL error discipline), NOT a hard failure.
+    #[test]
+    fn multiplicity_outside_aggregate_is_unbound() {
+        let r = run("SELECT ?s ?m WHERE { ?s ex:v ?x . BIND(MULTIPLICITY() AS ?m) } ORDER BY ?s");
+        assert_eq!(r.rows.len(), 5, "one row per matching subject");
+        for row in &r.rows {
+            assert!(row[0].is_some(), "?s bound");
+            assert_eq!(row[1], None, "MULTIPLICITY() outside an aggregate is an error ⇒ ?m unbound");
+        }
+    }
+
+    /// The common case — an aggregate that never mentions `MULTIPLICITY()` — is byte-for-byte
+    /// unchanged: the duplicate-collapsing path is not taken, the full bag is folded. Plain
+    /// `SUM(?x)` over {10×3,20×2} stays 70 (NOT the distinct-set 30).
+    #[test]
+    fn aggregate_without_multiplicity_folds_full_bag() {
+        let r = run("SELECT (SUM(?x) AS ?bag) (COUNT(?x) AS ?c) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }");
+        assert_eq!(r.rows[0][0], Some(int_lit(70)), "full bag sum, no distinct collapse");
+        assert_eq!(r.rows[0][1], Some(int_lit(5)), "COUNT folds the full bag");
+    }
+
+    /// Direct unit coverage of the `group_multiplicities` helper: it returns `None` when the
+    /// argument never calls `MULTIPLICITY()` (so the common path pays nothing) and the
+    /// distinct-with-cardinalities table when it does.
+    #[test]
+    fn group_multiplicities_helper_gating() {
+        use spargebra::algebra::Function;
+        let b = Bindings::unsorted(
+            vec![],
+            vec![
+                std::iter::once(dict::INLINE_BASE + 10).collect::<Row>(),
+                std::iter::once(dict::INLINE_BASE + 10).collect::<Row>(),
+                std::iter::once(dict::INLINE_BASE + 20).collect::<Row>(),
+            ],
+        );
+        let members = [0usize, 1, 2];
+        // A variable-only argument: no MULTIPLICITY() ⇒ None (full-bag path).
+        let var = Expression::Variable(Variable::new_unchecked("x"));
+        assert!(group_multiplicities(&b, &members, &var).is_none());
+        // A MULTIPLICITY() call ⇒ distinct rows + cardinalities, first-seen order.
+        let mult = Expression::FunctionCall(
+            Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+            vec![],
+        );
+        let table = group_multiplicities(&b, &members, &mult).expect("multiplicity present ⇒ Some");
+        let cards: Vec<u64> = table.iter().map(|&(_, c)| c).collect();
+        assert_eq!(cards, vec![2, 1], "two distinct rows: first with cardinality 2, second 1");
+    }
+
+    /// [OPUS-4.8] (sq-v411r) Direct unit coverage of `expr_uses_multiplicity` across EVERY
+    /// arm of its expression-tree walk. This boolean is load-bearing for correctness — it is
+    /// the gate that decides whether `eval_aggregate` / `eval_custom_aggregate` take the
+    /// distinct-collapsing (`group_multiplicities`-built) path, so a missed/false detection
+    /// would silently fold the wrong multiset. The query-level tests above reach only the
+    /// `Multiply`, `FunctionCall(Custom)` and `Variable` arms; this exercises the leaves
+    /// (`NamedNode`/`Literal`/`Variable`/`Bound`/`Exists`), the binary/unary recursion, the
+    /// `If`/`In`/`Coalesce`/`FunctionCall(args)` arms, and — crucially — the `Exists`
+    /// non-descent contract (a `MULTIPLICITY()` buried inside an `EXISTS` belongs to that
+    /// sub-query's scope and must NOT be reported here).
+    #[test]
+    fn expr_uses_multiplicity_walks_every_arm() {
+        use spargebra::algebra::{Function, GraphPattern};
+
+        let mult = || {
+            Expression::FunctionCall(
+                Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+                vec![],
+            )
+        };
+        let var = || Expression::Variable(Variable::new_unchecked("x"));
+        let lit = || Expression::Literal(oxrdf::Literal::from(1));
+        let bx = Box::new;
+
+        // --- Leaves: never contain MULTIPLICITY() on their own. ---
+        assert!(!expr_uses_multiplicity(&var()));
+        assert!(!expr_uses_multiplicity(&lit()));
+        assert!(!expr_uses_multiplicity(&Expression::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/p"
+        ))));
+        assert!(!expr_uses_multiplicity(&Expression::Bound(Variable::new_unchecked("y"))));
+
+        // A `MULTIPLICITY()` with arguments is NOT the reserved zero-arg builtin ⇒ false
+        // (the `if args.is_empty()` guard), and a non-Custom function with no inner
+        // MULTIPLICITY() is false too.
+        let mult_with_args = Expression::FunctionCall(
+            Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+            vec![var()],
+        );
+        assert!(!expr_uses_multiplicity(&mult_with_args), "zero-arg guard: args ⇒ not the builtin");
+
+        // --- The matching leaf. ---
+        assert!(expr_uses_multiplicity(&mult()), "the reserved zero-arg call IS detected");
+
+        // --- Binary recursion (left and right branch). ---
+        assert!(expr_uses_multiplicity(&Expression::Multiply(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Add(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Or(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::And(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Equal(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::SameTerm(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Greater(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Less(bx(mult()), bx(var()))));
+        assert!(!expr_uses_multiplicity(&Expression::Subtract(bx(var()), bx(lit()))));
+
+        // --- Unary recursion. ---
+        assert!(expr_uses_multiplicity(&Expression::UnaryMinus(bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Not(bx(mult()))));
+        assert!(!expr_uses_multiplicity(&Expression::UnaryPlus(bx(var()))));
+
+        // --- Ternary `If` (each of the three positions). ---
+        assert!(expr_uses_multiplicity(&Expression::If(bx(mult()), bx(var()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(mult()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(mult()))));
+        assert!(!expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(var()))));
+
+        // --- List arms: `In` (head + list), `Coalesce`, `FunctionCall(_, args)`. ---
+        assert!(expr_uses_multiplicity(&Expression::In(bx(mult()), vec![var()])));
+        assert!(expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit(), mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit()])));
+        assert!(expr_uses_multiplicity(&Expression::Coalesce(vec![var(), mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::Coalesce(vec![var(), lit()])));
+        assert!(expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![var()])));
+
+        // --- The `Exists` non-descent contract: a MULTIPLICITY() inside an EXISTS belongs to
+        //     that sub-query's scope, so it must NOT be reported for THIS aggregate. ---
+        let exists_with_mult = Expression::Exists(Box::new(GraphPattern::Filter {
+            expr: mult(),
+            inner: Box::new(GraphPattern::Bgp { patterns: vec![] }),
+        }));
+        assert!(
+            !expr_uses_multiplicity(&exists_with_mult),
+            "MULTIPLICITY() inside EXISTS belongs to the sub-query scope, not descended into"
+        );
+        // ...but a MULTIPLICITY() in the OUTER branch of an expression whose other branch is an
+        // EXISTS is still detected (proves we recurse around, not into, the Exists).
+        assert!(expr_uses_multiplicity(&Expression::And(bx(exists_with_mult), bx(mult()))));
+    }
+
+    /// [OPUS-4.8] (sq-v411r) Direct unit coverage of the `multiplicity` thread-local context
+    /// and its RAII `Guard`: `current()` is `None` outside any `set`; `set(k)` makes
+    /// `current()` read `Some(k)`; a NESTED `set` shadows and the inner guard's drop RESTORES
+    /// the outer value (the re-entrancy contract that stops an `EXISTS`/sub-query inside an
+    /// aggregate argument from observing a stale multiplicity); and dropping the outer guard
+    /// clears the context back to `None`.
+    #[test]
+    fn multiplicity_context_guard_nests_and_restores() {
+        assert_eq!(multiplicity::current(), None, "no context outside an aggregate");
+        {
+            let _outer = multiplicity::set(3);
+            assert_eq!(multiplicity::current(), Some(3));
+            {
+                let _inner = multiplicity::set(7);
+                assert_eq!(multiplicity::current(), Some(7), "inner set shadows outer");
+            }
+            assert_eq!(multiplicity::current(), Some(3), "inner guard drop restores outer");
+        }
+        assert_eq!(multiplicity::current(), None, "outer guard drop clears the context");
+    }
+}
+
+/// [OPUS-4.8] sq-rikm7 — ORDER BY / MIN / MAX agree with relational `=`/`<` on
+/// f64-collapsed DISTINCT numeric values (integers beyond 2^53, high-precision decimals).
+///
+/// The lenient numeric arm coerces operands to f64, whose rounding COLLAPSES two distinct
+/// exact values that share one f64. The relational operators (`cmp_expr`/`equal_expr`) and
+/// MIN/MAX (`num_compare`) already recheck exactly; before this fix ORDER BY did NOT (the
+/// substrate `compare_terms` numeric arm and the engine's numeric SortCell fast path both
+/// collapsed), so ORDER BY disagreed with them. These tests pin the agreement and FAIL if
+/// either recheck (the `compare_terms` `exact_cmp` hook or the `cmp_sort_num` tie recheck)
+/// is reverted.
+#[cfg(test)]
+mod f64_collapse_order_agreement {
+    use super::*;
+
+    fn lex(t: &Option<Term>) -> String {
+        match t {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            // Positional arg (not inline `{other:?}`) to dodge the CodeQL
+            // `rust/unused-variable` false positive. [OPUS-4.8]
+            other => panic!("expected a literal sort key, got {:?}", other),
+        }
+    }
+
+    fn order_by(g: &Graph, clause: &str) -> Vec<String> {
+        let q = format!("PREFIX ex: <http://ex/> SELECT ?v WHERE {{ ?s ex:v ?v }} ORDER BY {}", clause);
+        crate::query(g, &q).unwrap().rows.iter().map(|r| lex(&r[0])).collect()
+    }
+
+    #[test]
+    fn order_by_agrees_with_minmax_on_big_integers_beyond_2_53() {
+        // 2^53 (…992) and 2^53 + 1 (…993) share ONE f64 (…993 is not representable). Both
+        // fit i64, so the graph interns them as exact `xsd:integer` terms; the numerics
+        // cache stores only f64, collapsing them. The ids are laid out big-then-small so a
+        // COLLAPSE (Equal) sort would keep the input order — the ASC/DESC checks catch it.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> .\n\
+             ex:a ex:v 9007199254740993 .\n\
+             ex:b ex:v 9007199254740992 .\n",
+            "turtle",
+        )
+        .unwrap();
+        let small = "9007199254740992".to_string();
+        let big = "9007199254740993".to_string();
+
+        // ORDER BY orders by VALUE now — ASC and DESC are proper reverses (pre-fix they were
+        // IDENTICAL, both the collapsed input order: THIS is the revert detector).
+        assert_eq!(order_by(&g, "ASC(?v)"), vec![small.clone(), big.clone()]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec![big.clone(), small.clone()]);
+
+        // MIN/MAX (already exact via `num_compare`) agree with ORDER BY's endpoints.
+        let agg = crate::query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (MIN(?v) AS ?mn) (MAX(?v) AS ?mx) WHERE { ?s ex:v ?v }",
+        )
+        .unwrap();
+        assert_eq!(lex(&agg.rows[0][0]), small, "MIN == ORDER BY ASC head");
+        assert_eq!(lex(&agg.rows[0][1]), big, "MAX == ORDER BY DESC head");
+
+        // And relational `<` sees them distinct (b < a): the FILTER keeps exactly the b row.
+        let rel = crate::query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?vb WHERE { ex:b ex:v ?vb . ex:a ex:v ?va . FILTER(?vb < ?va) }",
+        )
+        .unwrap();
+        assert_eq!(rel.rows.len(), 1, "b < a must hold exactly");
+        assert_eq!(lex(&rel.rows[0][0]), small);
+    }
+
+    #[test]
+    fn order_by_orders_high_precision_decimals_by_value() {
+        // Two xsd:decimals differing only in the 18th fraction digit — they share one f64.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:a ex:v \"0.123456789012345679\"^^xsd:decimal .\n\
+             ex:b ex:v \"0.123456789012345678\"^^xsd:decimal .\n",
+            "turtle",
+        )
+        .unwrap();
+        let small = "0.123456789012345678".to_string();
+        let big = "0.123456789012345679".to_string();
+        assert_eq!(order_by(&g, "ASC(?v)"), vec![small.clone(), big.clone()]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec![big, small]);
+    }
+
+    #[test]
+    fn compare_values_exact_rechecks_f64_collapsed_numeric_values() {
+        // Directly exercises the substrate `exact_cmp` hook the engine implements for `Value`
+        // (the general `compare_values` path — the MIN/MAX mixed-type fallback and any consumer
+        // that orders numeric Values). Two integers beyond 2^53 share an f64 yet must order.
+        let a = Value::Term(Term::Literal(Literal::new_typed_literal("9007199254740993", xsd::INTEGER)));
+        let b = Value::Term(Term::Literal(Literal::new_typed_literal("9007199254740992", xsd::INTEGER)));
+        assert_eq!(as_num(&a), as_num(&b), "the f64 arm COLLAPSES the pair");
+        assert_eq!(compare_values(&a, &b), Some(Ordering::Greater));
+        assert_eq!(compare_values(&b, &a), Some(Ordering::Less));
+
+        // High-precision decimals sharing one f64.
+        let c = Value::Term(Term::Literal(Literal::new_typed_literal("0.123456789012345679", xsd::DECIMAL)));
+        let d = Value::Term(Term::Literal(Literal::new_typed_literal("0.123456789012345678", xsd::DECIMAL)));
+        assert_eq!(as_num(&c), as_num(&d));
+        assert_eq!(compare_values(&c, &d), Some(Ordering::Greater));
+
+        // A genuinely equal-VALUED cross-type pair stays Equal (no spurious inequality):
+        // 1 (integer) vs 1.0 (decimal).
+        let one_int = Value::Term(Term::Literal(Literal::new_typed_literal("1", xsd::INTEGER)));
+        let one_dec = Value::Num(Num::Dec(Dec { mant: 10, scale: 1 }));
+        assert_eq!(compare_values(&one_int, &one_dec), Some(Ordering::Equal));
+
+        // Two xsd:doubles that are f64-equal ARE equal: the engine's `exact_cmp` delegates to
+        // `num_compare`, whose f64 fallback (doubles have no exact decimal tier) returns Equal
+        // — so the collapse is correctly left in place, never a spurious inequality.
+        let dbl = Value::Num(Num::Double(9_007_199_254_740_992.0));
+        assert_eq!(dbl.exact_cmp(&dbl), Some(Ordering::Equal));
+        // A non-numeric operand has no exact recheck at all -> `None` (the f64 verdict stands).
+        let iri = Value::Term(Term::NamedNode(oxrdf::NamedNode::new("http://ex/x").unwrap()));
+        assert_eq!(dbl.exact_cmp(&iri), None, "non-numeric -> no exact recheck");
+    }
+
+    #[test]
+    fn as_num_routes_through_parse_xsd_f64_agreeing_with_as_numeric() {
+        // [OPUS-4.8] sq-rkzhr: the LENIENT `as_num` (the `CompareTerm::as_f64` seam that
+        // drives ORDER BY / the lenient numeric compare) must accept EXACTLY the double /
+        // float lexicals the EXACT `as_numeric` path accepts. Otherwise the sq-rikm7
+        // f64-collapse recheck can see a literal that is "numeric-and-equal" under `as_f64`
+        // yet yields no exact-recheck value (`exact_cmp` -> None) — the very asymmetry
+        // sq-rikm7 removed. `str::parse::<f64>` swallowed the non-XSD `inf`/`infinity`/`nan`
+        // spellings; `parse_xsd_f64` (shared with `as_numeric`) does not.
+        let dbl = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DOUBLE)));
+        let flt = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::FLOAT)));
+
+        // The XSD specials parse (this held via Rust's parser before, and still does).
+        assert_eq!(as_num(&dbl("INF")), Some(f64::INFINITY));
+        assert_eq!(as_num(&dbl("+INF")), Some(f64::INFINITY));
+        assert_eq!(as_num(&dbl("-INF")), Some(f64::NEG_INFINITY));
+        assert!(matches!(as_num(&dbl("NaN")), Some(n) if n.is_nan()));
+        assert_eq!(as_num(&flt("INF")), Some(f64::INFINITY));
+        assert!(matches!(as_num(&flt("NaN")), Some(n) if n.is_nan()));
+
+        // Non-XSD spellings Rust's `str::parse::<f64>` accepts are now REJECTED, matching
+        // `as_numeric` (before the fix `as_num` accepted them -> the two paths disagreed).
+        for bad in ["inf", "+inf", "infinity", "-infinity", "nan", "Infinity"] {
+            // Positional args dodge the CodeQL `rust/unused-variable` false positive. [OPUS-4.8]
+            assert_eq!(as_num(&dbl(bad)), None, "as_num must reject non-XSD spelling {:?}", bad);
+            assert!(as_numeric(&dbl(bad)).is_none(), "as_numeric already rejects {:?}", bad);
+        }
+
+        // The alignment invariant: the lenient and exact paths agree on presence for EVERY
+        // lexical — valid specials, ordinary numbers, non-XSD spellings, and non-numerics.
+        for s in ["INF", "+INF", "-INF", "NaN", "6", "6.0E0", "2.0E-1", "inf", "nan", "hello"] {
+            assert_eq!(
+                as_num(&dbl(s)).is_some(),
+                as_numeric(&dbl(s)).is_some(),
+                "as_num / as_numeric disagree on the validity of {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn compare_orders_double_infinities_and_isolates_nan() {
+        // [OPUS-4.8] sq-rkzhr: with `as_num` routed through `parse_xsd_f64`, the lenient
+        // compare seam orders the XSD floating specials by value (-INF < finite < +INF).
+        // [FABLE-5] sq-wjl8i: NaN is TOTALISED into the order — it sorts FIRST (before
+        // -INF) and ties with itself, instead of the former `None` (which callers mapped
+        // to Equal, making NaN "equal" to every numeric — the partiality witness).
+        // Relational `<` / `=` keep their NaN type-error semantics untouched.
+        let d = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DOUBLE)));
+        let (neg_inf, inf, five, nan) = (d("-INF"), d("INF"), d("5.0E0"), d("NaN"));
+        assert_eq!(compare_values(&neg_inf, &five), Some(Ordering::Less));
+        assert_eq!(compare_values(&five, &inf), Some(Ordering::Less));
+        assert_eq!(compare_values(&neg_inf, &inf), Some(Ordering::Less));
+        assert_eq!(compare_values(&inf, &inf), Some(Ordering::Equal));
+        assert_eq!(compare_values(&nan, &five), Some(Ordering::Less));
+        assert_eq!(compare_values(&five, &nan), Some(Ordering::Greater));
+        assert_eq!(compare_values(&nan, &neg_inf), Some(Ordering::Less));
+        assert_eq!(compare_values(&nan, &nan), Some(Ordering::Equal));
+
+        // End-to-end ORDER BY over stored double specials exercises the REAL query path
+        // (NaN routes through the general sort cell: the numerics cache uses NaN as its
+        // not-numeric sentinel, so the fast numeric cell never sees it).
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:a ex:v \"-INF\"^^xsd:double .\n\
+             ex:b ex:v \"5.0E0\"^^xsd:double .\n\
+             ex:c ex:v \"INF\"^^xsd:double .\n\
+             ex:d ex:v \"NaN\"^^xsd:double .\n",
+            "turtle",
+        )
+        .unwrap();
+        assert_eq!(order_by(&g, "ASC(?v)"), vec!["NaN", "-INF", "5.0E0", "INF"]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec!["INF", "5.0E0", "-INF", "NaN"]);
+    }
+
+    #[test]
+    fn order_by_mixed_numeric_string_temporal_column_is_deterministic() {
+        // A single ORDER BY column mixing a numeric graph term, a plain-string literal and an
+        // xsd:dateTime exercises the `Num`-vs-`Val` / `Num`-vs-`Temp` sort-cell cross arms
+        // (which reconstruct the `Val(Num::Double)` representation and defer to the shared
+        // `compare_values`). [FABLE-5] sq-wjl8i: cross-KIND literal pairs rank by
+        // `LiteralKind` (numeric < dateTime < string) — the exact order is additionally
+        // pinned end-to-end by `order_by_cross_kind_ranks_and_collapse_is_exact`; this test
+        // keeps the permutation/reversibility shape claims.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:n ex:v 5 .\n\
+             ex:s ex:v \"apple\" .\n\
+             ex:t ex:v \"2024-03-15T13:00:00Z\"^^xsd:dateTime .\n",
+            "turtle",
+        )
+        .unwrap();
+        // The result is a stable, deterministic permutation (the exact cross-type tie order is
+        // spec-unconstrained, but must not panic and must round-trip every row exactly once).
+        let asc = order_by(&g, "ASC(?v)");
+        let desc = order_by(&g, "DESC(?v)");
+        assert_eq!(asc.len(), 3);
+        assert_eq!(desc.len(), 3);
+        let mut sorted_asc = asc.clone();
+        sorted_asc.sort();
+        let mut sorted_desc = desc.clone();
+        sorted_desc.sort();
+        assert_eq!(sorted_asc, sorted_desc, "ASC and DESC are permutations of the same rows");
+        // DESC is the exact reverse of ASC (total order over distinct-valued rows).
+        let mut rev = asc.clone();
+        rev.reverse();
+        assert_eq!(rev, desc, "DESC(?v) is ASC(?v) reversed");
+    }
+
+    /// [FABLE-5] sq-wjl8i end-to-end: the kind-first rank and the exact mixed-tier
+    /// collapse recheck through the REAL query path (both the numeric sort-cell fast
+    /// path — all-numeric column — and the mixed-kind `compare_values` path).
+    #[test]
+    fn order_by_cross_kind_ranks_and_collapse_is_exact() {
+        // All-NUMERIC column at the 2^53 collapse: int 2^53, int 2^53+1 and the double
+        // carrying their shared f64 image. The exact order is 2^53 = 2^53E0 < 2^53+1
+        // (the former three-way collapsed tie was intransitive against the exact
+        // int/int order). The int/int and int/double ties are decided by
+        // `cmp_sort_num`'s exact recheck (the fast numeric sort cells).
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:a ex:v \"9007199254740993\"^^xsd:integer .\n\
+             ex:b ex:v \"9007199254740992E0\"^^xsd:double .\n\
+             ex:c ex:v \"9007199254740992\"^^xsd:integer .\n",
+            "turtle",
+        )
+        .unwrap();
+        let asc = order_by(&g, "ASC(?v)");
+        // The equal pair (2^53, 2^53E0) keeps input order (stable sort); both precede 2^53+1.
+        assert_eq!(asc[2], "9007199254740993", "the collapsed neighbour sorts strictly last");
+        assert!(asc[..2].contains(&"9007199254740992E0".to_string()));
+        assert!(asc[..2].contains(&"9007199254740992".to_string()));
+
+        // MIXED-KIND column: every numeric (NaN included) sorts before the boolean,
+        // the dateTime before the date, both before the plain string, the string
+        // before the language-tagged literal, and the unknown-datatype literal last —
+        // the documented LiteralKind rank; the digit-string "11" can no longer
+        // interleave lexically between numerics 10 and 2 (the sq-wjl8i witness).
+        let g2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:s ex:v \"11\" .\n\
+             ex:n1 ex:v 10 .\n\
+             ex:n2 ex:v 2 .\n\
+             ex:nan ex:v \"NaN\"^^xsd:double .\n\
+             ex:bt ex:v true .\n\
+             ex:dt ex:v \"2024-03-15T13:00:00Z\"^^xsd:dateTime .\n\
+             ex:d ex:v \"2020-01-01\"^^xsd:date .\n\
+             ex:lang ex:v \"chat\"@fr .\n\
+             ex:odd ex:v \"weird\"^^ex:custom .\n",
+            "turtle",
+        )
+        .unwrap();
+        assert_eq!(
+            order_by(&g2, "ASC(?v)"),
+            vec!["NaN", "2", "10", "true", "2024-03-15T13:00:00Z", "2020-01-01", "11", "chat", "weird"]
+        );
+    }
+}
+
+// [OPUS-4.8] (sq-pntvh.3, M4 Phase 3) Seam-level differential for the columnar residual-FILTER
+// path. The chunk-primitive kernels are unit-tested in `chunk.rs`; this asserts the load-bearing
+// wiring invariant: `apply_filter`'s columnar seam produces `b.rows` BYTE-IDENTICAL (same rows,
+// same order) to the scalar row path over a REAL graph, and DECLINES (falls back to the scalar
+// path) on every column shape not provably identical. Only built under the opt-in `vectorized`
+// feature.
+#[cfg(all(test, feature = "vectorized"))]
+mod columnar_filter_seam {
+    use super::*;
+
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+    /// `n` triples `ex:s{i} ex:age {i}` (integer literal → inline id). Returns
+    /// (graph, subject ids [dict IRIs, NON-inline], age ids [inline integers]).
+    fn ages_graph(n: u32) -> (Graph, Vec<Id>, Vec<Id>) {
+        let mut nt = String::new();
+        for i in 0..n {
+            nt.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{i}\"^^<{XSD_INT}> .\n"));
+        }
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let subj = (0..n)
+            .map(|i| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap())).unwrap())
+            .collect();
+        let age = (0..n)
+            .map(|i| g.id_of(&Term::Literal(Literal::new_typed_literal(i.to_string(), xsd::INTEGER))).unwrap())
+            .collect();
+        (g, subj, age)
+    }
+
+    fn var(name: &str) -> Variable {
+        Variable::new(name).unwrap()
+    }
+
+    fn int_lit(s: &str) -> Expression {
+        Expression::Literal(Literal::new_typed_literal(s, xsd::INTEGER))
+    }
+
+    /// `?v OP konst`.
+    fn mk_filter(op: &str, v: &Variable, konst: Expression) -> Expression {
+        let a = Box::new(Expression::Variable(v.clone()));
+        let k = Box::new(konst);
+        match op {
+            ">" => Expression::Greater(a, k),
+            ">=" => Expression::GreaterOrEqual(a, k),
+            "<" => Expression::Less(a, k),
+            "<=" => Expression::LessOrEqual(a, k),
+            "=" => Expression::Equal(a, k),
+            _ => unreachable!(),
+        }
+    }
+
+    /// The numeric age values (inline column, index 1) of a result row set, in order.
+    fn age_values(g: &Graph, rows: &[Row]) -> Vec<f64> {
+        rows.iter().map(|r| g.numeric_value(r[1]).unwrap()).collect()
+    }
+
+    #[test]
+    fn columnar_seam_is_byte_identical_to_scalar_on_inline_column() {
+        let n = 40u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let local = LocalVocab::default();
+        let age_var = var("age");
+
+        for (op, t) in [
+            (">", "20"), (">=", "20"), ("<", "10"), ("<=", "10"),
+            ("=", "13"), (">", "39"), (">=", "0"), (">", "100"),
+        ] {
+            let expr = mk_filter(op, &age_var, int_lit(t));
+
+            // The seam ENGAGES for an all-inline column.
+            let via_columnar = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
+            assert!(via_columnar.is_some(), "all-inline column must be columnar-eligible ({op} {t})");
+
+            // Scalar reference (the real row path).
+            let mut scalar = Bindings::unsorted(vars.clone(), rows.clone());
+            apply_filter_scalar(&g, &local, &mut scalar, &expr).unwrap();
+
+            // Dispatcher (takes the columnar branch under the feature).
+            let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
+            apply_filter(&g, &local, &mut disp, &expr).unwrap();
+
+            // BYTE-IDENTICAL: same rows (incl. the NON-inline subject column), same order.
+            assert_eq!(disp.rows, scalar.rows, "dispatcher rows != scalar for {op} {t}");
+            assert_eq!(via_columnar.as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
+        }
+    }
+
+    #[test]
+    fn columnar_seam_pins_exact_survivors_and_order() {
+        // Non-vacuous: pin the EXACT surviving age sequence (content + ascending order) so a
+        // wrong mask (off-by-one / inverted / column desync) turns this red.
+        let n = 40u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let age_var = var("age");
+
+        let out = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap();
+        let expected: Vec<f64> = (21..40).map(f64::from).collect();
+        assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=39, ascending");
+
+        // A DIFFERENT filter must select a DIFFERENT set (the mask does real work).
+        let other = columnar_filter(&g, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap();
+        assert_ne!(age_values(&g, &other), expected, "distinct filters must select distinct rows");
+    }
+
+    #[test]
+    fn columnar_seam_declines_and_matches_scalar_on_non_eligible_columns() {
+        // A non-inline dict integer, a negative integer, a non-numeric literal, and an unbound
+        // cell each break the all-inline gate → the seam DECLINES and the row path runs, still
+        // byte-identical.
+        let big = 2_000_000_000u32.to_string(); // > INLINE_MAX (2^30-1): a NON-inline dict integer
+        let nt = format!(
+            "<http://ex/a> <http://ex/age> \"5\"^^<{XSD_INT}> .\n\
+             <http://ex/b> <http://ex/age> \"{big}\"^^<{XSD_INT}> .\n\
+             <http://ex/c> <http://ex/age> \"-7\"^^<{XSD_INT}> .\n\
+             <http://ex/d> <http://ex/age> \"hello\" .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let lit_id = |s: &str, dt: Option<&str>| -> Id {
+            let t = match dt {
+                Some(d) => Term::Literal(Literal::new_typed_literal(s, oxrdf::NamedNode::new(d).unwrap())),
+                None => Term::Literal(oxrdf::Literal::new_simple_literal(s)),
+            };
+            g.id_of(&t).unwrap()
+        };
+        let five = lit_id("5", Some(XSD_INT));
+        assert!(dict::is_inline(five));
+        let big_id = lit_id(&big, Some(XSD_INT));
+        assert!(!dict::is_inline(big_id), "2e9 must be a NON-inline dict integer");
+        let neg = lit_id("-7", Some(XSD_INT));
+        let hello = lit_id("hello", None);
+
+        let vars = vec![var("s"), var("age")];
+        let expr = mk_filter(">", &var("age"), int_lit("0"));
+        let local = LocalVocab::default();
+
+        for age_cell in [big_id, neg, hello, NO_ID] {
+            let rows: Vec<Row> = vec![Row::from_slice(&[five, five]), Row::from_slice(&[five, age_cell])];
+            assert!(
+                columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).is_none(),
+                "a non-inline / unbound column cell must make the seam DECLINE"
+            );
+            let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
+            let mut scalar = Bindings::unsorted(vars.clone(), rows);
+            apply_filter(&g, &local, &mut disp, &expr).unwrap();
+            apply_filter_scalar(&g, &local, &mut scalar, &expr).unwrap();
+            assert_eq!(disp.rows, scalar.rows, "row-path result must be identical on decline");
+        }
+    }
+
+    #[test]
+    fn columnar_seam_declines_non_sargable_and_temporal_filters() {
+        let n = 8u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let b = Bindings::unsorted(vars, rows);
+        let age_var = var("age");
+
+        // var-vs-var: not sargable → decline.
+        let var_var = Expression::Greater(
+            Box::new(Expression::Variable(age_var.clone())),
+            Box::new(Expression::Variable(var("s"))),
+        );
+        assert!(columnar_filter(&g, &b, &var_var).is_none());
+
+        // A temporal comparison is sargable but has NO vector kernel yet → decline.
+        let dt = Expression::Literal(Literal::new_typed_literal(
+            "2020-01-01T00:00:00Z",
+            oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#dateTime").unwrap(),
+        ));
+        let temporal = Expression::Greater(Box::new(Expression::Variable(age_var)), Box::new(dt));
+        assert!(columnar_filter(&g, &b, &temporal).is_none(), "temporal comparison has no vector kernel");
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn columnar_seam_declines_while_zk_trace_armed() {
+        // The zk trace must capture the FILTER obligation set, so the columnar seam DECLINES
+        // while the recorder is armed and the scalar path records it
+        // (research/vector-at-a-time-m4.md §3.2, open question 2 — simplest-safe rule).
+        let n = 8u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let b = Bindings::unsorted(vars, rows);
+        let expr = mk_filter(">", &var("age"), int_lit("0"));
+
+        // Sanity: eligible (and firing) when zk is NOT armed.
+        assert!(columnar_filter(&g, &b, &expr).is_some(), "eligible without zk armed");
+        // Armed ⇒ decline.
+        let _guard = crate::zk::install();
+        assert!(crate::zk::enabled());
+        assert!(columnar_filter(&g, &b, &expr).is_none(), "columnar seam must decline while zk is armed");
+    }
+}
+
+// [OPUS-4.8] sq-qcnn.13 — Direct unit tests for internal exec functions (private API).
+// These supplement the integration tests in tests/eval_semantics.rs with white-box
+// coverage of paths reachable only from inside the crate: `minus_bindings` (disjoint
+// fast path + fully-bound fast path + the unbound-shared-variable general compatibility
+// scan), `effective_boolean` / `ebv` error arms, aggregate-error propagation via
+// `sum_values(_, errored=true)`, and the `minmax_values` numeric-promotion + mixed-type
+// fallback paths. [OPUS-4.8]
+
+/// Direct unit tests for `minus_bindings` — exercises the fast-path (disjoint
+/// domains → no-op, fully-bound compatible rows) and the general path (unbound
+/// shared variable triggering the compatibility scan with bound-domain-overlap check).
+#[cfg(test)]
+mod minus_bindings_unit {
+    use super::*;
+    use sparq_core::Graph;
+
+    fn var(s: &str) -> Variable {
+        Variable::new_unchecked(s)
+    }
+
+    /// `term_id` for a plain literal string via a scratch graph so we get a real
+    /// dictionary ID. The same graph must be used for every ID we want to join.
+    fn scratch() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> .\
+             ex:a ex:p \"v1\" .\
+             ex:b ex:p \"v2\" .\
+             ex:c ex:p \"v3\" .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    /// Resolve an IRI to its dictionary `Id` in the scratch graph. PANICS if the term
+    /// is absent (a test-setup mistake): a silent `NO_ID` fallback would masquerade as
+    /// an "unbound" sentinel and mask a typo, producing false pass/fail in the MINUS
+    /// compatibility tests. The IRI MUST be one interned by `scratch()`.
+    fn id(g: &Graph, iri: &str) -> Id {
+        use oxrdf::{NamedNode, Term};
+        g.id_of(&Term::NamedNode(NamedNode::new(iri).unwrap()))
+            .unwrap_or_else(|| panic!("test-setup error: IRI {} is not present in the scratch graph", iri))
+    }
+
+    /// Disjoint variable domains: left has {?s} only, right has {?x} only (no overlap).
+    /// MINUS must return the left unchanged (fast path: `shared.is_empty()` → return left).
+    #[test]
+    fn minus_disjoint_domains_returns_left_unchanged() {
+        let g = scratch();
+        let (a, b, c) = (id(&g, "http://ex/a"), id(&g, "http://ex/b"), id(&g, "http://ex/c"));
+        let left = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a]), Row::from_slice(&[b])]);
+        let right = Bindings::unsorted(vec![var("x")], vec![Row::from_slice(&[c])]);
+        let result = minus_bindings(left, right);
+        // No shared variable → nothing removed.
+        assert_eq!(result.rows.len(), 2, "disjoint domains: MINUS is a no-op, expected 2 rows");
+    }
+
+    /// Fully-bound shared variable (fast path: hash-table lookup).
+    /// Left has rows {s=a, s=b}; right has {s=a}. Fast path removes the a row.
+    #[test]
+    fn minus_fast_path_removes_compatible_row() {
+        let g = scratch();
+        let (a, b) = (id(&g, "http://ex/a"), id(&g, "http://ex/b"));
+        let left = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a]), Row::from_slice(&[b])]);
+        let right = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a])]);
+        let result = minus_bindings(left, right);
+        // a is compatible → removed; b is not in right → kept.
+        assert_eq!(result.rows.len(), 1, "fast path must remove compatible row a");
+        // The remaining row should be b.
+        assert_eq!(result.rows[0][0], b, "remaining row should have s=b");
+    }
+
+    /// General path: the left row has an UNBOUND shared variable (`?t = NO_ID`) alongside
+    /// a BOUND shared variable (`?s`) whose value agrees with the right row. The unbound
+    /// `?t` forces `minus_bindings` off the fast path into the per-row compatibility scan.
+    ///
+    /// SPARQL MINUS (§18.5): a left row is removed iff some right row is compatible AND
+    /// their bound domains overlap on ≥1 shared variable. Here the domains overlap on `?s`
+    /// (both bound, `a == a`); `?t` is unbound on the left so it is skipped (compatibility
+    /// only constrains variables bound on BOTH sides). Overlap holds ⇒ the row IS removed.
+    #[test]
+    fn minus_general_path_bound_overlap_removes_despite_unbound_var() {
+        let g = scratch();
+        let a = id(&g, "http://ex/a");
+        // Left: {?s = a, ?t = NO_ID (unbound)}; Right: {?s = a, ?t = a (bound)}.
+        let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
+        let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, a])]);
+        let result = minus_bindings(left, right);
+        // Overlap on ?s (both bound, equal) ⇒ compatible ⇒ removed; the unbound ?t is
+        // skipped by the "both sides bound" guard and neither blocks nor causes removal.
+        assert_eq!(result.rows.len(), 0, "bound overlap on ?s removes the row even though ?t is unbound on the left");
+    }
+
+    /// General path (unbound `?t` on the left forces the per-row compatibility scan off
+    /// the fast path): the shared variable `?s` is BOUND on both sides but to DIFFERENT
+    /// ids (`a` on the left, `b` on the right); `?t` is unbound on both sides.
+    ///
+    /// SPARQL MINUS (§18.5): remove the left row iff some right row is compatible AND the
+    /// bound domains overlap on ≥1 shared variable. The domains DO overlap on `?s` (bound
+    /// on both sides), but the values disagree (`a != b`), so the rows are INCOMPATIBLE —
+    /// nothing is removed and the left row is KEPT. (`?t`, unbound on both sides, is in
+    /// neither solution's domain and cannot force removal.)
+    #[test]
+    fn minus_general_path_incompatible_bound_shared_var_keeps_row() {
+        let g = scratch();
+        let a = id(&g, "http://ex/a");
+        let b = id(&g, "http://ex/b");
+        // Left: {?s=a, ?t=NO_ID}; Right: {?s=b, ?t=NO_ID}.
+        // ?s=a vs ?s=b: BOTH bound but NOT equal → incompatible → row KEPT.
+        let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
+        let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[b, NO_ID])]);
+        let result = minus_bindings(left, right);
+        // ?s=a != ?s=b → incompatible ⇒ NOT removed.
+        assert_eq!(result.rows.len(), 1, "incompatible bound ?s (a != b): left row must be kept");
+    }
+}
+
+/// Direct unit tests for `effective_boolean` / `ebv`: the three-valued logic gate
+/// used by every FILTER application. Pins the SPARQL 3VL contract at the function
+/// level so a mutation that collapses error→false or error→true is caught here.
+#[cfg(test)]
+mod effective_boolean_unit {
+    use super::*;
+
+    #[test]
+    fn ebv_error_is_none() {
+        // SPARQL EBV: error → None (a type error in the expression).
+        assert_eq!(ebv(&Value::Error), None, "ebv(Error) must be None");
+        assert!(!effective_boolean(&Value::Error), "effective_boolean(Error) must be false (drop row)");
+    }
+
+    #[test]
+    fn ebv_unbound_is_none() {
+        assert_eq!(ebv(&Value::Unbound), None, "ebv(Unbound) must be None");
+        assert!(!effective_boolean(&Value::Unbound), "effective_boolean(Unbound) must be false (drop row)");
+    }
+
+    #[test]
+    fn ebv_bool_true_is_some_true() {
+        assert_eq!(ebv(&Value::Bool(true)), Some(true));
+        assert!(effective_boolean(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn ebv_bool_false_is_some_false() {
+        assert_eq!(ebv(&Value::Bool(false)), Some(false));
+        assert!(!effective_boolean(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn ebv_nonzero_int_is_true() {
+        assert_eq!(ebv(&Value::Num(Num::Int(1))), Some(true));
+        assert_eq!(ebv(&Value::Num(Num::Int(-1))), Some(true));
+    }
+
+    #[test]
+    fn ebv_zero_int_is_false() {
+        assert_eq!(ebv(&Value::Num(Num::Int(0))), Some(false));
+    }
+
+    #[test]
+    fn ebv_iri_term_is_none_type_error() {
+        use oxrdf::NamedNode;
+        let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
+        assert_eq!(ebv(&iri), None, "EBV of IRI is a type error → None");
+        assert!(!effective_boolean(&iri), "effective_boolean(IRI) = false (drop row)");
+    }
+
+    #[test]
+    fn ebv_nonempty_string_is_true() {
+        let t = Value::Term(Term::Literal(Literal::new_simple_literal("hello")));
+        assert_eq!(ebv(&t), Some(true), "non-empty string literal EBV = true");
+    }
+
+    #[test]
+    fn ebv_empty_string_is_false() {
+        let t = Value::Term(Term::Literal(Literal::new_simple_literal("")));
+        assert_eq!(ebv(&t), Some(false), "empty string literal EBV = false");
+    }
+
+    #[test]
+    fn ebv_lang_tagged_literal_is_none_type_error() {
+        // rdf:langString is NOT xsd:string: its EBV is a type error.
+        let t = Value::Term(Term::Literal(Literal::new_language_tagged_literal_unchecked("hello", "en")));
+        assert_eq!(ebv(&t), None, "lang-tagged literal EBV is type error → None");
+    }
+
+    #[test]
+    fn ebv_typed_boolean_true_false() {
+        let tt = Value::Term(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)));
+        let ff = Value::Term(Term::Literal(Literal::new_typed_literal("false", xsd::BOOLEAN)));
+        assert_eq!(ebv(&tt), Some(true));
+        assert_eq!(ebv(&ff), Some(false));
+    }
+
+    #[test]
+    fn ebv_ill_formed_boolean_is_type_error() {
+        let ill = Value::Term(Term::Literal(Literal::new_typed_literal("yes", xsd::BOOLEAN)));
+        assert_eq!(ebv(&ill), None, "ill-formed boolean EBV is type error");
+    }
+
+    #[test]
+    fn ebv_xsd_string_nonempty_is_true() {
+        let s = Value::Term(Term::Literal(Literal::new_typed_literal("abc", xsd::STRING)));
+        assert_eq!(ebv(&s), Some(true));
+    }
+
+    #[test]
+    fn ebv_xsd_string_empty_is_false() {
+        let s = Value::Term(Term::Literal(Literal::new_typed_literal("", xsd::STRING)));
+        assert_eq!(ebv(&s), Some(false));
+    }
+}
+
+/// Direct unit tests for `sum_values` — the typed SUM with XSD promotion. Pins the
+/// `errored=true` → `None` branch and the integer-only and decimal-promotion paths.
+#[cfg(test)]
+mod sum_values_unit {
+    use super::*;
+
+    #[test]
+    fn sum_empty_is_zero_integer() {
+        // Sum({}) = 0^^xsd:integer (SPARQL 18.5.1.4).
+        let result = sum_values(&[], false);
+        // Num does not impl PartialEq; use matches! for the pattern.
+        assert!(matches!(result, Some(Num::Int(0))), "sum of empty set must be 0 integer");
+    }
+
+    #[test]
+    fn sum_errored_is_none() {
+        // A type error in ANY member makes the whole SUM None → unbound aggregate.
+        let result = sum_values(&[Value::Num(Num::Int(5))], true);
+        assert!(result.is_none(), "sum_values with errored=true must return None");
+    }
+
+    #[test]
+    fn sum_integers_stays_integer() {
+        let vals = vec![Value::Num(Num::Int(3)), Value::Num(Num::Int(7))];
+        let result = sum_values(&vals, false);
+        assert!(matches!(result, Some(Num::Int(10))), "sum of integers must be an integer");
+    }
+
+    #[test]
+    fn sum_int_plus_decimal_promotes_to_decimal() {
+        let dec = Num::Dec(Dec { mant: 5, scale: 1 }); // 0.5
+        let vals = vec![Value::Num(Num::Int(2)), Value::Num(dec)];
+        let result = sum_values(&vals, false);
+        // 2 + 0.5 = 2.5 decimal; the canonical form depends on Num::binop normalisation.
+        match result {
+            Some(Num::Dec(d)) => {
+                // Verify the decimal value is 2.5: mant / 10^scale == 2.5.
+                // Dec fields are (mant: i128, scale: u32). Any representation where
+                // mant as f64 / 10_f64.powi(scale as i32) ≈ 2.5 is acceptable.
+                let v = (d.mant as f64) / 10_f64.powi(d.scale as i32);
+                assert!((v - 2.5_f64).abs() < 1e-12_f64, "int+decimal must sum to 2.5, got mant={} scale={}", d.mant, d.scale);
+            }
+            other => panic!("int+decimal sum must be Decimal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_non_numeric_member_does_not_error_via_sum_values_itself() {
+        // `sum_values` receives only the VALUES passed; it doesn't evaluate expressions.
+        // A non-numeric Value::Term (e.g. an IRI) causes `as_numeric` to return None,
+        // making sum return None (the short-circuit path when a member has no numeric value).
+        use oxrdf::NamedNode;
+        let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
+        let result = sum_values(&[Value::Num(Num::Int(5)), iri], false);
+        // as_numeric(IRI) = None → sum_values returns None.
+        assert!(result.is_none(), "non-numeric member (IRI) must make sum_values return None");
+    }
+}
+
+/// Direct unit tests for `minmax_values` — numeric promotion path and empty-set path.
+#[cfg(test)]
+mod minmax_values_unit {
+    use super::*;
+
+    #[test]
+    fn minmax_empty_is_unbound() {
+        // Value does not impl PartialEq; use matches! for the pattern check.
+        assert!(
+            matches!(minmax_values(vec![], std::cmp::Ordering::Less), Value::Unbound),
+            "MIN(empty set) must be Unbound"
+        );
+        assert!(
+            matches!(minmax_values(vec![], std::cmp::Ordering::Greater), Value::Unbound),
+            "MAX(empty set) must be Unbound"
+        );
+    }
+
+    #[test]
+    fn min_over_integers_is_smallest() {
+        let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
+        let min = minmax_values(vals, std::cmp::Ordering::Less);
+        // MIN over an all-integer set is the smallest member (2). `minmax_values` returns
+        // it via `num_canonical_term`, i.e. a `Value::Term` carrying the canonical
+        // xsd:integer literal "2". Assert the EXACT lexical value AND datatype — NOT a
+        // substring `contains('2')`, which is vacuous because the xsd:integer datatype
+        // IRI (…/2001/XMLSchema#integer) already contains '2' regardless of the value.
+        match min {
+            Value::Num(Num::Int(n)) => assert_eq!(n, 2, "MIN of [5,2,8] must be exactly 2, got {}", n),
+            Value::Term(Term::Literal(ref l)) => {
+                assert_eq!(l.value(), "2", "MIN of [5,2,8] must have lexical value \"2\", got {}", l);
+                assert_eq!(
+                    l.datatype(),
+                    xsd::INTEGER,
+                    "MIN of integers must keep xsd:integer, got {}",
+                    l.datatype()
+                );
+            }
+            other => panic!("MIN of integers must be the integer 2 (numeric or integer term), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_over_integers_is_largest() {
+        let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
+        let max = minmax_values(vals, std::cmp::Ordering::Greater);
+        // MAX over an all-integer set is the largest member (8), returned as a canonical
+        // xsd:integer `Value::Term`. Assert the EXACT lexical value AND datatype — a
+        // substring `contains('8')` would also pass for wrong values like 18 or 80, so it
+        // is not an acceptable check for the `Value::Term` representation.
+        match max {
+            Value::Num(Num::Int(n)) => assert_eq!(n, 8, "MAX of [5,2,8] must be exactly 8, got {}", n),
+            Value::Term(Term::Literal(ref l)) => {
+                assert_eq!(l.value(), "8", "MAX of [5,2,8] must have lexical value \"8\", got {}", l);
+                assert_eq!(
+                    l.datatype(),
+                    xsd::INTEGER,
+                    "MAX of integers must keep xsd:integer, got {}",
+                    l.datatype()
+                );
+            }
+            other => panic!("MAX of integers must be the integer 8 (numeric or integer term), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn min_over_mixed_types_falls_back_to_compare_values() {
+        // A mix of IRI and literal forces the "not all numeric" path → compare_values fallback.
+        use oxrdf::NamedNode;
+        let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
+        let lit = Value::Term(Term::Literal(Literal::new_simple_literal("abc")));
+        let vals = vec![iri, lit];
+        // Should not panic; result is the "smaller" by compare_values total order.
+        let min = minmax_values(vals, std::cmp::Ordering::Less);
+        // IRI < plain literal in SPARQL total order, so MIN should be the IRI.
+        match &min {
+            Value::Term(Term::NamedNode(_)) => {} // expected: IRI
+            other => panic!("MIN of (IRI, string) should be the IRI, got {other:?}"),
+        }
+    }
+}
+
+// [SONNET-4.6] (sq-pntvh.4, M4 Phase 4) Seam-level differential for the columnar
+// GROUP-BY aggregate path. Verifies that `columnar_aggregate` produces output
+// BYTE-IDENTICAL to the scalar group fold (`group_aggregate`) over a REAL graph, and
+// DECLINES on every column shape not provably identical. Only built under `vectorized`.
+#[cfg(all(test, feature = "vectorized"))]
+mod columnar_aggregate_seam {
+    use super::*;
+
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+    /// Build `n` triples `ex:s{i} ex:score {i}` (integer literal → inline id).
+    /// Returns (graph, subject ids [dict IRIs], score ids [inline integers]).
+    fn scores_graph(n: u32) -> (Graph, Vec<Id>, Vec<Id>) {
+        let mut nt = String::new();
+        for i in 0..n {
+            nt.push_str(&format!("<http://ex/s{i}> <http://ex/score> \"{i}\"^^<{XSD_INT}> .\n"));
+        }
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let subj: Vec<Id> = (0..n)
+            .map(|i| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap())).unwrap())
+            .collect();
+        let score: Vec<Id> = (0..n)
+            .map(|i| g.id_of(&Term::Literal(Literal::new_typed_literal(i.to_string(), xsd::INTEGER))).unwrap())
+            .collect();
+        (g, subj, score)
+    }
+
+    fn var(name: &str) -> Variable {
+        Variable::new(name).unwrap()
+    }
+
+    /// TRUE scalar oracle: calls `eval_aggregate` directly, bypassing the columnar seam.
+    /// Returns `(rows, local_vocab)` — caller uses `local_vocab` for [`term_of`] decoding.
+    ///
+    /// Under `feature="vectorized"`, calling `group_aggregate` for the "reference" side is
+    /// vacuous — it takes the columnar path too, making a columnar-vs-columnar comparison that
+    /// cannot catch a columnar mutation. This helper replicates the sequential scalar fallback
+    /// of `group_aggregate` WITHOUT the columnar seam. [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
+    fn scalar_oracle(
+        g: &Graph,
+        b: &Bindings,
+        group_vars: &[Variable],
+        aggregates: &[(Variable, AggregateExpression)],
+    ) -> (Vec<Row>, LocalVocab) {
+        let key_cols: Vec<Option<usize>> = group_vars.iter().map(|v| b.col(v)).collect();
+        let (mut order, mut members) = build_groups(b, &key_cols);
+        if group_vars.is_empty() && order.is_empty() {
+            order.push(Key::new());
+            members.push(Vec::new());
+        }
+        let mut local = LocalVocab::default();
+        let mut rows = Vec::with_capacity(order.len());
+        for (key, mems) in order.iter().zip(&members) {
+            let mut row = Row::from_slice(key);
+            for (_, agg) in aggregates {
+                let v = eval_aggregate(g, &local, b, mems, agg)
+                    .expect("scalar oracle eval_aggregate must succeed");
+                let id = value_to_id(g, &mut local, &v);
+                row.push(id);
+            }
+            rows.push(row);
+        }
+        (rows, local)
+    }
+
+    /// Decode rows to `Option<Term>` slices for full-term comparison
+    /// (lexical + datatype, not raw ids or f64 values). [SONNET-4.6]
+    fn rows_to_terms(g: &Graph, local: &LocalVocab, rows: &[Row]) -> Vec<Vec<Option<oxrdf::Term>>> {
+        rows.iter()
+            .map(|row| row.iter().map(|&id| term_of(g, local, id)).collect())
+            .collect()
+    }
+
+    /// Run the columnar path (via `group_aggregate`) and the TRUE scalar oracle, then
+    /// assert their outputs are FULL-TERM-identical (lexical + datatype).
+    ///
+    /// `group_aggregate` — under `feature="vectorized"` — tries the columnar seam first.
+    /// The scalar oracle calls `eval_aggregate` directly, so the comparison is
+    /// columnar-vs-scalar, not columnar-vs-columnar. A datatype mutation in the columnar
+    /// path (e.g., SUM returning `Num::Double` instead of `Num::Int`) produces a different
+    /// term (different xsd: datatype) and fails. [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
+    fn check_agg_byte_identical(
+        g: &Graph,
+        b: Bindings,
+        group_vars: &[Variable],
+        aggregates: Vec<(Variable, AggregateExpression)>,
+    ) {
+        // TRUE scalar reference: calls eval_aggregate directly.
+        let (scalar_rows, scalar_local) = scalar_oracle(g, &b, group_vars, &aggregates);
+
+        // Columnar path: group_aggregate (tries columnar under vectorized, falls back otherwise).
+        let b_col = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+        let mut local_col = LocalVocab::default();
+        let col_out = group_aggregate(g, &mut local_col, b_col, group_vars, &aggregates)
+            .expect("columnar group_aggregate must succeed");
+
+        // Compare as full Terms (lexical + datatype), not raw ids.
+        // Raw ids across different LocalVocab instances diverge for non-inline terms.
+        let scalar_terms = rows_to_terms(g, &scalar_local, &scalar_rows);
+        let col_terms = rows_to_terms(g, &local_col, &col_out.rows);
+        assert_eq!(
+            scalar_terms, col_terms,
+            "columnar and scalar group_aggregate must produce FULL-TERM-identical output \
+             (lexical + datatype)"
+        );
+    }
+
+    /// T5 (byte-identity + non-vacuity): whole-dataset SUM/COUNT/MIN/MAX over an
+    /// all-inline-integer column: (a) `columnar_aggregate` returns `Some` (path engaged),
+    /// (b) the aggregate result decodes to the scalar-expected value, and (c) the columnar
+    /// result is FULL-TERM-identical to the TRUE scalar oracle (catches datatype mutations).
+    ///
+    /// Scores 0..=19: SUM=190 (xsd:integer), COUNT=20 (xsd:integer), MIN=0, MAX=19.
+    /// A mutation returning `Num::Double` instead of `Num::Int` for SUM changes the xsd:
+    /// datatype and fails (c); a MIN→MAX mutation changes the numeric value and fails (b).
+    /// [SONNET-4.6] (C2-fix sq-pntvh.4 adversarial review)
+    #[test]
+    fn t5_whole_dataset_agg_byte_identical_to_scalar() {
+        let n = 20u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+
+        // The key-cols list is empty (whole-dataset = no GROUP BY).
+        let key_cols: Vec<Option<usize>> = vec![];
+        let (order, members) = build_groups(&b, &key_cols);
+
+        let mk_agg = |name: AggregateFunction| -> Vec<(Variable, AggregateExpression)> {
+            vec![(
+                var("agg"),
+                AggregateExpression::FunctionCall {
+                    name,
+                    expr: Expression::Variable(score_var.clone()),
+                    distinct: false,
+                },
+            )]
+        };
+
+        // (expected_value, AggregateFunction label, aggregates)
+        let cases: &[(f64, AggregateFunction)] = &[
+            (190.0, AggregateFunction::Sum),   // 0+1+…+19 = 190
+            (20.0,  AggregateFunction::Count),  // 20 rows
+            (0.0,   AggregateFunction::Min),    // minimum of 0..=19
+            (19.0,  AggregateFunction::Max),    // maximum
+        ];
+
+        for &(expected, ref name) in cases {
+            let aggregates = mk_agg(name.clone());
+            let b2 = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+
+            // (a) Call columnar_aggregate DIRECTLY — assert it returns Some (path engaged).
+            let mut local_col = LocalVocab::default();
+            let col_rows = columnar_aggregate(
+                &g, &mut local_col, &b2, &[], &aggregates, &order, &members, &[var("agg")],
+            );
+            assert!(
+                col_rows.is_some(),
+                "columnar_aggregate must engage (return Some) for eligible aggregate {:?}",
+                name
+            );
+            let col_rows = col_rows.unwrap();
+            assert_eq!(col_rows.len(), 1, "whole-dataset agg must produce exactly 1 row for {:?}", name);
+
+            // (b) Decode the result id and compare with the scalar expected value (value check).
+            let result_id = col_rows[0][0];
+            let got = g.numeric_value(result_id).unwrap_or_else(|| {
+                // For sums beyond INLINE_MAX the result is in local vocab.
+                match term_of(&g, &local_col, result_id) {
+                    Some(Term::Literal(l)) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+                    _ => f64::NAN,
+                }
+            });
+            assert_eq!(
+                got, expected,
+                "aggregate {:?} over scores 0..=19 must equal {}", name, expected
+            );
+
+            // (c) FULL-TERM identity against the TRUE scalar oracle (catches datatype mutations).
+            // scalar_oracle calls eval_aggregate directly — it never touches the columnar seam,
+            // so a SUM Int→Double mutation in columnar is caught here by the xsd: datatype
+            // difference. [SONNET-4.6]
+            let (scalar_rows, scalar_local) = scalar_oracle(&g, &b2, &[], &aggregates);
+            let col_terms = rows_to_terms(&g, &local_col, &col_rows);
+            let scalar_terms = rows_to_terms(&g, &scalar_local, &scalar_rows);
+            assert_eq!(
+                col_terms, scalar_terms,
+                "columnar {:?} must be FULL-TERM-identical to scalar oracle (lexical + datatype)",
+                name
+            );
+        }
+    }
+
+    /// T5b: COUNT(*) byte-identical.
+    #[test]
+    fn t5b_count_star_byte_identical() {
+        let n = 10u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var], rows);
+        let count_star = vec![(
+            var("cnt"),
+            AggregateExpression::CountSolutions { distinct: false },
+        )];
+        check_agg_byte_identical(&g, b, &[], count_star);
+    }
+
+    /// T6 (mutation check): SUM output pins the EXACT aggregate value so an implementation
+    /// that returns MIN or MAX instead of SUM would fail this test. The aggregate value of
+    /// scores 0..19 is: SUM = 190, MIN = 0, MAX = 19 — all distinct.
+    #[test]
+    fn t6_mutation_check_sum_pins_exact_value() {
+        let n = 20u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+
+        let aggregates = vec![(
+            var("total"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Sum,
+                expr: Expression::Variable(score_var),
+                distinct: false,
+            },
+        )];
+
+        let mut local = LocalVocab::default();
+        let out = group_aggregate(&g, &mut local, b, &[], &aggregates).unwrap();
+        assert_eq!(out.rows.len(), 1, "whole-dataset aggregate must produce exactly 1 row");
+
+        // The aggregate result id must decode to the integer 190 (SUM 0..=19).
+        let result_id = out.rows[0][0];
+        let num_val = g.numeric_value(result_id)
+            .unwrap_or_else(|| {
+                // Might be a local-vocab term (for sums > INLINE_MAX) — materialise it.
+                let term = term_of(&g, &local, result_id).unwrap();
+                match &term {
+                    Term::Literal(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+                    _ => f64::NAN,
+                }
+            });
+        assert_eq!(num_val, 190.0_f64, "SUM(0..=19) must equal 190, not MIN=0 or MAX=19");
+    }
+
+    /// T5c: AVG over inline-integer column — columnar path engaged, result FULL-TERM-identical
+    /// to the TRUE scalar oracle. AVG(0..=19) = 190/20 = 9.5 (xsd:decimal). [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
+    #[test]
+    fn t5c_avg_byte_identical_to_scalar() {
+        let n = 20u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+        let key_cols: Vec<Option<usize>> = vec![];
+        let (order, members) = build_groups(&b, &key_cols);
+
+        let aggregates = vec![(
+            var("avg"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Avg,
+                expr: Expression::Variable(score_var),
+                distinct: false,
+            },
+        )];
+
+        let mut local_col = LocalVocab::default();
+        let col_rows = columnar_aggregate(
+            &g, &mut local_col, &b, &[], &aggregates, &order, &members, &[var("avg")],
+        ).expect("AVG over inline-integer column must engage (return Some)");
+
+        // TRUE scalar oracle: calls eval_aggregate directly, bypassing the columnar seam.
+        // Previously this called group_aggregate which under vectorized also went through
+        // the columnar path — producing a vacuous columnar-vs-columnar comparison. [SONNET-4.6]
+        let (scalar_rows, scalar_local) = scalar_oracle(&g, &b, &[], &aggregates);
+
+        // (a) FULL-TERM-identical: compare lexical + datatype, not raw ids.
+        let col_terms = rows_to_terms(&g, &local_col, &col_rows);
+        let scalar_terms = rows_to_terms(&g, &scalar_local, &scalar_rows);
+        assert_eq!(
+            col_terms, scalar_terms,
+            "columnar AVG must be FULL-TERM-identical to the scalar oracle (lexical + datatype)"
+        );
+
+        // (b) Non-vacuous: verify the result is 9.5 (190/20), not 0 or some wrong value.
+        //     AVG(0..=19) = 9.5 (xsd:decimal 9.5, stored as a local-vocab Dec term).
+        let result_id = col_rows[0][0];
+        let term = term_of(&g, &local_col, result_id).expect("AVG result must be a term");
+        let avg_str = match &term {
+            Term::Literal(l) => l.value().to_string(),
+            _ => panic!("AVG result must be a literal, got {:?}", term),
+        };
+        // The decimal 9.5 serialises as "9.5" (or equivalent exact decimal lexical).
+        let avg_f64: f64 = avg_str.parse().expect("AVG lexical must be numeric");
+        assert!(
+            (avg_f64 - 9.5_f64).abs() < 1e-9,
+            "AVG(0..=19) = 190/20 = 9.5, got {} (term = {:?})", avg_f64, term
+        );
+    }
+
+    /// T5d (GROUP BY, first-seen order): two-group GROUP BY with first-seen order
+    /// deliberately different from sorted order. Columnar path must preserve first-seen order
+    /// and produce FULL-TERM-identical GROUP BY results to the TRUE scalar oracle. [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
+    #[test]
+    fn t5d_group_by_first_seen_order_preserved() {
+        // Two groups: group "2" appears FIRST, group "1" appears SECOND.
+        // score column: group "2"→[10,20], group "1"→[5,15].
+        let nt = format!(
+            "<http://ex/r1> <http://ex/g> \"b\"^^<{XSD_INT}> .\n\
+             <http://ex/r1> <http://ex/score> \"10\"^^<{XSD_INT}> .\n\
+             <http://ex/r2> <http://ex/g> \"2\"^^<{XSD_INT}> .\n\
+             <http://ex/r2> <http://ex/score> \"20\"^^<{XSD_INT}> .\n\
+             <http://ex/r3> <http://ex/g> \"1\"^^<{XSD_INT}> .\n\
+             <http://ex/r3> <http://ex/score> \"5\"^^<{XSD_INT}> .\n\
+             <http://ex/r4> <http://ex/g> \"1\"^^<{XSD_INT}> .\n\
+             <http://ex/r4> <http://ex/score> \"15\"^^<{XSD_INT}> .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let lit = |v: &str| {
+            g.id_of(&Term::Literal(Literal::new_typed_literal(v, xsd::INTEGER))).unwrap()
+        };
+        // Bindings: two columns [g_val, score], rows in order [group2→10, group2→20, group1→5, group1→15].
+        let group_var = var("g");
+        let score_var = var("score");
+        let rows: Vec<Row> = vec![
+            Row::from_slice(&[lit("2"), lit("10")]),  // group "2" first
+            Row::from_slice(&[lit("2"), lit("20")]),
+            Row::from_slice(&[lit("1"), lit("5")]),   // group "1" second
+            Row::from_slice(&[lit("1"), lit("15")]),
+        ];
+        let b = Bindings::unsorted(vec![group_var.clone(), score_var.clone()], rows);
+
+        let aggregates = vec![(
+            var("s"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Sum,
+                expr: Expression::Variable(score_var),
+                distinct: false,
+            },
+        )];
+        let group_vars = vec![group_var];
+
+        // TRUE scalar reference: calls eval_aggregate directly, never the columnar seam.
+        // Previously called group_aggregate for both sides — under vectorized both took the
+        // columnar path, making the comparison vacuous. [SONNET-4.6]
+        let (scalar_rows, scalar_local) = scalar_oracle(&g, &b, &group_vars, &aggregates);
+
+        // Columnar path (via group_aggregate under vectorized).
+        let b_col = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+        let mut local_c = LocalVocab::default();
+        let col_out = group_aggregate(&g, &mut local_c, b_col, &group_vars, &aggregates).unwrap();
+
+        // FULL-TERM-identical comparison: lexical + datatype, not raw ids or f64.
+        let scalar_terms = rows_to_terms(&g, &scalar_local, &scalar_rows);
+        let col_terms = rows_to_terms(&g, &local_c, &col_out.rows);
+        assert_eq!(
+            col_terms, scalar_terms,
+            "GROUP BY columnar must preserve first-seen order and be FULL-TERM-identical to scalar oracle"
+        );
+        assert_eq!(col_out.rows.len(), 2, "must have 2 groups");
+        // Pin: first row = group "2" (SUM=30), second = group "1" (SUM=20).
+        let sum_val = |rows: &[Row], idx: usize| {
+            let id = rows[idx][1]; // [g_key, sum_val]
+            g.numeric_value(id).unwrap_or_else(|| {
+                let t = term_of(&g, &local_c, id).unwrap();
+                match &t { Term::Literal(l) => l.value().parse().unwrap(), _ => f64::NAN }
+            })
+        };
+        assert_eq!(sum_val(&col_out.rows, 0), 30.0, "first group (key=2) SUM must be 30");
+        assert_eq!(sum_val(&col_out.rows, 1), 20.0, "second group (key=1) SUM must be 20");
+    }
+
+    /// T7 (decline gate): a non-inline column (negative integer) must make the seam DECLINE
+    /// and the scalar path run; both produce the same result.
+    #[test]
+    fn t7_non_inline_column_declines() {
+        // A negative integer is not inline (inline range is [0, INLINE_MAX]).
+        let nt = format!(
+            "<http://ex/a> <http://ex/score> \"-1\"^^<{XSD_INT}> .\n\
+             <http://ex/b> <http://ex/score> \"2\"^^<{XSD_INT}> .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let neg_one = g.id_of(&Term::Literal(Literal::new_typed_literal("-1", xsd::INTEGER))).unwrap();
+        let two = g.id_of(&Term::Literal(Literal::new_typed_literal("2", xsd::INTEGER))).unwrap();
+        assert!(!dict::is_inline(neg_one), "-1 must be a non-inline dict id");
+        assert!(dict::is_inline(two), "2 must be inline");
+
+        let score_var = var("score");
+        let rows = vec![Row::from_slice(&[neg_one]), Row::from_slice(&[two])];
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+        let aggregates = vec![(
+            var("s"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Sum,
+                expr: Expression::Variable(score_var),
+                distinct: false,
+            },
+        )];
+        // Verify columnar_aggregate declines for the mixed (non-inline) column.
+        let key_cols: Vec<Option<usize>> = vec![];
+        let (order, members) = build_groups(&b, &key_cols);
+        let mut local = LocalVocab::default();
+        let out_vars = vec![var("s")];
+        let result = columnar_aggregate(
+            &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
+        );
+        assert!(result.is_none(), "non-inline column must make columnar_aggregate decline");
+    }
+
+    /// T8 (DISTINCT decline): DISTINCT aggregate must always decline.
+    #[test]
+    fn t8_distinct_aggregate_declines() {
+        let n = 5u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+        let aggregates = vec![(
+            var("c"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Count,
+                expr: Expression::Variable(score_var),
+                distinct: true, // DISTINCT → must decline
+            },
+        )];
+        let key_cols: Vec<Option<usize>> = vec![];
+        let (order, members) = build_groups(&b, &key_cols);
+        let mut local = LocalVocab::default();
+        let out_vars = vec![var("c")];
+        let result = columnar_aggregate(
+            &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
+        );
+        assert!(result.is_none(), "DISTINCT aggregate must make columnar_aggregate decline");
     }
 }

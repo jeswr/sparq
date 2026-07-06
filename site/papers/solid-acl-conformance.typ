@@ -8,12 +8,16 @@
 // scoped to LIBRARY-LEVEL decision parity (the authorization content of the specs), not
 // HTTP/CTH wire conformance — that scoping limitation is stated up front, not hidden.
 
-#import "_lib/bench.typ": headline, ev, provenance, authors, anon
+// [OPUS-4.8] sq-iixdh — import paper_heading_numbering so the Abstract is un-numbered and
+// sections render as "1.", "2." (not "0.1", "0.2").
+#import "_lib/bench.typ": headline, ev, provenance, authors, anon, paper_heading_numbering
 
 #set document(title: "Library-Level Solid Access-Control Conformance: WAC and ACP Decision-Parity Ratchets")
 #set text(size: 11pt)
 #set par(justify: true)
-#set heading(numbering: "1.")
+// Section numbering switched on here; the Abstract below is explicitly un-numbered so it
+// renders as front matter (venue convention), and == sections number as "1.", "2.", ...
+#set heading(numbering: paper_heading_numbering)
 
 #align(center)[
   #text(size: 17pt, weight: "bold")[
@@ -32,7 +36,7 @@
   Conformance-Test-Harness wire conformance, which has no library entry point here.
 ]]
 
-== Abstract
+#heading(level: 2, numbering: none, outlined: false)[Abstract]
 
 The Solid ecosystem standardises two access-control models — Web Access Control (WAC) and the
 newer Access Control Policy (ACP) — and a server is expected to honour whichever a pod uses. We

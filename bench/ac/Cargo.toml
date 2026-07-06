@@ -1,0 +1,39 @@
+# [OPUS-4.8] sq-i6du2.7 — AC-query benchmark harness DRIVER (epic sq-i6du2, #1613).
+#
+# DELIBERATELY a STANDALONE cargo project (own `[workspace]` table, same isolation
+# pattern as bench/parse + bench/dict + bench/zk). It is NOT a workspace member; it
+# path-depends on the workspace crate `sparq-acbench` (itself a `publish = false`
+# dev-only crate) purely so `bench/ac/run.sh` has a runnable entry point WITHOUT
+# adding a bin/example under `crates/` (which would be out of this bead's file scope:
+# scripts + registry only — see the bead FILES line).
+#
+# Nothing here is production code. No number produced here is committed to markdown;
+# wall-clock output is advisory + NON-CANONICAL on this shared work box (see the
+# QUIET-BOX convention in bench/CATALOG.md). The HARD contract is the fail-closed
+# oracle exit code: any W1/W2/W3 oracle mismatch => non-zero exit.
+#
+# SCOPE BOUNDARY (bead sq-i6du2.7): this driver runs ONLY the by-construction oracle
+# lanes that need no engine link. The W2 live `query_as` sub-lane and the W4 concurrency
+# query sub-lane require linking `sparq-solid` / the real engine and belong to the
+# separate live-driver bead sq-kvvcl; they are recorded here as Skipped-with-reason,
+# never as a fabricated pass.
+[package]
+name = "ac-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root — keeps this driver (and its resolved lockfile) out of the
+# root workspace, exactly like bench/parse and bench/dict.
+[workspace]
+
+[dependencies]
+# The by-construction generator + oracle crate under test (a workspace member;
+# resolves its own `version.workspace`/`edition.workspace`/`license.workspace` via the
+# root workspace it belongs to). No sparq-core / sparq-engine / sparq-solid dependency:
+# the oracle is structurally independent of the system under test by design.
+sparq-acbench = { path = "../../crates/sparq-acbench" }
+
+[[bin]]
+name = "ac-bench"
+path = "src/main.rs"

@@ -10,7 +10,7 @@ and must stay **under $5/month**. This is the security + cost design.
 > github-action-benchmark on the `benchmark-data` branch under `dev/bench`. **One-time owner
 > action (cannot be set from a workflow):** Settings → Pages → Source = "Deploy from a branch",
 > Branch = `benchmark-data` / `/ (root)` → Save. The dashboard then renders at
-> <https://jeswr.github.io/sparq/dev/bench>. [OPUS-4.8]
+> <https://sparq.jeswr.org/dev/bench>. [OPUS-4.8]
 
 ## Threat model & the three hard rules
 

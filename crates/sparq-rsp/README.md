@@ -56,12 +56,15 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Relation-to-stream (R2S)** — `R2S::{RStream, IStream, DStream}`: full / added /
   removed rows per window, computed as multiset diffs over 64-bit row hashes.
 - **RSP-QL surface syntax + multi-window joins** — `RspqlQuery::parse` reads
-  `REGISTER … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and `ContinuousMultiQuery`
-  joins across named windows on one synchronized event-time clock.
+  `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and
+  `ContinuousMultiQuery` joins across 2 or more named windows on one synchronized
+  event-time clock with full RSTREAM/ISTREAM/DSTREAM support.
 - **Pluggable materialisation (`EvalMode`)** — `PersistentDict` (default, compacted
   dictionary), `Rebuild` (v1 baseline), `Delta` (one live graph, per-slide delta), and
   `Snapshot` (one live graph + a cheap O(overlay) immutable point-in-time snapshot per
-  closed window), all producing identical results.
+  closed window), all producing identical results. The `Delta`/`Snapshot` window diff
+  runs on the shared eval substrate (`sparq-substrate` `join::delta::DeltaTable`,
+  id-level, monomorphic — no dynamic dispatch on the probe path).
 
 ## 📚 Learn more
 
@@ -72,7 +75,7 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Performance** — the `throughput` example
   (`cargo run --release -p sparq-rsp --example throughput`; append `-- --json <path>` to
   also write the same rows as a machine-readable JSON document, STDOUT unchanged) and
-  [`bench/rsp/`](../../bench/rsp); the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [`bench/rsp/`](../../bench/rsp); the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

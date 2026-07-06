@@ -16,6 +16,24 @@
 use crate::dict::{Dict, Id};
 use std::borrow::Cow;
 
+/// [OPUS-4.8] (sq-7d3dj.2) Rough average N-Triples line length, in bytes, used ONLY to pre-size
+/// the per-chunk triple `Vec` (here) and the per-chunk partial `Dict` (in `parse_block`) before
+/// filling them — killing the reallocation/rehash churn the ingest profile flagged (~5% of the
+/// parallel load). It is a pure capacity HINT: `bytes / AVG_NT_LINE_BYTES` estimates the triple
+/// (and, loosely, the distinct-term) count of a chunk, but it NEVER changes the parsed triples,
+/// their order, or the interned term/id bijection (pinned by
+/// `parse_chunk_dict_capacity_is_pure_hint` here and `presizing_is_pure_capacity_hint` for
+/// `parse_block`). Crucially, the reservation is derived ENTIRELY from
+/// the real chunk length: it is `bytes.len() / AVG_NT_LINE_BYTES`, hence never exceeds
+/// `bytes.len()` and cannot grow independently of the input. So — unlike HDT's independently
+/// declared `num_strings` (`decode.rs`), which an attacker could set huge behind a tiny file — it
+/// needs no HDT-style clamp against an untrusted count. `64` tracks the mean line of the
+/// deterministic CI corpus (`sparq-bench dump`); it is NOT a lower bound on line length, so
+/// shorter lines make it a slight under-reservation and longer ones a slight over-reservation —
+/// either way the miss is absorbed by ordinary `Vec`/`Dict` growth, since this only reserves
+/// capacity and never bounds the parsed count.
+pub(crate) const AVG_NT_LINE_BYTES: usize = 64;
+
 /// [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Maximum nesting depth of RDF 1.2 triple terms
 /// `<<( s p o )>>` accepted by the byte-level N-Triples/N-Quads parser before it returns a
 /// clean parse error instead of recursing until the native stack overflows and aborts the
@@ -265,7 +283,12 @@ fn span_literal(b: &[u8], i: usize) -> Result<usize, String> {
 /// Parses a slice of complete N-Triples lines, interning each term and returning the
 /// id-triples. Errors carry the byte offset.
 pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
-    let mut out = Vec::new();
+    // [OPUS-4.8] (sq-7d3dj.2) Pre-size the id-triple output from the chunk's byte length so the
+    // Vec does not re-grow (and copy) through ~log2(triples) doublings while parsing. Pure
+    // capacity hint (see `AVG_NT_LINE_BYTES`); a tiny chunk (`< AVG_NT_LINE_BYTES` bytes) yields
+    // `with_capacity(0)` == no allocation, and any slack is dropped with this Vec once the caller
+    // remaps it into the final store — so it never reaches the `store_bytes_per_triple` ratchet.
+    let mut out = Vec::with_capacity(bytes.len() / AVG_NT_LINE_BYTES);
     let n = bytes.len();
     let mut i = 0;
     while i < n {
@@ -413,9 +436,31 @@ fn decode<'a>(raw: &'a [u8], esc: bool) -> Result<Cow<'a, str>, String> {
     }
 }
 
+// [OPUS-4.8] (sq-7d3dj.18) Per-thread `scheme://authority/` prefix memo for the opt-in IRI
+// validation fast path. A thread-local is sound under the rayon chunk-parallel loader — each
+// worker keeps its own ring — and needs no clearing between parses: every memoized prefix was
+// accepted by `oxiri`, and IRI validity is a pure function of the bytes, so a retained (or
+// cross-parse) prefix can only change SPEED, never the accept/reject answer.
+#[cfg(feature = "iri-fast")]
+thread_local! {
+    static IRI_MEMO: std::cell::RefCell<crate::iri::IriPrefixMemo> =
+        std::cell::RefCell::new(crate::iri::IriPrefixMemo::new());
+}
+
 fn iri(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     let (start, end, esc, next) = scan_delim(b, i, b'>')?;
     let s = decode(&b[start..end], esc)?;
+    // [OPUS-4.8] (sq-7d3dj.18) When the opt-in `iri-fast` feature is on, validate every IRIREF
+    // against RFC-3987 (fast path in front of `oxiri`) so the byte-level loader rejects the
+    // malformed IRIs the serial oxttl path already rejects — reaching conformance parity at
+    // fast-path cost. OFF by default: the loader keeps its current unvalidated-fast behaviour.
+    #[cfg(feature = "iri-fast")]
+    {
+        let valid = IRI_MEMO.with(|m| m.borrow_mut().validate(&s));
+        if !valid {
+            return Err(format!("N-Triples: invalid IRI <{}> at byte {}", s, i));
+        }
+    }
     Ok((dict.intern_iri(&s), next))
 }
 
@@ -880,6 +925,46 @@ mod tests {
             e.contains("only valid in OBJECT position"),
             "message must explain the object-only rule, got: {e}"
         );
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.2) The `Dict` capacity is a PURE hint: parsing the same bytes into a
+    /// `Dict::new()` vs a `Dict::with_capacity(BIG)` must yield byte-identical triples AND an
+    /// identical term↔id bijection (same distinct-term count, same `term(id)` for every id) —
+    /// the reserved capacity changes the allocation, never the parsed result or id-assignment
+    /// order. (The out-`Vec` reservation is a fixed `bytes.len() / AVG_NT_LINE_BYTES` and is not
+    /// varied here; its own purity — being derived solely from the input length — is argued at
+    /// `AVG_NT_LINE_BYTES`.)
+    #[test]
+    fn parse_chunk_dict_capacity_is_pure_hint() {
+        // Repeated predicate + type IRIs, distinct subjects/objects, a typed literal, a lang
+        // literal, a blank node, and a nested triple term — a mix that grows both the term arena
+        // and the lookup table across many interns.
+        let mut nt = String::new();
+        for i in 0..200 {
+            nt.push_str(&format!("<http://ex/n{}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> .\n", i));
+            nt.push_str(&format!("<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n", i, i));
+            nt.push_str(&format!("<http://ex/n{}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i, i % 37));
+            nt.push_str(&format!("_:b{} <http://ex/reifies> <<( <http://ex/n{}> <http://ex/knows> <http://ex/n{}> )>> .\n", i, i, (i + 1) % 200));
+        }
+        let bytes = nt.as_bytes();
+
+        let mut d_plain = Dict::new();
+        let t_plain = parse_chunk(bytes, &mut d_plain).expect("plain parse");
+
+        // A deliberately OVER-sized reservation — the hint must still not perturb the result.
+        let mut d_big = Dict::with_capacity(10_000);
+        let t_big = parse_chunk(bytes, &mut d_big).expect("presized parse");
+
+        assert_eq!(t_plain, t_big, "id-triples (and their order) diverge under a capacity hint");
+        assert_eq!(d_plain.len(), d_big.len(), "distinct-term count diverges under a capacity hint");
+        for id in 1..=d_plain.len() as Id {
+            assert_eq!(
+                d_plain.term(id),
+                d_big.term(id),
+                "term for id {} diverges under a capacity hint (the term↔id bijection is not identical)",
+                id
+            );
+        }
     }
 }
 

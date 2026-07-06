@@ -64,7 +64,7 @@ jobs:
           node-version: 22
 
       - name: Cache cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -109,6 +109,16 @@ jobs:
         run: |
           npm run typecheck
           npm test
+
+      # [FABLE-5] sq-ohnj1 (#1499): the eye-js migration package. Build its wasm bundle
+      # (crates/sparq-reason-wasm) + tsc, run the eye-js socrates acceptance + overload/stub
+      # suite, and verify the tarball ships dist/ + the wasm engine. wasm-pack is installed above.
+      - name: eye-js compat package (build + test + guardrail)
+        working-directory: packages/eyereasoner-compat
+        run: |
+          npm run build
+          npm test
+          npm run check:package
 
       # Publish guardrail + git-pin verification (sq-bkag): `prepare` wired, the
       # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/.

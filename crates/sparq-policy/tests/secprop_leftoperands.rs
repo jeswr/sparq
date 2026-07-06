@@ -92,6 +92,7 @@ fn secprop_constraint_evaluates_fail_closed_unchanged() {
         iri: Some("urn:policy:1".into()),
         permissions: vec![rule],
         prohibitions: vec![],
+        conflict: None,
     };
 
     // Request supplies NO evidence for the secx: dimension → fail-closed DENY.

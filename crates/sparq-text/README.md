@@ -79,7 +79,11 @@ let r = query_text(&graph, r#"
 - **BM25 ranking, exact-token semantics** — UAX #29 word segmentation + Unicode
   lowercasing; **no stemming, no stopword list, no diacritic folding** (`café` ≠ `cafe`)
   — language-neutral by design. Only plain / `xsd:string` / language-tagged literals are
-  indexed (typed literals skipped); indexes are per-graph.
+  indexed (typed literals skipped); indexes are per-graph. A **differential BM25 oracle**
+  (`tests/bm25_oracle.rs`) pins `search`/`search_any` scores + ranking bit-for-bit
+  against an independent from-scratch reference scorer, wired into the central
+  scoreboard as a `sparq extension` ratchet — **honestly NOT a standards-conformance
+  claim** (no normative full-text-over-RDF / BM25 suite exists).
 - **Opt-in phrase positions** — the cheap default (`TextIndex::build`) stores **no**
   positions (8 B per token/doc pair); `build_with_positions` enables `phrase` /
   `phrase_near`. A phrase query against a positionless index is a **hard query error**
@@ -105,7 +109,7 @@ let r = query_text(&graph, r#"
 - **Benchmark** — `cargo run --release -p sparq-text --example bench_text` (no figures
   baked in here; query cost is dominated by hits scored — a short prefix over the
   synthetic Zipf vocabulary is a worst case by construction). Tracked figures on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

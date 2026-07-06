@@ -31,6 +31,15 @@
 #                       from advisory to HARD by sq-8ic6 once the backlog cleared (the last
 #                       stray, skills/cli/SKILL.md's inline ratio, was reworded to cite the
 #                       canonical measured source). Deterministic, grep-only, no network.
+#     • no-dyn-dispatch — perf-NEUTRALITY structural gate over the sparq-substrate hot loops
+#                       (the shared zero-overhead eval substrate, epic sq-6tykl/sq-qonbz):
+#                       FAILS if `dyn`/`Box<dyn>`/`&dyn` trait-object dispatch appears in the
+#                       leaf crate's hot paths (src/{join,numeric,rows,lib}.rs), which must stay
+#                       MONOMORPHISED so the substrate is free for sparq-engine AND the reasoners
+#                       (research/shared-eval-substrate.md §2.3/§4). Comment-aware (the source
+#                       documents the invariant in prose) + a narrow `// perf-neutrality-allow:
+#                       <reason>` per-line opt-out for a cold path. scripts/check-no-dyn-dispatch.py;
+#                       bead sq-0ja86. Deterministic, grep-only, no network, no build.
 #     • readme-template — crate-README length cap + 🚀/✨/📚 sections + License
 #                       (scripts/check-readme-template.py --enforce). PROMOTED from advisory
 #                       to HARD by sq-8ic6's deferred half once the sq-9jw5 README-overhaul
@@ -112,7 +121,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install typos
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: typos@1.47.2
       - name: typos (markdown doc surface only)
@@ -155,7 +164,7 @@ jobs:
             --offline
             --include-fragments
             --no-progress
-            README.md AGENTS.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
+            README.md AGENTS.md ASSURANCE.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
             './skills/**/*.md' './docs/**/*.md' './crates/**/*.md'
           fail: true
           # Don't post a tracking issue (read-only token; gating is enough).
@@ -178,7 +187,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -242,7 +251,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       # Pins the gate's own classification before it is trusted to guard the docs:
@@ -372,7 +381,7 @@ jobs:
       - name: shellcheck check-site-links.sh + its self-test
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: lychee@0.23.0
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
@@ -470,6 +479,102 @@ jobs:
       # runtime-honesty teeth. HARD job (no "advisory" token) — a regression reds the ci-summary gate.
       - name: "Self-test js-sbom lane vs external dev-deps on a published member (sq-pl1p)"
         run: bash scripts/tests/test_js_sbom_external_devdep.sh
+      # [FABLE-5] sq-90cv4: the ci-summary gate poll loop — the brain of the SINGLE
+      # required branch-protection check — lives in scripts/ci_summary_gate.py
+      # (extracted from ci-summary.yml's inline bash). Its verdict semantics
+      # (all-green=>PASS, real-failure=>FAIL, advisory word-boundary exclusion,
+      # sq-ipkku settle guard + #997 graceful timeout, anchored self-exclusion) AND
+      # the sq-90cv4 adaptive saturation budget (queued-siblings-under-saturation =>
+      # still-settling, idle-queue hang => RED, absolute cap bounded) are pinned by a
+      # hermetic stdlib-unittest suite (NO gh, NO network — injected fetchers). HARD
+      # (no "advisory" token): a regression in the gate's own logic must red CI
+      # before every merge depends on it.
+      - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
+        run: python3 scripts/tests/test_ci_summary_gate.py
+      # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
+      # LOAD-BEARING (the select pre-job feeds every wide lane's skip guard and
+      # the ci-summary gate's skipped-only-under-successful-selection rule), so
+      # its whole test surface gates HERE on every PR:
+      #   * test_ci_select.py       — the affected-set selector (sq-fmx4u.1):
+      #     closure math, §4.1 full-run triggers, fail-closed error paths, the
+      #     shadow/filterset wiring hooks. Hermetic (synthetic metadata; the one
+      #     real-metadata case self-skips without cargo).
+      #   * test_path_ownership.py  — the ownership map + out-of-crate-input
+      #     audit (sq-fmx4u.2): map validity, trigger-mirror drift guard.
+      #   * test_ci_select_wiring.py — cross-file INSPECTION of the wiring
+      #     itself: every selection-consuming `if:` carries the fail-closed
+      #     `mode != 'selected'` disjunct (empty outputs => run), every literal
+      #     '"<crate>"' guard needle is a REAL workspace member (a typo would
+      #     skip a lane exactly when it should run), the ci-select.yml job name
+      #     matches the gate's SELECT_RE, select callers are unconditional,
+      #     ENFORCE is the default with a ci-full label override + shadow rollback
+      #     escape hatch, and the nightly full-matrix backstop is wired (sq-fmx4u.5).
+      # The wiring test needs PyYAML to parse the workflows — same hash-pinned
+      # install the skill-frontmatter/setup jobs use (complete closure, no deps).
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML (pinned) for the selection wiring inspection test
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Self-test ci_select.py (affected-set selector — sq-fmx4u.1/.3)
+        run: python3 scripts/tests/test_ci_select.py
+      - name: Self-test path-ownership map + out-of-crate-input audit (sq-fmx4u.2)
+        run: python3 scripts/tests/test_path_ownership.py
+      - name: Selection wiring inspection (fail-closed guards + real crate needles — sq-fmx4u.3)
+        run: python3 scripts/tests/test_ci_select_wiring.py
+      # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
+      # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
+      # design §6.1). Hermetic stdlib-unittest suite (NO gh, NO git, NO cargo,
+      # NO network): the pure correlation core (precise per-crate hit, fail-safe
+      # triage for narrowed shards, the non-spam empty-skip-set property), the
+      # TRIAGE_LANE_RE pin against the real ci.yml shard job name, and the
+      # fail-loud exits (replay error / total blocker => non-zero). HARD (no
+      # "advisory" token): the detector's own logic must red CI if it regresses.
+      - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
+        run: python3 scripts/tests/test_ci_selection_alarm.py
+      # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
+      # #1670 audit, wired here alongside the other ci-scripts self-tests.
+      #
+      # test_cone_coverage.py (27 tests) — the cone-based coverage selector
+      # (scripts/cone_coverage.py): compute_cone() closure math, §4.1 full-run
+      # triggers, dev-dep propagation, shadow/enforce mode flags, shadow_report()
+      # label semantics, shard-filtering intersection, and the empty-all_members
+      # fallback. Stdlib-only, no cargo/network.
+      - name: Self-test cone_coverage.py (cone selector + shadow_report — sq-1cb6l)
+        run: python3 scripts/tests/test_cone_coverage.py
+      # test_drift_scan.py (37 tests) — the periodic drift scanner
+      # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
+      # skill-missing, explain-asymmetry, dashboard-row, conformance-split),
+      # the dedup-key stability contract, main(--dry-run), and the CI-guard
+      # that refuses to mint issues outside CI. Stdlib-only, no gh/git/network.
+      - name: Self-test drift-scan.py (all scanner classes + CI guard — sq-1cb6l)
+        run: python3 scripts/tests/test_drift_scan.py
+      # test_feature_matrix_tiers.py (50 tests) — the feature-matrix tier
+      # detector (scripts/feature-matrix-tiers.py): cfg expression parser
+      # (feature/test/not/any/all/other nodes + balanced-paren error), all
+      # acceptance criteria (a)–(i) (gated test file, cfg(not(feature)) src,
+      # nested combinators, parse-error fail-closed, unreadable-dir fail-closed,
+      # tier:check enforce, fail-open mutation, non-sensitive), plus extraction +
+      # split helpers. Stdlib-only, no subprocess/network.
+      - name: Self-test feature-matrix-tiers.py (cfg parser + tier enforcement — sq-1cb6l)
+        run: python3 scripts/tests/test_feature_matrix_tiers.py
+      # test_check_pypi_name.py (15 tests) — supplements the existing
+      # check-pypi-name.py --self-test: the pure HTTP-status → verdict decision
+      # table (404=AVAILABLE, 200=TAKEN, anything-else=INDETERMINATE — a non-404
+      # must NEVER read as available), the dist-name reader (pins `sparq-rdf`
+      # so a silent rename back to the taken `sparq` fails here), and the
+      # verdict-line rendering. Stdlib-only, no network.
+      - name: Self-test check-pypi-name.py (decision table + dist-name pin — sq-1cb6l)
+        run: python3 scripts/tests/test_check_pypi_name.py
+      # test_install_action_tool.py (11 tests) — supplements the existing
+      # check-install-action-tool.py --self-test + enforce run: pure fixture
+      # coverage (good/bad/no-with/no-tool/tag-pinned/other/mixed/no-leak
+      # cases), the 40-hex SHA pin guard, the live-workflows invariant (all
+      # install-action steps carry `with: tool:`), and the vacuous-pass guard
+      # (at least one SHA-pinned install-action must exist in the repo). Stdlib-
+      # only, no git/network.
+      - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
+        run: python3 scripts/tests/test_install_action_tool.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
@@ -488,10 +593,13 @@ jobs:
           set -uo pipefail
           # The advisory config (same tuned rules) must be named with a supported
           # prefix so it's accepted by --config. Pass whole-repo globs explicitly.
+          # [OPUS-4.8] sq-5reoy: dropped the "#zk/xpath/vendor" exclude — the zk/xpath
+          # tree (and its vendored ieee754 copy) was externalized to sparq-org/noir_XPath
+          # (#1599); the generic "#**/vendor" glob still covers any remaining vendor dir.
           npx --yes markdownlint-cli2@0.18.1 \
             --config advisory.markdownlint-cli2.jsonc \
             "**/*.md" "#node_modules" "#**/node_modules" "#target" "#**/target" \
-            "#vendor" "#**/vendor" "#zk/xpath/vendor" \
+            "#vendor" "#**/vendor" \
             > md-advisory.txt 2>&1 || true
           n=$(grep -cE ' MD[0-9]+/' md-advisory.txt || true)
           {
@@ -568,11 +676,41 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: No hard-coded performance numbers in user-facing docs — GATING
         run: python3 scripts/check-no-perf-numbers.py --enforce
+
+  # [OPUS-4.8] sq-0ja86 (epic sq-6tykl / sq-qonbz — the shared zero-overhead eval substrate):
+  # a perf-NEUTRALITY structural gate. crates/sparq-substrate is a leaf crate (depends only on
+  # sparq-core) holding the shared evaluation substrate consumed by BOTH sparq-engine AND the
+  # reasoners; the maintainer invariant (research/shared-eval-substrate.md §2.3/§4) is that its
+  # hot loops — the four join kernels behind the generic JoinKeys descriptor + generic Budget
+  # cancel hook (src/join.rs) and the XSD numeric value tower (src/numeric.rs) — stay
+  # MONOMORPHISED: NO `dyn`/`Box<dyn>`/`&dyn` trait-object dispatch on a per-row / per-key-group
+  # hot loop, so the substrate is zero-overhead for both consumers and the deterministic byte
+  # ratchets (wasm_bundle_bytes, store/dict bytes) do not regress. A generic `<B: Budget>` bound
+  # is FINE (it monomorphises); a trait OBJECT is not. The check (scripts/check-no-dyn-dispatch.py)
+  # is COMMENT-AWARE (the source legitimately documents "NO Box<dyn>…" in prose) and supports a
+  # narrow `// perf-neutrality-allow: <reason>` per-line opt-out for a genuinely-cold path. It
+  # mirrors no-perf-numbers exactly: deterministic, grep-only, no network, no build, same
+  # setup-python + `python3 scripts/check-*.py` invocation. The job NAME carries no
+  # "advisory"/"informational" token, so the ci-summary aggregator gates on it — it lives on the
+  # SAME docs-quality structural-gate surface as no-perf-numbers / terminology / readme-template,
+  # not a new branch-protection required check (the only required check stays ci-summary / gate).
+  no-dyn-dispatch:
+    name: no-dyn-dispatch (substrate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: No dynamic dispatch in the sparq-substrate hot loops (perf-neutrality) — GATING
+        run: python3 scripts/check-no-dyn-dispatch.py
 
   # [OPUS-4.8] sq-8ic6 (deferred half): PROMOTED to a HARD gate. The README-overhaul epic
   # (sq-9jw5) cleared the backlog — sq-inzv (#751) brought 20 publish=true crate READMEs to
@@ -592,7 +730,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       # [OPUS-4.8] sq-ixsf: hermetic self-test of the stub-classification + section/cap

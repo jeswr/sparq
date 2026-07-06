@@ -8,11 +8,16 @@
 // the /sparq basePath). It also asserts ESC closes the dialog.
 //
 // The palette is pure UI wired to the single GROUPS source — it needs no wasm bundle — so this
-// runs on the light site-e2e lane unconditionally (unlike the REPL/ZK specs that gate on wasm).
+// runs on the light site-e2e lane unconditionally (unlike the runner/ZK specs that gate on wasm).
 //
 // DOM anchors: the cmdk dialog exposes its accessible name "Command palette"; items are real
 // listbox options reachable by role + accessible name. No copy-scraping of layout text.
 import { test, expect, type Page } from "@playwright/test";
+// [OPUS-4.8] sq-ymr2e.1 — shared deterministic navigation barrier: waits for the SW-controller
+// signal AND the app-shell hydration (the "Primary" nav landmark), which is the deterministic
+// proxy for "the global ⌘K listener is armed", replacing the fixed 500ms sleep
+// (research/web-gui-test-program.md §1.1; no-timeout grep gate).
+import { waitForAppReady } from "./support/app-ready";
 
 // Relative (no leading slash) so it resolves UNDER the baseURL's `/sparq/` basePath — a
 // leading slash would target the origin root and miss the basePath entirely. /papers is a
@@ -36,9 +41,7 @@ function palette(page: Page) {
 // zk-prewarm spec performs via its readiness pill.
 async function gotoSettled(page: Page): Promise<void> {
   await page.goto(ROUTE, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-  // A short beat lets the post-reload document hydrate so the global ⌘K listener is armed.
-  await page.waitForTimeout(500);
+  await waitForAppReady(page);
 }
 
 test.beforeEach(async ({ page }) => {
