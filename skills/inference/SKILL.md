@@ -381,6 +381,29 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 - **`why()` is a witness, not a proof set.** It returns the first derivation in deterministic order, or `None` if the triple isn't in the closure or `ExplainOpts` caps (default depth 128, 65 536 nodes) are exceeded — not an enumeration of all derivations.
 - **Deletion semantics:** `delete` removes *base* (asserted) triples; a deleted base triple still derivable from the remainder stays in the closure, and deleting a derived-only fact is a no-op (standard materialized-view semantics).
 
+## Migrating from eye-js (`@sparq-org/eyereasoner-compat`)
+
+The npm package **`@sparq-org/eyereasoner-compat`** (`packages/eyereasoner-compat/`) is a
+drop-in for [eye-js](https://github.com/eyereasoner/eye-js)'s `n3reasoner(data, query?, options?)`,
+backed by this crate's wasm bundle (`crates/sparq-reason-wasm`) — no SWI-Prolog, a lighter
+browser payload. It maps the eye-js surface onto three wasm entry points and is HONEST about the
+boundary:
+
+- **Output modes.** `derivations` (default, EYE `--pass-only-new`) → `Reasoner.reasonN3New`;
+  `deductive_closure` (`--pass`) → `Reasoner.reasonN3`; `none` → empty. The `…_plus_rules` modes
+  (`--pass-all` / `--pass-all-ground`, which echo rules into the output) **throw** — sparq's
+  chainer consumes rules and emits only ground triples (a deferred follow-up bead, not faked).
+- **Query filter.** `n3reasoner(data, query)` maps the EYE `--query` rule to a SPARQL `CONSTRUCT`
+  over the materialised closure (`Reasoner.reasonN3Query`). Query rules using **builtins /
+  `{ … }` formulae / `( … )` lists fail closed** (a clear error, never a wrong answer).
+- **Builtins.** Only this crate's `math:`/`string:`/`list:`/`time:`/`log:` subset is available
+  (EYE's full library is larger); an unsupported builtin simply does not fire.
+- **SWIPL surface.** `SwiplEye` / `loadEyeImage` / `runQuery` / `EYE_PVM` / `linguareasoner` etc.
+  are re-exported as **throwing migration stubs**; `SWIPL` / `cb` options warn-and-ignore.
+
+See `packages/eyereasoner-compat/README.md` for the CDN (esm.sh/jsdelivr/unpkg) usage and the
+full output-mode + builtins-coverage tables.
+
 ## See also
 
 - `noir-circuit-patterns`, `noir-optimisation`, `verifiable-credentials-zk`, `sparql-formal-semantics` — the single-prover ZK estate; the `explain` `ProofTree` is intentionally a flat, id-free, premises-before-conclusion DAG meant as a ZK-derivation witness.
