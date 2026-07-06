@@ -67,15 +67,25 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   through data-property existentials. Anything not exactly decidable (pattern/length/digit
   facets, float/double or non-numeric bases/values, `owl:onDataRange`, complement) is
   **deferred, never guessed** — a wrong sat/unsat verdict would be an unsound entailment.
+- **ABox realisation & whole-ontology consistency — CR6 nominals** *(opt-in `abox` feature)* —
+  internalizes `ClassAssertion` (`a rdf:type C` ⇒ `{a} ⊑ C`) and `ObjectPropertyAssertion`
+  (`a p b` ⇒ `{a} ⊑ ∃p.{b}`) as SAFE-NOMINAL axioms over CR6, then reads off derived instance
+  typings (`a rdf:type C`), individual equality (`a owl:sameAs b`) and a whole-ontology
+  `inconsistent` verdict (`{a} ⊑ ⊥` or a global `⊤ ⊑ ⊥`) via the additive `realize` /
+  `realize_graph` entry — every emitted fact holds in EVERY model. The TBox
+  `Classifier::classify` / `classify_graph` stay **byte-identical** (they never internalize
+  assertions). Data-property assertions and non-EL class expressions stay counted skips
+  (`Report::skipped_assertions`, fail-closed — never a guessed typing).
 - **Honest fragment reporting** — class axioms outside the active fragment are counted in
   `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
   concrete-domain shapes; with it, only the unsupported remainder above.
 
 **Scope:** EL+⊥ + safe nominals/CR6 (E1, default), EL+ role reasoning (E2, `rbox`), transitive
-reduction (E3, `hasse`), exact-numeric concrete domains (CR7–CR9, `cdomain`); concurrency is
-**E4**. Constructs outside EL entirely (union / complement / `allValuesFrom` / cardinality /
-multi-individual `oneOf`) are always skipped. The classifier is **single-threaded**. Enable with
-`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse", "cdomain"] }`. The
+reduction (E3, `hasse`), exact-numeric concrete domains (CR7–CR9, `cdomain`), ABox realisation +
+whole-ontology consistency (`abox`); concurrency is **E4**. Constructs outside EL entirely (union /
+complement / `allValuesFrom` / cardinality / multi-individual `oneOf`) are always skipped. The
+classifier is **single-threaded**. Enable with
+`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse", "cdomain", "abox"] }`. The
 `snomed_go_scale_bench` example (`--features rbox,hasse`) is a *relative* (dimensionless, no
 hard-coded ms) end-to-end scaling check confirming normalise + RBox + Hasse compose with no
 hidden quadratic.

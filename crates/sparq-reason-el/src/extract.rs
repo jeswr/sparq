@@ -31,6 +31,19 @@ use crate::Report;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+/// Knobs controlling what [`extract`] reads. Default = TBox only (the byte-identical E1 path
+/// every existing caller uses). [OPUS-4.8] sq-pbz04.2.5: under the `abox` feature the ABox
+/// realisation entry (`crate::abox::realize`) sets `abox = true` to ALSO internalize
+/// `ClassAssertion`/`ObjectPropertyAssertion` triples as safe-nominal axioms. The struct is a
+/// zero-sized unit without the feature, so `Classifier::classify` / `classify_graph` — which
+/// always pass `ExtractOpts::default()` — are byte-identical regardless of the feature.
+#[derive(Clone, Copy, Default)]
+pub struct ExtractOpts {
+    /// Internalize ABox assertions (only meaningful under the `abox` feature).
+    #[cfg(feature = "abox")]
+    pub abox: bool,
+}
+
 /// Everything the extractor reads out of the RDF substrate: the normalized concept axioms, the
 /// name table, the [`Report`], and — only under the `rbox` feature — the normalized RBox role
 /// axioms (E2). Keeping the role axioms in a feature-gated field means the default build's
@@ -117,6 +130,12 @@ struct Vocab {
     on_datatype: Id,
     #[cfg(feature = "cdomain")]
     with_restrictions: Id,
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): `owl:bottomObjectProperty` — the empty object property.
+    /// When it occurs as a role, the extractor appends `∃⊥.⊤ ⊑ ⊥` so any `∃⊥.C` obligation
+    /// (typically an ABox instance of `∃⊥.⊤`) collapses to `⊥` (`NO_ID` if the term is absent,
+    /// which `Names::role_of` never resolves).
+    #[cfg(feature = "abox")]
+    bottom_object_property: Id,
     /// Predicate ids whose presence on a class node makes it non-EL (see [`NON_EL_MARKERS`]).
     non_el: FxHashSet<Id>,
     /// RBox vocabulary — only consulted under the `rbox` feature (E2).
@@ -152,6 +171,8 @@ impl Vocab {
             on_datatype: look(format!("{}onDatatype", OWL)),
             #[cfg(feature = "cdomain")]
             with_restrictions: look(format!("{}withRestrictions", OWL)),
+            #[cfg(feature = "abox")]
+            bottom_object_property: look(format!("{}bottomObjectProperty", OWL)),
             non_el: NON_EL_MARKERS
                 .iter()
                 .map(|m| look(format!("{}{}", OWL, m)))
@@ -218,7 +239,10 @@ struct Idx {
 /// Extracts and normalizes the EL+⊥ TBox from `triples`, returning the [`Extracted`] bundle
 /// (normal-form concept axioms, the name table, the [`Report`], and — under `rbox` — the
 /// normalized RBox role axioms). Single-threaded.
-pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
+pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted {
+    // `opts` only steers the `abox` internalization below; without that feature it is inert.
+    #[cfg(not(feature = "abox"))]
+    let _ = opts;
     let v = Vocab::intern(dict);
     let mut idx = Idx::default();
     for &[s, p, o] in triples {
@@ -356,7 +380,32 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
         }
     }
 
+    // [OPUS-4.8] sq-pbz04.2.5 (`abox`): internalize ABox assertions as safe-nominal axioms over
+    // the SAME normalizer + name table, so nominal + role ids stay consistent with the TBox
+    // concepts. `Classifier::classify` / `classify_graph` pass `abox = false`, so they never see
+    // these axioms (byte-identical, whatever the feature). `bottom_op_axiom` is the
+    // `owl:bottomObjectProperty` empty-role fact `∃⊥.⊤ ⊑ ⊥`, appended after `finish` only when
+    // that property actually occurred as a role (so `New-Feature-BottomObjectProperty-001`-shaped
+    // `{a} ⊑ ∃⊥.⊤` collapses to `{a} ⊑ ⊥`).
+    #[cfg(feature = "abox")]
+    let bottom_op_axiom = if opts.abox {
+        report.skipped_assertions = decode_abox(dict, triples, &idx, &v, &mut norm);
+        norm.names
+            .role_of(v.bottom_object_property)
+            .map(|r| Normal::ExistsSub(r, TOP, BOTTOM))
+    } else {
+        None
+    };
+
     let axioms = norm.finish();
+    #[cfg(feature = "abox")]
+    let axioms = {
+        let mut axioms = axioms;
+        if let Some(ax) = bottom_op_axiom {
+            axioms.push(ax);
+        }
+        axioms
+    };
     // [FABLE-5] sq-pbz04.2.2: append the concrete-domain axioms — `d ⊑ ⊥` for an EMPTY
     // value space (CR7; the clash then reaches classes with an `∃p.d` obligation via CR5)
     // and `d1 ⊑ d2` for every PROVEN value-space containment (CR8/CR9, threaded through
@@ -667,6 +716,149 @@ fn is_individual(dict: &Dict, id: Id) -> bool {
             dict.term_parts(id),
             sparq_core::dict::TermParts::Iri { .. } | sparq_core::dict::TermParts::Blank(_)
         )
+}
+
+/// [OPUS-4.8] sq-pbz04.2.5 (`abox`): the RDF/RDFS/OWL/XSD "structural" IRI namespaces. A
+/// predicate in one of these is NEVER an ABox object/data-property assertion — it is TBox/RBox
+/// vocabulary (`rdfs:subClassOf`, `owl:someValuesFrom`, `rdf:first`, …) or an annotation/facet.
+/// The recognisers below skip it (fail-closed): an in-namespace predicate is not misread as an
+/// object-property assertion, and a facet/annotation literal is not miscounted as a data skip.
+#[cfg(feature = "abox")]
+const STRUCTURAL_NS: &[&str] = &[OWL, RDF, RDFS, "http://www.w3.org/2001/XMLSchema#"];
+
+/// OWL/RDF/RDFS built-in classes that, as the OBJECT of an `rdf:type` triple, denote a
+/// DECLARATION (`X a owl:Class`, `p a owl:ObjectProperty`, …) rather than a Direct-Semantics
+/// `ClassAssertion`. Excluded so the extractor mints no spurious individual for a
+/// class/property/ontology/axiom node. `owl:Thing` / `owl:Nothing` are DELIBERATELY absent:
+/// `a rdf:type owl:Thing` is a valid (trivial) assertion and `a rdf:type owl:Nothing` a valid
+/// (inconsistency-forcing) one. `owl:NamedIndividual` is handled separately (register, no axiom).
+#[cfg(feature = "abox")]
+const META_TYPE_OBJECTS: &[(&str, &str)] = &[
+    (OWL, "Class"),
+    (OWL, "Restriction"),
+    (OWL, "ObjectProperty"),
+    (OWL, "DatatypeProperty"),
+    (OWL, "AnnotationProperty"),
+    (OWL, "OntologyProperty"),
+    (OWL, "Ontology"),
+    (OWL, "AllDifferent"),
+    (OWL, "AllDisjointClasses"),
+    (OWL, "AllDisjointProperties"),
+    (OWL, "NegativePropertyAssertion"),
+    (OWL, "FunctionalProperty"),
+    (OWL, "InverseFunctionalProperty"),
+    (OWL, "TransitiveProperty"),
+    (OWL, "SymmetricProperty"),
+    (OWL, "AsymmetricProperty"),
+    (OWL, "ReflexiveProperty"),
+    (OWL, "IrreflexiveProperty"),
+    (OWL, "DeprecatedClass"),
+    (OWL, "DeprecatedProperty"),
+    (OWL, "DataRange"),
+    (OWL, "Axiom"),
+    (RDFS, "Class"),
+    (RDFS, "Datatype"),
+    (RDFS, "ContainerMembershipProperty"),
+    (RDF, "Property"),
+    (RDF, "List"),
+    (RDF, "Statement"),
+];
+
+/// Whether `id` is an IRI in one of the [`STRUCTURAL_NS`] namespaces (or is not a usable
+/// property IRI at all: an inline literal / blank / literal predicate). Used to keep the ABox
+/// property-assertion recogniser off every TBox/RBox/annotation/facet predicate.
+#[cfg(feature = "abox")]
+fn is_structural_predicate(dict: &Dict, id: Id) -> bool {
+    if sparq_core::dict::is_inline(id) {
+        return true;
+    }
+    match dict.term_parts(id) {
+        sparq_core::dict::TermParts::Iri { prefix, suffix } => {
+            let iri = format!("{}{}", prefix, suffix);
+            STRUCTURAL_NS.iter().any(|ns| iri.starts_with(ns))
+        }
+        _ => true,
+    }
+}
+
+/// Whether a dict id denotes a LITERAL (an inline integer or a stored `Lit`) — the object shape
+/// of a `DataPropertyAssertion`. The complement of the individual test for object position.
+#[cfg(feature = "abox")]
+fn is_literal(dict: &Dict, id: Id) -> bool {
+    sparq_core::dict::is_inline(id)
+        || matches!(dict.term_parts(id), sparq_core::dict::TermParts::Lit { .. })
+}
+
+/// [OPUS-4.8] sq-pbz04.2.5 (`abox`): internalize the ABox assertions of `triples` into `norm` as
+/// SAFE-NOMINAL axioms over the CR6 machinery, minting every individual through `Names::nominal`
+/// so `owl:hasValue`/`owl:oneOf` fillers and asserted individuals share one concept:
+///
+/// - `a rdf:type C`  (C a decodable EL class, not a built-in meta class) ⇒ `{a} ⊑ C`;
+/// - `a p b`         (p a user-namespace object property, b an individual) ⇒ `{a} ⊑ ∃p.{b}`;
+/// - `a rdf:type owl:NamedIndividual` ⇒ register `a` (no axiom — a declaration).
+///
+/// Returns the count of assertions DEFERRED as counted skips (`Report::skipped_assertions`): a
+/// `DataPropertyAssertion` (literal object — the `cdomain` point-range rescue is a sequenced
+/// follow-up bead) and a `ClassAssertion` whose class expression is outside the EL fragment.
+/// SOUNDNESS: `{a} ⊑ C` holds because `{a}^I = {a^I} ⊆ C^I`; `{a} ⊑ ∃p.{b}` because
+/// `(a^I,b^I) ∈ p^I` with `b^I ∈ {b}^I`. Structural bnodes (restriction / intersection / list
+/// nodes) are never minted as individuals — realising one would be noise, not an entailment.
+#[cfg(feature = "abox")]
+fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mut Normalizer) -> usize {
+    use oxrdf::{NamedNode, Term as OTerm};
+    let look = |iri: String| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
+    let named_individual = look(format!("{}NamedIndividual", OWL));
+    let meta: FxHashSet<Id> = META_TYPE_OBJECTS
+        .iter()
+        .map(|(ns, name)| look(format!("{}{}", ns, name)))
+        .filter(|&id| id != sparq_core::dict::NO_ID)
+        .collect();
+
+    // A node the TBox pass uses as a class expression (restriction / intersection / oneOf / list
+    // cell) or a non-EL marker must never be minted as an ABox individual.
+    let structural = |n: Id| {
+        idx.is_restriction.contains(&n)
+            || idx.inter_head.contains_key(&n)
+            || idx.one_of_head.contains_key(&n)
+            || idx.first.contains_key(&n)
+            || idx.non_el_node.contains(&n)
+    };
+
+    let mut skipped = 0usize;
+    for &[s, p, o] in triples {
+        if p == v.ty {
+            if o == named_individual && named_individual != sparq_core::dict::NO_ID {
+                if is_individual(dict, s) && !structural(s) {
+                    let _ = norm.names.nominal(s); // register the declared individual only
+                }
+                continue;
+            }
+            if meta.contains(&o) || !is_individual(dict, s) || structural(s) {
+                continue; // a declaration, or a structural/non-individual subject
+            }
+            // ClassAssertion: {s} ⊑ decode(o). A non-EL class expression is a fail-closed skip.
+            let mut cache = FxHashMap::default();
+            match decode(o, idx, v, norm.names, &mut cache, 0) {
+                Some(cls) => {
+                    let a = norm.names.nominal(s);
+                    norm.add_sub(&Expr::Atom(a), &cls);
+                }
+                None => skipped += 1,
+            }
+        } else if !is_structural_predicate(dict, p) && is_individual(dict, s) && !structural(s) {
+            if is_individual(dict, o) && !structural(o) {
+                // ObjectPropertyAssertion: {s} ⊑ ∃p.{o}.
+                let role = norm.names.role(p);
+                let a = norm.names.nominal(s);
+                let b = norm.names.nominal(o);
+                norm.add_sub(&Expr::Atom(a), &Expr::Exists(role, Box::new(Expr::Atom(b))));
+            } else if is_literal(dict, o) {
+                // DataPropertyAssertion — deferred (fail-closed counted skip).
+                skipped += 1;
+            }
+        }
+    }
+    skipped
 }
 
 /// Walks an `rdf:first`/`rdf:rest` list from `head`, returning member node ids. Bounded by
