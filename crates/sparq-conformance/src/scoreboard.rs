@@ -224,15 +224,20 @@ pub struct Suite {
 ///   UCQ evaluated over the unmodified ABox returns EXACTLY the hand-derived certain
 ///   answers; the broader `pr:QL` entailment-arm intensional gap stays
 ///   experimental/OutOfScope, never summed in).
-/// * OWL 2 QL entailment-regime graduated subset 11 — `sparq-conformance`
-///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 11` (sq-pbz04.3.4; opt-in
+/// * OWL 2 QL entailment-regime graduated subset 15 — `sparq-conformance`
+///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 15` (sq-pbz04.3.4; opt-in
 ///   `ql-experimental` feature; a sparq EXTENSION ratchet, NOT an OWL 2 QL /
 ///   entailment-regime conformance claim — the floor is the PINNED NAMED-CASE list
 ///   of `pr:QL` `sparql11/entailment` cases passing ALL SIX graduation conditions,
 ///   exact set equality: regressions AND unpinned additions both fail CI; every
 ///   non-graduated case carries an exhaustive hold-reason taxonomy; raised 9→11 by
 ///   sq-pbz04.3.1 B2 literal-object broadening: `lang` + `plainLit` both graduate
-///   [SONNET-4.6]).
+///   [SONNET-4.6]; raised 11→15 by sq-pbz04.3.6 body-blank-node lifting +
+///   shared-existential join preservation in the emitter: `sparqldl-05`/`-06`
+///   (undistinguished-variable ASK, declaration-only TBox so `exists_super` empty)
+///   and `sparqldl-07`/`-08` (SHARED-blank-node JOIN SELECT — graduate once the
+///   emitter maps a repeated `Unbound` id to ONE variable, identity rewrite
+///   result-equivalent to the W3C oracle) all graduate [OPUS-4.8]).
 /// * OWL 2 EL classification 50 — `sparq-conformance` `tests/el_suite.rs`
 ///   `EL_SUITE_FLOOR = 50` (sq-pbz04.2.4; opt-in `el-suite` feature; a sparq EXTENSION
 ///   ratchet, NOT a full-OWL-2-EL-conformance claim — CR7–CR9 concrete domains + ABox
@@ -903,7 +908,16 @@ pub const SUITES: &[Suite] = &[
         // B2 literal-object broadening (SELECT ?x WHERE { ?x foaf:name "name"@en }, TBox
         // foaf:name a owl:DatatypeProperty — fully_captured, no existential generators,
         // identity rewrite returns exactly {:b}, result-equivalent to the W3C oracle).
-        ratchet_floor: 11,
+        // [OPUS-4.8] sq-pbz04.3.6 raised 11 → 15: the body-blank-node lifting graduates the four
+        // undistinguished-variable `sparqldl` cases. `sparqldl-05` (ASK { _:a rdf:type :Person })
+        // + `sparqldl-06` (ASK over a 4-hop blank-node cycle) graduate directly. `sparqldl-07` +
+        // `sparqldl-08` (SELECT * with a SHARED body blank node = an existential JOIN) graduate
+        // only because the same bead ALSO fixed emit::cq_to_bgp to map a repeated Unbound id to
+        // ONE emitted variable (preserving the join; the prior per-occurrence naming emitted a
+        // cartesian product that condition (6) correctly held as oracle-divergent). All four TBoxes
+        // are declaration-only (exists_super empty, condition (5) holds); each identity rewrite is
+        // result-equivalent to the W3C oracle.
+        ratchet_floor: 15,
         floor_basis: "graduated named pr:QL cases — six-condition soundness predicate (sparq \
                       EXTENSION over the QL fragment sparq rewrites, NOT an OWL 2 QL / \
                       entailment-regime conformance claim)",
