@@ -855,6 +855,14 @@ fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mu
             } else if is_literal(dict, o) {
                 // DataPropertyAssertion — deferred (fail-closed counted skip).
                 skipped += 1;
+            } else {
+                // ObjectPropertyAssertion whose OBJECT is a structural blank node (a
+                // restriction / intersection / list cell / non-EL node) — not a plain
+                // individual. [OPUS-4.8] sq-pbz04.2.5: still sound and fail-closed (we
+                // never guess a typing), but the skip was previously untallied; now counted
+                // so `Report::skipped_assertions` gives an honest "n assertions not
+                // internalized" total.
+                skipped += 1;
             }
         }
     }

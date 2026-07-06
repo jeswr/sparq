@@ -405,6 +405,37 @@ mod tests {
         assert!(r.type_assertions().contains(&(y, c)), "the EL class assertion still classifies");
     }
 
+    // --- ObjectPropertyAssertion with a structural bnode object is a counted skip. -------------
+    // [OPUS-4.8] sq-pbz04.2.5: previously the case was sound-and-fail-closed but untallied;
+    // this test pins that it is NOW counted in `skipped_assertions` rather than silently dropped.
+    #[test]
+    fn object_property_assertion_structural_bnode_object_is_counted_skip() {
+        // :alice :p [ a owl:Restriction ; owl:onProperty :q ; owl:someValuesFrom :D ] .
+        // The object blank node is structural (typed owl:Restriction, has onProperty/svf edges).
+        // The subject is a plain IRI individual, so the assertion is an OPA — but the object
+        // cannot be interned as a safe nominal. Fail-closed: counted as a skip, never guessed.
+        let ttl = format!(
+            "{PRE}
+             :alice :p [ a owl:Restriction ;
+                         owl:onProperty :q ;
+                         owl:someValuesFrom :D ] .
+             :alice a :Person ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert_eq!(
+            r.report().skipped_assertions,
+            1,
+            "the OPA with a structural-bnode object must be counted as a skip"
+        );
+        // The ClassAssertion still classifies alice correctly.
+        let (alice, person) = (iri(&dict, "http://ex/alice"), iri(&dict, "http://ex/Person"));
+        assert!(
+            r.type_assertions().contains(&(alice, person)),
+            "alice rdf:type Person still realized"
+        );
+    }
+
     // --- realize_graph materializes the readoff and is idempotent. -----------------------------
     #[test]
     fn realize_graph_materializes_typings_and_is_idempotent() {
