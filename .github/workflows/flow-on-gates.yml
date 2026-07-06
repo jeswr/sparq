@@ -175,6 +175,14 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
+      # [SONNET-4.6] sq-1cb6l: hermetic self-test of the G3 gate's pure logic —
+      # evaluate() + parse_status_lines() + registry_blocks() + dashboard_featured_text()
+      # + added_bench_suites() + suite_family(). Runs in this same job so a regression
+      # in the gate's detection logic also blocks the merge here, not only in CI.
+      # Stdlib-only, no git/network (the main() smoke test uses --dry-run +
+      # --changed-files + --base-toml so it never shells out). [SONNET-4.6]
+      - name: Self-test the new-bench-registered gate (G3, sq-1cb6l)
+        run: python3 scripts/tests/test_check_new_bench_registered.py
       - name: G3 — new bench suite is registered + featured (or featured=false)
         env:
           # On pull_request github.base_ref is the bare target branch ('main'); on

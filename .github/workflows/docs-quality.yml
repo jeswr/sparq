@@ -532,6 +532,49 @@ jobs:
       # "advisory" token): the detector's own logic must red CI if it regresses.
       - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
         run: python3 scripts/tests/test_ci_selection_alarm.py
+      # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
+      # #1670 audit, wired here alongside the other ci-scripts self-tests.
+      #
+      # test_cone_coverage.py (27 tests) — the cone-based coverage selector
+      # (scripts/cone_coverage.py): compute_cone() closure math, §4.1 full-run
+      # triggers, dev-dep propagation, shadow/enforce mode flags, shadow_report()
+      # label semantics, shard-filtering intersection, and the empty-all_members
+      # fallback. Stdlib-only, no cargo/network.
+      - name: Self-test cone_coverage.py (cone selector + shadow_report — sq-1cb6l)
+        run: python3 scripts/tests/test_cone_coverage.py
+      # test_drift_scan.py (37 tests) — the periodic drift scanner
+      # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
+      # skill-missing, explain-asymmetry, dashboard-row, conformance-split),
+      # the dedup-key stability contract, main(--dry-run), and the CI-guard
+      # that refuses to mint issues outside CI. Stdlib-only, no gh/git/network.
+      - name: Self-test drift-scan.py (all scanner classes + CI guard — sq-1cb6l)
+        run: python3 scripts/tests/test_drift_scan.py
+      # test_feature_matrix_tiers.py (50 tests) — the feature-matrix tier
+      # detector (scripts/feature-matrix-tiers.py): cfg expression parser
+      # (feature/test/not/any/all/other nodes + balanced-paren error), all
+      # acceptance criteria (a)–(i) (gated test file, cfg(not(feature)) src,
+      # nested combinators, parse-error fail-closed, unreadable-dir fail-closed,
+      # tier:check enforce, fail-open mutation, non-sensitive), plus extraction +
+      # split helpers. Stdlib-only, no subprocess/network.
+      - name: Self-test feature-matrix-tiers.py (cfg parser + tier enforcement — sq-1cb6l)
+        run: python3 scripts/tests/test_feature_matrix_tiers.py
+      # test_check_pypi_name.py (15 tests) — supplements the existing
+      # check-pypi-name.py --self-test: the pure HTTP-status → verdict decision
+      # table (404=AVAILABLE, 200=TAKEN, anything-else=INDETERMINATE — a non-404
+      # must NEVER read as available), the dist-name reader (pins `sparq-rdf`
+      # so a silent rename back to the taken `sparq` fails here), and the
+      # verdict-line rendering. Stdlib-only, no network.
+      - name: Self-test check-pypi-name.py (decision table + dist-name pin — sq-1cb6l)
+        run: python3 scripts/tests/test_check_pypi_name.py
+      # test_install_action_tool.py (11 tests) — supplements the existing
+      # check-install-action-tool.py --self-test + enforce run: pure fixture
+      # coverage (good/bad/no-with/no-tool/tag-pinned/other/mixed/no-leak
+      # cases), the 40-hex SHA pin guard, the live-workflows invariant (all
+      # install-action steps carry `with: tool:`), and the vacuous-pass guard
+      # (at least one SHA-pinned install-action must exist in the repo). Stdlib-
+      # only, no git/network.
+      - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
+        run: python3 scripts/tests/test_install_action_tool.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
