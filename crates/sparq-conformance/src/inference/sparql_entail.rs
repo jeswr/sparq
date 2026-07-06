@@ -1761,19 +1761,32 @@ mod ql_tests {
 
     #[test]
     fn intensional_guard_flags_schema_atoms_and_admits_extensional_ones() {
-        // Schema-vocabulary predicate: intensional (the paper-sparqldl-Q1 shape).
-        let cq = cq_of(&format!("{PRE} SELECT ?c WHERE {{ ?c rdfs:subClassOf :Student }}"));
-        assert!(intensional_atom(&cq).unwrap().contains("subClassOf"));
-        // owl: predicates are all semantics-bearing (fail-closed, incl. sameAs).
-        let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x owl:sameAs :a }}"));
-        assert!(intensional_atom(&cq).is_some());
-        // rdf:type with a class-position VARIABLE is a query FOR schema.
+        // B6 is now in the GATE (sq-pbz04.3.1): `check_atom_shape` rejects schema-vocabulary
+        // predicates directly, so `as_conjunctive_query` returns Err for those. We verify the
+        // gate rejects them, and that `intensional_atom()` still catches the remaining cases
+        // that slip past the gate (rdf:type with class-position variable or schema-ns constant).
+
+        // Schema-vocabulary predicate (paper-sparqldl-Q1 shape): gate now rejects. [SONNET-4.6]
+        let q_sub = parse(&format!("{PRE} SELECT ?c WHERE {{ ?c rdfs:subClassOf :Student }}"));
+        assert!(
+            sparq_reason_ql::as_conjunctive_query(&q_sub).is_err(),
+            "rdfs:subClassOf as predicate: gate must reject (B6 now in gate)"
+        );
+        // owl: predicates are all semantics-bearing — gate rejects. [SONNET-4.6]
+        let q_same = parse(&format!("{PRE} SELECT ?x WHERE {{ ?x owl:sameAs :a }}"));
+        assert!(
+            sparq_reason_ql::as_conjunctive_query(&q_same).is_err(),
+            "owl:sameAs as predicate: gate must reject (B6)"
+        );
+
+        // rdf:type with a class-position VARIABLE: gate admits (predicate rdf:type is not
+        // schema-vocabulary), but intensional_atom() flags it. [SONNET-4.6]
         let cq = cq_of(&format!("{PRE} SELECT ?c WHERE {{ :a rdf:type ?c }}"));
         assert!(intensional_atom(&cq).unwrap().contains("class-name-position"));
-        // rdf:type with a schema-namespace class constant.
+        // rdf:type with a schema-namespace class constant: likewise gate admits, harness catches.
         let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x rdf:type owl:Class }}"));
         assert!(intensional_atom(&cq).is_some());
-        // Extensional class + role atoms are admitted.
+        // Extensional class + role atoms are admitted by both gate and intensional_atom().
         let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y }}"));
         assert!(intensional_atom(&cq).is_none());
         // Annotation predicates stay admitted (no QL axiom changes their extension).
@@ -1818,13 +1831,28 @@ mod ql_tests {
                 Ok(_) => panic!("expected a gate rejection for: {}", q),
             }
         };
-        // B1/B3/B4 broadening shapes → pending-gate.
+        // B1 broadening shape → pending-gate. A UNION at the top level is a UCQ —
+        // `as_conjunctive_query` rejects multi-branch UCQs (use `as_ucq` for those), so
+        // it still generates a gate rejection classifiable as pending-gate (B1). [SONNET-4.6]
         let r = classify(&format!(
             "{PRE} SELECT ?x WHERE {{ {{ ?x rdf:type :A }} UNION {{ ?x rdf:type :B }} }}"
         ));
         assert_eq!(r.label(), "pending-gate");
         assert!(r.reason().contains("B1"));
-        let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x rdf:type :A FILTER(?x = :b) }}"));
+        // B6 gate-side intensional-atom rejection → permanently-outside. [SONNET-4.6]
+        let r = classify(&format!(
+            "{PRE} SELECT ?c WHERE {{ ?c rdfs:subClassOf :A }}"
+        ));
+        assert_eq!(r.label(), "permanently-outside");
+        assert!(r.reason().contains("intensional"));
+        // NOTE: B3 (distinguished-only FILTER) has LANDED (sq-pbz04.3.1) — a FILTER on a
+        // projected variable is now ACCEPTED by the gate, not a gate rejection. The
+        // classify_gate_rejection FILTER arm handles the legacy pending-gate case for
+        // older gate-side rejections; we verify it still classifies those correctly via a
+        // non-distinguished FILTER (which the gate still rejects B3-fail-closed).
+        let r = classify(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y FILTER(?y = :b) }}"
+        ));
         assert_eq!(r.label(), "pending-gate");
         // Non-recursive path → pending-gate (B5); recursive path → permanent.
         // (spargebra normalises `/` and `^` to plain BGPs — the B5 verification —
