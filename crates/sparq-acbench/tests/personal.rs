@@ -85,8 +85,7 @@ fn owner_always_allowed_wac() {
     let owner_ed = ds
         .expected_decisions
         .iter()
-        .filter(|e| e.model == AcModel::Wac && e.decision == Decision::Allow)
-        .next()
+        .find(|e| e.model == AcModel::Wac && e.decision == Decision::Allow)
         .expect("U1 must produce at least one Allow decision");
     let owner_uri = &owner_ed.request.agent;
 
