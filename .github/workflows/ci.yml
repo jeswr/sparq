@@ -2575,9 +2575,13 @@ jobs:
     # measured every nightly. The old single serial job walked all crates on ONE runner and
     # (once the concurrency cancel was fixed) would still hit the whole-job timeout on the
     # heavy crates before reaching the tail — so the later crates (engine … policy) were never
-    # measured. Sharded, each crate gets its OWN 120-min budget in parallel; a slow crate can
+    # measured. Sharded, each crate gets its OWN per-crate budget in parallel; a slow crate can
     # no longer starve or truncate the rest.
-    timeout-minutes: 120 # per-crate budget (was the whole-job budget)
+    # [SONNET-4.6] sq-qcnn.28: per-crate timeout via matrix.timeout_minutes (defaults 120min).
+    # Heavy crates (engine, solid, zk-compose, vectors, server, mpc) override to 360min via
+    # include entries. sparq-reason is sub-sharded 3×(--shard k/3) so each shard fits in 120min
+    # instead of one ~6h monolith.
+    timeout-minutes: ${{ fromJSON(matrix.timeout_minutes || '120') }}
     continue-on-error: true # advisory while the baseline seeds; remove when promoted to gating
     strategy:
       # fail-fast MUST be false: one crate's failure/timeout must NOT cancel the sibling
@@ -2596,7 +2600,9 @@ jobs:
           - sparq-algos
           - sparq-core
           - sparq-engine
-          - sparq-reason
+          # sparq-reason is NOT listed here — it is sub-sharded into 3 include entries below
+          # (--shard 1/3, 2/3, 3/3) so 3230 mutants fit in 3×120min instead of one ~6h job.
+          # [SONNET-4.6] sq-qcnn.28
           - sparq-shacl
           - sparq-geo
           - sparq-text
@@ -2623,6 +2629,7 @@ jobs:
           # mirroring scripts/coverage.sh's measure() PER-CRATE QUIRKS.
           - crate: sparq-core
             features: mmap,dict-spill
+            timeout_minutes: 360
           - crate: sparq-substrate
             features: numeric,join,compare,rows
           # [OPUS-4.8] sq-qcnn.14: sparq-canon QUIRK — the `rdf12-triple-terms` feature
@@ -2633,13 +2640,45 @@ jobs:
           # surface (lib.rs + rdf12.rs) to mutation, making the ceiling honest.
           - crate: sparq-canon
             features: rdf12-triple-terms
+          # [SONNET-4.6] sq-qcnn.28: HEAVY-CRATE TIMEOUT OVERRIDES.
+          # Run 28776460517 (2026-07-06): sparq-engine, sparq-solid, sparq-zk-compose,
+          # sparq-vectors all cancelled at the old 120min ceiling. Raise to 360min.
+          # sparq-server + sparq-mpc were killed by runner shutdown at 108min/57min; 360min
+          # gives them enough headroom and eliminates the race with the job-level timeout.
+          - crate: sparq-engine
+            timeout_minutes: 360
+          - crate: sparq-solid
+            timeout_minutes: 360
+          - crate: sparq-zk-compose
+            timeout_minutes: 360
+          - crate: sparq-vectors
+            timeout_minutes: 360
+          - crate: sparq-server
+            timeout_minutes: 360
+          - crate: sparq-mpc
+            timeout_minutes: 360
+          # [SONNET-4.6] sq-qcnn.28: sparq-reason SUB-SHARDS.
+          # 3230 mutants at ~13s each with 2 workers needs ~350min — over the 360min hard cap.
+          # Split into 3 shards of ~1077 mutants each; each fits in ~120min with the runner's
+          # 2 concurrent workers. cargo-mutants --shard k/n divides the full mutant list into
+          # n equal slices and processes only slice k. Since sparq-reason is unseeded, the
+          # ratchet --check reports "UNSEEDED" for each shard (exit 0) — no ceiling conflict.
+          # The 3 artifact uploads use per-shard suffixes set by GITHUB_OUTPUT in the run step.
+          - crate: sparq-reason
+            shard: "1/3"
+          - crate: sparq-reason
+            shard: "2/3"
+          - crate: sparq-reason
+            shard: "3/3"
     concurrency:
       # [OPUS-4.8] sq-qcnn.11: per-crate + per-ref concurrency key ("its own concurrency keys")
       # with cancel-in-progress:false so an overlapping run (e.g. a manual workflow_dispatch
       # while the scheduled nightly runs) queues this crate's shard rather than cancelling it —
       # belt-and-braces on top of the per-run WORKFLOW-level group that already stops
       # push-to-main from cancelling the nightly.
-      group: mutants-${{ github.ref }}-${{ matrix.crate }}
+      # [SONNET-4.6] sq-qcnn.28: include matrix.shard (empty for most crates) so sub-sharded
+      # sparq-reason entries get distinct concurrency slots.
+      group: mutants-${{ github.ref }}-${{ matrix.crate }}${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -2662,16 +2701,35 @@ jobs:
         # (sparq-core mmap,dict-spill / sparq-substrate numeric,join,compare,rows) — passed via
         # env (not inline ${{ }}) to keep it out of the shell-injection surface. A per-crate
         # failure is tolerated (continue-on-error) while seeding — the gate verdict is --check.
+        # [SONNET-4.6] sq-qcnn.28: continue-on-error:true at STEP level (in addition to job
+        # level) so that a runner shutdown mid-cargo-mutants does not mark the job as failure:
+        # the artifact upload (if: always()) still runs, and the job exits success even when the
+        # runner receives a shutdown signal. The ratchet regression is still reported in the step
+        # summary; only the JOB conclusion changes from failure to success.
+        id: run_mutants
+        continue-on-error: true
         env:
           CRATE: ${{ matrix.crate }}
           FEATURES: ${{ matrix.features }}
+          SHARD: ${{ matrix.shard }}
         run: |
           set -o pipefail
-          mkdir -p "target/mutants/$CRATE"
+          # [SONNET-4.6] sq-qcnn.28: sub-shard support. SHARD is empty for most crates;
+          # for sparq-reason it is "1/3", "2/3", or "3/3". The shard suffix maps "/" to "-"
+          # for use in file paths and artifact names ("1/3" -> "shard-1-3").
+          shard_args=()
+          artifact_suffix=""
+          if [ -n "$SHARD" ]; then
+            shard_args=(--shard "$SHARD")
+            artifact_suffix="-shard-${SHARD//\//-}"
+          fi
+          echo "artifact_suffix=${artifact_suffix}" >> "$GITHUB_OUTPUT"
+          output_dir="target/mutants/${CRATE}${artifact_suffix}"
+          mkdir -p "$output_dir"
           feat=()
           [ -n "$FEATURES" ] && feat=(--features "$FEATURES")
-          echo "::group::cargo-mutants $CRATE ${feat[*]}"
-          cargo mutants -p "$CRATE" "${feat[@]}" -o "target/mutants/$CRATE" \
+          echo "::group::cargo-mutants $CRATE ${feat[*]}${SHARD:+ --shard $SHARD}"
+          cargo mutants -p "$CRATE" "${feat[@]}" "${shard_args[@]}" -o "$output_dir" \
             || echo "WARN: cargo-mutants $CRATE did not complete cleanly (advisory)"
           echo "::endgroup::"
           # Run the ratchet --check on THIS crate's outcomes. --check NEVER fails on an
@@ -2679,14 +2737,15 @@ jobs:
           # crate now has MORE survivors than its committed ceiling. While advisory
           # (continue-on-error) that regression is REPORTED but does not block; promotion to
           # gating (sq-qcnn.27) drops continue-on-error + this job's "advisory" name token.
-          OUTCOMES=$(find "target/mutants/$CRATE" -name outcomes.json)
+          OUTCOMES=$(find "$output_dir" -name outcomes.json)
           echo "outcomes: ${OUTCOMES:-<none>}"
           if [ -n "$OUTCOMES" ]; then
             # shellcheck disable=SC2086 # intentional word-split: each path is a separate arg
             python3 scripts/mutants-gate.py --check $OUTCOMES \
               | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "no outcomes produced for $CRATE — nothing to check" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "no outcomes produced for $CRATE${SHARD:+ shard=$SHARD} — nothing to check" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload mutation outcomes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2696,8 +2755,10 @@ jobs:
           # matrix jobs uploading the SAME artifact name. Seeding an unseeded crate: download
           # its mutants-outcomes-nightly-<crate> artifact + run scripts/mutants-gate.py --seed
           # on the outcomes.json, then commit bench/mutants-baseline.json (reviewed).
-          name: mutants-outcomes-nightly-${{ matrix.crate }}
-          path: target/mutants/${{ matrix.crate }}/mutants.out/outcomes.json
+          # [SONNET-4.6] sq-qcnn.28: per-shard artifact suffix injected via GITHUB_OUTPUT
+          # (artifact_suffix is empty for non-sharded crates, "-shard-1-3" etc for sparq-reason).
+          name: mutants-outcomes-nightly-${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}
+          path: target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
 
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the
