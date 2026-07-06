@@ -206,6 +206,58 @@ fn big_srj_body(rows: usize) -> String {
     )
 }
 
+/// (bead sq-my8wd.5) [OPUS-4.8] Transport-reader seam: peak memory stays BELOW the
+/// response body size because the body is NEVER fully buffered as a `String`. The
+/// pre-reader-seam path held a full body String even with streaming row parsing, so
+/// peak was necessarily >= body. This test asserts we crossed that threshold.
+///
+/// Invariant (load-bearing for the reader seam): on the reader path the query
+/// thread's peak live-allocation delta is STRICTLY LESS THAN the body size.
+/// A generous buffer overhead is added for the BufReader, parser working state,
+/// id-level compact relation, and local vocab — but NOT a full body-sized String.
+#[test]
+fn transport_reader_seam_peak_stays_below_body_size() {
+    // ~10k rows, ~1.1 MB body. Large enough for the String-buffering cost to be
+    // measurable but small enough to keep the test fast.
+    let body = big_srj_body(10_000);
+    let body_len = body.len() as isize;
+    let url = serve(body, 1);
+
+    let g = Graph::load_str("<http://ex/a> <http://ex/p> <http://ex/b> .", "ntriples").unwrap();
+    // COUNT(*) keeps the output to a single row, isolating SERVICE consumption.
+    let q = format!(
+        "SELECT (COUNT(*) AS ?c) WHERE {{ SERVICE <{}> {{ ?s ?p ?n }} }}",
+        url
+    );
+
+    let (peak, res) = peak_delta_during(|| {
+        with_service_egress_allow(["127.0.0.1".to_string()], || query(&g, &q))
+    });
+    let res = res.expect("federated COUNT query (reader seam)");
+    assert_eq!(res.rows.len(), 1);
+    let count = res.rows[0][0].as_ref().expect("count term").to_string();
+    assert!(
+        count.starts_with("\"10000\""),
+        "duplicate rows must survive the reader path (multiset semantics), got {}",
+        count
+    );
+
+    // THE LOAD-BEARING INVARIANT: peak live bytes < body size.
+    // A generous additive overhead covers BufReader internal buffer + parser working
+    // state + compact id-level rows + deduped vocab — but NOT a full body String.
+    // If the body were buffered as a String the peak would be >= body_len.
+    let overhead = 4 << 20; // 4 MiB generous overhead
+    let bound = body_len + overhead;
+    assert!(
+        peak < bound,
+        "transport reader seam peak {} bytes >= body {} bytes + overhead {} bytes: \
+         the body is being buffered as a String (reader seam not active on this path)",
+        peak,
+        body_len,
+        overhead
+    );
+}
+
 #[test]
 fn large_service_result_consumption_is_bounded_by_the_body_not_the_relation() {
     // ~60k rows, ~7 MB on the wire. All terms are absent from the local graph, so

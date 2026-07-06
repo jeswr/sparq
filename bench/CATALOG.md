@@ -63,7 +63,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `dict-baseline`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | canonical loopback HTTP throughput harness; concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-throughput`, `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
@@ -379,6 +379,8 @@ python3 bench/u64-valueids/gen.py 1000000 /tmp/t3-literals.nt
 SPARQ_CLI=target/release/sparq-cli bench/inference/owl-bench.sh
 EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli bench/inference/eye-comparison.sh
 cargo run -p sparq-reason --example incremental_olympics_bench --release
+# access-controlled-query oracle (WAC/ACP/ODRL, sparq-acbench) — fail-closed pass/fail, no engine link:
+bench/ac/run.sh --smoke                              # per-commit smoke tier (bench/ac/run.sh --sf N = nightly)
 
 # --- zk (standalone projects + Noir toolchain) ---
 ( cd bench/zk        && cargo bench )

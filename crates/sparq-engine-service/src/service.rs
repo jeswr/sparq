@@ -127,6 +127,51 @@ pub trait Transport {
     fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String>;
 }
 
+/// Streaming transport seam: returns the raw HTTP response body as a `Read` handle
+/// so the parser can consume it incrementally WITHOUT buffering it into a `String`
+/// first. (bead sq-my8wd.5) [OPUS-4.8] / [FABLE-5]
+///
+/// The production `HttpTransport` implements this by handing back the ureq response
+/// body reader directly (with the same `SERVICE_MAX_BODY_BYTES` body cap enforced by
+/// the limit-wrapped reader). Test transports that implement `Transport` get a blanket
+/// impl via `TransportAsReader` so the streaming path is exercised without rewriting
+/// every canned-mock.
+///
+/// Compared to `Transport`, the contract change is only in what the body-read lifecycle:
+/// * The returned `Read` MUST be fully consumed (or EOF encountered) before the method
+///   is called again; it borrows from the response, so the caller may not hold it
+///   across calls.
+/// * On any I/O error mid-stream the `Read::read` impl returns `Err`. The parser
+///   treats any mid-stream error as a SERVICE failure (the same as a transport error).
+#[cfg(feature = "service")]
+pub trait ReaderTransport {
+    /// Send `query` to `endpoint` and return the response body as a `Read`. On a
+    /// transport/HTTP error (before any body bytes are available) returns `Err`.
+    fn fetch_reader<'a>(
+        &'a self,
+        endpoint: &str,
+        query: &str,
+    ) -> Result<Box<dyn std::io::Read + 'a>, String>;
+}
+
+/// Adapter: wraps any `Transport` as a `ReaderTransport` by calling `fetch()` and
+/// returning an `io::Cursor` over the owned `String` body.  This gives test mocks the
+/// streaming path without any changes. [OPUS-4.8] (sq-my8wd.5)
+#[cfg(feature = "service")]
+pub struct TransportAsReader<'t, T: ?Sized>(pub &'t T);
+
+#[cfg(feature = "service")]
+impl<T: Transport + ?Sized> ReaderTransport for TransportAsReader<'_, T> {
+    fn fetch_reader<'a>(
+        &'a self,
+        endpoint: &str,
+        query: &str,
+    ) -> Result<Box<dyn std::io::Read + 'a>, String> {
+        let body = self.0.fetch(endpoint, query)?;
+        Ok(Box::new(std::io::Cursor::new(body)))
+    }
+}
+
 /// Evaluate one SERVICE call end-to-end, STREAMING the parsed rows into `on_row` as
 /// they are decoded (bead sq-my8wd.4): send `query` to `endpoint` via `transport`,
 /// content-sniff + parse the response incrementally, and return the projected
@@ -141,6 +186,25 @@ pub fn eval_remote_into<F: RowSink>(
 ) -> Result<Vec<Variable>, String> {
     let body = transport.fetch(endpoint, query)?;
     parse_results_into(&body, on_row)
+}
+
+/// Reader-seam variant of [`eval_remote_into`]: send `query` to `endpoint` via
+/// `transport`, receive the response body as a `Read` stream (NOT buffered into a
+/// `String`), content-sniff + parse it incrementally, and call `on_row` for each
+/// parsed solution. Peak memory stays below the response body size — the body is
+/// never materialised in full. [OPUS-4.8] (bead sq-my8wd.5) [FABLE-5]
+///
+/// SILENT handling is the caller's responsibility (it owns the join-identity fallback,
+/// and must discard whatever the sink accumulated when this returns `Err`).
+#[cfg(feature = "service")]
+pub fn eval_remote_into_read<F: RowSink>(
+    transport: &dyn ReaderTransport,
+    endpoint: &str,
+    query: &str,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
+    let reader = transport.fetch_reader(endpoint, query)?;
+    parse_results_into_read(std::io::BufReader::new(reader), on_row)
 }
 
 /// Collecting wrapper over [`eval_remote_into`]: evaluate one SERVICE call end-to-end
@@ -198,6 +262,62 @@ pub(crate) fn parse_results(text: &str) -> Result<ServiceRelation, String> {
         Ok(())
     })?;
     Ok(ServiceRelation { vars, rows })
+}
+
+/// Parse a remote SELECT results document from a `BufRead` stream WITHOUT buffering
+/// the full body. Content-sniffs the first non-whitespace byte (identical dispatch
+/// logic to [`parse_results_into`]) then delegates to the reader-based JSON or XML
+/// parser. (bead sq-my8wd.5) [OPUS-4.8] [FABLE-5]
+///
+/// The `reader` is consumed incrementally; at no point is the whole body held in
+/// memory. A mid-stream I/O error is reported as a SERVICE failure.
+#[cfg(feature = "service")]
+pub(crate) fn parse_results_into_read<R: std::io::BufRead, F: RowSink>(
+    mut reader: R,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
+    // Content-sniff: advance past leading ASCII whitespace to find the first
+    // meaningful byte. We peek into the BufReader's internal buffer without
+    // consuming; if the buffer is empty we fill it first.
+    loop {
+        let buf = reader
+            .fill_buf()
+            .map_err(|e| format!("SERVICE: reading response: {}", e))?;
+        if buf.is_empty() {
+            return Err(
+                "SERVICE: endpoint response is neither SPARQL-Results-JSON nor -XML \
+                 (expected a leading '{' or '<')"
+                    .into(),
+            );
+        }
+        // Find first non-whitespace byte in this buffer chunk.
+        let pos = buf.iter().position(|b| !b.is_ascii_whitespace());
+        match pos {
+            Some(i) => {
+                let sniff = buf[i];
+                // Do NOT consume the whitespace prefix here; let the downstream
+                // parser see the full (trimmed-start) content. The BufReader has
+                // not advanced past `buf[i]`, so the parser starts reading from
+                // the correct position — but we must consume the leading whitespace
+                // bytes so they are not re-read.
+                reader.consume(i);
+                return match sniff {
+                    b'<' => parse_srx_into_read(reader, on_row),
+                    b'{' => parse_srj_into_read(reader, on_row),
+                    _ => Err(
+                        "SERVICE: endpoint response is neither SPARQL-Results-JSON nor -XML \
+                         (expected a leading '{' or '<')"
+                            .into(),
+                    ),
+                };
+            }
+            None => {
+                // The entire buffer chunk was whitespace; consume it and refill.
+                let n = buf.len();
+                reader.consume(n);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +651,33 @@ pub(crate) fn parse_srj(text: &str) -> Result<ServiceRelation, String> {
         Ok(())
     })?;
     Ok(ServiceRelation { vars, rows })
+}
+
+/// Reader-seam variant of [`parse_srj_into`]: parse a SPARQL-Results-JSON document
+/// from a `Read` stream WITHOUT buffering the body, calling `on_row` per solution.
+/// Uses `serde_json::Deserializer::from_reader`, so the only in-memory state is one
+/// binding object at a time — identical streaming guarantees to [`parse_srj_into`],
+/// extended to the HTTP body read. (bead sq-my8wd.5) [OPUS-4.8] [FABLE-5]
+///
+/// Result-semantics are IDENTICAL to [`parse_srj_into`] on the same byte sequence:
+/// same rows, order, multiplicity, and errors (the `srj_stream` seed logic is shared).
+#[cfg(feature = "service")]
+pub(crate) fn parse_srj_into_read<R: std::io::Read, F: RowSink>(
+    reader: R,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
+    use serde::de::DeserializeSeed;
+
+    let mut st = srj_stream::State::new(on_row);
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    if let Err(e) = srj_stream::TopSeed(&mut st).deserialize(&mut de) {
+        return Err(st
+            .take_fail()
+            .unwrap_or_else(|| format!("SERVICE: invalid results JSON: {}", e)));
+    }
+    de.end()
+        .map_err(|e| format!("SERVICE: invalid results JSON: {}", e))?;
+    st.finish()
 }
 
 /// Streaming serde seeds for SPARQL-Results-JSON (bead sq-my8wd.4). [FABLE-5]
@@ -1202,6 +1349,211 @@ pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
     Ok(ServiceRelation { vars, rows })
 }
 
+/// Reader-seam variant of [`parse_srx_into`]: parse a SPARQL-Results-XML document
+/// from a `BufRead` stream WITHOUT buffering the body into a `String`. Uses
+/// `quick_xml::Reader::from_reader` with the same event-driven logic as
+/// [`parse_srx_into`]; the only difference is that events are delivered via
+/// `read_event_into(&mut buf)` (a `Vec<u8>` working buffer) rather than
+/// `read_event()`. (bead sq-my8wd.5) [OPUS-4.8] [FABLE-5]
+///
+/// Result-semantics are IDENTICAL to [`parse_srx_into`] on the same byte sequence.
+#[cfg(feature = "service")]
+pub(crate) fn parse_srx_into_read<R: std::io::BufRead, F: RowSink>(
+    reader: R,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut qr = Reader::from_reader(reader);
+    qr.config_mut().trim_text(false);
+
+    // Event scratch buffer — reused across calls; event data is eagerly cloned out.
+    let mut buf: Vec<u8> = Vec::new();
+
+    let mut vars: Vec<Variable> = Vec::new();
+    let mut cur_row: rustc_hash::FxHashMap<String, Term> = rustc_hash::FxHashMap::default();
+    let mut cur_var: Option<String> = None;
+    #[allow(clippy::type_complexity)]
+    let mut cur_val: Option<(String, Option<String>, Option<String>, Option<String>, String)> =
+        None;
+    let mut triple_stack: Vec<(usize, [Option<Term>; 3])> = Vec::new();
+    let mut in_boolean = false;
+    let mut boolean: Option<bool> = None;
+
+    // Identical helper closures to the `from_str` parser.
+    fn commit_r(
+        term: Term,
+        triple_stack: &mut [(usize, [Option<Term>; 3])],
+        cur_row: &mut rustc_hash::FxHashMap<String, Term>,
+        cur_var: &Option<String>,
+    ) {
+        if let Some((slot, parts)) = triple_stack.last_mut() {
+            parts[*slot] = Some(term);
+        } else if let Some(var) = cur_var.clone() {
+            cur_row.insert(var, term);
+        }
+    }
+    fn set_slot_r(triple_stack: &mut [(usize, [Option<Term>; 3])], slot: usize) {
+        if let Some((s, _)) = triple_stack.last_mut() {
+            *s = slot;
+        }
+    }
+
+    loop {
+        buf.clear();
+        match qr
+            .read_event_into(&mut buf)
+            .map_err(|e| format!("SERVICE: invalid results XML: {e}"))?
+        {
+            Event::Eof => break,
+            ev @ (Event::Start(_) | Event::Empty(_)) => {
+                let is_empty = matches!(ev, Event::Empty(_));
+                let e = match &ev {
+                    Event::Start(e) | Event::Empty(e) => e,
+                    _ => unreachable!(),
+                };
+                let name = e.local_name();
+                let name = std::str::from_utf8(name.as_ref()).unwrap_or("").to_string();
+                let attr = |key: &str| -> Option<String> {
+                    e.attributes().filter_map(|a| a.ok()).find_map(|a| {
+                        let k = std::str::from_utf8(a.key.as_ref()).ok()?;
+                        if k == key || k.ends_with(&format!(":{key}")) {
+                            quick_xml::escape::unescape(std::str::from_utf8(&a.value).ok()?)
+                                .ok()
+                                .map(std::borrow::Cow::into_owned)
+                        } else {
+                            None
+                        }
+                    })
+                };
+                match name.as_str() {
+                    "variable" => {
+                        if let Some(v) = attr("name") {
+                            vars.push(Variable::new(&v).map_err(|e| {
+                                format!("SERVICE: bad result variable {v:?}: {e}")
+                            })?);
+                        }
+                    }
+                    "result" => cur_row.clear(),
+                    "binding" => cur_var = attr("name"),
+                    "uri" | "bnode" => cur_val = Some((name, None, None, None, String::new())),
+                    "literal" => {
+                        cur_val = Some((
+                            name,
+                            attr("lang"),
+                            attr("dir"),
+                            attr("datatype"),
+                            String::new(),
+                        ))
+                    }
+                    "triple" => triple_stack.push((0, [None, None, None])),
+                    "subject" => set_slot_r(&mut triple_stack, 0),
+                    "predicate" => set_slot_r(&mut triple_stack, 1),
+                    "object" => set_slot_r(&mut triple_stack, 2),
+                    "boolean" => in_boolean = true,
+                    _ => {}
+                }
+                if is_empty {
+                    if let Some((kind, lang, dir, dt, t)) = cur_val.take() {
+                        commit_r(
+                            srx_term(&kind, lang, dir, dt, t)?,
+                            &mut triple_stack,
+                            &mut cur_row,
+                            &cur_var,
+                        );
+                    }
+                }
+            }
+            Event::Text(t) => {
+                let s = t.decode().map_err(|e| e.to_string())?;
+                if in_boolean {
+                    boolean = Some(s.trim() == "true");
+                } else if let Some(v) = cur_val.as_mut() {
+                    v.4.push_str(&s);
+                }
+            }
+            Event::GeneralRef(r) => {
+                if let Some(v) = cur_val.as_mut() {
+                    let name = r.decode().map_err(|e| e.to_string())?;
+                    v.4.push_str(&resolve_xml_entity(&name)?);
+                }
+            }
+            Event::CData(t) => {
+                if let Some(v) = cur_val.as_mut() {
+                    v.4.push_str(&String::from_utf8_lossy(&t));
+                }
+            }
+            Event::End(e) => {
+                let name = e.local_name();
+                match name.as_ref() {
+                    b"uri" | b"bnode" | b"literal" => {
+                        if let Some((kind, lang, dir, dt, t)) = cur_val.take() {
+                            commit_r(
+                                srx_term(&kind, lang, dir, dt, t)?,
+                                &mut triple_stack,
+                                &mut cur_row,
+                                &cur_var,
+                            );
+                        }
+                    }
+                    b"triple" => {
+                        let Some((_, [s, p, o])) = triple_stack.pop() else {
+                            return Err("SERVICE: stray </triple> in results XML".into());
+                        };
+                        let subject = match s {
+                            Some(Term::NamedNode(n)) => NamedOrBlankNode::NamedNode(n),
+                            Some(Term::BlankNode(b)) => NamedOrBlankNode::BlankNode(b),
+                            other => {
+                                return Err(format!(
+                                    "SERVICE: invalid triple-term subject: {other:?}"
+                                ))
+                            }
+                        };
+                        let predicate = match p {
+                            Some(Term::NamedNode(n)) => n,
+                            other => {
+                                return Err(format!(
+                                    "SERVICE: invalid triple-term predicate: {other:?}"
+                                ))
+                            }
+                        };
+                        let object = o
+                            .ok_or_else(|| "SERVICE: triple term without object".to_string())?;
+                        commit_r(
+                            Term::Triple(Box::new(Triple {
+                                subject,
+                                predicate,
+                                object,
+                            })),
+                            &mut triple_stack,
+                            &mut cur_row,
+                            &cur_var,
+                        );
+                    }
+                    b"binding" => cur_var = None,
+                    b"result" => {
+                        let row: Vec<Option<Term>> =
+                            vars.iter().map(|v| cur_row.remove(v.as_str())).collect();
+                        cur_row.clear();
+                        on_row(row)?;
+                    }
+                    b"boolean" => in_boolean = false,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if boolean.is_some() {
+        return Err(
+            "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
+        );
+    }
+    Ok(vars)
+}
+
 // ---------------------------------------------------------------------------
 // SSRF egress policy (default-deny private / internal ranges) [OPUS-4.8]
 // ---------------------------------------------------------------------------
@@ -1809,6 +2161,49 @@ impl Transport for HttpTransport {
     }
 }
 
+/// `ReaderTransport` for `HttpTransport`: returns the ureq response body as a byte
+/// stream WITHOUT calling `read_to_string`, so the body is NEVER fully buffered as a
+/// `String`. The same `SERVICE_MAX_BODY_BYTES` cap is enforced by the limit-wrapped
+/// reader. (bead sq-my8wd.5) [OPUS-4.8] [FABLE-5]
+#[cfg(all(feature = "service", not(target_arch = "wasm32")))]
+impl ReaderTransport for HttpTransport {
+    fn fetch_reader<'a>(
+        &'a self,
+        endpoint: &str,
+        query: &str,
+    ) -> Result<Box<dyn std::io::Read + 'a>, String> {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .user_agent(concat!("sparq-engine/", env!("CARGO_PKG_VERSION")))
+            .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            EgressFilterResolver,
+        );
+        let resp = agent
+            .post(endpoint)
+            .header(
+                "Accept",
+                "application/sparql-results+json, application/sparql-results+xml;q=0.9",
+            )
+            .send_form([("query", query)]);
+        match resp {
+            Ok(r) => {
+                // Return the body as a capped byte reader — no `read_to_string`, no
+                // String allocation for the whole body. The limit is the same cap as
+                // the `Transport` path so the body-byte bound is preserved.
+                let reader = r.into_body().into_with_config().limit(SERVICE_MAX_BODY_BYTES).reader();
+                Ok(Box::new(reader))
+            }
+            Err(ureq::Error::StatusCode(code)) => {
+                Err(format!("SERVICE: endpoint {endpoint} returned HTTP {code}"))
+            }
+            Err(e) => Err(format!("SERVICE: request to {endpoint} failed: {e}")),
+        }
+    }
+}
+
 /// Max bytes read from a SERVICE response body. ureq-3's default `read_to_string` cap is 10 MiB;
 /// a federated SELECT can legitimately exceed that, so we raise it to a generous-but-finite bound
 /// (memory is still bounded — a runaway endpoint cannot OOM the engine). [OPUS-4.8] sq-g2xs.
@@ -2166,6 +2561,65 @@ mod tests {
         assert!(parse_results("").is_err());
         // Leading whitespace before the sniff byte is tolerated.
         assert!(parse_results("   {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}").is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // Bind-join block-size knob direct unit tests [OPUS-4.8] (sq-sjkj)
+    // ------------------------------------------------------------------
+
+    /// `bind_block_size()` returns the default when no scope is installed.
+    #[test]
+    fn bind_block_size_returns_default_outside_scope() {
+        // [OPUS-4.8] sq-sjkj: direct coverage for the public accessor.
+        // The default is DEFAULT_BIND_BLOCK (50) when no override is active.
+        let s = bind_block_size();
+        assert_eq!(s, DEFAULT_BIND_BLOCK, "default bind-block size must be DEFAULT_BIND_BLOCK");
+    }
+
+    /// `with_service_bound_join_block_size` scopes the override and restores it.
+    #[test]
+    fn with_service_bound_join_block_size_scopes_and_restores() {
+        // [OPUS-4.8] sq-sjkj: direct coverage for the scoped override entry point.
+        let before = bind_block_size();
+        with_service_bound_join_block_size(999, || {
+            assert_eq!(bind_block_size(), 999, "override must be active inside scope");
+        });
+        // The previous value is restored after the scope.
+        assert_eq!(bind_block_size(), before, "override must be gone after scope");
+    }
+
+    /// `with_service_bound_join_block_size(0, …)` is clamped to 1.
+    #[test]
+    fn with_service_bound_join_block_size_zero_is_clamped_to_one() {
+        // [OPUS-4.8] sq-sjkj: a zero block size is clamped to 1 so a tuple still
+        // gets pushed one-per-request rather than silently disabling the knob.
+        with_service_bound_join_block_size(0, || {
+            assert_eq!(bind_block_size(), 1, "zero must be clamped to 1");
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Per-query remote-request cap direct unit tests [OPUS-4.8] (sq-b93pv)
+    // ------------------------------------------------------------------
+
+    /// `remote_request_cap()` returns `None` when no scope is installed.
+    #[test]
+    fn remote_request_cap_returns_none_outside_scope() {
+        // [OPUS-4.8] sq-b93pv: direct coverage for the public accessor.
+        // The default is uncapped (None) when no override is active.
+        let cap = remote_request_cap();
+        assert_eq!(cap, None, "default remote-request cap must be None (uncapped)");
+    }
+
+    /// `with_service_remote_request_cap` scopes the cap and restores it.
+    #[test]
+    fn with_service_remote_request_cap_scopes_and_restores() {
+        // [OPUS-4.8] sq-b93pv: direct coverage for the scoped cap entry point.
+        assert_eq!(remote_request_cap(), None); // no prior override
+        with_service_remote_request_cap(8, || {
+            assert_eq!(remote_request_cap(), Some(8), "cap must be active inside scope");
+        });
+        assert_eq!(remote_request_cap(), None, "cap must be gone after scope");
     }
 
     /// Canned-response transport: proves `eval_remote` wires the transport into the
@@ -3001,6 +3455,143 @@ mod tests {
             })
             .is_err());
             assert_eq!(n, 0);
+        }
+
+        // ------------------------------------------------------------------
+        // Direct coverage for the reader-seam path (sq-my8wd.5) [OPUS-4.8]
+        // ------------------------------------------------------------------
+
+        /// `eval_remote_into_read` round-trips through the `TransportAsReader`
+        /// adapter (the test-seam path) and produces the same relation as the
+        /// non-reader path — direct coverage for the production entry point.
+        #[test]
+        fn eval_remote_into_read_via_transport_as_reader() {
+            let body = r#"{"head":{"vars":["x","y"]},"results":{"bindings":[
+                {"x":{"type":"uri","value":"http://ex/1"},"y":{"type":"literal","value":"a"}},
+                {"x":{"type":"uri","value":"http://ex/2"}}]}}"#;
+            let tr = super::TransportAsReader(&super::Canned(body));
+            let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+            let vars = eval_remote_into_read(&tr, "http://unused/", "SELECT * WHERE {}",
+                &mut |r| { rows.push(r); Ok(()) }).unwrap();
+            assert_eq!(vars.len(), 2);
+            assert_eq!(rows.len(), 2);
+        }
+
+        /// `parse_results_into_read` correctly sniffs and routes SRJ via a reader.
+        #[test]
+        fn parse_results_into_read_sniffs_srj() {
+            let body = r#"{"head":{"vars":["z"]},"results":{"bindings":[
+                {"z":{"type":"bnode","value":"b0"}}]}}"#;
+            let mut n = 0usize;
+            let vars = parse_results_into_read(std::io::BufReader::new(body.as_bytes()),
+                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            assert_eq!(vars.len(), 1);
+            assert_eq!(n, 1);
+        }
+
+        /// `parse_results_into_read` correctly sniffs and routes SRX via a reader.
+        #[test]
+        fn parse_results_into_read_sniffs_srx() {
+            let body = r#"<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+                <head><variable name="z"/></head>
+                <results><result><binding name="z">
+                    <uri>http://ex/srx</uri>
+                </binding></result></results></sparql>"#;
+            let mut n = 0usize;
+            let vars = parse_results_into_read(std::io::BufReader::new(body.as_bytes()),
+                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            assert_eq!(vars.len(), 1);
+            assert_eq!(n, 1);
+        }
+
+        /// `parse_srj_into_read` produces the same result as `parse_srj_into` on a
+        /// representative document — direct coverage for the streaming SRJ reader.
+        #[test]
+        fn parse_srj_into_read_agrees_with_into_on_representative_doc() {
+            let body = r#"{"head":{"vars":["s","o"]},"results":{"bindings":[
+                {"s":{"type":"uri","value":"http://ex/s1"},"o":{"type":"literal","value":"v1"}},
+                {"s":{"type":"uri","value":"http://ex/s2"}}]}}"#;
+            let mut from_str: Vec<Vec<Option<Term>>> = Vec::new();
+            let v1 = parse_srj_into(body, &mut |r| { from_str.push(r); Ok(()) }).unwrap();
+            let mut from_read: Vec<Vec<Option<Term>>> = Vec::new();
+            let v2 = parse_srj_into_read(body.as_bytes(), &mut |r| { from_read.push(r); Ok(()) }).unwrap();
+            assert_eq!(v1, v2);
+            assert_eq!(from_str, from_read);
+        }
+
+        /// `parse_srx_into_read` produces the same result as `parse_srx_into` on a
+        /// representative document — direct coverage for the streaming SRX reader.
+        #[test]
+        fn parse_srx_into_read_agrees_with_into_on_representative_doc() {
+            let body = r#"<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+                <head><variable name="s"/><variable name="o"/></head>
+                <results>
+                    <result>
+                        <binding name="s"><uri>http://ex/s1</uri></binding>
+                        <binding name="o"><literal>v1</literal></binding>
+                    </result>
+                    <result><binding name="s"><uri>http://ex/s2</uri></binding></result>
+                </results></sparql>"#;
+            let mut from_str: Vec<Vec<Option<Term>>> = Vec::new();
+            let v1 = parse_srx_into(body, &mut |r| { from_str.push(r); Ok(()) }).unwrap();
+            let mut from_read: Vec<Vec<Option<Term>>> = Vec::new();
+            let v2 = parse_srx_into_read(std::io::BufReader::new(body.as_bytes()),
+                &mut |r| { from_read.push(r); Ok(()) }).unwrap();
+            assert_eq!(v1, v2);
+            assert_eq!(from_str, from_read);
+        }
+
+        // ------------------------------------------------------------------
+        // Reader-seam error paths (sq-my8wd.5) [OPUS-4.8]
+        // ------------------------------------------------------------------
+
+        /// `parse_results_into_read` on an EMPTY body returns an error matching
+        /// the non-reader path, not a panic or silent empty result.
+        #[test]
+        fn parse_results_into_read_empty_body_is_error() {
+            // [OPUS-4.8] sq-my8wd.5 coverage: the `buf.is_empty()` early-return
+            // branch in `parse_results_into_read` (the empty-response path).
+            let err = parse_results_into_read(std::io::BufReader::new(b"".as_ref()),
+                &mut |_r| Ok(())).unwrap_err();
+            assert!(
+                err.contains("neither SPARQL-Results-JSON nor -XML"),
+                "empty body must report the sniff error: {err}"
+            );
+        }
+
+        /// `parse_results_into_read` on a body that is neither `{` nor `<`
+        /// returns the sniff error — mirrors `parse_results_into`'s rejection.
+        #[test]
+        fn parse_results_into_read_unknown_format_is_error() {
+            // [OPUS-4.8] sq-my8wd.5 coverage: the `_ => Err(…)` sniff branch in
+            // `parse_results_into_read` (the unrecognised-format path).
+            let err = parse_results_into_read(std::io::BufReader::new(b"plain text".as_ref()),
+                &mut |_r| Ok(())).unwrap_err();
+            assert!(
+                err.contains("neither SPARQL-Results-JSON nor -XML"),
+                "unrecognised body must report the sniff error: {err}"
+            );
+            // Whitespace-only body hits the empty-buffer path after draining whitespace.
+            let err2 = parse_results_into_read(std::io::BufReader::new(b"   ".as_ref()),
+                &mut |_r| Ok(())).unwrap_err();
+            assert!(
+                err2.contains("neither SPARQL-Results-JSON nor -XML"),
+                "whitespace-only body must report the sniff error: {err2}"
+            );
+        }
+
+        /// `parse_results_into_read` with a body prefixed by leading whitespace still
+        /// routes correctly to the SRJ parser — exercises the whitespace-consume loop.
+        #[test]
+        fn parse_results_into_read_leading_whitespace_routes_srj() {
+            // [OPUS-4.8] sq-my8wd.5 coverage: the `None` (all-whitespace-chunk)
+            // branch in `parse_results_into_read`, then routing to SRJ.
+            let body = b"   \n\t {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}";
+            let mut n = 0usize;
+            let vars = parse_results_into_read(std::io::BufReader::new(body.as_ref()),
+                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            assert_eq!(vars.len(), 1);
+            assert_eq!(n, 0); // no rows
         }
     }
 }
