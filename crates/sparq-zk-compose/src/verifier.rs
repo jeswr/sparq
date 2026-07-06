@@ -1520,6 +1520,14 @@ pub enum CheckError {
     JoinCommitmentChainMismatch { edge: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
+    /// [OPUS-4.8] sq-h732x: the FAIL-CLOSED extended-fragment structural routing
+    /// gate ([`dispatch_fragment`]) refused the presentation — the query is
+    /// outside the wave-1 fragment, or a disclosed solution's branch witness does
+    /// not route to a bound sub-proof of the correct circuit member. Carried into
+    /// [`verify_fragment_manifest`] so an extended-fragment refusal surfaces as one
+    /// structured error alongside the stage-1 gates. Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentDispatch(FragmentDispatchError),
 }
 
 impl std::fmt::Display for CheckError {
@@ -1836,6 +1844,10 @@ impl std::fmt::Display for CheckError {
                 "join edge {edge}: an N-way join chain over a shared variable carries differing join_commitments across its pairwise join_eq proofs (sq-r2s8 §2.4: every hop of a multi-way join must bind the SAME hiding commitment so the join value composes transitively — distinct commitments leave the N-way join unproven, fail-closed)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentDispatch(e) => {
+                write!(f, "extended-fragment dispatch rejected: {}", e)
+            }
         }
     }
 }
@@ -2031,27 +2043,78 @@ pub fn prefilter_manifest_structure(
     trusted_key_set: &KeySet,
     revocation_policy: &RevocationPolicy,
 ) -> Result<Vec<JoinEdge>, CheckError> {
-    // --- Stage 1a: sparq-zk layer-3 bnode / arity re-check. ---
-    // [OPUS-4.8] sq-en5dx (Finding A of the sq-1s2.6 composition review): feed the
-    // Q6 cross-graph obligation gate a GLOBAL-namespace attribution vector, NOT the
-    // raw scan-LOCAL indices. `manifest.attributions[pi]` indexes the ANSWERING
-    // scan's OWN `commitments`, so two DISTINCT `k=1` scans both declaring local
-    // index 0 (the `[[0],[0]]` cross-scan alias) would COLLAPSE to one element and
-    // the non-bnode obligation would be DROPPED for the cross-scan join. Keying the
-    // union on the committed-graph IDENTITY (via `global_attributions`) makes two
-    // distinct graphs distinct so the obligation is correctly required, while two
-    // scans over the SAME graph still collapse (a same-graph bnode join is
-    // legitimate). See `global_attributions` for the fail-closed edge cases.
-    let attributions = global_attributions(manifest);
-    let declared: Vec<JoinEdge> = manifest
-        .join_obligations
-        .iter()
-        .map(|(variable, i, j)| JoinEdge {
-            variable: variable.clone(),
-            patterns: (*i, *j),
-        })
-        .collect();
-    let required = recheck(&manifest.query, &attributions, &declared)?;
+    // The public structural pre-filter is the FLAT stage-1 regime
+    // (`skip_query_binding = false`): every stage-1 query-text gate runs, so its
+    // behaviour is byte-identical with or without the `extended-fragment` feature.
+    prefilter_manifest_structure_impl(manifest, trusted_key_set, revocation_policy, false)
+}
+
+/// Shared body of [`prefilter_manifest_structure`]. `skip_query_binding` selects
+/// the stage-1 QUERY-TEXT binding regime; every query-INDEPENDENT gate runs
+/// identically in both.
+///
+/// - `false` — the FLAT stage-1 fragment, the ONLY value the sound
+///   [`verify_manifest`] path and the default build ever use. Stage 1a runs the
+///   full [`recheck`] (`fragment_patterns` + the flat cross-graph Q6 obligation
+///   binding), and the query-text term-binding gates `bind_query_correctness`,
+///   `bind_attributions`, `bind_joins` all run.
+/// - `true` — the EXTENDED-fragment regime, set ONLY by
+///   `verify_fragment_manifest` AFTER `dispatch_fragment` has re-derived and
+///   routed the query through `fragment_query` (sq-h732x). Stage 1a's
+///   query-fragment ACCEPTANCE is routed through `fragment_query` (accepts the
+///   wave-1 `UNION` / `VALUES` / property-path extensions, fail-closed on anything
+///   outside), and the FLAT cross-graph obligation binding plus the per-branch
+///   term binding (`bind_query_correctness` / `bind_attributions` / `bind_joins`)
+///   are DEFERRED to the structural routing gate + bead sq-1zf94.
+///
+/// The query-INDEPENDENT gates — id hygiene (stage 1b), binding edges (stage 2),
+/// issuer attestation (stage 2d), revocation (stage 2f) — are UNCHANGED in both
+/// regimes. This is the honest scope of the extended-fragment routing: it lets an
+/// accepted extended query's sub-proofs verify end-to-end WITHOUT claiming the
+/// disclosed path/`VALUES` terms are bound to the proofs (that binding is
+/// sq-1zf94). NOT externally audited (sq-qhy4).
+// [OPUS-4.8] sq-h732x: mode-aware stage-1 pre-filter (flat vs extended fragment).
+fn prefilter_manifest_structure_impl(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    revocation_policy: &RevocationPolicy,
+    skip_query_binding: bool,
+) -> Result<Vec<JoinEdge>, CheckError> {
+    // --- Stage 1a: query-fragment gate + (flat stage-1 only) cross-graph
+    // obligations. ---
+    let required = if skip_query_binding {
+        // Extended-fragment regime: route the query-fragment ACCEPTANCE through
+        // `fragment_query` (fail-closed on anything OUTSIDE the wave-1 fragment)
+        // instead of the stage-1-only `fragment_patterns`, so the extended query is
+        // not rejected here. The flat cross-graph Q6 obligation binding is DEFERRED
+        // to `dispatch_fragment` (structural routing) + sq-1zf94 (term binding), so
+        // there are no flat obligations to return.
+        #[cfg(feature = "extended-fragment")]
+        fragment_query(&manifest.query).map_err(CheckError::Sparqzk)?;
+        Vec::new()
+    } else {
+        // [OPUS-4.8] sq-en5dx (Finding A of the sq-1s2.6 composition review): feed
+        // the Q6 cross-graph obligation gate a GLOBAL-namespace attribution vector,
+        // NOT the raw scan-LOCAL indices. `manifest.attributions[pi]` indexes the
+        // ANSWERING scan's OWN `commitments`, so two DISTINCT `k=1` scans both
+        // declaring local index 0 (the `[[0],[0]]` cross-scan alias) would COLLAPSE
+        // to one element and the non-bnode obligation would be DROPPED for the
+        // cross-scan join. Keying the union on the committed-graph IDENTITY (via
+        // `global_attributions`) makes two distinct graphs distinct so the
+        // obligation is correctly required, while two scans over the SAME graph
+        // still collapse (a same-graph bnode join is legitimate). See
+        // `global_attributions` for the fail-closed edge cases.
+        let attributions = global_attributions(manifest);
+        let declared: Vec<JoinEdge> = manifest
+            .join_obligations
+            .iter()
+            .map(|(variable, i, j)| JoinEdge {
+                variable: variable.clone(),
+                patterns: (*i, *j),
+            })
+            .collect();
+        recheck(&manifest.query, &attributions, &declared)?
+    };
 
     // --- Stage 1b: re-derive each circuit id from public inputs. ---
     for (i, sp) in manifest.sub_proofs.iter().enumerate() {
@@ -2157,7 +2220,17 @@ pub fn prefilter_manifest_structure(
     // #1). This stage is the VERIFIER-SIDE check that those bound values match
     // the query the relying party reads in `manifest.query` — without it a
     // proof of one statement is presented under a different query.
-    bind_query_correctness(manifest)?;
+    //
+    // [OPUS-4.8] sq-h732x: this gate re-parses the query with the FLAT
+    // `fragment_patterns` (rejecting `UNION`/`VALUES`/paths) and binds scan
+    // constants per the flat BGP model. In the extended-fragment regime
+    // (`skip_query_binding`) the per-branch term binding is DEFERRED to sq-1zf94,
+    // so it is skipped here (documented unbound-terms limitation — the sub-proofs
+    // still verify cryptographically, they are just not yet tied to the disclosed
+    // solution terms).
+    if !skip_query_binding {
+        bind_query_correctness(manifest)?;
+    }
 
     // --- Stage 2e: cross-graph attribution binding (audit #8). ---
     // Bind manifest.attributions (the JSON sets fed to the Q6 obligation gate in
@@ -2167,7 +2240,13 @@ pub fn prefilter_manifest_structure(
     // a collapsed `[[0],[0]]` to drop the cross-graph non-bnode obligation: the
     // declared attribution must be a SUPERSET of the proof-bound matched-graph
     // set, so under-declaring a contributing graph is rejected here.
-    bind_attributions(manifest)?;
+    //
+    // [OPUS-4.8] sq-h732x: re-parses via the flat `fragment_patterns` to map
+    // patterns->scans, so the extended-fragment regime (`skip_query_binding`)
+    // defers it to the per-branch routing (`dispatch_fragment`) + sq-1zf94.
+    if !skip_query_binding {
+        bind_attributions(manifest)?;
+    }
 
     // --- Stage 2d: issuer-signature / key-set binding (audit #3 / codex #1). ---
     // Every scan sub-proof's commitments[g] must carry a valid issuer signature
@@ -2215,7 +2294,14 @@ pub fn prefilter_manifest_structure(
     // structural gate that ties those bound public inputs to the attested scans and
     // the query. Placed AFTER bind_issuer_attestations so the commitments it
     // byte-matches are already known issuer-attested + in K (design §3.3 step 3).
-    bind_joins(manifest)?;
+    //
+    // [OPUS-4.8] sq-h732x: `bind_joins` re-derives the query-shared join slots via
+    // the flat `fragment_patterns`, so the extended-fragment regime
+    // (`skip_query_binding`) defers it — the hidden-join slot binding over a
+    // multi-branch query is part of the per-branch term binding (sq-1zf94).
+    if !skip_query_binding {
+        bind_joins(manifest)?;
+    }
 
     Ok(required)
 }
@@ -4748,7 +4834,53 @@ pub fn verify_manifest(
     nonce: &VerifierNonce,
     seen: &dyn SeenNonces,
 ) -> Result<(), CheckError> {
-    prefilter_manifest_structure(manifest, trusted_key_set, revocation_policy)?;
+    // The sound stage-1 entry point: the FLAT-fragment regime
+    // (`skip_query_binding = false`) keeps EVERY stage-1 query-text gate live, so
+    // this path is byte-identical with or without the `extended-fragment` feature.
+    verify_manifest_impl(
+        manifest,
+        prover,
+        work_dir,
+        trusted_key_set,
+        revocation_policy,
+        holder_registry,
+        holder_binding_policy,
+        entailment_policy,
+        nonce,
+        seen,
+        false,
+    )
+}
+
+/// Shared crypto-verification body of [`verify_manifest`] (and, under
+/// `extended-fragment`, `verify_fragment_manifest`). `skip_query_binding` is
+/// threaded straight into `prefilter_manifest_structure_impl` and selects the
+/// stage-1 query-text binding regime (flat vs extended fragment); it changes
+/// NOTHING else. Every other gate — the entailment regime, the verifier-nonce
+/// single-use + challenge binding, holder PoP, the per-sub-proof public-input
+/// reconstruction + canonical-vk + `bb verify`, and the hidden revocation /
+/// issuer / holder gates — runs identically in both regimes.
+// [OPUS-4.8] sq-h732x: mode-aware shared body (flat vs extended fragment).
+#[allow(clippy::too_many_arguments)]
+fn verify_manifest_impl(
+    manifest: &ProofManifest,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    trusted_key_set: &KeySet,
+    revocation_policy: &RevocationPolicy,
+    holder_registry: &HolderRegistry,
+    holder_binding_policy: &HolderBindingPolicy,
+    entailment_policy: &EntailmentPolicy,
+    nonce: &VerifierNonce,
+    seen: &dyn SeenNonces,
+    skip_query_binding: bool,
+) -> Result<(), CheckError> {
+    prefilter_manifest_structure_impl(
+        manifest,
+        trusted_key_set,
+        revocation_policy,
+        skip_query_binding,
+    )?;
 
     // --- sq-314: entailment regime + derivation steps (fail-closed). ---
     // Enforce `manifest.entailment_regime` against the relying party's policy so
@@ -5233,6 +5365,84 @@ pub fn dispatch_fragment(
     }
 
     Ok(())
+}
+
+/// FAIL-CLOSED wave-1 extended-fragment END-TO-END verification (sq-h732x):
+/// route a [`crate::manifest::FragmentManifest`]'s property-path / `UNION` /
+/// `VALUES` presentation all the way through the cryptographic gate, so an
+/// accepted extended query's `bb` sub-proofs actually VERIFY end-to-end — which
+/// [`verify_manifest`] alone CANNOT do, because its stage-1 `recheck` rejects
+/// every extended query at `fragment_patterns` before any sub-proof runs.
+///
+/// Two layers, both fail-closed:
+/// 1. [`dispatch_fragment`] re-derives the query fragment from the query TEXT
+///    alone (`fragment_query`, never the manifest), REFUSES anything outside the
+///    wave-1 fragment, and routes each disclosed solution's branch witness to a
+///    bound sub-proof of the correct circuit member — mapped into
+///    [`CheckError::FragmentDispatch`]. It runs FIRST, before the verifier nonce
+///    is burnt or any `bb` subprocess starts, so an outside-fragment / mis-routed
+///    presentation is refused without side effects.
+/// 2. the embedded [`crate::manifest::FragmentManifest::manifest`] is then run
+///    through the SAME crypto stage as [`verify_manifest`] (the per-sub-proof
+///    public-input reconstruction + canonical-vk + `bb verify`, the
+///    verifier-nonce single-use + challenge binding, holder PoP, issuer
+///    attestation, revocation, and the hidden gates), EXCEPT that stage-1a's
+///    query-fragment acceptance is routed through `fragment_query` (so the
+///    extended query is not rejected) and the flat per-branch TERM binding is
+///    deferred — see below.
+///
+/// # Honest scope (LOAD-BEARING — read before relying on this)
+/// This binds each construct to a bound sub-proof of the right member and runs
+/// that member's `bb verify`; it does **NOT** bind a path's
+/// `pred_enc`/`src_enc`/`dst_enc`, a `VALUES` row's cell terms, or the scan
+/// pattern constants to the DISCLOSED SOLUTION bindings, and it does NOT enforce
+/// the flat cross-graph Q6 non-bnode obligation for a branch. That
+/// disclosed-solution TERM binding is a SEPARATE, deliberately-scoped bead
+/// (**sq-1zf94**); until it lands an accepted extended-fragment proof is **NOT
+/// fully bound** — its sub-proofs are cryptographically valid statements of the
+/// right circuit member but are not yet tied to the specific disclosed terms. The
+/// whole verifier stack is internally re-audited but **NOT externally audited**
+/// (sq-qhy4). NO soundness / privacy property is asserted as achieved.
+// [OPUS-4.8] sq-h732x: extended-fragment end-to-end routing. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_fragment_manifest(
+    fm: &crate::manifest::FragmentManifest,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    trusted_key_set: &KeySet,
+    revocation_policy: &RevocationPolicy,
+    holder_registry: &HolderRegistry,
+    holder_binding_policy: &HolderBindingPolicy,
+    entailment_policy: &EntailmentPolicy,
+    nonce: &VerifierNonce,
+    seen: &dyn SeenNonces,
+) -> Result<(), CheckError> {
+    // (1) FAIL-CLOSED structural routing FIRST — before the nonce is burnt or any
+    // bb subprocess runs. Re-derive the fragment from the query text, refuse
+    // anything outside it, and route each branch witness to a bound sub-proof of
+    // the correct member.
+    dispatch_fragment(fm).map_err(CheckError::FragmentDispatch)?;
+
+    // (2) Crypto stage over the EMBEDDED manifest, with stage-1a routed through
+    // `fragment_query` (`skip_query_binding = true`) so the extended query is not
+    // rejected. Every other gate is identical to `verify_manifest` (see
+    // `verify_manifest_impl` / `prefilter_manifest_structure_impl`). The deferred
+    // per-branch term binding is the documented sq-1zf94 limitation above.
+    verify_manifest_impl(
+        &fm.manifest,
+        prover,
+        work_dir,
+        trusted_key_set,
+        revocation_policy,
+        holder_registry,
+        holder_binding_policy,
+        entailment_policy,
+        nonce,
+        seen,
+        true,
+    )
 }
 
 /// Reconstruct the bb `public_inputs` byte vector from the DECLARED
@@ -6086,6 +6296,57 @@ mod tests {
             Err(CheckError::MalformedField { proof: 0, what: "operand_enc" })
         ));
     }
+
+    // --- sq-h732x: stage-1 NON-REGRESSION (runs in BOTH feature states) -----
+
+    /// A ProofManifest carrying only the required fields — enough to drive the
+    /// flat stage-1 pre-filter for the query-fragment non-regression checks.
+    fn minimal_manifest(query: &str) -> ProofManifest {
+        ProofManifest {
+            r#type: "urn:sparq:zk:ProofManifest".to_string(),
+            query: query.to_string(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs: vec![],
+            binding_edges: vec![],
+            join_edges: vec![],
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+        }
+    }
+
+    #[test]
+    fn stage1_prefilter_still_rejects_union_fragment() {
+        // [OPUS-4.8] sq-h732x: the FLAT stage-1 pre-filter still rejects an
+        // extended (UNION) query at `recheck` with the SAME structured error as
+        // before the extended-fragment routing landed — byte-identical whether or
+        // not the `extended-fragment` feature is compiled in.
+        let m = minimal_manifest(
+            "SELECT * WHERE { { ?s <http://ex/p> ?o } UNION { ?o <http://ex/q> ?s } }",
+        );
+        let err = prefilter_manifest_structure(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+        )
+        .unwrap_err();
+        match err {
+            CheckError::Sparqzk(VerifyError::UnsupportedFragment(msg)) => {
+                assert!(msg.contains("UNION"), "expected UNION rejection, got {msg}");
+            }
+            other => panic!("flat stage-1 must still reject UNION, got {other:?}"),
+        }
+    }
 }
 
 // [OPUS-4.8] sq-3kd2g.6: FAIL-CLOSED wave-1 fragment DISPATCH tests — the
@@ -6498,5 +6759,150 @@ mod fragment_dispatch_tests {
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
         }
+    }
+
+    // --- sq-h732x: end-to-end verify_fragment_manifest routing -------------
+
+    /// A query OUTSIDE the wave-1 fragment (`OPTIONAL`).
+    const OUTSIDE: &str =
+        "SELECT * WHERE { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?r } }";
+
+    fn dummy_prover() -> CircuitProver {
+        // Never invoked in these tests — every case rejects before the sub-proof
+        // bb loop, so no nargo/bb toolchain is needed.
+        CircuitProver::new(std::env::temp_dir())
+    }
+
+    /// The full external-input set for `verify_fragment_manifest` /
+    /// `verify_manifest`, wired so the reject happens BEFORE the crypto gate.
+    #[allow(clippy::type_complexity)]
+    fn empty_verify_env() -> (
+        CircuitProver,
+        std::path::PathBuf,
+        KeySet,
+        RevocationPolicy,
+        HolderRegistry,
+        HolderBindingPolicy,
+        EntailmentPolicy,
+        VerifierNonce,
+        InMemorySeenNonces,
+    ) {
+        (
+            dummy_prover(),
+            std::env::temp_dir(),
+            KeySet::empty(),
+            RevocationPolicy::accept_version(1),
+            HolderRegistry::empty(),
+            HolderBindingPolicy::allow_bearer(),
+            EntailmentPolicy::simple_only(),
+            VerifierNonce::from_hex("0x2a").unwrap(),
+            InMemorySeenNonces::new(),
+        )
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_outside_fragment_before_bb() {
+        // `dispatch_fragment` runs FIRST (before the nonce is burnt or any bb
+        // subprocess starts): an OPTIONAL query fails closed as a structured
+        // CheckError::FragmentDispatch, never a silent fallthrough.
+        let m = fm(OUTSIDE, vec![], vec![]);
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::FragmentDispatch(FragmentDispatchError::OutsideFragment(_))),
+            "outside-fragment must fail-closed as FragmentDispatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fragment_manifest_routes_union_past_stage1_recheck() {
+        // The load-bearing end-to-end routing invariant: a UNION query that the
+        // FLAT `verify_manifest` rejects at its stage-1 `recheck` now routes PAST
+        // stage-1 through the fragment path and reaches the crypto/attestation
+        // gate. With an EMPTY trust anchor the scan commitments are unattested, so
+        // it fails at the issuer gate (`UnattestedCommitment`) — NOT at a stage-1
+        // fragment rejection. No bb: both reject before the sub-proof loop.
+        let m = fm(
+            UNION,
+            vec![sub(scan_min()), sub(scan_min())],
+            vec![bw(0, vec![0], vec![], vec![]), bw(1, vec![1], vec![], vec![])],
+        );
+        // Fragment path: routes past stage-1a; fails at the (empty-K) issuer gate.
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let frag_err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
+        assert!(
+            matches!(frag_err, CheckError::UnattestedCommitment { .. }),
+            "fragment path must route past stage-1 into the attestation gate, got {frag_err:?}"
+        );
+        // NON-REGRESSION: the FLAT entry point still rejects the same query at
+        // stage-1 with the same structured error as before this bead.
+        let (p2, w2, ks2, rp2, hr2, hbp2, ep2, n2, seen2) = empty_verify_env();
+        let flat_err = verify_manifest(
+            &m.manifest, &p2, &w2, &ks2, &rp2, &hr2, &hbp2, &ep2, &n2, &seen2,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(flat_err, CheckError::Sparqzk(VerifyError::UnsupportedFragment(_))),
+            "flat verify_manifest must still reject UNION at stage-1, got {flat_err:?}"
+        );
+    }
+
+    #[test]
+    fn prefilter_impl_routes_union_where_flat_rejects() {
+        // Direct unit test of the mode-aware stage-1a routing (no scans): the flat
+        // regime rejects UNION at `recheck`; the extended regime routes the
+        // acceptance through `fragment_query` and passes (obligations deferred).
+        let m = base_manifest(UNION, vec![]);
+        let flat = prefilter_manifest_structure_impl(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+            false,
+        );
+        assert!(
+            matches!(flat, Err(CheckError::Sparqzk(VerifyError::UnsupportedFragment(_)))),
+            "flat regime rejects UNION at stage-1a, got {flat:?}"
+        );
+        let ext = prefilter_manifest_structure_impl(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+            true,
+        );
+        assert!(
+            matches!(ext, Ok(ref v) if v.is_empty()),
+            "extended regime routes the UNION acceptance through fragment_query, got {ext:?}"
+        );
+    }
+
+    #[test]
+    fn prefilter_impl_extended_regime_still_enforces_id_hygiene() {
+        // Stage-1b (id hygiene) runs in BOTH regimes: a PathReach whose declared
+        // id (k=2) disagrees with the id re-derived from its single commitment
+        // (k=1) is rejected fail-closed even in the extended regime.
+        let bad = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        };
+        let m = base_manifest(PLUS, vec![sub(bad)]);
+        let err = prefilter_manifest_structure_impl(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CheckError::CircuitIdMismatch { proof: 0, .. }),
+            "extended regime must still run stage-1b id hygiene, got {err:?}"
+        );
     }
 }
