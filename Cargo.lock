@@ -75,9 +75,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.9.1"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
 dependencies = [
  "rustversion",
 ]
@@ -1596,9 +1596,9 @@ dependencies = [
 
 [[package]]
 name = "i_overlay"
-version = "7.0.1"
+version = "7.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24f1ff857e4d2bdcc70776e76ca75b2d6a79a5a58f6c9e1e781146bcfe83d257"
+checksum = "bf284de04038af713dad8b4a88d2bc97f1c8c0a87fc1f43e28e3b965d0136d9e"
 dependencies = [
  "i_float 3.0.0",
  "i_key_sort",
@@ -2364,7 +2364,7 @@ dependencies = [
  "oxrdfio",
  "oxsdatatypes",
  "rand 0.9.4",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "siphasher",
  "sparesults",
  "spareval",
@@ -2772,7 +2772,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustls",
  "socket2",
  "thiserror 2.0.18",
@@ -2792,7 +2792,7 @@ dependencies = [
  "lru-slab",
  "rand 0.9.4",
  "ring",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustls",
  "rustls-pki-types",
  "slab",
@@ -3144,9 +3144,9 @@ checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
-version = "2.1.2"
+version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_version"
@@ -3674,7 +3674,7 @@ dependencies = [
  "oxsdatatypes",
  "rand 0.9.4",
  "regex",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "sha1 0.10.6",
  "sha2 0.10.9",
  "sparesults",
@@ -3722,7 +3722,7 @@ name = "sparq-algos"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "sparq-core",
 ]
 
@@ -3796,7 +3796,7 @@ dependencies = [
  "oxrdfxml",
  "oxttl 0.2.3",
  "quick-xml 0.41.0",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -3824,7 +3824,7 @@ dependencies = [
  "oxrdfxml",
  "oxttl 0.2.3",
  "rayon",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
 ]
 
 [[package]]
@@ -3845,7 +3845,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "rayon",
  "regex",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
@@ -3875,7 +3875,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "quick-xml 0.41.0",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "sparq-core",
@@ -3888,7 +3888,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -3906,7 +3906,7 @@ dependencies = [
  "criterion",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
 ]
 
 [[package]]
@@ -3923,13 +3923,13 @@ version = "0.1.0"
 dependencies = [
  "geo",
  "geo-types",
- "i_overlay 7.0.1",
+ "i_overlay 7.0.2",
  "oxrdf 0.3.3",
  "proj4rs",
  "quick-xml 0.41.0",
  "rand 0.10.1",
  "rstar 0.13.0",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "spargebra",
  "sparq-core",
  "sparq-engine",
@@ -3969,7 +3969,7 @@ dependencies = [
  "getrandom 0.3.4",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "sparq-core",
@@ -4103,7 +4103,7 @@ dependencies = [
  "quick-xml 0.41.0",
  "rayon",
  "regex",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "smallvec",
  "sparq-core",
  "sparq-engine",
@@ -4115,7 +4115,7 @@ name = "sparq-reason-dl"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "sparq-core",
  "sparq-reason",
  "sparq-reason-el",
@@ -4126,7 +4126,7 @@ name = "sparq-reason-el"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "sparq-core",
  "sparq-substrate",
 ]
@@ -4137,7 +4137,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "spargebra",
 ]
 
@@ -4159,7 +4159,7 @@ name = "sparq-rsp"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -4186,7 +4186,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "spargebra",
  "sparq-core",
  "sparq-engine",
@@ -4232,7 +4232,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "regex",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "spargebra",
@@ -4257,7 +4257,7 @@ name = "sparq-sim"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "sparq-core",
 ]
@@ -4268,7 +4268,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -4286,7 +4286,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "oxrdf 0.3.3",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "smallvec",
  "sparq-core",
 ]
@@ -4309,7 +4309,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "rand 0.10.1",
  "rayon",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -4369,7 +4369,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "rayon",
  "reqwest",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -4916,9 +4916,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.23.3"
+version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
+checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
