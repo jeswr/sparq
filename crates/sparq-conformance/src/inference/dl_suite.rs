@@ -349,6 +349,9 @@ fn reason_kind(reason: &UnknownReason) -> String {
         UnknownReason::QlConsistencyPending => "QL consistency pending (sq-pbz04.3.4)",
         UnknownReason::ResourceBudget(_) => "deterministic count budget exhausted",
         UnknownReason::UnencodedConclusion(_) => "unencoded conclusion-axiom kind",
+        UnknownReason::ConclusionAnonymousIndividual(_) => {
+            "conclusion anonymous individual (non-rollable existential shape)"
+        }
         // `UnknownReason` is #[non_exhaustive]; a future variant is still an abstention.
         _ => "other typed abstention",
     };

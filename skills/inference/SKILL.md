@@ -276,7 +276,16 @@ that produced it (traceability). `entailment()` checks `O ⊨ α` per conclusion
 argued refutation encoding onto the tableau (`SubClassOf`, `ClassAssertion`,
 `ObjectPropertyAssertion` via a fresh-class encoding, `EquivalentClasses`, `DisjointClasses`,
 domain/range; property-axiom conclusions abstain). Every guard fails CLOSED — uncertainty is a
-typed `UnknownReason`, never a guessed verdict.
+typed `UnknownReason`, never a guessed verdict. **Conclusion anonymous individuals
+(sq-pbz04.4.13):** a blank-node individual in the CONCLUSION is read EXISTENTIALLY (per the
+official Direct-Semantics tests) — L1's skolem-constant reading is entailment-preserving on the
+premise but would certify a WRONG `NotEntailed` on the conclusion, so before the refutation loop a
+TREE-shaped anonymous assertion set (`a p _:x`, `_:x` typed / chaining to more blank nodes) **rolls
+up** into an existential class assertion `a : ∃p.(⊓ types ⊓ ⊓ ∃q.⟨child⟩)` the tableau decides
+SOUNDLY in both directions (so `somevaluesfrom2bnode` / `WebOnt-someValuesFrom-003` graduate to
+genuine passes); any non-rollable shape — shared between two assertions, cyclic, a named/nominal
+successor, or an unanchored free-existential root — abstains fail-closed
+(`ConclusionAnonymousIndividual`), never a skolem `NotEntailed`.
 
 **L5 — the conformance DIRECT-arm (`sparq-conformance`, opt-in `dl-direct` feature, bead
 sq-pbz04.4.5):** NOW BUILT. `inference::dl_suite::run_direct_arm` runs the DIRECT-sanctioned
