@@ -268,17 +268,29 @@ fn term_sig(t: &Term) -> String {
 }
 
 /// Build a `Bgp` from one CQ, mapping each atom to a triple pattern. Unbound `_` terms become
-/// fresh, deterministically-named non-distinguished variables (`__ql<n>`) — the standard SPARQL
+/// deterministically-named non-distinguished variables (`__ql<n>`) — the standard SPARQL
 /// encoding of an existential BGP variable. The naming is per-Bgp so two disjuncts never clash.
+///
+/// SHARING (load-bearing, [OPUS-4.8] sq-pbz04.3.6): the SAME internal `Unbound(id)` MUST map to
+/// the SAME emitted variable across all its occurrences in the CQ — a repeated id is a shared
+/// existential (a JOIN through an intermediate node), e.g. the shared body blank node `_:a` in
+/// `?X :p _:a . _:a :r ?Y`, or a fresh existential PerfectRef reuses across atoms. Assigning a
+/// fresh name PER OCCURRENCE would drop the join and emit a CARTESIAN product — an unsound
+/// OVER-approximation of the certain answers. So the id→name map is memoised per Bgp: distinct
+/// ids get distinct compact names, equal ids share one name.
 fn cq_to_bgp(cq: &Cq) -> GraphPattern {
     let rdf_type = NamedNodePattern::NamedNode(rdf_type_iri());
+    let mut fresh_ids: FxHashMap<u32, u32> = FxHashMap::default();
     let mut next_fresh = 0u32;
     let mut fresh_name = |id: u32| {
-        // Map an internal Unbound id to a stable per-Bgp variable name. Use a small local index
-        // so the emitted names are compact and order-stable.
-        let _ = id;
-        let n = next_fresh;
-        next_fresh += 1;
+        // Memoise: an internal Unbound id maps to ONE stable per-Bgp variable name (small local
+        // index, so emitted names are compact and order-stable). Equal ids → the same variable,
+        // preserving the shared-existential JOIN; distinct ids → distinct variables.
+        let n = *fresh_ids.entry(id).or_insert_with(|| {
+            let cur = next_fresh;
+            next_fresh += 1;
+            cur
+        });
         Variable::new_unchecked(format!("__ql{}", n))
     };
     let mut patterns = Vec::with_capacity(cq.atoms.len());

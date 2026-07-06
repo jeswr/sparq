@@ -64,8 +64,8 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 - **Broadened sound fragment** — **(B1)** top-level UCQ; **(B2)** literal-object role atoms (rigid);
   **(B3)** `FILTER` over distinguished-only vars (pass-through); **(B4)** constant-only `VALUES`
   (pass-through); **(Bbnode)** body blank nodes lifted to fresh existential variables — distinct
-  labels get distinct ids, shared labels get the same id so the applicability condition fires
-  correctly. [sq-pbz04.3.1/sq-pbz04.3.6]
+  labels get distinct ids; a shared label gets one id (blocking the applicability condition) and
+  emits as ONE variable, so a shared blank node is a JOIN not a cartesian product. [sq-pbz04.3.6]
 - **Intensional-atom guard (B6, always present)** — schema vocab predicates (`rdfs:subClassOf/
   subPropertyOf/domain/range`, all `owl:`) are **rejected**; annotation predicates admitted.
 - **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`MINUS`/paths/aggregation/
