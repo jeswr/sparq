@@ -175,14 +175,6 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      # [SONNET-4.6] sq-1cb6l: hermetic self-test of the G3 gate's pure logic —
-      # evaluate() + parse_status_lines() + registry_blocks() + dashboard_featured_text()
-      # + added_bench_suites() + suite_family(). Runs in this same job so a regression
-      # in the gate's detection logic also blocks the merge here, not only in CI.
-      # Stdlib-only, no git/network (the main() smoke test uses --dry-run +
-      # --changed-files + --base-toml so it never shells out). [SONNET-4.6]
-      - name: Self-test the new-bench-registered gate (G3, sq-1cb6l)
-        run: python3 scripts/tests/test_check_new_bench_registered.py
       - name: G3 — new bench suite is registered + featured (or featured=false)
         env:
           # On pull_request github.base_ref is the bare target branch ('main'); on
@@ -211,6 +203,13 @@ jobs:
         # Runs the hermetic gate unit tests so a regression in any gate script is
         # caught at PR time (the suite is stdlib-only; no git/network).
         run: python3 scripts/tests/test_gates.py
+      # [SONNET-4.6] sq-1cb6l: hermetic self-test of the G3 gate's pure logic —
+      # evaluate() + parse_status_lines() + registry_blocks() + dashboard_featured_text()
+      # + added_bench_suites() + suite_family(). Placed in G6 (the HARD config-documented
+      # job) so a regression in the gate's detection logic actually blocks the merge,
+      # mirroring the test_gates.py pattern. Stdlib-only, no git/network. [SONNET-4.6]
+      - name: Self-test the new-bench-registered gate (G3, sq-1cb6l)
+        run: python3 scripts/tests/test_check_new_bench_registered.py
       # [SONNET-4.6] sq-8hfhi: wire the reactive flow-on engine tests into CI so a
       # rule/engine regression (like the #1655 false-positive fnmatch/{suite} defect
       # fixed in #1664) is caught pre-merge, not post-merge. 31 tests covering: rule
