@@ -90,11 +90,18 @@ mod gated {
     // soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
     // StringEncodeForUri, ListConcatenate): 1 positive + 1 negative per builtin
     // (10 total) + 1 extra positive for NumericNotEqual = 11 net new assertions.
-    // [SONNET-4.6] sq-pbz04.5.4 — raised 58 → 61: Equal-atom audit:
-    // removed "equality lowers to owl:sameAs" (-1, was testing buggy behaviour),
-    // added Equal-in-conclusion rejection (+1), closure refuses Equal-in-conclusion (+1),
-    // ground-identity body Equal fires (+1), DistinctGroundEqual fail-closed (+1) = net +3.
-    pub const RIF_CORE_FLOOR: usize = 61;
+    // [SONNET-4.6] sq-pbz04.5.4 — Equal-atom audit: removed the "equality lowers to
+    // owl:sameAs" assertion from positive_atoms (-1, it tested buggy behaviour) and
+    // added FIVE assertions in equal_atom_audit (Equal-in-fact-head rejected, closure
+    // refuses it, Equal-in-rule-head rejected, ground-identity body Equal fires,
+    // DistinctGroundEqual fail-closed). NB: the prior "4 added" tally undercounted by
+    // one — equal_atom_audit added 5, not 4.
+    // [OPUS-4.8] sq-26vwp — raised to 73: +10 assertions for variable/mixed body Equal
+    // resolved by compile-time substitution/unification (V1 no over-derivation, V2
+    // same-node fires, ?x=<t> substitution end-to-end, head-var bound-by-substitution,
+    // chained-equality collapse, substitution-created distinct-ground fail-closed) —
+    // the measured `RIF-Core expressivity assertions N` count with the new tests.
+    pub const RIF_CORE_FLOOR: usize = 73;
 
     /// RIF surface DOCUMENTED out-of-scope for this front-end (the honest move: a
     /// floor reflecting reality + a recorded gap, never a faked pass). Mirrors
@@ -693,15 +700,21 @@ mod gated {
         );
     }
 
-    /// Equal-atom audit (sq-pbz04.5.4): three semantic requirements exercised
-    /// through the REAL `Document::validate` + `Document::closure` path.
+    /// Equal-atom audit (sq-pbz04.5.4 + sq-26vwp): the RIF-Core Equal semantics
+    /// exercised through the REAL `Document::validate` + `Document::closure` path.
     ///
     /// 1. Equal in a conclusion is rejected (non-vacuous — fact head and rule head).
     /// 2. Ground-identity body Equal is trivially true and eliminated at lowering
     ///    (the rule fires as if the atom were absent).
     /// 3. Distinct ground constants in a body Equal are fail-closed (pending sq-v5evr).
+    /// 4. Variable / mixed body Equal (`?x=?y`, `?x=t`) is resolved by compile-time
+    ///    substitution / unification (sq-26vwp), NOT an owl:sameAs triple pattern:
+    ///    V2 same-node unification fires without a sameAs assertion; V1 an asserted
+    ///    sameAs between distinct nodes does NOT over-derive; ground substitution +
+    ///    chained equalities collapse correctly; a substitution-created distinct
+    ///    ground fails closed.
     ///
-    /// [SONNET-4.6] sq-pbz04.5.4
+    /// [SONNET-4.6] sq-pbz04.5.4 / [OPUS-4.8] sq-26vwp
     fn equal_atom_audit(t: &mut Tally) {
         // --- 1. Equal in a CONCLUSION is rejected ---
         // (a) as a fact head
@@ -778,6 +791,141 @@ mod gated {
         t.ok(
             matches!(d3.validate(), Err(RifError::DistinctGroundEqual { .. })),
             "distinct ground constants in body Equal fail-closed pending sq-v5evr",
+        );
+
+        // --- 4. Variable / mixed body Equal via COMPILE-TIME substitution (sq-26vwp) ---
+        // [OPUS-4.8] The variable/mixed cases are resolved by substitution/unification
+        // at validate/lower time, NOT by an owl:sameAs triple pattern. Exercised through
+        // the REAL closure path so both defect directions are pinned.
+
+        // V2 (under-derivation gone): ?x=?y is UNIFIED, so ?x # SelfManaged :-
+        // ?x manager ?y, ?x=?y fires exactly for the self-managing node — no
+        // owl:sameAs assertion needed (RIF reflexivity honoured).
+        let mut d4 = Document::new();
+        d4.push(Rule::fact(Atom::Frame {
+            obj: iri("alice"),
+            pred: iri("manager"),
+            val: iri("alice"),
+        }));
+        d4.push(Rule::fact(Atom::Frame {
+            obj: iri("bob"),
+            pred: iri("manager"),
+            val: iri("carol"),
+        }));
+        d4.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("SelfManaged") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("manager"), val: var("y") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        d4.validate().expect("?x=?y unifies; valid (sq-26vwp)");
+        let mut dict4 = Dict::new();
+        let c4 = d4.closure(&mut dict4).expect("closure succeeds");
+        t.ok(
+            has(&dict4, &c4, &ns("alice"), RDF_TYPE, &ns("SelfManaged")),
+            "?x=?y unified: alice manages herself (same node) fires, no owl:sameAs (V2 fixed)",
+        );
+        t.ok(
+            !has(&dict4, &c4, &ns("bob"), RDF_TYPE, &ns("SelfManaged")),
+            "?x=?y unified: bob's manager is carol (distinct node) does NOT fire",
+        );
+
+        // V1 (over-derivation gone): an asserted owl:sameAs DATA triple between
+        // DISTINCT nodes must NOT satisfy ?x=?y; a genuine same-node pair DOES.
+        let owl_same = Term::Iri("http://www.w3.org/2002/07/owl#sameAs".to_string());
+        let mut d5 = Document::new();
+        d5.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("rel"), val: iri("b") }));
+        d5.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: owl_same, val: iri("b") }));
+        d5.push(Rule::fact(Atom::Frame { obj: iri("c"), pred: iri("rel"), val: iri("c") }));
+        d5.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("SelfRel") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("rel"), val: var("y") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        let mut dict5 = Dict::new();
+        let c5 = d5.closure(&mut dict5).expect("closure succeeds");
+        t.ok(
+            !has(&dict5, &c5, &ns("a"), RDF_TYPE, &ns("SelfRel")),
+            "asserted a owl:sameAs b does NOT license ?x=?y for distinct a,b (V1 fixed)",
+        );
+        t.ok(
+            has(&dict5, &c5, &ns("c"), RDF_TYPE, &ns("SelfRel")),
+            "c rel c (same node) DOES fire -> the rule is non-vacuous",
+        );
+
+        // ?x = <t> substitution end-to-end: ?x # Special :- ?x p ?v, ?v = <target>.
+        let mut d6 = Document::new();
+        d6.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("p"), val: iri("target") }));
+        d6.push(Rule::fact(Atom::Frame { obj: iri("b"), pred: iri("p"), val: iri("other") }));
+        d6.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("Special") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("p"), val: var("v") },
+                Atom::Equal { left: var("v"), right: iri("target") },
+            ],
+        ));
+        d6.validate().expect("?v=<target> substitutes; valid");
+        let mut dict6 = Dict::new();
+        let c6 = d6.closure(&mut dict6).expect("closure succeeds");
+        t.ok(
+            has(&dict6, &c6, &ns("a"), RDF_TYPE, &ns("Special")),
+            "?v=<target> substitution: a p target -> Special",
+        );
+        t.ok(
+            !has(&dict6, &c6, &ns("b"), RDF_TYPE, &ns("Special")),
+            "?v=<target> substitution: b p other -> NOT Special",
+        );
+
+        // A head var bound SOLELY by ?x=<a> is bound-by-substitution (the rule
+        // collapses to the fact <a> # C) — contrast the ?x=?x sole-binder case.
+        let mut d7 = Document::new();
+        d7.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
+            vec![Atom::Equal { left: var("x"), right: iri("a") }],
+        ));
+        t.eq(d7.validate(), Ok(()), "?x=<a> binds ?x by substitution (valid; not UnboundHeadVar)");
+        let mut dict7 = Dict::new();
+        let c7 = d7.closure(&mut dict7).expect("closure succeeds");
+        t.ok(
+            has(&dict7, &c7, &ns("a"), RDF_TYPE, &ns("C")),
+            "?x=<a> collapses the rule to the unconditional fact <a> # C",
+        );
+
+        // Chained ?x=?y, ?y=<target> collapse both to the ground term (fixpoint).
+        let mut d8 = Document::new();
+        d8.push(Rule::fact(Atom::Frame { obj: iri("s"), pred: iri("p"), val: iri("target") }));
+        d8.push(Rule::implies(
+            vec![Atom::Member { obj: var("z"), class: iri("Matched") }],
+            vec![
+                Atom::Frame { obj: var("z"), pred: iri("p"), val: var("x") },
+                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Equal { left: var("y"), right: iri("target") },
+            ],
+        ));
+        d8.validate().expect("chained equalities resolve; valid");
+        let mut dict8 = Dict::new();
+        let c8 = d8.closure(&mut dict8).expect("closure succeeds");
+        t.ok(
+            has(&dict8, &c8, &ns("s"), RDF_TYPE, &ns("Matched")),
+            "chained ?x=?y, ?y=<target> both collapse to <target>; s matches",
+        );
+
+        // Substitution can CREATE a distinct-ground equality -> fail-closed.
+        let mut d9 = Document::new();
+        d9.push(Rule::implies(
+            vec![Atom::Member { obj: iri("s"), class: iri("C") }],
+            vec![
+                Atom::Equal { left: var("x"), right: iri("a") },
+                Atom::Equal { left: var("y"), right: iri("b") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        t.ok(
+            matches!(d9.validate(), Err(RifError::DistinctGroundEqual { .. })),
+            "substitution-created distinct ground (a=b) fails closed (re-checked to fixpoint)",
         );
     }
 
