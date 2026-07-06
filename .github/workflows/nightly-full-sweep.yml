@@ -27,10 +27,14 @@
 # always self-identified as a 🤖 SPARQ agent.
 #
 # HONEST COVERAGE NOTES (validate/extend on first CI runs; tracked as follow-ups, not silently):
-#   • The full-inventory AXE scan (axe on EVERY route, not just the key interactive states the
-#     per-PR a11y spec covers) and the FULL-SURFACE visual sweep (beyond the committed key
-#     layouts) both need additional SPEC authoring in site/e2e — this workflow runs the widest
-#     suites that exist TODAY and is ready to pick up new specs automatically.
+#   • The full-inventory AXE scan (sq-izpab) is now implemented in e2e/nightly/ and activated by
+#     SPARQ_NIGHTLY_A11Y=1 in the a11y-sweep job below. The moderate/minor ratchet (beyond the
+#     zero serious/critical tier) is a planned follow-up bead — first nightly run calibrates counts.
+#   • The full-surface visual sweep (sq-ledny) is now implemented in e2e/visual/full-surface.spec.ts
+#     and runs via the container-pinned `npm run vr` path below. Baselines were NOT committed with
+#     the initial PR (container not available in the authoring environment); the first nightly run
+#     will mint them. Until then the first nightly-visual-diffs run may fail — run `npm run
+#     vr:update` after the first scheduled run to seed the missing baselines.
 #   • firefox/webkit and the macOS/Windows tauri rows are documented-untested in THIS
 #     environment; the smoke-mode `--list` validation of each was reproduced locally, the full
 #     runs mirror the proven per-PR recipes and are validated on the first scheduled run.
@@ -137,11 +141,16 @@ jobs:
       - name: Install npm dependencies (repo-root workspace lock)
         run: npm ci
 
-      # SMOKE mode: prove the a11y + surface-sweep harness is wired + runnable, without paying
-      # the browser/wasm build. `--list` collects the tests (no browser launch, no web server).
-      - name: Smoke — a11y/surface harness is runnable (--list)
+      # SMOKE mode: prove the a11y + surface-sweep + nightly-inventory harnesses are wired +
+      # runnable, without paying the browser/wasm build. `--list` collects the tests; the
+      # SPARQ_NIGHTLY_A11Y flag must be set so the nightly-a11y project is defined and the
+      # nightly spec appears in the list (the project is otherwise undefined and the spec
+      # would be invisible to the listing).
+      - name: Smoke — a11y/surface/nightly-inventory harnesses are runnable (--list)
         if: needs.config.outputs.mode == 'smoke'
-        run: npx playwright test --list e2e/a11y.spec.ts e2e/surface-sweep.spec.ts
+        env:
+          SPARQ_NIGHTLY_A11Y: "1"
+        run: npx playwright test --list e2e/a11y.spec.ts e2e/surface-sweep.spec.ts e2e/nightly/a11y-full-inventory.spec.ts
 
       # FULL mode: the real suite. Build the lean wasm bundle (mirrors site-visual.yml) so the
       # in-tab-engine a11y/render states run, then the pinned Typst → spec/paper fragments the
@@ -190,8 +199,14 @@ jobs:
         run: |
           npm run build-specs
           npm run build-papers
-      - name: Full site e2e + a11y sweep (headless chromium)
+      - name: Full site e2e + a11y sweep (headless chromium, incl. nightly full-inventory AXE)
         if: needs.config.outputs.mode == 'full'
+        # [SONNET-4.6] sq-izpab — SPARQ_NIGHTLY_A11Y=1 activates the `nightly-a11y` Playwright
+        # project (defined in playwright.config.ts only under this flag), which runs the full-
+        # inventory AXE sweep from e2e/nightly/. The per-PR `chromium` project (always active)
+        # ignores e2e/nightly/ — both projects run in this one npm run test:e2e invocation.
+        env:
+          SPARQ_NIGHTLY_A11Y: "1"
         run: npm run test:e2e
       - name: Upload Playwright report on failure
         if: failure() && needs.config.outputs.mode == 'full'

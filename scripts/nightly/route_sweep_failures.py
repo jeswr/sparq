@@ -42,7 +42,7 @@ CATEGORIES: dict[str, dict[str, str]] = {
     "visual": {
         "title": "visual-regression full-surface sweep",
         "scope": "the container-pinned toHaveScreenshot sweep (site/e2e/visual)",
-        "hint": "Download the visual-regression-diffs artifact; if the change is intentional, "
+        "hint": "Download the nightly-visual-diffs artifact; if the change is intentional, "
         "refresh baselines in a PR via `npm run vr:update`.",
     },
     "cross-browser": {
