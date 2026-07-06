@@ -91,19 +91,19 @@ version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-array]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-buffer]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-data]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-schema]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-trait]]
