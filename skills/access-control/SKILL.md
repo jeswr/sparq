@@ -568,7 +568,7 @@ SAME `Vec<TrustRule>` the gate consumes:
 
 Both install on top of the unchanged auth view (the ODRL-bridge precedent). The
 public surface is `sparq_trust::{vocab, policy, admit, wire, delegation}` (+ the opt-in
-`delegation_prov` / `did` / `store` / `secprop` modules) — see
+`delegation_prov` / `did` / `store` / `secprop` / `framework_vocab` modules) — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
 [issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
@@ -646,6 +646,40 @@ sparq ZK method may be labelled `secx:Proven` while the external accredited-cryp
 (`sq-qhy4`) is open.** The vocabulary **records** a claim and its epistemic basis; it is **NOT** a
 proof of any property. DPV alignment is *Light* (#1002 Option 2): `skos:closeMatch` cross-refs to
 W3C DPV `CryptographicMethods` where a near-match exists, not a full regulation→requirement chain.
+
+### `trustx:` certification-scope vocabulary — opt-in `framework-vocab` ([FABLE-5] sq-6syab.2, issue #1592)
+
+The `sparq_trust::framework_vocab` module (behind the **default-OFF `framework-vocab`** cargo feature)
+is the trust-expression program's **certification-scope layer** (design record
+`research/trust-expression-spec.md` §3.4 / D4): the vocabulary a verifier uses to ask *"prove X can be
+attested by unrevoked attributes issued by parties [X, Y, Z] OR by certified issuers WITHIN the eIDAS /
+DIATF framework, that have only issued what they are certified to issue"* (#1592). It **extends** the
+`trust:` vocabulary (shared `https://sparq.dev/ns/trust#` base — `trustx:` is a prose sub-prefix, not a
+new namespace) and **`rdfs:seeAlso`s** the vendored `sec-req:` eIDAS 2.0 / UK-DVS individuals rather than
+duplicating them (extend, do not fork; the design's D5). Like `secprop`, it is **data + Rust constants
+only** — a `const &str` registry (`ALL_TRUSTX_IRIS`) pinned to the canonical
+[`trust-framework.ttl`](../../crates/sparq-trust/ontologies/trust/trust-framework.ttl) by a byte-drift
+test — **not** an evaluator (the holder-side contract evaluation is the later, `sq-3kd2g`-gated
+`sq-6syab.4`).
+
+The three surfaces the layer names: (1) the **trust requirements** (`trustx:TrustRequirements` + `question` /
+`trustsIssuer` / `trustsFramework` / `requiresScopeConformance` / `requiresValidStatusAt`) — the
+verifier→holder contract carrier; the trust conditions live in the requirements graph, **not** in the query (no
+new query syntax); (2) the **two trust modes** — enumerated parties (`trustsIssuer`) OR
+framework-certified issuers (`trustsFramework`), composing by plain OR; (3) the **certification-scope
+terms** (`trustx:Certification` + `certifies` / `underFramework` / `scope` / `validFrom` / `validUntil`),
+where `scope` ranges from service-level (`trustx:AnyServiceScope`, the honest DIATF granularity — DIATF
+certifies a *service*, not an attribute list) down to a predicate set / SHACL shape reusing the existing
+`trust:forShape` idiom. Non-revocation is a **positive**, time-windowed `trustx:StatusAttestation` —
+existence of a covering window at `requiresValidStatusAt`, never evidence-of-absence (OWA/monotonicity).
+
+**Honesty (load-bearing):** framework-anchored trust is **anchored, not proven** — a
+`trustx:Certification` bottoms out in the framework operator's signed trusted-list / register artifacts
+(a trust anchor, not cryptography); the scope-conformance check constrains what the *verifier accepts*
+and, via the published certification, what the issuer was *authorised* to issue, but cannot retroactively
+prove an issuer never mis-issued elsewhere. **No term asserts a settled cryptographic soundness or
+privacy guarantee** (`sq-qhy4` external audit open; `sparq-mpc` semi-honest only). All `trustx:` IRIs are
+**NON-STANDARD** placeholders a WG would rehome.
 
 ### N3 proof-admissibility ruleset — opt-in `secprop-admissibility` ([OPUS-4.8] sq-ufsi9, Phase 2)
 

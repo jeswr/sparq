@@ -49,6 +49,14 @@ store = []
 # is `const &str` data + a TTL drift test, strictly additive (no new dep, no new edge
 # onto the lean default build).
 secprop-vocab = []
+# [FABLE-5] sq-6syab.2 — the `trustx:` certification-scope vocabulary (`framework_vocab`
+# module + `trust-framework.ttl`): the trust-expression program's layer for expressing
+# framework-certified-issuer trust and issuer certification scope (issue #1592; design
+# `research/trust-expression-spec.md` §3.4). It EXTENDS the `trust:` vocabulary and
+# REFERENCES the vendored `sec-req:` eIDAS/UK-DVS individuals — it does not fork or
+# duplicate them. Dependency-free — `const &str` data + a TTL drift test, strictly
+# additive (no new dep, no new edge onto the lean default build).
+framework-vocab = []
 # [OPUS-4.8] sq-ufsi9 — the N3 proof-admissibility ruleset over `sparq-reason` (the
 # §4.3 ODRL → admissible-proof-set reduction: strongerThan-closure / atLeast /
 # overDimension / satisfies, plus the Rust default-deny universal). Pure N3-text data

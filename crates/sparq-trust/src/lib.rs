@@ -147,6 +147,18 @@ pub mod admissibility;
 #[cfg(feature = "secprop-vocab")]
 #[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
 pub mod secprop;
+/// The `trustx:` certification-scope vocabulary (`framework_vocab` module +
+/// `trust-framework.ttl`) — the trust-expression program's layer for expressing
+/// framework-certified-issuer trust and issuer certification scope over the
+/// verifier→holder trust requirements (issue #1592; design record
+/// `research/trust-expression-spec.md` §3.4 / D4). It EXTENDS the `trust:` vocabulary
+/// (shared base IRI) and REFERENCES the vendored `sec-req:` eIDAS/UK-DVS individuals via
+/// `rdfs:seeAlso` — it does not fork or duplicate them (the design's D5). Behind the
+/// default-OFF `framework-vocab` feature: `const &str` data + a TTL drift test, no new
+/// dependency, strictly additive.
+#[cfg(feature = "framework-vocab")]
+#[cfg_attr(docsrs, doc(cfg(feature = "framework-vocab")))]
+pub mod framework_vocab;
 /// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
 /// versioning, revocation, and the admission cache key that composes with the
 /// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
