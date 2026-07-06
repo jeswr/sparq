@@ -38,6 +38,22 @@ const SPARQ_VR = !!process.env.SPARQ_VR;
 // per-PR lane) byte-identical to before — the projects array is spread with `[]` when unset, so
 // the per-PR path is untouched.
 const SPARQ_NIGHTLY_BROWSERS = !!process.env.SPARQ_NIGHTLY_BROWSERS;
+
+// [SONNET-4.6] sq-izpab — the NIGHTLY full-inventory a11y project. The per-PR `chromium`,
+// `firefox`, and `webkit` projects all ignore e2e/nightly/ (testIgnore below), so the
+// full-inventory AXE sweep (e2e/nightly/a11y-full-inventory.spec.ts) never runs per-PR.
+// The nightly workflow sets SPARQ_NIGHTLY_A11Y=1 to activate this project for the
+// nightly-full-sweep a11y job. Same chromium browser + determinism defaults as the per-PR
+// project; testMatch restricted to e2e/nightly/ so it does NOT double-run the main suite.
+const SPARQ_NIGHTLY_A11Y = !!process.env.SPARQ_NIGHTLY_A11Y;
+
+// [SONNET-4.6] sq-ledny — the NIGHTLY full-surface visual flag. The per-PR visual-desktop
+// and visual-mobile projects match ONLY the committed key-layouts spec by default; the
+// full-surface sweep (e2e/visual/full-surface.spec.ts) has no committed baselines on first
+// land and is nightly-only by design. The nightly workflow sets SPARQ_NIGHTLY_VR=1 so the
+// visual-sweep job (via vr.sh) matches ALL e2e/visual/**/*.spec.ts. Without the flag the
+// per-PR site-visual.yml lane keeps running exactly the pre-existing key-layouts tests.
+const SPARQ_NIGHTLY_VR = !!process.env.SPARQ_NIGHTLY_VR;
 if (SPARQ_VR && !existsSync("/ms-playwright") && !process.env.SPARQ_VR_ALLOW_HOST) {
   throw new Error(
     "SPARQ_VR=1 outside the pinned Playwright container (/ms-playwright not found). " +
@@ -103,23 +119,48 @@ export default defineConfig({
       name: "chromium",
       // Keep the pinned viewport at the project level too (device presets carry their own).
       use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 720 } },
-      // The visual specs run only in the container-scoped visual-* projects below.
-      testIgnore: /e2e[\\/]visual[\\/]/,
+      // Visual specs run only in the container-scoped visual-* projects below.
+      // Nightly a11y specs run only in the nightly-a11y project (activated by SPARQ_NIGHTLY_A11Y=1).
+      // Both are excluded here so the per-PR path is byte-unchanged.
+      testIgnore: [/e2e[\\/]visual[\\/]/, /e2e[\\/]nightly[\\/]/],
     },
+    // [SONNET-4.6] sq-izpab — nightly-only full-inventory a11y project (see SPARQ_NIGHTLY_A11Y above).
+    ...(SPARQ_NIGHTLY_A11Y
+      ? [
+          {
+            name: "nightly-a11y",
+            use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 720 } },
+            // Only pick up the nightly specs; the main e2e suite is already run by the
+            // chromium project in the same nightly job (npm run test:e2e runs both).
+            testMatch: /e2e[\\/]nightly[\\/].*\.spec\.ts/,
+          },
+        ]
+      : []),
     // [FABLE-5] sq-ymr2e.10 — container-only visual projects (see the SPARQ_VR guard above).
     // Two pinned viewports per §4: 1280×720 desktop + 390×844 mobile. Plain viewports (no
     // isMobile/deviceScaleFactor emulation): the site is responsive via CSS breakpoints, and
     // DSF=1 keeps baselines small + byte-stable.
+    //
+    // [SONNET-4.6] sq-ledny — testMatch is split on SPARQ_NIGHTLY_VR:
+    //   • Without the flag (per-PR site-visual.yml): only key-layouts.spec.ts — the specs
+    //     whose baselines ARE committed. full-surface.spec.ts is excluded so missing baselines
+    //     never advisory-fail the per-PR lane.
+    //   • With SPARQ_NIGHTLY_VR=1 (nightly visual-sweep via vr.sh): all e2e/visual/**/*.spec.ts
+    //     — includes full-surface and any future specs added to e2e/visual/.
     ...(SPARQ_VR
       ? [
           {
             name: "visual-desktop",
-            testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
+            testMatch: SPARQ_NIGHTLY_VR
+              ? /e2e[\\/]visual[\\/].*\.spec\.ts/
+              : /e2e[\\/]visual[\\/]key-layouts\.spec\.ts/,
             use: { viewport: { width: 1280, height: 720 } },
           },
           {
             name: "visual-mobile",
-            testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
+            testMatch: SPARQ_NIGHTLY_VR
+              ? /e2e[\\/]visual[\\/].*\.spec\.ts/
+              : /e2e[\\/]visual[\\/]key-layouts\.spec\.ts/,
             use: { viewport: { width: 390, height: 844 } },
           },
         ]
@@ -132,12 +173,14 @@ export default defineConfig({
           {
             name: "firefox",
             use: { ...devices["Desktop Firefox"], viewport: { width: 1280, height: 720 } },
-            testIgnore: /e2e[\\/]visual[\\/]/,
+            // Exclude both container-only visual and nightly-only a11y specs.
+            testIgnore: [/e2e[\\/]visual[\\/]/, /e2e[\\/]nightly[\\/]/],
           },
           {
             name: "webkit",
             use: { ...devices["Desktop Safari"], viewport: { width: 1280, height: 720 } },
-            testIgnore: /e2e[\\/]visual[\\/]/,
+            // Exclude both container-only visual and nightly-only a11y specs.
+            testIgnore: [/e2e[\\/]visual[\\/]/, /e2e[\\/]nightly[\\/]/],
           },
         ]
       : []),
