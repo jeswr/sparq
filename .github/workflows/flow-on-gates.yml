@@ -203,6 +203,16 @@ jobs:
         # Runs the hermetic gate unit tests so a regression in any gate script is
         # caught at PR time (the suite is stdlib-only; no git/network).
         run: python3 scripts/tests/test_gates.py
+      # [SONNET-4.6] sq-8hfhi: wire the reactive flow-on engine tests into CI so a
+      # rule/engine regression (like the #1655 false-positive fnmatch/{suite} defect
+      # fixed in #1664) is caught pre-merge, not post-merge. 31 tests covering: rule
+      # loading + well-formedness, evaluate() rule firing (new-crate / changed-surface /
+      # pub-API diff plumbing / competitor-label / new-bench / ZK circuit gate-count),
+      # idempotency-key stability, dry-run output correctness, and the CI guard that
+      # refuses to mint issues outside CI. Stdlib-only, no network, no git. Gating: the
+      # job name carries no advisory/informational token, so ci-summary gates on it.
+      - name: Self-test the flow-on reactive engine (rule loading + evaluate + dry-run — sq-8hfhi)
+        run: python3 scripts/tests/test_flow_on.py
       - name: Read PR labels (for the config-internal escape hatch)
         id: labels
         # [OPUS-4.8] Mirror G2: run on BOTH pull_request AND merge_group so the
