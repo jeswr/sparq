@@ -71,6 +71,13 @@ let g = Graph::from_parts(dict, triples);
   exact mixed-tier numeric ties, NaN totalised first (see the substrate `compare` docs).
   Monomorphic (no trait object on the sort loop) and purely additive — no materialiser calls
   it, so the entailed closure and its emission order are unchanged. Off by default.
+- **Compiled rules** (opt-in `compiled-rules`) — `n3::compiled`: lower N3 rule text ONCE to
+  an id-level IR (constants pre-interned into the caller's `Dict`) and run the semi-naive
+  fixpoint DIRECTLY over `[Id; 3]` facts on the shared substrate join kernels — no per-call
+  graph→text→re-parse round-trip. Scoped to the access-control subset (`log:notIncludes`/
+  `log:uri`/`log:(not)equalTo`, `string:` concatenation/encodeForUri/scrape/notGreaterThan);
+  everything else is a loud compile error. Closure set-equality vs `reason_n3` is pinned by
+  `tests/compiled_equivalence.rs` over the sparq-solid WAC/ACP rule corpus. Off by default.
 
 ## 📚 Learn more
 

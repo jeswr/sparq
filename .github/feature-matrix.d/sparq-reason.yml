@@ -47,3 +47,15 @@
   crate: "sparq-reason"
   features: "substrate-compare"
   test: true
+
+# [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): the id-level COMPILED-rule
+# evaluator for the scoped access-control N3 subset (n3::compiled — rule IR with
+# pre-interned symbols over the shared sparq-substrate join kernels). This leg builds +
+# tests + clippies the feature-ON state: the compile/eval unit suite AND
+# tests/compiled_equivalence.rs (the closure set-equality oracle vs reason_n3 over the
+# sparq-solid WAC/ACP/ODRL-spike rule corpus — a `required-features` target that would
+# otherwise run in NO CI lane).
+- name: "sparq-reason (compiled-rules)"
+  crate: "sparq-reason"
+  features: "compiled-rules"
+  test: true

@@ -80,6 +80,12 @@
 //! `log:conclusion` parity on deep multi-document closures (cwm_includes
 //! conclusion.n3 is the one remaining honest reasoner-suite fail).
 
+// [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): OPT-IN id-level compiled-rule
+// evaluation for the scoped access-control N3 subset — see the module's own docs for the
+// honest builtin/feature envelope. When the `compiled-rules` feature is off, zero of it
+// is compiled (this hook is the module's only footprint in the default build).
+#[cfg(feature = "compiled-rules")]
+pub mod compiled;
 mod model;
 pub mod parser;
 
