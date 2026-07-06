@@ -34,63 +34,62 @@ parser respectively; they are enumerated in the manifest's `outOfClassScenarios`
 this query-engine runner.
 
 <!-- [OPUS-4.8] sq-tlzvw (issue #1654): vendored spec text + machine-readable companion -->
+<!-- [FABLE-5] sq-bojxd: companion re-vendored from its canonical upstream home; provisional
+     companion + local shapes superseded (sq-dhnn3 namespace question resolved) -->
 ## Spec text (`spec.html`)
 
 `spec.html` is a **pinned, verbatim copy** of the upstream `index.html` (the ReSpec
-Editor's Draft) at the same upstream commit `5ea9718…` as the suite above — byte-identical
-to the upstream `HEAD` at vendoring time. It is present so the companion's quotes are
-fidelity-checkable against spec text **in this tree**, offline. Do NOT hand-edit it;
-re-vendor from upstream on any spec change and re-run the fidelity + SHACL checks below.
+Editor's Draft) at the upstream commit `5ea9718…` (unchanged through `306da22…`, the
+current companion pin below) — byte-identical to the upstream `HEAD` at vendoring time.
+It is present so the companion's quotes are fidelity-checkable against spec text **in
+this tree**, offline. Do NOT hand-edit it; re-vendor from upstream on any spec change
+and re-run the fidelity check below.
 
 ## Machine-readable companion (`spec.statements.ttl`)
 
-`spec.statements.ttl` is an **additive** normative-statement companion for the spec (the
-spec text is untouched), responding to `jeswr/sparq#1654`. It reuses the W3C `spec:`
-vocabulary (`http://www.w3.org/ns/spec#`) — the same one the Solid Protocol and Conformance
-Test Harness use — with an `sc:` extension for the testability spine and the coverage links.
-Each of the **86** RFC 2119 obligations of the spec is one `spec:Requirement` carrying:
+`spec.statements.ttl` is a **pinned, byte-identical mirror** of the upstream
+normative-statement companion. Its **canonical home is the upstream repo** (repo root,
+beside the spec source `index.html`); like the suite above, change it upstream and
+re-vendor — never hand-edit the copy here.
 
-- a **verbatim, character-for-character quote** (`spec:statement`) checked against `spec.html`;
-- its RFC 2119 level (`spec:requirementLevel`) and actor binding (`spec:requirementSubject`);
-- a **testability tag** (`sc:testabilityTag`) — `sc:Enforceable` (E) versus the
-  audit-accountable `sc:AuditInternal` (A-int) / `sc:AuditExistential` (A-exist) /
-  `sc:Permission` (P), so the companion never overclaims server enforceability;
-- a resolvable section anchor (`sc:section` → `spec.html#…`);
-- a link to the conformance vector that tests it (`sc:testedBy` → `manifest.json#<case-id>`)
-  **or** an honest `sc:testGap` (both, where coverage is partial).
+| Field | Value |
+|-------|-------|
+| Upstream commit | `306da228c6d1cfca08bebdf1bf8d21f14169b618` |
+| Upstream PRs | authoring `d321f4f` (direct commit) + coverage links <https://github.com/jeswr/solid-sparql-query/pull/3> |
+| Format | [`jeswr/spec-companion`](https://github.com/jeswr/spec-companion) (canonical vocab + SHACL shapes + validator) |
+| Statements | 83 (one `spec:Requirement` per normative statement, verbatim quotes) |
 
-Tag distribution: **E 37 · A-int 11 · A-exist 16 · P 22** (levels: MUST 38 · MUST NOT 25 ·
-SHOULD 10 · MAY 13). 25 requirements link at least one conformance vector; 69 carry an
-honest gap note (an out-of-class scenario, an audit-only property, or a permission).
+Each statement carries its RFC 2119 level, actor binding, an E / A-int / A-exist / P
+testability tag, a resolvable anchor into the spec, and either `spec:testCase` link(s) to
+the query-semantics conformance vector(s) that exercise it (22 statements link
+`test-suite/query-semantics/manifest.json#<case-id>` — the suite vendored as
+`manifest.json` here) or an honest `sc:testGap`.
 
-### The `sc:` namespace is provisional
+### History (supersession of the provisional companion)
 
-The `sc:` namespace IRI (`https://w3id.org/spec-companion#`) follows #1654's `sc:testGap`
-term and the maintainer's w3id convention, but the canonical `jeswr/spec-companion`
-repository was **not fetchable** at authoring time, so the exact IRI and term shapes should
-be reconciled with that vocabulary when it is available. The extension terms are
-self-described in `spec-companion.shapes.ttl`.
+sparq PR #1659 (bead `sq-tlzvw`, responding to #1654) authored a **provisional** companion
+here (86 statements; provisional `sc: <https://w3id.org/spec-companion#>` namespace; a local
+`spec-companion.shapes.ttl` SHACL guardrail) while the canonical `jeswr/spec-companion`
+repository was not fetchable. In parallel, that canonical format landed and the upstream
+spec repo received its own companion in it (`d321f4f`, 83 statements,
+`sc: <https://w3id.org/jeswr/spec-companion#>`). Per this suite's own rule (**upstream is
+canonical; change upstream and re-vendor**), bead `sq-bojxd` contributed the provisional
+companion's unique value upstream — its conformance-vector coverage adjudication,
+re-derived conservatively as the `spec:testCase` links of upstream PR #3 — and replaced the
+provisional companion + local shapes file with this mirror. That also resolves the
+provisional-namespace question (bead `sq-dhnn3`): the canonical namespace is adopted
+wholesale. The 86-vs-83 statement-count difference is a consolidation difference over the
+same normative text (the canonical file records keywordless / lowercase-keyword clauses as
+`sc:extractionNote`s on the companion document instead of minting statements).
 
-### Validation (spec-of-specs guardrail)
+### Validation
 
-`spec-companion.shapes.ttl` is the SHACL guardrail: every requirement must carry exactly one
-statement / level / subject / tag / section anchor and at least one of `sc:testedBy` /
-`sc:testGap`. Validate with sparq's own SHACL engine:
+Validate the mirror with the canonical tooling (a checkout of `jeswr/spec-companion`);
+`spec.html` is byte-identical to upstream `index.html` at the pin, so the quote-fidelity
+check holds against the in-tree copy:
 
 ```sh
-cargo run -p sparq-shacl --example validate -- \
-  spec.statements.ttl spec-companion.shapes.ttl
+node <spec-companion>/tools/validate.mjs spec.statements.ttl --spec-html spec.html
 ```
 
-Exit 0 / `Conforms` == validator-0-errors (verified for the current companion; a
-spot-check confirms the shapes are non-vacuous — dropping any required field fails).
-
-### Count versus the #1654 inventory
-
-The #1654 proposal cites an **88**-statement inventory; the tree yields **86** distinct
-RFC 2119 obligations (counted per keyword occurrence). The 2-statement gap is accounted for
-by two non-normative keyword tokens the companion deliberately excludes: the SPARQL
-`OPTIONAL` keyword in §Query cost and denial of service ("OPTIONAL-heavy queries") and the
-informative back-reference in §The read-oracle class ("makes their mitigation a SHOULD",
-which points at invariant 6's SHOULD rather than stating a new obligation). Per the standing
-rule, the **tree wins**; the discrepancy is recorded on #1654.
+PASS = 83 statements, 0 errors, 0 warnings (verified in-tree at the pin above).
