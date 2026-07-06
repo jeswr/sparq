@@ -45,10 +45,15 @@ let g = Graph::from_parts(dict, triples);
 - **Notation3** — `{ … } => { … }` rules with EYE-validated builtins (a separate subsystem).
 - **RIF-Core** (opt-in `rif-core`) — the W3C RIF **Core** dialect (the **monotone Horn**
   common subset of RIF-BLD/PRD) as a `rif::Document` rule front-end over the N3 chainer:
-  frame/membership/subclass/equality atoms + numeric/string/list builtins with
-  **range-restriction safety** enforced (unsafe rules are rejected, never looped). **Monotone,
-  NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF entailment regime are documented
-  out-of-scope (`rif::UNIMPLEMENTED`), not faked.
+  frame/membership/subclass atoms + numeric/string/list builtins with **range-restriction
+  safety** enforced (unsafe rules are rejected, never looped). **Equal-atom semantics
+  (sq-pbz04.5.4 + sq-26vwp):** Equal in a rule head is rejected (Core syntactic restriction);
+  body Equal is resolved at **compile time by substitution/unification** (not an `owl:sameAs`
+  triple) — `t=t` eliminated, `?x=t` substituted (binds `?x`), `?x=?y` unified — so same-node
+  reflexivity fires without a `sameAs` assertion and an asserted `sameAs` never over-derives;
+  distinct **ground** constants stay rejected fail-closed pending the value-space comparator
+  (sq-v5evr/#1646). **Monotone, NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF
+  entailment regime are documented out-of-scope (`rif::UNIMPLEMENTED`), not faked.
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
@@ -60,8 +65,9 @@ let g = Graph::from_parts(dict, triples);
 - **Shared join kernels** (opt-in `substrate-join`) — the RDFS predicate join (rdfs2/3/7)
   and the rdfs9 type join drive the *same* `sparq-substrate::join` hash-join body the SPARQL
   engine drives, supplying the reasoner's own key projection + budget monomorphically.
-  Behaviour-neutral: the same closure, only the join machinery is shared (only the PropExpand
-  orientation-swap branch stays hand-rolled — documented disposition in `substrate_join.rs`).
+  Also covers the OWL-RL semi-naive Δ⋈full adjacency (`prp-fp`, `prp-ifp`, `prp-trp`): a
+  persistent `DeltaAdj` (two `DeltaTable`s, `sq-qonbz.2`) replaces the per-round `FxHashMap`
+  probes — same closure output, only the join machinery changes.
   Off by default; byte/bundle ratchets unchanged.
 - **Shared term total order** (opt-in `substrate-compare`) — `compare::IdTerm` implements the
   substrate's `CompareTerm` for dictionary ids, so ordering entailed solutions

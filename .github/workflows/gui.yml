@@ -278,11 +278,19 @@ jobs:
   # with window.__TAURI__ + window.__TAURI_INTERNALS__ stubbed via page.addInitScript.  No Tauri
   # binary, no display server, no real IPC — fully deterministic.
   #
-  # GATING (no `advisory` keyword): unlike the tauri-driver e2e (which needs webkit2gtk + a
+  # GATING TODAY (no `advisory` keyword): unlike the tauri-driver e2e (which needs webkit2gtk + a
   # headless webview and keeps `advisory` for runner-image reliability), this lane is pure
-  # Playwright + Chromium on ubuntu-latest — reproducible on every Linux CI runner.  It is the
-  # deterministic, promotable gate for the GUI frontend and is intended to become a required
-  # branch-protection context (bead sq-ymr2e.5 → sq-var9 promotion sequence).
+  # Playwright + Chromium on ubuntu-latest — reproducible on every Linux CI runner. It was made
+  # gating at creation (sq-ymr2e.5) on the deterministic-lane rationale (retries=0, mocked IPC).
+  #
+  # [OPUS-4.8] sq-ymr2e.12 — GOVERNANCE NOTE: the checked-in gating/probation policy
+  # `.github/E2E-GATING-POLICY.md` (design research/web-gui-test-program.md §6.3) classifies this
+  # lane as a member of the deterministic PROMOTION SET, which is meant to EARN gating on a
+  # probation bar (§3 there) rather than gate from day one. This early promotion pre-dates that
+  # governance and is FLAGGED for the maintainer to ratify (keep gating) or reset to advisory —
+  # see §6 of the policy + tracking issue #1656. This bead does NOT unilaterally demote a green,
+  # deterministic gate; the
+  # lane keeps its current gating status until the maintainer decides. Do not silently flip it.
   #
   # PATH SCOPE: gui/** + packages/** (changes to the shared @sparq/client can affect the frontend).
   # The job is NOT in the `merge_group` event (ci-summary.yml cannot cross-workflow `needs:`); it

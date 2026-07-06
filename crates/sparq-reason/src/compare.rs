@@ -225,19 +225,13 @@ fn num_of_parts(value: &str, datatype: &str) -> Option<Num> {
     None
 }
 
-/// The engine's `num_compare`: exact via the `Dec` fixed-point tower when both operands
-/// have an exact tier (int/decimal), else by `f64` value (float/double, whose value IS
-/// its f64). (The value-space relational-compare hoist into the substrate is the parked
-/// seam-2 remainder, sq-v5evr; until then this six-line mirror is pinned by the
-/// engine-parity test.)
+/// The numeric relational comparison for `strict_cmp` — delegates to
+/// `Num::cmp_relational` (the shared substrate function, sq-v5evr): exact via the
+/// `Dec` fixed-point tower when both operands have an exact tier (int/decimal), else
+/// by `f64` value (float/double). NaN → `None` (SPARQL type error). [OPUS-4.8] sq-v5evr
 #[inline]
 fn num_compare(a: Num, b: Num) -> Option<Ordering> {
-    if let (Some(x), Some(y)) = (a.to_dec(), b.to_dec()) {
-        if let Some(o) = x.cmp(y) {
-            return Some(o);
-        }
-    }
-    a.f64().partial_cmp(&b.f64())
+    a.cmp_relational(b)
 }
 
 impl CompareTerm for IdTerm<'_> {
@@ -647,5 +641,26 @@ mod tests {
                 dt
             );
         }
+    }
+
+    /// Direct pin of `num_compare` → `Num::cmp_relational` (sq-v5evr): verifies the
+    /// delegation produces the expected relational semantics — exact for int/dec pairs,
+    /// f64 promotion for mixed/inexact, and `None` for NaN (SPARQL type error).
+    /// [OPUS-4.8] sq-v5evr
+    #[test]
+    fn num_compare_delegates_to_substrate_cmp_relational() {
+        use std::cmp::Ordering::*;
+        // Exact same-tier: integer vs integer
+        assert_eq!(num_compare(Num::Int(1), Num::Int(2)), Some(Less));
+        assert_eq!(num_compare(Num::Int(3), Num::Int(3)), Some(Equal));
+        assert_eq!(num_compare(Num::Int(5), Num::Int(4)), Some(Greater));
+        // Exact cross-tier: int vs decimal
+        let dec = Num::Dec(Dec { mant: 10, scale: 1 }); // 1.0
+        assert_eq!(num_compare(Num::Int(1), dec), Some(Equal));
+        // Double: normal
+        assert_eq!(num_compare(Num::Double(1.5), Num::Double(2.5)), Some(Less));
+        // NaN → None (SPARQL type error — the relational semantics, not cmp_total)
+        assert_eq!(num_compare(Num::Double(f64::NAN), Num::Int(0)), None);
+        assert_eq!(num_compare(Num::Int(0), Num::Double(f64::NAN)), None);
     }
 }

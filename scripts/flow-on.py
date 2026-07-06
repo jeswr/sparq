@@ -91,6 +91,14 @@ class Rule:
     description: str = ""
     when_paths: list[str] = field(default_factory=list)
     when_new_paths: list[str] = field(default_factory=list)
+    # [OPUS-4.8] sq-fyzq7: added paths matching any of these globs are DROPPED
+    # from the `when_new_paths` matching pool. This lets a `when_new_paths` rule
+    # ignore a sub-tree that is already covered elsewhere — e.g.
+    # `new-zk-circuit-gatecount` uses it to skip `zk/compose/**` members (owned by
+    # the hard `snapshot_covers_every_member` gate) so a new compose member does
+    # not mis-fire the "new top-level circuit" follow-on. Only filters the
+    # `when_new_paths` check; other predicates are unaffected.
+    exclude_new_paths: list[str] = field(default_factory=list)
     when_label: str | None = None
     when_title: str | None = None
     creates: list[CreateTemplate] = field(default_factory=list)
@@ -129,6 +137,7 @@ def load_rules(path: Path) -> list[Rule]:
             description=raw.get("description", ""),
             when_paths=list(raw.get("when_paths", [])),
             when_new_paths=list(raw.get("when_new_paths", [])),
+            exclude_new_paths=list(raw.get("exclude_new_paths", [])),
             when_label=raw.get("when_label"),
             when_title=raw.get("when_title"),
             creates=creates,
@@ -163,7 +172,7 @@ def build_context(
     changed: list[str],
     added: list[str],
 ) -> dict[str, str]:
-    """Compute the placeholder dict for {pr}/{pr_title}/{crate}/{suite}/{surface}.
+    """Compute the placeholder dict for {pr}/{pr_title}/{crate}/{suite}/{surface}/{zk_circuit}.
 
     Prefer ADDED paths for crate/suite (the rules that use them are new-* rules),
     falling back to all changed paths so changed-surface rules still resolve."""
@@ -171,12 +180,24 @@ def build_context(
     crate = _first_segment_after("crates/", pool_for_dir)
     suite = _first_segment_after("bench/", pool_for_dir) or _first_segment_after("zk/", pool_for_dir)
     surface = _first_segment_after("skills/", pool_for_dir)
+    # [OPUS-4.8] sq-fyzq7: the NEW top-level `zk/` circuit family, for the
+    # `new-zk-circuit-gatecount` rule. Derived ONLY from `zk/` (NEVER `bench/` —
+    # the shared `{suite}` above prefers `bench/`, which made a #1608-shaped diff
+    # mis-name the circuit `zk-compose` from the `bench/zk-compose/` output dir),
+    # and with `zk/compose/` EXCLUDED: compose members are already covered by the
+    # hard `snapshot_covers_every_member` gate, so a new member must not surface as
+    # a phantom new "circuit". The rule's `exclude_new_paths` keeps it from firing
+    # in that case, so a non-empty value here only appears for a genuine new family.
+    zk_circuit = _first_segment_after(
+        "zk/", [p for p in pool_for_dir if not p.startswith("zk/compose/")]
+    )
     return {
         "pr": str(pr),
         "pr_title": pr_title,
         "crate": crate or "",
         "suite": suite or "",
         "surface": surface or "",
+        "zk_circuit": zk_circuit or "",
     }
 
 
@@ -211,8 +232,15 @@ def rule_matches(
     # ALL present predicates must pass; absent predicates are ignored.
     if rule.when_paths and not _any_glob_match(rule.when_paths, changed):
         return False
-    if rule.when_new_paths and not _any_glob_match(rule.when_new_paths, added):
-        return False
+    if rule.when_new_paths:
+        # [OPUS-4.8] sq-fyzq7: drop any added path under an `exclude_new_paths`
+        # sub-tree BEFORE the match, so a rule can ignore additions already owned
+        # by another gate (e.g. `zk/compose/**` members → `snapshot_covers_every_member`).
+        new_pool = added
+        if rule.exclude_new_paths:
+            new_pool = [p for p in added if not _any_glob_match(rule.exclude_new_paths, [p])]
+        if not _any_glob_match(rule.when_new_paths, new_pool):
+            return False
     if rule.when_label is not None and rule.when_label not in labels:
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):

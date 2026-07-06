@@ -612,6 +612,29 @@ records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-i6du2.7 (epic sq-i6du2, #1613) — the access-controlled-query benchmark
+# harness. The standalone `ac-bench` driver (bench/ac, its own [workspace] like bench/parse
+# + bench/dict) runs the sparq-acbench (#1627) by-construction WAC/ACP/ODRL oracle over the
+# present use-case generators. Links NO engine crate: the oracle is structurally independent
+# of the system under test, so this suite is CORRECTNESS (a fail-closed pass/fail), not perf.
+[[benchmark]]
+id          = "ac-oracle"
+name        = "Access-controlled-query benchmark oracle (WAC/ACP/ODRL, sparq-acbench)"
+category    = "inference"
+measures    = "W1 decision / W2 result-set / W3 ACL-write-churn agreement between each generator's by-construction expected output and the shared procedural oracle (fail-closed pass/fail per lane); NOT a perf claim — the driver's indicative per-lane wall-clock is advisory + non-canonical"
+invoke      = "bench/ac/run.sh --smoke   # per-commit smoke tier; bench/ac/run.sh --sf N for a nightly tier"
+source      = "bench/ac/{run.sh,Cargo.toml,Cargo.lock,src/main.rs}; crates/sparq-acbench (generators + workload/oracle engine)"
+dataset     = "parameterised, seeded, deterministic in-crate generators (personal/project_mgmt/consortium; financial=U3 pending sq-i6du2.4, Skipped-with-reason). No external corpus, no network"
+quiet_box_sensitive = false  # deterministic oracle pass/fail, load-robust; the wall-clock lines are advisory-only and never committed
+pinning     = "GenParams::smoke() (fixed seed 42) for --smoke; --sf N is deterministic. No wall-clock affects the pass/fail verdict"
+records_to  = "stdout (per-suite TSV table + pass/fail/skip summary); exit non-zero on any oracle mismatch. No number committed to markdown"
+# [OPUS-4.8] sq-i6du2.7: internal fail-closed oracle harness for the opt-in AC-query benchmark
+# program, not a head-to-head competitor card — featured = false is a dashboard DISPOSITION (no
+# perf claim). The W2-live query_as + W4 query concurrency sub-lanes are the engine-linked driver
+# sq-kvvcl (Skipped-with-reason here). Dashboard promotion, if ever, deferred to a maintainer.
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
 [[benchmark]]
 id          = "policy-odrl-eval"
@@ -1170,6 +1193,51 @@ status      = "ok"
 # "no competitor card", it does NOT relax that regression gate. The proposed wasm
 # query micro-bench (sq-5pnl, a NEW wasm_query_us metric) is a SEPARATE concern.
 featured    = false
+
+# [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-substrate in-crate criterion
+# micro-bench for the four join kernels and the Num arithmetic tower. Closes
+# the bench-missing drift item for sparq-substrate (GitHub #1649). The bench
+# already existed in crates/sparq-substrate/benches/substrate.rs (sq-qonbz.4);
+# this entry registers it in the catalog so the drift-scanner goes quiet.
+# HONESTY: criterion wall-clock timings are NON-CANONICAL on a shared box; the
+# bench is trend-only. `featured = false` is the documented escape hatch for
+# in-crate micro-benches that are NOT head-to-head dashboard cards.
+[[benchmark]]
+id          = "substrate-join-numeric"
+name        = "sparq-substrate join kernels + Num arithmetic micro-bench"
+category    = "query"
+measures    = "criterion min-of-N wall-clock latency (ns/iter) for merge_join, hash build, hash probe-serial over rows of 100/1k/10k elements, and Num::binop (int_add, dec_mul, double_add) over 1k value pairs; all at throughput = Elements(n)"
+invoke      = "cargo bench -p sparq-substrate --features join,numeric"
+source      = "crates/sparq-substrate/benches/substrate.rs"
+dataset     = "synthetic in-bench (deterministic Row::new() enumeration, no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "row counts {100, 1000, 10000} and value counts (1000) are fixed in the bench source; corpus is deterministic; pin these for comparable Criterion baselines"
+records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
+status      = "ok"
+
+# [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-fedplan in-crate criterion
+# micro-bench for select_sources + plan_bgp. Closes the bench-missing drift
+# item for sparq-fedplan (GitHub #1648). The bench already existed in
+# crates/sparq-fedplan/benches/fedplan.rs (sq-my8wd.3); this entry registers
+# it in the catalog so the drift-scanner goes quiet.
+# HONESTY: fedplan is a planning crate whose execution cost is dominated by the
+# engine at runtime; the in-crate bench measures the planner's own overhead in
+# isolation over a synthetic 3-source/3-pattern BGP. `featured = false` is the
+# documented escape hatch for in-crate micro-benches.
+[[benchmark]]
+id          = "fedplan-source-selection"
+name        = "sparq-fedplan source selection + join planning micro-bench"
+category    = "query"
+measures    = "criterion min-of-N wall-clock latency (ns/iter) for select_sources and plan_bgp over a 3-predicate chain BGP at n_sources in {1, 3, 10}; isolates the planner overhead from engine execution cost"
+invoke      = "cargo bench -p sparq-fedplan --features fedplan"
+source      = "crates/sparq-fedplan/benches/fedplan.rs"
+dataset     = "synthetic in-bench (SourceDescriptor::builder with 5 predicates x 10 000 triples/pred; chain BGP with distinct predicate IRIs; no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "n_sources {1, 3, 10} and descriptor shape are fixed in the bench source; corpus is deterministic; pin these for comparable Criterion baselines"
+records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
+status      = "ok"
 
 # =============================================================================
 # CONFORMANCE — correctness against official W3C suites (NOT perf)

@@ -192,6 +192,8 @@ fn match_atom(
 /// source variables to target terms; constants and `Unbound` existentials in the source are RIGID
 /// (must equal the target term exactly). A distinguished (frozen) source variable must map to the
 /// SAME distinguished variable in the target. Returns false on any conflict.
+/// [SONNET-4.6] sq-pbz04.3.1: `Literal` arm added for B2 — a source literal constant maps only
+/// to the identical target literal (like `Const`).
 fn bind(
     s: &Term,
     t: &Term,
@@ -201,6 +203,11 @@ fn bind(
     match s {
         // A source constant maps only to the identical target constant.
         Term::Const(c) => matches!(t, Term::Const(c2) if c2 == c),
+        // B2: a source literal maps only to the identical target literal (same three fields).
+        // [SONNET-4.6] sq-pbz04.3.1
+        Term::Lit(lv, ld, ll) => {
+            matches!(t, Term::Lit(lv2, ld2, ll2) if lv2 == lv && ld2 == ld && ll2 == ll)
+        }
         // A source `_` existential is rigid under the standard CQ-homomorphism definition we use:
         // it is a NON-shared placeholder, but to stay SOUND we require it to map to the identical
         // target term. (Treating `_` as a mappable variable would be sound too, but only if we
