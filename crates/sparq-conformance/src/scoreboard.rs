@@ -806,7 +806,10 @@ pub const SUITES: &[Suite] = &[
         // [SONNET-4.6] sq-pbz04.5.2 — raised 47 → 58: 11 new assertions for the 5
         // new soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
         // StringEncodeForUri, ListConcatenate).
-        ratchet_floor: 58,
+        // [SONNET-4.6] sq-pbz04.5.4 — raised 58 → 61: Equal-atom audit (+3):
+        // conclusion-rejection + ground-identity body Equal + DistinctGroundEqual
+        // fail-closed (net +3: 4 added, 1 removed).
+        ratchet_floor: 61,
         floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
                       NOT the normative W3C SPARQL-RIF conformance suite)",
         note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \

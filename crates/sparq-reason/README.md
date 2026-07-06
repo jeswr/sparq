@@ -45,10 +45,13 @@ let g = Graph::from_parts(dict, triples);
 - **Notation3** — `{ … } => { … }` rules with EYE-validated builtins (a separate subsystem).
 - **RIF-Core** (opt-in `rif-core`) — the W3C RIF **Core** dialect (the **monotone Horn**
   common subset of RIF-BLD/PRD) as a `rif::Document` rule front-end over the N3 chainer:
-  frame/membership/subclass/equality atoms + numeric/string/list builtins with
-  **range-restriction safety** enforced (unsafe rules are rejected, never looped). **Monotone,
-  NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF entailment regime are documented
-  out-of-scope (`rif::UNIMPLEMENTED`), not faked.
+  frame/membership/subclass atoms + numeric/string/list builtins with **range-restriction
+  safety** enforced (unsafe rules are rejected, never looped). **Equal-atom semantics
+  (sq-pbz04.5.4):** Equal in a rule head is rejected (Core syntactic restriction); body Equal
+  with syntactically-identical terms is eliminated (trivially true); body Equal with distinct
+  ground constants is rejected fail-closed pending the value-space comparator (sq-v5evr/#1646).
+  **Monotone, NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF entailment regime
+  are documented out-of-scope (`rif::UNIMPLEMENTED`), not faked.
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
