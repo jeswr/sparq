@@ -30,6 +30,7 @@
 // SPECS); the filesystem guard tests in surface-sweep validate the BENCHMARK_FAMILY_KEYS /
 // DEEP_SURFACE_SLUGS / SHOWCASE_SLUGS constants — those guard tests are NOT duplicated here.
 // When a new route is added to surface-sweep.spec.ts, add it to the inventory below too.
+// [SONNET-4.6] sq-yk2ho — /assurance, /assurance/served-conformance, /dogfooding added.
 //
 // NEXT STEPS (follow-up bead). Add moderate/minor ratchet: run once with A11Y_NIGHTLY_SEED=1
 // to populate bench/a11y-nightly-baseline.json, review the seeded counts, commit, then wire
@@ -100,6 +101,10 @@ const STATIC_ROUTES: RouteEntry[] = [
   { path: "app/", name: "/app" },
   { path: "download/", name: "/download" },
   { path: "examples/", name: "/examples" },
+  // [SONNET-4.6] sq-yk2ho — previously-unlinked content routes now in inventory.
+  { path: "assurance/", name: "/assurance" },
+  { path: "assurance/served-conformance/", name: "/assurance/served-conformance" },
+  { path: "dogfooding/", name: "/dogfooding" },
 ];
 
 // ── Papers routes ─────────────────────────────────────────────────────────────────────────
