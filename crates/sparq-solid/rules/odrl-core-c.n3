@@ -1,0 +1,16 @@
+# [FABLE-5] sq-zgbso.2 — ODRL stateless core as N3, STRATUM C (of A→B→C→D).
+#
+# Runs seeded with stratum B's closure. `oc:blocked` is complete after stratum B (its
+# atomic piece from A, its compound piece from B), so rule MATCHING may now negate it.
+#
+# `?rule oc:matches true` mirrors `sparq_policy`'s `rule_matches`: the action permits
+# the requested action, target and assignee agree (or are unconstrained), and NO
+# constraint — atomic or compound — is unsatisfied. Duties are NOT part of matching
+# (they gate only the permission GRANT, stratum D), exactly like the evaluator.
+
+@prefix oc:  <https://sparq.dev/ns/odrl-core#> .
+@prefix log: <http://www.w3.org/2000/10/swap/log#> .
+
+{ ?rule a oc:Rule ; oc:actionOK true ; oc:targetOK true ; oc:assigneeOK true .
+  ?UNSCOPED log:notIncludes { ?rule oc:blocked true . } . }
+=> { ?rule oc:matches true . } .

@@ -1,0 +1,35 @@
+# [FABLE-5] sq-zgbso.2 — ODRL stateless core as N3, STRATUM B (of A→B→C→D).
+#
+# Runs as its own `reason_n3` call seeded with stratum A's closure (§3.5 discipline).
+# `oc:sat` is COMPLETE after stratum A (every satisfaction rule lives there), so this
+# stratum may negate over it — the piece the spike's finding (c) said needed fuller
+# stratification: `or`/`xone` require "NO operand is satisfied", a universal that is
+# negation over a DERIVED predicate and therefore cannot live in stratum A.
+#
+# Outputs: the remaining `?lc oc:lcNotSat true` pieces + `?rule oc:blocked true` for
+# rules with an unsatisfied compound constraint. `oc:blocked` is complete after THIS
+# stratum (both its stratum-A atomic piece and this logical piece are in), so stratum C
+# may negate over it.
+
+@prefix oc:  <https://sparq.dev/ns/odrl-core#> .
+@prefix log: <http://www.w3.org/2000/10/swap/log#> .
+
+# or: NOT-satisfied iff no operand is satisfied (logical_constraint_status: `or` is
+# Satisfied iff ANY operand is Satisfied; zero satisfied — whether the rest are
+# definitely-false or unprovable — never satisfies, fail-closed).
+{ ?lc oc:combinator oc:or .
+  ?UNSCOPED log:notIncludes { ?lc oc:operand ?c . ?c oc:sat true . } . }
+=> { ?lc oc:lcNotSat true . } .
+
+# xone: zero satisfied operands → provably not exactly one. (The ≥2 and any-unprovable
+# cases were already derived in stratum A; together the three pieces are exactly
+# "NOT (exactly one Satisfied AND no Unprovable)" — ¬Satisfied for xone.)
+{ ?lc oc:combinator oc:xone .
+  ?UNSCOPED log:notIncludes { ?lc oc:operand ?c . ?c oc:sat true . } . }
+=> { ?lc oc:lcNotSat true . } .
+
+# a rule with a compound constraint that is not Satisfied can never match
+# (rule_matches requires every logical constraint Satisfied — fail-closed on
+# Unprovable as well as DefinitelyUnsatisfied).
+{ ?rule a oc:Rule ; oc:logical ?lc . ?lc oc:lcNotSat true . }
+=> { ?rule oc:blocked true . } .

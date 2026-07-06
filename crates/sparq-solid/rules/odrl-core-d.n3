@@ -1,0 +1,58 @@
+# [FABLE-5] sq-zgbso.2 — ODRL stateless core as N3, STRATUM D (of A→B→C→D).
+#
+# Runs seeded with stratum C's closure. `oc:matches` is complete, so DENY-OVERRIDES —
+# "a matching prohibition blocks every permission grant" (`evaluate` step 1) — is now a
+# sound negation. Derives the SAME `<urn:sparq:auth>` view triples the Rust bridge
+# writes:
+#
+#   allow:  `?party auth:<mode> ?target`      (materialize_permission on a Permit)
+#   deny:   `?party auth:deny<Mode> ?target`  (materialize_prohibition on a match)
+#
+# The mode comes from the REQUEST action through the same table as
+# `odrl_bridge::action_to_mode` (below, as data facts): an unmapped request action —
+# including the `odrl:use` umbrella — yields no mode fact and therefore NO triple,
+# and a request without a concrete party or target derives nothing (fail-closed),
+# exactly like the bridge's concreteness checks.
+
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix auth: <https://sparq.dev/ns/auth#> .
+@prefix oc:   <https://sparq.dev/ns/odrl-core#> .
+@prefix log:  <http://www.w3.org/2000/10/swap/log#> .
+
+# ── request action → WAC/ACP mode (mirror of odrl_bridge::action_to_mode) ─────────────
+odrl:read    oc:mode auth:read .
+odrl:display oc:mode auth:read .
+odrl:present oc:mode auth:read .
+odrl:print   oc:mode auth:read .
+odrl:play    oc:mode auth:read .
+odrl:append  oc:mode auth:append .
+odrl:modify  oc:mode auth:write .
+odrl:delete  oc:mode auth:write .
+odrl:write   oc:mode auth:write .
+
+# ── request action → the `auth:deny<Mode>` predicate a matched prohibition emits ──────
+odrl:read    oc:denyMode auth:denyRead .
+odrl:display oc:denyMode auth:denyRead .
+odrl:present oc:denyMode auth:denyRead .
+odrl:print   oc:denyMode auth:denyRead .
+odrl:play    oc:denyMode auth:denyRead .
+odrl:append  oc:denyMode auth:denyAppend .
+odrl:modify  oc:denyMode auth:denyWrite .
+odrl:delete  oc:denyMode auth:denyWrite .
+odrl:write   oc:denyMode auth:denyWrite .
+
+# ── deny: a matched prohibition materializes the explicit deny triple ─────────────────
+{ ?p a oc:Prohibition ; oc:matches true .
+  ?req a oc:Request ; oc:reqAction ?a ; oc:reqParty ?party ; oc:reqTarget ?t .
+  ?a oc:denyMode ?dm . }
+=> { ?party ?dm ?t . } .
+
+# ── allow: a matched permission grants IFF its duties are discharged AND no
+#    prohibition matches the request (deny-overrides — `evaluate` denies on ANY
+#    matching prohibition, so the negation is over the whole policy's prohibitions) ────
+{ ?p a oc:Permission ; oc:matches true .
+  ?req a oc:Request ; oc:reqAction ?a ; oc:reqParty ?party ; oc:reqTarget ?t .
+  ?a oc:mode ?m .
+  ?UNSCOPED log:notIncludes { ?p oc:dutyBlocked true . } .
+  ?UNSCOPED2 log:notIncludes { ?x a oc:Prohibition ; oc:matches true . } . }
+=> { ?party ?m ?t . } .

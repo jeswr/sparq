@@ -117,9 +117,10 @@ use oxrdf::{Literal, NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
 use sparq_policy::{
-    conflict_admissibility, evaluate, matched_prohibition, prohibition_status, Operator, Policy,
-    ProhibitionStatus, Request, Rule, Value,
+    conflict_admissibility, evaluate, matched_prohibition, prohibition_status, Constraint,
+    ConstraintNode, LogicalOperator, Operator, Policy, ProhibitionStatus, Request, Rule, Value,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -1722,6 +1723,892 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
         deny_triple: Some((party.to_owned(), pred, target.to_owned())),
         emitted: vec![triple],
         ..BridgeOutcome::default()
+    }
+}
+
+// ============================================================================
+// [FABLE-5] sq-zgbso.2 — the ODRL STATELESS core evaluated as N3 rule strata
+// (`rules/odrl-core-{a,b,c,d}.n3`) through the SAME runtime `reason_n3` engine
+// WAC/ACP use, differential-locked against the Rust path (epic sq-zgbso, #1582;
+// design record `research/odrl-n3-compiled-rules.md`).
+//
+// OPT-IN, NON-DEFAULT: nothing in the crate calls this path — the Rust evaluator
+// ([`materialize_policy`] over [`sparq_policy::evaluate`]) remains THE default. This
+// entry point exists to prove decision parity at corpus scale
+// (`tests/odrl_n3_differential.rs`); flipping any default is a later maintainer
+// decision (and the build-time-compiled flip is sq-zgbso.5, gated on sq-zgbso.3/.4).
+//
+// # The stateless N3 subset (fail-closed contract)
+//
+// [`materialize_policy_n3`] evaluates exactly the subset both paths PROVABLY agree
+// on, and returns a loud `Err` — materializing NOTHING — for anything outside it:
+//
+// - **Rules:** Permission/Prohibition with action (incl. the `odrl:use` umbrella
+//   against the transfer subtree), exact-IRI target/assignee (or unconstrained),
+//   duties (discharge-by-action), and deny-overrides.
+// - **Constraints:** `odrl:dateTime` under `lt/lteq/gt/gteq/eq/neq` with the
+//   guarded lexical space below; every other dimension under `eq/neq/isA/isPartOf`
+//   with IRI/string operands, compared by the same `Value::as_str()` lexical the
+//   evaluator uses. Compound `odrl:and`/`or`/`xone` with ATOMIC operands.
+// - **Outside the subset (⇒ `Err`):** nested compound constraints, numeric
+//   operands/evidence (`odrl:count` is STATEFUL and stays Rust — mutation is not
+//   inference), order operators on non-dateTime dimensions, `isA`/`isPartOf` on
+//   `odrl:dateTime`, and non-admissible dateTime lexicals.
+// - **Impossible by construction:** [`N3Request`] carries no party/asset-collection
+//   membership and no purpose/spatial subsumption closure, so exact-IRI matching IS
+//   the Rust base case (with such evidence absent the two paths are byte-identical);
+//   a caller needing taxonomy evidence must use the Rust path.
+//
+// # dateTime normalization (spike sq-zgbso.1 finding (a), RESOLVED)
+//
+// The spike compared `odrl:dateTime` LEXICALLY (`string:notGreaterThan`), which is
+// instant-correct only for canonical UTC forms. The production strata instead
+// normalize BOTH operands to epoch seconds with the engine's offset-aware
+// `time:inSeconds` builtin and compare numerically — mixed `±hh:mm` offsets now
+// order by the INSTANT they denote, exactly like `sparq_policy`'s `parse_instant`.
+// Residually, the two normalizers differ on sub-second precision (Rust keeps
+// nanoseconds; `time:inSeconds` truncates), leap seconds (Rust clamps `:60`), and
+// exotic years — so the accepted lexical space is additionally FAIL-CLOSED to
+// `YYYY-MM-DD` / `YYYY-MM-DDThh:mm:ss` with an optional `Z`/`±hh:mm` offset, no
+// fractional seconds, no leap second, no negative or ≥5-digit year (see
+// `n3_datetime_admissible`). Anything else is a loud `Err`, never a silent
+// divergence window.
+//
+// # Stratification (spike finding (c) + design record §7)
+//
+// The engine's `log:notIncludes` is negation-as-failure WITHOUT retraction, so every
+// negated predicate must be COMPLETE before its stratum runs (the WAC/ACP §3.5
+// lesson). The spike's single stratum could not carry constraint-bearing
+// prohibitions; the production rules run FOUR strata:
+//
+//   A  structural legs + atomic constraint statuses (sat / unprovable / notSat) +
+//      duty blocking — negation over INPUT facts only;
+//   B  `or`/`xone` "no operand satisfied" — negation over A-complete `oc:sat`;
+//   C  rule matching — negation over B-complete `oc:blocked`;
+//   D  decision triples — deny from matched prohibitions; allow negating
+//      C-complete prohibition matches (deny-overrides) + A-complete duty blocks.
+// ============================================================================
+
+/// Stratum A of the ODRL-as-N3 rule set: structural match legs + atomic constraint
+/// statuses (negation over input facts only). [FABLE-5] sq-zgbso.2.
+const ODRL_CORE_A: &str = include_str!("../rules/odrl-core-a.n3");
+/// Stratum B: `or`/`xone` completion over stratum A's satisfaction facts.
+const ODRL_CORE_B: &str = include_str!("../rules/odrl-core-b.n3");
+/// Stratum C: rule matching over stratum B's completed blocking facts.
+const ODRL_CORE_C: &str = include_str!("../rules/odrl-core-c.n3");
+/// Stratum D: auth-view decision triples with deny-overrides.
+const ODRL_CORE_D: &str = include_str!("../rules/odrl-core-d.n3");
+
+/// The `oc:` helper vocabulary namespace the ODRL-as-N3 fact schema + rule strata use.
+const OC_NS: &str = "https://sparq.dev/ns/odrl-core#";
+/// Synthetic node IRI prefix for the serialized policy/request facts (rule nodes,
+/// constraint nodes, evidence nodes — stable, collision-free with real IRIs because
+/// the reserved `urn:sparq:` prefix is rejected in user-supplied principals).
+const OC_NODE: &str = "urn:sparq:odrl-n3#";
+const XSD_DATETIME_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+
+/// An evaluation request for the **N3 path** ([`materialize_policy_n3`]) — the
+/// stateless-subset counterpart of [`sparq_policy::Request`]. [FABLE-5] sq-zgbso.2.
+///
+/// By construction this type carries only evidence the N3 strata model faithfully:
+/// action / target / party, the evaluation time ([`at`](N3Request::at)), per-dimension
+/// IRI/string context evidence, and discharged duty actions. It deliberately has **no**
+/// party/asset-collection membership and **no** purpose/spatial subsumption closure —
+/// with that evidence absent, `sparq_policy`'s matching is exactly the exact-IRI base
+/// case the rules implement, so the two paths cannot silently diverge on it. Convert
+/// with [`to_request`](N3Request::to_request) to run the SAME request through the Rust
+/// evaluator (that is what the differential suite does).
+///
+/// # Examples
+///
+/// ```
+/// use sparq_solid::odrl_bridge::N3Request;
+/// let req = N3Request::new("http://www.w3.org/ns/odrl/2/read")
+///     .on("https://pod.ex/notes/n1")
+///     .by("https://alice.ex/card#me")
+///     .at("2026-07-01T00:00:00Z");
+/// let rust_req = req.to_request();
+/// assert_eq!(rust_req.action, "http://www.w3.org/ns/odrl/2/read");
+/// assert_eq!(rust_req.target.as_deref(), Some("https://pod.ex/notes/n1"));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct N3Request {
+    /// The requested `odrl:` action IRI.
+    pub action: String,
+    /// The target asset/graph IRI, if any (no target ⇒ nothing can materialize).
+    pub target: Option<String>,
+    /// The requesting party (WebID), if any. Doubles as the default
+    /// `odrl:recipient` evidence, mirroring [`Request::by`].
+    pub party: Option<String>,
+    /// The evaluation-time evidence (`odrl:dateTime`), as an admissible
+    /// `xsd:dateTime`/`xsd:date` lexical (see the module notes on the accepted
+    /// lexical space). `None` ⇒ time-gated rules are unprovable (fail-closed).
+    pub at: Option<String>,
+    /// Context evidence keyed by `leftOperand` IRI — [`Value::Iri`]/[`Value::Str`]
+    /// only (numeric/dateTime evidence is outside the subset; the evaluation time
+    /// goes in [`at`](N3Request::at)).
+    pub evidence: BTreeMap<String, Value>,
+    /// Duty action IRIs the caller asserts discharged.
+    pub discharged: BTreeSet<String>,
+}
+
+impl N3Request {
+    /// A request for `action` with no target/party/evidence yet.
+    pub fn new(action: impl Into<String>) -> N3Request {
+        N3Request { action: action.into(), ..N3Request::default() }
+    }
+
+    /// Set the target asset/graph IRI (chainable).
+    pub fn on(mut self, target: impl Into<String>) -> N3Request {
+        self.target = Some(target.into());
+        self
+    }
+
+    /// Set the requesting party (WebID) IRI (chainable).
+    pub fn by(mut self, party: impl Into<String>) -> N3Request {
+        self.party = Some(party.into());
+        self
+    }
+
+    /// Set the evaluation-time evidence (chainable) — the `odrl:dateTime` value
+    /// time-window constraints are checked against, mirroring [`Request::at`].
+    pub fn at(mut self, instant: impl Into<String>) -> N3Request {
+        self.at = Some(instant.into());
+        self
+    }
+
+    /// Add IRI/string context evidence for a `leftOperand` dimension (chainable).
+    pub fn with(mut self, left_operand: impl Into<String>, value: Value) -> N3Request {
+        self.evidence.insert(left_operand.into(), value);
+        self
+    }
+
+    /// Mark a duty action IRI as discharged (chainable).
+    pub fn discharge(mut self, duty_action: impl Into<String>) -> N3Request {
+        self.discharged.insert(duty_action.into());
+        self
+    }
+
+    /// The equivalent [`sparq_policy::Request`], for running the SAME request
+    /// through the Rust evaluator (the differential's other leg).
+    pub fn to_request(&self) -> Request {
+        let mut r = Request::new(self.action.clone());
+        if let Some(t) = &self.target {
+            r = r.on(t.clone());
+        }
+        if let Some(p) = &self.party {
+            r = r.by(p.clone());
+        }
+        if let Some(a) = &self.at {
+            r = r.at(a.clone());
+        }
+        for (k, v) in &self.evidence {
+            r = r.with(k.clone(), v.clone());
+        }
+        for d in &self.discharged {
+            r = r.discharge(d.clone());
+        }
+        r
+    }
+}
+
+/// Whether a dateTime lexical is inside the FAIL-CLOSED space on which the N3
+/// (`time:inSeconds`, second precision) and Rust (`parse_instant`, nanosecond
+/// precision) normalizers provably agree: `YYYY-MM-DD(Thh:mm:ss(Z|±hh:mm)?)?` with
+/// in-range fields, no fractional seconds, no leap second (`:60`), no negative or
+/// ≥5-digit year. [FABLE-5] sq-zgbso.2 (spike finding (a)).
+fn n3_datetime_admissible(s: &str) -> bool {
+    let b = s.as_bytes();
+    let all_digits = |r: &[u8]| r.iter().all(u8::is_ascii_digit);
+    let num2 = |r: &[u8]| -> u32 { (u32::from(r[0]) - 48) * 10 + (u32::from(r[1]) - 48) };
+    // date: YYYY-MM-DD with MM 01–12, DD 01–31
+    if b.len() < 10
+        || !all_digits(&b[0..4])
+        || b[4] != b'-'
+        || !all_digits(&b[5..7])
+        || b[7] != b'-'
+        || !all_digits(&b[8..10])
+    {
+        return false;
+    }
+    if !(1..=12).contains(&num2(&b[5..7])) || !(1..=31).contains(&num2(&b[8..10])) {
+        return false;
+    }
+    if b.len() == 10 {
+        return true; // bare xsd:date (midnight UTC on both paths)
+    }
+    // time: Thh:mm:ss with hh ≤ 23, mm/ss ≤ 59 (no leap second, no fraction)
+    if b.len() < 19
+        || b[10] != b'T'
+        || !all_digits(&b[11..13])
+        || b[13] != b':'
+        || !all_digits(&b[14..16])
+        || b[16] != b':'
+        || !all_digits(&b[17..19])
+        || num2(&b[11..13]) > 23
+        || num2(&b[14..16]) > 59
+        || num2(&b[17..19]) > 59
+    {
+        return false;
+    }
+    match &b[19..] {
+        [] => true,     // no timezone: UTC on both paths
+        [b'Z'] => true, // canonical UTC
+        // ±hh:mm offset with hh ≤ 14, mm ≤ 59 (the XSD offset range)
+        [sign, h1, h0, b':', m1, m0]
+            if matches!(sign, b'+' | b'-')
+                && all_digits(&[*h1, *h0])
+                && all_digits(&[*m1, *m0]) =>
+        {
+            num2(&[*h1, *h0]) <= 14 && num2(&[*m1, *m0]) <= 59
+        }
+        _ => false,
+    }
+}
+
+/// Whether `s` is safe to emit as an N3 IRI (`<…>`): non-empty and free of the
+/// characters N-Triples forbids inside an IRIREF. Fail-closed: an unserializable IRI
+/// is a loud error, never a mangled fact.
+fn n3_iri_ok(s: &str) -> bool {
+    !s.is_empty()
+        && !s
+            .chars()
+            .any(|c| c <= ' ' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\'))
+}
+
+/// Whether `s` is safe to emit as a (quoted, escaped) N3 string literal: no raw
+/// control characters other than tab/newline/CR (which `n3_escape` escapes).
+fn n3_lit_ok(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+}
+
+/// Escape a string for a quoted N3 literal.
+fn n3_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `oc:` operator IRI a [`sparq_policy::Operator`] serializes as.
+fn oc_op_iri(op: Operator) -> String {
+    let local = match op {
+        Operator::Eq => "eq",
+        Operator::Neq => "neq",
+        Operator::Lt => "lt",
+        Operator::Lteq => "lteq",
+        Operator::Gt => "gt",
+        Operator::Gteq => "gteq",
+        Operator::IsPartOf => "isPartOf",
+        Operator::IsA => "isA",
+    };
+    format!("{OC_NS}{local}")
+}
+
+/// Check one atomic constraint against the N3 subset (see the module notes):
+/// `odrl:dateTime` gets the order/equality operators with an admissible
+/// `xsd:dateTime` bound; every other dimension gets `eq/neq/isA/isPartOf` with an
+/// IRI/string bound. Anything else is a loud `Err` (fail-closed).
+fn n3_constraint_admissible(c: &Constraint) -> Result<(), String> {
+    if !n3_iri_ok(&c.left) {
+        return Err(format!("N3 path: constraint leftOperand {:?} is not a serializable IRI", c.left));
+    }
+    if c.left == ODRL_DATETIME {
+        if !matches!(
+            c.operator,
+            Operator::Lt | Operator::Lteq | Operator::Gt | Operator::Gteq | Operator::Eq | Operator::Neq
+        ) {
+            return Err(format!(
+                "N3 path: operator {:?} on odrl:dateTime is outside the stateless N3 subset",
+                c.operator
+            ));
+        }
+        match &c.right {
+            Value::DateTime(s) if n3_datetime_admissible(s) => Ok(()),
+            Value::DateTime(s) => Err(format!(
+                "N3 path: odrl:dateTime bound {s:?} is outside the admissible lexical space \
+                 (YYYY-MM-DD[Thh:mm:ss[Z|±hh:mm]], no fractional seconds/leap second/negative year) \
+                 — refusing fail-closed rather than risk instant-order divergence"
+            )),
+            other => Err(format!(
+                "N3 path: odrl:dateTime bound must be an xsd:dateTime/xsd:date literal, got {other}"
+            )),
+        }
+    } else {
+        if !matches!(c.operator, Operator::Eq | Operator::Neq | Operator::IsA | Operator::IsPartOf) {
+            return Err(format!(
+                "N3 path: order operator {:?} on non-dateTime dimension <{}> is outside the \
+                 stateless N3 subset",
+                c.operator, c.left
+            ));
+        }
+        match &c.right {
+            Value::Iri(s) if n3_iri_ok(s) => Ok(()),
+            Value::Str(s) if n3_lit_ok(s) => Ok(()),
+            Value::Iri(s) => Err(format!("N3 path: rightOperand IRI {s:?} is not serializable")),
+            Value::Str(s) => Err(format!("N3 path: rightOperand string {s:?} is not serializable")),
+            Value::Num(_) => Err(format!(
+                "N3 path: numeric rightOperand on <{}> is outside the stateless N3 subset \
+                 (odrl:count and numeric bounds stay on the Rust path)",
+                c.left
+            )),
+            Value::DateTime(_) => Err(format!(
+                "N3 path: dateTime rightOperand on non-dateTime dimension <{}> is outside the \
+                 stateless N3 subset",
+                c.left
+            )),
+        }
+    }
+}
+
+/// Check a whole policy against the N3 subset: every rule's direct constraints
+/// admissible, every compound constraint one level deep with atomic operands.
+fn n3_policy_admissible(policy: &Policy) -> Result<(), String> {
+    for rule in policy.permissions.iter().chain(policy.prohibitions.iter()) {
+        if !n3_iri_ok(&rule.action.0) {
+            return Err(format!("N3 path: rule action {:?} is not a serializable IRI", rule.action.0));
+        }
+        for v in [&rule.target, &rule.assignee].into_iter().flatten() {
+            if !n3_iri_ok(v) {
+                return Err(format!("N3 path: rule target/assignee {v:?} is not a serializable IRI"));
+            }
+        }
+        for d in &rule.duties {
+            if !n3_iri_ok(&d.action.0) {
+                return Err(format!("N3 path: duty action {:?} is not a serializable IRI", d.action.0));
+            }
+        }
+        for c in &rule.constraints {
+            n3_constraint_admissible(c)?;
+        }
+        for lc in &rule.logical_constraints {
+            for operand in &lc.operands {
+                match operand {
+                    ConstraintNode::Atomic(c) => n3_constraint_admissible(c)?,
+                    ConstraintNode::Compound(_) => {
+                        return Err(format!(
+                            "N3 path: nested LogicalConstraint {} is outside the stateless N3 \
+                             subset (one compound level with atomic operands is supported)",
+                            lc.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check an [`N3Request`] against the N3 subset: serializable IRIs, an admissible
+/// evaluation-time lexical, IRI/string evidence only (and the evaluation time only
+/// via [`N3Request::at`]).
+fn n3_request_admissible(request: &N3Request) -> Result<(), String> {
+    if !n3_iri_ok(&request.action) {
+        return Err(format!("N3 path: request action {:?} is not a serializable IRI", request.action));
+    }
+    for v in [&request.target, &request.party].into_iter().flatten() {
+        if !n3_iri_ok(v) {
+            return Err(format!("N3 path: request target/party {v:?} is not a serializable IRI"));
+        }
+    }
+    if let Some(at) = &request.at {
+        if !n3_datetime_admissible(at) {
+            return Err(format!(
+                "N3 path: evaluation time {at:?} is outside the admissible lexical space \
+                 (YYYY-MM-DD[Thh:mm:ss[Z|±hh:mm]], no fractional seconds/leap second/negative year)"
+            ));
+        }
+    }
+    for (left, v) in &request.evidence {
+        if left == ODRL_DATETIME {
+            return Err(
+                "N3 path: supply the evaluation time via N3Request::at, not the evidence map".to_owned()
+            );
+        }
+        if !n3_iri_ok(left) {
+            return Err(format!("N3 path: evidence dimension {left:?} is not a serializable IRI"));
+        }
+        match v {
+            Value::Iri(s) if n3_iri_ok(s) => {}
+            Value::Str(s) if n3_lit_ok(s) => {}
+            other => {
+                return Err(format!(
+                    "N3 path: evidence for <{left}> must be a serializable IRI/string, got {other} \
+                     (numeric/dateTime evidence is outside the stateless N3 subset)"
+                ));
+            }
+        }
+    }
+    for d in &request.discharged {
+        if !n3_iri_ok(d) {
+            return Err(format!("N3 path: discharged duty action {d:?} is not a serializable IRI"));
+        }
+    }
+    Ok(())
+}
+
+/// Serialize one admissible atomic constraint node into `oc:` facts. The bound is
+/// pre-lexicalized exactly as the Rust evaluator compares it (`Value::as_str()` for
+/// `eq/neq/isA`, the [`is_part_of`]-identical member split for `isPartOf`, the raw
+/// `xsd:dateTime` lexical for the dateTime dimension), so the rules and the evaluator
+/// share ONE source of value truth.
+///
+/// [`is_part_of`]: sparq_policy::Operator::IsPartOf
+fn n3_emit_constraint(out: &mut String, node: &str, c: &Constraint) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "<{node}> <{RDF_TYPE}> <{OC_NS}Atomic> .");
+    let _ = writeln!(out, "<{node}> <{OC_NS}left> <{}> .", c.left);
+    let _ = writeln!(out, "<{node}> <{OC_NS}op> <{}> .", oc_op_iri(c.operator));
+    if c.left == ODRL_DATETIME {
+        let _ = writeln!(out, "<{node}> <{OC_NS}boundDt> \"{}\"^^<{XSD_DATETIME_IRI}> .", c.right.as_str());
+    } else if c.operator == Operator::IsPartOf {
+        // The same member split `sparq_policy`'s `is_part_of` applies.
+        for member in c.right.as_str().split(['|', ' ', ',']).map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = writeln!(out, "<{node}> <{OC_NS}member> \"{}\" .", n3_escape(member));
+        }
+    } else {
+        let _ = writeln!(out, "<{node}> <{OC_NS}boundLex> \"{}\" .", n3_escape(c.right.as_str()));
+    }
+}
+
+/// Serialize an admissible `(policy, request)` pair into the `oc:` fact schema the
+/// ODRL rule strata consume. Serialization works from the PARSED model — the same
+/// [`Policy`] the Rust path evaluates — so the two paths consume identical semantic
+/// content (the WAC/ACP `assemble_input` discipline).
+fn n3_serialize(policy: &Policy, request: &N3Request) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    let kinds: [(&str, &[Rule], &str); 2] = [
+        ("perm", &policy.permissions, "Permission"),
+        ("proh", &policy.prohibitions, "Prohibition"),
+    ];
+    for (tag, rules, class) in kinds {
+        for (i, rule) in rules.iter().enumerate() {
+            let rn = format!("{OC_NODE}{tag}{i}");
+            let _ = writeln!(out, "<{rn}> <{RDF_TYPE}> <{OC_NS}{class}> .");
+            let _ = writeln!(out, "<{rn}> <{RDF_TYPE}> <{OC_NS}Rule> .");
+            let _ = writeln!(out, "<{rn}> <{OC_NS}action> <{}> .", rule.action.0);
+            match &rule.target {
+                Some(t) => {
+                    let _ = writeln!(out, "<{rn}> <{OC_NS}target> <{t}> .");
+                }
+                None => {
+                    let _ = writeln!(out, "<{rn}> <{OC_NS}anyTarget> true .");
+                }
+            }
+            match &rule.assignee {
+                Some(a) => {
+                    let _ = writeln!(out, "<{rn}> <{OC_NS}assignee> <{a}> .");
+                }
+                None => {
+                    let _ = writeln!(out, "<{rn}> <{OC_NS}anyAssignee> true .");
+                }
+            }
+            for d in &rule.duties {
+                let _ = writeln!(out, "<{rn}> <{OC_NS}dutyAction> <{}> .", d.action.0);
+            }
+            for (j, c) in rule.constraints.iter().enumerate() {
+                let cn = format!("{rn}-c{j}");
+                let _ = writeln!(out, "<{rn}> <{OC_NS}constraint> <{cn}> .");
+                n3_emit_constraint(&mut out, &cn, c);
+            }
+            for (j, lc) in rule.logical_constraints.iter().enumerate() {
+                let ln = format!("{rn}-l{j}");
+                let _ = writeln!(out, "<{rn}> <{OC_NS}logical> <{ln}> .");
+                let combinator = match lc.operator {
+                    LogicalOperator::And => "and",
+                    LogicalOperator::Or => "or",
+                    LogicalOperator::Xone => "xone",
+                };
+                let _ = writeln!(out, "<{ln}> <{OC_NS}combinator> <{OC_NS}{combinator}> .");
+                if lc.operands.is_empty() {
+                    let _ = writeln!(out, "<{ln}> <{OC_NS}emptyOperands> true .");
+                }
+                for (k, operand) in lc.operands.iter().enumerate() {
+                    // admissibility guaranteed atomic operands only
+                    if let ConstraintNode::Atomic(c) = operand {
+                        let on = format!("{ln}-o{k}");
+                        let _ = writeln!(out, "<{ln}> <{OC_NS}operand> <{on}> .");
+                        n3_emit_constraint(&mut out, &on, c);
+                    }
+                }
+            }
+        }
+    }
+
+    // The request + its evidence (the state-of-the-world the constraints test).
+    let rq = format!("{OC_NODE}req");
+    let _ = writeln!(out, "<{rq}> <{RDF_TYPE}> <{OC_NS}Request> .");
+    let _ = writeln!(out, "<{rq}> <{OC_NS}reqAction> <{}> .", request.action);
+    if let Some(t) = &request.target {
+        let _ = writeln!(out, "<{rq}> <{OC_NS}reqTarget> <{t}> .");
+    }
+    if let Some(p) = &request.party {
+        let _ = writeln!(out, "<{rq}> <{OC_NS}reqParty> <{p}> .");
+    }
+    if let Some(at) = &request.at {
+        let _ = writeln!(out, "<{rq}> <{OC_NS}atTime> \"{at}\"^^<{XSD_DATETIME_IRI}> .");
+        // evidence marker: the odrl:dateTime dimension is provable
+        let _ = writeln!(out, "<{OC_NODE}ev-dt> <{OC_NS}evLeft> <{ODRL_DATETIME}> .");
+    }
+    for (i, (left, v)) in request.evidence.iter().enumerate() {
+        let en = format!("{OC_NODE}ev{i}");
+        let _ = writeln!(out, "<{en}> <{OC_NS}evLeft> <{left}> .");
+        let _ = writeln!(out, "<{en}> <{OC_NS}evLex> \"{}\" .", n3_escape(v.as_str()));
+    }
+    // The recipient-of-data defaults to the requesting party (resolve_actual's
+    // `odrl:recipient` fallback) unless explicit recipient evidence was supplied.
+    if !request.evidence.contains_key(ODRL_RECIPIENT) {
+        if let Some(p) = &request.party {
+            let en = format!("{OC_NODE}ev-recipient");
+            let _ = writeln!(out, "<{en}> <{OC_NS}evLeft> <{ODRL_RECIPIENT}> .");
+            let _ = writeln!(out, "<{en}> <{OC_NS}evLex> \"{}\" .", n3_escape(p));
+        }
+    }
+    for d in &request.discharged {
+        let _ = writeln!(out, "<{rq}> <{OC_NS}discharged> <{d}> .");
+    }
+    out
+}
+
+/// Re-serialize a stratum's ground closure as facts for the next stratum (the
+/// `materialize_acp` inter-stratum seeding shape).
+fn n3_closure_facts(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(closure.len() * 64);
+    for t in closure {
+        let _ = writeln!(out, "{} {} {} .", dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
+    }
+    out
+}
+
+/// Evaluate `policy` against `request` **as N3 rule strata** (the WAC/ACP runtime
+/// `reason_n3` pattern) and materialize the derived auth-view triples — the OPT-IN
+/// N3 counterpart of [`materialize_policy`], differential-locked to it by
+/// `tests/odrl_n3_differential.rs`. [FABLE-5] sq-zgbso.2 (epic sq-zgbso, #1582).
+///
+/// The Rust path remains the default evaluator; nothing routes through this
+/// function unless a caller explicitly opts in. On the stateless subset (see the
+/// module notes) the derived triple set is EXACTLY the set the Rust bridge writes:
+/// allow grants from matched, duty-discharged, un-prohibited permissions and
+/// `auth:deny<Mode>` triples from matched prohibitions (deny-overrides). Stateful
+/// `odrl:count` enforcement stays on the Rust path (mutation is not inference).
+///
+/// # Errors / fail-closed
+///
+/// - A policy whose `odrl:conflict` strategy the bridge cannot honour returns the
+///   same loud *refusal* outcome as [`materialize_policy`] (nothing materialized).
+/// - A policy/request outside the stateless N3 subset — a non-admissible dateTime
+///   lexical, numeric operands, nested compounds, order operators on non-dateTime
+///   dimensions, unserializable IRIs — returns `Err` and materializes NOTHING:
+///   loud, never a silent divergence window.
+/// - Within the subset the strata are themselves fail-closed: missing evidence,
+///   unmapped actions, or a missing party/target derive no triple.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_solid::odrl_bridge::{materialize_policy_n3, N3Request};
+/// use sparq_policy::parse_policy_str;
+///
+/// let pol = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/1> a odrl:Set ; odrl:permission [
+///     odrl:action odrl:read ;
+///     odrl:target <https://pod.ex/notes/n1> ;
+///     odrl:assignee <https://alice.ex/card#me> ] .
+/// "#, "turtle")?;
+/// let req = N3Request::new("http://www.w3.org/ns/odrl/2/read")
+///     .on("https://pod.ex/notes/n1")
+///     .by("https://alice.ex/card#me");
+///
+/// let mut graph = sparq_core::Graph::new();
+/// let out = materialize_policy_n3(&mut graph, &pol, &req)?;
+/// assert!(out.granted);
+/// # Ok::<(), String>(())
+/// ```
+pub fn materialize_policy_n3(
+    graph: &mut Graph,
+    policy: &Policy,
+    request: &N3Request,
+) -> Result<BridgeOutcome, String> {
+    // 0. Refuse (fail-closed) an unimplementable odrl:conflict strategy FIRST — the
+    //    same guard, and the same refusal outcome, as the Rust path.
+    if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+        return Ok(refusal);
+    }
+    // 1. Subset admissibility — loud errors, nothing materialized.
+    n3_policy_admissible(policy)?;
+    n3_request_admissible(request)?;
+
+    // 2. The four stratified reason_n3 runs (§3.5 discipline: each stratum's negated
+    //    predicates are complete in the seed it receives).
+    let facts = n3_serialize(policy, request);
+    let mut d1 = Dict::new();
+    let c1 = sparq_reason::reason_n3(&mut d1, &format!("{facts}\n{ODRL_CORE_A}"))?;
+    let f1 = n3_closure_facts(&d1, &c1);
+    let mut d2 = Dict::new();
+    let c2 = sparq_reason::reason_n3(&mut d2, &format!("{f1}\n{ODRL_CORE_B}"))?;
+    let f2 = n3_closure_facts(&d2, &c2);
+    let mut d3 = Dict::new();
+    let c3 = sparq_reason::reason_n3(&mut d3, &format!("{f2}\n{ODRL_CORE_C}"))?;
+    let f3 = n3_closure_facts(&d3, &c3);
+    let mut d4 = Dict::new();
+    let c4 = sparq_reason::reason_n3(&mut d4, &format!("{f3}\n{ODRL_CORE_D}"))?;
+
+    // 3. Extract the derived auth-view triples (`auth:*` predicate, IRI subject/object).
+    let mut triples: Vec<(String, String, String)> = Vec::new();
+    for t in &c4 {
+        let Term::NamedNode(p) = d4.term(t[1]) else { continue };
+        if !p.as_str().starts_with(AUTH_NS) {
+            continue;
+        }
+        let (Term::NamedNode(s), Term::NamedNode(o)) = (d4.term(t[0]), d4.term(t[2])) else {
+            continue;
+        };
+        triples.push((s.as_str().to_owned(), p.as_str().to_owned(), o.as_str().to_owned()));
+    }
+    triples.sort();
+    triples.dedup();
+
+    // 4. Materialize into the auth view + bridged-provenance graph (the same append
+    //    path the Rust bridge uses) and report the outcome in the same shape.
+    let emitted: Vec<[Term; 3]> = triples
+        .iter()
+        .map(|(s, p, o)| {
+            [
+                Term::NamedNode(NamedNode::new_unchecked(s)),
+                Term::NamedNode(NamedNode::new_unchecked(p)),
+                Term::NamedNode(NamedNode::new_unchecked(o)),
+            ]
+        })
+        .collect();
+    append_bridged_triples(graph, &emitted);
+
+    let is_deny = |p: &str| p.strip_prefix(AUTH_NS).is_some_and(|l| l.starts_with("deny"));
+    let grant_triple = triples.iter().find(|(_, p, _)| !is_deny(p)).cloned();
+    let deny_triple = triples.iter().find(|(_, p, _)| is_deny(p)).cloned();
+    let granted = grant_triple.is_some();
+    let prohibited = deny_triple.is_some();
+    let reasons = if granted || prohibited {
+        Vec::new()
+    } else {
+        vec!["N3 strata derived no auth-view triple for the request (fail-closed)".to_owned()]
+    };
+    Ok(BridgeOutcome {
+        granted,
+        prohibited,
+        // Mirrors materialize_policy: the mode of the operative decision (both sides
+        // derive it from the REQUEST action, so one lookup serves either).
+        mode: (granted || prohibited).then(|| action_to_mode(&request.action)).flatten(),
+        grant_triple,
+        deny_triple,
+        refused: false,
+        reasons,
+        consumed: None,
+        emitted,
+    })
+}
+
+#[cfg(test)]
+mod odrl_n3_tests {
+    //! [FABLE-5] sq-zgbso.2 — direct unit tests for the N3-path public surface
+    //! (one per new public item, per the coverage-ratchet discipline) plus the
+    //! fail-closed guard edges. The corpus-scale Rust-vs-N3 differential lives in
+    //! `tests/odrl_n3_differential.rs`.
+    use super::*;
+    use sparq_policy::parse_policy_str;
+
+    const READ: &str = "http://www.w3.org/ns/odrl/2/read";
+
+    #[test]
+    fn n3request_builders_and_to_request_round_trip() {
+        let req = N3Request::new(READ)
+            .on("urn:t/1")
+            .by("urn:alice")
+            .at("2026-07-01T00:00:00Z")
+            .with("http://www.w3.org/ns/odrl/2/purpose", Value::Iri("urn:purpose/r".into()))
+            .discharge("http://www.w3.org/ns/odrl/2/anonymize");
+        let r = req.to_request();
+        assert_eq!(r.action, READ);
+        assert_eq!(r.target.as_deref(), Some("urn:t/1"));
+        assert_eq!(r.party.as_deref(), Some("urn:alice"));
+        assert_eq!(
+            r.request_time(),
+            Some(&Value::DateTime("2026-07-01T00:00:00Z".into()))
+        );
+        assert!(r.discharged_duties.contains("http://www.w3.org/ns/odrl/2/anonymize"));
+        assert_eq!(
+            r.context.get("http://www.w3.org/ns/odrl/2/purpose"),
+            Some(&Value::Iri("urn:purpose/r".into()))
+        );
+    }
+
+    #[test]
+    fn datetime_admissible_accepts_agreeing_forms() {
+        for ok in [
+            "2026-07-01T00:00:00Z",
+            "2026-07-01T23:59:59+14:00",
+            "2026-07-01T12:30:00-05:30",
+            "2026-07-01T12:30:00", // no tz = UTC on both paths
+            "2026-02-28",          // bare date = midnight UTC on both paths
+        ] {
+            assert!(n3_datetime_admissible(ok), "{ok} should be admissible");
+        }
+    }
+
+    #[test]
+    fn datetime_admissible_rejects_divergence_windows() {
+        for bad in [
+            "2026-07-01T00:00:00.5Z",  // fractional seconds: Rust keeps, N3 truncates
+            "2026-06-30T23:59:60Z",    // leap second: Rust clamps, N3 adds
+            "-0044-03-15T00:00:00Z",   // negative year
+            "12026-01-01T00:00:00Z",   // ≥5-digit year
+            "2026-7-1T00:00:00Z",      // non-fixed-width
+            "2026-13-01T00:00:00Z",    // month out of range
+            "2026-07-01T24:00:00Z",    // hour out of range
+            "2026-07-01T00:00:00+15:00", // offset beyond the XSD range
+            "not-a-date",
+            "",
+        ] {
+            assert!(!n3_datetime_admissible(bad), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn materialize_policy_n3_grants_and_appends_auth_view() {
+        let pol = parse_policy_str(
+            r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+            <urn:pol/1> a odrl:Set ; odrl:permission [
+                odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#,
+            "turtle",
+        )
+        .expect("parses");
+        let mut graph = Graph::new();
+        let out = materialize_policy_n3(&mut graph, &pol, &N3Request::new(READ).on("urn:t/1").by("urn:alice"))
+            .expect("in subset");
+        assert!(out.granted && !out.prohibited && !out.refused);
+        assert_eq!(
+            out.grant_triple,
+            Some(("urn:alice".into(), format!("{AUTH_NS}read"), "urn:t/1".into()))
+        );
+        assert_eq!(out.mode, Some(Mode::Read));
+        // the triple landed in the auth view through the same append path
+        assert!(named_graph_triples(&graph, AUTH_GRAPH)
+            .iter()
+            .any(|t| matches!(&t[1], Term::NamedNode(p) if p.as_str() == format!("{AUTH_NS}read"))));
+    }
+
+    #[test]
+    fn materialize_policy_n3_deny_overrides() {
+        let pol = parse_policy_str(
+            r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+            <urn:pol/1> a odrl:Set ;
+              odrl:permission [ odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ;
+              odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#,
+            "turtle",
+        )
+        .expect("parses");
+        let mut graph = Graph::new();
+        let out = materialize_policy_n3(&mut graph, &pol, &N3Request::new(READ).on("urn:t/1").by("urn:alice"))
+            .expect("in subset");
+        assert!(!out.granted, "deny-overrides: the matching prohibition blocks the grant");
+        assert!(out.prohibited);
+        assert_eq!(
+            out.deny_triple,
+            Some(("urn:alice".into(), format!("{AUTH_NS}denyRead"), "urn:t/1".into()))
+        );
+    }
+
+    #[test]
+    fn materialize_policy_n3_mirrors_conflict_refusal() {
+        let pol = parse_policy_str(
+            r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+            <urn:pol/1> a odrl:Set ; odrl:conflict odrl:perm ; odrl:permission [
+                odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#,
+            "turtle",
+        )
+        .expect("parses");
+        let mut graph = Graph::new();
+        let out = materialize_policy_n3(&mut graph, &pol, &N3Request::new(READ).on("urn:t/1").by("urn:alice"))
+            .expect("refusal is an outcome, not an Err");
+        assert!(out.refused && !out.granted && !out.prohibited);
+        assert!(named_graph_triples(&graph, AUTH_GRAPH).is_empty(), "refusal materializes nothing");
+    }
+
+    #[test]
+    fn materialize_policy_n3_errs_loudly_outside_the_subset() {
+        let mut graph = Graph::new();
+        // fractional-second dateTime bound → divergence window → Err
+        let pol = parse_policy_str(
+            r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            <urn:pol/1> a odrl:Set ; odrl:permission [
+                odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+                odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                                  odrl:rightOperand "2026-12-31T00:00:00.5Z"^^xsd:dateTime ] ] ."#,
+            "turtle",
+        )
+        .expect("parses");
+        let req = N3Request::new(READ).on("urn:t/1").by("urn:alice").at("2026-07-01T00:00:00Z");
+        let err = materialize_policy_n3(&mut graph, &pol, &req).expect_err("outside the subset");
+        assert!(err.contains("lexical space"), "clear reason, got: {err}");
+
+        // numeric bound (odrl:count) → Err (stateful count stays Rust)
+        let pol = parse_policy_str(
+            r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+            <urn:pol/2> a odrl:Set ; odrl:permission [
+                odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+                odrl:constraint [ odrl:leftOperand odrl:count ; odrl:operator odrl:lteq ;
+                                  odrl:rightOperand 5 ] ] ."#,
+            "turtle",
+        )
+        .expect("parses");
+        let err = materialize_policy_n3(&mut graph, &pol, &N3Request::new(READ).on("urn:t/1").by("urn:alice"))
+            .expect_err("numeric bound outside the subset");
+        assert!(err.contains("subset"), "clear reason, got: {err}");
+        // numeric evidence → Err
+        let req = N3Request::new(READ)
+            .on("urn:t/1")
+            .by("urn:alice")
+            .with("http://www.w3.org/ns/odrl/2/count", Value::Num(3.0));
+        let pol = parse_policy_str(
+            r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+            <urn:pol/3> a odrl:Set ; odrl:permission [
+                odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#,
+            "turtle",
+        )
+        .expect("parses");
+        let err = materialize_policy_n3(&mut graph, &pol, &req).expect_err("numeric evidence");
+        assert!(err.contains("subset"), "clear reason, got: {err}");
+        // dateTime evidence must go through `at`
+        let req = N3Request::new(READ)
+            .on("urn:t/1")
+            .by("urn:alice")
+            .with(super::ODRL_DATETIME, Value::Str("2026-07-01T00:00:00Z".into()));
+        let err = materialize_policy_n3(&mut graph, &pol, &req).expect_err("evidence-map time");
+        assert!(err.contains("N3Request::at"), "clear reason, got: {err}");
+        assert!(named_graph_triples(&graph, AUTH_GRAPH).is_empty(), "errors materialize nothing");
+    }
+
+    #[test]
+    fn n3_escape_and_serializability_guards() {
+        assert_eq!(n3_escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert!(n3_iri_ok("https://alice.ex/card#me"));
+        assert!(!n3_iri_ok("urn:sp ace"));
+        assert!(!n3_iri_ok("urn:angle>bracket"));
+        assert!(!n3_iri_ok(""));
+        assert!(n3_lit_ok("plain value"));
+        assert!(!n3_lit_ok("nul\u{0}byte"));
     }
 }
 

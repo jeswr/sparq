@@ -1,0 +1,176 @@
+# [FABLE-5] sq-zgbso.2 — ODRL stateless core as N3, STRATUM A (of A→B→C→D).
+#
+# Input facts are the `oc:` fact schema `odrl_bridge::materialize_policy_n3` serializes
+# from the PARSED `sparq_policy::Policy` + `N3Request` (never raw policy text — the two
+# paths must consume identical semantic content). This stratum derives everything whose
+# negation ranges ONLY over input facts (design record research/odrl-n3-compiled-rules.md;
+# stratification discipline: research/solid-access-control-design.md §3.5 — a negated
+# predicate must be COMPLETE before its stratum runs; input predicates are complete by
+# construction, so `log:notIncludes` here scopes only over `oc:evLeft` / `oc:member` /
+# `oc:discharged` / `oc:TransferAction`, none of which any rule derives).
+#
+# Outputs (inputs to stratum B/C/D):
+#   ?rule oc:actionOK / oc:targetOK / oc:assigneeOK true   — structural match legs
+#   ?c    oc:sat true          — atomic constraint SATISFIED (evidence exists + holds)
+#   ?c    oc:unprovable true   — no evidence for the constraint's dimension
+#   ?c    oc:notSat true       — NOT satisfied (definitely-failed OR unprovable):
+#                                 mirrors `constraint_satisfied == false` (fail-closed)
+#   ?lc   oc:lcNotSat true     — the compound-combinator pieces derivable here
+#   ?rule oc:blocked true      — some DIRECT atomic constraint of the rule is notSat
+#   ?rule oc:dutyBlocked true  — some duty action is undischarged
+#
+# dateTime (spike finding (a) RESOLVED): comparisons normalize BOTH operands to epoch
+# seconds via `time:inSeconds` — the engine's offset-aware civil-time extraction — and
+# compare with `math:*`, so arbitrary `±hh:mm` offsets order by the INSTANT they denote,
+# exactly like `sparq_policy`'s `parse_instant`. The wrapper additionally fail-closes
+# the accepted lexical space to second-precision forms (no fractional seconds, no leap
+# second, no negative year) where the two normalizers provably agree.
+
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix oc:   <https://sparq.dev/ns/odrl-core#> .
+@prefix log:  <http://www.w3.org/2000/10/swap/log#> .
+@prefix math: <http://www.w3.org/2000/10/swap/math#> .
+@prefix time: <http://www.w3.org/2000/10/swap/time#> .
+
+# ── ODRL 2.2 ownership-`transfer` subtree: the ONE top-level branch outside `use`
+#    (mirror of sparq_policy::model::is_transfer_subtree; `use` never permits these).
+odrl:transfer a oc:TransferAction .
+odrl:sell     a oc:TransferAction .
+odrl:give     a oc:TransferAction .
+
+# ── action: the rule's action permits the requested action ────────────────────────────
+# exact-IRI match (Action::permits, first arm)
+{ ?rule a oc:Rule ; oc:action ?a . ?req a oc:Request ; oc:reqAction ?a . }
+=> { ?rule oc:actionOK true . } .
+# the `odrl:use` umbrella permits any requested action NOT in the transfer subtree
+# (Action::permits, second arm — sq-euhr3). Static-set negation: input-only.
+{ ?rule a oc:Rule ; oc:action odrl:use . ?req a oc:Request ; oc:reqAction ?ra .
+  ?UNSCOPED log:notIncludes { ?ra a oc:TransferAction . } . }
+=> { ?rule oc:actionOK true . } .
+
+# ── target / assignee: exact IRI agreement, or the rule leaves the slot open ──────────
+# (rule.target == None → `oc:anyTarget` marker emitted by the serializer — no negation
+# needed; collection membership is OUTSIDE the N3 subset by construction: `N3Request`
+# cannot carry membership evidence, so exact match IS the Rust base case.)
+{ ?rule a oc:Rule ; oc:target ?t . ?req a oc:Request ; oc:reqTarget ?t . }
+=> { ?rule oc:targetOK true . } .
+{ ?rule a oc:Rule ; oc:anyTarget true . }
+=> { ?rule oc:targetOK true . } .
+{ ?rule a oc:Rule ; oc:assignee ?p . ?req a oc:Request ; oc:reqParty ?p . }
+=> { ?rule oc:assigneeOK true . } .
+{ ?rule a oc:Rule ; oc:anyAssignee true . }
+=> { ?rule oc:assigneeOK true . } .
+
+# ── atomic constraints, NON-dateTime dimensions ───────────────────────────────────────
+# Operands are pre-lexicalized by the serializer (`oc:boundLex` / `oc:evLex` carry the
+# SAME `Value::as_str()` string the Rust evaluator compares — one source of value truth),
+# so eq/neq here is exactly `value_eq` and isPartOf exactly `is_part_of` (the serializer
+# splits the set members). Only {eq, isA, neq, isPartOf} exist for non-dateTime
+# dimensions inside the wrapper-guarded subset (order operators there are REFUSED).
+#
+# eq / isA — satisfied iff the evidence lexical equals the bound lexical.
+{ ?c a oc:Atomic ; oc:op oc:eq ; oc:left ?l ; oc:boundLex ?b .
+  ?ev oc:evLeft ?l ; oc:evLex ?v . ?v log:equalTo ?b . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:eq ; oc:left ?l ; oc:boundLex ?b .
+  ?ev oc:evLeft ?l ; oc:evLex ?v . ?v log:notEqualTo ?b . }
+=> { ?c oc:notSat true . } .
+# neq — the mirror image.
+{ ?c a oc:Atomic ; oc:op oc:neq ; oc:left ?l ; oc:boundLex ?b .
+  ?ev oc:evLeft ?l ; oc:evLex ?v . ?v log:notEqualTo ?b . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:neq ; oc:left ?l ; oc:boundLex ?b .
+  ?ev oc:evLeft ?l ; oc:evLex ?v . ?v log:equalTo ?b . }
+=> { ?c oc:notSat true . } .
+# isPartOf — the evidence lexical is a member of the pre-split right-operand set.
+# (The negation ranges over `oc:member`, an input-only predicate — safe here. An empty
+# member set — e.g. an empty-string bound — has no member facts, so with evidence
+# present the notSat rule fires, mirroring `any()` over an empty set.)
+{ ?c a oc:Atomic ; oc:op oc:isPartOf ; oc:left ?l .
+  ?ev oc:evLeft ?l ; oc:evLex ?v . ?c oc:member ?v . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:isPartOf ; oc:left ?l .
+  ?ev oc:evLeft ?l ; oc:evLex ?v .
+  ?UNSCOPED log:notIncludes { ?c oc:member ?v . } . }
+=> { ?c oc:notSat true . } .
+
+# ── atomic constraints, the `odrl:dateTime` dimension ─────────────────────────────────
+# `oc:boundDt` is emitted ONLY for dateTime-dimension constraints; the evidence is the
+# request's `oc:atTime` (the `Request::at` evaluation-time evidence). Both normalize to
+# epoch seconds (offset-aware) before the numeric comparison — instant order, not
+# lexical order.
+{ ?c a oc:Atomic ; oc:op oc:lteq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:notGreaterThan ?bs . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:lteq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:greaterThan ?bs . }
+=> { ?c oc:notSat true . } .
+{ ?c a oc:Atomic ; oc:op oc:lt ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:lessThan ?bs . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:lt ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:notLessThan ?bs . }
+=> { ?c oc:notSat true . } .
+{ ?c a oc:Atomic ; oc:op oc:gteq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:notLessThan ?bs . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:gteq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:lessThan ?bs . }
+=> { ?c oc:notSat true . } .
+{ ?c a oc:Atomic ; oc:op oc:gt ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:greaterThan ?bs . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:gt ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:notGreaterThan ?bs . }
+=> { ?c oc:notSat true . } .
+# eq / neq on dateTime compare the INSTANT (value_eq's DateTime arm), not the lexical.
+{ ?c a oc:Atomic ; oc:op oc:eq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:equalTo ?bs . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:eq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:notEqualTo ?bs . }
+=> { ?c oc:notSat true . } .
+{ ?c a oc:Atomic ; oc:op oc:neq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:notEqualTo ?bs . }
+=> { ?c oc:sat true . } .
+{ ?c a oc:Atomic ; oc:op oc:neq ; oc:boundDt ?b . ?req a oc:Request ; oc:atTime ?t .
+  ?t time:inSeconds ?ts . ?b time:inSeconds ?bs . ?ts math:equalTo ?bs . }
+=> { ?c oc:notSat true . } .
+
+# ── unprovable: no evidence for the constraint's dimension ────────────────────────────
+# Mirrors `resolve_actual == None` (the serializer emits an `oc:evLeft` fact for every
+# dimension the request supplies — including `odrl:dateTime` when `at` is set and the
+# recipient-defaults-to-party rule). Unprovable ⇒ not satisfied (fail-closed): a
+# permission does not grant, a prohibition does not carve out. The unsatisfiable-guard
+# constraint parse.rs emits for malformed input (left `urn:sparq-policy:malformed`)
+# lands here too — no evidence dimension can ever match it.
+{ ?c a oc:Atomic ; oc:left ?l .
+  ?UNSCOPED log:notIncludes { ?ev oc:evLeft ?l . } . }
+=> { ?c oc:unprovable true . } .
+{ ?c oc:unprovable true . } => { ?c oc:notSat true . } .
+
+# ── duties: a permission with an undischarged duty action cannot grant ────────────────
+{ ?rule a oc:Rule ; oc:dutyAction ?a . ?req a oc:Request .
+  ?UNSCOPED log:notIncludes { ?req oc:discharged ?a . } . }
+=> { ?rule oc:dutyBlocked true . } .
+
+# ── compound-combinator pieces derivable in THIS stratum (positive over oc:sat /
+#    oc:notSat / oc:unprovable, which are complete at this stratum's fixpoint) ─────────
+# and: NOT-satisfied iff any operand is notSat (definitely false OR unprovable) —
+# logical_constraint_status: `and` is Satisfied only when EVERY operand is Satisfied.
+{ ?lc oc:combinator oc:and ; oc:operand ?c . ?c oc:notSat true . }
+=> { ?lc oc:lcNotSat true . } .
+# an EMPTY operand set never satisfies any combinator (and→Unprovable, or/xone→
+# DefinitelyUnsatisfied — all fold to notSat for rule matching, fail-closed).
+{ ?lc oc:emptyOperands true . } => { ?lc oc:lcNotSat true . } .
+# xone: an unprovable operand could be the disqualifying second true → never Satisfied.
+{ ?lc oc:combinator oc:xone ; oc:operand ?c . ?c oc:unprovable true . }
+=> { ?lc oc:lcNotSat true . } .
+# xone: two DISTINCT satisfied operands → provably ≥ 2 → not exactly one.
+{ ?lc oc:combinator oc:xone ; oc:operand ?c1 , ?c2 .
+  ?c1 oc:sat true . ?c2 oc:sat true . ?c1 log:notEqualTo ?c2 . }
+=> { ?lc oc:lcNotSat true . } .
+
+# ── a rule with a DIRECT atomic constraint that is notSat can never match ─────────────
+{ ?rule a oc:Rule ; oc:constraint ?c . ?c oc:notSat true . }
+=> { ?rule oc:blocked true . } .
