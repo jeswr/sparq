@@ -14,6 +14,10 @@ mod incremental;
 pub mod compare;
 #[cfg(feature = "substrate-join")]
 pub(crate) mod substrate_join;
+// [SONNET-4.6] sq-qonbz.2 — delta-aware adjacency tables for the OWL-RL semi-naive fixpoint,
+// gated behind `substrate-join` (same feature, no new dep).
+#[cfg(feature = "substrate-join")]
+mod owl_delta_adj;
 #[cfg(feature = "d-entail")]
 pub mod dtype;
 #[cfg(feature = "explain")]

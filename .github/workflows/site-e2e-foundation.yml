@@ -6,11 +6,14 @@
 # idle-preview state), so this lane needs NO wasm bundle and NO Typst — it is fast and
 # self-contained (contrast site-e2e.yml, which builds spec fragments for its ReSpec smoke).
 #
-# ADVISORY, by design: this lane is NOT wired into the `ci-summary` aggregator and NEVER gates the
-# merge queue. Promotion to a required check is the separate bead sq-ymr2e.12 (advisory-first,
-# promotion earned on a probation bar — research/web-gui-test-program.md §6.3). The browser-exec
-# step is `continue-on-error` so a browser flake can never block a PR; the deterministic lint +
-# grep-gate steps are hard (a broken foundation should be visible).
+# ADVISORY, by design: the whole word `advisory` in the job NAME is what excludes this lane from
+# the `ci-summary` aggregator, so it NEVER gates the merge queue. Promotion to a required check is
+# governed by the checked-in gating/probation policy `.github/E2E-GATING-POLICY.md` (advisory-first,
+# promotion earned on a probation bar + flake-quarantine — bead sq-ymr2e.12; design
+# research/web-gui-test-program.md §6.3). Promotion is the one-line flip in §4 of that policy (drop
+# ` (advisory)` from the job name + remove the step `continue-on-error`). The browser-exec step is
+# `continue-on-error` so a browser flake can never block a PR; the deterministic lint + grep-gate
+# steps are hard (a broken foundation should be visible).
 name: site-e2e-foundation (advisory)
 
 on:

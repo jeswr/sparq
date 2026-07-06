@@ -58,3 +58,16 @@
   crate: "sparq-reason-el"
   features: "cdomain"
   test: true
+
+# [OPUS-4.8] sq-pbz04.2.5: sparq-reason-el's `abox` feature — ABox realisation +
+# whole-ontology consistency. Same gap as the rbox/hasse/cdomain legs above: the
+# behavioral tests in `src/abox.rs` are gated `#[cfg(feature = "abox")]` (the whole
+# module is feature-gated), so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiles them EMPTY and runs
+# ZERO of them — this leg is the ONLY thing that executes them in CI. No new dep
+# (`abox = []`, reuses sparq-core + rustc-hash + oxrdf already in the default dep
+# set). Verified locally: `cargo test -p sparq-reason-el --features abox` green.
+- name: "sparq-reason-el (abox — ABox realisation + whole-ontology consistency)"
+  crate: "sparq-reason-el"
+  features: "abox"
+  test: true

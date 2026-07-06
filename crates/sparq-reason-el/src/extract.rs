@@ -8,6 +8,7 @@
 //   owl:intersectionOf (list)  C ⊓ … ⊓ Cn  (as a class expression node)
 //   owl:Restriction + owl:onProperty + owl:someValuesFrom   ∃r.C
 //   owl:Restriction + owl:onProperty + owl:hasValue         ∃r.{a}   (object value — CR6)
+//   owl:Restriction + owl:onProperty + owl:hasSelf true      ∃r.Self  (local reflexivity — CR-Self)
 //   owl:oneOf ( a )            {a}  — a SINGLETON enumeration (nominal, CR6)
 //   owl:disjointWith           C ⊓ D ⊑ ⊥
 //   owl:Thing / owl:Nothing    ⊤ / ⊥
@@ -31,6 +32,19 @@ use crate::Report;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+/// Knobs controlling what [`extract`] reads. Default = TBox only (the byte-identical E1 path
+/// every existing caller uses). [OPUS-4.8] sq-pbz04.2.5: under the `abox` feature the ABox
+/// realisation entry (`crate::abox::realize`) sets `abox = true` to ALSO internalize
+/// `ClassAssertion`/`ObjectPropertyAssertion` triples as safe-nominal axioms. The struct is a
+/// zero-sized unit without the feature, so `Classifier::classify` / `classify_graph` — which
+/// always pass `ExtractOpts::default()` — are byte-identical regardless of the feature.
+#[derive(Clone, Copy, Default)]
+pub struct ExtractOpts {
+    /// Internalize ABox assertions (only meaningful under the `abox` feature).
+    #[cfg(feature = "abox")]
+    pub abox: bool,
+}
+
 /// Everything the extractor reads out of the RDF substrate: the normalized concept axioms, the
 /// name table, the [`Report`], and — only under the `rbox` feature — the normalized RBox role
 /// axioms (E2). Keeping the role axioms in a feature-gated field means the default build's
@@ -47,6 +61,7 @@ pub struct Extracted {
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
 /// OWL class-expression / restriction predicates that lie OUTSIDE the EL+⊥ fragment this
 /// classifier implements. A class node carrying any of these is non-EL: [`decode`] returns
@@ -71,8 +86,15 @@ const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 /// multi-individual `oneOf` = disjunction; a literal-valued `oneOf`/`hasValue` = concrete
 /// domain) are detected structurally in [`extract`]/[`decode`] and still counted as skips.
 ///
-/// The remainder (`unionOf`/`complementOf`/`allValuesFrom`/cardinality/`hasSelf`) are outside
-/// EL entirely (they need ALC / Horn-SHIQ expressivity), not a deferred EL slice.
+/// [OPUS-4.8] sq-pbz04.2.6: `hasSelf` is NO LONGER a marker — `owl:hasSelf "true"^^xsd:boolean`
+/// with `owl:onProperty` is the OWL 2 EL profile's `ObjectHasSelf` (`∃r.Self`, the LOCAL
+/// reflexivity concept), decoded into a self-restriction concept and reasoned over by the
+/// completion rules CR-Self-1/CR-Self-2 (see `classify.rs`). Any OTHER `owl:hasSelf` shape (a
+/// non-`true` / non-boolean object, a missing `owl:onProperty`, or extra structure on the node)
+/// stays a COUNTED skip — fail-closed, never guessed.
+///
+/// The remainder (`unionOf`/`complementOf`/`allValuesFrom`/cardinality) are outside EL entirely
+/// (they need ALC / Horn-SHIQ expressivity), not a deferred EL slice.
 const NON_EL_MARKERS: &[&str] = &[
     "unionOf",       // disjunction — outside EL
     "complementOf",  // negation — outside EL
@@ -83,7 +105,6 @@ const NON_EL_MARKERS: &[&str] = &[
     "minQualifiedCardinality",
     "maxQualifiedCardinality",
     "qualifiedCardinality",
-    "hasSelf",
     // --- Deferred EL fragment: concrete domains (CR7–CR9) ---------------------------------
     "onDataRange",          // qualified data-range restriction (concrete domain)
     "withRestrictions",     // faceted datatype restriction (concrete domain)
@@ -105,6 +126,11 @@ struct Vocab {
     /// [FABLE-5] sq-pbz04.2.1: the safe-nominal (CR6) vocabulary.
     one_of: Id,
     has_value: Id,
+    /// [OPUS-4.8] sq-pbz04.2.6: `owl:hasSelf` — the local-reflexivity restriction predicate
+    /// (`ObjectHasSelf`). A node carrying `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r`
+    /// decodes to the self-restriction concept `∃r.Self` (CR-Self); any other object/shape is a
+    /// counted skip.
+    has_self: Id,
     rdf_first: Id,
     rdf_rest: Id,
     rdf_nil: Id,
@@ -117,6 +143,12 @@ struct Vocab {
     on_datatype: Id,
     #[cfg(feature = "cdomain")]
     with_restrictions: Id,
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): `owl:bottomObjectProperty` — the empty object property.
+    /// When it occurs as a role, the extractor appends `∃⊥.⊤ ⊑ ⊥` so any `∃⊥.C` obligation
+    /// (typically an ABox instance of `∃⊥.⊤`) collapses to `⊥` (`NO_ID` if the term is absent,
+    /// which `Names::role_of` never resolves).
+    #[cfg(feature = "abox")]
+    bottom_object_property: Id,
     /// Predicate ids whose presence on a class node makes it non-EL (see [`NON_EL_MARKERS`]).
     non_el: FxHashSet<Id>,
     /// RBox vocabulary — only consulted under the `rbox` feature (E2).
@@ -143,6 +175,7 @@ impl Vocab {
             restriction: look(format!("{}Restriction", OWL)),
             one_of: look(format!("{}oneOf", OWL)),
             has_value: look(format!("{}hasValue", OWL)),
+            has_self: look(format!("{}hasSelf", OWL)),
             rdf_first: look(format!("{}first", RDF)),
             rdf_rest: look(format!("{}rest", RDF)),
             rdf_nil: look(format!("{}nil", RDF)),
@@ -152,6 +185,8 @@ impl Vocab {
             on_datatype: look(format!("{}onDatatype", OWL)),
             #[cfg(feature = "cdomain")]
             with_restrictions: look(format!("{}withRestrictions", OWL)),
+            #[cfg(feature = "abox")]
+            bottom_object_property: look(format!("{}bottomObjectProperty", OWL)),
             non_el: NON_EL_MARKERS
                 .iter()
                 .map(|m| look(format!("{}{}", OWL, m)))
@@ -184,6 +219,11 @@ struct Idx {
     one_of_head: FxHashMap<Id, Id>, // class node -> owl:oneOf list head (resolved after the pass)
     one_of: FxHashMap<Id, Option<Id>>, // class node -> the SINGLETON individual (None = skip)
     has_value: FxHashMap<Id, Id>,   // restriction node -> owl:hasValue INDIVIDUAL (never a literal)
+    // [OPUS-4.8] sq-pbz04.2.6 — self-restrictions (ObjectHasSelf, CR-Self): restriction nodes
+    // carrying a VALID `owl:hasSelf "true"^^xsd:boolean`. A `false`/non-boolean/non-`true` object
+    // never lands here — it is routed to `non_el_node` (a counted skip) during the pass. `decode`
+    // turns a node in this set WITH `owl:onProperty` and no other filler into `∃r.Self`.
+    self_true: FxHashSet<Id>,
     // [FABLE-5] sq-pbz04.2.2 — concrete domains (CR7–CR9), collected only under `cdomain`.
     // The RAW structure (filled during the pass; candidate nodes stay non_el-marked so an
     // UNSUPPORTED shape keeps the exact pre-cdomain skip):
@@ -197,9 +237,11 @@ struct Idx {
     cd_one_of_lit: FxHashMap<Id, Id>, // enumeration node -> its SINGLETON literal member
     // [FABLE-5] soundness guard (PR #1434 adversarial-verify fix): nodes carrying a non-EL
     // marker OTHER than onDatatype/withRestrictions (unionOf, complementOf, allValuesFrom,
-    // cardinality, hasSelf, onDataRange, datatypeComplementOf). Such a node must NEVER be
+    // cardinality, onDataRange, datatypeComplementOf). Such a node must NEVER be
     // rescued as a concrete-domain range/point — decoding just its range half would DROP the
     // foreign structure and STRENGTHEN an LHS axiom. `resolve_cdomain` refuses these.
+    // [OPUS-4.8] sq-pbz04.2.6: `self_true` nodes are likewise refused (a mixed hasSelf/range
+    // node would drop the reflexivity half); the poison lives in `resolve_cdomain`'s `structure`.
     #[cfg(feature = "cdomain")]
     cd_foreign_marker: FxHashSet<Id>,
     // The RESOLVED supported nodes (filled by `resolve_cdomain` before axiom decoding):
@@ -218,7 +260,10 @@ struct Idx {
 /// Extracts and normalizes the EL+⊥ TBox from `triples`, returning the [`Extracted`] bundle
 /// (normal-form concept axioms, the name table, the [`Report`], and — under `rbox` — the
 /// normalized RBox role axioms). Single-threaded.
-pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
+pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted {
+    // `opts` only steers the `abox` internalization below; without that feature it is inert.
+    #[cfg(not(feature = "abox"))]
+    let _ = opts;
     let v = Vocab::intern(dict);
     let mut idx = Idx::default();
     for &[s, p, o] in triples {
@@ -258,6 +303,17 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
                 // `resolve_cdomain`/`decode`; anything else keeps the skip above.
                 #[cfg(feature = "cdomain")]
                 idx.cd_has_value_lit.insert(s, o);
+            }
+        } else if p == v.has_self {
+            // [OPUS-4.8] sq-pbz04.2.6: ObjectHasSelf. ONLY `"true"^^xsd:boolean` denotes the
+            // self-restriction ∃r.Self; any other object (`false`, a non-boolean literal, an
+            // IRI/blank) is a malformed/unsupported `owl:hasSelf` and the enclosing axiom stays a
+            // COUNTED skip (fail-closed — never guessed). `decode` further requires `owl:onProperty`
+            // and no other filler on the node before minting the self-concept.
+            if is_boolean_true(dict, o) {
+                idx.self_true.insert(s);
+            } else {
+                idx.non_el_node.insert(s);
             }
         } else if v.non_el.contains(&p) {
             idx.non_el_node.insert(s);
@@ -356,7 +412,32 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
         }
     }
 
+    // [OPUS-4.8] sq-pbz04.2.5 (`abox`): internalize ABox assertions as safe-nominal axioms over
+    // the SAME normalizer + name table, so nominal + role ids stay consistent with the TBox
+    // concepts. `Classifier::classify` / `classify_graph` pass `abox = false`, so they never see
+    // these axioms (byte-identical, whatever the feature). `bottom_op_axiom` is the
+    // `owl:bottomObjectProperty` empty-role fact `∃⊥.⊤ ⊑ ⊥`, appended after `finish` only when
+    // that property actually occurred as a role (so `New-Feature-BottomObjectProperty-001`-shaped
+    // `{a} ⊑ ∃⊥.⊤` collapses to `{a} ⊑ ⊥`).
+    #[cfg(feature = "abox")]
+    let bottom_op_axiom = if opts.abox {
+        report.skipped_assertions = decode_abox(dict, triples, &idx, &v, &mut norm);
+        norm.names
+            .role_of(v.bottom_object_property)
+            .map(|r| Normal::ExistsSub(r, TOP, BOTTOM))
+    } else {
+        None
+    };
+
     let axioms = norm.finish();
+    #[cfg(feature = "abox")]
+    let axioms = {
+        let mut axioms = axioms;
+        if let Some(ax) = bottom_op_axiom {
+            axioms.push(ax);
+        }
+        axioms
+    };
     // [FABLE-5] sq-pbz04.2.2: append the concrete-domain axioms — `d ⊑ ⊥` for an EMPTY
     // value space (CR7; the clash then reaches classes with an `∃p.d` obligation via CR5)
     // and `d1 ⊑ d2` for every PROVEN value-space containment (CR8/CR9, threaded through
@@ -392,8 +473,9 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
 /// structure — a restriction part, an intersection, an object enumeration, a mixed
 /// range/enumeration/hasValue shape, or ([FABLE-5] PR #1434 adversarial-verify fix) any
 /// OTHER non-EL marker (`owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`,
-/// cardinality, `owl:hasSelf`, `owl:onDataRange`, `owl:datatypeComplementOf`, tracked in
-/// `cd_foreign_marker`) — is REFUSED here and falls back to the ordinary non-EL skip.
+/// cardinality, `owl:onDataRange`, `owl:datatypeComplementOf`, tracked in `cd_foreign_marker`;
+/// or `owl:hasSelf`, tracked in `self_true`) — is REFUSED here and falls back to the ordinary
+/// non-EL skip.
 /// Decoding just its range half would DROP that structure and STRENGTHEN the asserted
 /// axiom in a subclass (LHS) position, which is unsound.
 #[cfg(feature = "cdomain")]
@@ -410,6 +492,9 @@ fn resolve_cdomain(
             || idx.has_value.contains_key(&n)
             || idx.inter_head.contains_key(&n)
             || idx.cd_foreign_marker.contains(&n)
+            // [OPUS-4.8] sq-pbz04.2.6: a hasSelf-true node is a self-restriction, not a data
+            // range — rescuing its range half would drop the reflexivity, so it is refused here.
+            || idx.self_true.contains(&n)
     };
     // Faceted ranges: need BOTH onDatatype and withRestrictions, and nothing else.
     let mut ranges: Vec<(Id, Id, Id)> = idx
@@ -449,6 +534,7 @@ fn resolve_cdomain(
                 && !idx.cd_on_datatype.contains_key(&n)
                 && !idx.cd_with_restrictions.contains_key(&n)
                 && !idx.cd_foreign_marker.contains(&n) // [FABLE-5] PR #1434 soundness fix
+                && !idx.self_true.contains(&n) // [OPUS-4.8] sq-pbz04.2.6: not a self-restriction
         })
         .map(|(&n, &l)| (n, l))
         .collect();
@@ -583,6 +669,28 @@ fn decode(
         return None;
     }
 
+    // [OPUS-4.8] sq-pbz04.2.6: a self-restriction node ∃r.Self (`ObjectHasSelf`). A VALID node
+    // carries `owl:hasSelf "true"^^xsd:boolean` (recorded in `self_true`), `owl:onProperty r`,
+    // and NOTHING else structural. Fail-closed: a missing `owl:onProperty`, or a co-occurring
+    // someValuesFrom / hasValue / intersectionOf on the SAME node, yields None so the enclosing
+    // axiom is skipped (never a half-decoded, structure-dropping guess). A co-occurring non-EL /
+    // concrete-domain marker already routed the node to `non_el_node` (handled above), so a mixed
+    // hasSelf/range node never reaches here.
+    if idx.self_true.contains(&node) {
+        let clean = !idx.svf.contains_key(&node)
+            && !idx.has_value.contains_key(&node)
+            && !idx.inter_head.contains_key(&node);
+        let result = match idx.on_prop.get(&node) {
+            Some(&p) if clean => {
+                let role = names.role(p);
+                Some(Expr::Atom(names.self_concept(role)))
+            }
+            _ => None,
+        };
+        cache.insert(node, result.clone());
+        return result;
+    }
+
     // [FABLE-5] sq-pbz04.2.1: an owl:oneOf enumeration node. A resolved SINGLETON individual
     // is the nominal {a} — a basic concept in the EL++ normal form (CR6). An unresolvable
     // enumeration (empty / multi-member / literal member) is None → the axiom is skipped.
@@ -667,6 +775,176 @@ fn is_individual(dict: &Dict, id: Id) -> bool {
             dict.term_parts(id),
             sparq_core::dict::TermParts::Iri { .. } | sparq_core::dict::TermParts::Blank(_)
         )
+}
+
+/// [OPUS-4.8] sq-pbz04.2.6: whether a dict id is the boolean-true literal `owl:hasSelf` requires
+/// (`"true"^^xsd:boolean`, or its equivalent lexical form `"1"^^xsd:boolean` — both denote the
+/// XSD boolean value *true*). An inline id is always an `xsd:integer`, never a boolean, so it is
+/// rejected outright. Everything else — `false`/`0`, a non-boolean literal, an IRI/blank — is
+/// NOT true, so the enclosing `owl:hasSelf` axiom stays a counted skip (fail-closed).
+fn is_boolean_true(dict: &Dict, id: Id) -> bool {
+    if sparq_core::dict::is_inline(id) {
+        return false;
+    }
+    matches!(
+        dict.term_parts(id),
+        sparq_core::dict::TermParts::Lit { value, datatype, lang: None }
+            if datatype == XSD_BOOLEAN && (value == "true" || value == "1")
+    )
+}
+
+/// [OPUS-4.8] sq-pbz04.2.5 (`abox`): the RDF/RDFS/OWL/XSD "structural" IRI namespaces. A
+/// predicate in one of these is NEVER an ABox object/data-property assertion — it is TBox/RBox
+/// vocabulary (`rdfs:subClassOf`, `owl:someValuesFrom`, `rdf:first`, …) or an annotation/facet.
+/// The recognisers below skip it (fail-closed): an in-namespace predicate is not misread as an
+/// object-property assertion, and a facet/annotation literal is not miscounted as a data skip.
+#[cfg(feature = "abox")]
+const STRUCTURAL_NS: &[&str] = &[OWL, RDF, RDFS, "http://www.w3.org/2001/XMLSchema#"];
+
+/// OWL/RDF/RDFS built-in classes that, as the OBJECT of an `rdf:type` triple, denote a
+/// DECLARATION (`X a owl:Class`, `p a owl:ObjectProperty`, …) rather than a Direct-Semantics
+/// `ClassAssertion`. Excluded so the extractor mints no spurious individual for a
+/// class/property/ontology/axiom node. `owl:Thing` / `owl:Nothing` are DELIBERATELY absent:
+/// `a rdf:type owl:Thing` is a valid (trivial) assertion and `a rdf:type owl:Nothing` a valid
+/// (inconsistency-forcing) one. `owl:NamedIndividual` is handled separately (register, no axiom).
+#[cfg(feature = "abox")]
+const META_TYPE_OBJECTS: &[(&str, &str)] = &[
+    (OWL, "Class"),
+    (OWL, "Restriction"),
+    (OWL, "ObjectProperty"),
+    (OWL, "DatatypeProperty"),
+    (OWL, "AnnotationProperty"),
+    (OWL, "OntologyProperty"),
+    (OWL, "Ontology"),
+    (OWL, "AllDifferent"),
+    (OWL, "AllDisjointClasses"),
+    (OWL, "AllDisjointProperties"),
+    (OWL, "NegativePropertyAssertion"),
+    (OWL, "FunctionalProperty"),
+    (OWL, "InverseFunctionalProperty"),
+    (OWL, "TransitiveProperty"),
+    (OWL, "SymmetricProperty"),
+    (OWL, "AsymmetricProperty"),
+    (OWL, "ReflexiveProperty"),
+    (OWL, "IrreflexiveProperty"),
+    (OWL, "DeprecatedClass"),
+    (OWL, "DeprecatedProperty"),
+    (OWL, "DataRange"),
+    (OWL, "Axiom"),
+    (RDFS, "Class"),
+    (RDFS, "Datatype"),
+    (RDFS, "ContainerMembershipProperty"),
+    (RDF, "Property"),
+    (RDF, "List"),
+    (RDF, "Statement"),
+];
+
+/// Whether `id` is an IRI in one of the [`STRUCTURAL_NS`] namespaces (or is not a usable
+/// property IRI at all: an inline literal / blank / literal predicate). Used to keep the ABox
+/// property-assertion recogniser off every TBox/RBox/annotation/facet predicate.
+#[cfg(feature = "abox")]
+fn is_structural_predicate(dict: &Dict, id: Id) -> bool {
+    if sparq_core::dict::is_inline(id) {
+        return true;
+    }
+    match dict.term_parts(id) {
+        sparq_core::dict::TermParts::Iri { prefix, suffix } => {
+            let iri = format!("{}{}", prefix, suffix);
+            STRUCTURAL_NS.iter().any(|ns| iri.starts_with(ns))
+        }
+        _ => true,
+    }
+}
+
+/// Whether a dict id denotes a LITERAL (an inline integer or a stored `Lit`) — the object shape
+/// of a `DataPropertyAssertion`. The complement of the individual test for object position.
+#[cfg(feature = "abox")]
+fn is_literal(dict: &Dict, id: Id) -> bool {
+    sparq_core::dict::is_inline(id)
+        || matches!(dict.term_parts(id), sparq_core::dict::TermParts::Lit { .. })
+}
+
+/// [OPUS-4.8] sq-pbz04.2.5 (`abox`): internalize the ABox assertions of `triples` into `norm` as
+/// SAFE-NOMINAL axioms over the CR6 machinery, minting every individual through `Names::nominal`
+/// so `owl:hasValue`/`owl:oneOf` fillers and asserted individuals share one concept:
+///
+/// - `a rdf:type C`  (C a decodable EL class, not a built-in meta class) ⇒ `{a} ⊑ C`;
+/// - `a p b`         (p a user-namespace object property, b an individual) ⇒ `{a} ⊑ ∃p.{b}`;
+/// - `a rdf:type owl:NamedIndividual` ⇒ register `a` (no axiom — a declaration).
+///
+/// Returns the count of assertions DEFERRED as counted skips (`Report::skipped_assertions`): a
+/// `DataPropertyAssertion` (literal object — the `cdomain` point-range rescue is a sequenced
+/// follow-up bead) and a `ClassAssertion` whose class expression is outside the EL fragment.
+/// SOUNDNESS: `{a} ⊑ C` holds because `{a}^I = {a^I} ⊆ C^I`; `{a} ⊑ ∃p.{b}` because
+/// `(a^I,b^I) ∈ p^I` with `b^I ∈ {b}^I`. Structural bnodes (restriction / intersection / list
+/// nodes) are never minted as individuals — realising one would be noise, not an entailment.
+#[cfg(feature = "abox")]
+fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mut Normalizer) -> usize {
+    use oxrdf::{NamedNode, Term as OTerm};
+    let look = |iri: String| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
+    let named_individual = look(format!("{}NamedIndividual", OWL));
+    let meta: FxHashSet<Id> = META_TYPE_OBJECTS
+        .iter()
+        .map(|(ns, name)| look(format!("{}{}", ns, name)))
+        .filter(|&id| id != sparq_core::dict::NO_ID)
+        .collect();
+
+    // A node the TBox pass uses as a class expression (restriction / intersection / oneOf / list
+    // cell) or a non-EL marker must never be minted as an ABox individual.
+    let structural = |n: Id| {
+        idx.is_restriction.contains(&n)
+            || idx.inter_head.contains_key(&n)
+            || idx.one_of_head.contains_key(&n)
+            || idx.first.contains_key(&n)
+            || idx.non_el_node.contains(&n)
+            // [OPUS-4.8] sq-pbz04.2.6: a self-restriction node (`∃r.Self`) is a class expression,
+            // never an ABox individual — it must not be minted as a nominal.
+            || idx.self_true.contains(&n)
+    };
+
+    let mut skipped = 0usize;
+    for &[s, p, o] in triples {
+        if p == v.ty {
+            if o == named_individual && named_individual != sparq_core::dict::NO_ID {
+                if is_individual(dict, s) && !structural(s) {
+                    let _ = norm.names.nominal(s); // register the declared individual only
+                }
+                continue;
+            }
+            if meta.contains(&o) || !is_individual(dict, s) || structural(s) {
+                continue; // a declaration, or a structural/non-individual subject
+            }
+            // ClassAssertion: {s} ⊑ decode(o). A non-EL class expression is a fail-closed skip.
+            let mut cache = FxHashMap::default();
+            match decode(o, idx, v, norm.names, &mut cache, 0) {
+                Some(cls) => {
+                    let a = norm.names.nominal(s);
+                    norm.add_sub(&Expr::Atom(a), &cls);
+                }
+                None => skipped += 1,
+            }
+        } else if !is_structural_predicate(dict, p) && is_individual(dict, s) && !structural(s) {
+            if is_individual(dict, o) && !structural(o) {
+                // ObjectPropertyAssertion: {s} ⊑ ∃p.{o}.
+                let role = norm.names.role(p);
+                let a = norm.names.nominal(s);
+                let b = norm.names.nominal(o);
+                norm.add_sub(&Expr::Atom(a), &Expr::Exists(role, Box::new(Expr::Atom(b))));
+            } else if is_literal(dict, o) {
+                // DataPropertyAssertion — deferred (fail-closed counted skip).
+                skipped += 1;
+            } else {
+                // ObjectPropertyAssertion whose OBJECT is a structural blank node (a
+                // restriction / intersection / list cell / non-EL node) — not a plain
+                // individual. [OPUS-4.8] sq-pbz04.2.5: still sound and fail-closed (we
+                // never guess a typing), but the skip was previously untallied; now counted
+                // so `Report::skipped_assertions` gives an honest "n assertions not
+                // internalized" total.
+                skipped += 1;
+            }
+        }
+    }
+    skipped
 }
 
 /// Walks an `rdf:first`/`rdf:rest` list from `head`, returning member node ids. Bounded by

@@ -19,7 +19,7 @@
 use oxrdf::{NamedNode, Term as OTerm};
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
-use sparq_reason_el::Classifier;
+use sparq_reason_el::{classify_graph, Classifier};
 
 const PRE: &str = r#"
     @prefix : <http://ex/> .
@@ -262,5 +262,180 @@ fn rbox_axioms_are_not_counted_as_skipped_class_axioms() {
     assert!(
         h.is_subclass_of(iri(&dict, "A"), iri(&dict, "B")),
         "the in-fragment class axiom still classifies"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// [SONNET-4.6] sq-pbz04.2.7: role-lattice readoff — `classify_graph` under `rbox` emits the
+// non-reflexive told-inclusion closure as `rdfs:subPropertyOf` triples.
+//
+// ORACLE: every emitted pair (r, s) holds in every model of the told inclusions (soundness),
+// and every non-reflexive closure pair that can be derived by the transitive closure of the
+// told `rdfs:subPropertyOf` axioms is present in the output (completeness of the readoff).
+// Self-pairs (r ⊑ r) are NEVER emitted — they are semantically trivial and excluded by spec.
+// Told pairs already in the input are NOT re-emitted (idempotency / deduplication).
+
+fn full_iri(s: &str) -> OTerm {
+    OTerm::NamedNode(NamedNode::new_unchecked(s.to_string()))
+}
+
+fn sub_property_of_id(dict: &Dict) -> Id {
+    dict.lookup(&full_iri(
+        "http://www.w3.org/2000/01/rdf-schema#subPropertyOf",
+    ))
+}
+
+#[test]
+fn role_readoff_chain_closure_emits_all_three_pairs() {
+    // [SONNET-4.6] sq-pbz04.2.7: r ⊑ s ⊑ t (two told inclusions). The told-inclusion
+    // closure contains: (r,s), (r,t), (s,t). All 3 non-reflexive pairs must be present in
+    // `triples` after `classify_graph`. Exactly 1 triple is NEW (r⊑t is the derived one;
+    // r⊑s and s⊑t were already in the input).
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :s rdfs:subPropertyOf :t .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+
+    let sub_prop = sub_property_of_id(&dict);
+    let r = iri(&dict, "r");
+    let s = iri(&dict, "s");
+    let t = iri(&dict, "t");
+
+    // All 3 non-reflexive closure pairs are present.
+    assert!(
+        triples.contains(&[r, sub_prop, s]),
+        "told r ⊑ s must be present"
+    );
+    assert!(
+        triples.contains(&[r, sub_prop, t]),
+        "derived transitive r ⊑ t must be emitted"
+    );
+    assert!(
+        triples.contains(&[s, sub_prop, t]),
+        "told s ⊑ t must be present"
+    );
+
+    // Self-pairs are NOT emitted.
+    assert!(
+        !triples.contains(&[r, sub_prop, r]),
+        "self-pair r ⊑ r must NOT be emitted"
+    );
+    assert!(
+        !triples.contains(&[s, sub_prop, s]),
+        "self-pair s ⊑ s must NOT be emitted"
+    );
+    assert!(
+        !triples.contains(&[t, sub_prop, t]),
+        "self-pair t ⊑ t must NOT be emitted"
+    );
+
+    // Exactly 1 new triple (r⊑t is the only derived one; r⊑s and s⊑t were told).
+    assert_eq!(
+        report.emitted_role_subsumptions,
+        1,
+        "only the transitive r ⊑ t is a NEW triple (told pairs are already in the graph)"
+    );
+}
+
+#[test]
+fn role_readoff_mutual_inclusion_emits_both_directions() {
+    // [SONNET-4.6] sq-pbz04.2.7: r ⊑ s and s ⊑ r (equivalent roles). Both directions must
+    // be present in the output. Neither is a self-pair. Exactly 0 NEW triples (both directions
+    // were told — the readoff covers them but adds nothing new).
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :s rdfs:subPropertyOf :r .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+
+    let sub_prop = sub_property_of_id(&dict);
+    let r = iri(&dict, "r");
+    let s = iri(&dict, "s");
+
+    assert!(
+        triples.contains(&[r, sub_prop, s]),
+        "told r ⊑ s must be present"
+    );
+    assert!(
+        triples.contains(&[s, sub_prop, r]),
+        "told s ⊑ r must be present"
+    );
+    // No self-pairs emitted.
+    assert!(
+        !triples.contains(&[r, sub_prop, r]),
+        "self-pair r ⊑ r must NOT be emitted"
+    );
+    assert!(
+        !triples.contains(&[s, sub_prop, s]),
+        "self-pair s ⊑ s must NOT be emitted"
+    );
+    // Both were told — no new triples.
+    assert_eq!(
+        report.emitted_role_subsumptions,
+        0,
+        "both directions were told — readoff adds nothing new"
+    );
+}
+
+#[test]
+fn role_readoff_no_self_pairs_ever() {
+    // [SONNET-4.6] sq-pbz04.2.7: a transitive role (r ∘ r ⊑ r) and a plain inclusion (r ⊑ s)
+    // — the closure gives super_of[r] = {r, s}. The self-pair (r, r) must never appear in the
+    // emitted triples, even though `r` is in its own `super_of` row (reflexivity). Likewise
+    // for `s`.
+    let ttl = format!(
+        "{PRE}
+         :r rdf:type owl:TransitiveProperty .
+         :r rdfs:subPropertyOf :s .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    classify_graph(&mut dict, &mut triples);
+
+    let sub_prop = sub_property_of_id(&dict);
+    let r = iri(&dict, "r");
+    let s = iri(&dict, "s");
+
+    // The non-reflexive (r, s) pair is present.
+    assert!(
+        triples.contains(&[r, sub_prop, s]),
+        "told r ⊑ s must be present"
+    );
+    // Self-pairs are NOT emitted, even for a transitive role.
+    assert!(
+        !triples.contains(&[r, sub_prop, r]),
+        "self-pair r ⊑ r must NOT be emitted (transitivity is not self-inclusion)"
+    );
+    assert!(
+        !triples.contains(&[s, sub_prop, s]),
+        "self-pair s ⊑ s must NOT be emitted"
+    );
+}
+
+#[test]
+fn role_readoff_is_idempotent() {
+    // [SONNET-4.6] sq-pbz04.2.7: a second `classify_graph` call adds no new role triples
+    // (the `present`-set deduplication covers the derived pairs too).
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :s rdfs:subPropertyOf :t .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let r1 = classify_graph(&mut dict, &mut triples);
+    assert_eq!(r1.emitted_role_subsumptions, 1, "first call derives r ⊑ t");
+    let r2 = classify_graph(&mut dict, &mut triples);
+    assert_eq!(
+        r2.emitted_role_subsumptions,
+        0,
+        "second call adds nothing (idempotent)"
     );
 }

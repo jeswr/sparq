@@ -61,6 +61,15 @@ pub struct Names {
     /// list used as the roots of the "reachable from a nominal" non-emptiness search.
     nominal_set: FxHashSet<Concept>,
     nominal_list: Vec<Concept>,
+    /// [OPUS-4.8] sq-pbz04.2.6: `role -> ∃role.Self` self-restriction concept (`owl:hasSelf`).
+    /// A self-concept is a basic atom with NO dict id (like a nominal, it must never surface as a
+    /// named class); the completion rules CR-Self-1/CR-Self-2 (see `classify.rs`) connect its
+    /// membership `∃r.Self ∈ S(X)` to the reflexive role link `(X,X) ∈ R(r)`.
+    self_by_role: FxHashMap<Role, Concept>,
+    /// `self-concept -> its role` — the inverse of `self_by_role`, driving the CR-Self-1 worklist
+    /// trigger (a derived `∃r.Self ∈ S(X)` must add the self-loop link) and the ABox self-loop
+    /// realisation readoff.
+    self_of_concept: FxHashMap<Concept, Role>,
 }
 
 /// The internal concept index for ⊤ (`owl:Thing`).
@@ -163,9 +172,72 @@ impl Names {
         &self.nominal_list
     }
 
+    /// [OPUS-4.8] sq-pbz04.2.6: maps a role to its self-restriction concept `∃r.Self`
+    /// (`owl:hasSelf`), minting one on first sight. Carries NO dict id (`dict_of` returns
+    /// `None`): a self-concept is a basic atom in the EL++ normal form, never a named class in
+    /// the emitted lattice. The same role always yields the same concept, so `∃r.Self` on both
+    /// sides of a `⊑` unifies on one atom (CR1 then threads `∃r.Self ⊑ D`, i.e. CR-Self-2).
+    pub fn self_concept(&mut self, role: Role) -> Concept {
+        if let Some(&c) = self.self_by_role.get(&role) {
+            return c;
+        }
+        let c = self.to_dict.len() as Concept;
+        self.to_dict.push(None);
+        self.self_by_role.insert(role, c);
+        self.self_of_concept.insert(c, role);
+        c
+    }
+
+    /// The role `r` iff `c` is the self-restriction concept `∃r.Self` — the CR-Self-1 trigger
+    /// test (a derived `∃r.Self ∈ S(X)` fires the reflexive link `(X,X) ∈ R(r)`); `None`
+    /// otherwise. Also drives the ABox self-loop realisation readoff (`a r a`).
+    pub fn self_role(&self, c: Concept) -> Option<Role> {
+        self.self_of_concept.get(&c).copied()
+    }
+
+    /// Whether ANY self-restriction was minted — the O(1) fast-path guard that keeps the CR-Self
+    /// rules a no-op (zero cost) on `owl:hasSelf`-free ontologies, so hasSelf-free classification
+    /// is byte-identical in behaviour AND cost to the pre-CR-Self path.
+    pub fn has_self_restrictions(&self) -> bool {
+        !self.self_by_role.is_empty()
+    }
+
     /// The dict id of a concept, if it is a NAMED class (⊤/⊥/fresh names return `None`).
     pub fn dict_of(&self, c: Concept) -> Option<Id> {
         self.to_dict.get(c as usize).copied().flatten()
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): every minted nominal as `(individual dict id, concept)`.
+    /// The bijection `nominal_by_dict` drives the ABox realisation readoff (per-individual typing
+    /// plus the concept→individual reverse map for `owl:sameAs`); it spans BOTH the
+    /// assertion-minted individuals (`abox`) and any TBox `owl:hasValue`/singleton-`owl:oneOf`
+    /// nominals.
+    #[cfg(feature = "abox")]
+    pub fn nominals(&self) -> impl Iterator<Item = (Id, Concept)> + '_ {
+        self.nominal_by_dict.iter().map(|(&id, &c)| (id, c))
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): the internal role for `dict_id` IF one was already
+    /// minted, WITHOUT minting a new one (unlike [`Names::role`]). Used to append the
+    /// `owl:bottomObjectProperty` empty-role axiom only when that property actually occurs.
+    #[cfg(feature = "abox")]
+    pub fn role_of(&self, dict_id: Id) -> Option<Role> {
+        self.role_by_dict.get(&dict_id).copied()
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.6 (`abox`): the source dict id of a role, if it is a NAMED object
+    /// property. Used by the self-loop realisation readoff (`abox`) to name the predicate of a
+    /// derived `a r a` assertion, and by the role-lattice readoff (`rbox`, sq-pbz04.2.7) to map
+    /// role-index pairs back to dict ids for `rdfs:subPropertyOf` emission. A fresh anonymous
+    /// chain role (`rbox`, sentinel `Id::MAX`) has no dict id and returns `None`; a
+    /// self-restriction's role is always a named property, so this resolves for every self-loop
+    /// the `abox` readoff emits.
+    #[cfg(any(feature = "abox", feature = "rbox"))]
+    pub fn role_dict_of(&self, r: Role) -> Option<Id> {
+        match self.role_to_dict.get(r as usize).copied() {
+            Some(id) if id != Id::MAX => Some(id),
+            _ => None,
+        }
     }
 
     /// The number of concepts minted so far (the dense index upper bound).

@@ -239,7 +239,7 @@ jobs:
       # 0.23.0 is the version lycheeverse/lychee-action@v2.8.0 ships, so behaviour matches the
       # markdown gate.
       - name: Install lychee
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: lychee@0.23.0
       - name: Link-check the static-export HTML (lychee --offline)

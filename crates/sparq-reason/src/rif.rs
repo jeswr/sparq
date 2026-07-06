@@ -16,13 +16,60 @@
 //! This is **RIF-Core**, not full RIF-BLD or RIF-PRD. Specifically:
 //!
 //! * **Conditions**: a conjunction (`And`) of positive atoms — frame (`o[p->v]`),
-//!   membership (`o # c`), subclass (`c1 ## c2`), and equality (`a = b`) atoms,
-//!   plus **externally-defined builtin** calls ([`Builtin`]). No `Or`, no
-//!   existentials in the body beyond the implicit universal closure, no negation.
+//!   membership (`o # c`), subclass (`c1 ## c2`) atoms,
+//!   plus **externally-defined builtin** calls ([`Builtin`]). `Equal` (`a = b`)
+//!   atoms are permitted in rule BODIES only (see Equal-atom semantics below).
+//!   No `Or`, no existentials in the body beyond the implicit universal closure,
+//!   no negation.
 //! * **Rules**: `Forall ?v… ( head :- body )` Horn implications with a single
 //!   (conjunctive) head. The head's atoms and variables are **range-restricted**
 //!   by the body (validated — see below).
 //! * **Facts**: ground atoms (a rule with an empty/`True` body).
+//!
+//! ## Equal-atom semantics — body-only, resolved at COMPILE TIME by substitution
+//!
+//! [SONNET-4.6] sq-pbz04.5.4 / [OPUS-4.8] sq-26vwp — RIF-Core is an important
+//! special case for `Equal` (`a = b`) atoms: unlike RIF-BLD (which permits equality
+//! in heads and applies **congruence closure** / equality-propagating semantics),
+//! **RIF-Core forbids `Equal` in rule conclusions** and gives body equality
+//! **ground-identity** semantics — two terms are equal iff they are identical after
+//! variable substitution (structural/syntactic equality over RDF terms), and `t = t`
+//! is ALWAYS true (reflexivity).
+//!
+//! Body `Equal` atoms are resolved **at validate / lower time by
+//! substitution / unification** (`resolve_body_equalities`), NOT by matching an
+//! `owl:sameAs` triple at runtime. Equality is a *built-in identity relation*; it is
+//! deliberately kept SEPARATE from the `owl:sameAs` RDF vocabulary — conflating the
+//! two is unsound (an asserted `owl:sameAs` *data* triple must not license a RIF
+//! equality, and a genuine `?x = ?y` must not depend on an `owl:sameAs` assertion).
+//! The following rewrites are applied to a **fixpoint**, so NO `Equal` atom ever
+//! reaches N3 lowering:
+//!
+//! 1. **`t = t` (identical after substitution)** — trivially true; the atom is
+//!    ELIMINATED and contributes NO bindings for range-restriction. A head variable
+//!    bound SOLELY by a `?x = ?x` atom is therefore rejected `UnboundHeadVar`
+//!    (unifying a variable with itself binds nothing).
+//! 2. **`?x = t` (one side a variable, the other any term)** — `t` is SUBSTITUTED
+//!    for `?x` throughout the rule (head + body). The variable becomes
+//!    **bound-by-substitution**: `?x # C :- ?x = <a>` derives `<a> # C`
+//!    unconditionally, and the UnboundHeadVar sweep correctly treats `?x` as bound.
+//! 3. **`?x = ?y` (two distinct variables)** — UNIFIED: one name is renamed to the
+//!    other throughout the rule, so the two occurrences collapse to one variable and
+//!    the join naturally requires the SAME node. `?x # Self :- ?x mgr ?y , ?x = ?y`
+//!    fires exactly for the individuals that manage themselves — with no `owl:sameAs`
+//!    assertion needed (reflexivity honoured) and without over-firing on distinct
+//!    nodes that merely carry an `owl:sameAs` triple.
+//! 4. **`t1 = t2` (two distinct NON-variable terms)** — rejected fail-closed with
+//!    [`RifError::DistinctGroundEqual`]. Value-space equality across XSD types (e.g.
+//!    `"1"^^xsd:integer = "1.0"^^xsd:decimal`) needs the shared value-space
+//!    comparator (sq-v5evr, issue #1646); until it lands the front-end refuses
+//!    rather than answering incorrectly. Because substitution runs to a fixpoint
+//!    FIRST, a chained `?x = ?y , ?y = "2"^^xsd:decimal` reduces both sides to the
+//!    constant and the ground-identity / distinct-ground checks are re-run on the
+//!    substituted terms.
+//!
+//! `Equal` in a HEAD is rejected with [`RifError::EqualInConclusion`] (a Core
+//! syntactic restriction relative to RIF-BLD).
 //!
 //! **EXPLICITLY EXCLUDED** (RIF-Core is monotone, so these would break
 //! monotonicity and are *not* in the dialect): negation-as-failure / `Naf`, the
@@ -53,13 +100,12 @@
 
 use crate::n3::Term as N3Term;
 use sparq_core::dict::{Dict, Id};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// RIF datatype / standard-vocabulary IRIs used when lowering.
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// N3 builtin namespaces the RIF builtins lower onto (the chainer recognises these).
 const MATH: &str = "http://www.w3.org/2000/10/swap/math#";
@@ -94,9 +140,16 @@ pub const UNIMPLEMENTED: &[&str] = &[
     "pred:matches DEFERRED: XPath/XSD regex dialect ≠ Rust regex crate dialect \
      (e.g. XSD character-class subtraction is not supported). A mapping cannot fail \
      closed on dialect-divergent patterns without a real XSD-regex front-end — deferred.",
+    // [SONNET-4.6] sq-pbz04.5.4 / [OPUS-4.8] sq-26vwp — Equal-atom handling:
+    // Equal in a rule CONCLUSION is REJECTED (RIF-Core syntactic restriction) via
+    // RifError::EqualInConclusion. Body Equal is resolved at compile time by
+    // substitution/unification (t=t eliminated; ?x=t substituted; ?x=?y unified).
+    // ONLY distinct-GROUND value-equality remains deferred (fail-closed), below.
     "pred:boolean-equal / pred:literal-not-identical / equality of distinct value-equal \
-     constants DEFERRED: need value-space equality beyond the numeric tower (sq-v5evr \
-     comparator, a named consumer) — deferred pending that seam.",
+     GROUND constants DEFERRED (fail-closed): need value-space equality beyond the numeric \
+     tower (sq-v5evr comparator, issue #1646, a named consumer) — rejects with \
+     DistinctGroundEqual pending that seam. Variable and mixed body Equal (?x=?y, ?x=t) are \
+     handled soundly by compile-time substitution/unification (sq-26vwp); body t=t works.",
     "guard predicates (pred:is-literal-integer etc.) DEFERRED: would require inventing \
      non-EYE N3 builtins, polluting the chainer's EYE-differential story — deferred.",
     "func:substring / func:substring-before / func:substring-after / func:string-join / \
@@ -336,7 +389,9 @@ pub enum Atom {
         /// The superclass.
         sup: Term,
     },
-    /// **Equality**: `a = b` (lowers to `a owl:sameAs b`).
+    /// **Equality**: `a = b` (body-only). Resolved at compile time by
+    /// substitution/unification (`resolve_body_equalities`) — never lowered to an
+    /// `owl:sameAs` triple. See the module-level Equal-atom semantics. [OPUS-4.8] sq-26vwp
     Equal {
         /// The left term.
         left: Term,
@@ -394,6 +449,12 @@ impl Atom {
 
     /// Lower a positive atom to one N3 triple. (Builtins lower separately, since a
     /// function builtin emits the producer/consumer ordering the chainer needs.)
+    ///
+    /// [OPUS-4.8] sq-26vwp — `Equal` returns `None`: body `Equal` atoms are resolved
+    /// away by `resolve_body_equalities` BEFORE lowering (never emitted as an
+    /// `owl:sameAs` triple) and `Equal` in a head is rejected by `validate`, so an
+    /// `Equal` atom must never reach this function. A `None` here therefore fails
+    /// closed at the caller rather than fabricating a `sameAs` triple.
     fn positive_to_n3(&self) -> Option<[N3Term; 3]> {
         match self {
             Atom::Frame { obj, pred, val } => Some([obj.to_n3(), pred.to_n3(), val.to_n3()]),
@@ -403,10 +464,7 @@ impl Atom {
             Atom::Subclass { sub, sup } => {
                 Some([sub.to_n3(), N3Term::Iri(RDFS_SUBCLASS_OF.to_string()), sup.to_n3()])
             }
-            Atom::Equal { left, right } => {
-                Some([left.to_n3(), N3Term::Iri(OWL_SAME_AS.to_string()), right.to_n3()])
-            }
-            Atom::Builtin { .. } => None,
+            Atom::Equal { .. } | Atom::Builtin { .. } => None,
         }
     }
 }
@@ -472,6 +530,23 @@ pub enum RifError {
         /// The offending builtin.
         op: Builtin,
     },
+    /// An `Equal` atom appeared in a rule HEAD. RIF-Core (unlike RIF-BLD) does
+    /// **not** permit equality in conclusions — it is a Core syntactic restriction.
+    /// `validate()` rejects any rule whose head contains an `Equal` atom with this
+    /// error. [SONNET-4.6] sq-pbz04.5.4
+    EqualInConclusion,
+    /// A body `Equal` atom has two **distinct non-variable** terms (e.g.
+    /// `"1"^^xsd:integer = "1.0"^^xsd:decimal`). This requires **value-space
+    /// equality** across XSD types, which depends on the shared value-space
+    /// comparator (sq-v5evr, issue #1646, not yet merged). Until that seam lands
+    /// this front-end rejects rather than answering incorrectly.
+    /// [SONNET-4.6] sq-pbz04.5.4
+    DistinctGroundEqual {
+        /// The left-hand term (rendered as a string for display).
+        left: String,
+        /// The right-hand term (rendered as a string for display).
+        right: String,
+    },
     /// A nonmonotonic / non-Core construct was supplied (defensive — these are not
     /// representable in the [`Atom`] model, so this is reserved for importers and
     /// internal lowering invariants).
@@ -506,6 +581,20 @@ impl fmt::Display for RifError {
                 "RIF-Core builtin {:?} may not appear in a rule head (builtins are body-only)",
                 op
             ),
+            // [SONNET-4.6] sq-pbz04.5.4
+            RifError::EqualInConclusion => write!(
+                f,
+                "RIF-Core does not permit Equal (=) in a rule conclusion; use RIF-BLD \
+                 for equality-in-head semantics (Core syntactic restriction)"
+            ),
+            // [SONNET-4.6] sq-pbz04.5.4
+            RifError::DistinctGroundEqual { left, right } => write!(
+                f,
+                "RIF-Core body Equal with distinct ground terms ({} = {}) requires \
+                 value-space equality (e.g. xsd:integer 1 vs xsd:decimal 1.0); \
+                 deferred pending sq-v5evr value-space comparator (#1646)",
+                left, right
+            ),
             RifError::Nonmonotonic { what } => write!(
                 f,
                 "RIF-Core is monotone: {} is not in the dialect (negation/production \
@@ -529,9 +618,9 @@ impl Document {
         self.rules.push(rule);
     }
 
-    /// **Validate** the document for RIF-Core **safety / range-restriction** —
-    /// the load-bearing builtin-safety invariant. Returns `Ok(())` if every rule
-    /// is safe, else the first [`RifError`].
+    /// **Validate** the document for RIF-Core **safety / range-restriction** and
+    /// **syntactic restrictions** — the load-bearing invariant. Returns `Ok(())` if
+    /// every rule is valid, else the first [`RifError`].
     ///
     /// A rule is safe when, processing the body **left to right**:
     /// * every builtin's **input** arguments are range-restricted — each input
@@ -540,21 +629,46 @@ impl Document {
     /// * every variable in the **head** is bound by some positive body atom or a
     ///   function builtin output.
     ///
-    /// Builtins must have correct arity and may not appear in a head.
+    /// In addition:
+    /// * Builtins must have correct arity and may not appear in a head.
+    /// * `Equal` atoms may **not** appear in a head (`RifError::EqualInConclusion`
+    ///   — RIF-Core syntactic restriction; see module-level doc comment).
+    /// * Body `Equal` atoms are resolved by compile-time substitution / unification
+    ///   (`resolve_body_equalities`) BEFORE range-restriction, so `?x = t` binds
+    ///   `?x` (substitution) while `?x = ?x` binds nothing (elimination). A body
+    ///   `Equal` reducing to two **distinct non-variable** terms is rejected
+    ///   fail-closed (`RifError::DistinctGroundEqual`) pending the value-space
+    ///   comparator (sq-v5evr/#1646).
     pub fn validate(&self) -> Result<(), RifError> {
         for rule in &self.rules {
-            // Head atoms must be positive.
+            // Head atoms must be positive and must NOT be Equal.
+            // [SONNET-4.6] sq-pbz04.5.4: RIF-Core forbids Equal in conclusions.
             for h in &rule.head {
-                if let Atom::Builtin { op, .. } = h {
-                    return Err(RifError::BuiltinInHead { op: *op });
+                match h {
+                    Atom::Builtin { op, .. } => {
+                        return Err(RifError::BuiltinInHead { op: *op });
+                    }
+                    Atom::Equal { .. } => {
+                        return Err(RifError::EqualInConclusion);
+                    }
+                    _ => {}
                 }
             }
-            // Walk the body left to right, growing the set of bound variables.
+            // [OPUS-4.8] sq-26vwp — resolve body `Equal` atoms by compile-time
+            // substitution / unification FIRST. The returned rule has NO body `Equal`
+            // atoms: each is eliminated (`t = t`), substituted (`?x = t`), or unified
+            // (`?x = ?y`); a distinct-ground `t1 = t2` fails closed with
+            // `DistinctGroundEqual` here (before range-restriction). Substitution DOES
+            // bind — a head var bound solely by `?x = t` is now genuinely bound; a head
+            // var bound solely by `?x = ?x` is now genuinely unbound (correctly caught
+            // by the UnboundHeadVar sweep below).
+            let resolved = resolve_body_equalities(rule)?;
+            // Walk the RESOLVED body left to right, growing the set of bound variables.
             // A positive atom binds all its variables (matched against facts). A
             // FUNCTION builtin requires its input args bound and then binds its
             // output arg; a PREDICATE builtin requires ALL its args bound.
             let mut bound: BTreeSet<String> = BTreeSet::new();
-            for atom in &rule.body {
+            for atom in &resolved.body {
                 match atom {
                     Atom::Builtin { op, args } => {
                         // [SONNET-4.6] sq-pbz04.5.2 — variadic builtins use >= check.
@@ -583,15 +697,26 @@ impl Document {
                             output[0].vars_into(&mut bound);
                         }
                     }
+                    // [OPUS-4.8] sq-26vwp — invariant: `resolve_body_equalities` removed
+                    // every body `Equal`. Reaching this arm is an internal resolution bug;
+                    // fail closed rather than silently treating it as a binding-generating
+                    // positive atom (which would resurrect the old owl:sameAs behaviour).
+                    Atom::Equal { .. } => {
+                        return Err(RifError::Nonmonotonic {
+                            what: "internal: unresolved Equal atom reached range-restriction \
+                                   (resolve_body_equalities invariant violated)"
+                                .to_string(),
+                        });
+                    }
                     positive => {
                         debug_assert!(positive.is_positive());
                         bound.append(&mut positive.vars());
                     }
                 }
             }
-            // Every head variable must be range-restricted by the body.
+            // Every head variable must be range-restricted by the resolved body.
             let mut head_vars = BTreeSet::new();
-            for h in &rule.head {
+            for h in &resolved.head {
                 head_vars.extend(h.vars());
             }
             for v in &head_vars {
@@ -613,6 +738,10 @@ impl Document {
         self.validate()?;
         let mut out = String::new();
         for rule in &self.rules {
+            // [OPUS-4.8] sq-26vwp — lower the RESOLVED rule (body `Equal` atoms
+            // substituted/unified away). A rule whose body becomes empty after
+            // resolution (e.g. `?x # C :- ?x = <a>`) is an unconditional FACT.
+            let rule = resolve_body_equalities(rule)?;
             if rule.body.is_empty() {
                 // Fact(s): emit each head atom as a ground triple.
                 for h in &rule.head {
@@ -672,12 +801,158 @@ fn require_bound(terms: &[Term], bound: &BTreeSet<String>) -> Result<(), RifErro
 }
 
 /// Lower a body atom (positive OR builtin) to its N3 surface form.
+///
+/// The caller passes atoms of a RESOLVED rule (`resolve_body_equalities`), which
+/// contains NO body `Equal` atoms; a stray `Equal` would make `positive_to_n3`
+/// return `None`, and the `expect` below fails closed rather than emitting an
+/// unsound `owl:sameAs` triple. [OPUS-4.8] sq-26vwp
 fn lower_body_atom(atom: &Atom) -> String {
-    if let Atom::Builtin { op, args } = atom {
-        lower_builtin(*op, args)
-    } else {
-        let t = atom.positive_to_n3().expect("non-builtin body atom is positive");
-        n3_triple(&t)
+    match atom {
+        Atom::Builtin { op, args } => lower_builtin(*op, args),
+        other => {
+            let t = other.positive_to_n3().expect(
+                "resolved body atom is a positive Frame/Member/Subclass (Equal atoms are \
+                 resolved away before lowering; sq-26vwp)",
+            );
+            n3_triple(&t)
+        }
+    }
+}
+
+/// Resolve every body `Equal` atom of `rule` by **compile-time substitution /
+/// unification**, returning an equivalent rule whose body contains NO `Equal`
+/// atoms. [OPUS-4.8] sq-26vwp — this is RIF-Core's ground-identity equality done
+/// at validate/lower time, NOT by matching an `owl:sameAs` triple at runtime.
+///
+/// The rewrites, applied to a **fixpoint** over the body's `Equal` atoms (a
+/// substitution can turn `?x = ?y` into `t = t` or `t1 = t2`):
+/// * `t = t` (identical after substitution) → trivially true, dropped (no binding).
+/// * `?x = t` (one side a variable) → substitute `t` for `?x` throughout head+body
+///   (the variable becomes bound-by-substitution).
+/// * `?x = ?y` (two distinct variables) → unify: rename one to the other everywhere.
+/// * `t1 = t2` (two distinct NON-variable terms) → [`RifError::DistinctGroundEqual`]
+///   (value-space equality is deferred to sq-v5evr/#1646 — fail closed).
+///
+/// An `Equal` equating a variable to a compound `List` term containing that same
+/// variable is rejected (occurs-check) rather than looped.
+fn resolve_body_equalities(rule: &Rule) -> Result<Rule, RifError> {
+    let mut subst: BTreeMap<String, Term> = BTreeMap::new();
+    // Iterate to a fixpoint: applying a new binding can expose a further
+    // ground-identity or distinct-ground equality among the remaining atoms.
+    loop {
+        let mut changed = false;
+        for atom in &rule.body {
+            if let Atom::Equal { left, right } = atom {
+                let l = apply_subst_term(left, &subst);
+                let r = apply_subst_term(right, &subst);
+                if l == r {
+                    // Trivially true (covers ?x=?x, t=t, and already-unified pairs).
+                    continue;
+                }
+                match (&l, &r) {
+                    (Term::Var(v), _) => {
+                        bind_var(&mut subst, v.clone(), r)?;
+                        changed = true;
+                    }
+                    (_, Term::Var(v)) => {
+                        bind_var(&mut subst, v.clone(), l)?;
+                        changed = true;
+                    }
+                    _ => {
+                        // Two distinct NON-variable terms: value-space equality,
+                        // deferred to sq-v5evr — fail closed (never guess).
+                        return Err(RifError::DistinctGroundEqual {
+                            left: format!("{:?}", l),
+                            right: format!("{:?}", r),
+                        });
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Build the resolved rule: apply the substitution to head + non-Equal body
+    // atoms, DROPPING every body Equal (all now trivially true or substituted).
+    let head = rule.head.iter().map(|a| apply_subst_atom(a, &subst)).collect();
+    let body = rule
+        .body
+        .iter()
+        .filter(|a| !matches!(a, Atom::Equal { .. }))
+        .map(|a| apply_subst_atom(a, &subst))
+        .collect();
+    Ok(Rule { head, body })
+}
+
+/// Insert `v -> t` into `subst`, keeping the map idempotent (every existing value
+/// that mentions `v` is rewritten to `t`). `t` must already be resolved w.r.t.
+/// `subst` (the caller applies `apply_subst_term` first). Occurs-check: a variable
+/// equated to a compound term containing itself is rejected. [OPUS-4.8] sq-26vwp
+fn bind_var(
+    subst: &mut BTreeMap<String, Term>,
+    v: String,
+    t: Term,
+) -> Result<(), RifError> {
+    if term_contains_var(&t, &v) {
+        return Err(RifError::Nonmonotonic {
+            what: format!("cyclic RIF-Core equality (occurs-check failed): ?{} = {:?}", v, t),
+        });
+    }
+    for val in subst.values_mut() {
+        *val = replace_var_in_term(val, &v, &t);
+    }
+    subst.insert(v, t);
+    Ok(())
+}
+
+/// Apply a (fully resolved, idempotent) substitution to a term — a single lookup
+/// per variable suffices, recursing into `List` terms. [OPUS-4.8] sq-26vwp
+fn apply_subst_term(t: &Term, subst: &BTreeMap<String, Term>) -> Term {
+    match t {
+        Term::Var(v) => subst.get(v).cloned().unwrap_or_else(|| t.clone()),
+        Term::List(items) => {
+            Term::List(items.iter().map(|x| apply_subst_term(x, subst)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Apply a substitution to every term of an atom. [OPUS-4.8] sq-26vwp
+fn apply_subst_atom(a: &Atom, subst: &BTreeMap<String, Term>) -> Atom {
+    let s = |t: &Term| apply_subst_term(t, subst);
+    match a {
+        Atom::Frame { obj, pred, val } => {
+            Atom::Frame { obj: s(obj), pred: s(pred), val: s(val) }
+        }
+        Atom::Member { obj, class } => Atom::Member { obj: s(obj), class: s(class) },
+        Atom::Subclass { sub, sup } => Atom::Subclass { sub: s(sub), sup: s(sup) },
+        Atom::Equal { left, right } => Atom::Equal { left: s(left), right: s(right) },
+        Atom::Builtin { op, args } => {
+            Atom::Builtin { op: *op, args: args.iter().map(s).collect() }
+        }
+    }
+}
+
+/// Replace every occurrence of variable `v` in `t` with `replacement` (recursing
+/// into `List` terms). Used to keep the substitution map idempotent. [OPUS-4.8] sq-26vwp
+fn replace_var_in_term(t: &Term, v: &str, replacement: &Term) -> Term {
+    match t {
+        Term::Var(name) if name == v => replacement.clone(),
+        Term::List(items) => {
+            Term::List(items.iter().map(|x| replace_var_in_term(x, v, replacement)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Does variable `v` occur anywhere in `t` (recursing into `List` terms)? The
+/// occurs-check for unification. [OPUS-4.8] sq-26vwp
+fn term_contains_var(t: &Term, v: &str) -> bool {
+    match t {
+        Term::Var(name) => name == v,
+        Term::List(items) => items.iter().any(|x| term_contains_var(x, v)),
+        _ => false,
     }
 }
 
@@ -1066,6 +1341,375 @@ mod tests {
         ));
     }
 
+    // ---------------------------------------------------------- Equal-atom tests
+    // [SONNET-4.6] sq-pbz04.5.4 — the three Equal-atom semantic requirements:
+    // (1) Equal in conclusion is rejected (non-vacuous);
+    // (2) ground-identity body Equal works (trivially true, rule fires);
+    // (3) value-equality (distinct ground constants) is fail-closed-abstained.
+
+    /// (1) Equal in a CONCLUSION — both as a fact head and as a rule head —
+    /// MUST be rejected with `EqualInConclusion`. This is a non-vacuous test:
+    /// it asserts the validator catches the case and that `closure` refuses it.
+    #[test]
+    fn validate_rejects_equal_in_conclusion() {
+        // Case A: a "fact" with an Equal head (Rule::fact wraps a single head atom;
+        // an empty body makes it a fact, so the head IS the conclusion).
+        let mut d = Document::new();
+        d.push(Rule::fact(Atom::Equal { left: iri("http://ex/a"), right: iri("http://ex/b") }));
+        assert_eq!(
+            d.validate(),
+            Err(RifError::EqualInConclusion),
+            "Equal as a fact head (conclusion) must be rejected"
+        );
+        let mut dict = Dict::new();
+        assert!(d.closure(&mut dict).is_err(), "closure must refuse Equal-in-conclusion");
+
+        // Case B: an implication whose head contains an Equal.
+        let mut d2 = Document::new();
+        d2.push(Rule::implies(
+            vec![Atom::Equal { left: var("x"), right: iri("http://ex/b") }],
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+        ));
+        assert_eq!(
+            d2.validate(),
+            Err(RifError::EqualInConclusion),
+            "Equal in a rule head must be rejected"
+        );
+    }
+
+    /// (2) Ground-identity body Equal: `t = t` (syntactically identical terms) is
+    /// trivially true and is ELIMINATED at lowering — the rule fires as if the
+    /// atom were absent. This exercises the real path (`closure`), not a mock.
+    #[test]
+    fn body_equal_ground_identity_works() {
+        // Rule: ?x # Adult :- ?x age ?n , ?n = ?n
+        // The `?n = ?n` atom is ground-identical after substitution → eliminated.
+        // The rule should fire just as if the Equal atom were not there.
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/p"),
+            pred: iri("http://ex/age"),
+            val: Term::int(30),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Adult") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("http://ex/age"), val: var("n") },
+                // ?n = ?n is trivially true; eliminated at lowering.
+                Atom::Equal { left: var("n"), right: var("n") },
+            ],
+        ));
+        doc.validate().expect("ground-identity body Equal is valid");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure must succeed");
+        assert!(
+            has(&dict, &closure, "http://ex/p", RDF_TYPE, "http://ex/Adult"),
+            "rule fires with trivially-true ground-identity body Equal eliminated"
+        );
+    }
+
+    /// (2b) A body `?n=?n` that is the SOLE binder of a head variable must be
+    /// REJECTED as UnboundHeadVar: the atom is eliminated at lowering, so the head
+    /// variable would be genuinely unbound in the emitted N3 rule. [OPUS-4.8] sq-26vwp.
+    #[test]
+    fn body_equal_identity_sole_binder_rejects_unbound_head_var() {
+        // Rule: ?n rdf:type C :- ?n = ?n
+        // `?n` is ONLY "bound" by the ?n=?n Equal atom, which is eliminated.
+        // validate() must catch this and return UnboundHeadVar { var: "n" }.
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: var("n"), class: iri("http://ex/C") }],
+            vec![Atom::Equal { left: var("n"), right: var("n") }],
+        ));
+        assert_eq!(
+            d.validate(),
+            Err(RifError::UnboundHeadVar { var: "n".to_string() }),
+            "head var solely bound by a ?n=?n (elided) atom must be rejected UnboundHeadVar"
+        );
+        let mut dict = Dict::new();
+        assert!(d.closure(&mut dict).is_err(), "closure must refuse sole-binder ?n=?n");
+
+        // Contrast: ?n=?n alongside a real binder is VALID (existing test case).
+        // Rule: ?x # Adult :- ?x age ?n , ?n = ?n   → OK (Frame binds x and n).
+        let mut d2 = Document::new();
+        d2.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Adult") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("http://ex/age"), val: var("n") },
+                Atom::Equal { left: var("n"), right: var("n") },
+            ],
+        ));
+        assert_eq!(
+            d2.validate(),
+            Ok(()),
+            "?n=?n alongside a Frame binder is valid (Frame already binds n)"
+        );
+    }
+
+    /// (3) Distinct ground constants in a body Equal (`"1"^^xsd:integer =
+    /// "1.0"^^xsd:decimal`) require value-space equality (sq-v5evr, #1646, not yet
+    /// merged). The validator MUST reject fail-closed rather than answer incorrectly.
+    #[test]
+    fn body_equal_distinct_ground_constants_fail_closed() {
+        let xsd_int = format!("{}integer", XSD);
+        let xsd_dec = format!("{}decimal", XSD);
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+            vec![
+                Atom::Member { obj: var("x"), class: iri("http://ex/D") },
+                Atom::Equal {
+                    left: Term::Lit { lex: "1".into(), datatype: xsd_int },
+                    right: Term::Lit { lex: "1.0".into(), datatype: xsd_dec },
+                },
+            ],
+        ));
+        assert!(
+            matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
+            "distinct ground constants in body Equal must be fail-closed (pending sq-v5evr)"
+        );
+        let mut dict = Dict::new();
+        assert!(d.closure(&mut dict).is_err(), "closure must refuse DistinctGroundEqual");
+    }
+
+    // ---- [OPUS-4.8] sq-26vwp — variable / mixed Equal via compile-time substitution ----
+
+    /// V2 (under-derivation gone): `?x = ?y` is UNIFIED at compile time, so the rule
+    /// fires exactly when the two variables bind the SAME node — with NO `owl:sameAs`
+    /// assertion needed (RIF reflexivity `t = t` is honoured). Exercises `closure`.
+    #[test]
+    fn body_equal_var_unification_same_node_fires() {
+        // Rule: ?x # SelfManaged :- ?x manager ?y , ?x = ?y
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/alice"),
+            pred: iri("http://ex/manager"),
+            val: iri("http://ex/alice"),
+        }));
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/bob"),
+            pred: iri("http://ex/manager"),
+            val: iri("http://ex/carol"),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/SelfManaged") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("http://ex/manager"), val: var("y") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        doc.validate().expect("?x=?y unifies; rule is valid");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            has(&dict, &closure, "http://ex/alice", RDF_TYPE, "http://ex/SelfManaged"),
+            "alice manages herself (same node) -> SelfManaged, no owl:sameAs needed (V2 fixed)"
+        );
+        assert!(
+            !has(&dict, &closure, "http://ex/bob", RDF_TYPE, "http://ex/SelfManaged"),
+            "bob's manager is carol (distinct node) -> NOT SelfManaged"
+        );
+    }
+
+    /// V1 (over-derivation gone): an asserted `owl:sameAs` DATA triple between
+    /// DISTINCT nodes must NOT satisfy `?x = ?y`. Equality is compile-time identity,
+    /// not the `owl:sameAs` vocabulary. The same rule DOES fire on a genuine
+    /// same-node pair, proving it is not vacuously false.
+    #[test]
+    fn body_equal_var_no_sameas_over_derivation() {
+        let owl_same = "http://www.w3.org/2002/07/owl#sameAs";
+        // Rule: ?x # SelfRel :- ?x rel ?y , ?x = ?y
+        let mut doc = Document::new();
+        // a rel b  (a and b are DISTINCT nodes)
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/a"),
+            pred: iri("http://ex/rel"),
+            val: iri("http://ex/b"),
+        }));
+        // a owl:sameAs b  (a vocabulary DATA triple — must NOT license RIF equality)
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/a"),
+            pred: iri(owl_same),
+            val: iri("http://ex/b"),
+        }));
+        // c rel c  (same node — SHOULD fire, so the rule is non-vacuous)
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/c"),
+            pred: iri("http://ex/rel"),
+            val: iri("http://ex/c"),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/SelfRel") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("http://ex/rel"), val: var("y") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            !has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/SelfRel"),
+            "a rel b with an asserted a owl:sameAs b must NOT derive a # SelfRel (V1 fixed)"
+        );
+        assert!(
+            has(&dict, &closure, "http://ex/c", RDF_TYPE, "http://ex/SelfRel"),
+            "c rel c (same node) DOES derive c # SelfRel -> the rule is non-vacuous"
+        );
+    }
+
+    /// `?v = <target>` substitutes the ground term for the variable throughout the
+    /// rule; the rule then fires only where the substituted constant matches.
+    #[test]
+    fn body_equal_var_ground_substitution_end_to_end() {
+        // Rule: ?x # Special :- ?x p ?v , ?v = <target>
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/a"),
+            pred: iri("http://ex/p"),
+            val: iri("http://ex/target"),
+        }));
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/b"),
+            pred: iri("http://ex/p"),
+            val: iri("http://ex/other"),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Special") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("http://ex/p"), val: var("v") },
+                Atom::Equal { left: var("v"), right: iri("http://ex/target") },
+            ],
+        ));
+        doc.validate().expect("?v=<target> substitutes; valid");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/Special"),
+            "a p target -> Special (substitution ?v:=target)"
+        );
+        assert!(
+            !has(&dict, &closure, "http://ex/b", RDF_TYPE, "http://ex/Special"),
+            "b p other -> NOT Special"
+        );
+    }
+
+    /// A head variable bound SOLELY by `?x = <a>` is bound-by-substitution (contrast
+    /// the `?x = ?x` sole-binder case, which is `UnboundHeadVar`): the rule collapses
+    /// to the unconditional fact `<a> # C`, and NO `owl:sameAs` is ever emitted.
+    #[test]
+    fn body_equal_var_ground_binds_head_var() {
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+            vec![Atom::Equal { left: var("x"), right: iri("http://ex/a") }],
+        ));
+        assert_eq!(d.validate(), Ok(()), "?x=<a> binds ?x by substitution -> valid");
+        // to_n3 collapses the rule to a FACT (empty resolved body) and emits no sameAs.
+        let src = d.to_n3_source().unwrap();
+        assert!(!src.contains("=>"), "rule with only ?x=<a> collapses to a fact (no `=>`)");
+        assert!(!src.contains("sameAs"), "no owl:sameAs is ever emitted");
+        let mut dict = Dict::new();
+        let closure = d.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+            "<a> # C is derived unconditionally (?x:=<a>)"
+        );
+    }
+
+    /// Chained equalities `?x = ?y , ?y = <target>` collapse both variables to the
+    /// ground term via fixpoint substitution.
+    #[test]
+    fn body_equal_chained_collapse_to_ground() {
+        // Rule: ?a # Matched :- ?a p ?x , ?x = ?y , ?y = <target>
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/s"),
+            pred: iri("http://ex/p"),
+            val: iri("http://ex/target"),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("a"), class: iri("http://ex/Matched") }],
+            vec![
+                Atom::Frame { obj: var("a"), pred: iri("http://ex/p"), val: var("x") },
+                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Equal { left: var("y"), right: iri("http://ex/target") },
+            ],
+        ));
+        doc.validate().expect("chained equalities resolve; valid");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            has(&dict, &closure, "http://ex/s", RDF_TYPE, "http://ex/Matched"),
+            "s p target -> Matched (chained ?x=?y, ?y=target both become target)"
+        );
+    }
+
+    /// A substitution can CREATE a ground identity: `?x = <a> , ?y = <a> , ?x = ?y`
+    /// makes the last atom reduce to `<a> = <a>`, eliminated (re-run to fixpoint).
+    #[test]
+    fn body_equal_subst_creates_ground_identity() {
+        // Rule: ?z # C :- ?z p ?x , ?x = <a> , ?y = <a> , ?x = ?y
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("http://ex/s"),
+            pred: iri("http://ex/p"),
+            val: iri("http://ex/a"),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("z"), class: iri("http://ex/C") }],
+            vec![
+                Atom::Frame { obj: var("z"), pred: iri("http://ex/p"), val: var("x") },
+                Atom::Equal { left: var("x"), right: iri("http://ex/a") },
+                Atom::Equal { left: var("y"), right: iri("http://ex/a") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        doc.validate().expect("substitution-created ground identity eliminated; valid");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            has(&dict, &closure, "http://ex/s", RDF_TYPE, "http://ex/C"),
+            "s p a -> C (x=a, y=a make x=y collapse to a=a, eliminated)"
+        );
+    }
+
+    /// A substitution can CREATE a distinct-ground equality: `?x = <a> , ?y = <b> ,
+    /// ?x = ?y` makes the last atom reduce to `<a> = <b>` -> fail-closed
+    /// `DistinctGroundEqual` (pending sq-v5evr), re-derived after substitution.
+    #[test]
+    fn body_equal_subst_creates_distinct_ground_fail_closed() {
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![
+                Atom::Equal { left: var("x"), right: iri("http://ex/a") },
+                Atom::Equal { left: var("y"), right: iri("http://ex/b") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        assert!(
+            matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
+            "substitution-created distinct ground (a=b) must fail closed"
+        );
+        let mut dict = Dict::new();
+        assert!(
+            d.closure(&mut dict).is_err(),
+            "closure refuses a substitution-created distinct-ground equality"
+        );
+    }
+
+    /// Occurs-check: `?x = (?x)` (a variable equal to a list containing itself) is
+    /// cyclic and is rejected fail-closed rather than looped.
+    #[test]
+    fn body_equal_occurs_check_fails_closed() {
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![Atom::Equal { left: var("x"), right: Term::List(vec![var("x")]) }],
+        ));
+        assert!(d.validate().is_err(), "cyclic ?x = (?x) must fail closed (occurs-check)");
+    }
+
     #[test]
     fn rif_error_displays() {
         let e = RifError::UnboundHeadVar { var: "y".to_string() };
@@ -1078,6 +1722,20 @@ mod tests {
         assert!(e.to_string().contains("body-only"));
         let e = RifError::UnboundBuiltinInput { var: "n".to_string() };
         assert!(e.to_string().contains("range-restricted"));
+        // [SONNET-4.6] sq-pbz04.5.4 — new error variants
+        let e = RifError::EqualInConclusion;
+        assert!(
+            e.to_string().contains("conclusion"),
+            "EqualInConclusion display mentions conclusion"
+        );
+        let e = RifError::DistinctGroundEqual {
+            left: "1^^integer".into(),
+            right: "1.0^^decimal".into(),
+        };
+        assert!(
+            e.to_string().contains("sq-v5evr"),
+            "DistinctGroundEqual display references the deferral bead"
+        );
     }
 
     #[test]

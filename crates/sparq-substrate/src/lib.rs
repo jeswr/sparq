@@ -32,6 +32,14 @@
 // so a wholesale `Value` relocation would be non-neutral and sprawling — the correct seam moves
 // the ALGORITHM, leaving `Value` engine-resident; see the deferred-remainder note in the PR).
 //
+// sq-v5evr (un-parked, [OPUS-4.8]): the VALUE-SPACE RELATIONAL COMPARE — the XPath
+// `op:numeric-less-than`/`op:numeric-equal` semantics, where NaN is incomparable (`None`)
+// and same-tier pairs compare exactly via the `Dec` tower — has been added to the `numeric`
+// module as `Num::cmp_relational`. This is the correct comparison for SPARQL `<`/`>`/`=`
+// FILTER expressions, D-entailment value-space equality, and RIF `pred:numeric-equal` /
+// `pred:numeric-less-than` builtins. The reasoner's `compare` module now delegates its
+// `num_compare` helper to this shared function instead of duplicating the logic.
+//
 // All moves are behaviour-neutral (the W3C SPARQL conformance floor + the join/scan/BGP/sort
 // micro-benches are bit-identical / within noise).
 //

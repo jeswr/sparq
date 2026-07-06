@@ -1,0 +1,5 @@
+# [OPUS-4.8] sq-i6du2.7 — the standalone ac-bench driver's own build/scratch dirs are
+# never committed (mirrors bench/parse/.gitignore + bench/dict/.gitignore). Cargo.lock IS
+# tracked (reproducible --locked builds), like the sibling standalone bench projects.
+data/
+target/

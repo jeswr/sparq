@@ -11,6 +11,21 @@
 //   CR4    ∃r.D ⊑ E ∈ T,  (X,Y) ∈ R(r),  D ∈ S(Y)   ⇒  E ∈ S(X)
 //   CR5    (X,Y) ∈ R(r),  ⊥ ∈ S(Y)         ⇒  ⊥ ∈ S(X)
 //   CR6    {a} ∈ S(X) ∩ S(Y),  X ⇝_R Y     ⇒  S(X) := S(X) ∪ S(Y)
+//   CRs1   ∃r.Self ∈ S(X)                  ⇒  (X,X) ∈ R(r)                       [sq-pbz04.2.6]
+//   CRs2   (X,X) ∈ R(r),  ∃r.Self ⊑ D ∈ T  ⇒  D ∈ S(X)   (self-concept atom + CR1; see below)
+//
+// [OPUS-4.8] sq-pbz04.2.6 — the two EL++ self-restriction (`owl:hasSelf` / `ObjectHasSelf`)
+// completion rules. `∃r.Self` (the LOCAL reflexivity concept `{x | (x,x) ∈ r}`) is extracted as
+// a distinguished basic concept atom (`Names::self_concept`), so `X ⊑ ∃r.Self` and `∃r.Self ⊑ D`
+// reduce to ordinary `Normal::Sub` axioms and CR1/CR2/CR4 propagate `∃r.Self` memberships for
+// free. CRs1 is the ONE genuinely new rule (implemented in the worklist below): when the atom
+// `∃r.Self` lands in S(X) — i.e. `X ⊑ ∃r.Self` — it adds the reflexive link `(X,X) ∈ R(r)` (which
+// then feeds CR4/CR5). CRs2 is realised BY CR1: `∃r.Self ⊑ D` is the axiom `Sub(self_r, D)`, so
+// `∃r.Self ∈ S(X)` fires `D ∈ S(X)` directly. SOUNDNESS side-condition (load-bearing): CRs2's
+// premise `(X,X) ∈ R(r)` is tracked as the self-concept membership `∃r.Self ∈ S(X)`, NOT the raw
+// R-link — a general self-link from CR3 (`X ⊑ ∃r.X`, whose invariant is only `X ⊑ ∃r.X`, NOT
+// `X ⊑ ∃r.Self`) must NEVER trigger CRs2. CRs1 IS sound to add to the ordinary link set because
+// `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the self-successor is X itself), so the R-invariant holds.
 //
 // CR4 is the load-bearing existential-traversal rule that OWL 2 RL lacks (spike §1.2): it is
 // the only rule that reasons THROUGH an r-successor, and it is why running `--reason owl` over
@@ -171,6 +186,9 @@ fn saturate_inner(
 ) -> Saturation {
     let ix = AxiomIndex::build(axioms);
     let n = names.concept_count();
+    // [OPUS-4.8] sq-pbz04.2.6: O(1) fast-path guard — on a hasSelf-free ontology CRs1 is skipped
+    // entirely, so classification is byte-identical (behaviour AND cost) to the pre-CR-Self path.
+    let has_self = names.has_self_restrictions();
     let mut sat = Saturation {
         s: vec![FxHashSet::default(); n],
         r_pred: FxHashMap::default(),
@@ -213,6 +231,21 @@ fn saturate_inner(
                     add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
                     #[cfg(not(feature = "rbox"))]
                     add_link(&mut sat, r, x, f, &ix, &mut queue);
+                }
+            }
+            // CRs1 (sq-pbz04.2.6): the self-restriction concept `∃r.Self` just entered S(X) —
+            // i.e. `X ⊑ ∃r.Self` — so add the reflexive link `(X,X) ∈ R(r)`. `add_link` fires
+            // CR4/CR5 for it, and under `rbox` `add_link_rbox` closes it under role
+            // inclusion/composition. SOUND: `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the r-successor is X
+            // itself), so `(X,X) ∈ R(r)` respects the `(C,D) ∈ R(r) ⟹ T ⊨ C ⊑ ∃r.D` invariant.
+            // CRs2 needs NO code here: `∃r.Self ⊑ D` is the axiom `Sub(self_r, D)`, so the `D ∈
+            // S(X)` conclusion already fired via CR1 above when `∃r.Self` entered S(X).
+            if has_self {
+                if let Some(r) = names.self_role(d) {
+                    #[cfg(feature = "rbox")]
+                    add_link_rbox(&mut sat, r, x, x, &ix, role_box, &mut queue);
+                    #[cfg(not(feature = "rbox"))]
+                    add_link(&mut sat, r, x, x, &ix, &mut queue);
                 }
             }
             // CR4 / CR5 with the new membership `D ∈ S(X)` as the trigger, where X is the
