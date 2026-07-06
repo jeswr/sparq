@@ -498,7 +498,31 @@ pub fn compile_wac(row: &IntentRow) -> CompiledPolicy {
 /// Compile one [`IntentRow`] to ACP triples (`acp:Policy` + matcher shape).
 ///
 /// # ACP semantics
-/// - `Scope::Subtree` → `acp:memberAccessControl` placement.
+///
+/// The output triples are intended for placement in the per-resource ACR document
+/// (`<resource.acr>` named graph). The engine's loader synthesizes
+/// `<resource> solidx:ownAcr <resource.acr>` by naming convention, so the ACR triples
+/// must follow the chain the engine's N3 rules (`rules/acp-a.n3`) consume:
+///
+/// ```text
+/// <resource.acr> acp:accessControl  <resource.acr#c>        # or memberAccessControl
+/// <resource.acr#c> acp:apply        <resource#acp-policy>
+/// <resource#acp-policy> acp:allow   acl:Read                 # note: acl:, NOT acp:
+/// <resource#acp-policy> acp:anyOf   <resource#acp-matcher>
+/// <resource#acp-matcher> acp:agent  <principal>
+/// ```
+///
+/// **Mode IRIs** — the engine (rules/acp-c.n3) maps modes via
+/// `acl:Read solidx:allowPred auth:read`, so modes MUST be in the `acl:` namespace
+/// (`http://www.w3.org/ns/auth/acl#Read`, not `acp:Read`).
+///
+/// **Access-control chain** — the loader finds `.acr`-suffixed graphs and derives
+/// `<R> solidx:ownAcr <R.acr>`. The rule then expects
+/// `?acr acp:accessControl ?c . ?c acp:apply ?pol` (own) or
+/// `?acr acp:memberAccessControl ?c . ?c acp:apply ?pol` (inherited; [`Scope::Subtree`]).
+///
+/// Other semantics:
+/// - `Scope::Subtree` → `acp:memberAccessControl` on the ACR document.
 /// - `Audience::AllExcept` → `acp:deny`-shaped policy.
 /// - `Audience::Group(g)` → per-member `acp:agent` matchers (blowup). The group IRI
 ///   is used as a placeholder; full expansion requires the group-closure table from
@@ -510,7 +534,10 @@ pub fn compile_wac(row: &IntentRow) -> CompiledPolicy {
 /// # Invariants
 /// - Output is deterministic given the same `row` and `group_members` slice.
 /// - No dependency on any sparq crate.
+/// - The oracle and the live driver both call this function, so alignment here
+///   makes the ACP oracle and engine agree on the authorization shape. [SONNET-4.6]
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compile_acp(row: &IntentRow, group_members: &[String]) -> CompiledPolicy {
     if row.condition != Condition::None {
         return CompiledPolicy {
@@ -520,42 +547,95 @@ pub fn compile_acp(row: &IntentRow, group_members: &[String]) -> CompiledPolicy 
         };
     }
 
-    let policy_id = format!("<{}#acp-policy>", row.resource_uri);
-    let resource = format!("<{}>", row.resource_uri);
+    // The ACR document IRI is <resource.acr>; the engine's loader derives
+    // `<resource> solidx:ownAcr <resource.acr>` from this naming convention.
+    //
+    // Policy and matcher IDs are distinguished by an FNV-1a hash of the intent's
+    // (audience key, scope, effect) so that multiple compile_acp calls for the SAME
+    // resource URI (one per intent row) produce DISTINCT IRIs — otherwise all matchers
+    // would accumulate on a single shared policy node, causing over-grant.
+    // FNV-1a is simple, dependency-free, and deterministic across platforms. [SONNET-4.6]
+    let aud_key = match &row.audience {
+        Audience::Public => "pub".to_string(),
+        Audience::Authenticated => "auth".to_string(),
+        Audience::Owner => "own".to_string(),
+        Audience::Agent(a) => format!("ag:{a}"),
+        Audience::Group(g) => format!("gr:{g}"),
+        Audience::ClientRestricted { agent, client } => format!("cl:{agent}:{client}"),
+        Audience::AllExcept(excl) => format!("ex:{}", excl.join(",")),
+    };
+    let scope_byte: u8 = match row.scope { Scope::Resource => b'r', Scope::Subtree => b's' };
+    let effect_byte: u8 = match row.effect { Effect::Allow => b'a', Effect::Deny => b'd' };
+
+    // FNV-1a 32-bit: offset-basis 2166136261, prime 16777619.
+    let mut h: u32 = 2_166_136_261u32;
+    for &b in aud_key.as_bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(16_777_619u32);
+    }
+    h ^= u32::from(scope_byte);
+    h = h.wrapping_mul(16_777_619u32);
+    h ^= u32::from(effect_byte);
+    h = h.wrapping_mul(16_777_619u32);
+    let frag = format!("acp-{h:08x}");
+
+    let acr_iri = format!("{}.acr", row.resource_uri);
+    let policy_id = format!("<{}#{frag}-pol>", row.resource_uri);
+    let acr = format!("<{acr_iri}>");
+    let ac_node = format!("<{acr_iri}#{frag}-c>");
+    let matcher_id = format!("<{}#{frag}-m>", row.resource_uri);
     let mut triples: Vec<String> = Vec::new();
     let mut expressibility = Expressibility::Native;
 
-    // rdf:type acp:Policy
+    // rdf:type acp:Policy — first triple so derive_acl_graph can extract the base IRI.
     triples.push(format!(
         "{policy_id} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/solid/acp#Policy> ."
     ));
 
-    // acp:allow or acp:deny predicate
+    // acp:allow or acp:deny predicate.
     let effect_pred = match row.effect {
         Effect::Allow => "<http://www.w3.org/ns/solid/acp#allow>",
         Effect::Deny => "<http://www.w3.org/ns/solid/acp#deny>",
     };
 
-    // access modes
+    // Access modes — MUST use the acl: namespace (http://www.w3.org/ns/auth/acl#).
+    // The engine's acp-c.n3 maps modes as `acl:Read solidx:allowPred auth:read`; using
+    // `acp:Read` (a different IRI) causes the mode mapping to silently miss and the
+    // policy never fires. [SONNET-4.6] sq-kvvcl defect-1 fix.
     if row.mode.read {
-        triples.push(format!("{policy_id} {effect_pred} <http://www.w3.org/ns/solid/acp#Read> ."));
+        triples.push(format!(
+            "{policy_id} {effect_pred} <http://www.w3.org/ns/auth/acl#Read> ."
+        ));
     }
     if row.mode.write {
-        triples.push(format!("{policy_id} {effect_pred} <http://www.w3.org/ns/solid/acp#Write> ."));
+        triples.push(format!(
+            "{policy_id} {effect_pred} <http://www.w3.org/ns/auth/acl#Write> ."
+        ));
     }
     if row.mode.control {
-        triples.push(format!("{policy_id} {effect_pred} <http://www.w3.org/ns/solid/acp#Control> ."));
+        triples.push(format!(
+            "{policy_id} {effect_pred} <http://www.w3.org/ns/auth/acl#Control> ."
+        ));
     }
 
-    // access-control placement
-    let ac_pred = match row.scope {
+    // Access-control chain on the ACR document.
+    // The engine rule (acp-a.n3 line 29) is:
+    //   { ?r solidx:ownAcr ?acr . ?acr acp:accessControl ?c . ?c acp:apply ?pol . }
+    //   => { ?pol solidx:appliesToResource ?r . }
+    // So we need <acr> acp:accessControl|memberAccessControl <acr#c> and
+    //            <acr#c> acp:apply <policy>  — NOT <resource> acp:accessControl <policy>.
+    // [SONNET-4.6] sq-kvvcl defect-1 fix.
+    let ac_link_pred = match row.scope {
         Scope::Resource => "<http://www.w3.org/ns/solid/acp#accessControl>",
         Scope::Subtree => "<http://www.w3.org/ns/solid/acp#memberAccessControl>",
     };
-    triples.push(format!("{resource} {ac_pred} {policy_id} ."));
+    triples.push(format!("{acr} {ac_link_pred} {ac_node} ."));
+    triples.push(format!(
+        "{ac_node} <http://www.w3.org/ns/solid/acp#apply> {policy_id} ."
+    ));
 
-    // matcher
-    let matcher_id = format!("<{}#acp-matcher>", row.resource_uri);
+    // Matcher — anyOf is sufficient (at least one matcher accepts → satisfied).
+    // `matcher_id` is already defined above with the unique frag slug.
     triples.push(format!(
         "{matcher_id} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/solid/acp#Matcher> ."
     ));
