@@ -135,7 +135,7 @@ QA bar for the whole site.
 
 ## 2. Site IA / sitemap
 
-Root site at `https://jeswr.github.io/sparq/`. Sidebar nav grouped by the surface taxonomy
+Root site at `https://sparq.jeswr.org/`. Sidebar nav grouped by the surface taxonomy
 (`skills/SKILL.md` is the canonical taxonomy source). Each group is a sidebar section; each
 surface is a page; the three flagships are top-billed "Showcase" pages.
 
@@ -376,10 +376,10 @@ bundle), explicitly **not** a prerequisite.
 
 - **Build:** Next.js 15.5 / React 19 / Tailwind v4 / shadcn (`radix-nova`) / `next-themes`,
   matching §1, **statically exported** (`output: 'export'`) to `out/`.
-- **Pages base path:** the repo's Pages site is served at **`https://jeswr.github.io/sparq/`**
+- **Pages base path:** the repo's Pages site is served at **`https://sparq.jeswr.org/`**
   (project page, not a user page), so set **`basePath: '/sparq'`** + matching `assetPrefix` and
   load all wasm/bb.js assets through the base path. (Confirmed: `gh api repos/jeswr/sparq/pages`
-  → `html_url: https://jeswr.github.io/sparq/`.)
+  → `html_url: https://sparq.jeswr.org/`.)
 - **Co-hosting with `/dev/bench`:** today Pages is served from the **`benchmark-data` branch**
   at `/` (`build_type: legacy`), whose tree is `index.html` + `dev/` — i.e. the benchmark
   dashboard lives at **`/sparq/dev/`**. The showcase becomes the **new root site**; we must

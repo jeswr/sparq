@@ -132,6 +132,21 @@ records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-pntvh.1 (epic sq-pntvh) — M4 Phase 1 vectorized FILTER/aggregate baseline.
+[[benchmark]]
+id          = "vectorized-eval-micro"
+name        = "Vectorized (M4) FILTER + aggregate micro-baseline over a synthetic column"
+category    = "query"
+measures    = "min-of-iters microseconds (metric_us lines) for the row-per-element FILTER vs the columnar select_numeric kernel (+ gather), and the row SUM/COUNT/MIN/MAX reductions, over an n-row integer column — the PERF BASELINE later M4 phases (decode primitive, columnar residual-FILTER/reducer-aggregate seams) measure their speedup against"
+invoke      = "cargo build -p sparq-engine --release --example bench_vectorized --features vectorized 2>&1 | tail -3 && ./target/release/examples/bench_vectorized 200000 7   # BUILD-then-run the prebuilt example binary (NOT `cargo run`) so the metric_us lines survive the EC2 serial-console ~64KB buffer bench/ec2-bench.sh caps to; required-features gate the example behind `vectorized`; args = [n_rows=200000] [iters=7]; self-contained synthetic in-process corpus"
+source      = "crates/sparq-engine/examples/bench_vectorized.rs; kernels crates/sparq-engine/src/chunk.rs (DataChunk::select_numeric/apply_selection); design research/vector-at-a-time-m4.md (§5.1, §6 Phase 1)"
+dataset     = "SYNTHETIC, generated in-process (no external data): n `(ex:s{i}, ex:age, i)` integer-literal triples; the object id column is the batch; args = [n_rows] [iters]"
+quiet_box_sensitive = true  # wall-clock micro-latency; trend-only, NOT in the deterministic perf-gate. Phase-1 row vs columnar-kernel are expected CLOSE (the kernel is a scaffold that re-gathers numeric_value per element — no SIMD win until the Phase 2 decode primitive)
+pinning     = "n_rows + iters (pin both for comparable numbers); corpus is deterministic (i in 0..n). No baked-in number — work-box timings are non-canonical (run on a quiet host)"
+records_to  = "stdout (metric_us lines)"
+featured    = false  # in-crate micro-bench for an opt-in capability; a relative baseline, not a dashboard series
+status      = "ok"
+
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
 [[benchmark]]
 id          = "sp2b"
@@ -278,6 +293,30 @@ quiet_box_sensitive = true  # classify wall-clock trend-only, NOT in scripts/per
 pinning     = "the in-process generator is a deterministic pure function of DEPTH (no RNG, byte-identical); the closed-form closure sizes (chain DEPTH·(DEPTH+1)/2; cr4 DEPTH+1) are asserted in-example, each VERIFIED by running (depth 5 -> 15/6; depth 2000 -> 2001000/2001), not guessed"
 records_to  = "stdout (trend-only wall time + the asserted closure sizes); structural assertions live in the example itself (classify_bench.rs)"
 featured    = false  # [OPUS-4.8] sq-evb1: capability micro-bench (MVP EL classifier), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
+status      = "ok"
+
+# [OPUS-4.8] sq-t5bne: QL-rewrite micro-bench for the opt-in (EXPERIMENTAL) sparq-reason-ql crate.
+# The QL-fragment analogue of reason-el-classify: where EL gates the consequence-based classifier,
+# this gates the PerfectRef DL-Lite_R query REWRITER. Two closed-form workloads over the SAME
+# public `rewrite` API — a DEPTH-deep rdfs:subClassOf chain and a DEPTH-deep rdfs:subPropertyOf
+# chain — each asserting the UCQ has EXACTLY DEPTH+1 disjuncts. That closed form proves the
+# rewrite/reduce saturation scales LINEARLY in the TBox size (no hidden UCQ blow-up, fixpoint
+# dedup working); a duplicate-disjunct or non-terminating-rewrite regression over-counts and
+# fails LOUDLY. SELF-ASSERTING + deterministic (the TBox+query are a pure function of DEPTH),
+# so wall-clock is trend-only. EXPERIMENTAL regime: the rewriter is oracle-tested, not graduated
+# to a conformance floor; the bench engages the off-by-default `experimental` feature.
+[[benchmark]]
+id          = "reason-ql-rewrite"
+name        = "sparq-reason-ql — OWL 2 QL PerfectRef query rewriting (subClassOf + subPropertyOf chains)"
+category    = "inference"
+measures    = "PerfectRef rewrite wall time over a DEPTH-parameterised in-process DL-Lite_R TBox, for two workloads: `subclass` (a DEPTH-deep rdfs:subClassOf chain `C0 ⊑ … ⊑ C_DEPTH` with query `?x rdf:type C_DEPTH`) and `subproperty` (a DEPTH-deep rdfs:subPropertyOf chain `P0 ⊑ … ⊑ P_DEPTH` with query `?x P_DEPTH ?y`). Each has the CLOSED-FORM UCQ size `report.disjuncts = DEPTH + 1` (the original CQ + one backward rewrite per ancestor). The example carries a SELF-ASSERTING gate: both closed forms are asserted in-process (deterministic), so a UCQ blow-up / dedup / non-termination regression — incl. a silent over-count — fails LOUDLY. The exact-linear UCQ size is the proof there is no hidden combinatorial blow-up in the rewrite/reduce fixpoint"
+invoke      = "cargo run -p sparq-reason-ql --example ql_rewrite_bench --release --features experimental [DEPTH]   # DEPTH defaults to 2000; self-contained, no dataset to fetch; requires the off-by-default `experimental` feature (the gated rewriter)"
+source      = "crates/sparq-reason-ql/examples/ql_rewrite_bench.rs (the runner + in-process TBox/query generator); crates/sparq-reason-ql/src/{lib.rs,cq.rs,dllite.rs,emit.rs,perfectref.rs} (the rewritten surface — `rewrite`, the CQ-shape gate, DL-Lite_R extraction, PerfectRef rewrite/reduce saturation, UCQ emission)"
+dataset     = "in-process: a DEPTH-deep rdfs:subClassOf chain (subclass workload) and a DEPTH-deep rdfs:subPropertyOf chain (subproperty workload), each a pure function of DEPTH (no RNG/network/toolchain, byte-deterministic). DEPTH=2000 default: each UCQ has 2001 disjuncts — sub-second total. gitignored+regenerable (nothing written to disk)"
+quiet_box_sensitive = true  # rewrite wall-clock trend-only, NOT in scripts/perf-gate.py; the closed-form UCQ-size assertions (DEPTH+1 disjuncts per workload) ARE a hard correctness gate (deterministic, load-robust; catches rewriter regressions incl. a silent UCQ blow-up / duplicate-disjunct over-count a single rewrite would miss)
+pinning     = "the in-process generator is a deterministic pure function of DEPTH (no RNG, byte-identical); the closed-form UCQ size (DEPTH+1 disjuncts per chain) is asserted in-example, VERIFIED by running (depth 5 -> 6/6; depth 2000 -> 2001/2001), not guessed"
+records_to  = "stdout (trend-only wall time + the asserted disjunct counts); structural assertions live in the example itself (ql_rewrite_bench.rs)"
+featured    = false  # [OPUS-4.8] sq-t5bne: EXPERIMENTAL capability micro-bench (oracle-tested QL rewriter), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
 status      = "ok"
 
 [[benchmark]]
@@ -570,6 +609,29 @@ records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.
 # [OPUS-4.8] sq-5o5.2: trend-only Solid WAC/ACP auth-view coverage, not a head-to-head competitor
 # card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion (esp. as a Solid
 # differentiator) deferred to a maintainer.
+featured    = false
+status      = "ok"
+
+# [OPUS-4.8] sq-i6du2.7 (epic sq-i6du2, #1613) — the access-controlled-query benchmark
+# harness. The standalone `ac-bench` driver (bench/ac, its own [workspace] like bench/parse
+# + bench/dict) runs the sparq-acbench (#1627) by-construction WAC/ACP/ODRL oracle over the
+# present use-case generators. Links NO engine crate: the oracle is structurally independent
+# of the system under test, so this suite is CORRECTNESS (a fail-closed pass/fail), not perf.
+[[benchmark]]
+id          = "ac-oracle"
+name        = "Access-controlled-query benchmark oracle (WAC/ACP/ODRL, sparq-acbench)"
+category    = "inference"
+measures    = "W1 decision / W2 result-set / W3 ACL-write-churn agreement between each generator's by-construction expected output and the shared procedural oracle (fail-closed pass/fail per lane); NOT a perf claim — the driver's indicative per-lane wall-clock is advisory + non-canonical"
+invoke      = "bench/ac/run.sh --smoke   # per-commit smoke tier; bench/ac/run.sh --sf N for a nightly tier"
+source      = "bench/ac/{run.sh,Cargo.toml,Cargo.lock,src/main.rs}; crates/sparq-acbench (generators + workload/oracle engine)"
+dataset     = "parameterised, seeded, deterministic in-crate generators (personal/project_mgmt/consortium; financial=U3 pending sq-i6du2.4, Skipped-with-reason). No external corpus, no network"
+quiet_box_sensitive = false  # deterministic oracle pass/fail, load-robust; the wall-clock lines are advisory-only and never committed
+pinning     = "GenParams::smoke() (fixed seed 42) for --smoke; --sf N is deterministic. No wall-clock affects the pass/fail verdict"
+records_to  = "stdout (per-suite TSV table + pass/fail/skip summary); exit non-zero on any oracle mismatch. No number committed to markdown"
+# [OPUS-4.8] sq-i6du2.7: internal fail-closed oracle harness for the opt-in AC-query benchmark
+# program, not a head-to-head competitor card — featured = false is a dashboard DISPOSITION (no
+# perf claim). The W2-live query_as + W4 query concurrency sub-lanes are the engine-linked driver
+# sq-kvvcl (Skipped-with-reason here). Dashboard promotion, if ever, deferred to a maintainer.
 featured    = false
 status      = "ok"
 
@@ -1047,6 +1109,29 @@ pinning     = "in-example op counts fixed; the cheap usize snapshot isolates the
 records_to  = "stdout (ns/op per primitive)"
 status      = "ok"
 
+# [OPUS-4.8] sq-7d3dj.5 (epic sq-7d3dj, roadmap item 5) — CANONICAL loopback HTTP
+# throughput harness for sparq-server: the PREREQUISITE that unblocks the HTTP opt
+# lane (sq-7d3dj.10/.12/.13). Stands up the REAL in-process server
+# (sparq_server::serve + router + AppState) on an ephemeral 127.0.0.1:0 loopback port
+# over a small fixed corpus and drives concurrent SELECT/ASK with a dependency-free
+# keep-alive client. HONESTY: req/s + latency are wall-clock sensitive → NON-CANONICAL
+# on a shared box; canonical numbers come from a quiet EC2 runner. Deliberately NOT
+# wired into scripts/ci-bench.sh / scripts/perf-gate.py — req/s is a trend/EC2 metric,
+# never a gated ratchet. `serve` family = non-capability → no dashboard card required.
+[[benchmark]]
+id          = "serve-throughput"
+name        = "sparq-server loopback HTTP throughput (req/s, p50/p99, peak RSS)"
+category    = "serve"
+measures    = "closed-loop req/s + p50/p99 latency (ms) for a small SELECT + an ASK at concurrency 1/8/32 (server default max_concurrent=32), plus process VmHWM peak RSS while serving one large full-scan SELECT (whole-result materialisation cost)"
+invoke      = "scripts/serve-throughput-bench.sh [--smoke] [--json PATH] [-- --triples N --conns 1,8,32 --duration S]\n              cargo run --release --bin serve_throughput   # in bench/serve-throughput"
+source      = "bench/serve-throughput/src/main.rs; scripts/serve-throughput-bench.sh"
+dataset     = "synthetic in-harness corpus generated by build_corpus (--triples target; 4 deterministic triples per subject: rdf:type, foaf:name, ex:age, ex:knows); NON-CANONICAL wall-clock"
+quiet_box_sensitive = true
+featured    = false  # `serve` non-capability family (measurement infra); trend/EC2 metric, not a dashboard head-to-head card
+pinning     = "corpus deterministic (fixed subject enumeration); pin --triples/--conns/--duration for comparable numbers; canonical numbers ONLY from a quiet EC2 runner"
+records_to  = "stdout (NON-CANONICAL summary table); optional --json document (dependency-free); NOT committed, NOT in the perf-gate"
+status      = "ok"
+
 # [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-mpc in-process counting-tier
 # bench matrix. Closes the bench-missing drift item for sparq-mpc by registering
 # the EXISTING example harness (it pre-dated the registry). HONESTY: this is the
@@ -1108,6 +1193,51 @@ status      = "ok"
 # "no competitor card", it does NOT relax that regression gate. The proposed wasm
 # query micro-bench (sq-5pnl, a NEW wasm_query_us metric) is a SEPARATE concern.
 featured    = false
+
+# [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-substrate in-crate criterion
+# micro-bench for the four join kernels and the Num arithmetic tower. Closes
+# the bench-missing drift item for sparq-substrate (GitHub #1649). The bench
+# already existed in crates/sparq-substrate/benches/substrate.rs (sq-qonbz.4);
+# this entry registers it in the catalog so the drift-scanner goes quiet.
+# HONESTY: criterion wall-clock timings are NON-CANONICAL on a shared box; the
+# bench is trend-only. `featured = false` is the documented escape hatch for
+# in-crate micro-benches that are NOT head-to-head dashboard cards.
+[[benchmark]]
+id          = "substrate-join-numeric"
+name        = "sparq-substrate join kernels + Num arithmetic micro-bench"
+category    = "query"
+measures    = "criterion min-of-N wall-clock latency (ns/iter) for merge_join, hash build, hash probe-serial over rows of 100/1k/10k elements, and Num::binop (int_add, dec_mul, double_add) over 1k value pairs; all at throughput = Elements(n)"
+invoke      = "cargo bench -p sparq-substrate --features join,numeric"
+source      = "crates/sparq-substrate/benches/substrate.rs"
+dataset     = "synthetic in-bench (deterministic Row::new() enumeration, no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "row counts {100, 1000, 10000} and value counts (1000) are fixed in the bench source; corpus is deterministic; pin these for comparable Criterion baselines"
+records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
+status      = "ok"
+
+# [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-fedplan in-crate criterion
+# micro-bench for select_sources + plan_bgp. Closes the bench-missing drift
+# item for sparq-fedplan (GitHub #1648). The bench already existed in
+# crates/sparq-fedplan/benches/fedplan.rs (sq-my8wd.3); this entry registers
+# it in the catalog so the drift-scanner goes quiet.
+# HONESTY: fedplan is a planning crate whose execution cost is dominated by the
+# engine at runtime; the in-crate bench measures the planner's own overhead in
+# isolation over a synthetic 3-source/3-pattern BGP. `featured = false` is the
+# documented escape hatch for in-crate micro-benches.
+[[benchmark]]
+id          = "fedplan-source-selection"
+name        = "sparq-fedplan source selection + join planning micro-bench"
+category    = "query"
+measures    = "criterion min-of-N wall-clock latency (ns/iter) for select_sources and plan_bgp over a 3-predicate chain BGP at n_sources in {1, 3, 10}; isolates the planner overhead from engine execution cost"
+invoke      = "cargo bench -p sparq-fedplan --features fedplan"
+source      = "crates/sparq-fedplan/benches/fedplan.rs"
+dataset     = "synthetic in-bench (SourceDescriptor::builder with 5 predicates x 10 000 triples/pred; chain BGP with distinct predicate IRIs; no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "n_sources {1, 3, 10} and descriptor shape are fixed in the bench source; corpus is deterministic; pin these for comparable Criterion baselines"
+records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
+status      = "ok"
 
 # =============================================================================
 # CONFORMANCE — correctness against official W3C suites (NOT perf)

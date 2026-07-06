@@ -27,7 +27,13 @@ name: fuzz
 on:
   push:
     branches: [main]
+  # [OPUS-4.8] sq-fmx4u.6: react to labeled/unlabeled too so toggling the `ci-full`
+  # label re-evaluates the change-based selection for the fuzz lane (ci-select.yml
+  # maps the label to `--full`, which forces the fuzz smoke to run). The default
+  # types (opened/synchronize/reopened) are listed explicitly so adding the label
+  # events does NOT drop `synchronize` (the push-to-PR trigger).
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # [OPUS-4.8] Merge queue: fuzz surfaces a check on PRs, so it must also run on the
   # queue's merge_group ref or the required ci-summary would wait for a sibling that
   # never appears there. The budget step below maps merge_group to the fast SMOKE
@@ -62,8 +68,45 @@ env:
   FUZZ_BUILD_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
+  # [OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): the change-based test-selection
+  # pre-job (the reusable .github/workflows/ci-select.yml — doctrine there). The
+  # `fuzz` job below guards on its affected-crate closure so a PR that touches
+  # neither the fuzzed crates NOR their reverse-dependency closure skips the
+  # (nightly-toolchain + 5-target sanitizer) build entirely. UNCONDITIONAL (no
+  # needs/if): the ci-summary gate REQUIRES every "change-based test selection"
+  # check-run to conclude success before any skipped sibling counts as satisfied,
+  # so this job must exist + be green on every trigger (design §5.3). Fail-closed:
+  # ci_select.py returns mode=full for every §4.1 trigger (shared crate / build
+  # file / .github/** / Cargo.lock / selector-self change) and for ANY internal
+  # error, and an empty/missing output satisfies the guard's `mode != 'selected'`
+  # first disjunct => the fuzz lane RUNS. On schedule (the nightly heavy soak) the
+  # event carries no PR diff => mode=full => the fuzz lane runs — the full-matrix
+  # backstop (design §6.1) is preserved.
+  select:
+    name: select
+    uses: ./.github/workflows/ci-select.yml
+    permissions:
+      contents: read
+
   fuzz:
     name: cargo-fuzz (parsers + mmap loader, bounded)
+    # [OPUS-4.8] sq-fmx4u.6: the fuzz crate (fuzz/Cargo.toml) depends on exactly
+    # sparq-core (RDF parsers + mmap loader), sparq-engine (SPARQL parse), and
+    # sparq-shacl (SHACL validation), so the fuzz smoke is affected iff any of
+    # those three is in the affected reverse-dep closure (single source of truth:
+    # `_LANE_SEEDS["fuzz"]` in scripts/ci_select.py, pinned by
+    # scripts/tests/test_ci_select_wiring.py). This is a job-level `if:` on a
+    # NON-matrix job, so `needs.select.outputs` is available (unlike the ci.yml
+    # per-shard case, which must guard in a step). FAIL-CLOSED: the leading
+    # `mode != 'selected'` disjunct means an empty/missing selection output RUNS
+    # the lane; a skipped job reports conclusion `skipped` (= satisfied) to the
+    # ci-summary gate — no per-leg name is individually required (bead sq-fmx4u.4).
+    needs: select
+    if: >-
+      needs.select.outputs.mode != 'selected' ||
+      contains(needs.select.outputs.affected, '"sparq-core"') ||
+      contains(needs.select.outputs.affected, '"sparq-engine"') ||
+      contains(needs.select.outputs.affected, '"sparq-shacl"')
     runs-on: ubuntu-latest
     # Generous ceiling above the worst case (nightly: 4 targets × 600s + build) so a
     # hung target fails with a clear timeout rather than running away.
@@ -104,7 +147,7 @@ jobs:
           # cache on its manifests so it is not shared with the workspace build.
           workspaces: "fuzz"
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-fuzz
       - name: Pick the per-target budget for this trigger

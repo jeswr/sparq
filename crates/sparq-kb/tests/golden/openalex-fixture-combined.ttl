@@ -1,0 +1,84 @@
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+<https://sparq.dev/ns/pkg/agent#literature-extractor> a pkg:MachineAgent ;
+  rdfs:label "literature extraction agent (Phase-5 scaffolding, fixtures)"@en .
+
+<https://doi.org/10.5555/example.rdf-parallel-parse> a pkg:Source ;
+  dcterms:title "Chunk-Parallel Scanning of Line-Delimited RDF" ;
+  pkg:exploredStatus pkg:Explored ;
+  dcterms:issued "2023"^^xsd:gYear .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/finding/1> a pkg:Finding ;
+  rdfs:label "partial (machine-extracted)"@en ;
+  sigimpl:justification "We present a chunk-parallel scanner for N-Triples that splits the input on record boundaries and parses each chunk independently." ;
+  pkg:confidence 0.6000 ;
+  pkg:assurance secx:Conjectured ;
+  prov:wasDerivedFrom <https://doi.org/10.5555/example.rdf-parallel-parse> ;
+  prov:wasGeneratedBy <https://sparq.dev/ns/pkg/agent#literature-extractor/activity/1> ;
+  prov:wasAttributedTo <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime ;
+  cito:citesAsEvidence <https://doi.org/10.5555/example.rdf-parallel-parse> .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/activity/1> a prov:Activity ;
+  prov:used <https://doi.org/10.5555/example.rdf-parallel-parse> ;
+  prov:wasAssociatedWith <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime .
+
+<https://doi.org/10.5555/example.zk-sparql-soundness> a pkg:Source ;
+  dcterms:title "Soundness of Zero-Knowledge Proofs over SPARQL Basic Graph Patterns" ;
+  pkg:exploredStatus pkg:Explored ;
+  dcterms:issued "2025"^^xsd:gYear .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/finding/2> a pkg:Finding ;
+  rdfs:label "partial (machine-extracted)"@en ;
+  sigimpl:justification "a full machine-checked soundness proof is left as future work and the security argument is informal." ;
+  pkg:confidence 0.5000 ;
+  pkg:assurance secx:Conjectured ;
+  prov:wasDerivedFrom <https://doi.org/10.5555/example.zk-sparql-soundness> ;
+  prov:wasGeneratedBy <https://sparq.dev/ns/pkg/agent#literature-extractor/activity/2> ;
+  prov:wasAttributedTo <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime ;
+  cito:citesAsEvidence <https://doi.org/10.5555/example.zk-sparql-soundness> .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/activity/2> a prov:Activity ;
+  prov:used <https://doi.org/10.5555/example.zk-sparql-soundness> ;
+  prov:wasAssociatedWith <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime .
+
+<https://sparq.dev/ns/pkg/agent#literature-extractor/finding/3> a pkg:Finding ;
+  rdfs:label "yes (machine-extracted)"@en ;
+  sigimpl:justification "This paper sketches a zero-knowledge protocol for proving the existence of a BGP match over a committed RDF graph." ;
+  pkg:confidence 0.7000 ;
+  pkg:assurance secx:Conjectured ;
+  prov:wasDerivedFrom <https://doi.org/10.5555/example.zk-sparql-soundness> ;
+  prov:wasGeneratedBy <https://sparq.dev/ns/pkg/agent#literature-extractor/activity/3> ;
+  prov:wasAttributedTo <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime ;
+  cito:citesAsEvidence <https://doi.org/10.5555/example.zk-sparql-soundness> .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/activity/3> a prov:Activity ;
+  prov:used <https://doi.org/10.5555/example.zk-sparql-soundness> ;
+  prov:wasAssociatedWith <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime .
+
+<https://doi.org/10.5555/example.semi-honest-mpc-join> a pkg:Source ;
+  dcterms:title "Semi-Honest Multi-Party Computation for Federated Joins" ;
+  pkg:exploredStatus pkg:Explored ;
+  dcterms:issued "2024"^^xsd:gYear .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/finding/4> a pkg:Finding ;
+  rdfs:label "yes (machine-extracted)"@en ;
+  sigimpl:justification "The protocol is secure in the semi-honest model; malicious security is not addressed." ;
+  pkg:confidence 0.6500 ;
+  pkg:assurance secx:Conjectured ;
+  prov:wasDerivedFrom <https://doi.org/10.5555/example.semi-honest-mpc-join> ;
+  prov:wasGeneratedBy <https://sparq.dev/ns/pkg/agent#literature-extractor/activity/4> ;
+  prov:wasAttributedTo <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime ;
+  cito:citesAsEvidence <https://doi.org/10.5555/example.semi-honest-mpc-join> .
+<https://sparq.dev/ns/pkg/agent#literature-extractor/activity/4> a prov:Activity ;
+  prov:used <https://doi.org/10.5555/example.semi-honest-mpc-join> ;
+  prov:wasAssociatedWith <https://sparq.dev/ns/pkg/agent#literature-extractor> ;
+  prov:generatedAtTime "-4656-05-28T09:28:20.459270Z"^^xsd:dateTime .
+

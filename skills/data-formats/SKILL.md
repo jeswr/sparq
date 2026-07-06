@@ -86,9 +86,23 @@ pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String>
 pub fn load_reader<R: std::io::Read>(reader: R, format: &str) -> Result<Graph, String>
 
 // Streaming + PARALLEL (needs `parallel`): pipelined 32 MiB block parse, never
-// materializes the whole decompressed doc. N-Triples gets the fast path; other
-// formats fall back to serial load_reader.
+// materializes the whole decompressed doc. N-Triples gets this parallel pipelined
+// path; other formats fall back to serial load_reader. (This is the PARALLEL-LOADER
+// fast path — distinct from the byte-level IRI-validation fast path noted below, which
+// is a separate, opt-in mechanism that covers N-Triples AND N-Quads.)
 pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) -> Result<Graph, String>
+
+// [OPUS-4.8] sq-7d3dj.18 — the byte-level N-Triples/N-Quads fast path does NOT validate IRIs
+// against RFC-3987 by default (it trusts input; the serial oxttl path DOES validate). The
+// OPT-IN `iri-fast` feature on `sparq-core` (OFF by default) turns that validation on for the
+// byte parser via a prefix-memoized fast path IN FRONT of `oxiri` — a last-N validated
+// `scheme://authority/` memo + a one-pass ASCII `iunreserved`/sub-delims suffix scan, falling
+// back to the full `oxiri` automaton on any non-ASCII / `%`-escape / `#` / delimiter anomaly.
+// It accepts EXACTLY what `oxiri::Iri::parse` accepts (an absolute IRI) — a MANDATORY
+// differential-fuzz gate (`sparq_core::iri`, run under `--features iri-fast`) asserts
+// `fast_accept ⇒ oxiri` and `validate == oxiri` over a committed adversarial corpus + a
+// deterministic generator, so a malformed IRI can never be wrong-accepted into the store.
+// The `oxiri` dep is already in-tree (via oxttl), so the feature adds zero new compilation.
 
 // Parse WITHOUT building indexes — the seam reasoning/transform hooks use.
 pub fn parse_to_triples(text: &str, format: &str) -> Result<(Dict, Vec<[Id; 3]>), String>
@@ -234,7 +248,10 @@ LIBRARY embedder it is opt-in (the engine library default stays lean): enable wi
 `sparq-engine = { version = "0.1", features = ["serialize-rdf"] }`. The `sparq-cli` and
 `sparq-server` BINARIES pull it into their default build via the default-on `jsonld` feature
 ([OPUS-4.8] sq-oy1f.4), so `dump …` and the server's `application/ld+json` work out of the box.
-The N-Triples writer (`triples_to_ntriples`) is always on.
+The N-Triples writer (`triples_to_ntriples`) is always on. Internally the writer matrix is
+housed in the `sparq-engine-serialize` sub-crate (`publish = false`, [FABLE-5] sq-6vshe.4) and
+re-exported verbatim — the `sparq_engine::serialize::*` paths and feature names above are
+unchanged and remain the supported surface.
 
 ```rust
 use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads,
@@ -363,6 +380,24 @@ original triples in a strict external processor, not only in sparq. (An `@id`/`@
 *input* — i.e. compacting an already-indexed document, as distinct from the fromRdf graph sparq
 produces — remains out of scope and falls back to default framing as noted above.)
 
+*Native document-level pipeline (in progress, opt-in, not yet wired to the surfaces).* The
+scope gaps above (scoped/typed contexts, `@propagate`, `@protected`, remote `@context` +
+`@import`) are being closed by a from-scratch, dependency-free **document-level** pipeline in
+the `sparq-jsonld` crate (design record `research/jsonld-1.1-design.md`, epic sq-oy1f). Its
+Context Processing foundation (sq-oy1f.24) ships today: `sparq_jsonld::context::ActiveContext`
+with `process()` (Context Processing + Create Term Definition, fallible with exact spec error
+codes), `expand_iri()` (IRI Expansion), RFC 3986 reference resolution, and **deny-by-default**
+remote-context loading via `DocumentLoader` (`NoopLoader` refuses every fetch — no ambient
+network — while `FsLoader` serves trusted local fixtures). The document-level **Expansion
+Algorithm** (sq-oy1f.25) ships too: `sparq_jsonld::expand(&input, &opts, &loader)` returns the
+canonical expanded array — Value Expansion, scoped (property/type) contexts,
+`@index`/`@id`/`@type`/`@language`/`@graph` container maps, `@nest`, `@reverse`, `@included`,
+`@json` literals, keyword aliases, and the drop-null + array-normalisation rules — raising the
+exact spec error code on invalid input and threading `frameExpansion`. Compaction / flattening /
+framing on this substrate, the surface wiring, and the conformance-lane switch to the normative
+document-level expand oracle land in later beads; the RDF-first writers above remain the shipped
+emit path until then.
+
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
 let ctx = parse_context_json(r#"{
@@ -376,6 +411,20 @@ let doc = graph_to_jsonld_compact(&g, &ctx); // term defs + @vocab + @type:@id c
 
 Exposed on the wasm `Store` as `serializeCompact(context, pretty, indent?)` (the JSON-LD
 SKILL note) and on the CLI as the `jsonld-compact[-pretty]` `dump` out-format (sq-oy1f.5).
+
+**Document-level JSON-LD 1.1 pipeline — the `sparq-jsonld` crate (epic sq-oy1f, in progress).**
+The RDF-first writers above have a hard conformance ceiling (scoped/typed contexts, `@nest`,
+`@index` maps, negative tests — structures an RDF projection has already erased). The full
+document-level pipeline (Context Processing, Expansion, Flattening, Compaction, Framing,
+from/to-RDF) is being built in the new **opt-in, dependency-free `sparq-jsonld` crate**
+(`crates/sparq-jsonld`, design record `research/jsonld-1.1-design.md`). Phase A (sq-oy1f.23)
+scaffolds it: the writer's `Json` AST moved out of `sparq-engine` into `sparq_jsonld::Json`
+(public API preserved — `sparq_engine::serialize::JsonLdValue` re-exports it, byte-identical
+output), alongside the full `JsonLdErrorCode` registry, `JsonLdOptions`, and a **deny-by-default**
+`DocumentLoader` (the default `NoopLoader` refuses every remote load — no ambient network). The
+crate is `serialize-rdf`-gated on the engine side, so the lean default + wasm builds are unchanged.
+The algorithms land in the follow-on beads (sq-oy1f.24+); until then the writer above is the JSON-LD
+emit path.
 
 **W3C JSON-LD 1.1 Framing (caller frame).** `graph_to_jsonld_framed(&g, &frame)` (or the
 slice-level `write_jsonld_framed(&named_graphs, &frame)`) reshapes the graph into a deterministic
@@ -527,16 +576,18 @@ cargo build -p sparq-cli --features serialize-rdf
   with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
   win materialises is to be confirmed on the canonical perf host (no number is asserted here).
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
-  JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19) drives the official
+  JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19 + sq-oy1f) drives the official
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:
   **toRdf** through the `jsonld` parser (oxjsonld), **fromRdf** through the `serialize-rdf`
-  writer, **compact** through the native Compaction Algorithm (`graph_to_jsonld_compact`), and
-  **frame** through the native Framing Algorithm (`graph_to_jsonld_framed`). toRdf/fromRdf/compact
+  writer, **compact** through the native Compaction Algorithm (`graph_to_jsonld_compact`),
+  **expand** + **flatten** through the shipping writer (`graph_to_jsonld(Expanded|Flattened)`),
+  and **frame** through the native Framing Algorithm (`graph_to_jsonld_framed`). toRdf/fromRdf/compact
   are compared by a re-parse RDF-dataset round-trip against the INPUT (`reparse(out) ≡ in`, the
-  oxjsonld self-reparse oracle); **frame** is compared by re-parse RDF-equivalence against the
-  suite's NORMATIVE expected output (`reparse(frame(D,F)) ≡ reparse(expected)`) — framing is a
-  SELECT+RESHAPE (it prunes/fills/drops), so the oracle anchors on the expected document, not the
-  input. The floors only RISE; they reflect ACTUAL current pass counts, not full conformance — the
+  oxjsonld self-reparse oracle); **expand/flatten/frame** are compared by re-parse RDF-equivalence
+  against the suite's NORMATIVE expected output (`reparse(write(D)) ≡ reparse(expected)`) — these
+  are JSON-LD normal forms / a SELECT+RESHAPE (they drop/merge/prune/fill), so the oracle anchors on
+  the expected document, not the input. The floors only RISE; they reflect ACTUAL current pass
+  counts, not full conformance — the
   remaining toRdf divergences are documented oxjsonld limits (remote/`@import` `@context` needs a
   `LoadDocumentCallback`; `expandContext`/`rdfDirection` options not applied; a few
   base-normalization edge cases + leniently-accepted negative tests), and fromRdf misses
@@ -555,8 +606,14 @@ cargo build -p sparq-cli --features serialize-rdf
   frame-validation errors, so it cannot honestly "pass" by rejecting). The compact/frame oracle
   is oxjsonld self-reparse, so the `@reverse` double-inversion / non-string-language interop gap
   documented above (the compaction interop caveat) is NOT caught by it and is tracked separately.
-  **expand/flatten output-document comparison remain NOT-IMPLEMENTED buckets** the runner reports
-  separately and never fails on (they grow the ratchet as those land). The lane is the opt-in
+  The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket: each
+  `jld:ExpandTest`/`jld:FlattenTest` input is parsed to RDF and projected through the shipping
+  writer, then compared by RDF-equivalence to the normative expected document; below-floor cases
+  are honest writer divergences (`@direction`/i18n-datatype, list/coercion shapes) and the SKIP
+  buckets are the documented ones (negatives sparq's TOTAL writer does not raise, JSON-LD-1.0-only,
+  empty-RDF inputs). Only **html** (script extraction) + **remote-doc** (a `LoadDocumentCallback`)
+  remain NOT-IMPLEMENTED buckets the runner reports separately and never fails on (they grow the
+  ratchet as those land). The lane is the opt-in
   `jsonld-suite` feature on `sparq-conformance` (forwards to `sparq-core/jsonld` +
   `sparq-engine/serialize-rdf`); OFF it compiles to a self-skip. Reproduce with
   `scripts/fetch-jsonld-tests.sh` + `scripts/fetch-jsonld-framing-tests.sh` then

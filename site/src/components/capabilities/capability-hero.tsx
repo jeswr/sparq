@@ -3,15 +3,17 @@
 // Faithful to the approved mockup (sparq-design-system/proposals/web-capabilities.html §HERO):
 // a confident display heading with the brand teal→violet gradient (the foundation `.text-gradient`
 // / `--hero-grad`, NO new hue), a lede, a DERIVED stat strip (hero-stats.ts — every figure from
-// real data), a theme jump-rail of the five lanes, and the REAL prefilled REPL query from
+// real data), a theme jump-rail of the five lanes, and the REAL prefilled query from
 // sample-graph.ts rendered with the shared `.sq-tok-*` highlighter. The "Run query" affordance
-// links to /try (the live in-tab REPL) — it never shows a fabricated result inline.
+// links to /app (the single workbench — sq-4hiqe, the /try REPL was removed) — it never shows a
+// fabricated result inline. /app is a separate overlaid Next app, so the CTAs are HARD anchors
+// (withBasePath), not next/link soft navigations.
 
-import Link from "next/link";
 import { ArrowRight, Play } from "lucide-react";
 
 import { GROUPS } from "@/data/surfaces";
 import { EXAMPLE_QUERIES } from "@/data/sample-graph";
+import { withBasePath } from "@/lib/base-path";
 import { Badge } from "@/components/ui/badge";
 import { HERO_STATS } from "@/components/capabilities/hero-stats";
 import { laneAccent } from "@/components/capabilities/lane-accents";
@@ -89,22 +91,22 @@ export function CapabilityHero() {
           </nav>
         </div>
 
-        {/* Right: a real prefilled REPL query → "Run query" opens it live in /try. */}
+        {/* Right: a real prefilled query → "Run query" opens it live in the /app workbench. */}
         <div className="overflow-hidden rounded-2xl border border-primary/25 bg-card shadow-elevation-2">
           <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
             <div className="flex items-center gap-2.5">
               <Badge variant="success" className="h-5 px-2 text-[11px]">
                 Live in your tab
               </Badge>
-              <span className="text-sm font-medium">Live SPARQL REPL</span>
+              <span className="text-sm font-medium">Live SPARQL</span>
             </div>
-            <Link
-              href="/try"
+            <a
+              href={withBasePath("/app/")}
               className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[13px] font-semibold text-primary-foreground shadow-elevation-glow transition-transform hover:translate-y-px"
             >
               <Play className="size-3.5 fill-current" aria-hidden />
               Run query
-            </Link>
+            </a>
           </div>
           <SparqlHighlight
             query={HERO_QUERY}
@@ -112,13 +114,13 @@ export function CapabilityHero() {
           />
           <p className="border-t px-5 py-2.5 text-[12px] text-muted-foreground">
             The real prefilled query from the sample social graph —{" "}
-            <Link
-              href="/try"
+            <a
+              href={withBasePath("/app/")}
               className="inline-flex items-center gap-1 font-medium text-primary underline-offset-4 hover:underline"
             >
-              open it in the live REPL
+              open it in the workbench
               <ArrowRight className="size-3" aria-hidden />
-            </Link>
+            </a>
             .
           </p>
         </div>

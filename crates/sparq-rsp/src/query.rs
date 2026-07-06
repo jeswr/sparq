@@ -445,7 +445,8 @@ impl ContinuousAsk {
 /// Applies ISTREAM/DSTREAM to a SELECT result: multiset row-hash diff of the
 /// current window's full result against the previous window's, then advances
 /// the diff base.
-fn diff_rows(
+// [SONNET-4.6] sq-2n1q3.3: made pub(crate) so ContinuousMultiQuery can reuse it.
+pub(crate) fn diff_rows(
     r2s: R2S,
     cur_rows: Vec<Vec<Option<Term>>>,
     prev_rows: &mut Vec<Vec<Option<Term>>>,
@@ -498,7 +499,8 @@ fn set_minus(keep: &[Triple], minus: &[Triple]) -> Vec<Triple> {
 }
 
 /// 64-bit hash of one result row (bound terms + unbound positions).
-fn row_hash(row: &[Option<Term>]) -> u64 {
+// [SONNET-4.6] sq-2n1q3.3: made pub(crate) so ContinuousMultiQuery can reuse it.
+pub(crate) fn row_hash(row: &[Option<Term>]) -> u64 {
     let mut h = rustc_hash::FxHasher::default();
     row.hash(&mut h);
     h.finish()

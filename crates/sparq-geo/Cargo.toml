@@ -40,8 +40,18 @@ rustdoc-args = ["--cfg", "docsrs"]
 # into CRS84, so projected literals can join the geographic machinery
 # (GeoIndex, metric distance). Off by default: most deployments never see
 # projected literals.
+# `geosparql_rewrite` (opt-in, OFF by default): the [`rewrite`] module — the OGC
+# GeoSPARQL query-rewrite extension (`/conf/query-rewrite-extension`). It expands a
+# topology-relation PROPERTY pattern (`?f geo:sfWithin ?region`) into a
+# default-geometry resolution + matching `geof:` FILTER, on a DEDICATED
+# `geosparql_rewrite` entry point. OFF by default so the STANDARD `sparq_engine`
+# entry points keep their exact W3C-conformant behaviour (a `geo:sfWithin` triple
+# matches only ASSERTED triples there) — the rewrite is a strict opt-in superset,
+# never a change to default SPARQL semantics. Implies `engine` (the rewrite hands a
+# rewritten `spargebra::Query` to the engine). [OPUS-4.8] sq-wf9qg
 default = ["engine"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
+geosparql_rewrite = ["engine"]
 reproject = ["dep:proj4rs"]
 
 [dependencies]
@@ -76,9 +86,12 @@ rstar = "0.13"
 # GML processor — we walk the OGC GML Simple-Features geometry subset GeoSPARQL
 # uses (Point/LineString/Polygon/Multi*). `default-features = false` keeps it to
 # the pull-parser with no serde. The transitive oxigraph stack (oxrdfxml /
-# sparesults) still pins quick-xml 0.37, so this 0.40 requirement currently
+# sparesults) still pins quick-xml 0.37, so this 0.41 requirement currently
 # resolves as a second copy in the lockfile until those upstreams bump. [OPUS-4.8]
-quick-xml = { version = "0.40", default-features = false }
+# Bumped 0.40 -> 0.41 for RUSTSEC-2026-0194 (quadratic duplicate-attribute check)
+# and RUSTSEC-2026-0195 (unbounded NsReader namespace-declaration allocation); both
+# transitive 0.37.5 copies are scoped-ignored in deny.toml until oxigraph bumps.
+quick-xml = { version = "0.41", default-features = false }
 # Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —
 # the workspace's pure-Rust constraint holds). One transitive dep (thiserror).
 proj4rs = { version = "0.1", optional = true }

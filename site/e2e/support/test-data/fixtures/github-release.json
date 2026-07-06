@@ -1,0 +1,33 @@
+{
+  "_fixture": "[OPUS-4.8] sq-ymr2e.1 — CHECKED-IN, FAKE GitHub releases/latest payload (the 200 'release ready' variant). Not a real release; version/size/digest are deterministic test data, never a shipped or benchmarked number. The /download page (sq-vw3ax.11) reads tag_name + assets[].{name,size,digest}. Digests are sha256:<64 hex>. Owner-agnostic route so it matches jeswr/sparq and sparq-org/sparq.",
+  "tag_name": "v0.4.2-e2e-fixture",
+  "name": "sparq v0.4.2 (e2e fixture)",
+  "html_url": "https://github.com/jeswr/sparq/releases/tag/v0.4.2-e2e-fixture",
+  "published_at": "2025-01-02T00:00:00Z",
+  "assets": [
+    {
+      "name": "sparq-gui-win-x64.msi",
+      "size": 94371840,
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "browser_download_url": "https://github.com/jeswr/sparq/releases/download/v0.4.2-e2e-fixture/sparq-gui-win-x64.msi"
+    },
+    {
+      "name": "sparq-gui-macos-universal.dmg",
+      "size": 88080384,
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "browser_download_url": "https://github.com/jeswr/sparq/releases/download/v0.4.2-e2e-fixture/sparq-gui-macos-universal.dmg"
+    },
+    {
+      "name": "sparq-gui-linux-x86_64.AppImage",
+      "size": 96468992,
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "browser_download_url": "https://github.com/jeswr/sparq/releases/download/v0.4.2-e2e-fixture/sparq-gui-linux-x86_64.AppImage"
+    },
+    {
+      "name": "SHA256SUMS",
+      "size": 512,
+      "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "browser_download_url": "https://github.com/jeswr/sparq/releases/download/v0.4.2-e2e-fixture/SHA256SUMS"
+    }
+  ]
+}

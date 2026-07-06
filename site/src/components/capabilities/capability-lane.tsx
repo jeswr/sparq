@@ -4,13 +4,13 @@
 // "lane" with a sticky NUMBERED spine (01 / 05) + a per-theme accent (chart-1…5) + a tile grid,
 // so the five capability areas read as five distinct places — scannable without reading every
 // blurb. The tiles are the existing CapabilityRowItem (lazy-mount machinery preserved); the
-// query-data lane carries the "open the live REPL" affordance, and the privacy lane carries the
+// query-data lane carries the "open the workbench" affordance, and the privacy lane carries the
 // explicit research-grade caveat strip (LIVE privacy-claims honesty, made loud not hidden).
 
-import Link from "next/link";
 import { AlertTriangle, PlayCircle } from "lucide-react";
 
 import { type CapabilityTheme } from "@/data/capabilities";
+import { withBasePath } from "@/lib/base-path";
 import { CapabilityRowItem } from "@/components/capabilities/capability-row";
 import { laneAccent } from "@/components/capabilities/lane-accents";
 
@@ -51,13 +51,15 @@ export function CapabilityLane({
           style={{ background: accent }}
         />
         {group.id === "query-data" && (
-          <Link
-            href="/try"
+          // [OPUS-4.8] sq-4hiqe — /app is the single workbench (the /try REPL was removed). /app is
+          // a separate overlaid Next app, so this is a HARD anchor, not a next/link soft nav.
+          <a
+            href={withBasePath("/app/")}
             className="mt-4 inline-flex items-center gap-1.5 text-[13px] font-semibold text-primary underline-offset-4 hover:underline"
           >
             <PlayCircle className="size-4" aria-hidden />
-            Open the full live SPARQL REPL
-          </Link>
+            Open the SPARQL workbench
+          </a>
         )}
       </div>
 

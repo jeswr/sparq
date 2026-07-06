@@ -99,27 +99,35 @@ export const RDF_FILE_EXTENSIONS = [
  * (cancelled / not in a Tauri webview). Implemented by invoking the dialog plugin's `open`
  * COMMAND directly (`plugin:dialog|open`) over IPC — so the GUI needs no `@tauri-apps/plugin-
  * dialog` npm package, only the Rust-side plugin (`tauri_plugin_dialog::init()`) + the granted
- * `dialog:allow-open` capability. The native loader (`load_path`) then decodes the chosen file.
+ * `dialog:allow-open` capability. The native loader (`load_path`) then decodes each chosen file.
+ *
+ * (sq-eydh9) Returns an array of selected paths (multi-select, `multiple: true`). An empty array
+ * means the user cancelled. On old desktop builds that return a single string the result is
+ * normalised to a one-element array so callers never need to branch on the return type.
  */
-export async function pickRdfFile(): Promise<string | null> {
+export async function pickRdfFile(): Promise<string[]> {
   const invoke = tauriInvoke();
-  if (!invoke) return null;
+  if (!invoke) return [];
   try {
-    // The dialog plugin's `open` command returns the selected path (string), or null on cancel.
+    // The dialog plugin's `open` command returns the selected path(s) or null on cancel.
+    // `multiple: true` → string[] on confirm; the API can still return a plain string when
+    // a legacy Tauri build conflates single/multi, so we normalise to string[] either way.
     const selected = await invoke<string | string[] | null>("plugin:dialog|open", {
       options: {
-        multiple: false,
+        multiple: true,
         directory: false,
-        title: "Import an RDF file into the workspace",
+        title: "Import RDF files into the workspace",
         filters: [
           { name: "RDF (incl. compressed + HDT)", extensions: [...RDF_FILE_EXTENSIONS] },
           { name: "All files", extensions: ["*"] },
         ],
       },
     });
-    return typeof selected === "string" ? selected : null;
+    if (selected === null) return [];
+    if (typeof selected === "string") return [selected];
+    return selected;
   } catch {
-    return null;
+    return [];
   }
 }
 

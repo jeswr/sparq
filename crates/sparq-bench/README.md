@@ -14,7 +14,7 @@ benchmarks dashboard.
 
 > **Internal tooling — not published** to crates.io (`publish = false`). Run it
 > as a workspace binary; it is not a library. Measured numbers belong in the
-> [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), never baked
+> [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), never baked
 > into docs.
 
 Contributing: [`AGENTS.md`](../../AGENTS.md).

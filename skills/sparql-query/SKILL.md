@@ -248,6 +248,31 @@ let r = query_with_aggregates(&g,
 // vendored spargebra (a parser limitation, tracked as a follow-up bead); non-DISTINCT works.
 ```
 
+**`MULTIPLICITY()` inside an aggregate** (no feature needed; default build) — a **NON-STANDARD
+extension** exposing the SPARQL 1.2 algebra's `multiplicity(μ|Ω)` device (which replaced the informal
+`card[Ω](μ)`). It is a zero-argument builtin valid ONLY inside an aggregate's argument expression: it
+evaluates to the bag cardinality of the current group member's solution within its group multiset.
+W3C SPARQL 1.2 defines `multiplicity` only as an algebra/semantics device — there is **no callable
+`multiplicity()` builtin in the rec and no conformance test for it** — so this is a sparq extension,
+not a 1.2-conformance feature.
+
+```rust
+// A sub-SELECT projecting away the subject collapses several rows to identical solutions
+// (bag semantics), so the group's distinct member carries a multiplicity > 1.
+let g = Graph::load_str(
+    "@prefix ex: <http://ex/> . ex:a ex:v 10 . ex:b ex:v 10 . ex:c ex:v 10 . ex:d ex:v 20 . ex:e ex:v 20 .",
+    "turtle").unwrap();
+// SUM(?x * MULTIPLICITY()) folds the DISTINCT solutions {10(×3), 20(×2)} = 10·3 + 20·2 = 70,
+// which equals plain SUM(?x) over the bag {10,10,10,20,20}. This is the whole point of the device.
+let r = sparq_engine::query(&g,
+    "PREFIX ex: <http://ex/> SELECT (SUM(?x * MULTIPLICITY()) AS ?w) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }").unwrap();
+```
+
+Semantics: when an aggregate argument calls `MULTIPLICITY()`, sparq folds the group's **distinct**
+solutions, each weighted by its bag cardinality (per the Set-Function algebra), so a value occurring
+`k` times contributes `k·x`, not `k²·x`. Outside an aggregate (e.g. a plain `BIND`) `MULTIPLICITY()`
+is an expression error → unbound. An aggregate that never mentions it is byte-for-byte unchanged.
+
 **Window functions** (opt-in `window-functions` feature) — **NON-STANDARD extension**: SPARQL has no
 W3C-REC `OVER (PARTITION BY … ORDER BY …)` syntax, so sparq exposes windowing two ways, both following
 the SQL:2003 window model (the surface Stardog / AnzoGraph expose) and neither touching the engine's
@@ -361,12 +386,25 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   forks-and-seals so an in-place mutation is all-or-nothing. `LOAD` only resolves `file://`; set the
   base dir with `with_load_base(path, || update(...))`.
 - **SPARQL `SERVICE` federation** is the non-default `service` cargo feature (pulls `ureq`; off on
-  wasm). When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
+  wasm). Internally the SERVICE client (HTTP transport, SPARQL-Results JSON/XML parse, bound-join
+  batching, SSRF egress policy) is housed in the `sparq-engine-service` sub-crate (`publish = false`,
+  [OPUS-4.8] sq-6vshe.4, seam A2 of the facade split) and re-exported through the facade — the
+  `service` feature name and the `sparq_engine::with_service_egress_allow` / `…egress_policy` /
+  `…SERVICE_EGRESS_REFUSED_MARKER` / `…allowlist_entry_permits` paths below are unchanged and remain
+  the supported surface.
+  When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
   an endpoint that resolves to a loopback / RFC1918 / link-local (incl. the `169.254.169.254`
   cloud-metadata IP) / unique-local / unspecified address is refused (checked on the *resolved* IP,
   so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
   for the scope: `with_service_egress_allow([host.to_string()], || query(&g, q))`. Public endpoints
-  need no opt-in. Every egress-refusal error string carries the stable
+  need no opt-in. An allowlist entry may be **host-level** (`127.0.0.1` — every port) or
+  **port-scoped** (`127.0.0.1:8053`, `[::1]:8053`, `.example.org:443` — that host on THAT port ONLY,
+  rejecting every other port) (`sq-a7jw4`): a port-scoped entry is strictly NARROWER, so an
+  in-process loopback harness can permit exactly `127.0.0.1:<ephemeral>` without re-opening the whole
+  loopback host. The port checked is the authority's port (its explicit `:port` or the scheme default),
+  which is exactly the dialled port — so port-scoping applies to the connect target and the resolved
+  IP is still re-vetted (no wildcard port; tightens, never loosens). Every egress-refusal error string
+  carries the stable
   `sparq_engine::SERVICE_EGRESS_REFUSED_MARKER` substring (`sq-iu0c`), so a network-exposed host can
   `contains()`-classify a blocked `SERVICE` as an authorization-policy refusal (e.g. HTTP `403`)
   rather than a server fault — `sparq-server` does exactly this.
@@ -390,10 +428,51 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   names no valid endpoint and contributes no federated answer. A **top-level** `SERVICE ?ep` with
   nothing to bind it still errors (or, under `SILENT`, yields the join identity). (No new public API —
   this is a behavioural addition on the `service` feature.)
+- **Per-query `SERVICE ?ep` remote-request cap** (`sq-b93pv`) — a `SERVICE ?ep` whose endpoint
+  variable binds to **many distinct endpoint IRIs** fans out into one remote dispatch per distinct
+  endpoint, so a hostile / high-cardinality `?ep` can amplify one client query into a burst of
+  outbound calls (the amplification the per-host egress allowlist does not bound). The **opt-in**
+  `with_service_remote_request_cap(n, || query(&g, q))` (or the `SPARQ_SERVICE_REMOTE_CAP` env var)
+  caps the number of distinct endpoints one `SERVICE ?ep` evaluation may dial; exceeding it is a
+  typed refusal **enforced PRE-HTTP** (at eval time, before any socket opens — a true pre-dispatch
+  bound, not a post-hoc cancellation) carrying the stable `sparq_engine::SERVICE_REMOTE_CAP_MARKER`
+  substring (so a server can classify it like the egress marker). It is **not** swallowed by
+  `SILENT` (a resource-policy refusal, not an unreachable endpoint — the same stance the query
+  budget takes). **Default is uncapped**, so a concrete-IRI `SERVICE <…>` and a normal-cardinality
+  `SERVICE ?ep` are unchanged.
 - **Per-query `SERVICE` timeout** (`sq-d4p`) — the SERVICE HTTP transport's socket timeout is now
   bounded by the active `QueryBudget` deadline (it caps at `min(remaining-until-deadline, default)`
   with a small non-zero floor), so a `SERVICE` fetch under a tight `deadline` no longer blocks for the
   full default on an unresponsive endpoint.
+- **Streaming / bounded `SERVICE` result consumption** (`sq-my8wd.4` / `sq-my8wd.5`) — remote
+  SPARQL-Results bodies (JSON and XML) are parsed INCREMENTALLY: each solution row is interned to
+  compact id-level bindings as it is parsed and the owned terms are dropped, so the engine never
+  holds a whole-document JSON DOM or a term-level copy of the remote relation. Peak memory per
+  `SERVICE` response is dominated by the id-level relation the join itself needs — a
+  large/adversarial remote result can no longer amplify to a large multiple of its wire size.
+  Behaviour-neutral by test: a frozen DOM-reference oracle pins identical rows, multiplicity, ORDER
+  and errors (`service.rs` `streaming_equivalence` tests).
+  **Reader-seam transport** (`sq-my8wd.5`): the `sparq-engine-service` crate's `ReaderTransport`
+  trait extends the `Transport` seam so the HTTP body is NEVER buffered into a full `String` —
+  `HttpTransport` implements it by returning the ureq response body reader directly. The
+  `TransportAsReader<'t, T>` adapter wraps any `Transport` implementation as a `ReaderTransport`
+  (useful for test mocks). The `eval_remote_into_read` function is the reader-seam entry point —
+  it is used internally by the engine's `exec.rs` SERVICE evaluator. These three items
+  (`ReaderTransport`, `TransportAsReader`, `eval_remote_into_read`) live in
+  `sparq_engine_service::service` and are not re-exported through the `sparq-engine` facade (they
+  are implementation-internal); test transports continue to implement `Transport` and are wrapped
+  via `TransportAsReader` so the streaming path is exercised without rewriting every canned mock.
+  [OPUS-4.8] [FABLE-5]
+- **`SERVICE` evaluation is W3C-conformance-tested end-to-end** (`sq-ddpgx`, epic sq-my8wd) — the
+  W3C SPARQL 1.1 `sparql11/service` evaluation suite runs against the engine's REAL `ureq` transport
+  through an in-process **loopback** harness: each `qt:serviceData` block is served by a real
+  `sparq_server::serve` endpoint on an ephemeral `127.0.0.1:0` port (the well-known endpoint IRIs are
+  rewritten to the bound URLs), so the whole federated path — HTTP, content negotiation,
+  SPARQL-Results parsing, the bind-join over the wire — is exercised, not a mock. It is the
+  `sparq-conformance` crate's opt-in **`service`** feature (a ratcheted floor in the central scoreboard;
+  `SILENT`-swallow vs non-`SILENT`-propagate against a closed port is pinned directly). Honest scope: a
+  variable `SERVICE ?ep` and a nested non-`SILENT` `SERVICE` are documented divergences (the loopback
+  fixture serves a plain graph with onward federation disabled), tracked-not-asserted under sq-my8wd.
 - **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
   feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
   syntax. sparq exposes them as a programmatic pass over a `QueryResult` (the SQL:2003 model
@@ -436,11 +515,32 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   ```
 - **Vectorized columnar primitives** are the non-default `vectorized` cargo feature (M4 plan, bead
   `sq-hvfe`): the `chunk` module's `DataChunk` (a column-major, vector-at-a-time id-level batch),
-  a numeric FILTER comparison kernel (`DataChunk::select_numeric` → a `SelVec`), and a
-  selection/gather kernel (`DataChunk::apply_selection`). This is a **building block**, NOT yet
-  wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
-  or off. When off, zero columnar code compiles and the default native + wasm builds are
-  byte-identical (no new dependencies; no `unsafe`).
+  a **decode kernel** (`DataChunk::decode_numeric_column` → a contiguous `Vec<f64>` value column,
+  `f64::NAN` sentinel for a non-numeric cell, with a gather-free fast path for an all-inline-integer
+  column — the SIMD enabler, M4 Phase 2 `sq-pntvh.2`), a numeric FILTER comparison kernel
+  (`DataChunk::select_numeric` → a `SelVec`), a **compare-over-decoded-column** kernel
+  (`DataChunk::select_decoded`, the branchless auto-vectorising compare that consumes the decode
+  kernel's output — M4 Phase 3 `sq-pntvh.3`), and a selection/gather kernel
+  (`DataChunk::apply_selection`). When off, zero columnar code compiles and the default native + wasm
+  builds are byte-identical (no new dependencies; no `unsafe`).
+  **`query`/`query_json`/etc. return byte-identical results whether the feature is on or off** — it
+  is a perf optimisation, never a semantics change. The first evaluator wiring landed in Phase 3
+  (`sq-pntvh.3`): a **columnar residual-FILTER seam** inside `apply_filter` (Seam A) that, for an
+  eligible single sargable-numeric residual `?v OP const` over an **all-inline-integer** column,
+  transposes to a `DataChunk`, decodes the column once, compares over the decoded column, gathers the
+  survivors, and materialises back — provably byte-identical to the scalar row path (same rows, same
+  order). It **declines** to the row path for anything not provably identical (non-inline / negative /
+  computed / unbound cells, temporal or non-sargable filters) and is **disabled whenever the `zk`
+  trace is armed** so the row path records the complete FILTER obligation set. The M4 wiring roadmap +
+  coexistence model is `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance gate landed
+  first (Phase 1, `sq-pntvh.1`): the differential BYTE-IDENTITY harness
+  `crates/sparq-engine/tests/vectorized_byte_identity.rs` (the columnar kernel's serialised survivors
+  are byte-identical to the row `FILTER` operator over the *same batch*, order-exact — a Phase-1
+  finding: cross-query byte-identity is unsound because a sargable filter re-plans the scan, so the
+  invariant is operator-level not full-query), the seam-level differential in
+  `crates/sparq-engine/src/exec.rs` (`mod columnar_filter_seam`), plus the native FILTER/aggregate
+  baseline bench `crates/sparq-engine/examples/bench_vectorized.rs` (`metric_us`, registered
+  `vectorized-eval-micro`, `featured = false`) later phases measure their speedup against.
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
   pattern, the executor first builds a membership filter over the already-materialised side's
@@ -473,6 +573,31 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   measurable hypothesis for the canonical perf host (bead `sq-0g6g`), not a baked-in number. When off,
   zero of this code compiles and the default native + wasm builds are byte-identical (no new deps; no
   `unsafe`).
+- **DP join-order enumerator (DPccp)** is the non-default `dp-planner` cargo feature (bead `sq-iywur`;
+  Moerkotte & Neumann, VLDB 2006). The DEFAULT join planner is the greedy GOO heuristic (a left-deep
+  order built one pattern at a time); `dp-planner` adds an OPT-IN alternative that enumerates every
+  **connected-subgraph / connected-complement pair** of the BGP join graph and fills a DP table
+  `best[S]` = the minimum-`Cout` **bushy** join tree over pattern set `S`, finding a provably
+  `Cout`-optimal order (seeded from the SAME index-range/characteristic-set cardinality estimator GOO
+  uses) — with **zero cross products** between patterns that share no variable. Install it per thread,
+  exactly like `with_cs_table`:
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["dp-planner"] }
+  let rows = sparq_engine::with_dp_planner(|| sparq_engine::query(&graph, sparql))?;
+  // …or with an explicit connected-subgraph budget:
+  let rows = sparq_engine::with_dp_planner_budget(1024, || sparq_engine::query(&graph, sparql))?;
+  ```
+  It is **ORDER-ONLY**: a BGP is a commutative/associative natural join, so every tree yields the SAME
+  bindings — the DP changes join order, never the answer (proven by the on-vs-off differential suite
+  `tests/dp_planner_differential.rs`, which runs in BOTH feature states). DPccp is worst-case
+  exponential, so the enumerator counts connected subgraphs first and **falls back to greedy GOO** when
+  the count exceeds `DpConfig::max_subgraphs` (the `with_dp_planner_budget` argument; `with_dp_planner`
+  uses a sensible default) — and also on a **disconnected** BGP (a deliberate cross-product query, or an
+  all-constant pattern), which has no single connected plan. Cyclic BGPs already route to LFTJ, so the
+  DP only ever governs binary-plan BGPs. Its payoff on adversarial BGP shapes is a measurable hypothesis
+  for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-the-
+  DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical, and
+  no new dependencies are added (no `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through

@@ -1,7 +1,0 @@
-[package]
-name = "xpath_test_fnfloor_float"
-type = "lib"
-authors = ["auto-generated"]
-
-[dependencies]
-xpath = { path = "../../xpath" }

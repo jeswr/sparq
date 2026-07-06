@@ -12,13 +12,12 @@
 # Fields: name (required -> check-run name), crate (required), features (required,
 # non-empty comma list), test (bool — run `cargo test` for the leg).
 
-# sparq-engine: RDF serializer matrix, CS-table star-join planner, zk-trace
-# seam, and SPARQL 1.1 federated SERVICE (tests use loopback only — no net).
-- name: "sparq-engine (serialize-rdf)"
-  crate: "sparq-engine"
-  features: "serialize-rdf"
-  test: true
-
+# sparq-engine: CS-table star-join planner, zk-trace seam, and SPARQL 1.1 federated
+# SERVICE (tests use loopback only — no net).
+# [OPUS-4.8] (sq-6vshe.4) The `serialize-rdf` + `streaming-serialization` legs MOVED to
+# .github/feature-matrix.d/sparq-engine-serialize.yml with the RDF writer matrix they exercise
+# (seam 1 of the facade split) — a `sparq-engine --features serialize-rdf` leg would now run
+# ZERO writer tests, so the tests are re-targeted to their new crate there.
 - name: "sparq-engine (cs-planner)"
   crate: "sparq-engine"
   features: "cs-planner"
@@ -29,6 +28,13 @@
   features: "zk"
   test: true
 
+# [OPUS-4.8] (sq-6vshe.4) Seam A2: the `service` MODULE + its in-src unit tests moved to the
+# internal sparq-engine-service sub-crate (see .github/feature-matrix.d/sparq-engine-service.yml).
+# This engine leg STAYS (unlike the serialize legs, which fully moved) because it still runs the
+# END-TO-END integration tests that exercise `exec::eval_service` through the facade —
+# tests/federation_features/* (loopback ureq path) + the exec `service_exec_tests` canned-transport
+# module — which did NOT move. So `cargo test -p sparq-engine --features service` still runs real
+# federated tests; the moved in-src parser/egress/transport unit tests run in the new-crate leg.
 - name: "sparq-engine (service)"
   crate: "sparq-engine"
   features: "service"
@@ -197,23 +203,22 @@
   features: "yannakakis"
   test: true
 
-# [OPUS-4.8] sq-townn (survey §A7): streaming Turtle / TriG serialisation. The whole
-# streaming surface (`write_turtle_streaming` / `write_trig_streaming` + the
-# `graph_to_*_streaming` wrappers, the per-subject-buffered `write_turtle_body_streaming`,
-# and the `accumulate_pred_object` helper in `src/serialize.rs`) is gated
-# `#[cfg(feature = "streaming-serialization")]`, AND its 10 in-src unit tests
-# (`serialize::tests::streaming::*` — the streamed==buffered byte-equality contracts over
-# multiple subjects / predicates / blank nodes / typed+lang literals / empty graph / TriG)
-# are likewise gated, so the default build (and ci.yml's `--workspace --all-targets`
-# archive, which passes NO `--features`) compiled them EMPTY and ran ZERO of the 10 — the
-# silent "compiled EMPTY ... tests never ran" gap this lane closes. The feature IMPLIES
-# `serialize-rdf` (the shared rendering helpers live there); the off path is byte-identical.
-# No new dep (`streaming-serialization = ["serialize-rdf"]`, std `io::Write` only) and no
-# `not(feature=…)` divergence, so a single isolated leg covers it; verified `cargo test -p
-# sparq-engine --features streaming-serialization` runs the 10 streaming tests and `cargo
-# clippy -p sparq-engine --all-targets --features streaming-serialization -- -D warnings`
-# is clean.
-- name: "sparq-engine (streaming-serialization)"
+# [OPUS-4.8] sq-iywur: opt-in DPccp dynamic-programming join-order enumerator. The whole
+# `dp` module (`src/dp.rs`, `pub mod dp` in lib.rs — the DPccp csg-cmp-pair enumerator, the
+# `with_dp_planner`/`with_dp_planner_budget` per-thread install, `QueryGraph`/`JoinTree`)
+# with its 7 in-src unit tests (`dp::tests::*`, incl. the 4000-random-graph brute-force
+# optimality check) AND the executor bridge (`eval_bgp_dp`/`eval_join_tree` + the planner
+# hook in `eval_bgp_binary`) are ALL `#[cfg(feature = "dp-planner")]`, so the default build
+# (and ci.yml's `--workspace --all-targets` archive, which passes NO `--features`) compiled
+# them EMPTY and ran ZERO of the 7 — the silent "compiled EMPTY ... tests never ran" gap
+# this lane closes. The end-to-end result-equivalence suite `tests/dp_planner_differential.rs`
+# is INTENTIONALLY NOT feature-gated (it runs in BOTH states to prove DP == greedy), but the
+# in-src unit tests are gated and run ZERO times by default. No new dep (`dp-planner = []`,
+# only the already-direct rustc-hash; no `unsafe`) and no `not(feature=…)` divergence (the
+# off path is byte-identical), so a single isolated leg covers it; verified `cargo test -p
+# sparq-engine --features dp-planner` runs the 7 unit + 9 differential tests and `cargo
+# clippy -p sparq-engine --all-targets --features dp-planner -- -D warnings` is clean.
+- name: "sparq-engine (dp-planner)"
   crate: "sparq-engine"
-  features: "streaming-serialization"
+  features: "dp-planner"
   test: true

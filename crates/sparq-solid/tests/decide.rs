@@ -321,7 +321,7 @@ fn decide_verdict_matches_accessible_oracle() {
     let mut acl = AclBuilder::new();
     acl.document("https://pod.ex/notes/n1.ttl");
     acl.default_for("https://pod.ex/", |a| a.agent(ALICE).mode(Mode::Read).mode(Mode::Write));
-    let mut s = store(acl);
+    let s = store(acl);
 
     let resource = "https://pod.ex/notes/n1.ttl";
     let res_node = NamedNode::new_unchecked(resource);
@@ -332,5 +332,112 @@ fn decide_verdict_matches_accessible_oracle() {
             let decided = s.decide(&sess, resource, mode).allow;
             assert_eq!(decided, oracle, "decide != accessible for {agent:?}/{mode:?}");
         }
+    }
+}
+
+// ─── sq-j8qtt (issue #1570): persistent AclIndex — INVALIDATION must be airtight ──────
+//
+// The structural ACL index that `decide`/`decide_batch`/`resolve_acl` walk is now built
+// ONCE per generation and reused (not rebuilt per call). A stale index after an ACL change
+// is a WRONG authorization, so these pin that a rule change is reflected by the very next
+// decision on the SAME store — in BOTH directions (a newly-granting ACL, and the
+// fail-open-critical case of a DELETED granting ACL) — through the real put_acl/delete_acl
+// → reindex seam, and that the lazy build is race-free under a shared `&self`. [OPUS-4.8]
+
+/// A materialized WAC store with content but NO access-control document anywhere.
+fn empty_store() -> PodStore {
+    let nquads =
+        "<https://pod.ex/notes/n1.ttl#it> <https://ex.dev/ns#title> \"hi\" <https://pod.ex/notes/n1.ttl> .\n";
+    let g = Graph::load_dataset(nquads, "nquads").expect("loads");
+    let mut s = PodStore::new(g);
+    s.materialize_wac().expect("materializes");
+    s
+}
+
+#[test]
+fn decide_reflects_put_acl_without_manual_reindex() {
+    // Warm the persistent index on a pod with NO ACL (a NoAcl deny), then authoritatively
+    // PUT a root .acl granting alice Read. The very next decide() on the SAME store must see
+    // the new grant — a stale index would still answer NoAcl (a wrong, fail-closed verdict).
+    let mut store = empty_store();
+    let alice = session(Some(ALICE));
+    let resource = "https://pod.ex/notes/n1.ttl";
+
+    let before = store.decide(&alice, resource, Mode::Read);
+    assert!(!before.allow && before.status == AclStatus::NoAcl, "no ACL yet ⇒ NoAcl deny");
+    assert!(store.resolve_acl(resource).is_none(), "warm the index: no control document yet");
+
+    let acl = format!(
+        "<https://pod.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .\n\
+         <https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> .\n\
+         <https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <{}> .\n\
+         <https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> .\n",
+        ALICE
+    );
+    store.put_acl("https://pod.ex/.acl", &acl, "ntriples").expect("put_acl");
+
+    let after = store.decide(&alice, resource, Mode::Read);
+    assert!(after.allow, "put_acl grant visible to the next decide (index was invalidated)");
+    assert_eq!(after.status, AclStatus::Resolved);
+    assert_eq!(after.scope, Some(AclScope::Default));
+    assert_eq!(
+        store.resolve_acl(resource).map(|e| e.acl),
+        Some(NamedNode::new_unchecked("https://pod.ex/.acl")),
+        "resolve_acl also sees the new control document"
+    );
+}
+
+#[test]
+fn decide_reflects_delete_acl_no_stale_grant() {
+    // The fail-OPEN-critical direction: an ACL that GRANTED access is DELETED. Warm the
+    // index (alice granted Read via the resource's OWN .acl), delete that .acl, and the next
+    // decision on the same store must STOP granting — a stale structural index would keep
+    // discovering the deleted control document.
+    let mut acl = AclBuilder::new();
+    acl.document("https://pod.ex/d.ttl");
+    acl.access_to("https://pod.ex/d.ttl", |a| a.agent(ALICE).mode(Mode::Read));
+    let mut store = store(acl);
+    let alice = session(Some(ALICE));
+    let resource = "https://pod.ex/d.ttl";
+
+    let before = store.decide(&alice, resource, Mode::Read);
+    assert!(before.allow && before.status == AclStatus::Resolved, "granted via own .acl");
+    assert!(store.resolve_acl(resource).is_some(), "warm the index: control document present");
+
+    store.delete_acl("https://pod.ex/d.ttl.acl").expect("delete_acl");
+
+    let after = store.decide(&alice, resource, Mode::Read);
+    assert!(!after.allow, "deleted ACL must not keep granting (index was invalidated)");
+    assert_eq!(after.status, AclStatus::NoAcl, "no control document remains ⇒ NoAcl");
+    assert!(store.resolve_acl(resource).is_none(), "resolve_acl no longer finds the deleted ACL");
+}
+
+#[test]
+fn concurrent_decide_shares_one_persistent_index() {
+    // `decide`/`resolve_acl` are `&self`; a per-request LDP server shares `&PodStore` across
+    // threads. The persistent index must build ONCE under contention and every thread must
+    // see the correct verdict — asserts PodStore stays Send+Sync and the lazy build is
+    // race-free.
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<PodStore>();
+
+    let mut acl = AclBuilder::new();
+    acl.document("https://pod.ex/d.ttl");
+    acl.access_to("https://pod.ex/d.ttl", |a| a.agent(ALICE).mode(Mode::Read));
+    let shared = std::sync::Arc::new(store(acl));
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let s = std::sync::Arc::clone(&shared);
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..200 {
+                assert!(s.decide(&session(Some(ALICE)), "https://pod.ex/d.ttl", Mode::Read).allow);
+                assert!(!s.decide(&session(Some(BOB)), "https://pod.ex/d.ttl", Mode::Read).allow);
+                assert!(s.resolve_acl("https://pod.ex/d.ttl").is_some());
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("thread ok");
     }
 }

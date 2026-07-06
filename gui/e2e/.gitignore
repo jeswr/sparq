@@ -1,3 +1,6 @@
 # [OPUS-4.8] sq-pnnl — the e2e harness's installed deps (webdriverio) are restored by
 # `npm ci` in CI from the committed package-lock.json; never commit the tree itself.
 /node_modules
+# [SONNET-4.6] sq-ymr2e.6 — failure artifacts (screenshots, driver logs) written on failure;
+# collected by the CI upload-artifact step, never committed.
+/artifacts

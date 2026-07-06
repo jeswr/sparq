@@ -45,21 +45,57 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
 - **Same dict/Graph seam as RL** — emits the lattice as `rdfs:subClassOf` triples queryable by
   plain BGP eval; no store changes.
 - **Unsatisfiable-class detection** — `owl:disjointWith` clashes surface `C ⊑ owl:Nothing`.
-- **RBox role automaton** *(opt-in `rbox` feature, Phase E2)* — `rdfs:subPropertyOf` role
-  inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions
-  (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`. OFF by default: zero
-  role-automaton code without it, and RBox axioms are then left unapplied (roles compared for
-  equality only).
+- **Safe nominals — CR6** — singleton `owl:oneOf` (`{a}`) and object-valued `owl:hasValue`
+  (`∃r.{a}`) classify (the reachability-guarded merge rule; every derivation sound, with
+  negative tests pinning the guard). Completeness is claimed for typical safe usage, NOT for
+  every EL++ nominal interplay; ABox `rdf:type` assertions are not internalized (TBox only).
+- **Self-restrictions — CR-Self** — `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r` is the
+  EL profile's `ObjectHasSelf` (`∃r.Self`, local reflexivity): `X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)` and
+  `∃r.Self ⊑ D` threads via the self-concept atom + CR1. A general `(X,X)` link from `X ⊑ ∃r.X`
+  never triggers it (the load-bearing side-condition). Any malformed shape (non-`true`/non-boolean
+  object, missing `owl:onProperty`) stays a counted skip. Under `abox` the self-loop realises as
+  the property assertion `a r a` (the WG `New-Feature-SelfRestriction-001` "Peter likes Peter").
+- **RBox role automaton + lattice readoff** *(opt-in `rbox` feature, Phases E2/E3)* —
+  `rdfs:subPropertyOf` inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty`
+  compositions (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`; and a
+  **role-lattice readoff**: `classify_graph` also emits the NON-REFLEXIVE told-inclusion closure
+  as `rdfs:subPropertyOf` triples (`Report::emitted_role_subsumptions` counts the new ones). OFF
+  by default: zero role-automaton code without it.
 - **Transitive reduction → Hasse diagram** *(opt-in `hasse` feature, Phase E3)* — `DirectHierarchy`
   reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
   cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +
   `owl:equivalentClass`) — O(N) Hasse edges on a deep chain instead of the O(N²) full closure.
-- **Honest fragment reporting** — class axioms outside the active fragment (unionOf /
-  cardinality / …) are counted in `Report::skipped_axioms`, never silently misapplied.
+- **Concrete domains — CR7–CR9** *(opt-in `cdomain` feature)* — faceted datatype restrictions
+  (`owl:onDatatype` + `owl:withRestrictions` with min/max{In,Ex}clusive) over `xsd:decimal` /
+  `xsd:integer` and its derived types (implicit bounds included), plus exact-numeric
+  `DataHasValue` / singleton `DataOneOf` points — decided EXACTLY on the shared
+  `sparq_substrate::numeric` value tower (never lossy f64). An **empty** range makes the class
+  unsatisfiable (clash via CR5); a **proven** value-space containment threads subsumptions
+  through data-property existentials. Anything not exactly decidable (pattern/length/digit
+  facets, float/double or non-numeric bases/values, `owl:onDataRange`, complement) is
+  **deferred, never guessed** — a wrong sat/unsat verdict would be an unsound entailment.
+- **ABox realisation & whole-ontology consistency — CR6 nominals** *(opt-in `abox` feature)* —
+  internalizes `ClassAssertion` (`a rdf:type C` ⇒ `{a} ⊑ C`) and `ObjectPropertyAssertion`
+  (`a p b` ⇒ `{a} ⊑ ∃p.{b}`) as SAFE-NOMINAL axioms over CR6, then reads off derived instance
+  typings (`a rdf:type C`), individual equality (`a owl:sameAs b`) and a whole-ontology
+  `inconsistent` verdict (`{a} ⊑ ⊥` or a global `⊤ ⊑ ⊥`) via the additive `realize` /
+  `realize_graph` entry — every emitted fact holds in EVERY model. The TBox
+  `Classifier::classify` / `classify_graph` stay **byte-identical** (they never internalize
+  assertions). Data-property assertions and non-EL class expressions stay counted skips
+  (`Report::skipped_assertions`, fail-closed — never a guessed typing).
+- **Honest fragment reporting** — class axioms outside the active fragment are counted in
+  `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
+  concrete-domain shapes; with it, only the unsupported remainder above.
 
-**Scope:** EL+⊥ (E1, default), EL+ role reasoning (E2, `rbox`), transitive reduction (E3, `hasse`).
-Concurrency is **E4**; nominals + concrete domains are deferred. The classifier is
-**single-threaded**. Enable with `sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`.
+**Scope:** EL+⊥ + safe nominals/CR6 + self-restrictions/CR-Self (E1, default), EL+ role reasoning (E2, `rbox`), transitive
+reduction (E3, `hasse`), exact-numeric concrete domains (CR7–CR9, `cdomain`), ABox realisation +
+whole-ontology consistency (`abox`); concurrency is **E4**. Constructs outside EL entirely (union /
+complement / `allValuesFrom` / cardinality / multi-individual `oneOf`) are always skipped. The
+classifier is **single-threaded**. Enable with
+`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse", "cdomain", "abox"] }`. The
+`snomed_go_scale_bench` example (`--features rbox,hasse`) is a *relative* (dimensionless, no
+hard-coded ms) end-to-end scaling check confirming normalise + RBox + Hasse compose with no
+hidden quadratic.
 
 ## 📚 Learn more
 

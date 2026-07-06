@@ -1,0 +1,36 @@
+# [OPUS-4.8] sq-qcnn.4 (epic sq-qcnn; DAG node A of research/differential-testing-value-level.md):
+# the ENGINE-INDEPENDENT value-normalisation + canonical-result library for the value-level
+# multi-oracle differential fuzzer.
+#
+# LOAD-BEARING CONSTRAINT: this crate deliberately depends on NO sparq crate — not
+# sparq-core, sparq-engine, or sparq-substrate. The whole point of a value-level
+# differential test is to catch a wrong bound VALUE; if the harness canonicalised both
+# sparq's and the oracle's results through sparq's own numeric tower / term comparator,
+# any bug there would cancel on both sides and the differential would go blind exactly
+# where it must see. So the normalisation is built from mature third-party exact-arithmetic
+# crates (num-bigint / bigdecimal) plus explicit XSD rules implemented here, structurally
+# independent of the engine under test.
+#
+# It is `publish = false` DEV/TEST tooling (the opt-in unit is the crate itself: nothing in
+# the shipping graph depends on it, so the lean core/engine/wasm build never links num-bigint
+# / bigdecimal via this crate). No cargo feature is needed — a leaf test crate that nothing
+# depends on has no lean surface to protect with an internal flag.
+[package]
+name = "sparq-difftest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Arbitrary-precision integers: xsd:integer (and derived) value equality BEYOND i128, where
+# an f64 (or sparq's own i128 exact tier) would collapse distinct integers.
+num-bigint = "0.4"
+# Arbitrary-precision decimals: xsd:decimal value equality for high-precision literals that
+# share an f64 (0.123456789012345678 vs ...679).
+bigdecimal = "0.4"
+# Parse the neutral wire form each oracle emits (SPARQL Results JSON).
+serde_json = "1"
+
+[dev-dependencies]
+# (none — the direct unit tests need only the crate's own deps.)

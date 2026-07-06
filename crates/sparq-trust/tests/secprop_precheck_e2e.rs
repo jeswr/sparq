@@ -17,16 +17,24 @@
 //!   gate admits NOTHING and NO grant derives, even though the credential signature,
 //!   freshness, and holder binding are all perfectly valid. The pre-check is a
 //!   *principled refusal*, not a cryptographic failure.
+//! - **BUNDLED, TAMPER-RESISTANT annotations** (`sq-nrwqs`, Phase 5.1) — the method's
+//!   secprop annotation graph is resolved from the bundled sparq-zk
+//!   `secprop-methods.ttl`, NOT from caller-supplied N3. The caller passes only the
+//!   method IRI + the ODRL preference; a caller cannot widen the recorded posture and an
+//!   unknown method fails closed. This hardens the input trust boundary; it makes NO new
+//!   soundness claim (the estate stays externally UNAUDITED, `sq-qhy4`).
 //!
 //! Runs only with the `secprop-precheck` feature; the `feature-matrix.yml` /
 //! `feature-matrix.d/sparq-trust.yml` leg EXECUTES it.
 //!
-//! 🤖 SPARQ agent — sq-dt5hv (epic sq-0dksu, Phase 5) [OPUS-4.8]. Flag for re-review
-//! when Fable returns.
+//! 🤖 SPARQ agent — sq-dt5hv (epic sq-0dksu, Phase 5) + sq-nrwqs (Phase 5.1) [OPUS-4.8].
+//! Flag for re-review when Fable returns.
 #![cfg(feature = "secprop-precheck")]
 
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
-use sparq_trust::admit::{admit, admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
+use sparq_trust::admit::{
+    admit, admit_with_precheck, AdmissibilityConstraint, AdmissibilityPreference, PrecheckOutcome,
+};
 use sparq_trust::policy::{parse_policy, ControlGate, TrustRule};
 use sparq_trust::vocab;
 use sparq_trust::wire::derive_grants;
@@ -51,15 +59,33 @@ const ACR_ABAC_RULE: &str = r#"@prefix schema: <http://schema.org/> .
 { ?x schema:age ?y . ?y math:greaterThan 18 } => { ?x auth:read <https://pod.ex/resourceX> } .
 "#;
 
-/// The method's secprop annotation block (the §4.3.3 levels; assurance is `Claimed` —
-/// `Proven` is barred while `sq-qhy4` is open).
-const ANNOTATIONS: &str = "\
-zk:poseidon2-rdfc10-v1\n\
-  secx:hasProperty [ secx:property secx:UnlinkabilityScope ; secx:level secx:PerPresentation ] ,\n\
-                   [ secx:property secx:AssuranceLevel ; secx:level secx:Claimed ] .\n";
+// [OPUS-4.8] sq-nrwqs (Phase 5.1): the method's secprop annotation graph is NO LONGER
+// caller-supplied — the pre-check resolves it from the bundled sparq-zk
+// `secprop-methods.ttl`, and the requester's ODRL preference is STRUCTURED (validated
+// `AdmissibilityConstraint` IRIs), not raw N3. The string-canonical method's bundled block
+// records `UnlinkabilityScope PerPresentation` and every positive property `Claimed` (so
+// its derived AssuranceLevel is `Claimed`; `Proven` is barred while `sq-qhy4` is open),
+// which is exactly the §4.3.3 worked-example posture these tests pin — now tamper-resistant.
+
+// The `secx:requires…` leftOperands + level IRIs the requester's `gteq` constraints name.
+const REQ_UNLINK: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresUnlinkabilityScope";
+const REQ_ASSUR: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresAssurance";
+const REQ_SOUND: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresSoundness";
+const LVL_PER_PRESENTATION: &str = "https://w3id.org/zkp-sparql/sec-prop#PerPresentation";
+const LVL_CLAIMED: &str = "https://w3id.org/zkp-sparql/sec-prop#Claimed";
+const LVL_PROVEN: &str = "https://w3id.org/zkp-sparql/sec-prop#Proven";
+const LVL_KNOWLEDGE_SOUND: &str = "https://w3id.org/zkp-sparql/sec-prop#KnowledgeSound";
 
 fn iri(s: &str) -> NamedNode {
     NamedNode::new(s).unwrap()
+}
+
+/// A single `gteq` admissibility constraint from two IRI strings.
+fn constraint(left: &str, right: &str) -> AdmissibilityConstraint {
+    AdmissibilityConstraint {
+        left_operand: iri(left),
+        right_operand: iri(right),
+    }
 }
 
 fn age_credential_graph(subject: &str, value: &str) -> Vec<Triple> {
@@ -151,12 +177,10 @@ fn read_granted(grants: &[Triple], subject: &str) -> bool {
     })
 }
 
-fn pref(constraint_iris: &[&str], policy_n3: &str) -> AdmissibilityPreference {
+fn pref(constraints: Vec<AdmissibilityConstraint>) -> AdmissibilityPreference {
     AdmissibilityPreference {
         method_iri: iri(METHOD),
-        constraint_iris: constraint_iris.iter().map(|s| (*s).to_owned()).collect(),
-        policy_n3: policy_n3.to_owned(),
-        annotations_n3: ANNOTATIONS.to_owned(),
+        constraints,
     }
 }
 
@@ -192,16 +216,10 @@ fn satisfiable_preference_admits_and_derives_the_grant() {
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
     // Relaxed: unlinkability >= PerPresentation (held), assurance >= Claimed (held).
-    let policy = "\
-zk:rUnlink odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerPresentation .\n\
-zk:rAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .\n";
-    let p = pref(
-        &[
-            "https://sparq.dev/ns/zk#rUnlink",
-            "https://sparq.dev/ns/zk#rAssur",
-        ],
-        policy,
-    );
+    let p = pref(vec![
+        constraint(REQ_UNLINK, LVL_PER_PRESENTATION),
+        constraint(REQ_ASSUR, LVL_CLAIMED),
+    ]);
 
     let (admitted, outcome) = admit_with_precheck(
         &cred,
@@ -228,6 +246,40 @@ zk:rAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl
     );
 }
 
+/// BUNDLED-RESOLUTION end-to-end: a `requiresSoundness gteq secx:KnowledgeSound`
+/// preference is satisfied purely from the shipped `secprop-methods.ttl` (which records
+/// the string-canonical method's `Soundness KnowledgeSound`) — a dimension NO caller
+/// supplies. The real gate then runs and the age>18 grant derives end-to-end. This pins
+/// that admissibility is decided by the bundled ontology, not caller-supplied N3
+/// (`sq-nrwqs`).
+#[test]
+fn bundled_soundness_preference_admits_and_derives_the_grant() {
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+
+    let p = pref(vec![constraint(REQ_SOUND, LVL_KNOWLEDGE_SOUND)]);
+
+    let (admitted, outcome) = admit_with_precheck(
+        &cred,
+        &rules,
+        &session(JESSE, NOW),
+        &iri(RESOURCE_X),
+        Some(&p),
+    );
+    assert_eq!(
+        outcome,
+        PrecheckOutcome::Admitted,
+        "the bundled Soundness KnowledgeSound satisfies the requester's gteq constraint"
+    );
+    assert_eq!(admitted.len(), 1, "the age fact passes the gate");
+    let grants = derive_grants(&admitted, ACR_ABAC_RULE).expect("derivation runs");
+    assert!(
+        read_granted(&grants, JESSE),
+        "the grant derives end-to-end from a bundled-resolved admissibility verdict"
+    );
+}
+
 /// Alice's STRICT `requiresAssurance gteq Proven` removes every Claimed-only sparq
 /// method while `sq-qhy4` is open: the gate admits NOTHING and NO grant derives, even
 /// though the signature, freshness, and holder binding are all valid. A principled
@@ -238,8 +290,7 @@ fn strict_assurance_preference_fails_closed_despite_a_valid_credential() {
     let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
-    let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Proven .";
-    let p = pref(&["https://sparq.dev/ns/zk#cAssur"], policy);
+    let p = pref(vec![constraint(REQ_ASSUR, LVL_PROVEN)]);
 
     // Sanity: the SAME credential admits without the pre-check (so the denial below is
     // the pre-check's doing, not a broken credential).
@@ -260,9 +311,9 @@ fn strict_assurance_preference_fails_closed_despite_a_valid_credential() {
     assert_eq!(
         outcome,
         PrecheckOutcome::Denied {
-            unsatisfied: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()]
+            unsatisfied: vec![REQ_ASSUR.to_owned()]
         },
-        "requiresAssurance gteq Proven names the unsatisfied constraint (the honest refusal)"
+        "requiresAssurance gteq Proven names the unsatisfied dimension (the honest refusal)"
     );
     assert!(
         admitted.is_empty(),
@@ -276,20 +327,18 @@ fn strict_assurance_preference_fails_closed_despite_a_valid_credential() {
     );
 }
 
-/// A preference whose method IRI does not match the annotation block fails closed (the
-/// graph is keyed on the IRI; a wrong/unknown method satisfies nothing).
+/// A preference whose method IRI has no BUNDLED annotation block is an unknown method:
+/// it fails closed with `UnknownMethod` (the bundled graph is the source of truth; a
+/// wrong/unknown method admits nothing) — the `sq-nrwqs` hardening.
 #[test]
 fn unknown_method_iri_fails_closed() {
     let (sk, pk) = gov_key();
     let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
-    let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .";
     let p = AdmissibilityPreference {
         method_iri: iri("https://sparq.dev/ns/zk#no-such-method"),
-        constraint_iris: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()],
-        policy_n3: policy.to_owned(),
-        annotations_n3: ANNOTATIONS.to_owned(),
+        constraints: vec![constraint(REQ_ASSUR, LVL_CLAIMED)],
     };
 
     let (admitted, outcome) = admit_with_precheck(
@@ -300,11 +349,11 @@ fn unknown_method_iri_fails_closed() {
         Some(&p),
     );
     assert!(
-        matches!(outcome, PrecheckOutcome::Denied { .. }),
-        "unknown method denies"
+        matches!(outcome, PrecheckOutcome::UnknownMethod { .. }),
+        "an unknown method (no bundled block) denies with UnknownMethod"
     );
     assert!(
         admitted.is_empty(),
-        "a method with no annotation block admits nothing"
+        "a method with no bundled annotation block admits nothing"
     );
 }

@@ -91,10 +91,10 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and
   enforces a valid status / bounded priority / no-stale-edge on every `pkg:Task`.
-- **Literature-ingestion scaffolding** (`literature` feature, `sq-2489d.5`) — the
-  `[connector]→[extract (record/replay)]→[ground]→[emit TTL]→[SHACL gate]→[sidecar]`
-  pipeline on **committed fixtures, ZERO network/model calls**; the grounding-resolver
-  **quarantines** (never drops) rejects; machine tier capped at `secx:Conjectured`.
+- **Literature ingestion + tiered dump** (`literature`/`literature-live`, `sq-2489d.5`/`sq-tzars.*`) — the
+  `[connector]→[extract]→[ground]→[SHACL gate]→[sidecar]` pipeline on **committed fixtures,
+  ZERO network in CI** (grounding **quarantines**, never drops; machine tier ≤ `secx:Conjectured`);
+  live (`literature-live`) adds a CORE v3 connector (paged search + retry + **fail-closed license**) and a subprocess-seam **live extractor** (record/replay preserved; defensive caps — confidence ≤ 0.7, never `Proven`, non-span justification rejected). `run_tiered` partitions emission into per-tier ARTIFACTS with **fail-closed** licence routing (unknown ⇒ restricted; metadata-only public projection).
 - **Opt-in by construction** — default build is data + constants only; the
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
@@ -106,8 +106,8 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 
 ## 📚 Learn more
 
-- Design records: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063) +
-  `research/provenance-driven-genai-kb.md` (§4/§5 literature-ingestion, `sq-2489d.5`).
+- Design records: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063), `research/
+  provenance-driven-genai-kb.md` (§4/§5 literature, `sq-2489d.5`) + `research/research-kb-program.md` (`sq-tzars`).
 - `ontology/pkg/PROVENANCE.md` — the per-term reuse + verified `skos:closeMatch`
   alignment record; precedent: `crates/sparq-trust/ontologies/zkp-sparql/`.
 - Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion PoC `.2`; the **query-the-PKG** helper

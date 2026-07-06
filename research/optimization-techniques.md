@@ -18,9 +18,13 @@ From `research/ARCHITECTURE.md` and `research/BENCHMARKS.md`:
 - **Joins:** merge join by default on co-sorted scans, gallop for skew, hash when
   not co-sorted, **Leapfrog Triejoin (LFTJ)** for cyclic/skewed BGPs. GYO
   acyclicity test routes cyclic→WCOJ, else binary.
-- **Planner:** spargebra → physical IR → filter pushdown → **DPccp/DPhyp under a
-  budget, GOO above**; cardinality from block-metadata counts + per-relation
-  multiplicities + **characteristic sets** for stars.
+- **Planner:** spargebra → physical IR → filter pushdown → cardinality-cost **greedy
+  GOO** join ordering by DEFAULT. An OPT-IN `dp-planner` feature (bead `sq-iywur`) adds a
+  connected-subgraph-complement-pair (**DPccp**) dynamic-programming enumerator that finds
+  a `Cout`-optimal *bushy* tree, **falling back to GOO above a connected-subgraph budget**
+  (and on disconnected BGPs). It is order-only (result-identical to GOO) and OFF by default.
+  Hypergraph **DPhyp** / interesting-orders-in-the-DP-table are NOT implemented. Cardinality
+  from block-metadata counts + per-relation multiplicities + **characteristic sets** for stars.
 - **Execution:** a **materialising evaluator** — builds `Vec<SmallVec<[Id;4]>>`
   rows. **No SIMD kernels, no compilation, and the query evaluator is still
   row-at-a-time.** The first building block of the vectorized `DataChunk` M4 path
@@ -94,7 +98,7 @@ Promise (P) is the scout's 1–5 score; *Win* = expected speedup with conditions
 | **LpBound (pessimistic lp-norm + LP bound)** | 5 | never-underestimate guarantee; tiny per-predicate stats (browser-friendly); prevents catastrophic plans | medium | C | arxiv 2502.05912 |
 | **Mid-query re-optimization (materialization checkpoints)** | 4 | large where first estimate badly wrong, ~0 overhead otherwise; **free since sparq already materialises** | **small** | L | arxiv 1902.08291 |
 | **SafeBound (compressed degree-seq bounds)** | 4 | up to 80% lower runtime vs PG, 500× faster planning, 6.8× less space; server-class | medium | M | arxiv 2211.09864 |
-| **DPhyp (DP over query hypergraph)** | 4 | optimal bushy vs greedy; 6–15-pattern BGPs; negligible tiny | medium | L | already in M2 plan |
+| **DPhyp (DP over query hypergraph)** | 4 | optimal bushy vs greedy; 6–15-pattern BGPs; negligible tiny | medium | L | DPccp shipped opt-in (`sq-iywur`); DPhyp still planned |
 | **IKKBZ + LinDP (adaptive, poly-time large joins)** | 4 | better plans than GOO, scales to huge BGPs (path/reasoning expansion) | medium | L | db.in.tum.de hugejoins |
 | **Zero-overhead bottom-up Yannakakis (semijoin in hash build)** | 4 | no-regret vs binary by construction; wins concentrated on pathological | large | C | vldb vol17 p3215-birler |
 
@@ -143,7 +147,7 @@ scaling prize.*
 
 ## 2. Prioritised roadmap
 
-Composing with the **existing** sort-merge + LFTJ + GOO/DPccp + inline-ValueId +
+Composing with the **existing** sort-merge + LFTJ + GOO (opt-in DPccp) + inline-ValueId +
 range-pruning design. The organising principle the sweep makes unavoidable: the
 2018–2026 literature has **pivoted from better join *ordering* to join-order-*robust*
 semi-join pre-reduction** (Yannakakis revival), and **the highest-leverage
@@ -412,9 +416,10 @@ codebase.
 1. **The field pivoted from better *cardinality estimation* to *order-robust execution*.**
    The strongest cross-cutting signal: with semi-join reduction (Yannakakis revival —
    Predicate Transfer, RPT, Yannakakis+, Shredded Yannakakis, TreeTracker) join order
-   becomes *almost irrelevant* (371×→1.6× variance). For sparq this means the shipped
-   DPccp + characteristic-set investment is **partly substitutable** by a semi-join-
-   reduction layer that makes GOO's mistakes cheap. `[M]` <!-- [OPUS-4.8] doc-sweep: DPccp is shipped (see top-of-doc architecture summary), was 'planned' -->
+   becomes *almost irrelevant* (371×→1.6× variance). For sparq this means the opt-in
+   DPccp enumerator (`dp-planner`, OFF by default) + characteristic-set investment is
+   **partly substitutable** by a semi-join-reduction layer that makes GOO's mistakes
+   cheap. `[M]` <!-- [OPUS-4.8] sq-iywur: DPccp now shipped as an OPT-IN (off-by-default) planner path, not the default; corrected the earlier stale "shipped as default" note. -->
 2. **sparq's dictionary encoding — chosen for compression — is a semi-join superpower.**
    The literature settled on *probabilistic Bloom* filters precisely because general
    SQL keys are wide/sparse. sparq's dense u32 ids make the **exact bitmap** variant

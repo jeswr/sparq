@@ -1,0 +1,169 @@
+# [OPUS-4.8] Change-based CI test-selection — path -> crate/trigger ownership map.
+# Bead sq-fmx4u.2 (epic sq-fmx4u). Design: research/change-based-test-selection.md
+# §4 (fail-safe rules + the ownership map). Authored by Opus 4.8 (Fable
+# unavailable; flag for re-review when Fable returns).
+#
+# WHO CONSUMES THIS: scripts/ci_select.py (the affected-set selector, bead .1)
+# reads the `[[map]]` array. scripts/ci_audit_inputs.py (the out-of-crate-input
+# audit, this bead) reads `[[map]]` AND the informational `[triggers]` mirror.
+# Any OTHER top-level key is ignored by both — safe to add documentation tables.
+#
+# HOW THE SELECTOR USES A CHANGED PATH (design §4, order is normative):
+#   1. §4.1 unconditional full-run trigger  (baked into ci_select `_FULL_TRIGGERS`)
+#   2. crate-prefix ownership                (a path under crates/<c>/ belongs to c)
+#   3. THIS map's `[[map]]` entries          (first match wins)
+#   4. otherwise UNOWNED, UNMAPPED           => mode=full  (fail-safe, design §2)
+# The map is consulted ONLY for a path that is neither a trigger nor inside a
+# crate dir. It therefore EXTENDS the fail-closed set — it can never weaken it:
+# a `safe=true` entry for a trigger/crate path is unreachable (steps 1-2 win
+# first), and the map-validity + audit tests forbid such an entry anyway.
+#
+# THREE VERDICT FORMS (design §4.2), nothing else:
+#   [[map]] pattern = "<glob>"  crates = ["a", "b"]   # attribute to consumer crates
+#   [[map]] pattern = "<glob>"  safe   = true         # PROVEN inert for the Rust matrix
+#   (an unmatched path falls through to the implicit mode=full default)
+# `pattern` is repo-relative POSIX; `dir/**` matches the dir or anything beneath
+# it, otherwise fnmatch. Every `crates` name must be a live workspace member and
+# every pattern root must exist on disk OR be a fetched/generated suite (the
+# map-validity test uses a git-ignore + scripts/fetch-*.sh allowlist, #1392).
+
+# ---------------------------------------------------------------------------
+# [triggers] — INFORMATIONAL MIRROR of ci_select.py `_FULL_TRIGGERS` (§4.1).
+# The selector does NOT read this table; it is the human-readable, drift-guarded
+# statement of the unconditional full-run set. `test_path_ownership.py` asserts
+# this list equals the selector's built-in patterns, so the two cannot diverge.
+# A change to ANY of these forces the whole matrix — a skip here would be unsound
+# (each feeds every build / redefines what "green" means for the whole repo).
+# ---------------------------------------------------------------------------
+[triggers]
+patterns = [
+  "Cargo.lock",             # resolved versions feed every build
+  "Cargo.toml",             # ROOT manifest: members / [workspace.dependencies] / lints / profiles / [patch]
+  "rust-toolchain",         # compiler pin affects all codegen
+  "rust-toolchain.toml",    # compiler pin affects all codegen
+  ".cargo/",                # global rustflags / registries / build config
+  ".github/",               # the CI definition itself, incl. the selection wiring
+  "scripts/",               # shared gate/coverage/check scripts executed by CI
+  "deny.toml",              # cargo-deny config: redefines a supply-chain green
+  "supply-chain/",          # cargo-vet / audit / SBOM config
+  "ci/path-ownership.toml", # the selection policy (this file) itself
+]
+
+# ---------------------------------------------------------------------------
+# [lanes] — INFORMATIONAL MIRROR of ci_select.py `_LANE_SEEDS` (design §5.2,
+# beads sq-fmx4u.6 phase 2 + sq-mel85 phase 2b). The selector does NOT read this
+# table; it documents, in the policy file, which SINGLETON CI lane maps to which
+# SEED crates. A lane is a whole-job that always exercises a FIXED crate set (the
+# fuzz smoke; the wasm bundle build; the perf-gate bench); it is skipped only when
+# NONE of its seeds is in the affected reverse-dependency closure.
+# `test_ci_select_wiring.py::test_ownership_toml_lanes_mirror_matches_lane_seeds`
+# asserts this table equals ci_select.py `_LANE_SEEDS` so the doc + the code cannot
+# diverge; the fuzz.yml + ci.yml `wasm` + bench.yml `bench` job `if:` guards
+# reference exactly these crate names, also pinned by that test. Under-listing a
+# seed would be a silent unsound skip; over-listing merely over-runs the lane
+# (fail-safe).
+# ---------------------------------------------------------------------------
+[lanes]
+# fuzz.yml — the cargo-fuzz targets; the out-of-workspace fuzz crate depends on:
+fuzz = ["sparq-core", "sparq-engine", "sparq-shacl"]
+# ci.yml `wasm` job — every browser bundle it builds (+ the rlib-only wasm smokes):
+wasm = [
+  "sparq-wasm",
+  "sparq-reason-wasm",
+  "sparq-rsp-wasm",
+  "sparq-text-wasm",
+  "sparq-shacl-wasm",
+  "sparq-introspect",
+  "sparq-solid",
+]
+# [SONNET-4.6] sq-mel85: bench.yml `bench` job — the perf regression gate.
+# TRUE INVARIANT: every hard-gated metric measured on the PR/merge_group tier must have
+# its source crate reach a bench seed. PR-tier hard-gated metrics today:
+#   store/dict/parse (sparq-core) — reached via sparq-cli + sparq-bench (both bench seeds)
+#   wasm_bundle_bytes (sparq-wasm) — DIRECT seed (a wasm-only diff does not flow up into
+#     engine/cli/bench; omitting sparq-wasm would be an unsound skip)
+# The four additional mode:auto ratchets (fts_bytes_per_doc / vectors_diskann_recall_at10
+# / vectors_pq_recall_at10 / geo_compliance_deficit) need NO bench seed because
+# ci-bench.sh measures them MAIN-tier-only (GITHUB_REF guards skip them on any non-main
+# ref); every main-tier event is mode=full. Push-to-main always runs mode=full.
+bench = ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"]
+
+# ---------------------------------------------------------------------------
+# [[map]] — attribution of OUT-OF-CRATE inputs to the crates that read them.
+# Each entry below is an AUDIT-PROVEN finding: a repo-level path referenced from
+# a crate's src/tests/benches/build.rs (include_str!/include_bytes! or an
+# env!("CARGO_MANIFEST_DIR")-relative read). `crates` lists EVERY direct reader
+# so a change to the input triggers each reader's reverse-dependency closure —
+# under-listing a reader would be a silent unsound skip (that is what the audit
+# scripts/ci_audit_inputs.py exists to prevent, fail-closed).
+# ---------------------------------------------------------------------------
+
+# The FO-bridge ingest compiles AGENTS.md + skills/*/SKILL.md front-matter into
+# sparq-kb's vendored ingest/agents-findings.ttl. The current kb tests read that
+# committed in-crate ttl (not the live docs), so this attribution is deliberately
+# CONSERVATIVE: it keeps a charter/skill edit aligned with its ingest consumer
+# (sparq-kb re-runs) instead of being silently skipped — an over-trigger, never
+# a skip (design §4.2). No other crate reads these paths.
+[[map]]
+pattern = "AGENTS.md"
+crates = ["sparq-kb"]
+
+[[map]]
+pattern = "skills/**"
+crates = ["sparq-kb"]
+
+# W3C/RDF conformance corpus — FETCHED (gitignored) by scripts/fetch-conformance.sh
+# et al. into tests/w3c/. Read by sparq-conformance's suites via
+# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail).
+[[map]]
+pattern = "tests/w3c/**"
+crates = ["sparq-conformance"]
+
+# W3C ODRL test suite — FETCHED by scripts/fetch-odrl-suite.sh into
+# tests/odrl-test-suite/. Read by sparq-policy's odrl_test_suite.rs.
+[[map]]
+pattern = "tests/odrl-test-suite/**"
+crates = ["sparq-policy"]
+
+# QLever "olympics" corpus (bench/qlever-olympics/olympics.nt). Read from the
+# tests of the engine + the crates that evaluate over it. Every reader is listed.
+[[map]]
+pattern = "bench/qlever-olympics/**"
+crates = ["sparq-engine", "sparq-introspect", "sparq-nlq", "sparq-sim", "sparq-vectors"]
+
+# QLever synthetic query corpus (bench/qlever-synthetic/queries) — read by
+# sparq-engine's dict-consolidation differential test.
+[[map]]
+pattern = "bench/qlever-synthetic/**"
+crates = ["sparq-engine"]
+
+# ZK-compose gate-count + SPARQL-feature catalog fixtures (committed JSON),
+# include_str!'d by sparq-zk-compose's gate_count/sparql_catalog tests.
+[[map]]
+pattern = "bench/zk-compose/**"
+crates = ["sparq-zk-compose"]
+
+# ---------------------------------------------------------------------------
+# SAFE list — paths AUDIT-PROVEN inert for the Rust matrix (design §4.2). The
+# list started EMPTY; each entry below was added only after the audit confirmed
+# NO workspace crate reads it from src/tests/benches/build.rs. The audit
+# re-verifies this every run (a crate that starts reading a safe path FAILS the
+# audit, forcing a re-evaluation). Docs/site lanes still run — they are separate
+# workflows, not gated by this selector.
+# ---------------------------------------------------------------------------
+
+# Design records / research notes. No crate compiles or reads research/.
+[[map]]
+pattern = "research/**"
+safe = true
+
+# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml);
+# no Rust crate reads site/.
+[[map]]
+pattern = "site/**"
+safe = true
+
+# The bead task database. Task-tracking only; no crate reads .beads/.
+[[map]]
+pattern = ".beads/**"
+safe = true

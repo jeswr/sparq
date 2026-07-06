@@ -61,18 +61,19 @@ use sparq_geo::{parse_gml_literal, parse_wkt_literal, vocab};
 /// Whether `iri` is a GeoSPARQL topology RELATION property IRI the query-rewrite
 /// extension expands.
 ///
-/// With the `engine` feature this delegates to the crate's own
+/// With the OPT-IN `geosparql_rewrite` feature this delegates to the crate's own
 /// [`sparq_geo::is_topology_property`] — the exact predicate the rewrite
-/// (sq-9g58) gates on. Without `engine` the rewrite module is not compiled
-/// (it needs `sparq_engine::Query`), so we recognise the same topology-relation
-/// local names directly over the `geo:` namespace; this keeps R4-R6/R28-R30
-/// probes meaningful in BOTH feature states.
+/// (sq-9g58) gates on. Without it the rewrite module is not compiled (it is
+/// gated behind that opt-in feature, sq-wf9qg), so we recognise the same
+/// topology-relation local names directly over the `geo:` namespace; this keeps
+/// R4-R6/R28-R30 probes meaningful in ALL feature states (default `engine`-only,
+/// `geosparql_rewrite`, and no-default).
 fn recognizes_topology_property(iri: &str) -> bool {
-    #[cfg(feature = "engine")]
+    #[cfg(feature = "geosparql_rewrite")]
     {
         sparq_geo::is_topology_property(iri)
     }
-    #[cfg(not(feature = "engine"))]
+    #[cfg(not(feature = "geosparql_rewrite"))]
     {
         const TOPOLOGY_LOCALS: &[&str] = &[
             "sfEquals",
@@ -435,7 +436,14 @@ fn requirements() -> Vec<Req> {
              envelope, boundary.",
             Coverage::Pass,
             "All nine are implemented (geof.rs / lex::); probed below across \
-             representative operands.",
+             representative operands. DISTANCE-ACCURACY HONESTY (sq-cbe4t): \
+             geof:distance in METRIC units is EXACT haversine for point↔point and \
+             point↔geometry (spherical closest point), but between two EXTENDED \
+             geometries it uses a LOCAL EQUIRECTANGULAR approximation about mean \
+             latitude — accurate at local scale, degrading at continental scale / \
+             near the poles. uom:degree/radian measure euclidean coordinate-space \
+             distance. No exactness is claimed for the extended↔extended path \
+             (see crates/sparq-geo/README.md 'Distance accuracy caveat').",
             || {
                 lex::distance("POINT(0 0)", "POINT(0 1)", METRE).is_ok()
                     && lex::buffer("POINT(0 0)", 1.0, METRE).is_ok()
@@ -646,6 +654,18 @@ fn ogc_geosparql_requirements_conformance() {
         "demonstrated {passed} / {} requirements (gaps {gaps}; floor {REQUIREMENTS_FLOOR})",
         reqs.len()
     );
+    // [OPUS-4.8] sq-cbe4t — DISTANCE-APPROXIMATION HONESTY NOTE on the scoreboard
+    // output: the R19 geof:distance pass is NOT a claim of metric exactness for
+    // every operand pair. Point↔point / point↔geometry is exact haversine;
+    // extended↔extended is a local equirectangular approximation. State it here so
+    // the scoreboard is never mistaken for an exact-distance certification.
+    println!(
+        "NOTE geof:distance accuracy — exact haversine point↔point / point↔geometry; \
+         LOCAL EQUIRECTANGULAR APPROXIMATION between two extended geometries (accurate \
+         locally, degrading at continental scale / near the poles). uom:degree/radian \
+         measure euclidean coordinate-space distance. See crates/sparq-geo/README.md \
+         'Distance accuracy caveat'."
+    );
 
     assert!(
         pass_failures.is_empty(),
@@ -673,6 +693,78 @@ fn requirements_floor_is_consistent() {
         REQUIREMENTS_FLOOR <= achievable,
         "REQUIREMENTS_FLOOR ({REQUIREMENTS_FLOOR}) exceeds achievable passes \
          ({achievable}) — the floor is unreachable; lower it or close a gap"
+    );
+}
+
+/// [OPUS-4.8] sq-cbe4t — pins the HONEST distance semantics the scoreboard note
+/// describes, so the documented boundary is enforced, not just asserted in prose:
+///
+/// * point↔point metric distance is EXACT haversine (matches a hand-computed
+///   great-circle value to sub-metre tolerance);
+/// * point↔geometry is exact (spherical closest point) — a point outside a small
+///   box equals the haversine to its nearest edge point;
+/// * extended↔extended is the LOCAL EQUIRECTANGULAR approximation — finite,
+///   positive, and (for a near-equatorial local pair) within a few percent of the
+///   haversine between the nearest vertices, i.e. an APPROXIMATION, never a faked
+///   exact value;
+/// * uom:degree measures euclidean coordinate-space distance (a different metric).
+#[test]
+fn distance_accuracy_boundary_is_as_documented() {
+    use sparq_geo::geof::lex;
+
+    const METRE: &str = "http://www.opengis.net/def/uom/OGC/1.0/metre";
+    const DEGREE: &str = "http://www.opengis.net/def/uom/OGC/1.0/degree";
+
+    // (1) Point↔point: exact haversine. 1° of latitude on the GRS80 mean sphere
+    // is π·R/180 ≈ 111195 m; (0,0)->(0,1) is exactly that meridian arc.
+    let d = lex::distance("POINT(0 0)", "POINT(0 1)", METRE).expect("metric point-point");
+    let expected_1deg = std::f64::consts::PI * 6_371_008.8 / 180.0;
+    assert!(
+        (d - expected_1deg).abs() < 1.0,
+        "point↔point distance must be exact haversine: got {d}, expected ~{expected_1deg}"
+    );
+
+    // (2) Point↔geometry: exact spherical closest point. A point due west of a
+    // small box equals the haversine to the box's nearest (west) edge.
+    let d_pg = lex::distance(
+        "POINT(0 0)",
+        "POLYGON((1 -1, 2 -1, 2 1, 1 1, 1 -1))",
+        METRE,
+    )
+    .expect("metric point-polygon");
+    // Nearest edge point is (1,0); haversine (0,0)->(1,0) ≈ 1° of longitude at the
+    // equator ≈ the same 1-degree arc. Must be finite and ~111 km.
+    assert!(
+        d_pg.is_finite() && (90_000.0..130_000.0).contains(&d_pg),
+        "point↔geometry distance must be exact-ish nearest-edge haversine: {d_pg}"
+    );
+
+    // (3) Extended↔extended: the equirectangular APPROXIMATION. Two small,
+    // near-equatorial boxes ~1° apart: the result is finite, positive, and close
+    // to (but, being an approximation, not bit-identical to) the haversine of the
+    // nearest vertices — exactly the documented behaviour.
+    let d_ee = lex::distance(
+        "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+        "POLYGON((2 0, 3 0, 3 1, 2 1, 2 0))",
+        METRE,
+    )
+    .expect("metric polygon-polygon");
+    assert!(
+        d_ee.is_finite() && d_ee > 0.0 && (90_000.0..130_000.0).contains(&d_ee),
+        "extended↔extended distance is the local equirectangular approximation: {d_ee}"
+    );
+
+    // (4) uom:degree is a DIFFERENT metric (euclidean coordinate space). The two
+    // boxes above are 1 coordinate-degree apart along x.
+    let d_deg = lex::distance(
+        "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+        "POLYGON((2 0, 3 0, 3 1, 2 1, 2 0))",
+        DEGREE,
+    )
+    .expect("degree polygon-polygon");
+    assert!(
+        (d_deg - 1.0).abs() < 1e-9,
+        "uom:degree measures coordinate-space distance: got {d_deg}, expected 1.0"
     );
 }
 

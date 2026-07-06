@@ -1,45 +1,46 @@
 # [OPUS-4.8] sq-40y0 — deploy the sparq feature-showcase site (site/) to GitHub Pages.
 #
-# WHAT THIS PUBLISHES: the Next.js static export under the Pages base path /sparq,
-# PLUS the existing benchmark dashboard preserved at /sparq/dev/, PLUS the DISTINCT
-# operational GUI frontend (gui/app) hosted at /sparq/app/. The dashboard tree
+# WHAT THIS PUBLISHES: the Next.js static export served ROOT-RELATIVE (basePath '') at the custom domain
+# https://sparq.jeswr.org/ (org-migration cutover, sq-uj38w),
+# PLUS the existing benchmark dashboard preserved at /dev/, PLUS the DISTINCT
+# operational GUI frontend (gui/app) hosted at /app/. The dashboard tree
 # (`dev/`) lives on the `benchmark-data` branch (written by bench.yml); this workflow
 # fetches that tree and OVERLAYS it into the export's `out/dev/` before upload, so a
 # single Pages artifact serves the showcase root, the unchanged dashboard at
-# /sparq/dev/bench/, AND the live "Try the GUI" workbench at /sparq/app/.
+# /dev/bench/, AND the live "Try the GUI" workbench at /app/.
 #
-# THE /sparq/app/ GUI (sq-vnd0i, maintainer's Option B): the marketing site's `/try` route
+# THE /app/ GUI (sq-vnd0i, maintainer's Option B): the marketing site's `/try` route
 # stays the lightweight in-browser SPARQL REPL playground; the live operational GUI is a
 # SEPARATE destination built from gui/app (a distinct Next.js workbench, NOT the site) and
 # overlaid at out/app/ — the site's "App" nav slot (wired in #1004) points there. Same single
 # Pages deploy; no Pages-API/source change (build_type is already 'workflow').
 #
 # HOW /dev/bench IS PRESERVED (traced):
-#   1. Pages is served at https://jeswr.github.io/sparq/ from this workflow
+#   1. Pages is served at https://sparq.jeswr.org/ from this workflow
 #      (build_type: workflow — the "GitHub Actions" source; the earlier "Deploy from a
 #      branch" legacy source has been retired). The benchmark dashboard formerly served
 #      from the `benchmark-data` branch root (a root index.html redirect + a dev/ tree:
 #      dev/bench/{index.html,dashboard.js,dashboard.css,data.js,...}) is now carried into
-#      THIS workflow's artifact via the overlay step below, so /sparq/dev/bench/ keeps
+#      THIS workflow's artifact via the overlay step below, so /dev/bench/ keeps
 #      working under the single Actions-built artifact.
 #   2. This workflow does NOT touch the `benchmark-data` branch — bench.yml keeps
 #      writing data.js + dev/bench/* there exactly as before. We only READ it.
 #   3. After `next build` writes the showcase to out/ (with its OWN root index.html),
 #      we `git archive` the `benchmark-data` branch's `dev/` directory into `out/dev/`.
 #      The showcase root replaces the old redirect; the dashboard is carried forward
-#      verbatim, so https://jeswr.github.io/sparq/dev/bench/ keeps working.
+#      verbatim, so https://sparq.jeswr.org/dev/bench/ keeps working.
 #   4. `out/.nojekyll` disables Jekyll so `_next/` (underscore-prefixed) assets serve.
 #
 # PAGES SOURCE (DONE — no longer needs:user): the repo's Pages source is already set to
-# "GitHub Actions" (sq-vbq9 resolved; `gh api repos/jeswr/sparq/pages` reports
+# "GitHub Actions" (sq-vbq9 resolved; `gh api repos/sparq-org/sparq/pages` reports
 # build_type: workflow), so this workflow's deploy step IS the live publisher — the site
-# at https://jeswr.github.io/sparq/ is served from the artifact below, not from any branch
+# at https://sparq.jeswr.org/ is served from the artifact below, not from any branch
 # root. No repo-settings action is outstanding for this workflow. (The alternative —
 # committing out/ onto benchmark-data — was rejected: it couples site source to the data
 # branch and races bench.yml's root index.html seed.)
 #
 # OPEN PRODUCT DECISION (sq-svtt, NOT a settings flip): Pages has ONE deploy slot and this
-# workflow owns the /sparq/ root. The mdBook guide (sq-w9sr/sq-h0tr) wants a published
+# workflow owns the / root. The mdBook guide (sq-w9sr/sq-h0tr) wants a published
 # home too; until that root question is decided (guide at /guide subpath vs at root vs a
 # merged deploy), docs.yml deliberately ships NO deploy job (build-validate only) so a
 # second deploy-pages cannot race + overwrite this showcase. That decision does not block
@@ -106,7 +107,7 @@ jobs:
           node-version: 22
 
       - name: Cache cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -183,27 +184,37 @@ jobs:
       # before — the migration changes only WHERE deps resolve from, not the produced out/ tree.
       - name: Build static site
         working-directory: site
+        # [OPUS-4.8] sq-uj38w — org-migration Pages cutover (atomic flip). The site now serves at the
+        # ROOT of the custom domain https://sparq.jeswr.org/ (custom domain set via site/public/CNAME
+        # → out/CNAME below), so the Pages build must emit ROOT-RELATIVE assets (/_next/… not
+        # /sparq/_next/…). NEXT_PUBLIC_BASE_PATH='' selects basePath '' in site/next.config.ts (the SAME
+        # switch the Tauri build uses). basePath and the custom domain MUST flip together in THIS one
+        # deploy — changing only one would break every asset/route URL.
+        env:
+          NEXT_PUBLIC_BASE_PATH: ""
         run: |
           npm ci
-          npm run build   # prebuild copies js/wasm → site/public/wasm + builds papers, then next build → out/
+          npm run build   # prebuild copies js/wasm → site/public/wasm + builds papers, then next build → out/ (root-relative, basePath '')
 
       # [OPUS-4.8] sq-vnd0i — build the DISTINCT operational GUI frontend (gui/app) as its hosted
-      # "Try the GUI live" web target and OVERLAY it at /sparq/app/ on the SAME Pages artifact.
+      # "Try the GUI live" web target and OVERLAY it at /app/ on the SAME Pages artifact.
       #
       # The maintainer picked Option B (bead sq-vnd0i): /try stays the lightweight in-browser
       # SPARQL REPL playground (the site's `/try` route, unchanged); the live operational GUI is a
-      # SEPARATE destination hosted at https://jeswr.github.io/sparq/app/ — a sub-path of THIS
+      # SEPARATE destination hosted at https://sparq.jeswr.org/app/ — a sub-path of THIS
       # single GitHub-Actions Pages deploy (the site's "App" nav slot, wired in #1004). This step
       # makes that route real: until now `site/src/app/app/page.tsx` was an honest PLACEHOLDER
-      # promising the hosted app "will live here at /sparq/app/"; this overlay delivers it.
+      # promising the hosted app "will live here at /app/"; this overlay delivers it.
       #
       # The GUI frontend embeds the in-tab WASM engine, so it consumes the SAME lean
       # `--features shacl,jsonld` bundle already built into `js/wasm/` above; its `prebuild`
       # `sync-wasm` copies that bundle into `gui/app/public/wasm/` before `next build`. `build:web`
       # leaves NEXT_PUBLIC_BASE_PATH unset, so `gui/app/next.config.ts` defaults basePath +
-      # assetPrefix to `/sparq/app` (every `_next/*` chunk URL is baked as `/sparq/app/...`), and
-      # the GUI passes the same `/sparq/app` prefix to the @sparq/client wasm loader, so the
-      # runtime engine fetch is `/sparq/app/wasm/...` — exactly where the overlay places it.
+      # assetPrefix to `/app` (every `_next/*` chunk URL is baked as `/app/...`), and
+      # the GUI passes the same `/app` prefix to the @sparq/client wasm loader, so the
+      # runtime engine fetch is `/app/wasm/...` — exactly where the overlay places it. (Pre-cutover
+      # sq-uj38w this sub-path was /sparq/app; the site now serves at the custom-domain ROOT so it
+      # collapsed to /app.)
       #
       # `npm install` at the repo root resolves the gui/app workspace member's deps from the
       # repo-root package-lock (mirrors gui.yml's gui-app job); it does NOT touch the wasm bundle.
@@ -211,7 +222,7 @@ jobs:
         run: npm install
       - name: Build the operational GUI frontend (hosted web target)
         working-directory: gui/app
-        run: npm run build:web   # presync check + prebuild sync-wasm (js/wasm → public/wasm), then next build → out/ (basePath /sparq/app)
+        run: npm run build:web   # presync check + prebuild sync-wasm (js/wasm → public/wasm), then next build → out/ (basePath /app)
 
       # [OPUS-4.8] sq-d8or — anti-drift: link-check the BUILT site HTML before publish.
       # The docs-quality `internal-links` job (sq-5fd1) lychee-checks the repo MARKDOWN;
@@ -228,13 +239,13 @@ jobs:
       # 0.23.0 is the version lycheeverse/lychee-action@v2.8.0 ships, so behaviour matches the
       # markdown gate.
       - name: Install lychee
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: lychee@0.23.0
       - name: Link-check the static-export HTML (lychee --offline)
         run: bash scripts/check-site-links.sh site/out
 
-      # ---- Preserve the existing benchmark dashboard(s) at /sparq/dev/ ----
+      # ---- Preserve the existing benchmark dashboard(s) at /dev/ ----
       # [OPUS-4.8] sq-zngy — fold ALL `dev/bench*` subtrees (not just dev/bench).
       # bench.yml writes benchmark-data:dev/bench (benchmark-data-dir-path: dev/bench);
       # bench-ec2.yml writes benchmark-data:dev/bench-ec2 (benchmark-data-dir-path:
@@ -276,11 +287,11 @@ jobs:
           # Static-export hygiene: disable Jekyll so _next/ assets are served.
           touch out/.nojekyll
 
-      # ---- Overlay the operational GUI frontend at /sparq/app/ ----
+      # ---- Overlay the operational GUI frontend at /app/ ----
       # [OPUS-4.8] sq-vnd0i — place the gui/app hosted web export INTO out/app/, mirroring the
       # dev/bench overlay above (a sub-tree of the SAME single Pages artifact). The GUI's
-      # static export (basePath /sparq/app) writes its index.html at the export ROOT with assets
-      # baked as /sparq/app/_next/... and /sparq/app/wasm/... , so serving it at /sparq/app/
+      # static export (basePath /app) writes its index.html at the export ROOT with assets
+      # baked as /app/_next/... and /app/wasm/... , so serving it at /app/
       # means copying the WHOLE export tree (index.html, _next/, wasm/, 404.html) into out/app/.
       # This step runs AFTER the lychee link-check (which checks only the SITE's own HTML) and
       # DELIBERATELY OVERWRITES the site's /app placeholder marketing card (site/src/app/app/) —
@@ -302,7 +313,7 @@ jobs:
           # tree (its index.html + any chunk it referenced) so only the real GUI remains.
           rsync -a --delete "$gui_out"/ out/app/
           # OVERLAY ASSERTION: the engine asset + the app entry MUST land where the baked URLs
-          # (/sparq/app/...) expect them, or the hosted GUI would 404 its own engine/chunks.
+          # (/app/...) expect them, or the hosted GUI would 404 its own engine/chunks.
           for f in out/app/index.html out/app/wasm/sparq_wasm_bg.wasm; do
             if [ -f "$f" ]; then
               echo "OK present: ${f#out/} ($(wc -c < "$f") bytes)"
@@ -311,19 +322,19 @@ jobs:
               exit 1
             fi
           done
-          # Sanity: the GUI index must reference the /sparq/app asset prefix (catches a basePath
+          # Sanity: the GUI index must reference the /app asset prefix (catches a basePath
           # regression that would silently break every asset/chunk URL once hosted).
-          if grep -q '/sparq/app/_next/' out/app/index.html; then
-            echo "OK: out/app/index.html references the /sparq/app asset prefix"
+          if grep -q '/app/_next/' out/app/index.html; then
+            echo "OK: out/app/index.html references the /app asset prefix"
           else
-            echo "::error::out/app/index.html does NOT reference /sparq/app/_next/ — basePath regression (the GUI would 404 its chunks when hosted)"
+            echo "::error::out/app/index.html does NOT reference /app/_next/ — basePath regression (the GUI would 404 its chunks when hosted)"
             exit 1
           fi
           echo "OK: operational GUI overlaid at out/app/" >> "$GITHUB_STEP_SUMMARY"
 
       # [OPUS-4.8] sq-zngy — ARTIFACT-LEVEL smoke check (NOT a live-URL check).
       # This step asserts the ASSEMBLED Pages output dir (site/out, the exact tree handed to
-      # upload-pages-artifact below) rather than probing the live https://jeswr.github.io/sparq/dev/...
+      # upload-pages-artifact below) rather than probing the live https://sparq.jeswr.org/dev/...
       # URL: the artifact check is deterministic + decoupled from deploy/propagation timing
       # (the live URL lags this run by the deploy + CDN flush), and it catches the dev/bench*
       # reconciliation regression at build time, BEFORE upload. It verifies the artifact
@@ -334,6 +345,16 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
+          # [OPUS-4.8] sq-uj38w — org-migration Pages cutover: the published root MUST carry a CNAME
+          # file (= `sparq.jeswr.org`) so this deploy sets the custom domain. Next copies site/public/
+          # into the export root, so out/CNAME appears from site/public/CNAME. If it is missing or wrong,
+          # the atomic flip would publish a root-relative build WITHOUT the custom domain — hard fail
+          # rather than deploy a half-flipped site.
+          if [ -f out/CNAME ] && grep -qx 'sparq.jeswr.org' out/CNAME; then
+            echo "OK: out/CNAME present and = sparq.jeswr.org (custom domain will be set on deploy)"
+          else
+            echo "::error::out/CNAME missing or not exactly 'sparq.jeswr.org' — custom-domain flip would not take effect"; fail=1
+          fi
           # Core dashboard (dev/bench) MUST always be present — these are hard requirements.
           #   present:            dev/bench/index.html, dev/bench/dashboard.js
           #   present + NON-EMPTY: dev/bench/data.js (the benchmark series; empty = broken overlay)

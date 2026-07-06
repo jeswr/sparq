@@ -1,0 +1,467 @@
+#!/usr/bin/env python3
+# [FABLE-5] Hermetic unit tests for the ci-summary gate poll loop
+# (scripts/ci_summary_gate.py — bead sq-90cv4). Authored by Claude Fable 5.
+#
+# The bead's mandate: prove the ADAPTIVE SATURATION BUDGET preserves the gate's
+# real pass/fail semantics EXACTLY. The four load-bearing cases:
+#   (a) all-green                      => SUCCESS   (test_all_green_success)
+#   (b) real gating failure           => FAILURE   (test_real_failure_fails)
+#   (c) saturation w/ queued siblings => still-settling, NOT a false RED, and the
+#       eventual verdict is the REAL one (test_saturation_extension_then_green /
+#       test_failure_during_extension_still_fails)
+#   (d) genuine hang (no progress, idle queue) => FAILURE
+#       (test_genuine_hang_fails), and saturation-forever is BOUNDED: the absolute
+#       cap still REDs (test_saturation_forever_bounded_red) — the extension can
+#       never convert a real failure into a pass NOR wait forever.
+# Plus the pre-existing semantics that must not regress: the sq-ipkku/#997
+# terminal-injection settle guard + graceful timeout, the sq-wjth advisory
+# word-boundary exclusion, the anchored self-run exclusion, and the empty-set pass.
+#
+# Fully hermetic: fetchers are injected (no gh, no network, no sleep).
+# Run:  python3 scripts/tests/test_ci_summary_gate.py   (stdlib only; no pytest)
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import sys
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # keep repeated local runs hermetic (no stale .pyc)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPT = REPO_ROOT / "scripts" / "ci_summary_gate.py"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("ci_summary_gate", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["ci_summary_gate"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+g = _load_module()
+
+
+def R(name, status="completed", conclusion="success", url=""):
+    return {"name": name, "status": status, "conclusion": conclusion,
+            "details_url": url, "html_url": ""}
+
+
+GREEN = R("build + test")
+GREEN2 = R("clippy")
+PENDING = R("coverage", status="queued", conclusion=None)
+IN_PROGRESS = R("coverage", status="in_progress", conclusion=None)
+RED = R("clippy", conclusion="failure")
+
+
+def tiny_cfg(**over):
+    """Small budgets so the loop phases are reachable in a handful of polls:
+    base budget = 4 polls, absolute cap = 8, settle = 2, floor = 2."""
+    base = dict(self_run_id="999", interval=0, min_polls=2, settle_polls=2,
+                base_polls=4, sat_interval=0, max_total_polls=8,
+                sat_queue_min=5, progress_window=2, max_consec_fetch_failures=3,
+                summary_path="")
+    base.update(over)
+    return g.Config(**base)
+
+
+def scripted(polls, repeat_last=True):
+    """fetch_runs() stub: returns polls[i] on call i (an Exception instance is
+    raised instead); repeats the final entry once exhausted."""
+    state = {"i": 0, "calls": 0}
+
+    def fetch():
+        state["calls"] += 1
+        i = min(state["i"], len(polls) - 1) if repeat_last else state["i"]
+        state["i"] += 1
+        entry = polls[i]
+        if isinstance(entry, Exception):
+            raise entry
+        return list(entry)
+
+    fetch.state = state
+    return fetch
+
+
+def run(cfg, polls, depth=0):
+    """Drive run_gate with scripted polls + a constant queue depth (None = the
+    depth API is unavailable). Returns (exit_code, captured_output)."""
+    out = io.StringIO()
+    fetch = scripted(polls)
+
+    def depth_fn():
+        return depth
+
+    with redirect_stdout(out):
+        code = g.run_gate(cfg, fetch, depth_fn, sleep_fn=lambda s: None)
+    return code, out.getvalue()
+
+
+class TestVerdictSemantics(unittest.TestCase):
+    """The core pass/fail semantics — unchanged by the adaptive budget."""
+
+    def test_all_green_success(self):
+        code, out = run(tiny_cfg(), [[GREEN, GREEN2]])
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+
+    def test_real_failure_fails(self):
+        code, out = run(tiny_cfg(), [[GREEN, RED]])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out)
+        self.assertIn("clippy", out)
+
+    def test_skipped_and_neutral_pass(self):
+        runs = [R("docs", conclusion="skipped"), R("wasm", conclusion="neutral"), GREEN]
+        code, _ = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+
+    def test_empty_set_passes(self):
+        code, out = run(tiny_cfg(), [[]])
+        self.assertEqual(code, 0)
+        self.assertIn("stable empty set", out)
+
+    def test_advisory_failure_excluded(self):
+        runs = [R("vale (prose, advisory)", conclusion="failure"),
+                R("unsafe report (cargo-geiger, informational)", conclusion="failure"),
+                GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+        self.assertIn("2 advisory check(s) excluded", out)
+
+    def test_advisories_plural_still_gates(self):
+        # sq-wjth word boundary: "advisories" must NOT match the advisory rule.
+        runs = [R("cargo-deny (advisories, bans, licenses, sources)", conclusion="failure")]
+        code, _ = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+
+    def test_incomplete_conclusion_fails(self):
+        # A terminal-status run with a null conclusion renders as "incomplete" and gates.
+        runs = [R("weird", conclusion=None)]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("incomplete", out)
+
+
+class TestSettleAndGracefulTimeout(unittest.TestCase):
+    """The sq-ipkku settle guard + the #997 graceful timeout must not regress."""
+
+    def test_terminal_injection_does_not_starve_settle(self):
+        polls = [
+            [GREEN, PENDING],                    # pending holds the gate
+            [GREEN, R("coverage")],              # all terminal, stable=1
+            [GREEN, R("coverage"), R("late")],   # terminal INJECTION: stable=2 (no reset)
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("::error::", out)
+
+    def test_graceful_timeout_all_green_passes(self):
+        # pending flip-flops so a full quiet settle never happens; depth is HIGH so
+        # the pending polls past the base budget extend instead of hanging-RED; the
+        # ABSOLUTE budget then renders the real (green) verdict — the #997 fix.
+        flip = [[GREEN, PENDING], [GREEN, R("coverage")]] * 4
+        code, out = run(tiny_cfg(), flip, depth=20)
+        self.assertEqual(code, 0)
+        self.assertIn("rendering the verdict on the final all-terminal set", out)
+
+    def test_graceful_timeout_real_failure_still_fails(self):
+        flip = [[GREEN, PENDING], [GREEN, R("coverage")]] * 3 \
+            + [[GREEN, PENDING], [GREEN, R("coverage", conclusion="failure")]]
+        code, out = run(tiny_cfg(), flip, depth=20)
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out)
+
+
+class TestAdaptiveSaturationBudget(unittest.TestCase):
+    """sq-90cv4: saturation extends, hangs RED, real verdicts are untouched."""
+
+    def test_saturation_extension_then_green(self):
+        # Siblings stay QUEUED through the base budget while the repo queue is deep
+        # (the congestion-collapse shape) — the gate must extend, then pass for real.
+        polls = [[GREEN, GREEN2, PENDING]] * 5 + [[GREEN, GREEN2, R("coverage")]]
+        code, out = run(tiny_cfg(), polls, depth=20)
+        self.assertEqual(code, 0)
+        self.assertIn("Extending the wait (adaptive budget", out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("::error::", out)
+
+    def test_genuine_hang_fails(self):
+        # Pending forever, idle queue, zero progress => RED at the base budget.
+        polls = [[GREEN, IN_PROGRESS]]
+        code, out = run(tiny_cfg(), polls, depth=0)
+        self.assertEqual(code, 1)
+        self.assertIn("genuine hang", out)
+
+    def test_saturation_forever_bounded_red(self):
+        # The extension is BOUNDED: perpetual saturation still REDs at the absolute
+        # cap — never an infinite wait, never a synthesized pass.
+        polls = [[GREEN, PENDING]]
+        code, out = run(tiny_cfg(), polls, depth=20)
+        self.assertEqual(code, 1)
+        self.assertIn("ABSOLUTE budget", out)
+
+    def test_failure_during_extension_still_fails(self):
+        # The adaptive budget must NEVER convert a real failure into a pass.
+        polls = [[GREEN, PENDING]] * 5 + [[GREEN, R("coverage", conclusion="failure")]]
+        code, out = run(tiny_cfg(), polls, depth=20)
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out)
+
+    def test_progress_signal_extends_when_depth_unknown(self):
+        # Queue-depth API unavailable (None) but completions keep landing => the
+        # progress signal alone extends; the eventual verdict is real.
+        polls = [
+            [R("a"), R("b"), PENDING, R("d", status="queued", conclusion=None),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d", status="queued", conclusion=None),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"), R("e"),
+             R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"), R("e"), R("f")],
+        ]
+        code, out = run(tiny_cfg(), polls, depth=None)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+
+    def test_no_progress_and_depth_unknown_is_a_hang(self):
+        # Unknown depth + flat completions must NOT extend forever: it REDs at the
+        # base budget exactly like the old behaviour (fail-closed on no evidence).
+        polls = [[GREEN, IN_PROGRESS]]
+        code, out = run(tiny_cfg(), polls, depth=None)
+        self.assertEqual(code, 1)
+        self.assertIn("genuine hang", out)
+
+
+class TestSelfExclusionAndFetch(unittest.TestCase):
+    def test_self_run_excluded_by_anchored_id(self):
+        me = R("gate", status="in_progress", conclusion=None,
+               url="https://github.com/o/r/actions/runs/999/job/1")
+        sibling = R("build + test", url="https://github.com/o/r/actions/runs/9991/job/2")
+        # Without the exclusion the pending self would deadlock the gate; with it,
+        # only the green sibling counts.
+        code, _ = run(tiny_cfg(), [[me, sibling]])
+        self.assertEqual(code, 0)
+
+    def test_anchoring_does_not_match_prefix_ids(self):
+        self.assertTrue(g.is_self({"details_url": "https://x/actions/runs/999/job/4"}, "999"))
+        self.assertTrue(g.is_self({"details_url": "https://x/actions/runs/999"}, "999"))
+        self.assertFalse(g.is_self({"details_url": "https://x/actions/runs/9991/job/4"}, "999"))
+        self.assertFalse(g.is_self({"html_url": "https://x/actions/runs/1999/job/4"}, "999"))
+        # html_url fallback when details_url is absent.
+        self.assertTrue(g.is_self({"html_url": "https://x/actions/runs/999/job/4"}, "999"))
+
+    def test_transient_fetch_failures_tolerated(self):
+        polls = [g.FetchError("blip"), g.FetchError("blip"), [GREEN], [GREEN]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0)
+        self.assertIn("skipping this poll", out)
+
+    def test_persistent_fetch_failures_fail_closed(self):
+        polls = [g.FetchError("down")]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 1)
+        self.assertIn("consecutive check-run fetch failures", out)
+
+
+class TestAdvisoryRule(unittest.TestCase):
+    def test_word_boundary_rule(self):
+        self.assertTrue(g.is_advisory("markdownlint-advisory (whole repo)"))
+        self.assertTrue(g.is_advisory("external-links (lychee online, advisory)"))
+        self.assertTrue(g.is_advisory("unsafe report (cargo-geiger, informational)"))
+        self.assertFalse(g.is_advisory("cargo-deny (advisories, bans, licenses, sources)"))
+        self.assertFalse(g.is_advisory("build + test"))
+        self.assertFalse(g.is_advisory("gate"))
+
+
+# [FABLE-5] sq-fmx4u.3: change-based test-selection semantics (design §5.3).
+# The three load-bearing safety invariants, exactly as the bead states them:
+#   (1) skipped-not-affected + select SUCCESS      => gate SUCCESS (no hang, no RED)
+#   (2) a job that FAILED                          => gate FAILURE (selection never
+#       masks a real failure, with or without skips present)
+#   (3) select present-but-not-success             => gate FAILURE even if every
+#       other sibling is green/skipped (a skip is only trustworthy under a
+#       successful selection — fail-closed, design §4.3)
+# plus the transition guarantee: select ABSENT (a pre-selection sibling set)
+# preserves the previous semantics byte-for-byte (skipped is non-failing).
+SELECT_NAME = "select / select (change-based test selection)"
+SEL_OK = R(SELECT_NAME)
+
+
+class TestSelectionSemantics(unittest.TestCase):
+    def test_skipped_not_affected_with_select_success_passes(self):
+        # Invariant 1: an enforced-selection run — wide lanes skipped, select green.
+        runs = [SEL_OK,
+                R("W3C/OGC GeoSPARQL conformance (ratchet)", conclusion="skipped"),
+                R("opt-in sparq-rsp (rsp)", conclusion="skipped"),
+                GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        # The bead's transparency line: N of M ran, K skipped, select healthy.
+        self.assertIn("2 skipped", out)
+        self.assertIn("selection pre-job succeeded", out)
+
+    def test_real_failure_still_fails_under_selection(self):
+        # Invariant 2: selection must never mask a genuine failure.
+        runs = [SEL_OK, RED, R("docs", conclusion="skipped")]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out)
+        self.assertIn("clippy", out)
+
+    def test_select_failure_reds_even_when_all_siblings_green(self):
+        # Invariant 3: an unobservable selection blocks the merge outright.
+        runs = [R(SELECT_NAME, conclusion="failure"), GREEN, GREEN2]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("selection pre-job", out)
+
+    def test_select_skipped_or_neutral_is_not_success(self):
+        # "did not succeed" is anything but success — a skipped/neutral select
+        # would otherwise sneak through the generic skipped/neutral tolerance.
+        for concl in ("skipped", "neutral", "cancelled", None):
+            runs = [R(SELECT_NAME, conclusion=concl),
+                    R("x", conclusion="skipped"), GREEN]
+            code, out = run(tiny_cfg(), [runs])
+            self.assertEqual(code, 1, f"select conclusion={concl!r} must RED the gate")
+            self.assertIn("selection pre-job", out)
+
+    def test_select_absent_preserves_legacy_skip_semantics(self):
+        # Transition guarantee: no selection check-run on the commit (old sibling
+        # sets / other repos' shapes) => skipped stays non-failing, as before.
+        runs = [R("docs", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+        self.assertNotIn("selection pre-job", out)
+
+    def test_multiple_select_runs_all_must_succeed(self):
+        # ci.yml AND feature-matrix.yml each call the reusable select job — the
+        # gate sees two same-named runs; ONE failing must RED the gate.
+        runs = [SEL_OK, R(SELECT_NAME, conclusion="failure"), GREEN]
+        code, _ = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+
+    def test_select_name_detection_contract(self):
+        # The name-detection contract with .github/workflows/ci-select.yml (also
+        # pinned cross-file by scripts/tests/test_ci_select_wiring.py).
+        self.assertTrue(g.is_select(SELECT_NAME))
+        self.assertFalse(g.is_select("build + test"))
+        self.assertFalse(g.is_select("gate"))
+        # And the select job must never be advisory-excluded.
+        self.assertFalse(g.is_advisory(SELECT_NAME))
+
+
+# [SONNET-4.6] Robustness-hardening tests (sq-90cv4 follow-up: Copilot gaps).
+# Covers:
+#   (a) _gh_json_lines converts subprocess raises (FileNotFoundError, TimeoutExpired)
+#       → FetchError → routed into the existing bounded skip path, not a raw crash.
+#   (b) fetch_queue_depth raising in run_gate → depth treated as None (unknown) →
+#       NO saturation extension granted on depth alone (conservative branch).
+# Mutation check: removing either try/except causes the test to go RED (the
+# underlying exception propagates instead of being caught/re-raised as FetchError).
+class TestSubprocessRobustness(unittest.TestCase):
+    """[SONNET-4.6] subprocess raises in _gh_json_lines / fetch_queue_depth must be
+    converted to graceful-degradation paths, never raw crashes."""
+
+    def test_gh_json_lines_file_not_found_raises_fetch_error(self):
+        """FileNotFoundError (gh not on PATH) must surface as FetchError so the
+        caller's FetchError handler (bounded retry / skip-this-poll) applies."""
+        from unittest.mock import patch
+        with patch("subprocess.run", side_effect=FileNotFoundError("gh: not found")):
+            with self.assertRaises(g.FetchError) as ctx:
+                g._gh_json_lines(["repos/x/y"])
+        self.assertIn("subprocess raised", str(ctx.exception))
+
+    def test_gh_json_lines_timeout_raises_fetch_error(self):
+        """TimeoutExpired must also surface as FetchError (same bounded-retry path)."""
+        from unittest.mock import patch
+        import subprocess as _sp
+        with patch("subprocess.run", side_effect=_sp.TimeoutExpired("gh", 30)):
+            with self.assertRaises(g.FetchError):
+                g._gh_json_lines(["repos/x/y"])
+
+    def test_subprocess_raise_routed_into_skip_tolerance(self):
+        """A FileNotFoundError inside _gh_json_lines → FetchError → treated as a
+        skipped poll (not a gate crash).  Two such errors then a green poll must pass
+        (within the 3-failure tolerance of tiny_cfg)."""
+        # Simulate _gh_json_lines raising FetchError (as it does after the fix for
+        # FileNotFoundError) for the first two calls, then returning [GREEN].
+        call_count = {"n": 0}
+
+        def fake_fetch():
+            n = call_count["n"]
+            call_count["n"] += 1
+            if n < 2:
+                raise g.FetchError("subprocess raised: gh: not found")
+            return [dict(GREEN)]
+
+        out = io.StringIO()
+
+        def depth_fn():
+            return 0
+
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), fake_fetch, depth_fn, sleep_fn=lambda s: None)
+        output = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("skipping this poll", output)
+        self.assertIn("PASSED", output)
+
+    def test_fetch_queue_depth_raises_treated_as_unknown_no_extension(self):
+        """When fetch_queue_depth() RAISES (subprocess spawn error inside the closure),
+        run_gate must catch it, treat depth as None (unknown), and NOT grant a
+        saturation extension — unknown depth with no progress is a genuine hang → RED.
+        Mutation check: remove the try/except in run_gate → RuntimeError propagates
+        instead of being caught → this test goes RED."""
+        out = io.StringIO()
+        fetch = scripted([[GREEN, IN_PROGRESS]])
+
+        def raising_depth():
+            raise RuntimeError("subprocess.run raised: gh not found")
+
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), fetch, raising_depth, sleep_fn=lambda s: None)
+        output = out.getvalue()
+        self.assertEqual(code, 1, "unknown-depth + no-progress must be a genuine hang RED")
+        self.assertIn("genuine hang", output)
+        self.assertNotIn("Extending the wait", output)
+
+    def test_fetch_queue_depth_raises_progress_still_extends(self):
+        """Unknown depth (depth_fn raises) does NOT block the progress-signal path:
+        if completions are landing the gate still extends (progress alone suffices)."""
+        # Six polls with decreasing pending; completions rising → progress=True.
+        # depth_fn always raises (unknown). Verify extension activates then passes.
+        polls = [
+            [R("a"), R("b"), PENDING, R("d", status="queued", conclusion=None),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d", status="queued", conclusion=None),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"), R("e"),
+             R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"), R("e"), R("f")],
+        ]
+        out = io.StringIO()
+        fetch = scripted(polls)
+
+        def raising_depth():
+            raise RuntimeError("depth API down")
+
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), fetch, raising_depth, sleep_fn=lambda s: None)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

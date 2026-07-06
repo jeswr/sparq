@@ -4,7 +4,7 @@
 // top frames the whole section.
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRight, FileText, Download, ScrollText } from "lucide-react";
+import { ArrowRight, FileText, FileCode, Download, ScrollText } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -32,6 +32,12 @@ export const metadata: Metadata = {
 // so the PDF resolves under both the Pages `/sparq` prefix and the Tauri root-relative build.
 function pdfHref(slug: string): string {
   return withBasePath(`/papers/${slug}.pdf`);
+}
+
+// [OPUS-4.8] sq-1scgk — the paper's single Typst source on GitHub (the authoring artifact the
+// PDF + in-site render both compile from). Matches the site's source-link convention.
+function sourceHref(source: string): string {
+  return `https://github.com/jeswr/sparq/blob/main/site/papers/${source}`;
 }
 
 export default function PapersIndexPage() {
@@ -97,6 +103,16 @@ export default function PapersIndexPage() {
                 >
                   <Download className="size-3.5" aria-hidden />
                   PDF
+                </a>
+                {/* [OPUS-4.8] sq-1scgk — the single Typst source (the repro/artifact anchor). */}
+                <a
+                  href={sourceHref(p.source)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+                >
+                  <FileCode className="size-3.5" aria-hidden />
+                  Source
                 </a>
               </div>
             </CardContent>

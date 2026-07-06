@@ -11,8 +11,8 @@
 //
 // NO WASM NEEDED. The hero + nav are server-rendered shell — they paint without the wasm engine,
 // so this spec runs on EVERY lane (including the light site-e2e CI lane that builds no wasm
-// bundle). The heavy in-tab REPL below the hero is its own (wasm-gated) concern, covered by
-// repl-results.spec.ts + try-query-smoke.spec.ts; here we only assert the shell boots clean.
+// bundle). The in-tab hero runner below the fold is its own (wasm-gated) concern, covered by
+// home-runner.spec.ts; here we only assert the shell boots clean.
 //
 // It is a CORRECTNESS smoke test, not a benchmark: it asserts the DOM + console, never a
 // wall-clock threshold (timings on a work-box / CI runner are non-canonical).
@@ -21,13 +21,13 @@ import { test, expect, type Page, type ConsoleMessage } from "@playwright/test";
 // Empty relative route → resolves to the baseURL's `/sparq/` basePath (the home page).
 const ROUTE = "";
 
-// The home page eagerly mounts the lazy in-tab REPL (`<ReplLazy>`), which pre-warms the wasm
-// engine by FETCHING `public/wasm/sparq_wasm_bg.wasm`. On the LIGHT site-e2e CI lane that bundle
-// is intentionally NOT built (no Rust toolchain), so the fetch 404s and the browser logs a bare
-// "Failed to load resource: the server responded with a status of 404 (Not Found)" console
+// The home page eagerly mounts the lazy in-tab hero runner (`HeroQueryRunner`), which pre-warms
+// the wasm engine by FETCHING `public/wasm/sparq_wasm_bg.wasm`. On the LIGHT site-e2e CI lane that
+// bundle is intentionally NOT built (no Rust toolchain), so the fetch 404s and the browser logs a
+// bare "Failed to load resource: the server responded with a status of 404 (Not Found)" console
 // error. That is the repo's documented "optional wasm — warn and skip" posture (sync-wasm.mjs),
-// NOT a product bug — the REPL surfaces a clear in-page "engine failed to load" state and the
-// SHELL we are smoke-testing (hero + nav) is unaffected. So we IGNORE that benign resource-load
+// NOT a product bug — the runner surfaces a clear in-page state and the SHELL we are smoke-testing
+// (hero + nav) is unaffected. So we IGNORE that benign resource-load
 // 404 while still catching every real client-side error (a JS throw / bad import / hydration
 // fault arrives as a `pageerror` or a NON-404 `console.error`, both of which still fail the test).
 const BENIGN_RESOURCE_404 = /Failed to load resource:.*\b404\b/i;
@@ -75,16 +75,21 @@ test("the home route renders the hero headline and the primary nav with no conso
   await gotoSettled(page, ROUTE);
 
   // The hero <h1> (server-rendered, paints with the shell). Matched on a stable substring of the
-  // headline copy rather than the whole gradient-split markup.
+  // headline copy rather than the whole gradient-split markup ("A full SPARQL engine. In this
+  // tab.").
   await expect(
-    page.getByRole("heading", { name: /state-of-the-art RDF engine/i, level: 1 }),
+    page.getByRole("heading", { name: /full SPARQL engine/i, level: 1 }),
   ).toBeVisible();
 
   // The slim top bar (the AppShell "Primary" navigation landmark) carries the six content
   // destinations. Asserting the landmark + its core links proves the nav booted, not just copy.
+  // [SONNET-4.6] sq-4hiqe — "Try" was removed from the nav (the /try playground is gone).
+  // [OPUS-4.8] sq-1scgk — "Papers" was promoted INTO the bar (maintainer 2026-07-04 item 9b:
+  // make the paper-factory output prominently findable); the bar is now
+  // Home · Capabilities · App · Benchmarks · Papers · Download (no Try item).
   const primary = page.getByRole("navigation", { name: "Primary" }).first();
   await expect(primary).toBeVisible();
-  for (const label of ["Home", "Capabilities", "Try", "Benchmarks"]) {
+  for (const label of ["Home", "Capabilities", "App", "Benchmarks", "Papers", "Download"]) {
     await expect(primary.getByRole("link", { name: label, exact: true })).toBeVisible();
   }
 

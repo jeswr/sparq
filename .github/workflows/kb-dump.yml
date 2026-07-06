@@ -1,0 +1,151 @@
+name: kb-dump
+
+# KB dump workflow — sparq-org/research-kb (sq-tzars.8).
+#
+# DUMPS ALREADY SAVED: sparq-org/research-kb (PRIVATE repo).
+#   Layout: dumps/YYYY-MM-DD/ per run, each containing:
+#     pkg-hand-authored.ttl.gz   — hand-authored PKG tier
+#     pkg-ontology.ttl.gz        — PKG ontology export
+#     manifest.json              — per-tier counts + tool versions
+#     dump-provenance.ttl        — prov:Activity with generatedAtTime + prov:used
+#   First dump: dumps/2026-07-05/ (committed 2026-07-05T08:06:16Z,
+#   fixed 2026-07-05T08:29:30Z — see sparq-org/research-kb commit history).
+#
+# AUTOMATION STATUS: The automated-push plan (push-to-main trigger + KB_DUMP_TOKEN
+#   secret requirement) is ABORTED per maintainer decision on issue #1552 (sq-yfh5d).
+#   Rationale: the first dump already exists in sparq-org/research-kb; recurring
+#   automated pushes are not needed until the maintainer explicitly re-enables them.
+#   To refresh the dump manually: run this workflow via workflow_dispatch from the
+#   GitHub Actions UI and supply a KB_DUMP_TOKEN secret at that time.
+#
+# SECRET: KB_DUMP_TOKEN
+#   A GitHub PAT (classic scope 'repo', or fine-grained Contents:write) on
+#   sparq-org/research-kb. Not required to exist as a persistent repo secret —
+#   the job skips gracefully when absent (see "Check KB_DUMP_TOKEN" step).
+#
+# (sq-tzars.8 / sq-yfh5d) [SONNET-4.6] 🤖 SPARQ agent — sparq-org/research-kb dump workflow.
+
+on:
+  # workflow_dispatch-only: automation aborted per #1552.  Run manually when a
+  # fresh dump is needed.
+  workflow_dispatch: {}
+
+concurrency:
+  group: kb-dump
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    name: kb-dump
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Check KB_DUMP_TOKEN
+        # Skip gracefully when the secret is absent — the caller can supply it at
+        # dispatch time.  Existing dumps are at sparq-org/research-kb/dumps/.
+        id: token_check
+        env:
+          KB_DUMP_TOKEN: ${{ secrets.KB_DUMP_TOKEN }}
+        run: |
+          if [ -z "${KB_DUMP_TOKEN}" ]; then
+            echo "::notice::KB_DUMP_TOKEN is not set — skipping push to sparq-org/research-kb."
+            echo ""
+            echo "To refresh the dump, re-run this workflow with a PAT that has"
+            echo "Contents:write permission on sparq-org/research-kb, set as"
+            echo "repository secret KB_DUMP_TOKEN or supplied at dispatch time."
+            echo ""
+            echo "Existing dumps: https://github.com/sparq-org/research-kb/tree/main/dumps"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "KB_DUMP_TOKEN is set (length=${#KB_DUMP_TOKEN})."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.token_check.outputs.skip == 'false'
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        if: steps.token_check.outputs.skip == 'false'
+        run: pip install --quiet rdflib
+
+      - name: Run PKG ingest (refresh hand-authored tier)
+        if: steps.token_check.outputs.skip == 'false'
+        run: |
+          python3 crates/sparq-kb/ingest/ingest_pkg.py \
+              --beads .beads/issues.jsonl \
+              --skills-dir skills \
+              --findings-yamlld crates/sparq-kb/ingest/agents-findings.yaml.ld \
+              --out crates/sparq-kb/ingest/pkg-instances.ttl
+
+      - name: Export-KB self-test (dry-run)
+        if: steps.token_check.outputs.skip == 'false'
+        run: python3 scripts/export-kb-dump.py --dry-run
+
+      - name: Assemble KB dump
+        if: steps.token_check.outputs.skip == 'false'
+        run: |
+          python3 scripts/export-kb-dump.py \
+              --out-dir /tmp/kb-dump-out \
+              --commit "${{ github.sha }}"
+
+      - name: Verify dump (no restricted content or secrets)
+        if: steps.token_check.outputs.skip == 'false'
+        # Belt-and-suspenders grep over the compressed artifacts to confirm the
+        # mandatory leak check in the export script was not bypassed.
+        run: |
+          DUMP_DATE=$(date -u +%Y-%m-%d)
+          DUMP_DIR="/tmp/kb-dump-out/${DUMP_DATE}"
+          echo "Verifying dump at: ${DUMP_DIR}"
+          FAIL=0
+          for f in "${DUMP_DIR}"/*.ttl.gz; do
+            echo "  checking: ${f}"
+            if zcat "${f}" | grep -qP "CORE_API_KEY|Bearer\s+[A-Za-z0-9_\-]{32,}"; then
+              echo "::error::Forbidden content found in ${f} — aborting push."
+              FAIL=1
+            fi
+          done
+          if [ "${FAIL}" -eq 1 ]; then
+            exit 1
+          fi
+          echo "Verification passed."
+
+      - name: Push dump to research-kb
+        if: steps.token_check.outputs.skip == 'false'
+        env:
+          KB_DUMP_TOKEN: ${{ secrets.KB_DUMP_TOKEN }}
+        run: |
+          DUMP_DATE=$(date -u +%Y-%m-%d)
+          DUMP_DIR="/tmp/kb-dump-out/${DUMP_DATE}"
+
+          # Clone the private external repo with the PAT
+          git clone \
+            "https://x-access-token:${KB_DUMP_TOKEN}@github.com/sparq-org/research-kb.git" \
+            /tmp/research-kb
+
+          # Copy the dump into the repo
+          mkdir -p "/tmp/research-kb/dumps/${DUMP_DATE}"
+          cp -r "${DUMP_DIR}/". "/tmp/research-kb/dumps/${DUMP_DATE}/"
+
+          # Commit and push
+          cd /tmp/research-kb
+          git config user.email "agent@sparq.dev"
+          git config user.name "SPARQ agent (sq-tzars.8)"
+          git add "dumps/${DUMP_DATE}"
+          # Check if there is anything to commit
+          if git diff --cached --quiet; then
+            echo "No changes to dump — nothing to push."
+          else
+            git commit -m "chore: KB dump ${DUMP_DATE} from sparq@${GITHUB_SHA:0:8}"
+            git push
+            echo "Pushed dump/${DUMP_DATE} to sparq-org/research-kb."
+          fi

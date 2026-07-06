@@ -186,6 +186,7 @@ mod tests {
             title: "orphan".to_string(),
             abstract_text: "x".to_string(),
             year: None,
+            license: None,
         };
         let cands = extractor.extract(std::slice::from_ref(&orphan)).unwrap();
         assert!(cands.is_empty());

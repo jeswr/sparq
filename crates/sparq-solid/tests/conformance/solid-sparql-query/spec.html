@@ -1,0 +1,1476 @@
+<!DOCTYPE html>
+<!-- AUTHORED-BY Claude Fable 5 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Access-Controlled SPARQL Query over a Solid Pod</title>
+  <script src="https://www.w3.org/Tools/respec/respec-w3c" class="remove" defer></script>
+  <script class="remove">
+    var respecConfig = {
+      specStatus: "CG-DRAFT",
+      group: "cg/solid",
+      shortName: "solid-sparql-query",
+      edDraftURI: "https://jeswr.github.io/solid-sparql-query/",
+      latestVersion: null,
+      github: "jeswr/solid-sparql-query",
+      editors: [
+        {
+          name: "Jesse Wright",
+          url: "https://jeswr.org/#me"
+        }
+      ],
+      copyrightStart: "2026",
+      maxTocLevel: 3,
+      lint: { "no-unused-dfns": false },
+      localBiblio: {
+        "SOLID-PROTOCOL": {
+          title: "Solid Protocol",
+          href: "https://solidproject.org/TR/protocol",
+          authors: ["Sarven Capadisli", "Tim Berners-Lee", "Ruben Verborgh", "Kjetil Kjernsmo"],
+          publisher: "W3C Solid Community Group",
+          status: "Draft Community Group Report"
+        },
+        "WAC": {
+          title: "Web Access Control",
+          href: "https://solidproject.org/TR/wac",
+          authors: ["Sarven Capadisli"],
+          publisher: "W3C Solid Community Group",
+          status: "Draft Community Group Report"
+        },
+        "ACP": {
+          title: "Access Control Policy (ACP)",
+          href: "https://solidproject.org/TR/acp",
+          authors: ["Matthieu Bosquet"],
+          publisher: "W3C Solid Community Group",
+          status: "Draft Community Group Report"
+        },
+        "SOLID-OIDC": {
+          title: "Solid-OIDC",
+          href: "https://solidproject.org/TR/oidc",
+          authors: ["Aaron Coburn", "elf Pavlik", "Dmitri Zagidulin"],
+          publisher: "W3C Solid Community Group",
+          status: "Draft Community Group Report"
+        },
+        "WEBID": {
+          title: "WebID 1.0",
+          href: "https://www.w3.org/2005/Incubator/webid/spec/identity/",
+          authors: ["Andrei Sambra", "Henry Story", "Tim Berners-Lee"],
+          publisher: "W3C WebID Community Group",
+          status: "Editor's Draft"
+        },
+        "SPARQL12-PROTOCOL": {
+          title: "SPARQL 1.2 Protocol",
+          href: "https://www.w3.org/TR/sparql12-protocol/",
+          publisher: "W3C",
+          status: "Working Draft"
+        },
+        "SPARQL12-QUERY": {
+          title: "SPARQL 1.2 Query Language",
+          href: "https://www.w3.org/TR/sparql12-query/",
+          publisher: "W3C",
+          status: "Working Draft"
+        },
+        "RDF12-CONCEPTS": {
+          title: "RDF 1.2 Concepts and Abstract Syntax",
+          href: "https://www.w3.org/TR/rdf12-concepts/",
+          publisher: "W3C",
+          status: "Working Draft"
+        }
+      }
+    };
+  </script>
+</head>
+<body>
+
+<section id="abstract">
+  <p>
+    This specification defines an HTTP endpoint through which a client can evaluate read-only
+    SPARQL queries over the RDF content of a Solid storage (a <em>Pod</em>), receiving results
+    computed exclusively from the resources the requesting agent is authorized to read. The
+    endpoint implements the SPARQL 1.1 Protocol query operation [[SPARQL11-PROTOCOL]]; requests
+    are authenticated as any other Solid resource request [[SOLID-PROTOCOL]] [[SOLID-OIDC]]
+    [[RFC9449]]; and authorization is the storage's existing access control system ([[WAC]] or
+    [[ACP]]), enforced by restricting the queried RDF dataset — one named graph per readable RDF
+    resource, with an empty default graph — <em>before</em> query evaluation. The specification
+    defines the mapping from Pod content to the queried dataset, the construction of the
+    per-request authorized dataset, an opt-in union default graph mode, and a set of
+    existence-non-disclosure invariants ensuring that a query can never reveal the existence or
+    contents of a resource the requester cannot read.
+  </p>
+</section>
+
+<section id="sotd">
+  <p>
+    This document specifies a <em>read interface</em> layered on Solid's existing authentication
+    and authorization substrate. It does not define a new authorization model and does not define
+    a new wire protocol.
+  </p>
+  <p>
+    This draft was prepared with the assistance of AI systems operated on behalf of the editor
+    (design: Claude Opus 4.8; Editor's Draft and final design resolutions: Claude Fable 5). The
+    editor is responsible for all content. Contributions and issues are welcome on the
+    <a href="https://github.com/jeswr/solid-sparql-query">GitHub repository</a>.
+  </p>
+</section>
+
+<section class="informative" id="introduction">
+  <h2>Introduction</h2>
+
+  <section id="motivation">
+    <h3>Motivation</h3>
+    <p>
+      The Solid Protocol [[SOLID-PROTOCOL]] gives agents fine-grained, resource-level access to
+      RDF data in a storage, but its read interface is resource-at-a-time: a client that wants to
+      answer a question spanning many resources must traverse and fetch each one (for example via
+      client-side link-traversal query engines). Solid has no ratified server-side query surface.
+      This is costly for clients, for servers, and for networks, and it makes whole classes of
+      applications — search, aggregation, cross-resource joins over one's own data — needlessly
+      hard to build.
+    </p>
+    <p>
+      SPARQL [[SPARQL11-QUERY]] is the W3C standard query language for RDF, with a stable,
+      universally implemented HTTP protocol [[SPARQL11-PROTOCOL]]. This specification brings the
+      two together: a per-storage SPARQL query endpoint whose observable behaviour is
+      indistinguishable from evaluating the query over <em>only</em> the resources the requester
+      could have fetched individually. A conforming endpoint adds query capability without adding
+      any disclosure capability.
+    </p>
+  </section>
+
+  <section id="relationship">
+    <h3>Relationship to the Solid Protocol and access control</h3>
+    <p>
+      This specification composes with, and does not modify, the Solid Protocol
+      [[SOLID-PROTOCOL]], Web Access Control [[WAC]], the Access Control Policy language [[ACP]],
+      and Solid-OIDC [[SOLID-OIDC]]. Authentication on the query endpoint is exactly the
+      authentication used on any other resource in the storage. Authorization decisions are made
+      by the storage's existing access control system; this specification consumes those
+      decisions — it introduces no new access modes, no new policy language, and no new identity
+      mechanism. The single governing principle is <a>GET-equivalence</a>: a triple is visible to
+      a query if and only if the requester is authorized to read the resource that asserts it.
+    </p>
+  </section>
+
+  <section id="non-goals">
+    <h3>Non-goals</h3>
+    <ul>
+      <li>
+        <strong>SPARQL Update.</strong> This specification defines a read-only interface. Update
+        operations are out of scope (see <a href="#sparql-update"></a>).
+      </li>
+      <li>
+        <strong>Cross-storage federation.</strong> A query endpoint is scoped to exactly one
+        storage. Querying across storages is left to clients and to future work.
+      </li>
+      <li>
+        <strong>A new protocol.</strong> The endpoint is a standard SPARQL 1.1 Protocol query
+        service; every existing SPARQL client library can use it unmodified.
+      </li>
+      <li>
+        <strong>A new authorization model.</strong> Visibility is decided by the storage's
+        existing access control system.
+      </li>
+      <li>
+        <strong>Guaranteed freshness or transactional isolation</strong> beyond that offered by
+        the server's own storage layer.
+      </li>
+    </ul>
+  </section>
+</section>
+
+<section id="terminology">
+  <h2>Terminology</h2>
+  <p>
+    This section defines the terms used in this specification. Terms defined by RDF 1.1
+    [[RDF11-CONCEPTS]], SPARQL 1.1 [[SPARQL11-QUERY]] [[SPARQL11-PROTOCOL]], and the Solid
+    Protocol [[SOLID-PROTOCOL]] are used with their definitions from those specifications; the
+    most load-bearing are restated here for convenience.
+  </p>
+  <dl>
+    <dt><dfn>agent</dfn></dt>
+    <dd>
+      A person, social entity, or software identified by a WebID [[WEBID]], per the Solid
+      Protocol.
+    </dd>
+    <dt><dfn>requester</dfn></dt>
+    <dd>
+      The agent on whose behalf a query request is made: the agent identified by the verified
+      WebID of the request's credentials, or, for an unauthenticated request, the public
+      (unauthenticated) agent.
+    </dd>
+    <dt><dfn>storage</dfn></dt>
+    <dd>
+      A space of URIs in which resources are controlled by a Solid server, as defined by the
+      Solid Protocol (colloquially, a <em>Pod</em>).
+    </dd>
+    <dt><dfn>resource</dfn></dt>
+    <dd>An HTTP resource in a storage, identified by an IRI without a fragment.</dd>
+    <dt><dfn>RDF source</dfn></dt>
+    <dd>
+      A resource whose state is fully represented as an RDF graph (cf. LDP RDF Source [[LDP]]).
+      Containers and RDF-bearing auxiliary resources (such as ACL resources) are RDF sources.
+    </dd>
+    <dt><dfn data-lt="readable">readable (by an agent)</dfn></dt>
+    <dd>
+      A resource is <em>readable</em> by an agent if and only if the storage's access control
+      system would authorize a <code>GET</code> request on that resource by that agent. For
+      resources governed by [[WAC]] this is the <code>acl:Read</code> access mode resolved
+      through the <code>acl:accessTo</code>/<code>acl:default</code> walk; for auxiliary
+      resources it is whatever access the governing specification requires to read them (for
+      example, reading a WAC ACL resource requires <code>acl:Control</code>); for [[ACP]] it is
+      the <em>Read</em> access mode granted by the applicable policies.
+    </dd>
+    <dt><dfn>GET-equivalence</dfn></dt>
+    <dd>
+      The governing visibility principle of this specification: an RDF triple is visible to a
+      query by a given requester if and only if the resource asserting that triple is
+      <a>readable</a> by that requester.
+    </dd>
+    <dt><dfn data-lt="resource graph|resource graphs">resource graph</dfn></dt>
+    <dd>
+      The RDF graph derived from an RDF source's representation by the mapping of
+      <a href="#dataset-mapping"></a> (including the flattening rule of
+      <a href="#concrete-syntaxes"></a>).
+    </dd>
+    <dt><dfn>inner named graph</dfn></dt>
+    <dd>
+      A named graph occurring <em>inside</em> a single resource's representation, when that
+      representation's concrete syntax serializes an RDF dataset rather than an RDF graph — for
+      example a JSON-LD node object carrying both <code>@id</code> and <code>@graph</code>
+      [[JSON-LD11]].
+    </dd>
+    <dt><dfn>authorized dataset</dfn></dt>
+    <dd>
+      The RDF dataset [[RDF11-CONCEPTS]] [[RDF11-DATASETS]] over which a given request's query is
+      evaluated: an empty default graph plus one named graph per RDF source in the storage that
+      is <a>readable</a> by the <a>requester</a>, as constructed in
+      <a href="#authorized-dataset"></a>. Where the request supplies an explicit dataset
+      description, it is resolved against the authorized dataset per
+      <a href="#dataset-clauses"></a>.
+    </dd>
+    <dt><dfn>query service</dfn></dt>
+    <dd>
+      The SPARQL Protocol service defined by this specification: a SPARQL 1.1 Protocol query
+      service [[SPARQL11-PROTOCOL]] scoped to a single <a>storage</a> and enforcing the
+      authorization and non-disclosure requirements of this specification. Also referred to as
+      the <em>query endpoint</em>.
+    </dd>
+    <dt><dfn>union default graph mode</dfn></dt>
+    <dd>
+      The opt-in, per-query mode of <a href="#union-default-graph"></a> in which the default
+      graph of the query's dataset is the merge of all named graphs of the <a>authorized
+      dataset</a>.
+    </dd>
+  </dl>
+
+  <section id="namespaces">
+    <h3>Namespaces and minted terms</h3>
+    <p>
+      This specification mints terms in the namespace
+      <code>http://www.w3.org/ns/solid/sparql#</code>, written below with the prefix
+      <code>solid-sparql:</code>.
+    </p>
+    <table class="def">
+      <thead>
+        <tr><th>Term</th><th>Type</th><th>Definition</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>solid-sparql:endpoint</code></td>
+          <td>Link relation (extension relation type per [[RFC8288]]) and RDF property</td>
+          <td>
+            Relates a <a>storage</a> (or a resource within it) to the <a>query service</a> for
+            that storage. See <a href="#discovery"></a>.
+          </td>
+        </tr>
+        <tr>
+          <td><code>solid-sparql:union-default-graph</code></td>
+          <td>Reserved graph IRI</td>
+          <td>
+            When used as a default-graph IRI of a query's dataset description, requests
+            <a>union default graph mode</a> for that query. See
+            <a href="#union-default-graph"></a>.
+          </td>
+        </tr>
+        <tr>
+          <td><code>solid-sparql:UnionDefaultGraphOptIn</code></td>
+          <td>Instance of <code>sd:Feature</code> [[SPARQL11-SERVICE-DESCRIPTION]]</td>
+          <td>
+            Advertises, in a service description, that the service implements the opt-in
+            <a>union default graph mode</a>. See <a href="#service-description"></a>.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">
+      These terms are proposed for the Solid vocabulary namespace and are subject to Solid
+      Community Group adoption. Until the namespace document is published, implementations should
+      treat the IRIs as defined by this specification.
+    </p>
+    <p>Other namespace prefixes used in this document:</p>
+    <table class="def">
+      <thead><tr><th>Prefix</th><th>Namespace IRI</th></tr></thead>
+      <tbody>
+        <tr><td><code>sd:</code></td><td><code>http://www.w3.org/ns/sparql-service-description#</code></td></tr>
+        <tr><td><code>acl:</code></td><td><code>http://www.w3.org/ns/auth/acl#</code></td></tr>
+        <tr><td><code>foaf:</code></td><td><code>http://xmlns.com/foaf/0.1/</code></td></tr>
+        <tr><td><code>dct:</code></td><td><code>http://purl.org/dc/terms/</code></td></tr>
+        <tr><td><code>schema:</code></td><td><code>https://schema.org/</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+</section>
+
+<section id="conformance">
+  <p>
+    This specification defines the following conformance classes:
+  </p>
+  <dl>
+    <dt><dfn>server</dfn></dt>
+    <dd>
+      A <em>Solid SPARQL query server</em>: a Solid storage server exposing a <a>query
+      service</a>. A conforming server satisfies every normative requirement of this
+      specification that is addressed to servers or to the query service.
+    </dd>
+    <dt><dfn>client</dfn></dt>
+    <dd>
+      A <em>client</em> of a query service. Any conforming SPARQL 1.1 Protocol client
+      [[SPARQL11-PROTOCOL]] capable of Solid authentication [[SOLID-OIDC]] can use a query
+      service; the requirements of this specification addressed to clients are the small number
+      of keyword statements explicitly directed at clients.
+    </dd>
+  </dl>
+</section>
+
+<section id="query-endpoint">
+  <h2>The Query Endpoint</h2>
+
+  <section id="location">
+    <h3>Location and scope</h3>
+    <p>
+      A server MAY expose a <a>query service</a> for a <a>storage</a>. A query service MUST be
+      scoped to exactly one storage: its <a>authorized dataset</a> is derived exclusively from
+      the resources of that storage. A server MUST NOT expose, through a single query service,
+      graphs derived from resources of more than one storage.
+    </p>
+    <p>
+      The IRI of the query service is determined by the server. It MAY be any IRI; it need not be
+      inside the storage's URI space.
+    </p>
+    <p class="note">
+      A common convention is <code>&lt;storage root&gt;sparql</code> — for example
+      <code>https://alice.pod.example/sparql</code> for the storage
+      <code>https://alice.pod.example/</code>. Clients discover the endpoint via
+      <a href="#discovery"></a> and must not assume this convention.
+    </p>
+  </section>
+
+  <section id="discovery">
+    <h3>Discovery</h3>
+    <p>
+      A server exposing a query service MUST advertise it by including, in responses to
+      <code>GET</code> and <code>HEAD</code> requests on the storage's root container, an HTTP
+      <code>Link</code> header [[RFC8288]] whose target is the query service IRI and whose
+      relation type is <code>http://www.w3.org/ns/solid/sparql#endpoint</code>.
+    </p>
+    <pre class="example" title="Advertising the query endpoint on the storage root">
+HTTP/1.1 200 OK
+Link: &lt;https://alice.pod.example/sparql&gt;; rel="http://www.w3.org/ns/solid/sparql#endpoint"</pre>
+    <p>
+      A server SHOULD also assert the endpoint in the storage description resource
+      [[SOLID-PROTOCOL]], using the relation IRI as an RDF property:
+    </p>
+    <pre class="example" title="Query endpoint in the storage description">
+@prefix solid-sparql: &lt;http://www.w3.org/ns/solid/sparql#&gt; .
+
+&lt;https://alice.pod.example/&gt; solid-sparql:endpoint &lt;https://alice.pod.example/sparql&gt; .</pre>
+    <p>
+      A server MAY include the <code>Link</code> header in responses for other resources of the
+      storage.
+    </p>
+    <p>
+      The advertisement of the query service, like the service description
+      (<a href="#service-description"></a>), MUST NOT vary in a way that discloses the existence
+      or contents of resources the requester cannot read.
+    </p>
+  </section>
+
+  <section id="protocol-operations">
+    <h3>Protocol operations</h3>
+    <p>
+      A query service MUST implement the <em>query operation</em> of the SPARQL 1.1 Protocol
+      [[SPARQL11-PROTOCOL]], including all three of its bindings:
+    </p>
+    <ul>
+      <li><em>query via GET</em> — the query in the <code>query</code> URI query parameter;</li>
+      <li><em>query via URL-encoded POST</em> — media type
+        <code>application/x-www-form-urlencoded</code>;</li>
+      <li><em>query via POST directly</em> — media type <code>application/sparql-query</code>.</li>
+    </ul>
+    <p>
+      A query service MUST support the SPARQL 1.1 Query language [[SPARQL11-QUERY]] for the
+      <code>query</code> operand, including the <code>SELECT</code>, <code>CONSTRUCT</code>,
+      <code>ASK</code>, and <code>DESCRIBE</code> query forms.
+    </p>
+    <p>
+      A query service MUST support the <code>default-graph-uri</code> and
+      <code>named-graph-uri</code> protocol parameters. As required by [[SPARQL11-PROTOCOL]], a
+      dataset description supplied via protocol parameters takes precedence over one supplied in
+      the query string (<code>FROM</code>/<code>FROM NAMED</code>). All dataset descriptions,
+      however supplied, are resolved through the authorization rules of
+      <a href="#dataset-clauses"></a>; a query service MUST NOT reject a request because its
+      dataset description references a graph the requester cannot read
+      (<a href="#non-disclosure"></a>).
+    </p>
+    <p>
+      A query service MUST NOT execute SPARQL Update operations
+      (see <a href="#sparql-update"></a>).
+    </p>
+  </section>
+
+  <section id="sparql12">
+    <h3>SPARQL 1.2 forward compatibility</h3>
+    <p>
+      SPARQL 1.2 [[SPARQL12-PROTOCOL]] [[SPARQL12-QUERY]] is, at the protocol layer, a
+      backward-compatible superset of SPARQL 1.1: the same three bindings and the same core media
+      types, adding an optional <code>version</code> media-type parameter and RDF-1.2-aware
+      payloads [[RDF12-CONCEPTS]].
+    </p>
+    <p>
+      A query service MAY additionally implement the SPARQL 1.2 Protocol query operation,
+      including accepting the <code>version</code> media-type parameter and producing RDF 1.2
+      constructs (such as triple terms) in results. A query service MUST NOT require any SPARQL
+      1.2 feature: every capability required for conformance to this specification is
+      expressible in SPARQL 1.1.
+    </p>
+  </section>
+
+  <section id="caching">
+    <h3>Caching</h3>
+    <p>
+      Query results are a function of the <a>requester</a>. A query service MUST prevent a
+      response computed for one requester from being served to a different requester by a shared
+      cache.
+    </p>
+    <p class="note">
+      In practice this means emitting <code>Cache-Control: private</code> (or
+      <code>no-store</code>) on query responses, together with an appropriate
+      <code>Vary</code> header (e.g. <code>Vary: Authorization, Accept</code>) [[RFC9110]].
+    </p>
+  </section>
+</section>
+
+<section id="dataset-mapping">
+  <h2>Pod Content to RDF Dataset Mapping</h2>
+  <p>
+    A SPARQL query is evaluated against an RDF dataset: one default graph and zero or more named
+    graphs [[SPARQL11-QUERY]] [[RDF11-CONCEPTS]]. This section defines how a storage's content
+    determines that dataset; <a href="#authorization"></a> defines how it is restricted per
+    request.
+  </p>
+
+  <section id="resource-graphs">
+    <h3>Resource graphs: one named graph per RDF source</h3>
+    <p>
+      Each <a>RDF source</a> in the storage contributes exactly one named graph to the queried
+      dataset:
+    </p>
+    <ul>
+      <li>
+        The <strong>graph name</strong> MUST be the resource's IRI, exactly as it identifies the
+        resource in the storage (no fragment; no normalization beyond that already performed for
+        resource identification).
+      </li>
+      <li>
+        The <strong>graph</strong> MUST be the <a>resource graph</a>: the RDF graph denoted by
+        the resource's representation, after the flattening rule of
+        <a href="#concrete-syntaxes"></a> where applicable.
+      </li>
+    </ul>
+    <p>
+      Containers are RDF sources; a container's resource graph comprises its representation as
+      served on <code>GET</code>, including server-managed containment triples. Auxiliary
+      resources that are RDF sources (for example WAC ACL resources) likewise contribute resource
+      graphs, subject to their own read-access rules (<a href="#read-visibility"></a>).
+    </p>
+    <p>
+      Resources that are not RDF sources (binary/non-RDF resources) MUST NOT contribute a graph
+      to the dataset.
+    </p>
+    <p class="note">
+      Because the graph name <em>is</em> the resource IRI, the set of named graph names is
+      exactly the set of (RDF source) resource IRIs — which is why enumerating graph names is
+      equivalent to listing resources, and why every disclosure rule in this specification is
+      enforced at the graph-name layer.
+    </p>
+  </section>
+
+  <section id="empty-default-graph">
+    <h3>The default graph is empty</h3>
+    <p>
+      The standing default graph of the queried dataset MUST be empty. A query that does not
+      supply a dataset description (no <code>FROM</code>/<code>FROM NAMED</code>, no
+      <code>default-graph-uri</code>/<code>named-graph-uri</code>) and does not invoke
+      <a>union default graph mode</a> is therefore evaluated against a dataset whose default
+      graph contains no triples: a bare basic graph pattern such as
+      <code>{ ?s ?p ?o }</code> yields zero solutions.
+    </p>
+    <p>
+      All resource content is exposed through <em>named</em> graphs. Cross-resource querying is
+      explicit: via <code>GRAPH</code> patterns (<a href="#cross-graph"></a>), via a per-query
+      dataset description (<a href="#dataset-clauses"></a>), or via the opt-in
+      <a>union default graph mode</a> (<a href="#union-default-graph"></a>).
+    </p>
+  </section>
+
+  <section id="concrete-syntaxes">
+    <h3>Concrete syntaxes and the flattening rule</h3>
+    <p>
+      A Turtle document [[TURTLE]] serializes a single RDF graph; for an RDF source represented
+      in Turtle (or any other graph-denoting syntax, such as N-Triples or RDFa), the resource
+      graph is simply that graph.
+    </p>
+    <p>
+      A JSON-LD document, by contrast, serializes an RDF <em>dataset</em> [[JSON-LD11]]
+      [[JSON-LD11-API]]: a node object carrying both <code>@id</code> and <code>@graph</code>
+      denotes an <a>inner named graph</a>, so a single resource's representation may deserialize
+      to default-graph triples <em>plus</em> named graphs. This breaks the one-resource-one-graph
+      bijection of <a href="#resource-graphs"></a> unless resolved. This specification resolves
+      it by <em>flattening</em>:
+    </p>
+    <p>
+      When an RDF source's representation deserializes to an RDF dataset, the <a>resource
+      graph</a> MUST be the RDF graph comprising every triple asserted in <em>any</em> graph of
+      that dataset — the default graph and all inner named graphs — with blank node identity
+      preserved as in the deserialized dataset. The inner graph names are discarded <em>as graph
+      names</em>; triples whose subject or object is an inner graph name are retained as ordinary
+      triples.
+    </p>
+    <p id="no-raw-preserve">
+      A server MUST NOT expose an <a>inner named graph</a> name as a named graph of the queried
+      dataset, and MUST NOT contribute triples from one resource's representation to any graph
+      other than that resource's own <a>resource graph</a>.
+    </p>
+    <p class="note" title="Why raw preservation is forbidden">
+      Promoting inner graph names to first-class SPARQL named graphs would let the content of one
+      resource choose arbitrary graph names — including names equal to <em>other resources'</em>
+      IRIs. Two resources declaring the same inner <code>@id</code> would commingle under one
+      graph name that the access control system decides as a unit, and a hostile document could
+      inject triples into the graph name of a resource its author cannot write. It would also
+      break the invariant that every named graph corresponds to exactly one resource and hence
+      exactly one access control verdict (<a href="#read-visibility"></a>). Flattening is
+      collision-free and keeps that invariant airtight.
+    </p>
+    <p class="note" title="What flattening does and does not lose">
+      Flattening affects only what a SPARQL query can <em>see</em>. The stored representation is
+      untouched: a <code>GET</code> on the resource returns the original document, inner graphs
+      and all. What is lost to queries is only the association between an inner graph name and
+      its triples — a structure that is rare in practice in Pod data. A compatible, opt-in
+      fidelity mode that preserves this association <em>as data</em> is sketched in
+      <a href="#fidelity-roadmap"></a>.
+    </p>
+  </section>
+
+  <section id="cross-graph">
+    <h3>Querying across graphs</h3>
+    <p>
+      This section is a consequence of SPARQL 1.1 semantics [[SPARQL11-QUERY]] applied to the
+      dataset of this specification; it is stated normatively because implementations MUST
+      preserve these outcomes exactly (they are load-bearing for
+      <a href="#non-disclosure"></a>).
+    </p>
+    <p>
+      SPARQL has no <code>FROM *</code> or <code>FROM ?g</code>: <code>FROM</code> and
+      <code>FROM NAMED</code> take fixed IRIs. The "query over all graphs" capability is the
+      <code>GRAPH ?g</code> pattern, whose graph variable, on a query service, ranges over
+      exactly the named graphs of the <a>authorized dataset</a>:
+    </p>
+    <ul>
+      <li>
+        <code>{ ?s ?p ?o }</code> — matches the (empty) default graph: <strong>zero
+        solutions</strong>.
+      </li>
+      <li>
+        <code>{ GRAPH ?g { ?s ?p ?o } }</code> — matches every triple in every readable named
+        graph, binding <code>?g</code> to each graph name.
+      </li>
+      <li>
+        <strong>Intra-graph join</strong> — two triple patterns inside a single
+        <code>GRAPH</code> block must be satisfied within the <em>same</em> graph:
+        <pre class="nohighlight">{ GRAPH ?g { ?p foaf:knows ?f . ?f foaf:name ?n } }</pre>
+      </li>
+      <li>
+        <strong>Cross-graph join</strong> — separate <code>GRAPH</code> blocks with distinct
+        graph variables allow the triples to come from different graphs (including, as a special
+        case, the same graph), joined on shared variables:
+        <pre class="nohighlight">{ GRAPH ?g1 { ?p foaf:knows ?f } GRAPH ?g2 { ?f foaf:name ?n } }</pre>
+      </li>
+      <li>
+        <strong>Per-query merged default graph</strong> — a dataset clause merging specific
+        graphs into the query's default graph, so bare patterns join across them:
+        <pre class="nohighlight">SELECT ?f ?n FROM &lt;A&gt; FROM &lt;B&gt; WHERE { ?p foaf:knows ?f . ?f foaf:name ?n }</pre>
+        An unreadable or absent <code>FROM</code> target contributes nothing
+        (<a href="#dataset-clauses"></a>).
+      </li>
+    </ul>
+    <p class="note">
+      Blank nodes are scoped to a single resource's representation: distinct resources never
+      share blank nodes, so cross-graph joins can only join on IRIs and literals. Worked
+      examples, including the intra- versus cross-graph contrast on a concrete dataset, are given
+      in <a href="#examples"></a>.
+    </p>
+  </section>
+
+  <section class="informative" id="fidelity-roadmap">
+    <h3>Roadmap: a named-graph fidelity mode (reification)</h3>
+    <p>
+      <em>This section is informative. It names, but does not specify, a future compatible
+      extension.</em>
+    </p>
+    <p>
+      A future version of this specification is expected to define an opt-in <em>fidelity
+      mode</em> that preserves inner-named-graph structure <em>as data inside the resource
+      graph</em>, using RDF 1.2 triple terms (RDF-star) [[RDF12-CONCEPTS]]: each triple of an
+      inner named graph would additionally be described by an annotation associating it with the
+      inner graph name, along the lines of:
+    </p>
+    <pre class="example nohighlight" title="Sketch (illustrative only — no terms are minted here)">
+GRAPH &lt;https://alice.pod.example/notes/meeting&gt; {
+  &lt;#decision1&gt; schema:text "Adopt the proposal" .
+  &lt;&lt; &lt;#decision1&gt; schema:text "Adopt the proposal" &gt;&gt;
+      solid-sparql:inGraph &lt;#minutes&gt; .   # predicate name illustrative
+}</pre>
+    <p>
+      This design keeps every property that makes flattening safe — no additional SPARQL named
+      graphs, no cross-resource name collisions, one access-control verdict per resource — while
+      making the inner-graph association queryable by clients that need it. It was chosen over
+      promoting inner graphs to namespaced first-class graphs because it needs no name-rewriting
+      or provenance table. It is deferred from this version because RDF-star querying is a SPARQL
+      1.2 feature, and this specification deliberately requires only SPARQL 1.1
+      (<a href="#sparql12"></a>): pulling reification into the core would smuggle a normative
+      RDF 1.2 dependency into a specification whose protocol layer refuses one. When defined, the
+      fidelity mode will be an additive, per-query or per-service opt-in; documents already
+      stored will need no migration, since flattening never alters stored representations. Any
+      such future mode must preserve the prohibition of
+      <a href="#no-raw-preserve">raw inner-graph-name promotion</a>.
+    </p>
+  </section>
+</section>
+
+<section id="authentication">
+  <h2>Authentication</h2>
+  <p>
+    A request to the query service is an ordinary HTTP request to the Solid server, and MUST be
+    authenticated exactly as a request to any other resource in the <a>storage</a>
+    [[SOLID-PROTOCOL]].
+  </p>
+  <ul>
+    <li>
+      A query service MUST accept DPoP-bound access tokens as defined by Solid-OIDC
+      [[SOLID-OIDC]] [[RFC9449]]: the access token is presented in the
+      <code>Authorization</code> header with the <code>DPoP</code> scheme, accompanied by a DPoP
+      proof whose <code>htu</code> and <code>htm</code> claims bind to the query service IRI and
+      to the HTTP method of the binding in use.
+    </li>
+    <li>
+      Token and proof verification (issuer trust, signature, expiry, replay, WebID
+      resolution and issuer confirmation) MUST be performed with the same rigour as for any other
+      Solid resource request; this specification adds no verification requirements and relaxes
+      none.
+    </li>
+    <li>
+      The verified WebID identifies the <a>requester</a> for authorization
+      (<a href="#authorization"></a>). A request presenting no credentials MUST be processed as
+      the public (unauthenticated) agent.
+    </li>
+    <li>
+      A server MAY support additional authentication schemes permitted by the Solid Protocol;
+      whatever the scheme, the requester used for authorization MUST be the authenticated agent
+      it establishes.
+    </li>
+  </ul>
+  <p>
+    A query service MAY refuse service categorically to classes of requester (for example,
+    requiring authentication for all queries, or disabling the endpoint entirely), using an
+    ordinary <code>401</code>/<code>403</code> response. Such refusal MUST be uniform: it MUST
+    NOT depend on the query text, on the dataset description, or on the existence, contents, or
+    access rules of any resource — otherwise the refusal itself becomes a disclosure oracle
+    (<a href="#non-disclosure"></a>).
+  </p>
+</section>
+
+<section id="authorization">
+  <h2>Authorization: the Authorized Dataset</h2>
+
+  <section id="read-visibility">
+    <h3>Read visibility (GET-equivalence)</h3>
+    <p>
+      Query visibility is governed by <a>GET-equivalence</a>: a named graph is part of a
+      requester's <a>authorized dataset</a> if and only if the corresponding resource is
+      <a>readable</a> by that requester — that is, if and only if the storage's access control
+      system would authorize a <code>GET</code> on that resource for that requester.
+    </p>
+    <ul>
+      <li>
+        For resources governed by WAC, readability is the <code>acl:Read</code> access mode,
+        resolved through the standard <code>acl:accessTo</code>/<code>acl:default</code>
+        inheritance walk, fail-closed [[WAC]].
+      </li>
+      <li>
+        For WAC ACL auxiliary resources, readability is governed by WAC's own rule for reading
+        ACLs (<code>acl:Control</code>); an agent without that access MUST NOT see the ACL's
+        graph in the dataset, even where the agent can read the resource the ACL protects.
+      </li>
+      <li>
+        For resources governed by ACP, readability is the <em>Read</em> access mode granted by
+        the applicable access control policies [[ACP]].
+      </li>
+    </ul>
+    <p>
+      Only readability governs visibility. No other access mode (write, append, control) grants
+      or denies query visibility.
+    </p>
+  </section>
+
+  <section id="authorized-dataset">
+    <h3>Constructing the authorized dataset</h3>
+    <p>For each query request, the query service MUST construct the <a>authorized dataset</a>:</p>
+    <ul>
+      <li>the default graph is empty (<a href="#empty-default-graph"></a>); and</li>
+      <li>
+        the named graphs are exactly the <a>resource graphs</a> of the RDF sources of the storage
+        that are <a>readable</a> by the <a>requester</a>, each named by its resource IRI
+        (<a href="#resource-graphs"></a>).
+      </li>
+    </ul>
+    <p>
+      Restriction MUST be applied at the graph-name layer, <em>before</em> query evaluation: the
+      query MUST be evaluated over exactly the authorized dataset (as modified by an explicit
+      dataset description per <a href="#dataset-clauses"></a> and
+      <a href="#union-default-graph"></a>). In particular:
+    </p>
+    <ul>
+      <li>
+        A <code>GRAPH ?g</code> pattern MUST range over exactly the named graphs of the
+        authorized dataset.
+      </li>
+      <li>
+        Evaluating the query over any larger dataset and filtering solutions afterwards
+        (<em>post-filtering</em>) does not satisfy this requirement, even if the final solution
+        sequence coincides: intermediate cardinalities, aggregate inputs, resource-limit
+        behaviour, and evaluation time would all become functions of unreadable content,
+        reopening the disclosure oracles this architecture closes
+        (<a href="#non-disclosure"></a>).
+      </li>
+      <li>
+        <code>DESCRIBE</code> results and every other server-chosen result content MUST be
+        derived exclusively from the authorized dataset.
+      </li>
+    </ul>
+    <p>
+      The authorization decisions used to construct the dataset MUST reflect the storage's access
+      control state as evaluated for this request; a server MAY use caches or indexes to compute
+      the readable set, provided the observable result equals a fresh per-request evaluation.
+    </p>
+  </section>
+
+  <section id="dataset-clauses">
+    <h3><code>FROM</code>, <code>FROM NAMED</code>, and protocol dataset parameters</h3>
+    <p>
+      A request MAY describe a query dataset via <code>FROM</code>/<code>FROM NAMED</code>
+      clauses in the query, or via <code>default-graph-uri</code>/<code>named-graph-uri</code>
+      protocol parameters (protocol parameters taking precedence, per [[SPARQL11-PROTOCOL]]).
+      Every IRI so referenced is resolved against the <a>authorized dataset</a>:
+    </p>
+    <ul>
+      <li>
+        an IRI naming a graph of the authorized dataset resolves to that graph;
+      </li>
+      <li>
+        any other IRI — whether it names a resource the requester cannot read, a resource that
+        does not exist, a non-RDF resource, or no resource at all — MUST be treated exactly as a
+        reference to a graph that does not exist: as a default-graph IRI it contributes no
+        triples to the merge; as a named-graph IRI it adds no named graph to the query's dataset.
+      </li>
+    </ul>
+    <p>
+      A query service MUST NOT respond with an error, a distinct status code, a distinct error
+      message, or any other distinguishable signal because a dataset description references an
+      unreadable or non-existent graph. The response MUST be indistinguishable from the response
+      to the same query referencing a graph that does not exist
+      (<a href="#non-disclosure"></a>).
+    </p>
+    <p>
+      Per SPARQL 1.1 dataset semantics, a query whose request supplies a dataset description is
+      evaluated over exactly the described dataset (as resolved above): its default graph is the
+      merge of the resolved default-graph IRIs' graphs, and its named graphs are the resolved
+      named-graph IRIs' graphs. A query with no dataset description (and no
+      <a>union default graph mode</a> request) is evaluated over the standing authorized dataset.
+    </p>
+    <p class="note">
+      <code>GRAPH &lt;iri&gt;</code> with a fixed IRI that is not a named graph of the query's
+      dataset simply yields zero solutions in SPARQL; no special server behaviour is needed or
+      permitted there.
+    </p>
+  </section>
+
+  <section id="union-default-graph">
+    <h3>Union default graph mode (opt-in)</h3>
+    <p>
+      A query service MAY implement <a>union default graph mode</a>. In this mode, the default
+      graph of a single query's dataset is the RDF merge of <em>all</em> named graphs of the
+      requester's <a>authorized dataset</a>, so bare basic graph patterns join across everything
+      the requester can read.
+    </p>
+    <p class="note">
+      Because blank nodes are scoped per resource (<a href="#cross-graph"></a>), the named graphs
+      of the authorized dataset share no blank nodes, and their RDF merge coincides with their
+      union.
+    </p>
+
+    <h4 id="udg-request">Requesting the mode</h4>
+    <p>
+      Union default graph mode MUST be requested explicitly, per query, by the requester. This
+      specification reserves the IRI
+      <code>http://www.w3.org/ns/solid/sparql#union-default-graph</code>
+      (<code>solid-sparql:union-default-graph</code>) for that purpose. A service implementing
+      the mode MUST honour the reserved IRI in both of the following positions:
+    </p>
+    <ul>
+      <li>
+        as a value of the <code>default-graph-uri</code> protocol parameter
+        [[SPARQL11-PROTOCOL]]; and
+      </li>
+      <li>
+        as the target of a <code>FROM</code> clause in the query text.
+      </li>
+    </ul>
+    <p>
+      When the reserved IRI appears among a query's default-graph IRIs, the default graph of that
+      query's dataset is the merge of (a) all named graphs of the authorized dataset and (b) the
+      resolved graphs of any other default-graph IRIs supplied alongside it. Since every readable
+      graph in (b) is already a member of (a), the result equals the union in (a).
+    </p>
+    <p>The reserved IRI affects only the <em>default graph</em>:</p>
+    <ul>
+      <li>
+        If the request supplies no explicit named-graph IRIs (no <code>FROM NAMED</code>, no
+        <code>named-graph-uri</code>), the named graphs of the query's dataset remain those of
+        the standing authorized dataset. This is a deliberate, spec-defined refinement of SPARQL
+        1.1's dataset-description behaviour, scoped exclusively to the reserved IRI, so that
+        <code>GRAPH</code> patterns remain usable alongside the union default graph.
+      </li>
+      <li>
+        If the request does supply explicit named-graph IRIs, those (resolved per
+        <a href="#dataset-clauses"></a>) constitute the query's named graphs, as usual.
+      </li>
+      <li>
+        Used as a <em>named</em>-graph IRI (<code>FROM NAMED</code>,
+        <code>named-graph-uri</code>), the reserved IRI names no graph and MUST be treated as
+        absent per <a href="#dataset-clauses"></a>. A <code>GRAPH ?g</code> variable MUST NOT
+        bind to the reserved IRI.
+      </li>
+    </ul>
+
+    <h4 id="udg-not-default">Never a standing default</h4>
+    <p>
+      A query service MUST NOT apply union default graph semantics to a query that has not
+      explicitly requested it: the standing default graph remains empty
+      (<a href="#empty-default-graph"></a>). Consequently a service MUST NOT describe itself with
+      <code>sd:UnionDefaultGraph</code> (<a href="#service-description"></a>), and MUST NOT offer
+      a configuration in which the union is the default dataset presented to queries that did not
+      opt in.
+    </p>
+
+    <h4 id="udg-non-implementing">Behaviour on services not implementing the mode</h4>
+    <p>
+      On a query service that does not implement union default graph mode, the reserved IRI is
+      simply an IRI that names no graph in the storage, and the rules of
+      <a href="#dataset-clauses"></a> apply: it resolves to nothing, without error. A client that
+      depends on the mode SHOULD first confirm the service advertises
+      <code>solid-sparql:UnionDefaultGraphOptIn</code> in its service description
+      (<a href="#service-description"></a>), since a request sent to a non-implementing service
+      will succeed with an empty default graph rather than fail.
+    </p>
+    <p class="note">
+      The reserved IRI is in the <code>w3.org</code> namespace and therefore cannot collide with
+      any resource IRI inside a storage.
+    </p>
+
+    <h4 id="udg-security">Security analysis</h4>
+    <p class="note">
+      The union's content is, by construction, exactly the union of graphs already exposed to the
+      same requester via <code>GRAPH ?g</code>; the mode therefore adds no new disclosure oracle.
+      Authorization is still enforced at the graph-name layer before evaluation — the union is
+      assembled from the authorized dataset, never from the raw store — and the reserved IRI
+      behaves like any other dataset-description target: absent if not requested, absent if
+      unsupported, with the same absence semantics as an unreadable graph, so its handling can
+      never leak. The mode is per-query and opt-in precisely so that the empty standing default
+      of <a href="#empty-default-graph"></a> — which makes accidental whole-store queries
+      impossible — is never weakened by configuration.
+    </p>
+  </section>
+</section>
+
+<section id="non-disclosure">
+  <h2>Existence Non-Disclosure</h2>
+  <p>
+    A query service MUST NOT disclose, by any observable behaviour, the existence, non-existence,
+    metadata, or contents of any resource outside the requester's <a>authorized dataset</a>.
+    Unreadable resources and non-existent resources MUST be observationally equivalent through
+    the query interface.
+  </p>
+
+  <section id="non-disclosure-invariants">
+    <h3>Invariants</h3>
+    <p>Specifically, for every query request:</p>
+    <ol>
+      <li>
+        <strong>Bindings.</strong> No solution, no triple of a <code>CONSTRUCT</code> or
+        <code>DESCRIBE</code> result, and no <code>ASK</code> answer may be derived from a graph
+        outside the authorized dataset.
+      </li>
+      <li>
+        <strong>Enumeration.</strong> <code>GRAPH ?g</code> MUST NOT produce a binding for, and
+        no result may otherwise reveal, the name of any graph outside the authorized dataset.
+      </li>
+      <li>
+        <strong>Aggregates.</strong> Aggregate values (<code>COUNT</code>, <code>SUM</code>,
+        <code>GROUP_CONCAT</code>, …) MUST be computed over solutions from the authorized dataset
+        only; a count may never differ because of unreadable content.
+      </li>
+      <li>
+        <strong>Status and errors.</strong> The response status code, headers, error document,
+        and any error message MUST NOT differ between (a) a query referencing an unreadable graph
+        and (b) the same query referencing a non-existent graph. There is no
+        <code>403</code>-versus-<code>404</code> distinction inside the dataset: dataset
+        references that cannot be honoured are silently absent
+        (<a href="#dataset-clauses"></a>), never errors.
+      </li>
+      <li>
+        <strong>Resource limits.</strong> Limit behaviour (<a href="#dos"></a>) MUST be a
+        function of the query and the authorized dataset only; evaluation over the authorized
+        dataset guarantees this structurally, since unreadable graphs never participate.
+      </li>
+      <li>
+        <strong>Timing.</strong> A query service SHOULD ensure that observable differences in
+        processing time do not disclose the existence or contents of resources outside the
+        authorized dataset.
+      </li>
+      <li>
+        <strong>Ancillary surfaces.</strong> The service description
+        (<a href="#service-description"></a>) and the discovery advertisement
+        (<a href="#discovery"></a>) MUST NOT reveal graphs the requester cannot read.
+      </li>
+    </ol>
+  </section>
+
+  <section id="structural-enforcement">
+    <h3>Structural enforcement</h3>
+    <p>
+      Invariants 1–5 are satisfied structurally — not by output scrubbing — when the
+      implementation restricts the dataset at the graph-name layer before evaluation, as
+      <a href="#authorized-dataset"></a> requires: an engine that never touches unreadable graphs
+      cannot leak them through bindings, counts, errors, limits, or (to first order) timing. This
+      is why post-filtering is non-conforming even when its final output is identical. The
+      residual timing channel addressed by invariant 6 concerns shared infrastructure (for
+      example, index structures whose access cost varies with whole-store size); see
+      <a href="#security"></a>.
+    </p>
+  </section>
+</section>
+
+<section id="result-formats">
+  <h2>Result Formats and Content Negotiation</h2>
+  <p>
+    Result serialization follows the SPARQL 1.1 family of result formats, negotiated via HTTP
+    content negotiation [[RFC9110]].
+  </p>
+  <ul>
+    <li>
+      For <code>SELECT</code> queries, a query service MUST support
+      <code>application/sparql-results+json</code> [[SPARQL11-RESULTS-JSON]],
+      <code>application/sparql-results+xml</code> [[RDF-SPARQL-XMLRES]],
+      <code>text/csv</code>, and <code>text/tab-separated-values</code>
+      [[SPARQL11-RESULTS-CSV-TSV]].
+    </li>
+    <li>
+      For <code>ASK</code> queries, a query service MUST support
+      <code>application/sparql-results+json</code> and
+      <code>application/sparql-results+xml</code>.
+    </li>
+    <li>
+      For <code>CONSTRUCT</code> and <code>DESCRIBE</code> queries, a query service MUST support
+      <code>text/turtle</code> [[TURTLE]] and <code>application/ld+json</code> [[JSON-LD11]],
+      mirroring the RDF representations required of Solid servers [[SOLID-PROTOCOL]]; it MAY
+      support additional RDF serializations.
+    </li>
+    <li>
+      When the request carries no <code>Accept</code> header, a query service SHOULD default to
+      <code>application/sparql-results+json</code> for <code>SELECT</code>/<code>ASK</code> and
+      <code>text/turtle</code> for <code>CONSTRUCT</code>/<code>DESCRIBE</code>.
+    </li>
+    <li>
+      A query service MAY additionally emit SPARQL 1.2 result-format extensions (for example,
+      triple terms in JSON results) when the client has negotiated them
+      (<a href="#sparql12"></a>); it MUST NOT emit them otherwise.
+    </li>
+  </ul>
+</section>
+
+<section id="service-description">
+  <h2>Service Description</h2>
+  <p>
+    On a <code>GET</code> request to the query service IRI with no query parameters, the service
+    SHOULD return a SPARQL 1.1 Service Description [[SPARQL11-SERVICE-DESCRIPTION]] describing
+    the endpoint's <em>capabilities</em>: supported language(s), result formats, features, and
+    (optionally) resource limits.
+  </p>
+  <p>
+    Because graph names are resource IRIs (<a href="#resource-graphs"></a>), a graph inventory is
+    a resource listing. Accordingly:
+  </p>
+  <ul>
+    <li>
+      A service description MUST NOT enumerate, or otherwise disclose, the name of any graph the
+      requester cannot read — via <code>sd:namedGraph</code>, <code>sd:availableGraphs</code>,
+      <code>sd:defaultDataset</code>, or any other property.
+    </li>
+    <li>
+      A service SHOULD omit the named-graph inventory entirely; clients discover readable graphs
+      at query time via <code>GRAPH ?g</code>. If a service does include an inventory, it MUST be
+      filtered, per request, to graphs readable by the requester.
+    </li>
+    <li>
+      A service description MUST NOT include the <code>sd:UnionDefaultGraph</code> feature: its
+      defined meaning — that the dataset's default graph is the union of the named graphs — would
+      falsely describe an endpoint whose standing default graph is empty
+      (<a href="#udg-not-default"></a>).
+    </li>
+    <li>
+      A service implementing <a>union default graph mode</a> MUST advertise it with
+      <code>sd:feature solid-sparql:UnionDefaultGraphOptIn</code>; a service not implementing the
+      mode MUST NOT advertise that feature.
+    </li>
+  </ul>
+  <pre class="example" title="A conforming service description (Turtle)">
+@prefix sd: &lt;http://www.w3.org/ns/sparql-service-description#&gt; .
+@prefix solid-sparql: &lt;http://www.w3.org/ns/solid/sparql#&gt; .
+
+&lt;https://alice.pod.example/sparql&gt; a sd:Service ;
+    sd:endpoint &lt;https://alice.pod.example/sparql&gt; ;
+    sd:supportedLanguage sd:SPARQL11Query ;
+    sd:resultFormat
+      &lt;http://www.w3.org/ns/formats/SPARQL_Results_JSON&gt; ,
+      &lt;http://www.w3.org/ns/formats/SPARQL_Results_XML&gt; ,
+      &lt;http://www.w3.org/ns/formats/SPARQL_Results_CSV&gt; ,
+      &lt;http://www.w3.org/ns/formats/SPARQL_Results_TSV&gt; ,
+      &lt;http://www.w3.org/ns/formats/Turtle&gt; ,
+      &lt;http://www.w3.org/ns/formats/JSON-LD&gt; ;
+    sd:feature solid-sparql:UnionDefaultGraphOptIn .
+# No graph inventory; no sd:UnionDefaultGraph.</pre>
+</section>
+
+<section id="security">
+  <h2>Security and Privacy Considerations</h2>
+
+  <section id="dos">
+    <h3>Query cost and denial of service</h3>
+    <p>
+      SPARQL evaluation cost is unbounded in general: property paths, large joins, and
+      <code>OPTIONAL</code>-heavy queries can consume arbitrary CPU, memory, and I/O. A query
+      service MAY impose resource limits — including evaluation timeouts, complexity or
+      cardinality bounds, result-size caps, and per-requester rate limits. When a limit causes a
+      query to be aborted, the service SHOULD respond with a <code>5xx</code> status (for
+      example, <code>503 Service Unavailable</code>, with <code>Retry-After</code> where
+      appropriate) or with a documented error response; it MUST honour the non-disclosure
+      invariants in doing so (<a href="#non-disclosure-invariants"></a>, invariant 5).
+    </p>
+  </section>
+
+  <section class="informative" id="read-oracle">
+    <h3>The read-oracle class</h3>
+    <p>
+      The central threat this specification defends against is the <em>read oracle</em>: any
+      channel through which a query's observable outcome varies with data the requester cannot
+      read. The class includes result bindings, <code>ASK</code> answers, aggregate counts, graph
+      enumeration, dataset-clause errors, status-code differences (<code>403</code> versus
+      <code>404</code>), resource-limit behaviour, and evaluation timing. The architecture closes
+      the class structurally: authorization is applied to graph <em>names</em> before evaluation,
+      so unreadable data never enters the computation whose outcome the attacker observes
+      (<a href="#structural-enforcement"></a>).
+    </p>
+    <p>
+      Residual channels are those shared between requests at the infrastructure layer — cache
+      occupancy, index sizes, storage latency correlated with whole-store contents. These are
+      qualitatively the same channels present in any multi-tenant HTTP server and are mitigated
+      with the usual tools (constant-time-ish paths where cheap, noise, rate limiting); invariant
+      6 of <a href="#non-disclosure-invariants"></a> makes their mitigation a SHOULD.
+    </p>
+  </section>
+
+  <section id="federated-query">
+    <h3>Federated query (<code>SERVICE</code>)</h3>
+    <p>
+      The SPARQL 1.1 <code>SERVICE</code> keyword instructs the <em>server</em> to contact remote
+      endpoints, creating a server-side request-forgery (SSRF) and confused-deputy surface. A
+      query service MAY reject queries containing <code>SERVICE</code>, and SHOULD reject them by
+      default. A service that does evaluate <code>SERVICE</code> patterns MUST NOT forward the
+      requester's credentials (or any server credential) to the remote endpoint, and SHOULD apply
+      standard SSRF protections (deny-by-default network egress, address-family and DNS
+      validation) to the outbound request.
+    </p>
+  </section>
+
+  <section id="privacy">
+    <h3>Privacy</h3>
+    <ul>
+      <li>
+        <strong>Cross-agent cache leakage.</strong> Results are per-requester; shared caching is
+        forbidden by <a href="#caching"></a>.
+      </li>
+      <li>
+        <strong>Aggregation risk.</strong> A query endpoint makes it cheaper to correlate data
+        the requester could already read. This is a usability feature, not a new authorization
+        exposure — by <a>GET-equivalence</a> the same correlation was available by fetching each
+        resource — but storage owners should be aware that convenient querying can change the
+        practical privacy calculus of broadly-readable data.
+      </li>
+      <li>
+        <strong>Query logs.</strong> Query texts can themselves reveal what a requester was
+        looking for. Servers that log queries should treat query logs with the same
+        confidentiality as resource-access logs.
+      </li>
+      <li>
+        <strong>Container listings.</strong> A readable container's graph includes containment
+        triples, so it names contained resources — exactly as a <code>GET</code> on the
+        container does. This is existing Solid behaviour, restated here because containment
+        triples become joinable at query time.
+      </li>
+    </ul>
+  </section>
+</section>
+
+<section id="sparql-update">
+  <h2>SPARQL Update (Out of Scope)</h2>
+  <p>
+    This specification defines a read-only interface. A query service MUST NOT execute SPARQL
+    Update operations [[SPARQL11-PROTOCOL]]. A request that is recognizably an update request
+    MUST be refused without side effects: a service SHOULD respond
+    <code>415 Unsupported Media Type</code> to a direct POST of
+    <code>application/sparql-update</code>, and <code>400 Bad Request</code> to a form request
+    carrying an <code>update</code> parameter.
+  </p>
+  <section class="informative" id="update-future">
+    <h3>Future work: an access-controlled update mapping</h3>
+    <p>
+      A future specification may define an update operation on the same substrate. The expected
+      mode mapping, recorded here so the design space is visible, is per target graph:
+      <code>WHERE</code> patterns require <em>Read</em> on every graph they consult;
+      <code>INSERT</code> requires <em>Append</em> on each target graph; <code>DELETE</code>
+      requires <em>Write</em> on each target graph. The principal new hazard is the
+      <code>DELETE</code>/<code>WHERE</code> read oracle — an update whose <em>effect</em>
+      (which triples got deleted, or whether anything changed) reveals the outcome of a
+      <code>WHERE</code> evaluation the requester could not have performed as a query — which
+      must be closed with the same before-evaluation dataset restriction used here, applied to
+      the <code>WHERE</code> clause. Update is deferred until that analysis is complete.
+    </p>
+  </section>
+</section>
+
+<section class="informative" id="test-scenarios">
+  <h2>Conformance Test Scenarios</h2>
+  <p>
+    The scenarios below restate the normative requirements of this specification in testable
+    form; the referenced sections are authoritative. Except where stated, assume the example
+    storage of <a href="#example-storage"></a>: requester <em>R</em> can read
+    <code>/profile/card</code> and <code>/contacts/bob</code> but not
+    <code>/private/journal</code>, and <code>/no-such-resource</code> does not exist.
+  </p>
+  <ol>
+    <li>
+      <strong>Protocol bindings.</strong> The same query submitted via GET, URL-encoded POST, and
+      direct POST returns the same results. (<a href="#protocol-operations"></a>)
+    </li>
+    <li>
+      <strong>Empty standing default graph.</strong> <code>SELECT * WHERE { ?s ?p ?o }</code>
+      with no dataset description returns zero solutions, whatever the storage contains.
+      (<a href="#empty-default-graph"></a>)
+    </li>
+    <li>
+      <strong>Graph-name mapping.</strong> Every binding of
+      <code>SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }</code> is the IRI of an RDF source
+      readable by <em>R</em>. (<a href="#resource-graphs"></a>,
+      <a href="#authorized-dataset"></a>)
+    </li>
+    <li>
+      <strong>No enumeration of unreadable graphs.</strong> The bindings of scenario 3 exclude
+      <code>&lt;/private/journal&gt;</code>. (<a href="#non-disclosure-invariants"></a>)
+    </li>
+    <li>
+      <strong>Unreadable ≡ non-existent (status).</strong>
+      <code>SELECT * FROM &lt;/private/journal&gt; WHERE { ?s ?p ?o }</code> and
+      <code>SELECT * FROM &lt;/no-such-resource&gt; WHERE { ?s ?p ?o }</code> both return
+      <code>200</code> with zero solutions and indistinguishable response structure — no error,
+      no <code>403</code>/<code>404</code>. (<a href="#dataset-clauses"></a>,
+      <a href="#non-disclosure-invariants"></a>)
+    </li>
+    <li>
+      <strong>Unreadable ≡ non-existent (ASK).</strong>
+      <code>ASK { GRAPH &lt;/private/journal&gt; { ?s ?p ?o } }</code> and
+      <code>ASK { GRAPH &lt;/no-such-resource&gt; { ?s ?p ?o } }</code> both answer
+      <code>false</code>. (<a href="#non-disclosure-invariants"></a>)
+    </li>
+    <li>
+      <strong>Aggregate non-disclosure.</strong>
+      <code>SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }</code> yields the same
+      <code>?n</code> whether or not <code>/private/journal</code> exists.
+      (<a href="#non-disclosure-invariants"></a>)
+    </li>
+    <li>
+      <strong>GET-equivalence for auxiliaries.</strong> With WAC governing the storage: an agent
+      holding <code>acl:Read</code> but not <code>acl:Control</code> on <code>/x</code> sees
+      graph <code>&lt;/x&gt;</code> but not graph <code>&lt;/x.acl&gt;</code>.
+      (<a href="#read-visibility"></a>)
+    </li>
+    <li>
+      <strong>Flattening.</strong> For the JSON-LD resource of <a href="#example-jsonld"></a>,
+      all triples (default-graph and inner-graph) are matched inside
+      <code>GRAPH &lt;/notes/meeting&gt;</code>, and
+      <code>ASK { GRAPH &lt;/notes/meeting#minutes&gt; { ?s ?p ?o } }</code> answers
+      <code>false</code>. (<a href="#concrete-syntaxes"></a>)
+    </li>
+    <li>
+      <strong>No raw preservation.</strong> No inner named graph name from any resource
+      representation ever appears as a <code>?g</code> binding or is matchable as a
+      <code>GRAPH</code> name. (<a href="#no-raw-preserve"></a>)
+    </li>
+    <li>
+      <strong>Intra- versus cross-graph joins.</strong> On the example storage, the intra-graph
+      query of <a href="#example-joins"></a> returns zero solutions and the cross-graph query
+      returns exactly one. (<a href="#cross-graph"></a>)
+    </li>
+    <li>
+      <strong>Union mode is opt-in only.</strong> On a service advertising
+      <code>solid-sparql:UnionDefaultGraphOptIn</code>: scenario 2 still returns zero solutions,
+      while the same bare-BGP query with
+      <code>FROM &lt;http://www.w3.org/ns/solid/sparql#union-default-graph&gt;</code> (or the
+      equivalent <code>default-graph-uri</code> parameter) returns solutions from all readable
+      graphs. (<a href="#union-default-graph"></a>)
+    </li>
+    <li>
+      <strong>Union IRI is inert elsewhere.</strong>
+      <code>FROM NAMED &lt;http://www.w3.org/ns/solid/sparql#union-default-graph&gt;</code> adds
+      no named graph, and <code>?g</code> never binds to the reserved IRI.
+      (<a href="#udg-request"></a>)
+    </li>
+    <li>
+      <strong>Service description hygiene.</strong> The service description contains no
+      named-graph inventory (or a per-requester-filtered one), and never
+      <code>sd:UnionDefaultGraph</code>. (<a href="#service-description"></a>)
+    </li>
+    <li>
+      <strong>Update refusal.</strong> A direct POST of <code>application/sparql-update</code> is
+      refused (e.g. <code>415</code>) with no side effects; a form POST with an
+      <code>update</code> parameter is refused (e.g. <code>400</code>).
+      (<a href="#sparql-update"></a>)
+    </li>
+    <li>
+      <strong>Cache privacy.</strong> Query responses carry cache directives preventing shared
+      caches from serving them to a different requester. (<a href="#caching"></a>)
+    </li>
+  </ol>
+</section>
+
+<section class="informative" id="examples">
+  <h2>Worked Examples</h2>
+
+  <section id="example-storage">
+    <h3>Example storage</h3>
+    <p>
+      The storage <code>https://alice.pod.example/</code> contains three RDF sources. The
+      requester <em>R</em> is authorized to read <code>/profile/card</code> and
+      <code>/contacts/bob</code>, but not <code>/private/journal</code>.
+    </p>
+    <pre class="example" title="Storage contents, shown as the graphs of R's authorized dataset (TriG-style)">
+# Graph &lt;https://alice.pod.example/profile/card&gt;   (readable by R)
+GRAPH &lt;https://alice.pod.example/profile/card&gt; {
+  &lt;https://alice.pod.example/profile/card#me&gt;
+      foaf:name  "Alice" ;
+      foaf:knows &lt;https://bob.pod.example/profile/card#me&gt; .
+}
+
+# Graph &lt;https://alice.pod.example/contacts/bob&gt;   (readable by R)
+GRAPH &lt;https://alice.pod.example/contacts/bob&gt; {
+  &lt;https://bob.pod.example/profile/card#me&gt; foaf:name "Bob" .
+}
+
+# https://alice.pod.example/private/journal exists but is NOT readable by R:
+# it contributes NO graph to R's authorized dataset.</pre>
+  </section>
+
+  <section id="example-basic">
+    <h3>The empty default graph, and enumerating readable graphs</h3>
+    <pre class="example" title="Bare BGP — zero solutions">
+SELECT ?s ?p ?o WHERE { ?s ?p ?o }
+# → no solutions: the standing default graph is empty.</pre>
+    <pre class="example" title="Enumerating readable graphs">
+SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }
+# → ?g = &lt;https://alice.pod.example/profile/card&gt;
+#   ?g = &lt;https://alice.pod.example/contacts/bob&gt;
+# /private/journal is absent — indistinguishable from not existing.</pre>
+    <p class="note">
+      A readable resource whose graph is empty (for example, an empty Turtle document) produces
+      no binding here — ordinary SPARQL semantics, since <code>GRAPH ?g</code> requires a
+      matching triple. That is not a disclosure issue; it is the same behaviour for every
+      requester who can read the resource.
+    </p>
+  </section>
+
+  <section id="example-joins">
+    <h3>Intra-graph versus cross-graph joins</h3>
+    <p>
+      Alice's <code>foaf:knows</code> triple lives in <code>/profile/card</code>, but Bob's name
+      lives in <code>/contacts/bob</code>. A join written inside a single <code>GRAPH</code>
+      block requires both triples in the <em>same</em> graph, and therefore fails:
+    </p>
+    <pre class="example" title="Intra-graph join — zero solutions">
+PREFIX foaf: &lt;http://xmlns.com/foaf/0.1/&gt;
+SELECT ?f ?n WHERE {
+  GRAPH ?g { ?p foaf:knows ?f . ?f foaf:name ?n }
+}
+# → no solutions: no single graph contains both triples.</pre>
+    <p>
+      Separate <code>GRAPH</code> blocks with distinct graph variables join across graphs on the
+      shared variable <code>?f</code>:
+    </p>
+    <pre class="example" title="Cross-graph join — one solution">
+PREFIX foaf: &lt;http://xmlns.com/foaf/0.1/&gt;
+SELECT ?f ?n WHERE {
+  GRAPH ?g1 { ?p foaf:knows ?f }
+  GRAPH ?g2 { ?f foaf:name ?n }
+}
+# → ?f = &lt;https://bob.pod.example/profile/card#me&gt;, ?n = "Bob"
+#   (?g1 = &lt;…/profile/card&gt;, ?g2 = &lt;…/contacts/bob&gt;)</pre>
+    <p>
+      Alternatively, merge chosen graphs into the query's default graph with <code>FROM</code>,
+      so bare patterns join across them:
+    </p>
+    <pre class="example" title="Per-query merged default graph">
+PREFIX foaf: &lt;http://xmlns.com/foaf/0.1/&gt;
+SELECT ?f ?n
+FROM &lt;https://alice.pod.example/profile/card&gt;
+FROM &lt;https://alice.pod.example/contacts/bob&gt;
+WHERE { ?p foaf:knows ?f . ?f foaf:name ?n }
+# → ?f = &lt;https://bob.pod.example/profile/card#me&gt;, ?n = "Bob"</pre>
+  </section>
+
+  <section id="example-unauthorized">
+    <h3>An unauthorized graph is absent</h3>
+    <pre class="example" title="Unreadable FROM target — empty, no error">
+SELECT ?s ?p ?o
+FROM &lt;https://alice.pod.example/private/journal&gt;
+WHERE { ?s ?p ?o }
+# → 200 OK, zero solutions.
+# Identical (status, shape, error-free) to:
+#   SELECT ?s ?p ?o FROM &lt;https://alice.pod.example/no-such-resource&gt; WHERE { ?s ?p ?o }</pre>
+    <pre class="example" title="ASK cannot probe existence">
+ASK { GRAPH &lt;https://alice.pod.example/private/journal&gt; { ?s ?p ?o } }
+# → false — exactly as for a graph that does not exist.</pre>
+  </section>
+
+  <section id="example-jsonld">
+    <h3>A JSON-LD resource with inner named graphs, under the flattening rule</h3>
+    <p>
+      The resource <code>https://alice.pod.example/notes/meeting</code> is stored as JSON-LD and
+      uses an inner named graph:
+    </p>
+    <pre class="example" title="Stored representation (returned byte-exact by GET)">
+{
+  "@context": {
+    "@vocab": "https://schema.org/",
+    "dct": "http://purl.org/dc/terms/"
+  },
+  "@graph": [
+    {
+      "@id": "https://alice.pod.example/notes/meeting",
+      "dct:title": "Meeting notes"
+    },
+    {
+      "@id": "https://alice.pod.example/notes/meeting#minutes",
+      "@graph": [
+        {
+          "@id": "https://alice.pod.example/notes/meeting#decision1",
+          "text": "Adopt the proposal"
+        }
+      ]
+    }
+  ]
+}</pre>
+    <p>
+      The representation deserializes to a dataset: one default-graph triple plus an inner named
+      graph <code>&lt;…#minutes&gt;</code>. Flattening (<a href="#concrete-syntaxes"></a>)
+      collapses it into the single resource graph:
+    </p>
+    <pre class="example" title="The resource graph seen by queries">
+GRAPH &lt;https://alice.pod.example/notes/meeting&gt; {
+  &lt;https://alice.pod.example/notes/meeting&gt;
+      &lt;http://purl.org/dc/terms/title&gt; "Meeting notes" .
+  &lt;https://alice.pod.example/notes/meeting#decision1&gt;
+      &lt;https://schema.org/text&gt; "Adopt the proposal" .
+}</pre>
+    <pre class="example" title="The inner graph name is not a SPARQL graph">
+ASK { GRAPH &lt;https://alice.pod.example/notes/meeting#minutes&gt; { ?s ?p ?o } }
+# → false: inner graph names are never named graphs of the dataset.
+
+SELECT ?text WHERE {
+  GRAPH &lt;https://alice.pod.example/notes/meeting&gt; {
+    ?d &lt;https://schema.org/text&gt; ?text
+  }
+}
+# → ?text = "Adopt the proposal" — the inner graph's triples are in the resource graph.</pre>
+    <p class="note">
+      Contrast the forbidden raw-preservation behaviour (<a href="#no-raw-preserve"></a>): had
+      <code>&lt;…#minutes&gt;</code> become a first-class graph, a hostile document at
+      <code>/evil</code> declaring an inner <code>@id</code> of
+      <code>https://alice.pod.example/profile/card</code> could have injected triples under the
+      profile's graph name.
+    </p>
+  </section>
+
+  <section id="example-union">
+    <h3>Union default graph mode (opt-in)</h3>
+    <p>On a service advertising <code>solid-sparql:UnionDefaultGraphOptIn</code>:</p>
+    <pre class="example" title="Opting in via FROM">
+PREFIX foaf: &lt;http://xmlns.com/foaf/0.1/&gt;
+SELECT ?f ?n
+FROM &lt;http://www.w3.org/ns/solid/sparql#union-default-graph&gt;
+WHERE { ?p foaf:knows ?f . ?f foaf:name ?n }
+# → ?f = &lt;https://bob.pod.example/profile/card#me&gt;, ?n = "Bob"
+# The default graph for THIS query is the merge of all graphs R can read;
+# a bare BGP now joins across resources.</pre>
+    <pre class="example" title="Opting in via the protocol parameter">
+GET /sparql?query=SELECT%20%3Ff%20%3Fn%20WHERE%20%7B%20%3Fp%20foaf%3Aknows%20%3Ff%20.%20%3Ff%20foaf%3Aname%20%3Fn%20%7D&default-graph-uri=http%3A%2F%2Fwww.w3.org%2Fns%2Fsolid%2Fsparql%23union-default-graph HTTP/1.1
+Host: alice.pod.example
+Accept: application/sparql-results+json</pre>
+    <p>
+      The same query without the reserved IRI still returns zero solutions — the standing
+      default graph remains empty, always.
+    </p>
+  </section>
+</section>
+
+<section id="acknowledgements" class="informative appendix">
+  <h2>Acknowledgements</h2>
+  <p>
+    This specification builds on the work of the W3C Solid Community Group and on the SPARQL and
+    RDF specifications of the W3C. The dataset-restriction-before-evaluation architecture and its
+    existence-non-disclosure invariants were developed and validated in the
+    <a href="https://github.com/jeswr/solid-server-rs"><code>solid-server-rs</code></a>
+    implementation.
+  </p>
+</section>
+
+</body>
+</html>

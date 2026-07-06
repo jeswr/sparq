@@ -1,6 +1,7 @@
-# kani — Kani bounded model-checking proof of the `.spqv` on-disk-format VALIDATOR (bead
-# sq-hkud, epic sq-toze; addresses memsafety gap MS-G4). [OPUS-4.8] authored while Fable
-# unavailable — re-review when Fable returns.
+# kani — Kani bounded model-checking proof of the `.spqv` + mmap-dict on-disk-format VALIDATORS
+# (beads sq-hkud / sq-ueuk, epic sq-toze; addresses memsafety gap MS-G4). [OPUS-4.8] authored
+# while Fable unavailable — re-review when Fable returns. Per-crate/per-harness split + timeouts
+# + step summary added under sq-otpxg (see RUNNER / STRUCTURE below).
 #
 # WHY (the MS-G4 gap, from compliance/memsafety/gap-register.md): the unsafe mmap on-disk
 # validators are covered by Miri (UB on the pure-Rust sites), the deterministic corruption
@@ -27,7 +28,11 @@
 # `open_validated`, so proving the in-memory path proves the B5 validator without Kani having
 # to model `mmap` / file I/O / FFI (which it cannot).
 #
-# AND — the `#[cfg(all(kani, feature = "mmap"))]` harnesses in crates/sparq-core/src/dict.rs:
+# AND — the `#[cfg(kani)]` / `#[cfg(all(kani, feature = "mmap"))]` harnesses in
+# crates/sparq-core/src/dict.rs:
+#   • inline_id_round_trip / inline_id_out_of_domain_is_none / id_partition_disjoint : pure
+#                                                 integer id-encoding + partition invariants
+#                                                 (fast — no loops/heap; no `mmap` needed).
 #   • validate_dict_bytes_never_panics          : for ALL four byte regions + term count up to
 #                                                 the harness bounds, the mmap dict validator
 #                                                 returns cleanly (Ok or Err), never panics /
@@ -38,44 +43,72 @@
 #                                                  tail.
 # `validate_dict_bytes` is the mmap-FREE seam (bead sq-ueuk) the mmap'd `MappedDict::validate`
 # now delegates to — a `memmap2::Mmap` derefs to the `&[u8]` it takes — so proving the seam
-# proves the dict B5 validator without Kani having to model `mmap` / file I/O / FFI. It is
-# built only under the `mmap` feature, so the run step passes `--features mmap`.
+# proves the dict B5 validator without Kani having to model `mmap` / file I/O / FFI. The two
+# `validate_dict_bytes_*` harnesses are built only under the `mmap` feature, so the sparq-core
+# matrix entry passes `--features mmap`.
 #
 # HISTORY (honest scope, now closed): the dict validator USED to have no mmap-free entry point
 # (it was reachable only through `Dict::open_mmap`, which needs a live `memmap2::Mmap` that
 # Kani cannot model — the same reason Miri cannot; see miri.yml). Bead sq-ueuk lifted the
 # header/length/bounds/record logic onto a plain `&[u8]` (`validate_dict_bytes`), so the dict
-# validator is now proven here alongside the `.spqv` validator. The vectors validator remains
-# the first, self-contained proof.
+# validator is now proven here alongside the `.spqv` validator.
+#
+# RUNNER / STRUCTURE (bead sq-otpxg — why per-crate + per-harness + timeouts):
+# The single-job form of this lane FAILED every scheduled run from 2026-06-22 onward with
+# "runner lost communication" — CBMC is memory-hungry, a standard GitHub runner has ~7 GB RAM,
+# and the two slow validator harnesses exhausted it mid-solve, killing the whole runner AND its
+# check-run silently (the lane is informational, so nobody noticed for ~12 days). The fix is
+# entirely CI-side (no harness-source change — those are owned this tick by bead sq-og8u8):
+#   1. SPLIT per crate into a matrix, `fail-fast: false`. Each crate proof set runs on its OWN
+#      fresh ~7 GB runner in parallel, so one crate's memory pressure cannot starve the other,
+#      and one crate's death cannot hide the other's results.
+#   2. Invoke cargo-kani PER HARNESS (`--harness <name>`) inside a per-invocation `timeout`
+#      ceiling (env `KANI_HARNESS_TIMEOUT`). A single runaway/OOM-prone proof is cut with a
+#      clean TIMEOUT record — the loop reaps the solver (anti-OOM invariant) and moves on to
+#      the next harness — instead of being allowed to consume all RAM and kill the runner. So
+#      one slow harness can no longer silently take down the whole job.
+#   3. Every harness's PASS / FAIL / TIMEOUT (+ wall time, + a log tail on non-pass) is written
+#      to `$GITHUB_STEP_SUMMARY` and mirrored as `::warning::` / `::error::` annotations, so a
+#      failure is VISIBLE on the run page and silent-death cannot recur.
+# A genuine counterexample (reachable panic/OOB/UB) OR a TIMEOUT ends the job red (honest — the
+# lane genuinely is not passing yet while the two slow harnesses exceed budget; bounding them is
+# tracked by sq-og8u8). No larger GitHub-hosted runner class or self-hosted runner is available
+# to this repo (`gh api /repos/sparq-org/sparq/actions/runners` == 0; every other workflow uses
+# `ubuntu-latest`), so option "beefier runner" is not currently reachable — recorded in the PR.
+#
+# ADDING A SUITE (bead sq-sqtk2.5 wires four new Phase-1 harness suites in): append ONE entry to
+# the `matrix.suite` list below — `{ name, crate, features, harnesses }`. `harnesses` is the
+# space-separated list of `#[kani::proof]` fn names in that crate. Nothing else changes: the
+# per-harness timeout loop + summary apply uniformly to every suite.
 #
 # HOW (the documented Kani flow — https://model-checking.github.io/kani/install-guide.html):
 #   cargo install --locked kani-verifier              (the cargo-kani driver from crates.io)
 #   cargo kani setup                                  (downloads the matching CBMC + Kani)
-#   cargo kani -p sparq-vectors                       (.spqv validator proofs)
-#   cargo kani -p sparq-core --features mmap          (mmap dict validator proofs)
+#   cargo kani -p <crate> [--features …] --harness H  (one bounded proof)
 # Kani injects the `kani` cfg + the `kani` crate itself during model checking, so the harness
 # needs no dependency entry; under a normal build the `#[cfg(kani)]` module is stripped (the
 # `kani` cfg is registered in sparq-vectors/Cargo.toml AND sparq-core/Cargo.toml [lints.rust]
-# so `-D warnings` is happy). The dict harness is `#[cfg(all(kani, feature = "mmap"))]`, so
-# the `sparq-core` invocation passes `--features mmap`.
+# so `-D warnings` is happy).
 #
-# UNTESTED-HERE: this lane has NOT been run in the authoring environment (Kani was not
-# installed). The harness is written against Kani's documented API and is VALIDATED ON THE
-# FIRST RUN of this workflow. If the first run surfaces an unwind-bound or API mismatch, fix
-# it there — the proof OBLIGATION (no panic/OOB over the bounded domain) is correct regardless.
+# UNTESTED-HERE (proof soundness): the harness BODIES were written against Kani's documented API
+# and are validated on the first CI run — if a run surfaces an unwind-bound or API mismatch, fix
+# it in the harness source (sq-og8u8); the proof OBLIGATION is correct regardless. The workflow
+# MECHANICS (per-harness `--harness` selection, timeout classification, summary) were reproduced
+# locally against Kani 0.67 on a high-RAM box (which does NOT reproduce the ~7 GB OOM, but does
+# confirm the commands + loop are correct).
 #
 # TRIGGER (deliberately OFF the per-PR critical path — like miri.yml / asan.yml / the nightly
 # fuzz tier): Kani installs CBMC and does exponential symbolic exploration, so a cold run is
 # many minutes. This is a NIGHTLY formal-assurance safety net, not a per-PR tax.
-#   • schedule (nightly) — the standing bounded-proof safety net over the .spqv validator.
-#   • workflow_dispatch  — on demand.
-# There is intentionally NO pull_request / merge_group / push trigger, so this workflow
-# creates NO check-run on a PR head or merge-queue ref — the required `ci-summary / gate`
-# aggregator (which POLLS sibling check-runs on the head commit) therefore never discovers it
-# and never waits on it. This lane is INFORMATIONAL / NON-BLOCKING, exactly the
-# nightly-safety-net posture of miri.yml + asan.yml + the nightly fuzz tier. (It is ALSO
-# belt-and-braces named "…, informational" so that even if it were ever wired onto a PR ref
-# it would be excluded from the gate by the ci-summary `\b(advisory|informational)\b` rule.)
+#   • schedule (nightly) — the standing bounded-proof safety net over the validators.
+#   • workflow_dispatch  — on demand (used to smoke-test this lane on a branch).
+# There is intentionally NO pull_request / merge_group / push trigger, so this workflow creates
+# NO check-run on a PR head or merge-queue ref — the required `ci-summary / gate` aggregator
+# (which POLLS sibling check-runs on the head commit) therefore never discovers it and never
+# waits on it. This lane is INFORMATIONAL / NON-BLOCKING, exactly the nightly-safety-net posture
+# of miri.yml + asan.yml + the nightly fuzz tier. (Each matrix job is ALSO belt-and-braces named
+# "…, informational" so that even if the lane were ever wired onto a PR ref it would be excluded
+# from the gate by the ci-summary `\b(advisory|informational)\b` rule.)
 #
 # Third-party actions are pinned by full commit SHA (supply-chain hardening); the trailing
 # `# vX.Y.Z` comment is what Dependabot follows to bump the pin. Pins + the pinned nightly
@@ -100,15 +133,41 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Per-harness wall-clock ceiling. A single runaway/OOM-prone proof is cut here with a clean
+  # TIMEOUT record (and its solver reaped) instead of being allowed to exhaust the ~7 GB runner
+  # and kill it silently. Tunable in one place; `timeout(1)` duration syntax (e.g. 20m, 1200s).
+  KANI_HARNESS_TIMEOUT: "20m"
 
 jobs:
   kani:
-    name: kani (.spqv + mmap-dict validator bounded proofs, informational)
+    name: kani ${{ matrix.suite.name }} (bounded proofs, informational)
     runs-on: ubuntu-latest
-    # `cargo kani setup` downloads CBMC + the Kani backend on a cold run, then the symbolic
-    # exploration runs. Generous ceiling so a hung proof fails with a clear timeout rather
-    # than running away (matches miri.yml / asan.yml posture).
+    # Backstop only — the real control is the per-harness KANI_HARNESS_TIMEOUT above. Generous
+    # so `cargo kani setup` (cold CBMC download) + per-harness codegen + the timeouts fit with
+    # margin; a hung harness is cut by its own timeout long before this fires.
     timeout-minutes: 90
+    strategy:
+      # One crate's OOM/timeout must NOT cancel the other crate's proofs.
+      fail-fast: false
+      matrix:
+        # ADD A SUITE = ONE ENTRY (see header). harnesses = space-separated `#[kani::proof]`
+        # fn names in that crate; features = extra cargo features the harnesses need.
+        suite:
+          - name: "sparq-vectors (.spqv validator)"
+            crate: sparq-vectors
+            features: ""
+            harnesses: >-
+              open_from_bytes_never_panics
+              open_validated_v2_tail_never_panics
+          - name: "sparq-core (dict validator + id partition)"
+            crate: sparq-core
+            features: "--features mmap"
+            harnesses: >-
+              inline_id_round_trip
+              inline_id_out_of_domain_is_none
+              id_partition_disjoint
+              validate_dict_bytes_never_panics
+              validate_dict_bytes_sized_tail_never_panics
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host
@@ -123,9 +182,10 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Kani uses a distinct instrumented target tree; key the cache so it is not confused
-          # with the stable workspace build in ci.yml or the miri/asan sysroots.
-          key: kani
+          # Kani uses a distinct instrumented target tree; key the cache per crate so the two
+          # matrix jobs do not clobber each other and neither is confused with the stable
+          # workspace build in ci.yml or the miri/asan sysroots.
+          key: kani-${{ matrix.suite.crate }}
       # Install the cargo-kani driver from crates.io (--locked for a reproducible resolve),
       # then fetch the matching CBMC + Kani backend. `cargo install` is itself SHA-resolved
       # against the crates.io index + the workspace lockfile semantics; no extra third-party
@@ -135,14 +195,95 @@ jobs:
         run: |
           cargo install --locked kani-verifier
           cargo kani setup
-      # Model-check every #[kani::proof] in sparq-vectors (the two .spqv-validator harnesses).
-      # A failed proof (a reachable panic / OOB / UB on some bounded input) fails the run with
-      # a counterexample trace.
-      - name: Kani — .spqv on-disk-format validator bounded proof
+      # Per-harness bounded proofs with a wall-clock timeout each, and a $GITHUB_STEP_SUMMARY
+      # table so every harness's PASS / FAIL / TIMEOUT is visible even if a later harness is
+      # cut. A FAIL (counterexample/build error) or a TIMEOUT ends the job red — honestly — but
+      # only AFTER every harness result has been recorded, so silent-death cannot recur.
+      - name: Kani bounded proofs (per-harness, timeout, summary)
+        env:
+          SUITE_NAME: ${{ matrix.suite.name }}
+          SUITE_CRATE: ${{ matrix.suite.crate }}
+          SUITE_FEATURES: ${{ matrix.suite.features }}
+          SUITE_HARNESSES: ${{ matrix.suite.harnesses }}
         run: |
-          cargo kani -p sparq-vectors
-      # Model-check the mmap-free dict validator seam (bead sq-ueuk). It is gated behind the
-      # `mmap` feature, so pass it; same failure semantics as above.
-      - name: Kani — mmap dict validator bounded proof
-        run: |
-          cargo kani -p sparq-core --features mmap
+          set -u
+          summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+          tmo="${KANI_HARNESS_TIMEOUT:-20m}"
+          {
+            echo "### 🤖 Kani bounded-proof results — ${SUITE_NAME}"
+            echo ""
+            echo "Runner \`ubuntu-latest\` (~7 GB). Each harness runs as its own \`cargo kani --harness\`"
+            echo "invocation under a \`${tmo}\` wall-clock ceiling; a runaway/OOM-prone proof is cut with a"
+            echo "clean **TIMEOUT** (solver reaped) rather than silently killing the runner."
+            echo ""
+            echo "| Harness | Result | Wall time |"
+            echo "| --- | --- | --- |"
+          } >> "$summary"
+
+          had_fail=0
+          had_timeout=0
+          for h in $SUITE_HARNESSES; do
+            log="kani-${SUITE_CRATE}-${h}.log"
+            start=$(date +%s)
+            # shellcheck disable=SC2086  # SUITE_FEATURES is an intentional word-split arg list.
+            # `&& ec=0 || ec=$?` — capture exit code without triggering `set -e` (bash -e {0}).
+            # Plain `cmd; ec=$?` would cause bash to abort the script on the first non-zero exit
+            # (timeout returns 124, cargo-kani returns non-zero on proof failure) BEFORE ec=$? runs.
+            # The `&&`/`||` list is `-e`-exempt; $? inside `|| ec=$?` is the exit of the left side.
+            timeout -k 30s "$tmo" cargo kani -p "$SUITE_CRATE" $SUITE_FEATURES --harness "$h" \
+              > "$log" 2>&1 && ec=0 || ec=$?
+            # Anti-OOM invariant: guarantee the memory-hungry solver is gone before the next
+            # harness starts (on a timeout the CBMC child can be orphaned when cargo-kani is
+            # SIGKILLed). This job runs nothing but Kani, so any cbmc process is ours.
+            pkill -9 -x cbmc 2>/dev/null || true
+            end=$(date +%s)
+            dur=$((end - start))
+            wall=$(printf '%dm%02ds' $((dur / 60)) $((dur % 60)))
+
+            case "$ec" in
+              0)
+                res="✅ PASS"
+                ;;
+              124 | 137)
+                res="⏱️ TIMEOUT (>${tmo})"
+                had_timeout=1
+                echo "::warning title=Kani timeout::${SUITE_CRATE}::${h} exceeded ${tmo} — recorded as TIMEOUT (see step summary). Bounding is tracked by sq-og8u8."
+                ;;
+              *)
+                res="❌ FAIL (exit ${ec})"
+                had_fail=1
+                echo "::error title=Kani proof failed::${SUITE_CRATE}::${h} failed (exit ${ec}) — a reachable panic/OOB/UB counterexample or a build error (see step summary)."
+                ;;
+            esac
+            echo "| \`${h}\` | ${res} | ${wall} |" >> "$summary"
+
+            if [ "$ec" -ne 0 ]; then
+              {
+                echo ""
+                echo "<details><summary>Log tail — <code>${h}</code> (${res})</summary>"
+                echo ""
+                echo '```'
+                tail -n 40 "$log" 2>/dev/null || true
+                echo '```'
+                echo ""
+                echo "</details>"
+              } >> "$summary"
+            fi
+          done
+
+          {
+            echo ""
+            if [ "$had_fail" -eq 1 ]; then
+              echo "**Overall: ❌ FAIL** — at least one harness surfaced a counterexample/error above; investigate it."
+            elif [ "$had_timeout" -eq 1 ]; then
+              echo "**Overall: ⏱️ TIMEOUT** — every harness that finished passed, but one or more exceeded the \`${tmo}\` budget. Bounding/pruning those is tracked by **sq-og8u8**."
+            else
+              echo "**Overall: ✅ PASS** — all harnesses verified within budget."
+            fi
+          } >> "$summary"
+
+          # Informational lane: a FAIL or TIMEOUT ends the job red (honest), but every result is
+          # already recorded above, so a slow/OOM harness can no longer silently kill the run.
+          if [ "$had_fail" -eq 1 ] || [ "$had_timeout" -eq 1 ]; then
+            exit 1
+          fi

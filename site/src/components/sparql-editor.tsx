@@ -101,10 +101,16 @@ export function SparqlEditor({
     <div className={cn("space-y-2", className)}>
       <div className="relative rounded-lg border bg-muted/40">
         {/* Highlight layer: aria-hidden (the textarea is the accessible control). A trailing
-            newline keeps the last line's height stable while typing at the very end. */}
+            newline keeps the last line's height stable while typing at the very end.
+            [FABLE-5] sq-ymr2e.9 — tabIndex -1: modern Chromium makes scrollable containers
+            with no focusable children KEYBOARD-focusable, which put this aria-hidden layer in
+            the Tab order (focus on aria-hidden content — a WCAG 4.1.2-class bug axe cannot
+            see; caught by e2e/a11y-keyboard.spec.ts). Scrolling stays available through the
+            textarea, whose scroll this layer mirrors. */}
         <pre
           ref={preRef}
           aria-hidden="true"
+          tabIndex={-1}
           className={cn(
             "pointer-events-none absolute inset-0 m-0 overflow-auto",
             EDITOR_PAD_CLASS,

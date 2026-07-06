@@ -2040,4 +2040,215 @@ mod tests {
         };
         assert_eq!(extract_integer_vector(&ok).unwrap(), vec![1000, 2000]);
     }
+
+    // =====================================================================
+    // [OPUS-4.8] sq-qcnn.26 — DIRECT mutation-directed tests for the Shamir
+    // share/reconstruct algebra. VALUE assertions on the dealer accessors, the
+    // fail-closed degree-reduce precondition, the per-operator security
+    // boundary, and the secret-key Debug redaction — surface the round-trip
+    // tests do not pin tightly enough for the mutation ratchet. Semi-honest
+    // scope only; NO protocol logic changed, NO security claim (sq-qhy4).
+    // =====================================================================
+
+    #[test]
+    fn dealer_parties_and_threshold_mirror_backend() {
+        // A constant-return mutant on either accessor would desync it from the
+        // backend silently; pin both to the exact honest-majority values.
+        for n in [2usize, 3, 4, 5, 7] {
+            let b = ShamirBackend::new_seeded(n, 0x1234 + n as u64).unwrap();
+            let dealer = b.dealer();
+            assert_eq!(dealer.parties(), n, "dealer.parties() must equal n");
+            assert_eq!(
+                dealer.threshold(),
+                (n - 1) / 2,
+                "dealer.threshold() = floor((n-1)/2)"
+            );
+            assert_eq!(dealer.threshold(), b.threshold());
+        }
+    }
+
+    #[test]
+    fn degree_reduce_deficient_backend_fails_closed_not_panics() {
+        // A DEFICIENT config n < 2t+1 (unbuildable by the honest-majority
+        // constructor) is what the `with_unchecked_threshold` escape hatch
+        // exists to exercise: degree_reduce over the FULL n-party sharing must
+        // return a descriptive MpcError::Protocol, NEVER panic / mis-reduce.
+        // This pins the fail-closed `shares_2t.len() < 2*self.t + 1` precondition
+        // in BOTH the comparison direction AND the `2*self.t + 1` arithmetic: a
+        // flip that raises the guard's threshold or reverses it lets the
+        // too-short sharing through to the `[..2*self.t + 1]` slice, which is
+        // out of range on the deficient n-party vector → PANIC (a caught mutant)
+        // rather than the original's clean Protocol. The spread of (n, t) puts n
+        // at several offsets from 2t+1 so each arithmetic variant (2*t → 2/t,
+        // 2+t; 2*t+1 → 2*t-1, 2*t*1) diverges on at least one config.
+        for &(n, t) in &[(3usize, 2usize), (4, 2), (5, 3), (6, 3)] {
+            let b = ShamirBackend::with_unchecked_threshold(n, t); // n < 2t+1
+            let mut dealer = b.dealer();
+            let shares = dealer.share(Fp::new(42)); // the full n-party sharing
+            assert_eq!(shares.len(), n);
+            let err = dealer.degree_reduce(&shares).unwrap_err();
+            assert!(
+                matches!(err, MpcError::Protocol(_)),
+                "deficient n={n} < 2t+1 (t={t}) must fail closed with Protocol, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn equality_open_semi_honest_only_at_minimal_odd_n() {
+        // The degree-2t equality / hidden-value open carries ZERO Reed–Solomon
+        // redundancy at the minimal honest-majority n = 2t+1 (odd n), so its
+        // per-operator security is SEMI-HONEST-ONLY there — the load-bearing
+        // no-detection boundary (contrast the degree-t aggregate, which stays
+        // robust). Pinned at n=5 (t=2) and n=7 (t=3): there 2*t differs from a
+        // mutated 2+t / 2/t and yields a DIFFERENT descriptor, so the exact-value
+        // assertion kills the arithmetic mutant on the degree-2t computation.
+        for &(n, t) in &[(5usize, 2usize), (7, 3)] {
+            let b = ShamirBackend::new(n).unwrap();
+            assert_eq!(b.threshold(), t);
+            let eq = b.operator_security(OperatorClass::EqualityJoin);
+            assert_eq!(
+                eq.malicious_security(0),
+                MaliciousSecurity::SemiHonestOnly,
+                "degree-2t equality open at n=2t+1={n} has zero RS redundancy → semi-honest-only"
+            );
+        }
+        // Even n gains exactly one redundant share at degree 2t → detect-and-abort
+        // (NOT semi-honest-only): a genuinely different descriptor at the same t.
+        let b6 = ShamirBackend::new(6).unwrap(); // t=2, degree 2t=4, n=6 > 2t+1=5
+        assert_eq!(
+            b6.operator_security(OperatorClass::EqualityJoin)
+                .malicious_security(0),
+            MaliciousSecurity::HonestMajorityAbort,
+            "n=6 degree-2t open has one redundant share → detect-and-abort"
+        );
+    }
+
+    #[test]
+    fn malicious_security_no_redundancy_branch_is_semi_honest_only() {
+        // The `n <= t+1` NO-REDUNDANCY arm of malicious_security() returns
+        // SemiHonestOnly (tampering is information-theoretically undetectable at
+        // exactly t+1 shares). It is UNREACHABLE via the honest-majority
+        // constructor (which fixes t=floor((n-1)/2), so every valid n has n>t+1),
+        // hence untested end-to-end — the with_unchecked_threshold escape hatch
+        // exercises it. Pinned at the boundary n == t+1, where the guard's `t+1`
+        // arithmetic is load-bearing: a `t+1`->`t` (or `t-1`) mutation moves n out
+        // of the no-redundancy arm and mis-reports HonestMajorityAbort instead.
+        let b = ShamirBackend::with_unchecked_threshold(3, 2); // n = 3 = t+1
+        assert_eq!(
+            b.malicious_security(),
+            MaliciousSecurity::SemiHonestOnly,
+            "n == t+1 carries no RS redundancy → semi-honest-only (no detection claim)"
+        );
+        // One share more (n = t+2) DOES carry redundancy → detect-and-abort, so the
+        // arm boundary is genuinely at t+1, not below it.
+        let b2 = ShamirBackend::with_unchecked_threshold(4, 2); // n = 4 = t+2
+        assert_eq!(
+            b2.malicious_security(),
+            MaliciousSecurity::HonestMajorityAbort,
+            "n == t+2 has one redundant share → detect-and-abort"
+        );
+    }
+
+    #[test]
+    fn dealer_debug_labels_struct_and_redacts_rng() {
+        // The ShamirDealer Debug must stay a non-empty, labelled struct that
+        // redacts the live masking RNG (a fmt body replaced by an empty `Ok(())`
+        // would drop the redaction and the label). The `contains` checks are
+        // absent in an empty-output mutant, so this kills the fmt default-body.
+        let b = ShamirBackend::new_seeded(5, 0x0DDD).unwrap();
+        let dealer = b.dealer();
+        let dbg = format!("{dealer:?}");
+        assert!(dbg.contains("ShamirDealer"), "Debug must name the struct: {dbg}");
+        assert!(
+            dbg.contains("<live masking RNG>"),
+            "Debug must redact the live RNG state: {dbg}"
+        );
+    }
+
+    #[test]
+    fn mac_session_debug_labels_struct_and_redacts_alpha() {
+        // The MacSession Debug must stay a non-empty, labelled struct that
+        // REDACTS the cleartext session key α (a Debug body replaced by an empty
+        // `Ok(())` would silently drop the redaction). The `contains` checks are
+        // absent in an empty-output mutant, so this kills the fmt default-body.
+        let b = ShamirBackend::new_seeded(5, 0xD00D).unwrap();
+        let mut dealer = b.dealer();
+        let session = dealer.new_mac_session();
+        let dbg = format!("{session:?}");
+        assert!(dbg.contains("MacSession"), "Debug must name the struct: {dbg}");
+        assert!(
+            dbg.contains("<secret session MAC key"),
+            "Debug must carry the α redaction label: {dbg}"
+        );
+        // The POINT of the redaction is that the cleartext α VALUE is absent, not merely
+        // that a label is present: a future Debug impl could print α *and* the label and
+        // still pass a label-only check. Capture α's own Debug rendering and assert it is
+        // NOT a substring of the session Debug output, so the redaction property is pinned.
+        let alpha_dbg = format!("{:?}", session.alpha_for_test());
+        assert!(
+            !dbg.contains(&alpha_dbg),
+            "Debug must NOT leak the cleartext α value {}: {}",
+            alpha_dbg,
+            dbg
+        );
+    }
+
+    #[test]
+    fn extract_single_integer_shape_and_value_guards() {
+        use crate::partial::{HolderId, PartialResult};
+        use oxrdf::{Literal, Term, Variable};
+        let int = |n: u64| Some(Term::Literal(Literal::from(n as i64)));
+        let one_var = || vec![Variable::new("salary").unwrap()];
+        let mk = |vars: Vec<Variable>, rows: Vec<Vec<Option<Term>>>| PartialResult {
+            holder: HolderId::new("h"),
+            vars,
+            rows,
+        };
+
+        // Happy path: exactly one row, one column, one integer literal → its value.
+        // (Pins a non-{0,1} value so a constant-return mutant is caught.)
+        assert_eq!(
+            extract_single_integer(&mk(one_var(), vec![vec![int(30_000)]])).unwrap(),
+            30_000
+        );
+
+        // Zero rows and many rows are BOTH protocol errors (the `rows.len() != 1`
+        // guard — a `!=`→`==` flip would reject the valid single-row case above).
+        assert!(matches!(
+            extract_single_integer(&mk(one_var(), vec![])),
+            Err(MpcError::Protocol(_))
+        ));
+        assert!(matches!(
+            extract_single_integer(&mk(one_var(), vec![vec![int(1)], vec![int(2)]])),
+            Err(MpcError::Protocol(_))
+        ));
+
+        // Multi-COLUMN via `vars.len() != 1` alone (single well-formed row) → error.
+        assert!(matches!(
+            extract_single_integer(&mk(
+                vec![Variable::new("a").unwrap(), Variable::new("b").unwrap()],
+                vec![vec![int(5), int(6)]]
+            )),
+            Err(MpcError::Protocol(_))
+        ));
+
+        // Multi-COLUMN via the ROW arity alone: vars claims ONE column but the row
+        // carries two cells. This is the case the `||` guard (`vars.len() != 1 ||
+        // rows[0].len() != 1`) must reject on the RIGHT operand — an `||`→`&&`
+        // flip would accept it and silently use only the first cell.
+        assert!(matches!(
+            extract_single_integer(&mk(one_var(), vec![vec![int(5), int(6)]])),
+            Err(MpcError::Protocol(_))
+        ));
+
+        // A non-integer literal in the single cell → error, never a guessed value.
+        assert!(matches!(
+            extract_single_integer(&mk(
+                one_var(),
+                vec![vec![Some(Term::Literal(Literal::new_simple_literal("hi")))]]
+            )),
+            Err(MpcError::Protocol(_))
+        ));
+    }
 }

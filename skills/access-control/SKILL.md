@@ -108,10 +108,53 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.query_json_as(...)` → JSON string; `store.ask_as(...)` → `bool`. These evaluate
   through the engine's **zero-copy `DatasetView`** filtered to the session's authorized
   graphs (the default, fast path).
+- **Empty default graph + union-default-graph opt-in — SPEC-COMPLIANT BY DEFAULT**
+  ([OPUS-4.8] sq-gq28y, issue #1546; maintainer decision "spec compliant - empty by default").
+  The read path (`query_as`/`query_json_as`/`ask_as`) implements the *Access-Controlled SPARQL
+  Query over a Solid Pod* [Editor's Draft](https://github.com/jeswr/solid-sparql-query)
+  empty-default + explicit-union semantics **out of the box**. The standing default graph is
+  **empty** (a bare `{ ?s ?p ?o }` matches nothing) UNLESS the query opts in with
+  `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` (the spec-minted
+  `UNION_DEFAULT_GRAPH_IRI`), which makes the default graph the union of the authorized named
+  graphs **for that request only** (a pure function of the query's dataset clause — no
+  cross-request state leak). An explicit `GRAPH ?g` / `GRAPH <g>` pattern is unaffected either
+  way. Semantics + honest scope:
+  - the reserved IRI is a **signal, never a graph name**: it is stripped from BOTH `FROM`
+    and `FROM NAMED` positions before evaluation and never binds `GRAPH ?g`. In `FROM NAMED`
+    position it is treated as **absent** (stripped, not intersected) so `GRAPH ?g` keeps
+    ranging over the full authorized set (draft: "when only the reserved IRI is given, the
+    named-graph set remains the authorized set");
+  - **fail-closed, exact-match**: a near-miss IRI is a normal (absent, per-pod-model) dataset
+    reference that contributes nothing and never widens — it does NOT silently enable the
+    union default graph. At this string API there is no "malformed opt-in value" (the signal
+    is one exact IRI, present-or-absent); the `default-graph-uri` **protocol-parameter**
+    equivalent and its fail-closed validation are the Solid HTTP layer's responsibility
+    (`solid-server-rs`), not sparq;
+  - emulated at the **query layer** (the opt-in triggers the existing per-pattern `GRAPH`
+    wrap; the engine view keeps its `Empty` default graph — no `UnionOfVisible` engine mode
+    is added, design record §5.4(a)). Default public surface: `UNION_DEFAULT_GRAPH_IRI`
+    (const) + `wrap_for_view_opt_in(sparql) -> Result<String, _>` (the spec-conformant
+    read-path rewrite, the differential oracle for the enforcement path).
+  - **security invariant (preserved by the flip):** empty-by-default is strictly MORE
+    conservative than union-always — it can only ever REMOVE a bare pattern's default-graph
+    solutions, never add graphs. Both variants evaluate over exactly the session's authorized
+    named-graph set (the view enforces that at the graph-name layer before evaluation); the
+    default-graph choice changes what the *default graph* sees, never *which* graphs are
+    readable, so it cannot widen the readable set.
+  - **legacy escape hatch:** the opt-in `legacy-union-default-graph` feature (OFF by default)
+    reinstates the pre-flip union-always default (a bare pattern ranges over the authorized
+    union) for downstream deployments that relied on that idiom and need to migrate on their
+    own schedule; new code should use `GRAPH ?g` or the spec-minted opt-in.
+  - **conformance:** the query-semantics conformance class of the spec is vendored + run in
+    `crates/sparq-solid/tests/conformance_solid_sparql_query.rs` (upstream suite in
+    `jeswr/solid-sparql-query:test-suite/query-semantics/`) and passes all 15 cases.
 - `store.query_as_rewrite(&Session, Mode, sparql)` — the v1 **`FROM NAMED` rewrite**
   portability path: enforces the same policy on any standard SPARQL 1.1 engine (one
   deliberate semantic difference noted in-source: a caller `FROM <g>` can only restrict
-  the view, never widen it).
+  the view, never widen it). **NB the spec empty-default flip applies to the view path
+  (`query_as`) only** — this v1 portability path keeps its union-always default-graph
+  emulation (it predates the draft and is a standard-SPARQL-portability oracle, not the
+  spec-conformant surface).
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
@@ -128,10 +171,45 @@ Materialize the authorization view from the access-control documents, then enfor
   authorization** — the server authorizes the request itself (e.g. `decide(.., Mode::Control)`)
   and `update_as` remains the session-checked write path. Always-present API (no cargo gate;
   mirrors `update_as`/`decide` — adds no dependency).
+  **Scale ([OPUS-4.8] issue #1571, sq-b7k7u):** an atomic single-`.acl`/`.acr` write still
+  re-materializes the whole auth view (the incremental materializer is deferred), but the
+  session-cache invalidation is **diff-based** ([SONNET-4.6] sq-b7k7u fix): `reindex_with`
+  diffs old vs new `AuthIndex` per-origin and invalidates exactly the origins whose (allow,
+  deny, cond) buckets changed — so a write to one pod does **not** cold-start every other
+  pod's cached view, and cross-origin dependencies (WAC `acl:agentGroup` membership hosted on
+  a different pod, foreign-subject grant triples, ACP cross-document policy/matcher
+  indirection) are caught automatically: if a write at origin A changes B's effective grants,
+  B's new index buckets differ → B is invalidated too. If the matcher maps change (not
+  origin-bucketed), it falls back to a full cache clear. A differential property test asserts
+  the scoped-cache state equals a from-scratch rebuild after every write (incl. the
+  fail-open-critical revoke direction and cross-origin agentGroup revoke).
+  The same origin-partitioned index makes `decide` cost one pod's grants, not the whole store.
 - `store.accessible(&Session, Mode) -> Arc<Vec<NamedNode>>` /
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
   index directly.
+- **Concurrent reads — the read side is `&self`** ([FABLE-5] sq-cnuqd, issue #1569). Every
+  read entry point (`accessible`, `accessible_set`, `view_for`, `query_as`, `query_json_as`,
+  `ask_as`, `query_as_rewrite`, `wac_allow`, `decide`) takes `&self`, so **N threads sharing
+  one `Arc<PodStore>` query the same materialized generation at once** — a per-request
+  Solid/SPARQL server no longer serialises every reader through one exclusive borrow. The
+  session cache behind these is **sharded + bounded**: `session_cache::SessionCache` stripes
+  the memoized per-session graph sets across independent `RwLock` shards keyed by the session
+  hash, so a warm hit is a shard *read* lock (+ two `Arc` clones) and only a miss/re-derive
+  takes that one shard's write lock; each shard is **LRU-bounded** (`SHARD_CAP`, with a
+  compacted recency queue) so a server keying per-request `now` timestamps cannot grow the
+  cache without bound. **Writes stay `&mut self`** (`materialize_*`, `put_acl`/`delete_acl`,
+  `update_as`) — they need exclusive access, so a server interleaves reads and writes by
+  wrapping the store in an `RwLock<PodStore>`/arc-swap (readers take the read lock, a write
+  takes the write lock). **Snapshot consistency (fail-closed, no torn set):** each read pins
+  ONE `Arc<AuthIndex>` snapshot for the whole set computation, and because writes are
+  `&mut self` (exclusive), a read observes either the whole pre-write generation or the whole
+  post-write one, never a half-and-half mix (generation pinning composes with #1584);
+  invalidation (`SessionCache::clear` / `invalidate_origin`, the diff-based #1585 path) visits
+  every shard so it reaches a session regardless of which shard it hashed into, and an
+  evicted/dropped set is re-derived on the current auth view — never assumed still authorized.
+  Covered by `tests/concurrent_readers.rs` (16 threads on one `Arc<PodStore>`; a revoke under
+  concurrent read observes only the two atomic snapshots and converges on the revoked view).
 - `store.wac_allow(&Session, &NamedNode) -> String` — build the public
   [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow) response-header value
   (`user="…",public="…"`) advertising the modes the session (and the public) hold on a
@@ -146,7 +224,10 @@ Materialize the authorization view from the access-control documents, then enfor
   `AuthIndex::accessible` oracle, so a `decide` allow is never wider than `query_as` would
   grant; `granted_modes` carries the full mode set in one decision (build a `WAC-Allow`
   body without four sweeps). `decide_batch` builds the structural ACL index ONCE for a page
-  of resources. Always-present API (no cargo gate; mirrors `wac_allow`).
+  of resources. Always-present API (no cargo gate; mirrors `wac_allow`). **API tier-1
+  (proposed-stable)** — the proposed semver-stable per-resource decision surface (freeze
+  pending maintainer ratification, #1346 / #1248; see
+  [`docs/api-stability.md`](../../docs/api-stability.md)).
 - `WacDecision::acl_link_header() -> Option<String>` / `AclScope::as_acl_predicate() ->
   &'static str` — **effective-ACL provenance surface** (FR-5, sq-snopa.4): the `<acl-iri>;
   rel="acl"` RFC-8288 [`Link`](https://solidproject.org/TR/protocol#acl-resource) value a
@@ -190,6 +271,12 @@ Materialize the authorization view from the access-control documents, then enfor
   `principal auth:deny<Mode> graph` triple, honoured by this enforcement under **deny-overrides**
   (`∪ allow ∖ ∪ deny` — a deny beats any allow for the same principal+target+mode). `…_policy`
   does both sides at once. Same fail-closed rules; no new enforcement engine.
+- **Loud refusal of an unimplementable `odrl:conflict` strategy** ([OPUS-4.8] sq-ihqbl): the bridge
+  implements only `odrl:conflict odrl:prohibit` (deny-overrides). A policy declaring `odrl:perm`,
+  `odrl:invalid` **with** a detected conflict, or an unknown strategy IRI is **REFUSED** — every
+  `materialize_odrl_*` entry materializes nothing and returns `BridgeOutcome { refused: true, .. }`
+  with a `REFUSED (odrl:conflict): …` reason, rather than silently coercing it into deny-overrides.
+  An unset `odrl:conflict` defaults to `prohibit` (not refused). See the `usage-control-policy` skill.
 - `store.materialize_odrl_permission_conditional(&Policy, &Request) -> BridgeOutcome` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
@@ -267,21 +354,25 @@ fn session_from_request<'a>(webid: Option<&'a str>, origin: Option<&'a str>) -> 
 }
 
 // Does this session have `mode` on the graph backing `resource`? (fail-closed)
-fn may(store: &mut PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
+// [FABLE-5] sq-cnuqd: `&PodStore` (shared) — many request handlers call this at once.
+fn may(store: &PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
     store.accessible(s, mode).iter().any(|g| g == resource)
 }
 
 // Build the WAC-Allow header value for the request, e.g. `user="read write",public="read"`.
-fn wac_allow_header(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
+fn wac_allow_header(store: &PodStore, s: &Session, resource: &NamedNode) -> String {
     store.wac_allow(s, resource)
 }
 ```
 
-Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &resource)`
+Per request: `session_from_request(...)` → `may(&store, &s, Mode::Read, &resource)`
 to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
 `WAC-Allow` header to `store.wac_allow(&s, &resource)`. `wac_allow` runs four
 `accessible` sweeps that share the per-session cache (each an O(1) hash check over the
-materialized index), so it is cheap. To pair the `WAC-Allow` advertisement with the WAC
+materialized index), so it is cheap. Because these read helpers take **`&self`** (sq-cnuqd),
+a concurrent server shares ONE `Arc<PodStore>` (or `Arc<RwLock<PodStore>>` if it also serves
+writes) across all request workers — they read in parallel through the sharded session cache;
+only a `put_acl`/materialize write needs the exclusive (`&mut`/write-lock) side. To pair the `WAC-Allow` advertisement with the WAC
 **ACL-discovery** header, run `store.decide(&s, "<resource-iri>", Mode::Read)` and emit its
 `acl_link_header()` (`Some("<acl-iri>; rel=\"acl\"")`) as the response `Link` header value
 when present (FR-5) — fail-closed: it is `None` when no governing ACL was discovered, so
@@ -503,7 +594,7 @@ SAME `Vec<TrustRule>` the gate consumes:
 
 Both install on top of the unchanged auth view (the ODRL-bridge precedent). The
 public surface is `sparq_trust::{vocab, policy, admit, wire, delegation}` (+ the opt-in
-`delegation_prov` / `did` / `store` / `secprop` modules) — see
+`delegation_prov` / `did` / `store` / `secprop` / `framework_vocab` modules) — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
 [issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
@@ -582,6 +673,40 @@ sparq ZK method may be labelled `secx:Proven` while the external accredited-cryp
 proof of any property. DPV alignment is *Light* (#1002 Option 2): `skos:closeMatch` cross-refs to
 W3C DPV `CryptographicMethods` where a near-match exists, not a full regulation→requirement chain.
 
+### `trustx:` certification-scope vocabulary — opt-in `framework-vocab` ([FABLE-5] sq-6syab.2, issue #1592)
+
+The `sparq_trust::framework_vocab` module (behind the **default-OFF `framework-vocab`** cargo feature)
+is the trust-expression program's **certification-scope layer** (design record
+`research/trust-expression-spec.md` §3.4 / D4): the vocabulary a verifier uses to ask *"prove X can be
+attested by unrevoked attributes issued by parties [X, Y, Z] OR by certified issuers WITHIN the eIDAS /
+DIATF framework, that have only issued what they are certified to issue"* (#1592). It **extends** the
+`trust:` vocabulary (shared `https://sparq.dev/ns/trust#` base — `trustx:` is a prose sub-prefix, not a
+new namespace) and **`rdfs:seeAlso`s** the vendored `sec-req:` eIDAS 2.0 / UK-DVS individuals rather than
+duplicating them (extend, do not fork; the design's D5). Like `secprop`, it is **data + Rust constants
+only** — a `const &str` registry (`ALL_TRUSTX_IRIS`) pinned to the canonical
+[`trust-framework.ttl`](../../crates/sparq-trust/ontologies/trust/trust-framework.ttl) by a byte-drift
+test — **not** an evaluator (the holder-side contract evaluation is the later, `sq-3kd2g`-gated
+`sq-6syab.4`).
+
+The three surfaces the layer names: (1) the **trust requirements** (`trustx:TrustRequirements` + `question` /
+`trustsIssuer` / `trustsFramework` / `requiresScopeConformance` / `requiresValidStatusAt`) — the
+verifier→holder contract carrier; the trust conditions live in the requirements graph, **not** in the query (no
+new query syntax); (2) the **two trust modes** — enumerated parties (`trustsIssuer`) OR
+framework-certified issuers (`trustsFramework`), composing by plain OR; (3) the **certification-scope
+terms** (`trustx:Certification` + `certifies` / `underFramework` / `scope` / `validFrom` / `validUntil`),
+where `scope` ranges from service-level (`trustx:AnyServiceScope`, the honest DIATF granularity — DIATF
+certifies a *service*, not an attribute list) down to a predicate set / SHACL shape reusing the existing
+`trust:forShape` idiom. Non-revocation is a **positive**, time-windowed `trustx:StatusAttestation` —
+existence of a covering window at `requiresValidStatusAt`, never evidence-of-absence (OWA/monotonicity).
+
+**Honesty (load-bearing):** framework-anchored trust is **anchored, not proven** — a
+`trustx:Certification` bottoms out in the framework operator's signed trusted-list / register artifacts
+(a trust anchor, not cryptography); the scope-conformance check constrains what the *verifier accepts*
+and, via the published certification, what the issuer was *authorised* to issue, but cannot retroactively
+prove an issuer never mis-issued elsewhere. **No term asserts a settled cryptographic soundness or
+privacy guarantee** (`sq-qhy4` external audit open; `sparq-mpc` semi-honest only). All `trustx:` IRIs are
+**NON-STANDARD** placeholders a WG would rehome.
+
 ### N3 proof-admissibility ruleset — opt-in `secprop-admissibility` ([OPUS-4.8] sq-ufsi9, Phase 2)
 
 The `sparq_trust::admissibility` module (behind the **default-OFF `secprop-admissibility`** feature,
@@ -611,26 +736,53 @@ open), and `requiresPostQuantumForgery gteq …` removes the DL-signature method
 **principled refusal** ("no admissible proof") over silently serving a non-conforming one. The §4.3.3
 worked example is the golden test: empty under Alice's strict preference, non-empty under the relaxed one.
 
-### Property-admissibility PRE-CHECK in the admission gate — opt-in `secprop-precheck` ([OPUS-4.8] sq-dt5hv, Phase 5, design §5b)
+### Property-admissibility PRE-CHECK in the admission gate — opt-in `secprop-precheck` ([OPUS-4.8] sq-dt5hv Phase 5 + sq-nrwqs Phase 5.1, design §5b)
 
 `sparq_trust::admit_with_precheck(cred, rules, session, target, preference)` (behind the **default-OFF
-`secprop-precheck`** feature, which enables `secprop-admissibility`) wires the admissibility reduction
-above into the REAL admission path as an **optional pre-admission check**. The `preference:
-Option<&AdmissibilityPreference>` carries the requester's machine-reasonable **ODRL privacy preference**
-— the presented proof's `method_iri` (the `zk:scheme`/`zk:cryptosuite` the registry records), the
-`constraint_iris` (`secx:requires…` `gteq` constraints), the `policy_n3`, and the method's
-`annotations_n3`. Before the existing signature / freshness / holder checks, the gate calls `admissible`
-over those four inputs and **fails closed** when the method does not satisfy every constraint — returning
-an EMPTY admitted set + a `PrecheckOutcome::{Admitted, Denied { unsatisfied }, ReductionError { error }}`
-(a reduction error is ALSO a fail-closed denial — a pre-check that cannot be evaluated never admits).
-**OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to `admit` (no reasoning
-runs); the pre-check can only ever **DENY**, never broaden, and never weakens a downstream crypto check
-(`admit` still verifies the checked issuer signature, scope, freshness, and holder binding). The golden
-e2e invariant (`tests/secprop_precheck_e2e.rs`): a perfectly valid credential is admitted with `None` and
-under a relaxed preference, but `requiresAssurance gteq secx:Proven` (Alice's strict preference, every
-sparq ZK method is `Claimed`-only while `sq-qhy4` is open) **admits nothing and derives no grant** — the
-principled refusal, in the data flow, not just the prose. Research-grade, externally **unaudited**
-(`sq-qhy4`); it reasons over recorded ANNOTATIONS, not cryptography.
+`secprop-precheck`** feature, which enables `secprop-admissibility` **and** `sparq-zk/secprop-annotations`)
+wires the admissibility reduction above into the REAL admission path as an **optional pre-admission check**.
+The `preference: Option<&AdmissibilityPreference>` carries the requester's machine-reasonable **ODRL privacy
+preference** — the presented proof's `method_iri` (the `zk:scheme`/`zk:cryptosuite` the registry records)
+and a `constraints: Vec<AdmissibilityConstraint>`, each a **structured** `gteq` constraint of two validated
+IRIs (`left_operand` = a `secx:requires…` operand, `right_operand` = the required level).
+
+**Phase 5.1 (sq-nrwqs) — bundled annotations + structured policy = tamper-resistant.** The caller supplies
+**no raw N3 at all**: the method's `secprop` property annotations are resolved from the bundled, drift-pinned
+`sparq-zk` `ontologies/secprop-methods.ttl` (the canonical source of truth) keyed on `method_iri`, and the
+policy triples are **synthesised internally** from the structured constraints (each operand a validated
+`NamedNode` emitted only as an `odrl:` object). Because there is no caller-supplied raw-N3 channel — neither
+for the annotations nor for the policy — a caller **cannot** inject a `secx:hasProperty` / `secx:atLeast` /
+`secx:satisfies` triple (or an N3 rule) to widen a method's recorded posture. (The Phase-5 `annotations_n3` /
+`policy_n3` raw-string fields, which raw-concatenated caller text into the reasoning document, are gone — that
+closed a real widening channel, not merely renamed it.) **`sq-ddbm8` defence in depth:** the operand fields are
+`pub` and `NamedNode::new_unchecked` bypasses `NamedNode::new`'s RFC-3987 validation, so the synthesiser
+**re-validates every operand as a well-formed IRIREF at the emission site** and **fails closed**
+(`PrecheckOutcome::MalformedConstraint { operand }`) on any operand carrying a term-breaking character
+(`>` / whitespace / `< " { } | ^` `` ` `` `\`) that could otherwise break out of its `<…>` object term — so the
+escape channel is structurally absent even off the `NamedNode::new` path. An **unknown method** (no bundled block) fails closed
+with `PrecheckOutcome::UnknownMethod { method }` — regardless of the (possibly empty) constraint set. Only
+`secx:QueryProofLayer` assertions are used (the §5a non-transfer rule); the method-wide `secx:AssuranceLevel`
+the `requiresAssurance` dimension reads is DERIVED as the **weakest** assurance across the method's positive
+query-proof claims (so every sparq method is `Claimed` while `sq-qhy4` is open, and settled-NEGATIVE Proven
+levels like `PQForgeable` never inflate it). This hardens the input trust boundary; it makes **no** new
+soundness/privacy claim.
+
+Before the existing signature / freshness / holder checks, the gate synthesises the policy from the structured
+constraints and calls `admissible` over the method IRI, that policy, and the **bundled** annotation graph, and
+**fails closed** when the method does not satisfy every constraint — returning an EMPTY admitted set + a
+`PrecheckOutcome::{Admitted, UnknownMethod { method }, Denied { unsatisfied }, ReductionError { error },
+MalformedConstraint { operand }}` (an unknown method / an unsatisfied constraint / a reduction error / a
+non-IRIREF-safe operand are ALL fail-closed denials — a pre-check that cannot be evaluated never admits;
+`Denied.unsatisfied` lists the failed constraints' `left_operand` dimensions; `MalformedConstraint` is the
+`sq-ddbm8` input-boundary guard above). **OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to
+`admit` (no reasoning runs); the pre-check can only ever **DENY**, never broaden, and never weakens a
+downstream crypto check (`admit` still verifies the checked issuer signature, scope, freshness, and holder
+binding). The golden e2e invariant (`tests/secprop_precheck_e2e.rs`): a perfectly valid credential is
+admitted with `None`, under a relaxed preference, and under a `requiresSoundness gteq secx:KnowledgeSound`
+preference satisfied purely from the bundled graph — but `requiresAssurance gteq secx:Proven` (Alice's
+strict preference, every sparq ZK method is `Claimed`-only while `sq-qhy4` is open) **admits nothing and
+derives no grant** — the principled refusal, in the data flow, not just the prose. Research-grade, externally
+**unaudited** (`sq-qhy4`); it reasons over recorded ANNOTATIONS, not cryptography.
 
 ### Live status / revocation + minimal denial justification — opt-in `status-list` ([OPUS-4.8] sq-pfae.7, design §6.1 P6)
 

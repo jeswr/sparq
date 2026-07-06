@@ -13,8 +13,15 @@
 # paid only on the PRs that actually change the site (matching js.yml / pages.yml, which
 # are likewise not merge-queue lanes). It re-runs on push to main for post-merge cover.
 #
-# The Playwright config drives `next dev` directly (NOT the static export) — the ZK route
-# is fully functional there and needs no wasm-REPL/Typst prebuild artifacts.
+# The Playwright config drives `next dev` directly (NOT the static export). `next dev`
+# serves routes on demand and does NOT run the `dev`/`prebuild` npm-script chain, so its
+# Typst prebuild step (build-specs.mjs) never fires. The ZK route needs no such artifacts,
+# but e2e/specs-smoke.spec.ts (sq-rvgr2.1) asserts the REAL ReSpec render of a per-spec page
+# — its <h1>/`nav#toc`/section anchors come from the build-time Typst fragment
+# src/generated/specs/<slug>.html (git-ignored). So this lane installs the same pinned Typst
+# the paper factory uses (mirroring pages.yml) and runs `npm run build-specs` BEFORE Playwright,
+# so the fragment exists on disk for `next dev` to read and the ReSpec rendering is CI-covered.
+# (Still no wasm-REPL bundle: neither the ZK smoke nor the specs smoke needs it.)
 name: site-e2e
 
 on:
@@ -91,7 +98,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: pw-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
@@ -99,5 +106,39 @@ jobs:
       - name: Install Playwright Chromium (+ OS deps)
         run: npx playwright install --with-deps chromium
 
-      - name: ZK prover pre-warm smoke test (headless Chromium)
+      # [OPUS-4.8] sq-rvgr2.1 — install the SAME pinned, SHA-256-verified Typst the paper
+      # factory uses (mirrors pages.yml's "Install Typst CLI" step) so `npm run build-specs`
+      # below renders the REAL ReSpec spec fragments (src/generated/specs/<slug>.html, git-
+      # ignored). Without this, e2e/specs-smoke.spec.ts sees only the "not built yet"
+      # placeholder and the per-spec <h1>/`nav#toc`/section-anchor assertions fail. Absolute
+      # paths only, so the job's `working-directory: site` default is irrelevant here.
+      - name: Install Typst CLI
+        run: |
+          set -euo pipefail
+          TYPST_VERSION=v0.15.0
+          TYPST_SHA256=59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea
+          url="https://github.com/typst/typst/releases/download/${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          curl -sSfL -o /tmp/typst.tar.xz "$url"
+          echo "${TYPST_SHA256}  /tmp/typst.tar.xz" | sha256sum -c -
+          tar -xf /tmp/typst.tar.xz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          cp /tmp/typst-x86_64-unknown-linux-musl/typst "$HOME/.local/bin/typst"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/typst" --version
+
+      # [OPUS-4.8] sq-rvgr2.1 — pre-bake the spec fragments (+ the honesty scan over the spec
+      # sources) BEFORE Playwright boots `next dev`, so the per-spec route's build-time
+      # readFileSync of src/generated/specs/<slug>.html reads the REAL ReSpec HTML (not the
+      # placeholder) and the specs-smoke ReSpec-render assertions exercise the true output.
+      - name: Build spec fragments (Typst → src/generated/specs)
+        run: npm run build-specs
+
+      # [SONNET-4.6] sq-ymr2e.8 — pre-bake paper HTML fragments so e2e/surface-sweep.spec.ts
+      # sees the REAL in-site paper render (src/generated/papers/<slug>.html) rather than the
+      # "not built yet" placeholder. Mirrors the build-specs step above. The paper HTML uses
+      # the same paper-evidence.json evidence injection as the PDF build.
+      - name: Build paper fragments (Typst → src/generated/papers)
+        run: npm run build-papers
+
+      - name: ZK prover pre-warm smoke test + site e2e (headless Chromium)
         run: npm run test:e2e
