@@ -1,0 +1,563 @@
+# [OPUS-4.8] sq-ymr2e.11 — NIGHTLY full-sweep lane (advisory-only, NEVER gates the merge queue).
+#
+# Design of record: research/web-gui-test-program.md §6.2. The per-PR lanes (site-e2e.yml /
+# site-visual.yml / gui.yml) are deliberately SCOPED for speed — chromium-only functional +
+# a11y, key-layout visual, Linux-only tauri smoke, all path-filtered. This lane is the wider,
+# slower net that runs on a SCHEDULE (and on manual dispatch), covering the dimensions the
+# per-PR path intentionally omits:
+#   • a11y / full-surface sweep — the whole site e2e + axe suite, run UNCONDITIONALLY (no path
+#     filter) and WITH the wasm bundle built, so the engine-gated states the light per-PR lane
+#     SKIPS are exercised too.
+#   • visual full-surface sweep — the container-pinned toHaveScreenshot suite.
+#   • cross-browser P1 journeys — firefox + webkit (per-PR runs chromium only).
+#   • tauri-driver GUI smoke — the real-IPC launch/round-trip smoke; its permanent home if the
+#     stabilization bead (sq-var9) ever demotes it from the per-PR gui.yml lane.
+#
+# WHY IT CANNOT GATE ci-summary. The `ci-summary / gate` aggregator polls the sibling
+# check-runs of a PR head / merge_group ref / push-to-main commit. THIS workflow triggers ONLY
+# on `schedule` + `workflow_dispatch`, so it never produces a check-run on any commit the gate
+# evaluates — it is structurally non-gating. As belt-and-suspenders (in case a trigger is ever
+# added), every routed job NAME carries the whole-word `advisory` token, which the aggregator
+# excludes by rule (`\b(advisory|informational)\b`). Two independent guarantees, both honest.
+#
+# FAILURE ROUTING. A nightly that opened one alert per failing TEST would drown the tracker and
+# stop being believed (§6.2: "alert fatigue is how nightlies die"). Instead the `route-failures`
+# job maintains EXACTLY ONE consolidated GitHub issue per failing CATEGORY, via
+# scripts/nightly/route_sweep_failures.py (find-or-refresh while red, auto-close on recovery),
+# always self-identified as a 🤖 SPARQ agent.
+#
+# HONEST COVERAGE NOTES (validate/extend on first CI runs; tracked as follow-ups, not silently):
+#   • The full-inventory AXE scan (axe on EVERY route, not just the key interactive states the
+#     per-PR a11y spec covers) and the FULL-SURFACE visual sweep (beyond the committed key
+#     layouts) both need additional SPEC authoring in site/e2e — this workflow runs the widest
+#     suites that exist TODAY and is ready to pick up new specs automatically.
+#   • firefox/webkit and the macOS/Windows tauri rows are documented-untested in THIS
+#     environment; the smoke-mode `--list` validation of each was reproduced locally, the full
+#     runs mirror the proven per-PR recipes and are validated on the first scheduled run.
+name: nightly-full-sweep
+
+on:
+  schedule:
+    # 05:17 UTC daily — off the top of the hour to dodge the cron thundering herd, and after
+    # the per-PR CI pool has quieted overnight.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke = fast structural validation (reliably green, for manual dispatch); full = the real heavy suites"
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      force_fail_categories:
+        description: "Comma-separated categories to FORCE-FAIL for routing validation (a11y,visual,cross-browser,tauri) or 'none'"
+        type: string
+        default: "none"
+      route_failures:
+        description: "Open/refresh consolidated issues on failure. Set false for a safe scratch-branch demo (routing runs dry, files nothing)."
+        type: boolean
+        default: true
+
+# Least-privilege default: read-only. Only the routing job elevates to issues: write.
+permissions:
+  contents: read
+
+# One nightly per ref; do NOT cancel a run in progress (a scheduled run and a manual dispatch
+# should not evict each other — they are cheap and infrequent).
+concurrency:
+  group: nightly-full-sweep-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Resolve the effective run config once. `schedule` carries no inputs, so it hard-codes the
+  # full/route path; `workflow_dispatch` honours the dispatch inputs (with defaults).
+  config:
+    name: resolve nightly run config (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.cfg.outputs.mode }}
+      route: ${{ steps.cfg.outputs.route }}
+      force_fail: ${{ steps.cfg.outputs.force_fail }}
+    steps:
+      - id: cfg
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_MODE: ${{ inputs.mode }}
+          IN_ROUTE: ${{ inputs.route_failures }}
+          IN_FORCE: ${{ inputs.force_fail_categories }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "schedule" ]; then
+            {
+              echo "mode=full"
+              echo "route=true"
+              echo "force_fail=none"
+            } >> "$GITHUB_OUTPUT"
+            echo "scheduled nightly → mode=full route=true"
+          else
+            {
+              echo "mode=${IN_MODE:-smoke}"
+              echo "route=${IN_ROUTE:-true}"
+              echo "force_fail=${IN_FORCE:-none}"
+            } >> "$GITHUB_OUTPUT"
+            echo "manual dispatch → mode=${IN_MODE:-smoke} route=${IN_ROUTE:-true} force_fail=${IN_FORCE:-none}"
+          fi
+
+  # ── Category 1: a11y / full-surface sweep (chromium) ─────────────────────────────────────
+  # full mode mirrors site-e2e.yml's recipe PLUS the lean wasm build (site-visual.yml), so the
+  # engine-gated a11y/render states the light per-PR lane SKIPS run here too. `npm run test:e2e`
+  # runs the whole site suite (surface-sweep full route inventory + a11y axe + functional).
+  a11y-sweep:
+    name: a11y full sweep (chromium, advisory)
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Force-fail check (routing validation)
+        env:
+          FORCE_FAIL: ${{ needs.config.outputs.force_fail }}
+        run: |
+          set -euo pipefail
+          case ",${FORCE_FAIL}," in
+            *",a11y,"*) echo "::error::forced failure injected for category a11y (routing validation)"; exit 1 ;;
+          esac
+          echo "a11y: no forced failure"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies (repo-root workspace lock)
+        run: npm ci
+
+      # SMOKE mode: prove the a11y + surface-sweep harness is wired + runnable, without paying
+      # the browser/wasm build. `--list` collects the tests (no browser launch, no web server).
+      - name: Smoke — a11y/surface harness is runnable (--list)
+        if: needs.config.outputs.mode == 'smoke'
+        run: npx playwright test --list e2e/a11y.spec.ts e2e/surface-sweep.spec.ts
+
+      # FULL mode: the real suite. Build the lean wasm bundle (mirrors site-visual.yml) so the
+      # in-tab-engine a11y/render states run, then the pinned Typst → spec/paper fragments the
+      # surface-sweep asserts on (mirrors site-e2e.yml), then the chromium suite.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: needs.config.outputs.mode == 'full'
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        if: needs.config.outputs.mode == 'full'
+        run: cargo install wasm-pack --locked
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: needs.config.outputs.mode == 'full'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/target
+          key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
+      - name: Build lean wasm bundle
+        if: needs.config.outputs.mode == 'full'
+        run: cd ../js && npm run build:wasm:lean
+      - name: Sync wasm bundle into site/public/wasm/
+        if: needs.config.outputs.mode == 'full'
+        run: npm run sync-wasm
+      - name: Install Playwright Chromium (+ OS deps)
+        if: needs.config.outputs.mode == 'full'
+        run: npx playwright install --with-deps chromium
+      - name: Install Typst CLI (pinned, SHA-256 verified)
+        if: needs.config.outputs.mode == 'full'
+        run: |
+          set -euo pipefail
+          TYPST_VERSION=v0.15.0
+          TYPST_SHA256=59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea
+          url="https://github.com/typst/typst/releases/download/${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          curl -sSfL -o /tmp/typst.tar.xz "$url"
+          echo "${TYPST_SHA256}  /tmp/typst.tar.xz" | sha256sum -c -
+          tar -xf /tmp/typst.tar.xz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          cp /tmp/typst-x86_64-unknown-linux-musl/typst "$HOME/.local/bin/typst"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/typst" --version
+      - name: Build spec + paper fragments (Typst)
+        if: needs.config.outputs.mode == 'full'
+        run: |
+          npm run build-specs
+          npm run build-papers
+      - name: Full site e2e + a11y sweep (headless chromium)
+        if: needs.config.outputs.mode == 'full'
+        run: npm run test:e2e
+      - name: Upload Playwright report on failure
+        if: failure() && needs.config.outputs.mode == 'full'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-a11y-report
+          path: |
+            site/playwright-report/
+            site/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Category 2: visual full-surface sweep (container-pinned) ─────────────────────────────
+  visual-sweep:
+    name: visual full-surface sweep (container-pinned, advisory)
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Force-fail check (routing validation)
+        env:
+          FORCE_FAIL: ${{ needs.config.outputs.force_fail }}
+        run: |
+          set -euo pipefail
+          case ",${FORCE_FAIL}," in
+            *",visual,"*) echo "::error::forced failure injected for category visual (routing validation)"; exit 1 ;;
+          esac
+          echo "visual: no forced failure"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install npm dependencies (repo-root workspace lock)
+        run: npm ci
+
+      # SMOKE: enumerate the visual specs (SPARQ_VR defines the visual projects; the host guard
+      # is bypassed for LISTING only — no screenshots are taken, so nothing is compared).
+      - name: Smoke — visual harness is runnable (--list)
+        if: needs.config.outputs.mode == 'smoke'
+        env:
+          SPARQ_VR: "1"
+          SPARQ_VR_ALLOW_HOST: "1"
+        run: npx playwright test --list e2e/visual
+
+      # FULL: mirror site-visual.yml. Unlike the per-PR lane (which keeps the vr step
+      # continue-on-error to stay advisory-in-the-gate), here a mismatch FAILS the job so the
+      # router files a consolidated visual issue — the nightly routes instead of gating.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: needs.config.outputs.mode == 'full'
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        if: needs.config.outputs.mode == 'full'
+        run: cargo install wasm-pack --locked
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: needs.config.outputs.mode == 'full'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/target
+          key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
+      - name: Build lean wasm bundle
+        if: needs.config.outputs.mode == 'full'
+        run: cd ../js && npm run build:wasm:lean
+      - name: Sync wasm bundle into site/public/wasm/
+        if: needs.config.outputs.mode == 'full'
+        run: npm run sync-wasm
+      - name: Determinism grep gate (no waitForTimeout calls)
+        if: needs.config.outputs.mode == 'full'
+        run: npm run test:e2e:grep-gate
+      - name: Visual full-surface sweep vs committed baselines (digest-pinned container)
+        if: needs.config.outputs.mode == 'full'
+        run: npm run vr
+      - name: Upload visual diff artifacts on failure
+        if: failure() && needs.config.outputs.mode == 'full'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-visual-diffs
+          path: |
+            site/test-results/
+            site/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Category 3: cross-browser P1 journeys (firefox + webkit) ─────────────────────────────
+  cross-browser:
+    name: cross-browser P1 journeys firefox+webkit (advisory)
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: site
+    env:
+      # The nightly-only firefox/webkit projects are opted in here (site/playwright.config.ts).
+      SPARQ_NIGHTLY_BROWSERS: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Force-fail check (routing validation)
+        env:
+          FORCE_FAIL: ${{ needs.config.outputs.force_fail }}
+        run: |
+          set -euo pipefail
+          case ",${FORCE_FAIL}," in
+            *",cross-browser,"*) echo "::error::forced failure injected for category cross-browser (routing validation)"; exit 1 ;;
+          esac
+          echo "cross-browser: no forced failure"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install npm dependencies (repo-root workspace lock)
+        run: npm ci
+
+      # SMOKE: prove the firefox+webkit projects are defined and the journey specs collect under
+      # them (spec filters FIRST — Playwright's `--project` is variadic and would swallow a
+      # trailing path). No browsers installed, no server started.
+      - name: Smoke — firefox+webkit journeys are runnable (--list)
+        if: needs.config.outputs.mode == 'smoke'
+        run: |
+          npx playwright test --list \
+            e2e/home-runner.spec.ts e2e/download-page.spec.ts e2e/download-app.spec.ts \
+            e2e/site-nav.spec.ts e2e/command-palette.spec.ts \
+            --project firefox --project webkit
+
+      # FULL: the real journeys on firefox + webkit. home-runner drives the in-tab engine, so the
+      # lean wasm bundle is built + synced (mirrors site-e2e-hero.yml); the static journeys
+      # (download/nav/palette) need no Typst fragments.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: needs.config.outputs.mode == 'full'
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        if: needs.config.outputs.mode == 'full'
+        run: cargo install wasm-pack --locked
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: needs.config.outputs.mode == 'full'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/target
+          key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
+      - name: Build lean wasm bundle
+        if: needs.config.outputs.mode == 'full'
+        run: cd ../js && npm run build:wasm:lean
+      - name: Sync wasm bundle into site/public/wasm/
+        if: needs.config.outputs.mode == 'full'
+        run: npm run sync-wasm
+      - name: Install Playwright firefox + webkit (+ OS deps)
+        if: needs.config.outputs.mode == 'full'
+        run: npx playwright install --with-deps firefox webkit
+      - name: P1 journeys on firefox + webkit
+        if: needs.config.outputs.mode == 'full'
+        run: |
+          npx playwright test \
+            e2e/home-runner.spec.ts e2e/download-page.spec.ts e2e/download-app.spec.ts \
+            e2e/site-nav.spec.ts e2e/command-palette.spec.ts \
+            --project firefox --project webkit
+      - name: Upload Playwright report on failure
+        if: failure() && needs.config.outputs.mode == 'full'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-cross-browser-report
+          path: |
+            site/playwright-report/
+            site/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Category 4: tauri-driver GUI smoke (Linux — authoritative, routed) ───────────────────
+  # The Linux row is the authoritative real-IPC smoke (research/web-gui-test-program.md §5); the
+  # non-Linux rows live in the separate `tauri-smoke-other-os` job (documented-untested, NOT
+  # routed). full mode mirrors gui.yml's `tauri-e2e` recipe.
+  tauri-smoke:
+    name: tauri-driver GUI smoke Linux (advisory)
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Force-fail check (routing validation)
+        env:
+          FORCE_FAIL: ${{ needs.config.outputs.force_fail }}
+        run: |
+          set -euo pipefail
+          case ",${FORCE_FAIL}," in
+            *",tauri,"*) echo "::error::forced failure injected for category tauri (routing validation)"; exit 1 ;;
+          esac
+          echo "tauri: no forced failure"
+
+      # SMOKE: cheap structural check that the tauri e2e harness is present + wired (no native
+      # build, no webview). Verifies the harness the full run depends on exists on disk.
+      - name: Smoke — tauri e2e harness present
+        if: needs.config.outputs.mode == 'smoke'
+        run: |
+          set -euo pipefail
+          test -f gui/e2e/package.json
+          test -f gui/e2e/support/no-sleep-gate.sh
+          node -e "const p=require('./gui/e2e/package.json'); if(!p.scripts||!p.scripts['test:e2e']){process.exit(1)}"
+          echo "tauri e2e harness present + test:e2e script wired"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: needs.config.outputs.mode == 'full'
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: needs.config.outputs.mode == 'full'
+        with:
+          node-version: 22
+      - name: Install Tauri system dependencies (+ WebKitWebDriver, xvfb)
+        if: needs.config.outputs.mode == 'full'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+      - name: Log WebKitWebDriver version
+        if: needs.config.outputs.mode == 'full'
+        run: |
+          echo "WebKitWebDriver: $(WebKitWebDriver --version 2>&1 || echo unknown)"
+          echo "webkit2gtk-driver apt: $(dpkg -l webkit2gtk-driver 2>/dev/null | tail -1)"
+      - name: Cache cargo (gui e2e)
+        if: needs.config.outputs.mode == 'full'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/src-tauri/target
+          key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
+      - name: Install wasm-pack
+        if: needs.config.outputs.mode == 'full'
+        run: cargo install wasm-pack --locked
+      - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
+        if: needs.config.outputs.mode == 'full'
+        working-directory: js
+        run: |
+          npm install
+          npm run build:wasm
+      - name: Build the GUI frontend static export (root-relative; embedded by the shell)
+        if: needs.config.outputs.mode == 'full'
+        run: |
+          npm install
+          (cd gui/app && npm run build:tauri)
+      - name: Build the GUI shell (debug, embeds the frontend)
+        if: needs.config.outputs.mode == 'full'
+        working-directory: gui/src-tauri
+        run: cargo build
+      - name: Install tauri-driver@2.0.6 (pinned)
+        if: needs.config.outputs.mode == 'full'
+        run: cargo install tauri-driver@2.0.6 --locked
+      - name: Install the e2e harness dependencies
+        if: needs.config.outputs.mode == 'full'
+        working-directory: gui/e2e
+        run: npm ci
+      - name: Determinism gate — no arbitrary sleeps (no-sleep-gate)
+        if: needs.config.outputs.mode == 'full'
+        working-directory: gui/e2e
+        run: bash support/no-sleep-gate.sh
+      - name: Run the tauri-driver smoke (headless under xvfb; retry once on failure)
+        if: needs.config.outputs.mode == 'full'
+        working-directory: gui/e2e
+        env:
+          APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+        run: |
+          ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
+            xvfb-run --auto-servernum npm run test:e2e && exit 0
+          echo "[tauri-e2e-nightly] first attempt failed; retrying once (xvfb startup flake check)…"
+          ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
+            xvfb-run --auto-servernum npm run test:e2e
+      - name: Upload failure artifacts
+        if: always() && needs.config.outputs.mode == 'full'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-tauri-e2e-artifacts
+          path: gui/e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── Category 4 (matrix skeleton): macOS + Windows tauri rows ─────────────────────────────
+  # DOCUMENTED-UNTESTED. The per-platform matrix is the design's stated aim (§6.2), but a real
+  # WKWebView (safaridriver) / WebView2 (msedgedriver) driver session on hosted macOS/Windows
+  # runners is unproven here. These rows carry `continue-on-error: true` and are NOT wired into
+  # the router, so a macOS/Windows harness gap can never fail the run nor file an issue — they
+  # are advisory probes to be hardened before promotion. Only runs in full mode.
+  tauri-smoke-other-os:
+    name: "tauri-driver GUI smoke ${{ matrix.os }} (advisory, documented-untested)"
+    needs: config
+    if: needs.config.outputs.mode == 'full'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Documented-untested per-platform tauri driver plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::tauri-driver on ${{ matrix.os }} is a documented-untested nightly probe."
+          echo "macOS  → WKWebView via safaridriver (Tauri macos webview); Windows → WebView2 via msedgedriver."
+          echo "This row is advisory (continue-on-error) and is NOT routed to a consolidated issue"
+          echo "until the per-platform driver session is proven. Bead: harden per-platform tauri matrix."
+
+  # ── Consolidated failure routing ─────────────────────────────────────────────────────────
+  # Reads each ROUTED category job's result and maintains one consolidated issue per FAILING
+  # category (create / refresh / auto-close-on-recovery). Runs always(), so it reports even when
+  # a category failed. `tauri-smoke-other-os` is intentionally excluded (advisory probe).
+  route-failures:
+    name: route consolidated failures (advisory)
+    needs: [config, a11y-sweep, visual-sweep, cross-browser, tauri-smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          sparse-checkout: scripts/nightly/route_sweep_failures.py
+          sparse-checkout-cone-mode: false
+      - name: Route category results to consolidated issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          A11Y: ${{ needs.a11y-sweep.result }}
+          VISUAL: ${{ needs.visual-sweep.result }}
+          XBROWSER: ${{ needs.cross-browser.result }}
+          TAURI: ${{ needs.tauri-smoke.result }}
+          ROUTE: ${{ needs.config.outputs.route }}
+        run: |
+          set -euo pipefail
+          echo "category results: a11y=$A11Y visual=$VISUAL cross-browser=$XBROWSER tauri=$TAURI (route=$ROUTE)"
+          args=(--repo "$REPO" --run-url "$RUN_URL"
+                --result "a11y=$A11Y" --result "visual=$VISUAL"
+                --result "cross-browser=$XBROWSER" --result "tauri=$TAURI")
+          if [ "$ROUTE" != "true" ]; then
+            args+=(--dry-run)
+            echo "route_failures=false → routing runs DRY (no issues filed)"
+          fi
+          python3 scripts/nightly/route_sweep_failures.py "${args[@]}"

@@ -29,6 +29,15 @@ import { defineConfig, devices } from "@playwright/test";
 // bare-host run even with SPARQ_VR=1 unless explicitly overridden — screenshots minted outside
 // the container are NOT comparable to the committed baselines.
 const SPARQ_VR = !!process.env.SPARQ_VR;
+
+// [OPUS-4.8] sq-ymr2e.11 — the NIGHTLY cross-browser projects. Per-PR e2e runs headless
+// chromium ONLY by design (research/web-gui-test-program.md §6.1); firefox + webkit run in the
+// nightly full-sweep lane (§6.2). Playwright projects can only be DEFINED in the config, so the
+// nightly lane opts them in with SPARQ_NIGHTLY_BROWSERS=1 and selects them with
+// `--project firefox --project webkit`. The env gate keeps a plain `npm run test:e2e` (and every
+// per-PR lane) byte-identical to before — the projects array is spread with `[]` when unset, so
+// the per-PR path is untouched.
+const SPARQ_NIGHTLY_BROWSERS = !!process.env.SPARQ_NIGHTLY_BROWSERS;
 if (SPARQ_VR && !existsSync("/ms-playwright") && !process.env.SPARQ_VR_ALLOW_HOST) {
   throw new Error(
     "SPARQ_VR=1 outside the pinned Playwright container (/ms-playwright not found). " +
@@ -112,6 +121,23 @@ export default defineConfig({
             name: "visual-mobile",
             testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
             use: { viewport: { width: 390, height: 844 } },
+          },
+        ]
+      : []),
+    // [OPUS-4.8] sq-ymr2e.11 — nightly-only firefox + webkit (see SPARQ_NIGHTLY_BROWSERS above).
+    // Same pinned 1280×720 viewport + the shared determinism `use` defaults; the container-only
+    // visual specs are excluded (visual baselines are chromium/Linux-container-pinned by policy).
+    ...(SPARQ_NIGHTLY_BROWSERS
+      ? [
+          {
+            name: "firefox",
+            use: { ...devices["Desktop Firefox"], viewport: { width: 1280, height: 720 } },
+            testIgnore: /e2e[\\/]visual[\\/]/,
+          },
+          {
+            name: "webkit",
+            use: { ...devices["Desktop Safari"], viewport: { width: 1280, height: 720 } },
+            testIgnore: /e2e[\\/]visual[\\/]/,
           },
         ]
       : []),
