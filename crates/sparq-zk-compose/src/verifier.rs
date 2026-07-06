@@ -140,8 +140,13 @@ use sparq_zk::verify::{
 // fail-closed `dispatch_fragment` routing gate consumes (never trusting the
 // manifest). Opt-in (`extended-fragment`). [OPUS-4.8] sq-1zf94: `SlotPattern` is
 // the shape of a re-derived path endpoint the disclosed-solution binding matches on.
+// [OPUS-4.8] sq-ygk6x: `branch_obligations` re-derives one UNION branch's Q6
+// cross-graph non-bnode obligations (join edges + multi-graph path links) from the
+// query text + the manifest's proof-bound per-obligation attributions — the
+// per-branch analogue of the flat `cross_graph_join_obligations` the compose
+// verifier's `bind_fragment_join_coherence` gate enforces.
 #[cfg(feature = "extended-fragment")]
-use sparq_zk::verify::{fragment_query, SlotPattern};
+use sparq_zk::verify::{branch_obligations, fragment_query, SlotPattern};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -1547,6 +1552,17 @@ pub enum CheckError {
     /// [`verify_fragment_manifest`]. Opt-in (`extended-fragment`).
     #[cfg(feature = "extended-fragment")]
     FragmentScan(FragmentScanError),
+    /// [OPUS-4.8] sq-ygk6x: the FAIL-CLOSED extended-fragment PER-BRANCH JOIN
+    /// COHERENCE + cross-graph Q6 non-bnode gate ([`bind_fragment_join_coherence`])
+    /// refused the presentation — an existential variable shared between two branch
+    /// atoms (scan/scan, scan/path, or path/path) resolves to disagreeing disclosed
+    /// values, a `PathReach` whose proof-bound attribution admits more than one
+    /// committed graph (whose interior-chain non-bnode obligation the verifier cannot
+    /// discharge from disclosed data), or a required cross-graph join obligation not
+    /// covered by the disclosed data. Carried into [`verify_fragment_manifest`].
+    /// Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentJoin(FragmentJoinError),
 }
 
 impl std::fmt::Display for CheckError {
@@ -1874,6 +1890,10 @@ impl std::fmt::Display for CheckError {
             #[cfg(feature = "extended-fragment")]
             CheckError::FragmentScan(e) => {
                 write!(f, "extended-fragment BGP scan-slot binding rejected: {}", e)
+            }
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentJoin(e) => {
+                write!(f, "extended-fragment per-branch join coherence rejected: {}", e)
             }
         }
     }
@@ -5897,17 +5917,20 @@ fn pattern_slot_consts(slots: &[SlotPattern; 3]) -> [Option<oxrdf::Term>; 3] {
 /// THIS structural gate AND the crypto stage has its disclosed scan-bound variables
 /// genuinely tied to the proofs.
 ///
-/// # Honest scope — the RESIDUAL still deferred (load-bearing)
-/// This closes the BGP-scan-slot residual [`bind_fragment_solution`] named, but the
-/// surface is not FULLY bound. Still NOT bound: (a) the flat cross-graph Q6
-/// non-bnode obligation per branch — this gate's join coherence checks
-/// enc-EQUALITY of selected slot values (the safe direction, like `bind_joins`) but
-/// does not itself enforce the non-bnode obligation for a cross-GRAPH existential
-/// join, and it does NOT bind an existential variable shared between a scan and a
-/// `PathReach` endpoint (a path endpoint's existential value is hidden) — both are
-/// sq-ygk6x; and (b) an EXISTENTIAL (non-projected) path endpoint's value (hidden
-/// by design). The whole verifier stack is internally re-audited but NOT externally
-/// audited (sq-qhy4). NO soundness / privacy property is asserted as achieved.
+/// # Honest scope — where the remaining obligations live (load-bearing)
+/// This gate binds the BGP-scan-slot residual [`bind_fragment_solution`] named and
+/// checks scan↔scan join coherence. The COMPLEMENTARY obligations — the flat
+/// cross-graph Q6 non-bnode obligation PER BRANCH, and the existential coherence of
+/// a variable shared between a scan slot and a `PathReach` endpoint (`src_enc` /
+/// `dst_enc`) — are enforced by [`bind_fragment_join_coherence`] (sq-ygk6x), run as
+/// the next layer of [`verify_fragment_manifest`]. What still remains after BOTH
+/// gates (documented on [`bind_fragment_join_coherence`]): the salt-uniqueness gate
+/// covers only SCAN-referenced committed graphs (so a cross-graph join through a
+/// single-graph PATH graph is an agreement check pending path-graph salt coverage —
+/// a multi-graph path is refused fail-closed), and an EXISTENTIAL (non-projected)
+/// path endpoint's value stays hidden by design. The whole verifier stack is
+/// internally re-audited but NOT externally audited (sq-qhy4). NO soundness /
+/// privacy property is asserted as achieved.
 // [OPUS-4.8] sq-qyfth: BGP scan-slot binding. Opt-in (`extended-fragment`),
 // research-grade, NOT-yet-sound (sq-qhy4).
 #[cfg(feature = "extended-fragment")]
@@ -6059,6 +6082,361 @@ pub fn bind_fragment_scans(
     Ok(())
 }
 
+/// Why the FAIL-CLOSED extended-fragment PER-BRANCH JOIN COHERENCE + cross-graph
+/// Q6 non-bnode gate ([`bind_fragment_join_coherence`], sq-ygk6x) REJECTED a
+/// presentation. Every variant is a fail-closed refusal: the verifier RE-DERIVES
+/// the branch's join structure + Q6 obligations from the query TEXT + the
+/// proof-bound disclosed data (rows / `src_enc` / `dst_enc` / attributions), never
+/// a prover-supplied claim.
+// [OPUS-4.8] sq-ygk6x. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentJoinError {
+    /// A structural inconsistency the routing / scan-slot gates normally rule out
+    /// first (a branch / obligation / proof / row index out of range, a wrong
+    /// sub-proof kind, a malformed proof-bound attribution, or a variable scan with
+    /// no selected supporting row). Kept so this gate never panics on an index — a
+    /// fail-closed refusal even if reached directly.
+    Structure { witness: usize, what: &'static str },
+    /// A proof-bound endpoint encoding / disclosed row slot (`src_enc` / `dst_enc` /
+    /// a scan row slot) is not a valid field element — refused fail-closed (the
+    /// crypto stage additionally rejects it as [`CheckError::MalformedField`]).
+    MalformedField { witness: usize, obligation: usize, what: &'static str },
+    /// Two atoms in the SAME branch that share a variable resolve it to DISAGREEING
+    /// disclosed values — the join has no single witness. `obligation` is the atom
+    /// (combined index: `0..patterns.len()` are BGP scans, `patterns.len()..` are
+    /// path obligations) whose value disagreed with the one first seen for `var`.
+    /// This is the sq-ygk6x join coherence spanning scan↔scan (mirroring
+    /// [`bind_fragment_scans`]) AND the NEW scan↔path / path↔path edges: a path
+    /// claiming a different node than its supporting scan row (or another path
+    /// endpoint) supports is refused, both directions.
+    Incoherent { witness: usize, obligation: usize, var: String },
+    /// A [`ProofInputs::PathReach`] sub-proof whose proof-bound attribution admits
+    /// MORE THAN ONE committed graph (`obligation` is its combined index). The path's
+    /// interior chain nodes then cross graph boundaries; the flat cross-graph
+    /// non-bnode obligation would demand every chain-equated interior node
+    /// IRI/literal-typed, but those nodes are hidden IN-CIRCUIT — the verifier cannot
+    /// discharge that obligation from disclosed data — so a multi-graph path is
+    /// refused fail-closed. A single-graph path (interior within one graph) is
+    /// accepted.
+    MultiGraphPath { witness: usize, obligation: usize },
+    /// A required cross-graph join obligation (re-derived per branch by
+    /// [`branch_obligations`]) whose shared variable is not covered by a disclosed
+    /// value in one of its two atoms — the disclosed data cannot discharge the
+    /// obligation, so it is refused fail-closed (the branch-local analogue of the
+    /// flat `recheck` MissingObligation rejection).
+    UncoveredCrossGraphJoin { witness: usize, variable: String },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentJoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentJoinError::Structure { witness, what } => write!(
+                f,
+                "branch witness {} join-coherence structure error: {} out of range (fail-closed)",
+                witness, what
+            ),
+            FragmentJoinError::MalformedField { witness, obligation, what } => write!(
+                f,
+                "branch witness {} obligation {}: proof-bound `{}` is not a valid field element (fail-closed)",
+                witness, obligation, what
+            ),
+            FragmentJoinError::Incoherent { witness, obligation, var } => write!(
+                f,
+                "branch witness {} obligation {} (?{}): atoms sharing this variable resolve it to disagreeing disclosed values (join incoherent — a scan↔path / scan↔scan / path↔path mismatch)",
+                witness, obligation, var
+            ),
+            FragmentJoinError::MultiGraphPath { witness, obligation } => write!(
+                f,
+                "branch witness {} obligation {}: a path whose proof-bound attribution admits more than one committed graph is refused (its interior-chain non-bnode obligation is not verifier-dischargeable from disclosed data)",
+                witness, obligation
+            ),
+            FragmentJoinError::UncoveredCrossGraphJoin { witness, variable } => write!(
+                f,
+                "branch witness {}: required cross-graph join on ?{} is not covered by the disclosed data (fail-closed)",
+                witness, variable
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentJoinError {}
+
+/// FAIL-CLOSED wave-1 extended-fragment PER-BRANCH JOIN COHERENCE + cross-graph Q6
+/// non-bnode gate (sq-ygk6x): the branch-local analogue of the flat cross-graph
+/// non-bnode obligation (`sparq_zk::verify::cross_graph_join_obligations` /
+/// `recheck`), extended to the path-rewritten obligations of one `UNION` branch.
+///
+/// [`bind_fragment_scans`] (#1678) bound each disclosed solution variable in a BGP
+/// SCAN to its selected row and checked scan↔scan join coherence, but explicitly
+/// left TWO residuals to THIS gate: (a) an existential variable shared between a
+/// BGP scan atom and a [`ProofInputs::PathReach`] ENDPOINT was not bound (the path
+/// `src_enc` / `dst_enc` are public `FieldHex`, directly comparable to a selected
+/// scan row slot), and (b) the flat cross-graph Q6 non-bnode obligation was not
+/// enforced PER BRANCH.
+///
+/// For each disclosed solution (one [`crate::manifest::BranchWitness`], attributed
+/// to a branch the routing gate already validated), the verifier re-derives the
+/// branch from the query TEXT alone ([`fragment_query`], never the manifest) and:
+///
+/// 1. **Join coherence (item 2).** Builds a per-branch value map from every atom's
+///    disclosed data — each BGP-scan variable slot from its SELECTED disclosed row
+///    ([`crate::manifest::BranchWitness::scan_rows`]) and each `PathReach` variable
+///    ENDPOINT from the proof-bound `src_enc` / `dst_enc` — and requires every
+///    occurrence of a shared variable to resolve to the SAME encoding. A path
+///    claiming a different node than its supporting scan row (or another path
+///    endpoint) supports is refused ([`FragmentJoinError::Incoherent`]), both
+///    directions. Because `src_enc` / `dst_enc` and the scan `rows` are byte-bound
+///    into the `bb` public inputs (audit #1), a coherent selection genuinely ties
+///    the shared existential value across the scan and path sub-proofs.
+/// 2. **Cross-graph Q6 non-bnode obligation (item 1).** Re-derives the branch's Q6
+///    obligations with [`branch_obligations`] over the PROOF-BOUND per-obligation
+///    graph attributions (each scan / path sub-proof's `attribution` bits over its
+///    `commitments`, interned to a per-branch committed-graph identity so two atoms
+///    over the SAME graph collapse and two over DISTINCT graphs stay distinct — the
+///    same safe-coarser discipline as the flat `global_attributions`). Every
+///    required cross-graph join edge's shared variable MUST be covered by the
+///    disclosed value map ([`FragmentJoinError::UncoveredCrossGraphJoin`] otherwise);
+///    the coherence check (1) already forces its two atoms to agree. Combined with
+///    the ALWAYS-ACTIVE salt-uniqueness gate (audit #9 — a same-label canonical
+///    blank node encodes DIFFERENTLY across two distinctly-salted graphs), an equal
+///    encoding across a cross-graph edge cannot be a blank node, so the flat
+///    non-bnode obligation holds branch-locally for BGP scan joins.
+/// 3. **Multi-graph paths (fail-closed).** A `PathReach` whose proof-bound
+///    attribution admits more than one committed graph
+///    ([`branch_obligations`]'s `path_link_non_bnode`) has interior chain nodes that
+///    cross graph boundaries. The flat obligation would demand those IRI/literal-
+///    typed, but they are hidden in-circuit — the verifier cannot discharge it from
+///    disclosed data — so such a path is refused fail-closed
+///    ([`FragmentJoinError::MultiGraphPath`]).
+///
+/// # Honest scope — the RESIDUAL still deferred (load-bearing)
+/// After this gate, the extended regime enforces the SAME cross-graph non-bnode
+/// obligation as the flat path for BGP scan↔scan joins (branch-locally, via the
+/// coherence enc-equality + the active salt-uniqueness gate — the identical
+/// mechanism), and additionally binds scan↔path / path↔path existential endpoints
+/// for coherence. What is NOT yet complete: the salt-uniqueness gate (audit #9)
+/// records only SCAN-referenced committed graphs, so for a cross-graph join between
+/// a scan graph and a (single-graph) PATH graph the enc-equality is an AGREEMENT
+/// check whose non-bnode COROLLARY additionally needs the path graph to be
+/// distinctly salted — extending salt-uniqueness (and the required issuer
+/// attestation) to path commitments is a follow-up bead. An EXISTENTIAL
+/// (non-projected) path endpoint's VALUE remains hidden by design (a privacy
+/// choice, not a non-bnode gap). The whole verifier stack is internally re-audited
+/// but NOT externally audited (sq-qhy4). NO soundness / privacy property is
+/// asserted as achieved.
+// [OPUS-4.8] sq-ygk6x: per-branch join coherence + cross-graph Q6. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+pub fn bind_fragment_join_coherence(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentJoinError> {
+    let manifest = &fm.manifest;
+    // Re-derive the fragment from the query TEXT alone (never the manifest).
+    let fq = fragment_query(&manifest.query)
+        .map_err(|_| FragmentJoinError::Structure { witness: 0, what: "query" })?;
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let Some(branch) = fq.branches.get(bw.branch) else {
+            return Err(FragmentJoinError::Structure { witness: wi, what: "branch" });
+        };
+        let n_scans = branch.patterns.len();
+
+        // Per-obligation disclosed value maps (combined index space: 0..n_scans are
+        // BGP scans, n_scans.. are path obligations — the SAME order `branch_obligations`
+        // uses) plus per-obligation proof-bound global attribution sets. A per-branch
+        // committed-graph identity interning (distinct graphs -> distinct ids, same
+        // graph -> one id) keys the attributions the SAME safe-coarser way as the flat
+        // `global_attributions`; it never touches the disclosed values.
+        let mut per_obl: Vec<std::collections::BTreeMap<String, Fr>> = Vec::new();
+        let mut scan_attrs: Vec<BTreeSet<usize>> = Vec::new();
+        let mut path_attrs: Vec<BTreeSet<usize>> = Vec::new();
+        let mut intern: std::collections::BTreeMap<[u8; 32], usize> =
+            std::collections::BTreeMap::new();
+        let mut next_id = 0usize;
+
+        // --- BGP-scan obligations. ---
+        for oi in 0..n_scans {
+            let pattern = &branch.patterns[oi];
+            let &pi = bw.scan_proofs.get(oi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "scan obligation",
+            })?;
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "scan proof index",
+            })?;
+            let ProofInputs::Scan { rows, row_count, commitments, attribution, .. } = &sp.inputs
+            else {
+                return Err(FragmentJoinError::Structure { witness: wi, what: "scan proof kind" });
+            };
+            scan_attrs.push(intern_attribution(commitments, attribution, &mut intern, &mut next_id)
+                .ok_or(FragmentJoinError::Structure { witness: wi, what: "scan attribution" })?);
+
+            // Disclosed value map for THIS scan's variable slots (from the selected
+            // supporting row). A constant-only pattern needs no row.
+            let mut map = std::collections::BTreeMap::new();
+            if pattern.slots.iter().any(|s| matches!(s, SlotPattern::Var(_))) {
+                let &row = bw.scan_rows.get(oi).ok_or(FragmentJoinError::Structure {
+                    witness: wi,
+                    what: "scan row selection",
+                })?;
+                let active = (*row_count as usize).min(rows.len());
+                if row >= active {
+                    return Err(FragmentJoinError::Structure { witness: wi, what: "scan row range" });
+                }
+                for (slot, s) in pattern.slots.iter().enumerate() {
+                    if let SlotPattern::Var(v) = s {
+                        let val = rows[row][slot].to_field().ok_or(
+                            FragmentJoinError::MalformedField {
+                                witness: wi,
+                                obligation: oi,
+                                what: "scan row slot",
+                            },
+                        )?;
+                        map.insert(v.clone(), val);
+                    }
+                }
+            }
+            per_obl.push(map);
+        }
+
+        // --- Bounded-path obligations. ---
+        for oi in 0..branch.path_reach.len() {
+            let obligation = &branch.path_reach[oi];
+            let &pi = bw.path_proofs.get(oi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "path obligation",
+            })?;
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "path proof index",
+            })?;
+            let ProofInputs::PathReach { src_enc, dst_enc, commitments, attribution, .. } =
+                &sp.inputs
+            else {
+                return Err(FragmentJoinError::Structure { witness: wi, what: "path proof kind" });
+            };
+            path_attrs.push(intern_attribution(commitments, attribution, &mut intern, &mut next_id)
+                .ok_or(FragmentJoinError::Structure { witness: wi, what: "path attribution" })?);
+
+            // A VARIABLE path endpoint's value IS the public `src_enc`/`dst_enc`
+            // (directly comparable to a scan row slot — the #1678 clean-extension
+            // observation). A constant endpoint is bound by `bind_fragment_solution`.
+            let combined = n_scans + oi;
+            let mut map = std::collections::BTreeMap::new();
+            if let SlotPattern::Var(v) = &obligation.subject {
+                let val = src_enc.to_field().ok_or(FragmentJoinError::MalformedField {
+                    witness: wi,
+                    obligation: combined,
+                    what: "path src_enc",
+                })?;
+                map.insert(v.clone(), val);
+            }
+            if let SlotPattern::Var(v) = &obligation.object {
+                let val = dst_enc.to_field().ok_or(FragmentJoinError::MalformedField {
+                    witness: wi,
+                    obligation: combined,
+                    what: "path dst_enc",
+                })?;
+                map.insert(v.clone(), val);
+            }
+            per_obl.push(map);
+        }
+
+        // (1) JOIN COHERENCE (item 2): every shared variable resolves to ONE value
+        // across all atoms (scan↔scan, scan↔path, path↔path). The safe-coarser
+        // direction — it can only reject more.
+        let mut seen: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
+        for (idx, map) in per_obl.iter().enumerate() {
+            for (v, val) in map {
+                match seen.get(v) {
+                    None => {
+                        seen.insert(v.clone(), *val);
+                    }
+                    Some(prev) if *prev == *val => {}
+                    Some(_) => {
+                        return Err(FragmentJoinError::Incoherent {
+                            witness: wi,
+                            obligation: idx,
+                            var: v.clone(),
+                        })
+                    }
+                }
+            }
+        }
+
+        // (2)+(3) CROSS-GRAPH Q6 obligation (item 1): re-derive the branch's Q6
+        // obligations from the PROOF-BOUND attributions (the per-branch analogue of
+        // the flat `recheck`). Arity is already validated by `dispatch_fragment`; a
+        // mismatch here is refused fail-closed.
+        let obligations = branch_obligations(branch, &scan_attrs, &path_attrs)
+            .map_err(|_| FragmentJoinError::Structure { witness: wi, what: "branch obligations" })?;
+
+        // (3) A multi-graph path's interior-chain non-bnode obligation is not
+        // verifier-dischargeable from disclosed data — refuse fail-closed.
+        if let Some(&p) = obligations.path_link_non_bnode.first() {
+            return Err(FragmentJoinError::MultiGraphPath { witness: wi, obligation: n_scans + p });
+        }
+
+        // (2) Every required cross-graph join edge's shared variable MUST be covered
+        // by the disclosed value map of BOTH its atoms (the coherence check above has
+        // already forced them equal). A required cross-graph obligation the disclosed
+        // data does not cover is refused fail-closed (branch-local `recheck`).
+        for edge in &obligations.join_edges {
+            let (i, j) = edge.patterns;
+            let covered = per_obl.get(i).is_some_and(|m| m.contains_key(&edge.variable))
+                && per_obl.get(j).is_some_and(|m| m.contains_key(&edge.variable));
+            if !covered {
+                return Err(FragmentJoinError::UncoveredCrossGraphJoin {
+                    witness: wi,
+                    variable: edge.variable.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The per-branch interned committed-graph identity set a sub-proof's PROOF-BOUND
+/// `attribution` bits select over its `commitments` (sq-ygk6x). `intern` maps each
+/// distinct 32-byte committed-graph identity to a stable per-branch id (distinct
+/// graphs -> distinct ids, the same graph -> one id — the flat `global_attributions`
+/// safe-coarser discipline). Returns `None` fail-closed on a malformed proof-bound
+/// attribution (length != `commitments` — stage 1b `AttributionMalformed` also
+/// rejects it) or a commitment that is not a valid field element; under-counting the
+/// contributing graphs would WEAKEN the obligation, so it is refused rather than
+/// padded.
+// [OPUS-4.8] sq-ygk6x.
+#[cfg(feature = "extended-fragment")]
+fn intern_attribution(
+    commitments: &[FieldHex],
+    attribution: &[bool],
+    intern: &mut std::collections::BTreeMap<[u8; 32], usize>,
+    next_id: &mut usize,
+) -> Option<BTreeSet<usize>> {
+    if attribution.len() != commitments.len() {
+        return None;
+    }
+    let mut out = BTreeSet::new();
+    for (g, &bit) in attribution.iter().enumerate() {
+        if !bit {
+            continue;
+        }
+        let key = field_to_be_bytes_32(&commitments[g].to_field()?);
+        let id = *intern.entry(key).or_insert_with(|| {
+            let v = *next_id;
+            *next_id += 1;
+            v
+        });
+        out.insert(id);
+    }
+    Some(out)
+}
+
 /// FAIL-CLOSED wave-1 extended-fragment END-TO-END verification (sq-h732x):
 /// route a [`crate::manifest::FragmentManifest`]'s property-path / `UNION` /
 /// `VALUES` presentation all the way through the cryptographic gate, so an
@@ -6066,7 +6444,7 @@ pub fn bind_fragment_scans(
 /// [`verify_manifest`] alone CANNOT do, because its stage-1 `recheck` rejects
 /// every extended query at `fragment_patterns` before any sub-proof runs.
 ///
-/// Four layers, all fail-closed:
+/// Five layers, all fail-closed:
 /// 1. [`dispatch_fragment`] re-derives the query fragment from the query TEXT
 ///    alone (`fragment_query`, never the manifest), REFUSES anything outside the
 ///    wave-1 fragment, and routes each disclosed solution's branch witness to a
@@ -6083,10 +6461,17 @@ pub fn bind_fragment_scans(
 /// 3. [`bind_fragment_scans`] (sq-qyfth) binds each solution variable occurring in
 ///    a BGP scan pattern to the selected disclosed row's slot value (again
 ///    re-derived from the query text + disclosed solution), enforces the scan
-///    answers the query pattern, and checks join coherence across atoms sharing a
-///    variable — mapped into [`CheckError::FragmentScan`]. Also before the nonce is
+///    answers the query pattern, and checks join coherence across SCAN atoms sharing
+///    a variable — mapped into [`CheckError::FragmentScan`]. Also before the nonce
+///    is burnt.
+/// 4. [`bind_fragment_join_coherence`] (sq-ygk6x) re-derives each branch's Q6
+///    obligations from the proof-bound attributions, binds every existential
+///    variable shared between two atoms — INCLUDING a scan slot and a `PathReach`
+///    endpoint — to one value (enc-equality), enforces the flat cross-graph
+///    non-bnode obligation branch-locally for BGP scans, and refuses a multi-graph
+///    path — mapped into [`CheckError::FragmentJoin`]. Also before the nonce is
 ///    burnt.
-/// 4. the embedded [`crate::manifest::FragmentManifest::manifest`] is then run
+/// 5. the embedded [`crate::manifest::FragmentManifest::manifest`] is then run
 ///    through the SAME crypto stage as [`verify_manifest`] (the per-sub-proof
 ///    public-input reconstruction + canonical-vk + `bb verify`, the
 ///    verifier-nonce single-use + challenge binding, holder PoP, issuer
@@ -6094,22 +6479,28 @@ pub fn bind_fragment_scans(
 ///    query-fragment acceptance is routed through `fragment_query` (so the
 ///    extended query is not rejected) and the FLAT per-branch term-binding gates
 ///    (`bind_query_correctness`/`bind_attributions`/`bind_joins`) are replaced by
-///    layers 2 + 3's extended analogue.
+///    layers 2–4's extended analogue.
 ///
 /// # Honest scope (LOAD-BEARING — read before relying on this)
-/// Layer 2 (sq-1zf94) binds the disclosed path predicate/endpoints and `VALUES`
-/// cells, and layer 3 (sq-qyfth) binds a disclosed solution's BGP-scan variables to
-/// the scan's disclosed rows — both via the audit-#1 byte binding of those public
-/// inputs. So an accepted proof's disclosed path endpoints, VALUES-constrained
-/// variables, AND BGP-scan-bound variables ARE now tied to the specific disclosed
-/// terms. What remains UNBOUND (documented on [`bind_fragment_scans`]): (a) the flat
-/// cross-graph Q6 non-bnode obligation per branch, and the existential scan↔path
-/// join coherence across a hidden path endpoint (sq-ygk6x); and (b) an EXISTENTIAL
-/// (non-projected) path endpoint's value (hidden by design). So an accepted
-/// extended-fragment proof is **more bound than #1665 but not yet FULLY bound** —
-/// the residual is enumerated, not hidden. The whole verifier stack is internally
-/// re-audited but **NOT externally audited** (sq-qhy4). NO soundness / privacy
-/// property is asserted as achieved.
+/// Layers 2–4 bind the disclosed path predicate/endpoints, `VALUES` cells, and a
+/// disclosed solution's BGP-scan variables (all via the audit-#1 byte binding of
+/// those public inputs), and layer 4 (sq-ygk6x) additionally enforces the flat
+/// cross-graph Q6 non-bnode obligation PER BRANCH for BGP scans and binds every
+/// existential variable shared across scan↔scan / scan↔path / path↔path atoms. So an
+/// accepted proof's disclosed path endpoints, VALUES-constrained variables, and
+/// BGP-scan-bound variables ARE tied to the specific disclosed terms, and its
+/// per-branch cross-graph scan joins carry the same non-bnode obligation as the flat
+/// path. What remains (documented on [`bind_fragment_join_coherence`]): (a) the
+/// salt-uniqueness gate (audit #9) covers only SCAN-referenced committed graphs, so
+/// a cross-graph join between a scan graph and a single-graph PATH graph is an
+/// AGREEMENT check whose non-bnode corollary additionally needs the path graph
+/// distinctly salted (a follow-up bead) — a multi-graph path is refused fail-closed;
+/// and (b) an EXISTENTIAL (non-projected) path endpoint's value stays hidden by
+/// design. So an accepted extended-fragment proof is **more bound than #1665, with
+/// the flat cross-graph obligation now branch-local for scans** — the residual is
+/// enumerated, not hidden. The whole verifier stack is internally re-audited but
+/// **NOT externally audited** (sq-qhy4). NO soundness / privacy property is asserted
+/// as achieved.
 // [OPUS-4.8] sq-h732x: extended-fragment end-to-end routing. Opt-in
 // (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
 #[cfg(feature = "extended-fragment")]
@@ -6144,11 +6535,21 @@ pub fn verify_fragment_manifest(
     // (2b) FAIL-CLOSED BGP SCAN-SLOT binding (sq-qyfth): bind each solution
     // variable occurring in a BGP scan pattern to the selected disclosed row's slot
     // value (re-derived from the query text + disclosed solution), and check join
-    // coherence across atoms sharing a variable. Also before the nonce is burnt or
-    // any bb runs. This closes the BGP-scan-slot residual `bind_fragment_solution`
-    // named; the remaining residual (cross-graph Q6 / scan↔path existential
-    // coherence, sq-ygk6x) is documented on `bind_fragment_scans`.
+    // coherence across scan atoms sharing a variable. Also before the nonce is burnt
+    // or any bb runs.
     bind_fragment_scans(fm).map_err(CheckError::FragmentScan)?;
+
+    // (2c) FAIL-CLOSED PER-BRANCH JOIN COHERENCE + cross-graph Q6 non-bnode
+    // (sq-ygk6x): re-derive each branch's Q6 obligations from the proof-bound
+    // per-obligation attributions and bind every existential variable shared between
+    // atoms — INCLUDING a scan slot and a `PathReach` endpoint (`src_enc`/`dst_enc`)
+    // — to one value (enc-equality). Enforces the flat cross-graph non-bnode
+    // obligation branch-locally for BGP scans (via the enc-equality + the active
+    // salt-uniqueness gate) and refuses a multi-graph path whose interior-chain
+    // non-bnode obligation the verifier cannot discharge. Also before the nonce is
+    // burnt or any bb runs. The remaining residual is documented on
+    // `bind_fragment_join_coherence`.
+    bind_fragment_join_coherence(fm).map_err(CheckError::FragmentJoin)?;
 
     // (3) Crypto stage over the EMBEDDED manifest, with stage-1a routed through
     // `fragment_query` (`skip_query_binding = true`) so the extended query is not
@@ -8277,6 +8678,245 @@ mod fragment_dispatch_tests {
             FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 2, var: "o".into() },
             FragmentScanError::JoinIncoherent { witness: 0, obligation: 1, slot: 0, var: "x".into() },
             FragmentScanError::WildcardSlot { witness: 0, obligation: 0, slot: 0 },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
+    }
+
+    // --- sq-ygk6x: PER-BRANCH JOIN COHERENCE + cross-graph Q6 (bind_fragment_join_coherence)
+    //
+    // Non-vacuous, no nargo/bb: an existential variable shared between a BGP scan
+    // slot and a PathReach endpoint (or two scans across graphs) is bound to ONE
+    // disclosed value; a mismatch REFUSES before the sub-proof loop. A multi-graph
+    // path (interior chain non-bnode not verifier-dischargeable) REFUSES. A coherent
+    // solution reaches the same downstream gate as the #1678 accept path.
+
+    /// A BGP scan joined to a `+` path on an EXISTENTIAL ?x (the path SUBJECT).
+    /// Projected ?s ?o; ?x is not projected.
+    const SCANPATH_SRC: &str =
+        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q>+ ?o }";
+    /// A BGP scan joined to a `+` path on an EXISTENTIAL ?x (the path OBJECT).
+    const SCANPATH_DST: &str =
+        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?o <http://ex/q>+ ?x }";
+
+    /// A branch witness carrying scan proofs, path proofs, VALUES rows, per-scan row
+    /// selection, and the disclosed solution together (sq-ygk6x tests).
+    #[allow(clippy::too_many_arguments)]
+    fn bw_full(
+        branch: usize,
+        scan_proofs: Vec<usize>,
+        path_proofs: Vec<usize>,
+        values_rows: Vec<usize>,
+        scan_rows: Vec<usize>,
+        solution: Vec<SolutionBinding>,
+    ) -> BranchWitness {
+        BranchWitness { branch, scan_proofs, path_proofs, values_rows, scan_rows, solution }
+    }
+
+    /// [`scan_real`] over a SPECIFIC committed graph (so two scans can be attributed
+    /// to DISTINCT graphs for the cross-graph tests).
+    fn scan_real_c(consts: [Option<&str>; 3], rows: Vec<[oxrdf::Term; 3]>, commit: &str) -> ProofInputs {
+        match scan_real(consts, rows) {
+            ProofInputs::Scan {
+                id,
+                pattern_is_const,
+                pattern_const_enc,
+                rows,
+                row_count,
+                attribution,
+                ..
+            } => ProofInputs::Scan {
+                id,
+                commitments: vec![fh(commit)],
+                pattern_is_const,
+                pattern_const_enc,
+                rows,
+                row_count,
+                attribution,
+            },
+            _ => unreachable!("scan_real always builds a Scan"),
+        }
+    }
+
+    #[test]
+    fn bind_join_coherence_accepts_a_coherent_scan_path() {
+        // scan row ?x = <x1>; path src_enc = enc(<x1>) agrees => coherent.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/x1", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(bind_fragment_join_coherence(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_join_coherence_rejects_scan_path_src_mismatch() {
+        // scan row ?x = <x1>; path src_enc = enc(<zzz>) disagrees => Incoherent at
+        // the path obligation (combined index 1 = n_scans(1) + 0).
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/zzz", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_rejects_scan_path_dst_mismatch() {
+        // ?x is the path OBJECT (dst_enc). scan ?x = <x1>; path dst_enc = enc(<zzz>)
+        // => Incoherent, the OTHER direction of the scan↔path endpoint join.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/o1", "http://ex/zzz");
+        let m = fm(
+            SCANPATH_DST,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_rejects_a_multi_graph_path() {
+        // A k=2 path (attribution [true, true]) admits a cross-graph interior chain
+        // whose non-bnode obligation the verifier cannot discharge => MultiGraphPath.
+        let pa = path_real(4, 2, 16, false, "http://ex/p", "http://ex/a", "http://ex/b");
+        let m = fm(
+            PLUS,
+            vec![sub(pa)],
+            vec![bw_full(0, vec![], vec![0], vec![], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::MultiGraphPath { witness: 0, obligation: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_refuses_cross_graph_disagreeing_join() {
+        // Two scans over DISTINCT committed graphs (0x1, 0x2) sharing existential ?x,
+        // whose selected rows DISAGREE — the encoding a blank node would take across
+        // two distinctly-salted graphs. Refused (join incoherent) at obligation 1.
+        let sc0 = scan_real_c(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+            "0x1",
+        );
+        let sc1 = scan_real_c(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/x2"), iri("http://ex/q"), iri("http://ex/o1")]],
+            "0x2",
+        );
+        let m = fm(
+            JOINQ,
+            vec![sub(sc0), sub(sc1)],
+            vec![bw_full(0, vec![0, 1], vec![], vec![], vec![0, 0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_accepts_cross_graph_agreeing_join() {
+        // Two scans over DISTINCT committed graphs sharing existential ?x whose rows
+        // AGREE (a non-bnode IRI encodes identically across graphs) => Ok, and the
+        // REQUIRED cross-graph obligation `branch_obligations` derives is covered.
+        let sc0 = scan_real_c(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+            "0x1",
+        );
+        let sc1 = scan_real_c(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/x1"), iri("http://ex/q"), iri("http://ex/o1")]],
+            "0x2",
+        );
+        let m = fm(
+            JOINQ,
+            vec![sub(sc0), sub(sc1)],
+            vec![bw_full(0, vec![0, 1], vec![], vec![], vec![0, 0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(bind_fragment_join_coherence(&m), Ok(()));
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_scan_path_incoherence_before_bb() {
+        // End-to-end: a path endpoint inconsistent with its supporting scan row is
+        // refused as CheckError::FragmentJoin BEFORE the nonce is burnt or any bb runs.
+        // ?x is existential (bind_fragment_solution ignores its src); ?o projected =>
+        // dst_enc = enc(o1) must match. The scan↔path ?x mismatch surfaces in layer 2c.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/zzz", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::FragmentJoin(FragmentJoinError::Incoherent { .. })),
+            "an incoherent scan↔path join must fail-closed as FragmentJoin, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fragment_manifest_coherent_scan_path_reaches_the_crypto_gate() {
+        // The accept path: a coherent scan↔path solution passes routing + all three
+        // binding layers, then reaches the SAME downstream attestation gate (empty K
+        // => UnattestedCommitment). No bb.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/x1", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::UnattestedCommitment { .. }),
+            "a coherent scan↔path solution must route past the bindings into the attestation gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_join_error_display_is_non_empty_for_each_variant() {
+        let errs = [
+            FragmentJoinError::Structure { witness: 0, what: "branch" },
+            FragmentJoinError::MalformedField { witness: 0, obligation: 1, what: "path src_enc" },
+            FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".into() },
+            FragmentJoinError::MultiGraphPath { witness: 0, obligation: 0 },
+            FragmentJoinError::UncoveredCrossGraphJoin { witness: 0, variable: "x".into() },
         ];
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
