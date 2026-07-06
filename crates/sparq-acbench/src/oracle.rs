@@ -263,3 +263,31 @@ fn mode_matches(requested: &crate::AccessMode, granted: &crate::AccessMode) -> b
         && (!requested.write || granted.write)
         && (!requested.control || granted.control)
 }
+
+// ── Workload-engine model dispatch (bead `sq-i6du2.6`) ────────────────────────────────
+
+/// Dispatch a request to the by-construction oracle for a given [`AcModel`].
+///
+/// This is the single entry point the workload engine (`workload.rs`, W1/W3/W4) uses to
+/// obtain the ground-truth decision for a `(request, model)` pair. It is a thin router
+/// over [`evaluate_wac`], [`evaluate_acp`], and [`evaluate_odrl`] so the workload engine
+/// never re-implements per-model semantics (single source of truth for the oracle).
+///
+/// **Structural independence**: like the three underlying evaluators, this function reads
+/// only the intent table — it never links or calls any sparq crate. That independence is
+/// the whole point of the benchmark: an unsound system-under-test must *disagree* with
+/// this oracle and thereby FAIL the harness.
+///
+/// **Determinism**: pure function of `(model, request, intents)`.
+#[must_use]
+pub(crate) fn evaluate(
+    model: &crate::AcModel,
+    request: &Request,
+    intents: &[IntentRow],
+) -> Decision {
+    match model {
+        crate::AcModel::Wac => evaluate_wac(request, intents),
+        crate::AcModel::Acp => evaluate_acp(request, intents),
+        crate::AcModel::Odrl => evaluate_odrl(request, intents),
+    }
+}
