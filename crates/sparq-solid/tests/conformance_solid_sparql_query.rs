@@ -100,7 +100,7 @@ fn solid_sparql_query_query_semantics_conformance() {
     let cases = manifest["cases"].as_array().expect("manifest.cases is an array");
     assert!(!cases.is_empty(), "the conformance suite has no cases");
 
-    let mut store = build_store(fixture);
+    let store = build_store(fixture);
     let mut passed = 0usize;
 
     for case in cases {

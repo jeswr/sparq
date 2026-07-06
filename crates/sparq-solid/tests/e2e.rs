@@ -42,7 +42,7 @@ const TITLES: &str = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title 
 #[cfg(not(feature = "legacy-union-default-graph"))]
 #[test]
 fn bare_default_graph_pattern_is_empty_by_default() {
-    let mut s = store();
+    let s = store();
     let alice = s.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
     let carol = s.query_as(&Session { agent: Some(CAROL), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
     let anon = s.query_as(&Session::default(), Mode::Read, TITLES).unwrap();
@@ -55,7 +55,7 @@ fn bare_default_graph_pattern_is_empty_by_default() {
 #[cfg(feature = "legacy-union-default-graph")]
 #[test]
 fn same_query_different_agents_different_results() {
-    let mut s = store();
+    let s = store();
     let alice = s.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
     let carol = s.query_as(&Session { agent: Some(CAROL), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
     let anon = s.query_as(&Session::default(), Mode::Read, TITLES).unwrap();
@@ -73,7 +73,7 @@ fn same_query_different_agents_different_results() {
 #[cfg(feature = "legacy-union-default-graph")]
 #[test]
 fn graph_patterns_and_cross_document_joins_stay_inside_the_sandbox() {
-    let mut s = store();
+    let s = store();
     // explicit GRAPH ?g: ranges over authorized graphs only (FROM NAMED injection)
     let q = "SELECT ?g WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }";
     let anon = s.query_as(&Session::default(), Mode::Read, q).unwrap();
@@ -96,7 +96,7 @@ fn graph_patterns_and_cross_document_joins_stay_inside_the_sandbox() {
 
 #[test]
 fn explicit_named_graph_query_cannot_escape() {
-    let mut s = store();
+    let s = store();
     // anonymous explicitly asks for a private graph: absent from FROM NAMED ⇒ empty
     let q = "SELECT ?o WHERE { GRAPH <https://pod.ex/priv0/c4/g0/d0.ttl> { ?s ?p ?o } }";
     let anon = s.query_as(&Session::default(), Mode::Read, q).unwrap();
@@ -164,7 +164,7 @@ fn view_path_and_rewrite_path_return_identical_json() {
 /// Shared driver: for every fixture session, assert the view path and the v1 `rewrite_for`
 /// path return byte-identical SPARQL-JSON for each query in `queries`.
 fn assert_paths_agree(queries: &[&str]) {
-    let mut s = store();
+    let s = store();
     let sessions = [
         ("alice", Session { agent: Some(ALICE), client: None, issuer: None, now: None }),
         ("carol", Session { agent: Some(CAROL), client: None, issuer: None, now: None }),

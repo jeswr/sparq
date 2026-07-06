@@ -52,6 +52,9 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 - **Trust-graph admission PoC (opt-in `trust-graph`, research — NOT a security guarantee)** — a
   [`sparq-trust`](../sparq-trust) admission stratum injects an issuer-signed, trusted-source-scoped
   credential fact ahead of the materialiser; OFF = byte-identical WAC/ACP. No privacy/ZK (`sq-qhy4` unaudited).
+- **Concurrent reads (`&self`, no feature flag)** — every read entry point (`accessible`, `view_for`,
+  `query_as`/`query_json_as`/`ask_as`, `wac_allow`) takes `&self`, so N threads sharing one `Arc<PodStore>`
+  query at once via a **sharded + bounded** session cache (interior `RwLock` stripes, LRU eviction); writes stay `&mut self`.
 
 ## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge`)
 
@@ -66,10 +69,9 @@ action, or partyless/targetless request materializes **nothing**.
 (`materialize_odrl_permission_conditional`) persists as a per-session-rechecked ACP `auth:ConditionalGrant`
 (recipient/assignee matchers; an inclusive `odrl:dateTime` window vs `Session::now`, **fail-closed with no
 clock**); `purpose`/`count`/strict bounds have no stateless analogue and stay **one-shot** (any unmappable
-constraint falls the whole rule back to one-shot). Bridged grants are ledger-tracked; `refresh_odrl_grant(s)`
+constraint falls the rule back to one-shot). Bridged grants are ledger-tracked; `refresh_odrl_grant(s)`
 rebuilds the view (static baseline + replay of valid entries), retracting lapsed ones. **Deny retraction is
-asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict
-(kept on `Applies`/`Ambiguous`); static grants are never in the ledger. Full mapping/replay detail in the SKILL.
+asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict. Full detail in the SKILL.
 
 ## WASM support
 
@@ -78,10 +80,9 @@ asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *defin
 transitive `oxrdf 0.3.3 → rand → getrandom` needs the host bundle to select a wasm RNG backend as
 `sparq-wasm` does (`getrandom`'s `wasm_js` feature + the `getrandom_backend` cfg; see the
 [migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:**
-`std::time::Instant` is unavailable there (no monotonic clock — `Instant::now()` panics), so
-`materialize_wac`/`materialize_acp` `cfg`-gate the wall-clock plumbing off and report `stats.millis == 0.0`
-rather than trapping (rest of `MaterializeStats` unchanged); a wasm32 runtime smoke test
-(`tests/wasm_materialize.rs`, `wasm-pack test --node`) guards it. Deno-wasm / Workers are run-feasible.
+`std::time::Instant` panics (no monotonic clock), so `materialize_wac`/`materialize_acp` `cfg`-gate the
+wall-clock plumbing off and report `stats.millis == 0.0` (rest of `MaterializeStats` unchanged); a wasm32
+smoke test (`tests/wasm_materialize.rs`, `wasm-pack test --node`) guards it. Deno-wasm / Workers run-feasible.
 
 ## Conformance, security & containment
 
@@ -97,9 +98,8 @@ rather than trapping (rest of `MaterializeStats` unchanged); a wasm32 runtime sm
 - **Security posture — fail-closed.** Absence of a grant makes a graph **invisible**. The reasoner is fed
   only ACL/ACR + structural facts — **never pod content** — so no writable document can grant itself
   access; the reserved `urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs
-  are stripped at load. `ldp:contains` is PSS-written opaque content, **never** derived from IRI structure
-  or read into the reasoner; containment *ancestry* drives ACL inheritance only (pinned by
-  `tests/containment_view_ownership.rs`).
+  are stripped at load. `ldp:contains` is PSS-written opaque content, never derived from IRI structure or
+  read into the reasoner; containment *ancestry* drives ACL inheritance only (`tests/containment_view_ownership.rs`).
 
 ## 📚 Learn more
 
