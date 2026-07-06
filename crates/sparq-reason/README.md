@@ -60,8 +60,9 @@ let g = Graph::from_parts(dict, triples);
 - **Shared join kernels** (opt-in `substrate-join`) — the RDFS predicate join (rdfs2/3/7)
   and the rdfs9 type join drive the *same* `sparq-substrate::join` hash-join body the SPARQL
   engine drives, supplying the reasoner's own key projection + budget monomorphically.
-  Behaviour-neutral: the same closure, only the join machinery is shared (only the PropExpand
-  orientation-swap branch stays hand-rolled — documented disposition in `substrate_join.rs`).
+  Also covers the OWL-RL semi-naive Δ⋈full adjacency (`prp-fp`, `prp-ifp`, `prp-trp`): a
+  persistent `DeltaAdj` (two `DeltaTable`s, `sq-qonbz.2`) replaces the per-round `FxHashMap`
+  probes — same closure output, only the join machinery changes.
   Off by default; byte/bundle ratchets unchanged.
 - **Shared term total order** (opt-in `substrate-compare`) — `compare::IdTerm` implements the
   substrate's `CompareTerm` for dictionary ids, so ordering entailed solutions
