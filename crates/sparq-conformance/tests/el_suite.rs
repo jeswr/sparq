@@ -187,13 +187,18 @@ mod gated {
         ),
         (
             "New-Feature-SelfRestriction-001",
-            "PERMANENT — conclusion `Peter likes Peter` from owl:hasSelf; owl:hasSelf is outside \
-             the classifier's EL fragment and the conclusion is an ABox fact",
+            "ABox — conclusion `Peter likes Peter` is a property assertion; owl:hasSelf is now \
+             in-fragment (CR-Self, sq-pbz04.2.6) and the `abox` realiser reads the self-loop off, \
+             but this lane runs the TBox `classify_graph` (no `abox`), which by contract emits no \
+             instance facts (graduates under the C2 ABox-mechanism re-pin — see \
+             research/owl2-rl-el-wave2-disposition.md §4)",
         ),
         (
             "New-Feature-SelfRestriction-002",
-            "PERMANENT — conclusion types the individual Peter into an owl:hasSelf restriction; \
-             owl:hasSelf is outside the classifier's EL fragment and ClassAssertion is ABox",
+            "ABox — conclusion types the individual Peter into an owl:hasSelf restriction (the \
+             CONVERSE of CR-Self-1: a raw self-link ⇒ ∃r.Self); owl:hasSelf is now in-fragment \
+             but this converse nominal readoff + the ABox ClassAssertion are out of this TBox \
+             lane's reach (documented sq-pbz04.2.6 follow-up)",
         ),
         (
             "WebOnt-Ontology-001",

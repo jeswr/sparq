@@ -49,6 +49,12 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   (`∃r.{a}`) classify (the reachability-guarded merge rule; every derivation sound, with
   negative tests pinning the guard). Completeness is claimed for typical safe usage, NOT for
   every EL++ nominal interplay; ABox `rdf:type` assertions are not internalized (TBox only).
+- **Self-restrictions — CR-Self** — `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r` is the
+  EL profile's `ObjectHasSelf` (`∃r.Self`, local reflexivity): `X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)` and
+  `∃r.Self ⊑ D` threads via the self-concept atom + CR1. A general `(X,X)` link from `X ⊑ ∃r.X`
+  never triggers it (the load-bearing side-condition). Any malformed shape (non-`true`/non-boolean
+  object, missing `owl:onProperty`) stays a counted skip. Under `abox` the self-loop realises as
+  the property assertion `a r a` (the WG `New-Feature-SelfRestriction-001` "Peter likes Peter").
 - **RBox role automaton** *(opt-in `rbox` feature, Phase E2)* — `rdfs:subPropertyOf` role
   inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions
   (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`. OFF by default: zero
@@ -80,7 +86,7 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
   concrete-domain shapes; with it, only the unsupported remainder above.
 
-**Scope:** EL+⊥ + safe nominals/CR6 (E1, default), EL+ role reasoning (E2, `rbox`), transitive
+**Scope:** EL+⊥ + safe nominals/CR6 + self-restrictions/CR-Self (E1, default), EL+ role reasoning (E2, `rbox`), transitive
 reduction (E3, `hasse`), exact-numeric concrete domains (CR7–CR9, `cdomain`), ABox realisation +
 whole-ontology consistency (`abox`); concurrency is **E4**. Constructs outside EL entirely (union /
 complement / `allValuesFrom` / cardinality / multi-individual `oneOf`) are always skipped. The
