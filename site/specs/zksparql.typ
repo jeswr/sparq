@@ -668,13 +668,31 @@ not a production guarantee while the external audit gate (sq-qhy4) is open.
 
 == FILTER expressions
 
+// [OPUS-4.8] sq-3kd2g.5: scope the admitted query-side FILTER constant to canonical
+// non-negative xsd:integer (the only lane sparq-zk::verify binds today, via filter_int); the
+// f64/signed/decimal/value_dl circuits exist but are not yet query-side reachable. Mirrors the
+// section 7.1 circuit-exists-vs-bound-end-to-end tiering. Do NOT widen while that wiring is
+// unbuilt.
 A `FILTER` is admitted only as a *conjunction* (`&&`, flattened) of atomic value comparisons of
-the form `?var op c`, where `op` is one of `=`, `!=`, `<`, `<=`, `>`, `>=` and `c` is a typed
-literal constant bindable by one of the value `FILTER` lanes (section 7.1). `?var != c` is
-recognised as its `Not(Equal(…))` parse; a `const op ?var` comparison is flipped so the
-variable is on the left; a non-canonical numeric lexical form (leading zero, sign, whitespace)
-is rejected because no honest proof could bind it. Each comparison binds slot-wise to a scan
-row, and error-as-unsatisfied (section 7.2) makes the shape monotone.
+the form `?var op c`, where `op` is one of `=`, `!=`, `<`, `<=`, `>`, `>=` and `c` is a
+canonical non-negative `xsd:integer` literal — the only constant the query-side `FILTER`
+re-derivation (`sparq-zk::verify`, shared by the stage-1 compose verifier and the
+extended-fragment gate) binds, through the `filter_int` lane. `?var != c` is recognised as its
+`Not(Equal(…))` parse; a `const op ?var` comparison is flipped so the variable is on the left;
+a non-canonical `xsd:integer` lexical form (leading zero, sign, whitespace) is rejected because
+the `filter_int` lane can bind only the canonical non-negative token, so no honest proof could
+match any other form. Each comparison binds slot-wise to a scan row, and error-as-unsatisfied
+(section 7.2) makes the shape monotone.
+
+The other value `FILTER` lanes — the integer-valued `xsd:double` fragment (`filter_f64`),
+signed integer (`filter_signed_int`), fixed-point `xsd:decimal` (`filter_decimal`), and, behind
+the off-by-default `dual-leaf` feature, the value-dictionary lanes (`filter_value_dl*`) — exist
+as composable circuit members (section 7.1) but are #strong[not] yet reachable from a
+query-side `FILTER`: no binding path wires a query constant of those datatypes to them today.
+This is the same realised-but-not-yet-bound-end-to-end distinction the *gate* tier of
+section 7.1 draws for the `path_reach` family — the circuit exists, but the query-side binding
+that would reach it does not — and until that wiring lands the gate #strong[MUST] reject a
+`FILTER` whose constant is not a canonical non-negative `xsd:integer`.
 
 Every other `FILTER` form is rejected fail-closed and #strong[MUST NOT] be silently disclosed
 unproven: a variable–variable comparison (`?a op ?b`), disjunction (`||`), a general negation
