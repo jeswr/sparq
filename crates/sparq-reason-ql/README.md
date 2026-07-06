@@ -17,15 +17,15 @@ This is a **separate crate** and the rewriter is behind an **off-by-default `exp
 feature** — the core engine and the wasm build carry zero QL code, deps, or cost by default.
 
 > **Soundness boundary (read this).** PerfectRef is sound + complete only for **conjunctive
-> queries**. Firing it on anything else silently mis-answers. So this crate is **FAIL-CLOSED**:
-> a query with `OPTIONAL` / `FILTER` / `MINUS` / `UNION` / a property path / aggregation / a
-> variable predicate is **rejected as out-of-scope**, never rewritten. The rewriter is validated
-> against a **hand-checked DL-Lite_R oracle**. On the **formal DL-Lite_R suite** (the hand-derived
-> certain-answer oracle from `sq-g19x0`) the rewrite is **sound AND complete case by case** — that
-> is now a **pinned floor** (`sparq-conformance`'s `ql_dllite_suite`, a *sparq-extension* ratchet,
-> **not** a full-OWL-2-QL-conformance claim — see Scope). The broader `pr:QL`
-> `sparql11/entailment` set stays **EXPERIMENTAL / OutOfScope** (it mixes intensional cases outside
-> sound rewriting).
+> queries** (and unions of them). Firing it on anything else silently mis-answers, so this crate
+> is **FAIL-CLOSED**: `OPTIONAL` / `MINUS` / aggregation / a variable predicate / a **recursive,
+> zero-length, or negated** property path (`+` `*` `?` `!p`) is **rejected as out-of-scope**,
+> never rewritten. Non-recursive paths (`/` `^` `|`) ARE handled — desugared to a CQ/UCQ before
+> rewriting (B5). The rewriter is validated against a **hand-checked DL-Lite_R oracle**: on the
+> **formal DL-Lite_R suite** (`sq-g19x0`) it is **sound AND complete case by case** — now a
+> **pinned floor** (`sparq-conformance`'s `ql_dllite_suite`, a *sparq-extension* ratchet, **not**
+> a full-OWL-2-QL-conformance claim). The broader `pr:QL` `sparql11/entailment` set stays
+> **EXPERIMENTAL / OutOfScope** (it mixes intensional cases outside sound rewriting).
 
 ## 🚀 Quickstart
 
@@ -61,11 +61,11 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
   with bounded **tree-witness** folding (existential witnesses captured with no unbounded chase),
   then **UCQ-containment minimisation** (redundant disjuncts dropped by the homomorphism
   containment test). Returns the **same certain answers** as `rewrite` in a **smaller UCQ**.
-- **Broadened sound fragment** — **(B1)** top-level UCQ; **(B2)** literal-object role atoms (rigid);
-  **(B3)** `FILTER` over distinguished-only vars (pass-through); **(B4)** constant-only `VALUES`
-  (pass-through); **(Bbnode)** body blank nodes lifted to fresh existential variables — distinct
-  labels get distinct ids; a shared label gets one id (blocking the applicability condition) and
-  emits as ONE variable, so a shared blank node is a JOIN not a cartesian product. [sq-pbz04.3.6]
+- **Broadened sound fragment** — **(B1)** top-level UCQ; **(B2)** literal-object role atoms;
+  **(B3)** `FILTER` / **(B4)** constant-only `VALUES` over distinguished-only vars (pass-through);
+  **(B5)** non-recursive property paths (`/` `^` `|`) desugared to a CQ/UCQ before rewriting —
+  fresh non-distinguished sequence intermediate (shared → a JOIN), inverse swap, alternation →
+  UCQ branches [sq-pbz04.3.2]; **(Bbnode)** body blank nodes → fresh existential vars [sq-pbz04.3.6].
 - **Intensional-atom guard (B6, always present)** — schema vocab predicates (`rdfs:subClassOf/
   subPropertyOf/domain/range`, all `owl:`) are **rejected**; annotation predicates admitted.
 - **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`MINUS`/paths/aggregation/
