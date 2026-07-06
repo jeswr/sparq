@@ -1748,3 +1748,86 @@ fn path_rejects_zero_length_occurrence_in_inactive_slot() {
         [GARBAGE, GARBAGE, GARBAGE], counts, enc,
     );
 }
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-apwxw: Mutation-pinning tests for the reviewer-identified
+// surviving mutants (escalated review comment, 2026-07-06).
+// ---------------------------------------------------------------------------
+
+// --- Item 1: padding-row attribution gate (`active &` in contrib) -----------
+//
+// Fixture (D=2, K=2, N=4): graph A holds the single chain edge (NA, P, NB);
+// graph B holds (NB, P, ND) -- the chain's endpoint NB appears as the SUBJECT of
+// graph B's committed triple. The prover witnesses: src=NA, dst=NB, path_len=1,
+// nodes=[NB, ND]. Step 0 is ACTIVE (NA-P->NB, attributed to A). Step 1 is
+// INACTIVE: nodes[1]=ND, but `cur` stays at NB (pass-through) and the inactive
+// step must NOT attribute graph B even though graph B contains (NB, P, ND) and
+// `present_g` would be true for that step.
+//
+// Without `active &` in `contrib[g] |= active & present_g`, graph B would be
+// spuriously attributed at the inactive step (provenance forgery). The accept
+// test pins that the correct circuit accepts [A only]; the reject test pins that
+// claiming [A,B] is rejected -- both mutations kill the surviving `contrib` mutant.
+fn path_graph_k2_attr_inactive() -> ([[[Field; 3]; 4]; 2], [u32; 2], [Field; 2], u32) {
+    // Graph A: the chain edge only. Graph B: (NB, P, ND) -- NB is the chain
+    // endpoint; an inactive padding row nodes[1]=ND walks into this triple's
+    // "present" check but the step is inactive and must not attribute.
+    let ga: [[Field; 3]; 4] = [[NA, P, NB], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let gb: [[Field; 3]; 4] = [[NB, P, ND], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let mut la: [Field; 4] = [0; 4];
+    let mut lb: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        la[i] = h3(ga[i][0], ga[i][1], ga[i][2]);
+        lb[i] = h3(gb[i][0], gb[i][1], gb[i][2]);
+    }
+    let ca = commit_fold(la, 1);
+    let cb = commit_fold(lb, 1);
+    // Canonicalise into ascending-commitment order (step-1b contract).
+    if ca.lt(cb) {
+        ([ga, gb], [1, 1], [ca, cb], 0)
+    } else {
+        ([gb, ga], [1, 1], [cb, ca], 1)
+    }
+}
+
+// ACCEPT: chain NA-P->NB lives in graph A only; graph B's committed triple
+// (NB,P,ND) is not visited by any ACTIVE step, so the true attribution is
+// [A only]. The real circuit accepts; the mutant (missing `active &`) would
+// compute [A,B] and fail the attribution assertion here.
+#[test]
+fn path_accepts_inactive_row_does_not_attribute_graph_b() {
+    let (enc, counts, commitments, idx_a) = path_graph_k2_attr_inactive();
+    let mut attr: [bool; 2] = [false, false];
+    attr[idx_a] = true;
+    // nodes[1] = ND (inactive): cur stays NB; graph B's (NB,P,ND) is not attributed.
+    path_reach_check::<2, 2, 4>(commitments, P, NA, NB, false, 2, attr, 1, [NB, ND], counts, enc);
+}
+
+// REJECT: claiming that graph B (which contributes only via the INACTIVE step)
+// is also a source -- the correct circuit's exact attribution check catches the
+// overstatement. (The mutant would accept [A,B] and pass this through, revealing it.)
+#[test(should_fail_with = "attribution does not match the witnessed chain's source graphs")]
+fn path_rejects_inactive_row_attribution_overstatement() {
+    let (enc, counts, commitments, _idx_a) = path_graph_k2_attr_inactive();
+    // Claim both graphs contributed, but only graph A's chain edge was active.
+    path_reach_check::<2, 2, 4>(
+        commitments, P, NA, NB, false, 2, [true, true], 1, [NB, ND], counts, enc,
+    );
+}
+
+// --- Item 2: padding-advance direction -- forged dst in the LAST padding row --
+//
+// Sibling to `path_rejects_padding_row_extending_the_chain`: the forged destination
+// ND is planted in the LAST (index 2) padding row instead of index 1. The pass-
+// through guard applies to ALL inactive rows regardless of position; the endpoint
+// check must still fail. This shape is exactly the "strongest witness" the escalated
+// reviewer verified manually on the PR head -- now pinned as a permanent test.
+#[test(should_fail_with = "chain does not reach the destination")]
+fn path_rejects_padding_row_forged_dst_in_last_slot() {
+    let (enc, counts, commitments) = path_graph();
+    // l=1 (only NA-P->NB active); nodes=[NB, GARBAGE, ND]: the forged destination
+    // ND is in the last (index 2) padding row. Inactive steps cannot advance cur.
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 1, [NB, GARBAGE, ND], counts, enc,
+    );
+}
