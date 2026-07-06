@@ -370,6 +370,29 @@ mod tests {
         }
     }
 
+    // [OPUS-4.8] sq-3kd2g.6: the bounded-depth path member reads the
+    // string-canonical leaf (committed term encodings), so it is a STRING-LANE
+    // member — legal for `string-canonical` + `dual-leaf`, rejected for the
+    // `value-only` research dial (no lexical handle). It is NEVER a value-lane
+    // member (it binds no `value_component`), so it resolves via the else branch
+    // with no dispatch-matrix change; this pins that classification.
+    #[cfg(feature = "extended-fragment")]
+    #[test]
+    fn path_reach_resolves_as_a_string_lane_member() {
+        let id = CircuitId::PathReach { d: 4, k: 2, n: 16 };
+        assert!(!is_value_lane_member(&id));
+        assert_eq!(
+            resolve_circuit(CommitmentMethod::StringCanonicalV1, &id),
+            Ok(id.clone())
+        );
+        assert_eq!(resolve_circuit(CommitmentMethod::DualLeafV1, &id), Ok(id.clone()));
+        #[cfg(feature = "commitment-value-only")]
+        assert!(matches!(
+            resolve_circuit(CommitmentMethod::ValueOnlyV1, &id),
+            Err(DispatchError::IllegalPair { .. })
+        ));
+    }
+
     #[test]
     fn identity_op_at_value_lane_guard_is_present() {
         // Forward guard for reject-list (v): if a member were ever BOTH a value-lane

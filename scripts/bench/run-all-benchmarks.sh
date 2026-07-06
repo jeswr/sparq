@@ -94,6 +94,7 @@ CATALOG=(
   "incremental-reason|standard|2700|4|inference-incremental|incremental maintenance vs re-materialization (olympics corpus)"
   "solid-wac|standard|2700|2|solid-wac-bench|Solid WAC auth-view materialization + per-query cost"
   "policy-odrl|standard|2700|2|policy-odrl-eval|ODRL policy parse + per-request evaluation latency"
+  "ac-oracle|fast|1800|2|ac-oracle|access-controlled-query oracle (WAC/ACP/ODRL, sparq-acbench), fail-closed self-asserting, no engine link"
   "serve-core|standard|2700|2|serve-core-bench|sparq-serve core example bench"
   "serve-throughput-smoke|standard|2700|2|serve-throughput|canonical loopback HTTP throughput harness, --smoke profile"
   "mcp-roundtrip|standard|2700|2|mcp-dispatch-overhead|MCP dispatch round-trip overhead"
@@ -224,6 +225,11 @@ suite_cmd() {
     incremental-reason) echo 'cargo run -p sparq-reason --example incremental_olympics_bench --release' ;;
     solid-wac) echo 'cargo run -p sparq-solid --example bench --release' ;;
     policy-odrl) echo 'cargo run -p sparq-policy --example bench --release' ;;
+    # bench/ac is a standalone [workspace] (like bench/parse + bench/dict); run.sh builds
+    # + runs the fail-closed ac-bench driver and propagates its non-zero exit on any oracle
+    # mismatch. Links no engine crate, so build-core is not a prerequisite (the driver only
+    # path-depends on the dev-only crate sparq-acbench). See bead sq-i6du2.7.
+    ac-oracle) echo 'bench/ac/run.sh --smoke' ;;
     serve-core) echo 'cargo run -p sparq-serve --example bench --release' ;;
     serve-throughput-smoke) echo 'scripts/serve-throughput-bench.sh --smoke --json "$SUITE_OUT/serve-throughput.json"' ;;
     serve-throughput-full) echo 'scripts/serve-throughput-bench.sh --json "$SUITE_OUT/serve-throughput.json"' ;;

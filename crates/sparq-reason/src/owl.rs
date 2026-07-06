@@ -944,6 +944,13 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let mut out: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     let mut inc: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     build_adjacency(&all, &need, &mut out, &mut inc);
+    // [SONNET-4.6] sq-qonbz.2 — under `substrate-join`, the `out`/`inc` FxHashMap adjacency
+    // probes are replaced by the persistent `DeltaTable`-backed `DeltaAdj`. The FxHashMaps
+    // above are still updated by `commit_serial`/`commit_candidates` (they are maintained but
+    // never read — the probes below go through `adj` instead). `adj` is built here from the
+    // same seed triple set and kept in sync via `extend_one` from `new_delta` after each commit.
+    #[cfg(feature = "substrate-join")]
+    let mut adj = crate::owl_delta_adj::DeltaAdj::build(&all, &need);
     // prp-trp generator edges (linear transitive-closure evaluation — see [`TrpGen`]).
     let mut gen = TrpGen::default();
     gen.rebuild(&all, &ax.transitive);
@@ -1029,14 +1036,32 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
             // --- prp-fp / prp-ifp (delta-driven; see the block comment above) --------
             if ax.functional.contains(&p) {
+                // [SONNET-4.6] sq-qonbz.2: under `substrate-join` probe through DeltaAdj
+                // (persistent build-side table, keyed on [p, s]); default: plain FxHashMap.
+                #[cfg(not(feature = "substrate-join"))]
                 if let Some(ys) = out.get(&p).and_then(|m| m.get(&s)) {
                     cand.extend(ys.iter().filter(|&&y| y != obj).map(|&y| [obj, o.same_as, y]));
                 }
+                #[cfg(feature = "substrate-join")]
+                adj.probe_out(p, s, |y| {
+                    if y != obj {
+                        cand.push([obj, o.same_as, y]);
+                    }
+                });
             }
             if ax.inv_functional.contains(&p) {
+                // [SONNET-4.6] sq-qonbz.2: under `substrate-join` probe through DeltaAdj
+                // (persistent build-side table, keyed on [p, o]); default: plain FxHashMap.
+                #[cfg(not(feature = "substrate-join"))]
                 if let Some(xs) = inc.get(&p).and_then(|m| m.get(&obj)) {
                     cand.extend(xs.iter().filter(|&&x| x != s).map(|&x| [s, o.same_as, x]));
                 }
+                #[cfg(feature = "substrate-join")]
+                adj.probe_inc(p, obj, |x| {
+                    if x != s {
+                        cand.push([s, o.same_as, x]);
+                    }
+                });
             }
             // --- prp-trp, linearized against the generator edges ---------------------
             if ax.transitive.contains(&p) {
@@ -1047,9 +1072,14 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 // backward: full ⋈ Δgen — a new generator edge extends every existing path
                 // ending at its start (incl. same-round delta paths, already in `inc`).
                 if gen.set.contains(&[s, p, obj]) {
+                    // [SONNET-4.6] sq-qonbz.2: probe DeltaAdj backward table under
+                    // `substrate-join`; plain FxHashMap under default.
+                    #[cfg(not(feature = "substrate-join"))]
                     if let Some(ws) = inc.get(&p).and_then(|m| m.get(&s)) {
                         trp.extend(ws.iter().map(|&w| [w, p, obj]));
                     }
+                    #[cfg(feature = "substrate-join")]
+                    adj.probe_inc(p, s, |w| trp.push([w, p, obj]));
                 }
             }
         };
@@ -1482,6 +1512,16 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             m
         };
         t_commit += __t.elapsed().as_secs_f64();
+        // [SONNET-4.6] sq-qonbz.2 — extend DeltaAdj with the newly-committed facts whose
+        // predicate is in `need`. This mirrors the `or_default().push()` updates that
+        // `commit_serial`/`commit_candidates` apply to `out`/`inc` above. Per-round cost is
+        // O(|new_delta|) — the same asymptotic cost as the FxHashMap path.
+        #[cfg(feature = "substrate-join")]
+        for &[s, p, obj] in &new_delta {
+            if need.contains(&p) {
+                adj.extend_one(s, p, obj);
+            }
+        }
         let __t = now();
         if merged {
             // A merge rewrites representatives across `all`; recanonicalize, rebuild the
@@ -1492,6 +1532,11 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             need =
                 ax.transitive.iter().chain(ax.functional.iter()).chain(ax.inv_functional.iter()).copied().collect();
             build_adjacency(&all, &need, &mut out, &mut inc);
+            // [SONNET-4.6] sq-qonbz.2 — rebuild DeltaAdj from the recanonicalised triple set
+            // (mirrors the `build_adjacency` call above; union-find merge rewrites ids, so the
+            // whole index must be rebuilt from scratch — same epoch as the FxHashMap path).
+            #[cfg(feature = "substrate-join")]
+            adj.rebuild(&all, &need);
             gen.rebuild(&all, &ax.transitive);
             schema_stale = true;
             rdfs_idx = RdfsIndex::default();
@@ -1536,6 +1581,10 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                     .copied()
                     .collect();
                 build_adjacency(&all, &need, &mut out, &mut inc);
+                // [SONNET-4.6] sq-qonbz.2 — rebuild DeltaAdj when a new property axiom arrives
+                // (mirrors the `build_adjacency` call above; same epoch as the FxHashMap path).
+                #[cfg(feature = "substrate-join")]
+                adj.rebuild(&all, &need);
                 gen.rebuild(&all, &ax.transitive);
                 cf = ClassFeatureIdx::default();
                 schema_stale = true;

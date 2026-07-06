@@ -1,5 +1,7 @@
 //! [OPUS-4.8] Multi-window continuous queries (sq-9u1).
 //! [SONNET-4.6] sq-2n1q3.3: 3+-window joins and ISTREAM/DSTREAM over multi-window joins.
+//! [SONNET-4.6] sq-2n1q3.5: substrate-join adoption analysis — REASONED NON-ADOPTION
+//! (see the "Substrate join: why it does not apply here" section below).
 //!
 //! [`ContinuousQuery`](crate::ContinuousQuery) is *one stream, one window, one
 //! query*. RSP-QL allows a query to open SEVERAL named windows — possibly over
@@ -53,7 +55,7 @@
 //!
 //! At each tick the FULL join result is computed first; when the `R2S` operator
 //! is `ISTREAM` or `DSTREAM` the diff against the previous tick's full result
-//! is applied (reusing [`crate::query::diff_rows`]). The diff base advances after
+//! is applied (reusing `crate::query::diff_rows`). The diff base advances after
 //! every tick, exactly as in `ContinuousQuery`.
 //!
 //! * **ISTREAM** — each tick emits the rows that APPEARED relative to the
@@ -63,6 +65,52 @@
 //! The `REGISTER ISTREAM <out> AS` / `REGISTER DSTREAM <out> AS` RSP-QL header
 //! form selects the operator; the programmatic `r2s` field is read from the
 //! parsed header.
+//!
+//! ## Substrate join: why it does not apply here (sq-2n1q3.5 analysis)
+//!
+//! [SONNET-4.6] sq-2n1q3.5 investigated whether the cross-window join in
+//! `eval_tick` / `materialize_named` should adopt
+//! `sparq_substrate::join::delta::DeltaTable` (the semi-naive probe kernel), as
+//! `eval.rs` did for its consecutive-window diff in sq-2n1q3.4.
+//!
+//! **Conclusion: reasoned non-adoption.** The substrate kernels are not
+//! applicable to this join surface for the following reasons:
+//!
+//! 1. **The engine already uses the substrate internally.** The cross-window
+//!    join is a general SPARQL `GRAPH <w1> { } GRAPH <w2> { }` pattern;
+//!    `sparq_engine::query_prepared` evaluates it via the engine's own
+//!    bind-join / hash-join paths, which already drive the substrate kernels
+//!    internally. There is no substrate bypass in this path.
+//!
+//! 2. **Different problem shape.** `eval.rs` adopted the substrate to replace
+//!    a per-slide term-level hash-set diff between CONSECUTIVE windows of a
+//!    SINGLE stream (the INSERT/DELETE membership test). That is a triple-level
+//!    set-membership operation with a persistent `DeltaTable` build side. The
+//!    cross-window join here is a full multi-graph SPARQL evaluation: arbitrary
+//!    query shape (filters, aggregates, OPTIONAL, UNION, aggregates), N windows,
+//!    variable bindings flowing across `GRAPH` patterns. No persistent build
+//!    side is applicable — each tick's named-graph assembly is fresh.
+//!
+//! 3. **Key projection is inaccessible without planner integration.** Using the
+//!    substrate for the cross-window join directly would require extracting the
+//!    variable-to-column layout from the prepared query's algebra — information
+//!    that lives in the engine's private `Bindings`/`LocalVocab` layer and
+//!    cannot be computed here without coupling to engine internals. The engine
+//!    seam (`research/shared-eval-substrate.md` §2.3) deliberately keeps that
+//!    projection private.
+//!
+//! 4. **Correct incremental evaluation is a planner change, not a multi.rs
+//!    change.** A genuinely incremental multi-window join (semi-naive evaluation
+//!    at the SPARQL algebra level, only re-evaluating the sub-patterns whose
+//!    window's content changed at this tick) would be a new feature of the query
+//!    planner, not a drop-in replacement in this module. That is a different
+//!    bead and a larger, non-behaviour-neutral scope.
+//!
+//! This non-adoption is therefore correct and sound: `multi.rs` continues to
+//! delegate the cross-window join to `sparq_engine::query_prepared` which
+//! drives the substrate through the engine's planned algebra. The RSP
+//! expressivity / SRBench correctness ratchet (`tests/srbench_oracle.rs`) is
+//! byte-identical before and after this analysis.
 //!
 //! ## Scope (honest)
 //!

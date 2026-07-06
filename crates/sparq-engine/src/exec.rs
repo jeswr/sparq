@@ -2523,13 +2523,18 @@ fn eval_service(
     // service.rs `streaming_equivalence` tests) — but the per-response peak memory is
     // the response body plus the id-level relation the join needs anyway, not a
     // whole-document DOM plus a second term-level copy.
+    //
+    // [OPUS-4.8] (sq-my8wd.5) READER-SEAM: use `eval_remote_into_read` so the HTTP body
+    // is consumed as a STREAM (never buffered as a full `String`). Peak memory now stays
+    // BELOW the response body size (not just O(body)) — the body String is eliminated.
+    // Test transports are wrapped via `TransportAsReader` so all existing tests pass.
     let mut id_rows: Vec<Row> = Vec::new();
     // [OPUS-4.8] (sq-my8wd.4) Savepoint the local vocab + byte budget BEFORE streaming so
     // a SILENT error can roll the partially-interned rows back out — see the SILENT arm.
     let vocab_mark = local.savepoint();
     let byte_mark = budget::byte_savepoint();
-    let fetched = service_transport::with(|t| {
-        sparq_engine_service::service::eval_remote_into(t, &endpoint, &query, &mut |row| {
+    let fetched = service_reader_transport::with(|t| {
+        sparq_engine_service::service::eval_remote_into_read(t, &endpoint, &query, &mut |row| {
             id_rows.push(intern_remote_row(graph, local, &row));
             Ok(())
         })
@@ -2721,8 +2726,10 @@ fn bound_join_to_endpoint(
         // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
         // the remote inner-joins the pushed bindings with its pattern.
         let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
-        let fetched = service_transport::with(|t| {
-            sparq_engine_service::service::eval_remote_into(t, endpoint, &query, &mut |row| {
+        // [OPUS-4.8] (sq-my8wd.5) Use the reader seam here too: the bound-join path
+        // fetches one block per VALUES chunk; each block's body is streamed, not buffered.
+        let fetched = service_reader_transport::with(|t| {
+            sparq_engine_service::service::eval_remote_into_read(t, endpoint, &query, &mut |row| {
                 acc_rows.push(intern_remote_row(graph, local, &row));
                 Ok(())
             })
@@ -2953,33 +2960,42 @@ pub(crate) mod service_transport {
         Guard(ACTIVE.with(|a| a.borrow_mut().replace(t)))
     }
 
-    /// Run `f` with the active transport — the installed test transport if any, else
-    /// the production HTTP client (native-only; on wasm there is no client, which is
-    /// moot because the `service` feature never reaches a wasm build).
-    pub(crate) fn with<R>(f: impl FnOnce(&dyn Transport) -> R) -> R {
-        ACTIVE.with(|a| {
-            let borrow = a.borrow();
-            match borrow.as_ref() {
-                Some(t) => f(t.as_ref()),
-                None => {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        // [OPUS-4.8] (sq-d4p) Bound the remote round-trip by the active
-                        // QueryBudget deadline: a query under a 5s budget must not block
-                        // for the transport's fixed 30s default on an unresponsive
-                        // endpoint. `remaining_timeout()` is `None` when no deadline is
-                        // installed, in which case the transport keeps its own default.
-                        f(&sparq_engine_service::service::HttpTransport::with_budget(
-                            super::budget::remaining_timeout(),
-                        ))
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        // Unreachable in practice (service is gated off wasm); keep the
-                        // module compilable if someone force-enables the feature.
-                        let _ = &f;
-                        unreachable!("SERVICE has no HTTP transport on wasm")
-                    }
+    /// Run `f` with the optional installed test transport (`None` = no override, use
+    /// the production HTTP client). Used by `service_reader_transport` to share the
+    /// same `ACTIVE` cell without re-exposing its private `RefCell`. [OPUS-4.8]
+    pub(crate) fn with_opt<R>(f: impl FnOnce(Option<&dyn Transport>) -> R) -> R {
+        ACTIVE.with(|a| f(a.borrow().as_deref()))
+    }
+}
+
+/// Reader-seam transport dispatcher: analogous to `service_transport` but uses the
+/// `ReaderTransport` seam so the HTTP body is NEVER buffered into a full `String`.
+/// (bead sq-my8wd.5) [OPUS-4.8]
+///
+/// When a test `Transport` is installed via `service_transport::install`, it is
+/// wrapped in `TransportAsReader` so it satisfies `ReaderTransport` — tests continue
+/// to work unchanged. The production path (`None` installed) uses `HttpTransport`
+/// directly as `ReaderTransport`, which streams the body via ureq's `into_reader()`.
+#[cfg(feature = "service")]
+pub(crate) mod service_reader_transport {
+    use sparq_engine_service::service::{ReaderTransport, TransportAsReader};
+
+    /// Run `f` with the active reader transport — wrapping any installed test
+    /// `Transport` as a `ReaderTransport`, or using `HttpTransport` directly.
+    pub(crate) fn with<R>(f: impl FnOnce(&dyn ReaderTransport) -> R) -> R {
+        super::service_transport::with_opt(|opt| match opt {
+            Some(t) => f(&TransportAsReader(t)),
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    f(&sparq_engine_service::service::HttpTransport::with_budget(
+                        super::budget::remaining_timeout(),
+                    ))
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = f;
+                    unreachable!("SERVICE has no HTTP transport on wasm")
                 }
             }
         })

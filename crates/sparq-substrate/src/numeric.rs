@@ -428,6 +428,38 @@ impl Num {
         }
     }
 
+    /// The **relational** numeric comparison used by the SPARQL `<`/`>`/`=` operators
+    /// and by `MIN`/`MAX` — XPath `op:numeric-less-than` / `op:numeric-equal` semantics.
+    ///
+    /// Unlike [`cmp_total`](Self::cmp_total), this comparison is **partial**: `NaN`
+    /// produces `None` (a SPARQL type error), and `+0.0` equals `-0.0`. Same-tier pairs
+    /// (`Int`/`Dec`) compare by exact value via [`Dec::cmp`]; mixed or inexact pairs fall
+    /// back to `f64::partial_cmp` (XPath promotion — a float/double operand promotes the
+    /// pair to `f64`, which is correct for the relational operators but can collapse
+    /// distinct exact values at the 2^53 boundary; that is an accepted consequence of the
+    /// XPath spec, not a bug). Returns `None` when either operand is `NaN`, matching the
+    /// engine's `values_equal`/`value_compare_strict` path (SPARQL type error on NaN).
+    ///
+    /// # When to use `cmp_total` vs `cmp_relational`
+    ///
+    /// - **`ORDER BY`, `MIN`/`MAX` (for the sort tie), `sort_ids`** — use `cmp_total`:
+    ///   NaN must be positioned somewhere to give a total order.
+    /// - **`<`, `>`, `=`, `!=` FILTER expressions and value-space equality**
+    ///   (D-entailment, RIF `pred:numeric-equal`) — use `cmp_relational`: NaN is an error.
+    ///
+    /// [OPUS-4.8] sq-v5evr — the value-space equality/relational-compare hoist.
+    #[inline]
+    pub fn cmp_relational(self, o: Num) -> Option<Ordering> {
+        // Exact tier: both Int/Dec → exact Dec comparison (no f64 promotion).
+        if let (Some(x), Some(y)) = (self.to_dec(), o.to_dec()) {
+            if let Some(ord) = x.cmp(y) {
+                return Some(ord);
+            }
+        }
+        // Mixed or inexact: f64 promotion.  NaN → None (SPARQL type error).
+        self.f64().partial_cmp(&o.f64())
+    }
+
     /// `op` under XPath operand promotion. `None` is a SPARQL type error (exact-type
     /// division by zero); exact-arithmetic overflow falls back to double, mirroring
     /// the engine's previous f64 behaviour.
@@ -1418,5 +1450,56 @@ mod tests {
         assert_eq!(f64_exact_decimal(f64::NAN), None);
         assert_eq!(f64_exact_decimal(f64::INFINITY), None);
         assert_eq!(f64_exact_decimal(f64::NEG_INFINITY), None);
+    }
+
+    // --- Num::cmp_relational — the SPARQL relational (</>/ =) numeric comparison ---
+    // [OPUS-4.8] sq-v5evr: the value-space equality/relational-compare hoist.
+
+    /// Basic ordering: int < dec < float < double ordering by value, and the identity
+    /// `cmp_relational(x, x) == Some(Equal)` for the non-NaN variants.
+    #[test]
+    fn cmp_relational_basic_ordering() {
+        use Ordering::*;
+        // Exact tier: int vs dec
+        assert_eq!(Num::Int(1).cmp_relational(Num::Int(2)), Some(Less));
+        assert_eq!(Num::Int(2).cmp_relational(Num::Int(1)), Some(Greater));
+        assert_eq!(Num::Int(1).cmp_relational(Num::Int(1)), Some(Equal));
+        let dec1 = Num::Dec(Dec { mant: 10, scale: 1 }); // 1.0
+        let dec2 = Num::Dec(Dec { mant: 15, scale: 1 }); // 1.5
+        assert_eq!(dec1.cmp_relational(dec2), Some(Less));
+        assert_eq!(Num::Int(1).cmp_relational(dec1), Some(Equal));
+        // Float / double
+        assert_eq!(Num::Double(1.0).cmp_relational(Num::Double(2.0)), Some(Less));
+        assert_eq!(Num::Float(3.0).cmp_relational(Num::Float(3.0)), Some(Equal));
+    }
+
+    /// NaN operands produce `None` (SPARQL type error) — unlike `cmp_total` which
+    /// totalises NaN first. This pin distinguishes `cmp_relational` from `cmp_total`.
+    #[test]
+    fn cmp_relational_nan_is_type_error() {
+        let nan = Num::Double(f64::NAN);
+        let fnan = Num::Float(f32::NAN);
+        assert_eq!(nan.cmp_relational(Num::Int(0)), None, "NaN vs int is type error");
+        assert_eq!(Num::Int(0).cmp_relational(nan), None, "int vs NaN is type error");
+        assert_eq!(nan.cmp_relational(nan), None, "NaN vs NaN is type error");
+        assert_eq!(fnan.cmp_relational(Num::Double(1.0)), None, "float-NaN is type error");
+    }
+
+    /// The XPath relational compare uses f64 promotion for mixed/inexact pairs — it does
+    /// NOT refine the f64 collapse at 2^53 (unlike `cmp_total`). Two integers that
+    /// collapse to the same f64 compare Equal under relational semantics (XPath spec).
+    #[test]
+    fn cmp_relational_mixed_tier_uses_f64_promotion() {
+        use Ordering::*;
+        // 2^53 and 2^53+1 collapse to the same f64 when compared as int vs double.
+        let int_lo = Num::Int(TWO53);
+        let dbl = Num::Double(TWO53 as f64);
+        // Int vs Int: exact dec path — distinct
+        let int_hi = Num::Dec(Dec { mant: TWO53 as i128 + 1, scale: 0 });
+        assert_eq!(int_lo.cmp_relational(int_hi), Some(Less));
+        // Int vs Double: f64 promotion — the double IS 2^53 exactly, so Equal
+        assert_eq!(int_lo.cmp_relational(dbl), Some(Equal));
+        // ±0.0 are equal (f64 comparison)
+        assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
     }
 }

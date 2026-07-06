@@ -33,31 +33,42 @@
 //! export's expectation. Every such row is pinned BY NAME in
 //! [`gated::DOCUMENTED_DIVERGENCES`] with an audited mechanism (exact SET equality: an
 //! unpinned new fail AND a stale entry that stops failing both go RED). The mechanisms
-//! are NOT laundered as acceptable: **M1 and M4 are genuine fidelity gaps in the merged
-//! L1 extractor that this conformance arm DISCOVERED** (they contradict L1's own
-//! "understood in full or refused" contract), captured as follow-up work in the PR's
-//! bead list; when the fixes land these entries stop failing and the pin forces a
-//! deliberate re-audit. The mechanisms:
+//! are NOT laundered as acceptable: M4 was a genuine fidelity gap in the merged L1
+//! extractor that this conformance arm DISCOVERED; it was FIXED by sq-pbz04.4.12 (see
+//! M4 below) and the 4 entries removed from the divergence pin as promised. M1 was
+//! FIXED by sq-pbz04.4.11, and M2 (conclusion-bnode existential reading) by sq-pbz04.4.13
+//! — its 2 entries removed (they now PASS). The mechanisms:
 //!
-//! - **M1 — named-composite inlining loses the name↔expression binding.** L1 inlines a
-//!   NAMED class carrying an inline definition (`:A owl:unionOf (…)` /
-//!   `owl:intersectionOf` / a restriction backbone) at each occurrence and emits NO
-//!   `EquivalentClasses(A, expr)` axiom, so a conclusion that mentions the NAME is
-//!   underivable — the approved corpus expectation (e.g. `c owl:intersectionOf (x y)` ⊨
-//!   `c ⊑ x`) proves the "inlining is model-preserving" claim wrong for entailment.
-//! - **M2 — anonymous individuals in a conclusion read as constants.** The official
-//!   expectation reads conclusion bnodes EXISTENTIALLY; the L1 model treats them as
-//!   (skolem) constants, so the refutation is satisfiable and the checker certifies a
-//!   `NotEntailed` that is wrong under the existential reading.
+//! - **M1 — FIXED (sq-pbz04.4.11).** Named-composite inlining previously lost the
+//!   name↔expression binding; `extract()` now emits `EquivalentClasses(A, expr)` for
+//!   every NAMED class carrying an inline backbone definition, and the 12 corpus cases
+//!   that required this binding now PASS.
+//! - **M2 — FIXED (sq-pbz04.4.13).** A blank-node individual in the CONCLUSION is now read
+//!   EXISTENTIALLY: a tree-shaped anonymous assertion set rolls up into an existential class
+//!   assertion the ALCH tableau decides SOUNDLY, so `somevaluesfrom2bnode` and
+//!   `WebOnt-someValuesFrom-003` now PASS (removed from the divergence pin). Any non-rollable
+//!   conclusion bnode (shared / cyclic / nominal / free-existential-root) abstains fail-closed
+//!   (`UnknownReason::ConclusionAnonymousIndividual`), NEVER the old wrong skolem-constant
+//!   `NotEntailed` — e.g. `WebOnt-AnnotationProperty-002` (whose `ap` edge is an annotation, so
+//!   its conclusion `_:x owl:Thing` is an unanchored free-existential root) shifts from a
+//!   coincidental skolem pass to an honest abstention. [OPUS-4.8]
 //! - **M3 — reserved vocabulary treated as plain names.** OWL-Full-shaped axioms over
 //!   reserved IRIs (`rdfs:Class ≡ owl:Class`, `owl:imports` domain/range, `rdf:type`
 //!   domain) extract as ordinary names; the legacy dual-tagged expectation assumes the
 //!   reserved semantics.
-//! - **M4 — orphan/cyclic list or class-expression structure treated as inert.** Bare
-//!   `rdf:first`/`rdf:rest` cells (even on `rdf:nil`, even cyclic) and unconsumed
-//!   class-expression backbones extract to an EMPTY/lossy ontology instead of a
-//!   refusal — yielding a wrong `Consistent` (I5.5 inconsistency cases) or a trivial
-//!   `Entailed` of an emptied non-conclusion.
+//! - **M4 — FIXED (sq-pbz04.4.12).** Orphan/cyclic `rdf:first`/`rdf:rest` cells (including
+//!   `rdf:nil rdf:rest _:b`, cyclic lists) and unconsumed anonymous class-expression
+//!   backbones now correctly refuse extraction (`MalformedList` /
+//!   `MalformedClassExpression`), yielding an `OutOfFragment` abstention instead of a wrong
+//!   `Consistent` verdict (I5.5-003/004) or a trivially-entailed empty non-conclusion
+//!   (I5.5-006/007). The load-bearing part of the fix (the escalated-review REFUTATION of
+//!   the first attempt): the orphan-reachability seed must NOT count an ignorable declaration
+//!   typing (`_:list a rdf:List`, `_:x a owl:Class`) as a consumer — that bypass wrongly
+//!   rescued the very cyclic/orphan cells the check exists to catch. Beyond I5.5-006/-007,
+//!   closing it also correctly refuses three graphs that carry an anonymous composite
+//!   appearing in NO axiom and had been passing only by that accident (I5.26-001, I5.26-006
+//!   consistency; I5.5-005 positive-entailment) — all honest fail-closed abstentions, never
+//!   wrong verdicts. [OPUS-4.8]
 //! - **M5 — ontology-header stripping vs a header-sensitive legacy expectation.** The
 //!   harness strips `owl:Ontology` typings on both sides (the RL/EL-lane convention);
 //!   WebOnt-Ontology-003's OWL-1-era non-entailment hinges on the stripped header.
@@ -67,7 +78,9 @@
 //!   L2 requires `ObjectIntersectionOf` arity ≥ 2 (the structural-spec arity); the
 //!   official tagging accepts the RDF singleton-intersection encoding (normalizing it
 //!   to its sole member), so positively-tagged cases carrying `owl:intersectionOf (x)`
-//!   come back `NotIn`.
+//!   come back `NotIn`. (WebOnt-I5.26-001 left this pin under sq-pbz04.4.12: its input's
+//!   anonymous singleton intersection appears in no axiom, so the M4 fix now ABSTAINS on it
+//!   rather than reaching the arity rule.)
 //!
 //! ## Feature gating (both states)
 //!
@@ -109,90 +122,66 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the scoped
     /// fragment — NOT full OWL 2 DL.
     ///
-    /// COMPOSITION: 111 consistency + 14 inconsistency + 57 positive-entailment +
-    /// 2 negative-entailment. [FABLE-5] sq-pbz04.4.5
-    pub const DL_DIRECT_FLOOR: usize = 184;
+    /// COMPOSITION: 105 consistency + 14 inconsistency + 69 positive-entailment +
+    /// 2 negative-entailment = 190. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12/.13
+    /// Re-pinned by sq-pbz04.4.11 (M1 named-composite fix): +8 net.
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): −3 (192 → 189) — three graphs with
+    /// an unconsumed anonymous composite (`WebOnt-I5.26-001`/`-006` consistency; `WebOnt-I5.5-005`
+    /// positive-entailment) now honestly abstain, plus the two M4 negative-entailment rows.
+    /// Re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode existential-reading fix): +1 (189 → 190).
+    /// Both M2 positive-entailment cases `somevaluesfrom2bnode` and `WebOnt-someValuesFrom-003`
+    /// now roll their tree-shaped conclusion bnodes into existential class assertions the
+    /// tableau certifies (68 → 70 positive-entailment passes); one previously-passing case,
+    /// `WebOnt-AnnotationProperty-002`, correctly shifts Pass → abstain because its conclusion
+    /// bnode is a FREE-EXISTENTIAL ROOT (`_:x owl:Thing` with the anchoring edge being an
+    /// annotation, so it is unanchored / non-rollable — its old skolem pass was coincidental
+    /// and unsound for a non-trivial class). Net positive-entailment +1 (70 − 1 = 69), all
+    /// four consistency/inconsistency lanes unchanged. [OPUS-4.8] sq-pbz04.4.13
+    pub const DL_DIRECT_FLOOR: usize = 190;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
     /// EXACT-pinned so the tri-state accounting is closed: profile lane, then the four
     /// reasoning lanes summed. [FABLE-5] sq-pbz04.4.5
-    pub const DL_PROFILE_ABSTAINED: usize = 114;
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): +3 (114 → 117). Closing the
+    /// declaration-typing reachability bypass makes the profile lane's extraction refuse the
+    /// three `WebOnt-I5.26-001` profile rows (EL/QL/RL): the input carries an anonymous
+    /// `owl:intersectionOf` that appears in no axiom, so extraction now fails → the profile
+    /// set is `Unknown` → abstain (previously it extracted and answered a wrong `NotIn`, the
+    /// M7 singleton-intersection divergence — now superseded by the honest abstention).
+    /// [OPUS-4.8] sq-pbz04.4.12
+    pub const DL_PROFILE_ABSTAINED: usize = 117;
     /// See [`DL_PROFILE_ABSTAINED`].
-    pub const DL_DIRECT_ABSTAINED: usize = 452;
+    /// Re-pinned by sq-pbz04.4.11: +4 from the 4 consistency cases that shifted from
+    /// Pass to OutOfFragment (budget exhaustion on the now-more-complete model).
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): MEASURED 463 against the pinned
+    /// export. Closing the declaration-typing reachability bypass moves the 2 M4
+    /// negative-entailment rows (I5.5-006/-007) from Fail (wrong definitive verdict) to
+    /// OutOfFragment (fail-closed refusal), and additionally REFUSES 3 previously-passing
+    /// rows that carried an unconsumed anonymous composite the declaration typing had been
+    /// rescuing (I5.26-001, I5.26-006 consistency; I5.5-005 positive-entailment) — all
+    /// honest abstentions, never wrong verdicts. [OPUS-4.8] sq-pbz04.4.12
+    /// Re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode fix): +1 (463 → 464). The
+    /// free-existential-root conclusion bnode of `WebOnt-AnnotationProperty-002` shifts from a
+    /// (coincidental) Pass to a fail-closed `ConclusionAnonymousIndividual` abstention; the two
+    /// graduated M2 cases move Fail → Pass (they never counted as abstentions). [OPUS-4.8]
+    pub const DL_DIRECT_ABSTAINED: usize = 464;
 
-    /// Audited, PINNED divergence rows (module docs — mechanisms M1–M7): every row
+    /// Audited, PINNED divergence rows (module docs — mechanisms M3/M5/M6): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
     /// runner's row key. EXACT set equality is asserted: an UNPINNED new fail and a
     /// STALE entry that stops failing both turn the lane RED (the el-suite /
-    /// ql_entailment_floor discipline). M1/M4 rows are DISCOVERED L1 fidelity gaps
-    /// held open by follow-up beads — never acceptable-by-design, never passes.
-    /// [FABLE-5] sq-pbz04.4.5
+    /// ql_entailment_floor discipline). M4 was FIXED by sq-pbz04.4.12 and removed from
+    /// this list — those 4 cases now ABSTAIN (OutOfFragment refusal) rather than producing
+    /// wrong definitive verdicts. M1 (named-composite name-binding) was FIXED by
+    /// sq-pbz04.4.11; M2 (conclusion-bnode existential reading) was FIXED by sq-pbz04.4.13 and
+    /// its two cases removed — they now PASS. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.13
     const DOCUMENTED_DIVERGENCES: &[(&str, &str)] = &[
-        // --- M1: named-composite inlining loses the name↔expression binding (L1 gap) ---
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-intersection-inst-comp",
-            "M1 — premise defines NAMED c by owl:intersectionOf; inlining drops \
-             EquivalentClasses(c, x⊓y), so c(z) is underivable",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-intersection-term",
-            "M1 — `c owl:intersectionOf (x y)` ⊨ c ⊑ x ∧ c ⊑ y needs the name binding \
-             the inlining drops",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-union-inst-comp",
-            "M1 — the union dual of rdfbased-sem-bool-intersection-inst-comp",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-union-term",
-            "M1 — the union dual of rdfbased-sem-bool-intersection-term",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-allvalues-cmp-class",
-            "M1 — NAMED x1/x2 defined by ∀p.c restriction backbones; c1 ⊑ c2 ⊨ x1 ⊑ x2 \
-             needs both name bindings",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-allvalues-cmp-prop",
-            "M1 — as rdfbased-sem-restrict-allvalues-cmp-class with the property compared",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-somevalues-cmp-class",
-            "M1 — the ∃ dual of rdfbased-sem-restrict-allvalues-cmp-class",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-somevalues-cmp-prop",
-            "M1 — the ∃ dual of rdfbased-sem-restrict-allvalues-cmp-prop",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-somevalues-inst-subj",
-            "M1 — NAMED z defined by an ∃p.c backbone; p(w,x) ∧ c(x) ⊨ z(w) needs the \
-             name binding",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-unionOf-001",
-            "M1 — `A owl:unionOf (Human Animal)` ∧ Human(John) ⊨ A(John) needs \
-             EquivalentClasses(A, Human⊔Animal)",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-unionOf-002",
-            "M1 — as WebOnt-unionOf-001 with the subclass direction (B ⊒ union member)",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-intersectionOf-001",
-            "M1 — the intersection sibling of WebOnt-unionOf-001",
-        ),
-        // --- M2: anonymous individuals in the conclusion read as constants (L4 gap) ---
-        (
-            "owl2-dl/positive-entailment: somevaluesfrom2bnode",
-            "M2 — conclusion `a p _:x` is the existential the premise's ∃p.⊤ typing \
-             grants; as a constant the refutation stays satisfiable",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-someValuesFrom-003",
-            "M2 — conclusion is an anonymous parent-chain (person ≡ ∃parent.person); \
-             bnode individuals as constants block the existential reading",
-        ),
+        // M2 (anonymous individuals in the conclusion read as constants) FIXED by
+        // sq-pbz04.4.13 — `somevaluesfrom2bnode` / `WebOnt-someValuesFrom-003` now roll their
+        // tree-shaped conclusion bnodes into existential class assertions and PASS; a
+        // non-rollable conclusion bnode (e.g. WebOnt-AnnotationProperty-002's
+        // free-existential root) abstains fail-closed, never a wrong verdict. [OPUS-4.8]
+        //
         // --- M3: reserved vocabulary treated as plain names ---
         (
             "owl2-dl/positive-entailment: WebOnt-Class-001",
@@ -208,26 +197,10 @@ mod gated {
             "M3 — premise gives rdf:type an rdfs:domain (reserved vocabulary); the \
              expected subclass conclusion needs that OWL-Full reading",
         ),
-        // --- M4: orphan/cyclic list structure treated as inert (L1 gap) ---
-        (
-            "owl2-dl/inconsistency: WebOnt-I5.5-003",
-            "M4 — `rdf:nil rdf:rest _:b` is an ill-formed-list inconsistency; L1 treats \
-             the bare cell as inert and extracts an empty (consistent) ontology",
-        ),
-        (
-            "owl2-dl/inconsistency: WebOnt-I5.5-004",
-            "M4 — as WebOnt-I5.5-003 with `rdf:nil rdf:first _:b`",
-        ),
-        (
-            "owl2-dl/negative-entailment: WebOnt-I5.5-006",
-            "M4 — the non-conclusion's cyclic orphan list extracts to an EMPTY ontology, \
-             which is trivially (wrongly) entailed",
-        ),
-        (
-            "owl2-dl/negative-entailment: WebOnt-I5.5-007",
-            "M4 — the non-conclusion's cyclic union backbone is never consumed by an \
-             axiom, extracting to an EMPTY ontology (trivially entailed)",
-        ),
+        // M4 (orphan/cyclic list and unconsumed backbone) FIXED by sq-pbz04.4.12 —
+        // WebOnt-I5.5-003/-004/-006/-007 now correctly ABSTAIN (OutOfFragment refusal)
+        // instead of producing wrong Consistent / Entailed verdicts. [OPUS-4.8]
+        //
         // --- M5: header-stripping vs a header-sensitive legacy expectation ---
         (
             "owl2-dl/negative-entailment: WebOnt-Ontology-003",
@@ -250,9 +223,10 @@ mod gated {
     /// one-member list — which the export tags in-EL/QL/RL but L2's structural-spec
     /// arity rule (≥ 2 members) rejects. [FABLE-5] sq-pbz04.4.5
     const PROFILE_DIVERGENCES: &[(&str, &str)] = &[
-        ("owl2-dl/profile-EL: WebOnt-I5.26-001", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-I5.26-001", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-I5.26-001", "M7 — singleton owl:intersectionOf operand list"),
+        // WebOnt-I5.26-001 (EL/QL/RL) REMOVED by sq-pbz04.4.12: its input carries an anonymous
+        // `owl:intersectionOf` that appears in no axiom, so the M4 orphan fix now makes
+        // extraction refuse it → the profile set is `Unknown` → the row ABSTAINS rather than
+        // producing the wrong `NotIn` (the M7 singleton divergence no longer applies). [OPUS-4.8]
         ("owl2-dl/profile-EL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
         ("owl2-dl/profile-QL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
         ("owl2-dl/profile-RL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
