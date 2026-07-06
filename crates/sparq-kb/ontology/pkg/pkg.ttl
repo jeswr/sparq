@@ -34,6 +34,12 @@
 # consistent with `trust:` (https://sparq.dev/ns/trust#) and `zk:`
 # (https://sparq.dev/ns/zk#). It is NOT minted/resolvable today; a future
 # standardisation pass would rehome the net-new terms.
+#
+# FO CHOICE RATIFIED (sq-mztg8.5, 2026-07-06): schema.org-as-top is the PKG's top
+# foundational ontology, ratified after Fable-subject Metric-1 re-run (PR #1603).
+# No data changes required. Verdict record: research/provenance-driven-genai-kb.md §6
+# item 5. Revisit trigger: if the fleet's KM-query tier moves predominantly to
+# Fable-class models, re-run bench/fo-km Metric-1 before reopening.
 
 @prefix pkg:     <https://sparq.dev/ns/pkg#> .
 @prefix prov:    <http://www.w3.org/ns/prov#> .
