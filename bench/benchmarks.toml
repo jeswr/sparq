@@ -612,6 +612,29 @@ records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-i6du2.7 (epic sq-i6du2, #1613) — the access-controlled-query benchmark
+# harness. The standalone `ac-bench` driver (bench/ac, its own [workspace] like bench/parse
+# + bench/dict) runs the sparq-acbench (#1627) by-construction WAC/ACP/ODRL oracle over the
+# present use-case generators. Links NO engine crate: the oracle is structurally independent
+# of the system under test, so this suite is CORRECTNESS (a fail-closed pass/fail), not perf.
+[[benchmark]]
+id          = "ac-oracle"
+name        = "Access-controlled-query benchmark oracle (WAC/ACP/ODRL, sparq-acbench)"
+category    = "inference"
+measures    = "W1 decision / W2 result-set / W3 ACL-write-churn agreement between each generator's by-construction expected output and the shared procedural oracle (fail-closed pass/fail per lane); NOT a perf claim — the driver's indicative per-lane wall-clock is advisory + non-canonical"
+invoke      = "bench/ac/run.sh --smoke   # per-commit smoke tier; bench/ac/run.sh --sf N for a nightly tier"
+source      = "bench/ac/{run.sh,Cargo.toml,Cargo.lock,src/main.rs}; crates/sparq-acbench (generators + workload/oracle engine)"
+dataset     = "parameterised, seeded, deterministic in-crate generators (personal/project_mgmt/consortium; financial=U3 pending sq-i6du2.4, Skipped-with-reason). No external corpus, no network"
+quiet_box_sensitive = false  # deterministic oracle pass/fail, load-robust; the wall-clock lines are advisory-only and never committed
+pinning     = "GenParams::smoke() (fixed seed 42) for --smoke; --sf N is deterministic. No wall-clock affects the pass/fail verdict"
+records_to  = "stdout (per-suite TSV table + pass/fail/skip summary); exit non-zero on any oracle mismatch. No number committed to markdown"
+# [OPUS-4.8] sq-i6du2.7: internal fail-closed oracle harness for the opt-in AC-query benchmark
+# program, not a head-to-head competitor card — featured = false is a dashboard DISPOSITION (no
+# perf claim). The W2-live query_as + W4 query concurrency sub-lanes are the engine-linked driver
+# sq-kvvcl (Skipped-with-reason here). Dashboard promotion, if ever, deferred to a maintainer.
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
 [[benchmark]]
 id          = "policy-odrl-eval"
