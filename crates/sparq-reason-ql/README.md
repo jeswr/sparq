@@ -62,7 +62,7 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
   then **UCQ-containment minimisation** (redundant disjuncts dropped by the homomorphism
   containment test). Returns the **same certain answers** as `rewrite` in a **smaller UCQ**.
 - **Broadened sound fragment** — **(B1)** top-level UCQ; **(B2)** literal-object role atoms;
-  **(B3)** `FILTER` / **(B4)** constant-only `VALUES` over distinguished-only vars (pass-through);
+  **(B3)** `FILTER` / **(B4)** constant-only `VALUES` over distinguished-only vars (pass-through, applied **per-branch** in a multi-branch UCQ so a branch's filter never leaks — sq-sg542);
   **(B5)** non-recursive property paths (`/` `^` `|`) desugared to a CQ/UCQ before rewriting —
   fresh non-distinguished sequence intermediate (shared → a JOIN), inverse swap, alternation →
   UCQ branches [sq-pbz04.3.2]; **(Bbnode)** body blank nodes → fresh existential vars [sq-pbz04.3.6].

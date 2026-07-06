@@ -553,16 +553,19 @@ mod gated {
     }
 
     #[test]
-    fn alternation_with_filter_rejected_fail_closed() {
-        // A path alternation combined with a FILTER produces a multi-branch UCQ carrying a
-        // per-branch modifier; the existing (lib.rs) emitter guard rejects it fail-closed — the
-        // branch-aware emitter is genuinely deferred (NOT in this bead's scope). Honest boundary.
+    fn alternation_with_filter_now_answered() {
+        // A path alternation combined with a FILTER produces a multi-branch UCQ whose branches EACH
+        // carry the FILTER the #1671 DNF pass distributed into them. The branch-aware emitter
+        // (sq-sg542) now ANSWERS it — each branch emits the FILTER over ITS OWN sub-union (formerly
+        // rejected fail-closed here). Acceptance + structure are pinned here; the full
+        // result-equivalence oracle (with a FILTER-capable evaluator) is in
+        // tests/branch_aware_emit.rs. [OPUS-4.8] sq-sg542
         let query = q(&format!("{PRE} SELECT ?x WHERE {{ ?x :p1|:p2 ?y FILTER(?x != :Bad) }}"));
-        let err = rewrite(&query, &fixture_tbox()).unwrap_err();
+        let r = rewrite(&query, &fixture_tbox()).expect("alternation + FILTER must now rewrite");
         assert!(
-            matches!(err, CqError::OutOfScope(ref r) if r.contains("multi-branch") && r.contains("FILTER")),
-            "alternation + FILTER must be rejected fail-closed; got {:?}",
-            err
+            r.query.to_string().to_uppercase().contains("FILTER"),
+            "the distributed FILTER must appear in the rewritten UCQ; got: {}",
+            r.query
         );
     }
 

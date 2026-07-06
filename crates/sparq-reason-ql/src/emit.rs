@@ -209,6 +209,43 @@ pub fn ucq_to_pattern(mut ucq: Vec<Cq>, cq: &ConjunctiveQuery) -> GraphPattern {
     apply_filter_exprs(with_values, &cq.filter_exprs)
 }
 
+/// BRANCH-AWARE fold for a multi-branch UCQ where the branches carry PER-BRANCH modifiers
+/// (FILTER/VALUES) — the general case sq-sg542 closes. Each `(disjuncts, cq)` pair is folded by
+/// [`ucq_to_pattern`] into that branch's OWN sub-body (the union of its PerfectRef disjuncts,
+/// wrapped in ONLY that branch's `filter_exprs` / `values_blocks`), and the branch sub-bodies are
+/// then combined by a top-level left-deep `Union` in SOURCE-BRANCH ORDER (deterministic).
+///
+/// SOUNDNESS — per-branch modifier isolation. Because each branch's FILTER/VALUES wraps only that
+/// branch's sub-union, a FILTER owned by branch *i* constrains branch *i* alone and can NEVER leak
+/// onto branch *j ≠ i* (nor is a branch's modifier ever silently dropped — the old single-passthrough
+/// emitter bug this bead fixes). FILTER and the VALUES-join both distribute over union, so wrapping
+/// the sub-union is equivalent to wrapping each disjunct; and certain answers distribute over union
+/// in DL-Lite_R (B1), so the union of the per-branch answer sets is exactly the UCQ's certain-answer
+/// set. The distinguished-only discipline (B3/B4), checked per branch by the gate, guarantees every
+/// modifier reads only projected variables bound in every disjunct of its branch. [OPUS-4.8] sq-sg542
+pub fn ucq_to_pattern_per_branch(branches: Vec<(Vec<Cq>, &ConjunctiveQuery)>) -> GraphPattern {
+    let mut branch_bodies: Vec<GraphPattern> = branches
+        .into_iter()
+        .map(|(disjuncts, cq)| ucq_to_pattern(disjuncts, cq))
+        .collect();
+    match branch_bodies.len() {
+        0 => GraphPattern::Bgp { patterns: vec![] },
+        1 => branch_bodies.pop().unwrap(),
+        _ => {
+            // Left-deep Union fold over the branch sub-bodies (source-branch order preserved).
+            let mut iter = branch_bodies.into_iter();
+            let mut acc = iter.next().unwrap();
+            for next in iter {
+                acc = GraphPattern::Union {
+                    left: Box::new(acc),
+                    right: Box::new(next),
+                };
+            }
+            acc
+        }
+    }
+}
+
 /// Wrap `body` in `Join { body, Values { variables, bindings } }` for each VALUES block.
 /// SPARQL VALUES as a join pattern is the standard way to inject constant bindings. [SONNET-4.6]
 fn apply_values_blocks(body: GraphPattern, blocks: &[ValuesBlock]) -> GraphPattern {
