@@ -268,6 +268,22 @@ Materialize the authorization view from the access-control documents, then enfor
   constraints falls back **entirely** to one-shot (fail-safe — never drops a bound). A
   dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). Mapping
   table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
+- `odrl_bridge::materialize_policy_n3(&mut Graph, &Policy, &N3Request) -> Result<BridgeOutcome, String>`
+  — **opt-in** (`odrl-bridge`; [FABLE-5] sq-zgbso.2, epic sq-zgbso/#1582): evaluate the
+  **stateless ODRL core as N3 rule strata** (`rules/odrl-core-{a,b,c,d}.n3`, the WAC/ACP
+  runtime `reason_n3` pattern) and materialize the SAME auth-view triples the Rust bridge
+  writes. **The Rust path (`materialize_policy`) remains the default evaluator** — this
+  entry exists to prove decision parity (CI-locked full-corpus differential
+  `tests/odrl_n3_differential.rs`; flipping any default is a maintainer decision, and the
+  build-time-compiled flip is sq-zgbso.4/.5). `odrl:dateTime` compares by **instant**
+  (offset-aware `time:inSeconds` normalization) with the accepted lexical space fail-closed
+  to second-precision forms; anything outside the stateless subset — numeric operands
+  (stateful `odrl:count` stays Rust), nested compound constraints, order operators on
+  non-dateTime dimensions — is a loud `Err` that materializes nothing. `N3Request` is the
+  evidence-restricted request type (action/target/party, `at` time, IRI/string context
+  evidence, discharged duties; **no** collection-membership/subsumption evidence by
+  construction — use the Rust path for taxonomy evidence); `N3Request::to_request()`
+  yields the equivalent `sparq_policy::Request` for the Rust leg.
 - `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when
   the policy changes and **retract** the ones that no longer hold (a withdrawn permission, a
