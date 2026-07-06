@@ -61,15 +61,15 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
   with bounded **tree-witness** folding (existential witnesses captured with no unbounded chase),
   then **UCQ-containment minimisation** (redundant disjuncts dropped by the homomorphism
   containment test). Returns the **same certain answers** as `rewrite` in a **smaller UCQ**.
-- **Broadened sound fragment** *(sq-pbz04.3.1)* — **(B1)** top-level UCQ accepted (each branch
-  rewrites independently); **(B2)** literal-object role atoms accepted (rigid, never `_`-eligible);
-  **(B3)** `FILTER` over distinguished-only variables passed through (fail-closed otherwise);
-  **(B4)** constant-only `VALUES` over distinguished variables passed through (fail-closed otherwise).
-- **Intensional-atom guard (B6)** *(always present)* — `rdfs:subClassOf/subPropertyOf/domain/range`
-  and all `owl:` predicates as atom predicates are **rejected**; annotation predicates
-  (`rdfs:label/comment/seeAlso/isDefinedBy`) are admitted as role atoms.
+- **Broadened sound fragment** — **(B1)** top-level UCQ; **(B2)** literal-object role atoms (rigid);
+  **(B3)** `FILTER` over distinguished-only vars (pass-through); **(B4)** constant-only `VALUES`
+  (pass-through); **(Bbnode)** body blank nodes lifted to fresh existential variables — distinct
+  labels get distinct ids, shared labels get the same id so the applicability condition fires
+  correctly. [sq-pbz04.3.1/sq-pbz04.3.6]
+- **Intensional-atom guard (B6, always present)** — schema vocab predicates (`rdfs:subClassOf/
+  subPropertyOf/domain/range`, all `owl:`) are **rejected**; annotation predicates admitted.
 - **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`MINUS`/paths/aggregation/
-  variable-predicate queries are **rejected** as `OutOfScope`, not mis-answered.
+  variable-predicate queries **rejected** as `OutOfScope`, never mis-answered.
 - **Query-rewriter seam** — emits a `Union`-folded UCQ as a `spargebra::Query`, run unchanged by
   the engine; no store or planner changes.
 - **Honest fragment reporting** — TBox axioms outside DL-Lite_R are counted in

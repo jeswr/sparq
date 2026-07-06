@@ -453,6 +453,11 @@ fn collect_conjunction(
 /// data only and would silently under-answer a schema-vocabulary query without this guard.
 /// Annotation predicates (rdfs:label/comment/seeAlso/isDefinedBy) are admitted as plain role
 /// atoms (no QL TBox axiom changes their extension). [SONNET-4.6] sq-pbz04.3.1
+///
+/// Body blank-node lifting (sq-pbz04.3.6): blank nodes in subject/object positions are now
+/// ADMITTED — they are non-distinguished existentials and are lifted to fresh `Unbound` ids by
+/// the emitter (`emit::cq_to_atoms`). The gate does not reject them; the emitter handles the
+/// mapping with the correct freshness/sharing semantics. [SONNET-4.6] sq-pbz04.3.6
 fn check_atom_shape(tp: &TriplePattern) -> Result<(), CqError> {
     use spargebra::term::NamedNodePattern;
     match &tp.predicate {

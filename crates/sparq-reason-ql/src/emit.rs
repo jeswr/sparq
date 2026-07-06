@@ -4,6 +4,19 @@
 // maps `Term::Lit` back to `TermPattern::Literal`. Filter (B3) and VALUES (B4)
 // pass-through: the rewritten UCQ body is wrapped in the original FILTER / VALUES so SPARQL
 // evaluation semantics apply post-rewrite.
+// [SONNET-4.6] sq-pbz04.3.6: body blank-node → fresh existential variable lifting. A blank
+// node in a SPARQL query body (e.g. `_:b rdf:type :Person`) is a non-distinguished existential:
+// it is scoped to the query, never an answer variable, and equivalent to a fresh non-shared
+// non-distinguished variable. The correct mapping is `Term::Unbound(id)` — exactly the symbol
+// PerfectRef's applicability condition governs. Each distinct blank-node LABEL within a CQ
+// maps to one fresh id (a shared label → same id → `is_bound_var` sees sharing); different
+// blank-node labels get different ids so they remain independent existentials. The freshness
+// invariant is preserved by `seed_fresh` in perfectref.rs: it seeds the global counter above
+// any `Unbound` id present in the input atoms, so blank-node ids never collide with the ids
+// PerfectRef introduces during saturation. FAIL-CLOSED: blank nodes in a DISTINGUISHED
+// (answer/projected) position are impossible in standard SPARQL (SELECT only projects named
+// variables); the class-atom object guard (`rdf:type _:b` is not a named class) provides
+// defence in depth. [OPUS-4.8] marker per shared contract.
 //
 // The seam is the same one sparq-vectors proves: produce a rewritten `spargebra::Query` so the
 // engine — planner, executor — runs the UCQ unchanged (no store/planner changes). A UCQ folds
@@ -18,21 +31,35 @@ use crate::cq::{ConjunctiveQuery, CqError, ValuesBlock};
 use crate::dllite::rdf_type_iri;
 use crate::perfectref::{Atom, Cq, Term};
 use crate::dllite::Role;
+use rustc_hash::FxHashMap;
 use spargebra::algebra::GraphPattern;
 use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
 /// Map the gated CQ's triple patterns to internal atoms + the answer-variable names. Returns the
 /// (atoms, answer) pair PerfectRef consumes. Errors (OutOfScope) if a triple pattern is not a
 /// DL-Lite atom in a way the CQ-shape gate did not already reject (defence in depth: e.g. a
-/// blank-node subject/object, or a quoted triple).
+/// quoted triple or a blank node in a class-name position).
 ///
 /// B2: literals in role-atom object positions are now accepted (mapped to `Term::Lit`).
 /// Soundness: a literal constant is never an unbound position, so no existential inclusion is
 /// applicable — the applicability condition is untouched. Role inclusions carry the literal
 /// constant unchanged. [SONNET-4.6] sq-pbz04.3.1
+///
+/// Body blank-node → fresh existential variable (sq-pbz04.3.6): a blank node in a SPARQL
+/// query body (`_:b rdf:type :Person`) is a non-distinguished existential. Each distinct
+/// blank-node label maps to one `Term::Unbound(id)`, with the SAME label → SAME id within this
+/// CQ (so sharing is detected correctly by `is_bound_var`). The freshness invariant is: ids
+/// assigned here start at 0 and `seed_fresh` in perfectref.rs scans the input atoms and seeds
+/// its `Fresh` counter strictly above the max id present — so no collision between blank-node
+/// ids and the ids PerfectRef introduces during saturation. [SONNET-4.6] sq-pbz04.3.6
 pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), CqError> {
     let rdf_type = rdf_type_iri();
     let mut atoms = Vec::with_capacity(cq.atoms.len());
+    // Blank-node label → Unbound id map. Shared labels → same id → `is_bound_var` detects
+    // sharing and correctly treats the shared position as bound (so the existential-introducing
+    // inclusions' applicability condition is evaluated correctly). [SONNET-4.6] sq-pbz04.3.6
+    let mut bnode_ids: FxHashMap<String, u32> = FxHashMap::default();
+    let mut next_bnode_id: u32 = 0;
     for tp in &cq.atoms {
         let pred = match &tp.predicate {
             NamedNodePattern::NamedNode(n) => n.clone(),
@@ -45,9 +72,23 @@ pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), Cq
         };
         if pred == rdf_type {
             // Class atom: subject is the arg, object must be a NAMED class.
-            let arg = term_pattern_to_term(&tp.subject)?;
+            let arg = term_pattern_to_term_with_bnode(
+                &tp.subject,
+                &mut bnode_ids,
+                &mut next_bnode_id,
+            )?;
             let class = match &tp.object {
                 TermPattern::NamedNode(c) => c.as_str().to_string(),
+                // Defence in depth: `rdf:type _:b` is rejected — a blank node is not a named
+                // class. This cannot be a distinguished existential in the class position.
+                // [SONNET-4.6] sq-pbz04.3.6
+                TermPattern::BlankNode(_) => {
+                    return Err(CqError::OutOfScope(
+                        "rdf:type object is a blank node, not a named class \
+                         (fail-closed sq-pbz04.3.6: blank-node class names are not DL-Lite)"
+                            .into(),
+                    ))
+                }
                 _ => {
                     return Err(CqError::OutOfScope(
                         "rdf:type object must be a named class for DL-Lite rewriting".into(),
@@ -57,9 +98,18 @@ pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), Cq
             atoms.push(Atom::Class { class, arg });
         } else {
             // Role atom: subject + object are terms, predicate is the role IRI.
-            // B2: literals are now permitted in object position. [SONNET-4.6]
-            let s = term_pattern_to_term(&tp.subject)?;
-            let o = term_pattern_to_term(&tp.object)?;
+            // B2: literals are now permitted in object position. [SONNET-4.6] sq-pbz04.3.1
+            // sq-pbz04.3.6: blank nodes in subject/object positions are now existentials.
+            let s = term_pattern_to_term_with_bnode(
+                &tp.subject,
+                &mut bnode_ids,
+                &mut next_bnode_id,
+            )?;
+            let o = term_pattern_to_term_with_bnode(
+                &tp.object,
+                &mut bnode_ids,
+                &mut next_bnode_id,
+            )?;
             atoms.push(Atom::Role {
                 role: Role::named(pred.as_str()),
                 s,
@@ -71,16 +121,39 @@ pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), Cq
     Ok((atoms, answer))
 }
 
-/// Map a spargebra `TermPattern` to an internal `Term`. Variables → `Var`, named nodes →
-/// `Const`, literals → `Lit` (B2). Blank nodes / quoted triples are NOT DL-Lite atom
-/// terms → OutOfScope. [SONNET-4.6] sq-pbz04.3.1 adds the `Lit` arm for B2.
-fn term_pattern_to_term(t: &TermPattern) -> Result<Term, CqError> {
+/// Map a spargebra `TermPattern` to an internal `Term`, resolving blank nodes to fresh
+/// existential `Unbound` ids via `bnode_ids` (the label-to-id map for this CQ).
+///
+/// - Variables → `Var` (by name).
+/// - Named nodes → `Const` (IRI string).
+/// - Literals → `Lit` (lexical, datatype, lang) — B2 [SONNET-4.6] sq-pbz04.3.1.
+/// - Blank nodes → `Unbound(id)` — B for body blank-node lifting [SONNET-4.6] sq-pbz04.3.6.
+///   A blank node label seen for the first time in this CQ gets a new id; repeated occurrences
+///   of the same label map to the SAME id (shared existential, counts as bound in
+///   `is_bound_var`). Soundness: a shared blank node is a join condition that the rewriter must
+///   preserve; `is_bound_var` then correctly BLOCKS the existential applicability condition on
+///   that position (exactly as it does for a shared named variable).
+/// - Quoted triples → `OutOfScope` (RDF-star, out of DL-Lite scope).
+fn term_pattern_to_term_with_bnode(
+    t: &TermPattern,
+    bnode_ids: &mut FxHashMap<String, u32>,
+    next_id: &mut u32,
+) -> Result<Term, CqError> {
     match t {
         TermPattern::Variable(v) => Ok(Term::Var(v.as_str().to_string())),
         TermPattern::NamedNode(n) => Ok(Term::Const(n.as_str().to_string())),
-        TermPattern::BlankNode(_) => Err(CqError::OutOfScope(
-            "blank-node term is out of DL-Lite atom scope".into(),
-        )),
+        // sq-pbz04.3.6: body blank nodes → fresh existential `Unbound`. Shared labels →
+        // same id → `is_bound_var` detects the shared position as bound.
+        // [SONNET-4.6] sq-pbz04.3.6
+        TermPattern::BlankNode(b) => {
+            let label = b.as_str().to_string();
+            let id = *bnode_ids.entry(label).or_insert_with(|| {
+                let id = *next_id;
+                *next_id += 1;
+                id
+            });
+            Ok(Term::Unbound(id))
+        }
         // B2: literals in role-atom object positions are now accepted. Store as three separate
         // strings (lexical value, datatype IRI, optional language tag) so `Term` can derive
         // `Ord`. The emitter reconstructs the original `oxrdf::Literal` from these fields.
