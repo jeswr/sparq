@@ -43,12 +43,10 @@
 //!    fail-closed.
 //! 2. **Ground-identity in the body** — a body `Equal { left, right }` atom where
 //!    both `left` and `right` are syntactically identical is trivially true and is
-//!    *eliminated* at lowering time (no N3 atom is emitted). `Equal { left:
-//!    Term::Iri("x"), right: Term::Iri("x") }` is always satisfied; it adds no
-//!    constraint. Variable equality works at runtime because both sides are bound to
-//!    the same RDF term through the chainer's matching (lowered to an
-//!    `owl:sameAs`-pattern triple in the N3 body, which holds when both variables
-//!    are bound to the same RDF node in the closure).
+//!    *eliminated* at lowering time (no N3 atom is emitted). It adds no constraint
+//!    and contributes no bindings for range-restriction. Because it is eliminated,
+//!    if the ONLY reason a head variable would be considered bound is a `?x=?x`-style
+//!    atom that will be dropped, validate rejects the rule with `UnboundHeadVar`.
 //! 3. **Distinct ground constants are rejected fail-closed** — `validate()` returns
 //!    [`RifError::DistinctGroundEqual`] for any body `Equal` atom whose `left` and
 //!    `right` are non-variable, non-identical terms (e.g.
@@ -56,6 +54,28 @@
 //!    equality** (comparing integer `1` with decimal `1.0`), which depends on the
 //!    shared value-space comparator not yet merged (sq-v5evr, issue #1646). Until
 //!    that seam lands, this front-end refuses rather than answering incorrectly.
+//!
+//! ## Variable and mixed Equal atoms (`?x=?y`, `?x=<iri>`) — KNOWN RESIDUAL DEFECT, tracked sq-26vwp
+//!
+//! [OPUS-4.8] Body `Equal` atoms where at least one side is a variable but the two
+//! sides are NOT syntactically identical (i.e., `?x=?y` with distinct variable
+//! names, or `?x=<iri>` mixed atoms) are currently lowered to an `owl:sameAs`-pattern
+//! triple in the N3 body. This lowering is UNSOUND in both directions and is a
+//! known residual defect tracked as bead `sq-26vwp`:
+//!
+//! * **V1 — over-derivation:** an asserted `owl:sameAs` vocabulary triple already
+//!   present in the dataset (e.g. `<a> owl:sameAs <b>`) satisfies the N3 body
+//!   pattern regardless of whether the two variables actually bind to the SAME
+//!   node. This lets the rule fire when it should not.
+//! * **V2 — under-derivation:** two variables binding to the SAME RDF node do NOT
+//!   satisfy `?x owl:sameAs ?y` unless an `owl:sameAs` triple is explicitly
+//!   asserted in the closure. The rule silently fails to fire when it should.
+//!
+//! This front-end does NOT currently reject variable/mixed Equal atoms (that would
+//! break callers relying on the current behavior when `owl:sameAs` is intentionally
+//! present). The behavior is documented here honestly rather than claimed correct.
+//! Callers should avoid `?x=?y` / `?x=<iri>` body Equal atoms until `sq-26vwp`
+//! lands (requires a chainer-level identity join, not a vocabulary triple lookup).
 //!
 //! **EXPLICITLY EXCLUDED** (RIF-Core is monotone, so these would break
 //! monotonicity and are *not* in the dialect): negation-as-failure / `Naf`, the
@@ -666,26 +686,35 @@ impl Document {
                             output[0].vars_into(&mut bound);
                         }
                     }
-                    // [SONNET-4.6] sq-pbz04.5.4 — body Equal audit:
+                    // [SONNET-4.6] sq-pbz04.5.4 / [OPUS-4.8] sq-26vwp — body Equal audit:
+                    // * Syntactically-identical terms (incl. ?x=?x): the atom is trivially
+                    //   true and is ELIMINATED at lowering time (lower_body_atom returns None).
+                    //   Because it is eliminated it contributes NO bindings for range-
+                    //   restriction — do NOT add its variables to `bound`. This prevents a
+                    //   head var that is SOLELY bound by a ?x=?x atom from slipping through
+                    //   validate as "bound" while the actual N3 rule has it unbound.
                     // * Distinct non-variable ground terms → fail-closed pending sq-v5evr.
-                    // * All other Equal atoms (var on at least one side, or identical
-                    //   ground terms) fall through to the positive arm to bind their vars.
+                    // * All other Equal atoms (var on at least one side, non-identical) are
+                    //   the known-unsound variable/mixed case (sq-26vwp). They are NOT
+                    //   rejected here (to avoid breaking callers), but they also do NOT bind
+                    //   variables for range-restriction via this arm; they fall through to
+                    //   `positive =>` which calls vars() and adds them. This is the existing
+                    //   (known-unsound) behavior, left unchanged pending sq-26vwp.
+                    Atom::Equal { left, right } if left == right => {
+                        // Syntactically identical (covers ?x=?x and t=t).
+                        // Trivially true; eliminated at lowering; contributes NO bindings.
+                        // No error. (If the only binder of a head var was this atom, the
+                        // subsequent UnboundHeadVar check will correctly reject the rule.)
+                    }
                     Atom::Equal { left, right } if !left.is_var() && !right.is_var() => {
-                        // Both sides are non-variable (IRI or Lit or List).
-                        // If they are syntactically identical, the atom is trivially true
-                        // (no variable contribution, no conflict — let it through to the
-                        // positive arm to harmlessly bind zero variables).
-                        // If they differ, reject fail-closed: value-space equality across
-                        // distinct typed literals requires sq-v5evr and is not yet landed.
-                        if left != right {
-                            return Err(RifError::DistinctGroundEqual {
-                                left: format!("{:?}", left),
-                                right: format!("{:?}", right),
-                            });
-                        }
-                        // Syntactically identical: treated as trivially true in the body.
-                        // No variable contribution; no error. (At lowering time this atom
-                        // is eliminated — see `lower_body_atom`.)
+                        // Both sides are non-variable (IRI or Lit or List) and NOT identical
+                        // (the identical case was caught above). Reject fail-closed: value-
+                        // space equality across distinct typed literals requires sq-v5evr and
+                        // is not yet landed.
+                        return Err(RifError::DistinctGroundEqual {
+                            left: format!("{:?}", left),
+                            right: format!("{:?}", right),
+                        });
                     }
                     positive => {
                         debug_assert!(positive.is_positive());
@@ -1251,6 +1280,44 @@ mod tests {
         assert!(
             has(&dict, &closure, "http://ex/p", RDF_TYPE, "http://ex/Adult"),
             "rule fires with trivially-true ground-identity body Equal eliminated"
+        );
+    }
+
+    /// (2b) A body `?n=?n` that is the SOLE binder of a head variable must be
+    /// REJECTED as UnboundHeadVar: the atom is eliminated at lowering, so the head
+    /// variable would be genuinely unbound in the emitted N3 rule. [OPUS-4.8] sq-26vwp.
+    #[test]
+    fn body_equal_identity_sole_binder_rejects_unbound_head_var() {
+        // Rule: ?n rdf:type C :- ?n = ?n
+        // `?n` is ONLY "bound" by the ?n=?n Equal atom, which is eliminated.
+        // validate() must catch this and return UnboundHeadVar { var: "n" }.
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: var("n"), class: iri("http://ex/C") }],
+            vec![Atom::Equal { left: var("n"), right: var("n") }],
+        ));
+        assert_eq!(
+            d.validate(),
+            Err(RifError::UnboundHeadVar { var: "n".to_string() }),
+            "head var solely bound by a ?n=?n (elided) atom must be rejected UnboundHeadVar"
+        );
+        let mut dict = Dict::new();
+        assert!(d.closure(&mut dict).is_err(), "closure must refuse sole-binder ?n=?n");
+
+        // Contrast: ?n=?n alongside a real binder is VALID (existing test case).
+        // Rule: ?x # Adult :- ?x age ?n , ?n = ?n   → OK (Frame binds x and n).
+        let mut d2 = Document::new();
+        d2.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Adult") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("http://ex/age"), val: var("n") },
+                Atom::Equal { left: var("n"), right: var("n") },
+            ],
+        ));
+        assert_eq!(
+            d2.validate(),
+            Ok(()),
+            "?n=?n alongside a Frame binder is valid (Frame already binds n)"
         );
     }
 
