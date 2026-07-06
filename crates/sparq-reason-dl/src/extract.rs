@@ -108,13 +108,32 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Result<Ontology, ExtractErro
     // [OPUS-4.8] Fix 1 + Fix 3: Index::build now returns Err on a branching list,
     // duplicate backbone value, or cross-type punned declaration.
     let idx = Index::build(triples, &v)?;
+
+    // [OPUS-4.8] sq-pbz04.4.12 — M4 fail-closed validation:
+    // Orphan/cyclic list cells and unconsumed class-expression backbones are NOT inert.
+    // The original comment was WRONG: a bare `rdf:first`/`rdf:rest` cell that is never
+    // consumed by an axiom, or a backbone node (`owl:unionOf` etc.) that is never
+    // referenced as a class-expression argument, represents a MALFORMED or ILL-FORMED
+    // graph structure that violates the "understood in full or refused" contract.
+    //   - `rdf:nil rdf:rest _:b` or `rdf:nil rdf:first _:b`: `rdf:nil` cannot be a list
+    //     cell (OWL I5.5-003/004 — Direct Semantics inconsistency).
+    //   - An orphan list cell with no reachable path from any axiom-consumed backbone head
+    //     (I5.5-006 cyclic orphan list).
+    //   - A composite-backbone node never referenced by any non-backbone axiom triple
+    //     (I5.5-007 unconsumed union backbone).
+    // In every case: extracting an empty/partial ontology and calling it consistent would
+    // be UNSOUND — the downstream reasoner must never reason over a partial picture of the
+    // graph. Refuse (fail-closed) with a typed ExtractError.
+    validate_no_orphan_structural_nodes(dict, triples, &v, &idx)?;
+
     let mut onto = Ontology::new();
 
     for &[s, p, o] in triples {
         // Class-expression backbone predicates are consumed WHEN the enclosing class node is
-        // decoded (via `Index`), and are inert on their own — skip them here. A dangling
-        // backbone triple (a restriction/list cell never referenced by an axiom) carries no
-        // logical import, so ignoring it is sound.
+        // decoded (via `Index`), and are inert on their own — skip them here. After the
+        // `validate_no_orphan_structural_nodes` pass above, every backbone node in the
+        // index is guaranteed to be reachable from a non-backbone axiom triple, so the
+        // skip here is safe: they were accounted for.
         if v.backbone.contains(&p) {
             continue;
         }
@@ -245,6 +264,226 @@ fn emit_named_composite_equiv(
         onto.axioms.extend(tail);
     }
     Ok(())
+}
+
+/// Validates that no structural (backbone) node is orphaned — i.e., every ANONYMOUS
+/// blank-node carrying class-expression or list backbone predicates is reachable from
+/// at least one non-backbone axiom triple. [OPUS-4.8] sq-pbz04.4.12 — the M4 fix.
+///
+/// # Soundness rationale
+///
+/// The "understood in full or refused" contract requires that the extractor cannot silently
+/// produce an empty or lossy ontology from a graph that carries meaningful (but unconsumed)
+/// structure. Four W3C Direct-Semantics corpus cases (M4) demonstrated the original gap:
+///
+/// - **I5.5-003/004**: `rdf:nil rdf:rest _:b` or `rdf:nil rdf:first _:b` — `rdf:nil` is
+///   the list terminator and cannot legally be a list cell. The triple is malformed; the
+///   inconsistency it encodes must be refused rather than producing an empty/consistent model.
+/// - **I5.5-006**: A self-referential list `_:l rdf:first :a; rdf:rest _:l` that is never
+///   connected to any axiom. Extracting to an empty ontology would wrongly certify consistency.
+/// - **I5.5-007**: An anonymous `_:x owl:unionOf _:list` whose cyclic list is never consumed
+///   by any axiom predicate. Same soundness trap.
+///
+/// # Named IRIs are excluded from this check
+///
+/// A named class IRI (e.g. `:A owl:intersectionOf (…)`) may appear in the backbone index
+/// with no direct non-backbone triple referencing it in the SAME graph — that is the normal
+/// pattern for a standalone named-composite class definition. The `emit_named_composite_equiv`
+/// post-pass (M1 fix) synthesises `EquivalentClasses(A, expr)` for every such named IRI,
+/// consuming it. Only **anonymous blank nodes** can be truly unconsumable (they have no
+/// name to bind, so `emit_named_composite_equiv` produces nothing for them).
+///
+/// # Algorithm
+///
+/// Seed the reachable set from BOTH the subjects and objects of every non-backbone triple
+/// that actually PLACES the node in an axiom or class-expression position (see
+/// `is_consuming_triple`), then BFS through the backbone index (intersectionOf → list head →
+/// list cells → members, etc.). Any anonymous blank structural node NOT reachable is an
+/// orphan → refused.
+///
+/// **Ignorable declaration/annotation triples do NOT seed reachability** ([OPUS-4.8]
+/// sq-pbz04.4.12): a triple whose only relationship to a structural node is a declaration
+/// typing (`rdf:type` → an ignorable `DECLARATION_TYPE_LOCALS` meta-class such as `rdf:List`)
+/// or an annotation predicate produces NO axiom in `classify_type`/`classify_triple`, so it
+/// is not a consumer. Seeding from it wrongly rescued cyclic/orphan list cells carrying the
+/// standard `_:list a rdf:List` typing (WebOnt-I5.5-006/-007), letting them slip past the
+/// refusal into an empty (wrongly-consistent) ontology.
+///
+/// **rdf:nil special case**: `rdf:nil` is the list terminator. If it appears as a SUBJECT
+/// of `rdf:first` or `rdf:rest`, the graph is unconditionally malformed — refused before
+/// the reachability pass.
+fn validate_no_orphan_structural_nodes(
+    dict: &Dict,
+    triples: &[[Id; 3]],
+    v: &Vocab,
+    idx: &Index,
+) -> Result<(), ExtractError> {
+    // --- rdf:nil cannot be a list cell (I5.5-003, I5.5-004) ----------------------------
+    // `v.rdf_nil == NO_ID` when the IRI is absent from the dict (no triple about nil → no
+    // check needed). When present, refuse if nil itself has a list-backbone predicate.
+    if v.rdf_nil != sparq_core::dict::NO_ID {
+        if idx.first.contains_key(&v.rdf_nil) {
+            return Err(ExtractError::MalformedList(
+                "rdf:nil cannot have an rdf:first property (ill-formed list cell on nil)"
+                    .to_string(),
+            ));
+        }
+        if idx.rest.contains_key(&v.rdf_nil) {
+            return Err(ExtractError::MalformedList(
+                "rdf:nil cannot have an rdf:rest property (ill-formed list cell on nil)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // If there are no structural nodes at all, there is nothing further to validate.
+    if idx.structural_nodes.is_empty() {
+        return Ok(());
+    }
+
+    // --- Reachability pass (I5.5-006, I5.5-007) -----------------------------------------
+    //
+    // Helper: `is_anonymous_blank` — true iff `id` is a blank node (not an inline literal,
+    // not a triple term, not a named IRI). Named IRIs are excluded from the orphan check
+    // because `emit_named_composite_equiv` will synthesise axioms for them; only anonymous
+    // blank structural nodes can be genuinely unconsumed.
+    let is_anonymous_blank = |id: Id| -> bool {
+        !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_))
+    };
+
+    // Seed: structural nodes that are considered "already consumed":
+    //
+    // 1. Named IRI structural nodes — they carry inline composite backbone definitions
+    //    (e.g. `:A owl:intersectionOf (…)`) and the `emit_named_composite_equiv` post-pass
+    //    synthesises `EquivalentClasses(A, expr)` for each one. Their list cells / filler
+    //    nodes must therefore be treated as reachable too (they will be visited through the
+    //    BFS expansion below). Named IRIs are always seeded to avoid falsely flagging list
+    //    cells or fillers that are only reachable through them.
+    //
+    // 2. Every structural node that appears as the SUBJECT OR OBJECT of a non-backbone
+    //    triple that actually PLACES the node in an axiom or class-expression position:
+    //   - Subject: e.g. `[ owl:intersectionOf (…) ] rdfs:subClassOf :C` — the blank node
+    //     is the SUBJECT of the axiom triple `rdfs:subClassOf`.
+    //   - Object: e.g. `:C rdfs:subClassOf _:x` — `_:x` is an OBJECT.
+    //
+    // [OPUS-4.8] sq-pbz04.4.12 — SOUNDNESS FIX: an IGNORABLE declaration or annotation
+    // triple is NOT a consumer and must NOT seed reachability. Crucially `_:list a rdf:List`
+    // (rdf:type whose object is an ignorable DECLARATION_TYPE_LOCALS meta-class, exactly the
+    // WebOnt-I5.5-006/-007 encoding) produces NO axiom in `classify_type` — treating it as a
+    // consumer wrongly seeded the cyclic/orphan list cell reachable, letting it slip past the
+    // refusal and extract to an empty ontology (a WRONG definitive verdict, not abstention).
+    // Reachability is seeded ONLY from triples that route into an actual axiom / class-
+    // expression position; `is_consuming_triple` mirrors `classify_triple`'s ignorable arms.
+    let mut reachable: FxHashSet<Id> = FxHashSet::default();
+    let mut worklist: Vec<Id> = Vec::new();
+
+    // Pre-seed all NAMED IRI structural nodes as reachable (emit_named_composite_equiv
+    // will synthesise axioms for them; their list cells and fillers are transitively OK).
+    for &node in &idx.structural_nodes {
+        if !is_anonymous_blank(node) && reachable.insert(node) {
+            worklist.push(node);
+        }
+    }
+
+    // Seed from subjects and objects of CONSUMING (axiom-placing) non-backbone triples only.
+    for &[s, p, o] in triples {
+        if v.backbone.contains(&p) {
+            continue;
+        }
+        if !is_consuming_triple(v, idx, p, o) {
+            continue;
+        }
+        for &id in &[s, o] {
+            if idx.structural_nodes.contains(&id) && reachable.insert(id) {
+                worklist.push(id);
+            }
+        }
+    }
+
+    // BFS: from every reachable structural node, follow backbone index edges to discover
+    // which nested structural nodes are transitively reachable.
+    while let Some(node) = worklist.pop() {
+        // Expand each backbone index: the VALUE of these maps is a child node (either a
+        // list head, list cell, or filler) that is reachable once the parent is reachable.
+        macro_rules! follow_value {
+            ($map:expr) => {
+                if let Some(&target) = $map.get(&node) {
+                    if idx.structural_nodes.contains(&target) && reachable.insert(target) {
+                        worklist.push(target);
+                    }
+                }
+            };
+        }
+        follow_value!(idx.intersection_of); // intersection head → list head
+        follow_value!(idx.union_of);        // union head → list head
+        follow_value!(idx.complement_of);   // complement node → operand
+        follow_value!(idx.some_values_from); // restriction → filler
+        follow_value!(idx.all_values_from);  // restriction → filler
+        // List cell traversal (the chain of rdf:first/rdf:rest cells).
+        if let Some(&first_val) = idx.first.get(&node) {
+            if idx.structural_nodes.contains(&first_val) && reachable.insert(first_val) {
+                worklist.push(first_val);
+            }
+        }
+        if let Some(&rest_val) = idx.rest.get(&node) {
+            if idx.structural_nodes.contains(&rest_val) && reachable.insert(rest_val) {
+                worklist.push(rest_val);
+            }
+        }
+    }
+
+    // Refuse any ANONYMOUS BLANK structural node that is NOT reachable. Named IRIs are
+    // excluded (handled by emit_named_composite_equiv). Non-blank structural nodes (e.g.
+    // an IRI used as an owl:Restriction subject) are similarly excluded — they would have
+    // been rejected by the bare-blank guard if they appeared in a class position, or by
+    // the axiom-dispatch arms if they were not a known class shape.
+    for &node in &idx.structural_nodes {
+        if reachable.contains(&node) || !is_anonymous_blank(node) {
+            continue;
+        }
+        let is_list_cell = idx.first.contains_key(&node) || idx.rest.contains_key(&node);
+        if is_list_cell {
+            return Err(ExtractError::MalformedList(format!(
+                "orphan list cell {} is not reachable from any axiom \
+                 (ill-formed or cyclic list structure not connected to any axiom)",
+                term_iri(dict, node)
+            )));
+        } else {
+            return Err(ExtractError::MalformedClassExpression(format!(
+                "unconsumed anonymous class-expression backbone on {} — backbone \
+                 predicates present but the node is never referenced by any axiom triple",
+                term_iri(dict, node)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a non-backbone triple `_ p o` actually CONSUMES a structural node — i.e. places it
+/// in an axiom or class-expression position — for the orphan-reachability seeding in
+/// [`validate_no_orphan_structural_nodes`]. [OPUS-4.8] sq-pbz04.4.12.
+///
+/// It is `false` for exactly the triples `classify_triple`/`classify_type` treat as IGNORABLE
+/// (produce no axiom):
+/// - a declaration typing `_ rdf:type o` where `o` is an ignorable `DECLARATION_TYPE_LOCALS`
+///   meta-class (`rdf:List`, `owl:Class`, `owl:Restriction`, …) — notably `_:list a rdf:List`,
+///   the WebOnt-I5.5-006/-007 encoding whose presence must NOT rescue a cyclic/orphan list;
+/// - an annotation triple (a built-in annotation predicate or a declared annotation property).
+///
+/// Every other non-backbone triple routes into a real axiom (subClassOf / equivalentClass /
+/// disjointWith / domain / range / a ClassAssertion via a non-declaration `rdf:type` object /
+/// a role assertion / an out-of-fragment refusal), so it genuinely references the node. The
+/// caller (the backbone predicates are already skipped) passes only non-backbone triples.
+fn is_consuming_triple(v: &Vocab, idx: &Index, p: Id, o: Id) -> bool {
+    // Declaration typing (`rdf:type` → ignorable meta-class) — no axiom emitted.
+    if p == v.ty && v.declaration_types.contains(&o) {
+        return false;
+    }
+    // Built-in or declared annotation predicate — no axiom emitted.
+    if v.annotation.contains(&p) || idx.annotation_props.contains(&p) {
+        return false;
+    }
+    true
 }
 
 /// Routes one non-backbone triple: into an [`Axiom`] on `onto`, silently past an ignorable

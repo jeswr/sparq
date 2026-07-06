@@ -992,7 +992,7 @@ pub const SUITES: &[Suite] = &[
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
                REAL fail-closed L1 extraction + grammar walk; explicit-negative and species \
                assertions are not checked (documented), abstentions are never passes, and \
-               the 30 singleton-intersection divergences are pinned by name",
+               the 27 singleton-intersection divergences are pinned by name",
     },
     Suite {
         label: "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
@@ -1003,18 +1003,20 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 192,
+        ratchet_floor: 189,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix: +12 positive- \
-                      entailment passes, -4 consistency passes shifted to abstain, net +8)",
+                      entailment passes, -4 consistency passes shifted to abstain, net +8); \
+                      re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, three graphs with \
+                      an unconsumed anonymous composite now honestly abstain, 192 -> 189)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
-               passes, and all 11 wrong-verdict divergences are pinned by name with audited \
-               mechanisms (M1 fixed by sq-pbz04.4.11; M4 orphan-list fidelity gap still \
-               open, held by follow-up bead sq-pbz04.4.12)",
+               passes, and all 6 remaining wrong-verdict divergences are pinned by name \
+               with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12 \
+               — those 4 rows now correctly abstain; remaining divergences: M2/M3/M5/M6)",
     },
 ];
 
