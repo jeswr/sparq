@@ -42,16 +42,21 @@ struct Snapshot {
     tolerance_pct: f64,
     members: std::collections::BTreeMap<String, u64>,
     /// sq-ncvq.8 (Gate G5): top-level `zk/` `bin` packages that are deliberately
-    /// NOT gate-count-baselined (e.g. the xpath unit-test harness — a `bin` that
-    /// drives library tests, not a deployed proving circuit). Map of package name
-    /// → reason. `snapshot_covers_top_level_circuits` requires every top-level
-    /// `bin` circuit to be either a `members` baseline or listed here.
+    /// NOT gate-count-baselined (a `bin` that drives library tests, not a deployed
+    /// proving circuit). Map of package name → reason.
+    /// `snapshot_covers_top_level_circuits` requires every top-level `bin` circuit
+    /// to be either a `members` baseline or listed here. [OPUS-4.8] sq-5reoy: this
+    /// is currently empty — the only former entry (the xpath unit-test harness)
+    /// moved to the `sparq-org/noir_XPath` face repo when the `zk/xpath` tree was
+    /// externalized (#1599), leaving `zk/compose` as the sole in-tree circuit family.
     #[serde(default)]
     exempt_circuits: std::collections::BTreeMap<String, String>,
 }
 
-/// `bench/zk-compose/gate_counts_latest.json` shape (the `zk/ieee754` JSON
-/// convention): `{ "benchmarks": { "<member>": { "circuit_size": N } } }`.
+/// `bench/zk-compose/gate_counts_latest.json` shape (the `sparq_ieee754` JSON
+/// convention — the `circuit_size` shape that originated in the ieee754 lineage,
+/// now the sparq-org/noir_IEEE754 face repo, sq-5reoy):
+/// `{ "benchmarks": { "<member>": { "circuit_size": N } } }`.
 #[derive(Deserialize)]
 struct BenchGateCounts {
     benchmarks: std::collections::BTreeMap<String, BenchEntry>,
@@ -338,10 +343,11 @@ fn bench_json_matches_snapshot() {
 /// entry (with a documented reason). So a deployable circuit cannot silently
 /// ship without a gate-count baseline.
 ///
-/// Today the only top-level `bin` package outside `zk/compose/` is the
-/// `xpath_unit_tests` harness (a `bin` that drives the xpath library's unit
-/// tests, NOT a deployed proving circuit) — it is listed in `exempt_circuits`.
-/// `zk/ieee754` and `zk/xpath/xpath` are `lib`s and have no circuit to gate.
+/// [OPUS-4.8] sq-5reoy: after the `zk/ieee754` and `zk/xpath` trees were
+/// externalized to the `sparq-org/noir_IEEE754` / `sparq-org/noir_XPath` face
+/// repos (#1599), `zk/compose/` is the only in-tree circuit family, so there are
+/// no top-level `bin` packages outside it and `exempt_circuits` is empty (the
+/// former `xpath_unit_tests` harness is now covered by the face repo's CI).
 /// Runs WITHOUT the toolchain — it only reads `Nargo.toml`s + the snapshot.
 ///
 /// [OPUS-4.8] sq-ncvq.10 doc-sync: this test is the "Enforced by: **G5**" cell of

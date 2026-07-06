@@ -8,4 +8,9 @@ authors = ["sparq"]
 # scheme's cross-vector chain depends on this exact library version.
 poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.3.0" }
 # SPARQL float comparisons (FILTER over xsd:double operands).
-sparq_ieee754 = { path = "../../ieee754" }
+# [OPUS-4.8] sq-5reoy: switched from the in-tree path dep to the released face
+# repo pinned by tag — the zk/ieee754 tree was externalized to sparq-org/noir_IEEE754
+# (#1599). v0.10.0 is byte-identical to the last in-tree state and carries the
+# sq-25mgo deep-underflow saturating-exponent fix. nargo fetches this git dep the
+# same way it already fetches the poseidon dep above (precedent: poseidon v0.3.0).
+sparq_ieee754 = { git = "https://github.com/sparq-org/noir_IEEE754", tag = "v0.10.0" }

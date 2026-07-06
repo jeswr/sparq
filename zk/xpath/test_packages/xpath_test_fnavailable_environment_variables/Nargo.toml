@@ -1,7 +1,0 @@
-[package]
-name = "xpath_test_fnavailable_environment_variables"
-type = "lib"
-authors = ["auto-generated"]
-
-[dependencies]
-xpath = { path = "../../xpath" }

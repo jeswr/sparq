@@ -19,7 +19,9 @@ extend-exclude = [
   "node_modules",
   "**/node_modules",
   "Cargo.lock",
-  "zk/xpath/vendor",
+  # [OPUS-4.8] sq-5reoy: the "zk/xpath/vendor" exclude was dropped — the zk/xpath tree
+  # moved to the sparq-org/noir_XPath face repo (#1599); "**/vendor" above still covers
+  # any remaining vendored subtree.
   "*.svg",
   # Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025; MIT-licensed
   # as of 2026-06-21): reproduced verbatim with British spelling + many author
