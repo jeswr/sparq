@@ -2563,6 +2563,65 @@ mod tests {
         assert!(parse_results("   {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}").is_ok());
     }
 
+    // ------------------------------------------------------------------
+    // Bind-join block-size knob direct unit tests [OPUS-4.8] (sq-sjkj)
+    // ------------------------------------------------------------------
+
+    /// `bind_block_size()` returns the default when no scope is installed.
+    #[test]
+    fn bind_block_size_returns_default_outside_scope() {
+        // [OPUS-4.8] sq-sjkj: direct coverage for the public accessor.
+        // The default is DEFAULT_BIND_BLOCK (50) when no override is active.
+        let s = bind_block_size();
+        assert_eq!(s, DEFAULT_BIND_BLOCK, "default bind-block size must be DEFAULT_BIND_BLOCK");
+    }
+
+    /// `with_service_bound_join_block_size` scopes the override and restores it.
+    #[test]
+    fn with_service_bound_join_block_size_scopes_and_restores() {
+        // [OPUS-4.8] sq-sjkj: direct coverage for the scoped override entry point.
+        let before = bind_block_size();
+        with_service_bound_join_block_size(999, || {
+            assert_eq!(bind_block_size(), 999, "override must be active inside scope");
+        });
+        // The previous value is restored after the scope.
+        assert_eq!(bind_block_size(), before, "override must be gone after scope");
+    }
+
+    /// `with_service_bound_join_block_size(0, …)` is clamped to 1.
+    #[test]
+    fn with_service_bound_join_block_size_zero_is_clamped_to_one() {
+        // [OPUS-4.8] sq-sjkj: a zero block size is clamped to 1 so a tuple still
+        // gets pushed one-per-request rather than silently disabling the knob.
+        with_service_bound_join_block_size(0, || {
+            assert_eq!(bind_block_size(), 1, "zero must be clamped to 1");
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Per-query remote-request cap direct unit tests [OPUS-4.8] (sq-b93pv)
+    // ------------------------------------------------------------------
+
+    /// `remote_request_cap()` returns `None` when no scope is installed.
+    #[test]
+    fn remote_request_cap_returns_none_outside_scope() {
+        // [OPUS-4.8] sq-b93pv: direct coverage for the public accessor.
+        // The default is uncapped (None) when no override is active.
+        let cap = remote_request_cap();
+        assert_eq!(cap, None, "default remote-request cap must be None (uncapped)");
+    }
+
+    /// `with_service_remote_request_cap` scopes the cap and restores it.
+    #[test]
+    fn with_service_remote_request_cap_scopes_and_restores() {
+        // [OPUS-4.8] sq-b93pv: direct coverage for the scoped cap entry point.
+        assert_eq!(remote_request_cap(), None); // no prior override
+        with_service_remote_request_cap(8, || {
+            assert_eq!(remote_request_cap(), Some(8), "cap must be active inside scope");
+        });
+        assert_eq!(remote_request_cap(), None, "cap must be gone after scope");
+    }
+
     /// Canned-response transport: proves `eval_remote` wires the transport into the
     /// parser without touching the network.
     struct Canned(&'static str);
@@ -3480,6 +3539,59 @@ mod tests {
                 &mut |r| { from_read.push(r); Ok(()) }).unwrap();
             assert_eq!(v1, v2);
             assert_eq!(from_str, from_read);
+        }
+
+        // ------------------------------------------------------------------
+        // Reader-seam error paths (sq-my8wd.5) [OPUS-4.8]
+        // ------------------------------------------------------------------
+
+        /// `parse_results_into_read` on an EMPTY body returns an error matching
+        /// the non-reader path, not a panic or silent empty result.
+        #[test]
+        fn parse_results_into_read_empty_body_is_error() {
+            // [OPUS-4.8] sq-my8wd.5 coverage: the `buf.is_empty()` early-return
+            // branch in `parse_results_into_read` (the empty-response path).
+            let err = parse_results_into_read(std::io::BufReader::new(b"".as_ref()),
+                &mut |_r| Ok(())).unwrap_err();
+            assert!(
+                err.contains("neither SPARQL-Results-JSON nor -XML"),
+                "empty body must report the sniff error: {err}"
+            );
+        }
+
+        /// `parse_results_into_read` on a body that is neither `{` nor `<`
+        /// returns the sniff error — mirrors `parse_results_into`'s rejection.
+        #[test]
+        fn parse_results_into_read_unknown_format_is_error() {
+            // [OPUS-4.8] sq-my8wd.5 coverage: the `_ => Err(…)` sniff branch in
+            // `parse_results_into_read` (the unrecognised-format path).
+            let err = parse_results_into_read(std::io::BufReader::new(b"plain text".as_ref()),
+                &mut |_r| Ok(())).unwrap_err();
+            assert!(
+                err.contains("neither SPARQL-Results-JSON nor -XML"),
+                "unrecognised body must report the sniff error: {err}"
+            );
+            // Whitespace-only body hits the empty-buffer path after draining whitespace.
+            let err2 = parse_results_into_read(std::io::BufReader::new(b"   ".as_ref()),
+                &mut |_r| Ok(())).unwrap_err();
+            assert!(
+                err2.contains("neither SPARQL-Results-JSON nor -XML"),
+                "whitespace-only body must report the sniff error: {err2}"
+            );
+        }
+
+        /// `parse_results_into_read` with a body prefixed by leading whitespace still
+        /// routes correctly to the SRJ parser — exercises the whitespace-consume loop.
+        #[test]
+        fn parse_results_into_read_leading_whitespace_routes_srj() {
+            // [OPUS-4.8] sq-my8wd.5 coverage: the `None` (all-whitespace-chunk)
+            // branch in `parse_results_into_read`, then routing to SRJ.
+            let body = b"   \n\t {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}";
+            let mut n = 0usize;
+            let vars = parse_results_into_read(std::io::BufReader::new(body.as_ref()),
+                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            assert_eq!(vars.len(), 1);
+            assert_eq!(n, 0); // no rows
         }
     }
 }
