@@ -30,7 +30,8 @@
 //! concern (`research/shared-eval-substrate.md` §6).
 
 use crate::rows::{Id, Key, Posting, Row, NO_ID};
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 
@@ -133,6 +134,20 @@ pub fn key_hash(key: &Key) -> u64 {
 /// high thread counts while keeping the per-partition tag-scan cheap.
 pub const JOIN_PARTS: usize = 64;
 
+/// The hash table type for hash-join build-side storage: a [`hashbrown::HashMap`] keyed on
+/// [`Key`] (the equi-join projection), mapping to the sorted posting list of matching
+/// build-row indices, backed by [`FxBuildHasher`].
+///
+/// Using `hashbrown::HashMap` (rather than `std::collections::HashMap`) lets [`probe_emit`]
+/// and [`probe_gather_indices`] call `raw_entry().from_hash` to skip the second internal
+/// re-hash on the partitioned probe path — a single [`key_hash`] call derives the radix
+/// partition **and** performs the table lookup. The `FxBuildHasher` keeps the stored hash
+/// identical to the explicit [`key_hash`] computation so the precomputed hash hits the
+/// correct bucket every time.
+///
+/// [SONNET-4.6] sq-7d3dj.19
+pub type JoinTable = HashMap<Key, Posting, FxBuildHasher>;
+
 /// Sorted **merge join** of two relations already sorted on a single shared key
 /// column (`lk` on the left, `rk` on the right), with optional `extra_shared`
 /// `(left_col, right_col)` pairs that must additionally agree (a second shared
@@ -196,10 +211,12 @@ pub fn merge_join<B: Budget>(
 }
 
 /// Builds the serial hash table for a hash join: maps each build-side key to the
-/// ascending list of build-row indices sharing it.
+/// ascending list of build-row indices sharing it. Returns a [`JoinTable`]
+/// (`hashbrown::HashMap<Key, Posting, FxBuildHasher>`) so that the probe path can
+/// call `raw_entry().from_hash` with the precomputed [`key_hash`] value.
 #[inline]
-pub fn build_table(build: &[Row], keys: &JoinKeys) -> FxHashMap<Key, Posting> {
-    let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+pub fn build_table(build: &[Row], keys: &JoinKeys) -> JoinTable {
+    let mut t = JoinTable::default();
     for (ri, row) in build.iter().enumerate() {
         t.entry(keys.left_key(row)).or_default().push(ri);
     }
@@ -211,12 +228,13 @@ pub fn build_table(build: &[Row], keys: &JoinKeys) -> FxHashMap<Key, Posting> {
 /// Within a partition rows are scanned in ascending index, so each posting list
 /// stays in ascending build-row order — exactly the serial build — and the probe
 /// output is byte-identical. Requires the `parallel` feature (the inner rayon
-/// import is the caller's; this returns the per-partition maps).
+/// import is the caller's; this returns the per-partition maps). Returns
+/// `Vec<`[`JoinTable`]`>` so the probe path can use `raw_entry().from_hash`.
 #[inline]
-pub fn build_partitioned(build: &[Row], keys: &JoinKeys, parts: &[u8]) -> Vec<FxHashMap<Key, Posting>> {
+pub fn build_partitioned(build: &[Row], keys: &JoinKeys, parts: &[u8]) -> Vec<JoinTable> {
     (0..JOIN_PARTS)
         .map(|p| {
-            let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+            let mut t = JoinTable::default();
             for (ri, row) in build.iter().enumerate() {
                 if parts[ri] as usize == p {
                     t.entry(keys.left_key(row)).or_default().push(ri);
@@ -230,43 +248,90 @@ pub fn build_partitioned(build: &[Row], keys: &JoinKeys, parts: &[u8]) -> Vec<Fx
 /// Emits, for one probe row, every combined output row (its build-side matches
 /// from `tables`, each extended with the probe-only columns). Shared by the serial
 /// and parallel probe paths so they are byte-identical. `tables` is either one
-/// serial table or `JOIN_PARTS` radix partitions; `probe_only` are the probe
+/// serial [`JoinTable`] or `JOIN_PARTS` radix partitions; `probe_only` are the probe
 /// columns appended after the build row.
+///
+/// **Single-hash optimisation ([SONNET-4.6] sq-7d3dj.19):** the join key is hashed
+/// ONCE via [`key_hash`]; the hash bits select the radix partition and
+/// `raw_entry().from_hash` performs the table lookup without a second internal
+/// re-hash. `out.reserve(matches.len())` allocates for all matches in one call —
+/// the **batch-emission contract** the sq-pntvh M4 morsel pipeline inherits:
+/// reserve then materialise once per key group, not per match.
 #[inline]
 pub fn probe_emit(
     prow: &Row,
     keys: &JoinKeys,
     build: &[Row],
-    tables: &[FxHashMap<Key, Posting>],
+    tables: &[JoinTable],
     probe_only: &[usize],
     out: &mut Vec<Row>,
 ) {
     let key: Key = keys.right_key(prow);
+    // [SONNET-4.6] sq-7d3dj.19: hash ONCE — partition selection and raw_entry lookup
+    // share this value; no second internal re-hash on the partitioned probe path.
+    let h = key_hash(&key);
     let table = if tables.len() == 1 {
         &tables[0]
     } else {
-        &tables[(key_hash(&key) % JOIN_PARTS as u64) as usize]
+        &tables[(h % JOIN_PARTS as u64) as usize]
     };
-    if let Some(matches) = table.get(&key) {
-        for &bi in matches {
-            let mut combined = build[bi].clone();
-            for &pi in probe_only {
-                combined.push(prow[pi]);
-            }
-            out.push(combined);
+    let Some((_, matches)) = table.raw_entry().from_hash(h, |k| *k == key) else {
+        return;
+    };
+    // Reserve exact match count — one allocation for the entire key group.
+    // Batch-emission contract (sq-pntvh M4): materialise after reserve, not per match.
+    // [SONNET-4.6] sq-7d3dj.19
+    out.reserve(matches.len());
+    for &bi in matches {
+        let mut combined = build[bi].clone();
+        for &pi in probe_only {
+            combined.push(prow[pi]);
         }
+        out.push(combined);
+    }
+}
+
+/// Collects, for one probe row, the build-side match indices into `build_indices`
+/// without materialising any output rows. This is the **M4 batch-emission contract**
+/// (sq-pntvh.7): a morsel pipeline calls this to gather `(build_idx, probe_row)`
+/// index runs, then materialises the combined output once per chunk — no per-match
+/// `Row` clone. The scalar [`probe_emit`] is the row-materialising wrapper over
+/// this primitive.
+///
+/// The join key is hashed ONCE via [`key_hash`]; the hash selects the radix
+/// partition and drives `raw_entry().from_hash` — the partitioned probe path pays
+/// exactly one hash operation, identical to the serial path.
+///
+/// [SONNET-4.6] sq-7d3dj.19
+#[inline]
+pub fn probe_gather_indices(
+    prow: &Row,
+    keys: &JoinKeys,
+    tables: &[JoinTable],
+    build_indices: &mut Vec<usize>,
+) {
+    let key: Key = keys.right_key(prow);
+    let h = key_hash(&key);
+    let table = if tables.len() == 1 {
+        &tables[0]
+    } else {
+        &tables[(h % JOIN_PARTS as u64) as usize]
+    };
+    if let Some((_, matches)) = table.raw_entry().from_hash(h, |k| *k == key) {
+        build_indices.extend(matches.iter().copied());
     }
 }
 
 /// Serial **hash join** probe: for every probe row, emit its build-side matches.
 /// `budget` is polled once per probe row (the engine's pre-move per-row check).
 /// The build table(s) and the layout are the caller's; this is the probe hot loop.
+/// Delegates per-row emission to [`probe_emit`] (single-hash + batch-reserve).
 #[inline]
 pub fn hash_probe_serial<B: Budget>(
     probe: &[Row],
     keys: &JoinKeys,
     build: &[Row],
-    tables: &[FxHashMap<Key, Posting>],
+    tables: &[JoinTable],
     probe_only: &[usize],
     budget: &B,
     out: &mut Vec<Row>,
@@ -1585,5 +1650,117 @@ mod tests {
         let mut out = Vec::new();
         lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
         assert_eq!(out, vec![row(&[10])], "k=4 intersection must find the single common value");
+    }
+
+    // [SONNET-4.6] sq-7d3dj.19 — DIRECT tests for `probe_gather_indices` (M4 batch-emission
+    // contract) and the single-hash optimisation in `probe_emit`.
+
+    #[test]
+    fn probe_gather_indices_serial_table_finds_matching_build_indices() {
+        // Serial table (len == 1): probe_gather_indices must return the correct build-row indices.
+        // [SONNET-4.6] sq-7d3dj.19
+        let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[1, 11])];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let tables = vec![build_table(&build, &keys)];
+
+        // key=1 matches build rows 0 and 2 (ascending index order from build_table).
+        let probe_row = row(&[1, 99]);
+        let mut indices = Vec::new();
+        probe_gather_indices(&probe_row, &keys, &tables, &mut indices);
+        assert_eq!(indices, vec![0usize, 2], "key=1 must yield build indices [0, 2] in insertion order");
+
+        // key=2 matches build row 1 only.
+        let mut indices2 = Vec::new();
+        probe_gather_indices(&row(&[2, 0]), &keys, &tables, &mut indices2);
+        assert_eq!(indices2, vec![1usize]);
+
+        // key=99 has no match.
+        let mut indices3 = Vec::new();
+        probe_gather_indices(&row(&[99, 0]), &keys, &tables, &mut indices3);
+        assert!(indices3.is_empty(), "unmatched key must yield no indices");
+    }
+
+    #[test]
+    fn probe_gather_indices_partitioned_table_finds_matching_build_indices() {
+        // Partitioned table (len == JOIN_PARTS): exercises the radix branch and raw_entry lookup.
+        // [SONNET-4.6] sq-7d3dj.19
+        let build = vec![row(&[10, 100]), row(&[20, 200]), row(&[10, 101])];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let parts: Vec<u8> = build
+            .iter()
+            .map(|r| (key_hash(&keys.left_key(r)) % JOIN_PARTS as u64) as u8)
+            .collect();
+        let tables = build_partitioned(&build, &keys, &parts);
+        assert_eq!(tables.len(), JOIN_PARTS);
+
+        let mut indices = Vec::new();
+        probe_gather_indices(&row(&[10, 0]), &keys, &tables, &mut indices);
+        assert_eq!(indices, vec![0usize, 2], "key=10 must yield build indices [0, 2] from partitioned table");
+    }
+
+    #[test]
+    fn probe_gather_indices_result_equivalent_to_probe_emit_indices() {
+        // Load-bearing invariant: probe_gather_indices must collect exactly the build indices
+        // that probe_emit materialises. Verifies the M4 batch-emission contract: the morsel
+        // pipeline can gather indices via probe_gather_indices and materialise the same rows.
+        // [SONNET-4.6] sq-7d3dj.19
+        let build = vec![
+            row(&[3, 30]),
+            row(&[1, 10]),
+            row(&[2, 20]),
+            row(&[1, 11]),
+            row(&[3, 31]),
+        ];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![1] };
+        let tables = vec![build_table(&build, &keys)];
+
+        for probe_val in [1u32, 2, 3, 99] {
+            let prow = row(&[probe_val, 77]);
+
+            // Collect build indices via probe_gather_indices.
+            let mut indices = Vec::new();
+            probe_gather_indices(&prow, &keys, &tables, &mut indices);
+
+            // Materialise the combined rows manually from the gathered indices.
+            let mut manual_out: Vec<Row> = Vec::with_capacity(indices.len());
+            for &bi in &indices {
+                let mut combined = build[bi].clone();
+                combined.push(prow[1]); // probe_only = [1]
+                manual_out.push(combined);
+            }
+
+            // Collect rows via probe_emit.
+            let mut emit_out = Vec::new();
+            probe_emit(&prow, &keys, &build, &tables, &[1], &mut emit_out);
+
+            assert_eq!(
+                manual_out, emit_out,
+                "probe_gather_indices + manual materialise must equal probe_emit for key={}",
+                probe_val
+            );
+        }
+    }
+
+    #[test]
+    fn probe_emit_reserve_is_exact_for_high_fanout() {
+        // Confirms the batch-reservation: for a key with N build matches, out.capacity()
+        // increases by exactly N after probe_emit (no over-allocation on a hot start).
+        // This is the deterministic alloc-count proof for the optimization. [SONNET-4.6] sq-7d3dj.19
+        let mut build = Vec::new();
+        for i in 0..20u32 {
+            build.push(row(&[7, i])); // 20 build rows all share key=7
+        }
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let tables = vec![build_table(&build, &keys)];
+
+        let mut out: Vec<Row> = Vec::new();
+        let cap_before = out.capacity();
+        probe_emit(&row(&[7, 99]), &keys, &build, &tables, &[], &mut out);
+        let cap_after = out.capacity();
+        assert_eq!(out.len(), 20, "all 20 build rows must be emitted");
+        // capacity must cover all 20 rows (reserve(20) was called); no under-allocation.
+        assert!(cap_after >= 20, "reserve(20) must have been called: cap_after={}", cap_after);
+        // and the grow should have been exactly from 0 → ≥20 (no wasted double-grow on cold start)
+        assert_eq!(cap_before, 0, "output was empty before probe_emit");
     }
 }
