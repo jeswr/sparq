@@ -12,6 +12,7 @@ import {
   gzipString,
   gunzipToString,
   formatBytes,
+  formatFootprintBytes,
 } from "../src/lib/data-formats.ts";
 
 test("the catalogue covers the four text formats plus JSON-LD", () => {
@@ -70,4 +71,22 @@ test("formatBytes renders B under 1 KiB and KB above", () => {
   assert.equal(formatBytes(0), "0 B");
   assert.equal(formatBytes(512), "512 B");
   assert.equal(formatBytes(2048), "2.0 KB");
+});
+
+// [SONNET-4.6] sq-su1oe (#820) — the unintrusive store-stats line formats the
+// in-memory footprint + ingest source size in B / KB / MB.
+test("formatFootprintBytes carries B / KB / MB magnitudes", () => {
+  assert.equal(formatFootprintBytes(0), "0 B");
+  assert.equal(formatFootprintBytes(512), "512 B");
+  assert.equal(formatFootprintBytes(2048), "2.0 KB");
+  assert.equal(formatFootprintBytes(5 * 1024 * 1024), "5.0 MB");
+  // The 1 KiB / 1 MiB boundaries round up into the next magnitude rather than showing "1024 B".
+  assert.equal(formatFootprintBytes(1024), "1.0 KB");
+  assert.equal(formatFootprintBytes(1024 * 1024), "1.0 MB");
+});
+
+test("formatFootprintBytes clamps a bad reading to 0 B (never a fabricated figure)", () => {
+  assert.equal(formatFootprintBytes(-1), "0 B");
+  assert.equal(formatFootprintBytes(Number.NaN), "0 B");
+  assert.equal(formatFootprintBytes(Number.POSITIVE_INFINITY), "0 B");
 });

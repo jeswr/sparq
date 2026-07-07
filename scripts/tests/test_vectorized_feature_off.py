@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-[OPUS-4.8] sq-pntvh.8: standalone test suite for check-vectorized-feature-off.py.
+[OPUS-4.8] sq-pntvh.8 / [OPUS-4.8] sq-v3nel: standalone test suite for
+check-vectorized-feature-off.py.
 
-Runs the same tripwires that --self-test runs, as proper test functions with a
-clear summary. No external frameworks — stdlib only.
+Covers leg1 (feature-resolution guard) and the RE-DESIGNED leg2 dynamic byte-identity
+check (base-tree vs head-tree feature-OFF wasm, declaration-token gated). No external
+frameworks — stdlib only.
 
 Usage:
     python3 scripts/tests/test_vectorized_feature_off.py
@@ -39,195 +41,286 @@ def _leg1_on_dict(meta: dict) -> int:
         os.unlink(tmp_path)
 
 
-def _leg2_on_dicts(results: list, floor: dict) -> int:
-    """Run check_leg2 on in-memory dicts via temp files."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as r_tmp:
-        json.dump(results, r_tmp)
-        r_path = r_tmp.name
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f_tmp:
-        json.dump(floor, f_tmp)
-        f_path = f_tmp.name
+def _leg2_dynamic(base_bytes: bytes, head_bytes: bytes,
+                  base_decl: dict | None, head_decl: dict | None,
+                  base_decl_names: list[str] | None = None,
+                  head_decl_names: list[str] | None = None) -> int:
+    """Run check_leg2_dynamic on in-memory wasm bytes + declaration dicts via temp files.
+
+    A None declaration writes NO file (missing path) to exercise the fail-safe default
+    (an absent declaration reads change_token as 0).
+
+    base_decl_names / head_decl_names exercise MECHANISM V2 (sq-v3nel-v2): each is a list
+    of file names materialised in a temp declarations directory (e.g. ["1720.json",
+    "README.md"]). None => no directory is passed for that side (V2 disabled).
+    """
+    paths: list[str] = []
+    dirs: list[str] = []
+
+    def _write_bytes(data: bytes) -> str:
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".wasm", delete=False) as tmp:
+            tmp.write(data)
+            paths.append(tmp.name)
+            return tmp.name
+
+    def _write_decl(data: dict | None) -> str:
+        if data is None:
+            # Return a path that does not exist -> _read_change_token defaults to 0.
+            return os.path.join(tempfile.gettempdir(), "sq-v3nel-nonexistent-decl.json")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            json.dump(data, tmp)
+            paths.append(tmp.name)
+            return tmp.name
+
+    def _mkdir(names: list[str] | None) -> str | None:
+        if names is None:
+            return None
+        d = tempfile.mkdtemp()
+        dirs.append(d)
+        for n in names:
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("{}")
+        return d
+
+    base_wasm = _write_bytes(base_bytes)
+    head_wasm = _write_bytes(head_bytes)
+    base_decl_p = _write_decl(base_decl)
+    head_decl_p = _write_decl(head_decl)
+    base_dir = _mkdir(base_decl_names)
+    head_dir = _mkdir(head_decl_names)
     try:
-        return _check.check_leg2(r_path, f_path)
+        return _check.check_leg2_dynamic(base_wasm, head_wasm, base_decl_p, head_decl_p,
+                                         base_dir, head_dir)
     finally:
-        os.unlink(r_path)
-        os.unlink(f_path)
+        for p in paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        for d in dirs:
+            for n in os.listdir(d):
+                os.unlink(os.path.join(d, n))
+            os.rmdir(d)
 
 
 # ---------------------------------------------------------------------------
-# Tripwire tests
+# Leg 1 tests (unchanged behaviour)
 # ---------------------------------------------------------------------------
 
 def test_leg1_guard_rejects_vectorized_in_resolve() -> bool:
-    """
-    Tripwire 1a: leg1 MUST reject a metadata fixture where sparq-engine's
-    resolved node features include 'vectorized'.
-    """
     bad_meta = {
         "packages": [
-            {
-                "name": "sparq-engine",
-                "features": {"default": [], "vectorized": []}
-            }
+            {"name": "sparq-engine", "features": {"default": [], "vectorized": []}}
         ],
         "resolve": {
             "nodes": [
                 {
                     "id": "sparq-engine 0.1.0 (path+file:///repo/crates/sparq-engine)",
-                    "features": ["vectorized"]
+                    "features": ["vectorized"],
                 }
             ]
-        }
+        },
     }
     rc = _leg1_on_dict(bad_meta)
     if rc != 0:
         print("  PASS — leg1 guard correctly rejected 'vectorized' in sparq-engine resolved node")
         return True
-    else:
-        print("  FAIL — leg1 guard did NOT reject 'vectorized'; the guard is broken")
-        return False
+    print("  FAIL — leg1 guard did NOT reject 'vectorized'; the guard is broken")
+    return False
 
 
 def test_leg1_guard_rejects_vectorized_in_default_features() -> bool:
-    """
-    Tripwire 1b: leg1 MUST reject a metadata fixture where sparq-engine lists
-    'vectorized' in its package-level default features.
-    """
     bad_meta = {
         "packages": [
-            {
-                "name": "sparq-engine",
-                "features": {"default": ["vectorized"], "vectorized": []}
-            }
+            {"name": "sparq-engine", "features": {"default": ["vectorized"], "vectorized": []}}
         ],
         "resolve": {
             "nodes": [
                 {
                     "id": "sparq-engine 0.1.0 (path+file:///repo/crates/sparq-engine)",
-                    "features": []
+                    "features": [],
                 }
             ]
-        }
+        },
     }
     rc = _leg1_on_dict(bad_meta)
     if rc != 0:
         print("  PASS — leg1 guard correctly rejected 'vectorized' in sparq-engine default features")
         return True
-    else:
-        print("  FAIL — leg1 guard did NOT reject 'vectorized' in default features; the guard is broken")
-        return False
+    print("  FAIL — leg1 guard did NOT reject 'vectorized' in default features; the guard is broken")
+    return False
 
 
 def test_leg1_accepts_clean_metadata() -> bool:
-    """
-    Sanity check: leg1 MUST accept metadata where vectorized is absent from defaults.
-    """
     clean_meta = {
         "packages": [
-            {
-                "name": "sparq-engine",
-                "features": {"default": [], "vectorized": []}
-            }
+            {"name": "sparq-engine", "features": {"default": [], "vectorized": []}}
         ],
         "resolve": {
             "nodes": [
                 {
                     "id": "sparq-engine 0.1.0 (path+file:///repo/crates/sparq-engine)",
-                    "features": []
+                    "features": [],
                 }
             ]
-        }
+        },
     }
     rc = _leg1_on_dict(clean_meta)
     if rc == 0:
         print("  PASS — leg1 correctly accepted clean metadata (vectorized absent from defaults)")
         return True
-    else:
-        print("  FAIL — leg1 incorrectly rejected clean metadata; false positive")
-        return False
+    print("  FAIL — leg1 incorrectly rejected clean metadata; false positive")
+    return False
 
 
-def test_leg2_comparator_rejects_perturbed_size() -> bool:
-    """
-    Tripwire 2: leg2 MUST reject a wasm_bundle_bytes value that differs from the
-    pinned feature_off_exact by even 1 byte.
+# ---------------------------------------------------------------------------
+# Leg 2 (dynamic byte-identity) tests — sq-v3nel
+# ---------------------------------------------------------------------------
 
-    [OPUS-4.8] leg2 now compares against feature_off_exact, NOT floor.  The floor
-    (1399703) is the 2%-band ratchet lower bound for bench.yml; the exact equality pin
-    is separate so that within-band main drift does not cause a false failure.
-    """
-    pinned_exact = 1399868  # [OPUS-4.8] CI x86_64 feature_off_exact pin. Re-pin from CI, never aarch64.
-    perturbed = pinned_exact + 1
-    bad_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": perturbed}]
-    bad_floor = {
-        "metrics": {
-            "wasm_bundle_bytes": {
-                "floor": 1399703,
-                "threshold": 0.02,
-                "mode": "auto",
-                "feature_off_exact": pinned_exact,
-            }
-        }
-    }
-    rc = _leg2_on_dicts(bad_results, bad_floor)
-    if rc != 0:
-        print(f"  PASS — leg2 comparator correctly rejected perturbed size "
-              f"({perturbed} != feature_off_exact={pinned_exact})")
-        return True
-    else:
-        print("  FAIL — leg2 comparator did NOT reject mismatched size; the comparator is broken")
-        return False
+_BASE = b"\x00asm\x01\x00\x00\x00feature-off-base-bundle"
+_HEAD_DIFF = _BASE + b"X"          # different length + content
+_HEAD_SAME_LEN = b"\x00asm\x01\x00\x00\x00feature-off-Xead-bundle"  # same length, diff content
 
 
-def test_leg2_rejects_missing_pin() -> bool:
-    """
-    [OPUS-4.8] Tripwire 3: leg2 MUST fail-closed when the floor file has no
-    'wasm_bundle_bytes' metric at all. The comparison loop only iterates keys present
-    in the floor, so a corrupted/edited baseline that drops the pin would otherwise
-    yield zero violations and silently pass — disabling the exact-equality gate.
-    """
-    good_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": 1399868}]
-    floor_without_pin = {
-        "metrics": {
-            # wasm_bundle_bytes intentionally absent; only an unrelated metric present.
-            "native_bytes_per_triple": {"floor": 42, "threshold": 0.02, "mode": "auto"},
-        }
-    }
-    rc = _leg2_on_dicts(good_results, floor_without_pin)
-    if rc != 0:
-        print("  PASS — leg2 fail-closed when the floor file omits wasm_bundle_bytes")
-        return True
-    else:
-        print("  FAIL — leg2 silently passed with no wasm_bundle_bytes pin; the gate is disabled")
-        return False
-
-
-def test_leg2_accepts_exact_match() -> bool:
-    """
-    Sanity check: leg2 MUST accept results that exactly match the feature_off_exact pin.
-
-    [OPUS-4.8] Uses feature_off_exact, not floor — mirrors the updated check_leg2() logic.
-    """
-    pinned_exact = 1399868  # [OPUS-4.8] CI x86_64 feature_off_exact pin. Re-pin from CI, never aarch64.
-    good_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": pinned_exact}]
-    good_floor = {
-        "metrics": {
-            "wasm_bundle_bytes": {
-                "floor": 1399703,
-                "threshold": 0.02,
-                "mode": "auto",
-                "feature_off_exact": pinned_exact,
-            }
-        }
-    }
-    rc = _leg2_on_dicts(good_results, good_floor)
+def test_leg2_identical_bytes_pass() -> bool:
+    """Byte-identical base/head builds => PASS regardless of declaration token."""
+    rc = _leg2_dynamic(_BASE, _BASE, {"change_token": 0}, {"change_token": 0})
     if rc == 0:
-        print(f"  PASS — leg2 comparator correctly accepted exact match "
-              f"(feature_off_exact={pinned_exact})")
+        print("  PASS — identical feature-OFF bytes accepted (deterministic, no static pin)")
         return True
-    else:
-        print("  FAIL — leg2 comparator incorrectly rejected an exact match; false positive")
-        return False
+    print("  FAIL — identical bytes were rejected; false positive")
+    return False
+
+
+def test_leg2_undeclared_change_rejected() -> bool:
+    """Bytes differ + token un-bumped => FAIL (the core tripwire)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 3}, {"change_token": 3})
+    if rc != 0:
+        print("  PASS — undeclared feature-OFF byte change rejected (token unchanged)")
+        return True
+    print("  FAIL — undeclared change was NOT rejected; the gate is disabled")
+    return False
+
+
+def test_leg2_declared_change_accepted() -> bool:
+    """Bytes differ + token bumped => PASS (declared intentional change)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 3}, {"change_token": 4})
+    if rc == 0:
+        print("  PASS — declared feature-OFF byte change accepted (token 3 -> 4)")
+        return True
+    print("  FAIL — declared change was rejected; false positive")
+    return False
+
+
+def test_leg2_same_length_content_change_caught() -> bool:
+    """Same length but different content, undeclared => FAIL (byte-for-byte, not size)."""
+    assert len(_HEAD_SAME_LEN) == len(_BASE), "fixture must be equal length"
+    rc = _leg2_dynamic(_BASE, _HEAD_SAME_LEN, {"change_token": 0}, {"change_token": 0})
+    if rc != 0:
+        print("  PASS — same-length content change caught (comparison is byte-for-byte)")
+        return True
+    print("  FAIL — same-length content change slipped through; the comparison is size-only")
+    return False
+
+
+def test_leg2_missing_base_decl_defaults_zero() -> bool:
+    """Absent base declaration file reads token 0; a head bump to 1 => declared => PASS.
+
+    Mirrors THIS PR's own situation: base main has no declaration file yet.
+    """
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, None, {"change_token": 1})
+    if rc == 0:
+        print("  PASS — missing base decl defaults to 0; head token 1 counts as declared")
+        return True
+    print("  FAIL — missing base decl mishandled; false negative")
+    return False
+
+
+def test_leg2_both_decls_missing_undeclared_rejected() -> bool:
+    """Both declaration files absent (both read 0) + bytes differ => FAIL (fail-safe)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, None, None)
+    if rc != 0:
+        print("  PASS — both decls absent => tokens 0==0 => undeclared change rejected")
+        return True
+    print("  FAIL — absent decls silently passed a byte change; fail-safe broken")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Leg 2 MECHANISM V2 (per-PR declaration files) tests — sq-v3nel-v2
+# ---------------------------------------------------------------------------
+
+def test_leg2_v2_new_file_accepted() -> bool:
+    """Bytes differ + head ADDS a per-PR file not in base => PASS (V2 declaration)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=["README.md"],
+                       head_decl_names=["README.md", "1720.json"])
+    if rc == 0:
+        print("  PASS — new per-PR file (1720.json) accepted as a V2 declaration")
+        return True
+    print("  FAIL — V2 file declaration rejected; false positive")
+    return False
+
+
+def test_leg2_v2_no_new_file_rejected() -> bool:
+    """Bytes differ + NO new file (README only, both sides) + token equal => FAIL."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=["README.md"],
+                       head_decl_names=["README.md"])
+    if rc != 0:
+        print("  PASS — no new per-PR file => undeclared change rejected (fail-closed)")
+        return True
+    print("  FAIL — undeclared change slipped through V2; the gate is disabled")
+    return False
+
+
+def test_leg2_v2_readme_not_a_declaration() -> bool:
+    """A NEW README.md (not <digits>.json|md) is NOT a declaration => FAIL when undeclared."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=[],
+                       head_decl_names=["README.md", ".gitkeep"])
+    if rc != 0:
+        print("  PASS — README.md/.gitkeep are not declarations; change stays rejected")
+        return True
+    print("  FAIL — a non-PR-numbered file was mistaken for a declaration")
+    return False
+
+
+def test_leg2_v2_md_declaration_accepted() -> bool:
+    """A <digits>.md declaration file is also accepted (json or md permitted)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=[],
+                       head_decl_names=["1718.md"])
+    if rc == 0:
+        print("  PASS — <PR-number>.md accepted as a V2 declaration")
+        return True
+    print("  FAIL — .md declaration rejected; false positive")
+    return False
+
+
+def test_leg2_legacy_scalar_still_accepted_in_transition() -> bool:
+    """Transition window: scalar token inequality still declares even with V2 dirs present.
+
+    Mirrors a pre-V2 in-flight branch that bumped the scalar token; head added no new file.
+    """
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 1726}, {"change_token": 1720},
+                       base_decl_names=["README.md"],
+                       head_decl_names=["README.md"])
+    if rc == 0:
+        print("  PASS — legacy scalar inequality still accepted during transition window")
+        return True
+    print("  FAIL — transition window broken; a pre-V2 declared branch would falsely fail")
+    return False
+
+
+def test_leg2_no_dirs_falls_back_to_scalar() -> bool:
+    """No declarations dirs passed at all (None) => V2 disabled, scalar path governs."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0})
+    if rc != 0:
+        print("  PASS — no dirs + equal scalar token => undeclared change rejected")
+        return True
+    print("  FAIL — missing dirs mishandled")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +332,18 @@ def main() -> int:
         ("leg1 rejects vectorized in resolve node", test_leg1_guard_rejects_vectorized_in_resolve),
         ("leg1 rejects vectorized in default features", test_leg1_guard_rejects_vectorized_in_default_features),
         ("leg1 accepts clean metadata (sanity)", test_leg1_accepts_clean_metadata),
-        ("leg2 rejects perturbed wasm size (tripwire)", test_leg2_comparator_rejects_perturbed_size),
-        ("leg2 fail-closed on missing pin (tripwire)", test_leg2_rejects_missing_pin),
-        ("leg2 accepts exact match (sanity)", test_leg2_accepts_exact_match),
+        ("leg2 identical bytes pass (sanity)", test_leg2_identical_bytes_pass),
+        ("leg2 undeclared change rejected (tripwire)", test_leg2_undeclared_change_rejected),
+        ("leg2 declared change accepted (sanity)", test_leg2_declared_change_accepted),
+        ("leg2 same-length content change caught (byte-for-byte)", test_leg2_same_length_content_change_caught),
+        ("leg2 missing base decl defaults to 0", test_leg2_missing_base_decl_defaults_zero),
+        ("leg2 both decls absent => undeclared rejected", test_leg2_both_decls_missing_undeclared_rejected),
+        ("leg2 V2 new per-PR file accepted", test_leg2_v2_new_file_accepted),
+        ("leg2 V2 no new file => undeclared rejected", test_leg2_v2_no_new_file_rejected),
+        ("leg2 V2 README/.gitkeep not a declaration", test_leg2_v2_readme_not_a_declaration),
+        ("leg2 V2 <PR>.md declaration accepted", test_leg2_v2_md_declaration_accepted),
+        ("leg2 legacy scalar accepted in transition window", test_leg2_legacy_scalar_still_accepted_in_transition),
+        ("leg2 no dirs falls back to scalar path", test_leg2_no_dirs_falls_back_to_scalar),
     ]
 
     passed = 0
