@@ -90,7 +90,8 @@
     "ON vs OFF) is PRESERVED, only the absolute baseline moved. 1404910 is the CI x86_64 runner measurement",
     "(run 28722406953, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1404910 sits",
     "within its +2% band (top 1427697), so bench.yml stays green.",
-    "[SONNET-4.6] (sq-7d3dj.20) 2026-07-07: feature_off_exact RE-PINNED 1404910 -> 1407500 (+2590 bytes, +0.184%). The LFTJ micro-opt in sparq-substrate/join.rs (PR #1716) changes Vec<usize> -> SmallVec<[usize;8]> in the Leapfrog struct; sparq-engine unconditionally enables sparq-substrate/join so this code is compiled into the WASM bundle even though join.rs is behind cfg(feature=\"join\"). The SmallVec generic monomorphization carries additional inline-storage code paths that increase WASM code size. This is NOT accidental vectorization (the invariant the zero-delta gate exists to protect); the feature-OFF INVARIANT (bundle identical with vectorized ON vs OFF) is PRESERVED. 1407500 is the CI x86_64 runner measurement (run to be confirmed, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1407500 sits within its +2% band (top 1427697), so bench.yml stays green."
+    "[SONNET-4.6] (sq-7d3dj.20) 2026-07-07: feature_off_exact RE-PINNED 1404910 -> 1407500 (+2590 bytes, +0.184%). The LFTJ micro-opt in sparq-substrate/join.rs (PR #1716) changes Vec<usize> -> SmallVec<[usize;8]> in the Leapfrog struct; sparq-engine unconditionally enables sparq-substrate/join so this code is compiled into the WASM bundle even though join.rs is behind cfg(feature=\"join\"). The SmallVec generic monomorphization carries additional inline-storage code paths that increase WASM code size. This is NOT accidental vectorization (the invariant the zero-delta gate exists to protect); the feature-OFF INVARIANT (bundle identical with vectorized ON vs OFF) is PRESERVED. 1407500 is the CI x86_64 runner measurement (run to be confirmed, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1407500 sits within its +2% band (top 1427697), so bench.yml stays green.",
+    "[OPUS-4.8] (sq-7d3dj.30.2 / PR #1733) 2026-07-07: BOTH wasm_bundle_bytes floor AND feature_off_exact RE-PINNED 1407500 -> 1439315 (+31815 bytes, +2.260% vs feature_off_exact; +2.83% vs the 1399703 ratchet floor). CAUSE: PR #1733 makes ORDER BY ... LIMIT k use an UNCONDITIONAL bounded top-k selection path (sparq-engine order-by eval) with a precomputed SortCell::Iri sort key; SortCell::Iri and the bounded-heap selection code are always-compiled (NOT feature-gated), so they link into the feature-OFF wasm bundle and grow it. This is NOT accidental vectorization (the invariant the zero-delta gate exists to protect) and the feature-OFF INVARIANT (bundle identical with vectorized ON vs OFF) is PRESERVED — only the absolute baseline moved. UNLIKE the prior five within-band re-pins, this +2.83% EXCEEDS the old floor's +2% band (top 1427697), so the ratchet floor itself is RAISED (a documented, reviewed size bump), not just feature_off_exact. TRADEOFF (proceed-and-document): accept the size-for-speed cost — bounded top-k turns ORDER BY+LIMIT from a full sort-then-truncate O(n log n) into an O(n log k) heap, a latency win that includes wasm/browser queries where the bundle ships. 1439315 is the CI x86_64 runner measurement (run 28854869618, artifact-exact-equality leg2 'Measure wasm bundle size'; the perf-gate 'run + track benchmarks' lane reads the same 1439315). threshold 0.02 + mode auto UNCHANGED — the +2% guard is RETAINED at the new floor, not widened. Canonical cross-crate wasm-size re-measure = bead sq-7d3dj.30.6."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -109,10 +110,10 @@
       "mode": "auto"
     },
     "wasm_bundle_bytes": {
-      "floor": 1399703,
+      "floor": 1439315,
       "threshold": 0.02,
       "mode": "auto",
-      "feature_off_exact": 1407500
+      "feature_off_exact": 1439315
     },
     "parse_ns_per_byte": {
       "floor": 4.9721,
