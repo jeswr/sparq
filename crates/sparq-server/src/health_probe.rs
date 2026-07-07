@@ -178,4 +178,63 @@ mod tests {
         assert!(req.contains("Connection: close\r\n"));
         assert!(req.ends_with("\r\n\r\n"));
     }
+
+    // [OPUS-4.8] sq-qcnn.37: tokio tests for the async `run_probe` TCP path — the unhealthy
+    // response branch (lines 110–117) and the 4 KiB buffer-cap break (line 104). Both require a
+    // real TcpListener mock in the same process. The pure `probe_healthy` classifier is already
+    // covered by the sync tests above; these pin the I/O path that surrounds it.
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn run_probe_unhealthy_response_returns_descriptive_err() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // Spawn a mock server that returns one non-200 response then shuts down cleanly.
+        tokio::spawn(async move {
+            if let Ok((mut conn, _)) = listener.accept().await {
+                let _ = conn
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                    .await;
+                // Explicit shutdown so the probe's read loop sees EOF (not a connection reset).
+                let _ = conn.shutdown().await;
+            }
+        });
+        let result = run_probe(&addr).await;
+        assert!(result.is_err(), "non-200 response must be an Err");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("unhealthy"),
+            "error message must mention 'unhealthy': {msg}",
+        );
+        // The status line text should be in the error for diagnostics.
+        assert!(
+            msg.contains("503") || msg.contains("Service Unavailable"),
+            "error message should carry the status line: {msg}",
+        );
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn run_probe_caps_read_buffer_at_4096_bytes() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // Send a healthy status line followed by >4 KiB of padding so the buffer-cap
+        // `break` at line 104 triggers before the stream reaches EOF.
+        tokio::spawn(async move {
+            if let Ok((mut conn, _)) = listener.accept().await {
+                let mut response = b"HTTP/1.1 200 OK\r\n\r\nok".to_vec();
+                response.extend(std::iter::repeat_n(b'x', 5000));
+                let _ = conn.write_all(&response).await;
+                // Explicit shutdown so the probe can read the buffer-cap break and then EOF.
+                let _ = conn.shutdown().await;
+            }
+        });
+        let result = run_probe(&addr).await;
+        // The 200 status line is in the first chunk, so the probe should succeed.
+        assert!(result.is_ok(), "healthy large response must succeed: {:?}", result);
+    }
 }
