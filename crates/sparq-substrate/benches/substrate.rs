@@ -258,7 +258,10 @@ fn bench_lftj_intersection_k3(c: &mut Criterion) {
         let t = Trie { tuples: (0..n).step_by(5).map(|v| vec![v]).collect() };
         // All three tries participate at level 0: k=3.
         let parts_at_level = vec![vec![0usize, 1, 2]];
-        let expected = n / 30; // multiples of lcm(2,3,5)=30
+        // multiples of lcm(2,3,5)=30 in 0..n — 0 IS included, so the count is
+        // ceil(n/30), not floor.  E.g. n=1000 → {0,30,...,990} = 34 values.
+        // [OPUS-4.8] off-by-one fix sq-7d3dj.20
+        let expected = n.div_ceil(30);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
