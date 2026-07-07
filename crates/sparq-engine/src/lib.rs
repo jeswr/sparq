@@ -906,9 +906,25 @@ pub fn query_json_stream_with_budget(
     graph: &Graph,
     sparql: &str,
     budget: &QueryBudget,
+    sink: impl FnMut(String) -> std::ops::ControlFlow<()>,
+) -> Result<(), String> {
+    query_json_stream_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget, sink)
+}
+
+/// [`query_json_stream_with_budget`] over a [`PreparedQuery`] — no per-execution parse.
+///
+/// [OPUS-4.8] (sq-7d3dj.34.1) The HTTP floor path: `sparq-server` parses the request query
+/// ONCE (to classify its form + apply any protocol dataset override) and hands the resulting
+/// algebra straight here, so the streamed SELECT-JSON body is produced without the engine
+/// re-parsing the query string — the per-request parse is paid exactly once, not twice. The
+/// concatenation of the chunks handed to `sink` is byte-identical to
+/// [`query_json_stream_with_budget`] for the same query and budget.
+pub fn query_json_stream_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
     mut sink: impl FnMut(String) -> std::ops::ControlFlow<()>,
 ) -> Result<(), String> {
-    let prepared = PreparedQuery::parse(sparql)?;
     let q = &prepared.query;
     let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
@@ -2249,6 +2265,33 @@ mod tests {
             })
             .unwrap();
             assert_eq!(streamed, single, "stream concat mismatch for: {q}");
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.1) The prepared streaming entry (no per-execution re-parse —
+    /// the HTTP floor path) produces a body byte-identical to BOTH the string-streaming entry
+    /// and the buffered `query_json`, over SELECT and ASK, so reusing the algebra parsed by the
+    /// server does not change any response byte.
+    #[test]
+    fn query_json_stream_prepared_matches_string_and_buffered() {
+        let b = QueryBudget::unlimited();
+        for q in [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }",
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }",
+            // 0-row (floor-shaped) result.
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nope ?o }",
+        ] {
+            let buffered = query_json(&g(), q).unwrap();
+            let prepared = PreparedQuery::parse(q).unwrap();
+            let mut streamed = String::new();
+            query_json_stream_prepared_with_budget(&g(), &prepared, &b, |c| {
+                streamed.push_str(&c);
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+            assert_eq!(streamed, buffered, "prepared-stream concat mismatch for: {q}");
         }
     }
 

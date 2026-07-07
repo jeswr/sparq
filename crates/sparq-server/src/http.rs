@@ -4991,7 +4991,6 @@ async fn run_query_pinned(
                 Err(_) => return not_acceptable_response(head_only),
             };
             let is_ask = prepared.form == QueryForm::Ask;
-            let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
             let cfg = config.clone();
             let allow = allow.clone();
@@ -5000,13 +4999,23 @@ async fn run_query_pinned(
             // header + early solutions reach the socket before the whole result is
             // serialised (TTFB). ASK and the XML/CSV/TSV SELECT forms keep the buffered
             // worker path below (their serialisers are `&QueryResult`-driven).
+            // [OPUS-4.8] (sq-7d3dj.34.1) The floor path (JSON SELECT stream + ASK) runs the
+            // algebra already parsed in `prepare` via the engine's `*_prepared` entry points —
+            // no second parse per request.
             if !is_ask && fmt == Format::Json {
-                return stream_select_json(gen, select, budget, head_only, allow, &config).await;
+                return stream_select_json(gen, prepared.query, budget, head_only, allow, &config)
+                    .await;
             }
+            let pquery = prepared.query;
+            let select = prepared.runnable;
             let task = tokio::task::spawn_blocking(move || {
                 with_engine_scope_allow(&allow, || {
                     if is_ask {
-                        match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
+                        match sparq_engine::ask_prepared_with_budget(
+                            gen.snapshot(),
+                            &pquery,
+                            &budget,
+                        ) {
                             Ok(value) => {
                                 let (body, ct) = match fmt {
                                     Format::Xml => {
@@ -5282,7 +5291,9 @@ const STREAM_CHANNEL_CAP: usize = 4;
 /// the `http-server` SKILL): a streamed body cannot retroactively become a 413/503.
 async fn stream_select_json(
     gen: PinnedGen,
-    select: String,
+    // [OPUS-4.8] (sq-7d3dj.34.1) The query PARSED ONCE in `prepare` — the engine runs it via
+    // `query_json_stream_prepared_with_budget` without re-parsing (the HTTP floor win).
+    query: sparq_engine::PreparedQuery,
     budget: QueryBudget,
     head_only: bool,
     allow: crate::service_config::ServiceAllowlist,
@@ -5299,7 +5310,7 @@ async fn stream_select_json(
                 // stopped reading). Abandon the rest of the work.
                 Err(_) => std::ops::ControlFlow::Break(()),
             };
-            if let Err(e) = sparq_engine::query_json_stream_with_budget(graph, &select, &budget, &mut sink) {
+            if let Err(e) = sparq_engine::query_json_stream_prepared_with_budget(graph, &query, &budget, &mut sink) {
                 let _ = tx.blocking_send(Err(e));
             }
             // `gen` (the generation pin) is held until the worker returns, so every snapshot

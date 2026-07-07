@@ -306,6 +306,15 @@ multi-chunk result, the HTTP status is committed: a later cap/deadline trip is s
 the client sees a broken/incomplete response) — a streamed `200` cannot retroactively become a
 `413`/`503`.
 
+<!-- [OPUS-4.8] sq-7d3dj.34.1 -->
+**Single parse per request (HTTP floor).** The read path parses each request query with
+`spargebra` exactly ONCE — the server parses to classify the form + apply any protocol dataset
+override, then hands the resulting algebra straight to the engine's `*_prepared` entry points
+(`query_json_stream_prepared_with_budget` for JSON SELECT, `ask_prepared_with_budget` for ASK),
+so the engine does not re-parse the query string. This shaves one full parse off the per-request
+floor for ARBITRARY novel queries (no query cache — parsing is still paid, just not twice);
+negligible on a trivial `ASK{}` (sub-µs), and larger on realistic multi-pattern queries.
+
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
      --data-urlencode 'query=SELECT ?s WHERE { ?s ?p ?o }'
