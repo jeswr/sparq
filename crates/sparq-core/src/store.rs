@@ -816,6 +816,32 @@ impl TripleStore {
         self.scan_with(pattern, perm, lead)
     }
 
+    /// [OPUS-4.8] (sq-7d3dj.30.4) Scans a SPECIFIC permutation `perm`, for callers that
+    /// need a particular SECONDARY column order rather than just a primary sort column
+    /// (e.g. the DISTINCT loose skip-scan wants the layout `[..bound.., P, J, ..]` so each
+    /// `P`-block is `J`-sorted). Returns `None` when `perm` is not built (e.g. the compact
+    /// index) or when the pattern's bound positions do not form a leading prefix of `perm`
+    /// (so a contiguous range scan is impossible). The returned rows are identical to what
+    /// `scan`/`scan_sorted` would yield had they chosen `perm` — only the choice differs.
+    pub fn scan_perm(&self, pattern: &Pattern, perm: Perm) -> Option<Scan<'_>> {
+        if !BUILT.contains(&perm) {
+            return None;
+        }
+        let order = perm.order();
+        let bound = |i: usize| pattern[i].is_some();
+        let total_bound = (0..3).filter(|&i| bound(i)).count();
+        let mut lead = 0;
+        while lead < 3 && bound(order[lead]) {
+            lead += 1;
+        }
+        // Every bound position must be within the leading prefix, else this permutation
+        // cannot answer the pattern with one contiguous range.
+        if lead != total_bound {
+            return None;
+        }
+        Some(self.scan_with(pattern, perm, lead))
+    }
+
     /// The inclusive [lo, hi] key bounds for a pattern's bound prefix in `perm` order.
     #[inline]
     fn bounds(pattern: &Pattern, perm: Perm, lead: usize) -> ([Id; 3], [Id; 3]) {
@@ -1020,6 +1046,62 @@ mod tests {
                 assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
             }
         }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.30.4) `scan_perm` returns the rows for a SPECIFIC built
+    /// permutation (with the pattern's bound positions as a leading prefix), and `None`
+    /// when the permutation is not built or the bound positions are not a prefix.
+    #[test]
+    fn scan_perm_selects_named_permutation() {
+        let triples: Vec<[Id; 3]> = vec![
+            [10, 1, 100],
+            [10, 2, 100],
+            [11, 1, 100],
+            [12, 1, 101],
+        ];
+        let store = TripleStore::from_triples(triples.clone());
+
+        // Fully-unbound: a built predicate-first permutation must be selectable, and its rows
+        // sorted in that permutation's column order. Which predicate-first perm is BUILT
+        // differs by index set: the default 6-perm build has PSO; the 3-perm `compact-index`
+        // build ({SPO, POS, OSP}) has POS instead — where `scan_perm(Perm::Pso)` correctly
+        // returns `None` because PSO is not built (the documented contract). [OPUS-4.8]
+        #[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
+        {
+            let scan = store.scan_perm(&[None, None, None], Perm::Pso).expect("PSO is built");
+            assert_eq!(scan.perm, Perm::Pso);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[0], t[2])); // predicate, subject, object
+            assert_eq!(spo, want, "PSO scan not sorted by (predicate, subject, object)");
+        }
+        #[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
+        {
+            // PSO is NOT built under compact-index → `scan_perm` declines it (the contract).
+            assert!(
+                store.scan_perm(&[None, None, None], Perm::Pso).is_none(),
+                "PSO is not built under compact-index; scan_perm must return None"
+            );
+            // POS IS built there and serves the fully-unbound pattern, sorted (predicate, object, subject).
+            let scan = store.scan_perm(&[None, None, None], Perm::Pos).expect("POS is built");
+            assert_eq!(scan.perm, Perm::Pos);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[2], t[0])); // predicate, object, subject
+            assert_eq!(spo, want, "POS scan not sorted by (predicate, object, subject)");
+        }
+
+        // Object bound: OSP places the object as the leading prefix → Some. (OSP is built in
+        // both the default and the compact index set.)
+        let obj = store.scan_perm(&[None, None, Some(100)], Perm::Osp).expect("OSP built");
+        assert!(obj.rows.iter().all(|r| obj.to_spo(r)[2] == 100), "OSP range must be object=100");
+        assert_eq!(obj.rows.len(), 3);
+
+        // Object bound but SPO does NOT put the bound object in the leading prefix → None.
+        assert!(
+            store.scan_perm(&[None, None, Some(100)], Perm::Spo).is_none(),
+            "SPO cannot serve an object-only bound pattern as a prefix range"
+        );
     }
 
     /// [OPUS-4.8 sq-7d3dj.31] Direct gate on the concurrent-N build's INDEPENDENT per-perm

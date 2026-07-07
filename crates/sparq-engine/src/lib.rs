@@ -147,6 +147,29 @@ pub mod sip_testing {
     }
 }
 
+/// Test-only surface for the DISTINCT-projection loose skip-scan (bead sq-7d3dj.30.4):
+/// toggle the pushdown and read its per-query statistics. NOT part of the stable query
+/// API. [OPUS-4.8]
+#[doc(hidden)]
+pub mod distinct_pushdown_testing {
+    /// Enables/disables the DISTINCT-projection pushdown on the current thread, returning
+    /// the previous value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::distinct_pushdown::set_enabled(v)
+    }
+
+    /// Clears the per-query pushdown statistics.
+    pub fn reset_stats() {
+        crate::exec::distinct_pushdown::reset_stats()
+    }
+
+    /// `(fired, distinct_values_emitted, permutation_rows_scanned)` since the last
+    /// [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize) {
+        crate::exec::distinct_pushdown::stats()
+    }
+}
+
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};
