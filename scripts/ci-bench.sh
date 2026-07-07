@@ -955,12 +955,31 @@ infs=$("$CLI" reason "$TMP/inf.ttl" turtle rdfs 2>&1 | grep -oE 'in [0-9.]+s' | 
 # crates + strip=symbols; hot engine crates stay opt-level 3). This ratchets the raw `cargo
 # build` `.wasm`, not the post-wasm-bindgen/wasm-opt npm artifact, so it tracks the profile
 # the shipped bundle uses. Skipped gracefully when the wasm target isn't installed.
+WASM_BIN=""
 if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
   if cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
     WASM_BIN=$(ls target/wasm32-unknown-unknown/release-wasm/*.wasm 2>/dev/null | head -1)
     if [ -n "${WASM_BIN:-}" ]; then
       add wasm_bundle_bytes bytes "$(wc -c < "$WASM_BIN" | tr -d ' ')"
     fi
+  fi
+fi
+
+# [OPUS-4.8] (sq-7d3dj.14) wasm_opt_bundle_bytes — TREND-ONLY shipped size after wasm-opt -Oz.
+# The raw wasm_bundle_bytes above is the HARD-GATED deterministic ratchet (scripts/perf-gate.py,
+# 2% band). This companion series emits the post-wasm-opt -Oz size (the "shipped" artifact after
+# the same wasm-bindgen/wasm-opt pass that `wasm-pack build` runs for the published npm bundle).
+# The ~10% gap between the two is name-section and producer metadata that browsers strip at load
+# time — real bundle-size wins from the optimisation program show up here while the raw gate stays
+# bit-identical. TREND-ONLY: scripts/perf-gate.py is intentionally UNTOUCHED. The wasm-opt version
+# is logged to stderr so per-run comparisons can account for tool-version changes. Skipped gracefully
+# when wasm-opt (binaryen) is absent or the wasm binary was not built above.
+if command -v wasm-opt >/dev/null 2>&1 && [ -n "${WASM_BIN:-}" ] && [ -f "${WASM_BIN:-}" ]; then
+  WASM_OPT_VER="$(wasm-opt --version 2>&1 | head -1 || echo 'unknown')"
+  echo "note: wasm-opt version for wasm_opt_bundle_bytes: $WASM_OPT_VER" >&2
+  WASM_OPT_OUT="$TMP/opt.wasm"
+  if wasm-opt -Oz --strip-debug --strip-producers "$WASM_BIN" -o "$WASM_OPT_OUT" 2>/dev/null; then
+    add wasm_opt_bundle_bytes bytes "$(wc -c < "$WASM_OPT_OUT" | tr -d ' ')"
   fi
 fi
 
