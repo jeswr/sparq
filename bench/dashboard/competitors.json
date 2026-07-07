@@ -45,78 +45,678 @@
     "              `suite` matches a featured-suite key in dashboard.js (e.g. \"Synthetic (qlever-style)\",",
     "              \"Deep Taxonomy\"). A null `value` renders \"n/a (not gathered)\"."
   ],
-
   "schema_version": 1,
   "gathered_at_utc": "2026-06-16",
   "gathered_by": "STATIC in-repo references (qlever/eye) + a LIVE ephemeral-EC2 gather of the SHACL engines (sq-ays7, re-measuring the earlier sq-8dp3 gather at the current HEAD). The SHACL `values` below were measured on a one-shot ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04), quiet_box=true, on repo commit f271b74, against the committed SHACL suite (bench/shacl/gen.sh 1 0 — the LUBM(1) ABox, ~103k triples, x the 5 hand-authored shape graphs in bench/shacl/shapes/). This is an EPHEMERAL GATHER POINT for cross-engine ordering, NOT the pinned reference band (the dashboard CI series runs on a GitHub-hosted runner; absolute µs across the two host classes are not directly comparable — the host class + quiet_box flag are recorded per datapoint). HONEST-N/A: oxigraph + qlever stay ABSENT from `values` — oxigraph WAS gathered live on the same box but only via the sparq-bench synthetic-compare path (a different dataset/scale/query-name set from any dashboard featured-suite metric; see oxigraph_compare_note), and qlever needs a multi-GB on-disk server that the gather does not auto-start (only the cross-machine M1 `references` numbers exist). Filling either would be apples-to-oranges, so both remain n/a.",
-
   "engines": [
-    { "id": "qlever", "label": "QLever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "source": "bench/qlever-baselines.md" },
-    { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "embedded Rust dev-dep (Cargo.lock); gathered on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (50k entities) — a DIFFERENT dataset/regime/query-name set from any dashboard metric, so NO same-row value cell (would be apples-to-oranges); see oxigraph_compare_note", "source": "crates/sparq-bench Cargo.toml + Cargo.lock" },
-    { "id": "eye", "label": "EYE", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0", "source": "bench/inference/eye-comparison.md" },
-    { "id": "rdfox", "label": "RDFox", "version": "not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)", "env": "n/a — no head-to-head run in-repo", "source": "research/inference-sota.md §1.1" },
-    { "id": "pyshacl", "label": "pySHACL", "version": "0.31.0", "env": "ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)", "source": "live gather — scripts/gather-ec2.sh + report_cli_adapter.py" },
-    { "id": "jena-shacl", "label": "Apache Jena SHACL", "version": "5.2.0", "env": "ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK (default-jdk), quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)", "source": "live gather — scripts/gather-ec2.sh + report_cli_adapter.py" }
+    {
+      "id": "qlever",
+      "label": "QLever",
+      "version": "0.5.47",
+      "env": "2020 MacBook Air M1, 16GB, native",
+      "source": "bench/qlever-baselines.md"
+    },
+    {
+      "id": "oxigraph",
+      "label": "Oxigraph",
+      "version": "0.5.8",
+      "env": "embedded Rust dev-dep (Cargo.lock); gathered on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (50k entities) — a DIFFERENT dataset/regime/query-name set from any dashboard metric, so NO same-row value cell (would be apples-to-oranges); see oxigraph_compare_note",
+      "source": "crates/sparq-bench Cargo.toml + Cargo.lock"
+    },
+    {
+      "id": "eye",
+      "label": "EYE",
+      "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2",
+      "env": "Apple M1 (fanless), macOS 25.4.0",
+      "source": "bench/inference/eye-comparison.md"
+    },
+    {
+      "id": "rdfox",
+      "label": "RDFox",
+      "version": "not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)",
+      "env": "n/a — no head-to-head run in-repo",
+      "source": "research/inference-sota.md §1.1"
+    },
+    {
+      "id": "pyshacl",
+      "label": "pySHACL",
+      "version": "0.31.0",
+      "env": "ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)",
+      "source": "live gather — scripts/gather-ec2.sh + report_cli_adapter.py"
+    },
+    {
+      "id": "jena-shacl",
+      "label": "Apache Jena SHACL",
+      "version": "5.2.0",
+      "env": "ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK (default-jdk), quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)",
+      "source": "live gather — scripts/gather-ec2.sh + report_cli_adapter.py"
+    }
   ],
-
   "oxigraph_compare_note": "Oxigraph 0.5.8 WAS gathered live on the ephemeral c7g.xlarge (commit f271b74, sq-ays7) via the sparq-bench compare path (--scale 50000 --iters 4, in-process synthetic social graph, ~0.4M triples). All 7 queries agreed with sparq on solution counts (correctness cross-check passed). Min-time results (sparq vs oxigraph): load 226.77ms vs 1.011s (4.46x); scan-type 5.17ms vs 33.15ms (6.41x); star-3 16.01ms vs 165.52ms (10.34x); chain-2 132.64ms vs 995.75ms (7.51x); triangle 258.43ms vs 1.260s (4.87x); filter-age 3.76ms vs 26.39ms (7.02x); count-edges 5.1µs vs 52.13ms; optional 13.71ms vs 103.09ms (7.52x). These are recorded here for transparency but deliberately NOT mapped into a `values` cell: the dashboard's synthetic-suite metric names (q03_star3/q04_follows_name/q10_optional_age) are the sparq-bench-compare CLI suite at CI scale on a gh-runner — a different dataset/scale/regime/query-name set from this in-process compare, so aligning them would be apples-to-oranges (forbidden by the HONESTY note).",
-
   "_comment_values": "SHACL per-workload validate latency (µs) measured on the ephemeral c7g.xlarge gather (sq-ays7, commit f271b74; re-measuring the earlier sq-8dp3 point) against the SAME data x shapes as the dashboard SHACL suite. Keyed by the dashboard metric STEM (metric name minus _us; dashboard.competitorsFor matches name-minus-_us). Unit is microseconds (matches the shacl_*_validate_us metric unit). HONESTY: cross-engine #violations were verified per workload before recording timing — sparq/jena/pyshacl AGREE on cardinality(149)/class_nodekind(125)/datatype_range(1874)/sparql_constraint(3738); on node_paths sparq+jena report 1802 (per-occurrence) while pyshacl reports 3604 (it does NOT decompose the sh:node inter-shape recursion the same way) — a SEMANTIC count difference, documented in bench/shacl/expected.tsv's per-engine caveat, so pyshacl's node_paths timing is for a DIFFERENT result count and is flagged here. Absolute µs are from a 4-vCPU Graviton, NOT the gh-runner CI band — for cross-engine ORDERING, not an absolute reference. NOTE: this is FILE-ONLY documentation (a sibling of `values`, not a member of it) so `values` stays a strict metric-stem -> {engineId: number} mapping; the dashboard.js mirror carries the same note as a JS comment above COMPETITORS_DATA.values.",
-
   "values": {
-    "shacl_cardinality_validate":      { "pyshacl": 2770805, "jena-shacl": 1468099 },
-    "shacl_class_nodekind_validate":   { "pyshacl": 2774018, "jena-shacl": 1482460 },
-    "shacl_datatype_range_validate":   { "pyshacl": 3600595, "jena-shacl": 1666635 },
-    "shacl_node_paths_validate":       { "pyshacl": 4467148, "jena-shacl": 1788495 },
-    "shacl_sparql_constraint_validate":{ "pyshacl": 27661760, "jena-shacl": 2248361 }
+    "shacl_cardinality_validate": {
+      "pyshacl": 2770805,
+      "jena-shacl": 1468099
+    },
+    "shacl_class_nodekind_validate": {
+      "pyshacl": 2774018,
+      "jena-shacl": 1482460
+    },
+    "shacl_datatype_range_validate": {
+      "pyshacl": 3600595,
+      "jena-shacl": 1666635
+    },
+    "shacl_node_paths_validate": {
+      "pyshacl": 4467148,
+      "jena-shacl": 1788495
+    },
+    "shacl_sparql_constraint_validate": {
+      "pyshacl": 27661760,
+      "jena-shacl": 2248361
+    }
   },
-
   "same_box_comparisons": [
     {
-      "_comment": "[OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2): sparq + Oxigraph (+ QLever best-effort) on ONE ephemeral AWS EC2 box against the SAME generated SP2Bench-250k corpus + the SAME bench/sp2b/queries .rq files in the SAME min-of-5 COUNT regime. DISTINCT from (a) the gh-runner CI-band featured-suites `values` cells above — that sparq column is a DIFFERENT machine, so a competitor µs from this box must NOT be placed beside it; and (b) the cross-machine `references` baselines (cited, own scale/machine). Absolute µs are THIS-BOX-ONLY (4-vCPU Graviton) — for cross-engine ORDERING, not an absolute cross-machine reference. HONESTY: the gather launched sparq (sparq-cli bench, captured) then Oxigraph (sparq-bench bench-corpus) on the same box, but the orchestrator's poll loop reached its bound and the instance hit its orphan-safe cleanup trap immediately AFTER the Oxigraph command was invoked and BEFORE its TSV reached the pulled log — so NO Oxigraph timing and NO QLever timing were captured. Rather than fabricate or cross-fill, oxigraph + qlever stay null (render 'n/a') and count_match stays null (cannot verify cross-engine row agreement without the Oxigraph rows). Only sparq's real per-query (rows, best_us) are recorded. The sparq+oxigraph row-counts therefore COULD NOT be cross-checked on this run. Re-running the gather to completion (sentinel-gated, longer poll bound) would fill the oxigraph column and enable the count_match check. Keep byte-for-meaning in sync with COMPETITORS_DATA.same_box_comparisons in dashboard.js.",
-      "suite": "SP2Bench",
-      "scale": "SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)",
+      "suite": "sp2b",
+      "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
       "iters": 5,
-      "git_commit": "681047f",
-      "gathered_at_utc": "2026-06-16",
-      "source": "live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)",
+      "git_commit": "0ab87b2a",
+      "gathered_at_utc": "2026-07-07T01:11:26Z",
+      "canonical": true,
+      "combine": "best-of the 2 back-to-back canonical gathers (20260707T015305Z + 20260707T015316Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×5, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+      "source": "canonical gather 'sparql-same-box-comparison' (canonical-competitor-matrix (sq-1sa9r)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+      "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
       "env": {
-        "host_class": "ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)",
+        "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
         "quiet_box": true,
-        "gathered_at_utc": "2026-06-16",
-        "note": "Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run."
+        "gathered_at_utc": "2026-07-07T01:11:26Z",
+        "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+        "kernel": "6.17.0-1019-aws",
+        "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
       },
       "engines": [
-        { "id": "sparq", "label": "sparq", "version": "git 681047f", "env": "ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT" },
-        { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired" },
-        { "id": "qlever", "label": "QLever", "version": "n/a", "env": "requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated" }
+        {
+          "id": "sparq",
+          "label": "sparq",
+          "version": "0ab87b2a",
+          "mode": "CLI in-process (sparq-cli bench, COUNT mode)",
+          "status": "ok"
+        },
+        {
+          "id": "oxigraph",
+          "label": "Oxigraph",
+          "version": "0.5.9",
+          "mode": "CLI in-process (prebuilt on-disk store, sha256-pinned)",
+          "status": "ok"
+        },
+        {
+          "id": "fuseki",
+          "label": "Apache Jena Fuseki",
+          "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
+          "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
+          "status": "failed",
+          "failure": "load timeout (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+        },
+        {
+          "id": "virtuoso",
+          "label": "Virtuoso Open-Source 7",
+          "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+          "mode": "HTTP SPARQL adapter (isql ld_dir)",
+          "status": "ok"
+        },
+        {
+          "id": "qlever",
+          "label": "QLever",
+          "version": "adfreiburg/qlever (sha256:2cc33823e65a…)",
+          "mode": "HTTP SPARQL adapter (qlever-index → qlever-server)",
+          "status": "ok"
+        }
       ],
       "rows": [
-        { "query": "q01",  "unit": "µs", "rows": 1,      "values": { "sparq": 9.2,      "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q02",  "unit": "µs", "rows": 6067,   "values": { "sparq": 6618.2,   "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q03a", "unit": "µs", "rows": 15823,  "values": { "sparq": 14525.7,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q03b", "unit": "µs", "rows": 114,    "values": { "sparq": 14355.4,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q03c", "unit": "µs", "rows": 0,      "values": { "sparq": 14140.6,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q04",  "unit": "µs", "rows": 541911, "values": { "sparq": 358604.1, "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q05b", "unit": "µs", "rows": 6933,   "values": { "sparq": 15317.7,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q07",  "unit": "µs", "rows": 48,     "values": { "sparq": 23383.4,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q08",  "unit": "µs", "rows": 358,    "values": { "sparq": 212938.1, "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q09",  "unit": "µs", "rows": 4,      "values": { "sparq": 23091.2,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q10",  "unit": "µs", "rows": 452,    "values": { "sparq": 3.8,      "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q11",  "unit": "µs", "rows": 10,     "values": { "sparq": 18652.1,  "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q12b", "unit": "µs", "rows": 1,      "values": { "sparq": 213513.8, "oxigraph": null, "qlever": null }, "count_match": null },
-        { "query": "q12c", "unit": "µs", "rows": 0,      "values": { "sparq": 4.9,      "oxigraph": null, "qlever": null }, "count_match": null }
+        {
+          "query": "q01",
+          "unit": "µs",
+          "rows": 1,
+          "values": {
+            "sparq": 10.5,
+            "oxigraph": 14296.3,
+            "fuseki": null,
+            "virtuoso": 743,
+            "qlever": 2946.9
+          },
+          "count_match": true
+        },
+        {
+          "query": "q02",
+          "unit": "µs",
+          "rows": 6067,
+          "values": {
+            "sparq": 6183.8,
+            "oxigraph": 524517.7,
+            "fuseki": null,
+            "virtuoso": 340770,
+            "qlever": 276392.4
+          },
+          "count_match": true
+        },
+        {
+          "query": "q03a",
+          "unit": "µs",
+          "rows": 15823,
+          "values": {
+            "sparq": 11804,
+            "oxigraph": 218440.3,
+            "fuseki": null,
+            "virtuoso": 95121,
+            "qlever": 46230.5
+          },
+          "count_match": true
+        },
+        {
+          "query": "q03b",
+          "unit": "µs",
+          "rows": 114,
+          "values": {
+            "sparq": 11315.9,
+            "oxigraph": 128549.8,
+            "fuseki": null,
+            "virtuoso": 1378,
+            "qlever": 1576.4
+          },
+          "count_match": true
+        },
+        {
+          "query": "q03c",
+          "unit": "µs",
+          "rows": 0,
+          "values": {
+            "sparq": 11393.2,
+            "oxigraph": 126918.1,
+            "fuseki": null,
+            "virtuoso": 613,
+            "qlever": 1246.6
+          },
+          "count_match": true
+        },
+        {
+          "query": "q04",
+          "unit": "µs",
+          "rows": 541911,
+          "values": {
+            "sparq": 347814.3,
+            "oxigraph": 19702535.7,
+            "fuseki": null,
+            "virtuoso": 8220214,
+            "qlever": 2900056.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "q05b",
+          "unit": "µs",
+          "rows": 6933,
+          "values": {
+            "sparq": 15409.2,
+            "oxigraph": 612795.9,
+            "fuseki": null,
+            "virtuoso": 109939,
+            "qlever": 31787.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "q07",
+          "unit": "µs",
+          "rows": 48,
+          "values": {
+            "sparq": 20378.9,
+            "oxigraph": null,
+            "fuseki": null,
+            "virtuoso": 508290,
+            "qlever": 8031.1
+          },
+          "count_match": true
+        },
+        {
+          "query": "q08",
+          "unit": "µs",
+          "rows": 358,
+          "values": {
+            "sparq": 153318,
+            "oxigraph": null,
+            "fuseki": null,
+            "virtuoso": 12809,
+            "qlever": 8567.8
+          },
+          "count_match": false
+        },
+        {
+          "query": "q09",
+          "unit": "µs",
+          "rows": 4,
+          "values": {
+            "sparq": 20488.4,
+            "oxigraph": 185741.3,
+            "fuseki": null,
+            "virtuoso": 13417,
+            "qlever": 1343.6
+          },
+          "count_match": true
+        },
+        {
+          "query": "q10",
+          "unit": "µs",
+          "rows": 452,
+          "values": {
+            "sparq": 3.7,
+            "oxigraph": 16483.8,
+            "fuseki": null,
+            "virtuoso": 5523,
+            "qlever": 4521.1
+          },
+          "count_match": true
+        },
+        {
+          "query": "q11",
+          "unit": "µs",
+          "rows": 10,
+          "values": {
+            "sparq": 24552.2,
+            "oxigraph": 742647.9,
+            "fuseki": null,
+            "virtuoso": 13407,
+            "qlever": 1925.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "q12b",
+          "unit": "µs",
+          "rows": 1,
+          "values": {
+            "sparq": 153496.5,
+            "oxigraph": 49991323.8,
+            "fuseki": null,
+            "virtuoso": 9003,
+            "qlever": 7218.5
+          },
+          "count_match": false
+        },
+        {
+          "query": "q12c",
+          "unit": "µs",
+          "rows": 0,
+          "values": {
+            "sparq": 5.2,
+            "oxigraph": 10764.2,
+            "fuseki": null,
+            "virtuoso": 573,
+            "qlever": 1389.6
+          },
+          "count_match": true
+        }
+      ]
+    },
+    {
+      "suite": "watdiv",
+      "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
+      "iters": 5,
+      "git_commit": "0ab87b2a",
+      "gathered_at_utc": "2026-07-07T01:11:26Z",
+      "canonical": true,
+      "combine": "best-of the 2 back-to-back canonical gathers (20260707T022331Z + 20260707T022342Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×5, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+      "source": "canonical gather 'sparql-same-box-comparison' (canonical-competitor-matrix (sq-1sa9r)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+      "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+      "env": {
+        "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+        "quiet_box": true,
+        "gathered_at_utc": "2026-07-07T01:11:26Z",
+        "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+        "kernel": "6.17.0-1019-aws",
+        "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
+      },
+      "engines": [
+        {
+          "id": "sparq",
+          "label": "sparq",
+          "version": "0ab87b2a",
+          "mode": "CLI in-process (sparq-cli bench, COUNT mode)",
+          "status": "ok"
+        },
+        {
+          "id": "oxigraph",
+          "label": "Oxigraph",
+          "version": "0.5.9",
+          "mode": "CLI in-process (prebuilt on-disk store, sha256-pinned)",
+          "status": "ok"
+        },
+        {
+          "id": "fuseki",
+          "label": "Apache Jena Fuseki",
+          "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
+          "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
+          "status": "failed",
+          "failure": "load timeout (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+        },
+        {
+          "id": "virtuoso",
+          "label": "Virtuoso Open-Source 7",
+          "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+          "mode": "HTTP SPARQL adapter (isql ld_dir)",
+          "status": "ok"
+        },
+        {
+          "id": "qlever",
+          "label": "QLever",
+          "version": "adfreiburg/qlever (sha256:2cc33823e65a…)",
+          "mode": "HTTP SPARQL adapter (qlever-index → qlever-server)",
+          "status": "ok"
+        }
+      ],
+      "rows": [
+        {
+          "query": "C3",
+          "unit": "µs",
+          "rows": 8763,
+          "values": {
+            "sparq": 50.2,
+            "oxigraph": 1175133.7,
+            "fuseki": null,
+            "virtuoso": 38567,
+            "qlever": 33535.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "F2",
+          "unit": "µs",
+          "rows": 1,
+          "values": {
+            "sparq": 24.8,
+            "oxigraph": 11441.5,
+            "fuseki": null,
+            "virtuoso": 747,
+            "qlever": 31867.6
+          },
+          "count_match": true
+        },
+        {
+          "query": "F3",
+          "unit": "µs",
+          "rows": 3,
+          "values": {
+            "sparq": 25.4,
+            "oxigraph": 12255.2,
+            "fuseki": null,
+            "virtuoso": 796,
+            "qlever": 9979
+          },
+          "count_match": true
+        },
+        {
+          "query": "F5",
+          "unit": "µs",
+          "rows": 34,
+          "values": {
+            "sparq": 101.8,
+            "oxigraph": 19965.7,
+            "fuseki": null,
+            "virtuoso": 1753,
+            "qlever": 10629.7
+          },
+          "count_match": true
+        },
+        {
+          "query": "L1",
+          "unit": "µs",
+          "rows": 4,
+          "values": {
+            "sparq": 15.6,
+            "oxigraph": 12966.1,
+            "fuseki": null,
+            "virtuoso": 728,
+            "qlever": 3706.4
+          },
+          "count_match": true
+        },
+        {
+          "query": "L2",
+          "unit": "µs",
+          "rows": 3,
+          "values": {
+            "sparq": 14.5,
+            "oxigraph": 11396.1,
+            "fuseki": null,
+            "virtuoso": 661,
+            "qlever": 2470.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "L3",
+          "unit": "µs",
+          "rows": 41,
+          "values": {
+            "sparq": 6.3,
+            "oxigraph": 11543.3,
+            "fuseki": null,
+            "virtuoso": 1070,
+            "qlever": 2485.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "L4",
+          "unit": "µs",
+          "rows": 2,
+          "values": {
+            "sparq": 5.4,
+            "oxigraph": 10630.4,
+            "fuseki": null,
+            "virtuoso": 658,
+            "qlever": 2317.2
+          },
+          "count_match": true
+        },
+        {
+          "query": "L5",
+          "unit": "µs",
+          "rows": 1,
+          "values": {
+            "sparq": 9.8,
+            "oxigraph": 10360.6,
+            "fuseki": null,
+            "virtuoso": 647,
+            "qlever": 3771.1
+          },
+          "count_match": true
+        },
+        {
+          "query": "S1",
+          "unit": "µs",
+          "rows": 6,
+          "values": {
+            "sparq": 32.6,
+            "oxigraph": 19872.9,
+            "fuseki": null,
+            "virtuoso": 1080,
+            "qlever": 132258.4
+          },
+          "count_match": true
+        },
+        {
+          "query": "S2",
+          "unit": "µs",
+          "rows": 4,
+          "values": {
+            "sparq": 12.1,
+            "oxigraph": 13321.9,
+            "fuseki": null,
+            "virtuoso": 773,
+            "qlever": 4018.8
+          },
+          "count_match": true
+        },
+        {
+          "query": "S3",
+          "unit": "µs",
+          "rows": 6,
+          "values": {
+            "sparq": 11.4,
+            "oxigraph": 11749.1,
+            "fuseki": null,
+            "virtuoso": 850,
+            "qlever": 5350.4
+          },
+          "count_match": true
+        },
+        {
+          "query": "S4",
+          "unit": "µs",
+          "rows": 4,
+          "values": {
+            "sparq": 11.4,
+            "oxigraph": 12297.5,
+            "fuseki": null,
+            "virtuoso": 746,
+            "qlever": 4051.8
+          },
+          "count_match": true
+        },
+        {
+          "query": "S5",
+          "unit": "µs",
+          "rows": 8,
+          "values": {
+            "sparq": 10.7,
+            "oxigraph": 12254.9,
+            "fuseki": null,
+            "virtuoso": 823,
+            "qlever": 5380.9
+          },
+          "count_match": true
+        },
+        {
+          "query": "S6",
+          "unit": "µs",
+          "rows": 1,
+          "values": {
+            "sparq": 9.4,
+            "oxigraph": 11013.5,
+            "fuseki": null,
+            "virtuoso": 663,
+            "qlever": 3771.6
+          },
+          "count_match": true
+        },
+        {
+          "query": "S7",
+          "unit": "µs",
+          "rows": 2,
+          "values": {
+            "sparq": 10.4,
+            "oxigraph": 10596,
+            "fuseki": null,
+            "virtuoso": 658,
+            "qlever": 3851.9
+          },
+          "count_match": true
+        }
       ]
     }
   ],
-
   "references": [
-    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q03_star3 (3-pattern star join), count", "value": 73, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1 — NOT the dashboard CI scale; reference only." },
-    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q04_follows_name (2-pattern chain), count", "value": 56, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only." },
-    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q10_optional_age (OPTIONAL left-join), count", "value": 60, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only." },
-    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "100M synthetic (12.5M entities × 8)", "metric": "q03_star3 (3-pattern star join), count", "value": 900, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only (observed 829–1195)", "source": "bench/qlever-baselines.md", "caveat": "100M-scale on an M1, not the dashboard CI scale — reference only." },
-    { "suite": "Deep Taxonomy", "engine": "eye", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0, idle", "scale": "dt1k — 1000-deep :sc chain", "metric": "forward closure (parse → fixpoint → serialize), wall-clock", "value": 4.19, "unit": "s", "regime": "least-contended run; same pipeline as `sparq-cli reason … n3`", "source": "bench/inference/eye-comparison.md (idle-machine table)", "caveat": "REASONING-CLOSURE task on an M1 — different task/machine/unit from any dashboard metric. Reference only." },
-    { "suite": "Deep Taxonomy", "engine": "eye", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0, idle", "scale": "dt10k — 10000-deep :sc chain", "metric": "forward closure, wall-clock", "value": 377.9, "unit": "s", "regime": "single run", "source": "bench/inference/eye-comparison.md (idle-machine table)", "caveat": "Reasoning closure on an M1; different task/machine/unit. Reference only." },
-    { "suite": "Deep Taxonomy", "engine": "eye", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0, idle", "scale": "dt100k — 100000-deep :sc chain", "metric": "forward closure, wall-clock", "value": null, "unit": "s", "regime": "not run (extrapolated ≈9h at EYE’s observed ≈N^1.95 DT scaling)", "source": "bench/inference/eye-comparison.md", "caveat": "n/a (not gathered) — EYE was not run at dt100k. NOT fabricated." }
+    {
+      "suite": "Synthetic (qlever-style)",
+      "engine": "qlever",
+      "version": "0.5.47",
+      "env": "2020 MacBook Air M1, 16GB, native",
+      "scale": "10M synthetic (1.25M entities × 8)",
+      "metric": "q03_star3 (3-pattern star join), count",
+      "value": 73,
+      "unit": "ms",
+      "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only",
+      "source": "bench/qlever-baselines.md",
+      "caveat": "10M-scale on an M1 — NOT the dashboard CI scale; reference only."
+    },
+    {
+      "suite": "Synthetic (qlever-style)",
+      "engine": "qlever",
+      "version": "0.5.47",
+      "env": "2020 MacBook Air M1, 16GB, native",
+      "scale": "10M synthetic (1.25M entities × 8)",
+      "metric": "q04_follows_name (2-pattern chain), count",
+      "value": 56,
+      "unit": "ms",
+      "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only",
+      "source": "bench/qlever-baselines.md",
+      "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only."
+    },
+    {
+      "suite": "Synthetic (qlever-style)",
+      "engine": "qlever",
+      "version": "0.5.47",
+      "env": "2020 MacBook Air M1, 16GB, native",
+      "scale": "10M synthetic (1.25M entities × 8)",
+      "metric": "q10_optional_age (OPTIONAL left-join), count",
+      "value": 60,
+      "unit": "ms",
+      "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only",
+      "source": "bench/qlever-baselines.md",
+      "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only."
+    },
+    {
+      "suite": "Synthetic (qlever-style)",
+      "engine": "qlever",
+      "version": "0.5.47",
+      "env": "2020 MacBook Air M1, 16GB, native",
+      "scale": "100M synthetic (12.5M entities × 8)",
+      "metric": "q03_star3 (3-pattern star join), count",
+      "value": 900,
+      "unit": "ms",
+      "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only (observed 829–1195)",
+      "source": "bench/qlever-baselines.md",
+      "caveat": "100M-scale on an M1, not the dashboard CI scale — reference only."
+    },
+    {
+      "suite": "Deep Taxonomy",
+      "engine": "eye",
+      "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2",
+      "env": "Apple M1 (fanless), macOS 25.4.0, idle",
+      "scale": "dt1k — 1000-deep :sc chain",
+      "metric": "forward closure (parse → fixpoint → serialize), wall-clock",
+      "value": 4.19,
+      "unit": "s",
+      "regime": "least-contended run; same pipeline as `sparq-cli reason … n3`",
+      "source": "bench/inference/eye-comparison.md (idle-machine table)",
+      "caveat": "REASONING-CLOSURE task on an M1 — different task/machine/unit from any dashboard metric. Reference only."
+    },
+    {
+      "suite": "Deep Taxonomy",
+      "engine": "eye",
+      "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2",
+      "env": "Apple M1 (fanless), macOS 25.4.0, idle",
+      "scale": "dt10k — 10000-deep :sc chain",
+      "metric": "forward closure, wall-clock",
+      "value": 377.9,
+      "unit": "s",
+      "regime": "single run",
+      "source": "bench/inference/eye-comparison.md (idle-machine table)",
+      "caveat": "Reasoning closure on an M1; different task/machine/unit. Reference only."
+    },
+    {
+      "suite": "Deep Taxonomy",
+      "engine": "eye",
+      "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2",
+      "env": "Apple M1 (fanless), macOS 25.4.0, idle",
+      "scale": "dt100k — 100000-deep :sc chain",
+      "metric": "forward closure, wall-clock",
+      "value": null,
+      "unit": "s",
+      "regime": "not run (extrapolated ≈9h at EYE’s observed ≈N^1.95 DT scaling)",
+      "source": "bench/inference/eye-comparison.md",
+      "caveat": "n/a (not gathered) — EYE was not run at dt100k. NOT fabricated."
+    }
   ]
 }
