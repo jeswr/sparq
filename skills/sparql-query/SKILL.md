@@ -84,6 +84,9 @@ SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` varia
 - `query_json(&Graph, &str) -> Result<String, String>` — SELECT/ASK as SPARQL-1.1 JSON.
 - `query_json_chunks_with_budget(&Graph, &str, &QueryBudget) -> Result<Vec<String>, String>` —
   streamed JSON (concatenation is byte-identical to `query_json`; for HTTP bodies).
+- `query_json_stream_with_budget(&Graph, &str, &QueryBudget, sink)` (+ the
+  `query_json_stream_prepared_with_budget` no-re-parse variant over a `PreparedQuery`) —
+  emits each JSON chunk to `sink` AS produced (TTFB streaming; the HTTP server's read path).
 - `ask(&Graph, &str) -> Result<bool, String>` — requires an ASK query.
 - `count(&Graph, &str) -> Result<usize, String>` — solution count without materialising terms.
 
