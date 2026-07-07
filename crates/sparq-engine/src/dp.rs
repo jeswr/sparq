@@ -40,14 +40,20 @@
 //! pattern with no variables) — those have no single connected plan, and the greedy
 //! path already handles cross products.
 //!
-//! ## Opt-in twice over
+//! ## Default-on when compiled; opt-out available [SONNET-4.6] sq-7d3dj.30.5
 //!
 //! The whole module compiles only under the non-default `dp-planner` cargo feature,
-//! and even then the DP path runs only while a planner is installed on the current
-//! thread with [`with_dp_planner`] / [`with_dp_planner_budget`] (the same
-//! thread-local install pattern as `with_cs_table`). With the feature off, or the
-//! feature on but no planner installed, the executor is byte-identical to the greedy
-//! default. Pulls in ZERO new dependencies and contains no `unsafe`.
+//! keeping `sparq-core` / `sparq-engine` lean when the feature is off (zero DP code
+//! compiles; the default native + wasm builds are byte-identical to the greedy-only
+//! build). When the feature IS compiled, DPccp runs **by default** on every thread
+//! for any BGP within the `4096`-connected-subgraph budget — no explicit install is
+//! required.
+//!
+//! To restore greedy GOO within a scoped call, use [`without_dp_planner`]. To set a
+//! budget different from the compiled-in default, use [`with_dp_planner_budget`].
+//! [`with_dp_planner`] re-installs the default budget explicitly and is provided for
+//! symmetry and backward compatibility. Pulls in ZERO new dependencies and contains
+//! no `unsafe`.
 
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
@@ -82,36 +88,75 @@ pub(crate) struct DpConfig {
     pub(crate) max_subgraphs: usize,
 }
 
-thread_local! {
-    static ACTIVE: RefCell<Option<DpConfig>> = const { RefCell::new(None) };
+/// Three-way thread-local install state for the DPccp planner. [SONNET-4.6] sq-7d3dj.30.5
+///
+/// * `Default` — no explicit override; [`active()`] returns the compiled-in default
+///   (`DEFAULT_MAX_SUBGRAPHS`). This is the initial state on every thread.
+/// * `Enabled(DpConfig)` — explicit install at a specific budget (set by
+///   [`install`] / [`with_dp_planner_budget`]).
+/// * `Disabled` — explicit opt-out; [`active()`] returns `None` (greedy GOO). Set by
+///   [`without_dp_planner`].
+#[derive(Clone, Copy, Debug)]
+enum Install {
+    Default,
+    Enabled(DpConfig),
+    Disabled,
 }
 
-/// Uninstalls the planner when the [`with_dp_planner`] closure returns (also on
-/// unwind, so a panicking query never leaks the install into the thread).
+thread_local! {
+    static ACTIVE: RefCell<Install> = const { RefCell::new(Install::Default) };
+}
+
+/// Restores the previous install state when dropped (including on unwind, so a
+/// panicking query never leaks an install into the calling thread).
 pub(crate) struct Guard {
-    prev: Option<DpConfig>,
+    prev: Install,
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        ACTIVE.with(|a| *a.borrow_mut() = self.prev.take());
+        ACTIVE.with(|a| *a.borrow_mut() = self.prev);
     }
 }
 
-pub(crate) fn install(cfg: DpConfig) -> Guard {
-    let prev = ACTIVE.with(|a| a.borrow_mut().replace(cfg));
+/// Atomically swaps the current install state with `s`, returning a [`Guard`] that
+/// restores the previous state on drop.
+fn set_install(s: Install) -> Guard {
+    let prev = ACTIVE.with(|a| {
+        let mut borrow = a.borrow_mut();
+        let prev = *borrow;
+        *borrow = s;
+        prev
+    });
     Guard { prev }
 }
 
-/// The installed planner config, if any.
+/// Installs a specific `DpConfig` on this thread, returning a guard that restores
+/// the previous state on drop. Called by [`with_dp_planner`] / [`with_dp_planner_budget`].
+pub(crate) fn install(cfg: DpConfig) -> Guard {
+    set_install(Install::Enabled(cfg))
+}
+
+/// Returns the effective `DpConfig` for the current thread:
+///
+/// * `Install::Default` — returns `Some(DpConfig { max_subgraphs: DEFAULT_MAX_SUBGRAPHS })`.
+/// * `Install::Enabled(cfg)` — returns `Some(cfg)`.
+/// * `Install::Disabled` — returns `None` (greedy GOO).
 pub(crate) fn active() -> Option<DpConfig> {
-    ACTIVE.with(|a| *a.borrow())
+    ACTIVE.with(|a| match *a.borrow() {
+        Install::Default => Some(DpConfig { max_subgraphs: DEFAULT_MAX_SUBGRAPHS }),
+        Install::Enabled(cfg) => Some(cfg),
+        Install::Disabled => None,
+    })
 }
 
 /// Runs `f` with the DP join-order planner installed at the default subgraph budget:
 /// every BGP the closure evaluates on this thread is planned by the DPccp enumerator
 /// when it fits the budget and is connected, and by greedy GOO otherwise. The result
 /// of any query is identical to the greedy default — only join order changes.
+///
+/// This is equivalent to the compiled-in default and is provided for backward
+/// compatibility and explicit scoped-override semantics.
 ///
 /// ```ignore
 /// let result = sparq_engine::with_dp_planner(|| sparq_engine::query(&graph, sparql))?;
@@ -126,6 +171,19 @@ pub fn with_dp_planner<T>(f: impl FnOnce() -> T) -> T {
 /// disables the DP entirely (always greedy).
 pub fn with_dp_planner_budget<T>(max_subgraphs: usize, f: impl FnOnce() -> T) -> T {
     let _guard = install(DpConfig { max_subgraphs });
+    f()
+}
+
+/// Runs `f` with the DPccp join-order planner explicitly disabled for this thread:
+/// every BGP evaluated inside the closure falls back to greedy GOO regardless of the
+/// compiled-in default. This is the inverse of [`with_dp_planner`].
+///
+/// ```ignore
+/// // Obtain the greedy baseline inside a scope that normally uses the default DPccp:
+/// let greedy = sparq_engine::without_dp_planner(|| sparq_engine::query(&graph, sparql))?;
+/// ```
+pub fn without_dp_planner<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = set_install(Install::Disabled);
     f()
 }
 
@@ -701,5 +759,47 @@ mod tests {
             }
         }
         assert!(checked > 100, "expected many connected samples, got {}", checked);
+    }
+
+    // ---- default-on and opt-out tests [SONNET-4.6] sq-7d3dj.30.5 ----------------
+
+    /// `active()` returns `None` inside `without_dp_planner` — direct unit test for
+    /// the `Disabled` install state and the `without_dp_planner` public function.
+    #[test]
+    fn disabled_state_makes_active_return_none() {
+        without_dp_planner(|| {
+            assert!(active().is_none(), "active() must be None inside without_dp_planner");
+        });
+    }
+
+    /// A scoped `install` at a custom budget restores the enclosing state when the guard drops.
+    /// Uses `with_dp_planner` as the outer scope to establish a known `Enabled` state.
+    #[test]
+    fn install_override_restores_on_drop() {
+        with_dp_planner(|| {
+            // Outer: Enabled(DEFAULT_MAX_SUBGRAPHS).
+            assert_eq!(active().unwrap().max_subgraphs, DEFAULT_MAX_SUBGRAPHS);
+            {
+                let _g = install(DpConfig { max_subgraphs: 7 });
+                assert_eq!(active().unwrap().max_subgraphs, 7);
+            }
+            // Guard dropped: Enabled(DEFAULT_MAX_SUBGRAPHS) restored.
+            assert_eq!(active().unwrap().max_subgraphs, DEFAULT_MAX_SUBGRAPHS);
+        });
+    }
+
+    /// After `without_dp_planner` guard drops, the previously enclosing state is restored
+    /// (here `Enabled(DEFAULT_MAX_SUBGRAPHS)` from `with_dp_planner`).
+    #[test]
+    fn opt_out_restores_prior_state_on_drop() {
+        with_dp_planner(|| {
+            let result = without_dp_planner(|| {
+                assert!(active().is_none());
+                99u64 // Return a sentinel to confirm the closure ran.
+            });
+            assert_eq!(result, 99);
+            // Restored to Enabled(DEFAULT_MAX_SUBGRAPHS).
+            assert_eq!(active().unwrap().max_subgraphs, DEFAULT_MAX_SUBGRAPHS);
+        });
     }
 }
