@@ -27,7 +27,15 @@
     "merge_group events (the merged commit set has no single PR body) and is not part of the",
     "reviewed diff; a token bump is audit-visible and least-gameable.",
     "",
-    "change_token seeded at 0. Increment by exactly 1 per declared feature-OFF byte change."
+    "change_token seeded at 0. Increment by exactly 1 per declared feature-OFF byte change.",
+    "[OPUS-4.8] 2026-07-07 sq-7d3dj.19 (PR #1726): hash-join single-hash probe + batch-emission",
+    "contract changes always-compiled substrate code, so the feature-OFF wasm bytes differ from",
+    "base intentionally. Declared. SIZE stays governed by the wasm_bundle_bytes +/-2% ratchet.",
+    "[OPUS-4.8] TOKEN-VALUE POLICY: check_leg2_dynamic accepts a declaration on INEQUALITY",
+    "(head change_token != base change_token), not a strict +1. Three feature-OFF PRs were in",
+    "flight at once (#1726/#1720/#1718); if all bumped 0->1 the 2nd-to-merge would see base==head==1",
+    "and FALSELY FAIL (order-dependent). So each uses its PR number as a globally-unique token,",
+    "keeping declarations order-independent regardless of merge order."
   ],
-  "change_token": 0
+  "change_token": 1726
 }
