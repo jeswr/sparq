@@ -388,6 +388,11 @@ impl TripleStore {
                     triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
                 radix_sort_rows(&mut v);
                 v.dedup();
+                // [SONNET-4.6 sq-7d3dj.32.1] Eliminate dedup capacity slack: after dedup the Vec
+                // retains its pre-dedup allocation.  shrink_to_fit realigns len == capacity so
+                // heap_bytes() (which counts capacity()) returns zero slack per permutation.
+                // ~8 B/triple recoverable at 10 M WatDiv across 6 perms.
+                v.shrink_to_fit();
                 (p, v)
             })
             .collect();
@@ -398,14 +403,21 @@ impl TripleStore {
         perms
     }
 
-    /// No-threads build of the permutation indexes (the feature-off sibling of `build_raw_perms`).
-    /// Deduplicates via the SPO ordering first (radix — no parallel sort to beat it here), then
-    /// maps the rest from the deduped array, reusing that array for the SPO slot. Kept
-    /// byte-identical to the historical body so the feature-off wasm bundle is unchanged.
+    /// No-threads build of the permutation indexes (wasm / no-rayon path). Deduplicates via
+    /// the SPO ordering first (radix — no parallel sort to beat it here), then maps the rest
+    /// from the deduped array, reusing that array for the SPO slot. [SONNET-4.6 sq-7d3dj.32.1]
+    /// shrink_to_fit added after dedup so the SPO slot carries zero capacity slack (the five
+    /// non-SPO perms are collected from the already-deduped iterator and are already exact).
+    /// The wasm bundle byte count changes from the historical value — declared in
+    /// bench/feature-off-declarations/ and bench/perf-baseline.json feature_off_exact.
     #[cfg(not(feature = "parallel"))]
     fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
         radix_sort_rows(&mut triples);
         triples.dedup();
+        // [SONNET-4.6 sq-7d3dj.32.1] Release the pre-dedup capacity so the SPO slot is
+        // exact-sized.  heap_bytes() counts capacity(); without this call it would count
+        // the full pre-dedup allocation even after duplicates are removed.
+        triples.shrink_to_fit();
 
         let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
             // Pre-sized exactly from the known triple count (the mapped iterator is
@@ -1351,5 +1363,38 @@ mod tests {
         assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
         assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
         assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
+    }
+
+    /// [SONNET-4.6 sq-7d3dj.32.1] Each built raw-mode permutation Vec must carry zero
+    /// capacity slack after construction.  heap_bytes() uses capacity(), so any excess
+    /// inflates the reported B/triple; shrink_to_fit() (called in both build_raw_perms
+    /// bodies) must leave len == capacity.  The input has heavy duplicates so the pre-dedup
+    /// allocation is larger than the post-dedup len — without shrink_to_fit the test fails.
+    #[test]
+    fn build_raw_perms_no_capacity_slack() {
+        // Build a Vec with heavy duplicates to maximise pre/post-dedup slack.
+        // 4 unique triples repeated 100x each → capacity starts at 400, len after dedup = 4.
+        let unique: Vec<[Id; 3]> = vec![
+            [1, 1, 1],
+            [2, 2, 2],
+            [3, 3, 3],
+            [4, 4, 4],
+        ];
+        let mut triples: Vec<[Id; 3]> = Vec::with_capacity(400);
+        for _ in 0..100 {
+            triples.extend_from_slice(&unique);
+        }
+        let store = TripleStore::from_triples(triples);
+        for &perm in BUILT {
+            if let PermData::Owned(ref v) = store.perms[perm as usize] {
+                assert_eq!(
+                    v.len(),
+                    v.capacity(),
+                    "permutation {perm:?}: capacity ({}) > len ({}) — dedup slack not eliminated",
+                    v.capacity(),
+                    v.len(),
+                );
+            }
+        }
     }
 }
