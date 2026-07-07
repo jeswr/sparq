@@ -33,9 +33,45 @@
 use crate::model::SparqlConstraint;
 use crate::report::ValidationResult;
 use oxrdf::{Term, Variable};
+use rustc_hash::FxHashMap;
 use spargebra::algebra::GraphPattern;
 use spargebra::term::GroundTerm;
 use spargebra::{Query, SparqlParser};
+use std::cell::Cell;
+
+thread_local! {
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Per-thread monotonic count of `sh:sparql`
+    /// constraint query executions (one per `sparq_engine::query_prepared` call the
+    /// SHACL-SPARQL path makes). The per-focus-node path runs one query PER focus
+    /// node — O(N_focus); the batched path ([`PreparedSparql::evaluate_batch`]) runs
+    /// one query per ~10 000-focus chunk — O(N_focus / chunk). A perf-regression
+    /// guard or an anti-vacuity test can assert the batched delta is ~O(#shapes),
+    /// not O(#focus_nodes). Thread-local (not a global atomic) so a `validate` on one
+    /// thread is not perturbed by a concurrent `validate` on another — the SHACL-SPARQL
+    /// evaluation runs the query on the calling thread, so the count is exact there.
+    /// Read via [`exec_count`].
+    static SPARQL_EXEC_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) Bumps the calling thread's `sh:sparql`
+/// query-execution counter by one (called at each engine query the path runs).
+fn bump_exec_count() {
+    SPARQL_EXEC_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) Read the calling thread's `sh:sparql`
+/// query-execution counter (see [`SPARQL_EXEC_COUNT`]). Monotonic; snapshot before
+/// and after a [`crate::validate`] call on the same thread and take the delta.
+pub(crate) fn exec_count() -> u64 {
+    SPARQL_EXEC_COUNT.with(Cell::get)
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) The maximum number of focus nodes injected into a
+/// single batched `VALUES ?this { … }` execution. Very large focus sets are
+/// chunked so query plans stay sane; chunking never changes the result set (the
+/// VALUES table partitions cleanly by `?this`, and results are grouped by `?this`
+/// afterwards regardless of chunk boundaries).
+const FOCUS_BATCH_CHUNK: usize = 10_000;
 
 /// One `($name, value)` pre-binding for a validator/constraint query: the value
 /// is injected as a single-row `VALUES (?name) { (value) }` table. SHACL §6.3
@@ -117,6 +153,16 @@ impl PreBindingViolation {
 pub(crate) struct PreparedSparql {
     /// The parsed `sh:select` algebra (prefixes already resolved at parse time).
     query: Query,
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Whether all focus nodes may be validated in ONE
+    /// batched `VALUES ?this { … }` execution (see [`Self::evaluate_batch`]). Batching
+    /// is result-equivalent to the per-focus path for the pre-binding-legal subset the
+    /// crate already enforces (no `MINUS` / author `VALUES` / `SERVICE`; a sub-`SELECT`
+    /// must project `$this`, so a NESTED aggregate necessarily groups by `$this`),
+    /// EXCEPT a TOP-level solution modifier whose effect is global rather than
+    /// per-focus: `LIMIT`/`OFFSET` (a global row cap), a `GROUP BY`/aggregate not keyed
+    /// on `$this` (mixes foci), or `REDUCED` (implementation-defined multiplicity).
+    /// Those keep the per-focus path (conservative fallback; see [`query_batchable`]).
+    batchable: bool,
 }
 
 impl PreparedSparql {
@@ -159,12 +205,24 @@ impl PreparedSparql {
             other => other,
         };
         check_pre_binding(body, PRE_BOUND_THIS)?;
-        Ok(Some(PreparedSparql { query }))
+        let batchable = query_batchable(pattern);
+        Ok(Some(PreparedSparql { query, batchable }))
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Whether this constraint may be evaluated for all
+    /// focus nodes in ONE batched execution (see the `batchable` field). A `false`
+    /// keeps the per-focus [`Self::evaluate`] path (still correct, just not sped up).
+    pub(crate) fn is_batchable(&self) -> bool {
+        self.batchable
     }
 
     /// Runs the constraint for one `focus` node against `data`, pushing one
     /// [`ValidationResult`] per solution. `make_result` lets the caller stamp the
     /// shape-owned fields (source shape/component, severity, shape messages).
+    ///
+    /// This is the per-focus path. [`Self::evaluate_batch`] runs the identical
+    /// mapping for ALL focus nodes in ONE execution when [`Self::is_batchable`];
+    /// both share [`row_to_fields`] so their reports are byte-for-byte identical.
     pub(crate) fn evaluate(
         &self,
         data: &sparq_core::Graph,
@@ -176,6 +234,7 @@ impl PreparedSparql {
         let Some(bound) = pre_bind_select(&self.query, &[("this", focus)]) else {
             return; // focus node not expressible as a VALUES ground term (unreachable today)
         };
+        bump_exec_count();
         let prepared = sparq_engine::PreparedQuery::from(bound);
         let Ok(result) = sparq_engine::query_prepared(data, &prepared) else {
             return; // a runtime query error → no solutions (lenient; never panics validate())
@@ -191,40 +250,161 @@ impl PreparedSparql {
         let result_vars: Vec<String> = result.vars.iter().map(|v| v.as_str().to_string()).collect();
 
         for row in &result.rows {
-            // sh:value (SHACL §5.2.2): the solution's ?value binding when the query
-            // projects ?value; otherwise the focus node itself. The focus-node
-            // default (when ?value is not projected at all) is what the W3C suite
-            // expects — e.g. sparql/node/sparql-003 projects only ?path and its
-            // expected sh:value is the focus node. A query that DOES project ?value
-            // but leaves it unbound on a row reports no sh:value (None).
-            let value = match vpos {
-                Some(i) => row.get(i).and_then(|c| c.clone()),
-                None => Some(focus.clone()),
-            };
-            let path = ppos
-                .and_then(|i| row.get(i))
-                .and_then(|c| c.clone())
-                .and_then(|t| match t {
-                    Term::NamedNode(n) => Some(crate::path::Path::Predicate(n.as_str().to_string())),
-                    _ => None,
-                });
-            // Message precedence: the constraint's sh:message (with {?var}
-            // substitution), else a bound ?message, else a generated default.
-            let row_message = mpos
-                .and_then(|i| row.get(i))
-                .and_then(|c| c.clone())
-                .map(term_lexical);
-            let default_message = match (&constraint.message, &row_message) {
-                (Some(tpl), _) => substitute(tpl, &result_vars, row),
-                (None, Some(m)) => m.clone(),
-                (None, None) => "Violates SPARQL-based constraint".to_string(),
-            };
-            out.push(make_result(ResultFields {
-                value,
-                path,
-                default_message,
-            }));
+            let fields = row_to_fields(focus, row, vpos, ppos, mpos, &result_vars, constraint);
+            out.push(make_result(fields));
         }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Runs the constraint for ALL `foci` in ONE batched
+    /// execution: injects a single `VALUES ?this { <f1> <f2> … }` (chunked at
+    /// [`FOCUS_BATCH_CHUNK`]), executes once per chunk, then GROUPS the solution rows
+    /// by their `?this` binding to build the per-focus results. This is the O(1)-query
+    /// replacement for the O(N_focus)-query per-focus loop (measured ~580× on the
+    /// LUBM `sparql_constraint` workload). MUST only be called when [`Self::is_batchable`].
+    ///
+    /// Result-equivalence: the injected multi-row `VALUES` uses the SAME algebra-level
+    /// push-down as the single-row path, and `?this` is projected, so a solution for
+    /// focus `f` is exactly the per-focus solution for `f` (the natural join on the
+    /// distinct-`?this` VALUES is idempotent per branch). Each result row is mapped by
+    /// the SAME [`row_to_fields`] the per-focus path uses. `make_result` is invoked with
+    /// the row's `?this` so the caller stamps the correct focus node.
+    ///
+    /// Returns a map with an entry for EVERY focus in `foci` (empty `Vec` when a focus
+    /// has no violations), so the caller can distinguish "covered, no violations" from
+    /// "not batched" — a focus not in the returned map (e.g. a blank node, which cannot
+    /// be a `VALUES` ground term, matching [`Self::evaluate`]'s early return) is simply
+    /// absent and yields no results, identical to the per-focus path.
+    pub(crate) fn evaluate_batch(
+        &self,
+        data: &sparq_core::Graph,
+        foci: &[Term],
+        constraint: &SparqlConstraint,
+        mut make_result: impl FnMut(&Term, ResultFields) -> ValidationResult,
+    ) -> FxHashMap<Term, Vec<ValidationResult>> {
+        // Every focus expressible as a VALUES ground term gets a (possibly empty)
+        // entry so the caller treats it as covered; a blank-node focus is excluded
+        // (no VALUES syntax) and left absent — exactly the per-focus early return.
+        let mut grouped: FxHashMap<Term, Vec<ValidationResult>> = FxHashMap::default();
+        let ground: Vec<&Term> = foci
+            .iter()
+            .filter(|f| term_to_ground(f).is_some())
+            .collect();
+        for f in &ground {
+            grouped.entry((*f).clone()).or_default();
+        }
+        for chunk in ground.chunks(FOCUS_BATCH_CHUNK) {
+            let Some(bound) = pre_bind_select_multi(&self.query, "this", chunk) else {
+                continue; // inexpressible term in the chunk (unreachable — all ground)
+            };
+            bump_exec_count();
+            let prepared = sparq_engine::PreparedQuery::from(bound);
+            let Ok(result) = sparq_engine::query_prepared(data, &prepared) else {
+                continue; // runtime query error → no solutions for this chunk (lenient)
+            };
+            let pos = |name: &str| result.vars.iter().position(|v| v.as_str() == name);
+            let (tpos, vpos, ppos, mpos) =
+                (pos("this"), pos("value"), pos("path"), pos("message"));
+            let result_vars: Vec<String> =
+                result.vars.iter().map(|v| v.as_str().to_string()).collect();
+            for row in &result.rows {
+                // The row's ?this routes it to its focus group. `?this` is always
+                // projected + bound (the injected VALUES binds it), so this is Some
+                // in practice; a row without it is skipped rather than mis-grouped.
+                let Some(this) = tpos.and_then(|i| row.get(i)).and_then(|c| c.clone()) else {
+                    continue;
+                };
+                let fields =
+                    row_to_fields(&this, row, vpos, ppos, mpos, &result_vars, constraint);
+                let vr = make_result(&this, fields);
+                grouped.entry(this).or_default().push(vr);
+            }
+        }
+        grouped
+    }
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) Maps one executed solution `row` to the per-solution
+/// [`ResultFields`] (SHACL §5.2.2). Shared by [`PreparedSparql::evaluate`] (single
+/// focus) and [`PreparedSparql::evaluate_batch`] (grouped by `?this`) so both
+/// produce byte-for-byte identical reports; `focus` is the loop focus / the row's
+/// `?this` respectively.
+fn row_to_fields(
+    focus: &Term,
+    row: &[Option<Term>],
+    vpos: Option<usize>,
+    ppos: Option<usize>,
+    mpos: Option<usize>,
+    result_vars: &[String],
+    constraint: &SparqlConstraint,
+) -> ResultFields {
+    // sh:value (SHACL §5.2.2): the solution's ?value binding when the query
+    // projects ?value; otherwise the focus node itself. The focus-node default
+    // (when ?value is not projected at all) is what the W3C suite expects — e.g.
+    // sparql/node/sparql-003 projects only ?path and its expected sh:value is the
+    // focus node. A query that DOES project ?value but leaves it unbound on a row
+    // reports no sh:value (None).
+    let value = match vpos {
+        Some(i) => row.get(i).and_then(|c| c.clone()),
+        None => Some(focus.clone()),
+    };
+    let path = ppos
+        .and_then(|i| row.get(i))
+        .and_then(|c| c.clone())
+        .and_then(|t| match t {
+            Term::NamedNode(n) => Some(crate::path::Path::Predicate(n.as_str().to_string())),
+            _ => None,
+        });
+    // Message precedence: the constraint's sh:message (with {?var} substitution),
+    // else a bound ?message, else a generated default.
+    let row_message = mpos
+        .and_then(|i| row.get(i))
+        .and_then(|c| c.clone())
+        .map(term_lexical);
+    let default_message = match (&constraint.message, &row_message) {
+        (Some(tpl), _) => substitute(tpl, result_vars, row),
+        (None, Some(m)) => m.clone(),
+        (None, None) => "Violates SPARQL-based constraint".to_string(),
+    };
+    ResultFields {
+        value,
+        path,
+        default_message,
+    }
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) `true` iff the query is safe to evaluate for all focus
+/// nodes in ONE batched `VALUES ?this` execution (the multi-row VALUES joined into
+/// the WHERE, results grouped by `?this` afterwards). Unsafe when a TOP-level
+/// solution modifier applies GLOBALLY across foci instead of per-focus:
+///   * `LIMIT`/`OFFSET` (`Slice`) — a global row cap;
+///   * `REDUCED` — implementation-defined duplicate multiplicity (batched vs
+///     per-focus could keep a different number of duplicates → different count);
+///   * a TOP-level aggregate (`Group`) NOT grouped by `$this` — an implicit single
+///     group (empty group vars) or a `GROUP BY ?other` mixes rows from all foci into
+///     one aggregate. A `GROUP BY $this` IS per-focus-equivalent (each focus is its
+///     own group), so it stays batchable. A NESTED aggregate sub-select is always
+///     safe: the pre-binding check ([`check_pre_binding`]) forces every sub-`SELECT`
+///     to project — hence `GROUP BY` — `$this`, so the multi-row VALUES join
+///     partitions it per focus; only the TOP-level query modifiers are inspected.
+///
+/// `Distinct`/`OrderBy`/`Project`/`Extend`/`Filter` are transparent: order is
+/// irrelevant to the violation bag; `Distinct` includes the distinct `?this` (so it
+/// collapses per-focus exactly as the per-focus path); `Extend`/`Filter` are the
+/// aggregate-projection / `HAVING` wrappers we descend through to reach a top-level
+/// `Group`, or ordinary per-row `BIND`/`FILTER` that are per-focus-equivalent. The
+/// walk stops (batchable) at the first branching/leaf node (`Join`/`Union`/`Bgp`/…),
+/// because a top-level aggregate's `Group` sits directly above the WHERE with only
+/// those transparent wrappers between it and the projection.
+fn query_batchable(pattern: &GraphPattern) -> bool {
+    match pattern {
+        GraphPattern::Slice { .. } | GraphPattern::Reduced { .. } => false,
+        GraphPattern::Group { variables, .. } => variables.iter().any(|v| v.as_str() == "this"),
+        GraphPattern::Distinct { inner }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::Filter { inner, .. }
+        | GraphPattern::Project { inner, .. } => query_batchable(inner),
+        _ => true,
     }
 }
 
@@ -418,6 +598,47 @@ fn pre_bind_values(bindings: &[Binding]) -> Option<GraphPattern> {
     Some(GraphPattern::Values {
         variables,
         bindings: vec![row],
+    })
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) Builds the MULTI-row `VALUES (?name) { (v1) (v2) … }`
+/// table that pre-binds `name` to EACH term in `foci` (one row per focus), for the
+/// batched `sh:sparql` path. Single column, N rows — as opposed to
+/// [`pre_bind_values`]'s single-row/N-column shape. Returns `None` if any focus is
+/// not a SPARQL ground term (all callers pre-filter to ground terms).
+fn pre_bind_values_multi(name: &str, foci: &[&Term]) -> Option<GraphPattern> {
+    let variables = vec![Variable::new_unchecked(name)];
+    let mut bindings = Vec::with_capacity(foci.len());
+    for f in foci {
+        bindings.push(vec![Some(term_to_ground(f)?)]);
+    }
+    Some(GraphPattern::Values {
+        variables,
+        bindings,
+    })
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) Pre-binds `name` to EVERY term in `foci` at once by
+/// injecting the multi-row `VALUES` from [`pre_bind_values_multi`] through the SAME
+/// [`inject_values`] push-down the single-focus [`pre_bind_select`] uses, so the
+/// batched query is the per-focus query unioned over foci. `name` is added to the
+/// projection so the executor returns it (used to group solutions by focus). The
+/// batched result set is exactly the per-focus results' union because the natural
+/// join on the distinct-`?this` VALUES is idempotent per branch.
+fn pre_bind_select_multi(query: &Query, name: &str, foci: &[&Term]) -> Option<Query> {
+    let Query::Select {
+        dataset,
+        pattern,
+        base_iri,
+    } = query
+    else {
+        return None;
+    };
+    let values = pre_bind_values_multi(name, foci)?;
+    Some(Query::Select {
+        dataset: dataset.clone(),
+        pattern: inject_values(pattern, values, &[name]),
+        base_iri: base_iri.clone(),
     })
 }
 
@@ -2136,5 +2357,204 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    // --- [OPUS-4.8] (sq-7d3dj.33.1) focus-node batching ----------------------
+
+    fn top_pattern(q: &str) -> GraphPattern {
+        match SparqlParser::new().parse_query(q).unwrap() {
+            Query::Select { pattern, .. } => pattern,
+            other => panic!("expected SELECT, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn query_batchable_plain_select_is_batchable() {
+        // A plain BGP+FILTER SELECT (the common sh:sparql shape) batches.
+        assert!(query_batchable(&top_pattern(
+            "SELECT ?this ?value WHERE { ?this <http://x/p> ?value . FILTER(?value < 0) }"
+        )));
+    }
+
+    #[test]
+    fn query_batchable_distinct_and_orderby_are_batchable() {
+        // DISTINCT includes the distinct ?this (collapses per-focus); ORDER BY is
+        // irrelevant to the violation bag — both stay batchable.
+        assert!(query_batchable(&top_pattern(
+            "SELECT DISTINCT ?this ?value WHERE { ?this <http://x/p> ?value } ORDER BY ?value"
+        )));
+    }
+
+    #[test]
+    fn query_batchable_rejects_top_level_limit() {
+        // A top-level LIMIT is a GLOBAL row cap — not equivalent per focus.
+        assert!(!query_batchable(&top_pattern(
+            "SELECT ?this ?value WHERE { ?this <http://x/p> ?value } LIMIT 5"
+        )));
+    }
+
+    #[test]
+    fn query_batchable_allows_group_by_this() {
+        // GROUP BY $this = each focus is its own group → per-focus-equivalent.
+        assert!(query_batchable(&top_pattern(
+            "SELECT ?this (COUNT(?value) AS ?c) WHERE { ?this <http://x/p> ?value } GROUP BY ?this"
+        )));
+    }
+
+    #[test]
+    fn query_batchable_rejects_implicit_aggregate() {
+        // An implicit single group (no GROUP BY) aggregates across ALL foci.
+        assert!(!query_batchable(&top_pattern(
+            "SELECT (COUNT(?value) AS ?c) WHERE { ?this <http://x/p> ?value }"
+        )));
+    }
+
+    #[test]
+    fn query_batchable_rejects_group_by_other() {
+        // GROUP BY a non-$this variable mixes rows from different foci into one group.
+        assert!(!query_batchable(&top_pattern(
+            "SELECT ?p (COUNT(?value) AS ?c) WHERE { ?this ?p ?value } GROUP BY ?p"
+        )));
+    }
+
+    #[test]
+    fn query_batchable_allows_nested_aggregate_subselect() {
+        // A NESTED aggregate sub-select is fine: the pre-binding check forces it to
+        // project (hence GROUP BY) $this, so the multi-row VALUES join partitions it
+        // per focus. Only the TOP-level chain is inspected.
+        assert!(query_batchable(&top_pattern(
+            "SELECT ?this WHERE { ?this <http://x/p> ?v . \
+             { SELECT ?this (COUNT(*) AS ?c) WHERE { ?this <http://x/q> ?w } GROUP BY ?this } \
+             FILTER(?c > 1) }"
+        )));
+    }
+
+    #[test]
+    fn pre_bind_values_multi_builds_one_column_n_rows() {
+        let a = iri("http://example.org/a");
+        let b = iri("http://example.org/b");
+        let c = iri("http://example.org/c");
+        let vals = pre_bind_values_multi("this", &[&a, &b, &c]).unwrap();
+        match vals {
+            GraphPattern::Values {
+                variables,
+                bindings,
+            } => {
+                assert_eq!(variables.len(), 1);
+                assert_eq!(variables[0].as_str(), "this");
+                assert_eq!(bindings.len(), 3, "one row per focus");
+                assert!(bindings.iter().all(|r| r.len() == 1), "single column");
+            }
+            other => panic!("expected VALUES, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pre_bind_values_multi_none_for_blank_node() {
+        // A blank node has no VALUES ground-term form (matches the per-focus skip).
+        let bnode = Term::BlankNode(oxrdf::BlankNode::new("b0").unwrap());
+        assert!(pre_bind_values_multi("this", &[&bnode]).is_none());
+    }
+
+    #[test]
+    fn pre_bind_select_multi_projects_this_and_injects_multi_row() {
+        // The injected query must project ?this (so results can be grouped by focus)
+        // and carry the N-row VALUES table.
+        let q = SparqlParser::new()
+            .parse_query("SELECT ?value WHERE { ?this <http://x/p> ?value }")
+            .unwrap();
+        let a = iri("http://example.org/a");
+        let b = iri("http://example.org/b");
+        let bound = pre_bind_select_multi(&q, "this", &[&a, &b]).unwrap();
+        let Query::Select { pattern, .. } = bound else {
+            panic!("expected SELECT");
+        };
+        // ?this added to the projection.
+        let GraphPattern::Project { variables, .. } = &pattern else {
+            panic!("expected Project at top, got {:?}", pattern);
+        };
+        assert!(
+            variables.iter().any(|v| v.as_str() == "this"),
+            "?this must be projected for grouping: {:?}",
+            variables
+        );
+        // A 2-row VALUES exists somewhere in the injected pattern.
+        fn max_values_rows(p: &GraphPattern) -> usize {
+            match p {
+                GraphPattern::Values { bindings, .. } => bindings.len(),
+                GraphPattern::Project { inner, .. }
+                | GraphPattern::Distinct { inner }
+                | GraphPattern::Reduced { inner }
+                | GraphPattern::Slice { inner, .. }
+                | GraphPattern::OrderBy { inner, .. }
+                | GraphPattern::Filter { inner, .. }
+                | GraphPattern::Extend { inner, .. }
+                | GraphPattern::Group { inner, .. }
+                | GraphPattern::Graph { inner, .. } => max_values_rows(inner),
+                GraphPattern::Join { left, right }
+                | GraphPattern::Union { left, right }
+                | GraphPattern::LeftJoin { left, right, .. }
+                | GraphPattern::Minus { left, right } => {
+                    max_values_rows(left).max(max_values_rows(right))
+                }
+                _ => 0,
+            }
+        }
+        assert_eq!(max_values_rows(&pattern), 2, "multi-row VALUES injected");
+    }
+
+    /// End-to-end batched execution: one `evaluate_batch` groups solutions by focus
+    /// and stamps them, with the executed-query count amortised to ONE for many foci.
+    #[test]
+    fn evaluate_batch_groups_by_focus_and_fires_once() {
+        use crate::model::SparqlConstraint;
+        let data = Graph::load_str(
+            "@prefix ex: <http://example.org/> .\n\
+             ex:a ex:age -1 . ex:b ex:age 5 . ex:c ex:age -2 . ex:d ex:age 9 .",
+            "turtle",
+        )
+        .unwrap();
+        let constraint = SparqlConstraint {
+            node: iri("http://example.org/constraint"),
+            select: "SELECT $this ?value WHERE { $this <http://example.org/age> ?value . \
+                     FILTER(?value < 0) }"
+                .to_string(),
+            prefixes: String::new(),
+            message: None,
+            severity: None,
+            deactivated: false,
+            prepared: None,
+        };
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
+        assert!(prepared.is_batchable());
+        let foci = [
+            iri("http://example.org/a"),
+            iri("http://example.org/b"),
+            iri("http://example.org/c"),
+            iri("http://example.org/d"),
+        ];
+        let before = exec_count();
+        let grouped = prepared.evaluate_batch(&data, &foci, &constraint, |focus, fields| {
+            crate::report::ValidationResult {
+                focus_node: focus.clone(),
+                path: fields.path,
+                value: fields.value,
+                source_shape: Term::NamedNode(NamedNode::new("http://example.org/S").unwrap()),
+                source_constraint: None,
+                source_component: crate::model::sh("SPARQLConstraintComponent"),
+                severity: crate::model::sh("Violation"),
+                messages: vec![],
+                default_message: fields.default_message,
+                details: vec![],
+            }
+        });
+        // Anti-vacuity: ONE execution for four focus nodes (not four).
+        assert_eq!(exec_count() - before, 1, "batched path must fire exactly once");
+        // Every focus has an entry; only the negative-age foci have a violation.
+        assert_eq!(grouped.len(), 4);
+        assert_eq!(grouped[&foci[0]].len(), 1); // ex:a age -1
+        assert_eq!(grouped[&foci[1]].len(), 0); // ex:b age 5
+        assert_eq!(grouped[&foci[2]].len(), 1); // ex:c age -2
+        assert_eq!(grouped[&foci[3]].len(), 0); // ex:d age 9
     }
 }
