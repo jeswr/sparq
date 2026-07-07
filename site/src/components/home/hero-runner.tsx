@@ -32,6 +32,7 @@ import { ResultCell } from "@/components/repl-result-cells";
 import {
   loadSparq,
   loadIntoStore,
+  datasetSize,
   prewarmSparqWhenIdle,
   type SparqlResults,
   type SparqlTerm,
@@ -193,6 +194,10 @@ export function HeroQueryRunner() {
   const [phase, setPhase] = React.useState<RunnerPhase>("idle");
   const [results, setResults] = React.useState<SparqlResults | null>(null);
   const [ms, setMs] = React.useState<number | null>(null);
+  // [SONNET-4.6] sq-su1oe (#820) — the total triple count in the in-tab store after the most
+  // recent run (default + named graphs via datasetSize). Shown in the proof footer alongside
+  // the result count + timing so visitors can see the dataset size, not just the query output.
+  const [triples, setTriples] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [engineReady, setEngineReady] = React.useState(false);
 
@@ -223,6 +228,9 @@ export function HeroQueryRunner() {
       setEngineReady(true);
       // Rebuild the store from the (possibly edited) Data tab each run, so editing data is live.
       const store = loadIntoStore(Store, data, HERO_SAMPLE_FORMAT);
+      // [SONNET-4.6] sq-su1oe (#820) — capture the dataset size for the proof footer.
+      // datasetSize counts the WHOLE dataset (default + named graphs) via a SELECT COUNT(*).
+      setTriples(datasetSize(store));
       const json = store.query(query);
       const parsed = JSON.parse(json) as SparqlResults;
       setResults(parsed);
@@ -437,11 +445,17 @@ export function HeroQueryRunner() {
       {phase === "done" && ms !== null && (
         // [FABLE-5] sq-ymr2e.10 — data-vr-mask: the measured "N results · <t> ms" proof line is
         // real wall-clock data, so the visual-regression rig masks it (mask, don't chase).
+        // [SONNET-4.6] sq-su1oe (#820) — triple count added: a live, measured figure from
+        // datasetSize(store) (the whole dataset, not just the default graph). Labelled
+        // "triples" not "rows" to distinguish from the SPARQL result-row count.
         <div
           data-vr-mask
           className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-muted/15 px-3 py-2 font-mono text-[11px] text-muted-foreground"
         >
           <span aria-live="polite">
+            {triples !== null && (
+              <>{triples.toLocaleString()} triple{triples === 1 ? "" : "s"}{" · "}</>
+            )}
             {rowCount} result{rowCount === 1 ? "" : "s"} · {ms.toFixed(1)} ms · in-browser · 0
             network requests
           </span>
