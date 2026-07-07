@@ -97,12 +97,12 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **Structured EXPLAIN** *(opt-in `explain-json` feature, OFF by default)* — `explain_plan` /
   `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
-- **Semi-join reducers** *(opt-in `semijoin-bitmap` / `yannakakis` features, OFF by default)* — `semijoin-
-  bitmap` prefilters the next binary-join scan by an EXACT membership filter (`KeyFilter`: a flat bitmap over
-  dense `u32` ids, or a hash set when sparse+huge); `yannakakis` adds the complementary bottom-up
-  full-semijoin **prepass** reducing every relation of an *acyclic* BGP against its join-tree neighbours before
-  the join (cost-gated; cyclic BGPs keep LFTJ). Both drop only rows that cannot match, so the RESULT is
-  **identical** to off (proven by the on-vs-off differential); off, the default build is byte-identical, no new deps.
+- **Semi-join reducers** *(opt-in `semijoin-bitmap` / `yannakakis` features, OFF by default)* — `semijoin-bitmap`
+  prefilters binary-join scans with an exact membership bitmap; `yannakakis` adds a bottom-up full-semijoin prepass
+  for acyclic BGPs (cost-gated; cyclic BGPs keep LFTJ). Result-identical to off (proven by the on-vs-off
+  differential); off, byte-identical, no new deps.
+- **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER and aggregate
+  operators use a columnar path for ≥ 256-row all-inline-integer batches; byte-identical to the scalar path. I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
