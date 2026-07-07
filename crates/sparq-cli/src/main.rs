@@ -43,7 +43,7 @@ fn main() {
         #[cfg(feature = "terse")]
         Some("terse") => cmd_terse(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli memstat <data-file> <format>            # deterministic memory-composition breakdown (B/triple) + RSS\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli memstat <data-file> <format> [compressed]  # deterministic memory-composition breakdown (B/triple) + RSS\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -957,12 +957,20 @@ fn cmd_memstat(args: &[String]) {
     let (path, format) = match (args.get(2), args.get(3)) {
         (Some(p), Some(f)) => (p.as_str(), f.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli memstat <data-file> <format>");
+            eprintln!("usage: sparq-cli memstat <data-file> <format> [compressed]");
             std::process::exit(2);
         }
     };
+    // Trailing literal `compressed` re-encodes into the memory-bound in-RAM mode
+    // (block-compressed permutations + blob dictionary, `Graph::into_compressed`) before
+    // reporting — the same graph, the other end of the in-memory footprint/latency
+    // trade, so the two framings come from one instrument. Mirrors `save`'s flag shape.
+    let compressed = args.get(4).map(String::as_str) == Some("compressed");
     let t = Instant::now();
-    let g = load_quiet(path, format);
+    let mut g = load_quiet(path, format);
+    if compressed {
+        g = g.into_compressed();
+    }
     let load_s = t.elapsed().as_secs_f64();
 
     let triples = g.len().max(1);
@@ -976,6 +984,7 @@ fn cmd_memstat(args: &[String]) {
     let (vm_rss, vm_hwm) = proc_vm_bytes();
 
     println!("memstat_version\t1");
+    println!("mode\t{}", if compressed { "compressed" } else { "raw" });
     println!("triples\t{}", g.len());
     println!("dict_terms\t{}", g.dict.len());
     println!("load_s\t{load_s:.3}");

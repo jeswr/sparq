@@ -4,7 +4,9 @@
 #
 #   1. IN-MEMORY  : `sparq-cli memstat` self-accounted heap B/triple, decomposed into
 #                   dictionary / six-permutation store / literal-value caches, plus the
-#                   kernel's post-load VmRSS and peak VmHWM (allocator + parse transients).
+#                   kernel's post-load VmRSS and peak VmHWM (allocator + parse transients);
+#                   measured in BOTH in-RAM storage modes — raw and the memory-bound
+#                   `into_compressed` (block-compressed perms + blob dict).
 #   2. EXTERNAL   : on-disk index directory size (raw and block-compressed `save`), and the
 #                   peak RSS of the BOUNDED-RAM external `build` (sparq's pinned low-resource
 #                   story — a different axis from RDFox's in-memory numbers; measure both,
@@ -102,6 +104,15 @@ for SCALE in $SCALES; do
   LOAD_S=$(ms_field "$MS" load_s)
   GNU_HWM=$(time_hwm_bytes "$TV")            # cross-check of memstat's VmHWM
 
+  # In-RAM MEMORY-BOUND mode (block-compressed perms + blob dict, Graph::into_compressed) —
+  # the other end of the in-memory footprint/latency trade. Byte counts are deterministic.
+  MSC="$SCRATCH/memstat-comp-$SCALE.tsv"
+  log "scale=$SCALE: memstat compressed (memory-bound in-RAM mode)..."
+  "$CLI" memstat "$CORPUS" ntriples compressed > "$MSC"
+  COMP_HEAP_BPT=$(ms_field "$MSC" heap_b_per_triple)
+  COMP_STORE_BPT=$(ms_field "$MSC" store_b_per_triple)
+  COMP_DICT_BPT=$(ms_field "$MSC" dict_b_per_triple)
+
   # ---- framing 2: external-memory / on-disk ---------------------------------------------
   DISK_RAW_BPT=na; DISK_COMP_BPT=na; EXT_HWM_BPT=na
   if [ "$SKIP_EXTERNAL" != "1" ]; then
@@ -123,7 +134,7 @@ for SCALE in $SCALES; do
     rm -rf "$EXTDIR"
   fi
 
-  LINE="MEMBPT scale=$SCALE sf=$SF triples=$TRIPLES terms=$TERMS corpus_bytes=$CORPUS_BYTES load_s=$LOAD_S heap_bpt=$HEAP_BPT store_bpt=$STORE_BPT dict_bpt=$DICT_BPT caches_bpt=$CACHES_BPT dict_bpterm=$DICT_BPTERM rss_bpt=$RSS_BPT hwm_bpt=$HWM_BPT gnu_hwm_bytes=$GNU_HWM disk_raw_bpt=$DISK_RAW_BPT disk_comp_bpt=$DISK_COMP_BPT extbuild_hwm_bpt=$EXT_HWM_BPT"
+  LINE="MEMBPT scale=$SCALE sf=$SF triples=$TRIPLES terms=$TERMS corpus_bytes=$CORPUS_BYTES load_s=$LOAD_S heap_bpt=$HEAP_BPT store_bpt=$STORE_BPT dict_bpt=$DICT_BPT caches_bpt=$CACHES_BPT dict_bpterm=$DICT_BPTERM rss_bpt=$RSS_BPT hwm_bpt=$HWM_BPT gnu_hwm_bytes=$GNU_HWM comp_heap_bpt=$COMP_HEAP_BPT comp_store_bpt=$COMP_STORE_BPT comp_dict_bpt=$COMP_DICT_BPT disk_raw_bpt=$DISK_RAW_BPT disk_comp_bpt=$DISK_COMP_BPT extbuild_hwm_bpt=$EXT_HWM_BPT"
   echo "$LINE"
   RESULTS+=("$LINE")
   [ "$KEEP_CORPUS" = "1" ] || rm -f "$CORPUS"

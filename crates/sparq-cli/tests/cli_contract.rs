@@ -285,6 +285,30 @@ fn memstat_breakdown_sums_and_ratios() {
         let (rss, hwm) = (field("vm_rss_bytes"), field("vm_hwm_bytes"));
         assert!(rss > 0.0 && hwm >= rss, "VmHWM ({hwm}) must be >= VmRSS ({rss}) > 0");
     }
+    // The trailing `compressed` flag reports the memory-bound in-RAM mode (block-compressed
+    // perms + blob dict): same triple/term counts, same exact decomposition contract, and
+    // the mode line flips so a caller can tell the framings apart. (No footprint-ordering
+    // assertion at 3 triples — block/blob fixed overheads dominate a tiny graph.)
+    let (code_c, out_c, err_c) = run3(&["memstat", s(&data), "ntriples", "compressed"]);
+    assert_eq!(code_c, 0, "stderr: {err_c}");
+    let cfield = |k: &str| -> String {
+        out_c
+            .lines()
+            .find(|l| l.starts_with(&format!("{k}\t")))
+            .and_then(|l| l.split('\t').nth(1))
+            .unwrap_or_else(|| panic!("missing field {k} in: {out_c}"))
+            .to_string()
+    };
+    assert_eq!(cfield("mode"), "compressed");
+    assert!(stdout.contains("mode\traw"), "default run must report mode=raw: {stdout}");
+    assert_eq!(cfield("triples"), "3", "compressed mode reports the same graph");
+    assert_eq!(cfield("dict_terms"), "6", "compressed mode reports the same dictionary");
+    let ctotal: f64 = cfield("heap_total_bytes").parse().expect("numeric total");
+    let csum: f64 = ["heap_dict_bytes", "heap_store_bytes", "heap_caches_bytes"]
+        .iter()
+        .map(|k| cfield(k).parse::<f64>().expect("numeric component"))
+        .sum();
+    assert_eq!(csum, ctotal, "compressed decomposition must also sum exactly");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
