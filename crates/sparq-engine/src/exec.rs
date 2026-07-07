@@ -366,6 +366,18 @@ pub(crate) mod budget {
         Ok(())
     }
 
+    /// Returns `true` when a budget is currently installed (even if not yet exhausted).
+    /// The columnar path uses this for the I3 fallback rule: when a budget is armed the
+    /// seam declines to the scalar path (the scalar debit schedule is not uniform-per-row
+    /// inside `apply_filter`, so the `k = min(batch_len, budget_remaining)` prefix rule
+    /// cannot be applied; the fallback is budget-armed ⇒ decline per the design record
+    /// `research/vector-at-a-time-m4-completion-design.md` §1 I3). [SONNET-4.6] (sq-pntvh.5)
+    #[cfg_attr(not(feature = "vectorized"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn active() -> bool {
+        ACTIVE.with(|c| c.get().on)
+    }
+
     /// Caps a speculative `Vec` pre-allocation while a budget is active, so a
     /// budgeted cross-product cannot allocate its full (possibly astronomical)
     /// output up front before the first cooperative check fires. Honours BOTH the
@@ -6894,12 +6906,12 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
 /// skipped; otherwise the scalar row path (`apply_filter_scalar`) runs verbatim. When the
 /// feature is OFF this compiles to exactly the scalar body — byte-identical, zero overhead.
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
-    // [OPUS-4.8] (sq-pntvh.3, M4 Phase 3) Columnar residual-FILTER seam (Seam A): for an
-    // eligible single sargable numeric residual over an all-inline-integer column, transpose to
-    // a `DataChunk`, decode the column ONCE (the Phase-2 primitive), compare over the decoded
-    // column, gather the survivors, and materialise back — byte-identical to the scalar row
-    // path but as one branchless, auto-vectorising compare loop instead of per-row `eval_expr`
-    // dispatch. Declines (→ scalar path) for anything not provably byte-identical.
+    // [SONNET-4.6] (sq-pntvh.5, M4 Phase 5) Dispatcher-gated columnar residual-FILTER seam
+    // (Seam A): the `columnar_filter` helper now runs through the shared `vec_dispatch`
+    // eligibility gate (VEC_MIN_BATCH threshold, I2/I3 checks, dtype precheck) and executes
+    // morsel-by-morsel (VEC_MORSEL rows per decode buffer) — extracting only the one tested
+    // column, not a full-width transpose. Declines (→ scalar path) for anything not provably
+    // byte-identical to `apply_filter_scalar`. I5 probe counters updated on each call.
     #[cfg(feature = "vectorized")]
     if let Some(rows) = columnar_filter(graph, b, expr) {
         b.rows = rows;
@@ -6908,47 +6920,98 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     apply_filter_scalar(graph, local, b, expr)
 }
 
-/// The columnar residual-FILTER attempt. Returns `Some(new_rows)` (the surviving rows, in the
-/// scalar path's order) when it handled the filter, or `None` to fall back to the scalar row
-/// path. The returned rows are **byte-identical** to `apply_filter_scalar`'s output.
+/// The columnar residual-FILTER attempt (M4 Phase 5 dispatcher-wired Seam A).
 ///
-/// Eligibility is deliberately narrow so the result is *provably* identical to the scalar
-/// `cmp_expr`/`equal_expr` path, not merely "close":
-/// * a **single sargable numeric** residual `?v OP const` (`extract_sargable` → `ScanCmp::Num`);
-///   temporal comparisons decline (there is no temporal vector kernel yet);
-/// * the compared variable is a present column;
-/// * **every** id in that column is an inline integer (`dict::is_inline`). Inline integers are
-///   f64-exact small non-negative integers, so the kernel's f64 comparison agrees with
-///   `cmp_expr` on every value — including the operator's f64-tie exact-lexical recheck, which
-///   for an exact small integer and a ≤15-significant-digit sargable threshold can only agree.
-///   The all-inline gate ALSO excludes local-vocab (computed) numerics — resolved by
-///   `eval_numeric` via `local.numeric`, not `graph.numeric_value` — and any unbound (`NO_ID`,
-///   which is not inline), both of which would otherwise diverge from the row path.
+/// Returns `Some(new_rows)` (the surviving rows, in the scalar path's order) when the
+/// dispatcher admits the operator invocation, or `None` to fall through to
+/// `apply_filter_scalar`. The returned rows are **byte-identical** to
+/// `apply_filter_scalar`'s output.
 ///
-/// **ZK coupling (soundness-relevant):** when the `zk` trace is armed the seam declines
-/// unconditionally, so the row path records the identical per-row `FILTER` obligation set
-/// (`split_sargable` already keeps every filter residual under `zk`). See
-/// `research/vector-at-a-time-m4.md` §3.2.
+/// ## Decline hierarchy (I1–I5, owned by `vec_dispatch`)
+///
+/// Checks are applied in this order; any failing check falls through to the scalar path
+/// with a `vec_dispatch::record_decline()` increment (I1: decline is total, silent-safe):
+///
+/// 1. **I2 (zk-decline):** when the `zk` proof-trace is armed the seam declines so the
+///    scalar path records the complete per-row FILTER obligation set.
+/// 2. **I3 (budget parity — fallback rule):** when a query budget is installed, the seam
+///    declines. The scalar `apply_filter` debit schedule is NOT uniform-per-row (budget is
+///    checked at operator entry, not inside the row loop), so the `k = min(batch, remaining)`
+///    prefix rule cannot be applied without a scalar-side budget-tracking refactor. The
+///    fallback is: budget-armed ⇒ decline. This is zero-risk; revisit when budget tracking
+///    is uniform-per-row.
+/// 3. **Operator shape:** only a single sargable `NUMERIC` comparison `?v OP const` (temporal
+///    comparisons have no vector kernel yet).
+/// 4. **`VEC_MIN_BATCH` (I4):** the batch must have at least `vec_dispatch::VEC_MIN_BATCH`
+///    rows. Smaller batches are cheaper on the scalar path.
+/// 5. **Column-dtype precheck:** every id in the filter column must be an inline integer
+///    (`dict::is_inline`). This is the provable byte-identity gate: an inline-integer id
+///    encodes its exact numeric value (value = id − INLINE_BASE), so the columnar f64
+///    comparison agrees with the scalar `numeric_value` comparison on every cell — including
+///    the f64-tie exact-lexical recheck, which for exact small integers can only agree.
+///    This gate ALSO excludes local-vocab (computed) ids and unbound (`NO_ID`) cells.
+///
+/// ## Execution (morsel-by-morsel, single-column extract)
+///
+/// For eligible invocations the function iterates morsels of `VEC_MORSEL` rows. Each morsel:
+/// - Extracts only the filter column c (O(morsel × 1), not a full-width transpose).
+/// - Builds a single-column `DataChunk` and calls the Phase-2/3 decode + select kernels.
+/// - Records the morsel via `vec_dispatch::record_chunk`.
+/// - Appends global survivor indices.
+///
+/// After all morsels, survivors are gathered from the original `b.rows` (order-preserving).
+///
+/// **ZK coupling (soundness-relevant):** see I2 above and `research/vector-at-a-time-m4.md`
+/// §3.2. [SONNET-4.6] (sq-pntvh.5)
 #[cfg(feature = "vectorized")]
 fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec<Row>> {
     use crate::chunk::{DataChunk, VecCmp};
+    use crate::vec_dispatch;
 
-    // ZK trace armed ⇒ decline so the scalar path records the FILTER obligation set.
+    // I2: ZK trace armed ⇒ decline so the scalar path records the FILTER obligation set.
     #[cfg(feature = "zk")]
     if crate::zk::enabled() {
+        vec_dispatch::record_decline();
         return None;
     }
 
-    // Only a single sargable NUMERIC comparison `?v OP const` is columnar-eligible.
-    let num = match extract_sargable(expr)? {
-        (var, ScanCmp::Num(c)) => (var, c),
-        (_, ScanCmp::Temp(..)) => return None,
-    };
-    let (var, cmp) = num;
-    let c = b.col(&var)?;
+    // I3: budget armed ⇒ decline (fallback rule — debit schedule is not uniform-per-row).
+    if budget::active() {
+        vec_dispatch::record_decline();
+        return None;
+    }
 
-    // Provable byte-identity gate: the whole filtered column must be inline integers.
+    // Operator-shape check: only a single sargable NUMERIC comparison is eligible.
+    // NOTE: do NOT use `extract_sargable(expr)?` — the `?` operator returns None without
+    // recording the decline, making the I5 counter miss non-sargable expressions. [SONNET-4.6]
+    let (var, cmp) = match extract_sargable(expr) {
+        None => {
+            vec_dispatch::record_decline();
+            return None;
+        }
+        Some((v, ScanCmp::Num(c))) => (v, c),
+        Some((_, ScanCmp::Temp(..))) => {
+            vec_dispatch::record_decline();
+            return None;
+        }
+    };
+    let c = match b.col(&var) {
+        Some(col) => col,
+        None => {
+            vec_dispatch::record_decline();
+            return None;
+        }
+    };
+
+    // VEC_MIN_BATCH: batches below the threshold are cheaper on the scalar path.
+    if b.rows.len() < vec_dispatch::VEC_MIN_BATCH {
+        vec_dispatch::record_decline();
+        return None;
+    }
+
+    // Column-dtype precheck: the whole filter column must be inline integers (I4-equivalent).
     if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
+        vec_dispatch::record_decline();
         return None;
     }
 
@@ -6960,13 +7023,41 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
         NumCmp::Eq(t) => VecCmp::Eq(t),
     };
 
-    // transpose → decode column ONCE → compare over the decoded column → gather → materialise.
-    let width = b.vars.len();
-    let chunk = DataChunk::from_rows(&b.rows, width)?;
-    let decoded = chunk.decode_numeric_column(graph, c);
-    let sel = DataChunk::select_decoded(&decoded, veccmp);
-    let filtered = chunk.apply_selection(&sel);
-    Some(filtered.to_rows().iter().map(|r| Row::from_slice(r.as_slice())).collect())
+    // Morsel-by-morsel execution: extract only the filter column (not a full-width
+    // transpose), decode it, select survivors, and collect global indices.
+    let morsel_size = vec_dispatch::VEC_MORSEL;
+    let mut survivor_indices: Vec<usize> = Vec::new();
+    let rows = &b.rows;
+
+    for start in (0..rows.len()).step_by(morsel_size) {
+        let end = (start + morsel_size).min(rows.len());
+        let morsel_len = end - start;
+
+        // Extract just the filter column for this morsel (O(morsel × 1), not O(morsel × width)).
+        let col: Vec<sparq_core::dict::Id> = rows[start..end].iter().map(|r| r[c]).collect();
+        let morsel_chunk = match DataChunk::from_columns(vec![col], morsel_len) {
+            Some(mc) => mc,
+            None => {
+                // Should not happen: col.len() == morsel_len by construction.
+                vec_dispatch::record_decline();
+                return None;
+            }
+        };
+
+        // Phase-2/3 primitives: decode once → compare over the decoded column.
+        let decoded = morsel_chunk.decode_numeric_column(graph, 0);
+        let local_sel = DataChunk::select_decoded(&decoded, veccmp);
+
+        // Record this morsel (I5 counter).
+        vec_dispatch::record_chunk(morsel_len);
+
+        // Translate local morsel indices to global row indices.
+        survivor_indices.extend(local_sel.iter().map(|&i| start + i));
+    }
+
+    // Materialise survivors from the original rows (order-preserving, full-width).
+    let result: Vec<Row> = survivor_indices.iter().map(|&r| Row::from_slice(b.rows[r].as_ref())).collect();
+    Some(result)
 }
 
 /// The columnar per-group aggregate attempt (M4 Phase 4, `sq-pntvh.4`). Returns `Some(rows)`
@@ -6976,6 +7067,8 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
 /// **Eligibility (conservative — decline is always safe, I1):**
 /// - `vectorized` feature ON (compile-gate only, not checked here)
 /// - ZK trace NOT armed (I2, checked below)
+/// - Budget NOT armed (I3, checked below — fallback rule, same as `columnar_filter`)
+/// - `VEC_MIN_BATCH` rows or more in the input (dispatcher threshold)
 /// - No DISTINCT aggregate
 /// - Only `SUM / COUNT / AVG / MIN / MAX` aggregate functions and `COUNT(*)`
 /// - Aggregate argument is a bare variable `?v` (not an expression)
@@ -6985,7 +7078,7 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
 ///
 /// When there are multiple aggregates, ALL must be eligible and use the SAME column (or
 /// `COUNT(*)` which needs no column). If any aggregate uses a different column, decline.
-/// [SONNET-4.6]
+/// [SONNET-4.6] (sq-pntvh.4 / sq-pntvh.5 dispatcher hook)
 #[cfg(feature = "vectorized")]
 #[allow(clippy::too_many_arguments)]
 fn columnar_aggregate(
@@ -6999,10 +7092,24 @@ fn columnar_aggregate(
     _out_vars: &[Variable],
 ) -> Option<Vec<Row>> {
     use crate::reduce::{reduce_count, reduce_max_id, reduce_min_id, reduce_sum};
+    use crate::vec_dispatch;
 
     // I2: ZK trace armed → decline so the scalar path records the aggregate obligations.
     #[cfg(feature = "zk")]
     if crate::zk::enabled() {
+        vec_dispatch::record_decline();
+        return None;
+    }
+
+    // I3: budget armed ⇒ decline (same fallback rule as columnar_filter). [SONNET-4.6]
+    if budget::active() {
+        vec_dispatch::record_decline();
+        return None;
+    }
+
+    // VEC_MIN_BATCH dispatcher threshold: small inputs are cheaper on the scalar path.
+    if b.rows.len() < vec_dispatch::VEC_MIN_BATCH {
+        vec_dispatch::record_decline();
         return None;
     }
 
@@ -7015,12 +7122,14 @@ fn columnar_aggregate(
         match agg {
             AggregateExpression::CountSolutions { distinct } => {
                 if *distinct {
+                    vec_dispatch::record_decline();
                     return None; // DISTINCT COUNT(*) requires full row dedup
                 }
                 // CountSolutions needs no column — always eligible.
             }
             AggregateExpression::FunctionCall { name, expr, distinct } => {
                 if *distinct {
+                    vec_dispatch::record_decline();
                     return None; // DISTINCT requires per-group value dedup
                 }
                 // Only the five standard numeric aggregates are supported.
@@ -7030,20 +7139,35 @@ fn columnar_aggregate(
                     | AggregateFunction::Avg
                     | AggregateFunction::Min
                     | AggregateFunction::Max => {}
-                    _ => return None,
+                    _ => {
+                        vec_dispatch::record_decline();
+                        return None;
+                    }
                 }
                 // Argument must be a bare variable (not an expression).
                 let v = match expr {
                     Expression::Variable(v) => v,
-                    _ => return None,
+                    _ => {
+                        vec_dispatch::record_decline();
+                        return None;
+                    }
                 };
                 // The variable must have a column in the input bindings.
-                let c = b.col(v)?;
+                let c = match b.col(v) {
+                    Some(ci) => ci,
+                    None => {
+                        vec_dispatch::record_decline();
+                        return None;
+                    }
+                };
                 // All column-dependent aggregates must reference the SAME column.
                 match agg_col {
                     None => agg_col = Some(c),
                     Some(existing) if existing == c => {}
-                    _ => return None,
+                    _ => {
+                        vec_dispatch::record_decline();
+                        return None;
+                    }
                 }
             }
         }
@@ -7055,6 +7179,7 @@ fn columnar_aggregate(
     // so the reducer sees the exact same integer the scalar eval_expr would materialise.
     if let Some(c) = agg_col {
         if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
+            vec_dispatch::record_decline();
             return None;
         }
     }
@@ -7140,6 +7265,9 @@ fn columnar_aggregate(
         rows.push(row);
     }
 
+    // I5: record one "chunk" for the aggregate seam (the whole group-table counts as one pass).
+    // [SONNET-4.6] (sq-pntvh.5 dispatcher hook)
+    vec_dispatch::record_chunk(b.rows.len());
     Some(rows)
 }
 
@@ -12405,7 +12533,8 @@ mod columnar_filter_seam {
 
     #[test]
     fn columnar_seam_is_byte_identical_to_scalar_on_inline_column() {
-        let n = 40u32;
+        // n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_filter engages.
+        let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
@@ -12440,15 +12569,16 @@ mod columnar_filter_seam {
     fn columnar_seam_pins_exact_survivors_and_order() {
         // Non-vacuous: pin the EXACT surviving age sequence (content + ascending order) so a
         // wrong mask (off-by-one / inverted / column desync) turns this red.
-        let n = 40u32;
+        // n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_filter engages.
+        let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
         let age_var = var("age");
 
         let out = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap();
-        let expected: Vec<f64> = (21..40).map(f64::from).collect();
-        assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=39, ascending");
+        let expected: Vec<f64> = (21..300).map(f64::from).collect();
+        assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=299, ascending");
 
         // A DIFFERENT filter must select a DIFFERENT set (the mask does real work).
         let other = columnar_filter(&g, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap();
@@ -12531,7 +12661,8 @@ mod columnar_filter_seam {
         // The zk trace must capture the FILTER obligation set, so the columnar seam DECLINES
         // while the recorder is armed and the scalar path records it
         // (research/vector-at-a-time-m4.md §3.2, open question 2 — simplest-safe rule).
-        let n = 8u32;
+        // n=300 to exceed VEC_MIN_BATCH (256) so the sanity check can confirm eligibility.
+        let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
@@ -12540,7 +12671,7 @@ mod columnar_filter_seam {
 
         // Sanity: eligible (and firing) when zk is NOT armed.
         assert!(columnar_filter(&g, &b, &expr).is_some(), "eligible without zk armed");
-        // Armed ⇒ decline.
+        // Armed ⇒ decline (I2 fires before VEC_MIN_BATCH, so batch size is irrelevant here).
         let _guard = crate::zk::install();
         assert!(crate::zk::enabled());
         assert!(columnar_filter(&g, &b, &expr).is_none(), "columnar seam must decline while zk is armed");
@@ -13015,13 +13146,14 @@ mod columnar_aggregate_seam {
     /// (b) the aggregate result decodes to the scalar-expected value, and (c) the columnar
     /// result is FULL-TERM-identical to the TRUE scalar oracle (catches datatype mutations).
     ///
-    /// Scores 0..=19: SUM=190 (xsd:integer), COUNT=20 (xsd:integer), MIN=0, MAX=19.
+    /// Scores 0..=299: SUM=44850 (xsd:integer), COUNT=300 (xsd:integer), MIN=0, MAX=299.
+    /// n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_aggregate engages.
     /// A mutation returning `Num::Double` instead of `Num::Int` for SUM changes the xsd:
     /// datatype and fails (c); a MIN→MAX mutation changes the numeric value and fails (b).
     /// [SONNET-4.6] (C2-fix sq-pntvh.4 adversarial review)
     #[test]
     fn t5_whole_dataset_agg_byte_identical_to_scalar() {
-        let n = 20u32;
+        let n = 300u32;
         let (g, _subj, score) = scores_graph(n);
         let score_var = var("score");
         let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
@@ -13044,10 +13176,10 @@ mod columnar_aggregate_seam {
 
         // (expected_value, AggregateFunction label, aggregates)
         let cases: &[(f64, AggregateFunction)] = &[
-            (190.0, AggregateFunction::Sum),   // 0+1+…+19 = 190
-            (20.0,  AggregateFunction::Count),  // 20 rows
-            (0.0,   AggregateFunction::Min),    // minimum of 0..=19
-            (19.0,  AggregateFunction::Max),    // maximum
+            (44850.0, AggregateFunction::Sum),   // 0+1+…+299 = 299*300/2 = 44850
+            (300.0,   AggregateFunction::Count),  // 300 rows
+            (0.0,     AggregateFunction::Min),    // minimum of 0..=299
+            (299.0,   AggregateFunction::Max),    // maximum
         ];
 
         for &(expected, ref name) in cases {
@@ -13078,7 +13210,7 @@ mod columnar_aggregate_seam {
             });
             assert_eq!(
                 got, expected,
-                "aggregate {:?} over scores 0..=19 must equal {}", name, expected
+                "aggregate {:?} over scores 0..=299 must equal {}", name, expected
             );
 
             // (c) FULL-TERM identity against the TRUE scalar oracle (catches datatype mutations).
@@ -13150,11 +13282,12 @@ mod columnar_aggregate_seam {
     }
 
     /// T5c: AVG over inline-integer column — columnar path engaged, result FULL-TERM-identical
-    /// to the TRUE scalar oracle. AVG(0..=19) = 190/20 = 9.5 (xsd:decimal). [SONNET-4.6]
+    /// to the TRUE scalar oracle. AVG(0..=299) = 44850/300 = 149.5 (xsd:decimal).
+    /// n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_aggregate engages. [SONNET-4.6]
     /// (C2-fix sq-pntvh.4 adversarial review)
     #[test]
     fn t5c_avg_byte_identical_to_scalar() {
-        let n = 20u32;
+        let n = 300u32;
         let (g, _subj, score) = scores_graph(n);
         let score_var = var("score");
         let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
@@ -13189,19 +13322,19 @@ mod columnar_aggregate_seam {
             "columnar AVG must be FULL-TERM-identical to the scalar oracle (lexical + datatype)"
         );
 
-        // (b) Non-vacuous: verify the result is 9.5 (190/20), not 0 or some wrong value.
-        //     AVG(0..=19) = 9.5 (xsd:decimal 9.5, stored as a local-vocab Dec term).
+        // (b) Non-vacuous: verify the result is 149.5 (44850/300), not 0 or some wrong value.
+        //     AVG(0..=299) = 149.5 (xsd:decimal, stored as a local-vocab Dec term).
         let result_id = col_rows[0][0];
         let term = term_of(&g, &local_col, result_id).expect("AVG result must be a term");
         let avg_str = match &term {
             Term::Literal(l) => l.value().to_string(),
             _ => panic!("AVG result must be a literal, got {:?}", term),
         };
-        // The decimal 9.5 serialises as "9.5" (or equivalent exact decimal lexical).
+        // The decimal 149.5 serialises as "149.5" (or equivalent exact decimal lexical).
         let avg_f64: f64 = avg_str.parse().expect("AVG lexical must be numeric");
         assert!(
-            (avg_f64 - 9.5_f64).abs() < 1e-9,
-            "AVG(0..=19) = 190/20 = 9.5, got {} (term = {:?})", avg_f64, term
+            (avg_f64 - 149.5_f64).abs() < 1e-9,
+            "AVG(0..=299) = 44850/300 = 149.5, got {} (term = {:?})", avg_f64, term
         );
     }
 
