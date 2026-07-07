@@ -1,4 +1,22 @@
-# scripts/bench — run-all-benchmarks orchestrator
+# scripts/bench — benchmark orchestrators + same-box gathers
+
+## shacl-same-box.sh — SHACL competitor comparison (sq-7d3dj.33)
+
+Same-box SHACL validation comparison — **sparq-shacl vs pySHACL vs Apache Jena
+SHACL** — over the shared `bench/shacl/` workloads (the 5 committed gate shapes
++ the SPARQL-constraint-heavy `bench/shacl/shapes-sparql/` set) at LUBM scales
+(default `univ=1` ~103k and `univ=10` ~1.3M triples). All three engines are
+timed **in-process, validate-only, best-of-N on a loaded graph** (drivers:
+`pyshacl-shacl-bench.py`, `JenaShaclBench.java`; sparq uses
+`examples/bench_shacl`), with per-workload timeouts recorded as honest `ERROR`
+rows and per-workload `#violations`/`conforms` cross-checked engine-vs-engine.
+Emits one `bench/canonical-competitor-results/`-shaped envelope JSON per scale;
+`canonical:false` unless `CANONICAL=1` (dedicated quiet box). Engine deps are
+gather-only `/tmp` scratch (pip venv + Jena tarball) — clean with
+`rm -rf /tmp/jena-shacl /tmp/shacl-bench-venv`. First-read + root-cause:
+[`research/shacl-baseline-2026-07.md`](../../research/shacl-baseline-2026-07.md).
+
+## run-all-benchmarks.sh — whole-estate orchestrator
 
 `run-all-benchmarks.sh` (bead sq-hz0g2) runs the **whole benchmark estate** with
 per-suite isolation and **streams results incrementally to a local folder as each
