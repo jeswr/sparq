@@ -1,17 +1,44 @@
 #!/usr/bin/env python3
 """
-[OPUS-4.8] sq-pntvh.8: feature-OFF CI proof for M4 vectorization.
+[OPUS-4.8] sq-pntvh.8 / [OPUS-4.8] sq-v3nel: feature-OFF CI proof for M4 vectorization.
 
-Proves compile-time absence (leg1, leg3) and artifact byte-determinism (leg2) of
+Proves compile-time absence (leg1, leg3) and artifact byte-DETERMINISM (leg2) of
 the vectorized-OFF build. Does NOT prove runtime performance neutrality — that is
 EC2-gated. This is the strongest claim deterministic ratchet infrastructure can
 support.
 
 Three legs:
   --leg1 <metadata-json>   cargo metadata check: `vectorized` absent from default features
-  --leg2 <bench-json> <floor-json>  wasm bundle exact-equality vs feature_off_exact pin
+  --leg2-dynamic <base.wasm> <head.wasm> <base-decl.json> <head-decl.json>
+                           DYNAMIC byte-identity: compare the feature-OFF wasm built
+                           from the BASE (target-branch/merge-base) tree against the one
+                           built from the HEAD (PR/merged) tree IN THE SAME CI RUN. No
+                           static byte pin => no merge-order dependence. Identical bytes
+                           => pass. Differing bytes => pass only if DECLARED (change_token
+                           bumped in bench/feature-off-declaration.json); else fail.
   --leg3                   cfg-audit: every vectorized call site in lib.rs/exec.rs is gated
   --self-test              run built-in tripwires that MUST fail (guard the guards)
+
+[OPUS-4.8] sq-v3nel (2026-07-07): leg 2 was RE-DESIGNED from a static exact-equality
+pin (bench/perf-baseline.json metrics.wasm_bundle_bytes.feature_off_exact) to this
+DYNAMIC same-run base-vs-head byte comparison. The static pin was ORDER-DEPENDENT: any
+PR touching always-compiled engine/core code changed the merged-tree bundle bytes, the
+correct pin value depended on merge ORDER, and armed PRs cycled BLOCKED while serial
+re-pin commits chased a moving target (see the retirement _comment in perf-baseline.json).
+The dynamic check has no static pin: a PR that does not touch always-compiled code yields
+byte-identical builds and passes deterministically; a PR that does must DECLARE the change
+by bumping change_token (audit-visible, reviewed diff). The SIZE of an accepted change is
+still governed, unchanged, by the wasm_bundle_bytes floor ratchet (+/-2% band) in bench.yml.
+
+Declaration mechanism (least-gameable + audit-visible, chosen over a PR-body line):
+  bench/feature-off-declaration.json carries an integer "change_token". A PR that
+  intentionally changes always-compiled feature-OFF bytes must INCREMENT that token in a
+  reviewed diff (and add a dated rationale line to its _comment). A PR-body marker was
+  REJECTED: it is invisible in merge_group events (no PR body on the merged commit set)
+  and is not part of the reviewed diff. The token lives in its OWN file, NOT inside
+  perf-baseline.json, because scripts/perf-gate.py's auto-ratchet-down rewrite
+  (write_baseline) reconstructs each metric with only floor/threshold/mode and would
+  silently wipe any extra field on the next push-to-main improvement commit.
 """
 
 from __future__ import annotations
@@ -102,115 +129,107 @@ def check_leg1(metadata_path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Leg 2: wasm bundle exact-equality vs pinned floor
+# Leg 2: DYNAMIC byte-identity — feature-OFF wasm, base tree vs head tree (sq-v3nel)
 # ---------------------------------------------------------------------------
 
-def check_leg2(bench_results_path: str, floor_path: str) -> int:
-    """
-    Returns 0 if measured wasm_bundle_bytes exactly equals the pinned feature_off_exact
-    value, 1 otherwise.
+def _read_change_token(decl_path: str) -> int:
+    """Read the integer 'change_token' from a feature-off declaration JSON file.
 
-    bench_results_path: JSON list in github-action-benchmark format
-      [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": N}, ...]
-    floor_path: bench/perf-baseline.json with structure
-      {"metrics": {"wasm_bundle_bytes": {"floor": N, "feature_off_exact": N, ...}}}
-
-    NOTE: leg 2 compares against `feature_off_exact`, NOT `floor`.
-    The ratchet floor (bench/perf-baseline.json wasm_bundle_bytes.floor) is the 2%-band
-    lower bound used by bench.yml — it can sit BELOW the current wasm size by up to 2%.
-    An exact-equality check against the floor therefore fails whenever main drifts
-    within-band. `feature_off_exact` is a dedicated pin updated in the same PR as any
-    wasm change; it always equals the ACTUAL byte count of the feature-OFF build.
+    Fail-SAFE default: a missing file, missing field, or non-integer value reads as 0.
+    Because an ABSENT declaration reads the same as an UN-bumped one, an undeclared byte
+    change still fails the gate (the check compares base vs head token for INEQUALITY).
     """
     try:
-        with open(bench_results_path) as fh:
-            results_list: list = json.load(fh)
-    except Exception as exc:
-        print(f"[leg2] ERROR: cannot read bench-results file {bench_results_path!r}: {exc}",
-              file=sys.stderr)
-        return 1
-
+        with open(decl_path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    tok = data.get("change_token", 0) if isinstance(data, dict) else 0
     try:
-        with open(floor_path) as fh:
-            floor_data: dict = json.load(fh)
-    except Exception as exc:
-        print(f"[leg2] ERROR: cannot read floor file {floor_path!r}: {exc}", file=sys.stderr)
+        return int(tok)
+    except (TypeError, ValueError):
+        return 0
+
+
+def check_leg2_dynamic(base_wasm: str, head_wasm: str,
+                       base_decl: str, head_decl: str) -> int:
+    """DYNAMIC byte-identity gate for the feature-OFF wasm bundle (sq-v3nel).
+
+    Compares the feature-OFF wasm built from the BASE (target-branch / merge-base) tree
+    against the one built from the HEAD (PR / merged) tree IN THE SAME CI RUN. Same
+    toolchain + same runner in one run => a deterministic comparison with NO static byte
+    pin, so NO merge-order dependence.
+
+    Policy:
+      * bytes byte-for-byte IDENTICAL  -> PASS. The PR touched no always-compiled code
+        that reaches the feature-OFF bundle. (This is the common case for non-engine PRs.)
+      * bytes DIFFER + change DECLARED -> PASS. 'declared' == change_token differs between
+        the base-tree and head-tree bench/feature-off-declaration.json (author bumped it).
+        The SIZE of the change is governed SEPARATELY, unchanged, by the wasm_bundle_bytes
+        floor ratchet (+/-2% band) in bench.yml — this gate governs INTENT, not magnitude.
+      * bytes DIFFER + NOT declared    -> FAIL. Either accidental default-path/vectorized
+        code leaked into the feature-OFF build (remove / cfg-gate it) or an intentional
+        always-compiled change was not declared (bump change_token).
+
+    Returns 0 on pass, 1 on fail/error.
+    """
+    try:
+        with open(base_wasm, "rb") as fh:
+            base_bytes = fh.read()
+    except OSError as exc:
+        print(f"[leg2] ERROR: cannot read base wasm {base_wasm!r}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        with open(head_wasm, "rb") as fh:
+            head_bytes = fh.read()
+    except OSError as exc:
+        print(f"[leg2] ERROR: cannot read head wasm {head_wasm!r}: {exc}", file=sys.stderr)
         return 1
 
-    # Build lookup from list
-    measured: dict[str, int] = {item["name"]: item["value"] for item in results_list}
-    floor_metrics: dict = floor_data.get("metrics", {})
+    base_len, head_len = len(base_bytes), len(head_bytes)
 
-    # [OPUS-4.8] Fail-closed if the pin itself is missing. The comparison loop below only
-    # iterates over keys PRESENT in floor_metrics, so a floor file that never defines
-    # 'wasm_bundle_bytes' (edited/corrupted/renamed baseline) would produce zero violations
-    # and silently PASS — disabling the exact-equality gate. Require the pinned metric up
-    # front so a missing baseline is a hard failure, not a skip.
-    if "wasm_bundle_bytes" not in floor_metrics:
+    if base_bytes == head_bytes:
         print(
-            f"[leg2] VIOLATION: 'wasm_bundle_bytes' metric absent from the 'metrics' section "
-            f"of {floor_path!r}. The exact-equality gate cannot run without a pin. Restore "
-            "metrics.wasm_bundle_bytes.feature_off_exact in bench/perf-baseline.json to the "
-            "exact byte count of the feature-OFF wasm build."
+            f"[leg2] OK — feature-OFF wasm is byte-for-byte IDENTICAL to the base tree "
+            f"({head_len} bytes). No always-compiled code changed the default build; "
+            "deterministic same-run comparison, no static pin, no merge-order dependence."
         )
-        print("\n[leg2] FAIL — the feature_off_exact pin is missing; refusing to pass a "
-              "gate that never compared the wasm bundle.")
-        return 1
+        return 0
 
-    # Only check metrics present in BOTH the floor AND the results
-    violations: list[str] = []
-    for metric_name, metric_cfg in floor_metrics.items():
-        if metric_name not in measured:
-            # Only require wasm_bundle_bytes — skip others
-            if metric_name == "wasm_bundle_bytes":
-                violations.append(
-                    f"[leg2] VIOLATION: 'wasm_bundle_bytes' not found in bench results. "
-                    f"Available keys: {list(measured.keys())}"
-                )
-            continue
-        if metric_name != "wasm_bundle_bytes":
-            # This script only gates on the wasm bundle as the feature-OFF proof metric
-            continue
+    # Bytes differ (size and/or content). Require an audit-visible declaration.
+    delta = head_len - base_len
+    pct = (delta / base_len * 100) if base_len else float("inf")
+    base_tok = _read_change_token(base_decl)
+    head_tok = _read_change_token(head_decl)
 
-        # [OPUS-4.8] Use feature_off_exact, NOT floor.
-        # The floor is the 2%-band ratchet lower bound (bench.yml); wasm can legitimately
-        # sit anywhere from floor to floor*1.02 and still pass bench.yml. Comparing against
-        # the floor in an exact-equality check fails whenever main drifts within-band.
-        exact_value = metric_cfg.get("feature_off_exact")
-        if exact_value is None:
-            violations.append(
-                f"[leg2] VIOLATION: 'wasm_bundle_bytes.feature_off_exact' is absent from "
-                f"{floor_path!r}. This field must be set to the exact byte count of the "
-                "feature-OFF wasm build (`cargo build --profile release-wasm -p sparq-wasm "
-                "--target wasm32-unknown-unknown`). Re-pin it by measuring the build output "
-                "and committing the value alongside any wasm change."
-            )
-            continue
+    print(
+        f"[leg2] feature-OFF wasm DIFFERS from the base tree: "
+        f"base={base_len} head={head_len} bytes, size delta={delta:+d} ({pct:+.3f}%). "
+        "Comparison is byte-for-byte, so same-length content changes are also detected."
+    )
 
-        actual_value = measured[metric_name]
-        if actual_value != exact_value:
-            delta = actual_value - exact_value
-            pct = (delta / exact_value * 100) if exact_value else float("inf")
-            violations.append(
-                f"[leg2] VIOLATION: wasm_bundle_bytes mismatch — "
-                f"measured={actual_value}, feature_off_exact={exact_value}, "
-                f"delta={delta:+d} bytes ({pct:+.3f}%). "
-                "Zero delta required: any accidental vectorized code would change the bundle "
-                "size. If this is a legitimate wasm change, update feature_off_exact in "
-                "bench/perf-baseline.json to the new measured value."
-            )
-        else:
-            print(f"[leg2] OK — wasm_bundle_bytes exact match: {actual_value} == {exact_value} "
-                  "(zero delta vs feature_off_exact pin, compile-time absence confirmed)")
+    if head_tok != base_tok:
+        print(
+            f"[leg2] OK — change DECLARED: bench/feature-off-declaration.json change_token "
+            f"{base_tok} -> {head_tok}. The feature-OFF byte change is intentional. Its SIZE "
+            "is governed by the wasm_bundle_bytes floor ratchet (+/-2% band) in bench.yml, "
+            "which is unchanged by this gate."
+        )
+        return 0
 
-    if violations:
-        for v in violations:
-            print(v)
-        print("\n[leg2] FAIL — wasm bundle size does not exactly match the feature_off_exact pin. "
-              "This gate requires ZERO delta (stricter than the 2% ratchet in bench.yml).")
-        return 1
-
-    return 0
+    print(
+        f"[leg2] VIOLATION: the feature-OFF wasm bundle changed vs the base tree "
+        f"(size delta {delta:+d} bytes, {pct:+.3f}%) but the change is NOT declared "
+        f"(change_token unchanged at {base_tok} in bench/feature-off-declaration.json).\n"
+        "  - If this is ACCIDENTAL vectorized / default-path code leaking into the "
+        "feature-OFF build, REMOVE it or gate it behind #[cfg(feature = \"vectorized\")].\n"
+        "  - If this is an INTENTIONAL change to always-compiled engine/core code, DECLARE "
+        "it: increment \"change_token\" in bench/feature-off-declaration.json (add a dated "
+        "rationale line to its _comment). If the SIZE moves > +/-2%, ALSO raise "
+        "metrics.wasm_bundle_bytes.floor in bench/perf-baseline.json (the bench.yml ratchet)."
+    )
+    print("\n[leg2] FAIL — undeclared feature-OFF bundle change. Declare it or remove it.")
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -351,19 +370,31 @@ def _leg1_on_dict(meta: dict) -> int:
         os.unlink(tmp_path)
 
 
-def _leg2_on_dicts(results: list, floor: dict) -> int:
-    """Run leg2 check on in-memory dicts via temp files."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as r_tmp:
-        json.dump(results, r_tmp)
-        r_path = r_tmp.name
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f_tmp:
-        json.dump(floor, f_tmp)
-        f_path = f_tmp.name
+def _leg2_dynamic_on_bytes(base_bytes: bytes, head_bytes: bytes,
+                           base_tok: int | None, head_tok: int | None) -> int:
+    """Run the dynamic leg2 check on in-memory wasm bytes + declaration tokens.
+
+    A token of None writes an EMPTY declaration file (missing field) to exercise the
+    fail-safe default (reads as 0). Otherwise writes {"change_token": <int>}.
+    """
+    paths: list[str] = []
+
+    def _write(data: bytes | str, suffix: str) -> str:
+        mode = "wb" if isinstance(data, bytes) else "w"
+        with tempfile.NamedTemporaryFile(mode=mode, suffix=suffix, delete=False) as tmp:
+            tmp.write(data)
+            paths.append(tmp.name)
+            return tmp.name
+
+    base_wasm = _write(base_bytes, ".wasm")
+    head_wasm = _write(head_bytes, ".wasm")
+    base_decl = _write("{}" if base_tok is None else json.dumps({"change_token": base_tok}), ".json")
+    head_decl = _write("{}" if head_tok is None else json.dumps({"change_token": head_tok}), ".json")
     try:
-        return check_leg2(r_path, f_path)
+        return check_leg2_dynamic(base_wasm, head_wasm, base_decl, head_decl)
     finally:
-        os.unlink(r_path)
-        os.unlink(f_path)
+        for p in paths:
+            os.unlink(p)
 
 
 def run_self_test() -> int:
@@ -400,32 +431,30 @@ def run_self_test() -> int:
         print("TRIPWIRE 1 (leg1): FAIL — guard did NOT detect 'vectorized'; the leg1 check is broken")
         all_passed = False
 
-    # ----- Tripwire 2: Leg 2 must reject a perturbed wasm bundle size -----
-    # [OPUS-4.8] Uses feature_off_exact (NOT floor) — mirrors the live check_leg2() logic.
-    # 1399868 = CI x86_64 feature-OFF wasm bytes. Re-pin from a CI run, never from aarch64.
-    pinned_exact = 1399868
-    perturbed = pinned_exact + 1  # 1 byte off — must be caught
-    bad_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": perturbed}]
-    bad_floor = {
-        "metrics": {
-            "wasm_bundle_bytes": {
-                "floor": 1399703,
-                "threshold": 0.02,
-                "mode": "auto",
-                "feature_off_exact": pinned_exact,
-            }
-        }
-    }
-    rc = _leg2_on_dicts(bad_results, bad_floor)
+    # ----- Tripwire 2: Leg 2 (dynamic) must reject an UNDECLARED byte change -----
+    # [OPUS-4.8] sq-v3nel: the dynamic check compares base-tree vs head-tree feature-OFF
+    # wasm bytes in the SAME run. Differing bytes with an un-bumped change_token MUST fail.
+    rc = _leg2_dynamic_on_bytes(b"\x00wasm-base", b"\x00wasm-headX", base_tok=0, head_tok=0)
     if rc != 0:
-        print("TRIPWIRE 2 (leg2): PASS — comparator correctly rejected perturbed bundle size "
-              f"({perturbed} != feature_off_exact={pinned_exact})")
+        print("TRIPWIRE 2 (leg2): PASS — dynamic check correctly rejected an UNDECLARED "
+              "feature-OFF byte change (bytes differ, change_token un-bumped)")
     else:
-        print("TRIPWIRE 2 (leg2): FAIL — comparator did NOT reject mismatched size; the leg2 check is broken")
+        print("TRIPWIRE 2 (leg2): FAIL — dynamic check did NOT reject an undeclared change; "
+              "the leg2 check is broken")
+        all_passed = False
+
+    # ----- Tripwire 3: Leg 2 (dynamic) must ACCEPT a declared byte change (guard sanity) -----
+    rc = _leg2_dynamic_on_bytes(b"\x00wasm-base", b"\x00wasm-headX", base_tok=0, head_tok=1)
+    if rc == 0:
+        print("TRIPWIRE 3 (leg2): PASS — dynamic check accepted a DECLARED change "
+              "(bytes differ, change_token 0 -> 1)")
+    else:
+        print("TRIPWIRE 3 (leg2): FAIL — dynamic check rejected a declared change; false positive")
         all_passed = False
 
     if all_passed:
-        print("\n[self-test] OK — both tripwires fired correctly. The guards can fail.")
+        print("\n[self-test] OK — all tripwires fired correctly. The guards can fail (and "
+              "the dynamic leg2 accepts a declared change).")
         return 0
     else:
         print("\n[self-test] FAIL — one or more tripwires did not fire. Fix the guard logic.")
@@ -443,9 +472,10 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--leg1", metavar="METADATA_JSON",
                       help="cargo metadata JSON to check for vectorized absence")
-    mode.add_argument("--leg2", nargs=2,
-                      metavar=("BENCH_RESULTS_JSON", "FLOOR_JSON"),
-                      help="bench-results + floor JSON for exact-equality wasm check")
+    mode.add_argument("--leg2-dynamic", dest="leg2_dynamic", nargs=4,
+                      metavar=("BASE_WASM", "HEAD_WASM", "BASE_DECL", "HEAD_DECL"),
+                      help="DYNAMIC byte-identity: base-tree vs head-tree feature-OFF wasm "
+                           "+ base/head feature-off-declaration.json (no static pin)")
     mode.add_argument("--leg3", action="store_true",
                       help="cfg-audit of vectorized call sites in lib.rs and exec.rs")
     mode.add_argument("--self-test", dest="self_test", action="store_true",
@@ -456,8 +486,9 @@ def main() -> int:
 
     if args.leg1:
         return check_leg1(args.leg1)
-    elif args.leg2:
-        return check_leg2(args.leg2[0], args.leg2[1])
+    elif args.leg2_dynamic:
+        return check_leg2_dynamic(args.leg2_dynamic[0], args.leg2_dynamic[1],
+                                  args.leg2_dynamic[2], args.leg2_dynamic[3])
     elif args.leg3:
         return check_leg3(repo_root=args.repo_root)
     elif args.self_test:

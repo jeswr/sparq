@@ -79,7 +79,11 @@ terse = ["dep:sparq-terse"]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
 # version on crates.io (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
-sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
+# [SONNET-4.6] sq-7d3dj.30.5: enable the opt-in DPccp join-order planner so the CLI
+# (the canonical bench binary) uses the cost-optimal bushy join tree by default for
+# small BGPs. sparq-engine's default features are unchanged; the feature is ON only for
+# the CLI, keeping the core lean per the opt-in feature architecture.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner"] }
 # [OPUS-4.8] (sq-l4ki) `query` reuses sparq-server's W3C SELECT result serialisers
 # (XML/CSV/TSV) for its `--format` flag instead of re-implementing them. We take ONLY
 # the pure serialiser library (`results`) — `default-features = false` drops the `server`

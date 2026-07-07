@@ -92,13 +92,12 @@
       "unviable": 46
     },
     "sparq-prov": {
-      "_note": "[SONNET-4.6] sq-qcnn.28: ceiling raised --allow-higher from 55 to 66 — measured_surviving grew 53 to 64 (11 new survivors) in run 28776460517 (2026-07-06). New code was added to sparq-prov since the 2026-06-30 seeding without proportionate test coverage. Genuine regression, not infrastructure noise; beaded for test-quality follow-up.",
-      "caught": 158,
-      "caught_pct": 71.43,
-      "ceiling": 66,
-      "measured_surviving": 64,
+      "caught": 166,
+      "caught_pct": 76.02,
+      "ceiling": 55,
+      "measured_surviving": 53,
       "timeout": 2,
-      "unviable": 22
+      "unviable": 25
     },
     "sparq-rsp": {
       "caught": 296,
@@ -134,7 +133,7 @@
       "unviable": 14
     },
     "sparq-substrate": {
-      "_note": "[SONNET-4.6] sq-qcnn.28: ceiling raised --allow-higher from 130 to 182 — measured_surviving grew 128 to 180 (52 new survivors) in run 28776460517 (2026-07-06). 535 mutants tested, 180 missed. New code added to sparq-substrate since last seeding lacks proportionate tests. Beaded for test-quality follow-up.",
+      "_note": "[SONNET-4.6] sq-qcnn.28: ceiling raised --allow-higher from 130 to 182 \u2014 measured_surviving grew 128 to 180 (52 new survivors) in run 28776460517 (2026-07-06). 535 mutants tested, 180 missed. New code added to sparq-substrate since last seeding lacks proportionate tests. Beaded for test-quality follow-up.",
       "caught": 312,
       "caught_pct": 64.77,
       "ceiling": 182,
