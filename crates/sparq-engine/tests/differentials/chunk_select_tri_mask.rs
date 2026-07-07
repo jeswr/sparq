@@ -8,9 +8,11 @@
 //!   inline ints, non-inline numerics, decimals, strings, unbound (`NO_ID`), and a
 //!   BIND-derived value; asserts byte-identity AND `rows_columnar > 0` AND
 //!   `rows_delegated > 0` — proving both halves of the hybrid executed.
-//! - **T2 (tie-exactness witness):** the `v = 9007199254740992` / `c = 9007199254740993`
-//!   pair (2^53 / 2^53+1): distinct exactly but equal as f64. `FILTER(?x < c)` should
-//!   keep the row; a naive pure-f64 path would drop it.
+//! - **T2 (tie-exactness witness):** the decimal `"0.99999999999999995"` (= 1 − 5×10⁻¹⁷,
+//!   which rounds UP to f64 `1.0`) vs constant `1`: exact comparison gives `true` but a
+//!   naive pure-f64 path would confident-fail (`1.0 < 1.0 = false`); the tri-mask delegates.
+//!   The 2^53 integer pair is tested by the unit test `tie_exactness_2_to_53_classified_as_tie`
+//!   in `chunk_select.rs`.
 //! - **T3 (operator sweep):** all five operators × boundary constants over the T1 column,
 //!   run through the byte-identity differential harness.
 //! - **T4 (invariants):** zk-armed ⇒ `chunks_built == 0` + identical bytes; NaN-constant
@@ -145,26 +147,31 @@ fn t1_mixed_column_both_populations_probe() {
 ///
 /// This test uses a **decimal** witness that is reachable within the guard:
 ///
-/// - Stored value: `"0.9999999999999999"^^xsd:decimal` (a 16-fractional-digit decimal)
-/// - Filter constant: `1` (1 significant digit — passes the sig_digits <= 15 guard)
-/// - `f64("0.9999999999999999") = 1.0` (rounds up: the value is 1 − 10⁻¹⁶, which lies
-///   above the half-ulp rounding boundary 1 − 2⁻⁵³ ≈ 1 − 1.11 × 10⁻¹⁶ at scale 1)
-/// - Exact comparison: `0.9999999999999999 < 1` → `true`
+/// - Stored value: `"0.99999999999999995"^^xsd:decimal` (= 1 − 5×10⁻¹⁷; 17 fractional
+///   digits — the sig_digits guard applies to the filter *constant* `1`, not the stored
+///   value, so 1 significant digit passes the ≤ 15 guard)
+/// - Filter constant: `1`
+/// - `f64("0.99999999999999995") = 1.0` (rounds UP: 1 − 5×10⁻¹⁷ lies ABOVE the midpoint
+///   1 − 2⁻⁵⁴ ≈ 1 − 5.55×10⁻¹⁷ between pred(1.0) and 1.0, so nearest-even rounds up)
+/// - Exact comparison: `0.99999999999999995 < 1` → `true`
 ///
 /// A naive pure-f64 path would classify this as a **confident fail** (1.0 < 1.0 = false)
-/// and drop the row. The tri-mask must classify it as a **tie** (f64 values equal →
+/// and drop the row. The tri-mask classifies it as a **tie** (f64 values equal →
 /// delegated), after which the scalar exact-lexical comparison correctly returns `true`.
 ///
-/// Asserts: the witness row survives AND the result is byte-identical to the scalar
-/// reference. [SONNET-4.6]
+/// Asserts: (1) the witness f64 equals 1.0 (tie precondition — if this regresses the
+/// witness becomes a confident lane and the test logic is invalid), (2) the witness row
+/// survives FILTER(?fval < 1) in the columnar result, and (3) `rows_delegated > 0`
+/// (genuinely attributable: the witness IS a tie). [OPUS-4.8]
 #[test]
 fn t2_tie_exactness_decimal_witness() {
     let mut nt = String::new();
-    // The tie witness: 0.9999999999999999 is strictly less than 1 exactly, but
-    // its f64 is 1.0 (rounds up). The tri-mask will see x == c and delegate;
-    // the scalar exact comparison then correctly returns true for FILTER(?fval < 1).
+    // The tie witness: 0.99999999999999995 is strictly less than 1 exactly (= 1 − 5×10⁻¹⁷),
+    // but its f64 is 1.0 (rounds UP past the midpoint 1 − 2⁻⁵⁴). The tri-mask sees x == c
+    // (1.0 == 1.0) and delegates; the scalar exact-lexical recheck returns true for
+    // FILTER(?fval < 1). A naive pure-f64 path would confident-fail (1.0 < 1.0 = false).
     nt.push_str(&format!(
-        "<http://ex/witness> <http://ex/v> \"0.9999999999999999\"^^<{XSD_DEC}> .\n"
+        "<http://ex/witness> <http://ex/v> \"0.99999999999999995\"^^<{XSD_DEC}> .\n"
     ));
     // Padding rows: integers 1..270 (>= 1, so none pass FILTER < 1).
     // This keeps the expected result to exactly the one witness row, and pushes
@@ -181,6 +188,21 @@ fn t2_tie_exactness_decimal_witness() {
     let q = format!(
         "{}SELECT ?v WHERE {{ ?s <http://ex/v> ?v . BIND(?v AS ?fval) . FILTER(?fval < 1) }}",
         PFX
+    );
+
+    // Tie precondition: the stored lexical must decode to f64 1.0 (same as the constant).
+    // If this ever regresses the witness becomes a confident lane (f64 < 1.0), and
+    // rows_delegated > 0 below would no longer prove the delegate path fired.
+    // Verified once statically (verify_t2 snippet) and here at runtime. [OPUS-4.8]
+    let witness_f64: f64 = "0.99999999999999995"
+        .parse()
+        .expect("T2 TIE-PRECONDITION: witness decimal must parse to f64");
+    assert_eq!(
+        witness_f64,
+        1.0_f64,
+        "T2 TIE-PRECONDITION: '0.99999999999999995' must decode to f64 1.0 (tie with constant 1); \
+         got {:?} — witness is a confident lane, not a tie; test logic is invalid",
+        witness_f64
     );
 
     reset_stats();
@@ -203,23 +225,29 @@ fn t2_tie_exactness_decimal_witness() {
         "T2: columnar and scalar results must be byte-identical"
     );
 
-    // The witness must survive: 0.9999999999999999 < 1 exactly.
+    // The witness must survive: 0.99999999999999995 < 1 exactly (= 1 − 5×10⁻¹⁷).
+    // Its f64 rounds to 1.0 so a naive pure-f64 path would drop it (1.0 < 1.0 = false);
+    // survival here proves the tri-mask delegated it and the scalar recheck returned true.
     assert!(
-        json_col.contains("0.9999999999999999"),
-        "T2: the tie-witness decimal 0.9999999999999999 must survive FILTER(?fval < 1) \
+        json_col.contains("0.99999999999999995"),
+        "T2: the tie-witness decimal 0.99999999999999995 must survive FILTER(?fval < 1) \
          (exact < 1, but f64 rounds to 1.0 — tri-mask must delegate, not confident-fail)"
     );
 
-    // Non-vacuity: if the columnar path engaged, delegation must have occurred (the
-    // witness row is always a tie for this constant).
-    if snap.chunks_built >= 1 {
-        assert!(
-            snap.rows_delegated > 0,
-            "T2: columnar engaged but rows_delegated == 0; the tie must have been delegated \
-             (rows_delegated={})",
-            snap.rows_delegated
-        );
-    }
+    // Unconditional delegation check: the witness is always a tie (f64 = 1.0 = constant),
+    // so whenever the columnar path engaged, it must have delegated at least one row.
+    // The precondition assert above ensures this is genuinely attributable to the witness.
+    assert!(
+        snap.chunks_built >= 1,
+        "T2: columnar path must engage (chunks_built={}); need > VEC_MIN_BATCH rows",
+        snap.chunks_built
+    );
+    assert!(
+        snap.rows_delegated > 0,
+        "T2: rows_delegated must be > 0; the witness (f64=1.0) is a genuine tie with \
+         constant 1 and must be delegated to exact-lexical recheck (rows_delegated={})",
+        snap.rows_delegated
+    );
 }
 
 // ==== T3: operator sweep over the mixed column ===================================
