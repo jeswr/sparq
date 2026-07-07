@@ -26,7 +26,9 @@ Engine URLs:
              http://127.0.0.1:7020/sparql). sparq-server accepts both
              application/sparql-query and application/sparql-update on this path.
   --qlever   QLever base URL (update via form POST; omit to skip QLever;
-             default None — QLever is skipped unless this flag is provided)
+             default None — QLever is skipped unless this flag is provided,
+             EXCEPT that --qlever-token alone implies http://127.0.0.1:7019
+             for backward-compat with the registered pss-update-parity invoke)
   --qlever-token TOKEN  QLever access token for the update endpoint (optional)
   --fuseki   Fuseki dataset base URL (update: <url>/update, query: <url>/query;
              e.g. http://127.0.0.1:3030/ds; omit to skip Fuseki)
@@ -88,6 +90,11 @@ def parse_args(argv):
             i += 2
         else:
             sys.exit(f"unknown arg {a}")
+    # Backward-compat with the registered pss-update-parity invocation
+    # (bench/benchmarks.toml passes only --qlever-token): a token implies the
+    # historical local QLever endpoint unless --qlever overrides it.
+    if opts["qlever"] is None and opts["qlever_token"] is not None:
+        opts["qlever"] = "http://127.0.0.1:7019"
     return iters, opts
 
 
