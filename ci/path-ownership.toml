@@ -162,6 +162,15 @@ crates = ["sparq-engine"]
 pattern = "bench/zk-compose/**"
 crates = ["sparq-zk-compose"]
 
+# [FABLE-5] sq-0iqzw: the ADJUDICATED cross-engine divergence allowlist, read at
+# runtime by the sparq-bench differential fuzzer (crates/sparq-bench/src/fuzz.rs
+# DivergenceAllowlist, via an env!("CARGO_MANIFEST_DIR")-relative path) AND by its
+# unit test committed_allowlist_enables_exactly_the_adjudicated_classes. Editing an
+# adjudicated class must re-run sparq-bench (the comparator that consumes it).
+[[map]]
+pattern = "bench/differential-divergences.json"
+crates = ["sparq-bench"]
+
 # ---------------------------------------------------------------------------
 # ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read
 # across a boundary where a real cargo dep edge would be a forbidden CYCLE, so no
