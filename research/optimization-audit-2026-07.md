@@ -260,6 +260,12 @@ Too many coupled decisions for a drive-by — this bead produces a design record
 large-SELECT scenario. The design record must specify the Content-Length contract
 change explicitly (it is client-visible).
 
+**Design record produced (sq-7d3dj.13):** `research/wave-d-pull-streaming-response-body.md`
+— the chunk-sink producer seam, bounded-channel transport + `PinnedGen` lifetime, the
+`Content-Length` → chunked transfer-encoding contract change, the mid-stream
+truncation-safety invariant, slow-client admission on `live_generations()`, and the
+D1–D6 impl decomposition (each wired to the `sq-7d3dj.23` TTFB series).
+
 ### 12. MEASURE-FIRST: sparsify native numerics cache (P3, memory)
 
 **Approach + honest framing.** Native `build()` keeps a dense 8 B/term f64 vec even on
