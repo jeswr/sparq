@@ -54,7 +54,7 @@ rustc-hash = { workspace = true }
 # oorandom) are already covered by upstream imports (bytecode-alliance / google /
 # mozilla) in supply-chain/imports.lock from when sparq-substrate added criterion.
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # Round-trip a descriptor parsed from the served N-Triples form.
 oxttl = { workspace = true }
 
