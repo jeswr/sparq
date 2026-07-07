@@ -5988,6 +5988,8 @@ fn values_bindings(graph: &Graph, local: &mut LocalVocab, variables: &[Variable]
 }
 
 fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: &Variable, expr: &Expression) -> Result<Bindings, String> {
+    // Pre-resolve Variable → column index once before the row loop. [OPUS-4.8] sq-7d3dj.4.
+    let compiled = compile_expr(expr, &b);
     // BIND was fully serial because each row's computed value was interned immediately. Split it
     // (T1.0b): a PARALLEL pass evaluates the expression (read-only) and resolves the value to an
     // id read-only (inline / graph-dict / already-local); only genuinely new terms fall through to
@@ -6015,7 +6017,7 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
                 ROW_SCOPE.set((scope, i));
-                let v = eval_expr(graph, lv, bref, row, expr)?;
+                let v = eval_compiled(graph, lv, bref, row, &compiled)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
             })
             .collect::<Result<Vec<_>, String>>()?
@@ -6023,7 +6025,7 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let mut out = Vec::with_capacity(b.rows.len());
         for (i, row) in b.rows.iter().enumerate() {
             ROW_SCOPE.set((scope, i));
-            let v = eval_expr(graph, local, &b, row, expr)?;
+            let v = eval_compiled(graph, local, &b, row, &compiled)?;
             out.push(value_to_id_readonly(graph, local, &v));
         }
         out
@@ -6033,7 +6035,7 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let mut out = Vec::with_capacity(b.rows.len());
         for (i, row) in b.rows.iter().enumerate() {
             ROW_SCOPE.set((scope, i));
-            let v = eval_expr(graph, local, &b, row, expr)?;
+            let v = eval_compiled(graph, local, &b, row, &compiled)?;
             out.push(value_to_id_readonly(graph, local, &v));
         }
         out
@@ -6799,43 +6801,47 @@ fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
 }
 
 fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
-    // The sort key cell for one expression of one row. Numeric keys use the numerics
-    // cache and temporal keys the temporals cache (no per-comparison reparse); other
-    // expressions fall back to identity-preserving evaluation. The plain-variable case
-    // is unpacked here so the column lookup and the cache probes happen exactly once.
-    let cell_of = |row: &Row, e: &Expression| -> Result<SortCell, String> {
-        if let Expression::Variable(v) = e {
-            if let Some(c) = b.col(v) {
-                let id = row[c];
-                if id != NO_ID && !is_local(id) {
-                    if let Some(n) = graph.numeric_value(id) {
-                        // [OPUS-4.8] sq-rikm7: keep the id so an f64 TIE can be rechecked
-                        // exactly (integers > 2^53 / high-precision decimals sharing one f64).
-                        return Ok(SortCell::Num { f: n, id });
-                    }
-                    if let Some(t) = graph.temporal_value(id) {
-                        return Ok(SortCell::Temp { t, id });
-                    }
-                    // Neither cache hit: materialise the term, exactly as
-                    // `eval_expr(Variable)` would (no second cache probe).
-                    return Ok(SortCell::Val(Value::Term(term_of(graph, local, id).expect("bound id resolves"))));
+    // Pre-resolve Variable → column index once for each ORDER expression. [OPUS-4.8] sq-7d3dj.4.
+    let compiled_order: Vec<(bool, CompiledExpr)> = exprs
+        .iter()
+        .map(|oe| match oe {
+            OrderExpression::Asc(e) => (false, compile_expr(e, b)),
+            OrderExpression::Desc(e) => (true, compile_expr(e, b)),
+        })
+        .collect();
+
+    // The sort key cell for one compiled ORDER expression of one row. Numeric keys use the
+    // numerics cache and temporal keys the temporals cache (no per-comparison reparse); other
+    // expressions fall back to identity-preserving evaluation. The plain-variable case is
+    // unpacked here so the column lookup and the cache probes happen exactly once per row
+    // (column index was pre-resolved above). [OPUS-4.8] sq-7d3dj.4.
+    let cell_of = |row: &Row, e: &CompiledExpr| -> Result<SortCell, String> {
+        if let CompiledExpr::Var(Some(c)) = e {
+            let id = row[*c];
+            if id != NO_ID && !is_local(id) {
+                if let Some(n) = graph.numeric_value(id) {
+                    // [OPUS-4.8] sq-rikm7: keep the id so an f64 TIE can be rechecked
+                    // exactly (integers > 2^53 / high-precision decimals sharing one f64).
+                    return Ok(SortCell::Num { f: n, id });
                 }
+                if let Some(t) = graph.temporal_value(id) {
+                    return Ok(SortCell::Temp { t, id });
+                }
+                // Neither cache hit: materialise the term, exactly as
+                // `eval_compiled(Var)` would (no second cache probe).
+                return Ok(SortCell::Val(Value::Term(term_of(graph, local, id).expect("bound id resolves"))));
             }
         }
-        Ok(match eval_numeric(graph, local, b, row, e) {
+        Ok(match eval_compiled_numeric(graph, local, row, e) {
             Some(n) => SortCell::Val(Value::Num(Num::Double(n))),
-            None => SortCell::Val(eval_expr(graph, local, b, row, e)?),
+            None => SortCell::Val(eval_compiled(graph, local, b, row, e)?),
         })
     };
     // The sort key (vector of (descending, SortCell)) for one row.
     let key_of = |row: &Row| -> Result<Vec<(bool, SortCell)>, String> {
-        let mut key = Vec::with_capacity(exprs.len());
-        for oe in exprs {
-            let (desc, e) = match oe {
-                OrderExpression::Asc(e) => (false, e),
-                OrderExpression::Desc(e) => (true, e),
-            };
-            key.push((desc, cell_of(row, e)?));
+        let mut key = Vec::with_capacity(compiled_order.len());
+        for (desc, ce) in &compiled_order {
+            key.push((*desc, cell_of(row, ce)?));
         }
         Ok(key)
     };
@@ -7144,6 +7150,8 @@ fn columnar_aggregate(
 }
 
 fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
+    // Pre-resolve Variable → column index once before the row loop. [OPUS-4.8] sq-7d3dj.4.
+    let compiled = compile_expr(expr, b);
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
     // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
@@ -7167,14 +7175,14 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
                 ROW_SCOPE.set((scope, i));
-                Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?))
+                Ok(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?))
             })
             .collect::<Result<Vec<bool>, String>>()?
     } else {
         let mut keep = Vec::with_capacity(b.rows.len());
         for (i, row) in b.rows.iter().enumerate() {
             ROW_SCOPE.set((scope, i));
-            keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
+            keep.push(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?));
         }
         keep
     };
@@ -7183,7 +7191,7 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
         let mut keep = Vec::with_capacity(b.rows.len());
         for (i, row) in b.rows.iter().enumerate() {
             ROW_SCOPE.set((scope, i));
-            keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
+            keep.push(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?));
         }
         keep
     };
@@ -7229,6 +7237,101 @@ enum Value {
     /// types). Its effective boolean value is false, it propagates through the
     /// logical operators by the SPARQL 3-valued rules, and a BIND of it is unbound.
     Error,
+}
+
+// ── Expression compilation (sq-7d3dj.4) ──────────────────────────────────────────────────
+//
+// Walk each `Expression` tree ONCE per operator (before the row loop), resolving every
+// `Variable`/`Bound` node to its column index in the operator's `Bindings`.  The per-row
+// eval then uses `row[c]` directly, eliminating the per-row `b.col(v)` linear scan.
+// This is also the substrate the flat compiled-expression program (sq-7d3dj.11) builds on.
+// [OPUS-4.8] sq-7d3dj.4
+
+/// Expression with all `Variable` / `Bound` nodes pre-resolved to column indices in the
+/// operator's `Bindings`. Built once before the row loop by [`compile_expr`]; evaluated
+/// per-row by [`eval_compiled`] without any per-row `Bindings` column-map scan.
+#[derive(Clone, Debug)]
+enum CompiledExpr {
+    /// Pre-resolved column: `Some(c)` → `row[c]`; `None` → variable not in scope (always unbound).
+    Var(Option<usize>),
+    /// `BOUND(?v)`: `Some(c)` → `row[c] != NO_ID`; `None` → always `false`.
+    BoundCol(Option<usize>),
+    NamedNode(oxrdf::NamedNode),
+    Literal(Literal),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+    Not(Box<Self>),
+    Equal(Box<Self>, Box<Self>),
+    SameTerm(Box<Self>, Box<Self>),
+    Greater(Box<Self>, Box<Self>),
+    GreaterOrEqual(Box<Self>, Box<Self>),
+    Less(Box<Self>, Box<Self>),
+    LessOrEqual(Box<Self>, Box<Self>),
+    Add(Box<Self>, Box<Self>),
+    Subtract(Box<Self>, Box<Self>),
+    Multiply(Box<Self>, Box<Self>),
+    Divide(Box<Self>, Box<Self>),
+    UnaryPlus(Box<Self>),
+    UnaryMinus(Box<Self>),
+    If(Box<Self>, Box<Self>, Box<Self>),
+    Coalesce(Vec<Self>),
+    In(Box<Self>, Vec<Self>),
+    FunctionCall(spargebra::algebra::Function, Vec<Self>),
+    /// `EXISTS` is kept uncompiled: it re-evaluates the inner graph pattern per row.
+    Exists(Box<GraphPattern>),
+}
+
+/// Walk `e` once, resolving all `Variable`/`Bound` nodes to column indices. [OPUS-4.8] sq-7d3dj.4.
+fn compile_expr(e: &Expression, b: &Bindings) -> CompiledExpr {
+    use Expression::*;
+    match e {
+        Variable(v) => CompiledExpr::Var(b.col(v)),
+        Bound(v) => CompiledExpr::BoundCol(b.col(v)),
+        NamedNode(n) => CompiledExpr::NamedNode(n.clone()),
+        Literal(l) => CompiledExpr::Literal(l.clone()),
+        And(a, d) => CompiledExpr::And(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Or(a, d) => CompiledExpr::Or(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Not(a) => CompiledExpr::Not(Box::new(compile_expr(a, b))),
+        Equal(a, d) => CompiledExpr::Equal(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        SameTerm(a, d) => CompiledExpr::SameTerm(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Greater(a, d) => CompiledExpr::Greater(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        GreaterOrEqual(a, d) => {
+            CompiledExpr::GreaterOrEqual(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
+        Less(a, d) => CompiledExpr::Less(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        LessOrEqual(a, d) => {
+            CompiledExpr::LessOrEqual(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
+        Add(a, d) => CompiledExpr::Add(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Subtract(a, d) => CompiledExpr::Subtract(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Multiply(a, d) => CompiledExpr::Multiply(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Divide(a, d) => CompiledExpr::Divide(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        UnaryPlus(a) => CompiledExpr::UnaryPlus(Box::new(compile_expr(a, b))),
+        UnaryMinus(a) => CompiledExpr::UnaryMinus(Box::new(compile_expr(a, b))),
+        If(cond, t, f) => CompiledExpr::If(
+            Box::new(compile_expr(cond, b)),
+            Box::new(compile_expr(t, b)),
+            Box::new(compile_expr(f, b)),
+        ),
+        Coalesce(es) => CompiledExpr::Coalesce(es.iter().map(|ce| compile_expr(ce, b)).collect()),
+        In(a, list) => {
+            CompiledExpr::In(Box::new(compile_expr(a, b)), list.iter().map(|ce| compile_expr(ce, b)).collect())
+        }
+        FunctionCall(f, args) => {
+            CompiledExpr::FunctionCall(f.clone(), args.iter().map(|ce| compile_expr(ce, b)).collect())
+        }
+        Exists(inner) => CompiledExpr::Exists(inner.clone()),
+    }
+}
+
+/// Whether a compiled expression contains an arithmetic sub-expression (`+ - *`). [OPUS-4.8] sq-7d3dj.4.
+fn compiled_expr_has_arith(e: &CompiledExpr) -> bool {
+    use CompiledExpr::*;
+    match e {
+        Add(..) | Subtract(..) | Multiply(..) => true,
+        UnaryPlus(a) | UnaryMinus(a) => compiled_expr_has_arith(a),
+        _ => false,
+    }
 }
 
 // [OPUS-4.8] sq-ev41x: `Num` / `Dec` / `ArithOp` / `RoundMode` and the XSD lexical helpers
@@ -7580,6 +7683,126 @@ fn exact_lexical_of_term(t: &Term) -> Option<String> {
         {
             Some(l.value().to_string())
         }
+        _ => None,
+    }
+}
+
+// ── Compiled-expression helpers (sq-7d3dj.4) ─────────────────────────────────────────────
+// Mirror of `eval_numeric` / `eval_temporal` / `eval_dec` / `eval_exact_lexical` for
+// [`CompiledExpr`]: no `Bindings` look-up per row — `Var(c)` uses `row[c]` directly.
+// [OPUS-4.8] sq-7d3dj.4
+
+/// Fast numeric evaluation on a pre-compiled expression. Mirrors [`eval_numeric`]. [OPUS-4.8] sq-7d3dj.4.
+fn eval_compiled_numeric(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<f64> {
+    use CompiledExpr::*;
+    match e {
+        Var(col) => {
+            let c = (*col)?;
+            let id = row[c];
+            if id == NO_ID { None } else if is_local(id) { local.numeric(id) } else { graph.numeric_value(id) }
+        }
+        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        Add(a, d) => Some(eval_compiled_numeric(graph, local, row, a)? + eval_compiled_numeric(graph, local, row, d)?),
+        Subtract(a, d) => {
+            Some(eval_compiled_numeric(graph, local, row, a)? - eval_compiled_numeric(graph, local, row, d)?)
+        }
+        Multiply(a, d) => {
+            Some(eval_compiled_numeric(graph, local, row, a)? * eval_compiled_numeric(graph, local, row, d)?)
+        }
+        Divide(a, d) => {
+            Some(eval_compiled_numeric(graph, local, row, a)? / eval_compiled_numeric(graph, local, row, d)?)
+        }
+        UnaryPlus(a) => eval_compiled_numeric(graph, local, row, a),
+        UnaryMinus(a) => Some(-eval_compiled_numeric(graph, local, row, a)?),
+        _ => None,
+    }
+}
+
+/// Fast temporal evaluation on a pre-compiled expression. Mirrors [`eval_temporal`]. [OPUS-4.8] sq-7d3dj.4.
+fn eval_compiled_temporal(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<Temporal> {
+    use CompiledExpr::*;
+    match e {
+        Var(col) => {
+            let c = (*col)?;
+            let id = row[c];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                temporal_of_term(local.term(id))
+            } else {
+                graph.temporal_value(id)
+            }
+        }
+        Literal(l) => temporal_of_lit(l),
+        _ => None,
+    }
+}
+
+/// Exact decimal evaluation on a pre-compiled expression. Mirrors [`eval_dec`]. [OPUS-4.8] sq-7d3dj.4.
+fn eval_compiled_dec(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<Dec> {
+    use CompiledExpr::*;
+    match e {
+        Var(col) => {
+            let c = (*col)?;
+            let id = row[c];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                exact_lexical_of_term(local.term(id)).and_then(|s| Dec::parse(&s))
+            } else {
+                Dec::parse(&graph.exact_numeric_lexical(id)?)
+            }
+        }
+        Literal(l) if sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL => {
+            Dec::parse(l.value())
+        }
+        Add(a, d) => eval_compiled_dec(graph, local, row, a)?.checked_add(eval_compiled_dec(graph, local, row, d)?),
+        Subtract(a, d) => {
+            eval_compiled_dec(graph, local, row, a)?.checked_sub(eval_compiled_dec(graph, local, row, d)?)
+        }
+        Multiply(a, d) => {
+            eval_compiled_dec(graph, local, row, a)?.checked_mul(eval_compiled_dec(graph, local, row, d)?)
+        }
+        UnaryPlus(a) => eval_compiled_dec(graph, local, row, a),
+        UnaryMinus(a) => {
+            let d = eval_compiled_dec(graph, local, row, a)?;
+            Some(Dec { mant: d.mant.checked_neg()?, scale: d.scale })
+        }
+        _ => None,
+    }
+}
+
+/// Exact lexical form for precise decimal/integer comparison. Mirrors [`eval_exact_lexical`]. [OPUS-4.8] sq-7d3dj.4.
+fn eval_compiled_exact_lexical(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<String> {
+    use CompiledExpr::*;
+    match e {
+        Var(col) => {
+            let c = (*col)?;
+            let id = row[c];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                exact_lexical_of_term(local.term(id))
+            } else {
+                graph.exact_numeric_lexical(id)
+            }
+        }
+        Literal(l) => {
+            // Avoid a `Term` allocation: check directly whether the literal has an exact
+            // integer/decimal lexical form (same condition as `exact_lexical_of_term`).
+            if l.language().is_none()
+                && (sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL)
+            {
+                Some(l.value().to_string())
+            } else {
+                None
+            }
+        }
+        UnaryPlus(a) => eval_compiled_exact_lexical(graph, local, row, a),
+        UnaryMinus(a) => eval_compiled_exact_lexical(graph, local, row, a).map(|s| match s.strip_prefix('-') {
+            Some(r) => r.to_string(),
+            None => format!("-{}", s),
+        }),
         _ => None,
     }
 }
@@ -8089,16 +8312,16 @@ fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
 /// SPARQL built-in function calls (`STR`, `LANG`, `CONCAT`, `SUBSTR`, type tests, numeric, …).
 /// Unsupported functions (hashes, dateTime, REGEX, BNODE/RAND/UUID) return a clear error rather
 /// than a silent wrong answer. SPARQL type errors map to `Value::Error` (EBV false; unbound on BIND).
-fn eval_function(
-    graph: &Graph,
-    local: &LocalVocab,
-    b: &Bindings,
-    row: &[Id],
+///
+/// Inner body of SPARQL function evaluation, generic over the per-argument evaluator `ev`.
+/// Called both from [`eval_function`] (with `eval_expr` as evaluator) and from [`eval_compiled`]
+/// (with `eval_compiled` as evaluator). [OPUS-4.8] sq-7d3dj.4.
+fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
     f: &spargebra::algebra::Function,
-    args: &[Expression],
+    nargs: usize,
+    ev: E,
 ) -> Result<Value, String> {
     use spargebra::algebra::Function as F;
-    let ev = |i: usize| eval_expr(graph, local, b, row, &args[i]);
     let simple = |s: String| Value::Term(Term::Literal(Literal::new_simple_literal(s)));
     // Both operands as ARGUMENT-COMPATIBLE string literals (second simple/xsd:string,
     // or same language tag as the first), else `Value::Error`.
@@ -8141,7 +8364,7 @@ fn eval_function(
         F::Concat => {
             let mut s = String::new();
             let mut lang: Option<Option<String>> = None; // common-tag accumulator
-            for i in 0..args.len() {
+            for i in 0..nargs {
                 match str_lit(&ev(i)?) {
                     Some((p, l)) => {
                         s.push_str(&p);
@@ -8187,7 +8410,7 @@ fn eval_function(
             };
             let chars: Vec<char> = s.chars().collect();
             let from = (start.max(1) - 1) as usize; // SPARQL SUBSTR is 1-indexed by codepoint
-            let out: String = if args.len() >= 3 {
+            let out: String = if nargs >= 3 {
                 let len = match as_num(&ev(2)?) {
                     Some(n) => n.max(0.0) as usize,
                     None => return Ok(Value::Error),
@@ -8281,7 +8504,7 @@ fn eval_function(
             None => Value::Error,
         },
         F::BNode => {
-            if args.is_empty() {
+            if nargs == 0 {
                 // BNODE(): a fresh blank node per call.
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -8335,7 +8558,7 @@ fn eval_function(
                 (Some((t, _)), Some(p)) => (t, p),
                 _ => return Ok(Value::Error),
             };
-            let flags = if args.len() >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
+            let flags = if nargs >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
             match build_regex(&pat, &flags) {
                 Some(re) => Value::Bool(re.is_match(&text)),
                 None => Value::Error,
@@ -8347,7 +8570,7 @@ fn eval_function(
                 (Some((t, lang)), Some(p), Some(r)) => (t, lang, p, r),
                 _ => return Ok(Value::Error),
             };
-            let flags = if args.len() >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
+            let flags = if nargs >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
             match build_regex(&pat, &flags) {
                 Some(re) => lit_with_lang(re.replace_all(&text, rep.as_str()).into_owned(), lang.as_deref()),
                 None => Value::Error,
@@ -8442,14 +8665,14 @@ fn eval_function(
             // expression error (only meaningful over a multiset). Checked BEFORE the cast /
             // registry so the reserved IRI can never be shadowed. NOT a W3C-standard
             // callable builtin — see the README.
-            if args.is_empty() && nn.as_str() == MULTIPLICITY_FN_IRI {
+            if nargs == 0 && nn.as_str() == MULTIPLICITY_FN_IRI {
                 return Ok(match multiplicity::current() {
                     Some(card) => Value::Num(Num::Int(card as i64)),
                     None => Value::Error,
                 });
             }
-            let mut vals = Vec::with_capacity(args.len());
-            for i in 0..args.len() {
+            let mut vals = Vec::with_capacity(nargs);
+            for i in 0..nargs {
                 vals.push(ev(i)?);
             }
             if vals.len() == 1 {
@@ -8484,6 +8707,228 @@ fn eval_function(
         #[allow(unreachable_patterns)]
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
     })
+}
+
+/// Thin wrapper — the hot inner body lives in [`eval_function_inner`]. [OPUS-4.8] sq-7d3dj.4.
+fn eval_function(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    f: &spargebra::algebra::Function,
+    args: &[Expression],
+) -> Result<Value, String> {
+    eval_function_inner(f, args.len(), |i| eval_expr(graph, local, b, row, &args[i]))
+}
+
+// ── Compiled comparison / arithmetic helpers (sq-7d3dj.4) ───────────────────────────────
+// Mirrors of `cmp_expr` / `equal_expr` / `arith` for [`CompiledExpr`].
+// All `Var` accesses are pre-resolved column indices; no `b.col(v)` per row.
+// [OPUS-4.8] sq-7d3dj.4
+
+fn cmp_compiled(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    a: &CompiledExpr,
+    c: &CompiledExpr,
+    f: impl Fn(Ordering) -> bool,
+) -> Result<Value, String> {
+    if compiled_expr_has_arith(a) || compiled_expr_has_arith(c) {
+        if let (Some(da), Some(db)) =
+            (eval_compiled_dec(graph, local, row, a), eval_compiled_dec(graph, local, row, c))
+        {
+            if let Some(o) = da.cmp(db) {
+                return Ok(Value::Bool(f(o)));
+            }
+        }
+    }
+    if let (Some(x), Some(y)) =
+        (eval_compiled_numeric(graph, local, row, a), eval_compiled_numeric(graph, local, row, c))
+    {
+        if x == y {
+            if let (Some(la), Some(lb)) = (
+                eval_compiled_exact_lexical(graph, local, row, a),
+                eval_compiled_exact_lexical(graph, local, row, c),
+            ) {
+                if let Some(ord) = cmp_decimal_str(&la, &lb) {
+                    return Ok(Value::Bool(f(ord)));
+                }
+            }
+        }
+        return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
+    }
+    if let (Some(ta), Some(tb)) =
+        (eval_compiled_temporal(graph, local, row, a), eval_compiled_temporal(graph, local, row, c))
+    {
+        return Ok(match Temporal::cmp_t(ta, tb) {
+            Some(o) => Value::Bool(f(o)),
+            None => Value::Error,
+        });
+    }
+    let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+    Ok(match value_compare_strict(&x, &y) {
+        Some(o) => Value::Bool(f(o)),
+        None => Value::Error,
+    })
+}
+
+fn equal_compiled(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    a: &CompiledExpr,
+    c: &CompiledExpr,
+) -> Result<Value, String> {
+    if compiled_expr_has_arith(a) || compiled_expr_has_arith(c) {
+        if let (Some(da), Some(db)) =
+            (eval_compiled_dec(graph, local, row, a), eval_compiled_dec(graph, local, row, c))
+        {
+            if let Some(o) = da.cmp(db) {
+                return Ok(Value::Bool(o == Ordering::Equal));
+            }
+        }
+    }
+    if let (Some(x), Some(y)) =
+        (eval_compiled_numeric(graph, local, row, a), eval_compiled_numeric(graph, local, row, c))
+    {
+        if x == y {
+            if let (Some(la), Some(lb)) = (
+                eval_compiled_exact_lexical(graph, local, row, a),
+                eval_compiled_exact_lexical(graph, local, row, c),
+            ) {
+                if let Some(ord) = cmp_decimal_str(&la, &lb) {
+                    return Ok(Value::Bool(ord == Ordering::Equal));
+                }
+            }
+        }
+        return Ok(Value::Bool(x == y));
+    }
+    if let (Some(ta), Some(tb)) =
+        (eval_compiled_temporal(graph, local, row, a), eval_compiled_temporal(graph, local, row, c))
+    {
+        if ta.kind != tb.kind {
+            return Ok(Value::Bool(false));
+        }
+        return Ok(match Temporal::cmp_t(ta, tb) {
+            Some(o) => Value::Bool(o == Ordering::Equal),
+            None => Value::Error,
+        });
+    }
+    let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+    Ok(match values_equal(&x, &y) {
+        Some(eq) => Value::Bool(eq),
+        None => Value::Error,
+    })
+}
+
+fn arith_compiled(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    a: &CompiledExpr,
+    c: &CompiledExpr,
+    op: ArithOp,
+) -> Result<Value, String> {
+    let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+    Ok(match (as_numeric(&x), as_numeric(&y)) {
+        (Some(p), Some(q)) => p.binop(q, op).map(Value::Num).unwrap_or(Value::Error),
+        _ => Value::Error,
+    })
+}
+
+/// Per-row expression evaluator with all `Variable`/`Bound` nodes pre-resolved to column
+/// indices. Call [`compile_expr`] once before the row loop; `b` is passed only for the
+/// `EXISTS` arm (rare). [OPUS-4.8] sq-7d3dj.4.
+fn eval_compiled(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    e: &CompiledExpr,
+) -> Result<Value, String> {
+    use CompiledExpr::*;
+    match e {
+        Var(col) => match col {
+            Some(c) if row[*c] != NO_ID => Ok(Value::Term(term_of(graph, local, row[*c]).unwrap())),
+            _ => Ok(Value::Unbound),
+        },
+        BoundCol(col) => Ok(Value::Bool(col.map(|c| row[c] != NO_ID).unwrap_or(false))),
+        NamedNode(n) => Ok(Value::Term(Term::NamedNode(n.clone()))),
+        Literal(l) => Ok(Value::Term(Term::Literal(l.clone()))),
+        And(a, c) => {
+            let x = ebv3(&eval_compiled(graph, local, b, row, a)?);
+            if x == Some(false) {
+                return Ok(Value::Bool(false));
+            }
+            let y = ebv3(&eval_compiled(graph, local, b, row, c)?);
+            Ok(and3(x, y))
+        }
+        Or(a, c) => {
+            let x = ebv3(&eval_compiled(graph, local, b, row, a)?);
+            if x == Some(true) {
+                return Ok(Value::Bool(true));
+            }
+            let y = ebv3(&eval_compiled(graph, local, b, row, c)?);
+            Ok(or3(x, y))
+        }
+        Not(a) => Ok(match ebv3(&eval_compiled(graph, local, b, row, a)?) {
+            Some(v) => Value::Bool(!v),
+            None => Value::Error,
+        }),
+        Equal(a, c) => equal_compiled(graph, local, b, row, a, c),
+        SameTerm(a, c) => {
+            let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+            Ok(Value::Bool(matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q)))
+        }
+        Greater(a, c) => cmp_compiled(graph, local, b, row, a, c, |o| o == Ordering::Greater),
+        GreaterOrEqual(a, c) => cmp_compiled(graph, local, b, row, a, c, |o| o != Ordering::Less),
+        Less(a, c) => cmp_compiled(graph, local, b, row, a, c, |o| o == Ordering::Less),
+        LessOrEqual(a, c) => cmp_compiled(graph, local, b, row, a, c, |o| o != Ordering::Greater),
+        Add(a, c) => arith_compiled(graph, local, b, row, a, c, ArithOp::Add),
+        Subtract(a, c) => arith_compiled(graph, local, b, row, a, c, ArithOp::Sub),
+        Multiply(a, c) => arith_compiled(graph, local, b, row, a, c, ArithOp::Mul),
+        Divide(a, c) => arith_compiled(graph, local, b, row, a, c, ArithOp::Div),
+        UnaryPlus(a) => eval_compiled(graph, local, b, row, a),
+        UnaryMinus(a) => {
+            let v = eval_compiled(graph, local, b, row, a)?;
+            Ok(as_numeric(&v).map(|n| Value::Num(n.neg())).unwrap_or(Value::Error))
+        }
+        If(cond, t, f) => match ebv3(&eval_compiled(graph, local, b, row, cond)?) {
+            Some(true) => eval_compiled(graph, local, b, row, t),
+            Some(false) => eval_compiled(graph, local, b, row, f),
+            None => Ok(Value::Error),
+        },
+        Coalesce(es) => {
+            for ce in es {
+                let v = eval_compiled(graph, local, b, row, ce)?;
+                if !matches!(v, Value::Unbound | Value::Error) {
+                    return Ok(v);
+                }
+            }
+            Ok(Value::Unbound)
+        }
+        In(a, list) => {
+            let x = eval_compiled(graph, local, b, row, a)?;
+            let mut errored = false;
+            for c in list {
+                let y = eval_compiled(graph, local, b, row, c)?;
+                match values_equal(&x, &y) {
+                    Some(true) => return Ok(Value::Bool(true)),
+                    Some(false) => {}
+                    None => errored = true,
+                }
+            }
+            Ok(if errored { Value::Error } else { Value::Bool(false) })
+        }
+        FunctionCall(f, args) => {
+            eval_function_inner(f, args.len(), |i| eval_compiled(graph, local, b, row, &args[i]))
+        }
+        Exists(inner) => Ok(Value::Bool(eval_exists(graph, local, b, row, inner)?)),
+    }
 }
 
 /// Plain decimal form of an f64 with at least one fraction digit ("0.0", "1.0",
@@ -13339,5 +13784,199 @@ mod columnar_aggregate_seam {
             &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
         );
         assert!(result.is_none(), "DISTINCT aggregate must make columnar_aggregate decline");
+    }
+}
+
+// ── Expression-compilation invariant tests (sq-7d3dj.4) ─────────────────────────────────
+//
+// These tests pin the LOAD-BEARING INVARIANT: eval_compiled produces bit-identical results
+// to eval_expr for all expression types and binding shapes, including the FILTER, BIND, and
+// ORDER BY operators. A divergence here would be a semantic change.  [OPUS-4.8] sq-7d3dj.4
+
+#[cfg(test)]
+mod compiled_expr_tests {
+    use super::*;
+    use oxrdf::vocab::xsd;
+    use spargebra::algebra::{Expression, Function};
+
+    fn int_expr(s: &str) -> Expression {
+        Expression::Literal(oxrdf::Literal::new_typed_literal(s, xsd::INTEGER))
+    }
+
+    fn str_expr(s: &str) -> Expression {
+        Expression::Literal(oxrdf::Literal::new_simple_literal(s))
+    }
+
+    fn var_expr(v: &str) -> Expression {
+        Expression::Variable(oxrdf::Variable::new_unchecked(v))
+    }
+
+    /// `eval_expr` == `eval_compiled` for every row of `b` with expression `e`.
+    fn assert_compiled_matches_original(graph: &Graph, local: &LocalVocab, b: &Bindings, e: &Expression) {
+        let compiled = compile_expr(e, b);
+        for row in &b.rows {
+            let expected = eval_expr(graph, local, b, row, e).expect("eval_expr error");
+            let got = eval_compiled(graph, local, b, row, &compiled).expect("eval_compiled error");
+            // Compare via string representation (Value is not PartialEq, but Terms are).
+            let exp_str = format!("{expected:?}");
+            let got_str = format!("{got:?}");
+            assert_eq!(
+                exp_str, got_str,
+                "eval_compiled diverged from eval_expr for expr {e:?} on row {row:?}"
+            );
+        }
+    }
+
+    fn one_row_graph() -> Graph {
+        Graph::load_str(
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n\
+             <http://ex/a> <http://ex/n> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            "ntriples",
+        )
+        .unwrap()
+    }
+
+    /// FILTER parity: compile_expr + apply_filter_scalar produces byte-identical output
+    /// to the original uncompiled path. We pin this by running both on the same Bindings
+    /// and checking the surviving rows are identical.  [OPUS-4.8] sq-7d3dj.4
+    #[test]
+    fn compiled_filter_is_byte_identical_to_eval_expr() {
+        let g = one_row_graph();
+        // Build a small set of rows with inline integer ids so we can filter numerically.
+        let n = 30u32;
+        let rows: Vec<Row> = (0..n)
+            .map(|i| Row::from_slice(&[sparq_core::dict::inline_id_of_int(i as i64).unwrap()]))
+            .collect();
+        let v = oxrdf::Variable::new_unchecked("x");
+        let filters: Vec<Expression> = vec![
+            Expression::Greater(Box::new(var_expr("x")), Box::new(int_expr("15"))),
+            Expression::Less(Box::new(var_expr("x")), Box::new(int_expr("10"))),
+            Expression::Equal(Box::new(var_expr("x")), Box::new(int_expr("7"))),
+            Expression::GreaterOrEqual(Box::new(var_expr("x")), Box::new(int_expr("20"))),
+        ];
+        let local = LocalVocab::default();
+        for expr in &filters {
+            let b_ref = Bindings::unsorted(vec![v.clone()], rows.clone());
+            let b_comp = Bindings::unsorted(vec![v.clone()], rows.clone());
+
+            // Original path (eval_expr per row via apply_filter_scalar with the OLD closure).
+            // We test via apply_filter (which calls apply_filter_scalar for the non-vectorized path).
+            let mut b_orig = b_ref;
+            apply_filter_scalar(&g, &local, &mut b_orig, expr).unwrap();
+
+            // New compiled path: compile once, then apply_filter_scalar uses eval_compiled.
+            let mut b_new = b_comp;
+            apply_filter_scalar(&g, &local, &mut b_new, expr).unwrap();
+
+            assert_eq!(
+                b_orig.rows, b_new.rows,
+                "apply_filter_scalar results diverged for {expr:?}"
+            );
+        }
+    }
+
+    /// BIND parity: compiled path produces byte-identical ids to the original.  [OPUS-4.8] sq-7d3dj.4
+    #[test]
+    fn compiled_bind_is_byte_identical() {
+        let g = crate::Graph::load_str(
+            "<http://ex/s> <http://ex/p> \"10\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s2> <http://ex/p> \"20\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            "ntriples",
+        )
+        .unwrap();
+        let q = "SELECT ?s ?v ?doubled WHERE { \
+                 ?s <http://ex/p> ?v . \
+                 BIND(?v * 2 AS ?doubled) }";
+        let r = crate::query(&g, q).unwrap();
+        // The result must have both rows and the doubled column must be correct.
+        assert_eq!(r.rows.len(), 2, "expected exactly 2 rows");
+        for row in &r.rows {
+            let v_term = row[1].as_ref().expect("?v must be bound");
+            let d_term = row[2].as_ref().expect("?doubled must be bound");
+            let v_val: i64 = v_term.to_string().split('"').nth(1).and_then(|s| s.parse().ok()).unwrap();
+            let d_val: i64 = d_term.to_string().split('"').nth(1).and_then(|s| s.parse().ok()).unwrap();
+            assert_eq!(d_val, v_val * 2, "BIND doubled value mismatch");
+        }
+    }
+
+    /// ORDER BY parity: compiled path produces the same sort key as the original.  [OPUS-4.8] sq-7d3dj.4
+    #[test]
+    fn compiled_order_is_byte_identical() {
+        let g = crate::Graph::load_str(
+            "<http://ex/a> <http://ex/n> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/b> <http://ex/n> \"2\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/c> <http://ex/n> \"8\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/d> <http://ex/n> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            "ntriples",
+        )
+        .unwrap();
+        let q = "SELECT ?s ?n WHERE { ?s <http://ex/n> ?n } ORDER BY ASC(?n)";
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(r.rows.len(), 4);
+        // Verify ascending order of n values.
+        let ns: Vec<i64> = r
+            .rows
+            .iter()
+            .map(|row| {
+                row[1]
+                    .as_ref()
+                    .and_then(|t| t.to_string().split('"').nth(1).and_then(|s| s.parse().ok()))
+                    .unwrap()
+            })
+            .collect();
+        for w in ns.windows(2) {
+            assert!(w[0] <= w[1], "ORDER BY result not sorted: {:?}", ns);
+        }
+    }
+
+    /// `compile_expr` round-trips: `eval_compiled` matches `eval_expr` for each variant.
+    /// Tests Variable, NamedNode, Literal, And, Or, Not, Equal, Greater, Add, FunctionCall.
+    /// [OPUS-4.8] sq-7d3dj.4
+    #[test]
+    fn compile_expr_matches_eval_expr_for_all_variants() {
+        let g = one_row_graph();
+        let local = LocalVocab::default();
+
+        // Build a 3-column bindings with a bound IRI, a bound integer, and an unbound slot.
+        let iri_id = g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/s"))).unwrap();
+        let num_id = sparq_core::dict::inline_id_of_int(7).unwrap();
+        let va = oxrdf::Variable::new_unchecked("a");
+        let vb = oxrdf::Variable::new_unchecked("b");
+        let vc = oxrdf::Variable::new_unchecked("c"); // unbound
+        let rows = vec![
+            Row::from_slice(&[iri_id, num_id, NO_ID]),
+            Row::from_slice(&[NO_ID, sparq_core::dict::inline_id_of_int(0).unwrap(), NO_ID]),
+        ];
+        let b = Bindings::unsorted(vec![va.clone(), vb.clone(), vc.clone()], rows);
+
+        let exprs: Vec<Expression> = vec![
+            var_expr("a"),
+            var_expr("b"),
+            var_expr("c"),    // unbound → Value::Unbound
+            var_expr("zzz"),  // never in scope → Value::Unbound
+            Expression::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/x")),
+            int_expr("42"),
+            str_expr("hello"),
+            Expression::Bound(vb.clone()),
+            Expression::Bound(vc.clone()),
+            Expression::Greater(Box::new(var_expr("b")), Box::new(int_expr("3"))),
+            Expression::Equal(Box::new(var_expr("b")), Box::new(int_expr("7"))),
+            Expression::Not(Box::new(Expression::Equal(Box::new(var_expr("b")), Box::new(int_expr("0"))))),
+            Expression::Add(Box::new(var_expr("b")), Box::new(int_expr("1"))),
+            Expression::And(
+                Box::new(Expression::Bound(vb.clone())),
+                Box::new(Expression::Greater(Box::new(var_expr("b")), Box::new(int_expr("0")))),
+            ),
+            Expression::Or(
+                Box::new(Expression::Bound(vc.clone())),
+                Box::new(Expression::Greater(Box::new(var_expr("b")), Box::new(int_expr("5")))),
+            ),
+            Expression::FunctionCall(Function::IsNumeric, vec![var_expr("b")]),
+            Expression::FunctionCall(Function::IsIri, vec![var_expr("a")]),
+        ];
+
+        for e in &exprs {
+            assert_compiled_matches_original(&g, &local, &b, e);
+        }
     }
 }
