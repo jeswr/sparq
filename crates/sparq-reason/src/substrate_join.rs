@@ -182,7 +182,7 @@ fn probe_into(
     probe: &[Row],
     keys: &JoinKeys,
     build: &[Row],
-    tables: &[rustc_hash::FxHashMap<sparq_substrate::rows::Key, sparq_substrate::rows::Posting>],
+    tables: &[sjoin::JoinTable],
     out: &mut Vec<[Id; 3]>,
     shape: impl Fn(&[Id], &[Id]) -> [Id; 3],
 ) {

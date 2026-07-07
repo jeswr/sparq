@@ -102,7 +102,7 @@ pub use cs::{with_cs_table, CsSet, CsTable};
 #[cfg(feature = "dp-planner")]
 pub mod dp;
 #[cfg(feature = "dp-planner")]
-pub use dp::{with_dp_planner, with_dp_planner_budget};
+pub use dp::{with_dp_planner, with_dp_planner_budget, without_dp_planner};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
 #[cfg(feature = "explain-json")]
@@ -279,6 +279,16 @@ pub use chunk::{DataChunk, SelVec, VecCmp};
 // when off. No new dependencies.
 #[cfg(feature = "vectorized")]
 pub(crate) mod reduce;
+// [SONNET-4.6] (sq-pntvh.5) M4 Phase 5: columnar_eligible dispatcher + morsel constants
+// (VEC_MIN_BATCH/VEC_MORSEL) + I5 probe counters {chunks_built, rows_columnar,
+// rows_delegated, declines_by_reason}. NON-DEFAULT `vectorized` feature; compiled out
+// entirely when off (relaxed atomics + dispatch helpers compile away). The probe counters
+// and VecStats snapshot are public but UNSTABLE/test-facing (not semver-stable). No new
+// dependencies.
+#[cfg(feature = "vectorized")]
+pub mod vec_dispatch;
+#[cfg(feature = "vectorized")]
+pub use vec_dispatch::{reset_stats, stats_snapshot, VecStats};
 
 // [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
 // (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary

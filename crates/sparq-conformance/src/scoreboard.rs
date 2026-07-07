@@ -238,18 +238,19 @@ pub struct Suite {
 ///   and `sparqldl-07`/`-08` (SHARED-blank-node JOIN SELECT — graduate once the
 ///   emitter maps a repeated `Unbound` id to ONE variable, identity rewrite
 ///   result-equivalent to the W3C oracle) all graduate [OPUS-4.8]).
-/// * OWL 2 EL classification 51 — `sparq-conformance` `tests/el_suite.rs`
-///   `EL_SUITE_FLOOR = 51` (sq-pbz04.2.4 base; sq-pbz04.2.9 raised 50→51: opt-in
-///   `el-suite` feature now also pulls `sparq-reason-el/rbox` + `sparq-reason-el/cdomain`
-///   (the CI lane exercises the full shipped feature set); the mutual-subsumption →
-///   owl:equivalentClass output-vocabulary completion graduates WebOnt-equivalentClass-003
-///   from the divergence list; a sparq EXTENSION ratchet, NOT a full-OWL-2-EL-conformance
-///   claim — ABox inconsistency remains deferred; floor = the MEASURED count of W3C OWL 2
-///   EL (test:EL ∧ test:RDF-BASED, Approved) check rows on which `sparq_reason_el`'s
-///   consequence-based classifier computes the expected outcome via `classify_graph` +
-///   the shared bnode-homomorphism entailment check; 27 audited PERMANENT divergences
-///   (ABox / RBox-output-vocabulary / owl:unionOf) are reported separately, never summed
-///   in). [SONNET-4.6]
+/// * OWL 2 EL classification 67 — `sparq-conformance` `tests/el_suite.rs`
+///   `EL_SUITE_FLOOR = 67` (sq-pbz04.2.4 base; sq-pbz04.2.9 raised 50→51; sq-pbz04.2.10
+///   raised 51→67: ABox graduation — `el-suite` now also pulls `sparq-reason-el/abox` so
+///   the CI lane exercises the full shipped feature set including the two-step
+///   `classify_graph` + `realize_graph` composition; 8 inconsistency + 8 positive-entailment
+///   tests graduate (disjoint-class ABox clashes, NPA, hasKey, hasSelf, bottomObjectProperty,
+///   equivalentProperty via augment_equivalent_properties); a sparq EXTENSION ratchet, NOT
+///   a full-OWL-2-EL-conformance claim; floor = the MEASURED count of W3C OWL 2 EL
+///   (test:EL ∧ test:RDF-BASED, Approved) check rows on which `sparq_reason_el`'s
+///   classifier + ABox realiser compute the expected outcome; 11 audited PERMANENT
+///   divergences (property-chain ABox expansion / reflexive properties / annotation
+///   propagation / owl:equivalentProperty extraction / owl:unionOf / bottomDataProperty /
+///   FunctionalProperty enforcement) are reported separately, never summed in). [SONNET-4.6]
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -944,22 +945,19 @@ pub const SUITES: &[Suite] = &[
     // opt-in `el-suite` feature). HONESTLY tallied as a sparq EXTENSION ratchet, NOT
     // folded into the conformance total — even though OWL 2 EL is a real W3C profile,
     // this lane compares each W3C OWL 2 EL test (test:EL ∧ test:RDF-BASED, Approved,
-    // no-imports) against what `sparq-reason-el`'s consequence-based classifier
-    // genuinely computes. [SONNET-4.6] sq-pbz04.2.9: the `el-suite` feature now also
-    // forwards `sparq-reason-el/rbox` + `sparq-reason-el/cdomain` so the CI lane
-    // exercises the FULL shipped feature set; the mutual-subsumption →
-    // owl:equivalentClass output-vocabulary completion graduates WebOnt-equivalentClass-003.
-    // The runner classifies each premise through the REAL
-    // `sparq_reason_el::classify_graph` (materializing the complete rdfs:subClassOf
-    // subsumption lattice IN PLACE) and checks: consistency (no unsatisfiable named
-    // class), inconsistency (some unsatisfiable named class — the TBox clash it can
-    // see), positive-entailment (the materialized lattice ENTAILS the conclusion under
-    // the shared bnode-homomorphism `entail::entails` after output-vocabulary augmentation),
-    // and negative-entailment (the non-conclusion is NOT entailed). The floor is the
-    // MEASURED PASS count; the 27 audited PERMANENT divergences (ABox-only inconsistency /
-    // individual facts, RBox-driven property-axiom output vocabulary, owl:unionOf) are
-    // reported separately and NEVER summed into the floor. `EL_SUITE_FLOOR` is mirrored
-    // here and kept in lock-step by `tests/scoreboard_floors.rs` (read textually).
+    // no-imports) against what `sparq-reason-el`'s consequence-based classifier +
+    // ABox realiser genuinely computes.
+    // [SONNET-4.6] sq-pbz04.2.9: the `el-suite` feature also forwards
+    // `sparq-reason-el/rbox` + `sparq-reason-el/cdomain` so the CI lane exercises the
+    // FULL shipped feature set; the mutual-subsumption → owl:equivalentClass
+    // output-vocabulary completion graduates WebOnt-equivalentClass-003.
+    // [SONNET-4.6] sq-pbz04.2.10: ABox graduation — `el-suite` now ALSO forwards
+    // `sparq-reason-el/abox`; the runner uses the two-step `classify_graph` (TBox
+    // closure) + `realize_graph` (ABox rows + whole-ontology inconsistency verdict)
+    // composition; 16 tests graduate (8 inconsistency + 8 positive-entailment) dropping
+    // the audited divergence list from 27 to 11 permanent entries; floor raised 51→67.
+    // `EL_SUITE_FLOOR` is mirrored here and kept in lock-step by
+    // `tests/scoreboard_floors.rs` (read textually).
     Suite {
         label: "OWL 2 EL classification (sparq-reason-el)",
         family: "sparq extension",
@@ -969,22 +967,23 @@ pub const SUITES: &[Suite] = &[
             feature: "el-suite",
         },
         ci_job: "inference-conformance",
-        // [SONNET-4.6] sq-pbz04.2.9 — RAISED 50 → 51: WebOnt-equivalentClass-003
-        // graduates via the equivalentClass output-vocabulary completion (mutual-
-        // subsumption → owl:equivalentClass is a semantic identity, not a test
-        // weakening); rbox + cdomain now on in the el-suite CI lane.
-        ratchet_floor: 51,
-        floor_basis: "pass — classifier computes the expected outcome (sparq EXTENSION over \
-                      the EL fragment the classifier implements, NOT a full-OWL-2-EL-conformance \
-                      claim; ABox inconsistency deferred)",
+        // [SONNET-4.6] sq-pbz04.2.10 — RAISED 51 → 67: ABox graduation (16 tests pass
+        // via realize_graph + augment_equivalent_properties); rbox + cdomain + abox now
+        // all on in the el-suite CI lane (full shipped feature set).
+        ratchet_floor: 67,
+        floor_basis: "pass — classifier + ABox realiser compute the expected outcome (sparq \
+                      EXTENSION over the EL fragment implemented, NOT a full-OWL-2-EL-conformance \
+                      claim)",
         note: "EXTENSION ratchet — the W3C OWL 2 EL suite checks classification/subsumption \
-               semantics and this runner compares against what sparq-reason-el's classifier \
-               computes over the EL fragment it implements (CR1–CR6 + rbox + cdomain): each \
-               premise classified through the REAL classify_graph, then consistency / \
-               inconsistency / positive- / negative-entailment via the shared \
-               bnode-homomorphism check (with output-vocabulary completions: datatypes + \
-               mutual-subsumption → equivalentClass); the 27 audited ABox / RBox-output / \
-               owl:unionOf divergences are reported separately, never faked as passes",
+               semantics and this runner compares against what sparq-reason-el's classifier + \
+               ABox realiser compute over the EL fragment (CR1–CR6 + rbox + cdomain + abox): \
+               each premise classified through classify_graph (TBox closure) then realize_graph \
+               (ABox rows + inconsistency verdict), then consistency / inconsistency / positive- \
+               / negative-entailment via the shared bnode-homomorphism check (output-vocabulary \
+               completions: datatypes + equivalentClass + equivalentProperty); the 11 audited \
+               permanent divergences (property-chain ABox / reflexive property / annotation \
+               propagation / equivalentProperty extraction / unionOf / bottomDataProperty / \
+               FunctionalProperty) are reported separately, never faked as passes",
     },
     // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
     // ratchets (runner: `inference::dl_suite` + the crate-local `tests/dl_suite.rs`,

@@ -1,0 +1,209 @@
+{
+  "gather": "sparql-same-box-comparison",
+  "wave": "canonical-competitor-matrix (sq-1sa9r)",
+  "canonical": true,
+  "canonical_note": "CANONICAL: dedicated QUIET c6i.4xlarge (16 vCPU / 32 GiB, x86_64) in eu-west-2, single-tenant, one engine active at a time on the SAME generated corpus + SAME query files. min-of-5 on a loaded store; per-query timeout recorded as honest 'timeout'/ERROR, never fabricated. Counts cross-checked engine-vs-engine AND vs bench/<suite>/expected-rows.tsv where present.",
+  "git_commit": "0ab87b2a",
+  "suite": "sp2b",
+  "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
+  "iters": 5,
+  "tsv_format": "<query>\\t<rows|ERROR>\\t<best_us|engine>",
+  "engines": {
+    "sparq": {
+      "version": "0ab87b2a",
+      "mode": "sparq-cli bench (count mode)"
+    },
+    "oxigraph": {
+      "version": "0.5.9",
+      "mode": "prebuilt-cli (on-disk store), sha256-pinned"
+    },
+    "fuseki": {
+      "version": "apache-jena-fuseki (docker)",
+      "image_digest": "stain/jena-fuseki@sha256:b1d0c96f19adddef417520184471ac816cf36c6e72936a88ea02b29f4305929a",
+      "mode": "http-sparql via scripts/fuseki-same-box.sh (tdb2.tdbloader->fuseki-server) + http_sparql_adapter.py"
+    },
+    "virtuoso": {
+      "version": "openlink/virtuoso-opensource-7",
+      "image_digest": "openlink/virtuoso-opensource-7@sha256:2a9914b95f8a52927a73947c87ec2727f78f87d38e41c38c379efb121f9cbed1",
+      "mode": "http-sparql via scripts/virtuoso-same-box.sh (isql ld_dir) + http_sparql_adapter.py"
+    },
+    "qlever": {
+      "version": "adfreiburg/qlever",
+      "image_digest": "adfreiburg/qlever@sha256:2cc33823e65a982010d1aae28a727b8507f7f19b158c0d42007ca97c3224922c",
+      "mode": "http-sparql via scripts/qlever-same-box.sh (qlever-index->qlever-server)"
+    }
+  },
+  "load": {
+    "sparq_load_s": "0.151",
+    "oxigraph_load_s": "1.404",
+    "fuseki_wall_s": "1800.8",
+    "virtuoso_wall_s": "65.7",
+    "qlever_wall_s": "21.0",
+    "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
+  },
+  "statuses": {
+    "sparq": "ok",
+    "oxigraph": "ok",
+    "fuseki": "failed",
+    "virtuoso": "ok",
+    "qlever": "ok"
+  },
+  "count_crosscheck": {
+    "q01": {
+      "sparq": "1",
+      "oxigraph": "1",
+      "fuseki": "n/a",
+      "virtuoso": "1",
+      "qlever": "1",
+      "all_agree": true,
+      "expected": "1",
+      "matches_expected": true
+    },
+    "q02": {
+      "sparq": "6067",
+      "oxigraph": "6067",
+      "fuseki": "n/a",
+      "virtuoso": "6067",
+      "qlever": "6067",
+      "all_agree": true,
+      "expected": "6067",
+      "matches_expected": true
+    },
+    "q03a": {
+      "sparq": "15823",
+      "oxigraph": "15823",
+      "fuseki": "n/a",
+      "virtuoso": "15823",
+      "qlever": "15823",
+      "all_agree": true,
+      "expected": "15823",
+      "matches_expected": true
+    },
+    "q03b": {
+      "sparq": "114",
+      "oxigraph": "114",
+      "fuseki": "n/a",
+      "virtuoso": "114",
+      "qlever": "114",
+      "all_agree": true,
+      "expected": "114",
+      "matches_expected": true
+    },
+    "q03c": {
+      "sparq": "0",
+      "oxigraph": "0",
+      "fuseki": "n/a",
+      "virtuoso": "0",
+      "qlever": "0",
+      "all_agree": true,
+      "expected": "0",
+      "matches_expected": true
+    },
+    "q04": {
+      "sparq": "541911",
+      "oxigraph": "541911",
+      "fuseki": "n/a",
+      "virtuoso": "541911",
+      "qlever": "541911",
+      "all_agree": true,
+      "expected": "541911",
+      "matches_expected": true
+    },
+    "q05b": {
+      "sparq": "6933",
+      "oxigraph": "6933",
+      "fuseki": "n/a",
+      "virtuoso": "6933",
+      "qlever": "6933",
+      "all_agree": true,
+      "expected": "6933",
+      "matches_expected": true
+    },
+    "q07": {
+      "sparq": "48",
+      "oxigraph": "ERROR",
+      "fuseki": "n/a",
+      "virtuoso": "48",
+      "qlever": "48",
+      "all_agree": true,
+      "expected": "48",
+      "matches_expected": true
+    },
+    "q08": {
+      "sparq": "358",
+      "oxigraph": "ERROR",
+      "fuseki": "n/a",
+      "virtuoso": "358",
+      "qlever": "0",
+      "all_agree": false,
+      "expected": "358",
+      "matches_expected": false
+    },
+    "q09": {
+      "sparq": "4",
+      "oxigraph": "4",
+      "fuseki": "n/a",
+      "virtuoso": "4",
+      "qlever": "4",
+      "all_agree": true,
+      "expected": "4",
+      "matches_expected": true
+    },
+    "q10": {
+      "sparq": "452",
+      "oxigraph": "452",
+      "fuseki": "n/a",
+      "virtuoso": "452",
+      "qlever": "452",
+      "all_agree": true,
+      "expected": "452",
+      "matches_expected": true
+    },
+    "q11": {
+      "sparq": "10",
+      "oxigraph": "10",
+      "fuseki": "n/a",
+      "virtuoso": "10",
+      "qlever": "10",
+      "all_agree": true,
+      "expected": "10",
+      "matches_expected": true
+    },
+    "q12b": {
+      "sparq": "1",
+      "oxigraph": "1",
+      "fuseki": "n/a",
+      "virtuoso": "1",
+      "qlever": "0",
+      "all_agree": false,
+      "expected": "1",
+      "matches_expected": false
+    },
+    "q12c": {
+      "sparq": "0",
+      "oxigraph": "0",
+      "fuseki": "n/a",
+      "virtuoso": "0",
+      "qlever": "0",
+      "all_agree": true,
+      "expected": "0",
+      "matches_expected": true
+    }
+  },
+  "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+  "env": {
+    "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+    "nproc": 16,
+    "os": "Linux",
+    "kernel": "6.17.0-1019-aws",
+    "quiet_box": true,
+    "gathered_at_utc": "2026-07-07T01:11:25Z",
+    "git_commit": "0ab87b2a"
+  },
+  "sparq_tsv": "q01\t1\t10.5\nq02\t6067\t6183.8\nq03a\t15823\t11804.0\nq03b\t114\t11315.9\nq03c\t0\t11393.2\nq04\t541911\t347814.3\nq05b\t6933\t15818.4\nq07\t48\t20378.9\nq08\t358\t156219.4\nq09\t4\t20488.4\nq10\t452\t3.7\nq11\t10\t24552.2\nq12b\t1\t153496.5\nq12c\t0\t5.2\n",
+  "oxigraph_tsv": "q01\t1\t14296.3\nq02\t6067\t524517.7\nq03a\t15823\t218440.3\nq03b\t114\t128549.8\nq03c\t0\t126918.1\nq04\t541911\t19702535.7\nq05b\t6933\t612795.9\nq07\tERROR\toxigraph\nq08\tERROR\toxigraph\nq09\t4\t186967.5\nq10\t452\t16483.8\nq11\t10\t742647.9\nq12b\t1\t50398631.0\nq12c\t0\t10764.2\n",
+  "fuseki_tsv": "",
+  "virtuoso_tsv": "q01\t1\t743\nq02\t6067\t356188\nq03a\t15823\t95121\nq03b\t114\t1378\nq03c\t0\t615\nq04\t541911\t8220214\nq05b\t6933\t110138\nq07\t48\t515902\nq08\t358\t12809\nq09\t4\t13417\nq10\t452\t5523\nq11\t10\t13407\nq12b\t1\t9003\nq12c\t0\t573\n",
+  "qlever_tsv": "q01\t1\t2946.9\nq02\t6067\t276392.4\nq03a\t15823\t46230.5\nq03b\t114\t1650.5\nq03c\t0\t1280.4\nq04\t541911\t2900056.2\nq05b\t6933\t31787.2\nq07\t48\t8031.1\nq08\t0\t8567.8\nq09\t4\t1343.6\nq10\t452\t4521.1\nq11\t10\t1925.2\nq12b\t0\t7218.5\nq12c\t0\t1389.6\n"
+}

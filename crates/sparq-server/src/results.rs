@@ -887,4 +887,74 @@ mod tests {
     fn cell_is(tsv: &str, value: &str) -> bool {
         tsv.lines().skip(1).flat_map(|l| l.split('\t')).any(|c| c == value)
     }
+
+    // [OPUS-4.8] sq-qcnn.37: direct unit tests for the pure XML/TSV encoding helpers that the
+    // integration path leaves uncovered (the specific special-char arms and the decimal-no-dot
+    // false path). These exercise the REAL encoding logic, not a proxy.
+
+    #[test]
+    fn xml_attr_escape_encodes_xml_special_characters() {
+        // Each XML special character must be encoded to its entity reference.
+        let mut s = String::new();
+        xml_attr_escape(&mut s, "&<>\"");
+        assert_eq!(s, "&amp;&lt;&gt;&quot;");
+        // Plain characters pass through unchanged.
+        let mut t = String::new();
+        xml_attr_escape(&mut t, "hello");
+        assert_eq!(t, "hello");
+    }
+
+    #[test]
+    fn push_ws_charref_encodes_tab_and_carriage_return() {
+        // \t must map to &#9; (the XML numeric character reference for HT).
+        let mut s = String::new();
+        push_ws_charref(&mut s, '\t');
+        assert_eq!(s, "&#9;");
+        // \r must map to &#13; (CR — used in some OS line endings).
+        let mut r = String::new();
+        push_ws_charref(&mut r, '\r');
+        assert_eq!(r, "&#13;");
+    }
+
+    #[test]
+    fn is_turtle_decimal_returns_false_when_no_dot_present() {
+        // An integer-only token (no '.') is NOT a Turtle DECIMAL — it is a Turtle INTEGER.
+        assert!(!is_turtle_decimal("123"));
+        assert!(!is_turtle_decimal("-456"));
+        assert!(!is_turtle_decimal("+7"));
+        // With a dot it IS a decimal (regression-guard for the passing path too).
+        assert!(is_turtle_decimal("12.3"));
+        assert!(is_turtle_decimal(".5"));
+    }
+
+    #[test]
+    fn push_ws_charref_covers_newline_space_and_passthrough_arms() {
+        // [OPUS-4.8] sq-qcnn.37: cover the two arms not exercised by the tab/CR test above.
+        // '\n' must map to &#10;
+        let mut nl = String::new();
+        push_ws_charref(&mut nl, '\n');
+        assert_eq!(nl, "&#10;");
+        // ' ' must map to &#32;
+        let mut sp = String::new();
+        push_ws_charref(&mut sp, ' ');
+        assert_eq!(sp, "&#32;");
+        // Any other character passes through verbatim (the defensive `_` arm that the
+        // comment notes is unreachable in normal use but that the match must have).
+        let mut pt = String::new();
+        push_ws_charref(&mut pt, 'a');
+        assert_eq!(pt, "a");
+    }
+
+    #[test]
+    fn is_turtle_boolean_returns_false_for_non_boolean_lexical_form() {
+        // [OPUS-4.8] sq-qcnn.37: exercise the non-matching (returns-false) arm of
+        // is_turtle_boolean. The matching arms are already exercised indirectly through
+        // the `tsv_abbreviation_edge_cases` test ("true"^^xsd:boolean).
+        assert!(!is_turtle_boolean("yes"));
+        assert!(!is_turtle_boolean("1"));
+        assert!(!is_turtle_boolean("True")); // case-sensitive
+        // Both canonical boolean values must still return true (regression guard).
+        assert!(is_turtle_boolean("true"));
+        assert!(is_turtle_boolean("false"));
+    }
 }
