@@ -25,19 +25,34 @@
 //   * MODE asymmetry (sparq/oxigraph = CLI in-process, fuseki/virtuoso/qlever = HTTP SPARQL
 //     adapter) is carried per engine so the site can label it.
 //
-// USAGE:  node scripts/bench/ingest-canonical-competitors.mjs [<results-dir>]
-//   default results-dir = bench/canonical-competitor-results/2026-07-07
+// USAGE:  node scripts/bench/ingest-canonical-competitors.mjs [<results-dir>...]
+//   default results-dirs = EVERY dated directory under bench/canonical-competitor-results/
+//   ([FABLE-5] sq-7d3dj.34: the HTTP/TTFB panel lands in a sibling dated dir, e.g.
+//   2026-07-07-http/, whose envelopes carry DISTINCT suite ids like "sp2b-http" — so
+//   multiple dirs combine into one same_box_comparisons array without collisions).
 // It rewrites ONLY the `same_box_comparisons` key of bench/dashboard/competitors.json;
 // every other key (schema_version, engines, values, references, …) is preserved verbatim.
 // Re-run site/scripts/sync-benchmarks.mjs afterwards to refresh the site JSON.
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+//
+// [FABLE-5] sq-7d3dj.34 — 6-col HTTP-profile envelopes: when an envelope's TSVs carry the
+// extended columns (`<query>\t<rows>\t<ka_best_us>\t<ka_ttfb_us>\t<fresh_us>\t<fresh_ttfb_us>`)
+// the row keeps `values` = keep-alive full-request best (col 3, backward-compatible) and
+// ADDITIONALLY carries values_ttfb / values_fresh / values_fresh_ttfb; the envelope's
+// `connection` note (keep-alive vs fresh-connect semantics) is carried onto the entry.
+// Engine measurement MODE is preferred from the envelope's engines map when present.
+import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
-const resultsDir =
-  process.argv[2] || join(repoRoot, "bench", "canonical-competitor-results", "2026-07-07");
+const resultsRoot = join(repoRoot, "bench", "canonical-competitor-results");
+const resultsDirs = process.argv.length > 2
+  ? process.argv.slice(2)
+  : readdirSync(resultsRoot)
+      .map((d) => join(resultsRoot, d))
+      .filter((p) => statSync(p).isDirectory())
+      .sort();
 const competitorsPath = join(repoRoot, "bench", "dashboard", "competitors.json");
 
 // Human labels + measurement MODE for each engine id (the CLI-vs-HTTP asymmetry the site
@@ -68,14 +83,21 @@ const ENGINE_META = {
 const ENGINE_ORDER = ["sparq", "oxigraph", "fuseki", "virtuoso", "qlever"];
 
 function parseTsv(tsv) {
-  // "<query>\t<rows|ERROR>\t<best_us|engine>" per line → { query: { rows, us|null } }
+  // 3-col "<query>\t<rows|ERROR>\t<best_us|engine>" per line → { query: { rows, us|null } }.
+  // 6-col HTTP-profile lines additionally yield { ttfb_us, fresh_us, fresh_ttfb_us }.
   const out = {};
   for (const line of (tsv || "").trim().split("\n")) {
     if (!line) continue;
-    const [query, rowsField, usField] = line.split("\t");
-    const us = /^-?\d/.test(usField) ? Number(usField) : null; // "ERROR"/engine-name → null
-    const rows = /^-?\d/.test(rowsField) ? Number(rowsField) : null;
-    out[query] = { rows, us };
+    const parts = line.split("\t");
+    const [query, rowsField, usField] = parts;
+    const num = (f) => (f != null && /^-?\d/.test(f) ? Number(f) : null);
+    const cell = { rows: num(rowsField), us: num(usField) };
+    if (parts.length >= 6) {
+      cell.ttfb_us = num(parts[3]);
+      cell.fresh_us = num(parts[4]);
+      cell.fresh_ttfb_us = num(parts[5]);
+    }
+    out[query] = cell;
   }
   return out;
 }
@@ -106,18 +128,32 @@ function buildEntry(gathers) {
   const rows = queries.map((q) => {
     const cc = primary.count_crosscheck[q] || {};
     const values = {};
+    const extended = { ttfb_us: {}, fresh_us: {}, fresh_ttfb_us: {} };
+    let anyExtended = false;
     let rowsCount = null;
     for (const id of engineIds) {
-      // best-of: MIN non-null best_us across gathers.
+      // best-of: MIN non-null across gathers, independently per measured field.
       let best = null;
+      const ext = { ttfb_us: null, fresh_us: null, fresh_ttfb_us: null };
       for (const { p } of parsed) {
         const cell = p[id] && p[id][q];
         if (cell && typeof cell.us === "number") {
           best = best == null ? cell.us : Math.min(best, cell.us);
           if (rowsCount == null && typeof cell.rows === "number") rowsCount = cell.rows;
         }
+        for (const k of Object.keys(ext)) {
+          if (cell && typeof cell[k] === "number") {
+            ext[k] = ext[k] == null ? cell[k] : Math.min(ext[k], cell[k]);
+          }
+        }
       }
       values[id] = best;
+      for (const k of Object.keys(ext)) {
+        if (ext[k] != null) {
+          extended[k][id] = ext[k];
+          anyExtended = true;
+        }
+      }
     }
     // Prefer the crosscheck's expected/sparq count for the honest "rows" column.
     const ccCount =
@@ -126,15 +162,27 @@ function buildEntry(gathers) {
         : cc.sparq != null && /^-?\d/.test(String(cc.sparq))
           ? Number(cc.sparq)
           : rowsCount;
-    return {
+    const row = {
       query: q,
       unit: "µs",
       rows: ccCount,
       values,
       count_match: typeof cc.all_agree === "boolean" ? cc.all_agree : null,
     };
+    if (anyExtended) {
+      // HTTP-profile extras: values = keep-alive full-request best (primary, above);
+      // TTFB + fresh-connect twins carried alongside, same best-of-gathers rule.
+      row.values_ttfb = extended.ttfb_us;
+      row.values_fresh = extended.fresh_us;
+      row.values_fresh_ttfb = extended.fresh_ttfb_us;
+    }
+    return row;
   });
 
+  // [FABLE-5] sq-7d3dj.34: an HTTP-profile envelope (6-col ttfb TSVs) records the true
+  // per-engine HTTP mode itself — prefer it. CLI-matrix envelopes keep the curated
+  // ENGINE_META display labels (stable output for the committed 2026-07-07 matrix).
+  const isHttpProfile = !!(primary.tsv_format && /ttfb/.test(primary.tsv_format));
   const engines = engineIds.map((id) => {
     const src = primary.engines[id] || {};
     const meta = ENGINE_META[id] || { label: id, mode: src.mode || "" };
@@ -145,7 +193,7 @@ function buildEntry(gathers) {
       id,
       label: meta.label,
       version: digest ? `${version} (${digest})` : version,
-      mode: meta.mode,
+      mode: isHttpProfile ? src.mode || meta.mode : meta.mode || src.mode,
       status,
     };
     if (status === "failed") {
@@ -153,19 +201,23 @@ function buildEntry(gathers) {
         primary.load && primary.load[id + "_wall_s"]
           ? ` (~${primary.load[id + "_wall_s"]}s wall)`
           : "";
-      e.failure = `load timeout${wall} — no query timings captured; shown as failed, not blank`;
+      e.failure = `engine run failed${wall} — no query timings captured; shown as failed, not blank`;
     }
     return e;
   });
 
   const tsList = gathers
     .map((g) => {
-      const m = /canonical-[^-]+-(\d{8}T\d{6}Z)/.exec(g.__file || "") || [];
+      const m = /canonical-.+-(\d{8}T\d{6}Z)/.exec(g.__file || "") || [];
       return m[1] || g.env?.gathered_at_utc || "?";
     })
     .join(" + ");
 
   return {
+    ...(primary.connection ? { connection: primary.connection } : {}),
+    ...(primary.tsv_format && /ttfb/.test(primary.tsv_format)
+      ? { profile: "http-ttfb (keep-alive + fresh-connect; values = keep-alive full-request best)" }
+      : {}),
     suite,
     scale: primary.scale,
     iters: primary.iters,
@@ -188,18 +240,21 @@ function buildEntry(gathers) {
   };
 }
 
-// ---- load envelopes, group by suite -------------------------------------------------
-const files = readdirSync(resultsDir).filter((f) => f.endsWith(".json"));
-if (!files.length) {
-  console.error(`[ingest-canonical] no envelope JSON in ${resultsDir}`);
-  process.exit(1);
-}
+// ---- load envelopes (across every results dir), group by suite ----------------------
 const bySuite = new Map();
-for (const f of files) {
-  const env = JSON.parse(readFileSync(join(resultsDir, f), "utf8"));
-  env.__file = f;
-  const key = env.suite;
-  (bySuite.get(key) || bySuite.set(key, []).get(key)).push(env);
+let fileCount = 0;
+for (const dir of resultsDirs) {
+  for (const f of readdirSync(dir).filter((x) => x.endsWith(".json"))) {
+    const env = JSON.parse(readFileSync(join(dir, f), "utf8"));
+    env.__file = f;
+    fileCount += 1;
+    const key = env.suite;
+    (bySuite.get(key) || bySuite.set(key, []).get(key)).push(env);
+  }
+}
+if (!fileCount) {
+  console.error(`[ingest-canonical] no envelope JSON in: ${resultsDirs.join(", ")}`);
+  process.exit(1);
 }
 
 // Assert counts identical across gathers of a suite (fail loud, never silently pick one).
@@ -211,7 +266,10 @@ for (const [suite, gathers] of bySuite) {
       const a = parseTsv(ref[id + "_tsv"]);
       const b = parseTsv(g[id + "_tsv"]);
       for (const q of Object.keys(a)) {
-        if (b[q] && a[q].rows !== b[q].rows) {
+        // [FABLE-5] sq-7d3dj.34: an ERROR row (rows=null, e.g. a per-query timeout that
+        // fired in only one of the gathers) is a MISSING count, not a DISAGREEING count —
+        // only two conflicting numeric counts refuse the ingest.
+        if (b[q] && a[q].rows != null && b[q].rows != null && a[q].rows !== b[q].rows) {
           console.error(
             `[ingest-canonical] COUNT MISMATCH ${suite} ${id} ${q}: ${a[q].rows} vs ${b[q].rows} — refusing to ingest.`,
           );

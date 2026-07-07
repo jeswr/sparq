@@ -183,7 +183,7 @@
             "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
             "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
             "status": "failed",
-            "failure": "load timeout (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+            "failure": "engine run failed (~1800.7s wall) — no query timings captured; shown as failed, not blank"
           },
           {
             "id": "virtuoso",
@@ -386,6 +386,534 @@
         ]
       },
       {
+        "connection": {
+          "modes_measured": [
+            "keep-alive",
+            "fresh-connect"
+          ],
+          "primary": "keep-alive",
+          "note": "EVERY query was measured in BOTH connection regimes (the fairness question research/perf-dominance-gap-2026-07.md D9 left open): cols 3-4 = keep-alive (ONE persistent HTTP/1.1 connection reused across iterations; min-of-N discards the connect-bearing first iteration), cols 5-6 = fresh-connect (a NEW TCP connection per iteration, connect cost included). TTFB = time from request start to status-line+headers received; full = entire body read. All values are per-mode minima over the iterations."
+        },
+        "profile": "http-ttfb (keep-alive + fresh-connect; values = keep-alive full-request best)",
+        "suite": "sp2b-http",
+        "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
+        "iters": 3,
+        "git_commit": "13bfa892",
+        "gathered_at_utc": "2026-07-07T09:24:34Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T085517Z + 20260707T092434Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×3, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-http-ttfb-panel (sq-7d3dj.34)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+        "env": {
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+          "quiet_box": true,
+          "gathered_at_utc": "2026-07-07T09:24:34Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq = sparq-server spawn->first-HTTP-answer seconds (load+bind); oxigraph = pure offline bulk-load seconds; fuseki/virtuoso/qlever = whole-recipe wall (load+serve+query+teardown)"
+        },
+        "engines": [
+          {
+            "id": "sparq",
+            "label": "sparq",
+            "version": "13bfa892",
+            "mode": "HTTP server (sparq-server, SPARQL 1.1 protocol at /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "oxigraph",
+            "label": "Oxigraph",
+            "version": "0.5.9",
+            "mode": "HTTP server (prebuilt sha256-pinned oxigraph serve-read-only, /query) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki 6.1.0 (official Apache tarball)",
+            "mode": "HTTP server (OFFLINE tdb2.tdbloader bulk load -> fuseki-server --tdb2, the intended bulk path; fixes the 2026-07-07 docker-image load hang) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP server (isql ld_dir bulk load, /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "qlever",
+            "label": "QLever",
+            "version": "adfreiburg/qlever (sha256:bc1958b921a7…)",
+            "mode": "HTTP server (qlever-index -> qlever-server) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          }
+        ],
+        "rows": [
+          {
+            "query": "q01",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 192,
+              "oxigraph": 1681,
+              "fuseki": 5493,
+              "virtuoso": 536,
+              "qlever": 8589
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 187,
+              "oxigraph": 1670,
+              "fuseki": 5216,
+              "virtuoso": 531,
+              "qlever": 3358
+            },
+            "values_fresh": {
+              "sparq": 222,
+              "oxigraph": 1800,
+              "fuseki": 5628,
+              "virtuoso": 561,
+              "qlever": 2845
+            },
+            "values_fresh_ttfb": {
+              "sparq": 218,
+              "oxigraph": 1789,
+              "fuseki": 5330,
+              "virtuoso": 556,
+              "qlever": 2829
+            }
+          },
+          {
+            "query": "q02",
+            "unit": "µs",
+            "rows": 6067,
+            "values": {
+              "sparq": 21318,
+              "oxigraph": 410637,
+              "fuseki": 500860,
+              "virtuoso": 350676,
+              "qlever": 237107
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 18579,
+              "oxigraph": 319344,
+              "fuseki": 485522,
+              "virtuoso": 345519,
+              "qlever": 181646
+            },
+            "values_fresh": {
+              "sparq": 20188,
+              "oxigraph": 406486,
+              "fuseki": 497612,
+              "virtuoso": 348744,
+              "qlever": 234247
+            },
+            "values_fresh_ttfb": {
+              "sparq": 18814,
+              "oxigraph": 317978,
+              "fuseki": 481655,
+              "virtuoso": 345499,
+              "qlever": 179250
+            }
+          },
+          {
+            "query": "q03a",
+            "unit": "µs",
+            "rows": 15823,
+            "values": {
+              "sparq": 17985,
+              "oxigraph": 151237,
+              "fuseki": 138900,
+              "virtuoso": 93568,
+              "qlever": 33913
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 17061,
+              "oxigraph": 1993,
+              "fuseki": 135984,
+              "virtuoso": 92261,
+              "qlever": 32943
+            },
+            "values_fresh": {
+              "sparq": 17170,
+              "oxigraph": 150733,
+              "fuseki": 138349,
+              "virtuoso": 93215,
+              "qlever": 34236
+            },
+            "values_fresh_ttfb": {
+              "sparq": 16549,
+              "oxigraph": 2144,
+              "fuseki": 135162,
+              "virtuoso": 92557,
+              "qlever": 33266
+            }
+          },
+          {
+            "query": "q03b",
+            "unit": "µs",
+            "rows": 114,
+            "values": {
+              "sparq": 12698,
+              "oxigraph": 102706,
+              "fuseki": 34730,
+              "virtuoso": 1235,
+              "qlever": 1384
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 12667,
+              "oxigraph": 102666,
+              "fuseki": 34313,
+              "virtuoso": 1225,
+              "qlever": 1363
+            },
+            "values_fresh": {
+              "sparq": 12272,
+              "oxigraph": 102358,
+              "fuseki": 35719,
+              "virtuoso": 1250,
+              "qlever": 1433
+            },
+            "values_fresh_ttfb": {
+              "sparq": 12259,
+              "oxigraph": 102318,
+              "fuseki": 35357,
+              "virtuoso": 1236,
+              "qlever": 1415
+            }
+          },
+          {
+            "query": "q03c",
+            "unit": "µs",
+            "rows": 0,
+            "values": {
+              "sparq": 12585,
+              "oxigraph": 101853,
+              "fuseki": 31690,
+              "virtuoso": 462,
+              "qlever": 4017
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 12578,
+              "oxigraph": 101842,
+              "fuseki": 31328,
+              "virtuoso": 457,
+              "qlever": 1166
+            },
+            "values_fresh": {
+              "sparq": 12262,
+              "oxigraph": 102687,
+              "fuseki": 32890,
+              "virtuoso": 499,
+              "qlever": 1148
+            },
+            "values_fresh_ttfb": {
+              "sparq": 12256,
+              "oxigraph": 102672,
+              "fuseki": 32561,
+              "virtuoso": 494,
+              "qlever": 1133
+            }
+          },
+          {
+            "query": "q04",
+            "unit": "µs",
+            "rows": 541911,
+            "values": {
+              "sparq": 428428,
+              "oxigraph": 17973020,
+              "fuseki": null,
+              "virtuoso": 8013390,
+              "qlever": 2115683
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 372029,
+              "oxigraph": 7772,
+              "virtuoso": 7883505,
+              "qlever": 88912
+            },
+            "values_fresh": {
+              "sparq": 429085,
+              "oxigraph": 17984944,
+              "virtuoso": 7999653,
+              "qlever": 2110505
+            },
+            "values_fresh_ttfb": {
+              "sparq": 388726,
+              "oxigraph": 7641,
+              "virtuoso": 7860868,
+              "qlever": 89386
+            }
+          },
+          {
+            "query": "q05b",
+            "unit": "µs",
+            "rows": 6933,
+            "values": {
+              "sparq": 22284,
+              "oxigraph": 553778,
+              "fuseki": 380931,
+              "virtuoso": 108515,
+              "qlever": 24309
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 22152,
+              "oxigraph": 13433,
+              "fuseki": 380033,
+              "virtuoso": 107642,
+              "qlever": 24172
+            },
+            "values_fresh": {
+              "sparq": 22734,
+              "oxigraph": 551813,
+              "fuseki": 378490,
+              "virtuoso": 108390,
+              "qlever": 24035
+            },
+            "values_fresh_ttfb": {
+              "sparq": 22556,
+              "oxigraph": 13623,
+              "fuseki": 377758,
+              "virtuoso": 108010,
+              "qlever": 23848
+            }
+          },
+          {
+            "query": "q07",
+            "unit": "µs",
+            "rows": 48,
+            "values": {
+              "sparq": 24220,
+              "oxigraph": null,
+              "fuseki": null,
+              "virtuoso": 502369,
+              "qlever": 7984
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 24213,
+              "virtuoso": 502357,
+              "qlever": 7971
+            },
+            "values_fresh": {
+              "sparq": 24346,
+              "virtuoso": 503275,
+              "qlever": 7654
+            },
+            "values_fresh_ttfb": {
+              "sparq": 24337,
+              "virtuoso": 503261,
+              "qlever": 7636
+            }
+          },
+          {
+            "query": "q08",
+            "unit": "µs",
+            "rows": 358,
+            "values": {
+              "sparq": 159142,
+              "oxigraph": null,
+              "fuseki": 25274,
+              "virtuoso": 12710,
+              "qlever": 48973
+            },
+            "count_match": false,
+            "values_ttfb": {
+              "sparq": 159113,
+              "fuseki": 24713,
+              "virtuoso": 12692,
+              "qlever": 8747
+            },
+            "values_fresh": {
+              "sparq": 157142,
+              "fuseki": 23388,
+              "virtuoso": 12716,
+              "qlever": 8503
+            },
+            "values_fresh_ttfb": {
+              "sparq": 157115,
+              "fuseki": 22982,
+              "virtuoso": 12698,
+              "qlever": 8485
+            }
+          },
+          {
+            "query": "q09",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 22897,
+              "oxigraph": 172166,
+              "fuseki": 163621,
+              "virtuoso": 13306,
+              "qlever": 10878
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 22890,
+              "oxigraph": 172151,
+              "fuseki": 163242,
+              "virtuoso": 13299,
+              "qlever": 1232
+            },
+            "values_fresh": {
+              "sparq": 23059,
+              "oxigraph": 173752,
+              "fuseki": 158518,
+              "virtuoso": 13341,
+              "qlever": 1237
+            },
+            "values_fresh_ttfb": {
+              "sparq": 23050,
+              "oxigraph": 173733,
+              "fuseki": 158079,
+              "virtuoso": 13335,
+              "qlever": 1215
+            }
+          },
+          {
+            "query": "q10",
+            "unit": "µs",
+            "rows": 452,
+            "values": {
+              "sparq": 309,
+              "oxigraph": 2264,
+              "fuseki": 7613,
+              "virtuoso": 5409,
+              "qlever": 3906
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 289,
+              "oxigraph": 612,
+              "fuseki": 7343,
+              "virtuoso": 5384,
+              "qlever": 3870
+            },
+            "values_fresh": {
+              "sparq": 347,
+              "oxigraph": 2325,
+              "fuseki": 8865,
+              "virtuoso": 5386,
+              "qlever": 3944
+            },
+            "values_fresh_ttfb": {
+              "sparq": 325,
+              "oxigraph": 699,
+              "fuseki": 8536,
+              "virtuoso": 5357,
+              "qlever": 3902
+            }
+          },
+          {
+            "query": "q11",
+            "unit": "µs",
+            "rows": 10,
+            "values": {
+              "sparq": 26793,
+              "oxigraph": 744451,
+              "fuseki": 37805,
+              "virtuoso": 12625,
+              "qlever": 4695
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 26783,
+              "oxigraph": 744432,
+              "fuseki": 37416,
+              "virtuoso": 12619,
+              "qlever": 1902
+            },
+            "values_fresh": {
+              "sparq": 27319,
+              "oxigraph": 745141,
+              "fuseki": 33360,
+              "virtuoso": 12620,
+              "qlever": 1826
+            },
+            "values_fresh_ttfb": {
+              "sparq": 27309,
+              "oxigraph": 745127,
+              "fuseki": 32943,
+              "virtuoso": 12612,
+              "qlever": 1810
+            }
+          },
+          {
+            "query": "q12b",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 156866,
+              "oxigraph": null,
+              "fuseki": 4966,
+              "virtuoso": 8628,
+              "qlever": 9520
+            },
+            "count_match": false,
+            "values_ttfb": {
+              "sparq": 156850,
+              "fuseki": 4605,
+              "virtuoso": 8622,
+              "qlever": 7208
+            },
+            "values_fresh": {
+              "sparq": 155381,
+              "fuseki": 3435,
+              "virtuoso": 8624,
+              "qlever": 7436
+            },
+            "values_fresh_ttfb": {
+              "sparq": 155364,
+              "fuseki": 3234,
+              "virtuoso": 8619,
+              "qlever": 7420
+            }
+          },
+          {
+            "query": "q12c",
+            "unit": "µs",
+            "rows": 0,
+            "values": {
+              "sparq": 183,
+              "oxigraph": 163,
+              "fuseki": 3471,
+              "virtuoso": 436,
+              "qlever": 2906
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 178,
+              "oxigraph": 158,
+              "fuseki": 3259,
+              "virtuoso": 431,
+              "qlever": 1253
+            },
+            "values_fresh": {
+              "sparq": 211,
+              "oxigraph": 325,
+              "fuseki": 3549,
+              "virtuoso": 477,
+              "qlever": 1327
+            },
+            "values_fresh_ttfb": {
+              "sparq": 206,
+              "oxigraph": 321,
+              "fuseki": 3350,
+              "virtuoso": 472,
+              "qlever": 1312
+            }
+          }
+        ]
+      },
+      {
         "suite": "watdiv",
         "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
         "iters": 5,
@@ -424,7 +952,7 @@
             "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
             "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
             "status": "failed",
-            "failure": "load timeout (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+            "failure": "engine run failed (~1800.7s wall) — no query timings captured; shown as failed, not blank"
           },
           {
             "id": "virtuoso",
@@ -649,6 +1177,617 @@
               "qlever": 3851.9
             },
             "count_match": true
+          }
+        ]
+      },
+      {
+        "connection": {
+          "modes_measured": [
+            "keep-alive",
+            "fresh-connect"
+          ],
+          "primary": "keep-alive",
+          "note": "EVERY query was measured in BOTH connection regimes (the fairness question research/perf-dominance-gap-2026-07.md D9 left open): cols 3-4 = keep-alive (ONE persistent HTTP/1.1 connection reused across iterations; min-of-N discards the connect-bearing first iteration), cols 5-6 = fresh-connect (a NEW TCP connection per iteration, connect cost included). TTFB = time from request start to status-line+headers received; full = entire body read. All values are per-mode minima over the iterations."
+        },
+        "profile": "http-ttfb (keep-alive + fresh-connect; values = keep-alive full-request best)",
+        "suite": "watdiv-http",
+        "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
+        "iters": 3,
+        "git_commit": "246b1bfe",
+        "gathered_at_utc": "2026-07-07T09:04:38Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T090401Z + 20260707T090438Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×3, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-http-ttfb-panel (sq-7d3dj.34)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+        "env": {
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+          "quiet_box": true,
+          "gathered_at_utc": "2026-07-07T09:04:38Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq = sparq-server spawn->first-HTTP-answer seconds (load+bind); oxigraph = pure offline bulk-load seconds; fuseki/virtuoso/qlever = whole-recipe wall (load+serve+query+teardown)"
+        },
+        "engines": [
+          {
+            "id": "sparq",
+            "label": "sparq",
+            "version": "246b1bfe",
+            "mode": "HTTP server (sparq-server, SPARQL 1.1 protocol at /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "oxigraph",
+            "label": "Oxigraph",
+            "version": "0.5.9",
+            "mode": "HTTP server (prebuilt sha256-pinned oxigraph serve-read-only, /query) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki 6.1.0 (official Apache tarball)",
+            "mode": "HTTP server (OFFLINE tdb2.tdbloader bulk load -> fuseki-server --tdb2, the intended bulk path; fixes the 2026-07-07 docker-image load hang) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP server (isql ld_dir bulk load, /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "qlever",
+            "label": "QLever",
+            "version": "adfreiburg/qlever (sha256:bc1958b921a7…)",
+            "mode": "HTTP server (qlever-index -> qlever-server) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          }
+        ],
+        "rows": [
+          {
+            "query": "C3",
+            "unit": "µs",
+            "rows": 8763,
+            "values": {
+              "sparq": 1940,
+              "oxigraph": 1141443,
+              "fuseki": 204670,
+              "virtuoso": 38496,
+              "qlever": 29891
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 1822,
+              "oxigraph": 57797,
+              "fuseki": 203727,
+              "virtuoso": 38292,
+              "qlever": 29446
+            },
+            "values_fresh": {
+              "sparq": 2003,
+              "oxigraph": 1149353,
+              "fuseki": 200218,
+              "virtuoso": 38710,
+              "qlever": 28735
+            },
+            "values_fresh_ttfb": {
+              "sparq": 1850,
+              "oxigraph": 58792,
+              "fuseki": 199409,
+              "virtuoso": 38491,
+              "qlever": 28543
+            }
+          },
+          {
+            "query": "F2",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 244,
+              "oxigraph": 638,
+              "fuseki": 5760,
+              "virtuoso": 698,
+              "qlever": 46504
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 238,
+              "oxigraph": 628,
+              "fuseki": 5478,
+              "virtuoso": 693,
+              "qlever": 34380
+            },
+            "values_fresh": {
+              "sparq": 275,
+              "oxigraph": 839,
+              "fuseki": 6966,
+              "virtuoso": 666,
+              "qlever": 33566
+            },
+            "values_fresh_ttfb": {
+              "sparq": 269,
+              "oxigraph": 829,
+              "fuseki": 6507,
+              "virtuoso": 661,
+              "qlever": 33540
+            }
+          },
+          {
+            "query": "F3",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 232,
+              "oxigraph": 901,
+              "fuseki": 6713,
+              "virtuoso": 744,
+              "qlever": 19913
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 227,
+              "oxigraph": 888,
+              "fuseki": 6234,
+              "virtuoso": 738,
+              "qlever": 10635
+            },
+            "values_fresh": {
+              "sparq": 265,
+              "oxigraph": 1085,
+              "fuseki": 6818,
+              "virtuoso": 749,
+              "qlever": 10307
+            },
+            "values_fresh_ttfb": {
+              "sparq": 260,
+              "oxigraph": 1072,
+              "fuseki": 6222,
+              "virtuoso": 743,
+              "qlever": 10276
+            }
+          },
+          {
+            "query": "F5",
+            "unit": "µs",
+            "rows": 34,
+            "values": {
+              "sparq": 390,
+              "oxigraph": 6285,
+              "fuseki": 8703,
+              "virtuoso": 1821,
+              "qlever": 10580
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 380,
+              "oxigraph": 6242,
+              "fuseki": 8096,
+              "virtuoso": 1808,
+              "qlever": 10548
+            },
+            "values_fresh": {
+              "sparq": 416,
+              "oxigraph": 6793,
+              "fuseki": 8213,
+              "virtuoso": 1884,
+              "qlever": 10630
+            },
+            "values_fresh_ttfb": {
+              "sparq": 406,
+              "oxigraph": 6747,
+              "fuseki": 7585,
+              "virtuoso": 1869,
+              "qlever": 10603
+            }
+          },
+          {
+            "query": "L1",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 221,
+              "oxigraph": 1204,
+              "fuseki": 5513,
+              "virtuoso": 672,
+              "qlever": 3933
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 216,
+              "oxigraph": 1191,
+              "fuseki": 4995,
+              "virtuoso": 667,
+              "qlever": 3918
+            },
+            "values_fresh": {
+              "sparq": 246,
+              "oxigraph": 1455,
+              "fuseki": 5778,
+              "virtuoso": 714,
+              "qlever": 4012
+            },
+            "values_fresh_ttfb": {
+              "sparq": 241,
+              "oxigraph": 1441,
+              "fuseki": 5332,
+              "virtuoso": 709,
+              "qlever": 3993
+            }
+          },
+          {
+            "query": "L2",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 224,
+              "oxigraph": 618,
+              "fuseki": 5788,
+              "virtuoso": 600,
+              "qlever": 7379
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 219,
+              "oxigraph": 607,
+              "fuseki": 5349,
+              "virtuoso": 593,
+              "qlever": 2612
+            },
+            "values_fresh": {
+              "sparq": 258,
+              "oxigraph": 806,
+              "fuseki": 6083,
+              "virtuoso": 645,
+              "qlever": 2677
+            },
+            "values_fresh_ttfb": {
+              "sparq": 254,
+              "oxigraph": 794,
+              "fuseki": 5603,
+              "virtuoso": 638,
+              "qlever": 2654
+            }
+          },
+          {
+            "query": "L3",
+            "unit": "µs",
+            "rows": 41,
+            "values": {
+              "sparq": 261,
+              "oxigraph": 700,
+              "fuseki": 5747,
+              "virtuoso": 973,
+              "qlever": 2607
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 254,
+              "oxigraph": 681,
+              "fuseki": 5312,
+              "virtuoso": 967,
+              "qlever": 2589
+            },
+            "values_fresh": {
+              "sparq": 304,
+              "oxigraph": 913,
+              "fuseki": 6093,
+              "virtuoso": 1038,
+              "qlever": 2521
+            },
+            "values_fresh_ttfb": {
+              "sparq": 296,
+              "oxigraph": 892,
+              "fuseki": 5585,
+              "virtuoso": 1031,
+              "qlever": 2503
+            }
+          },
+          {
+            "query": "L4",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 212,
+              "oxigraph": 402,
+              "fuseki": 5251,
+              "virtuoso": 596,
+              "qlever": 5047
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 207,
+              "oxigraph": 392,
+              "fuseki": 4771,
+              "virtuoso": 590,
+              "qlever": 2429
+            },
+            "values_fresh": {
+              "sparq": 255,
+              "oxigraph": 629,
+              "fuseki": 5495,
+              "virtuoso": 627,
+              "qlever": 2423
+            },
+            "values_fresh_ttfb": {
+              "sparq": 230,
+              "oxigraph": 618,
+              "fuseki": 5049,
+              "virtuoso": 622,
+              "qlever": 2406
+            }
+          },
+          {
+            "query": "L5",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 220,
+              "oxigraph": 294,
+              "fuseki": 5458,
+              "virtuoso": 604,
+              "qlever": 7783
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 215,
+              "oxigraph": 283,
+              "fuseki": 4998,
+              "virtuoso": 599,
+              "qlever": 3837
+            },
+            "values_fresh": {
+              "sparq": 249,
+              "oxigraph": 462,
+              "fuseki": 5151,
+              "virtuoso": 623,
+              "qlever": 4052
+            },
+            "values_fresh_ttfb": {
+              "sparq": 244,
+              "oxigraph": 452,
+              "fuseki": 4762,
+              "virtuoso": 617,
+              "qlever": 4033
+            }
+          },
+          {
+            "query": "S1",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 417,
+              "oxigraph": 7695,
+              "fuseki": 6932,
+              "virtuoso": 983,
+              "qlever": 149949
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 412,
+              "oxigraph": 7678,
+              "fuseki": 6509,
+              "virtuoso": 977,
+              "qlever": 149921
+            },
+            "values_fresh": {
+              "sparq": 423,
+              "oxigraph": 8144,
+              "fuseki": 7015,
+              "virtuoso": 998,
+              "qlever": 141646
+            },
+            "values_fresh_ttfb": {
+              "sparq": 417,
+              "oxigraph": 8127,
+              "fuseki": 6559,
+              "virtuoso": 992,
+              "qlever": 141619
+            }
+          },
+          {
+            "query": "S2",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 269,
+              "oxigraph": 1497,
+              "fuseki": 5324,
+              "virtuoso": 629,
+              "qlever": 8246
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 264,
+              "oxigraph": 1485,
+              "fuseki": 5088,
+              "virtuoso": 624,
+              "qlever": 4493
+            },
+            "values_fresh": {
+              "sparq": 294,
+              "oxigraph": 1733,
+              "fuseki": 4874,
+              "virtuoso": 671,
+              "qlever": 4308
+            },
+            "values_fresh_ttfb": {
+              "sparq": 289,
+              "oxigraph": 1721,
+              "fuseki": 4563,
+              "virtuoso": 666,
+              "qlever": 4285
+            }
+          },
+          {
+            "query": "S3",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 221,
+              "oxigraph": 790,
+              "fuseki": 5081,
+              "virtuoso": 716,
+              "qlever": 5509
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 215,
+              "oxigraph": 775,
+              "fuseki": 4772,
+              "virtuoso": 711,
+              "qlever": 5495
+            },
+            "values_fresh": {
+              "sparq": 246,
+              "oxigraph": 961,
+              "fuseki": 5632,
+              "virtuoso": 749,
+              "qlever": 5609
+            },
+            "values_fresh_ttfb": {
+              "sparq": 241,
+              "oxigraph": 944,
+              "fuseki": 5254,
+              "virtuoso": 743,
+              "qlever": 5589
+            }
+          },
+          {
+            "query": "S4",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 232,
+              "oxigraph": 932,
+              "fuseki": 4903,
+              "virtuoso": 644,
+              "qlever": 10268
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 227,
+              "oxigraph": 921,
+              "fuseki": 4450,
+              "virtuoso": 638,
+              "qlever": 4374
+            },
+            "values_fresh": {
+              "sparq": 264,
+              "oxigraph": 1075,
+              "fuseki": 5484,
+              "virtuoso": 684,
+              "qlever": 4337
+            },
+            "values_fresh_ttfb": {
+              "sparq": 257,
+              "oxigraph": 1065,
+              "fuseki": 5052,
+              "virtuoso": 678,
+              "qlever": 4314
+            }
+          },
+          {
+            "query": "S5",
+            "unit": "µs",
+            "rows": 8,
+            "values": {
+              "sparq": 256,
+              "oxigraph": 1055,
+              "fuseki": 5526,
+              "virtuoso": 770,
+              "qlever": 5761
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 242,
+              "oxigraph": 1040,
+              "fuseki": 5130,
+              "virtuoso": 763,
+              "qlever": 5745
+            },
+            "values_fresh": {
+              "sparq": 275,
+              "oxigraph": 1245,
+              "fuseki": 5574,
+              "virtuoso": 766,
+              "qlever": 5629
+            },
+            "values_fresh_ttfb": {
+              "sparq": 269,
+              "oxigraph": 1231,
+              "fuseki": 5240,
+              "virtuoso": 760,
+              "qlever": 5608
+            }
+          },
+          {
+            "query": "S6",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 227,
+              "oxigraph": 369,
+              "fuseki": 4764,
+              "virtuoso": 558,
+              "qlever": 6841
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 221,
+              "oxigraph": 358,
+              "fuseki": 4433,
+              "virtuoso": 552,
+              "qlever": 4075
+            },
+            "values_fresh": {
+              "sparq": 268,
+              "oxigraph": 593,
+              "fuseki": 4806,
+              "virtuoso": 594,
+              "qlever": 4134
+            },
+            "values_fresh_ttfb": {
+              "sparq": 261,
+              "oxigraph": 582,
+              "fuseki": 4434,
+              "virtuoso": 589,
+              "qlever": 4114
+            }
+          },
+          {
+            "query": "S7",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 240,
+              "oxigraph": 310,
+              "fuseki": 4814,
+              "virtuoso": 621,
+              "qlever": 8067
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 233,
+              "oxigraph": 300,
+              "fuseki": 4409,
+              "virtuoso": 615,
+              "qlever": 3978
+            },
+            "values_fresh": {
+              "sparq": 262,
+              "oxigraph": 531,
+              "fuseki": 5031,
+              "virtuoso": 660,
+              "qlever": 4017
+            },
+            "values_fresh_ttfb": {
+              "sparq": 257,
+              "oxigraph": 520,
+              "fuseki": 4767,
+              "virtuoso": 655,
+              "qlever": 4001
+            }
           }
         ]
       }
