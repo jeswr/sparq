@@ -1,0 +1,34 @@
+# [SONNET-4.6] sq-7d3dj.22 (epic sq-7d3dj) — deterministic allocation-count instrument.
+# 🤖 SPARQ agent. Standalone bench-only harness (own [workspace], like bench/serve-throughput)
+# so the repo's root workspace — and its clippy/test gate — is untouched by this measurement
+# infrastructure. Changes NO production code; zero gate/ratchet impact.
+[package]
+name = "alloc-track-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork; the
+# engine's behaviour (and build) depends on it, so this detached project must apply
+# the same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+sparq-core = { path = "../../crates/sparq-core" }
+sparq-engine = { path = "../../crates/sparq-engine" }
+# Parallel execution uses rayon; we clamp the thread pool to 1 for deterministic
+# alloc counts. Rayon is an optional dep in sparq-engine (default-on for native
+# builds), so it is present transitively; we also declare it directly so we can
+# call ThreadPoolBuilder here.
+rayon = "1"
+
+[[bin]]
+name = "alloc_track"
+path = "src/main.rs"
+
+[profile.release]
+debug = false
+lto = "thin"

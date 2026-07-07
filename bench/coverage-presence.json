@@ -98,6 +98,16 @@
       "had_integration_dir": true,
       "min_tests": 127
     },
+    "sparq-reason-el": {
+      "had_integration_dir": true,
+      "min_tests": 128,
+      "note": "[OPUS-4.8] sq-qcnn.23: OWL 2 EL classifier (E1 core + rbox Phase E2 + hasse Phase E3). 130 #[test]s measured across src/ (lib.rs 13, abox.rs 17, cdomain.rs 16, rbox.rs 7) and tests/ (differential.rs 20, rbox_differential.rs 16, cdomain.rs 18, hasse_reduction.rs 10, nominals.rs 11, snomed_go_scale.rs 2); floor 128 leaves a small margin (mirrors sparq-substrate/sparq-canon style). Brought under the presence gate so the EL classifier tests cannot silently vanish."
+    },
+    "sparq-reason-ql": {
+      "had_integration_dir": true,
+      "min_tests": 137,
+      "note": "[OPUS-4.8] sq-qcnn.23: EXPERIMENTAL OWL 2 QL rewriter (PerfectRef + CQ-shape gate). 139 #[test]s measured across src/ (cq.rs 27, minimise.rs 10, perfectref.rs 7, treewitness.rs 5, lib.rs 9, dllite.rs 2) and tests/ (oracle.rs 18, tbox_capture.rs 18, path_desugar.rs 23, broadened_shapes.rs 12, branch_aware_emit.rs 8); floor 137 leaves a small margin (mirrors sparq-substrate/sparq-canon style). Brought under the presence gate so the QL rewriter tests cannot silently vanish."
+    },
     "sparq-reason-wasm": {
       "had_integration_dir": true,
       "min_tests": 9

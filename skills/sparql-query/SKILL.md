@@ -541,6 +541,21 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `crates/sparq-engine/src/exec.rs` (`mod columnar_filter_seam`), plus the native FILTER/aggregate
   baseline bench `crates/sparq-engine/examples/bench_vectorized.rs` (`metric_us`, registered
   `vectorized-eval-micro`, `featured = false`) later phases measure their speedup against.
+  **Phase 5 (`sq-pntvh.5`) adds the shared dispatcher seam** (`src/vec_dispatch.rs`): a single module
+  that owns the I1–I5 decline hierarchy and the I5 probe counters shared by every current and future
+  seam. `VEC_MIN_BATCH` (256) is the minimum batch size below which the scalar path is cheaper;
+  `VEC_MORSEL` (2048) is the decode-buffer size for morsel-by-morsel `apply_filter` execution — each
+  morsel extracts only the one filter column (O(rows × 1), not a full-width transpose). The decline
+  hierarchy (in order): I2 = ZK-trace armed (scalar records the full obligation set); I3 = budget
+  armed (fallback rule — the debit schedule is not uniform-per-row); operator shape check (only a
+  simple sargable `?v OP const` numeric comparison); I4/`VEC_MIN_BATCH` batch-size gate; all-inline
+  dtype precheck. The aggregate seam (Seam B, `group_aggregate` → `columnar_aggregate`) is also
+  wired through the same I2/I3/`VEC_MIN_BATCH` checks. **I5 probe counters (test-facing / unstable)**:
+  `reset_stats()` / `stats_snapshot()` / `VecStats` let acceptance tests assert the seams are
+  non-vacuous (`chunks_built >= 1` for an eligible operator). Thread-local counters are used (not
+  global atomics) so parallel test threads don't interfere. The counters are **not semver-stable** —
+  external callers must not build stable logic on them; they exist only for the acceptance gate in
+  `tests/differentials/vectorized_byte_identity.rs` (T1–T4).
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
   pattern, the executor first builds a membership filter over the already-materialised side's

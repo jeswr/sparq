@@ -24,10 +24,14 @@
 // ignored" count.
 
 use crate::normal::{Expr, Names, Normal, Normalizer, BOTTOM, TOP};
-#[cfg(feature = "cdomain")]
+// [OPUS-4.8] sq-pbz04.2.8: the internal `Concept`/`Role` index types are also needed by the E4
+// ABox extras (`owl:hasKey` / negative-property-assertion / `owl:differentFrom`) under `abox`.
+#[cfg(any(feature = "cdomain", feature = "abox"))]
 use crate::normal::Concept;
+#[cfg(any(feature = "rbox", feature = "abox"))]
+use crate::normal::Role;
 #[cfg(feature = "rbox")]
-use crate::normal::{Role, RoleAxiom};
+use crate::normal::RoleAxiom;
 use crate::Report;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
@@ -56,6 +60,62 @@ pub struct Extracted {
     /// Normalized RBox axioms (role inclusions + compositions). Empty/absent without `rbox`.
     #[cfg(feature = "rbox")]
     pub role_axioms: Vec<RoleAxiom>,
+    /// [OPUS-4.8] sq-pbz04.2.8 (`abox`): the E4 ABox axioms (`owl:hasKey` / negative property
+    /// assertions / asserted `owl:differentFrom`) the realiser reasons over post-saturation.
+    /// Empty unless `opts.abox` (the `Classifier::classify` path never populates it).
+    #[cfg(feature = "abox")]
+    pub abox_extras: AboxExtras,
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8 (`abox`): the E4 ABox axioms the realiser reads off the saturation on
+/// top of the class/property assertions — `owl:hasKey` keys, negative property assertions, and
+/// asserted `owl:differentFrom` inequalities. Every concept / role / nominal referenced here is
+/// minted through the SAME [`Names`] table the saturation runs over, so the ids agree.
+#[cfg(feature = "abox")]
+#[derive(Default)]
+pub struct AboxExtras {
+    /// Well-formed `owl:hasKey` axioms (malformed ones are counted in `Report::skipped_assertions`).
+    pub keys: Vec<AboxKey>,
+    /// Negative object/data property assertions.
+    pub npas: Vec<AboxNpa>,
+    /// Asserted `owl:differentFrom` pairs `(a, b)` as found (one direction); the realiser emits the
+    /// symmetric closure.
+    pub different_from: Vec<(Id, Id)>,
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8 (`abox`): a supported `owl:hasKey` axiom — the key CLASS (as a
+/// saturation concept, so "a is derivably in the key class" is the membership test `class ∈ S({a})`)
+/// and the key PROPERTIES, each as `(role, property dict id)`. Both key kinds are matched on a
+/// SHARED value: an object key on a shared nominal successor (asserted or derived), a data key on a
+/// shared literal TERM (sound — identical terms denote identical values; value-equal-but-lexically-
+/// distinct literals are an honest incompleteness pending the `cdomain` numeric tower).
+#[cfg(feature = "abox")]
+pub struct AboxKey {
+    pub class: Concept,
+    pub props: Vec<(Role, Id)>,
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8 (`abox`): a negative property assertion. An `Object` NPA is a clash iff
+/// the positive `a p b` is ASSERTED or DERIVED (a nominal successor of `{a}` via `p`); a `Data` NPA
+/// is a clash iff the positive `a p v` is ASSERTED (data-property positives are not internalized, so
+/// a derived data positive is an honest incompleteness — never an unsound miss of a clash).
+#[cfg(feature = "abox")]
+pub enum AboxNpa {
+    /// Negative OBJECT property assertion `¬(a p b)`.
+    Object {
+        source_dict: Id,
+        prop_dict: Id,
+        target_dict: Id,
+        source_c: Concept,
+        role: Role,
+        target_c: Concept,
+    },
+    /// Negative DATA property assertion `¬(a p "v")`.
+    Data {
+        source_dict: Id,
+        prop_dict: Id,
+        value_dict: Id,
+    },
 }
 
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
@@ -149,6 +209,23 @@ struct Vocab {
     /// which `Names::role_of` never resolves).
     #[cfg(feature = "abox")]
     bottom_object_property: Id,
+    /// [OPUS-4.8] sq-pbz04.2.8 (`abox`): the E4 ABox vocabulary — `owl:hasKey` (keys), the
+    /// negative-property-assertion reification predicates (`owl:sourceIndividual` /
+    /// `owl:assertionProperty` / `owl:targetIndividual` / `owl:targetValue`), and
+    /// `owl:differentFrom`. Only consulted by [`decode_abox_e4`] under `opts.abox`; interned
+    /// (read-only) but unused on the `Classifier::classify` path, so that path stays byte-identical.
+    #[cfg(feature = "abox")]
+    has_key: Id,
+    #[cfg(feature = "abox")]
+    source_individual: Id,
+    #[cfg(feature = "abox")]
+    assertion_property: Id,
+    #[cfg(feature = "abox")]
+    target_individual: Id,
+    #[cfg(feature = "abox")]
+    target_value: Id,
+    #[cfg(feature = "abox")]
+    different_from: Id,
     /// Predicate ids whose presence on a class node makes it non-EL (see [`NON_EL_MARKERS`]).
     non_el: FxHashSet<Id>,
     /// RBox vocabulary — only consulted under the `rbox` feature (E2).
@@ -187,6 +264,18 @@ impl Vocab {
             with_restrictions: look(format!("{}withRestrictions", OWL)),
             #[cfg(feature = "abox")]
             bottom_object_property: look(format!("{}bottomObjectProperty", OWL)),
+            #[cfg(feature = "abox")]
+            has_key: look(format!("{}hasKey", OWL)),
+            #[cfg(feature = "abox")]
+            source_individual: look(format!("{}sourceIndividual", OWL)),
+            #[cfg(feature = "abox")]
+            assertion_property: look(format!("{}assertionProperty", OWL)),
+            #[cfg(feature = "abox")]
+            target_individual: look(format!("{}targetIndividual", OWL)),
+            #[cfg(feature = "abox")]
+            target_value: look(format!("{}targetValue", OWL)),
+            #[cfg(feature = "abox")]
+            different_from: look(format!("{}differentFrom", OWL)),
             non_el: NON_EL_MARKERS
                 .iter()
                 .map(|m| look(format!("{}{}", OWL, m)))
@@ -420,13 +509,20 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
     // that property actually occurred as a role (so `New-Feature-BottomObjectProperty-001`-shaped
     // `{a} ⊑ ∃⊥.⊤` collapses to `{a} ⊑ ⊥`).
     #[cfg(feature = "abox")]
-    let bottom_op_axiom = if opts.abox {
+    let (bottom_op_axiom, abox_extras) = if opts.abox {
         report.skipped_assertions = decode_abox(dict, triples, &idx, &v, &mut norm);
-        norm.names
+        let bottom = norm
+            .names
             .role_of(v.bottom_object_property)
-            .map(|r| Normal::ExistsSub(r, TOP, BOTTOM))
+            .map(|r| Normal::ExistsSub(r, TOP, BOTTOM));
+        // [OPUS-4.8] sq-pbz04.2.8: E4 — extract `owl:hasKey` / negative property assertions /
+        // asserted `owl:differentFrom`, minting every referenced concept/role/nominal into the SAME
+        // name table BEFORE saturation so the readoff's S-set / R-link lookups are well-sized.
+        let extras =
+            decode_abox_e4(dict, triples, &idx, &v, norm.names, &mut report.skipped_assertions);
+        (bottom, extras)
     } else {
-        None
+        (None, AboxExtras::default())
     };
 
     let axioms = norm.finish();
@@ -462,6 +558,8 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
         report,
         #[cfg(feature = "rbox")]
         role_axioms,
+        #[cfg(feature = "abox")]
+        abox_extras,
     }
 }
 
@@ -945,6 +1043,152 @@ fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mu
         }
     }
     skipped
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8 (`abox`): whether a dict id is a NAMED (IRI) individual/property. Keys
+/// apply only to NAMED individuals (OWL 2 Direct Semantics), and blank-node key VALUES are treated
+/// conservatively (not matched), so the E4 extractor filters on this.
+#[cfg(feature = "abox")]
+fn is_named_iri(dict: &Dict, id: Id) -> bool {
+    !sparq_core::dict::is_inline(id)
+        && matches!(dict.term_parts(id), sparq_core::dict::TermParts::Iri { .. })
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8 (`abox`): extract the E4 ABox axioms — `owl:hasKey` keys, negative
+/// property assertions, and asserted `owl:differentFrom` inequalities — minting every referenced
+/// class concept / property role / individual nominal into `names` so the post-saturation readoff
+/// (see `abox.rs`) can look them up in the saturated S-sets and R-links.
+///
+/// FAIL-CLOSED: a malformed shape is discarded and counted in `*skipped` — never a guessed
+/// derivation. Specifically a key whose class is not a decodable ATOMIC concept, whose list is
+/// empty, or whose list carries a non-IRI member; and an NPA missing its source / property / target
+/// or carrying a non-individual source / structural property / non-individual object.
+#[cfg(feature = "abox")]
+fn decode_abox_e4(
+    dict: &Dict,
+    triples: &[[Id; 3]],
+    idx: &Idx,
+    v: &Vocab,
+    names: &mut Names,
+    skipped: &mut usize,
+) -> AboxExtras {
+    let mut extras = AboxExtras::default();
+
+    // One pass: collect key heads (class -> hasKey list head), NPA reification parts (keyed by the
+    // NPA node), and asserted differentFrom pairs.
+    let mut key_heads: Vec<(Id, Id)> = Vec::new();
+    let mut npa_source: FxHashMap<Id, Id> = FxHashMap::default();
+    let mut npa_prop: FxHashMap<Id, Id> = FxHashMap::default();
+    let mut npa_target_ind: FxHashMap<Id, Id> = FxHashMap::default();
+    let mut npa_target_val: FxHashMap<Id, Id> = FxHashMap::default();
+    // NPA nodes in first-seen order (deduplicated) for a deterministic scan.
+    let mut npa_nodes: Vec<Id> = Vec::new();
+    let mut seen_npa: FxHashSet<Id> = FxHashSet::default();
+    for &[s, p, o] in triples {
+        let is_npa_part = p == v.source_individual
+            || p == v.assertion_property
+            || p == v.target_individual
+            || p == v.target_value;
+        if p == v.has_key {
+            key_heads.push((s, o));
+        } else if is_npa_part {
+            if seen_npa.insert(s) {
+                npa_nodes.push(s);
+            }
+            if p == v.source_individual {
+                npa_source.insert(s, o);
+            } else if p == v.assertion_property {
+                npa_prop.insert(s, o);
+            } else if p == v.target_individual {
+                npa_target_ind.insert(s, o);
+            } else {
+                npa_target_val.insert(s, o);
+            }
+        } else if p == v.different_from && is_individual(dict, s) && is_individual(dict, o) {
+            extras.different_from.push((s, o));
+        }
+    }
+
+    // Keys: decode the class to an ATOMIC concept and the list to IRI properties.
+    for (class_node, head) in key_heads {
+        let mut cache = FxHashMap::default();
+        let class = match decode(class_node, idx, v, names, &mut cache, 0) {
+            Some(Expr::Atom(c)) => c,
+            // A complex/undecodable key class (intersection, restriction, non-EL) is deferred.
+            _ => {
+                *skipped += 1;
+                continue;
+            }
+        };
+        let members = decode_list(head, idx, v);
+        if members.is_empty() || members.iter().any(|&m| !is_named_iri(dict, m)) {
+            *skipped += 1;
+            continue;
+        }
+        let props: Vec<(Role, Id)> = members.iter().map(|&m| (names.role(m), m)).collect();
+        extras.keys.push(AboxKey { class, props });
+    }
+
+    // [OPUS-4.8] sq-pbz04.2.8: mint every NAMED subject of a key-property assertion as a nominal, so
+    // the readoff's key analysis sees individuals that appear ONLY in a (skipped) DATA-property
+    // assertion (e.g. `Peter hasSSN "…"`). Object-key subjects are already minted by `decode_abox`
+    // (the OPA path); this is idempotent for them. Only runs when a well-formed key exists.
+    if !extras.keys.is_empty() {
+        let key_props: FxHashSet<Id> = extras
+            .keys
+            .iter()
+            .flat_map(|k| k.props.iter().map(|&(_, p)| p))
+            .collect();
+        for &[s, p, _] in triples {
+            if key_props.contains(&p) && is_named_iri(dict, s) {
+                let _ = names.nominal(s);
+            }
+        }
+    }
+
+    // Negative property assertions.
+    for node in npa_nodes {
+        let (Some(&src), Some(&prop)) = (npa_source.get(&node), npa_prop.get(&node)) else {
+            *skipped += 1; // an NPA node missing its source or property
+            continue;
+        };
+        if let Some(&tind) = npa_target_ind.get(&node) {
+            // Negative OBJECT property assertion.
+            if is_individual(dict, src)
+                && is_individual(dict, tind)
+                && !is_structural_predicate(dict, prop)
+            {
+                let role = names.role(prop);
+                let source_c = names.nominal(src);
+                let target_c = names.nominal(tind);
+                extras.npas.push(AboxNpa::Object {
+                    source_dict: src,
+                    prop_dict: prop,
+                    target_dict: tind,
+                    source_c,
+                    role,
+                    target_c,
+                });
+            } else {
+                *skipped += 1;
+            }
+        } else if let Some(&tval) = npa_target_val.get(&node) {
+            // Negative DATA property assertion.
+            if is_individual(dict, src) && is_literal(dict, tval) {
+                extras.npas.push(AboxNpa::Data {
+                    source_dict: src,
+                    prop_dict: prop,
+                    value_dict: tval,
+                });
+            } else {
+                *skipped += 1;
+            }
+        } else {
+            *skipped += 1; // an NPA node with no target
+        }
+    }
+
+    extras
 }
 
 /// Walks an `rdf:first`/`rdf:rest` list from `head`, returning member node ids. Bounded by
