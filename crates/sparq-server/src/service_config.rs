@@ -397,4 +397,43 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("service-allow-file"));
     }
+
+    // [OPUS-4.8] sq-qcnn.37: direct tests for the normalize_host branches and from_sources wrapper
+    // that the existing tests leave uncovered. Tests exercise the REAL normalisation logic.
+
+    #[test]
+    fn normalize_host_ipv6_with_non_digit_port_strips_brackets() {
+        // [addr]:nondigits — the inner condition `port.bytes().all(ascii_digit)` is FALSE,
+        // so normalize_host falls through to `return inner.to_string()` (strips brackets).
+        let mut a = ServiceAllowlist::default();
+        a.add("[::1]:abc").unwrap(); // non-digit port → normalize to bare ipv6 "::1"
+        assert_eq!(a.engine_entries(), vec!["::1".to_string()]);
+        // Empty port after the colon also takes the false branch.
+        let mut b = ServiceAllowlist::default();
+        b.add("[::1]:").unwrap(); // empty port → normalize to bare "::1"
+        assert_eq!(b.engine_entries(), vec!["::1".to_string()]);
+    }
+
+    #[test]
+    fn normalize_host_malformed_ipv6_no_closing_bracket() {
+        // Bracketed IPv6 with no closing `]` — split_once(']') returns None, so we fall to
+        // `return e.to_string()` (leave verbatim; the entry just won't match any real host).
+        let mut a = ServiceAllowlist::default();
+        a.add("[::1").unwrap(); // malformed — no ']' — stored verbatim
+        assert_eq!(a.engine_entries(), vec!["[::1".to_string()]);
+    }
+
+    #[test]
+    fn from_sources_wrapper_delegates_to_from_sources_with_env() {
+        // [OPUS-4.8] sq-qcnn.37: `from_sources` is a thin wrapper that reads the real
+        // SPARQ_SERVICE_ALLOW env var. The env var is NOT set in this test (the real
+        // env baseline is absent), so the result is the union of the CLI args only.
+        // This exercises the `from_sources` function body (lines 177–179).
+        let a = ServiceAllowlist::from_sources(
+            &["direct.example.org".to_string()],
+            None,
+        )
+        .expect("from_sources with valid CLI entry must succeed");
+        assert!(a.engine_entries().contains(&"direct.example.org".to_string()));
+    }
 }
