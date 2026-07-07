@@ -61,6 +61,7 @@ pub(crate) fn validate_graph(
         diagnostics: Vec::new(),
         active_meta: None,
         sparql_batch: FxHashMap::default(),
+        node_expr_cache: None,
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
@@ -72,10 +73,20 @@ pub(crate) fn validate_graph(
         // nested/data-graph focus falls back to the per-focus path unchanged.
         let foci = v.focus_nodes(sid);
         v.prime_sparql_batch(sid, &foci);
+        // [SONNET-4.6] (sq-7d3dj.33.5) If the shape has a SPARQL node expression
+        // (`sh:values [ sh:select … ]` / `[ sh:sparqlExpr … ]`), batch-evaluate it
+        // over ALL focus nodes in one query execution and cache the result map so
+        // `validate_shape` drains it per focus instead of re-running per focus node.
+        if let Some(idx) = v.shapes.shapes[sid].value_expr {
+            let data = v.data.graph();
+            let map = v.shapes.select_exprs[idx].eval_batch(data, &foci);
+            v.node_expr_cache = Some((sid, map));
+        }
         for focus in &foci {
             v.validate_shape(sid, focus, &mut out);
         }
         v.sparql_batch.clear();
+        v.node_expr_cache = None;
     }
     // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:shape` data-graph targets: a triple
     // `?n sh:shape ?S` in the DATA graph makes `?n` a focus node of shape `?S`.
@@ -103,6 +114,7 @@ pub(crate) fn count_focus_nodes(data: &Graph, shapes: &ShapesModel) -> usize {
         diagnostics: Vec::new(),
         active_meta: None,
         sparql_batch: FxHashMap::default(),
+        node_expr_cache: None,
     };
     let mut all: Vec<Term> = Vec::new();
     for &sid in &shapes.targeted {
@@ -138,6 +150,7 @@ pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node
         diagnostics: Vec::new(),
         active_meta: None,
         sparql_batch: FxHashMap::default(),
+        node_expr_cache: None,
     };
     v.conforms(node, sid)
 }
@@ -180,6 +193,13 @@ struct Validator<'a> {
     /// A `(sid, idx)` absent here (a non-batchable constraint, or a shape validated
     /// outside the top-level targeted loop) falls back to the per-focus path.
     sparql_batch: FxHashMap<(usize, usize), FxHashMap<Term, Vec<ValidationResult>>>,
+    /// [SONNET-4.6] (sq-7d3dj.33.5) Pre-computed node-expression value-node map.
+    /// Set to `Some((sid, map))` by [`validate_graph`] before iterating over a
+    /// shape's focus nodes when the shape carries `sh:values [ sh:select … ]` /
+    /// `[ sh:sparqlExpr … ]`, then cleared to `None` after the loop. This allows
+    /// [`validate_shape`] to drain from the pre-computed map instead of re-running
+    /// the SPARQL query per focus node (the O(N_focus) root cause).
+    node_expr_cache: Option<(usize, FxHashMap<Term, Vec<Term>>)>,
 }
 
 impl<'a> Validator<'a> {
@@ -328,7 +348,19 @@ impl<'a> Validator<'a> {
         // the shape's path (set in `result`), so only the value-node SET changes.
         let values: Vec<Term> = match shape.value_expr {
             Some(idx) => {
-                crate::view::dedup(self.shapes.select_exprs[idx].eval(self.data.graph(), focus))
+                // [SONNET-4.6] (sq-7d3dj.33.5) Use the pre-computed batch map when
+                // available (set by `validate_graph` before the focused shape loop);
+                // fall back to per-focus eval for nested/data-graph shapes.
+                let cached = self.node_expr_cache.as_ref().and_then(|(csid, map)| {
+                    if *csid == sid {
+                        map.get(focus).cloned()
+                    } else {
+                        None
+                    }
+                });
+                crate::view::dedup(cached.unwrap_or_else(|| {
+                    self.shapes.select_exprs[idx].eval(self.data.graph(), focus)
+                }))
             }
             None => match &shape.path {
                 Some(path) => path.values(&self.data, focus),

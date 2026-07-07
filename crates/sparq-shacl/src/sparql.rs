@@ -478,6 +478,54 @@ impl PreparedSelectExpr {
         Self::run(data, self.query.clone())
     }
 
+    /// [SONNET-4.6] (sq-7d3dj.33.5) Batch-evaluates the node expression for ALL
+    /// `foci` in ONE batched execution: injects a single `VALUES ?this { <f1> … }`
+    /// (chunked at [`FOCUS_BATCH_CHUNK`]), executes once per chunk, then GROUPS the
+    /// first-result-variable bindings by `?this` to build the per-focus value-node
+    /// sets. This is the O(1)-query replacement for calling [`Self::eval`] per focus
+    /// node (the O(N_focus) root cause for `sh:values` property shapes).
+    ///
+    /// Returns a map with an entry for EVERY expressible focus in `foci` (empty
+    /// `Vec` when a focus yields no output nodes). A blank-node focus (not a VALUES
+    /// ground term) is absent — identical to the empty-return of [`Self::eval`].
+    pub(crate) fn eval_batch(
+        &self,
+        data: &sparq_core::Graph,
+        foci: &[Term],
+    ) -> FxHashMap<Term, Vec<Term>> {
+        let mut grouped: FxHashMap<Term, Vec<Term>> = FxHashMap::default();
+        let ground: Vec<&Term> = foci
+            .iter()
+            .filter(|f| term_to_ground(f).is_some())
+            .collect();
+        for f in &ground {
+            grouped.entry((*f).clone()).or_default();
+        }
+        for chunk in ground.chunks(FOCUS_BATCH_CHUNK) {
+            let Some(bound) = pre_bind_select_multi(&self.query, "this", chunk) else {
+                continue; // inexpressible term in chunk (unreachable — all ground)
+            };
+            bump_exec_count();
+            let prepared = sparq_engine::PreparedQuery::from(bound);
+            let Ok(result) = sparq_engine::query_prepared(data, &prepared) else {
+                continue; // runtime query error → no nodes for this chunk (lenient)
+            };
+            // The output nodes are the bindings of the FIRST result variable (position 0).
+            // pre_bind_select_multi appends ?this to the projection when absent, so the
+            // author's first projected variable stays at position 0.
+            let tpos = result.vars.iter().position(|v| v.as_str() == "this");
+            for row in &result.rows {
+                let Some(this) = tpos.and_then(|i| row.get(i)).and_then(|c| c.clone()) else {
+                    continue;
+                };
+                if let Some(Some(node)) = row.first() {
+                    grouped.entry(this).or_default().push(node.clone());
+                }
+            }
+        }
+        grouped
+    }
+
     /// Runs a (possibly pre-bound) SELECT and collects the FIRST-result-variable
     /// bindings, skipping unbound rows. A runtime query error yields no nodes
     /// (lenient; never panics `validate`).
@@ -2243,6 +2291,111 @@ mod tests {
         .unwrap();
         let nodes = expr.eval_target(&data);
         assert_eq!(nodes, vec![iri("http://example.org/bob")]);
+    }
+
+    // --- [SONNET-4.6] (sq-7d3dj.33.5) PreparedSelectExpr::eval_batch ---------------
+    //
+    // Three tests covering the batched node-expression path:
+    //   * anti-vacuity: 4 foci → exactly 1 execution, correct per-focus grouping.
+    //   * equivalence: eval_batch and per-focus eval produce the same value-node sets.
+    //   * blank-node filtering: blank-node foci are absent from the result map.
+
+    const BATCH_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:a ex:color "red"    .
+        ex:b ex:color "blue"   .
+        ex:c ex:color "green"  .
+        ex:d ex:color "yellow" .
+    "#;
+
+    #[test]
+    fn eval_batch_groups_output_nodes_by_focus_and_fires_once() {
+        // [SONNET-4.6] (sq-7d3dj.33.5) 4 foci → exactly ONE query execution (not 4);
+        // each focus's output-node set is correct.
+        let data = graph(BATCH_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?c WHERE { $this ex:color ?c }",
+        )
+        .unwrap();
+        let foci = [
+            iri("http://example.org/a"),
+            iri("http://example.org/b"),
+            iri("http://example.org/c"),
+            iri("http://example.org/d"),
+        ];
+        let before = exec_count();
+        let grouped = expr.eval_batch(&data, &foci);
+        // Anti-vacuity: 4 foci → 1 execution, not 4.
+        assert_eq!(exec_count() - before, 1, "eval_batch must fire exactly once");
+        // Every expressible focus gets an entry; each has its color literal.
+        assert_eq!(grouped.len(), 4);
+        assert_eq!(
+            grouped[&foci[0]],
+            vec![Term::Literal(oxrdf::Literal::new_simple_literal("red"))]
+        );
+        assert_eq!(
+            grouped[&foci[1]],
+            vec![Term::Literal(oxrdf::Literal::new_simple_literal("blue"))]
+        );
+        assert_eq!(
+            grouped[&foci[2]],
+            vec![Term::Literal(oxrdf::Literal::new_simple_literal("green"))]
+        );
+        assert_eq!(
+            grouped[&foci[3]],
+            vec![Term::Literal(oxrdf::Literal::new_simple_literal("yellow"))]
+        );
+    }
+
+    #[test]
+    fn eval_batch_result_equals_per_focus_eval() {
+        // [SONNET-4.6] (sq-7d3dj.33.5) eval_batch must produce the same value-node
+        // sets as calling eval() once per focus node.
+        let data = graph(BATCH_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?c WHERE { $this ex:color ?c }",
+        )
+        .unwrap();
+        let foci = [
+            iri("http://example.org/a"),
+            iri("http://example.org/b"),
+            iri("http://example.org/c"),
+            iri("http://example.org/d"),
+        ];
+        let grouped = expr.eval_batch(&data, &foci);
+        for f in &foci {
+            let batched = grouped.get(f).cloned().unwrap_or_default();
+            let per_focus = expr.eval(&data, f);
+            assert_eq!(
+                batched, per_focus,
+                "eval_batch disagrees with eval() for focus {}",
+                f
+            );
+        }
+    }
+
+    #[test]
+    fn eval_batch_skips_blank_node_foci() {
+        // [SONNET-4.6] (sq-7d3dj.33.5) A blank-node focus cannot appear in VALUES
+        // syntax; eval_batch must omit it from the result map (not panic or error).
+        let data = graph(BATCH_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?c WHERE { $this ex:color ?c }",
+        )
+        .unwrap();
+        let bnode = Term::BlankNode(oxrdf::BlankNode::new("bn0").unwrap());
+        let iri_focus = iri("http://example.org/a");
+        let foci = [bnode.clone(), iri_focus.clone()];
+        let grouped = expr.eval_batch(&data, &foci);
+        // Blank node is absent; the IRI focus has its entry.
+        assert!(
+            !grouped.contains_key(&bnode),
+            "blank-node focus must be absent from eval_batch result"
+        );
+        assert!(grouped.contains_key(&iri_focus));
     }
 
     // --- [OPUS-4.8] (sq-0mjfd) SHACL-SPARQL pre-binding rejection (sht:Failure) --
