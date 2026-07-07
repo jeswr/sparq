@@ -1,0 +1,5 @@
+{
+  "pr": 1741,
+  "date": "2026-07-07",
+  "reason": "exec.rs adds always-compiled SIP join code (mod sip, certain_vars, subst_pattern, try_sip_join, SIP_MAX_SMALL_ROWS) — correlated graph-pattern join evaluation moves feature-OFF wasm bytes"
+}
