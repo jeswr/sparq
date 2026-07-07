@@ -8,7 +8,7 @@
 //! `AppState` — the exact stack the `sparq` binary runs) on an ephemeral `127.0.0.1:0`
 //! loopback port over a small fixed synthetic corpus, drives concurrent SPARQL SELECT/ASK
 //! queries against it with a dependency-free keep-alive HTTP/1.1 client, and reports
-//! {req/s, p50/p99 latency (ms), peak RSS}.
+//! {req/s, p50/p99 latency (ms), peak RSS, p50/p99 TTFB (time-to-first-byte) ms}.
 //!
 //! It changes NO server behaviour — it is measurement infrastructure only (a detached
 //! cargo project outside the root workspace, like `bench/serve` and `bench/memtier`).
@@ -273,11 +273,14 @@ fn request_bytes(addr: &SocketAddr, query: &str) -> Vec<u8> {
 }
 
 /// Writes one request and reads exactly one response (Content-Length framed). Returns the
-/// HTTP status, or `None` on a socket error (the caller reconnects).
-fn do_request(conn: &mut TcpStream, req: &[u8]) -> Option<u16> {
+/// HTTP status and time-to-first-byte in microseconds, or `None` on a socket error (the
+/// caller reconnects). TTFB is measured from request write to first read from socket.
+fn do_request(conn: &mut TcpStream, req: &[u8]) -> Option<(u16, u64)> {
     conn.write_all(req).ok()?;
+    let ttfb_start = Instant::now();
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 16384];
+    let mut ttfb_us = 0u64;
     let header_end = loop {
         if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
             break pos + 4;
@@ -285,6 +288,10 @@ fn do_request(conn: &mut TcpStream, req: &[u8]) -> Option<u16> {
         let n = conn.read(&mut tmp).ok()?;
         if n == 0 {
             return None;
+        }
+        // Record TTFB on first successful read [OPUS-4.8]
+        if ttfb_us == 0 {
+            ttfb_us = ttfb_start.elapsed().as_micros() as u64;
         }
         buf.extend_from_slice(&tmp[..n]);
     };
@@ -306,7 +313,7 @@ fn do_request(conn: &mut TcpStream, req: &[u8]) -> Option<u16> {
         }
         have += n;
     }
-    Some(status)
+    Some((status, ttfb_us))
 }
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -317,7 +324,7 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 // Closed-loop measurement
 // --------------------------------------------------------------------------- //
 
-/// One measured cell: {req/s, p50/p99 ms} over `conns` closed-loop connections.
+/// One measured cell: {req/s, p50/p99 ms, p50/p99 TTFB ms} over `conns` closed-loop connections.
 struct Sample {
     query: String,
     conns: usize,
@@ -328,12 +335,14 @@ struct Sample {
     reqs_per_s: f64,
     p50_ms: f64,
     p99_ms: f64,
+    p50_ttfb_ms: f64,
+    p99_ttfb_ms: f64,
 }
 
 /// Drive `query` closed-loop from `conns` keep-alive connections for `duration`, collecting
-/// per-request latencies. Closed-loop: each connection fires back-to-back, so this measures
-/// the server's saturation throughput at that concurrency (latency is interpreted relative
-/// to the level — the classic closed-loop caveat).
+/// per-request latencies and TTFB. Closed-loop: each connection fires back-to-back, so this
+/// measures the server's saturation throughput at that concurrency (latency is interpreted
+/// relative to the level — the classic closed-loop caveat).
 fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> Sample {
     let req = Arc::new(request_bytes(&addr, query));
     // Anchor the deadline AND the elapsed timer to one `start` instant so req/s and latency
@@ -350,13 +359,15 @@ fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> 
             let non200 = non200.clone();
             std::thread::spawn(move || {
                 let mut lat: Vec<u64> = Vec::with_capacity(1 << 16);
+                let mut ttfb: Vec<u64> = Vec::with_capacity(1 << 16);
                 let mut conn = TcpStream::connect(addr).expect("client connect");
                 conn.set_nodelay(true).ok();
                 while Instant::now() < deadline {
                     let t = Instant::now();
                     match do_request(&mut conn, &req) {
-                        Some(status) => {
+                        Some((status, ttfb_us)) => {
                             lat.push(t.elapsed().as_micros() as u64);
+                            ttfb.push(ttfb_us);
                             if status != 200 {
                                 non200.fetch_add(1, Ordering::Relaxed);
                             }
@@ -373,17 +384,21 @@ fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> 
                         }
                     }
                 }
-                lat
+                (lat, ttfb)
             })
         })
         .collect();
 
     let mut all: Vec<u64> = Vec::new();
+    let mut all_ttfb: Vec<u64> = Vec::new();
     for w in workers {
-        all.extend(w.join().expect("client worker join"));
+        let (lat, ttfb) = w.join().expect("client worker join");
+        all.extend(lat);
+        all_ttfb.extend(ttfb);
     }
     let elapsed_s = start.elapsed().as_secs_f64().max(1e-9);
     all.sort_unstable();
+    all_ttfb.sort_unstable();
     Sample {
         query: query.to_string(),
         conns,
@@ -394,6 +409,8 @@ fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> 
         reqs_per_s: all.len() as f64 / elapsed_s,
         p50_ms: percentile_ms(&all, 0.50),
         p99_ms: percentile_ms(&all, 0.99),
+        p50_ttfb_ms: percentile_ms(&all_ttfb, 0.50),
+        p99_ttfb_ms: percentile_ms(&all_ttfb, 0.99),
     }
 }
 
@@ -450,7 +467,7 @@ fn print_summary(cfg: &Config, corpus_triples: usize, samples: &[Sample], peak_r
         "# corpus={} triples  server max_concurrent=32 (default)  host_cpus={}",
         corpus_triples, cpus
     );
-    println!("# {:<40} {:>5} {:>12} {:>10} {:>10} {:>7} {:>7}", "query", "conns", "req/s", "p50_ms", "p99_ms", "errs", "non200");
+    println!("# {:<40} {:>5} {:>12} {:>10} {:>10} {:>7} {:>7} {:>10} {:>10}", "query", "conns", "req/s", "p50_ms", "p99_ms", "errs", "non200", "p50_ttfb", "p99_ttfb");
     for s in samples {
         let q = if s.query.len() > 40 {
             format!("{}…", &s.query[..39])
@@ -458,8 +475,8 @@ fn print_summary(cfg: &Config, corpus_triples: usize, samples: &[Sample], peak_r
             s.query.clone()
         };
         println!(
-            "  {:<40} {:>5} {:>12.0} {:>10.3} {:>10.3} {:>7} {:>7}",
-            q, s.conns, s.reqs_per_s, s.p50_ms, s.p99_ms, s.errors, s.non200
+            "  {:<40} {:>5} {:>12.0} {:>10.3} {:>10.3} {:>7} {:>7} {:>10.3} {:>10.3}",
+            q, s.conns, s.reqs_per_s, s.p50_ms, s.p99_ms, s.errors, s.non200, s.p50_ttfb_ms, s.p99_ttfb_ms
         );
     }
     println!(
@@ -496,7 +513,9 @@ fn write_json(
         s.push_str(&format!("      \"elapsed_s\": {:.6},\n", sm.elapsed_s));
         s.push_str(&format!("      \"reqs_per_s\": {:.3},\n", sm.reqs_per_s));
         s.push_str(&format!("      \"p50_ms\": {:.6},\n", sm.p50_ms));
-        s.push_str(&format!("      \"p99_ms\": {:.6}\n", sm.p99_ms));
+        s.push_str(&format!("      \"p99_ms\": {:.6},\n", sm.p99_ms));
+        s.push_str(&format!("      \"p50_ttfb_ms\": {:.6},\n", sm.p50_ttfb_ms));
+        s.push_str(&format!("      \"p99_ttfb_ms\": {:.6}\n", sm.p99_ttfb_ms));
         s.push_str(if i + 1 == samples.len() { "    }\n" } else { "    },\n" });
     }
     s.push_str("  ]\n}\n");

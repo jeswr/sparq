@@ -13,6 +13,23 @@
 //   ∃r.Self ∈ S({a})  (owl:hasSelf, sq-pbz04.2.6)  ⇒  `a r a`   (the CR-Self self-loop readoff)
 //   {a} ⊑ ⊥   OR  ⊤ ⊑ ⊥                            ⇒  a whole-ontology `inconsistent` verdict
 //
+// [OPUS-4.8] sq-pbz04.2.8 (E4) — three more ABox mechanisms read off the SAME saturation, all
+// soundness-over-completeness (each verdict holds in EVERY model of the input):
+//   * `owl:hasKey(C, keys)` — two DISTINCT named (IRI) individuals BOTH derivably in `C`, sharing a
+//     derivable value on EVERY key property, are the SAME (`owl:sameAs`). Sound: a shared ASSERTED/
+//     DERIVED value on every key witnesses the OWL 2 key-satisfaction antecedent, so `a = b` in every
+//     model. Firing on a PARTIAL match is impossible BY CONSTRUCTION (the per-property shared-value
+//     sets must ALL be non-empty AND pairwise-intersecting). Object keys match on a shared nominal
+//     successor; data keys on a shared literal TERM (identical terms ⇒ identical values — sound).
+//   * negative property assertions (`owl:NegativePropertyAssertion`) — a clash (whole-ontology
+//     inconsistency) iff the corresponding POSITIVE assertion is asserted or DERIVED. (Object: a
+//     nominal successor of `{a}` via `p`. Data: an asserted `a p "v"` triple — data positives are
+//     not internalized, an honest incompleteness, never an unsound missed clash.)
+//   * `owl:differentFrom` — read off ONLY from a DERIVED nominal clash (`{a} ⊓ {b} ⊑ ⊥`, e.g. `a : A`,
+//     `b : B`, `A ⊓ B ⊑ ⊥`) or the SYMMETRIC closure of an asserted inequality — never fabricated.
+//     An asserted-or-derived inequality that coincides with a derived `owl:sameAs` is a whole-ontology
+//     inconsistency (a proof that `a = b` AND `a ≠ b`).
+//
 // SOUNDNESS (the load-bearing invariant — soundness over completeness). The saturation maintains
 // `D ∈ S(C) ⟹ T ⊨ C ⊑ D`. A nominal `{a}` denotes the singleton `{a^I}`, so:
 //   * `C ∈ S({a})` with C named ⟹ `T ⊨ {a} ⊑ C` ⟹ `a^I ∈ C^I` — the typing holds in EVERY model.
@@ -20,18 +37,19 @@
 //   * `⊥ ∈ S({a})` ⟹ `{a}` is empty, but `a` witnesses it non-empty — a contradiction: the whole
 //     ontology has no model. `⊥ ∈ S(⊤)` is the global `⊤ ⊑ ⊥` case.
 // The CR6 reachability side-condition is untouched (this module only READS the saturation the
-// existing `classify::saturate` produced). Unsupported assertion shapes stay counted skips
-// (`Report::skipped_assertions`, fail-closed) — never a guessed typing.
+// existing `classify::saturate` produced). Unsupported assertion / key / NPA shapes stay counted
+// skips (`Report::skipped_assertions`, fail-closed) — never a guessed typing/equality/clash.
 
-use crate::extract::{self, ExtractOpts};
-use crate::normal::{Concept, Names, BOTTOM, TOP};
+use crate::extract::{self, AboxNpa, ExtractOpts};
+use crate::normal::{Concept, Names, Normal, BOTTOM, TOP};
 use crate::{classify, ClassHierarchy, Report};
 use rustc_hash::{FxHashMap, FxHashSet};
-use sparq_core::dict::{Dict, Id, NO_ID};
+use sparq_core::dict::{Dict, Id, TermParts, NO_ID};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const OWL_THING: &str = "http://www.w3.org/2002/07/owl#Thing";
 const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
+const OWL_DIFFERENT_FROM: &str = "http://www.w3.org/2002/07/owl#differentFrom";
 
 /// A list of `(individual dict id, class-or-individual dict id)` readoff rows.
 type Pairs = Vec<(Id, Id)>;
@@ -55,6 +73,10 @@ pub struct Realization {
     /// [OPUS-4.8] sq-pbz04.2.6: `(individual, object-property)` pairs for each derived
     /// `owl:hasSelf` self-loop `a r a` (`∃r.Self ∈ S({a})`), sorted + deduplicated.
     self_loops: Vec<(Id, Id)>,
+    /// [OPUS-4.8] sq-pbz04.2.8: derived `(a, b)` `owl:differentFrom` inequalities — the symmetric
+    /// closure of asserted `owl:differentFrom` PLUS every derived nominal clash (`{a} ⊓ {b} ⊑ ⊥`),
+    /// sorted + deduplicated. EMPTY when the ontology is inconsistent.
+    different_from: Vec<(Id, Id)>,
 }
 
 impl Realization {
@@ -85,8 +107,19 @@ impl Realization {
         &self.self_loops
     }
 
-    /// Whether the WHOLE ontology is inconsistent (`{a} ⊑ ⊥` for an asserted individual, or a
-    /// global `⊤ ⊑ ⊥`). See [`ClassHierarchy::is_inconsistent`].
+    /// [OPUS-4.8] sq-pbz04.2.8: realised `owl:differentFrom` inequalities as `(a, b)` pairs — the
+    /// symmetric closure of asserted `owl:differentFrom` plus every derived nominal clash
+    /// (`{a} ⊓ {b} ⊑ ⊥`, e.g. two individuals in provably-disjoint classes). Sorted + deduplicated;
+    /// EMPTY when the ontology is inconsistent. Every pair is SOUND (`a^I ≠ b^I` in every model);
+    /// missing inequalities are honest incompleteness, never an unsound derivation.
+    pub fn different_from(&self) -> &[(Id, Id)] {
+        &self.different_from
+    }
+
+    /// Whether the WHOLE ontology is inconsistent: `{a} ⊑ ⊥` for an asserted individual, a global
+    /// `⊤ ⊑ ⊥`, a [OPUS-4.8] sq-pbz04.2.8 negative property assertion whose positive is
+    /// asserted/derived, or a proof of both `a = b` (`owl:sameAs`) and `a ≠ b` (`owl:differentFrom`).
+    /// See [`ClassHierarchy::is_inconsistent`].
     pub fn is_inconsistent(&self) -> bool {
         self.hierarchy.is_inconsistent()
     }
@@ -127,25 +160,237 @@ pub fn realize(dict: &Dict, triples: &[[Id; 3]]) -> Realization {
     let mut hierarchy = crate::hierarchy_from(cls, &ex.names, ex.report);
 
     // Whole-ontology inconsistency: an asserted individual forced into ⊥, or a global ⊤ ⊑ ⊥.
-    let inconsistent = sat.s[TOP as usize].contains(&BOTTOM)
+    let base_inconsistent = sat.s[TOP as usize].contains(&BOTTOM)
         || ex
             .names
             .nominals()
             .any(|(_, c)| sat.s[c as usize].contains(&BOTTOM));
-    hierarchy.inconsistent = inconsistent;
 
-    let (types, same_as, self_loops) = if inconsistent {
+    // [OPUS-4.8] sq-pbz04.2.8 (E4): a negative property assertion whose positive is asserted/derived
+    // is a whole-ontology clash. Checked only when the base ontology is otherwise consistent (an
+    // already-inconsistent ontology is inconsistent regardless).
+    let mut inconsistent = base_inconsistent || npa_clashes(&sat, &ex, triples);
+
+    let (types, same_as, self_loops, different_from) = if inconsistent {
         // An inconsistent ontology entails everything — surface ONLY the verdict, not a flood.
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     } else {
-        readoff(dict, &sat, &ex.names)
+        let (types, mut same_as, self_loops) = readoff(dict, &sat, &ex.names);
+        // [OPUS-4.8] sq-pbz04.2.8: key-induced merges add to the CR6 `owl:sameAs` readoff.
+        same_as.extend(key_same_as(dict, &sat, &ex, triples));
+        same_as.sort_unstable();
+        same_as.dedup();
+        // Derived `owl:differentFrom` (asserted symmetric closure + derived nominal clashes).
+        let different_from = derive_different_from(dict, &sat, &ex);
+        // A proof of both `a = b` and `a ≠ b` is a whole-ontology inconsistency — surface the
+        // verdict, NOT the contradictory rows.
+        let same_set: FxHashSet<(Id, Id)> = same_as.iter().copied().collect();
+        if different_from.iter().any(|p| same_set.contains(p)) {
+            inconsistent = true;
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        } else {
+            (types, same_as, self_loops, different_from)
+        }
     };
+    hierarchy.inconsistent = inconsistent;
     Realization {
         hierarchy,
         types,
         same_as,
         self_loops,
+        different_from,
     }
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8: whether any negative property assertion clashes with an asserted/derived
+/// positive. An object NPA `¬(a p b)` clashes iff `{b}` is a nominal successor of `{a}` via `p` (the
+/// R-link, which the CR3 internalization of the positive `a p b` — asserted OR derived — populates),
+/// OR the positive triple `[a p b]` is directly asserted. A data NPA `¬(a p "v")` clashes iff the
+/// positive triple `[a p "v"]` is asserted (data positives are not internalized — an honest
+/// incompleteness for a derived data positive, never an unsound missed clash). SOUND: an entailed
+/// positive contradicts the entailed negative, so no model exists.
+fn npa_clashes(sat: &classify::Saturation, ex: &extract::Extracted, triples: &[[Id; 3]]) -> bool {
+    ex.abox_extras.npas.iter().any(|npa| match *npa {
+        AboxNpa::Object {
+            source_dict,
+            prop_dict,
+            target_dict,
+            source_c,
+            role,
+            target_c,
+        } => {
+            triples.contains(&[source_dict, prop_dict, target_dict])
+                || sat
+                    .r_succ
+                    .get(&role)
+                    .and_then(|by_x| by_x.get(&source_c))
+                    .is_some_and(|succ| succ.contains(&target_c))
+        }
+        AboxNpa::Data {
+            source_dict,
+            prop_dict,
+            value_dict,
+        } => triples.contains(&[source_dict, prop_dict, value_dict]),
+    })
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8: whether a dict id is a NAMED (IRI) individual — keys apply only to named
+/// individuals (OWL 2 Direct Semantics) and the derived-`differentFrom` readoff stays on named
+/// individuals (blank-node inequalities are noise), so both filter on this.
+fn is_named_iri(dict: &Dict, id: Id) -> bool {
+    !sparq_core::dict::is_inline(id) && matches!(dict.term_parts(id), TermParts::Iri { .. })
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8: the `owl:hasKey`-induced `owl:sameAs` merges. For each key, two DISTINCT
+/// named (IRI) individuals BOTH derivably in the key class that share a value on EVERY key property
+/// are merged. Object-key values are the key role's NAMED nominal successors in the saturation
+/// (`{b}` ∈ `R(p)[{a}]`, asserted or derived); data-key values are the asserted literal objects
+/// (`[a p "v"]`). SOUNDNESS: a shared value on every key property is exactly the OWL 2 key antecedent,
+/// so `a = b` in every model; a PARTIAL match cannot fire because the per-property value sets must
+/// ALL be non-empty AND pairwise-intersect. Emits both `(a, b)` and `(b, a)` (equality is symmetric).
+fn key_same_as(
+    dict: &Dict,
+    sat: &classify::Saturation,
+    ex: &extract::Extracted,
+    triples: &[[Id; 3]],
+) -> Vec<(Id, Id)> {
+    let mut out: Vec<(Id, Id)> = Vec::new();
+    if ex.abox_extras.keys.is_empty() {
+        return out;
+    }
+    // Reverse map: nominal concept -> its individual dict id.
+    let nom_to_dict: FxHashMap<Concept, Id> = ex.names.nominals().map(|(id, c)| (c, id)).collect();
+    // Asserted literal values, indexed by (property dict id, subject dict id), for data keys.
+    let key_props: FxHashSet<Id> = ex
+        .abox_extras
+        .keys
+        .iter()
+        .flat_map(|k| k.props.iter().map(|&(_, p)| p))
+        .collect();
+    let mut data_vals: FxHashMap<(Id, Id), FxHashSet<Id>> = FxHashMap::default();
+    if !key_props.is_empty() {
+        for &[s, p, o] in triples {
+            if key_props.contains(&p) && is_literal_id(dict, o) {
+                data_vals.entry((p, s)).or_default().insert(o);
+            }
+        }
+    }
+
+    for key in &ex.abox_extras.keys {
+        // Candidate members: NAMED individuals with the key class in their S-set, each carrying its
+        // per-property value set. Skip any member lacking a value on SOME key property — an
+        // incomplete key does not constrain it (this is the guard that makes a PARTIAL match unable
+        // to fire).
+        let mut cand: Vec<(Id, Vec<FxHashSet<Id>>)> = Vec::new();
+        for (m_id, m_c) in ex.names.nominals() {
+            if !is_named_iri(dict, m_id) || !sat.s[m_c as usize].contains(&key.class) {
+                continue;
+            }
+            let mut sig: Vec<FxHashSet<Id>> = Vec::with_capacity(key.props.len());
+            let mut complete = true;
+            for &(role, prop) in &key.props {
+                let mut vs: FxHashSet<Id> = FxHashSet::default();
+                // Object values: named nominal successors via the key role.
+                if let Some(succ) = sat.r_succ.get(&role).and_then(|by_x| by_x.get(&m_c)) {
+                    for &vc in succ {
+                        if let Some(&vd) = nom_to_dict.get(&vc) {
+                            if is_named_iri(dict, vd) {
+                                vs.insert(vd);
+                            }
+                        }
+                    }
+                }
+                // Data values: asserted literal objects.
+                if let Some(lits) = data_vals.get(&(prop, m_id)) {
+                    vs.extend(lits.iter().copied());
+                }
+                if vs.is_empty() {
+                    complete = false;
+                    break;
+                }
+                sig.push(vs);
+            }
+            if complete {
+                cand.push((m_id, sig));
+            }
+        }
+        // Merge every pair sharing a value on EVERY key property.
+        for i in 0..cand.len() {
+            for j in (i + 1)..cand.len() {
+                let matches = cand[i]
+                    .1
+                    .iter()
+                    .zip(&cand[j].1)
+                    .all(|(a, b)| !a.is_disjoint(b));
+                if matches {
+                    out.push((cand[i].0, cand[j].0));
+                    out.push((cand[j].0, cand[i].0));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8: whether a dict id denotes a LITERAL (an inline integer or a stored
+/// `Lit`) — the object shape of a data-property value.
+fn is_literal_id(dict: &Dict, id: Id) -> bool {
+    sparq_core::dict::is_inline(id) || matches!(dict.term_parts(id), TermParts::Lit { .. })
+}
+
+/// [OPUS-4.8] sq-pbz04.2.8: the derived `owl:differentFrom` pairs — the SYMMETRIC closure of asserted
+/// `owl:differentFrom`, PLUS every derived nominal clash. A clash `{a} ⊓ {b} ⊑ ⊥` is witnessed by a
+/// disjointness axiom `c1 ⊓ c2 ⊑ ⊥` with `c1 ∈ S({a})` and `c2 ∈ S({b})`: if `a = b` then
+/// `a^I ∈ c1^I ∩ c2^I = ∅`, impossible, so `a ≠ b` in every model (SOUND). Named (IRI) individuals
+/// only. Both directions are emitted; the caller sorts + deduplicates.
+fn derive_different_from(
+    dict: &Dict,
+    sat: &classify::Saturation,
+    ex: &extract::Extracted,
+) -> Vec<(Id, Id)> {
+    let mut out: Vec<(Id, Id)> = Vec::new();
+    // Asserted `owl:differentFrom`, symmetric closure.
+    for &(a, b) in &ex.abox_extras.different_from {
+        out.push((a, b));
+        out.push((b, a));
+    }
+    // Derived nominal clashes from binary disjointness axioms `c1 ⊓ c2 ⊑ ⊥`.
+    let has_disjoint = ex
+        .axioms
+        .iter()
+        .any(|ax| matches!(ax, Normal::AndSub(_, _, BOTTOM)));
+    if has_disjoint {
+        // Named-individual nominals only.
+        let named: Vec<(Id, Concept)> = ex
+            .names
+            .nominals()
+            .filter(|&(id, _)| is_named_iri(dict, id))
+            .collect();
+        for ax in &ex.axioms {
+            if let Normal::AndSub(c1, c2, BOTTOM) = *ax {
+                let holds = |c: Concept| -> Vec<Id> {
+                    named
+                        .iter()
+                        .filter(|&&(_, nc)| sat.s[nc as usize].contains(&c))
+                        .map(|&(id, _)| id)
+                        .collect()
+                };
+                let a1 = holds(c1);
+                let a2 = holds(c2);
+                for &a in &a1 {
+                    for &b in &a2 {
+                        if a != b {
+                            out.push((a, b));
+                            out.push((b, a));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Reads the realised type assertions + `owl:sameAs` pairs off a saturated (CONSISTENT)
@@ -212,12 +457,16 @@ pub struct AboxReport {
     pub emitted_same_as: usize,
     /// [OPUS-4.8] sq-pbz04.2.6: NEW `a r a` `owl:hasSelf` self-loop triples appended.
     pub emitted_self_assertions: usize,
+    /// [OPUS-4.8] sq-pbz04.2.8: NEW `a owl:differentFrom b` triples appended.
+    pub emitted_different_from: usize,
 }
 
 /// Classifies + realises the ABox and MATERIALIZES the readoff IN PLACE: appends every derived
-/// `(a rdf:type C)` (including `a rdf:type owl:Thing`, which is interned so it is always emitted)
-/// and `(a owl:sameAs b)` not already present, interning `rdf:type` / `owl:sameAs` / `owl:Thing`
-/// as needed. Whole-ontology inconsistency is surfaced via [`AboxReport::inconsistent`] (NOT as a
+/// `(a rdf:type C)` (including `a rdf:type owl:Thing`, which is interned so it is always emitted),
+/// `(a owl:sameAs b)` (CR6 nominal equality + [OPUS-4.8] sq-pbz04.2.8 `owl:hasKey` merges),
+/// `(a r a)` (sq-pbz04.2.6 `owl:hasSelf` self-loop) and `(a owl:differentFrom b)` (sq-pbz04.2.8)
+/// not already present, interning `rdf:type` / `owl:sameAs` / `owl:differentFrom` / `owl:Thing` as
+/// needed. Whole-ontology inconsistency is surfaced via [`AboxReport::inconsistent`] (NOT as a
 /// triple — the caller decides how to flag it), matching the TBox `classify_graph` convention of
 /// reporting clashes rather than emitting them. When inconsistent, NO rows are appended.
 ///
@@ -230,6 +479,7 @@ pub fn realize_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> AboxReport 
     let rdf_type = dict.intern_iri(RDF_TYPE);
     let _owl_thing = dict.intern_iri(OWL_THING);
     let owl_same_as = dict.intern_iri(OWL_SAME_AS);
+    let owl_different_from = dict.intern_iri(OWL_DIFFERENT_FROM);
 
     let r = realize(dict, triples);
     let inconsistent = r.is_inconsistent();
@@ -239,6 +489,7 @@ pub fn realize_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> AboxReport 
     let mut emitted_type_assertions = 0usize;
     let mut emitted_same_as = 0usize;
     let mut emitted_self_assertions = 0usize;
+    let mut emitted_different_from = 0usize;
     if !inconsistent {
         for &(ind, cls) in r.type_assertions() {
             let t = [ind, rdf_type, cls];
@@ -264,6 +515,14 @@ pub fn realize_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> AboxReport 
                 emitted_self_assertions += 1;
             }
         }
+        // [OPUS-4.8] sq-pbz04.2.8: `owl:differentFrom` inequalities.
+        for &(a, b) in r.different_from() {
+            let t = [a, owl_different_from, b];
+            if present.insert(t) {
+                triples.push(t);
+                emitted_different_from += 1;
+            }
+        }
     }
     AboxReport {
         report,
@@ -271,6 +530,7 @@ pub fn realize_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> AboxReport 
         emitted_type_assertions,
         emitted_same_as,
         emitted_self_assertions,
+        emitted_different_from,
     }
 }
 
@@ -625,6 +885,306 @@ mod tests {
         );
         // And the asserted OPA is never mistaken for a hasSelf readoff.
         assert!(r.self_assertions().is_empty(), "no ∃r.Self concept exists in S({{Peter}})");
+    }
+
+    // ======================================================================================
+    // [OPUS-4.8] sq-pbz04.2.8 — E4: owl:hasKey + negative property assertions + differentFrom.
+    // ======================================================================================
+
+    // --- New-Feature-Keys-001: a DATA-property key merges two individuals sharing a key value. ---
+    #[test]
+    fn keys_001_data_key_merges_individuals() {
+        // HasKey(owl:Thing () (:hasSSN)); Peter/Peter_Griffin both hasSSN "123-45-6789" ⊨ sameAs.
+        let ttl = format!(
+            "{PRE}
+             owl:Thing owl:hasKey ( :hasSSN ) .
+             :Peter :hasSSN \"123-45-6789\" .
+             :Peter_Griffin :hasSSN \"123-45-6789\" ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (peter, pg) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/Peter_Griffin"));
+        let sa = r.same_as();
+        assert!(sa.contains(&(peter, pg)), "Peter owl:sameAs Peter_Griffin (owl:hasKey)");
+        assert!(sa.contains(&(pg, peter)), "owl:sameAs is emitted symmetrically");
+    }
+
+    // --- New-Feature-Keys-003: a LOCALIZED key merges only members of the key class. ------------
+    #[test]
+    fn keys_003_localized_key_excludes_non_members() {
+        // HasKey(GriffinFamilyMember () (:hasName)); Peter/Peter_Griffin are members with hasName
+        // "Peter"; StPeter ALSO has hasName "Peter" but is NOT in the class ⊨ only Peter=Peter_Griffin.
+        let ttl = format!(
+            "{PRE}
+             :GriffinFamilyMember owl:hasKey ( :hasName ) .
+             :Peter a :GriffinFamilyMember ; :hasName \"Peter\" .
+             :Peter_Griffin a :GriffinFamilyMember ; :hasName \"Peter\" .
+             :StPeter :hasName \"Peter\" ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (peter, pg, stpeter) = (
+            iri(&dict, "http://ex/Peter"),
+            iri(&dict, "http://ex/Peter_Griffin"),
+            iri(&dict, "http://ex/StPeter"),
+        );
+        let sa = r.same_as();
+        assert!(sa.contains(&(peter, pg)), "the two class members merge");
+        assert!(
+            !sa.iter().any(|&(a, b)| a == stpeter || b == stpeter),
+            "StPeter is not in GriffinFamilyMember, so the localized key never touches it"
+        );
+    }
+
+    // --- New-Feature-Keys-002: a key collision against an asserted differentFrom ⇒ inconsistent. -
+    #[test]
+    fn keys_002_collision_versus_different_from_is_inconsistent() {
+        let ttl = format!(
+            "{PRE}
+             owl:Thing owl:hasKey ( :hasSSN ) .
+             :Peter :hasSSN \"123-45-6789\" .
+             :Peter_Griffin :hasSSN \"123-45-6789\" .
+             :Peter owl:differentFrom :Peter_Griffin ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(
+            r.is_inconsistent(),
+            "the key forces Peter=Peter_Griffin against an asserted differentFrom"
+        );
+        assert!(r.same_as().is_empty(), "no realisation rows for an inconsistent ontology");
+        assert!(r.different_from().is_empty());
+    }
+
+    // --- New-Feature-Keys-006: a key does NOT make its property functional (honest incompleteness). -
+    #[test]
+    fn keys_006_single_member_key_does_not_fire() {
+        // Peter is the ONLY member of the key class, with two DIFFERENT hasName values. The key
+        // constrains only DISTINCT individuals, so it never fires (no partner). The genuine
+        // inconsistency needs owl:FunctionalProperty reasoning, which is OUTSIDE the EL fragment
+        // (a declaration the extractor does not act on) — so the EL realiser is SOUNDLY consistent
+        // here (honest incompleteness), never a fabricated merge/clash.
+        let ttl = format!(
+            "{PRE}
+             :GriffinFamilyMember owl:hasKey ( :hasName ) .
+             :Peter a :GriffinFamilyMember ; :hasName \"Peter\" , \"Kichwa-Tembo\" .
+             :hasName a owl:FunctionalProperty ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent(), "a single-member key never fires (functional-prop clash is out of fragment)");
+        assert!(r.same_as().is_empty(), "no spurious merge from a one-member key");
+    }
+
+    // --- A PARTIAL key match (only SOME key properties agree) must NOT merge (the negative test). -
+    #[test]
+    fn partial_key_match_does_not_merge() {
+        // HasKey(C () (:p :q)); a and b share :p :v but DIFFER on :q — the multi-property key must
+        // not fire on the partial agreement (the classic HasKey over-derivation trap).
+        let ttl = format!(
+            "{PRE}
+             :C owl:hasKey ( :p :q ) .
+             :a a :C ; :p :v ; :q :w .
+             :b a :C ; :p :v ; :q :w2 ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
+        assert!(
+            !r.same_as().contains(&(a, b)) && !r.same_as().contains(&(b, a)),
+            "a partial key match must NOT merge — every key property must share a value"
+        );
+    }
+
+    // --- The COMPLEMENT: an OBJECT key with EVERY property agreeing DOES merge. -----------------
+    #[test]
+    fn object_key_full_match_merges() {
+        let ttl = format!(
+            "{PRE}
+             :C owl:hasKey ( :p :q ) .
+             :a a :C ; :p :v ; :q :w .
+             :b a :C ; :p :v ; :q :w ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
+        assert!(r.same_as().contains(&(a, b)), "both key properties agree ⇒ a owl:sameAs b");
+        assert!(r.same_as().contains(&(b, a)));
+    }
+
+    // --- New-Feature-NegativeObjectPropertyAssertion-001: NPA + asserted positive ⇒ inconsistent. -
+    #[test]
+    fn npa_object_001_asserted_positive_is_inconsistent() {
+        let ttl = format!(
+            "{PRE}
+             [ a owl:NegativePropertyAssertion ;
+               owl:sourceIndividual :Peter ;
+               owl:assertionProperty :hasSon ;
+               owl:targetIndividual :Meg ] .
+             :Peter :hasSon :Meg ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(r.is_inconsistent(), "¬(Peter hasSon Meg) contradicts the asserted positive");
+    }
+
+    // --- The NPA positive can be DERIVED (not asserted) — the object hasValue link. -------------
+    #[test]
+    fn npa_object_derived_positive_is_inconsistent() {
+        // {a} ⊑ ∃p.{b} (owl:hasValue) DERIVES the link (a,b) ∈ R(p), which the object NPA clashes
+        // with even though `a p b` is never an asserted triple.
+        let ttl = format!(
+            "{PRE}
+             :a a [ owl:onProperty :p ; owl:hasValue :b ] .
+             [ a owl:NegativePropertyAssertion ;
+               owl:sourceIndividual :a ;
+               owl:assertionProperty :p ;
+               owl:targetIndividual :b ] ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(r.is_inconsistent(), "the DERIVED p-link to {{b}} clashes with ¬(a p b)");
+    }
+
+    // --- An NPA WITHOUT a matching positive is consistent (a clash needs the positive). ---------
+    #[test]
+    fn npa_object_no_positive_is_consistent() {
+        let ttl = format!(
+            "{PRE}
+             [ a owl:NegativePropertyAssertion ;
+               owl:sourceIndividual :Peter ;
+               owl:assertionProperty :hasSon ;
+               owl:targetIndividual :Meg ] ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent(), "an NPA alone (no positive) is satisfiable");
+    }
+
+    // --- New-Feature-NegativeDataPropertyAssertion-001: data NPA + asserted positive ⇒ inconsistent. -
+    #[test]
+    fn npa_data_001_asserted_positive_is_inconsistent() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             [ a owl:NegativePropertyAssertion ;
+               owl:sourceIndividual :Meg ;
+               owl:assertionProperty :hasAge ;
+               owl:targetValue \"5\"^^xsd:integer ] .
+             :Meg :hasAge \"5\"^^xsd:integer ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(r.is_inconsistent(), "¬(Meg hasAge 5) contradicts the asserted data value");
+    }
+
+    // --- A data NPA WITHOUT a matching positive value is consistent. ----------------------------
+    #[test]
+    fn npa_data_no_positive_is_consistent() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             [ a owl:NegativePropertyAssertion ;
+               owl:sourceIndividual :Meg ;
+               owl:assertionProperty :hasAge ;
+               owl:targetValue \"5\"^^xsd:integer ] .
+             :Meg :hasAge \"6\"^^xsd:integer ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent(), "the asserted value differs from the negated one — consistent");
+    }
+
+    // --- WebOnt-differentFrom-001: owl:differentFrom is symmetric (asserted (a,b) ⊨ (b,a)). ------
+    #[test]
+    fn different_from_001_symmetric_readoff() {
+        let ttl = format!("{PRE} :a owl:differentFrom :b .");
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
+        let df = r.different_from();
+        assert!(df.contains(&(a, b)) && df.contains(&(b, a)), "differentFrom is symmetric");
+    }
+
+    // --- WebOnt-disjointWith-001: members of disjoint classes are owl:differentFrom. ------------
+    #[test]
+    fn disjoint_with_001_derived_different_from() {
+        // a : A, b : B, A disjointWith B ⊨ a owl:differentFrom b (a derived nominal clash).
+        let ttl = format!(
+            "{PRE}
+             :A owl:disjointWith :B .
+             :a a :A , owl:Thing .
+             :b a :B , owl:Thing ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent(), "a≠b: the individuals are distinct, so no single-individual clash");
+        let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
+        let df = r.different_from();
+        assert!(df.contains(&(a, b)) && df.contains(&(b, a)), "disjoint members are differentFrom");
+        assert!(!r.same_as().iter().any(|&(x, y)| (x, y) == (a, b)), "and never merged");
+    }
+
+    // --- A key merge that CONTRADICTS a derived disjointness clash ⇒ inconsistent. --------------
+    #[test]
+    fn key_merge_versus_derived_clash_is_inconsistent() {
+        // The key forces a=b, but a∈A, b∈B, A⊓B⊑⊥ forces a≠b — a proof of both, so inconsistent.
+        let ttl = format!(
+            "{PRE}
+             :A owl:disjointWith :B .
+             owl:Thing owl:hasKey ( :ssn ) .
+             :a a :A ; :ssn \"x\" .
+             :b a :B ; :ssn \"x\" ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(r.is_inconsistent(), "key-derived sameAs vs derived differentFrom ⇒ inconsistent");
+        assert!(r.same_as().is_empty() && r.different_from().is_empty());
+    }
+
+    // --- realize_graph materializes owl:differentFrom and stays idempotent. ---------------------
+    #[test]
+    fn realize_graph_materializes_different_from() {
+        let ttl = format!(
+            "{PRE}
+             :A owl:disjointWith :B .
+             :a a :A .
+             :b a :B ."
+        );
+        let (mut dict, mut triples) = parse(&ttl);
+        let rep = realize_graph(&mut dict, &mut triples);
+        assert!(!rep.inconsistent);
+        assert!(rep.emitted_different_from >= 1, "a owl:differentFrom b materialized");
+        let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
+        let df = iri(&dict, OWL_DIFFERENT_FROM);
+        assert!(triples.contains(&[a, df, b]), "a owl:differentFrom b in the graph");
+        let rep2 = realize_graph(&mut dict, &mut triples);
+        assert_eq!(rep2.emitted_different_from, 0, "second call is idempotent");
+    }
+
+    // --- A malformed owl:hasKey (empty key list) is a fail-closed counted skip. -----------------
+    #[test]
+    fn malformed_empty_key_is_counted_skip() {
+        let ttl = format!(
+            "{PRE}
+             :C owl:hasKey ( ) .
+             :a a :C ; :p :v .
+             :b a :C ; :p :v ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        assert!(r.report().skipped_assertions >= 1, "an empty key list is a counted skip");
+        let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
+        assert!(
+            !r.same_as().contains(&(a, b)),
+            "a skipped key fabricates no merge"
+        );
     }
 
     // --- An empty / TBox-only graph realises to nothing and is consistent. ----------------------

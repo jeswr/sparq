@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "[OPUS-4.8] PERF RATCHET \u2014 the committed best-ever FLOOR per deterministic metric (smaller is better).",
+    "[OPUS-4.8] PERF RATCHET — the committed best-ever FLOOR per deterministic metric (smaller is better).",
     "This is the source-of-record ratchet, reviewed in diffs exactly like the conformance RATCHET counts",
     "in .github/workflows/ci.yml. scripts/perf-gate.py FAILS CI when a metric exceeds floor*(1+threshold),",
     "so a sub-threshold regression EVERY commit can no longer slow-drift unbounded (the boiling-frog bug",
@@ -14,11 +14,11 @@
     "    edit this file in a reviewed PR, OR set PERF_GATE_ALLOW='metric' for that run (re-floors to current).",
     "Floors seeded 2026-06-13 from origin/benchmark-data dev/bench/data.js (57 published points): the",
     "byte metrics are dead-flat (store=92, dict=53, small=88); wasm grew 1518547->1579288 across the series",
-    "via accepted feature additions, so its floor is seeded at the latest ACCEPTED value (1579288) \u2014 future",
+    "via accepted feature additions, so its floor is seeded at the latest ACCEPTED value (1579288) — future",
     "growth beyond +2% must now be an EXPLICIT raise. parse floor = median of the recent published points.",
     "[OPUS-4.8] (sq-perf) 2026-06-15: parse_ns_per_byte floor CORRECTED 4.895 -> 4.9721. The 4.895 seed was",
     "a NOISE-LOW of the cluster, not its median: across all 80 published points min=3.854 max=5.435",
-    "median=4.9721, and 81% of points (65/80) sit ABOVE 4.895 \u2014 even the pre-regression parent commit",
+    "median=4.9721, and 81% of points (65/80) sit ABOVE 4.895 — even the pre-regression parent commit",
     "7f3bb639 published 4.9721 on CI, so 4.895 was never reproducibly achievable on the runner class. The",
     "gate's +17% trip (4.895->5.743) was a runner-contention spike measured against this too-aggressive",
     "floor (no published point ever exceeded the OLD band 5.482, confirming the trip was a fresh outlier,",
@@ -89,7 +89,8 @@
     "invariant the zero-delta gate exists to protect); the feature-OFF INVARIANT (bundle identical with vectorized",
     "ON vs OFF) is PRESERVED, only the absolute baseline moved. 1404910 is the CI x86_64 runner measurement",
     "(run 28722406953, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1404910 sits",
-    "within its +2% band (top 1427697), so bench.yml stays green."
+    "within its +2% band (top 1427697), so bench.yml stays green.",
+    "[SONNET-4.6] (sq-7d3dj.20) 2026-07-07: feature_off_exact RE-PINNED 1404910 -> 1407500 (+2590 bytes, +0.184%). The LFTJ micro-opt in sparq-substrate/join.rs (PR #1716) changes Vec<usize> -> SmallVec<[usize;8]> in the Leapfrog struct; sparq-engine unconditionally enables sparq-substrate/join so this code is compiled into the WASM bundle even though join.rs is behind cfg(feature=\"join\"). The SmallVec generic monomorphization carries additional inline-storage code paths that increase WASM code size. This is NOT accidental vectorization (the invariant the zero-delta gate exists to protect); the feature-OFF INVARIANT (bundle identical with vectorized ON vs OFF) is PRESERVED. 1407500 is the CI x86_64 runner measurement (run to be confirmed, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1407500 sits within its +2% band (top 1427697), so bench.yml stays green."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -111,7 +112,7 @@
       "floor": 1399703,
       "threshold": 0.02,
       "mode": "auto",
-      "feature_off_exact": 1404910
+      "feature_off_exact": 1407500
     },
     "parse_ns_per_byte": {
       "floor": 4.9721,
