@@ -54,35 +54,112 @@ fn oracle(g: &Graph, base_query: &str, offset: usize, limit: usize) -> Vec<Vec<O
 
 // ─── duplicate_keys ──────────────────────────────────────────────────────────
 
-/// All ORDER BY values identical — pure tie. The top-k path must select the
-/// SAME rows (and in the SAME order) as the full stable sort's prefix. If the
-/// heap's tiebreak index order were reversed, it would pick a different suffix
-/// of the tie group and the comparison would fail.
+/// All rows are FULLY tied on EVERY ORDER BY key (single key `?v`, constant) —
+/// the ONLY thing that distinguishes rows is their input order, i.e. the
+/// `input_idx` tiebreak in the bounded-selection comparator. The full stable
+/// sort preserves input order, so the top-k path must reproduce it via the
+/// `input_idx` ascending tiebreak; the observed `?s` values reveal which
+/// physical rows were selected.
 ///
-/// This IS the mutation spot-check: flip tie-break index direction in exec.rs
-/// `order_bindings` and this test goes red.
+/// This IS the mutation spot-check and it is now non-vacuous: because there is
+/// NO distinct secondary sort key, reversing the `input_idx` tiebreak direction
+/// in exec.rs `order_bindings` (`a.1.cmp(&c.1)` → `c.1.cmp(&a.1)`) makes the
+/// top-k path select the OPPOSITE end of the tie group, so `got != exp` and the
+/// test goes RED. Verified by temporarily reversing the tiebreak in the
+/// worktree (RED) and restoring it (GREEN). [OPUS-4.8] sq-7d3dj.30.2
+///
+/// Every (offset, limit) below keeps `cap = offset + limit < n` so the
+/// bounded-selection (top-k) path is actually exercised (when `cap >= n` the
+/// code falls through to the full stable sort and the tiebreak is untested).
 #[test]
 fn duplicate_keys() {
-    // 20 subjects all with ?v = 1 (same literal value, all tied).
+    // 20 subjects all with the SAME ?v = 1 (single ORDER BY key → pure tie on
+    // all keys; ?s is NOT a sort key, only an observation column).
+    let n = 20usize;
     let mut ttl = String::new();
-    for i in 0..20usize {
-        ttl.push_str(&format!("ex:s{i} ex:v 1 .\n"));
+    for i in 0..n {
+        // Pad ?s so its lexical order is unrelated to input order — the test must
+        // NOT accidentally become sensitive to a secondary key it does not sort on.
+        ttl.push_str(&format!("ex:s{i:02} ex:v 1 .\n"));
     }
     let g = load(&ttl);
 
-    // Verify differential for multiple LIMIT/OFFSET combinations that straddle
-    // the tie group: offset=0/5/10/15, limit=5.
-    for offset in [0usize, 5, 10, 15] {
+    // caps: 5, 10, 15 — all < n=20, so the top-k path runs for each.
+    for offset in [0usize, 5, 10] {
         let limit = 5;
-        let base_q = "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v ?s";
-        // Two-key sort (?v then ?s) gives a deterministic order even with ties on ?v.
-        let topk_q = format!("SELECT ?s WHERE {{ ?s ex:v ?v }} ORDER BY ?v ?s LIMIT {limit} OFFSET {offset}");
+        // SINGLE sort key ?v (all tied). Observe ?s to see which rows survived.
+        let base_q = "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v";
+        let topk_q = format!("SELECT ?s WHERE {{ ?s ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}");
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
         assert_eq!(
             got, exp,
             "duplicate_keys: offset={offset} limit={limit}: top-k differs from full-sort+slice"
         );
+    }
+}
+
+// ─── limit_zero ──────────────────────────────────────────────────────────────
+
+/// LIMIT 0 is legal SPARQL and is exercised by the W3C conformance suite. The
+/// budget `cap = offset + 0 = 0` reaches the bounded-selection path with k = 0;
+/// `select_nth_unstable_by(k - 1)` would underflow to `usize::MAX` and abort the
+/// process (SIGABRT, exit 134). Regression guard for that crash. [OPUS-4.8]
+#[test]
+fn limit_zero() {
+    let mut ttl = String::new();
+    for i in 0..10usize {
+        ttl.push_str(&format!("ex:s{i} ex:v {i} .\n"));
+    }
+    let g = load(&ttl);
+
+    // LIMIT 0 (with and without OFFSET) must return empty rows, not panic/abort.
+    let got = rows(&g, "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 0");
+    assert!(got.is_empty(), "limit_zero: LIMIT 0 must be empty, got {got:?}");
+
+    let got = rows(&g, "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 0 OFFSET 3");
+    assert!(got.is_empty(), "limit_zero: LIMIT 0 OFFSET 3 must be empty, got {got:?}");
+}
+
+// ─── empty_input ─────────────────────────────────────────────────────────────
+
+/// ORDER BY … LIMIT k over a pattern that matches NOTHING: n = 0. The
+/// bounded-selection path must not call `select_nth_unstable_by` on an empty
+/// slice (which panics). Regression guard. [OPUS-4.8]
+#[test]
+fn empty_input() {
+    // Graph has data, but the query pattern matches no rows.
+    let g = load("ex:s1 ex:v 1 .\n");
+    let got = rows(&g, "SELECT ?s WHERE { ?s ex:nonexistent ?v } ORDER BY ?v LIMIT 5");
+    assert!(got.is_empty(), "empty_input: expected empty, got {got:?}");
+    // Also with OFFSET.
+    let got = rows(&g, "SELECT ?s WHERE { ?s ex:nonexistent ?v } ORDER BY ?v LIMIT 5 OFFSET 2");
+    assert!(got.is_empty(), "empty_input (offset): expected empty, got {got:?}");
+}
+
+// ─── offset_budget_ge_n ──────────────────────────────────────────────────────
+
+/// OFFSET so large that the row budget `cap = offset + limit >= n`: the code
+/// MUST fall through to the full stable sort (`use_topk` false / `k >= n`) — a
+/// bounded `select_nth_unstable_by(nth)` with `nth >= len` would panic.
+/// Result must still equal the full-sort oracle. [OPUS-4.8]
+#[test]
+fn offset_budget_ge_n() {
+    let n = 8usize;
+    let mut ttl = String::new();
+    for i in 0..n {
+        ttl.push_str(&format!("ex:s{i} ex:v {i} .\n"));
+    }
+    let g = load(&ttl);
+
+    let base_q = "SELECT ?s ?v WHERE { ?s ex:v ?v } ORDER BY ?v";
+    // cap == n (offset 3 + limit 5) and cap > n (offset 6 + limit 5): both must
+    // take the full-sort path without panicking and match the oracle.
+    for (offset, limit) in [(3usize, 5usize), (6, 5), (7, 5)] {
+        let topk_q = format!("SELECT ?s ?v WHERE {{ ?s ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}");
+        let got = rows(&g, &topk_q);
+        let exp = oracle(&g, base_q, offset, limit);
+        assert_eq!(got, exp, "offset_budget_ge_n: offset={offset} limit={limit}");
     }
 }
 

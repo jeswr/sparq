@@ -6968,6 +6968,17 @@ fn order_bindings(
     // the stable-sort tie semantics exactly (smaller input_idx appears first).
     // [SONNET-4.6] sq-7d3dj.30.2
     if let Some(k) = row_budget {
+        // LIMIT 0 (k == 0) is legal SPARQL and is exercised by the W3C conformance
+        // suite. The result is empty regardless of order, so short-circuit here:
+        // `select_nth_unstable_by(k - 1)` below would underflow `k - 1` to
+        // `usize::MAX` and abort the process (SIGABRT). [OPUS-4.8] sq-7d3dj.30.2
+        if k == 0 {
+            b.rows.clear();
+            b.sorted_by = None;
+            return Ok(());
+        }
+        // Invariant for the bounded-selection path below: 0 < k < n, so
+        // `k - 1 < n = keyed.len()` and `select_nth_unstable_by(k - 1)` is in range.
         if k < n {
             // Build (key, input_idx, row) — parallel for large sets.
             // Use Vec<_> to avoid the clippy::type_complexity lint on the explicit type.
