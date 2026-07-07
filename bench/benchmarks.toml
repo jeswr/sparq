@@ -132,6 +132,28 @@ records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (
 featured    = false
 status      = "ok"
 
+# [SONNET-4.6] sq-7d3dj.22 (epic sq-7d3dj) — deterministic allocation-count instrument.
+# 🤖 SPARQ agent. Standalone bench-only harness that fills the "no counting allocator"
+# gap cited by measurement plans sq-7d3dj.6/.7/.19/.16. The `quiet_box_sensitive = false`
+# flag reflects that alloc COUNTS are deterministic (not wall-clock) — the series is
+# reproducible on any box. The `featured = false` escape-hatch marks it as an internal
+# micro-bench (no perf claim, no dashboard card required).
+[[benchmark]]
+id          = "alloc-track"
+name        = "Allocation-count instrument — counting allocator over op_* corpus"
+category    = "query"
+measures    = "per-operator allocation count (allocs) and peak live bytes (peak_bytes) over the same 28-query op_* corpus as operator-coverage, for EACH full sparq_engine::query(…) call; emitted as a TREND-ONLY series"
+invoke      = "cd bench/alloc-track && cargo run --release --bin alloc_track -- --scale 2000 --iters 3   # --smoke for a fast smoke run (scale=200 iters=2)"
+source      = "bench/alloc-track/src/main.rs (CountingAlloc #[global_allocator] + measure_once); bench/operators/queries/*.rq (embedded via include_str!)"
+dataset     = "SYNTHETIC in-process: same WatDiv-flavoured social graph as operator-coverage (deterministic fixed seed); 2 000 entities by default (all 28 queries reference subjects in 0..=99, so 200 entities suffices for --smoke)"
+quiet_box_sensitive = false  # alloc COUNTS are deterministic (code-path-dependent, not wall-clock); values are stable on the same binary regardless of box load
+pinning     = "scale (2000 default); dataset and all queries are deterministic (fixed SplitMix64 seed + committed query files embedded via include_str!); the harness asserts its own reproducibility (two measured iters must agree)"
+records_to  = "stdout (TSV: op / allocs / peak_bytes / rows / status); status = 'ok' (deterministic) or 'band[min,max]' (variance); exit 1 on variance so a caller notices non-determinism"
+# Internal micro-bench for the optimization-program delta gap; not a head-to-head competitor
+# card — featured = false exempts it from the dashboard-row requirement (escape hatch §2.1).
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-pntvh.1 (epic sq-pntvh) — M4 Phase 1 vectorized FILTER/aggregate baseline.
 [[benchmark]]
 id          = "vectorized-eval-micro"
