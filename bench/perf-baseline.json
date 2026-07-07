@@ -89,7 +89,16 @@
     "invariant the zero-delta gate exists to protect); the feature-OFF INVARIANT (bundle identical with vectorized",
     "ON vs OFF) is PRESERVED, only the absolute baseline moved. 1404910 is the CI x86_64 runner measurement",
     "(run 28722406953, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1404910 sits",
-    "within its +2% band (top 1427697), so bench.yml stays green."
+    "within its +2% band (top 1427697), so bench.yml stays green.",
+    "[OPUS-4.8] (sq-7d3dj.4) 2026-07-07: floor RAISED 1399703 -> 1461632 (+61929 bytes, +4.42%) AND feature_off_exact",
+    "RE-PINNED 1404910 -> 1461632 (+56722 bytes, +4.04%). The column-index hoist adds CompiledExpr / compile_expr /",
+    "eval_compiled / eval_function_inner to sparq-engine — new static code that sparq-wasm links in. This is a",
+    "DELIBERATE, reviewed feature addition (the protocol bullet: 'a wasm bundle bump from a new feature'); the",
+    "feature-OFF INVARIANT (bundle identical with vectorized ON vs OFF) is PRESERVED. The new value 1461632",
+    "exceeds the old floor's +2% band (top 1427697), so the floor must be raised explicitly alongside the",
+    "feature_off_exact pin. 1461632 is the CI x86_64 runner measurement (run 28836413326, job 85521051397,",
+    "artifact-exact-equality leg: cargo build --profile release-wasm -p sparq-wasm --target",
+    "wasm32-unknown-unknown, no --features vectorized). threshold 0.02 + mode auto UNCHANGED."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -108,10 +117,10 @@
       "mode": "auto"
     },
     "wasm_bundle_bytes": {
-      "floor": 1399703,
+      "floor": 1461632,
       "threshold": 0.02,
       "mode": "auto",
-      "feature_off_exact": 1404910
+      "feature_off_exact": 1461632
     },
     "parse_ns_per_byte": {
       "floor": 4.9721,
