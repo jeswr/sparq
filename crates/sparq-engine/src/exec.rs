@@ -13797,7 +13797,7 @@ mod columnar_aggregate_seam {
 mod compiled_expr_tests {
     use super::*;
     use oxrdf::vocab::xsd;
-    use spargebra::algebra::{Expression, Function};
+    use spargebra::algebra::{Expression, Function, OrderExpression};
 
     fn int_expr(s: &str) -> Expression {
         Expression::Literal(oxrdf::Literal::new_typed_literal(s, xsd::INTEGER))
@@ -13836,9 +13836,9 @@ mod compiled_expr_tests {
         .unwrap()
     }
 
-    /// FILTER parity: compile_expr + apply_filter_scalar produces byte-identical output
-    /// to the original uncompiled path. We pin this by running both on the same Bindings
-    /// and checking the surviving rows are identical.  [OPUS-4.8] sq-7d3dj.4
+    /// FILTER parity: apply_filter_scalar (which uses eval_compiled internally) produces
+    /// the same surviving rows as a reference path that applies eval_expr + effective_boolean
+    /// directly per row.  [OPUS-4.8] sq-7d3dj.4
     #[test]
     fn compiled_filter_is_byte_identical_to_eval_expr() {
         let g = one_row_graph();
@@ -13856,77 +13856,138 @@ mod compiled_expr_tests {
         ];
         let local = LocalVocab::default();
         for expr in &filters {
+            // Reference path: apply eval_expr + effective_boolean directly to each row.
             let b_ref = Bindings::unsorted(vec![v.clone()], rows.clone());
-            let b_comp = Bindings::unsorted(vec![v.clone()], rows.clone());
+            let reference_rows: Vec<Row> = b_ref
+                .rows
+                .iter()
+                .filter(|row| {
+                    eval_expr(&g, &local, &b_ref, row, expr)
+                        .map(|val| effective_boolean(&val))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
 
-            // Original path (eval_expr per row via apply_filter_scalar with the OLD closure).
-            // We test via apply_filter (which calls apply_filter_scalar for the non-vectorized path).
-            let mut b_orig = b_ref;
-            apply_filter_scalar(&g, &local, &mut b_orig, expr).unwrap();
-
-            // New compiled path: compile once, then apply_filter_scalar uses eval_compiled.
-            let mut b_new = b_comp;
-            apply_filter_scalar(&g, &local, &mut b_new, expr).unwrap();
+            // Compiled path: apply_filter_scalar uses eval_compiled internally.
+            let mut b_compiled = Bindings::unsorted(vec![v.clone()], rows.clone());
+            apply_filter_scalar(&g, &local, &mut b_compiled, expr).unwrap();
 
             assert_eq!(
-                b_orig.rows, b_new.rows,
-                "apply_filter_scalar results diverged for {expr:?}"
+                reference_rows, b_compiled.rows,
+                "compiled apply_filter_scalar diverged from eval_expr reference for {expr:?}"
+            );
+            // Sanity-check: the reference must be non-trivial for each filter expression.
+            assert!(
+                !reference_rows.is_empty(),
+                "filter {expr:?} kept no rows — test is vacuous"
+            );
+            assert!(
+                reference_rows.len() < rows.len(),
+                "filter {expr:?} kept all rows — test is vacuous"
             );
         }
     }
 
-    /// BIND parity: compiled path produces byte-identical ids to the original.  [OPUS-4.8] sq-7d3dj.4
+    /// BIND parity: extend_bindings (which uses eval_compiled internally) produces values
+    /// that are term-identical to what eval_expr yields for the same BIND expression on
+    /// the same input rows.  [OPUS-4.8] sq-7d3dj.4
     #[test]
     fn compiled_bind_is_byte_identical() {
-        let g = crate::Graph::load_str(
-            "<http://ex/s> <http://ex/p> \"10\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
-             <http://ex/s2> <http://ex/p> \"20\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
-            "ntriples",
-        )
-        .unwrap();
-        let q = "SELECT ?s ?v ?doubled WHERE { \
-                 ?s <http://ex/p> ?v . \
-                 BIND(?v * 2 AS ?doubled) }";
-        let r = crate::query(&g, q).unwrap();
-        // The result must have both rows and the doubled column must be correct.
-        assert_eq!(r.rows.len(), 2, "expected exactly 2 rows");
-        for row in &r.rows {
-            let v_term = row[1].as_ref().expect("?v must be bound");
-            let d_term = row[2].as_ref().expect("?doubled must be bound");
-            let v_val: i64 = v_term.to_string().split('"').nth(1).and_then(|s| s.parse().ok()).unwrap();
-            let d_val: i64 = d_term.to_string().split('"').nth(1).and_then(|s| s.parse().ok()).unwrap();
-            assert_eq!(d_val, v_val * 2, "BIND doubled value mismatch");
-        }
-    }
+        let g = one_row_graph();
+        let local = LocalVocab::default();
 
-    /// ORDER BY parity: compiled path produces the same sort key as the original.  [OPUS-4.8] sq-7d3dj.4
-    #[test]
-    fn compiled_order_is_byte_identical() {
-        let g = crate::Graph::load_str(
-            "<http://ex/a> <http://ex/n> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
-             <http://ex/b> <http://ex/n> \"2\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
-             <http://ex/c> <http://ex/n> \"8\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
-             <http://ex/d> <http://ex/n> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
-            "ntriples",
-        )
-        .unwrap();
-        let q = "SELECT ?s ?n WHERE { ?s <http://ex/n> ?n } ORDER BY ASC(?n)";
-        let r = crate::query(&g, q).unwrap();
-        assert_eq!(r.rows.len(), 4);
-        // Verify ascending order of n values.
-        let ns: Vec<i64> = r
+        // Input Bindings: ?v bound to the inline integer ids for 10 and 20.
+        let v_var = oxrdf::Variable::new_unchecked("v");
+        let v10 = sparq_core::dict::inline_id_of_int(10).unwrap();
+        let v20 = sparq_core::dict::inline_id_of_int(20).unwrap();
+
+        // The BIND expression: ?v * 2.
+        let bind_expr = Expression::Multiply(Box::new(var_expr("v")), Box::new(int_expr("2")));
+
+        // Reference path: eval_expr on each input row, converted to a Term for comparison.
+        let b_ref = Bindings::unsorted(
+            vec![v_var.clone()],
+            vec![Row::from_slice(&[v10]), Row::from_slice(&[v20])],
+        );
+        let reference: Vec<Option<Term>> = b_ref
             .rows
             .iter()
-            .map(|row| {
-                row[1]
-                    .as_ref()
-                    .and_then(|t| t.to_string().split('"').nth(1).and_then(|s| s.parse().ok()))
-                    .unwrap()
-            })
+            .map(|row| value_as_term(&eval_expr(&g, &local, &b_ref, row, &bind_expr).unwrap()))
             .collect();
-        for w in ns.windows(2) {
-            assert!(w[0] <= w[1], "ORDER BY result not sorted: {:?}", ns);
-        }
+
+        // Compiled path: extend_bindings uses eval_compiled internally.
+        let doubled_var = oxrdf::Variable::new_unchecked("doubled");
+        let mut local2 = LocalVocab::default();
+        let b_out = extend_bindings(
+            &g,
+            &mut local2,
+            Bindings::unsorted(
+                vec![v_var.clone()],
+                vec![Row::from_slice(&[v10]), Row::from_slice(&[v20])],
+            ),
+            &doubled_var,
+            &bind_expr,
+        )
+        .unwrap();
+        let doubled_col = b_out.col(&doubled_var).unwrap();
+        let compiled: Vec<Option<Term>> = b_out
+            .rows
+            .iter()
+            .map(|row| term_of(&g, &local2, row[doubled_col]))
+            .collect();
+
+        assert_eq!(
+            reference, compiled,
+            "extend_bindings result diverged from eval_expr reference for BIND ?v * 2"
+        );
+        assert_eq!(reference.len(), 2, "expected exactly 2 output rows");
+    }
+
+    /// ORDER BY parity: order_bindings (which uses eval_compiled internally) produces the
+    /// same row ordering as a reference sort that uses eval_expr to compute sort keys.
+    /// [OPUS-4.8] sq-7d3dj.4
+    #[test]
+    fn compiled_order_is_byte_identical() {
+        let g = one_row_graph();
+        let local = LocalVocab::default();
+
+        // Pre-sort Bindings: ?n bound to inline integer ids in arbitrary order.
+        let n_var = oxrdf::Variable::new_unchecked("n");
+        let n5 = sparq_core::dict::inline_id_of_int(5).unwrap();
+        let n2 = sparq_core::dict::inline_id_of_int(2).unwrap();
+        let n8 = sparq_core::dict::inline_id_of_int(8).unwrap();
+        let n1 = sparq_core::dict::inline_id_of_int(1).unwrap();
+        let pre_sort_rows = vec![
+            Row::from_slice(&[n5]),
+            Row::from_slice(&[n2]),
+            Row::from_slice(&[n8]),
+            Row::from_slice(&[n1]),
+        ];
+        let pre_sort = Bindings::unsorted(vec![n_var.clone()], pre_sort_rows.clone());
+
+        // Reference path: sort rows using eval_expr to compute the ?n sort key.
+        let n_expr = Expression::Variable(n_var.clone());
+        let mut reference_rows = pre_sort_rows.clone();
+        reference_rows.sort_by(|a_row, b_row| {
+            let va = eval_expr(&g, &local, &pre_sort, a_row, &n_expr).unwrap();
+            let vb = eval_expr(&g, &local, &pre_sort, b_row, &n_expr).unwrap();
+            compare_values(&va, &vb).unwrap_or(Ordering::Equal)
+        });
+
+        // Compiled path: order_bindings uses eval_compiled internally.
+        let mut b = Bindings::unsorted(vec![n_var.clone()], pre_sort_rows.clone());
+        order_bindings(&g, &local, &mut b, &[OrderExpression::Asc(n_expr.clone())]).unwrap();
+
+        assert_eq!(
+            reference_rows, b.rows,
+            "order_bindings result diverged from eval_expr reference for ORDER BY ASC(?n)"
+        );
+        // Sanity-check: the sort is non-trivial (input was not already sorted).
+        assert_ne!(
+            pre_sort_rows, b.rows,
+            "pre-sort input happened to be sorted — test is vacuous"
+        );
     }
 
     /// `compile_expr` round-trips: `eval_compiled` matches `eval_expr` for each variant.
