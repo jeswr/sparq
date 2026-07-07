@@ -212,3 +212,17 @@ export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   return `${(n / 1024).toFixed(1)} KB`;
 }
+
+/**
+ * [SONNET-4.6] sq-su1oe (#820) — formats a byte count for unintrusive store-stats readouts
+ * (B / KB / MB). {@link formatBytes} stops at KB (it serves the compression-ratio panel,
+ * where inputs are small); an in-memory store footprint or an uploaded source file can reach
+ * MB, so this carries the extra magnitude without over-precision. Negative or non-finite
+ * inputs clamp to `0 B` so a bad reading never renders a fabricated figure.
+ */
+export function formatFootprintBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "0 B";
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}

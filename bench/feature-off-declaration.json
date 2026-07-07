@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "[OPUS-4.8] sq-v3nel (2026-07-07): feature-OFF wasm-bundle CHANGE DECLARATION.",
+    "The vectorized-feature-off gate (leg 2, .github/workflows/vectorized-feature-off.yml)",
+    "builds the feature-OFF wasm bundle TWICE in one CI run — once from the base",
+    "(target-branch/merge-base) tree and once from the head (PR/merged) tree — and compares",
+    "them byte-for-byte. Same toolchain + same run => deterministic, with NO static byte pin,",
+    "so NO merge-order dependence (this replaces the retired feature_off_exact pin — see the",
+    "retirement entry in bench/perf-baseline.json's _comment chain).",
+    "",
+    "POLICY: a PR that INTENTIONALLY changes always-compiled engine/core code in a way that",
+    "moves the feature-OFF bundle bytes MUST DECLARE it by INCREMENTING \"change_token\" below",
+    "(by 1) in the same reviewed diff, and add a dated rationale line to this _comment. A PR",
+    "that does NOT touch always-compiled feature-OFF code leaves the token alone: its build is",
+    "byte-identical to base and passes automatically. An accidental default-path/vectorized",
+    "byte change with an un-bumped token FAILS the gate — that is the whole point.",
+    "",
+    "SCOPE: this token governs INTENT (did you mean to change the feature-OFF bytes at all?).",
+    "The SIZE of an accepted change is governed SEPARATELY, unchanged, by the",
+    "metrics.wasm_bundle_bytes floor ratchet (+/-2% band) in bench/perf-baseline.json /",
+    "bench.yml. A change moving the bundle > +/-2% must ALSO raise that floor.",
+    "",
+    "WHY A DEDICATED FILE (not a field in perf-baseline.json): scripts/perf-gate.py's",
+    "auto-ratchet-down rewrite (write_baseline) reconstructs each metric with only",
+    "floor/threshold/mode and would silently WIPE any extra field on the next push-to-main",
+    "improvement commit. WHY A TOKEN (not a PR-body marker): a PR-body line is invisible in",
+    "merge_group events (the merged commit set has no single PR body) and is not part of the",
+    "reviewed diff; a token bump is audit-visible and least-gameable.",
+    "",
+    "change_token seeded at 0. Increment by exactly 1 per declared feature-OFF byte change."
+  ],
+  "change_token": 0
+}

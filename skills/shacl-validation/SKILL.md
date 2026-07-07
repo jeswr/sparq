@@ -93,6 +93,11 @@ pub fn load_turtle_with_base(text: &str, base: &str) -> Result<Graph, String>;
 
 // Build a Graph from already-parsed oxrdf::Triples.
 pub fn graph_from_triples<I: IntoIterator<Item = oxrdf::Triple>>(triples: I) -> Graph;
+
+// Per-thread monotonic count of sh:sparql query executions (sq-7d3dj.33.1). Snapshot
+// the delta across a `validate` call to assert focus-node batching fired (a small
+// delta for a large focus set) — see "Focus-node batching" under SHACL-SPARQL below.
+pub fn sparql_constraint_executions() -> u64;
 ```
 
 `ValidationReport::conforms` honours a shapes-graph `sh:conformanceDisallows`
@@ -236,6 +241,20 @@ let shapes = Graph::load_str(r#"
 "#, "turtle").unwrap();
 let report = sparq_shacl::validate(&data, &shapes);   // source_component ends with "SPARQLConstraintComponent"
 ```
+
+*Focus-node batching (perf, sq-7d3dj.33.1).* Semantically each `sh:sparql` constraint
+is "run per focus node", but the engine evaluates it for **all** of a shape's focus
+nodes in ONE query: a single multi-row `VALUES ?this { … }` is injected (chunked at
+10 000 foci), executed once, and the solution rows are grouped by `?this` to build the
+per-focus results. This replaces the old O(N_focus × full-query) per-focus loop (which
+re-materialised the whole BGP for every focus node — quadratic) with O(1) queries per
+shape; the report is byte-for-byte identical. A constraint whose TOP-level form is
+NOT per-focus-equivalent — a `LIMIT`/`OFFSET`, a `GROUP BY`/aggregate not keyed on
+`$this` (an implicit single group or `GROUP BY ?other`), or `REDUCED` — falls back to
+the per-focus path automatically (a nested aggregate sub-select is always batched: the
+pre-binding rules force it to group by `$this`). `sparq_shacl::sparql_constraint_executions()`
+exposes a per-thread `sh:sparql` query-execution counter (snapshot the delta across a
+`validate` call) so a perf guard can assert the batched path fired.
 
 **SHACL-1.2 core constraints (always on, no feature flag).** The disjunctive
 *set* spellings of `sh:datatype` / `sh:nodeKind` — `sh:datatype ( xsd:string
