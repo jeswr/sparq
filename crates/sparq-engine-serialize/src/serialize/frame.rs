@@ -1203,4 +1203,134 @@ mod tests {
         );
         assert_eq!(out, r#"{"@graph":[]}"#);
     }
+
+    // -----------------------------------------------------------------------
+    // [OPUS-4.8] sq-qcnn.33 — coverage-raise tests: targeted paths not yet
+    // exercised by the framing suite above.
+    // -----------------------------------------------------------------------
+
+    /// `Embed::parse` with `Json::Raw("true")` and `Json::Raw("false")` — the legacy
+    /// boolean spellings for `@once` and `@never`.  The frame parser stores JSON `true`
+    /// / `false` as `Json::Raw`, not `Json::Str`, so these arms were previously uncovered.
+    #[test]
+    fn embed_boolean_true_false() {
+        // @embed: false — the legacy spelling of @never; the referenced node stays a
+        // bare {"@id":…} reference, identical to using "@embed":"@never".
+        let out_false = frame_doc(
+            "<http://ex/1> <http://ex/p> <http://ex/2> .\
+             <http://ex/2> <http://ex/q> \"X\" .",
+            r#"{"@id":"http://ex/1","http://ex/p":{"@embed":false}}"#,
+        );
+        assert_eq!(
+            out_false,
+            r#"{"@id":"http://ex/1","http://ex/p":{"@id":"http://ex/2"}}"#,
+            "embed=false is @never: {}",
+            out_false
+        );
+
+        // @embed: true — the legacy spelling of @once; the node is embedded the first
+        // time it is reached (same result as the default, but exercises the true arm).
+        let out_true = frame_doc(
+            "<http://ex/1> <http://ex/p> <http://ex/2> .\
+             <http://ex/2> <http://ex/q> \"X\" .",
+            r#"{"@id":"http://ex/1","http://ex/p":{"@embed":true}}"#,
+        );
+        assert!(
+            out_true.contains(r#""@id":"http://ex/2""#),
+            "embed=true embeds the node: {}",
+            out_true
+        );
+        assert!(
+            out_true.contains(r#""http://ex/q":"X""#),
+            "embedded node properties present: {}",
+            out_true
+        );
+    }
+
+    /// `Flags::updated_by` top-level `@omitDefault` field (line ~156): when the
+    /// top-level frame carries `@omitDefault:true`, absent-property fill is suppressed
+    /// for the whole tree via the inherited flag (not just a per-property override).
+    #[test]
+    fn top_level_omit_default_suppresses_fill() {
+        let out = frame_doc(
+            "<http://ex/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/T> .",
+            // Top-level @omitDefault:true — the absent "m" property is dropped instead of
+            // being filled with the @default value "FB".
+            r#"{"@type":"http://ex/T","@omitDefault":true,"http://ex/m":{"@default":"FB"}}"#,
+        );
+        // The absence of "m" in the output confirms the top-level @omitDefault was applied.
+        assert_eq!(
+            out,
+            r#"{"@id":"http://ex/1","@type":"http://ex/T"}"#,
+            "top-level @omitDefault suppresses fill: {}",
+            out
+        );
+    }
+
+    /// `match_type` wildcard `@type:{}` branch (~line 426): matches any node that has
+    /// at least one type; nodes without `@type` are excluded.
+    #[test]
+    fn type_wildcard_matches_only_typed_nodes() {
+        let out = frame_doc(
+            "<http://ex/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/T> .\
+             <http://ex/2> <http://ex/p> \"X\" .",
+            // @type:{} = wildcard — match any node that has a type.
+            r#"{"@type":{}}"#,
+        );
+        // ex:1 has a type and matches; ex:2 has no type and is excluded.
+        assert_eq!(
+            out,
+            r#"{"@id":"http://ex/1","@type":"http://ex/T"}"#,
+            "wildcard @type selects typed node only: {}",
+            out
+        );
+    }
+
+    /// `match_type` match-none `@type:[]` branch (~line 423): matches only nodes that
+    /// have NO `@type`; typed nodes are excluded.
+    #[test]
+    fn type_match_none_selects_untyped_nodes() {
+        let out = frame_doc(
+            "<http://ex/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/T> .\
+             <http://ex/2> <http://ex/p> \"X\" .",
+            // @type:[] = match-none — only untyped nodes match.
+            r#"{"@type":[]}"#,
+        );
+        // ex:2 has no type and matches; ex:1 is excluded.
+        assert_eq!(
+            out,
+            r#"{"@id":"http://ex/2","http://ex/p":"X"}"#,
+            "match-none @type selects untyped node only: {}",
+            out
+        );
+    }
+
+    /// `match_type` Json::Arr `wanted` branch (~line 431): an array of type IRIs in the
+    /// frame matches a node with ANY of those types (OR semantics).
+    #[test]
+    fn type_array_frame_matches_either_type() {
+        let out = frame_doc(
+            "<http://ex/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/T1> .\
+             <http://ex/2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/T2> .\
+             <http://ex/3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/T3> .",
+            // @type array: matches nodes typed T1 OR T2; T3 is excluded.
+            r#"{"@type":["http://ex/T1","http://ex/T2"]}"#,
+        );
+        // ex:1 and ex:2 match; ex:3 does not.
+        assert!(
+            out.contains(r#""@id":"http://ex/1""#),
+            "T1 node in result: {}",
+            out
+        );
+        assert!(
+            out.contains(r#""@id":"http://ex/2""#),
+            "T2 node in result: {}",
+            out
+        );
+        assert!(
+            !out.contains(r#""@id":"http://ex/3""#),
+            "T3 node excluded: {}",
+            out
+        );
+    }
 }
