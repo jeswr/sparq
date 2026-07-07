@@ -123,6 +123,30 @@ pub use update::{
     with_load_base, UpdateEffect,
 };
 
+/// Test/measurement hooks for sideways information passing (SIP) — the correlated
+/// graph-pattern join optimisation (bead sq-7d3dj.30.3). SIP is a semantics-preserving
+/// perf optimisation that is always on in normal evaluation; these hooks exist so the
+/// differential acceptance test can force it OFF and read whether it fired. Not part of
+/// the stable query API. [OPUS-4.8]
+#[doc(hidden)]
+pub mod sip_testing {
+    /// Enables/disables SIP on the current thread, returning the previous value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::sip::set_enabled(v)
+    }
+
+    /// Clears the per-query SIP firing statistics.
+    pub fn reset_stats() {
+        crate::exec::sip::reset_stats()
+    }
+
+    /// `(fired, correlated_child_rows, distinct_bindings_evaluated)` since the last
+    /// [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize) {
+        crate::exec::sip::stats()
+    }
+}
+
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};

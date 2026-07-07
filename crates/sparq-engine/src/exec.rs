@@ -506,6 +506,430 @@ pub(crate) mod trace {
     }
 }
 
+// ---- Sideways information passing (SIP): correlated graph-pattern join (sq-7d3dj.30.3) ----
+//
+// [OPUS-4.8] When `Join(A, B)` is evaluated and the ALREADY-EVALUATED side `A` is
+// SMALL, evaluate the big child `B` CORRELATED on A's bindings instead of cold: for
+// each distinct binding of A's variables that are CERTAINLY bound in B (and bound to
+// an IRI in A), substitute that IRI as a constant into B's patterns — pushing into
+// UNION branches, BGP scans, property paths and filters — so the scan seeds from the
+// constant, then recombine preserving MULTIPLICITY. Conservative: any scope/threshold
+// condition failure returns to the existing cold path, bit-for-bit.
+//
+// Soundness (bag semantics): `A ⋈ B = ⊎_C (A_C ⋈ B)` where `A_C` partitions `A` by the
+// pushed-variable values `C`, and `A_C ⋈ B = A_C ⋈ σ_{P=C}(B)`. Because every pushed
+// variable is a CERTAIN variable of `B` (bound in every `B` solution), substituting the
+// constant is exactly `σ_{P=C}(B)` with the pushed columns projected out (re-supplied by
+// `A_C`). Pushed values are restricted to IRIs (term identity — no literal value-space /
+// numeric-precision hazard), matching the design record (research/
+// sp2bench-complex-shape-deficit.md §2.2). SP2Bench q08/q12b: the 1-row `?erdoes` side
+// seeds the Union's `?document dc:creator ?erdoes` scan instead of a blind whole-corpus
+// creator self-join.
+pub(crate) mod sip {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static FIRED: Cell<bool> = const { Cell::new(false) };
+        static CORRELATED_ROWS: Cell<usize> = const { Cell::new(0) };
+        static BINDINGS_EVALUATED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether correlated (SIP) join evaluation is enabled on this thread (default on).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables SIP on this thread, returning the previous value. The
+    /// differential acceptance test uses it to compare correlated-on vs -off results.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query firing statistics (call before a measured/traced run).
+    pub(crate) fn reset_stats() {
+        FIRED.with(|f| f.set(false));
+        CORRELATED_ROWS.with(|c| c.set(0));
+        BINDINGS_EVALUATED.with(|b| b.set(0));
+    }
+
+    /// Records one fired correlated evaluation: `rows` solutions produced across
+    /// `bindings` distinct pushed-value combinations.
+    pub(crate) fn record(rows: usize, bindings: usize) {
+        FIRED.with(|f| f.set(true));
+        CORRELATED_ROWS.with(|c| c.set(c.get().saturating_add(rows)));
+        BINDINGS_EVALUATED.with(|b| b.set(b.get().saturating_add(bindings)));
+    }
+
+    /// `(fired, correlated_child_rows, distinct_bindings_evaluated)` since the last
+    /// [`reset_stats`]. The anti-vacuity acceptance test asserts `fired` and that the
+    /// correlated child produced far fewer rows than the cold (blind) child.
+    pub(crate) fn stats() -> (bool, usize, usize) {
+        (
+            FIRED.with(|f| f.get()),
+            CORRELATED_ROWS.with(|c| c.get()),
+            BINDINGS_EVALUATED.with(|b| b.get()),
+        )
+    }
+}
+
+/// Maximum size of the already-evaluated (small) join side for which correlated
+/// evaluation of the other child is attempted; above it the cold path is used.
+const SIP_MAX_SMALL_ROWS: usize = 64;
+
+/// Certain (always-bound) REAL variables of a graph pattern — a sound
+/// UNDER-approximation of the SPARQL bound set: it never adds a variable that some
+/// solution may leave unbound, so any variable it reports is safe to substitute as a
+/// constant. Blank-node slots are excluded (we never substitute into them).
+fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
+    use GraphPattern as G;
+    // A directly-positioned (non-quoted, non-blank) query variable of a term slot.
+    fn real(t: &TermPattern) -> Option<&Variable> {
+        if let TermPattern::Variable(v) = t {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    match p {
+        G::Bgp { patterns } => {
+            for tp in patterns {
+                for v in [real(&tp.subject), nnp_var_ref(&tp.predicate), real(&tp.object)]
+                    .into_iter()
+                    .flatten()
+                {
+                    out.insert(v.clone());
+                }
+            }
+        }
+        G::Path { subject, object, .. } => {
+            for v in [real(subject), real(object)].into_iter().flatten() {
+                out.insert(v.clone());
+            }
+        }
+        G::Join { left, right } => {
+            certain_vars(left, out);
+            certain_vars(right, out);
+        }
+        // Only the mandatory (left) side of an OPTIONAL / MINUS is certainly bound.
+        G::LeftJoin { left, .. } | G::Minus { left, .. } => certain_vars(left, out),
+        G::Filter { inner, .. }
+        | G::OrderBy { inner, .. }
+        | G::Distinct { inner }
+        | G::Reduced { inner }
+        | G::Slice { inner, .. } => certain_vars(inner, out),
+        // A variable is certain in a UNION only if certain in BOTH branches.
+        G::Union { left, right } => {
+            let mut l = FxHashSet::default();
+            let mut r = FxHashSet::default();
+            certain_vars(left, &mut l);
+            certain_vars(right, &mut r);
+            out.extend(l.intersection(&r).cloned());
+        }
+        G::Graph { name, inner } => {
+            if let NamedNodePattern::Variable(v) = name {
+                out.insert(v.clone());
+            }
+            certain_vars(inner, out);
+        }
+        // BIND may evaluate to an error (leaving its target UNBOUND), so the extended
+        // variable is NOT certain; only the inner pattern's certain vars are.
+        G::Extend { inner, .. } => certain_vars(inner, out),
+        G::Values { variables, bindings } => {
+            for (i, v) in variables.iter().enumerate() {
+                if bindings.iter().all(|row| row.get(i).is_some_and(Option::is_some)) {
+                    out.insert(v.clone());
+                }
+            }
+        }
+        // Projection / grouping drop non-listed variables; keep the listed ones that
+        // are certain in the inner pattern.
+        G::Project { inner, variables } | G::Group { inner, variables, .. } => {
+            let mut inner_c = FxHashSet::default();
+            certain_vars(inner, &mut inner_c);
+            for v in variables {
+                if inner_c.contains(v) {
+                    out.insert(v.clone());
+                }
+            }
+        }
+        // Service (and anything else): conservatively bind nothing certain.
+        _ => {}
+    }
+}
+
+/// A borrow of a predicate-slot variable (predicates are never blank/quoted).
+fn nnp_var_ref(p: &NamedNodePattern) -> Option<&Variable> {
+    match p {
+        NamedNodePattern::Variable(v) => Some(v),
+        NamedNodePattern::NamedNode(_) => None,
+    }
+}
+
+/// Substitutes each `var -> IRI` in `sub` throughout a graph pattern, returning `None`
+/// when substitution is not clearly sound (e.g. a `SERVICE`, a sub-`SELECT`/aggregate
+/// that projects a substituted variable, or a `BOUND(?v)` on a substituted variable) —
+/// in which case the caller falls back to cold evaluation.
+fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<GraphPattern> {
+    use GraphPattern as G;
+    Some(match p {
+        G::Bgp { patterns } => G::Bgp {
+            patterns: patterns.iter().map(|tp| subst_triple(tp, sub)).collect::<Option<Vec<_>>>()?,
+        },
+        G::Path { subject, path, object } => G::Path {
+            subject: subst_term(subject, sub)?,
+            path: path.clone(),
+            object: subst_term(object, sub)?,
+        },
+        G::Join { left, right } => G::Join {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+        },
+        G::LeftJoin { left, right, expression } => G::LeftJoin {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+            expression: match expression {
+                Some(e) => Some(subst_expr(e, sub)?),
+                None => None,
+            },
+        },
+        G::Filter { expr, inner } => G::Filter {
+            expr: subst_expr(expr, sub)?,
+            inner: Box::new(subst_pattern(inner, sub)?),
+        },
+        G::Union { left, right } => G::Union {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+        },
+        G::Graph { name, inner } => G::Graph {
+            name: subst_nnp(name, sub),
+            inner: Box::new(subst_pattern(inner, sub)?),
+        },
+        G::Minus { left, right } => G::Minus {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+        },
+        G::Extend { inner, variable, expression } => {
+            // A BIND target that is itself a substituted variable would shadow the
+            // constant — bail conservatively.
+            if sub.contains_key(variable) {
+                return None;
+            }
+            G::Extend {
+                inner: Box::new(subst_pattern(inner, sub)?),
+                variable: variable.clone(),
+                expression: subst_expr(expression, sub)?,
+            }
+        }
+        G::Values { variables, bindings } => {
+            if variables.iter().any(|v| sub.contains_key(v)) {
+                return None;
+            }
+            G::Values { variables: variables.clone(), bindings: bindings.clone() }
+        }
+        G::OrderBy { inner, expression } => G::OrderBy {
+            inner: Box::new(subst_pattern(inner, sub)?),
+            expression: expression.iter().map(|oe| subst_order(oe, sub)).collect::<Option<Vec<_>>>()?,
+        },
+        G::Distinct { inner } => G::Distinct { inner: Box::new(subst_pattern(inner, sub)?) },
+        G::Reduced { inner } => G::Reduced { inner: Box::new(subst_pattern(inner, sub)?) },
+        G::Slice { inner, start, length } => G::Slice {
+            inner: Box::new(subst_pattern(inner, sub)?),
+            start: *start,
+            length: *length,
+        },
+        // A sub-SELECT / GROUP that projects a substituted variable would emit it
+        // unbound; if it does not project any, the substitution is still sound.
+        G::Project { inner, variables } => {
+            if variables.iter().any(|v| sub.contains_key(v)) {
+                return None;
+            }
+            G::Project { inner: Box::new(subst_pattern(inner, sub)?), variables: variables.clone() }
+        }
+        // Aggregation and everything else (Service, …): conservative bail.
+        _ => return None,
+    })
+}
+
+fn subst_triple(tp: &TriplePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<TriplePattern> {
+    Some(TriplePattern {
+        subject: subst_term(&tp.subject, sub)?,
+        predicate: subst_nnp(&tp.predicate, sub),
+        object: subst_term(&tp.object, sub)?,
+    })
+}
+
+fn subst_term(t: &TermPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<TermPattern> {
+    Some(match t {
+        TermPattern::Variable(v) => match sub.get(v) {
+            Some(nn) => TermPattern::NamedNode(nn.clone()),
+            None => TermPattern::Variable(v.clone()),
+        },
+        // A quoted triple term (RDF 1.2) can embed a substituted variable — recurse.
+        TermPattern::Triple(inner) => TermPattern::Triple(Box::new(subst_triple(inner, sub)?)),
+        other => other.clone(),
+    })
+}
+
+fn subst_nnp(p: &NamedNodePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> NamedNodePattern {
+    match p {
+        NamedNodePattern::Variable(v) => match sub.get(v) {
+            Some(nn) => NamedNodePattern::NamedNode(nn.clone()),
+            None => NamedNodePattern::Variable(v.clone()),
+        },
+        NamedNodePattern::NamedNode(_) => p.clone(),
+    }
+}
+
+fn subst_order(oe: &OrderExpression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<OrderExpression> {
+    Some(match oe {
+        OrderExpression::Asc(e) => OrderExpression::Asc(subst_expr(e, sub)?),
+        OrderExpression::Desc(e) => OrderExpression::Desc(subst_expr(e, sub)?),
+    })
+}
+
+fn subst_expr(e: &Expression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<Expression> {
+    use Expression as E;
+    let bx = |x: Option<Expression>| x.map(Box::new);
+    Some(match e {
+        E::NamedNode(_) | E::Literal(_) => e.clone(),
+        E::Variable(v) => match sub.get(v) {
+            Some(nn) => E::NamedNode(nn.clone()),
+            None => E::Variable(v.clone()),
+        },
+        E::Or(a, b) => E::Or(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::And(a, b) => E::And(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Equal(a, b) => E::Equal(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::SameTerm(a, b) => E::SameTerm(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Greater(a, b) => E::Greater(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::GreaterOrEqual(a, b) => E::GreaterOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Less(a, b) => E::Less(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::LessOrEqual(a, b) => E::LessOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::In(a, list) => E::In(
+            bx(subst_expr(a, sub))?,
+            list.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?,
+        ),
+        E::Add(a, b) => E::Add(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Subtract(a, b) => E::Subtract(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Multiply(a, b) => E::Multiply(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Divide(a, b) => E::Divide(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::UnaryPlus(a) => E::UnaryPlus(bx(subst_expr(a, sub))?),
+        E::UnaryMinus(a) => E::UnaryMinus(bx(subst_expr(a, sub))?),
+        E::Not(a) => E::Not(bx(subst_expr(a, sub))?),
+        E::If(c, t, f) => E::If(
+            bx(subst_expr(c, sub))?,
+            bx(subst_expr(t, sub))?,
+            bx(subst_expr(f, sub))?,
+        ),
+        E::Coalesce(list) => E::Coalesce(list.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?),
+        E::FunctionCall(f, args) => E::FunctionCall(
+            f.clone(),
+            args.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?,
+        ),
+        E::Exists(gp) => E::Exists(Box::new(subst_pattern(gp, sub)?)),
+        // `BOUND(?v)` on a substituted (certainly-bound) variable is always true, but
+        // rewriting it changes nothing measurable here — bail conservatively rather
+        // than synthesise a boolean literal.
+        E::Bound(v) if sub.contains_key(v) => return None,
+        E::Bound(v) => E::Bound(v.clone()),
+    })
+}
+
+/// Attempts sideways-information-passing evaluation of `Join(left, right)` given the
+/// already-evaluated `left`. Returns `Ok(Some(result))` when correlated evaluation
+/// fired (bag-equivalent to the cold join), or `Ok(None)` to fall back to cold. See
+/// the module comment for the soundness argument.
+fn try_sip_join(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    right: &GraphPattern,
+) -> Result<Option<Bindings>, String> {
+    if !sip::enabled() || left.rows.is_empty() || left.rows.len() > SIP_MAX_SMALL_ROWS {
+        return Ok(None);
+    }
+    // Variables that are certain in `right` — the only ones safe to substitute.
+    let mut cert = FxHashSet::default();
+    certain_vars(right, &mut cert);
+    if cert.is_empty() {
+        return Ok(None);
+    }
+    // Candidate push columns: a left variable that is certain in `right` AND bound to a
+    // NamedNode (IRI) in EVERY left row (term identity keeps substitution exact).
+    let mut push: Vec<(Variable, usize, Vec<oxrdf::NamedNode>)> = Vec::new();
+    for (col, v) in left.vars.iter().enumerate() {
+        if !cert.contains(v) {
+            continue;
+        }
+        let mut iris: Vec<oxrdf::NamedNode> = Vec::with_capacity(left.rows.len());
+        let mut ok = true;
+        for row in &left.rows {
+            match term_of(graph, local, row[col]) {
+                Some(Term::NamedNode(n)) => iris.push(n),
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            push.push((v.clone(), col, iris));
+        }
+    }
+    if push.is_empty() {
+        return Ok(None);
+    }
+    // Group left rows by their pushed-value combination `C` (dedup for EVALUATION,
+    // never for the join result). `key_of` builds the ordered IRI-string key.
+    let key_of = |ri: usize| -> Vec<String> {
+        push.iter().map(|(_, _, iris)| iris[ri].as_str().to_string()).collect()
+    };
+    let mut order: Vec<Vec<String>> = Vec::new();
+    let mut groups: FxHashMap<Vec<String>, Vec<usize>> = FxHashMap::default();
+    for ri in 0..left.rows.len() {
+        let k = key_of(ri);
+        match groups.entry(k.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push(ri),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                order.push(k);
+                e.insert(vec![ri]);
+            }
+        }
+    }
+
+    let mut result: Option<Bindings> = None;
+    let mut total_child_rows = 0usize;
+    for key in &order {
+        let members = &groups[key];
+        // Build the var -> IRI substitution for this C from the first member row.
+        let ri0 = members[0];
+        let mut smap: FxHashMap<Variable, oxrdf::NamedNode> = FxHashMap::default();
+        for (v, _, iris) in &push {
+            smap.insert(v.clone(), iris[ri0].clone());
+        }
+        // Substitute into `right`; a non-substitutable construct aborts SIP entirely
+        // (fall back to the cold join for the whole operator, bit-for-bit).
+        let Some(subst) = subst_pattern(right, &smap) else {
+            return Ok(None);
+        };
+        let b_prime = eval_graph_pattern(graph, local, &subst)?;
+        total_child_rows += b_prime.rows.len();
+        // `A_C`: the left rows whose pushed values equal this C (multiplicity intact).
+        let a_c = Bindings::unsorted(
+            left.vars.clone(),
+            members.iter().map(|&ri| left.rows[ri].clone()).collect(),
+        );
+        let joined = join_bindings(a_c, b_prime);
+        result = Some(match result {
+            None => joined,
+            Some(acc) => union_bindings(acc, joined),
+        });
+    }
+    sip::record(total_child_rows, order.len());
+    Ok(result)
+}
+
 // ---- Extension-function registry (SPARQL 17.6) --------------------------------
 //
 // A thread-local registry installed by the `*_with_functions` entry points /
@@ -2499,6 +2923,14 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
                     let l2 = eval_graph_pattern(graph, local, left)?;
                     return Ok(join_bindings(l2, r));
                 }
+            }
+            // Sideways information passing (SIP): when the already-evaluated `l` is
+            // SMALL, evaluate the big `right` child CORRELATED on it — seeding scans
+            // (incl. inside UNION branches) from `l`'s bound IRIs instead of cold.
+            // Conservative: any scope/threshold condition failure returns `None` and
+            // we fall through to the cold join below, bit-for-bit. [OPUS-4.8] (sq-7d3dj.30.3)
+            if let Some(joined) = try_sip_join(graph, local, &l, right)? {
+                return Ok(joined);
             }
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(join_bindings(l, r))
@@ -13708,5 +14140,87 @@ mod columnar_aggregate_seam {
             &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
         );
         assert!(result.is_none(), "DISTINCT aggregate must make columnar_aggregate decline");
+    }
+}
+
+#[cfg(test)]
+mod sip_unit {
+    //! Direct unit tests for the SIP helpers (`certain_vars` / `subst_pattern`),
+    //! complementing the end-to-end `tests/sip_join.rs`. [OPUS-4.8] (sq-7d3dj.30.3)
+    use super::*;
+    use oxrdf::{NamedNode, Variable};
+
+    fn var(s: &str) -> Variable {
+        Variable::new(s).unwrap()
+    }
+    fn nn(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+    fn tp(s: &str, p: &str, o: &str) -> TriplePattern {
+        TriplePattern {
+            subject: TermPattern::Variable(var(s)),
+            predicate: NamedNodePattern::NamedNode(nn(p)),
+            object: TermPattern::Variable(var(o)),
+        }
+    }
+
+    #[test]
+    fn certain_vars_union_is_branch_intersection() {
+        // left binds {x, y}; right binds {x, z}; only x is certain in the UNION.
+        let left = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
+        let right = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/q", "z")] };
+        let u = GraphPattern::Union { left: Box::new(left), right: Box::new(right) };
+        let mut out = FxHashSet::default();
+        certain_vars(&u, &mut out);
+        assert!(out.contains(&var("x")), "x certain (bound in both branches)");
+        assert!(!out.contains(&var("y")), "y bound in only one branch");
+        assert!(!out.contains(&var("z")), "z bound in only one branch");
+    }
+
+    #[test]
+    fn certain_vars_leftjoin_excludes_optional_side() {
+        let left = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
+        let right = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/q", "opt")] };
+        let lj = GraphPattern::LeftJoin {
+            left: Box::new(left),
+            right: Box::new(right),
+            expression: None,
+        };
+        let mut out = FxHashSet::default();
+        certain_vars(&lj, &mut out);
+        assert!(out.contains(&var("x")) && out.contains(&var("y")));
+        assert!(!out.contains(&var("opt")), "an OPTIONAL-right var is never certain");
+    }
+
+    #[test]
+    fn subst_pattern_replaces_variable_in_bgp_and_filter() {
+        let inner = GraphPattern::Bgp { patterns: vec![tp("doc", "http://e/creator", "prin")] };
+        let filt = GraphPattern::Filter {
+            expr: Expression::Not(Box::new(Expression::Equal(
+                Box::new(Expression::Variable(var("a"))),
+                Box::new(Expression::Variable(var("prin"))),
+            ))),
+            inner: Box::new(inner),
+        };
+        let mut sub = FxHashMap::default();
+        sub.insert(var("prin"), nn("http://e/paul"));
+        let out = subst_pattern(&filt, &sub).expect("substitution should succeed");
+        // The substituted variable must be fully gone (pattern positions AND filter).
+        let dbg = format!("{:?}", out);
+        assert!(dbg.contains("paul"), "result must carry the substituted IRI");
+        assert!(!dbg.contains("prin"), "substituted variable ?prin must be gone: {}", dbg);
+        assert!(dbg.contains("\"a\""), "the untouched ?a must remain");
+    }
+
+    #[test]
+    fn subst_pattern_bails_on_bound_of_substituted_var() {
+        let inner = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
+        let filt = GraphPattern::Filter { expr: Expression::Bound(var("x")), inner: Box::new(inner) };
+        let mut sub = FxHashMap::default();
+        sub.insert(var("x"), nn("http://e/c"));
+        assert!(
+            subst_pattern(&filt, &sub).is_none(),
+            "BOUND(?x) on a substituted variable must force the cold fallback"
+        );
     }
 }

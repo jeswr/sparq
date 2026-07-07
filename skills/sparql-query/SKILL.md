@@ -556,6 +556,21 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   global atomics) so parallel test threads don't interfere. The counters are **not semver-stable** —
   external callers must not build stable logic on them; they exist only for the acceptance gate in
   `tests/differentials/vectorized_byte_identity.rs` (T1–T4).
+- **Sideways information passing (SIP) — correlated graph-pattern join** is a DEFAULT-ON,
+  semantics-preserving optimisation (bead `sq-7d3dj.30.3`; research/sp2bench-complex-shape-deficit.md
+  §2.2). When a `Join(A, B)` is evaluated and the already-evaluated side `A` is **small** (≤ 64 rows),
+  the executor evaluates the big child `B` **correlated** on A's bindings instead of cold: for each
+  distinct binding of A's variables that are **certainly bound** in `B` and bound to an **IRI** in `A`,
+  that IRI is substituted as a constant into `B`'s patterns — pushing *into UNION branches, BGP scans,
+  property paths and filters* — so a scan seeds from the constant rather than running blind. Results are
+  recombined preserving **multiplicity** (bag semantics). It is **conservative**: it fires only for
+  IRI-valued correlation variables that are certain in `B` (never a variable that a solution may leave
+  unbound — e.g. inside an OPTIONAL right side, or MINUS, or a projecting sub-`SELECT`), and any
+  scope/threshold failure falls back to the **cold** evaluation bit-for-bit. The answer is identical
+  either way (proven on-vs-off by `tests/sip_join.rs`, incl. an anti-vacuity trace assertion that the
+  correlated child actually collapsed). SP2Bench q08/q12b: the 1-row `?erdoes` side seeds the Union's
+  `?document dc:creator ?erdoes` scan instead of a whole-corpus creator self-join. Payoff on complex-shape
+  workloads is a measurable hypothesis for the canonical perf host, not a baked-in number.
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
   pattern, the executor first builds a membership filter over the already-materialised side's
