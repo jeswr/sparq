@@ -31,6 +31,7 @@
 
 use crate::rows::{Id, Key, Posting, Row, NO_ID};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 
 /// A cooperative-cancellation poll the join kernels call once per key-group /
@@ -413,7 +414,15 @@ impl<'a> TrieIter<'a> {
 
 /// Leapfrog intersection of the participating iterators at one level.
 struct Leapfrog {
-    order: Vec<usize>, // participant indices, kept in cyclic key order
+    /// Participant iterator indices kept in cyclic ascending-key order.
+    ///
+    /// `SmallVec<[usize; 8]>` inline for k ≤ 8 (all practical WCO arities) so the
+    /// struct lives entirely on the stack — no per-recursion-level heap allocation.
+    /// For k=3 (the dominant triangle/clique case), `search_k3` loads all three
+    /// entries as stack-local copies at entry so the hot loop never reads this field.
+    ///
+    /// [SONNET-4.6] sq-7d3dj.20
+    order: SmallVec<[usize; 8]>,
     p: usize,
     ended: bool,
     key: Id,
@@ -421,7 +430,12 @@ struct Leapfrog {
 
 impl Leapfrog {
     fn init(iters: &mut [TrieIter], parts: &[usize]) -> Self {
-        let mut lf = Leapfrog { order: parts.to_vec(), p: 0, ended: false, key: 0 };
+        let mut lf = Leapfrog {
+            order: SmallVec::from_slice(parts),
+            p: 0,
+            ended: false,
+            key: 0,
+        };
         if parts.iter().any(|&i| iters[i].at_end()) {
             lf.ended = true;
             return lf;
@@ -430,31 +444,108 @@ impl Leapfrog {
         lf.search(iters);
         lf
     }
+
+    /// Advance the leapfrog state to the next common value across all participants.
+    ///
+    /// Three micro-optimisations ([SONNET-4.6] sq-7d3dj.20):
+    ///
+    /// (a) **Branchless wrap**: `p` only advances by 1 per iteration, so
+    ///     `(p + 1) % k` becomes `p += 1; if p == k { p = 0 }` — compiles to a
+    ///     `cmov` rather than an integer divide.
+    ///
+    /// (b) **Hoisted indirection**: `order[p]` and `order[prev]` are resolved once
+    ///     per iteration into `cur_idx` / `prev_idx` locals, eliminating repeated
+    ///     SmallVec + slice pointer chases inside the hot loop.
+    ///
+    /// (c) **Monomorphized k=3 dispatch**: routes to `search_k3` when
+    ///     `order.len() == 3` (the triangle / 3-clique case dominating WCO workloads),
+    ///     which additionally copies all three entries as stack-local variables so the
+    ///     hot loop never touches the `order` field at all.
+    #[inline]
     fn search(&mut self, iters: &mut [TrieIter]) {
         let k = self.order.len();
+        // (c) Route to monomorphized k=3 path for the dominant WCO arity.
+        if k == 3 {
+            return self.search_k3(iters);
+        }
         loop {
-            let max = iters[self.order[(self.p + k - 1) % k]].key();
-            let min = iters[self.order[self.p]].key();
+            // (a) Branchless predecessor: p only decrements by 1 cyclically.
+            let prev = if self.p == 0 { k - 1 } else { self.p - 1 };
+            // (b) Hoist: resolve order[..] into locals once per iteration.
+            let prev_idx = self.order[prev];
+            let cur_idx = self.order[self.p];
+            let max = iters[prev_idx].key();
+            let min = iters[cur_idx].key();
             if min == max {
                 self.key = min;
                 return;
             }
-            iters[self.order[self.p]].seek(max);
-            if iters[self.order[self.p]].at_end() {
+            iters[cur_idx].seek(max);
+            if iters[cur_idx].at_end() {
                 self.ended = true;
                 return;
             }
-            self.p = (self.p + 1) % k;
+            // (a) Branchless wrap: advance p one step mod k.
+            self.p += 1;
+            if self.p == k {
+                self.p = 0;
+            }
         }
     }
+
+    /// Monomorphized k=3 fast path for triangle / 3-clique queries.
+    ///
+    /// Loads `order[0..3]` into a stack-local array `o` at entry so the hot loop
+    /// reads register-resident copies rather than the `SmallVec` field.  Cyclic
+    /// advance is a compare-and-reset against the fixed modulus 3, eliminating both
+    /// `%` ops present in the generic path.
+    ///
+    /// Only called from [`search`](Leapfrog::search) when `order.len() == 3`.
+    /// [SONNET-4.6] sq-7d3dj.20
+    #[inline]
+    fn search_k3(&mut self, iters: &mut [TrieIter]) {
+        debug_assert_eq!(self.order.len(), 3);
+        // Load all three order entries as stack-locals — hot loop never touches
+        // self.order again. [SONNET-4.6] sq-7d3dj.20
+        let o = [self.order[0], self.order[1], self.order[2]];
+        loop {
+            // Predecessor in {0, 1, 2}: 0 → 2, else p − 1.
+            let prev = if self.p == 0 { 2usize } else { self.p - 1 };
+            let ci = o[self.p]; // current iterator index
+            let max = iters[o[prev]].key();
+            let min = iters[ci].key();
+            if min == max {
+                self.key = min;
+                return;
+            }
+            iters[ci].seek(max);
+            if iters[ci].at_end() {
+                self.ended = true;
+                return;
+            }
+            // Branchless cyclic advance for the fixed modulus 3: no % op.
+            self.p += 1;
+            if self.p == 3 {
+                self.p = 0;
+            }
+        }
+    }
+
+    #[inline]
     fn next(&mut self, iters: &mut [TrieIter]) {
         let k = self.order.len();
-        iters[self.order[self.p]].next();
-        if iters[self.order[self.p]].at_end() {
+        // (b) Hoist: resolve order[p] once. [SONNET-4.6] sq-7d3dj.20
+        let cur_idx = self.order[self.p];
+        iters[cur_idx].next();
+        if iters[cur_idx].at_end() {
             self.ended = true;
             return;
         }
-        self.p = (self.p + 1) % k;
+        // (a) Branchless wrap: advance p one step mod k. [SONNET-4.6] sq-7d3dj.20
+        self.p += 1;
+        if self.p == k {
+            self.p = 0;
+        }
         self.search(iters);
     }
 }
@@ -1335,5 +1426,72 @@ mod tests {
         assert!(any_unbound(&rows, &[0, 1])); // any unbound in the set trips it
         let full = vec![row(&[1, 2, 3])];
         assert!(!any_unbound(&full, &[0, 1, 2])); // all bound
+    }
+
+    // [SONNET-4.6] sq-7d3dj.20 — DIRECT tests for the monomorphized k=3 path.
+
+    #[test]
+    fn lftj_k3_three_way_intersection() {
+        // 3-way set intersection: R(x) ∧ S(x) ∧ T(x).
+        // All three tries participate at level 0 (k=3), exercising the monomorphized
+        // search_k3 path directly. Results must match the manual intersection.
+        // [SONNET-4.6] sq-7d3dj.20
+        let r = Trie { tuples: vec![vec![1], vec![2], vec![3], vec![5], vec![7]] };
+        let s = Trie { tuples: vec![vec![2], vec![3], vec![5], vec![6], vec![8]] };
+        let t = Trie { tuples: vec![vec![1], vec![3], vec![5], vec![7], vec![9]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        // Intersection: {3, 5} — values present in all three tries.
+        assert_eq!(out.len(), 2, "k=3 intersection must find exactly 2 common values");
+        assert!(out.contains(&row(&[3])));
+        assert!(out.contains(&row(&[5])));
+    }
+
+    #[test]
+    fn lftj_k3_intersection_empty_when_no_common_value() {
+        // k=3 path: empty intersection. [SONNET-4.6] sq-7d3dj.20
+        let r = Trie { tuples: vec![vec![1], vec![2]] };
+        let s = Trie { tuples: vec![vec![3], vec![4]] };
+        let t = Trie { tuples: vec![vec![5], vec![6]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        assert!(out.is_empty(), "k=3 path must produce empty output when no common value exists");
+    }
+
+    #[test]
+    fn lftj_k3_intersection_result_equivalent_to_k2_pair_intersection() {
+        // Invariant: 3-way intersection equals the pairwise intersection computed
+        // sequentially. Verifies the k=3 path is semantically equivalent to the
+        // generic path. [SONNET-4.6] sq-7d3dj.20
+        let vals_r: Vec<u32> = (0..20).filter(|x| x % 2 == 0).collect(); // even
+        let vals_s: Vec<u32> = (0..20).filter(|x| x % 3 == 0).collect(); // multiples of 3
+        let vals_t: Vec<u32> = (0..20).filter(|x| x % 4 == 0).collect(); // multiples of 4
+
+        // Expected: values divisible by lcm(2,3,4)=12 in 0..20 → {0, 12}
+        let expected: Vec<Row> = vals_r
+            .iter()
+            .filter(|&&v| vals_s.contains(&v) && vals_t.contains(&v))
+            .map(|&v| row(&[v]))
+            .collect();
+
+        let r = Trie { tuples: vals_r.iter().map(|&v| vec![v]).collect() };
+        let s = Trie { tuples: vals_s.iter().map(|&v| vec![v]).collect() };
+        let t = Trie { tuples: vals_t.iter().map(|&v| vec![v]).collect() };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        let mut out_sorted = out.clone();
+        out_sorted.sort();
+        let mut exp_sorted = expected.clone();
+        exp_sorted.sort();
+        assert_eq!(out_sorted, exp_sorted, "k=3 result must match sequential pairwise intersection");
     }
 }
