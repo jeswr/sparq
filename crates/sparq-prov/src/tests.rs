@@ -361,3 +361,47 @@ fn minted_iri_has_exact_known_value() {
     // Confirm the derived triples are the expected two age-renamed triples.
     assert_eq!(d.triples().len(), 2, "CONSTRUCT should produce two triples");
 }
+
+// ── sq-qcnn.39: mutation-kill tests — exact prov_graph triple counts for CONSTRUCT. [SONNET-4.6]
+
+/// `Derivation::prov_graph()` for a CONSTRUCT with 1 used input and no agent must emit
+/// exactly 9 triples: 2 type, 2 timing, rdfs:label, prov:value, wasGeneratedBy, used,
+/// wasDerivedFrom. Pinning the count kills mutations that drop any `push()` call.
+/// [SONNET-4.6] sq-qcnn.39
+#[test]
+fn construct_prov_graph_exact_triple_count() {
+    let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+    let d = derive_construct(&g(), q, cfg()).unwrap();
+    assert_eq!(
+        d.prov_graph().len(),
+        9,
+        "CONSTRUCT prov_graph with 1 input must emit exactly 9 triples; got {:?}",
+        d.prov_graph().len()
+    );
+}
+
+/// With an agent configured, one extra `wasAssociatedWith` triple is added, so the
+/// count is 10 (9 + 1). Confirms the agent branch emits exactly one triple.
+/// [SONNET-4.6] sq-qcnn.39
+#[test]
+fn construct_prov_graph_with_agent_exact_triple_count() {
+    let config = ProvConfig {
+        activity: Some(NamedNode::new_unchecked("http://ex/a")),
+        entity: Some(NamedNode::new_unchecked("http://ex/e")),
+        agent: Some(NamedNode::new_unchecked("http://ex/agent")),
+        used: vec![NamedNode::new_unchecked("http://ex/src")],
+        clock: fixed_clock,
+    };
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        config,
+    )
+    .unwrap();
+    // 9 base + 1 wasAssociatedWith = 10
+    assert_eq!(
+        d.prov_graph().len(),
+        10,
+        "CONSTRUCT prov_graph with agent must emit 10 triples"
+    );
+}
