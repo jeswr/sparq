@@ -87,7 +87,7 @@ oxrdf = { workspace = true, optional = true }
 # [SONNET-4.6] sq-qonbz.4: criterion for the join/numeric micro-bench (dev-only, never
 # reaches the lean default or wasm build). Pinned at "0.5" to match the bench/zk pattern.
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 oxrdf = { workspace = true }
 
 # [SONNET-4.6] sq-qonbz.4: The micro-bench exercises merge_join + hash build/probe + Num
