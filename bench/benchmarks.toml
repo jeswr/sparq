@@ -576,7 +576,9 @@ id          = "bytes-per-triple"
 name        = "Memory footprint bytes/triple at scale (in-RAM + on-disk/external)"
 category    = "compression"
 measures    = "per scale (1M/10M/50M WatDiv): self-accounted heap B/triple decomposed dict/store/caches (memstat), post-load VmRSS + peak VmHWM B/triple, on-disk B/triple raw + block-compressed (save), bounded-RAM external-build peak RSS"
-invoke      = "apt-get install -y time libboost-all-dev >/dev/null 2>&1 || sudo apt-get install -y time libboost-all-dev >/dev/null 2>&1; SCALES=\"1000000 10000000 50000000\" bash scripts/bench/bytes-per-triple.sh"
+# SCALES is single-quoted: ec2-bench.sh's extract_invoke keeps a TOML \" literally in the
+# emitted command, which would split the env assignment at the first space.
+invoke      = "apt-get install -y time libboost-all-dev >/dev/null 2>&1 || sudo apt-get install -y time libboost-all-dev >/dev/null 2>&1; SCALES='1000000 10000000 50000000' bash scripts/bench/bytes-per-triple.sh"
 source      = "scripts/bench/bytes-per-triple.sh, crates/sparq-cli/src/main.rs (cmd_memstat)"
 dataset     = "WatDiv seed-1 (bench/watdiv/gen.sh) at SF 10/100/500; generated on-box, gitignored"
 quiet_box_sensitive = true  # byte counts + VmHWM are deterministic; load_s is not — run on a dedicated box for the canonical envelope (memory-roomy, e.g. r7g.4xlarge; VOLUME_GB>=100, WATCHDOG_SECS=10800)
