@@ -1,0 +1,5 @@
+2@prefix ex: <http://ex/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:n0 a ex:T ; ex:age 42 ; ex:name "nm"@en .
+ex:n1 ex:val "1.5"^^xsd:decimal ; ex:p _:b0 .
+_:b0 ex:name "x" ; ex:list ( 1 2 3 ) .

@@ -153,6 +153,12 @@ _LANE_SEEDS: dict[str, list[str]] = {
         "sparq-bench",
         "sparq-wasm",
     ],
+    # [FABLE-5] sq-0iqzw: fuzz.yml `differential-smoke` — the PR-level BLOCKING
+    # sparq-vs-Oxigraph differential regression windows (the sparq-bench in-process
+    # oracle). Seeds: the engine under test (sparq-core/sparq-engine) plus the
+    # harness/oracle crate itself, so a generator or comparator change re-runs its
+    # own gate.
+    "differential-smoke": ["sparq-core", "sparq-engine", "sparq-bench"],
 }
 
 

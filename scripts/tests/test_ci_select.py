@@ -686,9 +686,12 @@ class LaneMappingTests(unittest.TestCase):
         self.assertTrue(cs.lane_runs(sel, ["sparq-core-TYPO"]),
                         "an unknown seed must fail-closed to RUN")
 
-    def test_lane_seeds_are_the_expected_three_lanes(self):
+    def test_lane_seeds_are_the_expected_lanes(self):
         # [SONNET-4.6] sq-mel85 added the `bench` lane to the fuzz + wasm phase-2 set.
-        self.assertEqual(set(cs._LANE_SEEDS), {"fuzz", "wasm", "bench"})
+        # [FABLE-5] sq-0iqzw added `differential-smoke` (fuzz.yml PR-level blocking
+        # sparq-vs-Oxigraph differential regression windows).
+        self.assertEqual(set(cs._LANE_SEEDS),
+                         {"fuzz", "wasm", "bench", "differential-smoke"})
         self.assertEqual(cs._LANE_SEEDS["fuzz"],
                          ["sparq-core", "sparq-engine", "sparq-shacl"])
         self.assertIn("sparq-wasm", cs._LANE_SEEDS["wasm"])
@@ -697,6 +700,9 @@ class LaneMappingTests(unittest.TestCase):
         # wasm_bundle_bytes floor is enforced only in bench.yml — a direct seed).
         self.assertEqual(cs._LANE_SEEDS["bench"],
                          ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"])
+        # differential-smoke: the engine under test + the harness/oracle crate.
+        self.assertEqual(cs._LANE_SEEDS["differential-smoke"],
+                         ["sparq-core", "sparq-engine", "sparq-bench"])
 
     # ---- SAFE-only coverage-ratchet skip (acceptance) -------------------------
     @staticmethod

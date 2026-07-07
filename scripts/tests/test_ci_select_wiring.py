@@ -372,6 +372,26 @@ class TestPhase2LaneScoping(unittest.TestCase):
         self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
         self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
 
+    # ---- differential-smoke lane (fuzz.yml) — [FABLE-5] sq-0iqzw --------------------
+    def test_differential_smoke_job_guarded_by_its_seed_closure(self):
+        job = self.fuzz["jobs"]["differential-smoke"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
+                      "differential-smoke guard must be fail-closed (empty output => RUN)")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs,
+                      "differential-smoke must need the select pre-job")
+        self.assertEqual(
+            self._guard_needles(cond), self.lane_seeds["differential-smoke"],
+            "differential-smoke guard needles must equal "
+            "ci_select.py _LANE_SEEDS['differential-smoke']")
+        # The job is a BLOCKING gate leg: its name must never pick up the
+        # advisory/informational exclusion words (that would silently un-gate it).
+        self.assertNotRegex(
+            str(job.get("name", "")), r"(?i)\b(advisory|informational)\b",
+            "differential-smoke must GATE — no advisory/informational token")
+
     # ---- bench (perf-gate) lane (bench.yml) — [SONNET-4.6] sq-mel85 ----------------
     def test_bench_job_guarded_by_its_seed_closure(self):
         job = self.bench["jobs"]["bench"]
