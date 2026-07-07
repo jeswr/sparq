@@ -2385,6 +2385,32 @@ fn skipscan_distinct(graph: &Graph, id_pat: &IdPattern, target_pos: usize) -> Op
     Some((out, scanned))
 }
 
+/// Returns `true` when the same query variable occupies more than one of the subject,
+/// predicate, or object slots in `tp` (e.g. `?x ?p ?x`). The fallback path enforces
+/// positional equality for repeated variables via `build_row`; the skip-scan helpers do
+/// not, so we must decline to push down any branch that contains such a pattern.
+/// [SONNET-4.6]
+fn has_intra_triple_repeated_var(tp: &TriplePattern) -> bool {
+    let sv = if let TermPattern::Variable(v) = &tp.subject {
+        Some(v)
+    } else {
+        None
+    };
+    let pv = if let NamedNodePattern::Variable(v) = &tp.predicate {
+        Some(v)
+    } else {
+        None
+    };
+    let ov = if let TermPattern::Variable(v) = &tp.object {
+        Some(v)
+    } else {
+        None
+    };
+    (sv.is_some() && pv.is_some() && sv == pv)
+        || (sv.is_some() && ov.is_some() && sv == ov)
+        || (pv.is_some() && ov.is_some() && pv == ov)
+}
+
 /// The DISTINCT projected-variable ids contributed by one UNION branch, together with the
 /// permutation rows the skip scan touched. Returns only values NOT already in `seen`
 /// (they are added there by the caller). `None` = shape the pushdown cannot enumerate.
@@ -2401,6 +2427,15 @@ fn branch_distinct_values(
     let mut filters: Vec<Expression> = Vec::new();
     flatten_conjunction(branch, &mut patterns, &mut filters);
     if !filters.is_empty() {
+        return Ok(None);
+    }
+    // [SONNET-4.6] Decline when any pattern has a variable repeated across S/P/O positions
+    // (e.g. `?x ?p ?x`). The fallback enforces positional equality via build_row; without
+    // this guard the skip scan would over-approximate (include predicates that have no
+    // self-loop triple). Counterexample: data {ex:a ex:knows ex:a. ex:b ex:likes ex:c.},
+    // query SELECT DISTINCT ?p WHERE { ?x ?p ?x } — correct={ex:knows}, pushdown
+    // (unguarded)={ex:knows, ex:likes}.
+    if patterns.iter().any(has_intra_triple_repeated_var) {
         return Ok(None);
     }
     match patterns.len() {

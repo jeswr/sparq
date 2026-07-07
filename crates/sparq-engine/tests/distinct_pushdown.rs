@@ -270,6 +270,38 @@ fn empty_result_equivalence() {
     assert!(on.is_empty(), "no solutions expected");
 }
 
+/// Regression: intra-triple repeated variable must NOT push down.
+///
+/// Pattern `?x ?p ?x` requires subject == object; the skip-scan helpers enumerate
+/// predicates without checking that constraint, so they over-approximate. This test
+/// checks that the pushdown DECLINES (does not fire), the fallback answer is correct
+/// (only the self-loop predicate ex:knows qualifies), and on == off.
+///
+/// Counterexample data: `ex:a ex:knows ex:a` (self-loop) + `ex:b ex:likes ex:c`
+/// (no self-loop). Correct DISTINCT ?p = {ex:knows}; an unguarded skip-scan would
+/// return {ex:knows, ex:likes}. [SONNET-4.6]
+#[test]
+fn intra_triple_repeated_var_fallback() {
+    let g = load("ex:a ex:knows ex:a . ex:b ex:likes ex:c .");
+    let q = "SELECT DISTINCT ?p WHERE { ?x ?p ?x }";
+
+    // pushdown OFF gives the oracle (enforces ?x==?x via build_row)
+    let (off, on) = on_off(&g, q);
+    assert_eq!(off, on, "repeated-var query must give the same answer on vs off");
+
+    // The correct answer contains only ex:knows (ex:b ex:likes ex:c has subject != object)
+    let expected: Vec<Vec<Option<String>>> =
+        vec![vec![Some("<http://example.org/knows>".to_string())]];
+    assert_eq!(on, expected, "only the self-loop predicate qualifies");
+
+    // Crucially: the pushdown must NOT fire (the guard declines it)
+    distinct_pushdown_testing::reset_stats();
+    distinct_pushdown_testing::set_enabled(true);
+    let _ = query(&g, &format!("{PFX}{q}")).expect("query failed");
+    let (fired, _, _) = distinct_pushdown_testing::stats();
+    assert!(!fired, "pushdown must not fire on a pattern with a repeated variable (?x ?p ?x)");
+}
+
 #[test]
 fn public_toggle_and_stats() {
     // Direct unit coverage of the public `distinct_pushdown_testing` surface.
