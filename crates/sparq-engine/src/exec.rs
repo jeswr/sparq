@@ -6,6 +6,7 @@
 //! `LocalVocab`, mirroring QLever's local vocabulary.
 
 use crate::QueryResult;
+use std::ops::ControlFlow;
 use oxrdf::vocab::xsd;
 use oxrdf::{BlankNode, Literal, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
@@ -1617,22 +1618,6 @@ fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
     }
 }
 
-/// Appends a serialised fragment to the chunk list. Chunked mode (`flush = Some`)
-/// MOVES the fragment in as its own chunk — never a second copy of result bytes;
-/// single-string mode (`flush = None`) concatenates onto the tail (the pre-existing
-/// behaviour of the parallel join). Concatenation order — and so the byte stream —
-/// is identical either way.
-// [OPUS-4.8] Both call sites are in `parallel`-gated blocks (the sequential/wasm paths
-// `push` directly); gate the helper too so the `-D warnings` clippy gate stays clean in
-// no-parallel/wasm builds.
-#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
-fn emit_chunk(chunks: &mut Vec<String>, frag: String, flush: Option<usize>) {
-    match chunks.last_mut() {
-        Some(tail) if flush.is_none() => tail.push_str(&frag),
-        _ => chunks.push(frag),
-    }
-}
-
 /// Concatenates JSON chunks back into the single-string form (the non-streamed API).
 fn join_chunks(mut chunks: Vec<String>) -> String {
     if chunks.len() == 1 {
@@ -1648,7 +1633,21 @@ fn join_chunks(mut chunks: Vec<String>) -> String {
 /// caller falls back to the general evaluator). The vector-at-a-time idea for the most
 /// common (single-pattern) browser query. Output is a chunk sequence (see
 /// [`eval_select_json_chunks`]); concatenated it is the exact JSON document.
-fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Option<Vec<String>> {
+///
+/// [OPUS-4.8] (sq-7d3dj.34.2) Emit-based: hands each serialised chunk to `emit` **as it is
+/// produced** instead of collecting a `Vec<String>`, so the server can begin writing the
+/// results header + early solutions to the socket before the whole result is serialised
+/// (TTFB streaming). `emit` returns [`ControlFlow::Break`] when the consumer has gone away
+/// (the HTTP client disconnected); the scan then stops early. Returns `Some(())` when this
+/// shape was handled (fell into the streaming path), `None` when the caller must use the
+/// general evaluator. The concatenation of the chunks handed to `emit` is byte-identical to
+/// the pre-emit `Vec<String>` output.
+fn single_pattern_scan_json_emit(
+    graph: &Graph,
+    pattern: &GraphPattern,
+    flush: Option<usize>,
+    emit: &mut dyn FnMut(String) -> ControlFlow<()>,
+) -> Option<()> {
     // zk-trace: this streaming path serialises straight from the scan without
     // materialising Bindings, so it never hits the scan-recording hook. Fall
     // through to the Bindings path (which records) while a recorder is armed —
@@ -1703,7 +1702,8 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     head.push_str("]},\"results\":{\"bindings\":[");
     if unsat {
         head.push_str("]}}");
-        return Some(vec![head]);
+        let _ = emit(head);
+        return Some(());
     }
 
     let scan = match filt {
@@ -1805,23 +1805,32 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
             // caller's `budget::check(0)` converts into the budget error (a chunk skipped
             // above means the deadline is globally past, so this fires deterministically).
             let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
-            let mut chunks = vec![s];
+            // Accumulate into `pending` and hand a chunk to `emit` at each flush boundary
+            // (byte-identical concatenation to the old `emit_chunk` Vec layout — only the
+            // chunk *boundaries* differ, and the concat is what the byte-identity contract
+            // covers). `s` already holds the head.
+            let mut pending = s;
             let mut wrote = false;
             for (_, f) in frags {
                 if f.is_empty() {
                     continue;
                 }
                 if wrote {
-                    chunks.last_mut().expect("chunks start non-empty").push(',');
+                    pending.push(',');
                 }
                 wrote = true;
-                emit_chunk(&mut chunks, f, flush);
+                pending.push_str(&f);
+                if flush.is_some_and(|n| pending.len() >= n)
+                    && emit(std::mem::take(&mut pending)).is_break()
+                {
+                    return Some(());
+                }
             }
-            chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
-            return Some(chunks);
+            pending.push_str("]}}");
+            let _ = emit(pending);
+            return Some(());
         }
     }
-    let mut chunks: Vec<String> = Vec::new();
     let mut written = 0usize;
     for (i, row) in scan_rows.iter().enumerate() {
         // Coarse budget check every 1024 scanned rows; the caller's sticky check
@@ -1837,14 +1846,14 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
         }
         written += 1;
         write_row(row, &mut s);
-        if flush.is_some_and(|n| s.len() >= n) {
-            chunks.push(std::mem::take(&mut s));
+        if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
+            return Some(());
         }
     }
     let _ = budget::exhausted(written); // final row-count gate (sticky)
     s.push_str("]}}");
-    chunks.push(s);
-    Some(chunks)
+    let _ = emit(s);
+    Some(())
 }
 
 /// Evaluates a SELECT and serialises it straight to SPARQL-JSON, skipping the
@@ -1861,10 +1870,42 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
 /// sequential paths, head+fragments concatenated on the parallel path — exactly the
 /// old behaviour and allocation profile).
 pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    eval_select_json_emit(graph, pattern, flush, &mut |c| {
+        out.push(c);
+        ControlFlow::Continue(())
+    })?;
+    Ok(out)
+}
+
+/// [`eval_select_json_chunks`] driven through a per-chunk `emit` callback instead of a
+/// collected `Vec<String>`.
+///
+/// [OPUS-4.8] (sq-7d3dj.34.2) This is the emit core both the buffered `Vec` API (above)
+/// and the server's TTFB-streaming HTTP body ([`crate::query_json_stream_with_budget`])
+/// share, so the byte layout is defined once. Each serialised chunk is handed to `emit`
+/// **as it is produced**: on the streaming path the server writes the results header +
+/// early solutions to the socket before the whole result is serialised, and — for the
+/// single-pattern scan fast path — before the scan even finishes. `emit` returns
+/// [`ControlFlow::Break`] to abandon the rest of the work (the HTTP client disconnected).
+///
+/// The concatenation of the chunks handed to `emit` is **byte-identical** to
+/// [`eval_select_json`]/[`eval_select_json_chunks`] for the same `flush`; only the chunk
+/// *boundaries* may differ (the byte-identity contract is over the concatenation). A
+/// cooperative budget (row / byte cap or deadline) that trips is surfaced by the caller's
+/// `budget::check` as an `Err` exactly as before — but note that on the streaming path
+/// early chunks may already have been flushed when the trip is detected (the server maps a
+/// post-first-byte trip to a truncated body, since the HTTP status is already committed).
+pub fn eval_select_json_emit(
+    graph: &Graph,
+    pattern: &GraphPattern,
+    flush: Option<usize>,
+    emit: &mut dyn FnMut(String) -> ControlFlow<()>,
+) -> Result<(), String> {
     // Streaming fast paths — no Bindings materialised at all.
-    if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
+    if single_pattern_scan_json_emit(graph, pattern, flush, emit).is_some() {
         budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
-        return Ok(json);
+        return Ok(());
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
@@ -1925,29 +1966,34 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
                 f
             })
             .collect();
-        let mut chunks = vec![s];
+        // Accumulate into `s` (which already holds the head) and hand a chunk to `emit` at
+        // each flush boundary. The concatenation is byte-identical to the old `emit_chunk`
+        // Vec layout; only the chunk boundaries differ.
         for (i, f) in frags.into_iter().enumerate() {
             if i > 0 {
-                chunks.last_mut().expect("chunks start non-empty").push(',');
+                s.push(',');
             }
-            emit_chunk(&mut chunks, f, flush);
+            s.push_str(&f);
+            if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
+                return Ok(());
+            }
         }
-        chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
-        return Ok(chunks);
+        s.push_str("]}}");
+        let _ = emit(s);
+        return Ok(());
     }
-    let mut chunks: Vec<String> = Vec::new();
     for (i, row) in bindings.rows.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
         write_row(row, &mut s);
-        if flush.is_some_and(|n| s.len() >= n) {
-            chunks.push(std::mem::take(&mut s));
+        if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
+            return Ok(());
         }
     }
     s.push_str("]}}");
-    chunks.push(s);
-    Ok(chunks)
+    let _ = emit(s);
+    Ok(())
 }
 
 /// ASK evaluation: `true` iff `pattern` has at least one solution. The pattern is
@@ -2194,15 +2240,6 @@ fn try_topk_orderby(
     inner: &GraphPattern,
     row_budget: usize,
 ) -> Result<Option<Bindings>, String> {
-    // [OPUS-4.8] (sq-7d3dj.30.3) `ORDER BY … LIMIT 0` yields `row_budget = 0`; the
-    // bounded-select top-k path (`order_bindings` → `select_nth_unstable_by(k - 1)`)
-    // requires `k >= 1`, so k = 0 panics (debug) / underflows (release). Decline so the
-    // caller uses the full path and slices to empty. Surfaced by the W3C
-    // `sparql10/solution-seq` "Limit 3" (slice-03) conformance test against the .30.2
-    // top-k path; guarded here rather than at the call site so the helper is robust.
-    if row_budget == 0 {
-        return Ok(None);
-    }
     match inner {
         GraphPattern::Project { inner: proj_inner, variables } => {
             Ok(try_topk_orderby(graph, local, proj_inner, row_budget)?
@@ -6540,8 +6577,10 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // parallel, then each partition builds its private map lock-free. Within a partition rows
     // are scanned in ascending index, so each posting list stays in ascending build-row order —
     // exactly the serial build — and the probe output is byte-identical.
+    // JoinTable = hashbrown::HashMap<Key, Posting, FxBuildHasher>; the type inference here
+    // avoids a dependency on rustc_hash::FxHashMap in the type annotation. [SONNET-4.6] sq-7d3dj.19
     #[cfg(feature = "parallel")]
-    let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
+    let tables = if build.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let parts: Vec<u8> = build
             .rows
@@ -6553,7 +6592,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         vec![sjoin::build_table(&build.rows, &keys)]
     };
     #[cfg(not(feature = "parallel"))]
-    let tables: Vec<FxHashMap<Key, Posting>> = vec![sjoin::build_table(&build.rows, &keys)];
+    let tables = vec![sjoin::build_table(&build.rows, &keys)];
     // The probe is read-only over the (partitioned) table, so for a large probe side build the
     // output in parallel on native.
     #[cfg(feature = "parallel")]
@@ -7859,6 +7898,17 @@ fn order_bindings(
     // the stable-sort tie semantics exactly (smaller input_idx appears first).
     // [SONNET-4.6] sq-7d3dj.30.2
     if let Some(k) = row_budget {
+        // LIMIT 0 (k == 0) is legal SPARQL and is exercised by the W3C conformance
+        // suite. The result is empty regardless of order, so short-circuit here:
+        // `select_nth_unstable_by(k - 1)` below would underflow `k - 1` to
+        // `usize::MAX` and abort the process (SIGABRT). [OPUS-4.8] sq-7d3dj.30.2
+        if k == 0 {
+            b.rows.clear();
+            b.sorted_by = None;
+            return Ok(());
+        }
+        // Invariant for the bounded-selection path below: 0 < k < n, so
+        // `k - 1 < n = keyed.len()` and `select_nth_unstable_by(k - 1)` is in range.
         if k < n {
             // Build (key, input_idx, row) — parallel for large sets.
             // Use Vec<_> to avoid the clippy::type_complexity lint on the explicit type.

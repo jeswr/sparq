@@ -43,6 +43,10 @@ use crate::QueryBudget;
 /// module docs for the one runtime-dependent caveat).
 pub fn explain(graph: &Graph, sparql: &str) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    // [OPUS-4.8] (sq-7d3dj.30.1) EXPLAIN the ACTUAL executed plan: apply the same
+    // pre-execution algebra rewrite `PreparedQuery::parse` does (feature-gated).
+    #[cfg(feature = "algebra-rewrite")]
+    let q = crate::rewrite::rewrite_query(q);
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
@@ -68,6 +72,9 @@ pub fn explain_analyze(graph: &Graph, sparql: &str) -> Result<String, String> {
 /// [`explain_analyze`] under a cooperative [`QueryBudget`] (deadline / max rows).
 pub fn explain_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    // [OPUS-4.8] (sq-7d3dj.30.1) ANALYZE the ACTUAL executed plan (feature-gated rewrite).
+    #[cfg(feature = "algebra-rewrite")]
+    let q = crate::rewrite::rewrite_query(q);
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
@@ -636,5 +643,177 @@ mod tests {
         let g = Graph::load_str(&ttl, "turtle").unwrap();
         let plan = explain(&g, "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:p ?b . ?c ex:q ?d }").unwrap();
         assert!(plan.contains("cross product"), "{plan}");
+    }
+
+    // [SONNET-4.6] sq-qcnn.35 — direct unit tests for previously uncovered paths.
+
+    /// `fmt_nanos` covers all four scale branches (ns / µs / ms / s).
+    /// This function is private so it can only be tested from inside this module.
+    #[test]
+    fn fmt_nanos_all_scale_branches() {
+        // nanoseconds branch: n < 1_000
+        assert_eq!(fmt_nanos(0), "0ns");
+        assert_eq!(fmt_nanos(999), "999ns");
+        // microseconds branch: 1_000 <= n < 1_000_000
+        assert_eq!(fmt_nanos(1_000), "1.0\u{00b5}s");
+        assert_eq!(fmt_nanos(1_500), "1.5\u{00b5}s");
+        // milliseconds branch: 1_000_000 <= n < 1_000_000_000
+        assert_eq!(fmt_nanos(1_000_000), "1.00ms");
+        assert_eq!(fmt_nanos(2_500_000), "2.50ms");
+        // seconds branch: n >= 1_000_000_000
+        assert_eq!(fmt_nanos(1_000_000_000), "1.00s");
+        assert_eq!(fmt_nanos(2_500_000_000), "2.50s");
+    }
+
+    /// `render_pattern` branches not hit by the existing explain tests:
+    /// Filter (non-conjunctive EXISTS), Join (non-conjunctive with Values),
+    /// LeftJoin with Some(expression), Extend (non-conjunctive inner), Minus,
+    /// Values (standalone), Path (property path), Graph, Distinct, Reduced,
+    /// Group, and the `other` fallback (SERVICE).
+    #[test]
+    fn explain_render_pattern_uncovered_arms() {
+        // Filter (non-conjunctive): FILTER EXISTS is not filter_scope_ok, so
+        // is_conjunctive(Filter(Bgp, EXISTS)) = false → Filter arm fires.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ?s ex:knows ?o } }",
+        )
+        .unwrap();
+        assert!(plan.contains("Filter"), "{plan}");
+
+        // Join (non-conjunctive): Join(Bgp, Values) is not conjunctive because
+        // is_conjunctive(Values) = false → Join arm fires.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . VALUES ?a { 30 35 } }",
+        )
+        .unwrap();
+        assert!(plan.contains("Join"), "{plan}");
+
+        // LeftJoin with Some(expression): OPTIONAL { ... FILTER(...) } creates
+        // LeftJoin with an expression argument → Some(e) arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT * WHERE { \
+             ?s ex:age ?a OPTIONAL { ?s ex:knows ?k FILTER(?k != ex:carol) } }",
+        )
+        .unwrap();
+        assert!(plan.contains("LeftJoin / OPTIONAL (filter:"), "{plan}");
+
+        // Extend (non-conjunctive): BIND after OPTIONAL creates Extend(LeftJoin, ...) which
+        // is_conjunctive(Extend) = is_conjunctive(inner) = is_conjunctive(LeftJoin) = false.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?copy WHERE { \
+             ?s ex:age ?a OPTIONAL { ?s ex:knows ?k } BIND(?a AS ?copy) }",
+        )
+        .unwrap();
+        assert!(plan.contains("Extend"), "{plan}");
+
+        // Minus: MINUS { ... } is non-conjunctive → Minus arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a MINUS { ?s ex:knows ?k } }",
+        )
+        .unwrap();
+        assert!(plan.contains("Minus"), "{plan}");
+
+        // Values (standalone): SELECT ?x WHERE { VALUES ?x { ... } } →
+        // Project(Values{...}) → is_conjunctive(Values) = false → Values arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?x WHERE { VALUES ?x { ex:alice ex:bob } }",
+        )
+        .unwrap();
+        assert!(plan.contains("Values (2 row(s) over ?x)"), "{plan}");
+
+        // PropertyPath: ?s ex:knows+ ?o → Path{..} which is non-conjunctive → Path arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE { ?s ex:knows+ ?o }",
+        )
+        .unwrap();
+        assert!(plan.contains("PropertyPath"), "{plan}");
+
+        // Distinct: SELECT DISTINCT generates Distinct wrapper → Distinct arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT DISTINCT ?a WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
+        assert!(plan.contains("Distinct"), "{plan}");
+
+        // Reduced: SELECT REDUCED generates Reduced wrapper → Reduced arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT REDUCED ?a WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
+        assert!(plan.contains("Reduced"), "{plan}");
+
+        // Group: GROUP BY generates Group operator → Group arm.
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s (COUNT(*) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?s",
+        )
+        .unwrap();
+        assert!(plan.contains("Group"), "{plan}");
+
+        // `other` fallback: SERVICE clause is not explicitly matched → other arm prints debug.
+        let plan = explain(
+            &g(),
+            "SELECT * WHERE { SERVICE <http://ex/endpoint> { ?s ?p ?o } }",
+        )
+        .unwrap();
+        assert!(plan.contains("Service"), "{plan}");
+    }
+
+    /// `render_conjunctive` :: empty-patterns branch — `SELECT * WHERE {}` produces a
+    /// `Bgp { patterns: [] }` which is conjunctive; `flatten_conjunction` yields an
+    /// empty patterns vec, hitting the `if patterns.is_empty()` arm.
+    #[test]
+    fn explain_empty_bgp_unit_solution() {
+        let plan = explain(&g(), "SELECT * WHERE {}").unwrap();
+        assert!(plan.contains("BGP (empty \u{2014} unit solution)"), "{plan}");
+    }
+
+    /// `query_form_pattern` :: DESCRIBE arm (the Describe variant).
+    #[test]
+    fn explain_describe_form() {
+        let plan = explain(&g(), "PREFIX ex: <http://ex/> DESCRIBE ex:alice").unwrap();
+        assert!(plan.contains("EXPLAIN (DESCRIBE)"), "{plan}");
+    }
+
+    /// `Graph` arm in `render_pattern`: a GRAPH clause over a dataset with named graphs.
+    #[test]
+    fn explain_render_graph_clause() {
+        let nq = "<http://ex/a> <http://ex/p> <http://ex/x> <http://ex/g1> .\n";
+        let ds = Graph::load_dataset(nq, "nquads").unwrap();
+        let plan = explain(&ds, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap();
+        assert!(plan.contains("Graph"), "{plan}");
+    }
+
+    /// `explain_analyze_with_budget` direct call with a non-unlimited budget.
+    /// `explain_analyze` calls it with `unlimited()`, so calling directly with
+    /// a `max_rows` budget exercises the same path while confirming the budget
+    /// argument flows through correctly.
+    #[test]
+    fn explain_analyze_with_budget_direct_call() {
+        let budget = QueryBudget { max_rows: Some(100), ..QueryBudget::unlimited() };
+        let r = explain_analyze_with_budget(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }",
+            &budget,
+        )
+        .unwrap();
+        assert!(r.contains("Execution trace"), "{r}");
+        assert!(r.contains("Total: 3 result row(s)"), "{r}");
+        // Non-SELECT/ASK is rejected even with a budget.
+        assert!(explain_analyze_with_budget(
+            &g(),
+            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            &QueryBudget::unlimited(),
+        )
+        .is_err());
     }
 }

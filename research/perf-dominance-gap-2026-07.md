@@ -73,20 +73,21 @@ AHEAD-BUT-NOT-OOM / PARITY / BEHIND / NOT-MEASURED.
 | D4 | **Bulk-load throughput** (CLI, vs oxigraph) | 1.37 M t/s (sp2b) / 3.2 M t/s (watdiv) | oxigraph 176 k / 382 k t/s | **7.8× / 8.4×** | import 1.76 M t/s aggregate / ~27.5 k t/s per thread (64 thr, WatDiv 19.47 B; partial hw) | **AHEAD-BUT-NOT-OOM** (small-corpus, startup-dominated) | **NEW P1 sq-7d3dj.31** (scale-up + profile) |
 | D5 | **RDFox-class in-memory import rate** (big-core hw) | NOT-MEASURED | — | — | 1.76 M t/s / ~27.5 k t/s per thread; 1 M t/s `[reported]` / ~7.8 k t/s per core | **NOT-MEASURED** | **CITE sq-mbg0k** (G3) |
 | D6 | **Reasoning / materialisation throughput** | `rdfs_infer_s` 0.133 s (CI scale, correctness-first; no t/s at scale) | none in the matrix | — | 6.1 M t/s / ~47.7 k t/s per core (LUBM, SPARC T5-8); 60 M t/s headline | **NOT-MEASURED** at comparable scale | **CITE sq-1s03r** (G2) + **sq-w34fa** (G1 incremental) |
-| D7 | **Memory footprint** (in-RAM bytes/triple) | **88–92 B/triple** (CI-scale deterministic; dict 53 B/term) | none in the matrix | — | 34.7–36.9 B/triple best in-mem; 45–85 B/fact product; 40–60 B/triple disk | **NOT-MEASURED at scale / face-value PARITY-or-BEHIND** | **NEW P1 sq-7d3dj.32** (canonical B/triple at scale + root-cause) |
-| D8 | **SHACL validation** | 329 µs–**760 ms** per shape (sparql-constraint 760170 µs) | none in matrix; RDFox: no numeric claim | — | no public SHACL number | **NOT-MEASURED** (no baseline) | **NEW P1 sq-7d3dj.33** (competitor SHACL + profile 760 ms path) |
-| D9 | **HTTP serving / TTFB** | NOT-MEASURED canonically (sparq ran CLI-mode) | virtuoso/qlever HTTP full-round-trip floor ≈600 µs / ≈1.2 ms | — | latency marketing only ("minutes → <1 s") → non-comparable | **NOT-MEASURED** | **NEW P1 sq-7d3dj.34** (same-box HTTP panel) |
-| D10 | **fuseki result** | — | **FAILED** (loader timeout 1800 s) | — | — | **NOT-MEASURED** (broken run, not a win) | folded into **sq-7d3dj.34** (fuseki re-run) |
+| D7 | **Memory footprint** (in-RAM bytes/triple) | raw heap **84.4 B/triple** (50M WatDiv, canonical aarch64 i-0798990569f269435, sha `5ce8b4f9`; see `research/memory-per-triple-2026-07.md`); compressed **54.5 B/triple**; ext-build peak **73.4 B/triple** | Oxigraph: NOT-MEASURED at scale | — | 34.7–36.9 B/triple best in-mem; 45–85 B/fact product; 40–60 B/triple disk | **BEHIND** RDFox best in-class (raw ~2.3×); compressed **within product band** (45–85); ext-build below raw-heap floor at 50M | sq-7d3dj.32.1–.32.6 (improvement beads); see `research/memory-per-triple-2026-07.md` |
+| D8 | **SHACL validation** | same-box first-read `research/shacl-baseline-2026-07.md` (#1734, work-box, **non-canonical**): core constraints **7–32× AHEAD** of jena-shacl; `sh:sparql` was **4.5–34× BEHIND** → root-caused (per-focus re-execution) and fixed by VALUES batching (#1737; node-expression sibling #1754); cross-box corroboration sq-ays7 (c7g.xlarge, `f271b74`, 2026-06-16) suggests the residual `sh:sparql` lead vs jena-shacl may be ~3× | pyshacl / jena-shacl (same-box first-read) | — | no public SHACL number | **AHEAD (non-canonical first-read)**; `sh:sparql` fix merged, canonical verdict pending | **sq-7d3dj.33.3** (canonical EC2 re-run) + **.33.4** (core-constraint headroom) |
+| D9 | **HTTP serving / TTFB** | measured canonically — `research/perf-dominance-gap-2026-07-http-addendum.md` (#1742): WatDiv HTTP **AHEAD 16/16** (1.3–15.4×, transport-floor-bound); SP2Bench HTTP **wins 6 / behind 6** count-checked (median ≈1.0×; q08/q12b excluded — count divergence ADJUDICATED (sq-ai2wa): QLever evaluates bnode≠IRI as a strict type-error (0 rows) vs sparq/virtuoso lenient identity semantics; `expected-rows.tsv` is correct, QLever's timing on those rows stays disqualified); **TTFB BEHIND ~48×** on large SELECTs (first byte at ~87 % of total; oxigraph 7.8 ms) | oxigraph / virtuoso / qlever / fuseki (same-box HTTP) | — | latency marketing only ("minutes → <1 s") → non-comparable | **MIXED**: ahead (floor-bound) on WatDiv; even on SP2B complex-shape (D3); **BEHIND on TTFB** | PR #1745 (stream SELECT-JSON) + **sq-7d3dj.34.1** (request floor) + **sq-7d3dj.34.2** / lazy-pull design (first-solution latency); canonical re-check after |
+| D10 | **fuseki result** | measured after fixing its docker image (#1742 — the stock image shipped no TDB2 loader tools); fuseki rows now included in the HTTP addendum panel | fuseki (same-box HTTP) | — | — | **MEASURED** (see the #1742 addendum) | resolved in **#1742**; comparison folded into D9 |
 | D11 | **Wikidata-scale query latency** vs hosted service | NOT-MEASURED | — | — | 4× / ~20× / ~800× vs WQS (hw unstated → non-comparable) | **NOT-MEASURED** (lower priority) | **CITE sq-ohsvs** (G4) |
 
 **Headline.** sparq is **CLEARLY-AHEAD by order(s) of magnitude on WatDiv (every query,
 every engine)** and **on SP2Bench vs the clean CLI baseline (oxigraph, every query)**. It is
-**BEHIND on the SP2Bench complex-shape class vs virtuoso/qlever** (7 of 14 queries), and
-**NOT-MEASURED** on the RDFox-differentiator axes (big-core import, billions-scale
-materialisation, incremental maintenance, memory-at-scale, SHACL-vs-baseline, HTTP/TTFB,
-Wikidata panel). No axis is a **spun** win: fuseki FAILED is a re-run, not a win; the
-sub-order-of-magnitude load lead is labelled honestly; the memory axis carries a face-value
-concern.
+**BEHIND on the SP2Bench complex-shape class vs virtuoso/qlever** (7 of 14 queries) and
+**BEHIND RDFox best-published in-memory** on the memory axis (D7, now canonical-measured).
+**NOT-MEASURED** remains on: big-core import, billions-scale materialisation, incremental
+maintenance, Oxigraph memory baseline, SHACL-vs-baseline, HTTP/TTFB, Wikidata panel. No
+axis is a **spun** win: fuseki FAILED is a re-run, not a win; the sub-order-of-magnitude
+load lead is labelled honestly; the memory axis compressed mode is within the RDFox product
+band (not best-in-class).
 
 ## 2. Why WatDiv is CLEARLY-AHEAD even after the HTTP correction
 
@@ -156,15 +157,19 @@ then a targeted fix.
   **startup/fixed-cost dominated** — the steady-state ratio at 10 M–1 B is unknown.
   fuseki/virtuoso/qlever load figures are **whole-recipe wall** (pull+load+query+teardown) and
   are **not** load-comparable. **sq-7d3dj.31** scales this up and profiles the remaining gap.
-- **Memory (D7).** `store_bytes_per_triple` = **92** (small-corpus variant 88; dict 53
-  B/term), a deterministic CI metric. RDFox publishes **34.7–36.9 B/triple** in-memory
-  (best) and **45–85 B/fact** for the current product. At face value sparq is ~2.5× the RDFox
-  best case and at/above the product band → **not clearly ahead**. Caveat: sparq's figure is
-  small-scale (dictionary + three permutation indexes as fixed cost, which amortize with
-  size), RDFox's is billions-scale, and sparq's pinned story is the low-resource
-  **external-memory** build (a different axis). **NOT-MEASURED at comparable scale** with a
-  face-value concern → **sq-7d3dj.32** (canonical B/triple at 10 M–1 B + a per-triple cost
-  breakdown; no G1–G4 bead covers memory).
+- **Memory (D7) — UPDATED with canonical measurement.** The CI proxy (88–92 B/triple) is
+  superseded by the three-rung canonical envelope in `research/memory-per-triple-2026-07.md`
+  (aarch64 EC2 `i-0798990569f269435`, sha `5ce8b4f9`, 2026-07-07). At **50M WatDiv triples**:
+  raw 6-perm heap **84.4 B/triple** (store 75.4 + dict 8.3 + caches 0.75); block-compressed
+  mode **54.5 B/triple**; external-memory build peak **73.4 B/triple** — below the raw-heap
+  floor. RDFox publishes **34.7–36.9 B/triple** best in-memory (at billions-scale, SPARC
+  T5-8) and **45–85 B/fact** for the current product. Honest verdict: raw mode is **BEHIND**
+  RDFox best in-class (~2.3×); compressed mode is **within** the current product band;
+  ext-build confirms sparq's "Wikidata on limited RAM" positioning. Comparability caveat:
+  RDFox's best-published figures are at 1.5 B triples on a very large machine; sparq's 50M
+  run still shows a downward trend (84.4 vs 88.6 at 10M vs 93.4 at 1M) and has not
+  converged. Improvement lanes: sq-7d3dj.32.1 (Vec slack), .32.2 (compressed promotion),
+  .32.3 (3-perm profile → 36 B/triple store floor, within RDFox best-case band).
 - **Reasoning (D6).** `rdfs_infer_s` = 0.133 s at CI scale (correctness-first; LUBM(1),
   depth-1k–10k). No OSS engine in the matrix materialises, and there is **no billions-scale
   t/s** number to place against RDFox's 6.1 M t/s (~47.7 k t/s per core, SPARC T5-8) or its
@@ -193,8 +198,9 @@ duplicated).
    q03b/c, q07, q08, q09, q11, q12b on the canonical box; confirm root cause; targeted fix.
 2. **sq-7d3dj.31** (NEW, P1) — Bulk-load throughput scale-up (D4): canonical 10 M/100 M/1 B
    sparq-vs-oxigraph load sweep + profile to push past order-of-magnitude.
-3. **sq-7d3dj.32** (NEW, P1) — In-RAM bytes/triple at scale (D7): canonical B/triple at
-   10 M–1 B + per-triple cost breakdown; root-cause the 88–92 small-scale figure.
+3. **sq-7d3dj.32** (MEASUREMENT DONE — improvement beads open) — In-RAM bytes/triple at
+   scale (D7): canonical 3-rung envelope now in `research/memory-per-triple-2026-07.md`
+   (84.4 B/triple raw / 54.5 compressed at 50M). Fix lanes: sq-7d3dj.32.1–.32.6.
 4. **sq-7d3dj.33** (NEW, P1) — SHACL competitor baseline + profile (D8): same-box pyshacl /
    Jena SHACL comparison; flamegraph the ~760 ms `sh:sparql` path.
 5. **sq-7d3dj.34** (NEW, P1) — HTTP/TTFB same-box panel (D9) + fuseki loader re-run (D10):

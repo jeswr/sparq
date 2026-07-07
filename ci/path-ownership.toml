@@ -18,14 +18,29 @@
 # a `safe=true` entry for a trigger/crate path is unreachable (steps 1-2 win
 # first), and the map-validity + audit tests forbid such an entry anyway.
 #
-# THREE VERDICT FORMS (design §4.2), nothing else:
-#   [[map]] pattern = "<glob>"  crates = ["a", "b"]   # attribute to consumer crates
-#   [[map]] pattern = "<glob>"  safe   = true         # PROVEN inert for the Rust matrix
+# VERDICT FORMS (design §4.2):
+#   [[map]] pattern = "<glob>"  crates  = ["a", "b"]  # attribute an OUT-OF-CRATE path
+#   [[map]] pattern = "<glob>"  safe    = true        # PROVEN inert for the Rust matrix
+#   [[map]] pattern = "<glob>"  readers = ["a", "b"]  # ADDITIONAL-READERS (sq-m4bxc)
 #   (an unmatched path falls through to the implicit mode=full default)
 # `pattern` is repo-relative POSIX; `dir/**` matches the dir or anything beneath
-# it, otherwise fnmatch. Every `crates` name must be a live workspace member and
-# every pattern root must exist on disk OR be a fetched/generated suite (the
-# map-validity test uses a git-ignore + scripts/fetch-*.sh allowlist, #1392).
+# it, otherwise fnmatch. Every `crates`/`readers` name must be a live workspace
+# member and every pattern root must exist on disk OR be a fetched/generated
+# suite (the map-validity test uses a git-ignore + scripts/fetch-*.sh allowlist,
+# #1392).
+#
+# ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — the ONE verdict form the
+# selector consults EVEN FOR A CRATE-OWNED PATH. `crates`/`safe` are consulted
+# only for a path that is neither a trigger nor inside a crate dir (steps 1-2 win
+# first); `readers` is different: it UNIONS the listed crates into the affected
+# set IN ADDITION to the path's normal prefix owner, without changing the
+# ownership verdict. It closes the case where crate R #[cfg(test)]-reads a
+# SIBLING crate O's committed input but a real `R -> O` cargo dep would be a
+# forbidden cycle (so no reverse-closure attribution can reach R). It is MONOTONE
+# / fail-safe: adding a `readers` entry can only ENLARGE the run set (it never
+# rescues an unowned/unmapped path from mode=full), so it never introduces an
+# unsound skip (§2). The out-of-crate-input audit (scripts/ci_audit_inputs.py)
+# treats a sibling read as covered iff the reader is listed here.
 
 # ---------------------------------------------------------------------------
 # [triggers] — INFORMATIONAL MIRROR of ci_select.py `_FULL_TRIGGERS` (§4.1).
@@ -142,6 +157,31 @@ crates = ["sparq-engine"]
 [[map]]
 pattern = "bench/zk-compose/**"
 crates = ["sparq-zk-compose"]
+
+# ---------------------------------------------------------------------------
+# ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read
+# across a boundary where a real cargo dep edge would be a forbidden CYCLE, so no
+# reverse-dependency closure can attribute them. Each is an AUDIT-PROVEN residual
+# that used to be backstopped only by the nightly FULL run (design §6.1); the
+# monotone union closes it directly. Listing the OWNER crate too is redundant
+# (prefix-ownership already covers it) but harmless and documents every reader.
+# ---------------------------------------------------------------------------
+
+# sparq-zk's #[cfg(test)] module include_str!s sparq-trust's shared secprop-ext
+# vocab (crates/sparq-zk/src/secprop.rs) to assert the two crates' sec-prop IRIs
+# agree. sparq-trust DEPENDS ON sparq-zk (crates/sparq-trust/Cargo.toml), so a
+# sparq-zk -> sparq-trust dep would be a cycle: additional-readers instead.
+[[map]]
+pattern = "crates/sparq-trust/ontologies/zkp-sparql/**"
+readers = ["sparq-zk", "sparq-trust"]
+
+# sparq-reason's compiled-vs-interpreted N3 equivalence + incremental tests read
+# sparq-solid's WAC/ACP/ODRL-spike rule corpus READ-ONLY from ../sparq-solid/rules
+# at runtime. sparq-solid DEPENDS ON sparq-reason (crates/sparq-solid/Cargo.toml),
+# so a sparq-reason -> sparq-solid dep would be a cycle: additional-readers instead.
+[[map]]
+pattern = "crates/sparq-solid/rules/**"
+readers = ["sparq-reason"]
 
 # ---------------------------------------------------------------------------
 # SAFE list — paths AUDIT-PROVEN inert for the Rust matrix (design §4.2). The

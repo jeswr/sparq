@@ -37,6 +37,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CI_SELECT = REPO_ROOT / "scripts" / "ci_select.py"
+MAP_FILE = REPO_ROOT / "ci" / "path-ownership.toml"
 
 
 def _load_module():
@@ -215,9 +216,100 @@ class OwnershipMapTests(unittest.TestCase):
         self.assertIn("unknown crate", sel.reason)
 
     def test_map_malformed_entry_raises(self):
-        m = [{"pattern": "tests/w3c/**"}]  # neither safe nor crates
+        m = [{"pattern": "tests/w3c/**"}]  # neither safe, crates, nor readers
         with self.assertRaises(cs.SelectorError):
             cs.select(["tests/w3c/x"], self.meta, m)
+
+
+class AdditionalReadersTests(unittest.TestCase):
+    """[FABLE-5] sq-m4bxc: the additional-readers (monotone union) mechanism.
+
+    A `readers` entry unions extra reader crates into the affected set EVEN FOR
+    A CRATE-OWNED path, closing a sibling read where a real dep edge would be a
+    forbidden cycle. The load-bearing invariant is MONOTONICITY: adding a
+    `readers` entry can only ENLARGE (never shrink) the selection — so it can
+    never turn a run into an unsound skip (design §2/§4.2)."""
+
+    def setUp(self):
+        self.meta = _synthetic_meta()
+
+    def test_readers_union_enlarges_a_crate_owned_selection(self):
+        # An `app` change alone selects {app}. A readers entry on the app dir
+        # naming `parse` also pulls parse's reverse closure (parse<-engine<-app).
+        base = cs.select(["crates/app/src/lib.rs"], self.meta)
+        self.assertEqual(base.affected, ["app"])
+        m = [{"pattern": "crates/app/**", "readers": ["parse"]}]
+        sel = cs.select(["crates/app/src/lib.rs"], self.meta, m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app", "engine", "parse"])
+        self.assertIn("parse", sel.affected)  # the extra reader is present
+
+    def test_readers_added_alongside_prefix_owner(self):
+        # The path's normal prefix owner is STILL selected (readers only adds).
+        m = [{"pattern": "crates/app/**", "readers": ["parse"]}]
+        sel = cs.select(["crates/app/src/lib.rs"], self.meta, m)
+        self.assertIn("app", sel.changed_crates)
+        self.assertIn("parse", sel.changed_crates)
+
+    def test_unknown_additional_reader_fails_full(self):
+        # A `readers` naming a non-member cannot silently skip — fail-safe to full.
+        m = [{"pattern": "crates/app/**", "readers": ["ghost-crate"]}]
+        sel = cs.select(["crates/app/src/lib.rs"], self.meta, m)
+        self.assertEqual(sel.mode, "full")
+        self.assertIn("unknown additional-reader", sel.reason)
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+
+    def test_readers_never_rescue_an_unowned_path(self):
+        # MONOTONICITY GUARD: a `readers` entry must NOT convert an otherwise
+        # unowned/unmapped path (which forces full) into a narrow selection —
+        # that would SHRINK the run set. It stays full.
+        m = [{"pattern": "weird/**", "readers": ["core"]}]
+        sel = cs.select(["weird/thing.txt"], self.meta, m)
+        self.assertEqual(sel.mode, "full")
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+
+    def test_readers_entry_is_not_an_ownership_verdict(self):
+        # apply_ownership_map treats a readers-only entry as transparent (None),
+        # so it never provides a `crates`/`safe` verdict nor raises.
+        m = [{"pattern": "data/**", "readers": ["core"]}]
+        self.assertIsNone(cs.apply_ownership_map("data/x", m))
+
+    def test_additional_readers_helper_unions_all_matches(self):
+        m = [
+            {"pattern": "crates/app/**", "readers": ["parse"]},
+            {"pattern": "crates/app/src/**", "readers": ["engine"]},
+        ]
+        self.assertEqual(cs.additional_readers("crates/app/src/lib.rs", m), ["engine", "parse"])
+        self.assertEqual(cs.additional_readers("crates/core/src/x.rs", m), [])
+
+    def test_monotonicity_property_readers_only_enlarges(self):
+        # PROPERTY: for ANY changed-path set, adding a `readers` entry yields an
+        # affected set that is a SUPERSET of the selection without it. Exercise a
+        # spread of cases (leaf / root / mapped / safe / unowned-full).
+        readers_entry = {"pattern": "crates/app/**", "readers": ["parse", "core"]}
+        base_maps = [
+            [],
+            [{"pattern": "research/**", "safe": True}],
+            [{"pattern": "tests/w3c/**", "crates": ["engine"]}],
+        ]
+        path_sets = [
+            ["crates/app/src/lib.rs"],
+            ["crates/core/src/dict.rs"],
+            ["crates/devlib/src/lib.rs"],
+            ["research/x.md", "crates/app/src/lib.rs"],
+            ["tests/w3c/data.ttl", "crates/app/x.rs"],
+            ["docs/unowned.md"],  # forces full in both -> superset (equal) holds
+        ]
+        for base in base_maps:
+            augmented = base + [readers_entry]
+            for paths in path_sets:
+                base_sel = cs.select(paths, self.meta, base)
+                aug_sel = cs.select(paths, self.meta, augmented)
+                self.assertTrue(
+                    set(base_sel.affected).issubset(set(aug_sel.affected)),
+                    f"monotonicity violated for paths={paths}, base={base}: "
+                    f"{base_sel.affected} !subset {aug_sel.affected}",
+                )
 
 
 class MapValidityTests(unittest.TestCase):
@@ -436,6 +528,31 @@ class RealMetadataShapeTests(unittest.TestCase):
         self.assertEqual(sel.mode, "selected")
         self.assertIn("sparq-geo", sel.affected)
         self.assertNotIn("sparq-parse", sel.affected)  # parse does not depend on geo
+
+    # ---- sq-m4bxc additional-readers acceptance, REAL metadata + REAL map ------
+    # These use the SHIPPED ci/path-ownership.toml `readers` entries against live
+    # cargo metadata: a change to sparq-trust's shared secprop vocab must select
+    # sparq-zk (a sparq-zk->sparq-trust dep is a cycle, so the reverse closure
+    # cannot reach it), and a change to sparq-solid's rule corpus must select
+    # sparq-reason (sparq-solid depends on sparq-reason — the reverse cycle).
+    def test_secprop_ext_change_selects_zk_and_trust(self):
+        real_map = cs.load_ownership_map(str(MAP_FILE))
+        sel = cs.select(
+            ["crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl"],
+            self.meta, real_map,
+        )
+        self.assertEqual(sel.mode, "selected")
+        self.assertIn("sparq-zk", sel.affected,
+                      "a secprop-ext.ttl change must run sparq-zk's cross-crate drift test")
+        self.assertIn("sparq-trust", sel.affected)
+
+    def test_solid_rules_change_selects_reason(self):
+        real_map = cs.load_ownership_map(str(MAP_FILE))
+        sel = cs.select(["crates/sparq-solid/rules/wac.n3"], self.meta, real_map)
+        self.assertEqual(sel.mode, "selected")
+        self.assertIn("sparq-reason", sel.affected,
+                      "a sparq-solid/rules change must run sparq-reason's N3-equivalence tests")
+        self.assertIn("sparq-solid", sel.affected)
 
     # ---- phase-2 lane mapping against REAL metadata (bead sq-fmx4u.6) ----------
     def test_lane_seed_crates_are_real_workspace_members(self):

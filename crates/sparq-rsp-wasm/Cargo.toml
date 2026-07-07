@@ -50,3 +50,10 @@ wasm-bindgen-test = "0.3"
 [package.metadata.wasm-pack.profile.release]
 # Optimise the wasm for size (the bundle is small, but keep parity with the other bundles).
 wasm-opt = ["-Oz"]
+# [SONNET-4.6] sq-7d3dj.15 — `js build:rsp-wasm` now passes `--profile release-wasm`
+# (NOT `--release`). wasm-pack only recognises the built-in `dev`/`profiling`/`release` profile
+# keys; the above `release` block is IGNORED for `--profile release-wasm` and wasm-opt uses its
+# default `-O` instead. The size win comes from the cargo `release-wasm` profile (opt-level "z"
+# on cold parse crates + strip=symbols). `--config profile.release-wasm.strip=false` is passed
+# in the build script so wasm-opt can read the wasm `target_features` custom section (which
+# cargo's strip would otherwise discard) — wasm-opt does the final strip.

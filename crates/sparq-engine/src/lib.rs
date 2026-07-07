@@ -27,6 +27,13 @@ pub mod json;
 // new deps (oxrdf + spargebra are already direct deps).
 #[cfg(feature = "params")]
 pub mod params;
+// [OPUS-4.8] (sq-7d3dj.30.1) Pre-execution SPARQL algebra rewrite pass (result-equivalent
+// FILTER `?v = <iri>` constant-substitution + `OPTIONAL … !bound` → anti-join). NON-DEFAULT
+// `algebra-rewrite` feature; when off, zero of this code compiles, `PreparedQuery::parse`
+// takes the algebra verbatim, and the default native + wasm builds are byte-identical. Pulls
+// in no new deps (oxrdf + spargebra are already direct deps).
+#[cfg(feature = "algebra-rewrite")]
+pub mod rewrite;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
@@ -102,7 +109,7 @@ pub use cs::{with_cs_table, CsSet, CsTable};
 #[cfg(feature = "dp-planner")]
 pub mod dp;
 #[cfg(feature = "dp-planner")]
-pub use dp::{with_dp_planner, with_dp_planner_budget};
+pub use dp::{with_dp_planner, with_dp_planner_budget, without_dp_planner};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
 #[cfg(feature = "explain-json")]
@@ -598,8 +605,28 @@ pub struct PreparedQuery {
 
 impl PreparedQuery {
     /// Parses a SPARQL query string into its reusable algebra form.
+    ///
+    /// With the opt-in `algebra-rewrite` feature ON, the parsed algebra is run
+    /// through the result-equivalent pre-execution rewrite pass (`rewrite`
+    /// module) here — the single seam every string query entry point
+    /// ([`query`], [`ask`], [`count`], the JSON paths) funnels through — so
+    /// production benefits without touching the executor. The `From<Query>`
+    /// conversion deliberately does NOT rewrite: it takes an already-built
+    /// algebra verbatim (the opt-out / test-baseline path). When the feature is
+    /// OFF the algebra is stored verbatim and the build is byte-identical.
     pub fn parse(sparql: &str) -> Result<PreparedQuery, String> {
-        Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+        // Feature-OFF arm is the VERBATIM pre-`algebra-rewrite` expression so the
+        // default build's codegen is byte-identical (the `feature_off_exact` wasm
+        // gate). Only the feature-ON arm introduces the rewrite call. [OPUS-4.8]
+        #[cfg(not(feature = "algebra-rewrite"))]
+        {
+            Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+        }
+        #[cfg(feature = "algebra-rewrite")]
+        {
+            let query = rewrite::rewrite_query(SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?);
+            Ok(PreparedQuery { query })
+        }
     }
 
     /// The wrapped `spargebra` algebra (e.g. to inspect the query form or dataset
@@ -876,6 +903,49 @@ pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &Query
         Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, pattern, Some(JSON_CHUNK_BYTES)),
         Query::Ask { pattern, .. } => {
             Ok(vec![format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?)])
+        }
+        _ => Err("only SELECT and ASK queries are supported".into()),
+    }
+}
+
+/// Streams the SPARQL-JSON serialisation of a SELECT (or ASK) result, invoking `sink` for
+/// each serialised chunk **as it is produced** rather than materialising the whole
+/// `Vec<String>` first ([`query_json_chunks_with_budget`]).
+///
+/// [OPUS-4.8] (sq-7d3dj.34.2) This is the TTFB-streaming entry point: the server sinks each
+/// chunk straight onto the HTTP socket, so the results header + early solutions are written
+/// before the whole result is serialised — and, for the single-pattern scan fast path,
+/// before the scan even finishes. The concatenation of the chunks handed to `sink` is
+/// **byte-identical** to [`query_json_with_budget`] for the same query and budget.
+///
+/// `sink` returns [`std::ops::ControlFlow::Break`] to stop early (the consumer went away —
+/// e.g. the HTTP client disconnected); the engine then abandons the remaining work. A
+/// cooperative budget (row / byte cap or deadline) that trips is returned as `Err` exactly
+/// as on the buffered path, but note that on this streaming path some chunks may already
+/// have been handed to `sink` (and flushed to the socket) when the trip is detected — a
+/// post-first-byte trip cannot change the already-sent HTTP status, so the caller truncates
+/// the body (see the server's `stream_select_json`).
+pub fn query_json_stream_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+    mut sink: impl FnMut(String) -> std::ops::ControlFlow<()>,
+) -> Result<(), String> {
+    let prepared = PreparedQuery::parse(sparql)?;
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
+    let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
+    let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
+    match q {
+        Query::Select { pattern, .. } => {
+            exec::eval_select_json_emit(graph, pattern, Some(JSON_CHUNK_BYTES), &mut sink)
+        }
+        Query::Ask { pattern, .. } => {
+            let doc = format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?);
+            let _ = sink(doc);
+            Ok(())
         }
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
@@ -2181,6 +2251,79 @@ mod tests {
         let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
         let e = query_json_chunks_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.2) `query_json_stream_with_budget` hands each chunk to the
+    /// sink AS IT IS PRODUCED and its concatenation is byte-identical to the buffered JSON.
+    #[test]
+    fn query_json_stream_concat_is_byte_identical() {
+        let b = QueryBudget::unlimited();
+        for q in [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }",
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }",
+        ] {
+            let single = query_json(&g(), q).unwrap();
+            let mut streamed = String::new();
+            query_json_stream_with_budget(&g(), q, &b, |c| {
+                streamed.push_str(&c);
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+            assert_eq!(streamed, single, "stream concat mismatch for: {q}");
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.2) ANTI-VACUITY: on a large (>64 KiB) result the sink is
+    /// invoked MORE THAN ONCE and the FIRST chunk (carrying the results header) is delivered
+    /// BEFORE the last chunk — i.e. bytes are emitted before the result is exhausted. This is
+    /// the property the server relies on to flush a first byte before full serialisation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn query_json_stream_flushes_first_chunk_before_exhaustion() {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..3000 {
+            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        let q = "SELECT * WHERE { ?s ?p ?o }";
+        let single = query_json(&big, q).unwrap();
+        assert!(single.len() > 64 * 1024, "test corpus must exceed one chunk");
+
+        let mut chunks: Vec<String> = Vec::new();
+        query_json_stream_with_budget(&big, q, &QueryBudget::unlimited(), |c| {
+            chunks.push(c);
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        // Multiple flushes: the first arrived before the last was produced.
+        assert!(chunks.len() > 1, "expected an incremental multi-chunk stream, got {}", chunks.len());
+        // The first chunk opens the SPARQL-results document (header emitted before all rows).
+        assert!(chunks[0].starts_with("{\"head\""), "first chunk must carry the header: {}", &chunks[0][..chunks[0].len().min(40)]);
+        // Only the final chunk closes the document.
+        assert!(chunks.last().unwrap().ends_with("]}}"), "last chunk must close the document");
+        assert!(!chunks[0].ends_with("]}}"), "the header chunk must NOT be the whole document");
+        assert_eq!(chunks.concat(), single, "stream concat mismatch");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.2) A sink that returns `Break` (the HTTP client disconnected)
+    /// stops the engine early instead of serialising the rest of a large result.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn query_json_stream_break_stops_early() {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..3000 {
+            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        let mut calls = 0usize;
+        query_json_stream_with_budget(&big, "SELECT * WHERE { ?s ?p ?o }", &QueryBudget::unlimited(), |_c| {
+            calls += 1;
+            std::ops::ControlFlow::Break(()) // bail after the very first chunk
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "engine must stop after the sink breaks on the first chunk");
     }
 
     /// [OPUS-4.8] roborev 1538 (High) / sq-7d3dj.10: a budget must bound CPU/memory on a

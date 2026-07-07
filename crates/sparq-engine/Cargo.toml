@@ -228,6 +228,26 @@ semijoin-bitmap = []
 # snowflake workloads) is a measurable HYPOTHESIS for the canonical perf host (sq-0g6g), NOT a
 # baked-in number.
 yannakakis = ["semijoin-bitmap"]
+# [OPUS-4.8] (sq-7d3dj.30.1) Pre-execution SPARQL ALGEBRA REWRITE pass (`rewrite` module):
+# a result-equivalent transform applied to the parsed `spargebra` algebra by
+# `PreparedQuery::parse` (and the EXPLAIN parse sites) BEFORE evaluation. Two rewrites:
+#   (a) EQUALITY SUBSTITUTION — `FILTER(?v = <iri>)` (or `<iri> = ?v` / `sameTerm`) folds the
+#       IRI constant into the group's triple patterns (`?v` re-bound via Extend when it stays
+#       in scope), turning a post-join FILTER over all enumerated rows into an indexed
+#       constant-seeded scan (SP2Bench q03b/q03c). RESTRICTED TO IRI (NamedNode) CONSTANTS:
+#       `=` on IRIs is term-identity so the substitution is EXACT; literal `=` is value
+#       equality (`"1"^^xsd:int = "01"^^xsd:integer`, and the open sq-lr2ii high-precision
+#       xsd:decimal class) and is NEVER rewritten — this restriction is the stated sq-lr2ii
+#       avoidance contract (research/sp2bench-complex-shape-deficit.md §4).
+#   (b) ANTI-JOIN — `FILTER(!bound(?v), LeftJoin(A, B))` where `?v` is certain in `B`, absent
+#       from `A`, and `A`/`B` share a certain variable, becomes `Minus(A, B)` (SP2Bench q07).
+# Every rewrite is BAG-result-equivalent (validated by the W3C conformance suite run with the
+# feature ON + tests/rewrite_pass.rs); a shape that does not exactly meet the conditions is
+# left VERBATIM (conservative — unrewritten == current behaviour). OPT-IN and OFF by default:
+# when off, zero rewrite code compiles, `PreparedQuery::parse` takes the algebra verbatim, and
+# the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies (oxrdf +
+# spargebra are already direct deps) and contains no `unsafe`.
+algebra-rewrite = []
 
 # [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
 # numeric column — the perf baseline every later vectorized (M4) phase measures against.
@@ -298,6 +318,13 @@ uuid = { version = "1", features = ["v4"] }
 # byte-identity differential (tests/dict_spill_differential.rs).
 sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap", "parallel", "dict-spill"] }
 rayon.workspace = true
+# [OPUS-4.8] (sq-7d3dj.30.1) DEV-only re-listing of the ALREADY-present `spargebra` dep so
+# tests/rewrite_pass.rs can parse a query to RAW `spargebra` algebra (the un-rewritten
+# baseline) and feed it through `PreparedQuery::from` — the on-vs-off oracle for the
+# `algebra-rewrite` pass. `spargebra` is already a normal dependency (above), so this adds
+# ZERO new crate to the lock/graph; it only makes the type visible to the integration-test
+# crate. Normal library code never uses this entry.
+spargebra.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
