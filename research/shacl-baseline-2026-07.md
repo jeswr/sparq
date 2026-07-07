@@ -86,8 +86,9 @@ Data-graph load (advisory, s): sparq 0.369 · Jena 10.150 · pySHACL (rdflib) 30
   below the order-of-magnitude mandate → headroom bead sq-7d3dj.33.4.
 - The first LUBM(1) gather ran while another agent's `cargo-mutants` wave loaded
   the box (load >16); it was re-gathered on the quiet box and the table above is
-  the quiet re-run. Both raw envelopes live in `/tmp` only (NON-canonical —
-  deliberately not committed; the canonical run is sq-7d3dj.33.3).
+  the quiet re-run. The raw envelopes were deliberately NOT committed (they are
+  NON-canonical; only the `CANONICAL=1` run — sq-7d3dj.33.3 — commits envelopes
+  into `bench/canonical-competitor-results/`).
 
 ## 3. Root cause of the ~760 ms `sparql_constraint` workload
 
