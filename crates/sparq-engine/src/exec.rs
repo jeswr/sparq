@@ -874,6 +874,13 @@ type Row = SmallVec<[Id; 4]>;
 #[cfg(feature = "parallel")]
 const PAR_THRESHOLD: usize = 50_000;
 
+/// Maximum `offset + limit` (row budget) for the bounded-heap ORDER BY path.
+/// When the requested budget k is at most this threshold AND k < n (total rows),
+/// the `Slice{...OrderBy{...}}` pattern uses bounded selection O(n + k log k)
+/// instead of a full stable sort O(n log n). The threshold avoids heap overhead
+/// when k is large relative to n. [SONNET-4.6] sq-7d3dj.30.2
+const TOP_K_ORDER_BY_THRESHOLD: usize = 1_024;
+
 /// A join / group key (the ids of the shared or grouping columns). Inlined up to
 /// 2 columns — most joins are on one or two variables — so building a hash table
 /// or probing it allocates nothing per key.
@@ -1627,6 +1634,16 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
                         slice_bindings(&mut b, *start, *length);
                         return Ok(b);
                     }
+                    // Top-k ORDER BY: when the inner pattern (possibly under Project/Reduced)
+                    // contains an OrderBy and the budget k = offset + limit is within the
+                    // threshold, use bounded selection instead of a full stable sort.
+                    // Result is byte-identical to the full-sort+slice path. [SONNET-4.6] sq-7d3dj.30.2
+                    if cap <= TOP_K_ORDER_BY_THRESHOLD {
+                        if let Some(mut b) = try_topk_orderby(graph, local, inner, cap)? {
+                            slice_bindings(&mut b, *start, *length);
+                            return Ok(b);
+                        }
+                    }
                 }
             }
             let mut b = eval_modified(graph, local, inner)?;
@@ -1635,7 +1652,7 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
         }
         GraphPattern::OrderBy { inner, expression } => {
             let mut b = eval_modified(graph, local, inner)?;
-            order_bindings(graph, local, &mut b, expression)?;
+            order_bindings(graph, local, &mut b, expression, None)?;
             Ok(b)
         }
         GraphPattern::Group { inner, variables, aggregates } => {
@@ -1664,6 +1681,43 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             group_aggregate(graph, local, b, variables, aggregates)
         }
         other => eval_graph_pattern(graph, local, other),
+    }
+}
+
+/// Attempts the bounded-heap ORDER BY optimisation for a `Slice` with a known
+/// row budget `k = offset + limit`.
+///
+/// Peeks through `Project` / `Reduced` transparent wrappers to find an `OrderBy`
+/// node. When found, evaluates the pattern below the `OrderBy`, sorts using
+/// `order_bindings` with the top-k hint so only `k` rows survive, applies any
+/// projection, and returns `Some(Bindings)`. Returns `None` when no `OrderBy`
+/// is present at the transparent-wrapper boundary — the caller falls through to
+/// full `eval_modified`. [SONNET-4.6] sq-7d3dj.30.2
+fn try_topk_orderby(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    inner: &GraphPattern,
+    row_budget: usize,
+) -> Result<Option<Bindings>, String> {
+    match inner {
+        GraphPattern::Project { inner: proj_inner, variables } => {
+            Ok(try_topk_orderby(graph, local, proj_inner, row_budget)?
+                .map(|b| project_bindings(b, variables)))
+        }
+        GraphPattern::Reduced { inner: red_inner } => {
+            try_topk_orderby(graph, local, red_inner, row_budget)
+        }
+        GraphPattern::OrderBy { inner: ord_inner, expression } => {
+            let mut b = eval_modified(graph, local, ord_inner)?;
+            // Use the top-k path only when the budget is strictly less than n;
+            // otherwise the heap adds overhead with no benefit.
+            let use_topk = b.rows.len() > row_budget;
+            order_bindings(graph, local, &mut b, expression, if use_topk { Some(row_budget) } else { None })?;
+            Ok(Some(b))
+        }
+        // Not an OrderBy under transparent wrappers: decline so the caller
+        // falls through to the regular eval_modified path.
+        _ => Ok(None),
     }
 }
 
@@ -6669,6 +6723,13 @@ enum SortCell {
     /// numeric column agree with the relational `<` (`cmp_expr`) and MIN/MAX, which already
     /// recheck. [OPUS-4.8] sq-rikm7
     Num { f: f64, id: Id },
+    /// A named-node (IRI) GRAPH term: the IRI string precomputed once at key-build time,
+    /// eliminating per-comparison `term_of` materialisation and `value_str` allocation for
+    /// IRI-typed ORDER BY columns (the SP2Bench q11 case: all ?ee values are IRIs, so
+    /// every comparison calls into `compare_terms` which allocates the string twice).
+    /// `cmp_sort_cells` can then directly compare two `&str` slices — no allocation.
+    /// [SONNET-4.6] sq-7d3dj.30.2
+    Iri(Box<str>),
     Val(Value),
 }
 
@@ -6725,6 +6786,31 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         (SortCell::Val(v), SortCell::Num { f, .. }) => {
             compare_values(v, &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
         }
+        // Two IRI sort cells: direct string comparison — no allocation, no term_class
+        // dispatch. [SONNET-4.6] sq-7d3dj.30.2
+        (SortCell::Iri(a), SortCell::Iri(b)) => a.as_ref().cmp(b.as_ref()),
+        // IRI against a Num/Temp cell (a MIXED-type column): IRIs are term-class Iri
+        // (rank 2 in the SPARQL total order), literals are Literal (rank 3) — so IRIs
+        // always sort before any literal, regardless of numeric or temporal subtype.
+        (SortCell::Iri(_), SortCell::Num { .. }) => Ordering::Less,
+        (SortCell::Num { .. }, SortCell::Iri(_)) => Ordering::Greater,
+        (SortCell::Iri(_), SortCell::Temp { .. }) => Ordering::Less,
+        (SortCell::Temp { .. }, SortCell::Iri(_)) => Ordering::Greater,
+        // IRI against a generic Val: dispatch on the Val variant to determine rank.
+        // Val can hold Unbound (rank 0), BlankNode (rank 1), NamedNode/IRI (rank 2),
+        // Literal/Num/Bool (rank 3), Triple (rank 4).
+        (SortCell::Iri(a), SortCell::Val(v)) => match v {
+            Value::Unbound | Value::Error => Ordering::Greater, // IRI after unbound
+            Value::Term(Term::BlankNode(_)) => Ordering::Greater, // IRI after blank node
+            Value::Term(Term::NamedNode(n)) => a.as_ref().cmp(n.as_str()), // same class
+            _ => Ordering::Less, // IRI before literals and triple terms
+        },
+        (SortCell::Val(v), SortCell::Iri(a)) => match v {
+            Value::Unbound | Value::Error => Ordering::Less,
+            Value::Term(Term::BlankNode(_)) => Ordering::Less,
+            Value::Term(Term::NamedNode(n)) => n.as_str().cmp(a.as_ref()),
+            _ => Ordering::Greater,
+        },
         (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
     }
 }
@@ -6810,11 +6896,28 @@ fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
     Value::Term(term_of(graph, local, id).expect("sort key id resolves"))
 }
 
-fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
+/// Sort or bounded-select the bindings according to `exprs`.
+///
+/// When `row_budget` is `Some(k)` AND `k < b.rows.len()`, uses bounded selection
+/// (quickselect O(n) + sort O(k log k)) instead of a full stable sort O(n log n).
+/// The top-k path uses `input_idx` as a tiebreaker to reproduce the stable sort's
+/// tie behaviour EXACTLY — byte-identical to `order_bindings(…, None)` + slice
+/// `[0..k]` for any k. When `row_budget` is `None` or `k >= n`, uses the full
+/// stable sort (unchanged). [SONNET-4.6] sq-7d3dj.30.2
+fn order_bindings(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &mut Bindings,
+    exprs: &[OrderExpression],
+    row_budget: Option<usize>,
+) -> Result<(), String> {
     // The sort key cell for one expression of one row. Numeric keys use the numerics
-    // cache and temporal keys the temporals cache (no per-comparison reparse); other
-    // expressions fall back to identity-preserving evaluation. The plain-variable case
-    // is unpacked here so the column lookup and the cache probes happen exactly once.
+    // cache and temporal keys the temporals cache (no per-comparison reparse); IRI
+    // terms precompute the IRI string once (SortCell::Iri) — eliminates per-comparison
+    // term_of materialisation + value_str allocation for IRI ORDER BY columns;
+    // other expressions fall back to identity-preserving evaluation.
+    // The plain-variable case is unpacked here so the column lookup and the cache
+    // probes happen exactly once. [SONNET-4.6] sq-7d3dj.30.2 (Iri fast path)
     let cell_of = |row: &Row, e: &Expression| -> Result<SortCell, String> {
         if let Expression::Variable(v) = e {
             if let Some(c) = b.col(v) {
@@ -6828,9 +6931,14 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                     if let Some(t) = graph.temporal_value(id) {
                         return Ok(SortCell::Temp { t, id });
                     }
-                    // Neither cache hit: materialise the term, exactly as
-                    // `eval_expr(Variable)` would (no second cache probe).
-                    return Ok(SortCell::Val(Value::Term(term_of(graph, local, id).expect("bound id resolves"))));
+                    // Neither numeric nor temporal: materialise the term once.
+                    // For IRI terms, store the IRI string in SortCell::Iri so comparisons
+                    // are direct &str comparisons with no per-comparison allocation.
+                    let term = term_of(graph, local, id).expect("bound id resolves");
+                    if let Term::NamedNode(n) = &term {
+                        return Ok(SortCell::Iri(n.as_str().into()));
+                    }
+                    return Ok(SortCell::Val(Value::Term(term)));
                 }
             }
         }
@@ -6851,9 +6959,78 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
         }
         Ok(key)
     };
-    // Precompute the keys (independent, read-only) — in parallel for large result sets.
+
+    let n = b.rows.len();
+
+    // Top-k bounded-selection path: O(n + k log k) instead of O(n log n).
+    // Activated when the caller supplies a row_budget k < n. The comparator
+    // adds `input_idx` as a tiebreaker so the partition and final sort reproduce
+    // the stable-sort tie semantics exactly (smaller input_idx appears first).
+    // [SONNET-4.6] sq-7d3dj.30.2
+    if let Some(k) = row_budget {
+        if k < n {
+            // Build (key, input_idx, row) — parallel for large sets.
+            // Use Vec<_> to avoid the clippy::type_complexity lint on the explicit type.
+            #[cfg(feature = "parallel")]
+            let mut keyed: Vec<_> = if n >= PAR_THRESHOLD {
+                use rayon::prelude::*;
+                b.rows
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                b.rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                    .collect::<Result<Vec<_>, String>>()?
+            };
+            #[cfg(not(feature = "parallel"))]
+            let mut keyed: Vec<_> = b
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                .collect::<Result<_, String>>()?;
+
+            // Strict total-order comparator: sort key first (descending as flagged),
+            // then input_idx as tiebreaker (smaller index = appears earlier in the
+            // stable sort, so it sorts LESS here — reproduces the stable sort exactly).
+            let cmp_total =
+                |a: &(Vec<(bool, SortCell)>, usize, Row),
+                 c: &(Vec<(bool, SortCell)>, usize, Row)| {
+                    for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
+                        let ord = cmp_sort_cells(graph, local, av, cv);
+                        let ord = if *desc { ord.reverse() } else { ord };
+                        if ord != Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                    // Tiebreak: smaller input_idx wins (matches stable sort input order).
+                    a.1.cmp(&c.1)
+                };
+
+            // Partition: after select_nth_unstable_by(k-1), keyed[..k] holds the k
+            // smallest elements by cmp_total (not yet sorted within that prefix).
+            // select_nth_unstable_by requires k > 0 and k-1 < len, both guaranteed here.
+            debug_assert!(k > 0 && k <= keyed.len());
+            keyed.select_nth_unstable_by(k - 1, |a, c| cmp_total(a, c));
+
+            // Sort the selected prefix into the correct final order.
+            keyed[..k].sort_by(|a, c| cmp_total(a, c));
+
+            b.rows = keyed.into_iter().take(k).map(|(_, _, r)| r).collect();
+            b.sorted_by = None;
+            return Ok(());
+        }
+        // k >= n: top-k budget covers all rows, fall through to full stable sort.
+    }
+
+    // Full stable sort path (unchanged). Precompute the keys (independent, read-only)
+    // — in parallel for large result sets.
     #[cfg(feature = "parallel")]
-    let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> = if b.rows.len() >= PAR_THRESHOLD {
+    let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> = if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
         b.rows.par_iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
     } else {
