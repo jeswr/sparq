@@ -23,9 +23,7 @@
     "datapoint records its `env` (host class, cpu, os, quiet_box flag) so the dashboard can label a",
     "noisy gh-runner point distinctly from an EC2 reference line. See `bench/CATALOG.md` QUIET-BOX note."
   ],
-
   "schema_version": 1,
-
   "results_layout": {
     "_comment": [
       "Where gathered numbers + version/env metadata LAND. `scripts/gather-competitors.sh` writes a",
@@ -35,12 +33,19 @@
     ],
     "gather_output": "bench/competitor-results/<engine>-<suite>-<UTC-timestamp>.json",
     "gather_output_gitignored": true,
-    "env_recorded_per_run": ["host_class", "cpu_model", "nproc", "os", "kernel", "quiet_box", "gathered_at_utc", "git_commit"],
+    "env_recorded_per_run": [
+      "host_class",
+      "cpu_model",
+      "nproc",
+      "os",
+      "kernel",
+      "quiet_box",
+      "gathered_at_utc",
+      "git_commit"
+    ],
     "dashboard_snapshot": "the top-level `engines` + `values` keys of THIS file (committed only deliberately, reviewed in-diff like bench/perf-baseline.json)"
   },
-
   "sparq_suite_catalog": "bench/benchmarks.toml (machine-readable) + bench/CATALOG.md (human guide). Competitor `comparable_suites` below reference suite ids/dirs from that catalog.",
-
   "competitors": [
     {
       "id": "oxigraph",
@@ -52,13 +57,34 @@
       "install_recipe": "none — built into the workspace via the `sparq-bench` crate; `cargo build -p sparq-bench --release`",
       "run_recipe": "cargo run -p sparq-bench --release -- --scale <entities> --iters <K>  (compare path: sparq vs Oxigraph on the in-process synthetic social graph, solution-count cross-check + per-query warm latency)",
       "comparable_suites": [
-        { "sparq_suite": "sparq-bench-compare", "note": "head-to-head warm latency + solution-count agreement on the synthetic social graph" },
-        { "sparq_suite": "sparq-bench-fuzz",    "note": "correctness only (no perf): differential fuzz vs Oxigraph" },
-        { "sparq_suite": "sp2b",                 "note": "comparable in count mode on the SP2Bench corpus (load .nt into oxigraph::store::Store, run queries/)" },
-        { "sparq_suite": "watdiv",               "note": "comparable in count mode on the WatDiv SF=1 corpus" },
-        { "sparq_suite": "bsbm",                 "note": "comparable on the BSBM Explore corpus (CONSTRUCT/DESCRIBE forms compare produced-triple counts)" },
-        { "sparq_suite": "dbpsb",                "note": "comparable on the DBPSB/FEASIBLE DBpedia cut" },
-        { "sparq_suite": "lubm",                 "note": "comparable on the LUBM extensional tier (Oxigraph has no OWL-RL reasoner — entailed tier is NOT comparable)" }
+        {
+          "sparq_suite": "sparq-bench-compare",
+          "note": "head-to-head warm latency + solution-count agreement on the synthetic social graph"
+        },
+        {
+          "sparq_suite": "sparq-bench-fuzz",
+          "note": "correctness only (no perf): differential fuzz vs Oxigraph"
+        },
+        {
+          "sparq_suite": "sp2b",
+          "note": "comparable in count mode on the SP2Bench corpus (load .nt into oxigraph::store::Store, run queries/)"
+        },
+        {
+          "sparq_suite": "watdiv",
+          "note": "comparable in count mode on the WatDiv SF=1 corpus"
+        },
+        {
+          "sparq_suite": "bsbm",
+          "note": "comparable on the BSBM Explore corpus (CONSTRUCT/DESCRIBE forms compare produced-triple counts)"
+        },
+        {
+          "sparq_suite": "dbpsb",
+          "note": "comparable on the DBPSB/FEASIBLE DBpedia cut"
+        },
+        {
+          "sparq_suite": "lubm",
+          "note": "comparable on the LUBM extensional tier (Oxigraph has no OWL-RL reasoner — entailed tier is NOT comparable)"
+        }
       ],
       "version_env_metadata": "captured at gather time from Cargo.lock (exact resolved oxigraph version) + host env block; the sparq-bench compare path already prints both engines' load/query timings and peak RSS to stdout.",
       "quiet_box_sensitive": true,
@@ -75,12 +101,30 @@
       "install_recipe": "docker pull docker.io/adfreiburg/qlever@sha256:6fb9ce89e6461607e0826872369ad09c48e96b4c6faffc3f0c8133001858c29b  (or the qlever-control CLI: pipx install qlever; `qlever` reads a Qleverfile, which carries the same digest pin). Docker is NOT installed on the dev box — this competitor is gather-only on a box that has Docker.",
       "run_recipe": "in a bench/qlever-* dir: `qlever get-data && qlever index && qlever start`, then `python3 compare.py <iters> <endtoend|compute>` (drives sparq-cli AND the QLever HTTP endpoint; min-of-N cold).",
       "comparable_suites": [
-        { "sparq_suite": "qlever-olympics",        "note": "real skewed DBpedia/Wallscope olympics (~1.78M); compare.py compute|endtoend" },
-        { "sparq_suite": "qlever-synthetic-10m",   "note": "10M synthetic social graph (bench/qlever-synthetic)" },
-        { "sparq_suite": "qlever-synthetic-100m",  "note": "100M synthetic social graph (bench/qlever-100m); EC2/heavy tier" },
-        { "sparq_suite": "watdiv",                 "note": "WatDiv corpus via a Qleverfile (skewed-data tuning target — QLever's home turf)" },
-        { "sparq_suite": "bsbm",                   "note": "BSBM Explore corpus via a Qleverfile" },
-        { "sparq_suite": "lubm",                   "note": "LUBM extensional tier (QLever does not materialize OWL-RL — entailed tier not comparable)" }
+        {
+          "sparq_suite": "qlever-olympics",
+          "note": "real skewed DBpedia/Wallscope olympics (~1.78M); compare.py compute|endtoend"
+        },
+        {
+          "sparq_suite": "qlever-synthetic-10m",
+          "note": "10M synthetic social graph (bench/qlever-synthetic)"
+        },
+        {
+          "sparq_suite": "qlever-synthetic-100m",
+          "note": "100M synthetic social graph (bench/qlever-100m); EC2/heavy tier"
+        },
+        {
+          "sparq_suite": "watdiv",
+          "note": "WatDiv corpus via a Qleverfile (skewed-data tuning target — QLever's home turf)"
+        },
+        {
+          "sparq_suite": "bsbm",
+          "note": "BSBM Explore corpus via a Qleverfile"
+        },
+        {
+          "sparq_suite": "lubm",
+          "note": "LUBM extensional tier (QLever does not materialize OWL-RL — entailed tier not comparable)"
+        }
       ],
       "version_env_metadata": "the gather script records (a) the resolved image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — and (b) the host env block. compare.py reports only timings + correctness, no server build string, so there is no separate 'server-reported version' to capture; `--run` refuses a live qlever gather when the digest cannot be resolved (no Docker / image not pulled) rather than writing an unversioned result. Stored QLever reference numbers + machine spec live in bench/qlever-baselines.md.",
       "stored_baselines": "bench/qlever-baselines.md (we do NOT re-run QLever every sparq iteration — re-measure only when its version or the dataset changes; record date + version there).",
@@ -103,11 +147,26 @@
         "note": "POST each suite query (or its `SELECT (COUNT(*) AS ?n)` compute-mode wrap) to the Fuseki /query endpoint; parse SPARQL-results-JSON, count solutions (or read ?n). Methodology extends bench/CATALOG.md QUIET-BOX: gather ONCE on an otherwise-idle box, same machine+suite+scale back-to-back vs sparq, COLD + min-of-N. Cross-check COUNT/result-size first."
       },
       "comparable_suites": [
-        { "sparq_suite": "sp2b",   "note": "SP2Bench corpus; load .nt via tdb2.tdbloader, run queries/*.rq against the endpoint. COUNT(*) compute-mode headline; cross-check result-size vs sparq first." },
-        { "sparq_suite": "watdiv", "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph WatDiv comparison)." },
-        { "sparq_suite": "lubm",   "note": "LUBM EXTENSIONAL tier ONLY — Fuseki/TDB2 does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever)." },
-        { "sparq_suite": "bsbm",   "note": "BSBM Explore corpus via the endpoint; CONSTRUCT/DESCRIBE forms compare produced-triple counts." },
-        { "sparq_suite": "dbpsb",  "note": "DBPSB/FEASIBLE DBpedia cut; the suite Jena/Fuseki is most-reported on in the literature." }
+        {
+          "sparq_suite": "sp2b",
+          "note": "SP2Bench corpus; load .nt via tdb2.tdbloader, run queries/*.rq against the endpoint. COUNT(*) compute-mode headline; cross-check result-size vs sparq first."
+        },
+        {
+          "sparq_suite": "watdiv",
+          "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph WatDiv comparison)."
+        },
+        {
+          "sparq_suite": "lubm",
+          "note": "LUBM EXTENSIONAL tier ONLY — Fuseki/TDB2 does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever)."
+        },
+        {
+          "sparq_suite": "bsbm",
+          "note": "BSBM Explore corpus via the endpoint; CONSTRUCT/DESCRIBE forms compare produced-triple counts."
+        },
+        {
+          "sparq_suite": "dbpsb",
+          "note": "DBPSB/FEASIBLE DBpedia cut; the suite Jena/Fuseki is most-reported on in the literature."
+        }
       ],
       "version_env_metadata": "gather records the Fuseki Docker image DIGEST (or the distribution version / `fuseki --version`) + java -version + the host env block. Results land git-ignored in bench/competitor-results/fuseki-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
       "quiet_box_sensitive": true,
@@ -129,11 +188,26 @@
         "note": "POST each suite query (or its `SELECT (COUNT(*) AS ?n)` compute-mode wrap) to the Virtuoso /sparql endpoint; parse SPARQL-results-JSON, count solutions (or read ?n). Methodology extends bench/CATALOG.md QUIET-BOX: gather ONCE on an otherwise-idle box, same machine+suite+scale back-to-back vs sparq, COLD + min-of-N. Cross-check COUNT/result-size first. CAVEAT: Virtuoso's default ResultSetMaxRows caps a SELECT at 10000 rows — a large-result query (e.g. SP2Bench q04) is TRUNCATED by default, which shows up as a COUNT/result-size MISMATCH vs sparq (not a silent pass); raise ResultSetMaxRows in the Virtuoso config, or scope the perf headline to the COUNT(*) compute wrap, when comparing full-result suites."
       },
       "comparable_suites": [
-        { "sparq_suite": "sp2b",   "note": "SP2Bench corpus; isql bulk-load the .ttl, run queries/*.rq against /sparql. COUNT(*) compute-mode headline; cross-check result-size vs sparq first (mind the 10000-row default cap on full-result forms)." },
-        { "sparq_suite": "watdiv", "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph/Fuseki WatDiv comparison)." },
-        { "sparq_suite": "lubm",   "note": "LUBM EXTENSIONAL tier ONLY — Virtuoso does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever/Fuseki)." },
-        { "sparq_suite": "bsbm",   "note": "BSBM Explore corpus via the endpoint; BSBM is the benchmark Virtuoso is most-reported on in the literature. CONSTRUCT/DESCRIBE forms compare produced-triple counts." },
-        { "sparq_suite": "dbpsb",  "note": "DBPSB/FEASIBLE DBpedia cut; the DBpedia endpoint IS Virtuoso, so this is its home turf." }
+        {
+          "sparq_suite": "sp2b",
+          "note": "SP2Bench corpus; isql bulk-load the .ttl, run queries/*.rq against /sparql. COUNT(*) compute-mode headline; cross-check result-size vs sparq first (mind the 10000-row default cap on full-result forms)."
+        },
+        {
+          "sparq_suite": "watdiv",
+          "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph/Fuseki WatDiv comparison)."
+        },
+        {
+          "sparq_suite": "lubm",
+          "note": "LUBM EXTENSIONAL tier ONLY — Virtuoso does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever/Fuseki)."
+        },
+        {
+          "sparq_suite": "bsbm",
+          "note": "BSBM Explore corpus via the endpoint; BSBM is the benchmark Virtuoso is most-reported on in the literature. CONSTRUCT/DESCRIBE forms compare produced-triple counts."
+        },
+        {
+          "sparq_suite": "dbpsb",
+          "note": "DBPSB/FEASIBLE DBpedia cut; the DBpedia endpoint IS Virtuoso, so this is its home turf."
+        }
       ],
       "version_env_metadata": "gather records the Virtuoso Docker image DIGEST (or `isql ... status()` server version) + the host env block. Results land git-ignored in bench/competitor-results/virtuoso-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
       "quiet_box_sensitive": true,
@@ -150,10 +224,16 @@
       "install_recipe": "no Homebrew formula; install from eyereasoner/eye install.sh at the pinned commit (saved-state .pvm via SWI-Prolog). EYE is NOT installed on the dev box — gather-only where `eye` is on PATH. Set EYE=/path/to/eye.",
       "run_recipe": "EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli bench/inference/eye-comparison.sh  (min-of-N wall seconds; emits the sparq-vs-EYE table). EYE on dt100k is ~hours — gated behind EYE_DT100K=1.",
       "comparable_suites": [
-        { "sparq_suite": "inference-eye-comparison", "note": "socrates / DeepTaxonomy (dt1k,dt10k,dt100k) / anc500 / grid30 N3 closures" }
+        {
+          "sparq_suite": "inference-eye-comparison",
+          "note": "socrates / DeepTaxonomy (dt1k,dt10k,dt100k) / anc500 / grid30 N3 closures"
+        }
       ],
       "excluded_suites": [
-        { "sparq_suite": "lubm", "reason": "[OPUS-4.8 sq-bzr7] NOT wired and NOT comparable as previously listed. RESOLUTION = bead option (b): the OWL-RL->N3 translation needed to make EYE's closure comparable to `sparq-cli reason ... owl` on the LUBM entailed tier (Q4-Q13) is out of scope for one bench-wiring PR, so the suite is removed from comparable_suites. WHY it is not a drop-in: (1) EYE is a forward-chaining N3 reasoner, not a SPARQL query engine — it does NOT run the LUBM `.rq` queries on either tier; the only axis on which EYE could be compared here is *closure materialization*. (2) sparq's `reason owl` applies the full W3C OWL 2 RL/RDF rule table (crates/sparq-reason/src/owl.rs implements cls-*/cax-*/scm-*/prp-*/eq-* — incl. cls-svf someValuesFrom, cls-int intersectionOf, prp-trp TransitiveProperty, prp-inv inverseOf — the exact features LUBM Q6/Q9/Q11/Q12/Q13 depend on; see bench/lubm/README.md). To compare like-for-like, EYE would need a faithful, separately-VALIDATED OWL 2 RL ruleset *as N3* whose closure reproduces bench/lubm/expected-rows.tsv exactly. The repo's only OWL-in-N3 file (tests/w3c/n3/files/'state transitions'/owl2rl.n3) is a ~12-rule demo that omits transitivity (commented out), someValuesFrom, intersectionOf and inverseOf, so its closure would UNDER-count those queries — wiring it would be a misleading, not a fair, comparison. Authoring + validating the full OWL 2 RL N3 rule table is its own task; capture as a follow-up bead if the entailed-tier EYE comparison is ever wanted. EYE remains wired + comparable on the N3-closure suite above (inference-eye-comparison), which is its native pipeline." }
+        {
+          "sparq_suite": "lubm",
+          "reason": "[OPUS-4.8 sq-bzr7] NOT wired and NOT comparable as previously listed. RESOLUTION = bead option (b): the OWL-RL->N3 translation needed to make EYE's closure comparable to `sparq-cli reason ... owl` on the LUBM entailed tier (Q4-Q13) is out of scope for one bench-wiring PR, so the suite is removed from comparable_suites. WHY it is not a drop-in: (1) EYE is a forward-chaining N3 reasoner, not a SPARQL query engine — it does NOT run the LUBM `.rq` queries on either tier; the only axis on which EYE could be compared here is *closure materialization*. (2) sparq's `reason owl` applies the full W3C OWL 2 RL/RDF rule table (crates/sparq-reason/src/owl.rs implements cls-*/cax-*/scm-*/prp-*/eq-* — incl. cls-svf someValuesFrom, cls-int intersectionOf, prp-trp TransitiveProperty, prp-inv inverseOf — the exact features LUBM Q6/Q9/Q11/Q12/Q13 depend on; see bench/lubm/README.md). To compare like-for-like, EYE would need a faithful, separately-VALIDATED OWL 2 RL ruleset *as N3* whose closure reproduces bench/lubm/expected-rows.tsv exactly. The repo's only OWL-in-N3 file (tests/w3c/n3/files/'state transitions'/owl2rl.n3) is a ~12-rule demo that omits transitivity (commented out), someValuesFrom, intersectionOf and inverseOf, so its closure would UNDER-count those queries — wiring it would be a misleading, not a fair, comparison. Authoring + validating the full OWL 2 RL N3 rule table is its own task; capture as a follow-up bead if the entailed-tier EYE comparison is ever wanted. EYE remains wired + comparable on the N3-closure suite above (inference-eye-comparison), which is its native pipeline."
+        }
       ],
       "version_env_metadata": "gather records `eye --version`, the SWI-Prolog version, and the host env block; the cited third-party EYE measurements + machine spec live in bench/inference/eye-comparison.md.",
       "quiet_box_sensitive": true,
@@ -169,13 +249,28 @@
       "install_recipe": "pip install pyshacl rdflib  (gather-only — NOT a committed dependency of the repo; engines stay out of git per AGENTS.md). The adapter also needs rdflib for the shared report->count parser.",
       "run_recipe": "scripts/gather-competitors.sh --run --only pyshacl  with SHACL_DATA=<data.ttl> SHACL_SHAPES=<shapes.ttl> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below.",
       "adapter": {
-        "cmd": ["pyshacl", "-s", "{shapes}", "-f", "turtle", "-o", "{report}", "{data}"],
+        "cmd": [
+          "pyshacl",
+          "-s",
+          "{shapes}",
+          "-f",
+          "turtle",
+          "-o",
+          "{report}",
+          "{data}"
+        ],
         "report_format": "turtle",
         "report_to": "file",
-        "version_cmd": ["pyshacl", "--version"]
+        "version_cmd": [
+          "pyshacl",
+          "--version"
+        ]
       },
       "comparable_suites": [
-        { "sparq_suite": "shacl-validate-bench", "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts — engines that dedup results differ from sparq, which does not) before trusting any timing" }
+        {
+          "sparq_suite": "shacl-validate-bench",
+          "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts — engines that dedup results differ from sparq, which does not) before trusting any timing"
+        }
       ],
       "version_env_metadata": "gather records `pyshacl --version`, rdflib version, and the host env block.",
       "quiet_box_sensitive": true,
@@ -191,13 +286,26 @@
       "install_recipe": "download apache-jena-<ver>.tar.gz (Apache-2.0) and put bin/ on PATH, OR use the `stain/jena` Docker image (Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
       "run_recipe": "scripts/gather-competitors.sh --run --only jena-shacl  with SHACL_DATA=<data.ttl> SHACL_SHAPES=<shapes.ttl> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below (Jena writes the sh:ValidationReport to stdout in Turtle).",
       "adapter": {
-        "cmd": ["shacl", "validate", "--data", "{data}", "--shapes", "{shapes}"],
+        "cmd": [
+          "shacl",
+          "validate",
+          "--data",
+          "{data}",
+          "--shapes",
+          "{shapes}"
+        ],
         "report_format": "turtle",
         "report_to": "stdout",
-        "version_cmd": ["shacl", "--version"]
+        "version_cmd": [
+          "shacl",
+          "--version"
+        ]
       },
       "comparable_suites": [
-        { "sparq_suite": "shacl-validate-bench", "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts — engines that dedup results differ from sparq, which does not) before trusting any timing. sh:sparql coverage differs across engines — scope perf to constraints all Tier-1 implement." }
+        {
+          "sparq_suite": "shacl-validate-bench",
+          "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts — engines that dedup results differ from sparq, which does not) before trusting any timing. sh:sparql coverage differs across engines — scope perf to constraints all Tier-1 implement."
+        }
       ],
       "version_env_metadata": "gather records the Jena version (or Docker image digest) + java -version + the host env block.",
       "quiet_box_sensitive": true,
@@ -212,9 +320,14 @@
       "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file.",
       "install_recipe": "npm i rdf-validate-shacl @rdfjs/data-model @rdfjs/dataset @rdfjs/term-map @rdfjs/namespace @rdfjs/parser-n3 @rdfjs/environment clownface  (gather-only — NOT committed; set JS_MODULES_DIR to the node_modules parent). Optionally `npm i shacl-engine` for the shacl-engine variant (set adapter.js_engine).",
       "run_recipe": "scripts/gather-competitors.sh --run --only rdf-validate-shacl  with SHACL_DATA + SHACL_SHAPES (+ JS_MODULES_DIR) set; the dispatch calls scripts/bench-adapters/js_shacl_adapter.mjs.",
-      "adapter": { "js_engine": "rdf-validate-shacl" },
+      "adapter": {
+        "js_engine": "rdf-validate-shacl"
+      },
       "comparable_suites": [
-        { "sparq_suite": "shacl-validate-bench", "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts) before trusting timing; also the harness for sparq's own WASM SHACL in-runtime comparison" }
+        {
+          "sparq_suite": "shacl-validate-bench",
+          "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts) before trusting timing; also the harness for sparq's own WASM SHACL in-runtime comparison"
+        }
       ],
       "version_env_metadata": "gather records the resolved npm version + node --version + the host env block.",
       "quiet_box_sensitive": true,
@@ -230,7 +343,10 @@
       "install_recipe": "run Fuseki with the jena-geosparql assembler (Apache-2.0), load the geo corpus (bench/geo/gen.sh), and build the spatial index; OR use a geosparql-fuseki Docker image (Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
       "run_recipe": "scripts/gather-competitors.sh --run --only geosparql-jena  with SPARQL_ENDPOINT=<fuseki geosparql endpoint> SPARQL_QUERY_FILE=bench/geo/queries/<workload>.rq set; the dispatch calls scripts/bench-adapters/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count).",
       "comparable_suites": [
-        { "sparq_suite": "geo-bench", "note": "same fixed CRS84 point corpus x the queries/*.rq within/geof: workloads; cross-check the result-set SIZE (counts-not-coords — float geometry is not bit-stable) before trusting any timing. The all-WKT subset is fully like-for-like; GML+WKT support is the compliance comparison." }
+        {
+          "sparq_suite": "geo-bench",
+          "note": "same fixed CRS84 point corpus x the queries/*.rq within/geof: workloads; cross-check the result-set SIZE (counts-not-coords — float geometry is not bit-stable) before trusting any timing. The all-WKT subset is fully like-for-like; GML+WKT support is the compliance comparison."
+        }
       ],
       "version_env_metadata": "gather records the Jena/Fuseki version (or Docker image digest) + java -version + the host env block.",
       "quiet_box_sensitive": true,
@@ -246,7 +362,10 @@
       "install_recipe": "postgis/postgis Docker image (gather-only). NOT a committed dependency. NOTE: PostGIS is a relational store, not a SPARQL engine — there is no like-for-like geof: path; treat as a sub-component lower bound only.",
       "run_recipe": "bespoke (NOT gather-competitors.sh): load the same POINT corpus into a geometry column with a GiST index, run ST_DWithin over the MATCHED CRS/metric, record the row count + latency.",
       "comparable_suites": [
-        { "sparq_suite": "geo-bench", "note": "LOOSE lower bound on the spatial-index sub-component (GiST R-tree vs sparq-geo's rstar) ONLY; match CRS/operation semantics (great-circle vs geodesic/projected) or omit. NOT a SPARQL/geof: competitor — apples-to-oranges; never put on the dashboard as a peer." }
+        {
+          "sparq_suite": "geo-bench",
+          "note": "LOOSE lower bound on the spatial-index sub-component (GiST R-tree vs sparq-geo's rstar) ONLY; match CRS/operation semantics (great-circle vs geodesic/projected) or omit. NOT a SPARQL/geof: competitor — apples-to-oranges; never put on the dashboard as a peer."
+        }
       ],
       "version_env_metadata": "PostGIS_Full_Version() + the host env block, if ever gathered.",
       "quiet_box_sensitive": true,
@@ -266,7 +385,10 @@
         "note": "POST `SELECT (COUNT(?s) AS ?n) WHERE { ?s text:query (rdfs:comment \"<terms>\") }` (the jena-text analogue of text:matches); parse SPARQL-results-JSON, read ?n. Scope to AND/OR/prefix/phrase — match sparq-text's BM25 k1=1.2/b=0.75 where Fuseki exposes it."
       },
       "comparable_suites": [
-        { "sparq_suite": "text-index-bench", "note": "same corpus loaded as RDF literals; cross-check the HIT COUNT (text:query result size vs sparq-text search().len()) before trusting any timing. jena-text ranking/analyzer differs from sparq-text's UAX#29-tokenized BM25, so scope the comparison to AND/OR/prefix/phrase result SETS, not score order." }
+        {
+          "sparq_suite": "text-index-bench",
+          "note": "same corpus loaded as RDF literals; cross-check the HIT COUNT (text:query result size vs sparq-text search().len()) before trusting any timing. jena-text ranking/analyzer differs from sparq-text's UAX#29-tokenized BM25, so scope the comparison to AND/OR/prefix/phrase result SETS, not score order."
+        }
       ],
       "version_env_metadata": "gather records the Fuseki version (or Docker image digest) + java -version + the host env block.",
       "quiet_box_sensitive": true,
@@ -286,7 +408,10 @@
         "dataset_env": "BEIR_CUT (scifact|trec-covid; default scifact), BEIR_K (top-k, default 100), BEIR_DATA_DIR (download cache, default /tmp/beir-data)"
       },
       "comparable_suites": [
-        { "sparq_suite": "text-index-bench", "note": "KERNEL-ONLY, IR-quality axis: compare Recall@100/nDCG@10 on the same BEIR cut + qrels. NOT a SPARQL benchmark (no RDF surface) and NOT on the dashboard. Scope to AND/OR/prefix/phrase/slop + BM25 k1=1.2/b=0.75 to stay fair." }
+        {
+          "sparq_suite": "text-index-bench",
+          "note": "KERNEL-ONLY, IR-quality axis: compare Recall@100/nDCG@10 on the same BEIR cut + qrels. NOT a SPARQL benchmark (no RDF surface) and NOT on the dashboard. Scope to AND/OR/prefix/phrase/slop + BM25 k1=1.2/b=0.75 to stay fair."
+        }
       ],
       "version_env_metadata": "gather records the Anserini + Lucene versions, the BEIR cut + qrels checksum, java -version, and the host env block.",
       "quiet_box_sensitive": true,
@@ -305,7 +430,10 @@
         "kind_note": "python-lib (vector_lib_adapter.py) + exact-kNN numpy oracle (G4). Report the recall-QPS PARETO at MATCHED recall, never a single latency. Scope to what sparq-vectors implements (cosine/L2 top-k; HNSW + Vamana + PQ) or it is unfair."
       },
       "comparable_suites": [
-        { "sparq_suite": "vector-ann-bench", "note": "same dataset + exact-kNN ground truth; cross-check recall@10 (the recall_deficit_milli) at MATCHED recall before comparing QPS. hnswlib is the dashboard peer for the HNSW row; FAISS/ScaNN/DiskANN-ref are kernel references. NEVER compare a single latency — only the recall-QPS Pareto. No competitor does ANN-inside-SPARQL over dict-encoded ids (uncontested)." }
+        {
+          "sparq_suite": "vector-ann-bench",
+          "note": "same dataset + exact-kNN ground truth; cross-check recall@10 (the recall_deficit_milli) at MATCHED recall before comparing QPS. hnswlib is the dashboard peer for the HNSW row; FAISS/ScaNN/DiskANN-ref are kernel references. NEVER compare a single latency — only the recall-QPS Pareto. No competitor does ANN-inside-SPARQL over dict-encoded ids (uncontested)."
+        }
       ],
       "version_env_metadata": "gather records each library version, the dataset name + checksum, the param sweep, python/numpy versions, and the host env block.",
       "quiet_box_sensitive": true,
@@ -324,7 +452,10 @@
         "kind_note": "loose-only; not a like-for-like kernel peer. Documented for honesty, off the dashboard. `kind` is `reference` — an INERT kind that scripts/gather-competitors.sh does NOT auto-dispatch (the shared-adapter loop only handles report-cli/js-lib/http-sparql/vector-lib), so the harness will never HTTP-query a vector DB as a SPARQL endpoint (these are NOT SPARQL servers). If ever gathered it is a bespoke recall-QPS run flagged with the full-DB overhead asymmetry, never a same-row dashboard cell."
       },
       "comparable_suites": [
-        { "sparq_suite": "vector-ann-bench", "note": "LOOSE-ONLY: full vector DBs are more than an embedded index; apples-to-oranges. Context note, not a dashboard column. Use the ann-benchmarks kernel peers for the fair recall-QPS comparison." }
+        {
+          "sparq_suite": "vector-ann-bench",
+          "note": "LOOSE-ONLY: full vector DBs are more than an embedded index; apples-to-oranges. Context note, not a dashboard column. Use the ann-benchmarks kernel peers for the fair recall-QPS comparison."
+        }
       ],
       "version_env_metadata": "gather records each DB image digest + the host env block.",
       "quiet_box_sensitive": true,
@@ -340,22 +471,548 @@
       "install_recipe": "use the `rdfhdt/hdt-cpp` Docker image (core LGPL / tools Apache-2.0), OR build from source (autotools: `./autogen.sh && ./configure && make`). Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost. gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
       "run_recipe": "scripts/gather-competitors.sh --run --only hdt-cpp with HDT_ARCHIVE=<in.hdt> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below (hdt2rdf decodes the SAME archive sparq-hdt loads, to N-Triples on stdout — the load+decode-to-native analogue). Cross-check the decoded TRIPLE COUNT against sparq-hdt's store.len() before trusting any timing. Match the regime: hdt-cpp `mapHDT` (mmap) vs `loadHDT` (in-RAM) — compare in-RAM vs in-RAM.",
       "adapter": {
-        "cmd": ["hdt2rdf", "{archive}"],
+        "cmd": [
+          "hdt2rdf",
+          "{archive}"
+        ],
         "report_format": "ntriples",
         "report_to": "stdout",
-        "version_cmd": ["hdt2rdf", "--version"],
+        "version_cmd": [
+          "hdt2rdf",
+          "--version"
+        ],
         "kind_note": "DECODE-ONLY. The report is the decoded N-Triples; the comparable signal is decode wall-clock + the decoded triple count (cross-check vs sparq-hdt store.len()). A query-over-HDT (hdtSearch) head-to-head is deliberately NOT wired — it is not like-for-like (sparq-hdt re-indexes; hdt-cpp queries the compressed bitmap in place)."
       },
       "comparable_suites": [
-        { "sparq_suite": "hdt-suite", "note": "DECODE-ONLY: hdt2rdf decodes the SAME .hdt sparq-hdt loads; cross-check the decoded triple count (== sparq-hdt store.len(), 328 for snikmeta) before trusting any decode timing. Query-over-HDT is OUT OF SCOPE — not like-for-like (sparq-hdt re-indexes into its own Dict/Graph; hdt-cpp queries the compressed BitmapTriples in place)." }
+        {
+          "sparq_suite": "hdt-suite",
+          "note": "DECODE-ONLY: hdt2rdf decodes the SAME .hdt sparq-hdt loads; cross-check the decoded triple count (== sparq-hdt store.len(), 328 for snikmeta) before trusting any decode timing. Query-over-HDT is OUT OF SCOPE — not like-for-like (sparq-hdt re-indexes into its own Dict/Graph; hdt-cpp queries the compressed BitmapTriples in place)."
+        }
       ],
       "version_env_metadata": "gather records the hdt-cpp Docker image digest (or source tag) + the host env block.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "hdt-cpp"
+    },
+    {
+      "id": "serd",
+      "name": "serd / serdi (C RDF parser+serializer)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] RDF parser+serializer reference for the parse-competitors and serialize-bench suites. serd is a C99 library with a CLI (`serdi`); it reads/writes Turtle, NTriples, NQuads. Compared on MB/s parse throughput and serialize throughput vs sparq's custom parsers/writers. Apache-2.0 -> numbers are publishable.",
+      "pinned_version": "serd (pin the exact release version at gather time, e.g. `serdi --version`)",
+      "version_source": "`serdi --version` at run time, recorded in the gather results file",
+      "install_recipe": "download a release tarball from https://gitlab.com/drobilla/serd/-/releases (or `apt install serd-tools` / `brew install serd`). gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/gather-competitors.sh --run --only serd with DATA_FILE=<corpus.nt> set; dispatch calls scripts/bench-adapters/parse_cli_adapter.py (`serdi -i ntriples -o ntriples {data}` measuring MB/s via wall time + wc -l). For serialize: `serdi -i ntriples -o turtle {data}` round-trip.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "parse-competitors",
+          "note": "NT parse throughput (MB/s) on the same pinned corpus — serd vs sparq custom NT parser; cross-check triple count before trusting timing"
+        },
+        {
+          "sparq_suite": "serialize-bench",
+          "note": "NT->Turtle serialize throughput vs sparq's Turtle writer; same corpus, cross-check triple-count round-trip"
+        }
+      ],
+      "version_env_metadata": "gather records `serdi --version`, compiler version (if built from source), and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "serd",
+      "unverified_pin": true,
+      "honesty_caveat": "Version is unverified and TBD; to be pinned to a real release version at the first gather run."
+    },
+    {
+      "id": "raptor",
+      "name": "Raptor / rapper (C RDF parsing library)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Redland Raptor RDF parser+serializer; the `rapper` CLI wraps the library. Covers NT, Turtle, RDF/XML, and more. Compared on parse + serialize throughput vs sparq. LGPL-2.1 -> check license before publishing; note the LGPL terms on the results.",
+      "pinned_version": "raptor2 / rapper (pin the exact version at gather time via `rapper --version`)",
+      "version_source": "`rapper --version` at run time, recorded in the gather results file",
+      "install_recipe": "`apt install raptor2-utils` / `brew install raptor`. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/gather-competitors.sh --run --only raptor; dispatch calls scripts/bench-adapters/parse_cli_adapter.py (`rapper -i ntriples -o ntriples {data}` measuring MB/s). Cross-check triple count.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "parse-competitors",
+          "note": "NT parse throughput (MB/s) on the same pinned corpus — rapper vs sparq custom NT parser; cross-check triple count"
+        },
+        {
+          "sparq_suite": "serialize-bench",
+          "note": "NT->Turtle serialize throughput vs sparq's Turtle writer"
+        }
+      ],
+      "version_env_metadata": "gather records `rapper --version` and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "raptor",
+      "unverified_pin": true,
+      "honesty_caveat": "Version is unverified and TBD; to be pinned to a real release version at the first gather run."
+    },
+    {
+      "id": "jena-riot",
+      "name": "Apache Jena RIOT parser+writer",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Apache Jena RIOT is the reference Java RDF I/O toolkit (part of apache-jena). The `riot` CLI reads/writes NT, Turtle, RDF/XML, TriG, JSON-LD. Apache-2.0 -> numbers are publishable. Compared on parse + serialize throughput vs sparq's custom parsers/writers. The parse-competitors suite's tier-1 JVM reference.",
+      "pinned_version": "apache-jena (riot CLI; pin the exact distribution version at gather time via `riot --version`)",
+      "version_source": "`riot --version` at run time (reports the Jena distribution version), recorded in the gather results file",
+      "install_recipe": "download apache-jena-<ver>.tar.gz (Apache-2.0) and put bin/ on PATH, OR use the `stain/jena` Docker image. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/gather-competitors.sh --run --only jena-riot; dispatch calls scripts/bench-adapters/parse_cli_adapter.py (`riot --input=N-Triples {data}` measuring MB/s). Cross-check triple count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "parse-competitors",
+          "note": "NT parse throughput (MB/s) on the same pinned corpus — riot vs sparq custom NT parser; cross-check triple count"
+        },
+        {
+          "sparq_suite": "serialize-bench",
+          "note": "NT->Turtle serialize throughput vs sparq's Turtle writer; riot --output=Turtle round-trip"
+        }
+      ],
+      "version_env_metadata": "gather records `riot --version`, java -version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "jena-riot",
+      "unverified_pin": true,
+      "honesty_caveat": "Version is unverified and TBD; to be pinned to a real distribution version at the first gather run."
+    },
+    {
+      "id": "cwm",
+      "name": "cwm (W3C Closed World Machine, N3 reasoner)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Tim Berners-Lee's cwm is the reference Python N3 reasoner. Used as an N3-rules competitor on the inference-eye-comparison suite alongside EYE; the third column in sq-hmd7l.11's cwm+jen3 addition. MIT/W3C -> numbers are publishable. cwm is Python-2 legacy; run under Python 2 or the python3 fork.",
+      "pinned_version": "cwm (pin the exact version/git commit at gather time; `cwm --version` or `python2 cwm.py --version`)",
+      "version_source": "`cwm --version` or the git commit of the checked-out source, recorded in the gather results file",
+      "install_recipe": "download from https://www.w3.org/2000/10/swap/cwm.py (or the cwm git mirror). Requires Python 2 or the community Python 3 fork. gather-only — NOT a committed dependency.",
+      "run_recipe": "cwm bench/inference/socrates.n3 --think for the socrates closure; cwm gen_deeptaxonomy.n3 --think for the DeepTaxonomy closure. Cross-check closure triple count before timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "inference-eye-comparison",
+          "note": "N3 forward closure on the same DeepTaxonomy/socrates/anc500 corpora as EYE — cwm is the third column; cross-check closure triple count vs sparq-cli reason n3 before trusting timing"
+        }
+      ],
+      "version_env_metadata": "gather records the cwm version/commit, Python version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "cwm",
+      "unverified_pin": true,
+      "honesty_caveat": "Version/commit is unverified and TBD; to be pinned to a real version or commit at the first gather run."
+    },
+    {
+      "id": "jen3",
+      "name": "jen3 (N3 reasoner, JavaScript)",
+      "kind": "js-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] jen3 is a JavaScript N3 reasoner (npm). The JS-ecosystem N3 counterpart to EYE and cwm, run via Node.js. MIT -> numbers are publishable. Part of the N3-reasoners comparison row in sq-hmd7l.11.",
+      "pinned_version": "jen3 (pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
+      "install_recipe": "`npm install jen3` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/n3_reasoner_adapter.mjs with ENGINE=jen3; reasons over the same N3 corpora as EYE. Cross-check closure triple count before timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "inference-eye-comparison",
+          "note": "N3 forward closure on the same corpora as EYE and cwm — jen3 is the fourth column; cross-check closure triple count vs sparq-cli reason n3 before trusting timing"
+        }
+      ],
+      "version_env_metadata": "gather records the resolved jen3 npm version, node --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "jen3",
+      "unverified_pin": true,
+      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+    },
+    {
+      "id": "vlog",
+      "name": "VLog (existential-rule / Datalog reasoner)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] VLog is a high-performance Datalog/existential-rule reasoner from VU Amsterdam. The materialize-competitors suite compares sparq OWL-RL/RDFS closure on LUBM vs VLog's materialization. Apache-2.0 -> numbers are publishable.",
+      "pinned_version": "VLog (pin the exact release version / Docker image DIGEST at gather time)",
+      "version_source": "the VLog binary version or Docker image DIGEST, recorded in the gather results file",
+      "install_recipe": "download from https://github.com/karmaresearch/vlog/releases (Apache-2.0) or use a Docker image. gather-only — NOT a committed dependency.",
+      "run_recipe": "vlog mat --rules <owl-rl-rules.dlog> --data <lubm.nt> --reasoningAlgo <method>; cross-check materialized triple count vs sparq-cli reason owl before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "materialize-competitors",
+          "note": "OWL-RL/RDFS closure on the LUBM(1) ABox — VLog materialization vs sparq-cli reason owl; cross-check closure triple count (sparq: ~150k) before trusting timing. Note: VLog is a general Datalog engine, not a native OWL-RL engine — rule encoding fidelity must be verified"
+        }
+      ],
+      "version_env_metadata": "gather records VLog version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "vlog",
+      "unverified_pin": true,
+      "honesty_caveat": "Version/digest is unverified and TBD; to be pinned to a real release version or digest at the first gather run."
+    },
+    {
+      "id": "nemo",
+      "name": "Nemo (Datalog reasoner)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Nemo is a high-performance Datalog reasoner in Rust from knowsys. The materialize-competitors suite compares sparq OWL-RL/RDFS closure on LUBM vs Nemo's materialization. Apache-2.0 -> numbers are publishable. The Rust-native peer column.",
+      "pinned_version": "nemo (pin the exact release version at gather time; `nemo --version`)",
+      "version_source": "`nemo --version` at run time, recorded in the gather results file",
+      "install_recipe": "download from https://github.com/knowsys/nemo/releases (Apache-2.0), or `cargo install nemo-cli`. gather-only — NOT a committed dependency.",
+      "run_recipe": "nemo --rules <owl-rl-rules.rls> <lubm.nt> --output <mat.nt>; cross-check materialized triple count vs sparq-cli reason owl before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "materialize-competitors",
+          "note": "OWL-RL/RDFS closure on the LUBM(1) ABox — Nemo materialization vs sparq-cli reason owl; cross-check closure triple count before trusting timing. Note: Nemo is a general Datalog engine — rule encoding fidelity must be verified"
+        }
+      ],
+      "version_env_metadata": "gather records `nemo --version` and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "nemo",
+      "unverified_pin": true,
+      "honesty_caveat": "Version is unverified and TBD; to be pinned to a real release version at the first gather run."
+    },
+    {
+      "id": "elk",
+      "name": "ELK (OWL 2 EL reasoner, Java)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] ELK is the reference OWL 2 EL consequence-based reasoner (Oxford/Yandex). The reason-el-real suite compares sparq-reason-el classification on real ontologies (GO / OpenGALEN) vs ELK. Apache-2.0 -> numbers are publishable. ELK is the gold-standard EL classifier.",
+      "pinned_version": "elk-reasoner (pin the exact Maven artifact version / jar release at gather time)",
+      "version_source": "the ELK jar version (from the jar manifest or the ELK CLI --version), recorded in the gather results file",
+      "install_recipe": "download elk-owlapi-standalone-<ver>.jar from https://github.com/liveontologies/elk-reasoner/releases (Apache-2.0). gather-only — NOT a committed dependency.",
+      "run_recipe": "java -jar elk-owlapi-standalone-<ver>.jar --input <ontology.owl> --task classify; cross-check the subsumption count vs sparq-reason-el before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "reason-el-real",
+          "note": "OWL 2 EL classification on real ontologies (GO / OpenGALEN) — subsumption count oracle + timing vs sparq-reason-el; cross-check subsumption count before trusting timing"
+        }
+      ],
+      "version_env_metadata": "gather records the ELK jar version, java -version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "elk",
+      "unverified_pin": true,
+      "honesty_caveat": "Jar version is unverified and TBD; to be pinned to a real Maven artifact version at the first gather run."
+    },
+    {
+      "id": "ontop",
+      "name": "Ontop (SPARQL-to-SQL / OWL 2 QL rewriting system)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Ontop is a VKG / SPARQL-to-SQL OBDA system that implements OWL 2 QL query rewriting (PerfectRef-style UCQ expansion). The reason-ql-npd suite compares sparq-reason-ql rewriting on the NPD + Requiem suites vs Ontop's rewriter. Apache-2.0 -> numbers are publishable.",
+      "pinned_version": "Ontop (pin the exact release version / Docker image DIGEST at gather time)",
+      "version_source": "the Ontop binary version or Docker image DIGEST, recorded in the gather results file",
+      "install_recipe": "download from https://github.com/ontop/ontop/releases (Apache-2.0) or use the Docker image. gather-only — NOT a committed dependency.",
+      "run_recipe": "ontop rewrite --input <query.sparql> --ontology <tbox.owl> --mapping <mapping.obda>; compare rewrite time and UCQ size vs sparq-reason-ql. Cross-check UCQ disjunct count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "reason-ql-npd",
+          "note": "OWL 2 QL query rewriting on NPD + Requiem suites — UCQ size (disjunct count) oracle + rewrite time vs sparq-reason-ql. The UCQ disjunct count is the primary correctness oracle; rewrite time is secondary. CAVEAT: Ontop is a full VKG/OBDA system (includes SQL generation, mapping, etc.); compare rewriter phase only, not end-to-end"
+        }
+      ],
+      "version_env_metadata": "gather records the Ontop version, java -version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "ontop",
+      "unverified_pin": true,
+      "honesty_caveat": "Version/digest is unverified and TBD; to be pinned to a real release version or digest at the first gather run."
+    },
+    {
+      "id": "hermit-openllet",
+      "name": "HermiT / Openllet (OWL DL tableau reasoner)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] HermiT (Oxford) is the reference OWL 2 DL tableau reasoner; Openllet is its actively-maintained fork. The reason-dl-ore suite compares sparq-reason-dl tableau on ORE corpora vs HermiT/Openllet. HermiT: LGPL-3.0; Openllet: Apache-2.0. Note the LGPL terms for HermiT if publishing numbers.",
+      "pinned_version": "Openllet (pin the exact Maven artifact version / jar release at gather time; prefer Openllet which is Apache-2.0)",
+      "version_source": "the Openllet jar version (from the jar manifest or CLI), recorded in the gather results file",
+      "install_recipe": "download openllet-cli-<ver>.jar from https://github.com/Galigator/openllet/releases (Apache-2.0). If HermiT is needed: download from https://github.com/owlcs/HermiT/releases (LGPL-3.0). gather-only — NOT a committed dependency.",
+      "run_recipe": "java -jar openllet-cli-<ver>.jar explain --consistency --input <ontology.owl>; or classification: openllet classify. Cross-check DL classification outcome vs sparq-reason-dl before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "reason-dl-ore",
+          "note": "OWL 2 DL classification/consistency on ORE corpora — Openllet is the reference column; cross-check consistency/classification verdict before trusting timing. Prefer Openllet (Apache-2.0) over HermiT (LGPL-3.0) for publishable numbers"
+        }
+      ],
+      "version_env_metadata": "gather records the Openllet jar version, java -version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "openllet",
+      "unverified_pin": true,
+      "honesty_caveat": "Jar version is unverified and TBD; to be pinned to a real Maven artifact version at the first gather run."
+    },
+    {
+      "id": "titanium-json-ld",
+      "name": "Titanium JSON-LD 1.1 (Java)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Titanium-JSON-LD is a Java JSON-LD 1.1 processor (apicatalog). The jsonld-bench suite compares W3C conformance pass-rate + parse/expand throughput vs sparq's JSON-LD processor. Apache-2.0 -> numbers are publishable.",
+      "pinned_version": "titanium-json-ld (pin the exact Maven artifact com.apicatalog:titanium-json-ld:<ver> at gather time)",
+      "version_source": "the Maven artifact version (from the jar manifest or pom.xml), recorded in the gather results file",
+      "install_recipe": "download from https://github.com/filip26/titanium-json-ld/releases (Apache-2.0). gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/jsonld_adapter.py --engine titanium --input <doc.jsonld> --op expand; cross-check the expanded triple count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "jsonld-bench",
+          "note": "JSON-LD expand/compact/N-Quads serialize throughput on the same corpus — Titanium vs sparq JSON-LD; cross-check triple count and W3C test-suite pass-rate before trusting timing"
+        }
+      ],
+      "version_env_metadata": "gather records the Titanium version, java -version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "titanium-json-ld",
+      "unverified_pin": true,
+      "honesty_caveat": "Maven artifact version is unverified and TBD; to be pinned to a real version at the first gather run."
+    },
+    {
+      "id": "jsonld-js",
+      "name": "jsonld.js (JavaScript JSON-LD processor)",
+      "kind": "js-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] jsonld.js is the reference JavaScript JSON-LD 1.1 processor (digitalbazaar). The jsonld-bench suite compares W3C conformance pass-rate + expand/serialize throughput vs sparq's JSON-LD processor. BSD-3-Clause -> numbers are publishable. The JS-ecosystem reference column.",
+      "pinned_version": "jsonld (npm; pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
+      "install_recipe": "`npm install jsonld` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/jsonld_adapter.mjs --engine jsonld --input <doc.jsonld> --op expand; cross-check the expanded triple count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "jsonld-bench",
+          "note": "JSON-LD expand/compact/N-Quads serialize throughput — jsonld.js vs sparq JSON-LD; cross-check triple count and W3C test-suite pass-rate before trusting timing. jsonld.js is the canonical JS-ecosystem reference"
+        }
+      ],
+      "version_env_metadata": "gather records the resolved jsonld npm version, node --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "jsonld-js",
+      "unverified_pin": true,
+      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+    },
+    {
+      "id": "rdf-canonize-js",
+      "name": "rdf-canonize (JavaScript RDFC-1.0 implementation)",
+      "kind": "js-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] rdf-canonize is the reference JavaScript RDFC-1.0 (formerly RDF Dataset Normalization / RDNA) implementation (digitalbazaar). The canon-bench suite compares W3C RDFC-1.0 conformance pass-rate + throughput vs sparq's canonicalization + DoS-resistance (poison-graph capping). BSD-3-Clause -> numbers are publishable.",
+      "pinned_version": "rdf-canonize (npm; pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
+      "install_recipe": "`npm install rdf-canonize` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/canon_adapter.mjs --engine rdf-canonize --input <dataset.nq>; cross-check the canonical N-Quads byte-for-byte vs sparq's output before trusting timing. Poison-graph cap-hit is a result, not a failure.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "canon-bench",
+          "note": "RDFC-1.0 canonical N-Quads on the same W3C test corpora + poison-graph stress cases — rdf-canonize vs sparq; cross-check byte-identical canonical output before trusting timing. Poison-graph cap-hits are recorded as 'capped' results, not failures"
+        }
+      ],
+      "version_env_metadata": "gather records the resolved rdf-canonize npm version, node --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "rdf-canonize-js",
+      "unverified_pin": true,
+      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+    },
+    {
+      "id": "rdf-canon-rust",
+      "name": "rdf-canon (Rust RDFC-1.0 crate)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] rdf-canon is a Rust crate implementing RDFC-1.0 (formerly RDF Dataset Normalization). The canon-bench suite compares W3C conformance pass-rate + throughput vs sparq's canonicalization. MIT/Apache-2.0 -> numbers are publishable. The same-language Rust peer.",
+      "pinned_version": "rdf-canon (crates.io; pin the exact crate version at gather time)",
+      "version_source": "the resolved crate version in the gather box's Cargo.lock, recorded in the results file",
+      "install_recipe": "`cargo install rdf-canon` at gather time. gather-only — NOT a committed dependency of the main workspace.",
+      "run_recipe": "scripts/bench-adapters/canon_adapter.sh --engine rdf-canon --input <dataset.nq>; cross-check canonical N-Quads byte-for-byte vs sparq's output before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "canon-bench",
+          "note": "RDFC-1.0 canonical N-Quads on the same W3C test corpora + poison-graph stress cases — rdf-canon Rust vs sparq; cross-check byte-identical canonical output before trusting timing. The Rust-peer row is the fairest apples-to-apples throughput comparison"
+        }
+      ],
+      "version_env_metadata": "gather records the rdf-canon crate version and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "rdf-canon-rust",
+      "unverified_pin": true,
+      "honesty_caveat": "Crate version is unverified and TBD; to be pinned to a real crates.io version at the first gather run."
+    },
+    {
+      "id": "comunica",
+      "name": "Comunica (federated SPARQL query engine)",
+      "kind": "js-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] Comunica is a modular linked-data query framework (Ghent / IDLab) with reference federation support. The federation-fedshop suite compares sparq federation vs Comunica on the FedShop benchmark (local member endpoints). MIT -> numbers are publishable. Comunica is the reference federated-SPARQL engine.",
+      "pinned_version": "@comunica/query-sparql-file (npm; pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
+      "install_recipe": "`npm install @comunica/query-sparql-file` (or @comunica/query-sparql for HTTP endpoints) at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/comunica_adapter.mjs --endpoint <member-endpoint> --query <fedshop.rq>; cross-check the result count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "federation-fedshop",
+          "note": "FedShop-shaped federation: sparq SERVICE joins over local member endpoints vs Comunica's federation — cross-check result count AND source-selection precision before trusting wall time. Comunica is the reference federated-SPARQL engine"
+        }
+      ],
+      "version_env_metadata": "gather records the resolved @comunica/query-sparql npm version, node --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "comunica",
+      "unverified_pin": true,
+      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+    },
+    {
+      "id": "rsp4j-yasper",
+      "name": "RSP4J / YASPER (RSP engines)",
+      "kind": "binary",
+      "role": "[SONNET-4.6 sq-hmd7l.1] RSP4J is a Java reference RSP (RDF Stream Processing) framework; YASPER is its early predecessor. The bounded count-matched-replay RSP comparison (design record sec 5.2) drives RSP4J with the SAME timestamped replay as sparq's clock-free oracle, requiring per-window result-count agreement before reporting sustained triples/s. Apache-2.0 -> numbers are publishable. HONESTY: the time-model caveat (clock-based service vs sparq's clock-free watermark) travels in every envelope row.",
+      "pinned_version": "RSP4J (pin the exact Maven artifact version / jar release at gather time)",
+      "version_source": "the RSP4J jar version (from the jar manifest or Maven coordinates), recorded in the gather results file",
+      "install_recipe": "download from https://github.com/riccardotommasini/rsp4j/releases (Apache-2.0). gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/rsp4j_adapter.sh --input <replay.ts.nq> --window <range/step>; drive RSP4J with the SAME pinned timestamped replay as sparq's rsp_oracle. Require per-window result-count agreement FIRST (exit if mismatch); then report sustained triples/s. Per design record sec 5.2: windows that cannot be count-matched are excluded and the exclusion reported.",
+      "adapter": {
+        "kind_note": "clock-based Java RSP service driven with the identical timestamped replay as sparq's clock-free oracle. Per-window result-count agreement is the PRIMARY gate (cross-check before any timing). Time-model caveat: RSP4J processes real-clock windows; sparq's watermark model is clock-free. The caveat travels in every envelope row (`time_model_caveat: true`). Use `--replay-delay-ms 0` to minimize real-clock drift in the replay."
+      },
+      "comparable_suites": [
+        {
+          "sparq_suite": "rsp-throughput",
+          "note": "bounded count-matched-replay: same pinned timestamped input stream, per-window result-count agreement required first, then sustained triples/s side-by-side. Time-model caveat on every row (design record sec 5.2). Windows that cannot be count-matched are excluded and reported. NOT a raw wall-clock head-to-head"
+        }
+      ],
+      "version_env_metadata": "gather records the RSP4J jar version, java -version, the replay checksum, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "rsp4j",
+      "unverified_pin": true,
+      "honesty_caveat": "Jar version is unverified and TBD; to be pinned to a real Maven artifact version at the first gather run."
+    },
+    {
+      "id": "igraph",
+      "name": "igraph (C/Python graph analytics library)",
+      "kind": "python-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] igraph is a high-performance C graph analytics library with a Python API. The graphalytics suite compares sparq-algos graph analytics (PageRank / BFS / WCC / LPA) vs igraph, validated with the LDBC Graphalytics validation framework. MIT -> numbers are publishable. igraph is the primary same-language-performance reference.",
+      "pinned_version": "igraph (PyPI; pin the exact version at gather time)",
+      "version_source": "`python3 -c 'import igraph; print(igraph.__version__)'` at run time, recorded in the gather results file",
+      "install_recipe": "`pip install igraph` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/graph_analytics_adapter.py --engine igraph --input <graph.edgelist> --algo <pagerank|bfs|wcc|lpa>; cross-check the algorithm output vs the LDBC Graphalytics validation ground truth before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "graphalytics",
+          "note": "LDBC Graphalytics-validated comparison: PageRank / BFS / WCC / LPA on the same graph corpus — igraph vs sparq-algos. LDBC validation oracle required (cross-check output before timing). CAVEAT: igraph is an embedded graph library (direct adjacency structures); sparq-algos operates over an RDF triple store graph (report the export cost separately)"
+        }
+      ],
+      "version_env_metadata": "gather records the igraph version, python --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "igraph",
+      "unverified_pin": true,
+      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run."
+    },
+    {
+      "id": "networkit",
+      "name": "NetworKit (C++/Python large-scale graph analytics)",
+      "kind": "python-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] NetworKit is a C++/Python framework for large-scale graph analytics. The graphalytics suite compares sparq-algos vs NetworKit on the same LDBC-validated algorithms. MIT -> numbers are publishable. NetworKit is the high-performance reference for large-scale analytics.",
+      "pinned_version": "networkit (PyPI; pin the exact version at gather time)",
+      "version_source": "`python3 -c 'import networkit; print(networkit.__version__)'` at run time, recorded in the gather results file",
+      "install_recipe": "`pip install networkit` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/graph_analytics_adapter.py --engine networkit --input <graph.edgelist> --algo <pagerank|bfs|wcc|lpa>; cross-check vs LDBC Graphalytics validation oracle before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "graphalytics",
+          "note": "LDBC Graphalytics-validated comparison: PageRank / BFS / WCC / LPA — NetworKit vs sparq-algos. LDBC validation oracle required. CAVEAT: NetworKit is an embedded graph library; sparq-algos operates over an RDF triple store graph (report the export cost separately from the algo time)"
+        }
+      ],
+      "version_env_metadata": "gather records the NetworKit version, python --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "networkit",
+      "unverified_pin": true,
+      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run."
+    },
+    {
+      "id": "pyoxigraph",
+      "name": "pyoxigraph (Python bindings for Oxigraph)",
+      "kind": "python-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] pyoxigraph is the official Python binding for the Oxigraph RDF store. The python-bindings-bench suite compares sparq's Python API (sparq-py) vs pyoxigraph + rdflib on binding-overhead (parse/load/query time from Python). MIT -> numbers are publishable. pyoxigraph is the primary Python-RDF peer.",
+      "pinned_version": "pyoxigraph (PyPI; pin the exact version at gather time)",
+      "version_source": "`python3 -c 'import pyoxigraph; print(pyoxigraph.__version__)'` at run time, recorded in the gather results file",
+      "install_recipe": "`pip install pyoxigraph` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/python_rdf_adapter.py --engine pyoxigraph --input <data.nt> --query <q.rq>; measure binding-overhead: load + query round-trip. Cross-check result count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "python-bindings-bench",
+          "note": "Python binding overhead: load time + query time from Python API — pyoxigraph vs sparq-py. Cross-check result count before trusting timing. CAVEAT: both pyoxigraph and sparq-py are thin bindings over Rust engines; the comparison is binding-overhead + Rust engine performance (not Python vs Rust)"
+        }
+      ],
+      "version_env_metadata": "gather records the pyoxigraph version, python --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "pyoxigraph",
+      "unverified_pin": true,
+      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run."
+    },
+    {
+      "id": "rdflib",
+      "name": "rdflib (Python RDF library)",
+      "kind": "python-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] rdflib is the reference Python RDF library (pure Python + optional C extensions). The python-bindings-bench suite compares sparq's Python API vs rdflib for loading and querying RDF data from Python. BSD-3-Clause -> numbers are publishable. rdflib is the baseline 'pure-Python' column.",
+      "pinned_version": "rdflib (PyPI; pin the exact version at gather time)",
+      "version_source": "`python3 -c 'import rdflib; print(rdflib.__version__)'` at run time, recorded in the gather results file",
+      "install_recipe": "`pip install rdflib` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/python_rdf_adapter.py --engine rdflib --input <data.nt> --query <q.rq>; measure load + query round-trip. Cross-check result count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "python-bindings-bench",
+          "note": "Python RDF API overhead: rdflib load + query vs sparq-py. Cross-check result count. CAVEAT: rdflib is a pure-Python implementation; the comparison is honest binding-overhead vs full-engine capability (rdflib has no native indices comparable to sparq's permutation indexes) — label it the 'baseline/ecosystem reference' column"
+        }
+      ],
+      "version_env_metadata": "gather records the rdflib version, python --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "rdflib",
+      "unverified_pin": true,
+      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run."
+    },
+    {
+      "id": "oxigraph-wasm",
+      "name": "Oxigraph npm WASM (@oxigraph/oxigraph)",
+      "kind": "js-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] @oxigraph/oxigraph is the official npm WASM package for Oxigraph (compiled from the same Oxigraph codebase). The wasm-compare suite compares sparq's WASM bundle size (deterministic bytes) vs @oxigraph/oxigraph, and in-browser latency when available. MIT -> numbers are publishable. The primary WASM peer.",
+      "pinned_version": "@oxigraph/oxigraph (npm; pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
+      "install_recipe": "`npm install @oxigraph/oxigraph` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/wasm_compare_adapter.mjs --engine oxigraph-wasm --input <data.nt> --query <q.rq>; measure WASM bundle bytes (deterministic) + in-process query time. Cross-check result count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "wasm-compare",
+          "note": "WASM bundle bytes (deterministic, no quiet-box requirement) vs sparq's @jeswr/sparq WASM bundle; also in-process query time. Bundle-bytes comparison is load-robust (quiet_box_sensitive = false for size); query time is advisory (quiet-box)"
+        }
+      ],
+      "version_env_metadata": "gather records the resolved @oxigraph/oxigraph npm version, node --version, the WASM bundle byte count, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "oxigraph-wasm",
+      "unverified_pin": true,
+      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+    },
+    {
+      "id": "n3js-quadstore",
+      "name": "N3.js + quadstore (JavaScript RDF)",
+      "kind": "js-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] N3.js is the reference JavaScript Turtle/N-Triples parser (digitalbazaar/RDF-ext); quadstore is a persistable RDF quad store on top of LevelDB (jacoscaz/quadstore). Together they form the primary JavaScript RDF stack that the WASM comparison is most relevant to. MIT -> numbers are publishable. The JS-RDF-stack peer for the WASM latency comparison.",
+      "pinned_version": "n3 + quadstore (npm; pin exact versions at gather time)",
+      "version_source": "the resolved npm versions (n3 + quadstore) in the gather box's node_modules, recorded in the results file",
+      "install_recipe": "`npm install n3 quadstore classic-level` at gather time. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/wasm_compare_adapter.mjs --engine n3-quadstore --input <data.nt> --query <q.rq>; SPARQL via the sparqljs-based query path over quadstore. Cross-check result count before trusting timing.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "wasm-compare",
+          "note": "JS-stack query latency vs sparq WASM: N3.js + quadstore + sparqljs in the same Node.js runtime. CAVEAT: quadstore's SPARQL support is partial; scope to the query subset all engines support and label clearly"
+        }
+      ],
+      "version_env_metadata": "gather records the resolved n3 + quadstore npm versions, node --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "n3js-quadstore",
+      "unverified_pin": true,
+      "honesty_caveat": "npm versions are unverified and TBD; to be pinned to real npm versions at the first gather run."
+    },
+    {
+      "id": "css-gsp",
+      "name": "Community Solid Server (GSP-loose)",
+      "kind": "reference",
+      "role": "[SONNET-4.6 sq-hmd7l.1] The Community Solid Server (CSS) is a W3C Solid-compliant server that exposes HTTP/SPARQL + Graph Store Protocol (GSP) endpoints. Listed as GSP-LOOSE (a Solid-spec server, NOT a pure GSP performance peer): CSS implements GSP as part of a broader Solid/LDP stack (persistence, access control, MIME content negotiation). MIT -> numbers are publishable if gathered. `kind` is `reference` to note the loose-only posture — the primary GSP comparison is sparq-server vs Fuseki GSP + Oxigraph GSP (like-for-like HTTP servers); CSS is the Solid-server context datapoint. Any timing must be labelled 'GSP-loose / Solid-overhead included' and NOT averaged with the Fuseki/Oxigraph like-for-like columns.",
+      "pinned_version": "@solid/community-server (npm; pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules (or the Docker image DIGEST), recorded in the results file",
+      "install_recipe": "`npm install -g @solid/community-server` at gather time, or use the Docker image. gather-only — NOT a committed dependency.",
+      "run_recipe": "start CSS with a SPARQL backend, issue GSP PUT/GET/PATCH requests, record throughput. Label every result 'GSP-loose / Solid-overhead included'. NOT gathered via scripts/gather-competitors.sh standard dispatch (`kind=reference` is INERT for the auto-dispatch loop).",
+      "comparable_suites": [
+        {
+          "sparq_suite": "gsp-bench",
+          "note": "GSP-LOOSE: CSS is a Solid-stack server, not a pure HTTP-RDF store; any GSP timing includes Solid/LDP/access-control overhead. Report separately from the like-for-like Fuseki/Oxigraph GSP columns. NEVER average with the like-for-like columns"
+        }
+      ],
+      "version_env_metadata": "gather records the @solid/community-server npm version (or Docker image digest), node --version, and the host env block",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": null,
+      "unverified_pin": true,
+      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version or Docker image digest at the first gather run."
+    },
+    {
+      "id": "pykeen",
+      "name": "PyKEEN (KGE link prediction, Python)",
+      "kind": "python-lib",
+      "role": "[SONNET-4.6 sq-hmd7l.1] PyKEEN is the reference Python KGE (Knowledge Graph Embedding) library (AstraZeneca / Fraunhofer). The kge-ablation suite compares sparq-kge link-prediction quality (MRR / Hits@k) vs PyKEEN's pinned published reference numbers on FB15k-237 and WN18RR at matched model + hyperparameters. MIT -> numbers are publishable. PyKEEN is the gold-standard KGE library; the comparison is quality-matching (MRR/Hits@k), NOT throughput.",
+      "pinned_version": "pykeen (PyPI; pin the exact version at gather time)",
+      "version_source": "`python3 -c 'import pykeen; print(pykeen.__version__)'` at run time, recorded in the gather results file. PyKEEN published reference numbers are pinned from its documentation (Alibek et al., JMLR 2021) — those are PAPER-PINNED, not re-run.",
+      "install_recipe": "`pip install pykeen torch` at gather time. gather-only — NOT a committed dependency. NOTE: PyKEEN requires PyTorch; GPU acceleration is OPTIONAL (report CPU vs GPU tier separately).",
+      "run_recipe": "scripts/bench-adapters/kge_adapter.py --engine pykeen --model TransE --dataset FB15k-237 --eval mrr,hits10; compare MRR/Hits@k vs sparq-kge at MATCHED model+hyperparams. The primary comparison uses PyKEEN's PUBLISHED reference numbers (JMLR 2021 Table 2); a same-box PyKEEN run is OPTIONAL for model-for-model verification.",
+      "comparable_suites": [
+        {
+          "sparq_suite": "kge-ablation",
+          "note": "KGE link prediction quality (MRR / Hits@k) on FB15k-237 + WN18RR at MATCHED model + hyperparams — PyKEEN reference numbers vs sparq-kge. PRIMARY comparison: PyKEEN PUBLISHED numbers (JMLR 2021 Table 2, Alibek et al.); same-box PyKEEN run is optional for verification. CAVEAT: quality comparison is NOT throughput — do NOT conflate MRR/Hits@k with training time"
+        }
+      ],
+      "version_env_metadata": "gather records the pykeen version, torch version, python --version, GPU model (if used), and the host env block. If using published reference numbers, cite the paper (Alibek et al. JMLR 2021) + the table + the model/dataset.",
+      "quiet_box_sensitive": false,
+      "dashboard_engine_id": "pykeen",
+      "unverified_pin": true,
+      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run. Note: primary comparison uses PUBLISHED reference numbers (JMLR 2021 Table 2), not a live gather."
     }
   ],
-
   "engines": [],
-
   "values": {}
 }
