@@ -617,6 +617,24 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-
   the-DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical,
   and no new dependencies are added (no `unsafe`).
+- **Pre-execution algebra rewrite pass** is the non-default `algebra-rewrite` cargo feature (bead
+  `sq-7d3dj.30.1`; design record `research/sp2bench-complex-shape-deficit.md` §2.1/§2.5/§4). With it ON,
+  `PreparedQuery::parse` (the single seam every string query entry point funnels through) and the two
+  EXPLAIN parse sites run the parsed `spargebra` algebra through `sparq_engine::rewrite::rewrite_query`
+  BEFORE evaluation. Two rewrites: **(a) equality substitution** — a `FILTER(?v = <iri>)` (also
+  `<iri> = ?v` / `sameTerm(?v, <iri>)`) whose `?v` occurs in the group's triple patterns folds the IRI
+  constant INTO those patterns (turning a post-join FILTER over every enumerated row into a
+  constant-seeded indexed scan; `?v` is re-bound via `Extend` so it stays in scope), and **(b)
+  anti-join** — `FILTER(!bound(?v), LeftJoin(A, B))` becomes `Minus(A, B)` when `?v` is certain in `B`,
+  absent from `A`, and `A`/`B` share a certain variable. **IRI-only:** rewrite (a) fires ONLY for
+  `NamedNode` constants (`=` on IRIs is term-identity, so the substitution is exact); a **literal**
+  equality (`?v = 1`, `?v = "1"^^xsd:decimal`) is NEVER rewritten — this is the deliberate avoidance
+  contract for the open value-equality/decimal bug `sq-lr2ii`. Every rewrite is **bag-result-equivalent**
+  (`query`/`ask`/`count`/`query_json` return the SAME answers on vs off — proven by
+  `tests/rewrite_pass.rs` plus the W3C conformance suite run with the feature ON), and a shape that does
+  not exactly meet a rewrite's conditions is left **verbatim** (conservative). Note `From<Query>` does
+  NOT rewrite (it takes an already-built algebra as-is). When off, zero rewrite code compiles, the
+  default native + wasm builds are byte-identical, and no new dependencies are added (no `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through

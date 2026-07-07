@@ -43,6 +43,10 @@ use crate::QueryBudget;
 /// module docs for the one runtime-dependent caveat).
 pub fn explain(graph: &Graph, sparql: &str) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    // [OPUS-4.8] (sq-7d3dj.30.1) EXPLAIN the ACTUAL executed plan: apply the same
+    // pre-execution algebra rewrite `PreparedQuery::parse` does (feature-gated).
+    #[cfg(feature = "algebra-rewrite")]
+    let q = crate::rewrite::rewrite_query(q);
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
@@ -68,6 +72,9 @@ pub fn explain_analyze(graph: &Graph, sparql: &str) -> Result<String, String> {
 /// [`explain_analyze`] under a cooperative [`QueryBudget`] (deadline / max rows).
 pub fn explain_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    // [OPUS-4.8] (sq-7d3dj.30.1) ANALYZE the ACTUAL executed plan (feature-gated rewrite).
+    #[cfg(feature = "algebra-rewrite")]
+    let q = crate::rewrite::rewrite_query(q);
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);

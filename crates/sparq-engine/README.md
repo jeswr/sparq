@@ -99,8 +99,8 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
 - **Semi-join reducers** *(opt-in `semijoin-bitmap` / `yannakakis` features, OFF by default)* — `semijoin-bitmap`
   prefilters binary-join scans with an exact membership bitmap; `yannakakis` adds a bottom-up full-semijoin prepass
-  for acyclic BGPs (cost-gated; cyclic BGPs keep LFTJ). Result-identical to off (proven by the on-vs-off
-  differential); off, byte-identical, no new deps.
+  for acyclic BGPs (cost-gated; cyclic keep LFTJ). Result-identical to off (proven differentially); off, no new deps.
+- **Algebra rewrite pass** *(opt-in `algebra-rewrite` feature, OFF by default)* — `PreparedQuery::parse` folds a `FILTER(?v = <iri>)` IRI constant into the group's triple patterns (an indexed constant-seeded scan, not a post-join filter) and rewrites `OPTIONAL … FILTER(!bound(?v))` to an anti-join (`Minus`); IRI-only (never a literal — the `sq-lr2ii` avoidance contract), bag-result-equivalent, off byte-identical, no new deps.
 - **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER and aggregate
   operators use a columnar path for ≥ 256-row all-inline-integer batches; byte-identical to the scalar path. I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
