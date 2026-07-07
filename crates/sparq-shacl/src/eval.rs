@@ -19,6 +19,28 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// a triple-term via `?r rdf:reifies <<( s p o )>>`. Used by `sh:reifierShape`.
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+thread_local! {
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Test-only: when set, `prime_sparql_batch` skips
+    /// priming so `validate` takes the per-focus path — lets the in-crate
+    /// differential test diff the batched report against the per-focus one.
+    static FORCE_NO_BATCH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) Test-only helper: run `f` (typically a `validate`
+/// closure) with `sh:sparql` focus-node batching forced OFF, restoring the prior
+/// state afterwards. Used by the batched-vs-per-focus report-equivalence test.
+#[cfg(test)]
+pub(crate) fn with_sparql_batching_disabled<R>(f: impl FnOnce() -> R) -> R {
+    let prev = FORCE_NO_BATCH.with(Cell::get);
+    FORCE_NO_BATCH.with(|c| c.set(true));
+    let r = f();
+    FORCE_NO_BATCH.with(|c| c.set(prev));
+    r
+}
+
 /// Runs every targeted shape over its focus nodes. Results are deliberately NOT
 /// deduplicated: the SHACL test suite expects one result per constraint-component
 /// OCCURRENCE (e.g. two sh:class violations on one value) and per traversal route
@@ -38,12 +60,22 @@ pub(crate) fn validate_graph(
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
         active_meta: None,
+        sparql_batch: FxHashMap::default(),
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
-        for focus in v.focus_nodes(sid) {
-            v.validate_shape(sid, &focus, &mut out);
+        // [OPUS-4.8] (sq-7d3dj.33.1) Enumerate this shape's focus nodes ONCE, then
+        // batch-evaluate its `sh:sparql` constraints over the whole focus set in a
+        // single query each (instead of re-running the full query per focus node —
+        // the O(N_focus × full-query) quadratic root cause). `validate_shape` then
+        // drains the primed per-focus results; a non-batchable constraint or a
+        // nested/data-graph focus falls back to the per-focus path unchanged.
+        let foci = v.focus_nodes(sid);
+        v.prime_sparql_batch(sid, &foci);
+        for focus in &foci {
+            v.validate_shape(sid, focus, &mut out);
         }
+        v.sparql_batch.clear();
     }
     // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:shape` data-graph targets: a triple
     // `?n sh:shape ?S` in the DATA graph makes `?n` a focus node of shape `?S`.
@@ -70,6 +102,7 @@ pub(crate) fn count_focus_nodes(data: &Graph, shapes: &ShapesModel) -> usize {
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
         active_meta: None,
+        sparql_batch: FxHashMap::default(),
     };
     let mut all: Vec<Term> = Vec::new();
     for &sid in &shapes.targeted {
@@ -104,6 +137,7 @@ pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
         active_meta: None,
+        sparql_batch: FxHashMap::default(),
     };
     v.conforms(node, sid)
 }
@@ -138,6 +172,14 @@ struct Validator<'a> {
     /// apply a per-occurrence `sh:message` / `sh:severity` (SHACL 1.2). `None` when
     /// the current constraint carries no annotation (the common case).
     active_meta: Option<ComponentMeta>,
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Batched `sh:sparql` results, keyed by
+    /// `(shape id, sparql-constraint index)` → (focus node → its results). Primed
+    /// by [`Validator::prime_sparql_batch`] once per targeted shape (over ALL its
+    /// focus nodes in one execution) and drained per focus by
+    /// [`Validator::eval_sparql`], replacing the O(N_focus)-query per-focus loop.
+    /// A `(sid, idx)` absent here (a non-batchable constraint, or a shape validated
+    /// outside the top-level targeted loop) falls back to the per-focus path.
+    sparql_batch: FxHashMap<(usize, usize), FxHashMap<Term, Vec<ValidationResult>>>,
 }
 
 impl<'a> Validator<'a> {
@@ -1244,6 +1286,95 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Stamps one `sh:sparql` solution's per-result
+    /// [`crate::sparql::ResultFields`] with the shape-owned fields (source
+    /// shape/constraint/component, severity, messages). Shared by the per-focus
+    /// [`Self::eval_sparql`] fallback and the batched [`Self::prime_sparql_batch`] so
+    /// both stamp identically — the load-bearing report-equivalence invariant.
+    fn stamp_sparql(
+        &self,
+        sid: usize,
+        idx: usize,
+        focus: &Term,
+        fields: crate::sparql::ResultFields,
+    ) -> ValidationResult {
+        let shape = &self.shapes.shapes[sid];
+        let constraint = &self.shapes.sparql[idx];
+        // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` on the
+        // `sh:SPARQLConstraint` node OVERRIDES the shape's default severity (SHACL
+        // 1.2 `sparql/node/sparql-001`); otherwise inherit the shape's severity.
+        let severity = constraint
+            .severity
+            .clone()
+            .unwrap_or_else(|| shape.severity.clone());
+        ValidationResult {
+            focus_node: focus.clone(),
+            // A bound ?path overrides the shape's path; otherwise inherit the
+            // (property-shape) path, if any.
+            path: fields.path.or_else(|| shape.path.clone()),
+            value: fields.value,
+            source_shape: shape.node.clone(),
+            // [OPUS-4.8] (sq-mue75) stamp the originating `sh:SPARQLConstraint` node
+            // onto each result as `sh:sourceConstraint` (SHACL §5.2.2).
+            source_constraint: Some(constraint.node.clone()),
+            source_component: sh("SPARQLConstraintComponent"),
+            severity,
+            messages: shape.messages.clone(),
+            default_message: fields.default_message,
+            details: Vec::new(),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Batch-evaluates shape `sid`'s `sh:sparql`
+    /// constraints over ALL its focus nodes in ONE execution each, priming
+    /// [`Self::sparql_batch`] for the per-focus drain in [`Self::eval_sparql`]. This
+    /// replaces the O(N_focus × full-query) per-focus re-execution with O(1) queries
+    /// (chunked at 10 000 foci) — the quadratic root cause fixed by this bead. A
+    /// constraint that is NOT batchable (a top-level `LIMIT`/`OFFSET`, a `GROUP
+    /// BY`/aggregate not keyed on `$this`, or `REDUCED` — see
+    /// `crate::sparql::PreparedSparql::is_batchable`) is left unprimed and falls back
+    /// to the per-focus path unchanged.
+    fn prime_sparql_batch(&mut self, sid: usize, foci: &[Term]) {
+        // [OPUS-4.8] (sq-7d3dj.33.1) Test-only knob so the in-crate differential test
+        // can force the per-focus path and diff its report against the batched one.
+        #[cfg(test)]
+        if FORCE_NO_BATCH.with(Cell::get) {
+            return;
+        }
+        // A single focus is as cheap per-focus (and needs no map); correctness holds
+        // either way, so only prime when batching can actually amortise a query.
+        if foci.len() < 2 {
+            return;
+        }
+        let sparql_idxs: Vec<usize> = self.shapes.shapes[sid]
+            .components
+            .iter()
+            .filter_map(|c| match c {
+                Component::Sparql(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        for idx in sparql_idxs {
+            let constraint = &self.shapes.sparql[idx];
+            if constraint.deactivated {
+                continue;
+            }
+            let Some(prepared) = &constraint.prepared else {
+                continue; // ill-formed sh:select — skipped (lenient, per crate policy)
+            };
+            if !prepared.is_batchable() {
+                continue; // non-batchable shape → per-focus fallback (documented)
+            }
+            let map = prepared.evaluate_batch(
+                self.data.graph(),
+                foci,
+                constraint,
+                |focus, fields| self.stamp_sparql(sid, idx, focus, fields),
+            );
+            self.sparql_batch.insert((sid, idx), map);
+        }
+    }
+
     /// SHACL-SPARQL evaluation for one `sh:sparql` constraint occurrence.
     fn eval_sparql(
         &mut self,
@@ -1252,6 +1383,19 @@ impl<'a> Validator<'a> {
         idx: usize,
         out: &mut Vec<ValidationResult>,
     ) {
+        // [OPUS-4.8] (sq-7d3dj.33.1) Fast path: drain the results this focus already
+        // received when the shape's constraints were batch-evaluated (the common
+        // top-level targeted case). Every focus covered by the batch has an entry —
+        // even with zero violations — so a `Some(_)` here means "already computed",
+        // never "not yet run"; we must not fall through and re-execute per-focus.
+        if let Some(per_focus) = self.sparql_batch.get(&(sid, idx)) {
+            if let Some(results) = per_focus.get(focus) {
+                out.extend(results.iter().cloned());
+                return;
+            }
+        }
+        // Per-focus fallback: a non-batchable constraint, a focus outside the primed
+        // set (a nested / `sh:shape` data-graph validation), or a single-focus shape.
         let constraint = &self.shapes.sparql[idx];
         if constraint.deactivated {
             return;
@@ -1259,39 +1403,12 @@ impl<'a> Validator<'a> {
         let Some(prepared) = &constraint.prepared else {
             return; // ill-formed sh:select — skipped (lenient, per crate policy)
         };
-        let component = sh("SPARQLConstraintComponent");
-        let shape = &self.shapes.shapes[sid];
-        // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` on the
-        // `sh:SPARQLConstraint` node OVERRIDES the shape's default severity (SHACL
-        // 1.2 `sparql/node/sparql-001`); otherwise inherit the shape's severity.
-        let severity = constraint
-            .severity
-            .clone()
-            .unwrap_or_else(|| shape.severity.clone());
-        let (shape_node, shape_path, shape_messages) =
-            (shape.node.clone(), shape.path.clone(), shape.messages.clone());
-        // [OPUS-4.8] (sq-mue75) stamp the originating `sh:SPARQLConstraint` node
-        // onto each result as `sh:sourceConstraint` (SHACL §5.2.2).
-        let constraint_node = constraint.node.clone();
         let data = self.data.graph();
         prepared.evaluate(
             data,
             focus,
             constraint,
-            |fields| ValidationResult {
-                focus_node: focus.clone(),
-                // A bound ?path overrides the shape's path; otherwise inherit the
-                // (property-shape) path, if any.
-                path: fields.path.or_else(|| shape_path.clone()),
-                value: fields.value,
-                source_shape: shape_node.clone(),
-                source_constraint: Some(constraint_node.clone()),
-                source_component: component.clone(),
-                severity: severity.clone(),
-                messages: shape_messages.clone(),
-                default_message: fields.default_message,
-                details: Vec::new(),
-            },
+            |fields| self.stamp_sparql(sid, idx, focus, fields),
             out,
         );
     }

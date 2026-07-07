@@ -109,7 +109,7 @@ pub use cs::{with_cs_table, CsSet, CsTable};
 #[cfg(feature = "dp-planner")]
 pub mod dp;
 #[cfg(feature = "dp-planner")]
-pub use dp::{with_dp_planner, with_dp_planner_budget};
+pub use dp::{with_dp_planner, with_dp_planner_budget, without_dp_planner};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
 #[cfg(feature = "explain-json")]
