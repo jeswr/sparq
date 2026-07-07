@@ -39,7 +39,7 @@ tarball), never committed.
 > the durable deliverable is the harness; the citable numbers come from the
 > `CANONICAL=1` quiet-box re-run (bead filed, see §4).
 
-#### LUBM(1) — 103 104 triples, iters=3 (best-of)
+### LUBM(1) — 103 104 triples, iters=3 (best-of)
 
 | workload | violations (all 3 agree) | sparq | Jena SHACL 5.4.0 | pySHACL 0.31.0 | sparq vs Jena | sparq vs pySHACL |
 |---|---:|---:|---:|---:|---|---|
@@ -52,7 +52,7 @@ tarball), never committed.
 
 Data-graph load (advisory, s): sparq 0.129 · Jena 1.079 · pySHACL (rdflib) 3.846
 
-#### LUBM(10) — 1 316 700 triples, iters=1
+### LUBM(10) — 1 316 700 triples, iters=1
 
 | workload | violations (all 3 agree) | sparq | Jena SHACL 5.4.0 | pySHACL 0.31.0 | sparq vs Jena | sparq vs pySHACL |
 |---|---:|---:|---:|---:|---|---|
