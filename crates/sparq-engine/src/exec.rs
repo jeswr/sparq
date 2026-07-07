@@ -5649,8 +5649,10 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // parallel, then each partition builds its private map lock-free. Within a partition rows
     // are scanned in ascending index, so each posting list stays in ascending build-row order —
     // exactly the serial build — and the probe output is byte-identical.
+    // JoinTable = hashbrown::HashMap<Key, Posting, FxBuildHasher>; the type inference here
+    // avoids a dependency on rustc_hash::FxHashMap in the type annotation. [SONNET-4.6] sq-7d3dj.19
     #[cfg(feature = "parallel")]
-    let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
+    let tables = if build.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let parts: Vec<u8> = build
             .rows
@@ -5662,7 +5664,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         vec![sjoin::build_table(&build.rows, &keys)]
     };
     #[cfg(not(feature = "parallel"))]
-    let tables: Vec<FxHashMap<Key, Posting>> = vec![sjoin::build_table(&build.rows, &keys)];
+    let tables = vec![sjoin::build_table(&build.rows, &keys)];
     // The probe is read-only over the (partitioned) table, so for a large probe side build the
     // output in parallel on native.
     #[cfg(feature = "parallel")]
