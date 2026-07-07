@@ -22,6 +22,9 @@
 //!   * `non_conjunctive_fallback`   — an OPTIONAL under the DISTINCT falls back.
 //!   * `three_pattern_branch_fallback` — a 3-pattern branch falls back (still correct).
 //!   * `shared_projected_var_fallback` — `?p` used as BOTH the join and projected var.
+//!   * `quoted_triple_term_pattern_fallback` — a DISTINCT over an RDF 1.2 quoted-triple
+//!     term pattern DECLINES the pushdown (never errors) and the fallback answers correctly
+//!     (W3C sparql12 eval-triple-terms/pattern-10 regression).
 //!   * `public_toggle_and_stats`    — the `distinct_pushdown_testing` public surface.
 
 use sparq_core::Graph;
@@ -300,6 +303,55 @@ fn intra_triple_repeated_var_fallback() {
     let _ = query(&g, &format!("{PFX}{q}")).expect("query failed");
     let (fired, _, _) = distinct_pushdown_testing::stats();
     assert!(!fired, "pushdown must not fire on a pattern with a repeated variable (?x ?p ?x)");
+}
+
+/// Regression (W3C sparql12 eval-triple-terms/pattern-10): a DISTINCT projection over a
+/// pattern that embeds an RDF 1.2 quoted-triple term must DECLINE the pushdown, never error.
+///
+/// The general BGP planner decomposes a variable-carrying quoted-triple term
+/// (`extract_quoted_constraints` -> `quoted_relation`) BEFORE pattern preparation; the
+/// DISTINCT skip-scan path prepares the raw pattern, so before the `has_quoted_triple_term`
+/// guard `prepare_pattern` tried to resolve the whole quoted term to a single ground id and
+/// returned the hard error "variable where a term was expected", failing the whole query
+/// (W3C conformance regressed 1229 -> 1228). The guard makes the pushdown decline so the
+/// fallback produces the equivalent answer. [OPUS-4.8] (sq-7d3dj.30.4)
+#[test]
+fn quoted_triple_term_pattern_fallback() {
+    // Two documents each annotating a triple term, plus a plain (non-annotating) triple that
+    // must NOT appear in the answer. Triple-term object syntax `<<( s p o )>>` (object-only).
+    let g = load(
+        "ex:doc1 ex:annotates <<( ex:alice foaf:age 30 )>> .\n\
+         ex:doc2 ex:annotates <<( ex:bob foaf:age 40 )>> .\n\
+         ex:plain ex:other ex:thing .",
+    );
+
+    // Single-pattern branch: the projected `?s` is a simple subject variable, the object is a
+    // quoted-triple term carrying variables — exactly the shape that errored pre-fix.
+    let single = "SELECT DISTINCT ?s WHERE { ?s ex:annotates <<( ?a foaf:age ?n )>> }";
+    // UNION-of-branches variant, mirroring the W3C pattern-10 Distinct{Project} over UNION.
+    let unioned = "SELECT DISTINCT ?s WHERE { \
+        { ?s ex:annotates <<( ?a foaf:age 30 )>> } UNION \
+        { ?s ex:annotates <<( ?a foaf:age 40 )>> } }";
+
+    let expected: Vec<Vec<Option<String>>> = vec![
+        vec![Some("<http://example.org/doc1>".to_string())],
+        vec![Some("<http://example.org/doc2>".to_string())],
+    ];
+
+    for q in [single, unioned] {
+        // Pushdown ON must not error (it did pre-fix); ON == OFF; and the answer is exact.
+        let (off, on) = on_off(&g, q);
+        assert_eq!(off, on, "quoted-triple DISTINCT result differs with pushdown on vs off: {}", q);
+        assert_eq!(on, expected, "unexpected DISTINCT ?s over a quoted-triple pattern: {}", q);
+
+        // The pushdown must DECLINE (never fire) on a quoted-triple-term branch — the fallback
+        // answered above. This asserts the fix's plan decision, not just the result.
+        distinct_pushdown_testing::reset_stats();
+        distinct_pushdown_testing::set_enabled(true);
+        let _ = query(&g, &format!("{PFX}{q}")).expect("quoted-triple query must not error");
+        let (fired, _, _) = distinct_pushdown_testing::stats();
+        assert!(!fired, "pushdown must decline a quoted-triple-term pattern: {}", q);
+    }
 }
 
 #[test]

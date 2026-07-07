@@ -584,8 +584,10 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   makes later branches near-free. It is **conservative**: it fires only for that exact single-variable
   DISTINCT shape and only when a built permutation exposes the required column order (the compact/wasm
   index {SPO, POS, OSP} lacks PSO, so a subject-side probe declines there); every other shape — REDUCED,
-  multi-variable projections, filters, three-pattern branches, `?p` used as the join variable — falls
-  back to the full materialise-then-dedup path **bit-for-bit**. The answer is DISTINCT-set identical
+  multi-variable projections, filters, three-pattern branches, `?p` used as the join variable, a pattern
+  with a variable repeated across S/P/O (`?x ?p ?x`), and any pattern embedding an RDF 1.2 quoted-triple
+  term (`<<?s ?p "o">> …`, decomposed by the general BGP planner) — falls back to the full
+  materialise-then-dedup path **bit-for-bit** (never erroring). The answer is DISTINCT-set identical
   either way (proven on-vs-off by `tests/distinct_pushdown.rs`, incl. a q09-shaped anti-vacuity assertion
   that the scanned rows collapse to a small fraction of the full join). SP2Bench q09: the 2-branch
   `DISTINCT ?predicate` over persons answers a handful of predicates without materialising the ~77 k-row

@@ -2448,6 +2448,17 @@ fn has_intra_triple_repeated_var(tp: &TriplePattern) -> bool {
         || (pv.is_some() && ov.is_some() && pv == ov)
 }
 
+/// Returns `true` when `tp` carries a nested RDF 1.2 quoted-triple term (`<<s p o>>` /
+/// `<<( s p o )>>`) in its subject or object slot. Such a term, when it embeds a variable, is
+/// decomposed by the general BGP planner before pattern preparation; the DISTINCT skip-scan
+/// path prepares the raw pattern, so `prepare_pattern` would ERROR on the embedded variable
+/// instead of declining. The pushdown must decline any branch containing one (the predicate
+/// slot is a `NamedNodePattern`, which cannot be a triple term, so only S/O are checked).
+/// [OPUS-4.8] (sq-7d3dj.30.4)
+fn has_quoted_triple_term(tp: &TriplePattern) -> bool {
+    matches!(tp.subject, TermPattern::Triple(_)) || matches!(tp.object, TermPattern::Triple(_))
+}
+
 /// The DISTINCT projected-variable ids contributed by one UNION branch, together with the
 /// permutation rows the skip scan touched. Returns only values NOT already in `seen`
 /// (they are added there by the caller). `None` = shape the pushdown cannot enumerate.
@@ -2473,6 +2484,17 @@ fn branch_distinct_values(
     // query SELECT DISTINCT ?p WHERE { ?x ?p ?x } — correct={ex:knows}, pushdown
     // (unguarded)={ex:knows, ex:likes}.
     if patterns.iter().any(has_intra_triple_repeated_var) {
+        return Ok(None);
+    }
+    // [OPUS-4.8] (sq-7d3dj.30.4) Decline when any pattern embeds an RDF 1.2 quoted-triple
+    // term (e.g. `<<?s ?p "o">> ?p2 ?z`) in a subject/object slot. A quoted term that
+    // carries a variable is decomposed by the general BGP planner (`extract_quoted_constraints`
+    // -> `quoted_relation`) BEFORE pattern preparation runs; the skip-scan path prepares the
+    // raw pattern, so `prepare_pattern` would try to resolve the whole quoted term to one
+    // ground id and ERROR ("variable where a term was expected") rather than fall back. We
+    // must always DECLINE (never error) so the general path produces the equivalent answer
+    // (W3C sparql12 eval-triple-terms/pattern-10). See `has_quoted_triple_term`.
+    if patterns.iter().any(has_quoted_triple_term) {
         return Ok(None);
     }
     match patterns.len() {

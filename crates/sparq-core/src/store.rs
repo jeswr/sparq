@@ -1061,15 +1061,38 @@ mod tests {
         ];
         let store = TripleStore::from_triples(triples.clone());
 
-        // Fully-unbound: PSO must be selectable and its rows sorted by (predicate, subject).
-        let scan = store.scan_perm(&[None, None, None], Perm::Pso).expect("PSO is built");
-        assert_eq!(scan.perm, Perm::Pso);
-        let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
-        let mut want = triples.clone();
-        want.sort_by_key(|t| (t[1], t[0], t[2])); // predicate, subject, object
-        assert_eq!(spo, want, "PSO scan not sorted by (predicate, subject, object)");
+        // Fully-unbound: a built predicate-first permutation must be selectable, and its rows
+        // sorted in that permutation's column order. Which predicate-first perm is BUILT
+        // differs by index set: the default 6-perm build has PSO; the 3-perm `compact-index`
+        // build ({SPO, POS, OSP}) has POS instead — where `scan_perm(Perm::Pso)` correctly
+        // returns `None` because PSO is not built (the documented contract). [OPUS-4.8]
+        #[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
+        {
+            let scan = store.scan_perm(&[None, None, None], Perm::Pso).expect("PSO is built");
+            assert_eq!(scan.perm, Perm::Pso);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[0], t[2])); // predicate, subject, object
+            assert_eq!(spo, want, "PSO scan not sorted by (predicate, subject, object)");
+        }
+        #[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
+        {
+            // PSO is NOT built under compact-index → `scan_perm` declines it (the contract).
+            assert!(
+                store.scan_perm(&[None, None, None], Perm::Pso).is_none(),
+                "PSO is not built under compact-index; scan_perm must return None"
+            );
+            // POS IS built there and serves the fully-unbound pattern, sorted (predicate, object, subject).
+            let scan = store.scan_perm(&[None, None, None], Perm::Pos).expect("POS is built");
+            assert_eq!(scan.perm, Perm::Pos);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[2], t[0])); // predicate, object, subject
+            assert_eq!(spo, want, "POS scan not sorted by (predicate, object, subject)");
+        }
 
-        // Object bound: OSP places the object as the leading prefix → Some.
+        // Object bound: OSP places the object as the leading prefix → Some. (OSP is built in
+        // both the default and the compact index set.)
         let obj = store.scan_perm(&[None, None, Some(100)], Perm::Osp).expect("OSP built");
         assert!(obj.rows.iter().all(|r| obj.to_spo(r)[2] == 100), "OSP range must be object=100");
         assert_eq!(obj.rows.len(), 3);
