@@ -102,6 +102,10 @@ wasm = [
 # ci-bench.sh measures them MAIN-tier-only (GITHUB_REF guards skip them on any non-main
 # ref); every main-tier event is mode=full. Push-to-main always runs mode=full.
 bench = ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"]
+# [FABLE-5] sq-0iqzw: fuzz.yml `differential-smoke` job — the PR-level BLOCKING
+# sparq-vs-Oxigraph differential regression windows (sparq-bench in-process
+# Oxigraph oracle): the engine under test + the harness/oracle crate itself.
+differential-smoke = ["sparq-core", "sparq-engine", "sparq-bench"]
 
 # ---------------------------------------------------------------------------
 # [[map]] — attribution of OUT-OF-CRATE inputs to the crates that read them.
