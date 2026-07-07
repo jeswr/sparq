@@ -14,8 +14,16 @@ Three legs:
                            from the BASE (target-branch/merge-base) tree against the one
                            built from the HEAD (PR/merged) tree IN THE SAME CI RUN. No
                            static byte pin => no merge-order dependence. Identical bytes
-                           => pass. Differing bytes => pass only if DECLARED (change_token
-                           bumped in bench/feature-off-declaration.json); else fail.
+                           => pass. Differing bytes => pass only if DECLARED (see MECHANISM
+                           V2 below); else fail.
+     [--declarations-dirs <base-dir> <head-dir>]
+                           MECHANISM V2 (sq-v3nel-v2): per-PR declaration FILES. A PR
+                           declares by ADDING its own bench/feature-off-declarations/
+                           <PR-number>.json (or .md) file. "declared" == the head-tree
+                           declarations directory contains at least one <digits>.json/.md
+                           file the base-tree directory does NOT (set difference). Different
+                           PRs add different files, so git NEVER textually conflicts (the
+                           old scalar change_token put every declaring PR on the SAME line).
   --leg3                   cfg-audit: every vectorized call site in lib.rs/exec.rs is gated
   --self-test              run built-in tripwires that MUST fail (guard the guards)
 
@@ -30,15 +38,30 @@ byte-identical builds and passes deterministically; a PR that does must DECLARE 
 by bumping change_token (audit-visible, reviewed diff). The SIZE of an accepted change is
 still governed, unchanged, by the wasm_bundle_bytes floor ratchet (+/-2% band) in bench.yml.
 
-Declaration mechanism (least-gameable + audit-visible, chosen over a PR-body line):
-  bench/feature-off-declaration.json carries an integer "change_token". A PR that
-  intentionally changes always-compiled feature-OFF bytes must INCREMENT that token in a
-  reviewed diff (and add a dated rationale line to its _comment). A PR-body marker was
-  REJECTED: it is invisible in merge_group events (no PR body on the merged commit set)
-  and is not part of the reviewed diff. The token lives in its OWN file, NOT inside
-  perf-baseline.json, because scripts/perf-gate.py's auto-ratchet-down rewrite
-  (write_baseline) reconstructs each metric with only floor/threshold/mode and would
-  silently wipe any extra field on the next push-to-main improvement commit.
+Declaration mechanism V2 (sq-v3nel-v2, 2026-07-07): per-PR FILES, not a shared scalar.
+  A PR declares an intentional feature-OFF byte change by ADDING its own
+  bench/feature-off-declarations/<PR-number>.json file (fields: {pr, date, reason}).
+  The gate is satisfied iff the head tree's declarations directory contains at least one
+  <digits>.json/.md file the base tree's does NOT — a set difference on the directory
+  listing. Because different PRs add DIFFERENT files, two declaring PRs never touch the
+  same line and git never marks them CONFLICTING.
+
+  WHY V2 replaced the scalar change_token: the original mechanism stored ONE integer in
+  bench/feature-off-declaration.json, so EVERY declaring PR edited the SAME line. The
+  gate check was order-independent but the FILE was not: the first declared PR to merge
+  made every other declared PR textually CONFLICTING (#1720 and #1718 both went DIRTY for
+  exactly this while #1726's declaration merged). Per-PR files remove the shared line.
+
+  TRANSITION WINDOW: check_leg2_dynamic accepts EITHER mechanism so in-flight branches
+  that already bumped the scalar token do not break. "declared" is true if the scalar
+  change_token differs between base and head (legacy) OR a new declaration file was added
+  (V2). The legacy scalar file bench/feature-off-declaration.json is RETIRED (frozen, kept
+  parseable so the script's fail-safe token read still works) but its inequality path stays
+  live until all pre-V2 branches have merged or rebased.
+
+  WHY A PR-body marker was still REJECTED: it is invisible in merge_group events (no PR
+  body on the merged commit set) and is not part of the reviewed diff. A committed per-PR
+  file is audit-visible, least-gameable, and conflict-free.
 """
 
 from __future__ import annotations
@@ -133,7 +156,11 @@ def check_leg1(metadata_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _read_change_token(decl_path: str) -> int:
-    """Read the integer 'change_token' from a feature-off declaration JSON file.
+    """Read the integer 'change_token' from a feature-off declaration JSON file (LEGACY).
+
+    Retained for the TRANSITION WINDOW (sq-v3nel-v2): the scalar mechanism is retired but
+    in-flight branches that already bumped the token must still be accepted. The V2
+    per-PR-file mechanism (_new_declaration_files below) is the going-forward path.
 
     Fail-SAFE default: a missing file, missing field, or non-integer value reads as 0.
     Because an ABSENT declaration reads the same as an UN-bumped one, an undeclared byte
@@ -151,9 +178,40 @@ def _read_change_token(decl_path: str) -> int:
         return 0
 
 
+# MECHANISM V2 (sq-v3nel-v2): a declaration FILE is bench/feature-off-declarations/
+# <PR-number>.json (or .md). Only names matching <digits>.json|md count as declarations,
+# so a README.md / .gitkeep in the directory is NOT mistaken for a declaration.
+_DECL_FILE_RE = re.compile(r'^\d+\.(?:json|md)$')
+
+
+def _list_declaration_files(dir_path: str | None) -> set[str]:
+    """Return the set of per-PR declaration file names in a declarations directory.
+
+    Fail-SAFE: a None / missing / non-directory path reads as the EMPTY set, so an absent
+    directory can never be mistaken for a declaration (keeps the gate fail-closed).
+    Only names matching <digits>.json|md are counted (README.md/.gitkeep are ignored).
+    """
+    if not dir_path or not os.path.isdir(dir_path):
+        return set()
+    return {name for name in os.listdir(dir_path) if _DECL_FILE_RE.match(name)}
+
+
+def _new_declaration_files(base_dir: str | None, head_dir: str | None) -> set[str]:
+    """Return declaration files the HEAD tree has that the BASE tree does NOT (set diff).
+
+    A non-empty result means the PR ADDED at least one bench/feature-off-declarations/
+    <PR-number>.json — i.e. it DECLARED an intentional feature-OFF byte change under
+    mechanism V2. Because each PR adds a distinctly-named file, this never collides with
+    another declaring PR (unlike the old shared scalar token line).
+    """
+    return _list_declaration_files(head_dir) - _list_declaration_files(base_dir)
+
+
 def check_leg2_dynamic(base_wasm: str, head_wasm: str,
-                       base_decl: str, head_decl: str) -> int:
-    """DYNAMIC byte-identity gate for the feature-OFF wasm bundle (sq-v3nel).
+                       base_decl: str, head_decl: str,
+                       base_decls_dir: str | None = None,
+                       head_decls_dir: str | None = None) -> int:
+    """DYNAMIC byte-identity gate for the feature-OFF wasm bundle (sq-v3nel / sq-v3nel-v2).
 
     Compares the feature-OFF wasm built from the BASE (target-branch / merge-base) tree
     against the one built from the HEAD (PR / merged) tree IN THE SAME CI RUN. Same
@@ -163,13 +221,18 @@ def check_leg2_dynamic(base_wasm: str, head_wasm: str,
     Policy:
       * bytes byte-for-byte IDENTICAL  -> PASS. The PR touched no always-compiled code
         that reaches the feature-OFF bundle. (This is the common case for non-engine PRs.)
-      * bytes DIFFER + change DECLARED -> PASS. 'declared' == change_token differs between
-        the base-tree and head-tree bench/feature-off-declaration.json (author bumped it).
+      * bytes DIFFER + change DECLARED -> PASS. 'declared' is satisfied by EITHER mechanism
+        (transition window, sq-v3nel-v2):
+          V2 (going-forward): the head-tree bench/feature-off-declarations/ directory
+            contains a <PR-number>.json/.md file the base tree does NOT (set difference).
+            Conflict-free: each PR adds its own file.
+          LEGACY (retired, still accepted): change_token differs between the base-tree and
+            head-tree bench/feature-off-declaration.json (a pre-V2 branch bumped it).
         The SIZE of the change is governed SEPARATELY, unchanged, by the wasm_bundle_bytes
         floor ratchet (+/-2% band) in bench.yml — this gate governs INTENT, not magnitude.
       * bytes DIFFER + NOT declared    -> FAIL. Either accidental default-path/vectorized
         code leaked into the feature-OFF build (remove / cfg-gate it) or an intentional
-        always-compiled change was not declared (bump change_token).
+        always-compiled change was not declared (add a per-PR declaration file).
 
     Returns 0 on pass, 1 on fail/error.
     """
@@ -199,8 +262,6 @@ def check_leg2_dynamic(base_wasm: str, head_wasm: str,
     # Bytes differ (size and/or content). Require an audit-visible declaration.
     delta = head_len - base_len
     pct = (delta / base_len * 100) if base_len else float("inf")
-    base_tok = _read_change_token(base_decl)
-    head_tok = _read_change_token(head_decl)
 
     print(
         f"[leg2] feature-OFF wasm DIFFERS from the base tree: "
@@ -208,24 +269,45 @@ def check_leg2_dynamic(base_wasm: str, head_wasm: str,
         "Comparison is byte-for-byte, so same-length content changes are also detected."
     )
 
+    # V2 (going-forward): a per-PR declaration FILE was added under
+    # bench/feature-off-declarations/ (set difference on the directory listing). Preferred
+    # because each PR adds a distinct file, so declaring PRs never textually conflict.
+    new_files = _new_declaration_files(base_decls_dir, head_decls_dir)
+    if new_files:
+        print(
+            "[leg2] OK — change DECLARED (mechanism V2): the head tree added "
+            f"bench/feature-off-declarations/{sorted(new_files)} not present in the base "
+            "tree. The feature-OFF byte change is intentional. Its SIZE is governed by the "
+            "wasm_bundle_bytes floor ratchet (+/-2% band) in bench.yml, unchanged by this gate."
+        )
+        return 0
+
+    # LEGACY (retired, accepted during the transition window): the scalar change_token in
+    # bench/feature-off-declaration.json differs between base and head tree. Kept live so
+    # pre-V2 branches that already bumped the token do not break.
+    base_tok = _read_change_token(base_decl)
+    head_tok = _read_change_token(head_decl)
     if head_tok != base_tok:
         print(
-            f"[leg2] OK — change DECLARED: bench/feature-off-declaration.json change_token "
-            f"{base_tok} -> {head_tok}. The feature-OFF byte change is intentional. Its SIZE "
-            "is governed by the wasm_bundle_bytes floor ratchet (+/-2% band) in bench.yml, "
-            "which is unchanged by this gate."
+            f"[leg2] OK — change DECLARED (legacy scalar, transition window): "
+            f"bench/feature-off-declaration.json change_token {base_tok} -> {head_tok}. "
+            "The feature-OFF byte change is intentional. Its SIZE is governed by the "
+            "wasm_bundle_bytes floor ratchet (+/-2% band) in bench.yml, unchanged by this gate. "
+            "NOTE: the scalar mechanism is retired — new PRs should add a per-PR declaration "
+            "file under bench/feature-off-declarations/ (mechanism V2) instead."
         )
         return 0
 
     print(
         f"[leg2] VIOLATION: the feature-OFF wasm bundle changed vs the base tree "
         f"(size delta {delta:+d} bytes, {pct:+.3f}%) but the change is NOT declared "
-        f"(change_token unchanged at {base_tok} in bench/feature-off-declaration.json).\n"
+        f"(no new bench/feature-off-declarations/<PR>.json file added, and the legacy scalar "
+        f"change_token is unchanged at {base_tok}).\n"
         "  - If this is ACCIDENTAL vectorized / default-path code leaking into the "
         "feature-OFF build, REMOVE it or gate it behind #[cfg(feature = \"vectorized\")].\n"
         "  - If this is an INTENTIONAL change to always-compiled engine/core code, DECLARE "
-        "it: increment \"change_token\" in bench/feature-off-declaration.json (add a dated "
-        "rationale line to its _comment). If the SIZE moves > +/-2%, ALSO raise "
+        "it (mechanism V2): add bench/feature-off-declarations/<PR-number>.json with "
+        "{pr, date, reason}. If the SIZE moves > +/-2%, ALSO raise "
         "metrics.wasm_bundle_bytes.floor in bench/perf-baseline.json (the bench.yml ratchet)."
     )
     print("\n[leg2] FAIL — undeclared feature-OFF bundle change. Declare it or remove it.")
@@ -371,13 +453,20 @@ def _leg1_on_dict(meta: dict) -> int:
 
 
 def _leg2_dynamic_on_bytes(base_bytes: bytes, head_bytes: bytes,
-                           base_tok: int | None, head_tok: int | None) -> int:
-    """Run the dynamic leg2 check on in-memory wasm bytes + declaration tokens.
+                           base_tok: int | None, head_tok: int | None,
+                           base_decl_names: list[str] | None = None,
+                           head_decl_names: list[str] | None = None) -> int:
+    """Run the dynamic leg2 check on in-memory wasm bytes + declarations.
 
     A token of None writes an EMPTY declaration file (missing field) to exercise the
     fail-safe default (reads as 0). Otherwise writes {"change_token": <int>}.
+
+    base_decl_names / head_decl_names exercise MECHANISM V2: each is a list of file names
+    materialised inside a temp declarations directory (e.g. ["1720.json", "README.md"]).
+    None => no directory passed (V2 disabled for that side).
     """
     paths: list[str] = []
+    dirs: list[str] = []
 
     def _write(data: bytes | str, suffix: str) -> str:
         mode = "wb" if isinstance(data, bytes) else "w"
@@ -386,15 +475,32 @@ def _leg2_dynamic_on_bytes(base_bytes: bytes, head_bytes: bytes,
             paths.append(tmp.name)
             return tmp.name
 
+    def _mkdir(names: list[str] | None) -> str | None:
+        if names is None:
+            return None
+        d = tempfile.mkdtemp()
+        dirs.append(d)
+        for n in names:
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("{}")
+        return d
+
     base_wasm = _write(base_bytes, ".wasm")
     head_wasm = _write(head_bytes, ".wasm")
     base_decl = _write("{}" if base_tok is None else json.dumps({"change_token": base_tok}), ".json")
     head_decl = _write("{}" if head_tok is None else json.dumps({"change_token": head_tok}), ".json")
+    base_dir = _mkdir(base_decl_names)
+    head_dir = _mkdir(head_decl_names)
     try:
-        return check_leg2_dynamic(base_wasm, head_wasm, base_decl, head_decl)
+        return check_leg2_dynamic(base_wasm, head_wasm, base_decl, head_decl,
+                                  base_dir, head_dir)
     finally:
         for p in paths:
             os.unlink(p)
+        for d in dirs:
+            for n in os.listdir(d):
+                os.unlink(os.path.join(d, n))
+            os.rmdir(d)
 
 
 def run_self_test() -> int:
@@ -452,6 +558,30 @@ def run_self_test() -> int:
         print("TRIPWIRE 3 (leg2): FAIL — dynamic check rejected a declared change; false positive")
         all_passed = False
 
+    # ----- Tripwire 4: Leg 2 V2 must ACCEPT a per-PR declaration FILE added by head -----
+    # [OPUS-4.8] sq-v3nel-v2: scalar token unchanged, but head added 1720.json not in base.
+    rc = _leg2_dynamic_on_bytes(b"\x00wasm-base", b"\x00wasm-headX", base_tok=0, head_tok=0,
+                                base_decl_names=["README.md"],
+                                head_decl_names=["README.md", "1720.json"])
+    if rc == 0:
+        print("TRIPWIRE 4 (leg2 V2): PASS — dynamic check accepted a DECLARED change via a "
+              "new per-PR file (bench/feature-off-declarations/1720.json added by head)")
+    else:
+        print("TRIPWIRE 4 (leg2 V2): FAIL — V2 file declaration rejected; false positive")
+        all_passed = False
+
+    # ----- Tripwire 5: Leg 2 V2 must REJECT when NO new file is added (README-only) -----
+    # A README.md present on both sides is NOT a declaration; scalar token also unchanged.
+    rc = _leg2_dynamic_on_bytes(b"\x00wasm-base", b"\x00wasm-headX", base_tok=0, head_tok=0,
+                                base_decl_names=["README.md"],
+                                head_decl_names=["README.md"])
+    if rc != 0:
+        print("TRIPWIRE 5 (leg2 V2): PASS — no new per-PR file (only README on both sides) "
+              "correctly rejected as UNDECLARED")
+    else:
+        print("TRIPWIRE 5 (leg2 V2): FAIL — undeclared change slipped through V2; the gate is disabled")
+        all_passed = False
+
     if all_passed:
         print("\n[self-test] OK — all tripwires fired correctly. The guards can fail (and "
               "the dynamic leg2 accepts a declared change).")
@@ -475,11 +605,18 @@ def main() -> int:
     mode.add_argument("--leg2-dynamic", dest="leg2_dynamic", nargs=4,
                       metavar=("BASE_WASM", "HEAD_WASM", "BASE_DECL", "HEAD_DECL"),
                       help="DYNAMIC byte-identity: base-tree vs head-tree feature-OFF wasm "
-                           "+ base/head feature-off-declaration.json (no static pin)")
+                           "+ base/head feature-off-declaration.json (legacy scalar). Add "
+                           "--declarations-dirs for mechanism V2 (per-PR files).")
     mode.add_argument("--leg3", action="store_true",
                       help="cfg-audit of vectorized call sites in lib.rs and exec.rs")
     mode.add_argument("--self-test", dest="self_test", action="store_true",
                       help="run built-in tripwires (both must exit non-zero to pass)")
+    parser.add_argument("--declarations-dirs", dest="declarations_dirs", nargs=2,
+                        metavar=("BASE_DIR", "HEAD_DIR"),
+                        help="MECHANISM V2 (sq-v3nel-v2): base-tree and head-tree "
+                             "bench/feature-off-declarations/ directories. A PR declares by "
+                             "adding its own <PR-number>.json file (set difference). Combined "
+                             "with --leg2-dynamic; either mechanism satisfies the gate.")
     parser.add_argument("--repo-root", default=".",
                         help="repo root for --leg3 (default: cwd)")
     args = parser.parse_args()
@@ -487,8 +624,11 @@ def main() -> int:
     if args.leg1:
         return check_leg1(args.leg1)
     elif args.leg2_dynamic:
+        base_dir = args.declarations_dirs[0] if args.declarations_dirs else None
+        head_dir = args.declarations_dirs[1] if args.declarations_dirs else None
         return check_leg2_dynamic(args.leg2_dynamic[0], args.leg2_dynamic[1],
-                                  args.leg2_dynamic[2], args.leg2_dynamic[3])
+                                  args.leg2_dynamic[2], args.leg2_dynamic[3],
+                                  base_dir, head_dir)
     elif args.leg3:
         return check_leg3(repo_root=args.repo_root)
     elif args.self_test:
