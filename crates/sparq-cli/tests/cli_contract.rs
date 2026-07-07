@@ -242,6 +242,60 @@ fn query_unknown_format_exits_2() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// [FABLE-5] (sq-7d3dj.32) `memstat` prints the deterministic memory-composition TSV:
+/// the component lines must be present, the components must sum EXACTLY to the total
+/// (the breakdown is a decomposition, not an estimate), the per-triple/per-term ratios
+/// must be consistent with the byte lines, and on Linux the VmRSS/VmHWM lines must be
+/// non-zero with HWM >= RSS. An exact-value contract so a broken field or a swapped
+/// component goes red, not just "some output appeared".
+#[test]
+fn memstat_breakdown_sums_and_ratios() {
+    let dir = scratch("memstat");
+    let data = write(&dir, "data.nt", NT);
+    let (code, stdout, stderr) = run3(&["memstat", s(&data), "ntriples"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let field = |k: &str| -> f64 {
+        stdout
+            .lines()
+            .find(|l| l.starts_with(&format!("{k}\t")))
+            .and_then(|l| l.split('\t').nth(1))
+            .unwrap_or_else(|| panic!("missing field {k} in: {stdout}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("non-numeric field {k} in: {stdout}"))
+    };
+    assert_eq!(field("memstat_version"), 1.0);
+    assert_eq!(field("triples"), 3.0, "fixture has exactly 3 triples");
+    // Exact decomposition: dict + store + caches == total.
+    let (total, dict, store, caches) =
+        (field("heap_total_bytes"), field("heap_dict_bytes"), field("heap_store_bytes"), field("heap_caches_bytes"));
+    assert_eq!(dict + store + caches, total, "components must sum to the total");
+    assert!(dict > 0.0 && store > 0.0, "dict and store must both be accounted");
+    // Ratios are the byte lines over the counts (2-decimal rounding tolerance).
+    assert!((field("heap_b_per_triple") - total / 3.0).abs() < 0.01, "b/triple ratio");
+    let terms = field("dict_terms");
+    assert!(terms >= 5.0, "fixture interns at least 5 distinct terms; got {terms}");
+    assert!((field("dict_b_per_term") - dict / terms).abs() < 0.01, "b/term ratio");
+    // Store = SIX raw u32x3 permutation indexes over 3 deduped triples: at least 6*3*12 =
+    // 216 B. The lower bound is load-bearing (a 3-permutation compact-index accounting
+    // would report 108 and go red); the upper bound only tolerates the SPO Vec's small
+    // parse-time capacity overshoot (heap_bytes counts capacity(), not len()).
+    assert!((216.0..=600.0).contains(&store), "store bytes for 3 triples: {store}");
+    #[cfg(target_os = "linux")]
+    {
+        let (rss, hwm) = (field("vm_rss_bytes"), field("vm_hwm_bytes"));
+        assert!(rss > 0.0 && hwm >= rss, "VmHWM ({hwm}) must be >= VmRSS ({rss}) > 0");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// [FABLE-5] (sq-7d3dj.32) `memstat` with missing args is a usage error (exit 2).
+#[test]
+fn memstat_missing_args_exits_2() {
+    let (code, _o, stderr) = run3(&["memstat"]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("usage: sparq-cli memstat"), "stderr: {stderr}");
+}
+
 // ---------------------------------------------------------------------------
 // 2. Happy paths — compressed-input auto-detection (gzip / zstd / bzip2)
 //    All three codecs of the *same* N-Triples bytes must load identically.

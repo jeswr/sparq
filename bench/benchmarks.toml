@@ -568,6 +568,22 @@ pinning     = "dataset + optional query"
 records_to  = "stdout; research/compressed-perms-verdict.md, research/dict-compression-measured.md"
 status      = "ok"
 
+# [FABLE-5] sq-7d3dj.32: bytes/triple AT SCALE in both framings (in-memory + external), the
+# canonical instrument behind the RDFox §2.4 memory-footprint comparison. The CI-scale
+# ancestor is the perf-gate metric store_bytes_per_triple (scripts/ci-bench.sh).
+[[benchmark]]
+id          = "bytes-per-triple"
+name        = "Memory footprint bytes/triple at scale (in-RAM + on-disk/external)"
+category    = "compression"
+measures    = "per scale (1M/10M/50M WatDiv): self-accounted heap B/triple decomposed dict/store/caches (memstat), post-load VmRSS + peak VmHWM B/triple, on-disk B/triple raw + block-compressed (save), bounded-RAM external-build peak RSS"
+invoke      = "apt-get install -y time libboost-all-dev >/dev/null 2>&1 || sudo apt-get install -y time libboost-all-dev >/dev/null 2>&1; SCALES=\"1000000 10000000 50000000\" bash scripts/bench/bytes-per-triple.sh"
+source      = "scripts/bench/bytes-per-triple.sh, crates/sparq-cli/src/main.rs (cmd_memstat)"
+dataset     = "WatDiv seed-1 (bench/watdiv/gen.sh) at SF 10/100/500; generated on-box, gitignored"
+quiet_box_sensitive = true  # byte counts + VmHWM are deterministic; load_s is not — run on a dedicated box for the canonical envelope (memory-roomy, e.g. r7g.4xlarge; VOLUME_GB>=100, WATCHDOG_SECS=10800)
+pinning     = "WatDiv seed 1 + SF list; denominator = deduped triple count from memstat"
+records_to  = "stdout MEMBPT lines + MEMBPT_JSON envelope; vendored under bench/canonical-competitor-results/; research/memory-per-triple-2026-07.md"
+status      = "ok"
+
 # =============================================================================
 # SCALING — parallel thread sweep
 # =============================================================================

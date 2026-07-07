@@ -18,6 +18,7 @@ fn main() {
         Some("query") => cmd_query(&args),
         Some("reason") => cmd_reason(&args),
         Some("bench") => cmd_bench(&args),
+        Some("memstat") => cmd_memstat(&args),
         Some("bench-mmap") => cmd_bench_mmap(&args),
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
@@ -42,7 +43,7 @@ fn main() {
         #[cfg(feature = "terse")]
         Some("terse") => cmd_terse(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli memstat <data-file> <format>            # deterministic memory-composition breakdown (B/triple) + RSS\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -940,6 +941,76 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
         dict as f64 / g.dict.len().max(1) as f64,
     );
     g
+}
+
+/// [FABLE-5] (sq-7d3dj.32) `memstat <data-file> <format>` — load a document and print a
+/// DETERMINISTIC memory-composition breakdown as `name<TAB>value` lines on stdout, plus the
+/// process RSS counters. This is the at-scale extension of the CI `store_bytes_per_triple`
+/// metric (scripts/ci-bench.sh greps the same `heap_bytes()` self-accounting off the load
+/// summary line): here the total is DECOMPOSED into its components — dictionary vs the six
+/// permutation indexes vs the numeric/temporal caches — so a bytes-per-triple figure comes
+/// with its explanation, and the kernel's `VmRSS`/`VmHWM` (post-load resident + peak during
+/// load, Linux `/proc/self/status`; 0 elsewhere) sit next to the self-accounted heap so
+/// allocator/parse-transient overhead is visible rather than assumed. Consumed by
+/// `scripts/bench/bytes-per-triple.sh` (bench id `bytes-per-triple`).
+fn cmd_memstat(args: &[String]) {
+    let (path, format) = match (args.get(2), args.get(3)) {
+        (Some(p), Some(f)) => (p.as_str(), f.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli memstat <data-file> <format>");
+            std::process::exit(2);
+        }
+    };
+    let t = Instant::now();
+    let g = load_quiet(path, format);
+    let load_s = t.elapsed().as_secs_f64();
+
+    let triples = g.len().max(1);
+    let terms = g.dict.len().max(1);
+    let heap_total = g.heap_bytes();
+    let heap_dict = g.dict.heap_bytes();
+    let heap_store = g.store.heap_bytes();
+    // The remainder is the numerics + temporals literal-value caches (their accessors are
+    // crate-private; the subtraction is exact because Graph::heap_bytes is the plain sum).
+    let heap_caches = heap_total.saturating_sub(heap_dict + heap_store);
+    let (vm_rss, vm_hwm) = proc_vm_bytes();
+
+    println!("memstat_version\t1");
+    println!("triples\t{}", g.len());
+    println!("dict_terms\t{}", g.dict.len());
+    println!("load_s\t{load_s:.3}");
+    println!("heap_total_bytes\t{heap_total}");
+    println!("heap_dict_bytes\t{heap_dict}");
+    println!("heap_store_bytes\t{heap_store}");
+    println!("heap_caches_bytes\t{heap_caches}");
+    println!("heap_b_per_triple\t{:.2}", heap_total as f64 / triples as f64);
+    println!("store_b_per_triple\t{:.2}", heap_store as f64 / triples as f64);
+    println!("dict_b_per_triple\t{:.2}", heap_dict as f64 / triples as f64);
+    println!("caches_b_per_triple\t{:.2}", heap_caches as f64 / triples as f64);
+    println!("dict_b_per_term\t{:.2}", heap_dict as f64 / terms as f64);
+    println!("vm_rss_bytes\t{vm_rss}");
+    println!("vm_hwm_bytes\t{vm_hwm}");
+    println!("rss_b_per_triple\t{:.2}", vm_rss as f64 / triples as f64);
+    println!("hwm_b_per_triple\t{:.2}", vm_hwm as f64 / triples as f64);
+}
+
+/// (`VmRSS`, `VmHWM`) of this process in BYTES from Linux `/proc/self/status` — the
+/// post-load resident set and the peak resident set (which captures parse-time
+/// transients the post-load heap accounting cannot). `(0, 0)` where `/proc` is
+/// unavailable (non-Linux), so `memstat`'s deterministic heap lines still work there.
+fn proc_vm_bytes() -> (u64, u64) {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return (0, 0);
+    };
+    let field = |key: &str| -> u64 {
+        status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(0, |kib| kib * 1024)
+    };
+    (field("VmRSS:"), field("VmHWM:"))
 }
 
 /// [OPUS-4.8] (sq-678h, sq-e3pj) `dump <file[.gz|.bz2|.zst]> <in-format> <out-format>` — load an
