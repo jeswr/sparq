@@ -568,10 +568,18 @@ impl PreparedQuery {
     /// algebra verbatim (the opt-out / test-baseline path). When the feature is
     /// OFF the algebra is stored verbatim and the build is byte-identical.
     pub fn parse(sparql: &str) -> Result<PreparedQuery, String> {
-        let query = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+        // Feature-OFF arm is the VERBATIM pre-`algebra-rewrite` expression so the
+        // default build's codegen is byte-identical (the `feature_off_exact` wasm
+        // gate). Only the feature-ON arm introduces the rewrite call. [OPUS-4.8]
+        #[cfg(not(feature = "algebra-rewrite"))]
+        {
+            Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+        }
         #[cfg(feature = "algebra-rewrite")]
-        let query = rewrite::rewrite_query(query);
-        Ok(PreparedQuery { query })
+        {
+            let query = rewrite::rewrite_query(SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?);
+            Ok(PreparedQuery { query })
+        }
     }
 
     /// The wrapped `spargebra` algebra (e.g. to inspect the query form or dataset

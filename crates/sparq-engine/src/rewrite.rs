@@ -485,15 +485,20 @@ fn certain_vars(p: &GraphPattern) -> FxHashSet<Variable> {
                 }
             }
         }
-        GraphPattern::Group { inner, variables, aggregates } => {
+        GraphPattern::Group { inner, variables, aggregates: _ } => {
+            // GROUP BY keys that are certain in `inner` stay certain. Aggregate
+            // OUTPUTS are intentionally EXCLUDED: an aggregate (e.g. SUM/AVG over a
+            // non-numeric term) can error and leave its output variable UNBOUND, so
+            // it is not bound in every solution. Including it would over-approximate
+            // and could let the anti-join guard fire unsoundly on a
+            // `Filter(!bound(?agg), LeftJoin(A, B))` where `?agg` is an aggregate
+            // output inside `B`. Omitting it is a strictly-safe under-approximation.
+            // [OPUS-4.8]
             let c = certain_vars(inner);
             for v in variables {
                 if c.contains(v) {
                     s.insert(v.clone());
                 }
-            }
-            for (o, _) in aggregates {
-                s.insert(o.clone());
             }
         }
         // A `SILENT` SERVICE may yield the unit solution (nothing certain); a
@@ -668,6 +673,82 @@ mod tests {
             rewrite_query(raw.clone()),
             raw,
             "no shared variable between A and B → Minus is NOT equivalent → decline"
+        );
+    }
+
+    // ---- REGRESSION (soundness, PR #1735 review finding #2): `certain_vars`'
+    // Group arm must NOT treat an aggregate OUTPUT as certain. An aggregate can
+    // error (e.g. SUM/AVG over a non-numeric term) and leave its output UNBOUND
+    // while the group (with its GROUP BY key bound) still exists, so an aggregate
+    // output is *not* bound in every solution. Before the fix the Group arm
+    // inserted every aggregate output unconditionally — an over-approximation that
+    // could make `antijoin_ok` read the output as certain-in-`right` and rewrite
+    // `Filter(!bound(?agg), LeftJoin(A,B))` → `Minus(A,B)` unsoundly.
+    //
+    // This builds the `Group` node DIRECTLY (surface SPARQL `(SUM(?n) AS ?total)`
+    // wraps the aggregate in an `Extend` that already guards `?total`, so it does
+    // not exercise the Group arm — this constructs the raw shape the arm sees).
+    // With the buggy loop present `?total` appears in the set and this fails;
+    // with the fix it is absent. [OPUS-4.8]
+    #[test]
+    fn certain_vars_group_excludes_aggregate_output() {
+        use spargebra::algebra::{AggregateExpression, AggregateFunction};
+        use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+        let doc = Variable::new("doc").unwrap();
+        let n = Variable::new("n").unwrap();
+        let total = Variable::new("total").unwrap();
+        // inner: `?doc ex:cites ?n`  (binds both ?doc and ?n)
+        let inner = GraphPattern::Bgp {
+            patterns: vec![TriplePattern {
+                subject: TermPattern::Variable(doc.clone()),
+                predicate: NamedNodePattern::NamedNode(NamedNode::new("http://ex/cites").unwrap()),
+                object: TermPattern::Variable(n.clone()),
+            }],
+        };
+        // GROUP BY ?doc with aggregate output ?total = SUM(?n).
+        let group = GraphPattern::Group {
+            inner: Box::new(inner),
+            variables: vec![doc.clone()],
+            aggregates: vec![(
+                total.clone(),
+                AggregateExpression::FunctionCall {
+                    name: AggregateFunction::Sum,
+                    expr: Expression::Variable(n.clone()),
+                    distinct: false,
+                },
+            )],
+        };
+        let cv = certain_vars(&group);
+        assert!(cv.contains(&doc), "GROUP BY key ?doc is certain");
+        assert!(
+            !cv.contains(&total),
+            "aggregate output ?total must NOT be certain (aggregate errors leave it unbound)"
+        );
+    }
+
+    // ---- End-to-end (defense-in-depth): the reviewer's scenario — a GROUP BY
+    // sub-SELECT aggregate `?total` inside an OPTIONAL body, then FILTER(!bound) —
+    // must leave the plan UNCHANGED (no anti-join). At the surface-SPARQL level
+    // `?total` is bound by an `Extend` over the `Group` (spargebra desugaring), so
+    // it is declined by the Extend rule regardless of the Group-arm fix; this
+    // pins the observable end-to-end behaviour. [OPUS-4.8]
+    #[test]
+    fn antijoin_declines_over_optional_aggregate_subselect() {
+        let raw = parse(&format!(
+            "{PFX} SELECT ?doc WHERE {{ \
+               ?doc a ex:Article . \
+               OPTIONAL {{ SELECT ?doc (SUM(?n) AS ?total) WHERE {{ ?doc ex:cites ?n }} GROUP BY ?doc }} \
+               FILTER(!bound(?total)) }}"
+        ));
+        // Sanity: the baseline algebra really has the anti-join candidate shape (a
+        // LeftJoin whose right is a Project over a Group) — else the test is vacuous.
+        let raw_dbg = format!("{:?}", pattern_of(&raw));
+        assert!(raw_dbg.contains("LeftJoin"), "baseline must have a LeftJoin: {}", raw_dbg);
+        assert!(raw_dbg.contains("Group"), "baseline OPTIONAL body must be a Group: {}", raw_dbg);
+        assert_eq!(
+            rewrite_query(raw.clone()),
+            raw,
+            "aggregate output is not certain → anti-join must NOT fire (plan unchanged)"
         );
     }
 
