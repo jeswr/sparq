@@ -1060,4 +1060,138 @@ mod tests {
             "SPARQL UPDATE"
         );
     }
+
+    // ── sq-qcnn.39: mutation-kill additions — exact prov_graph triple counts,
+    // prov:value annotation check, and USING keyword coverage. [SONNET-4.6] ─────
+
+    /// `UpdateDerivation::prov_graph()` for an INSERT…WHERE update (inserts non-empty,
+    /// 1 used input, no agent) must emit exactly 9 triples (5 activity: type/label/value/
+    /// startedAt/endedAt; 3 entity: type/wasGeneratedBy/wasDerivedFrom; 1 used).
+    /// Pinning the count kills mutations that drop any single `push()` call.
+    #[test]
+    fn insert_where_prov_graph_exact_triple_count() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+        // 5 activity + 3 entity (inserts non-empty) + 1 used = 9
+        assert_eq!(
+            d.prov_graph().len(),
+            9,
+            "INSERT WHERE with 1 input emits 9 prov triples"
+        );
+    }
+
+    /// For a pure-DELETE update (2 deleted triples, 1 used input, no agent), the exact
+    /// count is: 5 activity + 0 entity (inserts empty) + 1 used + 4 invalidation
+    /// (2 × entity-type + wasInvalidatedBy) = 10. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn pure_delete_prov_graph_exact_triple_count() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> DELETE { ?s ex:name ?n } WHERE { ?s ex:name ?n }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.deleted().len(), 2, "two name triples deleted");
+        // 5 activity + 1 used + 4 invalidation (2 × rdf:type + wasInvalidatedBy) = 10
+        assert_eq!(
+            d.prov_graph().len(),
+            10,
+            "pure DELETE with 2 deletes + 1 input emits 10 prov triples"
+        );
+    }
+
+    /// For a DELETE/INSERT WHERE (2 inserts, 2 deletes, 1 used input), the exact count
+    /// is: 5 activity + 3 entity + 1 used + 4 invalidation = 13. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn delete_insert_prov_graph_exact_triple_count() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> \
+             DELETE { ?s ex:age ?a } INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.inserted().len(), 2, "two inserts");
+        assert_eq!(d.deleted().len(), 2, "two deletes");
+        // 5 activity + 3 entity (wasGeneratedBy + type + wasDerivedFrom×1)
+        // + 1 used + 4 invalidation = 13
+        assert_eq!(
+            d.prov_graph().len(),
+            13,
+            "DELETE/INSERT WHERE with 2 inserts + 2 deletes + 1 input emits 13 prov triples"
+        );
+    }
+
+    /// The update activity records the verbatim update text as a `prov:value` recipe —
+    /// the same annotation that `Derivation` (CONSTRUCT) emits for the query text.
+    /// No existing test checks for `prov:value` in `UpdateDerivation::prov_graph()`,
+    /// so this test kills the mutation that drops that push. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn update_prov_graph_contains_query_recipe() {
+        let q = "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+        let mut graph = g();
+        let d = derive_update(&mut graph, q, cfg()).unwrap();
+        let ls = lines(&d);
+        let a = d.activity().as_str();
+        // The verbatim update text is recorded on the activity as prov:value.
+        assert!(
+            ls.contains(&format!(
+                "<{a}> <http://www.w3.org/ns/prov#value> \"{q}\" ."
+            )),
+            "update prov_graph must carry the query text as prov:value; lines: {ls:?}"
+        );
+    }
+
+    /// `kind_label` must classify a `USING`-prefixed update as `"DELETE/INSERT WHERE"`.
+    /// The `USING` form is covered by the same branch as `WITH` / `INSERT` / `DELETE`
+    /// (`starts_with("INSERT") || starts_with("DELETE") || starts_with("WITH") || starts_with("USING")`).
+    /// Not having a direct test for `USING` leaves that branch arm unexercised by an
+    /// exact-value assertion, allowing a mutation that removes the `starts_with("USING")`
+    /// conjunct to survive. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn kind_label_using_is_delete_insert_where() {
+        assert_eq!(
+            kind_label("USING <http://ex/g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }"),
+            "DELETE/INSERT WHERE"
+        );
+        // PREFIX-stripped form (strip_prologue removes the prologue, USING is then first).
+        assert_eq!(
+            kind_label(
+                "PREFIX ex: <http://ex/> USING <http://ex/g> \
+                 DELETE { ?s ex:p ?o } WHERE { ?s ex:p ?o }"
+            ),
+            "DELETE/INSERT WHERE"
+        );
+    }
+
+    /// Pins the exact minted activity and entity IRIs for a known UPDATE derivation
+    /// (fixed clock + fixed query text). The IRI is:
+    ///   `urn:sparq:prov:{role}:{s_nanos:x}-{e_nanos:x}-{fnv1a(query):016x}`
+    /// where s_nanos = e_nanos = 1_700_000_000 * 1_000_000_000 = 0x17979cfe362a0000
+    /// and fnv1a("PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }")
+    /// = 0x5125ddbf0b0c39fd.
+    /// This kills any arithmetic mutation in `mint()` that alters the FNV-1a output,
+    /// exercising the UPDATE call path specifically. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn minted_iri_for_update_has_exact_known_value() {
+        let q = "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+        let d = derive_update(&mut g(), q, cfg()).unwrap();
+        assert_eq!(
+            d.activity().as_str(),
+            "urn:sparq:prov:activity:17979cfe362a0000-17979cfe362a0000-5125ddbf0b0c39fd",
+            "activity IRI must match FNV-1a XOR hash of the update text + fixed-clock nanos"
+        );
+        assert_eq!(
+            d.entity().as_str(),
+            "urn:sparq:prov:entity:17979cfe362a0000-17979cfe362a0000-5125ddbf0b0c39fd",
+            "entity IRI must match FNV-1a XOR hash of the update text + fixed-clock nanos"
+        );
+    }
 }
