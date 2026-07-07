@@ -227,7 +227,7 @@ mod tests {
         tokio::spawn(async move {
             if let Ok((mut conn, _)) = listener.accept().await {
                 let mut response = b"HTTP/1.1 200 OK\r\n\r\nok".to_vec();
-                response.extend(std::iter::repeat(b'x').take(5000));
+                response.extend(std::iter::repeat_n(b'x', 5000));
                 let _ = conn.write_all(&response).await;
                 // Explicit shutdown so the probe can read the buffer-cap break and then EOF.
                 let _ = conn.shutdown().await;
