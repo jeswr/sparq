@@ -104,8 +104,8 @@
       "note": "[OPUS-4.8] sq-fggn: behavioural tests for the lowest-covered modules (footprint commutativity, scheduler public surface, PodId/WriteError display) lifted measured line% 84.82 -> 94.47; floor = floor(measured) - 2 margin."
     },
     "sparq-server": {
-      "floor": 88,
-      "note": "[OPUS-4.8] sq-qcnn.19: direct unit tests for budget-envelope branches (max-bytes/max-rows which-knob logic, timeout relay), not_acceptable_response HEAD branch, json_error_bodies middleware (pass-through + rewrite), method_not_allowed, gsp_post empty-body paths (default 204, absent named 201, existing named 204), apply_update MVCC sequencing, and ServerConfig::from_env / env_parse scaffolding lifted measured line% 88.14 -> 90.19 (http.rs 88.14% -> 93.93%); floor = floor(90.19) - 2 = 88."
+      "floor": 90,
+      "note": "[OPUS-4.8] sq-qcnn.37: direct unit tests for pure XML/TSV encoding helpers (xml_attr_escape, push_ws_charref all arms, is_turtle_boolean non-matching arm, is_turtle_decimal), health_probe async TCP path (unhealthy 503 + 4 KiB buffer-cap), normalize_host IPv6 branches, from_sources_with_env wrapper, term_json BlankNode + Triple-BlankNode-subject arms, and 16 additional ServerConfig::from_env / SPARQ_* env-var branches (MAX_BODY_BYTES, MAX_CONCURRENT, MAX_SUBSCRIPTIONS_PER_CONN, MAX_SUBSCRIPTIONS, ALLOW_REMOTE, LOG_FULL_REQUESTS, etc.) lifted measured line% 90.19 -> 92.09; floor = floor(92.09) - 2 = 90."
     },
     "sparq-shacl": {
       "floor": 93,
