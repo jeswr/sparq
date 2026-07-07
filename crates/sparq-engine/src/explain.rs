@@ -313,7 +313,7 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
     }
 
     // Binary plan: split the sargable filters, then replay the GOO loop.
-    let (pat_filters, residual) = exec::split_sargable(&patterns, &filters);
+    let (pat_filters, residual) = exec::split_sargable(graph, &patterns, &filters);
     let pfilter = |i: usize| -> Option<(usize, ScanCmp)> { pat_filters.get(i).copied().flatten() };
     let _ = writeln!(
         out,

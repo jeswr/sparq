@@ -1615,7 +1615,7 @@ fn single_pattern_scan_json_emit(
     }
     // Only pushed-down sargable numeric FILTER(s); a residual filter needs the general
     // expression evaluator.
-    let (pat_filters, residual) = split_sargable(&patterns, &filters);
+    let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
     if !residual.is_empty() {
         return None;
     }
@@ -2221,7 +2221,7 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
             if patterns.len() != 1 {
                 return Ok(None);
             }
-            let (pat_filters, residual) = split_sargable(&patterns, &filters);
+            let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
             if !residual.is_empty() {
                 return Ok(None);
             }
@@ -2331,7 +2331,7 @@ fn count_single_filtered(
     // Resolve every filter to (canonical position, comparison); all must be sargable.
     let mut cmps: Vec<(usize, ScanCmp)> = Vec::with_capacity(filters.len());
     for f in filters {
-        let (var, cmp) = extract_sargable(f)?;
+        let (var, cmp) = extract_sargable(graph, f)?;
         let pos = pos_vars.iter().position(|v| v.as_ref() == Some(&var))?;
         cmps.push((pos, cmp));
     }
@@ -2847,7 +2847,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         // Push sargable numeric FILTERs down into the binary-plan scans (the WCOJ
         // path applies them afterwards); apply the rest normally.
         let (mut b, residual) = if bgp_uses_binary(&patterns) {
-            let (pat_filters, residual) = split_sargable(&patterns, &filters);
+            let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
             // [OPUS-4.8] (sq-5zf8i / §A4) Acyclic BGP: run the Yannakakis full-semijoin
             // prepass before the binary join when the opt-in `yannakakis` feature is on
             // (it internally cost-gates + falls back to `eval_bgp_binary`, threading the
@@ -3760,7 +3760,14 @@ fn inline_pass_values(cmp: ScanCmp) -> Option<(u32, u32)> {
 /// Recognises a FILTER of the form `?v OP constant` (or the symmetric
 /// `constant OP ?v`) over a numeric or temporal constant, returning the variable
 /// and the comparison to push down.
-fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
+///
+/// [OPUS-4.8] (sq-lr2ii) A NUMERIC comparison is DECLINED (returns `None`) when the graph
+/// holds an f64-inexact decimal ([`Graph::has_high_precision_decimal`]): the f64 `numerics`
+/// cache the scan probes could then decide `=`/`<`/`>`/`<=`/`>=` wrongly for that value (e.g.
+/// `"1.000000000000000001"^^xsd:decimal` collapses onto the f64 `1.0`), so such comparisons
+/// fall back to the exact general evaluator instead. Temporal pushdown is unaffected, and a
+/// graph with no f64-inexact decimal keeps the numeric fast path.
+fn extract_sargable(graph: &Graph, e: &Expression) -> Option<(Variable, ScanCmp)> {
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
@@ -3813,7 +3820,14 @@ fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
     for (var, konst, op) in [(l, r, on_left), (r, l, on_right)] {
         let Some(v) = var_of(var) else { continue };
         if let Some(c) = lit_num(konst) {
-            return Some((v, num_cmp(op, c)));
+            // sq-lr2ii: decline the f64 numeric fast path when the graph holds an f64-inexact
+            // decimal — the scan's per-row f64 compare could be wrong for it. A numeric
+            // constant is never also a temporal one, so declining here yields `None` for this
+            // orientation; the exact general evaluator handles the residual FILTER correctly.
+            if !graph.has_high_precision_decimal() {
+                return Some((v, num_cmp(op, c)));
+            }
+            continue;
         }
         if let Some(t) = lit_temp(konst) {
             return Some((v, ScanCmp::Temp(op, t)));
@@ -3840,7 +3854,7 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// Splits FILTERs into per-pattern sargable numeric predicates (pushed into the
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
-pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
+pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
     // zk-trace: a sargable FILTER pushed into the scan would make the scan
     // record only the POST-filter rows (the rows that PASSED), losing the
     // FILTER obligation and under-capturing the input set — the proof must
@@ -3855,7 +3869,7 @@ pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression])
     let mut pat_filters: Vec<Option<(usize, ScanCmp)>> = vec![None; patterns.len()];
     let mut residual = Vec::new();
     for f in filters {
-        if let Some((var, cmp)) = extract_sargable(f) {
+        if let Some((var, cmp)) = extract_sargable(graph, f) {
             if let Some((i, pos)) = patterns
                 .iter()
                 .enumerate()
@@ -7650,9 +7664,9 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
     }
 
     // Operator-shape check: only a single sargable NUMERIC comparison is eligible.
-    // NOTE: do NOT use `extract_sargable(expr)?` — the `?` operator returns None without
+    // NOTE: do NOT use `extract_sargable(graph, expr)?` — the `?` operator returns None without
     // recording the decline, making the I5 counter miss non-sargable expressions. [SONNET-4.6]
-    let (var, cmp) = match extract_sargable(expr) {
+    let (var, cmp) = match extract_sargable(graph, expr) {
         None => {
             vec_dispatch::record_decline();
             return None;
