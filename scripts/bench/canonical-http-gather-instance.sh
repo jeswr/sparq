@@ -24,6 +24,7 @@ WATDIV_SF="${WATDIV_SF:-1}"
 ITERS="${ITERS:-3}"
 QTO="${QTO:-300}"          # per-query adapter cap, s (covers 2 regimes x ITERS requests)
 GATHERS="${GATHERS:-2}"
+SUITES="${SUITES:-sp2b watdiv}"   # space-separated suite filter (partial re-runs)
 OXI_VERSION="${OXI_VERSION:-v0.5.9}"
 OXI_SHA256_X86_64="${OXI_SHA256_X86_64:-4be355715ba3945e8fb8c94a06662a29808683bf2ec355894dba9e82762e7cc7}"
 
@@ -31,7 +32,8 @@ step() { echo "[STEP $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a /root/GATHER_S
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."   # repo root
 SHA=$(git rev-parse --short HEAD)
-step "canonical-http gather @ $SHA (sp2b=$SP2B_TRIPLES watdiv_sf=$WATDIV_SF iters=$ITERS qto=$QTO gathers=$GATHERS)"
+step "canonical-http gather @ $SHA (sp2b=$SP2B_TRIPLES watdiv_sf=$WATDIV_SF iters=$ITERS qto=$QTO gathers=$GATHERS suites='$SUITES')"
+want_suite() { case " $SUITES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 step "cargo build --release -p sparq-server"
 cargo build --release -q -p sparq-server || step "WARN: sparq-server build failed"
@@ -53,13 +55,25 @@ docker pull -q "$QLEVER_IMG"   || step "WARN: qlever pull failed"
 VIRTUOSO_DIG=$(docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$VIRTUOSO_IMG" 2>/dev/null || echo "$VIRTUOSO_IMG")
 QLEVER_DIG=$(docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$QLEVER_IMG" 2>/dev/null || echo "$QLEVER_IMG")
 
-# --- generate corpora (deterministic) ---
-step "sp2b gen ($SP2B_TRIPLES triples)"
-SP2B_CORPUS=$(bash bench/sp2b/gen.sh "$SP2B_TRIPLES" 2>/tmp/sp2b_gen.err | tail -n1)
-step "sp2b corpus=$SP2B_CORPUS"
-step "watdiv gen (SF=$WATDIV_SF)"
-WATDIV_CORPUS=$(bash bench/watdiv/gen.sh "$WATDIV_SF" 2>/tmp/watdiv_gen.err | tail -n1)
-step "watdiv corpus=$WATDIV_CORPUS"
+# --- generate corpora (deterministic; only for the SELECTED suites) ---
+# [FABLE-5] a FAILED generation is a LOUD "FATAL" step (with the gen stderr tail inlined),
+# not a silent empty variable — run 1 (2026-07-07) skipped the whole watdiv suite as a
+# quiet "NO CORPUS" because the box was missing Boost and nothing shouted.
+SP2B_CORPUS=""; WATDIV_CORPUS=""
+if want_suite sp2b; then
+  step "sp2b gen ($SP2B_TRIPLES triples)"
+  SP2B_CORPUS=$(bash bench/sp2b/gen.sh "$SP2B_TRIPLES" 2>/tmp/sp2b_gen.err | tail -n1)
+  [ -n "$SP2B_CORPUS" ] && [ -f "$SP2B_CORPUS" ] \
+    || step "FATAL: sp2b gen produced no corpus — $(tail -3 /tmp/sp2b_gen.err 2>/dev/null | tr '\n' ' ')"
+  step "sp2b corpus=$SP2B_CORPUS"
+fi
+if want_suite watdiv; then
+  step "watdiv gen (SF=$WATDIV_SF)"
+  WATDIV_CORPUS=$(bash bench/watdiv/gen.sh "$WATDIV_SF" 2>/tmp/watdiv_gen.err | tail -n1)
+  [ -n "$WATDIV_CORPUS" ] && [ -f "$WATDIV_CORPUS" ] \
+    || step "FATAL: watdiv gen produced no corpus — $(tail -3 /tmp/watdiv_gen.err 2>/dev/null | tr '\n' ' ')"
+  step "watdiv corpus=$WATDIV_CORPUS"
+fi
 
 CPU=$(LC_ALL=C grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//' || uname -p)
 NPROC=$(nproc); KERNEL=$(uname -r)
@@ -155,8 +169,8 @@ run_suite_http() {
 
 g=1
 while [ "$g" -le "$GATHERS" ]; do
-  run_suite_http sp2b   "$SP2B_CORPUS"   ttl bench/sp2b/queries   bench/sp2b/expected-rows.tsv   "SP2Bench $SP2B_TRIPLES triples (real Freiburg sp2b_gen, deterministic)" "$g"
-  run_suite_http watdiv "$WATDIV_CORPUS" nt  bench/watdiv/queries bench/watdiv/expected-rows.tsv "WatDiv SF=$WATDIV_SF (real Waterloo watdiv, deterministic seed=1)" "$g"
+  want_suite sp2b && run_suite_http sp2b "$SP2B_CORPUS" ttl bench/sp2b/queries bench/sp2b/expected-rows.tsv "SP2Bench $SP2B_TRIPLES triples (real Freiburg sp2b_gen, deterministic)" "$g"
+  want_suite watdiv && run_suite_http watdiv "$WATDIV_CORPUS" nt bench/watdiv/queries bench/watdiv/expected-rows.tsv "WatDiv SF=$WATDIV_SF (real Waterloo watdiv, deterministic seed=1)" "$g"
   g=$(( g + 1 ))
 done
 

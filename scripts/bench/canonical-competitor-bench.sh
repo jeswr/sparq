@@ -36,6 +36,7 @@ WATDIV_SF="${WATDIV_SF:-1}"
 ITERS="${ITERS:-3}"
 QTO="${QTO:-300}"
 GATHERS="${GATHERS:-2}"
+SUITES="${SUITES:-sp2b watdiv}"   # space-separated suite filter (partial re-runs)
 WATCHDOG_S="${WATCHDOG_S:-10800}"                 # 3h hard cap (self-terminate backstop)
 POLL_DEADLINE_S="${POLL_DEADLINE_S:-9900}"        # 2h45m < watchdog, so watchdog stays backstop
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-60}"
@@ -107,7 +108,9 @@ step() { echo "[STEP \$(date -u +%Y-%m-%dT%H:%M:%SZ)] \$*" | tee -a /root/GATHER
 export DEBIAN_FRONTEND=noninteractive
 step "apt update+install"
 apt-get update -qq
-apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 unzip docker.io openjdk-21-jre-headless bc || true
+# libboost-all-dev: the WatDiv generator (bench/watdiv/gen.sh) compiles against Boost
+# headers — omitting it silently skipped the watdiv suite ("NO CORPUS", 2026-07-07 run 1).
+apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 unzip docker.io openjdk-21-jre-headless libboost-all-dev bc || true
 step "start docker"
 systemctl enable --now docker || systemctl start docker || true
 for _ in \$(seq 1 60); do docker info >/dev/null 2>&1 && { step "docker up"; break; }; sleep 2; done
@@ -124,7 +127,7 @@ cd sparq
 git fetch -q origin "$BRANCH" && git checkout -q "$BRANCH"
 step "checked out \$(git rev-parse --short HEAD)"
 
-SP2B_TRIPLES=$SP2B_TRIPLES WATDIV_SF=$WATDIV_SF ITERS=$ITERS QTO=$QTO GATHERS=$GATHERS \
+SP2B_TRIPLES=$SP2B_TRIPLES WATDIV_SF=$WATDIV_SF ITERS=$ITERS QTO=$QTO GATHERS=$GATHERS SUITES="$SUITES" \
   bash scripts/bench/canonical-http-gather-instance.sh
 UD
 )
