@@ -70,6 +70,20 @@ export interface SameBoxRow {
   count_match: boolean | null;
 }
 
+// [OPUS-4.8] sq-1sa9r — one engine column in a same-box comparison. `mode` labels the
+// measurement path (CLI in-process vs HTTP SPARQL adapter) — a real asymmetry that must be
+// surfaced. `status`/`failure` carry a whole-engine failure (e.g. fuseki load timeout) so
+// the column renders "failed", never blank.
+export interface SameBoxEngine {
+  id: string;
+  label: string;
+  version: string;
+  env?: string;
+  mode?: string;
+  status?: string; // "ok" | "failed"
+  failure?: string;
+}
+
 export interface SameBoxComparison {
   suite: string;
   scale: string;
@@ -77,13 +91,20 @@ export interface SameBoxComparison {
   git_commit: string;
   gathered_at_utc: string;
   source: string;
+  // [OPUS-4.8] sq-1sa9r — true for a dedicated quiet-box canonical gather (recorded as
+  // `canonical` in the envelope). Absent/false = an ephemeral non-canonical ordering gather.
+  canonical?: boolean;
+  combine?: string; // how duplicate gathers were combined (e.g. best-of)
+  count_crosscheck_note?: string;
   env: {
     host_class: string;
     quiet_box: boolean;
     gathered_at_utc?: string;
+    cpu_model?: string;
+    kernel?: string;
     note?: string;
   };
-  engines: { id: string; label: string; version: string; env?: string }[];
+  engines: SameBoxEngine[];
   rows: SameBoxRow[];
 }
 
@@ -473,6 +494,30 @@ export type CompetitiveSummary =
       nonCanonical: boolean;
     }
   | {
+      // [OPUS-4.8] sq-1sa9r — a CANONICAL (or non-canonical) same-box multi-engine gather.
+      // We deliberately do NOT headline a single "N× faster" multiplier here: the engines are
+      // measured in DIFFERENT modes (sparq/Oxigraph in-process via the CLI; Fuseki/Virtuoso/
+      // QLever over an HTTP SPARQL adapter), so on small result sets the absolute ratios carry
+      // per-query harness/transport overhead as much as engine speed. Instead we report the
+      // honest, count-checked "fastest on W of N" plus the raw range, heavily caveated.
+      kind: "same-box";
+      competitors: string[]; // competitor labels that produced >=1 timing
+      cliCompetitors: string[]; // in-process CLI competitors (excl. sparq), e.g. Oxigraph
+      httpEngines: string[]; // HTTP-adapter engines, e.g. Fuseki / Virtuoso / QLever
+      failedEngines: string[]; // labels of engines that failed to load (e.g. Fuseki)
+      total: number; // count-cross-checked queries compared
+      wins: number; // queries where sparq was the fastest engine
+      losses: number; // queries where a competitor was faster
+      median: number; // median (fastest-competitor / sparq) over the compared queries
+      min: number;
+      max: number;
+      diffQueries: string[]; // queries excluded because engines disagreed on the count
+      canonical: boolean;
+      host: string;
+      scale: string;
+      gitCommit: string;
+    }
+  | {
       kind: "pending";
       // a same-box comparison EXISTS for this suite but competitor cells are null
       reason: string;
@@ -549,16 +594,26 @@ export function competitiveSummary(
     };
   }
 
-  // (2) same_box_comparisons (SP2Bench): per-query rows with a sparq value + competitor
-  //     values measured on ONE box. Compute ratios only from rows where BOTH sparq and at
-  //     least one competitor have a real number.
+  // (2) same_box_comparisons (SP2Bench / WatDiv): per-query rows with a sparq value +
+  //     competitor values measured on ONE box. HONESTY (sq-1sa9r): we compute the ratio ONLY
+  //     from rows whose solution COUNT cross-checked across engines (count_match !== false —
+  //     a disagreeing count means a competitor computed a DIFFERENT answer, so its timing is
+  //     not comparable). We also record the mode asymmetry (in-process CLI vs HTTP adapter)
+  //     and any failed engine so the UI can caveat, never a bald "N× faster" headline.
   const sb = sameBoxFor(suite);
   if (sb) {
     const ratios: number[] = [];
+    const diffQueries: string[] = [];
     const engines = new Set<string>();
+    let wins = 0;
+    let losses = 0;
     for (const row of sb.rows) {
       const sparq = row.values["sparq"];
       if (typeof sparq !== "number" || sparq <= 0) continue;
+      if (row.count_match === false) {
+        diffQueries.push(row.query);
+        continue; // engines disagreed on the count — timing not comparable
+      }
       let best = Infinity;
       for (const [eng, v] of Object.entries(row.values)) {
         if (eng === "sparq") continue;
@@ -567,21 +622,46 @@ export function competitiveSummary(
           if (v < best) best = v;
         }
       }
-      if (best !== Infinity) ratios.push(best / sparq);
+      if (best !== Infinity) {
+        const ratio = best / sparq;
+        ratios.push(ratio);
+        if (ratio > 1) wins += 1;
+        else if (ratio < 1) losses += 1;
+      }
     }
+    // Label + mode grouping comes from THIS comparison's own engines (not the top-level
+    // registry), so a competitor absent from the registry still gets its proper label, and
+    // the CLI-vs-HTTP asymmetry is classified from each engine's recorded `mode`.
+    const isHttp = (e: { mode?: string }) => /http/i.test(e.mode || "");
+    const isCli = (e: { mode?: string }) => /in-process/i.test(e.mode || "");
+    const failedEngines = sb.engines
+      .filter((e) => e.status === "failed")
+      .map((e) => e.label);
+    const competitors = sb.engines
+      .filter((e) => e.id !== "sparq" && engines.has(e.id))
+      .map((e) => e.label);
+    const cliCompetitors = sb.engines
+      .filter((e) => e.id !== "sparq" && isCli(e))
+      .map((e) => e.label);
+    const httpEngines = sb.engines.filter((e) => isHttp(e)).map((e) => e.label);
     if (ratios.length > 0) {
       return {
-        kind: "speedup",
+        kind: "same-box",
+        competitors,
+        cliCompetitors,
+        httpEngines,
+        failedEngines,
+        total: ratios.length,
+        wins,
+        losses,
+        median: round1(median(ratios)),
         min: round1(Math.min(...ratios)),
         max: round1(Math.max(...ratios)),
-        median: round1(median(ratios)),
-        n: ratios.length,
-        competitor: "next-best competitor",
-        engines: engineLabels([...engines]),
-        provenance:
-          (sb.env.host_class || "ephemeral box") +
-          " (NON-CANONICAL; for cross-engine ordering)",
-        nonCanonical: true,
+        diffQueries,
+        canonical: sb.canonical === true,
+        host: sb.env.host_class || "quiet box",
+        scale: sb.scale,
+        gitCommit: sb.git_commit,
       };
     }
     // a same-box gather EXISTS but every competitor cell is null → honest pending
@@ -590,7 +670,7 @@ export function competitiveSummary(
       reason:
         "A same-box " +
         sb.suite +
-        " comparison was run, but competitor (Oxigraph / QLever) timings were not captured this run, so no speedup can be computed yet.",
+        " comparison was run, but competitor timings were not captured this run, so no comparison can be computed yet.",
       provenance: sb.env.host_class,
     };
   }
@@ -794,6 +874,9 @@ export function summaryHeadline(suite: string, s: CompetitiveSummary): string {
         ? `${s.min}×`
         : `${s.min}×–${s.max}× (median ${s.median}×)`;
     return `${range} faster than ${s.competitor} across ${suite}`;
+  }
+  if (s.kind === "same-box") {
+    return `${s.canonical ? "canonical " : ""}same-box: sparq fastest on ${s.wins}/${s.total} count-checked queries (vs ${s.competitors.length} competitor${s.competitors.length === 1 ? "" : "s"})`;
   }
   if (s.kind === "pending") return "competitor baseline pending";
   return "sparq absolute numbers (no competitor baseline yet)";

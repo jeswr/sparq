@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-06-16T16:09:17.098Z",
-  "source": "benchmark-data branch (dev/bench/data.js)",
+  "generatedAt": "2026-07-07T04:29:51.847Z",
+  "source": "benchmark-data branch (dev/bench/data.js) (kept — --competitors-only: refreshed labels+competitors only)",
   "latest": {
     "commit": "fd219babd41d36e36b8e72e161c5c4c8277583fe",
     "date": 1781556283889,
@@ -28650,6 +28650,22 @@
       "mode": "query",
       "unit": "µs"
     },
+    "hdt_load_s": {
+      "label": "HDT — load+decode .hdt to a native Graph (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "wall-clock load+decode of the synthetic .hdt (trend-only; machine-sensitive)",
+      "mode": "load",
+      "unit": "s"
+    },
+    "hdt_vs_ntgz_load_s": {
+      "label": "HDT — gzipped-N-Triples / HDT load-time ratio (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "ntgz_load_s / hdt_load_s on the same triples (ratio survives contention; trend-only)",
+      "mode": "ratio",
+      "unit": "ratio"
+    },
     "load_s": {
       "label": "Load — parse + index build (synthetic)",
       "suite": "Pipeline",
@@ -28782,6 +28798,38 @@
       "mode": "count",
       "regime": "extensional",
       "unit": "µs"
+    },
+    "nlq_ask_repairs": {
+      "label": "NL→SPARQL ask loop — repair rounds",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "repair rounds the ask loop needed (0 = stub's first SPARQL was valid + executable)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_ask_result_rows": {
+      "label": "NL→SPARQL ask loop — result rows",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "rows the full ask loop returns (GROUP BY ?type -> one row per type)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_prompt_chars": {
+      "label": "NL→SPARQL grounded prompt — char length (token-budget proxy)",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "length of the schema-grounded prompt prompt_for(question) builds; smaller = leaner",
+      "mode": "count",
+      "unit": "chars"
+    },
+    "nlq_synth_triples": {
+      "label": "NL→SPARQL synthetic graph — triple count",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "triples in the synthetic typed graph (3 per entity)",
+      "mode": "count",
+      "unit": "count"
     },
     "op_q01_bgp_count": {
       "label": "Operator — BGP — single triple pattern, count",
@@ -29653,6 +29701,102 @@
       "mode": "validate",
       "unit": "µs"
     },
+    "snikmeta_direct_eq_upstream": {
+      "label": "HDT direct_eq_upstream — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "1 iff direct decoder == upstream-backed path on the same bytes (oracle)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_distinct_predicates": {
+      "label": "HDT distinct_predicates — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct predicates via a full SPO scan (triple-pattern resolution)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_rdf_type_triples": {
+      "label": "HDT rdf_type_triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "bound-predicate triple-pattern resolution (rdf:type triples)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_terms": {
+      "label": "HDT terms — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct dictionary terms interned into sparq's Dict (id-translation)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_triples": {
+      "label": "HDT triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "stored triples of the decoded graph (load-and-decode-to-native)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_acp_auth_triples": {
+      "label": "Solid acp_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised ACP auth view (materialize_acp, 3 strata)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_alice_readable_graphs": {
+      "label": "Solid alice_readable_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "graphs visible to ALICE in Mode::Read (AuthIndex walk)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_authorized_rows": {
+      "label": "Solid authorized_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query restricted to alice's authorized subset",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_full_dataset_rows": {
+      "label": "Solid full_dataset_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query over the FULL dataset (GRAPH ?g)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_auth_triples": {
+      "label": "Solid wac_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised WAC auth view (materialize_wac)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_named_graphs": {
+      "label": "Solid wac_named_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "named graphs in the WAC fixture",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_quads": {
+      "label": "Solid wac_quads — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "total quads across the WAC fixture's named graphs",
+      "mode": "count",
+      "unit": "count"
+    },
     "sp2b_q01_count": {
       "label": "SP2Bench q01 — single journal's issue year (selective lookup), count",
       "suite": "SP2Bench",
@@ -30186,480 +30330,487 @@
       "query": "compiled sparq-wasm browser bundle size",
       "unit": "bytes"
     },
-    "watdiv_C1_count": {
-      "label": "WatDiv C1 — complex query, count",
+    "wasm_opt_bundle_bytes": {
+      "label": "WASM shipped size (wasm-opt -Oz)",
+      "suite": "Memory / Size",
+      "dataset": "n/a (build artifact, post wasm-opt -Oz; binaryen — version logged per CI run)",
+      "query": "sparq-wasm bundle size after wasm-opt -Oz (trend-only; raw gate is wasm_bundle_bytes)",
+      "unit": "bytes"
+    },
+    "watdiv_sf1000_C1_count": {
+      "label": "WatDiv C1 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C1_json": {
-      "label": "WatDiv C1 — complex query, json",
+    "watdiv_sf1000_C1_json": {
+      "label": "WatDiv C1 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C1_materialize": {
-      "label": "WatDiv C1 — complex query, materialize",
+    "watdiv_sf1000_C1_materialize": {
+      "label": "WatDiv C1 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C2_count": {
-      "label": "WatDiv C2 — complex query, count",
+    "watdiv_sf1000_C2_count": {
+      "label": "WatDiv C2 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C2_json": {
-      "label": "WatDiv C2 — complex query, json",
+    "watdiv_sf1000_C2_json": {
+      "label": "WatDiv C2 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C2_materialize": {
-      "label": "WatDiv C2 — complex query, materialize",
+    "watdiv_sf1000_C2_materialize": {
+      "label": "WatDiv C2 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C3_count": {
-      "label": "WatDiv C3 — complex query, count",
+    "watdiv_sf1000_F1_count": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_json": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_materialize": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_count": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_json": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_materialize": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1_C3_count": {
+      "label": "WatDiv C3 (SF=1) — complex query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C3_json": {
-      "label": "WatDiv C3 — complex query, json",
+    "watdiv_sf1_C3_json": {
+      "label": "WatDiv C3 (SF=1) — complex query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C3_materialize": {
-      "label": "WatDiv C3 — complex query, materialize",
+    "watdiv_sf1_C3_materialize": {
+      "label": "WatDiv C3 (SF=1) — complex query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F1_count": {
-      "label": "WatDiv F1 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F1_json": {
-      "label": "WatDiv F1 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F1_materialize": {
-      "label": "WatDiv F1 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F2_count": {
-      "label": "WatDiv F2 — snowflake query, count",
+    "watdiv_sf1_F2_count": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F2_json": {
-      "label": "WatDiv F2 — snowflake query, json",
+    "watdiv_sf1_F2_json": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F2_materialize": {
-      "label": "WatDiv F2 — snowflake query, materialize",
+    "watdiv_sf1_F2_materialize": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F3_count": {
-      "label": "WatDiv F3 — snowflake query, count",
+    "watdiv_sf1_F3_count": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F3_json": {
-      "label": "WatDiv F3 — snowflake query, json",
+    "watdiv_sf1_F3_json": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F3_materialize": {
-      "label": "WatDiv F3 — snowflake query, materialize",
+    "watdiv_sf1_F3_materialize": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F4_count": {
-      "label": "WatDiv F4 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F4_json": {
-      "label": "WatDiv F4 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F4_materialize": {
-      "label": "WatDiv F4 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F5_count": {
-      "label": "WatDiv F5 — snowflake query, count",
+    "watdiv_sf1_F5_count": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F5_json": {
-      "label": "WatDiv F5 — snowflake query, json",
+    "watdiv_sf1_F5_json": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F5_materialize": {
-      "label": "WatDiv F5 — snowflake query, materialize",
+    "watdiv_sf1_F5_materialize": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L1_count": {
-      "label": "WatDiv L1 — linear query, count",
+    "watdiv_sf1_L1_count": {
+      "label": "WatDiv L1 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L1_json": {
-      "label": "WatDiv L1 — linear query, json",
+    "watdiv_sf1_L1_json": {
+      "label": "WatDiv L1 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L1_materialize": {
-      "label": "WatDiv L1 — linear query, materialize",
+    "watdiv_sf1_L1_materialize": {
+      "label": "WatDiv L1 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L2_count": {
-      "label": "WatDiv L2 — linear query, count",
+    "watdiv_sf1_L2_count": {
+      "label": "WatDiv L2 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L2_json": {
-      "label": "WatDiv L2 — linear query, json",
+    "watdiv_sf1_L2_json": {
+      "label": "WatDiv L2 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L2_materialize": {
-      "label": "WatDiv L2 — linear query, materialize",
+    "watdiv_sf1_L2_materialize": {
+      "label": "WatDiv L2 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L3_count": {
-      "label": "WatDiv L3 — linear query, count",
+    "watdiv_sf1_L3_count": {
+      "label": "WatDiv L3 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L3_json": {
-      "label": "WatDiv L3 — linear query, json",
+    "watdiv_sf1_L3_json": {
+      "label": "WatDiv L3 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L3_materialize": {
-      "label": "WatDiv L3 — linear query, materialize",
+    "watdiv_sf1_L3_materialize": {
+      "label": "WatDiv L3 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L4_count": {
-      "label": "WatDiv L4 — linear query, count",
+    "watdiv_sf1_L4_count": {
+      "label": "WatDiv L4 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L4_json": {
-      "label": "WatDiv L4 — linear query, json",
+    "watdiv_sf1_L4_json": {
+      "label": "WatDiv L4 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L4_materialize": {
-      "label": "WatDiv L4 — linear query, materialize",
+    "watdiv_sf1_L4_materialize": {
+      "label": "WatDiv L4 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L5_count": {
-      "label": "WatDiv L5 — linear query, count",
+    "watdiv_sf1_L5_count": {
+      "label": "WatDiv L5 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L5_json": {
-      "label": "WatDiv L5 — linear query, json",
+    "watdiv_sf1_L5_json": {
+      "label": "WatDiv L5 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L5_materialize": {
-      "label": "WatDiv L5 — linear query, materialize",
+    "watdiv_sf1_L5_materialize": {
+      "label": "WatDiv L5 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S1_count": {
-      "label": "WatDiv S1 — star query, count",
+    "watdiv_sf1_S1_count": {
+      "label": "WatDiv S1 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S1_json": {
-      "label": "WatDiv S1 — star query, json",
+    "watdiv_sf1_S1_json": {
+      "label": "WatDiv S1 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S1_materialize": {
-      "label": "WatDiv S1 — star query, materialize",
+    "watdiv_sf1_S1_materialize": {
+      "label": "WatDiv S1 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S2_count": {
-      "label": "WatDiv S2 — star query, count",
+    "watdiv_sf1_S2_count": {
+      "label": "WatDiv S2 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S2_json": {
-      "label": "WatDiv S2 — star query, json",
+    "watdiv_sf1_S2_json": {
+      "label": "WatDiv S2 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S2_materialize": {
-      "label": "WatDiv S2 — star query, materialize",
+    "watdiv_sf1_S2_materialize": {
+      "label": "WatDiv S2 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S3_count": {
-      "label": "WatDiv S3 — star query, count",
+    "watdiv_sf1_S3_count": {
+      "label": "WatDiv S3 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S3_json": {
-      "label": "WatDiv S3 — star query, json",
+    "watdiv_sf1_S3_json": {
+      "label": "WatDiv S3 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S3_materialize": {
-      "label": "WatDiv S3 — star query, materialize",
+    "watdiv_sf1_S3_materialize": {
+      "label": "WatDiv S3 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S4_count": {
-      "label": "WatDiv S4 — star query, count",
+    "watdiv_sf1_S4_count": {
+      "label": "WatDiv S4 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S4_json": {
-      "label": "WatDiv S4 — star query, json",
+    "watdiv_sf1_S4_json": {
+      "label": "WatDiv S4 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S4_materialize": {
-      "label": "WatDiv S4 — star query, materialize",
+    "watdiv_sf1_S4_materialize": {
+      "label": "WatDiv S4 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S5_count": {
-      "label": "WatDiv S5 — star query, count",
+    "watdiv_sf1_S5_count": {
+      "label": "WatDiv S5 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S5_json": {
-      "label": "WatDiv S5 — star query, json",
+    "watdiv_sf1_S5_json": {
+      "label": "WatDiv S5 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S5_materialize": {
-      "label": "WatDiv S5 — star query, materialize",
+    "watdiv_sf1_S5_materialize": {
+      "label": "WatDiv S5 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S6_count": {
-      "label": "WatDiv S6 — star query, count",
+    "watdiv_sf1_S6_count": {
+      "label": "WatDiv S6 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S6_json": {
-      "label": "WatDiv S6 — star query, json",
+    "watdiv_sf1_S6_json": {
+      "label": "WatDiv S6 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S6_materialize": {
-      "label": "WatDiv S6 — star query, materialize",
+    "watdiv_sf1_S6_materialize": {
+      "label": "WatDiv S6 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S7_count": {
-      "label": "WatDiv S7 — star query, count",
+    "watdiv_sf1_S7_count": {
+      "label": "WatDiv S7 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S7_json": {
-      "label": "WatDiv S7 — star query, json",
+    "watdiv_sf1_S7_json": {
+      "label": "WatDiv S7 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S7_materialize": {
-      "label": "WatDiv S7 — star query, materialize",
+    "watdiv_sf1_S7_materialize": {
+      "label": "WatDiv S7 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
@@ -31196,37 +31347,59 @@
     },
     "same_box_comparisons": [
       {
-        "_comment": "[OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2): sparq + Oxigraph (+ QLever best-effort) on ONE ephemeral AWS EC2 box against the SAME generated SP2Bench-250k corpus + the SAME bench/sp2b/queries .rq files in the SAME min-of-5 COUNT regime. DISTINCT from (a) the gh-runner CI-band featured-suites `values` cells above — that sparq column is a DIFFERENT machine, so a competitor µs from this box must NOT be placed beside it; and (b) the cross-machine `references` baselines (cited, own scale/machine). Absolute µs are THIS-BOX-ONLY (4-vCPU Graviton) — for cross-engine ORDERING, not an absolute cross-machine reference. HONESTY: the gather launched sparq (sparq-cli bench, captured) then Oxigraph (sparq-bench bench-corpus) on the same box, but the orchestrator's poll loop reached its bound and the instance hit its orphan-safe cleanup trap immediately AFTER the Oxigraph command was invoked and BEFORE its TSV reached the pulled log — so NO Oxigraph timing and NO QLever timing were captured. Rather than fabricate or cross-fill, oxigraph + qlever stay null (render 'n/a') and count_match stays null (cannot verify cross-engine row agreement without the Oxigraph rows). Only sparq's real per-query (rows, best_us) are recorded. The sparq+oxigraph row-counts therefore COULD NOT be cross-checked on this run. Re-running the gather to completion (sentinel-gated, longer poll bound) would fill the oxigraph column and enable the count_match check. Keep byte-for-meaning in sync with COMPETITORS_DATA.same_box_comparisons in dashboard.js.",
-        "suite": "SP2Bench",
-        "scale": "SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)",
+        "suite": "sp2b",
+        "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
         "iters": 5,
-        "git_commit": "681047f",
-        "gathered_at_utc": "2026-06-16",
-        "source": "live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)",
+        "git_commit": "0ab87b2a",
+        "gathered_at_utc": "2026-07-07T01:11:26Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T015305Z + 20260707T015316Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×5, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-competitor-matrix (sq-1sa9r)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
         "env": {
-          "host_class": "ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)",
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
           "quiet_box": true,
-          "gathered_at_utc": "2026-06-16",
-          "note": "Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run."
+          "gathered_at_utc": "2026-07-07T01:11:26Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
         },
         "engines": [
           {
             "id": "sparq",
             "label": "sparq",
-            "version": "git 681047f",
-            "env": "ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT"
+            "version": "0ab87b2a",
+            "mode": "CLI in-process (sparq-cli bench, COUNT mode)",
+            "status": "ok"
           },
           {
             "id": "oxigraph",
             "label": "Oxigraph",
-            "version": "0.5.8",
-            "env": "same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired"
+            "version": "0.5.9",
+            "mode": "CLI in-process (prebuilt on-disk store, sha256-pinned)",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
+            "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
+            "status": "failed",
+            "failure": "load timeout (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP SPARQL adapter (isql ld_dir)",
+            "status": "ok"
           },
           {
             "id": "qlever",
             "label": "QLever",
-            "version": "n/a",
-            "env": "requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated"
+            "version": "adfreiburg/qlever (sha256:2cc33823e65a…)",
+            "mode": "HTTP SPARQL adapter (qlever-index → qlever-server)",
+            "status": "ok"
           }
         ],
         "rows": [
@@ -31235,154 +31408,449 @@
             "unit": "µs",
             "rows": 1,
             "values": {
-              "sparq": 9.2,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 10.5,
+              "oxigraph": 14296.3,
+              "fuseki": null,
+              "virtuoso": 743,
+              "qlever": 2946.9
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q02",
             "unit": "µs",
             "rows": 6067,
             "values": {
-              "sparq": 6618.2,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 6183.8,
+              "oxigraph": 524517.7,
+              "fuseki": null,
+              "virtuoso": 340770,
+              "qlever": 276392.4
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q03a",
             "unit": "µs",
             "rows": 15823,
             "values": {
-              "sparq": 14525.7,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 11804,
+              "oxigraph": 218440.3,
+              "fuseki": null,
+              "virtuoso": 95121,
+              "qlever": 46230.5
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q03b",
             "unit": "µs",
             "rows": 114,
             "values": {
-              "sparq": 14355.4,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 11315.9,
+              "oxigraph": 128549.8,
+              "fuseki": null,
+              "virtuoso": 1378,
+              "qlever": 1576.4
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q03c",
             "unit": "µs",
             "rows": 0,
             "values": {
-              "sparq": 14140.6,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 11393.2,
+              "oxigraph": 126918.1,
+              "fuseki": null,
+              "virtuoso": 613,
+              "qlever": 1246.6
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q04",
             "unit": "µs",
             "rows": 541911,
             "values": {
-              "sparq": 358604.1,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 347814.3,
+              "oxigraph": 19702535.7,
+              "fuseki": null,
+              "virtuoso": 8220214,
+              "qlever": 2900056.2
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q05b",
             "unit": "µs",
             "rows": 6933,
             "values": {
-              "sparq": 15317.7,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 15409.2,
+              "oxigraph": 612795.9,
+              "fuseki": null,
+              "virtuoso": 109939,
+              "qlever": 31787.2
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q07",
             "unit": "µs",
             "rows": 48,
             "values": {
-              "sparq": 23383.4,
+              "sparq": 20378.9,
               "oxigraph": null,
-              "qlever": null
+              "fuseki": null,
+              "virtuoso": 508290,
+              "qlever": 8031.1
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q08",
             "unit": "µs",
             "rows": 358,
             "values": {
-              "sparq": 212938.1,
+              "sparq": 153318,
               "oxigraph": null,
-              "qlever": null
+              "fuseki": null,
+              "virtuoso": 12809,
+              "qlever": 8567.8
             },
-            "count_match": null
+            "count_match": false
           },
           {
             "query": "q09",
             "unit": "µs",
             "rows": 4,
             "values": {
-              "sparq": 23091.2,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 20488.4,
+              "oxigraph": 185741.3,
+              "fuseki": null,
+              "virtuoso": 13417,
+              "qlever": 1343.6
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q10",
             "unit": "µs",
             "rows": 452,
             "values": {
-              "sparq": 3.8,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 3.7,
+              "oxigraph": 16483.8,
+              "fuseki": null,
+              "virtuoso": 5523,
+              "qlever": 4521.1
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q11",
             "unit": "µs",
             "rows": 10,
             "values": {
-              "sparq": 18652.1,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 24552.2,
+              "oxigraph": 742647.9,
+              "fuseki": null,
+              "virtuoso": 13407,
+              "qlever": 1925.2
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q12b",
             "unit": "µs",
             "rows": 1,
             "values": {
-              "sparq": 213513.8,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 153496.5,
+              "oxigraph": 49991323.8,
+              "fuseki": null,
+              "virtuoso": 9003,
+              "qlever": 7218.5
             },
-            "count_match": null
+            "count_match": false
           },
           {
             "query": "q12c",
             "unit": "µs",
             "rows": 0,
             "values": {
-              "sparq": 4.9,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 5.2,
+              "oxigraph": 10764.2,
+              "fuseki": null,
+              "virtuoso": 573,
+              "qlever": 1389.6
             },
-            "count_match": null
+            "count_match": true
+          }
+        ]
+      },
+      {
+        "suite": "watdiv",
+        "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
+        "iters": 5,
+        "git_commit": "0ab87b2a",
+        "gathered_at_utc": "2026-07-07T01:11:26Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T022331Z + 20260707T022342Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×5, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-competitor-matrix (sq-1sa9r)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+        "env": {
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+          "quiet_box": true,
+          "gathered_at_utc": "2026-07-07T01:11:26Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
+        },
+        "engines": [
+          {
+            "id": "sparq",
+            "label": "sparq",
+            "version": "0ab87b2a",
+            "mode": "CLI in-process (sparq-cli bench, COUNT mode)",
+            "status": "ok"
+          },
+          {
+            "id": "oxigraph",
+            "label": "Oxigraph",
+            "version": "0.5.9",
+            "mode": "CLI in-process (prebuilt on-disk store, sha256-pinned)",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
+            "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
+            "status": "failed",
+            "failure": "load timeout (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP SPARQL adapter (isql ld_dir)",
+            "status": "ok"
+          },
+          {
+            "id": "qlever",
+            "label": "QLever",
+            "version": "adfreiburg/qlever (sha256:2cc33823e65a…)",
+            "mode": "HTTP SPARQL adapter (qlever-index → qlever-server)",
+            "status": "ok"
+          }
+        ],
+        "rows": [
+          {
+            "query": "C3",
+            "unit": "µs",
+            "rows": 8763,
+            "values": {
+              "sparq": 50.2,
+              "oxigraph": 1175133.7,
+              "fuseki": null,
+              "virtuoso": 38567,
+              "qlever": 33535.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "F2",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 24.8,
+              "oxigraph": 11441.5,
+              "fuseki": null,
+              "virtuoso": 747,
+              "qlever": 31867.6
+            },
+            "count_match": true
+          },
+          {
+            "query": "F3",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 25.4,
+              "oxigraph": 12255.2,
+              "fuseki": null,
+              "virtuoso": 796,
+              "qlever": 9979
+            },
+            "count_match": true
+          },
+          {
+            "query": "F5",
+            "unit": "µs",
+            "rows": 34,
+            "values": {
+              "sparq": 101.8,
+              "oxigraph": 19965.7,
+              "fuseki": null,
+              "virtuoso": 1753,
+              "qlever": 10629.7
+            },
+            "count_match": true
+          },
+          {
+            "query": "L1",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 15.6,
+              "oxigraph": 12966.1,
+              "fuseki": null,
+              "virtuoso": 728,
+              "qlever": 3706.4
+            },
+            "count_match": true
+          },
+          {
+            "query": "L2",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 14.5,
+              "oxigraph": 11396.1,
+              "fuseki": null,
+              "virtuoso": 661,
+              "qlever": 2470.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "L3",
+            "unit": "µs",
+            "rows": 41,
+            "values": {
+              "sparq": 6.3,
+              "oxigraph": 11543.3,
+              "fuseki": null,
+              "virtuoso": 1070,
+              "qlever": 2485.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "L4",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 5.4,
+              "oxigraph": 10630.4,
+              "fuseki": null,
+              "virtuoso": 658,
+              "qlever": 2317.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "L5",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 9.8,
+              "oxigraph": 10360.6,
+              "fuseki": null,
+              "virtuoso": 647,
+              "qlever": 3771.1
+            },
+            "count_match": true
+          },
+          {
+            "query": "S1",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 32.6,
+              "oxigraph": 19872.9,
+              "fuseki": null,
+              "virtuoso": 1080,
+              "qlever": 132258.4
+            },
+            "count_match": true
+          },
+          {
+            "query": "S2",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 12.1,
+              "oxigraph": 13321.9,
+              "fuseki": null,
+              "virtuoso": 773,
+              "qlever": 4018.8
+            },
+            "count_match": true
+          },
+          {
+            "query": "S3",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 11.4,
+              "oxigraph": 11749.1,
+              "fuseki": null,
+              "virtuoso": 850,
+              "qlever": 5350.4
+            },
+            "count_match": true
+          },
+          {
+            "query": "S4",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 11.4,
+              "oxigraph": 12297.5,
+              "fuseki": null,
+              "virtuoso": 746,
+              "qlever": 4051.8
+            },
+            "count_match": true
+          },
+          {
+            "query": "S5",
+            "unit": "µs",
+            "rows": 8,
+            "values": {
+              "sparq": 10.7,
+              "oxigraph": 12254.9,
+              "fuseki": null,
+              "virtuoso": 823,
+              "qlever": 5380.9
+            },
+            "count_match": true
+          },
+          {
+            "query": "S6",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 9.4,
+              "oxigraph": 11013.5,
+              "fuseki": null,
+              "virtuoso": 663,
+              "qlever": 3771.6
+            },
+            "count_match": true
+          },
+          {
+            "query": "S7",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 10.4,
+              "oxigraph": 10596,
+              "fuseki": null,
+              "virtuoso": 658,
+              "qlever": 3851.9
+            },
+            "count_match": true
           }
         ]
       }
