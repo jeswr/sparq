@@ -169,6 +169,26 @@ records_to  = "stdout (metric_us lines)"
 featured    = false  # in-crate micro-bench for an opt-in capability; a relative baseline, not a dashboard series
 status      = "ok"
 
+# [SONNET-4.6] sq-pntvh.9 (epic sq-pntvh) — M4 Phase 9: Seam-A end-to-end A/B measurement.
+# Tests the exec.rs columnar_filter seam (Phase 5 wired, sq-pntvh.5) end-to-end via two
+# sparq-cli builds: feature-OFF (scalar path) vs feature-ON (columnar dispatch active).
+# WIN/NO-WIN verdict gates sq-pntvh.6 (morsel pull-pipeline); NO-WIN honestly defers
+# Phases 6/7 per research/vector-at-a-time-m4-completion-design.md §8.2. Results go to the
+# sq-pntvh bead comment — no numbers committed to the repo (non-canonical wall-clock).
+[[benchmark]]
+id          = "seam-a-e2e"
+name        = "Seam-A end-to-end A/B: feature-ON vs feature-OFF for join->FILTER + GROUP-BY shapes"
+category    = "query"
+measures    = "feature-ON vs feature-OFF min-of-iters wall-clock (metric_us) for two eligible shapes: (1) join->residual-FILTER on an inline-integer column — the exec.rs columnar_filter seam (Phase 5, Seam A) targets this shape; (2) join->GROUP-BY reducer — Phase 4 columnar aggregate NOT yet wired, expected equal timing across feature states (Phase-4 honest baseline). WIN criterion: seam_a_filter_on_us < seam_a_filter_off_us"
+invoke      = "bench/scripts/seam_a_e2e.sh 500000 5   # N=500000 >> VEC_MIN_BATCH=256; iters=5; builds two sparq-cli binaries (feature-OFF in target/release; feature-ON in /tmp/seam-a-vec); emits metric_us lines + seam_a_verdict summary"
+source      = "bench/scripts/seam_a_e2e.sh; crates/sparq-engine/src/exec.rs (columnar_filter seam, apply_filter); crates/sparq-engine/src/vec_dispatch.rs (VEC_MIN_BATCH=256, VEC_MORSEL=2048); design research/vector-at-a-time-m4-completion-design.md (sec4 Seam A, sec7 dispatch table row3)"
+dataset     = "SYNTHETIC, generated in-script by an inline Python stdlib generator (no external data): N `(ex:s{i}, ex:age, i)` + N `(ex:s{i}, ex:tag, i%10)` integer-literal triples; join of the two patterns yields N rows, all with inline-integer ?age ids — satisfying VEC_MIN_BATCH and dtype-precheck eligibility gates; FILTER threshold = N*0.7 (keeps ~30% rows, always >> VEC_MIN_BATCH for N>=1000); corpus deterministic (sequential i in 0..N, no RNG)"
+quiet_box_sensitive = true  # wall-clock A/B comparison; verdict only meaningful on a quiet dedicated box; non-canonical on work-boxes
+pinning     = "N + ITERS (pin both for comparable numbers); FILTER threshold = N*7/10 (deterministic function of N); two builds: feature-OFF default sparq-cli + feature-ON --features sparq-engine/vectorized; corpus byte-deterministic (sequential integers)"
+records_to  = "stdout (metric_us lines + seam_a_verdict); EC2 timing numbers in sq-pntvh bead comment — not committed to repo"
+featured    = false  # internal M4 measurement for an opt-in capability; A/B verdict gates further work, not a dashboard series
+status      = "ok"
+
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
 [[benchmark]]
 id          = "sp2b"
