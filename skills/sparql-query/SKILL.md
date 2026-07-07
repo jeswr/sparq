@@ -603,31 +603,35 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   measurable hypothesis for the canonical perf host (bead `sq-0g6g`), not a baked-in number. When off,
   zero of this code compiles and the default native + wasm builds are byte-identical (no new deps; no
   `unsafe`).
-- **DP join-order enumerator (DPccp)** is the non-default `dp-planner` cargo feature (bead `sq-iywur`;
-  Moerkotte & Neumann, VLDB 2006). The DEFAULT join planner is the greedy GOO heuristic (a left-deep
-  order built one pattern at a time); `dp-planner` adds an OPT-IN alternative that enumerates every
-  **connected-subgraph / connected-complement pair** of the BGP join graph and fills a DP table
-  `best[S]` = the minimum-`Cout` **bushy** join tree over pattern set `S`, finding a provably
-  `Cout`-optimal order (seeded from the SAME index-range/characteristic-set cardinality estimator GOO
-  uses) — with **zero cross products** between patterns that share no variable. Install it per thread,
-  exactly like `with_cs_table`:
+- **DP join-order enumerator (DPccp)** is the `dp-planner` cargo feature (bead `sq-iywur`;
+  Moerkotte & Neumann, VLDB 2006; made default-on for `sparq-cli` by bead `sq-7d3dj.30.5`).
+  It enumerates every **connected-subgraph / connected-complement pair** of the BGP join graph
+  and fills a DP table `best[S]` = the minimum-`Cout` **bushy** join tree over pattern set `S`,
+  finding a provably `Cout`-optimal order (seeded from the SAME index-range/characteristic-set
+  cardinality estimator GOO uses) — with **zero cross products** between patterns that share no
+  variable. When the feature is compiled (as in `sparq-cli`), DPccp fires **by default** for
+  any BGP with ≥ 3 patterns within the subgraph budget — no install call required. To opt out
+  for one scope (restores greedy GOO), or to set an explicit budget, use the scoped helpers:
   ```rust
   // Cargo.toml: sparq-engine = { version = "0.1", features = ["dp-planner"] }
-  let rows = sparq_engine::with_dp_planner(|| sparq_engine::query(&graph, sparql))?;
-  // …or with an explicit connected-subgraph budget:
+  // Default-on — no install required; DPccp fires for BGPs with ≥3 patterns within budget.
+  let rows = sparq_engine::query(&graph, sparql)?;
+  // Explicit opt-out (restores greedy GOO for this scope):
+  let greedy = sparq_engine::without_dp_planner(|| sparq_engine::query(&graph, sparql))?;
+  // Explicit install at a custom budget:
   let rows = sparq_engine::with_dp_planner_budget(1024, || sparq_engine::query(&graph, sparql))?;
   ```
   It is **ORDER-ONLY**: a BGP is a commutative/associative natural join, so every tree yields the SAME
   bindings — the DP changes join order, never the answer (proven by the on-vs-off differential suite
   `tests/dp_planner_differential.rs`, which runs in BOTH feature states). DPccp is worst-case
   exponential, so the enumerator counts connected subgraphs first and **falls back to greedy GOO** when
-  the count exceeds `DpConfig::max_subgraphs` (the `with_dp_planner_budget` argument; `with_dp_planner`
-  uses a sensible default) — and also on a **disconnected** BGP (a deliberate cross-product query, or an
-  all-constant pattern), which has no single connected plan. Cyclic BGPs already route to LFTJ, so the
+  the count exceeds `DpConfig::max_subgraphs`, on a **disconnected** BGP (a cross-product query or an
+  all-constant pattern), and for BGPs with fewer than 3 patterns (for n≤2, greedy is already optimal
+  and carries less overhead than the full enumeration path). Cyclic BGPs already route to LFTJ, so the
   DP only ever governs binary-plan BGPs. Its payoff on adversarial BGP shapes is a measurable hypothesis
-  for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-the-
-  DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical, and
-  no new dependencies are added (no `unsafe`).
+  for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-
+  the-DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical,
+  and no new dependencies are added (no `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through

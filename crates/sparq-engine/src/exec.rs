@@ -2123,15 +2123,6 @@ fn try_topk_orderby(
     inner: &GraphPattern,
     row_budget: usize,
 ) -> Result<Option<Bindings>, String> {
-    // [OPUS-4.8] (sq-7d3dj.30.3) `ORDER BY … LIMIT 0` yields `row_budget = 0`; the
-    // bounded-select top-k path (`order_bindings` → `select_nth_unstable_by(k - 1)`)
-    // requires `k >= 1`, so k = 0 panics (debug) / underflows (release). Decline so the
-    // caller uses the full path and slices to empty. Surfaced by the W3C
-    // `sparql10/solution-seq` "Limit 3" (slice-03) conformance test against the .30.2
-    // top-k path; guarded here rather than at the call site so the helper is robust.
-    if row_budget == 0 {
-        return Ok(None);
-    }
     match inner {
         GraphPattern::Project { inner: proj_inner, variables } => {
             Ok(try_topk_orderby(graph, local, proj_inner, row_budget)?
@@ -6090,8 +6081,10 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // parallel, then each partition builds its private map lock-free. Within a partition rows
     // are scanned in ascending index, so each posting list stays in ascending build-row order —
     // exactly the serial build — and the probe output is byte-identical.
+    // JoinTable = hashbrown::HashMap<Key, Posting, FxBuildHasher>; the type inference here
+    // avoids a dependency on rustc_hash::FxHashMap in the type annotation. [SONNET-4.6] sq-7d3dj.19
     #[cfg(feature = "parallel")]
-    let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
+    let tables = if build.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let parts: Vec<u8> = build
             .rows
@@ -6103,7 +6096,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         vec![sjoin::build_table(&build.rows, &keys)]
     };
     #[cfg(not(feature = "parallel"))]
-    let tables: Vec<FxHashMap<Key, Posting>> = vec![sjoin::build_table(&build.rows, &keys)];
+    let tables = vec![sjoin::build_table(&build.rows, &keys)];
     // The probe is read-only over the (partitioned) table, so for a large probe side build the
     // output in parallel on native.
     #[cfg(feature = "parallel")]
@@ -7409,6 +7402,17 @@ fn order_bindings(
     // the stable-sort tie semantics exactly (smaller input_idx appears first).
     // [SONNET-4.6] sq-7d3dj.30.2
     if let Some(k) = row_budget {
+        // LIMIT 0 (k == 0) is legal SPARQL and is exercised by the W3C conformance
+        // suite. The result is empty regardless of order, so short-circuit here:
+        // `select_nth_unstable_by(k - 1)` below would underflow `k - 1` to
+        // `usize::MAX` and abort the process (SIGABRT). [OPUS-4.8] sq-7d3dj.30.2
+        if k == 0 {
+            b.rows.clear();
+            b.sorted_by = None;
+            return Ok(());
+        }
+        // Invariant for the bounded-selection path below: 0 < k < n, so
+        // `k - 1 < n = keyed.len()` and `select_nth_unstable_by(k - 1)` is in range.
         if k < n {
             // Build (key, input_idx, row) — parallel for large sets.
             // Use Vec<_> to avoid the clippy::type_complexity lint on the explicit type.
