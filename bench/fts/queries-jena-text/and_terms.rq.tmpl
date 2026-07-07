@@ -1,0 +1,10 @@
+# [FABLE-5] sq-hmd7l.2 — jena-text translation of the sparq-text `and_terms` workload:
+# `text:matches "a b"` (docs containing BOTH terms) => Lucene explicit-AND query string.
+# COUNT(DISTINCT ?s) is the matching-DOC count, directly comparable to sparq-text's
+# search().len() (one <http://example.org/comment> literal per subject in this corpus).
+# The 10000000 third argument OVERRIDES jena-text's default result limit (10000), which
+# would otherwise silently truncate large result sets and corrupt the count crosscheck.
+PREFIX text: <http://jena.apache.org/text#>
+SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {
+  ?s text:query ( <http://example.org/comment> '%%A%% AND %%B%%' 10000000 ) .
+}
