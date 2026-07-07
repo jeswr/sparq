@@ -111,7 +111,11 @@ ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
 # [SONNET-4.6] sq-pbz04.2.9 — also forward `rbox` (CR10/CR11 property-chain + transitive
 # role saturation) and `cdomain` (CR7–CR9 faceted datatype-restriction + DataHasValue) so
 # the CI lane exercises the FULL shipped feature set, not just the default E1 classifier.
-el-suite = ["dep:sparq-reason-el", "sparq-reason-el/rbox", "sparq-reason-el/cdomain"]
+# [SONNET-4.6] sq-pbz04.2.10 — also forward `abox` (ABox internalization + realisation +
+# whole-ontology consistency from sq-pbz04.2.5/.6/.7/.8) so the CI lane exercises the full
+# ABox-mechanism layer: `realize_graph` replaces `classify_graph` in the lane, routing
+# new realisation rows + the whole-ontology inconsistency verdict into the outcome mapping.
+el-suite = ["dep:sparq-reason-el", "sparq-reason-el/rbox", "sparq-reason-el/cdomain", "sparq-reason-el/abox"]
 
 # [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 **Direct-Semantics arm** of the
 # OWL WG export (the `inference::dl_suite` runner + the crate-local `tests/dl_suite.rs`
