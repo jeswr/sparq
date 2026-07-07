@@ -132,6 +132,28 @@ records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (
 featured    = false
 status      = "ok"
 
+# [SONNET-4.6] sq-7d3dj.22 (epic sq-7d3dj) — deterministic allocation-count instrument.
+# 🤖 SPARQ agent. Standalone bench-only harness that fills the "no counting allocator"
+# gap cited by measurement plans sq-7d3dj.6/.7/.19/.16. The `quiet_box_sensitive = false`
+# flag reflects that alloc COUNTS are deterministic (not wall-clock) — the series is
+# reproducible on any box. The `featured = false` escape-hatch marks it as an internal
+# micro-bench (no perf claim, no dashboard card required).
+[[benchmark]]
+id          = "alloc-track"
+name        = "Allocation-count instrument — counting allocator over op_* corpus"
+category    = "query"
+measures    = "per-operator allocation count (allocs) and peak live bytes (peak_bytes) over the same 28-query op_* corpus as operator-coverage, for EACH full sparq_engine::query(…) call; emitted as a TREND-ONLY series"
+invoke      = "cd bench/alloc-track && cargo run --release --bin alloc_track -- --scale 2000 --iters 3   # --smoke for a fast smoke run (scale=200 iters=2)"
+source      = "bench/alloc-track/src/main.rs (CountingAlloc #[global_allocator] + measure_once); bench/operators/queries/*.rq (embedded via include_str!)"
+dataset     = "SYNTHETIC in-process: same WatDiv-flavoured social graph as operator-coverage (deterministic fixed seed); 2 000 entities by default (all 28 queries reference subjects in 0..=99, so 200 entities suffices for --smoke)"
+quiet_box_sensitive = false  # alloc COUNTS are deterministic (code-path-dependent, not wall-clock); values are stable on the same binary regardless of box load
+pinning     = "scale (2000 default); dataset and all queries are deterministic (fixed SplitMix64 seed + committed query files embedded via include_str!); the harness asserts its own reproducibility (two measured iters must agree)"
+records_to  = "stdout (TSV: op / allocs / peak_bytes / rows / status); status = 'ok' (deterministic) or 'band[min,max]' (variance); exit 1 on variance so a caller notices non-determinism"
+# Internal micro-bench for the optimization-program delta gap; not a head-to-head competitor
+# card — featured = false exempts it from the dashboard-row requirement (escape hatch §2.1).
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-pntvh.1 (epic sq-pntvh) — M4 Phase 1 vectorized FILTER/aggregate baseline.
 [[benchmark]]
 id          = "vectorized-eval-micro"
@@ -145,6 +167,26 @@ quiet_box_sensitive = true  # wall-clock micro-latency; trend-only, NOT in the d
 pinning     = "n_rows + iters (pin both for comparable numbers); corpus is deterministic (i in 0..n). No baked-in number — work-box timings are non-canonical (run on a quiet host)"
 records_to  = "stdout (metric_us lines)"
 featured    = false  # in-crate micro-bench for an opt-in capability; a relative baseline, not a dashboard series
+status      = "ok"
+
+# [SONNET-4.6] sq-pntvh.9 (epic sq-pntvh) — M4 Phase 9: Seam-A end-to-end A/B measurement.
+# Tests the exec.rs columnar_filter seam (Phase 5 wired, sq-pntvh.5) end-to-end via two
+# sparq-cli builds: feature-OFF (scalar path) vs feature-ON (columnar dispatch active).
+# WIN/NO-WIN verdict gates sq-pntvh.6 (morsel pull-pipeline); NO-WIN honestly defers
+# Phases 6/7 per research/vector-at-a-time-m4-completion-design.md §8.2. Results go to the
+# sq-pntvh bead comment — no numbers committed to the repo (non-canonical wall-clock).
+[[benchmark]]
+id          = "seam-a-e2e"
+name        = "Seam-A end-to-end A/B: feature-ON vs feature-OFF for join->FILTER + GROUP-BY shapes"
+category    = "query"
+measures    = "feature-ON vs feature-OFF min-of-iters wall-clock (metric_us) for two eligible shapes: (1) join->residual-FILTER on an inline-integer column — the exec.rs columnar_filter seam (Phase 5, Seam A) targets this shape; (2) join->GROUP-BY reducer — Phase 4 columnar aggregate NOT yet wired, expected equal timing across feature states (Phase-4 honest baseline). WIN criterion: seam_a_filter_on_us < seam_a_filter_off_us"
+invoke      = "bench/scripts/seam_a_e2e.sh 500000 5   # N=500000 >> VEC_MIN_BATCH=256; iters=5; builds two sparq-cli binaries (feature-OFF in target/release; feature-ON in /tmp/seam-a-vec); emits metric_us lines + seam_a_verdict summary"
+source      = "bench/scripts/seam_a_e2e.sh; crates/sparq-engine/src/exec.rs (columnar_filter seam, apply_filter); crates/sparq-engine/src/vec_dispatch.rs (VEC_MIN_BATCH=256, VEC_MORSEL=2048); design research/vector-at-a-time-m4-completion-design.md (sec4 Seam A, sec7 dispatch table row3)"
+dataset     = "SYNTHETIC, generated in-script by an inline Python stdlib generator (no external data): N `(ex:s{i}, ex:age, i)` + N `(ex:s{i}, ex:tag, i%10)` integer-literal triples; join of the two patterns yields N rows, all with inline-integer ?age ids — satisfying VEC_MIN_BATCH and dtype-precheck eligibility gates; FILTER threshold = N*0.7 (keeps ~30% rows, always >> VEC_MIN_BATCH for N>=1000); corpus deterministic (sequential i in 0..N, no RNG)"
+quiet_box_sensitive = true  # wall-clock A/B comparison; verdict only meaningful on a quiet dedicated box; non-canonical on work-boxes
+pinning     = "N + ITERS (pin both for comparable numbers); FILTER threshold = N*7/10 (deterministic function of N); two builds: feature-OFF default sparq-cli + feature-ON --features sparq-engine/vectorized; corpus byte-deterministic (sequential integers)"
+records_to  = "stdout (metric_us lines + seam_a_verdict); EC2 timing numbers in sq-pntvh bead comment — not committed to repo"
+featured    = false  # internal M4 measurement for an opt-in capability; A/B verdict gates further work, not a dashboard series
 status      = "ok"
 
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
