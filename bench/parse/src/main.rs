@@ -232,8 +232,10 @@ fn main() {
         Some("bench-hdt-zip") => bench_hdt_zip(&args[2]),
         // Internal: load ONE path once in a fresh process, print its peak RSS.
         Some("hdt-rss") => hdt_rss(&args[2], &args[3]),
+        // [SONNET-4.6] (sq-hmd7l.6) external parser competitor columns.
+        Some("bench-ext") => bench_ext(&args[2]),
         _ => {
-            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|ab-ttl-intern|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip ... [--json <results.json>]");
+            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|ab-ttl-intern|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip|bench-ext ... [--json <results.json>]");
             std::process::exit(2);
         }
     }
@@ -1101,6 +1103,338 @@ fn bench_hdt_zip(path: &str) {
             black_box(g.store.len());
         });
         row(name, &format!("{ext} decode+parse (direct, {ratio:.2}x compressed)"), 1, secs, plain.len(), triples);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] bench-ext — external parser competitor columns (sq-hmd7l.6)
+// ---------------------------------------------------------------------------
+//
+// Invokes serdi (serd), rapper (raptor2), and Jena riot as subprocesses over
+// the SAME corpus file used by bench-nt / bench-ttl.  Key design invariants:
+//
+//  REGIME LABEL  Every output row carries the substring "subprocess" in the
+//                task column so the reader knows timing includes process spawn,
+//                kernel file-I/O, parse, and process exit — NOT comparable to
+//                in-process "parse-only" rows that exclude all three costs.
+//
+//  COUNT GUARD   Before printing any MB/s row, the tool's reported or
+//                observable triple count is cross-checked against the oxttl
+//                authoritative count for the same file.  A mismatch is printed
+//                to stderr and the row is suppressed — no fabricated numbers.
+//
+//  ABSENT TOOL   `tool_available()` probes PATH with `which`; a missing tool
+//                prints a diagnostic to stderr and the column is absent.  The
+//                suite exits 0 with no rows when all three are absent.
+//
+//  NON-CANONICAL These numbers come from the shared work box, not a quiet EC2
+//                instance.  The first-read gap record (research/gap-parse-2026-07.md)
+//                is flagged NON-canonical; canonical rows ride sq-hmd7l.26.
+
+/// Returns `true` if `tool` is found on PATH (via `which`).
+fn tool_available(tool: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(tool)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Runs `argv[0]` with `argv[1..]` ITERS times, capturing all output (stdout
+/// + stderr concatenated).
+///
+/// Returns `(min_wall_secs, combined_output_of_best_run)`,
+/// or `None` on launch failure or non-zero exit.
+fn subprocess_time_and_output(argv: &[&str]) -> Option<(f64, String)> {
+    if argv.is_empty() {
+        return None;
+    }
+    let mut min_secs = f64::MAX;
+    let mut best_output = String::new();
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        let out = std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .output()
+            .ok()?;
+        let secs = t.elapsed().as_secs_f64();
+        if !out.status.success() {
+            eprintln!("warn: {} exited {:?}", argv[0], out.status);
+            return None;
+        }
+        if secs < min_secs {
+            min_secs = secs;
+            best_output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+    }
+    (min_secs < f64::MAX).then_some((min_secs, best_output))
+}
+
+/// Runs `argv[0]` with `argv[1..]` ITERS times, discarding stdout + stderr.
+/// Returns the minimum wall-clock seconds, or `None` on failure.
+fn subprocess_time_sink(argv: &[&str]) -> Option<f64> {
+    if argv.is_empty() {
+        return None;
+    }
+    let mut min_secs = f64::MAX;
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        let status = std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        let secs = t.elapsed().as_secs_f64();
+        if !status.success() {
+            eprintln!("warn: {} exited {:?}", argv[0], status);
+            return None;
+        }
+        min_secs = min_secs.min(secs);
+    }
+    (min_secs < f64::MAX).then_some(min_secs)
+}
+
+/// Prints one external-tool row.
+///
+/// Pre-condition: caller has already verified count agreement (INVARIANT: no
+/// MB/s row without triple-count agreement vs the corpus's known count).
+/// The `count-ok` column always shows `yes` because this function is only
+/// reachable after the count guard passes.
+fn ext_row(dataset: &str, task: &str, secs: f64, bytes: usize, triples: usize) {
+    let mbs = bytes as f64 / 1e6 / secs;
+    let mts = triples as f64 / 1e6 / secs;
+    println!("| {dataset} | {task} | 1 (subprocess) | {secs:.3} | {mbs:.0} | {mts:.2} | yes |");
+    json_push(vec![
+        ("dataset", json_str(dataset)),
+        ("task", json_str(task)),
+        ("regime", json_str("subprocess")),
+        ("secs", format!("{secs:.6}")),
+        ("bytes", bytes.to_string()),
+        ("triples", triples.to_string()),
+        ("mb_s", format!("{mbs:.3}")),
+        ("mtriples_s", format!("{mts:.3}")),
+        ("count_ok", "true".to_string()),
+    ]);
+}
+
+/// External parser competitor measurements (`bench-ext <file>`).
+///
+/// Detects format from the file extension (`.nt` → N-Triples, `.ttl` /
+/// `.turtle` → Turtle) and invokes serdi, rapper, and Jena riot as
+/// subprocesses.  Each tool is timed min-of-ITERS; triple count is
+/// cross-checked before any MB/s row is printed.
+///
+/// The table header has an extra `count-ok` column vs bench-nt / bench-ttl
+/// to make the count-guard contract visible in the output.
+fn bench_ext(path: &str) {
+    let is_nt = path.ends_with(".nt");
+    let is_ttl = path.ends_with(".ttl") || path.ends_with(".turtle");
+    if !is_nt && !is_ttl {
+        eprintln!(
+            "bench-ext: unrecognised extension in {path} — expected .nt or .ttl"
+        );
+        std::process::exit(2);
+    }
+    let format_name = if is_nt { "N-Triples" } else { "Turtle" };
+    let rapper_fmt = if is_nt { "ntriples" } else { "turtle" };
+
+    // Raw bytes drive the MB/s denominator.
+    let text = read_to_string(path);
+    let bytes_slice = text.as_bytes();
+    let name = dataset_name(path);
+
+    // Authoritative triple count via oxttl — same oracle as bench-nt / bench-ttl.
+    let expected: usize = if is_nt {
+        oxttl::NTriplesParser::new()
+            .for_slice(bytes_slice)
+            .fold(0usize, |acc, r| {
+                r.expect("dataset must parse");
+                acc + 1
+            })
+    } else {
+        oxttl::TurtleParser::new()
+            .for_slice(bytes_slice)
+            .fold(0usize, |acc, r| {
+                r.expect("dataset must parse");
+                acc + 1
+            })
+    };
+    let nbytes = bytes_slice.len();
+    eprintln!(
+        "{name}: {nbytes} bytes, {expected} triples ({format_name}, authoritative oxttl count)"
+    );
+
+    // Table for external tools: same columns as bench-nt plus `count-ok`.
+    println!(
+        "| dataset | task | threads | s (min-of-{ITERS}) | MB/s | Mtriples/s | count-ok |"
+    );
+    println!("|---|---|---|---|---|---|---|");
+
+    // Absolute path so tools that require a URI or absolute path work correctly.
+    let abs = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let abs_str = abs.to_str().unwrap();
+
+    // ── rapper / raptor2 ──────────────────────────────────────────────────────
+    //
+    // Mode: `rapper -c -i <fmt> <file>`
+    //   `-c`  count-only; parses without serializing output.  Closest available
+    //         equivalent to "parse-only" for an external tool.
+    //   Without `-q`  so the count line appears on stderr:
+    //         "rapper: Parsing returned N triples"
+    // Regime: subprocess (spawn + file-I/O + parse), count-only (no serialization,
+    //         no store build).
+    // Note: `-q` (quiet) suppresses the count line entirely — do NOT add it.
+    if tool_available("rapper") {
+        let task = format!(
+            "rapper/raptor2 {format_name} (subprocess, count-only, no store)"
+        );
+        match subprocess_time_and_output(&["rapper", "-c", "-i", rapper_fmt, abs_str]) {
+            Some((secs, output)) => {
+                // Count is on stderr: "rapper: Parsing returned N triples"
+                let parsed_count = output.lines().find_map(|line| {
+                    let rest = line.strip_prefix("rapper: Parsing returned ")?;
+                    rest.strip_suffix(" triples")
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                });
+                match parsed_count {
+                    Some(c) if c == expected => {
+                        ext_row(name, &task, secs, nbytes, expected);
+                    }
+                    Some(c) => {
+                        eprintln!(
+                            "WARN: rapper reported {c} triples, expected {expected} \
+                             — suppressing MB/s row (INVARIANT: no row without count agreement)"
+                        );
+                    }
+                    None => {
+                        eprintln!(
+                            "WARN: could not parse triple count from rapper output \
+                             — suppressing MB/s row; raw output: {:?}",
+                            &output[..output.len().min(200)]
+                        );
+                    }
+                }
+            }
+            None => eprintln!("warn: rapper invocation failed — skipping column"),
+        }
+    } else {
+        eprintln!("rapper: not found on PATH — column absent");
+    }
+
+    // ── serdi / serd ──────────────────────────────────────────────────────────
+    //
+    // No built-in count mode: we pipe stdout (NT output) through `wc -l` via
+    // a shell pipeline for count verification, then time ITERS sink runs.
+    // Regime: subprocess (spawn + file-I/O + parse + NT serialization to sink).
+    // The count-check run uses a separate shell pipeline; the timing runs
+    // redirect stdout to /dev/null to avoid the serialization cost distorting
+    // the timed measurement (the task label says "serialize-to-sink" to be
+    // honest about what the timing includes).
+    if tool_available("serdi") {
+        let task = format!(
+            "serdi/serd {format_name} (subprocess, parse+serialize-to-sink)"
+        );
+        // Count check via `serdi <file> | wc -l`.
+        let count_result: Option<usize> = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("serdi '{}' | wc -l", abs_str))
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                } else {
+                    None
+                }
+            });
+        match count_result {
+            None => {
+                eprintln!("warn: could not verify serdi triple count — skipping column");
+            }
+            Some(c) if c != expected => {
+                eprintln!(
+                    "WARN: serdi line-count {c} != expected {expected} \
+                     — suppressing MB/s row (INVARIANT: no row without count agreement)"
+                );
+            }
+            Some(_) => {
+                // Count verified; time ITERS runs with stdout discarded.
+                match subprocess_time_sink(&["serdi", abs_str]) {
+                    Some(secs) => ext_row(name, &task, secs, nbytes, expected),
+                    None => eprintln!("warn: serdi timing run failed — skipping column"),
+                }
+            }
+        }
+    } else {
+        eprintln!("serdi: not found on PATH — column absent");
+    }
+
+    // ── Jena riot ─────────────────────────────────────────────────────────────
+    //
+    // Mode: `riot --count <file>`
+    //   `--count`  parse and count without writing output.
+    //   Count appears in combined output: "Triples = N" or
+    //   "INFO  riot  :: Triples      = N" depending on riot version.
+    // Regime: subprocess (spawn + file-I/O + parse), count-mode (no serialization,
+    //         no store build).
+    // Fallback: if `--count` is unavailable (older riot), the column is absent;
+    //           we do NOT fall back to a sink run because count cannot then be
+    //           verified (INVARIANT).
+    if tool_available("riot") {
+        let task = format!(
+            "Jena riot {format_name} (subprocess, --count, no store)"
+        );
+        match subprocess_time_and_output(&["riot", "--count", abs_str]) {
+            Some((secs, output)) => {
+                // "Triples = N" or "Triples      = N" (riot pads the field name)
+                let parsed_count = output.lines().find_map(|line| {
+                    let pos = line.find("Triples")?;
+                    let after = &line[pos..];
+                    let eq = after.find('=')?;
+                    after[eq + 1..]
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                });
+                match parsed_count {
+                    Some(c) if c == expected => {
+                        ext_row(name, &task, secs, nbytes, expected);
+                    }
+                    Some(c) => {
+                        eprintln!(
+                            "WARN: riot reported {c} triples, expected {expected} \
+                             — suppressing MB/s row (INVARIANT: no row without count agreement)"
+                        );
+                    }
+                    None => {
+                        eprintln!(
+                            "WARN: could not parse triple count from riot --count output \
+                             — suppressing MB/s row; raw output: {:?}",
+                            &output[..output.len().min(200)]
+                        );
+                    }
+                }
+            }
+            None => {
+                // --count failed (old riot or unsupported flag).  Count cannot be
+                // verified from a sink run, so per the INVARIANT we skip entirely.
+                eprintln!(
+                    "warn: riot --count failed (unsupported flag or error) \
+                     — column absent (count verification not possible in fallback mode)"
+                );
+            }
+        }
+    } else {
+        eprintln!("riot: not found on PATH — column absent");
     }
 }
 
