@@ -27,6 +27,13 @@ pub mod json;
 // new deps (oxrdf + spargebra are already direct deps).
 #[cfg(feature = "params")]
 pub mod params;
+// [OPUS-4.8] (sq-7d3dj.30.1) Pre-execution SPARQL algebra rewrite pass (result-equivalent
+// FILTER `?v = <iri>` constant-substitution + `OPTIONAL … !bound` → anti-join). NON-DEFAULT
+// `algebra-rewrite` feature; when off, zero of this code compiles, `PreparedQuery::parse`
+// takes the algebra verbatim, and the default native + wasm builds are byte-identical. Pulls
+// in no new deps (oxrdf + spargebra are already direct deps).
+#[cfg(feature = "algebra-rewrite")]
+pub mod rewrite;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
@@ -551,8 +558,20 @@ pub struct PreparedQuery {
 
 impl PreparedQuery {
     /// Parses a SPARQL query string into its reusable algebra form.
+    ///
+    /// With the opt-in `algebra-rewrite` feature ON, the parsed algebra is run
+    /// through the result-equivalent pre-execution rewrite pass (`rewrite`
+    /// module) here — the single seam every string query entry point
+    /// ([`query`], [`ask`], [`count`], the JSON paths) funnels through — so
+    /// production benefits without touching the executor. The `From<Query>`
+    /// conversion deliberately does NOT rewrite: it takes an already-built
+    /// algebra verbatim (the opt-out / test-baseline path). When the feature is
+    /// OFF the algebra is stored verbatim and the build is byte-identical.
     pub fn parse(sparql: &str) -> Result<PreparedQuery, String> {
-        Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+        let query = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+        #[cfg(feature = "algebra-rewrite")]
+        let query = rewrite::rewrite_query(query);
+        Ok(PreparedQuery { query })
     }
 
     /// The wrapped `spargebra` algebra (e.g. to inspect the query form or dataset
