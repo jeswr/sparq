@@ -1494,4 +1494,96 @@ mod tests {
         exp_sorted.sort();
         assert_eq!(out_sorted, exp_sorted, "k=3 result must match sequential pairwise intersection");
     }
+
+    // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants from
+    // nightly run 28776460517. Each asserts an EXACT value or outcome so a mutation
+    // of the key/hash/trie logic goes red.
+
+    /// `key_hash` must produce distinct values for distinct keys so the hash join
+    /// partitions build and probe rows correctly into separate buckets.
+    /// Kills: `126:5 replace key_hash -> u64 with 0` (constant hash collapses all
+    /// partitions to one, making this assertion fail since equal hashes for distinct keys
+    /// are not guaranteed by the function's contract but a constant-0 trivially equals 0).
+    #[test]
+    fn key_hash_distinct_keys_produce_distinct_hashes() {
+        use smallvec::smallvec;
+        let k1: Key = smallvec![1u32];
+        let k2: Key = smallvec![2u32];
+        let k3: Key = smallvec![100u32, 200u32];
+        let k4: Key = smallvec![100u32, 201u32];
+        // With a constant-0 hash, ALL of these would be equal — so assert they differ.
+        assert_ne!(key_hash(&k1), key_hash(&k2), "key [1] and [2] must hash differently");
+        assert_ne!(key_hash(&k3), key_hash(&k4), "key [100,200] and [100,201] must hash differently");
+    }
+
+    /// When a trie has multiple child rows for the same parent key, `TrieIter::open`
+    /// must expose ALL of them at the child level. The parent-column index in `open`
+    /// is `frames.len() - 1`; mutating to `/ 1` (= `frames.len()`, one-off) reads the
+    /// wrong column for the grouping key, shrinking the visible child range.
+    /// Kills: `401:46 replace - with / in TrieIter<'a>::open`.
+    #[test]
+    fn lftj_multiple_children_per_parent_key_all_emitted() {
+        // Trie with a=1 having three children b=1,2,3. The leapfrog intersection of
+        // two identical tries must emit all three (a=1,b=1), (a=1,b=2), (a=1,b=3).
+        // Under the mutation, open() uses column 1 (the b value) as the parent grouping
+        // key, which confines each iterator to only the first child row → 1 row output.
+        let r = Trie { tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]] };
+        let s = Trie { tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
+        let parts_at_level = vec![vec![0usize, 1], vec![0usize, 1]];
+        let mut current = vec![NO_ID; 2];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &NoBudget, &mut out);
+        assert_eq!(out.len(), 3, "must emit all 3 children; open() must use column 0 not 1");
+        assert!(out.contains(&row(&[1, 1])));
+        assert!(out.contains(&row(&[1, 2])));
+        assert!(out.contains(&row(&[1, 3])));
+    }
+
+    /// The generic Leapfrog::search path (k >= 4) must advance `p` FORWARD (`+= 1`),
+    /// not backward. With k=4 participants starting at distinct values the leapfrog
+    /// must seek iterators in order; `p -= 1` from p=0 underflows (debug panic) or
+    /// cycles backward through the wrong iterator.
+    /// Kills: `489:20 replace += with -= in Leapfrog::search`.
+    ///
+    /// Also exercises the k=2 case where the two iterators start at different values
+    /// (so the `p += 1` branch is reached inside search, unlike the existing tests
+    /// where both iterators always start at the same key and `search` returns early).
+    #[test]
+    fn lftj_k2_different_start_keys_reaches_search_advance() {
+        // R starts at 3, S starts at 5; intersection is {7}.
+        // `search` must seek R from 3 to 7 (via 5, then wrap) and S from 5 to 7,
+        // going through the `p += 1` branch at least once.
+        let r = Trie { tuples: vec![vec![3], vec![7]] };
+        let s = Trie { tuples: vec![vec![5], vec![7]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
+        let parts_at_level = vec![vec![0usize, 1]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        assert_eq!(out, vec![row(&[7])]);
+    }
+
+    /// k=4 leapfrog with all four participants starting at distinct values forces
+    /// multiple iterations through the `p += 1` branch of `search` (the generic path,
+    /// since k != 3 bypasses `search_k3`).
+    #[test]
+    fn lftj_k4_intersection_via_generic_search_path() {
+        // Four single-column tries; only value 10 is common to all.
+        let a = Trie { tuples: vec![vec![1], vec![5], vec![10]] };
+        let b = Trie { tuples: vec![vec![3], vec![7], vec![10]] };
+        let c = Trie { tuples: vec![vec![4], vec![8], vec![10]] };
+        let d = Trie { tuples: vec![vec![2], vec![6], vec![10]] };
+        let mut iters = vec![
+            TrieIter::new(&a),
+            TrieIter::new(&b),
+            TrieIter::new(&c),
+            TrieIter::new(&d),
+        ];
+        let parts_at_level = vec![vec![0usize, 1, 2, 3]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        assert_eq!(out, vec![row(&[10])], "k=4 intersection must find the single common value");
+    }
 }
