@@ -492,7 +492,10 @@ struct Entry {
 /// Runs the DPccp enumerator over `qg`, returning the minimum-`Cout` bushy join tree
 /// spanning **all** patterns, or `None` — meaning "fall back to greedy GOO" — when:
 ///
-/// * there are fewer than 2 patterns (nothing to order) or more than `MAX_PATTERNS`;
+/// * there are fewer than **3** patterns or more than `MAX_PATTERNS` — for n=1 there is
+///   nothing to order; for n=2 greedy GOO is already `Cout`-optimal (there is exactly one
+///   connected join, and greedy seeds from the more selective pattern) and carries less
+///   overhead than the full DPccp enumeration path. [SONNET-4.6] sq-7d3dj.30.5
 /// * the BGP join graph is disconnected (no single connected plan; greedy does the
 ///   cross products);
 /// * the connected-subgraph count exceeds `max_subgraphs` (DP-table budget guard); or
@@ -501,7 +504,7 @@ struct Entry {
 ///   `pairs` allocation + sort even for a very large `max_subgraphs`).
 pub(crate) fn plan(qg: &QueryGraph, max_subgraphs: usize) -> Option<JoinTree> {
     let n = qg.n;
-    if !(2..=MAX_PATTERNS).contains(&n) || max_subgraphs == 0 {
+    if !(3..=MAX_PATTERNS).contains(&n) || max_subgraphs == 0 {
         return None;
     }
     // `n <= MAX_PATTERNS` (63) after the guard above, so the shift never overflows and
@@ -666,8 +669,19 @@ mod tests {
 
     #[test]
     fn budget_zero_falls_back() {
-        let g = qg(&[10.0, 20.0], &[(0b11, 4.0)]);
+        // n=2 now returns None for any budget (n<3 threshold), and zero budget would
+        // also trip for n>=3. Use n=3 to test the budget-zero guard specifically.
+        let g = qg(&[10.0, 20.0, 30.0], &[(0b011, 4.0), (0b110, 4.0)]);
         assert!(plan(&g, 0).is_none(), "a zero budget must always fall back to greedy");
+    }
+
+    /// For n=2 connected BGPs, DPccp adds overhead without benefit — greedy GOO is
+    /// already optimal (one join order). `plan()` must return `None`. [SONNET-4.6] sq-7d3dj.30.5
+    #[test]
+    fn two_pattern_bgp_falls_back_to_greedy() {
+        let g = qg(&[10.0, 20.0], &[(0b11, 4.0)]);
+        assert!(plan(&g, 4096).is_none(), "n=2 connected BGP must fall back (n<3 threshold)");
+        assert!(plan(&g, DEFAULT_MAX_SUBGRAPHS).is_none(), "n=2 must fall back at default budget");
     }
 
     #[test]
