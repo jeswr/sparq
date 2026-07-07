@@ -379,6 +379,16 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   (a vendored) `spargebra` with `sparql-12` + `sep-0006`.
 - **Only SELECT/ASK** go through `query`/`query_json`/`count`; CONSTRUCT/DESCRIBE have their own
   functions, and a form mismatch is a clean `Err` (e.g. `ask()` on a SELECT).
+- **Numeric FILTER comparisons are VALUE-EXACT, incl. high-precision `xsd:decimal`** (`sq-lr2ii`).
+  A single-pattern `?v OP const` numeric FILTER is normally pushed into the scan and decided via the
+  O(1) f64 `numerics` cache (`extract_sargable`). Because an f64 cannot represent a decimal with
+  `> 15` significant digits exactly (e.g. `"1.000000000000000001"^^xsd:decimal` shares the f64 `1.0`
+  with the integer `1`), that fast path is **declined** whenever the graph holds such a decimal
+  (`Graph::has_high_precision_decimal`) OR the constant itself has `> 15` significant digits — the
+  comparison then falls back to the exact evaluator (`=`/`<`/`>`/`<=`/`>=` decided by exact decimal
+  string arithmetic, matching the `BIND((?v = c) AS ?b)` expression path). The decline is
+  graph-wide/conservative (correctness first): a graph carrying one high-precision decimal skips the
+  numeric-pushdown optimisation for all its numeric FILTERs, never the wrong answer.
 - **`SELECT *`** never exposes blank-node "variables" (`_:x` in a pattern is an existential var).
 - **`update` vs `update_in_place` vs `update_in_place_atomic`** — `update` returns a fresh `Graph`
   (input borrowed, untouched, atomic by construction); `update_in_place(&mut g, …)` mutates via the
