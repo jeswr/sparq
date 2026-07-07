@@ -83,7 +83,7 @@ Pull-streaming replaces "evaluate-all → collect `Vec<String>` → stream the `
 "evaluate-and-serialize incrementally → push each chunk into a bounded channel → hyper
 drains the channel". Concretely:
 
-```
+```text
   spawn_blocking task (owns PinnedGen, budget guard installed)
     engine produces chunk_0, chunk_1, …  ──►  tx.blocking_send(chunk_i)   (bounded, cap C)
                                                      │  backpressure
@@ -372,10 +372,10 @@ must not ship until admission + the pin cap exist.
 
 ## 9. Decomposition into impl beads
 
-Each child is wired to depend on **`sq-7d3dj.23`** (the TTFB series) — per the architect's
-note, *no impl bead may claim a streaming win without the metric that measures it*. The
-memory-only beads (S1) additionally depend on `sq-7d3dj.5`'s peak-RSS series (already
-landed). Beads are ordered by value × independence.
+Beads that claim a streaming win (D2, D4) are wired to depend on **`sq-7d3dj.23`** (the
+TTFB series) — per the architect's note, *no impl bead may claim a streaming win without
+the metric that measures it*. The memory-only beads (S1) additionally depend on
+`sq-7d3dj.5`'s peak-RSS series (already landed). Beads are ordered by value × independence.
 
 | Child | Bead | Scope | Tier | Win | Depends on | Risk |
 |---|---|---|---|---|---|---|
