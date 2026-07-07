@@ -88,5 +88,12 @@ cost. The shared adapters live in `scripts/bench-adapters/` (`report_cli_adapter
 the W3C suite's per-occurrence expectations). Engines that *do* dedup will report a different
 `#violations` for the same data, so a cross-engine comparison uses **per-engine expected counts**
 (`scripts/bench-adapters/cross_check_shacl.sh`), not the single sparq constant in `expected.tsv`.
+
+**Same-box comparison harness** (`sq-7d3dj.33`): `scripts/bench/shacl-same-box.sh` runs sparq vs
+pySHACL vs Jena SHACL **in-process, validate-only, best-of-N** over these workloads *plus* the
+SPARQL-constraint-heavy `shapes-sparql/sparql_heavy.ttl` set (kept out of `shapes/` so this
+suite's `expected.tsv` gate is untouched), cross-checks counts per workload, and emits
+`bench/canonical-competitor-results/`-shaped envelopes (`canonical:false` off the quiet box).
+First read + the `sh:sparql` root-cause: `research/shacl-baseline-2026-07.md`.
 `<focus_nodes>` is engine-independent. `sh:sparql` coverage differs across engines — scope perf to
 constraints all Tier-1 implement.
