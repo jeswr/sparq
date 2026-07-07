@@ -3912,16 +3912,29 @@ fn parse_nt_record(bytes: &[u8]) -> Option<[Term; 3]> {
 
 /// The numeric-value cache for a dictionary: `numerics[id-1]` is the f64 value of term
 /// `id` (NaN for non-numeric). Parallel when the `parallel` feature is on.
+///
+/// [SONNET-4.6] (sq-7d3dj.6) Rebuilt from borrowed `TermParts` — no per-id owned `Term`
+/// allocation. Uses the `is_numeric_datatype_str` borrowed-component path already proven
+/// by the spill build (`dictspill.rs`), removing O(distinct-terms) allocations from
+/// `Graph::build`.
 fn numerics_of(dict: &Dict) -> Vec<f64> {
     let n = dict.len();
+    let numeric_of_parts = |i: usize| -> f64 {
+        match dict.term_parts(i as Id + 1) {
+            dict::TermParts::Lit { value, datatype, lang: None } if is_numeric_datatype_str(datatype) => {
+                value.parse::<f64>().unwrap_or(f64::NAN)
+            }
+            _ => f64::NAN,
+        }
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        (0..n).into_par_iter().map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+        (0..n).into_par_iter().map(numeric_of_parts).collect()
     }
     #[cfg(not(feature = "parallel"))]
     {
-        (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+        (0..n).map(numeric_of_parts).collect()
     }
 }
 
@@ -9868,6 +9881,43 @@ mod tests {
                 assert_eq!(temporal_count, 2, "both temporal literals survive (sparse={sparse} compressed={compressed})");
                 std::fs::remove_dir_all(&dir).ok();
             }
+        }
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.6) The borrowed-path `numerics_of` must produce the SAME f64 cache
+    /// as the old owned-path for every dictionary id — including numerics (xsd:decimal/double/float/
+    /// integer-subtypes), temporals, plain IRIs, strings, and lang-tagged literals. This is the
+    /// load-bearing invariant for the allocation-removal optimisation: the cache bytes are identical
+    /// whether built via `dict.term(id)` (old) or `dict.term_parts(id)` (new borrowed path).
+    #[test]
+    fn numerics_of_borrowed_path_byte_identical_to_owned() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix ex: <http://ex/> .\n\
+            ex:a ex:v \"1.5\"^^xsd:decimal .\n\
+            ex:b ex:v \"2.5\"^^xsd:double .\n\
+            ex:c ex:v \"3.0\"^^xsd:float .\n\
+            ex:d ex:v \"42\"^^xsd:integer .\n\
+            ex:e ex:v \"100\"^^xsd:long .\n\
+            ex:f ex:v \"hello\" .\n\
+            ex:g ex:v \"bonjour\"@fr .\n\
+            ex:h ex:v ex:iri .\n\
+            ex:i ex:v \"2020-01-01T00:00:00Z\"^^xsd:dateTime .";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let dict = &g.dict;
+        let n = dict.len();
+        // Owned-path reference: the old `numerics_of` logic byte-for-byte.
+        let owned: Vec<f64> = (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect();
+        // Borrowed-path: current `numerics_of`.
+        let borrowed = numerics_of(dict);
+        assert_eq!(owned.len(), borrowed.len(), "length mismatch");
+        for (idx, (a, b)) in owned.iter().zip(borrowed.iter()).enumerate() {
+            let id = idx as Id + 1;
+            // Compare as bits: NaN == NaN in the cache (we want byte-identical, not IEEE equality).
+            assert_eq!(
+                a.to_bits(), b.to_bits(),
+                "id {}: owned bits {:016x} != borrowed bits {:016x}",
+                id, a.to_bits(), b.to_bits()
+            );
         }
     }
 

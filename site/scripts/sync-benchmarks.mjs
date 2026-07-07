@@ -132,8 +132,11 @@ if (dataJs) {
   // `latest` so the trend charts still render (one marker) on a fork without the branch.
   history =
     Array.isArray(prev.history) && prev.history.length ? prev.history : [latest];
+  // [FABLE-5] sq-7d3dj.34: strip any prior "(kept — …)" suffixes before appending, so
+  // repeated --competitors-only runs stay idempotent instead of accumulating the marker.
+  const baseSource = prev.source.replace(/( \(kept — [^)]*\))+$/, "");
   source =
-    prev.source +
+    baseSource +
     (competitorsOnly
       ? " (kept — --competitors-only: refreshed labels+competitors only)"
       : " (kept — benchmark-data ref unavailable this run)");

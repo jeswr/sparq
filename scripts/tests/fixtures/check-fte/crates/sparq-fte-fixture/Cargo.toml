@@ -1,0 +1,13 @@
+[package]
+name = "sparq-fte-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# [SONNET-4.6] sq-qcnn.31: Negative fixture for check-feature-test-execution.py --self-test.
+# This crate has a feature-gated test (tests/ghost.rs) that is NOT wired to any CI executor.
+# The structural guard MUST detect it as UNMAPPED; if it does not, --self-test exits 1.
+
+[features]
+# ghost-feature: a default-OFF feature with no CI executor leg and no allowlist entry.
+# This intentional gap is what the --self-test verifies the detector can find.
+ghost-feature = []

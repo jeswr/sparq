@@ -68,6 +68,12 @@ export interface SameBoxRow {
   rows: number;
   values: Record<string, number | null>;
   count_match: boolean | null;
+  // [FABLE-5] sq-7d3dj.34 — present on HTTP/TTFB-panel suites (e.g. "sp2b-http") only:
+  // `values` is then the keep-alive full-request best; these carry the TTFB and
+  // fresh-connect twins (same best-of-gathers rule; see the entry's `connection` note).
+  values_ttfb?: Record<string, number | null>;
+  values_fresh?: Record<string, number | null>;
+  values_fresh_ttfb?: Record<string, number | null>;
 }
 
 // [OPUS-4.8] sq-1sa9r — one engine column in a same-box comparison. `mode` labels the
@@ -96,6 +102,10 @@ export interface SameBoxComparison {
   canonical?: boolean;
   combine?: string; // how duplicate gathers were combined (e.g. best-of)
   count_crosscheck_note?: string;
+  // [FABLE-5] sq-7d3dj.34 — HTTP/TTFB-panel entries only: which connection regimes were
+  // measured (keep-alive AND fresh-connect) + which one `values` reports.
+  connection?: { modes_measured: string[]; primary: string; note: string };
+  profile?: string;
   env: {
     host_class: string;
     quiet_box: boolean;
