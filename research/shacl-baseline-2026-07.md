@@ -39,11 +39,55 @@ tarball), never committed.
 > the durable deliverable is the harness; the citable numbers come from the
 > `CANONICAL=1` quiet-box re-run (bead filed, see §4).
 
-<!-- FIRST-READ-TABLE -->
+#### LUBM(1) — 103 104 triples, iters=3 (best-of)
+
+| workload | violations (all 3 agree) | sparq | Jena SHACL 5.4.0 | pySHACL 0.31.0 | sparq vs Jena | sparq vs pySHACL |
+|---|---:|---:|---:|---:|---|---|
+| `cardinality` | 149 | 435 µs | 5.8 ms | 55.3 ms | 13.4× ahead | 127.0× ahead |
+| `class_nodekind` | 125 | 397 µs | 8.1 ms | 48.3 ms | 20.4× ahead | 121.7× ahead |
+| `datatype_range` | 1874 | 27.4 ms | 34.0 ms | 542.1 ms | 1.2× ahead | 19.8× ahead |
+| `node_paths` | 1802 | 14.0 ms | 64.8 ms | 1.04 s | 4.6× ahead | 74.5× ahead |
+| `sparql_constraint` | 3738 | 915.8 ms | 204.1 ms | 32.62 s | **4.5× BEHIND** | 35.6× ahead |
+| `sparql_heavy` | 4343 | 1.55 s | 287.5 ms | 52.80 s | **5.4× BEHIND** | 34.0× ahead |
+
+Data-graph load (advisory, s): sparq 0.129 · Jena 1.079 · pySHACL (rdflib) 3.846
+
+#### LUBM(10) — 1 316 700 triples, iters=1
+
+| workload | violations (all 3 agree) | sparq | Jena SHACL 5.4.0 | pySHACL 0.31.0 | sparq vs Jena | sparq vs pySHACL |
+|---|---:|---:|---:|---:|---|---|
+| `cardinality` | 1965 | 9.2 ms | 297.5 ms | 361.2 ms | 32.3× ahead | 39.2× ahead |
+| `class_nodekind` | 1602 | 8.5 ms | 266.7 ms | 300.0 ms | 31.5× ahead | 35.5× ahead |
+| `datatype_range` | 24019 | 219.9 ms | 1.62 s | 6.03 s | 7.3× ahead | 27.4× ahead |
+| `node_paths` | 23040 | 135.4 ms | 2.29 s | 15.47 s | 16.9× ahead | 114.3× ahead |
+| `sparql_constraint` | 47696 | 200.79 s | 6.76 s | **timeout** (>900 s cap) | **29.7× BEHIND** | n/a |
+| `sparql_heavy` | 55157 | 313.68 s | 9.25 s | **timeout** (>900 s cap) | **33.9× BEHIND** | n/a |
+
+Data-graph load (advisory, s): sparq 0.369 · Jena 10.150 · pySHACL (rdflib) 30.335
 
 **Reading (directional):**
 
-<!-- FIRST-READ-FINDINGS -->
+- **Counts cross-check clean**: all three engines agree on `#violations` and
+  `conforms` for **all 6 workloads at both scales** (`all_agree: true` across the
+  board) — the timing comparison rests on verified-identical answers.
+- **Core constraints (cardinality / class / nodekind / datatype / paths): sparq
+  leads everywhere** — 13–32× vs Jena and 20–127× vs pySHACL, with the lead
+  *widening* at the 1.3M-triple scale (sub-linear scaling vs both).
+- **HONEST GAP — `sh:sparql` workloads: sparq is BEHIND Jena, and the gap grows
+  with scale**: 4.5–5.4× behind at 103k triples, **~30–34× behind at 1.3M**
+  (200.8 s / 313.7 s vs 6.8 s / 9.3 s). Root cause in §3 — sparq re-executes the
+  full constraint query per focus node (quadratic), Jena substitutes `$this`
+  into an index-seeded evaluation (linear). The batching fix (sq-7d3dj.33.1)
+  is measured to bring LUBM(1) `sparql_constraint` from ~916 ms to ~1.5 ms —
+  which would flip the row to ~2 orders of magnitude AHEAD of Jena.
+- **pySHACL times out (>900 s) on both `sh:sparql` workloads at 1.3M triples**
+  (recorded honestly as `ERROR/timeout`, not fabricated).
+- **`datatype_range` vs Jena is only ~1.2× (103k) / 7.3× (1.3M)** — ahead, but
+  below the order-of-magnitude mandate → headroom bead sq-7d3dj.33.4.
+- The first LUBM(1) gather ran while another agent's `cargo-mutants` wave loaded
+  the box (load >16); it was re-gathered on the quiet box and the table above is
+  the quiet re-run. Both raw envelopes live in `/tmp` only (NON-canonical —
+  deliberately not committed; the canonical run is sq-7d3dj.33.3).
 
 ## 3. Root cause of the ~760 ms `sparql_constraint` workload
 
@@ -83,7 +127,7 @@ once per focus node.
 |---|---|
 | Whole **unbound** constraint query, run once | 926 µs → all 3 738 solutions |
 | Same query with a **single-row** `VALUES ?this` (what the validator runs per focus node) | 464 µs → 3 rows |
-| × 1 874 focus nodes | 1 874 × 464 µs ≈ **870 ms** ≈ the observed 860 ms (CI trend ~760 ms) |
+| × 1 874 focus nodes | 1 874 × 464 µs ≈ **870 ms** ≈ the observed 860–916 ms (CI trend ~760 ms) |
 | Same query with **all 1 874 focus nodes in ONE `VALUES`** | **1 479 µs** → the same 3 738 rows |
 
 So the whole workload's answer set is computable in ~1.5 ms; the current
@@ -106,7 +150,12 @@ index, not by re-running a whole query.
 
 ## 4. Follow-up beads
 
-<!-- BEADS -->
+| Bead | P | What |
+|---|---|---|
+| `sq-7d3dj.33.1` | P1 | **The fix**: batch all focus nodes into ONE `VALUES` execution in `sparq-shacl` (measured ~580× on `sparql_constraint`; guard the non-batchable aggregate/LIMIT forms). |
+| `sq-7d3dj.33.2` | P2 | Engine-level bind-join / sideways-information-passing: seed BGP scans from a tiny VALUES join side instead of full-scan + hash-join (fixes the general query-shape class). |
+| `sq-7d3dj.33.3` | P2 | CANONICAL EC2 re-run of this harness (`CANONICAL=1`, dedicated quiet box) — ideally after sq-7d3dj.33.1 lands, or before/after for the honest delta. |
+| `sq-7d3dj.33.4` | P2 | Core-constraint headroom: `datatype_range` / `node_paths` are ahead of Jena but below the order-of-magnitude bar at some scales — profile + targeted fix. |
 
 ## 5. Reproduction
 
