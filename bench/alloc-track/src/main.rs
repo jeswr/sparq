@@ -539,6 +539,72 @@ fn main() {
     }
 
     eprintln!("# alloc-track: all {} queries deterministic across {} measured iters", OPS.len(), cfg.iters - 1);
+
+    // --------------------------------------------------------------------------- //
+    // Load-time allocation measurement (sq-7d3dj.6)
+    // Measures allocations during Graph::load_str — the ingest path that includes
+    // Graph::build + numerics_of + temporals_of. Provides before/after evidence for
+    // the sq-7d3dj.6 optimisation (borrowed-path numerics cache, no per-id owned Term).
+    // --------------------------------------------------------------------------- //
+
+    eprintln!("# load-time allocation measurements (sq-7d3dj.6)...");
+
+    // Warmup: call load once without counting to flush any lazy initialisation that
+    // would skew the first measurement (e.g., regex engines, thread-local setup).
+    let _ = sparq_core::Graph::load_str(&turtle, "turtle").expect("warmup load must succeed");
+
+    let mut load_measurements: Vec<Measurement> = Vec::with_capacity(cfg.iters - 1);
+    for _ in 0..(cfg.iters - 1) {
+        counters_reset();
+        let g = sparq_core::Graph::load_str(&turtle, "turtle")
+            .expect("load must succeed");
+        let (allocs, peak_bytes) = counters_snap();
+        let rows = g.len();
+        load_measurements.push(Measurement { allocs, peak_bytes, rows });
+    }
+
+    let load_first = load_measurements[0];
+    let load_alloc_matches = load_measurements.iter().all(|m| m.allocs == load_first.allocs);
+    let load_peak_matches = load_measurements.iter().all(|m| m.peak_bytes == load_first.peak_bytes);
+    let load_rows_match = load_measurements.iter().all(|m| m.rows == load_first.rows);
+
+    if !load_rows_match {
+        eprintln!("# ERROR: load triple count varied across iterations — dataset not stable");
+        std::process::exit(2);
+    }
+
+    let load_status = if load_alloc_matches && load_peak_matches {
+        "ok".to_string()
+    } else {
+        let alloc_min = load_measurements.iter().map(|m| m.allocs).min().unwrap();
+        let alloc_max = load_measurements.iter().map(|m| m.allocs).max().unwrap();
+        let peak_min = load_measurements.iter().map(|m| m.peak_bytes).min().unwrap();
+        let peak_max = load_measurements.iter().map(|m| m.peak_bytes).max().unwrap();
+        eprintln!(
+            "# VARIANCE detected for load_n{}: allocs=[{},{}] peak_bytes=[{},{}]",
+            cfg.scale, alloc_min, alloc_max, peak_min, peak_max
+        );
+        format!("band allocs=[{},{}] peak=[{},{}]", alloc_min, alloc_max, peak_min, peak_max)
+    };
+
+    let (load_allocs, load_peak) = if load_alloc_matches && load_peak_matches {
+        (load_first.allocs, load_first.peak_bytes)
+    } else {
+        (
+            load_measurements.iter().map(|m| m.allocs).min().unwrap(),
+            load_measurements.iter().map(|m| m.peak_bytes).min().unwrap(),
+        )
+    };
+
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        format!("load_n{}", cfg.scale),
+        load_allocs,
+        load_peak,
+        load_first.rows,
+        load_status
+    );
+    eprintln!("# load_n{}: allocs={} peak_bytes={} triples={} status={}", cfg.scale, load_allocs, load_peak, load_first.rows, load_status);
 }
 
 // --------------------------------------------------------------------------- //
