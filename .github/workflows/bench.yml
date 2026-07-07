@@ -153,6 +153,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown   # enables the wasm bundle-size metric in ci-bench.sh
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # [OPUS-4.8] (sq-7d3dj.14) binaryen (wasm-opt) — installed unconditionally so the
+      # TREND-ONLY wasm_opt_bundle_bytes metric runs on BOTH PR and main tiers. ci-bench.sh
+      # guards on `command -v wasm-opt` so the step is a no-op skip when absent. The version
+      # is logged per CI run (see ci-bench.sh wasm_opt_bundle_bytes block).
+      - name: Install binaryen (wasm-opt for shipped-size trend metric)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
       # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN ONLY. On push to
       # main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install these, so the
       # ci-bench.sh suite hooks SKIP gracefully (each is guarded on `command -v <tool>`) and PR perf

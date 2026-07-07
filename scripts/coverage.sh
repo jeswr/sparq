@@ -123,6 +123,27 @@ PER_COMMIT_CRATES=(
   # the focused bnode-isomorphism / oxrdf-bridge unit cases; sparq-algos' reflects the inline
   # PageRank/centrality/community oracles plus the tests/topology_oracles.rs integration suite.
   sparq-algos sparq-canon
+  # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): the two CORE OWL 2 reasoners that were
+  # untracked by BOTH coverage gates.  Their whole gate-exercising surface is behind
+  # DEFAULT-OFF features, so a default-feature `cargo llvm-cov -p <crate>` would build
+  # the crate with the EL classifier / QL rewriter compiled OUT and report a
+  # non-representative (low or empty) number.  Each MUST be measured WITH its
+  # whole-surface features on — the `case` in measure() below names them:
+  #   * sparq-reason-el  —  `rbox` (CR10/CR11 role-inclusion automaton, Phase E2) +
+  #                          `hasse` (DirectHierarchy transitive-reduction, Phase E3).
+  #                          The E1 classify core is always present; rbox+hasse together
+  #                          exercise the full normalise->saturate->reduce pipeline.
+  #   * sparq-reason-ql  —  `experimental` (the PerfectRef rewriting pass; without it
+  #                          only the cheap CQ-shape gate types compile in, which is not
+  #                          a representative number for the rewriter floor).
+  # Neither cdomain (requires sparq-substrate dep) nor abox is included in the EL
+  # measurement: the bead architect explicitly specified rbox,hasse as the whole-surface
+  # ceiling for this gate wiring pass (those features close the SNOMED/EL+ gap; cdomain/
+  # abox are separately tracked beads).  Nothing in the workspace depends on these crates
+  # by default, so their tests are otherwise run ONLY by the feature-matrix leg; wiring
+  # them here brings both cores under the line-coverage ratchet ("no crate silently
+  # dropped", matching sparq-substrate/sparq-canon above). [OPUS-4.8]
+  sparq-reason-el sparq-reason-ql
   # [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn, umbrella sq-qonbz): the shared zero-overhead
   # evaluation SUBSTRATE — the correctness core (the id-tuple Row/Key/Posting vocabulary,
   # the XSD numeric value tower, the four id-tuple join kernels, and the SPARQL term total
@@ -179,8 +200,8 @@ SHARD_GROUPS=(
   "sparq-engine"
   # shard 2 (~336s measured)
   "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
-  # shard 3 (~336s measured)
-  "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
+  # shard 3 (~336s measured; + sparq-reason-el [EL rbox+hasse] + sparq-reason-ql [QL experimental], sq-qcnn.23)
+  "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-reason-el sparq-reason-ql sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
   # shard 4 (~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
   "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize sparq-engine-service"
 )
@@ -479,6 +500,26 @@ measure() {
     sparq-substrate)
       cargo_args+=(--features numeric,join,compare,rows)
       features+=("numeric" "join" "compare" "rows") ;;
+    # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): OWL 2 EL consequence-based classifier.
+    # Whole gate-exercising surface is behind DEFAULT-OFF `rbox` + `hasse`:
+    #   * `rbox`  — CR10/CR11 role-inclusion + property-chain automaton (Phase E2).
+    #   * `hasse` — DirectHierarchy transitive reduction to direct-subsumer diagram (E3).
+    # Without BOTH, the normalize->saturate->reduce pipeline is only partially compiled
+    # and the line% reflects only the E1 core — a non-representative measurement.
+    # Note: `cdomain` (concrete domains, requires sparq-substrate dep) and `abox`
+    # (ABox internalization) are NOT included: the architect-specified whole-surface for
+    # this gate wiring pass is rbox+hasse (Cargo.toml Phases E2+E3, the SNOMED/EL+ gap).
+    sparq-reason-el)
+      cargo_args+=(--features rbox,hasse)
+      features+=("rbox" "hasse") ;;
+    # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): OWL 2 QL query-rewriting reasoner.
+    # Whole gate-exercising surface is behind DEFAULT-OFF `experimental`:
+    # without it only the cheap CQ-shape gate types compile in and the PerfectRef
+    # rewriter is compiled OUT — a non-representative (low) number. Mirrors the
+    # sparq-reason-el rbox+hasse quirk and the sparq-fedplan `fedplan` quirk above.
+    sparq-reason-ql)
+      cargo_args+=(--features experimental)
+      features+=("experimental") ;;
     # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
     # (Turtle/TriG/N-Quads/JSON-LD) peeled into this internal sub-crate. Its WHOLE surface is
     # behind DEFAULT-OFF `serialize-rdf` (mirroring the gating it had inside sparq-engine), so a
