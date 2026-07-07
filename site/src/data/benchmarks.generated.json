@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-06-16T16:09:17.098Z",
-  "source": "benchmark-data branch (dev/bench/data.js)",
+  "generatedAt": "2026-07-07T09:27:19.008Z",
+  "source": "benchmark-data branch (dev/bench/data.js) (kept — --competitors-only: refreshed labels+competitors only)",
   "latest": {
     "commit": "fd219babd41d36e36b8e72e161c5c4c8277583fe",
     "date": 1781556283889,
@@ -28650,6 +28650,22 @@
       "mode": "query",
       "unit": "µs"
     },
+    "hdt_load_s": {
+      "label": "HDT — load+decode .hdt to a native Graph (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "wall-clock load+decode of the synthetic .hdt (trend-only; machine-sensitive)",
+      "mode": "load",
+      "unit": "s"
+    },
+    "hdt_vs_ntgz_load_s": {
+      "label": "HDT — gzipped-N-Triples / HDT load-time ratio (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "ntgz_load_s / hdt_load_s on the same triples (ratio survives contention; trend-only)",
+      "mode": "ratio",
+      "unit": "ratio"
+    },
     "load_s": {
       "label": "Load — parse + index build (synthetic)",
       "suite": "Pipeline",
@@ -28782,6 +28798,38 @@
       "mode": "count",
       "regime": "extensional",
       "unit": "µs"
+    },
+    "nlq_ask_repairs": {
+      "label": "NL→SPARQL ask loop — repair rounds",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "repair rounds the ask loop needed (0 = stub's first SPARQL was valid + executable)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_ask_result_rows": {
+      "label": "NL→SPARQL ask loop — result rows",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "rows the full ask loop returns (GROUP BY ?type -> one row per type)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_prompt_chars": {
+      "label": "NL→SPARQL grounded prompt — char length (token-budget proxy)",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "length of the schema-grounded prompt prompt_for(question) builds; smaller = leaner",
+      "mode": "count",
+      "unit": "chars"
+    },
+    "nlq_synth_triples": {
+      "label": "NL→SPARQL synthetic graph — triple count",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "triples in the synthetic typed graph (3 per entity)",
+      "mode": "count",
+      "unit": "count"
     },
     "op_q01_bgp_count": {
       "label": "Operator — BGP — single triple pattern, count",
@@ -29653,6 +29701,102 @@
       "mode": "validate",
       "unit": "µs"
     },
+    "snikmeta_direct_eq_upstream": {
+      "label": "HDT direct_eq_upstream — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "1 iff direct decoder == upstream-backed path on the same bytes (oracle)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_distinct_predicates": {
+      "label": "HDT distinct_predicates — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct predicates via a full SPO scan (triple-pattern resolution)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_rdf_type_triples": {
+      "label": "HDT rdf_type_triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "bound-predicate triple-pattern resolution (rdf:type triples)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_terms": {
+      "label": "HDT terms — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct dictionary terms interned into sparq's Dict (id-translation)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_triples": {
+      "label": "HDT triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "stored triples of the decoded graph (load-and-decode-to-native)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_acp_auth_triples": {
+      "label": "Solid acp_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised ACP auth view (materialize_acp, 3 strata)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_alice_readable_graphs": {
+      "label": "Solid alice_readable_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "graphs visible to ALICE in Mode::Read (AuthIndex walk)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_authorized_rows": {
+      "label": "Solid authorized_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query restricted to alice's authorized subset",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_full_dataset_rows": {
+      "label": "Solid full_dataset_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query over the FULL dataset (GRAPH ?g)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_auth_triples": {
+      "label": "Solid wac_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised WAC auth view (materialize_wac)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_named_graphs": {
+      "label": "Solid wac_named_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "named graphs in the WAC fixture",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_quads": {
+      "label": "Solid wac_quads — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "total quads across the WAC fixture's named graphs",
+      "mode": "count",
+      "unit": "count"
+    },
     "sp2b_q01_count": {
       "label": "SP2Bench q01 — single journal's issue year (selective lookup), count",
       "suite": "SP2Bench",
@@ -30186,480 +30330,487 @@
       "query": "compiled sparq-wasm browser bundle size",
       "unit": "bytes"
     },
-    "watdiv_C1_count": {
-      "label": "WatDiv C1 — complex query, count",
+    "wasm_opt_bundle_bytes": {
+      "label": "WASM shipped size (wasm-opt -Oz)",
+      "suite": "Memory / Size",
+      "dataset": "n/a (build artifact, post wasm-opt -Oz; binaryen — version logged per CI run)",
+      "query": "sparq-wasm bundle size after wasm-opt -Oz (trend-only; raw gate is wasm_bundle_bytes)",
+      "unit": "bytes"
+    },
+    "watdiv_sf1000_C1_count": {
+      "label": "WatDiv C1 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C1_json": {
-      "label": "WatDiv C1 — complex query, json",
+    "watdiv_sf1000_C1_json": {
+      "label": "WatDiv C1 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C1_materialize": {
-      "label": "WatDiv C1 — complex query, materialize",
+    "watdiv_sf1000_C1_materialize": {
+      "label": "WatDiv C1 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C2_count": {
-      "label": "WatDiv C2 — complex query, count",
+    "watdiv_sf1000_C2_count": {
+      "label": "WatDiv C2 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C2_json": {
-      "label": "WatDiv C2 — complex query, json",
+    "watdiv_sf1000_C2_json": {
+      "label": "WatDiv C2 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C2_materialize": {
-      "label": "WatDiv C2 — complex query, materialize",
+    "watdiv_sf1000_C2_materialize": {
+      "label": "WatDiv C2 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C3_count": {
-      "label": "WatDiv C3 — complex query, count",
+    "watdiv_sf1000_F1_count": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_json": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_materialize": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_count": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_json": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_materialize": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1_C3_count": {
+      "label": "WatDiv C3 (SF=1) — complex query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C3_json": {
-      "label": "WatDiv C3 — complex query, json",
+    "watdiv_sf1_C3_json": {
+      "label": "WatDiv C3 (SF=1) — complex query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C3_materialize": {
-      "label": "WatDiv C3 — complex query, materialize",
+    "watdiv_sf1_C3_materialize": {
+      "label": "WatDiv C3 (SF=1) — complex query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F1_count": {
-      "label": "WatDiv F1 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F1_json": {
-      "label": "WatDiv F1 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F1_materialize": {
-      "label": "WatDiv F1 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F2_count": {
-      "label": "WatDiv F2 — snowflake query, count",
+    "watdiv_sf1_F2_count": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F2_json": {
-      "label": "WatDiv F2 — snowflake query, json",
+    "watdiv_sf1_F2_json": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F2_materialize": {
-      "label": "WatDiv F2 — snowflake query, materialize",
+    "watdiv_sf1_F2_materialize": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F3_count": {
-      "label": "WatDiv F3 — snowflake query, count",
+    "watdiv_sf1_F3_count": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F3_json": {
-      "label": "WatDiv F3 — snowflake query, json",
+    "watdiv_sf1_F3_json": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F3_materialize": {
-      "label": "WatDiv F3 — snowflake query, materialize",
+    "watdiv_sf1_F3_materialize": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F4_count": {
-      "label": "WatDiv F4 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F4_json": {
-      "label": "WatDiv F4 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F4_materialize": {
-      "label": "WatDiv F4 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F5_count": {
-      "label": "WatDiv F5 — snowflake query, count",
+    "watdiv_sf1_F5_count": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F5_json": {
-      "label": "WatDiv F5 — snowflake query, json",
+    "watdiv_sf1_F5_json": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F5_materialize": {
-      "label": "WatDiv F5 — snowflake query, materialize",
+    "watdiv_sf1_F5_materialize": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L1_count": {
-      "label": "WatDiv L1 — linear query, count",
+    "watdiv_sf1_L1_count": {
+      "label": "WatDiv L1 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L1_json": {
-      "label": "WatDiv L1 — linear query, json",
+    "watdiv_sf1_L1_json": {
+      "label": "WatDiv L1 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L1_materialize": {
-      "label": "WatDiv L1 — linear query, materialize",
+    "watdiv_sf1_L1_materialize": {
+      "label": "WatDiv L1 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L2_count": {
-      "label": "WatDiv L2 — linear query, count",
+    "watdiv_sf1_L2_count": {
+      "label": "WatDiv L2 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L2_json": {
-      "label": "WatDiv L2 — linear query, json",
+    "watdiv_sf1_L2_json": {
+      "label": "WatDiv L2 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L2_materialize": {
-      "label": "WatDiv L2 — linear query, materialize",
+    "watdiv_sf1_L2_materialize": {
+      "label": "WatDiv L2 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L3_count": {
-      "label": "WatDiv L3 — linear query, count",
+    "watdiv_sf1_L3_count": {
+      "label": "WatDiv L3 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L3_json": {
-      "label": "WatDiv L3 — linear query, json",
+    "watdiv_sf1_L3_json": {
+      "label": "WatDiv L3 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L3_materialize": {
-      "label": "WatDiv L3 — linear query, materialize",
+    "watdiv_sf1_L3_materialize": {
+      "label": "WatDiv L3 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L4_count": {
-      "label": "WatDiv L4 — linear query, count",
+    "watdiv_sf1_L4_count": {
+      "label": "WatDiv L4 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L4_json": {
-      "label": "WatDiv L4 — linear query, json",
+    "watdiv_sf1_L4_json": {
+      "label": "WatDiv L4 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L4_materialize": {
-      "label": "WatDiv L4 — linear query, materialize",
+    "watdiv_sf1_L4_materialize": {
+      "label": "WatDiv L4 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L5_count": {
-      "label": "WatDiv L5 — linear query, count",
+    "watdiv_sf1_L5_count": {
+      "label": "WatDiv L5 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L5_json": {
-      "label": "WatDiv L5 — linear query, json",
+    "watdiv_sf1_L5_json": {
+      "label": "WatDiv L5 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L5_materialize": {
-      "label": "WatDiv L5 — linear query, materialize",
+    "watdiv_sf1_L5_materialize": {
+      "label": "WatDiv L5 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S1_count": {
-      "label": "WatDiv S1 — star query, count",
+    "watdiv_sf1_S1_count": {
+      "label": "WatDiv S1 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S1_json": {
-      "label": "WatDiv S1 — star query, json",
+    "watdiv_sf1_S1_json": {
+      "label": "WatDiv S1 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S1_materialize": {
-      "label": "WatDiv S1 — star query, materialize",
+    "watdiv_sf1_S1_materialize": {
+      "label": "WatDiv S1 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S2_count": {
-      "label": "WatDiv S2 — star query, count",
+    "watdiv_sf1_S2_count": {
+      "label": "WatDiv S2 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S2_json": {
-      "label": "WatDiv S2 — star query, json",
+    "watdiv_sf1_S2_json": {
+      "label": "WatDiv S2 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S2_materialize": {
-      "label": "WatDiv S2 — star query, materialize",
+    "watdiv_sf1_S2_materialize": {
+      "label": "WatDiv S2 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S3_count": {
-      "label": "WatDiv S3 — star query, count",
+    "watdiv_sf1_S3_count": {
+      "label": "WatDiv S3 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S3_json": {
-      "label": "WatDiv S3 — star query, json",
+    "watdiv_sf1_S3_json": {
+      "label": "WatDiv S3 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S3_materialize": {
-      "label": "WatDiv S3 — star query, materialize",
+    "watdiv_sf1_S3_materialize": {
+      "label": "WatDiv S3 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S4_count": {
-      "label": "WatDiv S4 — star query, count",
+    "watdiv_sf1_S4_count": {
+      "label": "WatDiv S4 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S4_json": {
-      "label": "WatDiv S4 — star query, json",
+    "watdiv_sf1_S4_json": {
+      "label": "WatDiv S4 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S4_materialize": {
-      "label": "WatDiv S4 — star query, materialize",
+    "watdiv_sf1_S4_materialize": {
+      "label": "WatDiv S4 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S5_count": {
-      "label": "WatDiv S5 — star query, count",
+    "watdiv_sf1_S5_count": {
+      "label": "WatDiv S5 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S5_json": {
-      "label": "WatDiv S5 — star query, json",
+    "watdiv_sf1_S5_json": {
+      "label": "WatDiv S5 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S5_materialize": {
-      "label": "WatDiv S5 — star query, materialize",
+    "watdiv_sf1_S5_materialize": {
+      "label": "WatDiv S5 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S6_count": {
-      "label": "WatDiv S6 — star query, count",
+    "watdiv_sf1_S6_count": {
+      "label": "WatDiv S6 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S6_json": {
-      "label": "WatDiv S6 — star query, json",
+    "watdiv_sf1_S6_json": {
+      "label": "WatDiv S6 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S6_materialize": {
-      "label": "WatDiv S6 — star query, materialize",
+    "watdiv_sf1_S6_materialize": {
+      "label": "WatDiv S6 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S7_count": {
-      "label": "WatDiv S7 — star query, count",
+    "watdiv_sf1_S7_count": {
+      "label": "WatDiv S7 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S7_json": {
-      "label": "WatDiv S7 — star query, json",
+    "watdiv_sf1_S7_json": {
+      "label": "WatDiv S7 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S7_materialize": {
-      "label": "WatDiv S7 — star query, materialize",
+    "watdiv_sf1_S7_materialize": {
+      "label": "WatDiv S7 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
@@ -31196,37 +31347,59 @@
     },
     "same_box_comparisons": [
       {
-        "_comment": "[OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2): sparq + Oxigraph (+ QLever best-effort) on ONE ephemeral AWS EC2 box against the SAME generated SP2Bench-250k corpus + the SAME bench/sp2b/queries .rq files in the SAME min-of-5 COUNT regime. DISTINCT from (a) the gh-runner CI-band featured-suites `values` cells above — that sparq column is a DIFFERENT machine, so a competitor µs from this box must NOT be placed beside it; and (b) the cross-machine `references` baselines (cited, own scale/machine). Absolute µs are THIS-BOX-ONLY (4-vCPU Graviton) — for cross-engine ORDERING, not an absolute cross-machine reference. HONESTY: the gather launched sparq (sparq-cli bench, captured) then Oxigraph (sparq-bench bench-corpus) on the same box, but the orchestrator's poll loop reached its bound and the instance hit its orphan-safe cleanup trap immediately AFTER the Oxigraph command was invoked and BEFORE its TSV reached the pulled log — so NO Oxigraph timing and NO QLever timing were captured. Rather than fabricate or cross-fill, oxigraph + qlever stay null (render 'n/a') and count_match stays null (cannot verify cross-engine row agreement without the Oxigraph rows). Only sparq's real per-query (rows, best_us) are recorded. The sparq+oxigraph row-counts therefore COULD NOT be cross-checked on this run. Re-running the gather to completion (sentinel-gated, longer poll bound) would fill the oxigraph column and enable the count_match check. Keep byte-for-meaning in sync with COMPETITORS_DATA.same_box_comparisons in dashboard.js.",
-        "suite": "SP2Bench",
-        "scale": "SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)",
+        "suite": "sp2b",
+        "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
         "iters": 5,
-        "git_commit": "681047f",
-        "gathered_at_utc": "2026-06-16",
-        "source": "live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)",
+        "git_commit": "0ab87b2a",
+        "gathered_at_utc": "2026-07-07T01:11:26Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T015305Z + 20260707T015316Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×5, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-competitor-matrix (sq-1sa9r)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
         "env": {
-          "host_class": "ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)",
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
           "quiet_box": true,
-          "gathered_at_utc": "2026-06-16",
-          "note": "Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run."
+          "gathered_at_utc": "2026-07-07T01:11:26Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
         },
         "engines": [
           {
             "id": "sparq",
             "label": "sparq",
-            "version": "git 681047f",
-            "env": "ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT"
+            "version": "0ab87b2a",
+            "mode": "CLI in-process (sparq-cli bench, COUNT mode)",
+            "status": "ok"
           },
           {
             "id": "oxigraph",
             "label": "Oxigraph",
-            "version": "0.5.8",
-            "env": "same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired"
+            "version": "0.5.9",
+            "mode": "CLI in-process (prebuilt on-disk store, sha256-pinned)",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
+            "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
+            "status": "failed",
+            "failure": "engine run failed (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP SPARQL adapter (isql ld_dir)",
+            "status": "ok"
           },
           {
             "id": "qlever",
             "label": "QLever",
-            "version": "n/a",
-            "env": "requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated"
+            "version": "adfreiburg/qlever (sha256:2cc33823e65a…)",
+            "mode": "HTTP SPARQL adapter (qlever-index → qlever-server)",
+            "status": "ok"
           }
         ],
         "rows": [
@@ -31235,154 +31408,1588 @@
             "unit": "µs",
             "rows": 1,
             "values": {
-              "sparq": 9.2,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 10.5,
+              "oxigraph": 14296.3,
+              "fuseki": null,
+              "virtuoso": 743,
+              "qlever": 2946.9
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q02",
             "unit": "µs",
             "rows": 6067,
             "values": {
-              "sparq": 6618.2,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 6183.8,
+              "oxigraph": 524517.7,
+              "fuseki": null,
+              "virtuoso": 340770,
+              "qlever": 276392.4
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q03a",
             "unit": "µs",
             "rows": 15823,
             "values": {
-              "sparq": 14525.7,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 11804,
+              "oxigraph": 218440.3,
+              "fuseki": null,
+              "virtuoso": 95121,
+              "qlever": 46230.5
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q03b",
             "unit": "µs",
             "rows": 114,
             "values": {
-              "sparq": 14355.4,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 11315.9,
+              "oxigraph": 128549.8,
+              "fuseki": null,
+              "virtuoso": 1378,
+              "qlever": 1576.4
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q03c",
             "unit": "µs",
             "rows": 0,
             "values": {
-              "sparq": 14140.6,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 11393.2,
+              "oxigraph": 126918.1,
+              "fuseki": null,
+              "virtuoso": 613,
+              "qlever": 1246.6
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q04",
             "unit": "µs",
             "rows": 541911,
             "values": {
-              "sparq": 358604.1,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 347814.3,
+              "oxigraph": 19702535.7,
+              "fuseki": null,
+              "virtuoso": 8220214,
+              "qlever": 2900056.2
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q05b",
             "unit": "µs",
             "rows": 6933,
             "values": {
-              "sparq": 15317.7,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 15409.2,
+              "oxigraph": 612795.9,
+              "fuseki": null,
+              "virtuoso": 109939,
+              "qlever": 31787.2
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q07",
             "unit": "µs",
             "rows": 48,
             "values": {
-              "sparq": 23383.4,
+              "sparq": 20378.9,
               "oxigraph": null,
-              "qlever": null
+              "fuseki": null,
+              "virtuoso": 508290,
+              "qlever": 8031.1
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q08",
             "unit": "µs",
             "rows": 358,
             "values": {
-              "sparq": 212938.1,
+              "sparq": 153318,
               "oxigraph": null,
-              "qlever": null
+              "fuseki": null,
+              "virtuoso": 12809,
+              "qlever": 8567.8
             },
-            "count_match": null
+            "count_match": false
           },
           {
             "query": "q09",
             "unit": "µs",
             "rows": 4,
             "values": {
-              "sparq": 23091.2,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 20488.4,
+              "oxigraph": 185741.3,
+              "fuseki": null,
+              "virtuoso": 13417,
+              "qlever": 1343.6
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q10",
             "unit": "µs",
             "rows": 452,
             "values": {
-              "sparq": 3.8,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 3.7,
+              "oxigraph": 16483.8,
+              "fuseki": null,
+              "virtuoso": 5523,
+              "qlever": 4521.1
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q11",
             "unit": "µs",
             "rows": 10,
             "values": {
-              "sparq": 18652.1,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 24552.2,
+              "oxigraph": 742647.9,
+              "fuseki": null,
+              "virtuoso": 13407,
+              "qlever": 1925.2
             },
-            "count_match": null
+            "count_match": true
           },
           {
             "query": "q12b",
             "unit": "µs",
             "rows": 1,
             "values": {
-              "sparq": 213513.8,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 153496.5,
+              "oxigraph": 49991323.8,
+              "fuseki": null,
+              "virtuoso": 9003,
+              "qlever": 7218.5
             },
-            "count_match": null
+            "count_match": false
           },
           {
             "query": "q12c",
             "unit": "µs",
             "rows": 0,
             "values": {
-              "sparq": 4.9,
-              "oxigraph": null,
-              "qlever": null
+              "sparq": 5.2,
+              "oxigraph": 10764.2,
+              "fuseki": null,
+              "virtuoso": 573,
+              "qlever": 1389.6
             },
-            "count_match": null
+            "count_match": true
+          }
+        ]
+      },
+      {
+        "connection": {
+          "modes_measured": [
+            "keep-alive",
+            "fresh-connect"
+          ],
+          "primary": "keep-alive",
+          "note": "EVERY query was measured in BOTH connection regimes (the fairness question research/perf-dominance-gap-2026-07.md D9 left open): cols 3-4 = keep-alive (ONE persistent HTTP/1.1 connection reused across iterations; min-of-N discards the connect-bearing first iteration), cols 5-6 = fresh-connect (a NEW TCP connection per iteration, connect cost included). TTFB = time from request start to status-line+headers received; full = entire body read. All values are per-mode minima over the iterations."
+        },
+        "profile": "http-ttfb (keep-alive + fresh-connect; values = keep-alive full-request best)",
+        "suite": "sp2b-http",
+        "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
+        "iters": 3,
+        "git_commit": "13bfa892",
+        "gathered_at_utc": "2026-07-07T09:24:34Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T085517Z + 20260707T092434Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×3, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-http-ttfb-panel (sq-7d3dj.34)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+        "env": {
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+          "quiet_box": true,
+          "gathered_at_utc": "2026-07-07T09:24:34Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq = sparq-server spawn->first-HTTP-answer seconds (load+bind); oxigraph = pure offline bulk-load seconds; fuseki/virtuoso/qlever = whole-recipe wall (load+serve+query+teardown)"
+        },
+        "engines": [
+          {
+            "id": "sparq",
+            "label": "sparq",
+            "version": "13bfa892",
+            "mode": "HTTP server (sparq-server, SPARQL 1.1 protocol at /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "oxigraph",
+            "label": "Oxigraph",
+            "version": "0.5.9",
+            "mode": "HTTP server (prebuilt sha256-pinned oxigraph serve-read-only, /query) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki 6.1.0 (official Apache tarball)",
+            "mode": "HTTP server (OFFLINE tdb2.tdbloader bulk load -> fuseki-server --tdb2, the intended bulk path; fixes the 2026-07-07 docker-image load hang) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP server (isql ld_dir bulk load, /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "qlever",
+            "label": "QLever",
+            "version": "adfreiburg/qlever (sha256:bc1958b921a7…)",
+            "mode": "HTTP server (qlever-index -> qlever-server) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          }
+        ],
+        "rows": [
+          {
+            "query": "q01",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 192,
+              "oxigraph": 1681,
+              "fuseki": 5493,
+              "virtuoso": 536,
+              "qlever": 8589
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 187,
+              "oxigraph": 1670,
+              "fuseki": 5216,
+              "virtuoso": 531,
+              "qlever": 3358
+            },
+            "values_fresh": {
+              "sparq": 222,
+              "oxigraph": 1800,
+              "fuseki": 5628,
+              "virtuoso": 561,
+              "qlever": 2845
+            },
+            "values_fresh_ttfb": {
+              "sparq": 218,
+              "oxigraph": 1789,
+              "fuseki": 5330,
+              "virtuoso": 556,
+              "qlever": 2829
+            }
+          },
+          {
+            "query": "q02",
+            "unit": "µs",
+            "rows": 6067,
+            "values": {
+              "sparq": 21318,
+              "oxigraph": 410637,
+              "fuseki": 500860,
+              "virtuoso": 350676,
+              "qlever": 237107
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 18579,
+              "oxigraph": 319344,
+              "fuseki": 485522,
+              "virtuoso": 345519,
+              "qlever": 181646
+            },
+            "values_fresh": {
+              "sparq": 20188,
+              "oxigraph": 406486,
+              "fuseki": 497612,
+              "virtuoso": 348744,
+              "qlever": 234247
+            },
+            "values_fresh_ttfb": {
+              "sparq": 18814,
+              "oxigraph": 317978,
+              "fuseki": 481655,
+              "virtuoso": 345499,
+              "qlever": 179250
+            }
+          },
+          {
+            "query": "q03a",
+            "unit": "µs",
+            "rows": 15823,
+            "values": {
+              "sparq": 17985,
+              "oxigraph": 151237,
+              "fuseki": 138900,
+              "virtuoso": 93568,
+              "qlever": 33913
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 17061,
+              "oxigraph": 1993,
+              "fuseki": 135984,
+              "virtuoso": 92261,
+              "qlever": 32943
+            },
+            "values_fresh": {
+              "sparq": 17170,
+              "oxigraph": 150733,
+              "fuseki": 138349,
+              "virtuoso": 93215,
+              "qlever": 34236
+            },
+            "values_fresh_ttfb": {
+              "sparq": 16549,
+              "oxigraph": 2144,
+              "fuseki": 135162,
+              "virtuoso": 92557,
+              "qlever": 33266
+            }
+          },
+          {
+            "query": "q03b",
+            "unit": "µs",
+            "rows": 114,
+            "values": {
+              "sparq": 12698,
+              "oxigraph": 102706,
+              "fuseki": 34730,
+              "virtuoso": 1235,
+              "qlever": 1384
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 12667,
+              "oxigraph": 102666,
+              "fuseki": 34313,
+              "virtuoso": 1225,
+              "qlever": 1363
+            },
+            "values_fresh": {
+              "sparq": 12272,
+              "oxigraph": 102358,
+              "fuseki": 35719,
+              "virtuoso": 1250,
+              "qlever": 1433
+            },
+            "values_fresh_ttfb": {
+              "sparq": 12259,
+              "oxigraph": 102318,
+              "fuseki": 35357,
+              "virtuoso": 1236,
+              "qlever": 1415
+            }
+          },
+          {
+            "query": "q03c",
+            "unit": "µs",
+            "rows": 0,
+            "values": {
+              "sparq": 12585,
+              "oxigraph": 101853,
+              "fuseki": 31690,
+              "virtuoso": 462,
+              "qlever": 4017
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 12578,
+              "oxigraph": 101842,
+              "fuseki": 31328,
+              "virtuoso": 457,
+              "qlever": 1166
+            },
+            "values_fresh": {
+              "sparq": 12262,
+              "oxigraph": 102687,
+              "fuseki": 32890,
+              "virtuoso": 499,
+              "qlever": 1148
+            },
+            "values_fresh_ttfb": {
+              "sparq": 12256,
+              "oxigraph": 102672,
+              "fuseki": 32561,
+              "virtuoso": 494,
+              "qlever": 1133
+            }
+          },
+          {
+            "query": "q04",
+            "unit": "µs",
+            "rows": 541911,
+            "values": {
+              "sparq": 428428,
+              "oxigraph": 17973020,
+              "fuseki": null,
+              "virtuoso": 8013390,
+              "qlever": 2115683
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 372029,
+              "oxigraph": 7772,
+              "virtuoso": 7883505,
+              "qlever": 88912
+            },
+            "values_fresh": {
+              "sparq": 429085,
+              "oxigraph": 17984944,
+              "virtuoso": 7999653,
+              "qlever": 2110505
+            },
+            "values_fresh_ttfb": {
+              "sparq": 388726,
+              "oxigraph": 7641,
+              "virtuoso": 7860868,
+              "qlever": 89386
+            }
+          },
+          {
+            "query": "q05b",
+            "unit": "µs",
+            "rows": 6933,
+            "values": {
+              "sparq": 22284,
+              "oxigraph": 553778,
+              "fuseki": 380931,
+              "virtuoso": 108515,
+              "qlever": 24309
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 22152,
+              "oxigraph": 13433,
+              "fuseki": 380033,
+              "virtuoso": 107642,
+              "qlever": 24172
+            },
+            "values_fresh": {
+              "sparq": 22734,
+              "oxigraph": 551813,
+              "fuseki": 378490,
+              "virtuoso": 108390,
+              "qlever": 24035
+            },
+            "values_fresh_ttfb": {
+              "sparq": 22556,
+              "oxigraph": 13623,
+              "fuseki": 377758,
+              "virtuoso": 108010,
+              "qlever": 23848
+            }
+          },
+          {
+            "query": "q07",
+            "unit": "µs",
+            "rows": 48,
+            "values": {
+              "sparq": 24220,
+              "oxigraph": null,
+              "fuseki": null,
+              "virtuoso": 502369,
+              "qlever": 7984
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 24213,
+              "virtuoso": 502357,
+              "qlever": 7971
+            },
+            "values_fresh": {
+              "sparq": 24346,
+              "virtuoso": 503275,
+              "qlever": 7654
+            },
+            "values_fresh_ttfb": {
+              "sparq": 24337,
+              "virtuoso": 503261,
+              "qlever": 7636
+            }
+          },
+          {
+            "query": "q08",
+            "unit": "µs",
+            "rows": 358,
+            "values": {
+              "sparq": 159142,
+              "oxigraph": null,
+              "fuseki": 25274,
+              "virtuoso": 12710,
+              "qlever": 48973
+            },
+            "count_match": false,
+            "values_ttfb": {
+              "sparq": 159113,
+              "fuseki": 24713,
+              "virtuoso": 12692,
+              "qlever": 8747
+            },
+            "values_fresh": {
+              "sparq": 157142,
+              "fuseki": 23388,
+              "virtuoso": 12716,
+              "qlever": 8503
+            },
+            "values_fresh_ttfb": {
+              "sparq": 157115,
+              "fuseki": 22982,
+              "virtuoso": 12698,
+              "qlever": 8485
+            }
+          },
+          {
+            "query": "q09",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 22897,
+              "oxigraph": 172166,
+              "fuseki": 163621,
+              "virtuoso": 13306,
+              "qlever": 10878
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 22890,
+              "oxigraph": 172151,
+              "fuseki": 163242,
+              "virtuoso": 13299,
+              "qlever": 1232
+            },
+            "values_fresh": {
+              "sparq": 23059,
+              "oxigraph": 173752,
+              "fuseki": 158518,
+              "virtuoso": 13341,
+              "qlever": 1237
+            },
+            "values_fresh_ttfb": {
+              "sparq": 23050,
+              "oxigraph": 173733,
+              "fuseki": 158079,
+              "virtuoso": 13335,
+              "qlever": 1215
+            }
+          },
+          {
+            "query": "q10",
+            "unit": "µs",
+            "rows": 452,
+            "values": {
+              "sparq": 309,
+              "oxigraph": 2264,
+              "fuseki": 7613,
+              "virtuoso": 5409,
+              "qlever": 3906
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 289,
+              "oxigraph": 612,
+              "fuseki": 7343,
+              "virtuoso": 5384,
+              "qlever": 3870
+            },
+            "values_fresh": {
+              "sparq": 347,
+              "oxigraph": 2325,
+              "fuseki": 8865,
+              "virtuoso": 5386,
+              "qlever": 3944
+            },
+            "values_fresh_ttfb": {
+              "sparq": 325,
+              "oxigraph": 699,
+              "fuseki": 8536,
+              "virtuoso": 5357,
+              "qlever": 3902
+            }
+          },
+          {
+            "query": "q11",
+            "unit": "µs",
+            "rows": 10,
+            "values": {
+              "sparq": 26793,
+              "oxigraph": 744451,
+              "fuseki": 37805,
+              "virtuoso": 12625,
+              "qlever": 4695
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 26783,
+              "oxigraph": 744432,
+              "fuseki": 37416,
+              "virtuoso": 12619,
+              "qlever": 1902
+            },
+            "values_fresh": {
+              "sparq": 27319,
+              "oxigraph": 745141,
+              "fuseki": 33360,
+              "virtuoso": 12620,
+              "qlever": 1826
+            },
+            "values_fresh_ttfb": {
+              "sparq": 27309,
+              "oxigraph": 745127,
+              "fuseki": 32943,
+              "virtuoso": 12612,
+              "qlever": 1810
+            }
+          },
+          {
+            "query": "q12b",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 156866,
+              "oxigraph": null,
+              "fuseki": 4966,
+              "virtuoso": 8628,
+              "qlever": 9520
+            },
+            "count_match": false,
+            "values_ttfb": {
+              "sparq": 156850,
+              "fuseki": 4605,
+              "virtuoso": 8622,
+              "qlever": 7208
+            },
+            "values_fresh": {
+              "sparq": 155381,
+              "fuseki": 3435,
+              "virtuoso": 8624,
+              "qlever": 7436
+            },
+            "values_fresh_ttfb": {
+              "sparq": 155364,
+              "fuseki": 3234,
+              "virtuoso": 8619,
+              "qlever": 7420
+            }
+          },
+          {
+            "query": "q12c",
+            "unit": "µs",
+            "rows": 0,
+            "values": {
+              "sparq": 183,
+              "oxigraph": 163,
+              "fuseki": 3471,
+              "virtuoso": 436,
+              "qlever": 2906
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 178,
+              "oxigraph": 158,
+              "fuseki": 3259,
+              "virtuoso": 431,
+              "qlever": 1253
+            },
+            "values_fresh": {
+              "sparq": 211,
+              "oxigraph": 325,
+              "fuseki": 3549,
+              "virtuoso": 477,
+              "qlever": 1327
+            },
+            "values_fresh_ttfb": {
+              "sparq": 206,
+              "oxigraph": 321,
+              "fuseki": 3350,
+              "virtuoso": 472,
+              "qlever": 1312
+            }
+          }
+        ]
+      },
+      {
+        "suite": "watdiv",
+        "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
+        "iters": 5,
+        "git_commit": "0ab87b2a",
+        "gathered_at_utc": "2026-07-07T01:11:26Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T022331Z + 20260707T022342Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×5, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-competitor-matrix (sq-1sa9r)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+        "env": {
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+          "quiet_box": true,
+          "gathered_at_utc": "2026-07-07T01:11:26Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq/oxigraph = pure load seconds; fuseki/virtuoso/qlever = whole-recipe wall (image-cached pull+load+query+teardown)"
+        },
+        "engines": [
+          {
+            "id": "sparq",
+            "label": "sparq",
+            "version": "0ab87b2a",
+            "mode": "CLI in-process (sparq-cli bench, COUNT mode)",
+            "status": "ok"
+          },
+          {
+            "id": "oxigraph",
+            "label": "Oxigraph",
+            "version": "0.5.9",
+            "mode": "CLI in-process (prebuilt on-disk store, sha256-pinned)",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki (docker) (sha256:b1d0c96f19ad…)",
+            "mode": "HTTP SPARQL adapter (tdb2.tdbloader → fuseki-server)",
+            "status": "failed",
+            "failure": "engine run failed (~1800.7s wall) — no query timings captured; shown as failed, not blank"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP SPARQL adapter (isql ld_dir)",
+            "status": "ok"
+          },
+          {
+            "id": "qlever",
+            "label": "QLever",
+            "version": "adfreiburg/qlever (sha256:2cc33823e65a…)",
+            "mode": "HTTP SPARQL adapter (qlever-index → qlever-server)",
+            "status": "ok"
+          }
+        ],
+        "rows": [
+          {
+            "query": "C3",
+            "unit": "µs",
+            "rows": 8763,
+            "values": {
+              "sparq": 50.2,
+              "oxigraph": 1175133.7,
+              "fuseki": null,
+              "virtuoso": 38567,
+              "qlever": 33535.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "F2",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 24.8,
+              "oxigraph": 11441.5,
+              "fuseki": null,
+              "virtuoso": 747,
+              "qlever": 31867.6
+            },
+            "count_match": true
+          },
+          {
+            "query": "F3",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 25.4,
+              "oxigraph": 12255.2,
+              "fuseki": null,
+              "virtuoso": 796,
+              "qlever": 9979
+            },
+            "count_match": true
+          },
+          {
+            "query": "F5",
+            "unit": "µs",
+            "rows": 34,
+            "values": {
+              "sparq": 101.8,
+              "oxigraph": 19965.7,
+              "fuseki": null,
+              "virtuoso": 1753,
+              "qlever": 10629.7
+            },
+            "count_match": true
+          },
+          {
+            "query": "L1",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 15.6,
+              "oxigraph": 12966.1,
+              "fuseki": null,
+              "virtuoso": 728,
+              "qlever": 3706.4
+            },
+            "count_match": true
+          },
+          {
+            "query": "L2",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 14.5,
+              "oxigraph": 11396.1,
+              "fuseki": null,
+              "virtuoso": 661,
+              "qlever": 2470.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "L3",
+            "unit": "µs",
+            "rows": 41,
+            "values": {
+              "sparq": 6.3,
+              "oxigraph": 11543.3,
+              "fuseki": null,
+              "virtuoso": 1070,
+              "qlever": 2485.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "L4",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 5.4,
+              "oxigraph": 10630.4,
+              "fuseki": null,
+              "virtuoso": 658,
+              "qlever": 2317.2
+            },
+            "count_match": true
+          },
+          {
+            "query": "L5",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 9.8,
+              "oxigraph": 10360.6,
+              "fuseki": null,
+              "virtuoso": 647,
+              "qlever": 3771.1
+            },
+            "count_match": true
+          },
+          {
+            "query": "S1",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 32.6,
+              "oxigraph": 19872.9,
+              "fuseki": null,
+              "virtuoso": 1080,
+              "qlever": 132258.4
+            },
+            "count_match": true
+          },
+          {
+            "query": "S2",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 12.1,
+              "oxigraph": 13321.9,
+              "fuseki": null,
+              "virtuoso": 773,
+              "qlever": 4018.8
+            },
+            "count_match": true
+          },
+          {
+            "query": "S3",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 11.4,
+              "oxigraph": 11749.1,
+              "fuseki": null,
+              "virtuoso": 850,
+              "qlever": 5350.4
+            },
+            "count_match": true
+          },
+          {
+            "query": "S4",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 11.4,
+              "oxigraph": 12297.5,
+              "fuseki": null,
+              "virtuoso": 746,
+              "qlever": 4051.8
+            },
+            "count_match": true
+          },
+          {
+            "query": "S5",
+            "unit": "µs",
+            "rows": 8,
+            "values": {
+              "sparq": 10.7,
+              "oxigraph": 12254.9,
+              "fuseki": null,
+              "virtuoso": 823,
+              "qlever": 5380.9
+            },
+            "count_match": true
+          },
+          {
+            "query": "S6",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 9.4,
+              "oxigraph": 11013.5,
+              "fuseki": null,
+              "virtuoso": 663,
+              "qlever": 3771.6
+            },
+            "count_match": true
+          },
+          {
+            "query": "S7",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 10.4,
+              "oxigraph": 10596,
+              "fuseki": null,
+              "virtuoso": 658,
+              "qlever": 3851.9
+            },
+            "count_match": true
+          }
+        ]
+      },
+      {
+        "connection": {
+          "modes_measured": [
+            "keep-alive",
+            "fresh-connect"
+          ],
+          "primary": "keep-alive",
+          "note": "EVERY query was measured in BOTH connection regimes (the fairness question research/perf-dominance-gap-2026-07.md D9 left open): cols 3-4 = keep-alive (ONE persistent HTTP/1.1 connection reused across iterations; min-of-N discards the connect-bearing first iteration), cols 5-6 = fresh-connect (a NEW TCP connection per iteration, connect cost included). TTFB = time from request start to status-line+headers received; full = entire body read. All values are per-mode minima over the iterations."
+        },
+        "profile": "http-ttfb (keep-alive + fresh-connect; values = keep-alive full-request best)",
+        "suite": "watdiv-http",
+        "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
+        "iters": 3,
+        "git_commit": "246b1bfe",
+        "gathered_at_utc": "2026-07-07T09:04:38Z",
+        "canonical": true,
+        "combine": "best-of the 2 back-to-back canonical gathers (20260707T090401Z + 20260707T090438Z): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-2×3, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.",
+        "source": "canonical gather 'sparql-same-box-comparison' (canonical-http-ttfb-panel (sq-7d3dj.34)) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs",
+        "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+        "env": {
+          "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+          "quiet_box": true,
+          "gathered_at_utc": "2026-07-07T09:04:38Z",
+          "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+          "kernel": "6.17.0-1019-aws",
+          "note": "sparq = sparq-server spawn->first-HTTP-answer seconds (load+bind); oxigraph = pure offline bulk-load seconds; fuseki/virtuoso/qlever = whole-recipe wall (load+serve+query+teardown)"
+        },
+        "engines": [
+          {
+            "id": "sparq",
+            "label": "sparq",
+            "version": "246b1bfe",
+            "mode": "HTTP server (sparq-server, SPARQL 1.1 protocol at /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "oxigraph",
+            "label": "Oxigraph",
+            "version": "0.5.9",
+            "mode": "HTTP server (prebuilt sha256-pinned oxigraph serve-read-only, /query) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "fuseki",
+            "label": "Apache Jena Fuseki",
+            "version": "apache-jena-fuseki 6.1.0 (official Apache tarball)",
+            "mode": "HTTP server (OFFLINE tdb2.tdbloader bulk load -> fuseki-server --tdb2, the intended bulk path; fixes the 2026-07-07 docker-image load hang) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "virtuoso",
+            "label": "Virtuoso Open-Source 7",
+            "version": "openlink/virtuoso-opensource-7 (sha256:2a9914b95f8a…)",
+            "mode": "HTTP server (isql ld_dir bulk load, /sparql) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          },
+          {
+            "id": "qlever",
+            "label": "QLever",
+            "version": "adfreiburg/qlever (sha256:bc1958b921a7…)",
+            "mode": "HTTP server (qlever-index -> qlever-server) via http_sparql_adapter.py --profile",
+            "status": "ok"
+          }
+        ],
+        "rows": [
+          {
+            "query": "C3",
+            "unit": "µs",
+            "rows": 8763,
+            "values": {
+              "sparq": 1940,
+              "oxigraph": 1141443,
+              "fuseki": 204670,
+              "virtuoso": 38496,
+              "qlever": 29891
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 1822,
+              "oxigraph": 57797,
+              "fuseki": 203727,
+              "virtuoso": 38292,
+              "qlever": 29446
+            },
+            "values_fresh": {
+              "sparq": 2003,
+              "oxigraph": 1149353,
+              "fuseki": 200218,
+              "virtuoso": 38710,
+              "qlever": 28735
+            },
+            "values_fresh_ttfb": {
+              "sparq": 1850,
+              "oxigraph": 58792,
+              "fuseki": 199409,
+              "virtuoso": 38491,
+              "qlever": 28543
+            }
+          },
+          {
+            "query": "F2",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 244,
+              "oxigraph": 638,
+              "fuseki": 5760,
+              "virtuoso": 698,
+              "qlever": 46504
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 238,
+              "oxigraph": 628,
+              "fuseki": 5478,
+              "virtuoso": 693,
+              "qlever": 34380
+            },
+            "values_fresh": {
+              "sparq": 275,
+              "oxigraph": 839,
+              "fuseki": 6966,
+              "virtuoso": 666,
+              "qlever": 33566
+            },
+            "values_fresh_ttfb": {
+              "sparq": 269,
+              "oxigraph": 829,
+              "fuseki": 6507,
+              "virtuoso": 661,
+              "qlever": 33540
+            }
+          },
+          {
+            "query": "F3",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 232,
+              "oxigraph": 901,
+              "fuseki": 6713,
+              "virtuoso": 744,
+              "qlever": 19913
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 227,
+              "oxigraph": 888,
+              "fuseki": 6234,
+              "virtuoso": 738,
+              "qlever": 10635
+            },
+            "values_fresh": {
+              "sparq": 265,
+              "oxigraph": 1085,
+              "fuseki": 6818,
+              "virtuoso": 749,
+              "qlever": 10307
+            },
+            "values_fresh_ttfb": {
+              "sparq": 260,
+              "oxigraph": 1072,
+              "fuseki": 6222,
+              "virtuoso": 743,
+              "qlever": 10276
+            }
+          },
+          {
+            "query": "F5",
+            "unit": "µs",
+            "rows": 34,
+            "values": {
+              "sparq": 390,
+              "oxigraph": 6285,
+              "fuseki": 8703,
+              "virtuoso": 1821,
+              "qlever": 10580
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 380,
+              "oxigraph": 6242,
+              "fuseki": 8096,
+              "virtuoso": 1808,
+              "qlever": 10548
+            },
+            "values_fresh": {
+              "sparq": 416,
+              "oxigraph": 6793,
+              "fuseki": 8213,
+              "virtuoso": 1884,
+              "qlever": 10630
+            },
+            "values_fresh_ttfb": {
+              "sparq": 406,
+              "oxigraph": 6747,
+              "fuseki": 7585,
+              "virtuoso": 1869,
+              "qlever": 10603
+            }
+          },
+          {
+            "query": "L1",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 221,
+              "oxigraph": 1204,
+              "fuseki": 5513,
+              "virtuoso": 672,
+              "qlever": 3933
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 216,
+              "oxigraph": 1191,
+              "fuseki": 4995,
+              "virtuoso": 667,
+              "qlever": 3918
+            },
+            "values_fresh": {
+              "sparq": 246,
+              "oxigraph": 1455,
+              "fuseki": 5778,
+              "virtuoso": 714,
+              "qlever": 4012
+            },
+            "values_fresh_ttfb": {
+              "sparq": 241,
+              "oxigraph": 1441,
+              "fuseki": 5332,
+              "virtuoso": 709,
+              "qlever": 3993
+            }
+          },
+          {
+            "query": "L2",
+            "unit": "µs",
+            "rows": 3,
+            "values": {
+              "sparq": 224,
+              "oxigraph": 618,
+              "fuseki": 5788,
+              "virtuoso": 600,
+              "qlever": 7379
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 219,
+              "oxigraph": 607,
+              "fuseki": 5349,
+              "virtuoso": 593,
+              "qlever": 2612
+            },
+            "values_fresh": {
+              "sparq": 258,
+              "oxigraph": 806,
+              "fuseki": 6083,
+              "virtuoso": 645,
+              "qlever": 2677
+            },
+            "values_fresh_ttfb": {
+              "sparq": 254,
+              "oxigraph": 794,
+              "fuseki": 5603,
+              "virtuoso": 638,
+              "qlever": 2654
+            }
+          },
+          {
+            "query": "L3",
+            "unit": "µs",
+            "rows": 41,
+            "values": {
+              "sparq": 261,
+              "oxigraph": 700,
+              "fuseki": 5747,
+              "virtuoso": 973,
+              "qlever": 2607
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 254,
+              "oxigraph": 681,
+              "fuseki": 5312,
+              "virtuoso": 967,
+              "qlever": 2589
+            },
+            "values_fresh": {
+              "sparq": 304,
+              "oxigraph": 913,
+              "fuseki": 6093,
+              "virtuoso": 1038,
+              "qlever": 2521
+            },
+            "values_fresh_ttfb": {
+              "sparq": 296,
+              "oxigraph": 892,
+              "fuseki": 5585,
+              "virtuoso": 1031,
+              "qlever": 2503
+            }
+          },
+          {
+            "query": "L4",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 212,
+              "oxigraph": 402,
+              "fuseki": 5251,
+              "virtuoso": 596,
+              "qlever": 5047
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 207,
+              "oxigraph": 392,
+              "fuseki": 4771,
+              "virtuoso": 590,
+              "qlever": 2429
+            },
+            "values_fresh": {
+              "sparq": 255,
+              "oxigraph": 629,
+              "fuseki": 5495,
+              "virtuoso": 627,
+              "qlever": 2423
+            },
+            "values_fresh_ttfb": {
+              "sparq": 230,
+              "oxigraph": 618,
+              "fuseki": 5049,
+              "virtuoso": 622,
+              "qlever": 2406
+            }
+          },
+          {
+            "query": "L5",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 220,
+              "oxigraph": 294,
+              "fuseki": 5458,
+              "virtuoso": 604,
+              "qlever": 7783
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 215,
+              "oxigraph": 283,
+              "fuseki": 4998,
+              "virtuoso": 599,
+              "qlever": 3837
+            },
+            "values_fresh": {
+              "sparq": 249,
+              "oxigraph": 462,
+              "fuseki": 5151,
+              "virtuoso": 623,
+              "qlever": 4052
+            },
+            "values_fresh_ttfb": {
+              "sparq": 244,
+              "oxigraph": 452,
+              "fuseki": 4762,
+              "virtuoso": 617,
+              "qlever": 4033
+            }
+          },
+          {
+            "query": "S1",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 417,
+              "oxigraph": 7695,
+              "fuseki": 6932,
+              "virtuoso": 983,
+              "qlever": 149949
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 412,
+              "oxigraph": 7678,
+              "fuseki": 6509,
+              "virtuoso": 977,
+              "qlever": 149921
+            },
+            "values_fresh": {
+              "sparq": 423,
+              "oxigraph": 8144,
+              "fuseki": 7015,
+              "virtuoso": 998,
+              "qlever": 141646
+            },
+            "values_fresh_ttfb": {
+              "sparq": 417,
+              "oxigraph": 8127,
+              "fuseki": 6559,
+              "virtuoso": 992,
+              "qlever": 141619
+            }
+          },
+          {
+            "query": "S2",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 269,
+              "oxigraph": 1497,
+              "fuseki": 5324,
+              "virtuoso": 629,
+              "qlever": 8246
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 264,
+              "oxigraph": 1485,
+              "fuseki": 5088,
+              "virtuoso": 624,
+              "qlever": 4493
+            },
+            "values_fresh": {
+              "sparq": 294,
+              "oxigraph": 1733,
+              "fuseki": 4874,
+              "virtuoso": 671,
+              "qlever": 4308
+            },
+            "values_fresh_ttfb": {
+              "sparq": 289,
+              "oxigraph": 1721,
+              "fuseki": 4563,
+              "virtuoso": 666,
+              "qlever": 4285
+            }
+          },
+          {
+            "query": "S3",
+            "unit": "µs",
+            "rows": 6,
+            "values": {
+              "sparq": 221,
+              "oxigraph": 790,
+              "fuseki": 5081,
+              "virtuoso": 716,
+              "qlever": 5509
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 215,
+              "oxigraph": 775,
+              "fuseki": 4772,
+              "virtuoso": 711,
+              "qlever": 5495
+            },
+            "values_fresh": {
+              "sparq": 246,
+              "oxigraph": 961,
+              "fuseki": 5632,
+              "virtuoso": 749,
+              "qlever": 5609
+            },
+            "values_fresh_ttfb": {
+              "sparq": 241,
+              "oxigraph": 944,
+              "fuseki": 5254,
+              "virtuoso": 743,
+              "qlever": 5589
+            }
+          },
+          {
+            "query": "S4",
+            "unit": "µs",
+            "rows": 4,
+            "values": {
+              "sparq": 232,
+              "oxigraph": 932,
+              "fuseki": 4903,
+              "virtuoso": 644,
+              "qlever": 10268
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 227,
+              "oxigraph": 921,
+              "fuseki": 4450,
+              "virtuoso": 638,
+              "qlever": 4374
+            },
+            "values_fresh": {
+              "sparq": 264,
+              "oxigraph": 1075,
+              "fuseki": 5484,
+              "virtuoso": 684,
+              "qlever": 4337
+            },
+            "values_fresh_ttfb": {
+              "sparq": 257,
+              "oxigraph": 1065,
+              "fuseki": 5052,
+              "virtuoso": 678,
+              "qlever": 4314
+            }
+          },
+          {
+            "query": "S5",
+            "unit": "µs",
+            "rows": 8,
+            "values": {
+              "sparq": 256,
+              "oxigraph": 1055,
+              "fuseki": 5526,
+              "virtuoso": 770,
+              "qlever": 5761
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 242,
+              "oxigraph": 1040,
+              "fuseki": 5130,
+              "virtuoso": 763,
+              "qlever": 5745
+            },
+            "values_fresh": {
+              "sparq": 275,
+              "oxigraph": 1245,
+              "fuseki": 5574,
+              "virtuoso": 766,
+              "qlever": 5629
+            },
+            "values_fresh_ttfb": {
+              "sparq": 269,
+              "oxigraph": 1231,
+              "fuseki": 5240,
+              "virtuoso": 760,
+              "qlever": 5608
+            }
+          },
+          {
+            "query": "S6",
+            "unit": "µs",
+            "rows": 1,
+            "values": {
+              "sparq": 227,
+              "oxigraph": 369,
+              "fuseki": 4764,
+              "virtuoso": 558,
+              "qlever": 6841
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 221,
+              "oxigraph": 358,
+              "fuseki": 4433,
+              "virtuoso": 552,
+              "qlever": 4075
+            },
+            "values_fresh": {
+              "sparq": 268,
+              "oxigraph": 593,
+              "fuseki": 4806,
+              "virtuoso": 594,
+              "qlever": 4134
+            },
+            "values_fresh_ttfb": {
+              "sparq": 261,
+              "oxigraph": 582,
+              "fuseki": 4434,
+              "virtuoso": 589,
+              "qlever": 4114
+            }
+          },
+          {
+            "query": "S7",
+            "unit": "µs",
+            "rows": 2,
+            "values": {
+              "sparq": 240,
+              "oxigraph": 310,
+              "fuseki": 4814,
+              "virtuoso": 621,
+              "qlever": 8067
+            },
+            "count_match": true,
+            "values_ttfb": {
+              "sparq": 233,
+              "oxigraph": 300,
+              "fuseki": 4409,
+              "virtuoso": 615,
+              "qlever": 3978
+            },
+            "values_fresh": {
+              "sparq": 262,
+              "oxigraph": 531,
+              "fuseki": 5031,
+              "virtuoso": 660,
+              "qlever": 4017
+            },
+            "values_fresh_ttfb": {
+              "sparq": 257,
+              "oxigraph": 520,
+              "fuseki": 4767,
+              "virtuoso": 655,
+              "qlever": 4001
+            }
           }
         ]
       }

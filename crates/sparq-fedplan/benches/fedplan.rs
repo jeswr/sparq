@@ -13,7 +13,9 @@
 //!   3-pattern BGP with varying numbers of descriptors.
 //! - `plan_bgp` — bind-vs-hash join planning over the selected sources.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+// [OPUS-4.8] criterion 0.8 deprecated its own black_box in favour of std::hint::black_box.
+use std::hint::black_box;
 use sparq_fedplan::{
     plan_bgp, select_sources, Bgp, PlanOptions, PredPartition, SourceDescriptor, SourceId, Term,
     TriplePattern, Var,

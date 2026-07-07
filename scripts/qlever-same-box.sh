@@ -70,6 +70,14 @@ QLEVER_QUERY_TIMEOUT="${QLEVER_QUERY_TIMEOUT:-60}"
 QLEVER_JOBS="${QLEVER_JOBS:-4}"
 QLEVER_MIN_FREE_GB="${QLEVER_MIN_FREE_GB:-10}"
 QLEVER_NAME="${QLEVER_NAME:-qlever-srv-$$}"
+HTTP_PROFILE="${HTTP_PROFILE:-0}"
+
+# [FABLE-5] sq-7d3dj.34: HTTP_PROFILE=1 routes the query loop through the SHARED
+# scripts/bench-adapters/http_sparql_adapter.py in --profile mode (6-col rows: keep-alive
+# + fresh-connect full-request latency AND TTFB). The default 3-col inline loop below is
+# byte-for-byte unchanged.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ADAPTER="$SCRIPT_DIR/bench-adapters/http_sparql_adapter.py"
 
 log()  { printf '[qlever] %s\n' "$*" >&2; }
 die()  { printf '[qlever] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -207,6 +215,18 @@ shopt -s nullglob
 any_ok=0
 for q in "$QUERIES_DIR"/*.rq; do
   name="$(basename "$q" .rq)"
+  if [ "$HTTP_PROFILE" = "1" ]; then
+    # 6-col profile rows via the shared adapter (keep-alive/fresh + TTFB). brace-group
+    # `|| true` is LOAD-BEARING under set -euo pipefail (see fuseki-same-box.sh).
+    row="$({ timeout "$QLEVER_QUERY_TIMEOUT" python3 "$ADAPTER" \
+               --endpoint "http://localhost:${QLEVER_PORT}" --query-file "$q" \
+               --engine qlever --iters "$ITERS" --profile 2>/dev/null || true; } \
+           | awk -F'\t' -v n="$name" 'NR==1{$1=n; print}' OFS='\t')"
+    [ -n "$row" ] || row="$name	ERROR	qlever"
+    printf '%s\n' "$row" >> "$OUT_TSV"
+    case "$row" in *$'\tERROR\t'*) ;; *) any_ok=1 ;; esac
+    continue
+  fi
   row="$(QLEVER_PORT="$QLEVER_PORT" QLEVER_QUERY_TIMEOUT="$QLEVER_QUERY_TIMEOUT" ITERS="$ITERS" \
     python3 - "$q" "$name" <<'PY'
 import os, sys, time, json, urllib.parse, urllib.request

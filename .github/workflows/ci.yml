@@ -2640,6 +2640,14 @@ jobs:
           # surface (lib.rs + rdf12.rs) to mutation, making the ceiling honest.
           - crate: sparq-canon
             features: rdf12-triple-terms
+          # [SONNET-4.6] sq-qcnn.39: sparq-prov QUIRK — the `reason` feature gates
+          # src/reason.rs + tests/reason_prov.rs (PROV-O lineage for reasoner
+          # materialization). Without it, cargo-mutants mutates reason.rs but the
+          # tests never compile, so all mutations there trivially "miss" — not a
+          # test gap, just non-compiled code. Adding the feature makes the ceiling
+          # honest and matches scripts/coverage.sh's PER-CRATE QUIRKS.
+          - crate: sparq-prov
+            features: reason
           # [SONNET-4.6] sq-qcnn.28: HEAVY-CRATE TIMEOUT OVERRIDES.
           # Run 28776460517 (2026-07-06): sparq-engine, sparq-solid, sparq-zk-compose,
           # sparq-vectors all cancelled at the old 120min ceiling. Raise to 360min.
