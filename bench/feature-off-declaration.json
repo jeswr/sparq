@@ -35,7 +35,24 @@
     "(head change_token != base change_token), not a strict +1. Three feature-OFF PRs were in",
     "flight at once (#1726/#1720/#1718); if all bumped 0->1 the 2nd-to-merge would see base==head==1",
     "and FALSELY FAIL (order-dependent). So each uses its PR number as a globally-unique token,",
-    "keeping declarations order-independent regardless of merge order."
+    "keeping declarations order-independent regardless of merge order.",
+    "",
+    "[OPUS-4.8] sq-v3nel-v2 (2026-07-07): THIS SCALAR FILE IS RETIRED. Even with unique",
+    "per-PR token VALUES the mechanism had a serial-CONFLICT flaw: every declaring PR edited",
+    "the SAME \"change_token\" line, so the first declared PR to merge made every other declared",
+    "PR textually CONFLICTING in git (#1720 and #1718 both went DIRTY for exactly this after",
+    "#1726's declaration merged). The gate check was order-independent but the FILE was not.",
+    "REPLACEMENT (mechanism V2): a PR now declares by ADDING its OWN file",
+    "bench/feature-off-declarations/<PR-number>.json ({pr, date, reason}); the gate is",
+    "satisfied by a set difference on that directory (head has a file base does not). Different",
+    "PRs add different files, so git NEVER conflicts. See bench/feature-off-declarations/",
+    "README.md and scripts/check-vectorized-feature-off.py (check_leg2_dynamic).",
+    "",
+    "TRANSITION WINDOW: this file is kept PARSEABLE and change_token is FROZEN at 1726 so",
+    "check_leg2_dynamic's fail-safe token read still works, and any in-flight pre-V2 branch",
+    "that already bumped the scalar token (base 1726 != head <prnum>) is still accepted via",
+    "the legacy inequality path until it merges or rebases onto V2. Do NOT bump this token in",
+    "new PRs — add a per-PR declaration file instead."
   ],
   "change_token": 1726
 }

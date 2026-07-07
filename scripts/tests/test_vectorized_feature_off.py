@@ -42,13 +42,20 @@ def _leg1_on_dict(meta: dict) -> int:
 
 
 def _leg2_dynamic(base_bytes: bytes, head_bytes: bytes,
-                  base_decl: dict | None, head_decl: dict | None) -> int:
+                  base_decl: dict | None, head_decl: dict | None,
+                  base_decl_names: list[str] | None = None,
+                  head_decl_names: list[str] | None = None) -> int:
     """Run check_leg2_dynamic on in-memory wasm bytes + declaration dicts via temp files.
 
     A None declaration writes NO file (missing path) to exercise the fail-safe default
     (an absent declaration reads change_token as 0).
+
+    base_decl_names / head_decl_names exercise MECHANISM V2 (sq-v3nel-v2): each is a list
+    of file names materialised in a temp declarations directory (e.g. ["1720.json",
+    "README.md"]). None => no directory is passed for that side (V2 disabled).
     """
     paths: list[str] = []
+    dirs: list[str] = []
 
     def _write_bytes(data: bytes) -> str:
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".wasm", delete=False) as tmp:
@@ -65,18 +72,35 @@ def _leg2_dynamic(base_bytes: bytes, head_bytes: bytes,
             paths.append(tmp.name)
             return tmp.name
 
+    def _mkdir(names: list[str] | None) -> str | None:
+        if names is None:
+            return None
+        d = tempfile.mkdtemp()
+        dirs.append(d)
+        for n in names:
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("{}")
+        return d
+
     base_wasm = _write_bytes(base_bytes)
     head_wasm = _write_bytes(head_bytes)
     base_decl_p = _write_decl(base_decl)
     head_decl_p = _write_decl(head_decl)
+    base_dir = _mkdir(base_decl_names)
+    head_dir = _mkdir(head_decl_names)
     try:
-        return _check.check_leg2_dynamic(base_wasm, head_wasm, base_decl_p, head_decl_p)
+        return _check.check_leg2_dynamic(base_wasm, head_wasm, base_decl_p, head_decl_p,
+                                         base_dir, head_dir)
     finally:
         for p in paths:
             try:
                 os.unlink(p)
             except OSError:
                 pass
+        for d in dirs:
+            for n in os.listdir(d):
+                os.unlink(os.path.join(d, n))
+            os.rmdir(d)
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +247,83 @@ def test_leg2_both_decls_missing_undeclared_rejected() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Leg 2 MECHANISM V2 (per-PR declaration files) tests — sq-v3nel-v2
+# ---------------------------------------------------------------------------
+
+def test_leg2_v2_new_file_accepted() -> bool:
+    """Bytes differ + head ADDS a per-PR file not in base => PASS (V2 declaration)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=["README.md"],
+                       head_decl_names=["README.md", "1720.json"])
+    if rc == 0:
+        print("  PASS — new per-PR file (1720.json) accepted as a V2 declaration")
+        return True
+    print("  FAIL — V2 file declaration rejected; false positive")
+    return False
+
+
+def test_leg2_v2_no_new_file_rejected() -> bool:
+    """Bytes differ + NO new file (README only, both sides) + token equal => FAIL."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=["README.md"],
+                       head_decl_names=["README.md"])
+    if rc != 0:
+        print("  PASS — no new per-PR file => undeclared change rejected (fail-closed)")
+        return True
+    print("  FAIL — undeclared change slipped through V2; the gate is disabled")
+    return False
+
+
+def test_leg2_v2_readme_not_a_declaration() -> bool:
+    """A NEW README.md (not <digits>.json|md) is NOT a declaration => FAIL when undeclared."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=[],
+                       head_decl_names=["README.md", ".gitkeep"])
+    if rc != 0:
+        print("  PASS — README.md/.gitkeep are not declarations; change stays rejected")
+        return True
+    print("  FAIL — a non-PR-numbered file was mistaken for a declaration")
+    return False
+
+
+def test_leg2_v2_md_declaration_accepted() -> bool:
+    """A <digits>.md declaration file is also accepted (json or md permitted)."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0},
+                       base_decl_names=[],
+                       head_decl_names=["1718.md"])
+    if rc == 0:
+        print("  PASS — <PR-number>.md accepted as a V2 declaration")
+        return True
+    print("  FAIL — .md declaration rejected; false positive")
+    return False
+
+
+def test_leg2_legacy_scalar_still_accepted_in_transition() -> bool:
+    """Transition window: scalar token inequality still declares even with V2 dirs present.
+
+    Mirrors a pre-V2 in-flight branch that bumped the scalar token; head added no new file.
+    """
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 1726}, {"change_token": 1720},
+                       base_decl_names=["README.md"],
+                       head_decl_names=["README.md"])
+    if rc == 0:
+        print("  PASS — legacy scalar inequality still accepted during transition window")
+        return True
+    print("  FAIL — transition window broken; a pre-V2 declared branch would falsely fail")
+    return False
+
+
+def test_leg2_no_dirs_falls_back_to_scalar() -> bool:
+    """No declarations dirs passed at all (None) => V2 disabled, scalar path governs."""
+    rc = _leg2_dynamic(_BASE, _HEAD_DIFF, {"change_token": 0}, {"change_token": 0})
+    if rc != 0:
+        print("  PASS — no dirs + equal scalar token => undeclared change rejected")
+        return True
+    print("  FAIL — missing dirs mishandled")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -237,6 +338,12 @@ def main() -> int:
         ("leg2 same-length content change caught (byte-for-byte)", test_leg2_same_length_content_change_caught),
         ("leg2 missing base decl defaults to 0", test_leg2_missing_base_decl_defaults_zero),
         ("leg2 both decls absent => undeclared rejected", test_leg2_both_decls_missing_undeclared_rejected),
+        ("leg2 V2 new per-PR file accepted", test_leg2_v2_new_file_accepted),
+        ("leg2 V2 no new file => undeclared rejected", test_leg2_v2_no_new_file_rejected),
+        ("leg2 V2 README/.gitkeep not a declaration", test_leg2_v2_readme_not_a_declaration),
+        ("leg2 V2 <PR>.md declaration accepted", test_leg2_v2_md_declaration_accepted),
+        ("leg2 legacy scalar accepted in transition window", test_leg2_legacy_scalar_still_accepted_in_transition),
+        ("leg2 no dirs falls back to scalar path", test_leg2_no_dirs_falls_back_to_scalar),
     ]
 
     passed = 0
