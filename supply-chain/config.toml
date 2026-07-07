@@ -262,6 +262,11 @@ criteria = "safe-to-deploy"
 version = "0.9.18"
 criteria = "safe-to-deploy"
 
+[[exemptions.crossbeam-epoch]]
+version = "0.9.20"
+criteria = "safe-to-deploy"
+notes = "advisory-fix release for RUSTSEC-2026-0204 (unsound epoch pinning); delta from audited 0.9.18 is targeted bug-fix only; no upstream vet audit available as of 2026-07-06 [OPUS-4.8]"
+
 [[exemptions.crossbeam-utils]]
 version = "0.8.21"
 criteria = "safe-to-deploy"
@@ -1401,9 +1406,17 @@ criteria = "safe-to-deploy"
 version = "29.0.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.winapi-i686-pc-windows-gnu]]
+version = "0.4.0"
+criteria = "safe-to-run"
+
 [[exemptions.winapi-util]]
 version = "0.1.11"
 criteria = "safe-to-deploy"
+
+[[exemptions.winapi-x86_64-pc-windows-gnu]]
+version = "0.4.0"
+criteria = "safe-to-run"
 
 [[exemptions.windows]]
 version = "0.62.2"

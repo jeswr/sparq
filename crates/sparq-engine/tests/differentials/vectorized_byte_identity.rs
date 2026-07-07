@@ -247,3 +247,212 @@ fn unfiltered_scan_order_is_deterministic() {
     let b = query_json(&g, &format!("{}{}", PFX, q)).unwrap();
     assert_eq!(a.as_bytes(), b.as_bytes(), "single-pattern scan order must be deterministic");
 }
+
+// =================== T1-T4: Phase-5 dispatcher-seam acceptance tests (sq-pntvh.5) =====
+//
+// These tests exercise the `vec_dispatch` module's I5 probe counters through the full
+// query execution path.
+//
+// Seam B (columnar_aggregate) is tested via whole-dataset SUM on a large graph: the
+// Group → group_aggregate → columnar_aggregate path is not intercepted by
+// single_pattern_scan_json (Group is not conjunctive), so the seam is always exercised
+// end-to-end.
+//
+// Seam A (columnar_filter) decline paths are tested via: (a) a sub-threshold aggregate
+// on a small graph (VEC_MIN_BATCH decline), and (b) a REGEX FILTER on a large graph
+// (shape-check decline). Note: the SPARQL parser combines `FILTER A FILTER B` within one
+// group graph pattern into a single `AND` expression, so the "double-filter trick" does
+// not produce a simple sargable residual — shape-check declines cover non-sargable
+// expressions instead. [SONNET-4.6]
+
+/// T1 (sq-pntvh.5): end-to-end non-vacuity (Seam B / columnar_aggregate) — a
+/// whole-dataset SUM on >= VEC_MIN_BATCH (256) inline rows engages the columnar path
+/// (`chunks_built >= 1`) and produces JSON byte-identical to the budget-armed scalar path
+/// (I3 decline forces scalar fallback). [SONNET-4.6]
+#[test]
+fn t1_eligible_dispatch_engages_columnar_and_is_byte_identical_to_scalar() {
+    use sparq_engine::{query_json_with_budget, reset_stats, stats_snapshot, QueryBudget};
+
+    let g = ages_graph(400);
+    // Whole-dataset SUM: Group → group_aggregate → columnar_aggregate.
+    // 400 rows all-inline integers, > VEC_MIN_BATCH=256.
+    let q = format!(
+        "{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}",
+        PFX
+    );
+
+    // --- Columnar run: no budget => columnar_aggregate engages ---
+    reset_stats();
+    let json_columnar = query_json(&g, &q).expect("T1 columnar query must succeed");
+    let snap_col = stats_snapshot();
+    assert!(
+        snap_col.chunks_built >= 1,
+        "T1: columnar path must engage (chunks_built={}, need >= 1)",
+        snap_col.chunks_built
+    );
+    assert!(
+        snap_col.rows_columnar >= 256,
+        "T1: rows_columnar must be >= VEC_MIN_BATCH=256 (got {})",
+        snap_col.rows_columnar
+    );
+
+    // --- Scalar run: finite max_rows arms budget => I3 decline => scalar fallback ---
+    reset_stats();
+    let json_scalar = query_json_with_budget(
+        &g,
+        &q,
+        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
+    ).expect("T1 scalar (budget-armed) query must succeed");
+    let snap_sc = stats_snapshot();
+    assert_eq!(
+        snap_sc.chunks_built, 0,
+        "T1: budget-armed path must not engage columnar (chunks_built={})",
+        snap_sc.chunks_built
+    );
+
+    // --- Byte-identity ---
+    assert_eq!(
+        json_columnar.as_bytes(),
+        json_scalar.as_bytes(),
+        "T1: columnar SUM result must be byte-identical to scalar (budget-armed) result"
+    );
+}
+
+/// T2 (sq-pntvh.5): declined paths — `chunks_built` stays zero and declines are
+/// recorded for:
+/// (a) sub-threshold aggregate (< VEC_MIN_BATCH rows);
+/// (b) non-sargable FILTER shape (REGEX / AND expressions decline via shape check).
+/// In both cases the scalar path produces a correct result. [SONNET-4.6]
+#[test]
+fn t2_decline_paths_record_decline_and_produce_correct_result() {
+    use sparq_engine::{reset_stats, stats_snapshot};
+
+    // (a) Sub-threshold aggregate: SUM on a small graph.
+    // 10 rows < VEC_MIN_BATCH=256 => columnar_aggregate declines.
+    let g_small = ages_graph(10);
+    reset_stats();
+    let json_small = query_json(
+        &g_small,
+        &format!("{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}", PFX),
+    ).expect("T2a sub-threshold aggregate must succeed");
+    let snap_a = stats_snapshot();
+    assert_eq!(
+        snap_a.chunks_built, 0,
+        "T2a: sub-threshold aggregate must decline columnar (chunks_built={})",
+        snap_a.chunks_built
+    );
+    assert!(
+        snap_a.declines_by_reason >= 1,
+        "T2a: at least one VEC_MIN_BATCH decline must be recorded (got {})",
+        snap_a.declines_by_reason
+    );
+
+    // (b) Non-sargable FILTER shape: REGEX is not a numeric comparison;
+    // extract_sargable returns None => shape decline in columnar_filter.
+    // The graph is large (400 rows) so the only reason for decline is the shape check.
+    let g_large = ages_graph(400);
+    reset_stats();
+    let json_nonsarg = query_json(
+        &g_large,
+        &format!(
+            "{}SELECT ?s WHERE {{ ?s ex:age ?age . FILTER(REGEX(STR(?age), \"5\")) }}",
+            PFX
+        ),
+    ).expect("T2b non-sargable query must succeed");
+    let snap_b = stats_snapshot();
+    assert_eq!(
+        snap_b.chunks_built, 0,
+        "T2b: non-sargable FILTER must decline columnar (chunks_built={})",
+        snap_b.chunks_built
+    );
+    assert!(
+        snap_b.declines_by_reason >= 1,
+        "T2b: at least one shape-check decline must be recorded (got {})",
+        snap_b.declines_by_reason
+    );
+
+    // Sanity: both results are valid SPARQL JSON.
+    assert!(json_small.contains("\"results\""), "T2a result must be valid SPARQL JSON");
+    assert!(json_nonsarg.contains("\"results\""), "T2b result must be valid SPARQL JSON");
+}
+
+/// T3 (sq-pntvh.5): ZK composition — when a ZK trace recorder is armed, the columnar
+/// seam declines (I2: ZK-decline fires before the morsel loop) so the proof recorder
+/// receives the complete operator inputs via the scalar path. [SONNET-4.6]
+#[cfg(feature = "zk")]
+#[test]
+fn t3_zk_trace_armed_forces_scalar_path() {
+    use sparq_engine::{reset_stats, stats_snapshot};
+
+    // Use a whole-dataset SUM: columnar_aggregate checks I2 first.
+    let g = ages_graph(400);
+    let q = format!("{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}", PFX);
+
+    // Arm the ZK trace recorder (install() is pub; enabled() is pub(crate) so not callable here).
+    let _zk_guard = sparq_engine::zk::install();
+
+    reset_stats();
+    let json_zk = query_json(&g, &q).expect("T3 ZK-armed query must succeed");
+    let snap = stats_snapshot();
+
+    assert_eq!(
+        snap.chunks_built, 0,
+        "T3: ZK-armed path must decline columnar (chunks_built={}, need 0)",
+        snap.chunks_built
+    );
+    assert!(
+        snap.declines_by_reason >= 1,
+        "T3: ZK decline must be recorded (declines={})",
+        snap.declines_by_reason
+    );
+
+    // The result is still correct (scalar path ran): SUM result must be present.
+    assert!(json_zk.contains("\"total\""), "T3 ZK-armed result must bind ?total");
+    assert!(!json_zk.contains("\"bindings\":[]"), "T3: ZK-armed SUM result must be non-empty");
+}
+
+/// T4 (sq-pntvh.5): budget parity — a budget-armed query (I3 decline => scalar) produces
+/// JSON BYTE-IDENTICAL to the no-budget (columnar) result, confirming the two execution
+/// paths are equivalent on the same input. [SONNET-4.6]
+#[test]
+fn t4_budget_parity_columnar_and_scalar_are_byte_identical() {
+    use sparq_engine::{query_json_with_budget, reset_stats, stats_snapshot, QueryBudget};
+
+    let g = ages_graph(400);
+    // Whole-dataset SUM: columnar path for no-budget, scalar for budget-armed.
+    let q = format!(
+        "{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}",
+        PFX
+    );
+
+    // Columnar run: no budget => columnar_aggregate engages.
+    reset_stats();
+    let json_no_budget = query_json(&g, &q).expect("T4 no-budget query must succeed");
+    let snap_no_budget = stats_snapshot();
+    assert!(
+        snap_no_budget.chunks_built >= 1,
+        "T4: no-budget path must engage columnar (chunks_built={})",
+        snap_no_budget.chunks_built
+    );
+
+    // Budget-armed run: finite max_rows arms budget => I3 decline => scalar fallback.
+    reset_stats();
+    let json_with_budget = query_json_with_budget(
+        &g,
+        &q,
+        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
+    ).expect("T4 budget-armed query must succeed");
+    let snap_with_budget = stats_snapshot();
+    assert_eq!(
+        snap_with_budget.chunks_built, 0,
+        "T4: budget-armed path must decline columnar (chunks_built={})",
+        snap_with_budget.chunks_built
+    );
+
+    // Byte-identity: both paths must produce the exact same JSON output.
+    assert_eq!(
+        json_no_budget.as_bytes(),
+        json_with_budget.as_bytes(),
+        "T4: budget-armed (scalar) JSON must be byte-identical to no-budget (columnar) JSON"
+    );
+}

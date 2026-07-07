@@ -2500,6 +2500,13 @@
       "query": "compiled sparq-wasm browser bundle size",
       "unit": "bytes"
     },
+    "wasm_opt_bundle_bytes": {
+      "label": "WASM shipped size (wasm-opt -Oz)",
+      "suite": "Memory / Size",
+      "dataset": "n/a (build artifact, post wasm-opt -Oz; binaryen — version logged per CI run)",
+      "query": "sparq-wasm bundle size after wasm-opt -Oz (trend-only; raw gate is wasm_bundle_bytes)",
+      "unit": "bytes"
+    },
     "watdiv_sf1000_C1_count": {
       "label": "WatDiv C1 (SF=1000) — complex query, count",
       "suite": "WatDiv",
