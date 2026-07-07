@@ -7,12 +7,14 @@
 #     from the resolved default workspace feature set and the wasm profile — catches the
 #     feature-unification trap before any build.
 #
-#   Leg 2 (artifact exact-equality): wasm bundle built feature-OFF, size asserted ==
-#     bench/perf-baseline.json metrics.wasm_bundle_bytes.feature_off_exact (zero delta,
-#     stricter than the 2% ratchet in bench.yml). Uses feature_off_exact, NOT the ratchet
-#     floor — the floor can sit below the current wasm size by up to 2% (within-band),
-#     so an exact-equality check against it gives false failures on within-band main drift.
-#     Any accidental vectorized code would change the bundle size.
+#   Leg 2 (artifact-exact-equality, DYNAMIC byte-identity — [OPUS-4.8] sq-v3nel 2026-07-07):
+#     builds the feature-OFF wasm bundle TWICE in one run — base (target-branch/merge-base)
+#     tree vs head (PR/merged) tree — and compares BYTE-FOR-BYTE. No static pin, so NO
+#     merge-order dependence (replaces the retired feature_off_exact exact-byte pin, which
+#     was order-dependent and could not converge under a busy queue). Identical bytes => pass;
+#     differing bytes => pass only if DECLARED (change_token bumped in
+#     bench/feature-off-declaration.json), else fail. The SIZE of an accepted change is
+#     governed SEPARATELY, unchanged, by the wasm_bundle_bytes floor ratchet (±2%) in bench.yml.
 #
 #   Leg 3 (cfg-audit): script asserting every `vectorized` module registration and
 #     evaluator call site in crates/sparq-engine/src/lib.rs and exec.rs is under
@@ -20,8 +22,9 @@
 #
 # Honest scope:
 #   - Legs 1 and 3 prove COMPILE-TIME ABSENCE of the vectorized feature in the default build.
-#   - Leg 2 proves ARTIFACT BYTE-DETERMINISM (zero delta vs feature_off_exact pin). Any
-#     accidental vectorized code would change the bundle size.
+#   - Leg 2 proves ARTIFACT BYTE-DETERMINISM (head feature-OFF bundle identical to the base
+#     tree's, or an explicitly declared change). Any accidental vectorized/default-path code
+#     would change the bundle bytes vs the base tree and, undeclared, fails the leg.
 #   - This does NOT prove runtime performance neutrality — that is EC2-gated.
 #
 # Gate integration:
@@ -81,6 +84,7 @@ jobs:
               - 'scripts/check-vectorized-feature-off.py'
               - 'scripts/tests/test_vectorized_feature_off.py'
               - 'bench/perf-baseline.json'
+              - 'bench/feature-off-declaration.json'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
         run: |
@@ -128,14 +132,27 @@ jobs:
           echo "Tripwires verified — guards correctly reject bad synthetic fixtures"
 
   # ---------------------------------------------------------------------------
-  # Job 2: artifact exact-equality (wasm bundle feature-OFF)
-  # Builds sparq-wasm without the `vectorized` feature and asserts the bundle size
-  # equals the pinned feature_off_exact value EXACTLY (zero delta) — NOT the ratchet
-  # floor. Any accidental vectorized code would change the bundle size.
+  # Job 2: artifact-exact-equality (wasm bundle feature-OFF) — DYNAMIC byte-identity
+  # [OPUS-4.8] sq-v3nel (2026-07-07): RE-DESIGNED from a static exact-byte pin to a
+  # same-run base-vs-head comparison. Builds the feature-OFF wasm bundle TWICE in ONE run —
+  # once from the BASE (target-branch / merge-base) tree and once from the HEAD (PR/merged)
+  # tree — and compares them BYTE-FOR-BYTE. Identical toolchain + run => deterministic,
+  # with NO static pin, so NO merge-order dependence (the old feature_off_exact pin was
+  # order-dependent and could not converge under a busy queue — armed PRs cycled BLOCKED
+  # while serial re-pin commits chased a moving target; see bench/perf-baseline.json
+  # _comment retirement entry).
   #
-  # Honest scope: this leg proves compile-time absence via artifact byte-determinism.
-  # It does NOT prove runtime perf neutrality, which is EC2-gated. The native
-  # bytes/triple metric is gated (with 2% threshold) by the existing bench.yml lane.
+  # A PR that does NOT touch always-compiled code => identical bytes => auto-pass. A PR that
+  # DOES must DECLARE it (increment change_token in bench/feature-off-declaration.json),
+  # else this leg FAILS. The SIZE of an accepted change is governed SEPARATELY, unchanged,
+  # by the wasm_bundle_bytes floor ratchet (±2% band) in bench.yml.
+  #
+  # Honest scope: proves compile-time ABSENCE via artifact byte-determinism. Does NOT prove
+  # runtime perf neutrality (EC2-gated). Job NAME is preserved: the only required check is
+  # ci-summary's `gate`; this job is picked up by the aggregator by name (no advisory/
+  # informational token), so it still gates. Build-cost: on a cache MISS this leg does one
+  # EXTRA wasm build (base tree); the base build is CACHED keyed by base SHA, so PRs sharing
+  # a base main tip pay it once and subsequent runs are ~single-build cost.
   # ---------------------------------------------------------------------------
   artifact-exact-equality:
     needs: changes
@@ -148,6 +165,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # Full history so the base SHA (merge-base / target-branch tip) is resolvable and
+          # checkout-able for the base-tree build.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
@@ -158,34 +178,92 @@ jobs:
         with:
           shared-key: vectorized-feature-off-wasm
 
-      - name: Build sparq-wasm (feature-OFF, default features only)
-        # Builds WITHOUT --features vectorized — default features only.
-        # The release-wasm profile is size-optimised (opt-level z for cold parse crates,
-        # strip symbols) matching the bench.yml bundle-size measurement.
-        run: cargo build --profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown
-
-      - name: Measure wasm bundle size and emit bench-results format
+      - name: Resolve base SHA (per event)
+        id: base
         run: |
           set -euo pipefail
-          WASM=$(find target/wasm32-unknown-unknown/release-wasm -name "sparq_wasm*.wasm" | head -1)
-          if [ -z "$WASM" ]; then
+          case "${{ github.event_name }}" in
+            pull_request) BASE="${{ github.event.pull_request.base.sha }}" ;;
+            merge_group)  BASE="${{ github.event.merge_group.base_sha }}" ;;
+            *)            BASE="$(git rev-parse HEAD^ 2>/dev/null || echo '')" ;;
+          esac
+          echo "base_sha=$BASE" >> "$GITHUB_OUTPUT"
+          echo "Resolved base SHA: '$BASE' (event=${{ github.event_name }})"
+
+      # Cache the BASE-tree feature-OFF wasm + its declaration file, keyed by base SHA.
+      # Many concurrent PRs share the same base main tip, so this amortises the extra build.
+      - name: Restore cached base-tree wasm
+        id: base-cache
+        if: steps.base.outputs.base_sha != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: base-wasm
+          key: feature-off-base-wasm-${{ runner.os }}-${{ steps.base.outputs.base_sha }}
+
+      # Second checkout of the base tree (only on cache miss and when a base SHA exists).
+      - name: Checkout base tree
+        if: steps.base.outputs.base_sha != '' && steps.base-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.base.outputs.base_sha }}
+          path: base-tree
+          persist-credentials: false
+
+      - name: Build BASE-tree feature-OFF wasm (cache miss only)
+        if: steps.base.outputs.base_sha != '' && steps.base-cache.outputs.cache-hit != 'true'
+        # Build WITHOUT --features vectorized using the base tree's OWN release-wasm profile
+        # and a separate target dir so it never clobbers the head build cache.
+        run: |
+          set -euo pipefail
+          cargo build --profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown \
+            --manifest-path base-tree/Cargo.toml --target-dir base-tree/target
+          BASE_WASM=$(find base-tree/target/wasm32-unknown-unknown/release-wasm -name "sparq_wasm*.wasm" | head -1)
+          if [ -z "$BASE_WASM" ]; then
+            echo "ERROR: no sparq_wasm*.wasm found in base-tree build output" >&2
+            exit 1
+          fi
+          mkdir -p base-wasm
+          cp "$BASE_WASM" base-wasm/base.wasm
+          # Base-tree declaration file may not exist on older base commits -> synthesize an
+          # empty one so the token reads 0 (fail-safe default).
+          if [ -f base-tree/bench/feature-off-declaration.json ]; then
+            cp base-tree/bench/feature-off-declaration.json base-wasm/base-decl.json
+          else
+            echo '{}' > base-wasm/base-decl.json
+          fi
+          echo "Base-tree feature-OFF wasm: $(wc -c < base-wasm/base.wasm) bytes"
+
+      - name: Build HEAD-tree feature-OFF wasm
+        # Builds WITHOUT --features vectorized — default features only. The release-wasm
+        # profile is size-optimised (opt-level z for cold parse crates, strip symbols).
+        run: |
+          set -euo pipefail
+          cargo build --profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown
+          HEAD_WASM=$(find target/wasm32-unknown-unknown/release-wasm -name "sparq_wasm*.wasm" | head -1)
+          if [ -z "$HEAD_WASM" ]; then
             echo "ERROR: no sparq_wasm*.wasm found under target/wasm32-unknown-unknown/release-wasm" >&2
             exit 1
           fi
-          SIZE=$(wc -c < "$WASM")
-          echo "Measured wasm bundle: $WASM -> $SIZE bytes"
-          echo "[{\"name\":\"wasm_bundle_bytes\",\"unit\":\"bytes\",\"value\":$SIZE}]" > feature-off-results.json
-          cat feature-off-results.json
+          cp "$HEAD_WASM" head.wasm
+          echo "Head-tree feature-OFF wasm: $(wc -c < head.wasm) bytes"
 
-      - name: Leg 2 — exact equality vs feature_off_exact pin (zero delta)
+      - name: Leg 2 — dynamic byte-identity (base tree vs head tree)
+        # If no base SHA could be resolved (e.g. a rootless first commit), there is nothing
+        # to compare against — pass with a note. Otherwise run the dynamic comparison.
         run: |
           set -euo pipefail
+          if [ -z "${{ steps.base.outputs.base_sha }}" ]; then
+            echo "[leg2] SKIP — no base SHA resolvable for event ${{ github.event_name }}; nothing to compare." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 scripts/check-vectorized-feature-off.py \
-            --leg2 feature-off-results.json bench/perf-baseline.json \
+            --leg2-dynamic base-wasm/base.wasm head.wasm \
+            base-wasm/base-decl.json bench/feature-off-declaration.json \
             2>&1 | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
 
       - name: Tripwire self-test (leg 2 comparator can fail)
-        # The test file runs both tripwires; exit non-zero means a tripwire did not fire.
+        # The test file runs the leg2 tripwires; exit non-zero means a tripwire did not fire.
         run: python3 scripts/tests/test_vectorized_feature_off.py
 
   # ---------------------------------------------------------------------------
