@@ -228,7 +228,9 @@ mod tests {
         assert_eq!(merge_ascending(&[0, 3, 6], &[1, 2, 5]), vec![0, 1, 2, 3, 5, 6]);
         assert_eq!(merge_ascending(&[], &[1, 2, 3]), vec![1, 2, 3]);
         assert_eq!(merge_ascending(&[1, 2, 3], &[]), vec![1, 2, 3]);
-        assert_eq!(merge_ascending(&[], &[]), vec![]);
+        // Both-empty case: annotate types so the compiler can resolve the generic. [SONNET-4.6]
+        let e: [usize; 0] = [];
+        assert_eq!(merge_ascending(&e, &e), Vec::<usize>::new());
     }
 
     /// A column with mixed NaN, tie, and confident lanes round-trips through the full

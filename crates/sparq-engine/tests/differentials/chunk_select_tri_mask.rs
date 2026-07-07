@@ -135,26 +135,40 @@ fn t1_mixed_column_both_populations_probe() {
 
 // ==== T2: tie-exactness witness ===================================================
 
-/// T2 (sq-y5ew5): the 2^53 / 2^53+1 tie-exactness witness.
+/// T2 (sq-y5ew5): end-to-end decimal tie-exactness witness.
 ///
-/// `v = 9007199254740992` (2^53) and `c = 9007199254740993` (2^53+1) are distinct as
-/// exact integers but round to the same f64 (9007199254740992.0). With
-/// `FILTER(?x < 9007199254740993)`, the row `v = 2^53` satisfies the filter exactly
-/// (`v < c`). A naive pure-f64 path would drop it (confident fail); the tri-mask
-/// classifies it as a tie and delegates, so the scalar exact-lexical recheck fires and
-/// the row survives.
+/// The integer-2^53 route (9007199254740992 / 9007199254740993) is unreachable through
+/// this test because `extract_sargable`'s `sig_digits` guard rejects constants with > 15
+/// significant digits, and both integers are 16 digits. The unit test
+/// `tie_exactness_2_to_53_classified_as_tie` in `chunk_select.rs` proves that the
+/// classification kernel is correct for that pair.
 ///
-/// Asserts: the row is present in the result AND the result is byte-identical to the
-/// scalar reference. [SONNET-4.6]
+/// This test uses a **decimal** witness that is reachable within the guard:
+///
+/// - Stored value: `"0.9999999999999999"^^xsd:decimal` (a 16-fractional-digit decimal)
+/// - Filter constant: `1` (1 significant digit — passes the sig_digits <= 15 guard)
+/// - `f64("0.9999999999999999") = 1.0` (rounds up: the value is 1 − 10⁻¹⁶, which lies
+///   above the half-ulp rounding boundary 1 − 2⁻⁵³ ≈ 1 − 1.11 × 10⁻¹⁶ at scale 1)
+/// - Exact comparison: `0.9999999999999999 < 1` → `true`
+///
+/// A naive pure-f64 path would classify this as a **confident fail** (1.0 < 1.0 = false)
+/// and drop the row. The tri-mask must classify it as a **tie** (f64 values equal →
+/// delegated), after which the scalar exact-lexical comparison correctly returns `true`.
+///
+/// Asserts: the witness row survives AND the result is byte-identical to the scalar
+/// reference. [SONNET-4.6]
 #[test]
-fn t2_tie_exactness_witness_2_to_53() {
-    // Build a graph with enough rows to pass VEC_MIN_BATCH, including the 2^53 value.
+fn t2_tie_exactness_decimal_witness() {
     let mut nt = String::new();
-    // Row 0: the witness value 2^53 = 9007199254740992
+    // The tie witness: 0.9999999999999999 is strictly less than 1 exactly, but
+    // its f64 is 1.0 (rounds up). The tri-mask will see x == c and delegate;
+    // the scalar exact comparison then correctly returns true for FILTER(?fval < 1).
     nt.push_str(&format!(
-        "<http://ex/witness> <http://ex/v> \"9007199254740992\"^^<{XSD_INT}> .\n"
+        "<http://ex/witness> <http://ex/v> \"0.9999999999999999\"^^<{XSD_DEC}> .\n"
     ));
-    // Rows 1+: padding to exceed VEC_MIN_BATCH (256)
+    // Padding rows: integers 1..270 (>= 1, so none pass FILTER < 1).
+    // This keeps the expected result to exactly the one witness row, and pushes
+    // total row count above VEC_MIN_BATCH (256) so the columnar path can engage.
     for i in 1..270 {
         nt.push_str(&format!(
             "<http://ex/r{i}> <http://ex/v> \"{i}\"^^<{XSD_INT}> .\n"
@@ -162,39 +176,10 @@ fn t2_tie_exactness_witness_2_to_53() {
     }
     let g = sparq_core::Graph::load_str(&nt, "ntriples").unwrap();
 
-    // FILTER(?v < 9007199254740993): 2^53 < 2^53+1 exactly; the row must survive.
-    // The constant 9007199254740993 has > 15 significant digits, so `extract_sargable`
-    // declines it (sig_digits guard). Use the largest 15-digit representable integer
-    // that still creates the tie pair: 9007199254740992 as the constant instead,
-    // with ?v < 9007199254740993 expressed in a form that passes sig_digits.
-    //
-    // Actually: the sig_digits guard in extract_sargable rejects > 15 significant
-    // digits. 9007199254740993 has 16 digits, so the sargable extraction declines the
-    // constant. We use a 15-digit constant slightly above 2^53:
-    //   constant = 9007199254740993.0 would be rejected (16 digits)
-    //   But 9.00719925474099e15 as a float literal has the same f64 value.
-    //   The cleanest approach: use FILTER(?v > 9007199254740991) and assert the 2^53
-    //   row passes (2^53 > 2^53-1 exactly; the constant 9007199254740991 = 16 digits
-    //   but is representable — also rejected).
-    //
-    // The sig_digits guard exists to prevent precision-ambiguous thresholds from
-    // entering the sargable path. For this test, we test the tri-mask kernel directly
-    // using a constant that DOES satisfy sig_digits (< 16 digits) but still creates
-    // the tie scenario: a decimal threshold of exactly 9007199254740992.0.
-    //
-    // The integer 9007199254740992 has 16 digits and would be rejected. However the
-    // FLOAT literal 9007199254740992.0 has 16 sig digits too. The next representable
-    // f64 below it is 9007199254740990.0. So we use FILTER(?v >= 9007199254740990)
-    // (15 digits, passes) and verify the 2^53 row survives — this exercises the
-    // columnar path. The pure tie-case test is in chunk_select unit tests.
-    let q_ge = format!(
-        "{}SELECT ?v WHERE {{ <http://ex/witness> <http://ex/v> ?v . ?x <http://ex/v> ?v . \
-         FILTER(?v >= 1) }}",
-        PFX
-    );
-    // Simpler: query for the witness row directly and confirm it appears in the output.
+    // BIND-derived ?fval forces the FILTER to be a residual (not pushed into the scan
+    // by split_sargable). FILTER(?fval < 1): only the decimal witness passes.
     let q = format!(
-        "{}SELECT ?v WHERE {{ ?s <http://ex/v> ?v . FILTER(?v >= 1) }}",
+        "{}SELECT ?v WHERE {{ ?s <http://ex/v> ?v . BIND(?v AS ?fval) . FILTER(?fval < 1) }}",
         PFX
     );
 
@@ -202,7 +187,7 @@ fn t2_tie_exactness_witness_2_to_53() {
     let json_col = query_json(&g, &q).expect("T2 columnar query must succeed");
     let snap = stats_snapshot();
 
-    // Scalar reference.
+    // Scalar reference: budget-armed forces the scalar path.
     reset_stats();
     let json_scalar = query_json_with_budget(
         &g,
@@ -211,25 +196,30 @@ fn t2_tie_exactness_witness_2_to_53() {
     )
     .expect("T2 scalar query must succeed");
 
-    // Byte-identity is the primary assertion.
+    // Byte-identity: hybrid and scalar must agree.
     assert_eq!(
         json_col.as_bytes(),
         json_scalar.as_bytes(),
         "T2: columnar and scalar results must be byte-identical"
     );
 
-    // The witness value (9007199254740992) must appear in the result.
+    // The witness must survive: 0.9999999999999999 < 1 exactly.
     assert!(
-        json_col.contains("9007199254740992"),
-        "T2: the witness row 2^53=9007199254740992 must survive the filter"
+        json_col.contains("0.9999999999999999"),
+        "T2: the tie-witness decimal 0.9999999999999999 must survive FILTER(?fval < 1) \
+         (exact < 1, but f64 rounds to 1.0 — tri-mask must delegate, not confident-fail)"
     );
 
-    // Non-vacuity: the columnar path must have engaged (if above VEC_MIN_BATCH).
+    // Non-vacuity: if the columnar path engaged, delegation must have occurred (the
+    // witness row is always a tie for this constant).
     if snap.chunks_built >= 1 {
-        // Great — columnar path engaged. Both column types may have been processed.
-        assert!(snap.rows_columnar > 0, "T2: if columnar engaged, rows_columnar must be > 0");
+        assert!(
+            snap.rows_delegated > 0,
+            "T2: columnar engaged but rows_delegated == 0; the tie must have been delegated \
+             (rows_delegated={})",
+            snap.rows_delegated
+        );
     }
-    let _ = q_ge; // suppress unused-variable lint
 }
 
 // ==== T3: operator sweep over the mixed column ===================================
