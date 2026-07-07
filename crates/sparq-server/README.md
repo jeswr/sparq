@@ -38,8 +38,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
   GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
-  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
-  SELECT bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
+  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); TTFB-streamed
+  SELECT-JSON bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
   keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**, and a **`Sparq-Generation`** header + **`?generation=N`** snapshot pin (default build, bounded to the ring's concurrency-retention window; aged-out → `410`).
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
