@@ -289,6 +289,12 @@ pub(crate) mod reduce;
 pub mod vec_dispatch;
 #[cfg(feature = "vectorized")]
 pub use vec_dispatch::{reset_stats, stats_snapshot, VecStats};
+// [SONNET-4.6] (sq-y5ew5) M4 hybrid tri-mask FILTER kernel for general decoded columns:
+// classifies each lane into Confident / Tie / Unknown and delegates Tie+Unknown to the
+// scalar predicate. NON-DEFAULT `vectorized` feature; zero code compiles when off. No new
+// dependencies. `pub(crate)` only — purely an internal accelerator, no public surface.
+#[cfg(feature = "vectorized")]
+pub(crate) mod chunk_select;
 
 // [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
 // (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary

@@ -102,7 +102,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   for acyclic BGPs (cost-gated; cyclic BGPs keep LFTJ). Result-identical to off (proven by the on-vs-off
   differential); off, byte-identical, no new deps.
 - **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER and aggregate
-  operators use a columnar path for ≥ 256-row all-inline-integer batches; byte-identical to the scalar path. I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
+  operators use a columnar path for ≥ 256-row batches; the hybrid tri-mask delegates tie/unknown lanes to the scalar path (byte-identical). I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more

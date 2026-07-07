@@ -526,14 +526,17 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   **`query`/`query_json`/etc. return byte-identical results whether the feature is on or off** — it
   is a perf optimisation, never a semantics change. The first evaluator wiring landed in Phase 3
   (`sq-pntvh.3`): a **columnar residual-FILTER seam** inside `apply_filter` (Seam A) that, for an
-  eligible single sargable-numeric residual `?v OP const` over an **all-inline-integer** column,
-  transposes to a `DataChunk`, decodes the column once, compares over the decoded column, gathers the
-  survivors, and materialises back — provably byte-identical to the scalar row path (same rows, same
-  order). It **declines** to the row path for anything not provably identical (non-inline / negative /
-  computed / unbound cells, temporal or non-sargable filters) and is **disabled whenever the `zk`
-  trace is armed** so the row path records the complete FILTER obligation set. The M4 wiring roadmap +
-  coexistence model is `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance gate landed
-  first (Phase 1, `sq-pntvh.1`): the differential BYTE-IDENTITY harness
+  eligible single sargable-numeric residual `?v OP const`, decodes the column once and runs the
+  **hybrid tri-mask** (`src/chunk_select.rs`, bead `sq-y5ew5`): each lane is classified Confident
+  (finite f64, `v != c` — f64 verdict is unambiguous by the monotone-rounding lemma), Tie (`v == c`
+  as f64), or Unknown (NaN sentinel for non-numeric / unbound / local-vocab ids). Tie + Unknown lanes
+  are **delegated** to the full scalar `eval_expr` predicate (which handles the exact-lexical recheck
+  for ties); confident-passes and delegated-passes are merged in ascending order. This is provably
+  byte-identical by construction (design record §3). The seam **declines** entirely to the row path
+  for temporal or non-sargable filters, batches below `VEC_MIN_BATCH`, and is **disabled whenever the
+  `zk` trace is armed** so the row path records the complete FILTER obligation set. The M4 wiring
+  roadmap + coexistence model is `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance
+  gate landed first (Phase 1, `sq-pntvh.1`): the differential BYTE-IDENTITY harness
   `crates/sparq-engine/tests/vectorized_byte_identity.rs` (the columnar kernel's serialised survivors
   are byte-identical to the row `FILTER` operator over the *same batch*, order-exact — a Phase-1
   finding: cross-query byte-identity is unsound because a sargable filter re-plans the scan, so the
@@ -548,14 +551,15 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   morsel extracts only the one filter column (O(rows × 1), not a full-width transpose). The decline
   hierarchy (in order): I2 = ZK-trace armed (scalar records the full obligation set); I3 = budget
   armed (fallback rule — the debit schedule is not uniform-per-row); operator shape check (only a
-  simple sargable `?v OP const` numeric comparison); I4/`VEC_MIN_BATCH` batch-size gate; all-inline
-  dtype precheck. The aggregate seam (Seam B, `group_aggregate` → `columnar_aggregate`) is also
-  wired through the same I2/I3/`VEC_MIN_BATCH` checks. **I5 probe counters (test-facing / unstable)**:
+  simple sargable `?v OP const` numeric comparison, finite constant); `VEC_MIN_BATCH` batch-size gate.
+  The aggregate seam (Seam B, `group_aggregate` → `columnar_aggregate`) is also wired through the
+  same I2/I3/`VEC_MIN_BATCH` checks. **I5 probe counters (test-facing / unstable)**:
   `reset_stats()` / `stats_snapshot()` / `VecStats` let acceptance tests assert the seams are
-  non-vacuous (`chunks_built >= 1` for an eligible operator). Thread-local counters are used (not
-  global atomics) so parallel test threads don't interfere. The counters are **not semver-stable** —
-  external callers must not build stable logic on them; they exist only for the acceptance gate in
-  `tests/differentials/vectorized_byte_identity.rs` (T1–T4).
+  non-vacuous (`chunks_built >= 1` for an eligible operator, `rows_delegated > 0` when tie/unknown
+  lanes exist). Thread-local counters are used (not global atomics) so parallel test threads don't
+  interfere. The counters are **not semver-stable** — external callers must not build stable logic on
+  them; they exist only for the acceptance gate in `tests/differentials/vectorized_byte_identity.rs`
+  (T1–T4) and `tests/differentials/chunk_select_tri_mask.rs` (sq-y5ew5 T1–T5).
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
   pattern, the executor first builds a membership filter over the already-materialised side's
