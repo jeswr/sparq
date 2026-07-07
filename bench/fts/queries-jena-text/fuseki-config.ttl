@@ -1,0 +1,49 @@
+# [FABLE-5] sq-hmd7l.2 — Fuseki + jena-text assembler for the FTS same-box comparison
+# harness (scripts/bench/fts-same-box.sh). PINNED in-repo so the competitor's indexing
+# configuration is part of the recorded methodology, not an ad-hoc gather artifact.
+#
+# Shape: an in-memory dataset wrapped in a text:TextDataset with an in-memory Lucene
+# index ("mem" directory) — everything transient, sized for the synthetic bench/fts
+# corpus (100k..1M eight-word literals). Loading N-Triples through the /fts/data GSP
+# endpoint indexes each literal on commit, so the harness's load wall-time INCLUDES
+# Lucene indexing (recorded as the advisory load metric, comparable to sparq-text's
+# advisory build time — both are outside the timed query section).
+#
+# Analyzer: Lucene StandardAnalyzer, pinned explicitly. It UAX#29-tokenizes +
+# lowercases — the same segmentation family as sparq-text's unicode-segmentation
+# tokenizer; on this corpus (ASCII [a-z]+[0-9]+ words, space-separated) the two
+# tokenizations are identical, which is what makes the AND/OR/prefix/phrase result-SET
+# counts directly comparable. Ranking/score order is NOT comparable (BM25 parameters +
+# index statistics differ) and is out of scope per the bench/competitors.json caveat.
+PREFIX fuseki:  <http://jena.apache.org/fuseki#>
+PREFIX rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ja:      <http://jena.hpl.hp.com/2005/11/Assembler#>
+PREFIX text:    <http://jena.apache.org/text#>
+PREFIX :        <http://sparq.dev/bench/fts/fuseki-config#>
+
+:service rdf:type fuseki:Service ;
+    fuseki:name "fts" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query ; fuseki:name "query" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data" ] ;
+    fuseki:dataset :textDataset .
+
+:textDataset rdf:type text:TextDataset ;
+    text:dataset :baseDataset ;
+    text:index :indexLucene .
+
+:baseDataset rdf:type ja:MemoryDataset .
+
+:indexLucene rdf:type text:TextIndexLucene ;
+    text:directory "mem" ;
+    text:analyzer [ a text:StandardAnalyzer ] ;
+    text:entityMap :entMap .
+
+# The bench/fts corpus predicate (<http://example.org/comment>) is the ONE indexed
+# field; it is also the default field, so a bare Lucene query string searches it.
+:entMap rdf:type text:EntityMap ;
+    text:defaultField "comment" ;
+    text:entityField "uri" ;
+    text:uidField "uid" ;
+    text:map (
+        [ text:field "comment" ; text:predicate <http://example.org/comment> ]
+    ) .
