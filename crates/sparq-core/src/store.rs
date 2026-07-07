@@ -353,21 +353,57 @@ impl TripleStore {
         TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None }
     }
 
-    /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all
-    /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
-    /// parallel) and deduplicated first; the rest are independent and built concurrently.
+    /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all six
+    /// by default; just SPO/POS/OSP under `compact-index`). Two `cfg`-selected bodies: the
+    /// PARALLEL build builds every permutation concurrently; the NO-THREADS build keeps the
+    /// single SPO sort+dedup and maps the rest from it. They are separate `fn` definitions so
+    /// the no-threads (wasm) codegen is byte-for-byte the historical body — this change adds
+    /// NOTHING to the feature-off bundle.
+    ///
+    /// [OPUS-4.8 sq-7d3dj.31] Concurrent-N (parallel body): build EVERY BUILT permutation (SPO
+    /// included) concurrently via the O(n) LSD radix sort, each mapping+sorting+deduping its
+    /// OWN copy straight from the raw input. This removes the serial critical-path dependency
+    /// the prior path had — where SPO was `par_sort_unstable`+deduped FIRST and the other five
+    /// could not start until that finished. Measured on this box (8T, 8 M triples, drift-
+    /// cancelled interleaved A/B): the index build (`from_triples`) is ~13-16% faster, because
+    /// the five non-SPO perms no longer wait on the SPO sort — the parallelism gain outweighs
+    /// re-deriving SPO by radix instead of reusing the deduped array. Numbers are non-canonical
+    /// (this box's thermal/contention noise); the *ratio* + the structural reason (no serial
+    /// pre-phase) are the load-bearing points.
+    ///
+    /// Correctness: each perm deduped INDEPENDENTLY yields the identical multiset — a duplicate
+    /// `[s,p,o]` is a duplicate in every column order, and `Vec::dedup` after a full sort
+    /// removes exactly the consecutive equals, so every BUILT perm is byte-identical to the
+    /// reference `sort_unstable`+dedup+permute. Gated by the
+    /// `from_triples_perms_match_reference_sort` differential test.
+    #[cfg(feature = "parallel")]
+    fn build_raw_perms(triples: Vec<[Id; 3]>) -> [PermData; 6] {
+        let built: Vec<(Perm, Vec<[Id; 3]>)> = BUILT
+            .par_iter()
+            .map(|&p| {
+                let order = p.order();
+                // Pre-sized exactly from the known triple count (the mapped iterator is
+                // ExactSize, so `collect` reserves `triples.len()` up front — no grow tail).
+                let mut v: Vec<[Id; 3]> =
+                    triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+                radix_sort_rows(&mut v);
+                v.dedup();
+                (p, v)
+            })
+            .collect();
+        let mut perms: [PermData; 6] = std::array::from_fn(|_| PermData::default());
+        for (p, v) in built {
+            perms[p as usize] = PermData::Owned(v);
+        }
+        perms
+    }
+
+    /// No-threads build of the permutation indexes (the feature-off sibling of `build_raw_perms`).
+    /// Deduplicates via the SPO ordering first (radix — no parallel sort to beat it here), then
+    /// maps the rest from the deduped array, reusing that array for the SPO slot. Kept
+    /// byte-identical to the historical body so the feature-off wasm bundle is unchanged.
+    #[cfg(not(feature = "parallel"))]
     fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
-        // Deduplicate via the SPO ordering first. This single large array keeps the
-        // parallel comparison sort: measured on this box, `par_sort_unstable` beats the
-        // sequential radix for one 2M-row array (all cores vs one), so radix here would
-        // REGRESS the SPO/dedup step. The win is below — the FIVE non-SPO permutations move
-        // to the O(n) LSD radix (sq-7d3dj.17), which beats the sequential comparison sort
-        // and is where the flagged sort-family self-time lives (they build concurrently via
-        // par_iter, each a sequential radix). The no-threads build has no parallel sort, so
-        // radix wins the SPO step there too. [OPUS-4.8]
-        #[cfg(feature = "parallel")]
-        triples.par_sort_unstable();
-        #[cfg(not(feature = "parallel"))]
         radix_sort_rows(&mut triples);
         triples.dedup();
 
@@ -384,9 +420,6 @@ impl TripleStore {
 
         // Build every BUILT permutation except SPO (which is the deduped `triples`).
         let to_build: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
-        #[cfg(feature = "parallel")]
-        let built: Vec<Vec<[Id; 3]>> = to_build.par_iter().map(|p| build(p.order())).collect();
-        #[cfg(not(feature = "parallel"))]
         let built: Vec<Vec<[Id; 3]>> = to_build.iter().map(|p| build(p.order())).collect();
 
         // Place each built permutation at its canonical slot; the rest stay empty.
@@ -974,6 +1007,32 @@ mod tests {
                 let got = store.perms[perm as usize].as_slice();
                 assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
             }
+        }
+    }
+
+    /// [OPUS-4.8 sq-7d3dj.31] Direct gate on the concurrent-N build's INDEPENDENT per-perm
+    /// dedup: with the parallel build, SPO is no longer deduped-first-then-mapped — every perm
+    /// dedups its own sorted copy. On a heavily-duplicated input (the same handful of triples
+    /// repeated thousands of times) each BUILT perm must still hold EXACTLY the distinct set,
+    /// sorted, with no residual duplicate row — proving independent dedup equals the SPO-first
+    /// dedup it replaced. Non-vacuous: the expected length is the true distinct count.
+    #[test]
+    fn from_triples_independent_dedup_removes_all_duplicates() {
+        let base: [[Id; 3]; 5] = [[3, 1, 9], [1, 2, 2], [1, 2, 8], [7, 4, 4], [3, 1, 5]];
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        // Repeat the whole set 4000× (20 000 rows, only 5 distinct) plus one lone triple.
+        for _ in 0..4000 {
+            triples.extend_from_slice(&base);
+        }
+        triples.push([9, 9, 9]);
+        let distinct = 6; // the 5 in `base` plus [9,9,9]
+
+        let store = TripleStore::from_triples(triples);
+        for &perm in BUILT {
+            let rows = store.perms[perm as usize].as_slice();
+            assert_eq!(rows.len(), distinct, "permutation {perm:?} still holds duplicate rows");
+            // Fully sorted in this perm's column order, and strictly increasing (no dup).
+            assert!(rows.windows(2).all(|w| w[0] < w[1]), "permutation {perm:?} not strictly sorted/deduped");
         }
     }
 

@@ -575,6 +575,22 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] sq-qcnn.32: the advisory-job registry + gate-intent placement
+      # check. Two directions, both diff-visible instead of review-catch-dependent:
+      #   C2 — every job whose NAME matches \b(advisory|informational)\b must have
+      #        a registry entry in .github/advisory-registry.json with
+      #        {owner_bead, promotion_criteria, registered}.
+      #   C3 — no run-step invoking a gate-classified script (scripts/*gate*.py) may
+      #        live inside an advisory-named job without a `gate_script_waiver` in
+      #        the registry (lesson: #1679 gate-intent G3 self-test sat in an advisory
+      #        job = provably non-gating until caught).
+      # Self-test pins the gate's own classification logic; the enforce step applies
+      # it over the live workflows. Stdlib-only, no deps — placed here with the other
+      # structural workflow-lint steps.
+      - name: Self-test the advisory-registry checker (C2/C3 logic — sq-qcnn.32)
+        run: python3 scripts/check-advisory-registry.py --self-test
+      - name: "Enforce advisory-job registry + gate-intent placement (C2/C3) — GATING"
+        run: python3 scripts/check-advisory-registry.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
