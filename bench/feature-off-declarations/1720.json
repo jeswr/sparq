@@ -1,0 +1,5 @@
+{
+  "pr": 1720,
+  "date": "2026-07-07",
+  "reason": "[OPUS-4.8] sq-7d3dj.6: building the numerics cache from borrowed TermParts (dropping the per-id owned Term) changes always-compiled sparq-core ingest code, so the feature-OFF wasm bundle bytes move from base by design. SIZE stays governed by the wasm_bundle_bytes +/-2% floor ratchet."
+}
