@@ -584,6 +584,26 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   correlated child actually collapsed). SP2Bench q08/q12b: the 1-row `?erdoes` side seeds the Union's
   `?document dc:creator ?erdoes` scan instead of a whole-corpus creator self-join. Payoff on complex-shape
   workloads is a measurable hypothesis for the canonical perf host, not a baked-in number.
+- **Correlated (theta) anti-join for `OPTIONAL … FILTER(!bound)`** is a DEFAULT-ON,
+  semantics-preserving optimisation (bead `sq-7d3dj.30.9`, SP2Bench q06). The negation idiom
+  `Filter(!bound(?nb), LeftJoin(A, B, F))` — where `?nb` is **certain** in `B` and **absent** from `A` —
+  is exactly an anti-join: a left row survives iff **no** `b ∈ B` is compatible with it **and** makes the
+  OPTIONAL condition `F` effectively **true**. The default-off `algebra-rewrite` pass turns the simpler
+  `F = None` case into `Minus`, but declines when `F` references **outer** variables (q06's
+  `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` scans the whole corpus. This
+  eval-time path instead splits `F` into a correlation equality `?outer = ?inner` (with `?inner` certain
+  in `B`) and a residual theta (`?yr2 < ?yr`), then **seeds the right scan sideways** with the outer
+  correlation IRI (the SIP machinery) so each distinct correlation evaluates a tiny `B'` instead of the
+  cold corpus; the residual theta is re-checked verbatim per candidate with full 3-valued semantics
+  (a **type error ⇒ no match**, so the outer row **survives** — never spuriously eliminated). It is
+  **conservative**: the SIP id-seeding fast path fires only for **IRI**-valued correlations (IRI value-
+  equality *is* term identity); a **literal**-valued correlation (the `sq-lr2ii` value-equality class:
+  high-precision decimals, whitespace-padded numerics) routes through the **value-correct** path that
+  re-checks the equality with SPARQL `=`, never a term-identity probe that could miss a value-equal
+  partner. Each surviving row is emitted **once** (multiplicity preserved), and any shape/scope miss
+  (e.g. `?nb` also bound on the left, or no seedable equality) **declines** to the identical prior plan.
+  Proven on-vs-off by `tests/theta_antijoin.rs` (incl. a type-error-survives witness, a literal value-
+  equality witness, and a randomised differential); the toggle/stats live behind `theta_antijoin_testing`.
 - **DISTINCT-projection loose (skip) index scan** is a DEFAULT-ON, semantics-preserving optimisation
   (bead `sq-7d3dj.30.4`; research/sp2bench-complex-shape-deficit.md §2.3). For `SELECT DISTINCT ?p`
   over a BGP / **UNION** of BGPs where `?p` is the **single** projected variable, the executor

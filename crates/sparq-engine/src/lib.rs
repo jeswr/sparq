@@ -170,6 +170,32 @@ pub mod distinct_pushdown_testing {
     }
 }
 
+/// Test/measurement hooks for the correlated (theta) anti-join — the
+/// `OPTIONAL … FILTER(!bound(?nb))` negation idiom with a correlated inner FILTER
+/// (bead sq-7d3dj.30.9, SP2Bench q06). A semantics-preserving perf optimisation that
+/// is always on in normal evaluation; these hooks exist so the differential
+/// acceptance test can force it OFF and read whether it fired. NOT part of the stable
+/// query API. [FABLE-5]
+#[doc(hidden)]
+pub mod theta_antijoin_testing {
+    /// Enables/disables the correlated theta anti-join on the current thread,
+    /// returning the previous value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::theta_antijoin::set_enabled(v)
+    }
+
+    /// Clears the per-query firing statistics.
+    pub fn reset_stats() {
+        crate::exec::theta_antijoin::reset_stats()
+    }
+
+    /// `(fired, correlated_right_rows, distinct_correlations_evaluated)` since the
+    /// last [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize) {
+        crate::exec::theta_antijoin::stats()
+    }
+}
+
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};

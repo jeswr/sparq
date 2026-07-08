@@ -584,6 +584,90 @@ pub(crate) mod sip {
     }
 }
 
+// ---- Correlated (theta) anti-join for OPTIONAL+FILTER(!bound) (sq-7d3dj.30.9) ----
+//
+// [FABLE-5] The SPARQL negation idiom `Filter(!bound(?nb), LeftJoin(A, B, Some(F)))`
+// with `?nb` CERTAIN in `B` and ABSENT from `A` is exactly an ANTI-JOIN with a theta
+// condition: a left row `a` survives iff there is NO `b ∈ B` with `a` and `b`
+// compatible on their shared variables AND `F(merge(a, b))` effectively TRUE.
+//
+// The #1735 rewrite turns the `expression: None` case into `Minus`, but declines here
+// because `F` references OUTER variables (SP2Bench q06:
+// `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` evaluates the
+// full right side against the whole document set. This path instead:
+//   (a) partitions `F` into EQUALITY conjuncts `?outer = ?inner` (correlation) whose
+//       `?inner` is certain-in-`B` and `?outer` is a left variable, and a RESIDUAL
+//       theta remainder (everything else, e.g. `?yr2 < ?yr`);
+//   (b) for each distinct left correlation tuple, SEEDS the `B` scan sideways with the
+//       outer IRI bound into `?inner`'s position (extending the #1741 SIP machinery to
+//       the anti-join), evaluating a tiny correlated `B'` instead of the cold corpus;
+//   (c) for each surviving `b ∈ B'` re-checks the FULL residual theta with verbatim
+//       `eval_expr` (3-valued: an error / false does NOT match, so the left row
+//       SURVIVES); the left row is dropped iff some `b` makes the whole condition true.
+//
+// Soundness / semantic traps (each has a witness test):
+//   * `?outer = ?inner` is SPARQL `=` (VALUE equality), not `sameTerm`. Seeding by term
+//     identity is exact ONLY when the pushed outer value is an IRI (IRI value-equality
+//     IS term identity). A left row whose correlation value is a LITERAL routes through
+//     the value-correct COLD anti-join (B evaluated once, full `F` re-checked per pair
+//     via `eval_expr`) — never the id-seeding fast path (the sq-lr2ii class: high-
+//     precision decimals, whitespace-padded numerics — a term-identity probe would miss
+//     a value-equal-but-not-identical literal and SPURIOUSLY KEEP a row that must drop).
+//   * Multiplicity: each surviving left row is emitted ONCE (with its original
+//     multiplicity), never multiplied by the number of `B` matches it lacks.
+//   * Output layout is the LeftJoin's: surviving left rows padded with `NO_ID` for every
+//     right-only variable (they never matched), so it is drop-in for the cold plan.
+//   * DECLINE is total: any shape/scope/threshold miss returns `Ok(None)` and the caller
+//     runs the identical prior `Filter{LeftJoin}` plan, bit-for-bit.
+pub(crate) mod theta_antijoin {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static FIRED: Cell<bool> = const { Cell::new(false) };
+        static CORRELATED_ROWS: Cell<usize> = const { Cell::new(0) };
+        static BINDINGS_EVALUATED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether the correlated theta anti-join is enabled on this thread (default on).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables the path on this thread, returning the previous value. The
+    /// differential acceptance test uses it to compare fast-path vs cold results.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query firing statistics (call before a measured/traced run).
+    pub(crate) fn reset_stats() {
+        FIRED.with(|f| f.set(false));
+        CORRELATED_ROWS.with(|c| c.set(0));
+        BINDINGS_EVALUATED.with(|b| b.set(0));
+    }
+
+    /// Records one fired anti-join: `rows` right-side solutions produced across
+    /// `bindings` distinct correlation tuples evaluated.
+    pub(crate) fn record(rows: usize, bindings: usize) {
+        FIRED.with(|f| f.set(true));
+        CORRELATED_ROWS.with(|c| c.set(c.get().saturating_add(rows)));
+        BINDINGS_EVALUATED.with(|b| b.set(b.get().saturating_add(bindings)));
+    }
+
+    /// `(fired, correlated_right_rows, distinct_correlations_evaluated)` since the last
+    /// [`reset_stats`]. The anti-vacuity acceptance test asserts `fired` and that the
+    /// correlated right side produced far fewer rows than the cold (blind) right side.
+    pub(crate) fn stats() -> (bool, usize, usize) {
+        (
+            FIRED.with(|f| f.get()),
+            CORRELATED_ROWS.with(|c| c.get()),
+            BINDINGS_EVALUATED.with(|b| b.get()),
+        )
+    }
+}
+
 /// [OPUS-4.8] (sq-7d3dj.30.4) DISTINCT-projection loose (skip) index scan.
 ///
 /// For `Distinct{Project{[?p]}{ BGP / Union-of-BGPs }}` the engine can enumerate the
@@ -3925,6 +4009,16 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
                     apply_filter(graph, local, &mut b, expr)?;
                     return Ok(b);
                 }
+            }
+            // [FABLE-5] (sq-7d3dj.30.9) Correlated (theta) anti-join: the negation idiom
+            // `Filter(!bound(?nb), LeftJoin(A, B, Some(F)))` with an OPTIONAL condition
+            // that references OUTER variables (SP2Bench q06) — the #1735 rewrite declines
+            // it (it needs `expression: None`). This recognises the shape, seeds the right
+            // scan sideways with the outer correlation IRI, and evaluates a correlated
+            // anti-join with the residual theta re-checked verbatim. Any miss returns
+            // `None` and falls through to the identical cold `Filter{LeftJoin}` plan below.
+            if let Some(b) = try_theta_antijoin(graph, local, expr, inner)? {
+                return Ok(b);
             }
             let mut b = eval_graph_pattern(graph, local, inner)?;
             apply_filter(graph, local, &mut b, expr)?;
@@ -7522,6 +7616,425 @@ fn left_outer_merge(
     // Output is ordered by the join variable (at column lk of out_vars).
     let sorted_by = out_vars.get(lk).cloned();
     Ok(Bindings { vars: out_vars, rows, sorted_by })
+}
+
+// ---- Correlated (theta) anti-join (sq-7d3dj.30.9) --------------------------------
+// [FABLE-5] See the `theta_antijoin` module comment near the top of this file for the
+// shape, the SIP seeding, and the full soundness argument.
+
+/// One correlation conjunct `?outer = ?inner` extracted from the OPTIONAL condition,
+/// where `?inner` is certain-in-`B` and `?outer` is a left variable. The remaining
+/// conjuncts (residual theta) are re-checked verbatim per candidate right row.
+struct Correlation {
+    /// Column of `?outer` in the LEFT bindings.
+    left_col: usize,
+    /// The certain-in-`B` variable `?inner` seeded sideways into the right scan.
+    inner_var: Variable,
+}
+
+/// Attempts the correlated theta anti-join for `Filter(!bound(?nb), LeftJoin(A, B, F))`.
+///
+/// Returns `Ok(Some(result))` when the shape matched AND the path fired (result is
+/// bag-equivalent to the cold `Filter{LeftJoin}` plan), or `Ok(None)` to DECLINE — in
+/// which case the caller runs the identical prior plan.
+fn try_theta_antijoin(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    filter_expr: &Expression,
+    inner: &GraphPattern,
+) -> Result<Option<Bindings>, String> {
+    if !theta_antijoin::enabled() {
+        return Ok(None);
+    }
+    // Shape: outer filter is exactly `!bound(?nb)` over a `LeftJoin` WITH a condition.
+    let Some(nb) = as_not_bound_var(filter_expr) else { return Ok(None) };
+    let GraphPattern::LeftJoin { left, right, expression: Some(cond) } = inner else {
+        return Ok(None);
+    };
+
+    // `?nb` must be a right-only anti-join witness: certain in `B` (so the LeftJoin
+    // binds it on EVERY match, hence `!bound` selects exactly the non-matches) and
+    // ABSENT from `A` (else `!bound(?nb)` is not the anti-join predicate — decline).
+    let mut b_certain = FxHashSet::default();
+    certain_vars(right, &mut b_certain);
+    if !b_certain.contains(&nb) || pattern_has_var(left, &nb) {
+        return Ok(None);
+    }
+
+    // Evaluate the mandatory left side once.
+    let left_b = eval_graph_pattern(graph, local, left)?;
+
+    // Output layout, computed STATICALLY (never evaluate `B` cold — that is exactly
+    // what this path avoids): the LeftJoin's variables = left's vars, then each
+    // in-scope right variable not already present. Surviving rows carry only left
+    // values + `NO_ID` padding for the right-only columns.
+    let right_scope = in_scope_vars(right);
+    let mut out_vars = left_b.vars.clone();
+    for v in &right_scope {
+        if !out_vars.contains(v) {
+            out_vars.push(v.clone());
+        }
+    }
+    let n_right_only = out_vars.len() - left_b.vars.len();
+    if left_b.rows.is_empty() {
+        return Ok(Some(Bindings::unsorted(out_vars, Vec::new())));
+    }
+
+    // Partition the OPTIONAL condition into correlation equalities and a residual.
+    // A correlation conjunct is `?outer = ?inner` (either orientation) with `?inner`
+    // certain in `B` and `?outer` a LEFT variable. Everything else is residual theta,
+    // re-checked verbatim on the merged row. `sameTerm` is NOT treated as a
+    // correlation (it is term identity, but keeping it in the residual is always
+    // sound and it is not the q06 idiom). [FABLE-5]
+    let conjuncts = split_and(cond);
+    let mut correlations: Vec<Correlation> = Vec::new();
+    let mut residual: Vec<&Expression> = Vec::new();
+    for c in &conjuncts {
+        if let Some((va, vb)) = as_var_equality(c) {
+            // Orient: the certain-in-B side is `?inner`, the left side is `?outer`.
+            let (outer, inner_var) = if b_certain.contains(&vb) && left_b.col(&va).is_some() {
+                (va.clone(), vb.clone())
+            } else if b_certain.contains(&va) && left_b.col(&vb).is_some() {
+                (vb.clone(), va.clone())
+            } else {
+                residual.push(c);
+                continue;
+            };
+            // `?inner` must not also be a left variable (that would be a shared join
+            // var handled by compatibility, not a seedable correlation) and the outer
+            // must be resolvable to a column.
+            if left_b.col(&inner_var).is_some() {
+                residual.push(c);
+                continue;
+            }
+            let Some(left_col) = left_b.col(&outer) else {
+                residual.push(c);
+                continue;
+            };
+            correlations.push(Correlation { left_col, inner_var });
+        } else {
+            residual.push(c);
+        }
+    }
+    // No correlation to seed sideways → the SIP win is absent; decline so the cold
+    // plan runs (this path exists to seed the right scan, not to reimplement it).
+    if correlations.is_empty() {
+        return Ok(None);
+    }
+
+    // Group left rows by their correlation tuple (dedup for EVALUATION only). A group
+    // whose correlation values are all IRIs takes the SIP fast path; a group with any
+    // non-IRI correlation value routes to the value-correct cold anti-join.
+    let mut order: Vec<Vec<Id>> = Vec::new();
+    let mut groups: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+    for (ri, row) in left_b.rows.iter().enumerate() {
+        let key: Vec<Id> = correlations.iter().map(|c| row[c.left_col]).collect();
+        match groups.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push(ri),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                order.push(key);
+                e.insert(vec![ri]);
+            }
+        }
+    }
+
+    // The residual theta, evaluated on the merged (A-row ⊕ B'-row) tuple via full
+    // SPARQL 3-valued semantics. We build a merged row per candidate and run each
+    // residual conjunct; a conjunct that is not effectively-true (false OR error OR
+    // unbound) means this `b` does NOT match, so the left row is NOT eliminated by it.
+    let residual_owned: Vec<Expression> = residual.into_iter().cloned().collect();
+
+    let mut result_rows: Vec<Row> = Vec::with_capacity(left_b.rows.len());
+    let mut total_child_rows = 0usize;
+    let mut fired = false;
+
+    for key in &order {
+        let members = &groups[key];
+        let ri0 = members[0];
+
+        // Decide the group's path: SIP-seed iff every correlation value is an IRI.
+        let mut smap: FxHashMap<Variable, oxrdf::NamedNode> = FxHashMap::default();
+        let mut all_iri = true;
+        for c in &correlations {
+            match term_of(graph, local, left_b.rows[ri0][c.left_col]) {
+                Some(Term::NamedNode(n)) => {
+                    smap.insert(c.inner_var.clone(), n);
+                }
+                _ => {
+                    all_iri = false;
+                    break;
+                }
+            }
+        }
+
+        // Evaluate the right side for this correlation group.
+        //  * SIP fast path (all IRIs): seed `?inner := <iri>` into `B`, evaluating a
+        //    tiny correlated `B'`. Sound because for an IRI, `=` IS term identity.
+        //  * Value-correct cold path (any non-IRI, or non-substitutable `B`): evaluate
+        //    `B` once uncorrelated; the equality is re-checked below via `eval_expr`.
+        let (b_prime, seeded) = if all_iri {
+            match subst_pattern(right, &smap) {
+                Some(subst) => (eval_graph_pattern(graph, local, &subst)?, true),
+                // Non-substitutable right (SERVICE, sub-SELECT projecting a seeded var,
+                // …): fall back to the cold right for this group.
+                None => (eval_graph_pattern(graph, local, right)?, false),
+            }
+        } else {
+            (eval_graph_pattern(graph, local, right)?, false)
+        };
+        total_child_rows += b_prime.rows.len();
+        fired = true;
+
+        // Per-group column maps relative to THIS `b_prime` (its var order is its own):
+        //  * `shared` — (left_col, bprime_col) pairs for variables present on both
+        //    sides (join-compatibility must hold on them);
+        //  * `out_src[i]` — how to fill `out_vars[i]` in a merged candidate row: from
+        //    the left row, the b_prime row, or `NO_ID`. The merged row is built in the
+        //    STATIC `out_vars` order so `eval_expr` (with `tmp.vars = out_vars`)
+        //    resolves every variable — including the seeded `?inner` and the residual's
+        //    outer vars — correctly.
+        let shared: Vec<(usize, usize)> = left_b
+            .vars
+            .iter()
+            .enumerate()
+            .filter_map(|(lc, v)| b_prime.col(v).map(|bc| (lc, bc)))
+            .collect();
+        enum Src {
+            Left(usize),
+            Right(usize),
+            Unbound,
+        }
+        // When seeded, `?inner` was folded to a CONSTANT inside `B`, so `b_prime` no
+        // longer binds it. Re-materialise its id here so a residual conjunct that
+        // references `?inner` still sees the seeded value on the merged row.
+        // `Src::Seeded(id)` supplies it directly.
+        enum Seed {
+            None,
+            Value(Id),
+        }
+        let mut seeded_ids: FxHashMap<Variable, Id> = FxHashMap::default();
+        if seeded {
+            for c in &correlations {
+                if let Some(nn) = smap.get(&c.inner_var) {
+                    let t = Term::NamedNode(nn.clone());
+                    let id = graph.id_of(&t).unwrap_or_else(|| local.intern(t));
+                    seeded_ids.insert(c.inner_var.clone(), id);
+                }
+            }
+        }
+        let out_src: Vec<(Src, Seed)> = out_vars
+            .iter()
+            .map(|v| {
+                let seed = match seeded_ids.get(v) {
+                    Some(id) => Seed::Value(*id),
+                    None => Seed::None,
+                };
+                let src = if let Some(lc) = left_b.col(v) {
+                    Src::Left(lc)
+                } else if let Some(bc) = b_prime.col(v) {
+                    Src::Right(bc)
+                } else {
+                    Src::Unbound
+                };
+                (src, seed)
+            })
+            .collect();
+
+        // For each left member row, test whether ANY b' matches (compatibility on
+        // shared vars ∧ every residual conjunct effectively-true ∧ — when NOT seeded —
+        // every correlation equality effectively-true via full value `=`). If a match
+        // exists the row is DROPPED; otherwise it SURVIVES padded with NO_ID.
+        for &ri in members {
+            let lrow = &left_b.rows[ri];
+            if budget::exhausted(result_rows.len()) {
+                break;
+            }
+            let mut matched = false;
+            for rrow in &b_prime.rows {
+                if !compatible(lrow, rrow, &shared) {
+                    continue;
+                }
+                // Build the merged candidate in static out_vars order.
+                let combined: Row = out_src
+                    .iter()
+                    .map(|(src, seed)| match (src, seed) {
+                        // A seeded `?inner` supplies its constant even though `b_prime`
+                        // no longer binds it (it was folded into `B`).
+                        (Src::Unbound, Seed::Value(id)) => *id,
+                        (Src::Left(lc), _) => lrow[*lc],
+                        (Src::Right(bc), _) => rrow[*bc],
+                        (Src::Unbound, Seed::None) => NO_ID,
+                    })
+                    .collect();
+                let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
+                // When NOT seeded, the correlation equalities were NOT enforced by
+                // substitution, so re-check them here (verbatim value `=`).
+                if !seeded {
+                    let mut eq_ok = true;
+                    for c in &correlations {
+                        let lhs = Expression::Variable(out_vars[c.left_col].clone());
+                        let rhs = Expression::Variable(c.inner_var.clone());
+                        let e = Expression::Equal(Box::new(lhs), Box::new(rhs));
+                        if !effective_boolean(&eval_expr(graph, local, &tmp, &combined, &e)?) {
+                            eq_ok = false;
+                            break;
+                        }
+                    }
+                    if !eq_ok {
+                        continue;
+                    }
+                }
+                // Residual theta (e.g. `?yr2 < ?yr`): every conjunct must be
+                // effectively TRUE for this b to match (error/false ⇒ no match).
+                let mut theta_ok = true;
+                for e in &residual_owned {
+                    if !effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?) {
+                        theta_ok = false;
+                        break;
+                    }
+                }
+                if theta_ok {
+                    matched = true;
+                    break; // one match is enough to eliminate; multiplicity: emit ≤once.
+                }
+            }
+            if !matched {
+                // Survives: left row padded with NO_ID for each right-only variable.
+                let mut combined: Row = lrow.clone();
+                combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
+                result_rows.push(combined);
+            }
+        }
+    }
+
+    if fired {
+        theta_antijoin::record(total_child_rows, order.len());
+    }
+    Ok(Some(Bindings::unsorted(out_vars, result_rows)))
+}
+
+/// Does `var` occur ANYWHERE in `p` (any triple position, any expression including
+/// `EXISTS` sub-patterns)? A SOUND OVER-approximation for the anti-join scope guard:
+/// reporting a spurious occurrence only makes the rewrite DECLINE (safe); missing a
+/// real one would be unsound, so every node kind recurses fully. [FABLE-5]
+fn pattern_has_var(p: &GraphPattern, var: &Variable) -> bool {
+    use GraphPattern as G;
+    let te = |t: &TermPattern| term_pattern_has_var(t, var);
+    let ne = |n: &NamedNodePattern| matches!(n, NamedNodePattern::Variable(v) if v == var);
+    match p {
+        G::Bgp { patterns } => patterns
+            .iter()
+            .any(|tp| te(&tp.subject) || ne(&tp.predicate) || te(&tp.object)),
+        G::Path { subject, object, .. } => te(subject) || te(object),
+        G::Join { left, right } | G::Union { left, right } | G::Minus { left, right } | G::Lateral { left, right } => {
+            pattern_has_var(left, var) || pattern_has_var(right, var)
+        }
+        G::LeftJoin { left, right, expression } => {
+            pattern_has_var(left, var)
+                || pattern_has_var(right, var)
+                || expression.as_ref().is_some_and(|e| expr_has_var(e, var))
+        }
+        G::Filter { expr, inner } => expr_has_var(expr, var) || pattern_has_var(inner, var),
+        G::Graph { name, inner } => ne(name) || pattern_has_var(inner, var),
+        G::Extend { inner, variable, expression } => {
+            variable == var || expr_has_var(expression, var) || pattern_has_var(inner, var)
+        }
+        G::Values { variables, .. } => variables.iter().any(|v| v == var),
+        G::OrderBy { inner, expression } => {
+            pattern_has_var(inner, var)
+                || expression.iter().any(|o| match o {
+                    OrderExpression::Asc(e) | OrderExpression::Desc(e) => expr_has_var(e, var),
+                })
+        }
+        G::Project { inner, variables } | G::Group { inner, variables, .. } => {
+            variables.iter().any(|v| v == var) || pattern_has_var(inner, var)
+        }
+        G::Distinct { inner } | G::Reduced { inner } | G::Slice { inner, .. } => {
+            pattern_has_var(inner, var)
+        }
+        G::Service { name, inner, .. } => ne(name) || pattern_has_var(inner, var),
+    }
+}
+
+fn term_pattern_has_var(t: &TermPattern, var: &Variable) -> bool {
+    match t {
+        TermPattern::Variable(v) => v == var,
+        TermPattern::Triple(inner) => {
+            term_pattern_has_var(&inner.subject, var)
+                || matches!(&inner.predicate, NamedNodePattern::Variable(v) if v == var)
+                || term_pattern_has_var(&inner.object, var)
+        }
+        _ => false,
+    }
+}
+
+/// Does `var` occur anywhere in expression `e` (including `EXISTS` sub-patterns)?
+/// Over-approximation for the scope guard (spurious `true` only declines). [FABLE-5]
+fn expr_has_var(e: &Expression, var: &Variable) -> bool {
+    use Expression as E;
+    match e {
+        E::Variable(v) | E::Bound(v) => v == var,
+        E::NamedNode(_) | E::Literal(_) => false,
+        E::Or(a, b)
+        | E::And(a, b)
+        | E::Equal(a, b)
+        | E::SameTerm(a, b)
+        | E::Greater(a, b)
+        | E::GreaterOrEqual(a, b)
+        | E::Less(a, b)
+        | E::LessOrEqual(a, b)
+        | E::Add(a, b)
+        | E::Subtract(a, b)
+        | E::Multiply(a, b)
+        | E::Divide(a, b) => expr_has_var(a, var) || expr_has_var(b, var),
+        E::In(a, list) => expr_has_var(a, var) || list.iter().any(|x| expr_has_var(x, var)),
+        E::UnaryPlus(i) | E::UnaryMinus(i) | E::Not(i) => expr_has_var(i, var),
+        E::If(a, b, c) => expr_has_var(a, var) || expr_has_var(b, var) || expr_has_var(c, var),
+        E::Coalesce(list) | E::FunctionCall(_, list) => list.iter().any(|x| expr_has_var(x, var)),
+        E::Exists(p) => pattern_has_var(p, var),
+    }
+}
+
+/// `Some(v)` iff `e` is exactly `!BOUND(?v)` (`Not(Bound(v))`) — the anti-join
+/// filter predicate.
+fn as_not_bound_var(e: &Expression) -> Option<Variable> {
+    match e {
+        Expression::Not(inner) => match inner.as_ref() {
+            Expression::Bound(v) => Some(v.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `Some((a, b))` iff `e` is `?a = ?b` (a variable-to-variable SPARQL `=` equality).
+/// `sameTerm` is intentionally NOT matched (it is term identity, not the correlation
+/// idiom — leaving it in the residual is always sound).
+fn as_var_equality(e: &Expression) -> Option<(Variable, Variable)> {
+    match e {
+        Expression::Equal(a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expression::Variable(va), Expression::Variable(vb)) => Some((va.clone(), vb.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Flattens a top-level `&&` (`Expression::And`) tree into its conjuncts, left to
+/// right (single-element for a non-`And`).
+fn split_and(e: &Expression) -> Vec<&Expression> {
+    fn go<'a>(e: &'a Expression, out: &mut Vec<&'a Expression>) {
+        match e {
+            Expression::And(a, b) => {
+                go(a, out);
+                go(b, out);
+            }
+            other => out.push(other),
+        }
+    }
+    let mut v = Vec::new();
+    go(e, &mut v);
+    v
 }
 
 fn union_bindings(left: Bindings, right: Bindings) -> Bindings {
@@ -16013,5 +16526,95 @@ mod sip_unit {
             subst_pattern(&filt, &sub).is_none(),
             "BOUND(?x) on a substituted variable must force the cold fallback"
         );
+    }
+}
+
+#[cfg(test)]
+mod theta_antijoin_unit {
+    //! Direct unit tests for the correlated theta anti-join's pure shape helpers,
+    //! complementing the end-to-end `tests/theta_antijoin.rs`. [FABLE-5]
+    //! (bead sq-7d3dj.30.9)
+    use super::*;
+    use oxrdf::{NamedNode, Variable};
+
+    fn var(s: &str) -> Variable {
+        Variable::new(s).unwrap()
+    }
+    fn nn(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+    fn ev(s: &str) -> Expression {
+        Expression::Variable(var(s))
+    }
+
+    #[test]
+    fn as_not_bound_var_matches_only_not_bound() {
+        assert_eq!(
+            as_not_bound_var(&Expression::Not(Box::new(Expression::Bound(var("a"))))),
+            Some(var("a")),
+            "!bound(?a) must extract ?a"
+        );
+        // Not a `!bound`: bare bound, bare not, equality.
+        assert!(as_not_bound_var(&Expression::Bound(var("a"))).is_none());
+        assert!(as_not_bound_var(&Expression::Not(Box::new(ev("a")))).is_none());
+        assert!(as_not_bound_var(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+    }
+
+    #[test]
+    fn as_var_equality_matches_var_to_var_only() {
+        assert_eq!(
+            as_var_equality(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))),
+            Some((var("a"), var("b")))
+        );
+        // A var = IRI equality is NOT a correlation (one side is a constant).
+        assert!(as_var_equality(&Expression::Equal(
+            Box::new(ev("a")),
+            Box::new(Expression::NamedNode(nn("http://e/x")))
+        ))
+        .is_none());
+        // `sameTerm` is intentionally not a correlation (kept in the residual).
+        assert!(as_var_equality(&Expression::SameTerm(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+    }
+
+    #[test]
+    fn split_and_flattens_left_to_right() {
+        let e = Expression::And(
+            Box::new(Expression::And(Box::new(ev("a")), Box::new(ev("b")))),
+            Box::new(ev("c")),
+        );
+        let cs = split_and(&e);
+        assert_eq!(cs.len(), 3, "((a && b) && c) → three conjuncts");
+        assert_eq!(cs[0], &ev("a"));
+        assert_eq!(cs[1], &ev("b"));
+        assert_eq!(cs[2], &ev("c"));
+        // A non-And yields a single-element list.
+        assert_eq!(split_and(&ev("z")).len(), 1);
+    }
+
+    #[test]
+    fn pattern_has_var_reaches_every_node_kind() {
+        let bgp = |s: &str, p: &str, o: &str| GraphPattern::Bgp {
+            patterns: vec![TriplePattern {
+                subject: TermPattern::Variable(var(s)),
+                predicate: NamedNodePattern::NamedNode(nn(p)),
+                object: TermPattern::Variable(var(o)),
+            }],
+        };
+        // A var buried in the OPTIONAL condition (not in any triple slot) must be found.
+        let lj = GraphPattern::LeftJoin {
+            left: Box::new(bgp("a", "http://e/p", "b")),
+            right: Box::new(bgp("c", "http://e/q", "d")),
+            expression: Some(Expression::Less(Box::new(ev("yr2")), Box::new(ev("yr")))),
+        };
+        assert!(pattern_has_var(&lj, &var("yr")), "outer var in the OPTIONAL condition");
+        assert!(pattern_has_var(&lj, &var("d")), "right-side triple var");
+        assert!(pattern_has_var(&lj, &var("a")), "left-side triple var");
+        assert!(!pattern_has_var(&lj, &var("absent")), "an unrelated var must not be found");
+        // EXISTS sub-pattern var.
+        let filt = GraphPattern::Filter {
+            expr: Expression::Exists(Box::new(bgp("e", "http://e/r", "f"))),
+            inner: Box::new(bgp("a", "http://e/p", "b")),
+        };
+        assert!(pattern_has_var(&filt, &var("f")), "var inside an EXISTS sub-pattern");
     }
 }
