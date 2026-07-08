@@ -365,3 +365,156 @@ fn public_toggle_and_stats() {
     let (fired, emitted, scanned) = distinct_pushdown_testing::stats();
     assert!(!fired && emitted == 0 && scanned == 0, "stats not cleared by reset");
 }
+
+// ── [FABLE-5] (sq-7d3dj.30.10) permutation-metadata / pattern-trick strategy tests ──────
+//
+// bead sq-7d3dj.30.10 added TWO strategies under the existing DISTINCT pushdown, chosen by
+// anchor cardinality, and a shared-anchor cache across UNION branches:
+//   * a small anchor (≤ the internal threshold) uses the per-member "pattern trick"
+//     (bind the join column to each anchor member, skip-enumerate its few `?p`);
+//   * a large anchor uses the cost-aware, anchor-window-CLIPPED per-`?p`-block existence
+//     scan (galloping intersection driven from the shorter side).
+// The load-bearing invariant is unchanged: DISTINCT result-SET equivalence with the pushdown
+// on vs off, on EITHER strategy. These tests straddle the threshold so both fire, and add a
+// randomized differential + Slice(LIMIT/OFFSET)-over-DISTINCT preservation + a mutation guard.
+
+/// A large-anchor q09 corpus: `n` persons (n far exceeds the internal small-anchor
+/// threshold, so the BLOCK-scan strategy is exercised), `docs` documents naming a person as
+/// object with high multiplicity, plus noise predicates on documents that must be excluded.
+#[test]
+fn large_anchor_q09_block_scan_equivalence_and_collapse() {
+    // 1000 persons > the small-anchor threshold → forces the clipped block-scan path.
+    let g = q09_dataset(1000, 4000);
+    let distinct_q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+    let bag_q = format!("SELECT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+
+    // Result-set equivalence (the load-bearing invariant) on the large-anchor path.
+    let (off, on) = on_off(&g, &distinct_q);
+    assert_eq!(off, on, "large-anchor q09 DISTINCT differs pushdown on vs off");
+    // Exact set (mutation guard: any wrong/extra/missing predicate fails).
+    let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
+    assert_eq!(got, expected_q09_predicates(), "large-anchor DISTINCT predicate set wrong");
+
+    // Anti-vacuity on the block-scan path: the loose scan touched far fewer rows than the
+    // full (non-distinct) join it replaces (only when the required PSO perm is built).
+    distinct_pushdown_testing::set_enabled(false);
+    let full_bag = query(&g, &format!("{PFX}{bag_q}")).expect("bag").rows.len();
+    distinct_pushdown_testing::set_enabled(true);
+    distinct_pushdown_testing::reset_stats();
+    let res = query(&g, &format!("{PFX}{distinct_q}")).expect("distinct");
+    let (fired, emitted, scanned) = distinct_pushdown_testing::stats();
+    assert_eq!(res.rows.len(), 5, "fixture answers 5 distinct predicates");
+    if sparq_core::store::BUILT.contains(&sparq_core::store::Perm::Pso) {
+        assert!(fired, "large-anchor q09 pushdown must fire");
+        assert_eq!(emitted, 5);
+        assert!(scanned * 4 < full_bag, "block scan did not collapse: scanned={} full_bag={}", scanned, full_bag);
+    }
+}
+
+/// A small-anchor branch: the anchor (`ex:Book` instances) is well under the threshold, so
+/// the per-member pattern-trick path runs. Equivalence + exact set + the pushdown fires.
+#[test]
+fn small_anchor_pattern_trick_equivalence() {
+    // 12 books (small anchor) each with a title + a person creator; a large mass of noise
+    // triples with unrelated predicates whose subjects/objects are never books.
+    let mut ttl = String::new();
+    for b in 0..12 {
+        ttl.push_str(&format!("ex:book{b} rdf:type ex:Book .\n"));
+        ttl.push_str(&format!("ex:book{b} ex:title \"T{b}\" .\n"));
+        ttl.push_str(&format!("ex:book{b} ex:creator ex:auth{b} .\n"));
+    }
+    // Noise: 3000 articles with their own predicates, none a Book subject/object.
+    for a in 0..3000 {
+        ttl.push_str(&format!("ex:art{a} ex:journal \"J{}\" .\n", a % 50));
+        ttl.push_str(&format!("ex:art{a} ex:year {} .\n", 1990 + (a % 30)));
+    }
+    let g = load(&ttl);
+    // Branch: person(book)-as-subject predicates.
+    let q = "SELECT DISTINCT ?p WHERE { \
+        { ?x rdf:type ex:Book . ?x ?p ?o } UNION { ?x rdf:type ex:Book . ?s ?p ?x } }";
+    let (off, on) = on_off(&g, q);
+    assert_eq!(off, on, "small-anchor pattern-trick differs pushdown on vs off");
+    let mut got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
+    got.sort();
+    // rdf:type + ex:title + ex:creator (book as subject); ex:creator's object is auth, not a
+    // book, so the object-side branch contributes nothing new here.
+    let mut want = vec![
+        "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string(),
+        "<http://example.org/title>".to_string(),
+        "<http://example.org/creator>".to_string(),
+    ];
+    want.sort();
+    assert_eq!(got, want, "small-anchor DISTINCT predicate set wrong");
+    if sparq_core::store::BUILT.contains(&sparq_core::store::Perm::Pso) {
+        distinct_pushdown_testing::reset_stats();
+        distinct_pushdown_testing::set_enabled(true);
+        let _ = query(&g, &format!("{PFX}{q}")).unwrap();
+        assert!(distinct_pushdown_testing::stats().0, "small-anchor pushdown must fire");
+    }
+}
+
+/// Randomized differential: many small random graphs of the q09 join shape, over anchor
+/// sizes that STRADDLE the internal small/large-anchor threshold, must give an identical
+/// DISTINCT `?predicate` set with the pushdown on vs off — so BOTH strategies are exercised.
+#[test]
+fn randomized_differential_both_strategies() {
+    // Deterministic xorshift PRNG (no dev-dep).
+    let mut state: u64 = 0x9E3779B97F4A7C15;
+    let mut rng = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for trial in 0..40 {
+        // Anchor sizes chosen to straddle the 256 threshold.
+        let n = 1 + (rng() % 400) as usize; // 1..=400 persons
+        let docs = (rng() % 600) as usize;
+        let mut ttl = String::new();
+        for p in 0..n {
+            ttl.push_str(&format!("ex:p{p} rdf:type foaf:Person .\n"));
+            if rng() % 2 == 0 {
+                ttl.push_str(&format!("ex:p{p} foaf:age {} .\n", 20 + (rng() % 40)));
+            }
+            if rng() % 3 == 0 {
+                ttl.push_str(&format!("ex:p{p} foaf:knows ex:p{} .\n", rng() as usize % n));
+            }
+        }
+        for d in 0..docs {
+            ttl.push_str(&format!("ex:d{d} rdf:type ex:Doc .\n"));
+            ttl.push_str(&format!("ex:d{d} ex:title \"T{d}\" .\n"));
+            if rng() % 2 == 0 {
+                ttl.push_str(&format!("ex:d{d} foaf:maker ex:p{} .\n", rng() as usize % n));
+            }
+            if rng() % 4 == 0 {
+                ttl.push_str(&format!("ex:d{d} ex:cites ex:p{} .\n", rng() as usize % n));
+            }
+        }
+        let g = load(&ttl);
+        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+        let (off, on) = on_off(&g, &q);
+        assert_eq!(off, on, "trial {trial} (n={n}, docs={docs}): pushdown on != off");
+    }
+}
+
+/// A Slice (LIMIT/OFFSET) above the DISTINCT must be preserved: the pushdown produces the
+/// same DISTINCT set, and the slice is applied above it identically on vs off. LIMIT without
+/// ORDER BY is order-insensitive, so we compare the CARDINALITY (the retained-row count),
+/// which the slice must not change relative to the naive path.
+#[test]
+fn slice_over_distinct_preserved() {
+    let g = q09_dataset(20, 60); // small anchor → pattern-trick path
+    for (off_n, lim) in [(0usize, 2usize), (1, 2), (2, 10), (0, 100)] {
+        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}} LIMIT {lim} OFFSET {off_n}");
+        let prev = distinct_pushdown_testing::set_enabled(false);
+        let off_rows = query(&g, &format!("{PFX}{q}")).expect("off").rows.len();
+        distinct_pushdown_testing::set_enabled(true);
+        let on_rows = query(&g, &format!("{PFX}{q}")).expect("on").rows.len();
+        distinct_pushdown_testing::set_enabled(prev);
+        // 5 distinct predicates total; the slice retains max(0, min(lim, 5-off)).
+        let full = 5usize;
+        let want = lim.min(full.saturating_sub(off_n));
+        assert_eq!(off_rows, want, "naive slice count wrong for off={off_n} lim={lim}");
+        assert_eq!(on_rows, want, "pushdown slice count differs from naive for off={off_n} lim={lim}");
+    }
+}
