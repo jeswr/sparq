@@ -587,8 +587,11 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
 - **Id-level term-identity FILTER fast path** is the non-default `id-filter-fastpath` cargo feature
   (bead `sq-7d3dj.30.11`). It removes the per-row term MATERIALIZATION the compiled FILTER evaluator
   otherwise performs for `=`/`!=`, by two id-level short-circuits: **(a)** a static term-kind analysis
-  (`nonliteral_vars`) proves a variable is bound ONLY in subject/predicate positions (never object /
-  BIND / VALUES / SERVICE) and so can never be a literal — for two such operands (or a constant IRI)
+  (`nonliteral_vars`) proves a variable is bound ONLY in BGP subject/predicate slots — never a BGP
+  object, a property-PATH endpoint (a path object can be a literal; a `Reverse`/zero-length subject
+  end too), a quoted-triple inner slot, a `BIND`/`VALUES` binding, or any variable of an un-analysed
+  construct (`SERVICE`/`Lateral`/sub-`SELECT` inner vars are all poisoned to literal-risk) — and so
+  can never be a literal — for two such operands (or a constant IRI)
   SPARQL `=` is exactly dictionary-id equality and `!=` id inequality (the canonicalising dict gives
   each IRI/bnode one id); **(b)** EQUAL ids of ANY kind are the same term, so `=` short-circuits `true`
   and `!=` `false` (mirroring the `sameTerm` decision the exact path already takes — safe even for

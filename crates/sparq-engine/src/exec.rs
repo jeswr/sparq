@@ -760,42 +760,71 @@ fn collect_kind_positions(
     maybe_lit: &mut FxHashSet<Variable>,
 ) {
     use GraphPattern as G;
-    fn real(t: &TermPattern) -> Option<&Variable> {
-        if let TermPattern::Variable(v) = t {
-            Some(v)
-        } else {
-            None
+    // A quoted-triple slot (`TermPattern::Triple`) recurses: its INNER object can itself be a
+    // literal, so a variable appearing anywhere inside a quoted triple is treated as literal-risk.
+    // Poison EVERY variable syntactically inside a term slot into `maybe_lit` — used for slots
+    // that can bind a literal (object slots, path endpoints) and for quoted-triple slots whose
+    // inner object can be a literal. Conservative: only ever ADDS literal-risk, never non-literal.
+    fn poison_slot(t: &TermPattern, maybe_lit: &mut FxHashSet<Variable>) {
+        match t {
+            TermPattern::Variable(v) => {
+                maybe_lit.insert(v.clone());
+            }
+            TermPattern::Triple(tp) => {
+                poison_slot(&tp.subject, maybe_lit);
+                if let NamedNodePattern::Variable(v) = &tp.predicate {
+                    maybe_lit.insert(v.clone());
+                }
+                poison_slot(&tp.object, maybe_lit);
+            }
+            _ => {}
         }
+    }
+    // Poison every IN-SCOPE variable of an un-analysed sub-pattern (SERVICE, Lateral, …): we
+    // cannot prove ANY of them non-literal, and — crucially — a variable one of these binds must
+    // NOT be claimed non-literal on the strength of a subject occurrence in a sibling UNION branch.
+    fn poison_all(p: &GraphPattern, maybe_lit: &mut FxHashSet<Variable>) {
+        p.on_in_scope_variable(|v| {
+            maybe_lit.insert(v.clone());
+        });
     }
     match p {
         G::Bgp { patterns } => {
             for tp in patterns {
-                // Subject / predicate slots are IRI / bnode / (RDF 1.2) quoted-triple — never a
-                // literal. The object slot is the only one that can bind a literal.
-                if let Some(v) = real(&tp.subject) {
-                    nonlit.insert(v.clone());
+                // Subject / predicate slots are IRI / bnode — never a literal. A quoted-triple
+                // subject can carry an inner literal, so poison it instead of crediting it.
+                match &tp.subject {
+                    TermPattern::Variable(v) => {
+                        nonlit.insert(v.clone());
+                    }
+                    other => poison_slot(other, maybe_lit),
                 }
                 if let Some(v) = nnp_var_ref(&tp.predicate) {
                     nonlit.insert(v.clone());
                 }
-                if let Some(v) = real(&tp.object) {
-                    maybe_lit.insert(v.clone());
-                }
+                // The object slot can bind a literal (directly or inside a quoted triple).
+                poison_slot(&tp.object, maybe_lit);
             }
         }
-        // A property-path binds subject and object; both are IRI / bnode ends (paths cannot
-        // traverse to a literal node), so both slots are non-literal.
+        // A property-path binds subject and object, but the OBJECT end can be a literal (the final
+        // step of a sequence/alternative is an ordinary object slot), and under `Reverse` or a
+        // zero-length `ZeroOrMore`/`ZeroOrOne` match the SUBJECT end can equal a literal object.
+        // So NEITHER endpoint is credited non-literal here — both are literal-risk. A path variable
+        // is still proven non-literal if it appears in a subject/predicate slot of some BGP.
         G::Path { subject, object, .. } => {
-            if let Some(v) = real(subject) {
-                nonlit.insert(v.clone());
-            }
-            if let Some(v) = real(object) {
-                nonlit.insert(v.clone());
-            }
+            poison_slot(subject, maybe_lit);
+            poison_slot(object, maybe_lit);
         }
         G::Join { left, right } | G::Union { left, right } => {
             collect_kind_positions(left, nonlit, maybe_lit);
             collect_kind_positions(right, nonlit, maybe_lit);
+        }
+        // LATERAL binds its right side correlated on the left; the right can be any construct
+        // (incl. a sub-SELECT projecting a computed literal), so poison the right's in-scope vars
+        // and analyse the left normally.
+        G::Lateral { left, right } => {
+            collect_kind_positions(left, nonlit, maybe_lit);
+            poison_all(right, maybe_lit);
         }
         // OPTIONAL / MINUS: the right side still POSITIONS its variables, so its subject/predicate
         // occurrences remain non-literal evidence and its object occurrences remain literal-risk.
@@ -830,30 +859,46 @@ fn collect_kind_positions(
                 maybe_lit.insert(v.clone());
             }
         }
-        // Projection / grouping: a projected/grouped variable keeps the inner analysis; a fresh
-        // aggregate/group-key output variable could be a literal (e.g. `(SUM(?x) AS ?s)`), so the
-        // OUTPUT variables not present in the inner analysis are conservatively literal-risk. We
-        // simply recurse into the inner and add all listed output variables as literal-risk unless
-        // proven non-literal by the inner (the `\` in `nonliteral_vars` drops any that are risk).
+        // PROJECT (a sub-SELECT) only exposes its projected variables; its inner variables are NOT
+        // visible to the surrounding query, so inner-only vars must contribute NEITHER non-literal
+        // evidence NOR literal-risk to the outer scope. Analyse the inner into local sets and merge
+        // back only the classifications for the PROJECTED variables.
         G::Project { inner, variables } => {
-            collect_kind_positions(inner, nonlit, maybe_lit);
-            // A projection only renames/restricts columns; variables that survive keep the inner
-            // verdict. Nothing new to add — the inner recursion already classified them.
-            let _ = variables;
+            let mut inner_nl = FxHashSet::default();
+            let mut inner_ml = FxHashSet::default();
+            collect_kind_positions(inner, &mut inner_nl, &mut inner_ml);
+            let proj: FxHashSet<&Variable> = variables.iter().collect();
+            for v in inner_nl.into_iter().filter(|v| proj.contains(v)) {
+                nonlit.insert(v);
+            }
+            for v in inner_ml.into_iter().filter(|v| proj.contains(v)) {
+                maybe_lit.insert(v);
+            }
         }
+        // GROUP: a grouped-by variable keeps the inner verdict; an aggregate result variable
+        // (SUM/COUNT/… AS ?v) is a computed literal. Like PROJECT, only the OUTPUT columns
+        // (group keys + aggregate targets) are visible, so analyse the inner locally and merge only
+        // the group-key variables' verdicts; the aggregate targets are added as literal-risk.
         G::Group { inner, variables, aggregates } => {
-            collect_kind_positions(inner, nonlit, maybe_lit);
-            let _ = variables;
-            // Aggregate result variables (SUM/COUNT/… AS ?v) are computed literals.
+            let mut inner_nl = FxHashSet::default();
+            let mut inner_ml = FxHashSet::default();
+            collect_kind_positions(inner, &mut inner_nl, &mut inner_ml);
+            let keys: FxHashSet<&Variable> = variables.iter().collect();
+            for v in inner_nl.into_iter().filter(|v| keys.contains(v)) {
+                nonlit.insert(v);
+            }
+            for v in inner_ml.into_iter().filter(|v| keys.contains(v)) {
+                maybe_lit.insert(v);
+            }
             for (v, _) in aggregates {
                 maybe_lit.insert(v.clone());
             }
         }
-        // SERVICE, sub-SELECT (Project handled above), and anything else: we cannot prove any of
-        // its variables non-literal, so record NONE as non-literal. We do NOT need to add them to
-        // `maybe_lit` (a variable is reported only if it also appears in `nonlit`), but recursing
-        // is harmless and future-proof for nested analysable sub-patterns. Conservatively skip.
-        _ => {}
+        // SERVICE and anything else un-analysed: we cannot prove ANY of its variables non-literal,
+        // and — since a sibling UNION branch might position one of them as a subject — we must
+        // POISON all of its in-scope variables into `maybe_lit` so no such false non-literal claim
+        // survives the `nonlit \ maybe_lit` difference in `nonliteral_vars`.
+        other => poison_all(other, maybe_lit),
     }
 }
 
@@ -16512,6 +16557,98 @@ mod idfast_unit {
         let g = GraphPattern::Graph { name: NamedNodePattern::Variable(var("g")), inner: Box::new(inner) };
         let nl = nonliteral_vars(&g);
         assert!(nl.contains(&var("g")), "a GRAPH-name var binds an IRI");
+    }
+
+    // ---- static analysis: soundness holes flagged in PR #1785 review ------------------------
+
+    #[test]
+    fn nonliteral_vars_path_object_is_literal_risk() {
+        // A property-path OBJECT can bind a literal (the final step of an alternative/sequence is
+        // an ordinary object slot). `?x (:p|:q) ?name` must NOT report ?name non-literal, and — to
+        // be safe under Reverse / zero-length matches — must NOT report the subject ?x either
+        // (unless a BGP positions it as a subject/predicate).
+        let path = GraphPattern::Path {
+            subject: TermPattern::Variable(var("x")),
+            path: PropertyPathExpression::Alternative(
+                Box::new(PropertyPathExpression::NamedNode(nn("http://ex/p"))),
+                Box::new(PropertyPathExpression::NamedNode(nn("http://ex/q"))),
+            ),
+            object: TermPattern::Variable(var("name")),
+        };
+        let nl = nonliteral_vars(&path);
+        assert!(!nl.contains(&var("name")), "a path OBJECT can be a literal");
+        assert!(!nl.contains(&var("x")), "a path endpoint is not credited non-literal on its own");
+    }
+
+    #[test]
+    fn nonliteral_vars_reverse_path_endpoints_are_literal_risk() {
+        // Under Reverse the subject slot is the traversal OBJECT end, which can be a literal.
+        let path = GraphPattern::Path {
+            subject: TermPattern::Variable(var("s")),
+            path: PropertyPathExpression::Reverse(Box::new(PropertyPathExpression::NamedNode(nn(
+                "http://ex/p",
+            )))),
+            object: TermPattern::Variable(var("o")),
+        };
+        let nl = nonliteral_vars(&path);
+        assert!(!nl.contains(&var("s")), "a Reverse-path subject end can be a literal");
+        assert!(!nl.contains(&var("o")), "a Reverse-path object end can be a literal");
+    }
+
+    #[test]
+    fn nonliteral_vars_union_with_unanalysable_branch_poisons() {
+        // ?x is a SUBJECT in the left branch but bound by an un-analysed SERVICE in the right —
+        // the SERVICE could bind it to a literal, so the subject occurrence must NOT win.
+        let left = bgp(vec![tp_svo("x", "http://ex/p", TermPattern::Variable(var("o")))]);
+        let service = GraphPattern::Service {
+            name: NamedNodePattern::NamedNode(nn("http://remote/sparql")),
+            inner: Box::new(bgp(vec![tp_svo("y", "http://ex/q", TermPattern::Variable(var("x")))])),
+            silent: false,
+        };
+        let u = GraphPattern::Union { left: Box::new(left), right: Box::new(service) };
+        let nl = nonliteral_vars(&u);
+        assert!(!nl.contains(&var("x")), "a SERVICE-bound var must not be claimed non-literal via a sibling subject slot");
+    }
+
+    #[test]
+    fn nonliteral_vars_quoted_triple_object_is_literal_risk() {
+        // A quoted-triple subject `<<( ?s :p ?lit )>> :q ?o` carries an INNER object ?lit that can
+        // be a literal — it must be literal-risk, not credited as a (subject-position) non-literal.
+        let quoted = TermPattern::Triple(Box::new(TriplePattern {
+            subject: TermPattern::Variable(var("s")),
+            predicate: NamedNodePattern::NamedNode(nn("http://ex/p")),
+            object: TermPattern::Variable(var("lit")),
+        }));
+        let p = bgp(vec![TriplePattern {
+            subject: quoted,
+            predicate: NamedNodePattern::NamedNode(nn("http://ex/q")),
+            object: TermPattern::Variable(var("o")),
+        }]);
+        let nl = nonliteral_vars(&p);
+        assert!(!nl.contains(&var("lit")), "an inner quoted-triple object can be a literal");
+        assert!(!nl.contains(&var("s")), "a quoted-triple inner subject is not credited here");
+    }
+
+    #[test]
+    fn differential_path_object_numeric_promotion_end_to_end() {
+        // The concrete result-change the review found: two path OBJECTS holding value-equal but
+        // id-DISTINCT numerics ("1"^^integer vs "1.0"^^decimal). `FILTER(?a = ?b)` must be TRUE
+        // (numeric promotion) whether the feature is on or off — the fix keeps ?a/?b literal-risk
+        // so path (a) declines and the exact value path runs.
+        let nt = concat!(
+            "<http://ex/s1> <http://ex/val> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s2> <http://ex/val> \"1.0\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+        );
+        let g = Graph::load_str(nt, "ntriples").unwrap();
+        // Path so the operands are PATH objects, exercising the G::Path arm's classification.
+        let q = concat!(
+            "SELECT ?a ?b WHERE { ",
+            "?s1 <http://ex/val> ?a . ?s2 (<http://ex/val>|<http://ex/other>) ?b . ",
+            "FILTER(?a = ?b) }"
+        );
+        let r = crate::query(&g, q).unwrap();
+        // 1 = 1.0 by value -> every (a,b) pair over the two value-equal literals matches: 2x2 = 4.
+        assert_eq!(r.rows.len(), 4, "numeric-promotion `=` over path objects must stay value-true");
     }
 
     // ---- equal_idfast unit behaviour -------------------------------------------------------
