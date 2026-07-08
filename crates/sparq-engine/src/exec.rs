@@ -9267,13 +9267,19 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
     // [FABLE-5] (sq-7d3dj.30.11) Rewrite eligible `=` nodes into the id-level fast path using the
     // non-literal columns the FILTER dispatch computed for THIS operator (empty for every other
     // caller → no-op). Done ONCE, before the row loop; rayon workers see the rewritten program.
+    // TAKE (drain) the installed set: it is valid ONLY for THIS `Bindings` layout, and this
+    // consuming call is the one the wrapping FILTER dispatch installed it for. Draining to empty
+    // means a nested FILTER re-entered during row evaluation (an `EXISTS` inner, whose columns
+    // index a DIFFERENT `Bindings`) — or any later unwrapped `apply_filter` on this thread — sees
+    // the empty default and rewrites nothing, so it can never apply the outer pattern's column
+    // indices to a mismatched layout. [FABLE-5] (sq-7d3dj.30.11, PR #1785 review).
     #[cfg(feature = "id-filter-fastpath")]
-    IDFAST_NONLIT_COLS.with(|cols| {
-        let cols = cols.borrow();
+    {
+        let cols = IDFAST_NONLIT_COLS.with(|cols| std::mem::take(&mut *cols.borrow_mut()));
         if !cols.is_empty() {
             idfast_rewrite(&mut compiled, &cols);
         }
-    });
+    }
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
     // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
@@ -9719,6 +9725,22 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
 /// scan / count pushdown answers without materialising the whole relation) instead
 /// of building every inner solution just to call `.any()` on it.
 fn eval_exists(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
+    // [FABLE-5] (sq-7d3dj.30.11, PR #1785 review) Defence-in-depth against the id-fast column set
+    // leaking into EXISTS re-entry: install an EMPTY set for the whole inner evaluation, so a
+    // nested FILTER computes its OWN set against its OWN `Bindings` (via the wrapped dispatch) and
+    // never inherits the outer pattern's column indices — which index a DIFFERENT layout. (The
+    // consuming `apply_filter_scalar` already drains the set before the row loop, so by the time
+    // this per-row re-entry runs the thread-local is empty anyway; this guard makes the invariant
+    // hold regardless of future changes to WHEN the drain happens.)
+    #[cfg(feature = "id-filter-fastpath")]
+    return with_idfast_nonlit_cols(FxHashSet::default(), || {
+        eval_exists_inner(graph, local, b, row, inner)
+    });
+    #[cfg(not(feature = "id-filter-fastpath"))]
+    eval_exists_inner(graph, local, b, row, inner)
+}
+
+fn eval_exists_inner(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
     // zk-trace: the inner pattern is re-run per outer row; tag its scans
     // `in_exists` and suppress their steps / filter obligations (EXISTS is
     // outside the stage-1 verifiable fragment — sparq-zk::verify rejects it;
@@ -16465,6 +16487,9 @@ mod idfast_unit {
     fn ne_expr() -> Expression {
         Expression::Not(Box::new(eq_expr()))
     }
+    fn eq_expr_xy() -> Expression {
+        Expression::Equal(Box::new(Expression::Variable(var("x"))), Box::new(Expression::Variable(var("y"))))
+    }
 
     /// A literal-heavy, mixed graph: IRIs, blank nodes, and literals including numeric-promotion
     /// pairs, whitespace-padded numerics, language tags, and cross-datatype pairs.
@@ -16649,6 +16674,74 @@ mod idfast_unit {
         let r = crate::query(&g, q).unwrap();
         // 1 = 1.0 by value -> every (a,b) pair over the two value-equal literals matches: 2x2 = 4.
         assert_eq!(r.rows.len(), 4, "numeric-promotion `=` over path objects must stay value-true");
+    }
+
+    #[test]
+    fn differential_exists_nested_filter_no_column_leak() {
+        // PR #1785 re-review: the id-fast column set installed for the OUTER FILTER must NOT leak
+        // into an EXISTS-nested FILTER, whose columns index a DIFFERENT Bindings layout. The outer
+        // FILTER is over IRI subject columns (?a, ?b — non-literal), but the nested EXISTS FILTER
+        // is over two LITERAL columns (?v1, ?v2) holding value-equal, id-DISTINCT numerics
+        // ("1"^^integer vs "1.0"^^decimal). If the outer set (cols {0,1}) leaked, the nested
+        // `?v1 = ?v2` would rewrite to IdEqNonLit and evaluate FALSE (unequal ids), flipping EXISTS
+        // to false; correct SPARQL is TRUE (numeric promotion). Must hold feature-ON.
+        let nt = concat!(
+            "<http://ex/s1> <http://ex/val> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s2> <http://ex/val> \"1.0\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+            "<http://ex/a> <http://ex/p> <http://ex/o1> .\n",
+            "<http://ex/b> <http://ex/q> <http://ex/o2> .\n",
+        );
+        let g = Graph::load_str(nt, "ntriples").unwrap();
+        // The OUTER pattern is a UNION (non-conjunctive), so its FILTER routes through the WRAPPED
+        // dispatch that INSTALLS the id-fast column set (cols for ?a — an IRI subject). During that
+        // filter's row loop the set is live; the EXISTS inner FILTER `?v1 = ?v2` (over two LITERAL
+        // columns) re-enters on the same thread — pre-fix it would rewrite using the OUTER cols and
+        // flip EXISTS to false. Post-fix (drain-on-consume + EXISTS empty-set guard) it stays TRUE.
+        let q = concat!(
+            "SELECT ?a WHERE { ",
+            "{ ?a <http://ex/p> <http://ex/o1> } UNION { ?a <http://ex/q> <http://ex/o2> } ",
+            "FILTER(EXISTS { ?s1 <http://ex/val> ?v1 . ?s2 <http://ex/val> ?v2 . FILTER(?v1 = ?v2) }) }"
+        );
+        let r = crate::query(&g, q).unwrap();
+        // EXISTS is TRUE (1 = 1.0 by value), so both UNION rows (?a = ex:a, ex:b) survive.
+        assert_eq!(r.rows.len(), 2, "EXISTS-nested numeric-promotion `=` must stay value-TRUE (no column-set leak)");
+    }
+
+    #[test]
+    fn apply_filter_scalar_drains_installed_cols_before_nested_reentry() {
+        // Directly exercises the drain-on-consume invariant that fixes the EXISTS-re-entry leak
+        // (PR #1785 re-review): the installed set is valid ONLY for the Bindings it was computed
+        // against, and `eval_compiled` can re-enter FILTER evaluation (via EXISTS) DURING the outer
+        // filter's row loop — while the outer set is still installed (the restore-guard has not yet
+        // run). If the set were merely BORROWED (not drained before the loop), that nested filter
+        // would apply the OUTER column indices to a DIFFERENT Bindings layout.
+        //
+        // We model exactly that window: install {0,1}, and while it is installed run a NESTED
+        // `apply_filter_scalar` over LITERAL columns at the same indices {0,1} (value-equal,
+        // id-distinct "1"^^integer / "1.0"^^decimal). The nested filter must NOT see {0,1} — it
+        // must take the exact numeric-promotion path and KEEP the row. A stale {0,1} would rewrite
+        // `?x = ?y` to IdEqNonLit and DROP it.
+        let g = mixed_graph();
+        let local = LocalVocab::default();
+        let ids = object_ids(&g); // ids[1]="1"^^integer, ids[2]="1.0"^^decimal (value-equal)
+        let s1 = g.id_of(&Term::NamedNode(nn("http://ex/s1"))).unwrap();
+
+        let mut outer = Bindings::unsorted(vec![var("x"), var("y")], vec![Row::from_slice(&[s1, s1])]);
+        with_idfast_nonlit_cols([0usize, 1usize].into_iter().collect(), || {
+            // The OUTER consuming call drains the set to empty BEFORE its row loop.
+            apply_filter_scalar(&g, &local, &mut outer, &eq_expr_xy()).unwrap();
+            // Simulate an EXISTS re-entry that happens WHILE the guard is still live (i.e. before
+            // the `with_` scope exits): a nested filter over literal columns at indices {0,1}.
+            let mut nested =
+                Bindings::unsorted(vec![var("x"), var("y")], vec![Row::from_slice(&[ids[1], ids[2]])]);
+            apply_filter_scalar(&g, &local, &mut nested, &eq_expr_xy()).unwrap();
+            assert_eq!(
+                nested.rows.len(),
+                1,
+                "1 = 1.0 by value must survive — the outer set must have been DRAINED, not leaked into re-entry"
+            );
+        });
+        assert_eq!(outer.rows.len(), 1, "s1 = s1 keeps the outer row");
     }
 
     // ---- equal_idfast unit behaviour -------------------------------------------------------
