@@ -28,9 +28,12 @@
 //!    `f64` bits from the SAME `Graph::numeric_value` cache (`-0.0` folded into
 //!    `+0.0`); `xsd:string` by string value; language-tagged literals by
 //!    (lowercased tag, value); well-formed `xsd:boolean` by parsed value. Rows
-//!    with no provable key — local-vocab ids, RDF 1.2 triple terms, and
+//!    with no provable key — local-vocab ids, RDF 1.2 triple terms,
 //!    value-comparable temporals (`xsd:dateTime`/`dateTimeStamp`/`date`, where
-//!    different lexicals can denote one instant) — fall into a [`JKey::Hard`]
+//!    different lexicals can denote one instant), and numeric-DATATYPE literals
+//!    that missed the numeric cache (whose raw parse is STRICTER than the
+//!    evaluator's trimming `Num::of_literal` fallback, so a miss does not prove
+//!    the term unpairable) — fall into a [`JKey::Hard`]
 //!    class that is paired by running the EXACT evaluator (`equal_expr`) against
 //!    every row of the other side: exactly today's semantics for those rows.
 //! 2. **False positives are rechecked** — the pass NEVER consumes the FILTER: the
@@ -402,6 +405,16 @@ enum JKey {
     Bool(bool),
 }
 
+/// `is_numeric_dt` by datatype-IRI string (the dict's `term_parts` hands out the
+/// datatype without materialising a `Literal`): the numeric-datatype family whose
+/// `=` is decided by VALUE, exactly the set `lit_kind` sends to `Num::of_literal`.
+fn is_numeric_datatype(dt: &str) -> bool {
+    sparq_core::is_integer_datatype(dt)
+        || dt == xsd::DECIMAL.as_str()
+        || dt == xsd::DOUBLE.as_str()
+        || dt == xsd::FLOAT.as_str()
+}
+
 /// Classifies one bound id into its [`JKey`]. Mirrors the evaluator's dispatch
 /// order in `equal_expr`: the numeric-cache route first (`eval_numeric` reads the
 /// same cache), then the temporal cache (value-comparable ⇒ `Hard`), then the term
@@ -437,10 +450,20 @@ fn key_of(graph: &Graph, id: Id) -> JKey {
                     _ => JKey::Term(id),
                 };
             }
-            // Numeric datatypes reaching here missed the cache (ill-formed lexical),
-            // well-formed temporals were caught above (ill-formed ones land here),
-            // and every other datatype family is `=`-TRUE only via term identity
-            // (same-datatype comparison is lexical, i.e. identity).
+            // A NUMERIC datatype reaching here missed the `numeric_value` cache — but
+            // the cache (a raw `str::parse::<f64>`) is STRICTER than the evaluator's
+            // `values_equal` fallback (`Num::of_literal`, which TRIMS the lexical): a
+            // whitespace-padded `" 1"^^xsd:integer` is a cache miss yet value-equal to
+            // `"1"^^xsd:integer` under a different id. No provable key ⇒ Hard (the
+            // exact evaluator pairs it; genuinely ill-formed lexicals then type-error
+            // exactly as today).
+            if is_numeric_datatype(datatype) {
+                return JKey::Hard;
+            }
+            // Well-formed temporals were caught above; an ill-formed temporal lexical
+            // lands here and — like every remaining datatype family — is `=`-TRUE only
+            // via term identity (same-datatype comparison is lexical, i.e. identity;
+            // identical (lexical, datatype) interns to one id).
             JKey::Term(id)
         }
     }
@@ -686,6 +709,24 @@ mod tests {
         assert!(on[0].iter().any(|c| c.contains("1.000000000000000010")), "bag: {:?}", on);
     }
 
+    // ---- a numeric lexical the CACHE rejects but the evaluator's fallback accepts:
+    // `Num::of_literal` TRIMS, so " 1"^^xsd:integer is a cache miss yet value-equal
+    // to "1"^^xsd:integer under a different id. Keying it by term identity would
+    // silently DROP the pair; it must take the Hard (exact-evaluator) class. ----
+    #[test]
+    fn whitespace_padded_numeric_pairs_by_value() {
+        let g = load(concat!(
+            "<http://ex/a> <http://ex/p> \" 1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/b> <http://ex/q> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/b> <http://ex/q> \"2\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        ));
+        let q = format!(
+            "{PFX} SELECT ?x ?y WHERE {{ <http://ex/a> ex:p ?x . <http://ex/b> ex:q ?y . FILTER(?x = ?y) }}"
+        );
+        let on = assert_on_off_equal(&g, &q);
+        assert_eq!(on.len(), 1, "bag: {:?}", on);
+    }
+
     // ---- plain literal and explicit ^^xsd:string are the same value ----
     #[test]
     fn plain_literal_equals_xsd_string() {
@@ -885,6 +926,7 @@ mod tests {
             "<http://ex/s> <http://ex/p> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> .\n",
             "<http://ex/s> <http://ex/p> \"1\"^^<http://www.w3.org/2001/XMLSchema#boolean> .\n",
             "<http://ex/s> <http://ex/p> \"2020-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n",
+            "<http://ex/s> <http://ex/p> \" 7\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
             "<http://ex/s> <http://ex/p> \"u\"^^<http://ex/unknownDt> .\n",
         ));
         let id_of = |needle: &str| -> Id {
@@ -905,6 +947,9 @@ mod tests {
         assert_eq!(key_of(&g, id_of("\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>")), JKey::Bool(true));
         // Value-comparable temporals are the Hard class.
         assert_eq!(key_of(&g, id_of("2020-01-01T00:00:00Z")), JKey::Hard);
+        // A cache-missing numeric-datatype lexical (whitespace-padded) is Hard, NOT
+        // an identity key: the evaluator's trimming fallback can still pair it.
+        assert_eq!(key_of(&g, id_of("\" 7\"")), JKey::Hard);
         // Unknown datatype: identity key. IRIs: identity key.
         let uid = id_of("unknownDt");
         assert_eq!(key_of(&g, uid), JKey::Term(uid));
