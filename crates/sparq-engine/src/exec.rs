@@ -7802,9 +7802,12 @@ fn try_theta_antijoin(
             }
             // Every correlation value id-hashable (a NamedNode OR BlankNode, never a
             // literal)? Then an exact id-bucket probe is sound: for IRIs and blank nodes
-            // SPARQL `=` coincides with term identity (two DISTINCT blank nodes `=` is a
-            // type error ⇒ no match, which an id-bucket non-match reproduces exactly).
-            // A LITERAL value is the sq-lr2ii value-equality hazard → value-correct scan.
+            // SPARQL `=` coincides with term identity. Per SPARQL 1.1 §17.4.1.7
+            // (RDFterm-equal), `=` on two DISTINCT non-literal terms returns FALSE (a type
+            // error arises only when BOTH arguments are literals) — and FALSE and error
+            // both mean NO MATCH under the anti-join, which an id-bucket non-match
+            // reproduces exactly. A LITERAL value is the sq-lr2ii value-equality hazard →
+            // value-correct scan. [FABLE-5]
             let id_hashable = correlations.iter().all(|c| {
                 matches!(
                     term_of(graph, local, lrow[c.left_col]),
@@ -7932,6 +7935,14 @@ fn try_theta_antijoin(
 enum MergeSrc {
     Left(usize),
     Right(usize),
+    /// A SHARED column: take the left cell, but fall through to the right cell when the
+    /// left is `NO_ID`. This mirrors `merge_rows` (sparq-substrate `join.rs`) EXACTLY,
+    /// so the anti-join's condition-evaluation row matches the cold `left_outer_join`'s
+    /// even when `A` binds the shared var only partially (e.g. an OPTIONAL/UNION inside
+    /// `A`). Without the fall-through a left-unbound shared cell stayed `NO_ID`, the
+    /// residual saw UNBOUND → error → no match, and the left row spuriously survived
+    /// (the reviewer's counterexample). [FABLE-5]
+    LeftThenRight(usize, usize),
     /// A seeded `?inner` constant (its id) that the right side no longer binds.
     Const(Id),
     Unbound,
@@ -7946,14 +7957,13 @@ fn merged_row_plan(
 ) -> (Vec<MergeSrc>, Vec<Variable>) {
     let out_src = out_vars
         .iter()
-        .map(|v| {
-            if let Some(lc) = left.col(v) {
-                MergeSrc::Left(lc)
-            } else if let Some(bc) = right.col(v) {
-                MergeSrc::Right(bc)
-            } else {
-                MergeSrc::Unbound
-            }
+        .map(|v| match (left.col(v), right.col(v)) {
+            // Shared column: mirror `merge_rows` — left, falling through to right when
+            // the left cell is unbound. [FABLE-5]
+            (Some(lc), Some(bc)) => MergeSrc::LeftThenRight(lc, bc),
+            (Some(lc), None) => MergeSrc::Left(lc),
+            (None, Some(bc)) => MergeSrc::Right(bc),
+            (None, None) => MergeSrc::Unbound,
         })
         .collect();
     (out_src, out_vars.to_vec())
@@ -7987,6 +7997,13 @@ fn antijoin_row_matches(
             .map(|s| match s {
                 MergeSrc::Left(lc) => lrow[*lc],
                 MergeSrc::Right(bc) => rrow[*bc],
+                MergeSrc::LeftThenRight(lc, bc) => {
+                    if lrow[*lc] == NO_ID {
+                        rrow[*bc]
+                    } else {
+                        lrow[*lc]
+                    }
+                }
                 MergeSrc::Const(id) => *id,
                 MergeSrc::Unbound => NO_ID,
             })

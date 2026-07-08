@@ -599,7 +599,9 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   a tiny `B'`. Either way the residual theta is re-checked verbatim per candidate with full 3-valued
   semantics (a **type error ⇒ no match**, so the outer row **survives** — never spuriously eliminated).
   Id-hashing is exact for **IRI and blank-node** correlations (for both, SPARQL `=` coincides with term
-  identity — two distinct blank nodes `=` is a type error ⇒ no match, which an id non-match reproduces);
+  identity — per SPARQL 1.1 §17.4.1.7 RDFterm-equal, `=` on two distinct non-literal terms returns
+  **false** (a type error arises only when both arguments are literals), and false and error alike mean
+  **no match** under the anti-join, which an id non-match reproduces);
   a **literal**-valued correlation (the `sq-lr2ii` value-equality class: high-precision decimals,
   whitespace-padded numerics) routes through a **value-correct** scan that re-checks the equality with
   SPARQL `=`, never a term-identity probe that could miss a value-equal partner. Each surviving row is

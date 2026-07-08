@@ -296,6 +296,49 @@ fn nested_optional_equivalence() {
 }
 
 #[test]
+fn partially_bound_shared_var_fill_through() {
+    // WITNESS for the reviewer's counterexample (PR #1786): a shared join var `?s` is
+    // bound only PARTIALLY on the left (an OPTIONAL inside A leaves it unbound for
+    // `ex:d0`) but is CERTAIN in B, and the residual references it via `BOUND(?s)`.
+    //
+    // The cold `left_outer_join` builds the condition row via `merge_rows`, which FILLS
+    // the left-unbound `?s` from the right, so `BOUND(?s)` is true, the inner matches,
+    // and `ex:d0` is ELIMINATED (0 rows). The fast path previously sourced `?s` from the
+    // left ONLY, saw UNBOUND → error → no match → `ex:d0` SPURIOUSLY SURVIVED (1 row).
+    // The `MergeSrc::LeftThenRight` fill-through makes the fast path mirror `merge_rows`;
+    // on == off pins it. This test is RED on the pre-fix code (fast=1 row, cold=0). It is
+    // load-bearing that the fast path actually FIRES on this shape (asserted below).
+    let g = load(
+        "ex:d0 ex:p ex:val0 .
+         ex:x0 ex:owner ex:s_any . ex:x0 ex:val ex:val0 . ex:x0 ex:mark ex:m .",
+    );
+    let q = "SELECT ?d WHERE {
+        ?d ex:p ?v .
+        OPTIONAL { ?d ex:q ?s }                # ?s partially bound in A (unbound for ex:d0)
+        OPTIONAL {
+          ?x ex:owner ?s .                     # ?s shared with A, certain in B
+          ?x ex:val ?inner .
+          ?x ex:mark ?nb .
+          FILTER (?v = ?inner && BOUND(?s))    # residual references the shared var
+        } FILTER(!bound(?nb))
+      }";
+    let (off, on) = on_off(&g, q);
+    assert_eq!(
+        off, on,
+        "partially-bound shared var: fast path diverged from cold (fill-through bug)"
+    );
+    // The cold plan eliminates ex:d0 (fill-through makes BOUND(?s) true) ⇒ 0 rows.
+    assert!(off.is_empty(), "cold plan must eliminate ex:d0 (0 rows), got {:?}", off);
+    // And the fast path must have actually FIRED on this shape (otherwise the test is
+    // vacuous — it would trivially match the cold path by falling back).
+    theta_antijoin_testing::set_enabled(true);
+    theta_antijoin_testing::reset_stats();
+    let _ = query(&g, &format!("{PFX}{q}")).expect("query");
+    let (fired, _rows, _bindings) = theta_antijoin_testing::stats();
+    assert!(fired, "theta anti-join did not fire on the partially-bound-shared-var shape");
+}
+
+#[test]
 fn hash_path_large_cardinality_equivalence() {
     // > SIP_MAX_SMALL_ROWS (64) distinct IRI correlations forces the HASH anti-join
     // strategy (evaluate B once, partition by ?inner). Must equal the cold path AND
@@ -371,6 +414,11 @@ fn randomised_differential() {
         // strategies AND both id-hashable term kinds are fuzzed against the cold path.
         let big = trial % 2 == 0;
         let bnode_authors = trial % 3 == 0;
+        // Every 4th trial ALSO adds a PARTIALLY-BOUND shared var `?tag` (bound on only
+        // some documents via an OPTIONAL in A, certain in B) referenced by the residual
+        // via `BOUND(?tag)` — the failing class the pre-fix generator could not produce
+        // (left-unbound shared var read by the residual). [FABLE-5]
+        let shared_var = trial % 4 == 0;
         let n_auth = if big { 70 + next(30) as usize } else { 1 + next(4) as usize };
         let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
         let author = |a: usize| {
@@ -397,9 +445,38 @@ fn randomised_differential() {
                 let yr = 1990 + next(20);
                 ttl.push_str(&format!("ex:d{} dcterms:issued \"{}\"^^xsd:integer .\n", d, yr));
             }
+            // For the shared-var variant, bind `?tag` on ~2/3 of documents (an IRI). The
+            // OPTIONAL in A leaves it UNBOUND on the rest, so the merged condition row
+            // must fill it from the right to reproduce the cold semantics. [FABLE-5]
+            if shared_var && next(3) != 0 {
+                ttl.push_str(&format!("ex:d{} ex:tag ex:t{} .\n", d, next(3)));
+            }
         }
         let g = load(&ttl);
-        let q = format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}");
+        // The shared-var body adds `OPTIONAL { ?document ex:tag ?tag }` in A and a
+        // certain `?document2 ex:tag ?tag` + a `BOUND(?tag)` conjunct in the residual,
+        // so a left-unbound `?tag` is READ by the residual (the counterexample class).
+        let body = if shared_var {
+            "\
+  ?class rdfs:subClassOf foaf:Document .
+  ?document rdf:type ?class .
+  ?document dcterms:issued ?yr .
+  ?document dc:creator ?author .
+  ?author foaf:name ?name
+  OPTIONAL { ?document ex:tag ?tag }
+  OPTIONAL {
+    ?class2 rdfs:subClassOf foaf:Document .
+    ?document2 rdf:type ?class2 .
+    ?document2 dcterms:issued ?yr2 .
+    ?document2 dc:creator ?author2 .
+    ?document2 ex:tag ?tag
+    FILTER (?author = ?author2 && ?yr2 < ?yr && BOUND(?tag))
+  } FILTER (!bound(?author2))
+"
+        } else {
+            Q06_BODY
+        };
+        let q = format!("SELECT ?document ?yr ?name ?tag WHERE {{\n{body}\n}}");
         let (off, on) = on_off(&g, &q);
         assert_eq!(off, on, "randomised differential mismatch on trial {}", trial);
     }
