@@ -213,7 +213,11 @@ they are constructed so the fix there and the work here cannot conflict semantic
 - **ASK early-termination through joins** (streaming first-solution evaluation): real
   but subsumed for q12b by .30.3 at this corpus scale, and it would touch the same
   `exec.rs` eval paths as three other beads. Revisit after .30.6 if q12b is still
-  behind.
+  behind. *(Post-chain update: the diagnostic re-run confirmed this as the dominant
+  residual — q12a cost its full SELECT twin. Now implemented as `sq-7d3dj.30.8`:
+  block-driven capped conjunctive chain + capped UNION/OPTIONAL/Join arms in
+  `try_capped`, plus emptiness-neutral ASK plan simplification; witnesses in
+  `crates/sparq-engine/tests/ask_early_exit.rs`.)* [FABLE-5]
 - **UNION common-subexpression sharing** (q07/q09 both re-scan shared subpatterns):
   measured secondary to the fixes above; fold into a later bead only if .30.6 shows a
   residual gap.
