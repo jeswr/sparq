@@ -203,6 +203,20 @@
   features: "yannakakis"
   test: true
 
+# sq-7d3dj.30.1 (#1735): the `algebra-rewrite` opt-in pass gates ALL of its unit tests
+# (11 in `src/rewrite.rs`, incl. the soundness revert-witnesses
+# `certain_vars_group_excludes_aggregate_output` + the anti-join decline tests) and the
+# whole-file e2e result-equivalence suite `tests/rewrite_pass.rs` behind
+# `#[cfg(feature = "algebra-rewrite")]` — without this leg they run ZERO times in CI
+# (ci.yml's --all-features lanes are clippy/rustdoc only). Reviewer-required leg (Fable
+# verdict on #1735): the regression witness for a previously-caught unsoundness must sit
+# in a gate, not a one-time local run. No new dep (`algebra-rewrite = []`), feature-OFF
+# path byte-identical (cfg-split PreparedQuery::parse).
+- name: "sparq-engine (algebra-rewrite)"
+  crate: "sparq-engine"
+  features: "algebra-rewrite"
+  test: true
+
 # [OPUS-4.8] sq-iywur: opt-in DPccp dynamic-programming join-order enumerator. The whole
 # `dp` module (`src/dp.rs`, `pub mod dp` in lib.rs — the DPccp csg-cmp-pair enumerator, the
 # `with_dp_planner`/`with_dp_planner_budget` per-thread install, `QueryGraph`/`JoinTree`)

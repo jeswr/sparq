@@ -12,9 +12,13 @@
 #     tree vs head (PR/merged) tree — and compares BYTE-FOR-BYTE. No static pin, so NO
 #     merge-order dependence (replaces the retired feature_off_exact exact-byte pin, which
 #     was order-dependent and could not converge under a busy queue). Identical bytes => pass;
-#     differing bytes => pass only if DECLARED (change_token bumped in
-#     bench/feature-off-declaration.json), else fail. The SIZE of an accepted change is
-#     governed SEPARATELY, unchanged, by the wasm_bundle_bytes floor ratchet (±2%) in bench.yml.
+#     differing bytes => pass only if DECLARED. DECLARATION (mechanism V2, sq-v3nel-v2): a PR
+#     adds its OWN file bench/feature-off-declarations/<PR-number>.json — the gate is satisfied
+#     by a set difference on that directory (head has a file base does not), so declaring PRs
+#     never textually CONFLICT (the old shared scalar change_token line did — #1720/#1718 went
+#     DIRTY behind #1726). The legacy scalar change_token is retired but still accepted during a
+#     transition window. The SIZE of an accepted change is governed SEPARATELY, unchanged, by
+#     the wasm_bundle_bytes floor ratchet (±2%) in bench.yml.
 #
 #   Leg 3 (cfg-audit): script asserting every `vectorized` module registration and
 #     evaluator call site in crates/sparq-engine/src/lib.rs and exec.rs is under
@@ -85,6 +89,7 @@ jobs:
               - 'scripts/tests/test_vectorized_feature_off.py'
               - 'bench/perf-baseline.json'
               - 'bench/feature-off-declaration.json'
+              - 'bench/feature-off-declarations/**'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
         run: |
@@ -143,9 +148,10 @@ jobs:
   # _comment retirement entry).
   #
   # A PR that does NOT touch always-compiled code => identical bytes => auto-pass. A PR that
-  # DOES must DECLARE it (increment change_token in bench/feature-off-declaration.json),
-  # else this leg FAILS. The SIZE of an accepted change is governed SEPARATELY, unchanged,
-  # by the wasm_bundle_bytes floor ratchet (±2% band) in bench.yml.
+  # DOES must DECLARE it (mechanism V2: add bench/feature-off-declarations/<PR-number>.json —
+  # conflict-free per-PR file, sq-v3nel-v2), else this leg FAILS. The SIZE of an accepted
+  # change is governed SEPARATELY, unchanged, by the wasm_bundle_bytes floor ratchet (±2%
+  # band) in bench.yml.
   #
   # Honest scope: proves compile-time ABSENCE via artifact byte-determinism. Does NOT prove
   # runtime perf neutrality (EC2-gated). Job NAME is preserved: the only required check is
@@ -231,6 +237,14 @@ jobs:
           else
             echo '{}' > base-wasm/base-decl.json
           fi
+          # MECHANISM V2 (sq-v3nel-v2): snapshot the base-tree per-PR declarations directory
+          # so leg 2 can set-difference it against the head tree. Absent on pre-V2 base
+          # commits -> synthesize an EMPTY dir (fail-safe: an absent dir reads as no
+          # declarations, so an undeclared byte change still fails).
+          mkdir -p base-wasm/base-declarations
+          if [ -d base-tree/bench/feature-off-declarations ]; then
+            cp -a base-tree/bench/feature-off-declarations/. base-wasm/base-declarations/
+          fi
           echo "Base-tree feature-OFF wasm: $(wc -c < base-wasm/base.wasm) bytes"
 
       - name: Build HEAD-tree feature-OFF wasm
@@ -257,9 +271,13 @@ jobs:
               | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # base-declarations may be absent on a cache-hit whose base was built before V2 -
+          # create an empty dir so the path always resolves (script treats it as no decls).
+          mkdir -p base-wasm/base-declarations
           python3 scripts/check-vectorized-feature-off.py \
             --leg2-dynamic base-wasm/base.wasm head.wasm \
             base-wasm/base-decl.json bench/feature-off-declaration.json \
+            --declarations-dirs base-wasm/base-declarations bench/feature-off-declarations \
             2>&1 | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
 
       - name: Tripwire self-test (leg 2 comparator can fail)

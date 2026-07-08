@@ -1,5 +1,36 @@
 # scripts/bench — benchmark orchestrators + same-box gathers
 
+## multi-axis-box.sh — bin-packed multi-axis canonical runner (sq-hmd7l.25)
+
+ONE dedicated quiet box instead of one box per small axis (the cost discipline of
+`research/comparative-benchmarking-everything.md` §4 point 5, design record PR
+#1768): provisions a single `purpose=sparq-bench` c6i.4xlarge, runs the
+ordered wave-1 axis list (`fts geo hdt update parse`; override/reorder with
+`AXES=`) **strictly serially** — one axis, and therefore one engine, active at a
+time — then the box self-terminates.
+
+- **Modes:** `--dry-run` prints the packed execution plan (axes + harness
+  presence, caps, budget arithmetic, orphan-proofing summary) with **no AWS
+  call**; `AWS_PROFILE=pss ... --launch [<branch>]` provisions for real;
+  `--instance` is the on-box entrypoint (contains **no** shutdown/terminate
+  call — self-termination lives only in the launcher-generated user-data).
+- **Orphan-proof** (per the standing EC2 rules):
+  `--instance-initiated-shutdown-behavior terminate`, a FIRST-LINE user-data
+  watchdog (3h hard cap default) + `systemd-run` backup, launcher poll deadline
+  **below** the watchdog, EXIT-trap terminate + ephemeral keypair/SG teardown,
+  the prod/dev instance ids refused by id, and a post-launch
+  `scripts/orphan-check-bench.sh` dry-run that must come back clean.
+- **Results, both channels:** per-axis `=== SPARQ_BENCH_RESULT <axis> ===`
+  console blocks (compact envelope JSON under a per-envelope byte cap for the
+  ~64KB serial buffer, plus a provenance line: instance id/type, commit, UTC,
+  canonical flag) inside one outer marker range, **and** an incremental SSH pull
+  of the full envelopes from `/root/axis-results/` into `RESULTS_LOCAL`.
+- **Discipline:** `df` floor check + scratch cleanup between axes; dataset caps
+  (`PARSE_GEN_N`, per-axis `AXIS_ENV_<axis>` env passthrough); an axis whose
+  harness has not landed on the checked-out branch is skipped with an honest
+  `absent` status (bead reference printed), never a fabricated row. The parse
+  axis emits raw harness rows until its envelope wrapper lands (sq-hmd7l.6).
+
 ## shacl-same-box.sh — SHACL competitor comparison (sq-7d3dj.33)
 
 Same-box SHACL validation comparison — **sparq-shacl vs pySHACL vs Apache Jena

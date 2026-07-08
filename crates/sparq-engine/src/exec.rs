@@ -6,6 +6,7 @@
 //! `LocalVocab`, mirroring QLever's local vocabulary.
 
 use crate::QueryResult;
+use std::ops::ControlFlow;
 use oxrdf::vocab::xsd;
 use oxrdf::{BlankNode, Literal, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
@@ -503,6 +504,489 @@ pub(crate) mod trace {
     pub(crate) fn take() -> Vec<Node> {
         NODES.with(|n| std::mem::take(&mut *n.borrow_mut()))
     }
+}
+
+// ---- Sideways information passing (SIP): correlated graph-pattern join (sq-7d3dj.30.3) ----
+//
+// [OPUS-4.8] When `Join(A, B)` is evaluated and the ALREADY-EVALUATED side `A` is
+// SMALL, evaluate the big child `B` CORRELATED on A's bindings instead of cold: for
+// each distinct binding of A's variables that are CERTAINLY bound in B (and bound to
+// an IRI in A), substitute that IRI as a constant into B's patterns — pushing into
+// UNION branches, BGP scans, property paths and filters — so the scan seeds from the
+// constant, then recombine preserving MULTIPLICITY. Conservative: any scope/threshold
+// condition failure returns to the existing cold path, bit-for-bit.
+//
+// Soundness (bag semantics): `A ⋈ B = ⊎_C (A_C ⋈ B)` where `A_C` partitions `A` by the
+// pushed-variable values `C`, and `A_C ⋈ B = A_C ⋈ σ_{P=C}(B)`. Because every pushed
+// variable is a CERTAIN variable of `B` (bound in every `B` solution), substituting the
+// constant is exactly `σ_{P=C}(B)` with the pushed columns projected out (re-supplied by
+// `A_C`). Pushed values are restricted to IRIs (term identity — no literal value-space /
+// numeric-precision hazard), matching the design record (research/
+// sp2bench-complex-shape-deficit.md §2.2). SP2Bench q08/q12b: the 1-row `?erdoes` side
+// seeds the Union's `?document dc:creator ?erdoes` scan instead of a blind whole-corpus
+// creator self-join.
+pub(crate) mod sip {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static FIRED: Cell<bool> = const { Cell::new(false) };
+        static CORRELATED_ROWS: Cell<usize> = const { Cell::new(0) };
+        static BINDINGS_EVALUATED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether correlated (SIP) join evaluation is enabled on this thread (default on).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables SIP on this thread, returning the previous value. The
+    /// differential acceptance test uses it to compare correlated-on vs -off results.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query firing statistics (call before a measured/traced run).
+    pub(crate) fn reset_stats() {
+        FIRED.with(|f| f.set(false));
+        CORRELATED_ROWS.with(|c| c.set(0));
+        BINDINGS_EVALUATED.with(|b| b.set(0));
+    }
+
+    /// Records one fired correlated evaluation: `rows` solutions produced across
+    /// `bindings` distinct pushed-value combinations.
+    pub(crate) fn record(rows: usize, bindings: usize) {
+        FIRED.with(|f| f.set(true));
+        CORRELATED_ROWS.with(|c| c.set(c.get().saturating_add(rows)));
+        BINDINGS_EVALUATED.with(|b| b.set(b.get().saturating_add(bindings)));
+    }
+
+    /// `(fired, correlated_child_rows, distinct_bindings_evaluated)` since the last
+    /// [`reset_stats`]. The anti-vacuity acceptance test asserts `fired` and that the
+    /// correlated child produced far fewer rows than the cold (blind) child.
+    pub(crate) fn stats() -> (bool, usize, usize) {
+        (
+            FIRED.with(|f| f.get()),
+            CORRELATED_ROWS.with(|c| c.get()),
+            BINDINGS_EVALUATED.with(|b| b.get()),
+        )
+    }
+}
+
+/// [OPUS-4.8] (sq-7d3dj.30.4) DISTINCT-projection loose (skip) index scan.
+///
+/// For `Distinct{Project{[?p]}{ BGP / Union-of-BGPs }}` the engine can enumerate the
+/// DISTINCT projected values directly from an existing permutation sorted by the
+/// projected column (a loose/skip scan — the general form of qlever's "pattern trick"
+/// over the six permutations, NO new index) instead of materialising every full-width
+/// join row and deduping post-hoc. The load-bearing invariant is DISTINCT result-SET
+/// equivalence with the pushdown on vs off; the stats below back the anti-vacuity
+/// acceptance test (the produced/scanned rows must COLLAPSE vs the full join size).
+pub(crate) mod distinct_pushdown {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static FIRED: Cell<bool> = const { Cell::new(false) };
+        static ROWS_EMITTED: Cell<usize> = const { Cell::new(0) };
+        static ROWS_SCANNED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether the DISTINCT-projection pushdown is enabled on this thread (default on).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables the pushdown on this thread, returning the previous value. The
+    /// differential acceptance test uses it to compare pushdown-on vs -off results.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query pushdown statistics (call before a measured/traced run).
+    pub(crate) fn reset_stats() {
+        FIRED.with(|f| f.set(false));
+        ROWS_EMITTED.with(|c| c.set(0));
+        ROWS_SCANNED.with(|c| c.set(0));
+    }
+
+    /// Records one fired pushdown: `emitted` distinct values produced, having TOUCHED
+    /// `scanned` permutation rows (the skip-scan's galloped-through rows — far fewer than
+    /// the materialised join when the pushdown is non-vacuous).
+    pub(crate) fn record(emitted: usize, scanned: usize) {
+        FIRED.with(|f| f.set(true));
+        ROWS_EMITTED.with(|c| c.set(c.get().saturating_add(emitted)));
+        ROWS_SCANNED.with(|c| c.set(c.get().saturating_add(scanned)));
+    }
+
+    /// `(fired, distinct_values_emitted, permutation_rows_scanned)` since the last
+    /// [`reset_stats`]. The anti-vacuity acceptance test asserts `fired` and that
+    /// `permutation_rows_scanned` is far smaller than the full-join row count.
+    pub(crate) fn stats() -> (bool, usize, usize) {
+        (
+            FIRED.with(|f| f.get()),
+            ROWS_EMITTED.with(|c| c.get()),
+            ROWS_SCANNED.with(|c| c.get()),
+        )
+    }
+}
+
+/// Maximum size of the already-evaluated (small) join side for which correlated
+/// evaluation of the other child is attempted; above it the cold path is used.
+const SIP_MAX_SMALL_ROWS: usize = 64;
+
+/// Certain (always-bound) REAL variables of a graph pattern — a sound
+/// UNDER-approximation of the SPARQL bound set: it never adds a variable that some
+/// solution may leave unbound, so any variable it reports is safe to substitute as a
+/// constant. Blank-node slots are excluded (we never substitute into them).
+fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
+    use GraphPattern as G;
+    // A directly-positioned (non-quoted, non-blank) query variable of a term slot.
+    fn real(t: &TermPattern) -> Option<&Variable> {
+        if let TermPattern::Variable(v) = t {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    match p {
+        G::Bgp { patterns } => {
+            for tp in patterns {
+                for v in [real(&tp.subject), nnp_var_ref(&tp.predicate), real(&tp.object)]
+                    .into_iter()
+                    .flatten()
+                {
+                    out.insert(v.clone());
+                }
+            }
+        }
+        G::Path { subject, object, .. } => {
+            for v in [real(subject), real(object)].into_iter().flatten() {
+                out.insert(v.clone());
+            }
+        }
+        G::Join { left, right } => {
+            certain_vars(left, out);
+            certain_vars(right, out);
+        }
+        // Only the mandatory (left) side of an OPTIONAL / MINUS is certainly bound.
+        G::LeftJoin { left, .. } | G::Minus { left, .. } => certain_vars(left, out),
+        G::Filter { inner, .. }
+        | G::OrderBy { inner, .. }
+        | G::Distinct { inner }
+        | G::Reduced { inner }
+        | G::Slice { inner, .. } => certain_vars(inner, out),
+        // A variable is certain in a UNION only if certain in BOTH branches.
+        G::Union { left, right } => {
+            let mut l = FxHashSet::default();
+            let mut r = FxHashSet::default();
+            certain_vars(left, &mut l);
+            certain_vars(right, &mut r);
+            out.extend(l.intersection(&r).cloned());
+        }
+        G::Graph { name, inner } => {
+            if let NamedNodePattern::Variable(v) = name {
+                out.insert(v.clone());
+            }
+            certain_vars(inner, out);
+        }
+        // BIND may evaluate to an error (leaving its target UNBOUND), so the extended
+        // variable is NOT certain; only the inner pattern's certain vars are.
+        G::Extend { inner, .. } => certain_vars(inner, out),
+        G::Values { variables, bindings } => {
+            for (i, v) in variables.iter().enumerate() {
+                if bindings.iter().all(|row| row.get(i).is_some_and(Option::is_some)) {
+                    out.insert(v.clone());
+                }
+            }
+        }
+        // Projection / grouping drop non-listed variables; keep the listed ones that
+        // are certain in the inner pattern.
+        G::Project { inner, variables } | G::Group { inner, variables, .. } => {
+            let mut inner_c = FxHashSet::default();
+            certain_vars(inner, &mut inner_c);
+            for v in variables {
+                if inner_c.contains(v) {
+                    out.insert(v.clone());
+                }
+            }
+        }
+        // Service (and anything else): conservatively bind nothing certain.
+        _ => {}
+    }
+}
+
+/// A borrow of a predicate-slot variable (predicates are never blank/quoted).
+fn nnp_var_ref(p: &NamedNodePattern) -> Option<&Variable> {
+    match p {
+        NamedNodePattern::Variable(v) => Some(v),
+        NamedNodePattern::NamedNode(_) => None,
+    }
+}
+
+/// Substitutes each `var -> IRI` in `sub` throughout a graph pattern, returning `None`
+/// when substitution is not clearly sound (e.g. a `SERVICE`, a sub-`SELECT`/aggregate
+/// that projects a substituted variable, or a `BOUND(?v)` on a substituted variable) —
+/// in which case the caller falls back to cold evaluation.
+fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<GraphPattern> {
+    use GraphPattern as G;
+    Some(match p {
+        G::Bgp { patterns } => G::Bgp {
+            patterns: patterns.iter().map(|tp| subst_triple(tp, sub)).collect::<Option<Vec<_>>>()?,
+        },
+        G::Path { subject, path, object } => G::Path {
+            subject: subst_term(subject, sub)?,
+            path: path.clone(),
+            object: subst_term(object, sub)?,
+        },
+        G::Join { left, right } => G::Join {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+        },
+        G::LeftJoin { left, right, expression } => G::LeftJoin {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+            expression: match expression {
+                Some(e) => Some(subst_expr(e, sub)?),
+                None => None,
+            },
+        },
+        G::Filter { expr, inner } => G::Filter {
+            expr: subst_expr(expr, sub)?,
+            inner: Box::new(subst_pattern(inner, sub)?),
+        },
+        G::Union { left, right } => G::Union {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+        },
+        G::Graph { name, inner } => G::Graph {
+            name: subst_nnp(name, sub),
+            inner: Box::new(subst_pattern(inner, sub)?),
+        },
+        G::Minus { left, right } => G::Minus {
+            left: Box::new(subst_pattern(left, sub)?),
+            right: Box::new(subst_pattern(right, sub)?),
+        },
+        G::Extend { inner, variable, expression } => {
+            // A BIND target that is itself a substituted variable would shadow the
+            // constant — bail conservatively.
+            if sub.contains_key(variable) {
+                return None;
+            }
+            G::Extend {
+                inner: Box::new(subst_pattern(inner, sub)?),
+                variable: variable.clone(),
+                expression: subst_expr(expression, sub)?,
+            }
+        }
+        G::Values { variables, bindings } => {
+            if variables.iter().any(|v| sub.contains_key(v)) {
+                return None;
+            }
+            G::Values { variables: variables.clone(), bindings: bindings.clone() }
+        }
+        G::OrderBy { inner, expression } => G::OrderBy {
+            inner: Box::new(subst_pattern(inner, sub)?),
+            expression: expression.iter().map(|oe| subst_order(oe, sub)).collect::<Option<Vec<_>>>()?,
+        },
+        G::Distinct { inner } => G::Distinct { inner: Box::new(subst_pattern(inner, sub)?) },
+        G::Reduced { inner } => G::Reduced { inner: Box::new(subst_pattern(inner, sub)?) },
+        G::Slice { inner, start, length } => G::Slice {
+            inner: Box::new(subst_pattern(inner, sub)?),
+            start: *start,
+            length: *length,
+        },
+        // A sub-SELECT / GROUP that projects a substituted variable would emit it
+        // unbound; if it does not project any, the substitution is still sound.
+        G::Project { inner, variables } => {
+            if variables.iter().any(|v| sub.contains_key(v)) {
+                return None;
+            }
+            G::Project { inner: Box::new(subst_pattern(inner, sub)?), variables: variables.clone() }
+        }
+        // Aggregation and everything else (Service, …): conservative bail.
+        _ => return None,
+    })
+}
+
+fn subst_triple(tp: &TriplePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<TriplePattern> {
+    Some(TriplePattern {
+        subject: subst_term(&tp.subject, sub)?,
+        predicate: subst_nnp(&tp.predicate, sub),
+        object: subst_term(&tp.object, sub)?,
+    })
+}
+
+fn subst_term(t: &TermPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<TermPattern> {
+    Some(match t {
+        TermPattern::Variable(v) => match sub.get(v) {
+            Some(nn) => TermPattern::NamedNode(nn.clone()),
+            None => TermPattern::Variable(v.clone()),
+        },
+        // A quoted triple term (RDF 1.2) can embed a substituted variable — recurse.
+        TermPattern::Triple(inner) => TermPattern::Triple(Box::new(subst_triple(inner, sub)?)),
+        other => other.clone(),
+    })
+}
+
+fn subst_nnp(p: &NamedNodePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> NamedNodePattern {
+    match p {
+        NamedNodePattern::Variable(v) => match sub.get(v) {
+            Some(nn) => NamedNodePattern::NamedNode(nn.clone()),
+            None => NamedNodePattern::Variable(v.clone()),
+        },
+        NamedNodePattern::NamedNode(_) => p.clone(),
+    }
+}
+
+fn subst_order(oe: &OrderExpression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<OrderExpression> {
+    Some(match oe {
+        OrderExpression::Asc(e) => OrderExpression::Asc(subst_expr(e, sub)?),
+        OrderExpression::Desc(e) => OrderExpression::Desc(subst_expr(e, sub)?),
+    })
+}
+
+fn subst_expr(e: &Expression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<Expression> {
+    use Expression as E;
+    let bx = |x: Option<Expression>| x.map(Box::new);
+    Some(match e {
+        E::NamedNode(_) | E::Literal(_) => e.clone(),
+        E::Variable(v) => match sub.get(v) {
+            Some(nn) => E::NamedNode(nn.clone()),
+            None => E::Variable(v.clone()),
+        },
+        E::Or(a, b) => E::Or(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::And(a, b) => E::And(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Equal(a, b) => E::Equal(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::SameTerm(a, b) => E::SameTerm(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Greater(a, b) => E::Greater(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::GreaterOrEqual(a, b) => E::GreaterOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Less(a, b) => E::Less(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::LessOrEqual(a, b) => E::LessOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::In(a, list) => E::In(
+            bx(subst_expr(a, sub))?,
+            list.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?,
+        ),
+        E::Add(a, b) => E::Add(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Subtract(a, b) => E::Subtract(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Multiply(a, b) => E::Multiply(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::Divide(a, b) => E::Divide(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::UnaryPlus(a) => E::UnaryPlus(bx(subst_expr(a, sub))?),
+        E::UnaryMinus(a) => E::UnaryMinus(bx(subst_expr(a, sub))?),
+        E::Not(a) => E::Not(bx(subst_expr(a, sub))?),
+        E::If(c, t, f) => E::If(
+            bx(subst_expr(c, sub))?,
+            bx(subst_expr(t, sub))?,
+            bx(subst_expr(f, sub))?,
+        ),
+        E::Coalesce(list) => E::Coalesce(list.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?),
+        E::FunctionCall(f, args) => E::FunctionCall(
+            f.clone(),
+            args.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?,
+        ),
+        E::Exists(gp) => E::Exists(Box::new(subst_pattern(gp, sub)?)),
+        // `BOUND(?v)` on a substituted (certainly-bound) variable is always true, but
+        // rewriting it changes nothing measurable here — bail conservatively rather
+        // than synthesise a boolean literal.
+        E::Bound(v) if sub.contains_key(v) => return None,
+        E::Bound(v) => E::Bound(v.clone()),
+    })
+}
+
+/// Attempts sideways-information-passing evaluation of `Join(left, right)` given the
+/// already-evaluated `left`. Returns `Ok(Some(result))` when correlated evaluation
+/// fired (bag-equivalent to the cold join), or `Ok(None)` to fall back to cold. See
+/// the module comment for the soundness argument.
+fn try_sip_join(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    right: &GraphPattern,
+) -> Result<Option<Bindings>, String> {
+    if !sip::enabled() || left.rows.is_empty() || left.rows.len() > SIP_MAX_SMALL_ROWS {
+        return Ok(None);
+    }
+    // Variables that are certain in `right` — the only ones safe to substitute.
+    let mut cert = FxHashSet::default();
+    certain_vars(right, &mut cert);
+    if cert.is_empty() {
+        return Ok(None);
+    }
+    // Candidate push columns: a left variable that is certain in `right` AND bound to a
+    // NamedNode (IRI) in EVERY left row (term identity keeps substitution exact).
+    let mut push: Vec<(Variable, usize, Vec<oxrdf::NamedNode>)> = Vec::new();
+    for (col, v) in left.vars.iter().enumerate() {
+        if !cert.contains(v) {
+            continue;
+        }
+        let mut iris: Vec<oxrdf::NamedNode> = Vec::with_capacity(left.rows.len());
+        let mut ok = true;
+        for row in &left.rows {
+            match term_of(graph, local, row[col]) {
+                Some(Term::NamedNode(n)) => iris.push(n),
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            push.push((v.clone(), col, iris));
+        }
+    }
+    if push.is_empty() {
+        return Ok(None);
+    }
+    // Group left rows by their pushed-value combination `C` (dedup for EVALUATION,
+    // never for the join result). `key_of` builds the ordered IRI-string key.
+    let key_of = |ri: usize| -> Vec<String> {
+        push.iter().map(|(_, _, iris)| iris[ri].as_str().to_string()).collect()
+    };
+    let mut order: Vec<Vec<String>> = Vec::new();
+    let mut groups: FxHashMap<Vec<String>, Vec<usize>> = FxHashMap::default();
+    for ri in 0..left.rows.len() {
+        let k = key_of(ri);
+        match groups.entry(k.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push(ri),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                order.push(k);
+                e.insert(vec![ri]);
+            }
+        }
+    }
+
+    let mut result: Option<Bindings> = None;
+    let mut total_child_rows = 0usize;
+    for key in &order {
+        let members = &groups[key];
+        // Build the var -> IRI substitution for this C from the first member row.
+        let ri0 = members[0];
+        let mut smap: FxHashMap<Variable, oxrdf::NamedNode> = FxHashMap::default();
+        for (v, _, iris) in &push {
+            smap.insert(v.clone(), iris[ri0].clone());
+        }
+        // Substitute into `right`; a non-substitutable construct aborts SIP entirely
+        // (fall back to the cold join for the whole operator, bit-for-bit).
+        let Some(subst) = subst_pattern(right, &smap) else {
+            return Ok(None);
+        };
+        let b_prime = eval_graph_pattern(graph, local, &subst)?;
+        total_child_rows += b_prime.rows.len();
+        // `A_C`: the left rows whose pushed values equal this C (multiplicity intact).
+        let a_c = Bindings::unsorted(
+            left.vars.clone(),
+            members.iter().map(|&ri| left.rows[ri].clone()).collect(),
+        );
+        let joined = join_bindings(a_c, b_prime);
+        result = Some(match result {
+            None => joined,
+            Some(acc) => union_bindings(acc, joined),
+        });
+    }
+    sip::record(total_child_rows, order.len());
+    Ok(result)
 }
 
 // ---- Extension-function registry (SPARQL 17.6) --------------------------------
@@ -1134,22 +1618,6 @@ fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
     }
 }
 
-/// Appends a serialised fragment to the chunk list. Chunked mode (`flush = Some`)
-/// MOVES the fragment in as its own chunk — never a second copy of result bytes;
-/// single-string mode (`flush = None`) concatenates onto the tail (the pre-existing
-/// behaviour of the parallel join). Concatenation order — and so the byte stream —
-/// is identical either way.
-// [OPUS-4.8] Both call sites are in `parallel`-gated blocks (the sequential/wasm paths
-// `push` directly); gate the helper too so the `-D warnings` clippy gate stays clean in
-// no-parallel/wasm builds.
-#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
-fn emit_chunk(chunks: &mut Vec<String>, frag: String, flush: Option<usize>) {
-    match chunks.last_mut() {
-        Some(tail) if flush.is_none() => tail.push_str(&frag),
-        _ => chunks.push(frag),
-    }
-}
-
 /// Concatenates JSON chunks back into the single-string form (the non-streamed API).
 fn join_chunks(mut chunks: Vec<String>) -> String {
     if chunks.len() == 1 {
@@ -1165,7 +1633,21 @@ fn join_chunks(mut chunks: Vec<String>) -> String {
 /// caller falls back to the general evaluator). The vector-at-a-time idea for the most
 /// common (single-pattern) browser query. Output is a chunk sequence (see
 /// [`eval_select_json_chunks`]); concatenated it is the exact JSON document.
-fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Option<Vec<String>> {
+///
+/// [OPUS-4.8] (sq-7d3dj.34.2) Emit-based: hands each serialised chunk to `emit` **as it is
+/// produced** instead of collecting a `Vec<String>`, so the server can begin writing the
+/// results header + early solutions to the socket before the whole result is serialised
+/// (TTFB streaming). `emit` returns [`ControlFlow::Break`] when the consumer has gone away
+/// (the HTTP client disconnected); the scan then stops early. Returns `Some(())` when this
+/// shape was handled (fell into the streaming path), `None` when the caller must use the
+/// general evaluator. The concatenation of the chunks handed to `emit` is byte-identical to
+/// the pre-emit `Vec<String>` output.
+fn single_pattern_scan_json_emit(
+    graph: &Graph,
+    pattern: &GraphPattern,
+    flush: Option<usize>,
+    emit: &mut dyn FnMut(String) -> ControlFlow<()>,
+) -> Option<()> {
     // zk-trace: this streaming path serialises straight from the scan without
     // materialising Bindings, so it never hits the scan-recording hook. Fall
     // through to the Bindings path (which records) while a recorder is armed —
@@ -1192,7 +1674,7 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     }
     // Only pushed-down sargable numeric FILTER(s); a residual filter needs the general
     // expression evaluator.
-    let (pat_filters, residual) = split_sargable(&patterns, &filters);
+    let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
     if !residual.is_empty() {
         return None;
     }
@@ -1220,7 +1702,8 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     head.push_str("]},\"results\":{\"bindings\":[");
     if unsat {
         head.push_str("]}}");
-        return Some(vec![head]);
+        let _ = emit(head);
+        return Some(());
     }
 
     let scan = match filt {
@@ -1322,23 +1805,32 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
             // caller's `budget::check(0)` converts into the budget error (a chunk skipped
             // above means the deadline is globally past, so this fires deterministically).
             let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
-            let mut chunks = vec![s];
+            // Accumulate into `pending` and hand a chunk to `emit` at each flush boundary
+            // (byte-identical concatenation to the old `emit_chunk` Vec layout — only the
+            // chunk *boundaries* differ, and the concat is what the byte-identity contract
+            // covers). `s` already holds the head.
+            let mut pending = s;
             let mut wrote = false;
             for (_, f) in frags {
                 if f.is_empty() {
                     continue;
                 }
                 if wrote {
-                    chunks.last_mut().expect("chunks start non-empty").push(',');
+                    pending.push(',');
                 }
                 wrote = true;
-                emit_chunk(&mut chunks, f, flush);
+                pending.push_str(&f);
+                if flush.is_some_and(|n| pending.len() >= n)
+                    && emit(std::mem::take(&mut pending)).is_break()
+                {
+                    return Some(());
+                }
             }
-            chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
-            return Some(chunks);
+            pending.push_str("]}}");
+            let _ = emit(pending);
+            return Some(());
         }
     }
-    let mut chunks: Vec<String> = Vec::new();
     let mut written = 0usize;
     for (i, row) in scan_rows.iter().enumerate() {
         // Coarse budget check every 1024 scanned rows; the caller's sticky check
@@ -1354,14 +1846,14 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
         }
         written += 1;
         write_row(row, &mut s);
-        if flush.is_some_and(|n| s.len() >= n) {
-            chunks.push(std::mem::take(&mut s));
+        if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
+            return Some(());
         }
     }
     let _ = budget::exhausted(written); // final row-count gate (sticky)
     s.push_str("]}}");
-    chunks.push(s);
-    Some(chunks)
+    let _ = emit(s);
+    Some(())
 }
 
 /// Evaluates a SELECT and serialises it straight to SPARQL-JSON, skipping the
@@ -1378,10 +1870,42 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
 /// sequential paths, head+fragments concatenated on the parallel path — exactly the
 /// old behaviour and allocation profile).
 pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    eval_select_json_emit(graph, pattern, flush, &mut |c| {
+        out.push(c);
+        ControlFlow::Continue(())
+    })?;
+    Ok(out)
+}
+
+/// [`eval_select_json_chunks`] driven through a per-chunk `emit` callback instead of a
+/// collected `Vec<String>`.
+///
+/// [OPUS-4.8] (sq-7d3dj.34.2) This is the emit core both the buffered `Vec` API (above)
+/// and the server's TTFB-streaming HTTP body ([`crate::query_json_stream_with_budget`])
+/// share, so the byte layout is defined once. Each serialised chunk is handed to `emit`
+/// **as it is produced**: on the streaming path the server writes the results header +
+/// early solutions to the socket before the whole result is serialised, and — for the
+/// single-pattern scan fast path — before the scan even finishes. `emit` returns
+/// [`ControlFlow::Break`] to abandon the rest of the work (the HTTP client disconnected).
+///
+/// The concatenation of the chunks handed to `emit` is **byte-identical** to
+/// [`eval_select_json`]/[`eval_select_json_chunks`] for the same `flush`; only the chunk
+/// *boundaries* may differ (the byte-identity contract is over the concatenation). A
+/// cooperative budget (row / byte cap or deadline) that trips is surfaced by the caller's
+/// `budget::check` as an `Err` exactly as before — but note that on the streaming path
+/// early chunks may already have been flushed when the trip is detected (the server maps a
+/// post-first-byte trip to a truncated body, since the HTTP status is already committed).
+pub fn eval_select_json_emit(
+    graph: &Graph,
+    pattern: &GraphPattern,
+    flush: Option<usize>,
+    emit: &mut dyn FnMut(String) -> ControlFlow<()>,
+) -> Result<(), String> {
     // Streaming fast paths — no Bindings materialised at all.
-    if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
+    if single_pattern_scan_json_emit(graph, pattern, flush, emit).is_some() {
         budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
-        return Ok(json);
+        return Ok(());
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
@@ -1442,29 +1966,34 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
                 f
             })
             .collect();
-        let mut chunks = vec![s];
+        // Accumulate into `s` (which already holds the head) and hand a chunk to `emit` at
+        // each flush boundary. The concatenation is byte-identical to the old `emit_chunk`
+        // Vec layout; only the chunk boundaries differ.
         for (i, f) in frags.into_iter().enumerate() {
             if i > 0 {
-                chunks.last_mut().expect("chunks start non-empty").push(',');
+                s.push(',');
             }
-            emit_chunk(&mut chunks, f, flush);
+            s.push_str(&f);
+            if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
+                return Ok(());
+            }
         }
-        chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
-        return Ok(chunks);
+        s.push_str("]}}");
+        let _ = emit(s);
+        return Ok(());
     }
-    let mut chunks: Vec<String> = Vec::new();
     for (i, row) in bindings.rows.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
         write_row(row, &mut s);
-        if flush.is_some_and(|n| s.len() >= n) {
-            chunks.push(std::mem::take(&mut s));
+        if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
+            return Ok(());
         }
     }
     s.push_str("]}}");
-    chunks.push(s);
-    Ok(chunks)
+    let _ = emit(s);
+    Ok(())
 }
 
 /// ASK evaluation: `true` iff `pattern` has at least one solution. The pattern is
@@ -1617,6 +2146,18 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             // input sets (the reduction is verifier-side; zk module docs).
             #[cfg(feature = "zk")]
             let _zk = crate::zk::op_scope(crate::zk::Op::Distinct);
+            // DISTINCT-projection loose skip-scan: `Distinct{Project{[?p]}{BGP/Union}}`
+            // can enumerate the DISTINCT projected values directly from a permutation
+            // sorted by ?p (no full-join materialisation). Result-SET equivalent to the
+            // path below; conservatively declines (→ None) on any other shape. The zk
+            // recorder needs the whole PRE-distinct input set, so the pushdown is
+            // suppressed while armed (checked inside `try_distinct_pushdown`).
+            // [OPUS-4.8] sq-7d3dj.30.4
+            if distinct_pushdown::enabled() {
+                if let Some(b) = try_distinct_pushdown(graph, local, inner)? {
+                    return Ok(b);
+                }
+            }
             let mut b = eval_modified(graph, local, inner)?;
             distinct_bindings(&mut b);
             Ok(b)
@@ -1721,6 +2262,407 @@ fn try_topk_orderby(
     }
 }
 
+/// [OPUS-4.8] (sq-7d3dj.30.4) Attempts the DISTINCT-projection loose skip-scan for the
+/// pattern under a `Distinct`.
+///
+/// Returns `Some(bindings)` when `inner` is `Project{[?p]}{ body }` (a SINGLE projected
+/// variable) and every UNION branch of `body` is a filter-free BGP that admits direct
+/// enumeration of the DISTINCT `?p` values from an existing permutation sorted by `?p`
+/// (a loose/skip scan — the general form of qlever's pattern trick over the six
+/// permutations, NO new index). Returns `None` on ANY other shape, so the caller falls
+/// back to the full materialise-then-dedup path. Because the enumerated set is exactly
+/// `{ v : ∃ a solution of the branch with ?p = v }`, unioned across branches, the result
+/// is DISTINCT-set equivalent to the fallback by construction.
+///
+/// The zk completeness witness needs the whole PRE-distinct input set, so the pushdown
+/// declines while the recorder is armed.
+fn try_distinct_pushdown(
+    graph: &Graph,
+    _local: &mut LocalVocab,
+    inner: &GraphPattern,
+) -> Result<Option<Bindings>, String> {
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return Ok(None);
+    }
+    // An empty-default dataset view short-circuits the BGP at eval time; stay on the
+    // general path so the view semantics are applied uniformly.
+    if view::default_is_empty() {
+        return Ok(None);
+    }
+    // Shape gate: DISTINCT over a single-variable projection.
+    let (pvar, body) = match inner {
+        GraphPattern::Project { inner, variables } if variables.len() == 1 => {
+            (&variables[0], inner.as_ref())
+        }
+        _ => return Ok(None),
+    };
+
+    let mut branches: Vec<&GraphPattern> = Vec::new();
+    collect_union_branches(body, &mut branches);
+
+    // Global first-seen dedup across branches — a value found in an earlier branch is
+    // never re-enumerated (the "already-seen" set of the loose scan).
+    let mut seen: FxHashSet<Id> = FxHashSet::default();
+    let mut out_ids: Vec<Id> = Vec::new();
+    let mut total_scanned = 0usize;
+
+    for branch in &branches {
+        match branch_distinct_values(graph, branch, pvar, &seen)? {
+            Some((new_ids, scanned)) => {
+                total_scanned = total_scanned.saturating_add(scanned);
+                for id in new_ids {
+                    if seen.insert(id) {
+                        out_ids.push(id);
+                    }
+                }
+            }
+            // Any branch we cannot fully enumerate → decline the whole pushdown so the
+            // fallback produces the (equivalent) answer for the entire pattern.
+            None => return Ok(None),
+        }
+    }
+
+    distinct_pushdown::record(out_ids.len(), total_scanned);
+    let rows: Vec<Row> = out_ids.iter().map(|&id| std::iter::once(id).collect()).collect();
+    Ok(Some(Bindings { vars: vec![pvar.clone()], rows, sorted_by: None }))
+}
+
+/// Flattens a (possibly nested) `UNION` into its branch patterns; a non-union pattern is
+/// a single branch. DISTINCT over `A UNION B` equals DISTINCT over the union of the
+/// per-branch value sets, so each branch is enumerated independently.
+fn collect_union_branches<'a>(p: &'a GraphPattern, out: &mut Vec<&'a GraphPattern>) {
+    match p {
+        GraphPattern::Union { left, right } => {
+            collect_union_branches(left, out);
+            collect_union_branches(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// The canonical triple positions (0=subject, 1=predicate, 2=object) at which `var`
+/// appears in a prepared pattern's `pos_vars`.
+fn var_positions_of(pos_vars: &[Option<Variable>; 3], var: &Variable) -> Vec<usize> {
+    (0..3).filter(|&i| pos_vars[i].as_ref() == Some(var)).collect()
+}
+
+/// The single query variable shared by both patterns' `pos_vars`, or `None` unless
+/// EXACTLY one distinct variable is shared (the clean single-join-variable case).
+fn single_shared_var<'a>(
+    a: &'a [Option<Variable>; 3],
+    b: &[Option<Variable>; 3],
+) -> Option<&'a Variable> {
+    let mut shared: Vec<&Variable> = Vec::new();
+    for v in a.iter().flatten() {
+        if b.iter().flatten().any(|w| w == v) && !shared.contains(&v) {
+            shared.push(v);
+        }
+    }
+    if shared.len() == 1 {
+        Some(shared[0])
+    } else {
+        None
+    }
+}
+
+/// The built permutation whose canonical column order is exactly `order`, if any.
+fn perm_for_order(order: [usize; 3]) -> Option<sparq_core::store::Perm> {
+    sparq_core::store::Perm::ALL.into_iter().find(|p| p.order() == order)
+}
+
+/// The distinct ids appearing at canonical position `target_pos` of `id_pat`'s matching
+/// triples (a variable position — the membership set for a semi-join). `None` declines
+/// under budget pressure so the caller falls back.
+fn collect_var_ids(graph: &Graph, id_pat: &IdPattern, target_pos: usize) -> Option<FxHashSet<Id>> {
+    let scan = graph.store.scan(id_pat);
+    let order = scan.perm.order();
+    let k = order.iter().position(|&c| c == target_pos)?;
+    let rows = scan.rows.as_ref();
+    let mut set: FxHashSet<Id> = FxHashSet::default();
+    for (n, r) in rows.iter().enumerate() {
+        if n & 4095 == 0 && budget::exhausted(set.len()) {
+            return None;
+        }
+        set.insert(r[k]);
+    }
+    Some(set)
+}
+
+/// Enumerates the DISTINCT ids at canonical position `target_pos` via a loose/skip scan
+/// over a permutation sorted by that column (galloping past each value's block with a
+/// binary search rather than touching every row). Returns `(values, rows_touched)`, or
+/// `None` when no built permutation sorts the matching range by `target_pos` (conservative
+/// decline).
+fn skipscan_distinct(graph: &Graph, id_pat: &IdPattern, target_pos: usize) -> Option<(Vec<Id>, usize)> {
+    let scan = graph.store.scan_sorted(id_pat, target_pos);
+    let order = scan.perm.order();
+    // The range's rows are sorted by `target_pos` only when it is the FIRST unbound
+    // column of the chosen permutation's order.
+    if order.into_iter().find(|&c| id_pat[c].is_none()) != Some(target_pos) {
+        return None;
+    }
+    let k = order.iter().position(|&c| c == target_pos)?;
+    let rows = scan.rows.as_ref();
+    let mut out: Vec<Id> = Vec::new();
+    let mut scanned = 0usize;
+    let mut i = 0usize;
+    while i < rows.len() {
+        if budget::exhausted(out.len()) {
+            return None;
+        }
+        let v = rows[i][k];
+        out.push(v);
+        scanned += 1;
+        // Gallop to the end of this value's contiguous block (all rows[i..] have
+        // `col >= v`, so `col <= v` is exactly the v-block).
+        let block_len = rows[i..].partition_point(|r| r[k] <= v).max(1);
+        i += block_len;
+    }
+    Some((out, scanned))
+}
+
+/// Returns `true` when the same query variable occupies more than one of the subject,
+/// predicate, or object slots in `tp` (e.g. `?x ?p ?x`). The fallback path enforces
+/// positional equality for repeated variables via `build_row`; the skip-scan helpers do
+/// not, so we must decline to push down any branch that contains such a pattern.
+/// [SONNET-4.6]
+fn has_intra_triple_repeated_var(tp: &TriplePattern) -> bool {
+    let sv = if let TermPattern::Variable(v) = &tp.subject {
+        Some(v)
+    } else {
+        None
+    };
+    let pv = if let NamedNodePattern::Variable(v) = &tp.predicate {
+        Some(v)
+    } else {
+        None
+    };
+    let ov = if let TermPattern::Variable(v) = &tp.object {
+        Some(v)
+    } else {
+        None
+    };
+    (sv.is_some() && pv.is_some() && sv == pv)
+        || (sv.is_some() && ov.is_some() && sv == ov)
+        || (pv.is_some() && ov.is_some() && pv == ov)
+}
+
+/// Returns `true` when `tp` carries a nested RDF 1.2 quoted-triple term (`<<s p o>>` /
+/// `<<( s p o )>>`) in its subject or object slot. Such a term, when it embeds a variable, is
+/// decomposed by the general BGP planner before pattern preparation; the DISTINCT skip-scan
+/// path prepares the raw pattern, so `prepare_pattern` would ERROR on the embedded variable
+/// instead of declining. The pushdown must decline any branch containing one (the predicate
+/// slot is a `NamedNodePattern`, which cannot be a triple term, so only S/O are checked).
+/// [OPUS-4.8] (sq-7d3dj.30.4)
+fn has_quoted_triple_term(tp: &TriplePattern) -> bool {
+    matches!(tp.subject, TermPattern::Triple(_)) || matches!(tp.object, TermPattern::Triple(_))
+}
+
+/// The DISTINCT projected-variable ids contributed by one UNION branch, together with the
+/// permutation rows the skip scan touched. Returns only values NOT already in `seen`
+/// (they are added there by the caller). `None` = shape the pushdown cannot enumerate.
+fn branch_distinct_values(
+    graph: &Graph,
+    branch: &GraphPattern,
+    pvar: &Variable,
+    seen: &FxHashSet<Id>,
+) -> Result<Option<(Vec<Id>, usize)>, String> {
+    if !is_conjunctive(branch) {
+        return Ok(None);
+    }
+    let mut patterns: Vec<TriplePattern> = Vec::new();
+    let mut filters: Vec<Expression> = Vec::new();
+    flatten_conjunction(branch, &mut patterns, &mut filters);
+    if !filters.is_empty() {
+        return Ok(None);
+    }
+    // [SONNET-4.6] Decline when any pattern has a variable repeated across S/P/O positions
+    // (e.g. `?x ?p ?x`). The fallback enforces positional equality via build_row; without
+    // this guard the skip scan would over-approximate (include predicates that have no
+    // self-loop triple). Counterexample: data {ex:a ex:knows ex:a. ex:b ex:likes ex:c.},
+    // query SELECT DISTINCT ?p WHERE { ?x ?p ?x } — correct={ex:knows}, pushdown
+    // (unguarded)={ex:knows, ex:likes}.
+    if patterns.iter().any(has_intra_triple_repeated_var) {
+        return Ok(None);
+    }
+    // [OPUS-4.8] (sq-7d3dj.30.4) Decline when any pattern embeds an RDF 1.2 quoted-triple
+    // term (e.g. `<<?s ?p "o">> ?p2 ?z`) in a subject/object slot. A quoted term that
+    // carries a variable is decomposed by the general BGP planner (`extract_quoted_constraints`
+    // -> `quoted_relation`) BEFORE pattern preparation runs; the skip-scan path prepares the
+    // raw pattern, so `prepare_pattern` would try to resolve the whole quoted term to one
+    // ground id and ERROR ("variable where a term was expected") rather than fall back. We
+    // must always DECLINE (never error) so the general path produces the equivalent answer
+    // (W3C sparql12 eval-triple-terms/pattern-10). See `has_quoted_triple_term`.
+    if patterns.iter().any(has_quoted_triple_term) {
+        return Ok(None);
+    }
+    match patterns.len() {
+        1 => single_pattern_distinct(graph, &patterns[0], pvar, seen),
+        2 => two_pattern_distinct(graph, &patterns, pvar, seen),
+        _ => Ok(None),
+    }
+}
+
+/// Single-pattern branch: every distinct `?p` value in the pattern's range is a solution,
+/// so enumerate them directly via the skip scan.
+fn single_pattern_distinct(
+    graph: &Graph,
+    tp: &TriplePattern,
+    pvar: &Variable,
+    seen: &FxHashSet<Id>,
+) -> Result<Option<(Vec<Id>, usize)>, String> {
+    let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
+    if unsat {
+        return Ok(Some((Vec::new(), 0)));
+    }
+    let ppos = match var_positions_of(&pos_vars, pvar).as_slice() {
+        [p] => *p,
+        _ => return Ok(None),
+    };
+    let (vals, scanned) = match skipscan_distinct(graph, &id_pat, ppos) {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let new: Vec<Id> = vals.into_iter().filter(|v| !seen.contains(v)).collect();
+    Ok(Some((new, scanned)))
+}
+
+/// Two-pattern (anchor + probe) branch joined on a single variable: `?p` lives in exactly
+/// one pattern (the probe); the other (the anchor) constrains the join variable. Enumerate
+/// distinct `?p` from the probe and keep only those whose probe row set intersects the
+/// anchor's join-variable set (a loose semi-join existence check).
+fn two_pattern_distinct(
+    graph: &Graph,
+    patterns: &[TriplePattern],
+    pvar: &Variable,
+    seen: &FxHashSet<Id>,
+) -> Result<Option<(Vec<Id>, usize)>, String> {
+    let (idp0, pv0, uns0) = prepare_pattern(graph, &patterns[0])?;
+    let (idp1, pv1, uns1) = prepare_pattern(graph, &patterns[1])?;
+    let in0 = var_positions_of(&pv0, pvar);
+    let in1 = var_positions_of(&pv1, pvar);
+    // `?p` must appear EXACTLY ONCE, in exactly one of the two patterns (that is the probe).
+    match (in0.as_slice(), in1.as_slice()) {
+        ([ppos], []) => {
+            probe_anchor_distinct(graph, (&idp0, &pv0, uns0), (&idp1, &pv1, uns1), *ppos, seen)
+        }
+        ([], [ppos]) => {
+            probe_anchor_distinct(graph, (&idp1, &pv1, uns1), (&idp0, &pv0, uns0), *ppos, seen)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Prepared-pattern triple `(id_pat, pos_vars, unsat)` passed by reference.
+type PreparedRef<'a> = (&'a IdPattern, &'a [Option<Variable>; 3], bool);
+
+/// The loose semi-join for `{ anchor, probe }`: `probe` binds `?p` (at `ppos`) and the
+/// join variable; `anchor` constrains the join variable. Enumerates distinct `?p` from a
+/// permutation ordered `[.., P, J, ..]` (so each `?p`-block is sorted by the join variable)
+/// and keeps a `?p` iff its block contains a join-variable id present in the anchor set.
+fn probe_anchor_distinct(
+    graph: &Graph,
+    probe: PreparedRef<'_>,
+    anchor: PreparedRef<'_>,
+    ppos: usize,
+    seen: &FxHashSet<Id>,
+) -> Result<Option<(Vec<Id>, usize)>, String> {
+    let (probe_ip, probe_pv, probe_uns) = probe;
+    let (anchor_ip, anchor_pv, anchor_uns) = anchor;
+    if probe_uns || anchor_uns {
+        return Ok(Some((Vec::new(), 0)));
+    }
+    // Exactly one shared (join) variable, which must not be the projected variable.
+    let jvar = match single_shared_var(probe_pv, anchor_pv) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let jpos = match var_positions_of(probe_pv, jvar).as_slice() {
+        [p] => *p,
+        _ => return Ok(None),
+    };
+    let anchor_jpos = match var_positions_of(anchor_pv, jvar).first() {
+        Some(&p) => p,
+        None => return Ok(None),
+    };
+    if jpos == ppos {
+        return Ok(None);
+    }
+    // We need a permutation ordered `[.., P, J, third]` so a `?p`-block is sorted by the
+    // join variable (bounding the per-block existence scan). `scan_sorted(ppos)` only
+    // pins the FIRST unbound column, so choose the exact permutation ourselves.
+    let third = 3 - ppos - jpos;
+    let want = perm_for_order([ppos, jpos, third]).ok_or("no such permutation")?;
+    let scan = match graph.store.scan_perm(probe_ip, want) {
+        Some(s) => s,
+        // Permutation not built (e.g. the compact wasm index) or the pattern's bound
+        // positions are not a prefix in it → decline (fall back to the full path).
+        None => return Ok(None),
+    };
+    // `want.order() == [ppos, jpos, third]`, so P is column 0 and J is column 1, but only
+    // when every bound position precedes them; `scan_perm` guarantees the bound prefix, and
+    // both P and J are variables here, so this holds.
+    let (kp, jk) = (0usize, 1usize);
+    debug_assert_eq!(scan.perm.order()[kp], ppos);
+    debug_assert_eq!(scan.perm.order()[jk], jpos);
+    let rows = scan.rows.as_ref();
+    let mut out: Vec<Id> = Vec::new();
+    let mut scanned = 0usize;
+    let mut i = 0usize;
+    // The anchor's join-variable membership set, with its id range for the O(1)
+    // range-disjointness fast-reject below.
+    let a = match collect_var_ids(graph, anchor_ip, anchor_jpos) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let (a_min, a_max) = match (a.iter().min().copied(), a.iter().max().copied()) {
+        (Some(lo), Some(hi)) => (lo, hi),
+        // Empty anchor → the join is empty → no `?p` qualifies.
+        _ => return Ok(Some((Vec::new(), 0))),
+    };
+    while i < rows.len() {
+        if budget::exhausted(out.len()) {
+            return Ok(None);
+        }
+        let pv_id = rows[i][kp];
+        let block_len = rows[i..].partition_point(|r| r[kp] <= pv_id).max(1);
+        let block = &rows[i..i + block_len];
+        i += block_len;
+        // Already emitted by an earlier branch — no re-check needed.
+        if seen.contains(&pv_id) {
+            continue;
+        }
+        // The block is join-variable-sorted, so its join range is [first, last]. When that
+        // range is DISJOINT from the anchor set's id range, no anchor member can occur in
+        // it — reject the whole `?p` in O(1) (the common loose-scan win for value-typed
+        // predicates whose objects never overlap the entity id range).
+        let (bmin, bmax) = (block[0][jk], block[block.len() - 1][jk]);
+        scanned += 1;
+        if bmax < a_min || bmin > a_max {
+            continue;
+        }
+        // Existence: does any join-variable id in this block belong to the anchor set?
+        // Gallop distinct join values (block is join-sorted), early-exit on the first hit.
+        let mut bi = 0usize;
+        let mut hit = false;
+        while bi < block.len() {
+            let jv = block[bi][jk];
+            scanned += 1;
+            if a.contains(&jv) {
+                hit = true;
+                break;
+            }
+            let jlen = block[bi..].partition_point(|r| r[jk] <= jv).max(1);
+            bi += jlen;
+        }
+        if hit {
+            out.push(pv_id);
+        }
+    }
+    Ok(Some((out, scanned)))
+}
+
 /// Evaluates a pattern producing at most `cap` rows by stopping the scan early,
 /// when that is safe: a single-pattern scan (optionally with a pushed-down
 /// sargable numeric filter) under projection. Returns `None` for anything that
@@ -1751,7 +2693,7 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
             if patterns.len() != 1 {
                 return Ok(None);
             }
-            let (pat_filters, residual) = split_sargable(&patterns, &filters);
+            let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
             if !residual.is_empty() {
                 return Ok(None);
             }
@@ -1861,7 +2803,7 @@ fn count_single_filtered(
     // Resolve every filter to (canonical position, comparison); all must be sargable.
     let mut cmps: Vec<(usize, ScanCmp)> = Vec::with_capacity(filters.len());
     for f in filters {
-        let (var, cmp) = extract_sargable(f)?;
+        let (var, cmp) = extract_sargable(graph, f)?;
         let pos = pos_vars.iter().position(|v| v.as_ref() == Some(&var))?;
         cmps.push((pos, cmp));
     }
@@ -2377,7 +3319,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         // Push sargable numeric FILTERs down into the binary-plan scans (the WCOJ
         // path applies them afterwards); apply the rest normally.
         let (mut b, residual) = if bgp_uses_binary(&patterns) {
-            let (pat_filters, residual) = split_sargable(&patterns, &filters);
+            let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
             // [OPUS-4.8] (sq-5zf8i / §A4) Acyclic BGP: run the Yannakakis full-semijoin
             // prepass before the binary join when the opt-in `yannakakis` feature is on
             // (it internally cost-gates + falls back to `eval_bgp_binary`, threading the
@@ -2453,6 +3395,14 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
                     let l2 = eval_graph_pattern(graph, local, left)?;
                     return Ok(join_bindings(l2, r));
                 }
+            }
+            // Sideways information passing (SIP): when the already-evaluated `l` is
+            // SMALL, evaluate the big `right` child CORRELATED on it — seeding scans
+            // (incl. inside UNION branches) from `l`'s bound IRIs instead of cold.
+            // Conservative: any scope/threshold condition failure returns `None` and
+            // we fall through to the cold join below, bit-for-bit. [OPUS-4.8] (sq-7d3dj.30.3)
+            if let Some(joined) = try_sip_join(graph, local, &l, right)? {
+                return Ok(joined);
             }
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(join_bindings(l, r))
@@ -3282,7 +4232,14 @@ fn inline_pass_values(cmp: ScanCmp) -> Option<(u32, u32)> {
 /// Recognises a FILTER of the form `?v OP constant` (or the symmetric
 /// `constant OP ?v`) over a numeric or temporal constant, returning the variable
 /// and the comparison to push down.
-fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
+///
+/// [OPUS-4.8] (sq-lr2ii) A NUMERIC comparison is DECLINED (returns `None`) when the graph
+/// holds an f64-inexact decimal ([`Graph::has_high_precision_decimal`]): the f64 `numerics`
+/// cache the scan probes could then decide `=`/`<`/`>`/`<=`/`>=` wrongly for that value (e.g.
+/// `"1.000000000000000001"^^xsd:decimal` collapses onto the f64 `1.0`), so such comparisons
+/// fall back to the exact general evaluator instead. Temporal pushdown is unaffected, and a
+/// graph with no f64-inexact decimal keeps the numeric fast path.
+fn extract_sargable(graph: &Graph, e: &Expression) -> Option<(Variable, ScanCmp)> {
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
@@ -3335,7 +4292,14 @@ fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
     for (var, konst, op) in [(l, r, on_left), (r, l, on_right)] {
         let Some(v) = var_of(var) else { continue };
         if let Some(c) = lit_num(konst) {
-            return Some((v, num_cmp(op, c)));
+            // sq-lr2ii: decline the f64 numeric fast path when the graph holds an f64-inexact
+            // decimal — the scan's per-row f64 compare could be wrong for it. A numeric
+            // constant is never also a temporal one, so declining here yields `None` for this
+            // orientation; the exact general evaluator handles the residual FILTER correctly.
+            if !graph.has_high_precision_decimal() {
+                return Some((v, num_cmp(op, c)));
+            }
+            continue;
         }
         if let Some(t) = lit_temp(konst) {
             return Some((v, ScanCmp::Temp(op, t)));
@@ -3362,7 +4326,7 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// Splits FILTERs into per-pattern sargable numeric predicates (pushed into the
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
-pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
+pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
     // zk-trace: a sargable FILTER pushed into the scan would make the scan
     // record only the POST-filter rows (the rows that PASSED), losing the
     // FILTER obligation and under-capturing the input set — the proof must
@@ -3377,7 +4341,7 @@ pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression])
     let mut pat_filters: Vec<Option<(usize, ScanCmp)>> = vec![None; patterns.len()];
     let mut residual = Vec::new();
     for f in filters {
-        if let Some((var, cmp)) = extract_sargable(f) {
+        if let Some((var, cmp)) = extract_sargable(graph, f) {
             if let Some((i, pos)) = patterns
                 .iter()
                 .enumerate()
@@ -5649,8 +6613,10 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // parallel, then each partition builds its private map lock-free. Within a partition rows
     // are scanned in ascending index, so each posting list stays in ascending build-row order —
     // exactly the serial build — and the probe output is byte-identical.
+    // JoinTable = hashbrown::HashMap<Key, Posting, FxBuildHasher>; the type inference here
+    // avoids a dependency on rustc_hash::FxHashMap in the type annotation. [SONNET-4.6] sq-7d3dj.19
     #[cfg(feature = "parallel")]
-    let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
+    let tables = if build.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let parts: Vec<u8> = build
             .rows
@@ -5662,7 +6628,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         vec![sjoin::build_table(&build.rows, &keys)]
     };
     #[cfg(not(feature = "parallel"))]
-    let tables: Vec<FxHashMap<Key, Posting>> = vec![sjoin::build_table(&build.rows, &keys)];
+    let tables = vec![sjoin::build_table(&build.rows, &keys)];
     // The probe is read-only over the (partitioned) table, so for a large probe side build the
     // output in parallel on native.
     #[cfg(feature = "parallel")]
@@ -7181,9 +8147,9 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
     }
 
     // Operator-shape check: only a single sargable NUMERIC comparison is eligible.
-    // NOTE: do NOT use `extract_sargable(expr)?` — the `?` operator returns None without
+    // NOTE: do NOT use `extract_sargable(graph, expr)?` — the `?` operator returns None without
     // recording the decline, making the I5 counter miss non-sargable expressions. [SONNET-4.6]
-    let (var, cmp) = match extract_sargable(expr) {
+    let (var, cmp) = match extract_sargable(graph, expr) {
         None => {
             vec_dispatch::record_decline();
             return None;
@@ -14365,5 +15331,87 @@ mod compiled_expr_tests {
         for e in &exprs {
             assert_compiled_matches_original(&g, &local, &b, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod sip_unit {
+    //! Direct unit tests for the SIP helpers (`certain_vars` / `subst_pattern`),
+    //! complementing the end-to-end `tests/sip_join.rs`. [OPUS-4.8] (sq-7d3dj.30.3)
+    use super::*;
+    use oxrdf::{NamedNode, Variable};
+
+    fn var(s: &str) -> Variable {
+        Variable::new(s).unwrap()
+    }
+    fn nn(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+    fn tp(s: &str, p: &str, o: &str) -> TriplePattern {
+        TriplePattern {
+            subject: TermPattern::Variable(var(s)),
+            predicate: NamedNodePattern::NamedNode(nn(p)),
+            object: TermPattern::Variable(var(o)),
+        }
+    }
+
+    #[test]
+    fn certain_vars_union_is_branch_intersection() {
+        // left binds {x, y}; right binds {x, z}; only x is certain in the UNION.
+        let left = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
+        let right = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/q", "z")] };
+        let u = GraphPattern::Union { left: Box::new(left), right: Box::new(right) };
+        let mut out = FxHashSet::default();
+        certain_vars(&u, &mut out);
+        assert!(out.contains(&var("x")), "x certain (bound in both branches)");
+        assert!(!out.contains(&var("y")), "y bound in only one branch");
+        assert!(!out.contains(&var("z")), "z bound in only one branch");
+    }
+
+    #[test]
+    fn certain_vars_leftjoin_excludes_optional_side() {
+        let left = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
+        let right = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/q", "opt")] };
+        let lj = GraphPattern::LeftJoin {
+            left: Box::new(left),
+            right: Box::new(right),
+            expression: None,
+        };
+        let mut out = FxHashSet::default();
+        certain_vars(&lj, &mut out);
+        assert!(out.contains(&var("x")) && out.contains(&var("y")));
+        assert!(!out.contains(&var("opt")), "an OPTIONAL-right var is never certain");
+    }
+
+    #[test]
+    fn subst_pattern_replaces_variable_in_bgp_and_filter() {
+        let inner = GraphPattern::Bgp { patterns: vec![tp("doc", "http://e/creator", "prin")] };
+        let filt = GraphPattern::Filter {
+            expr: Expression::Not(Box::new(Expression::Equal(
+                Box::new(Expression::Variable(var("a"))),
+                Box::new(Expression::Variable(var("prin"))),
+            ))),
+            inner: Box::new(inner),
+        };
+        let mut sub = FxHashMap::default();
+        sub.insert(var("prin"), nn("http://e/paul"));
+        let out = subst_pattern(&filt, &sub).expect("substitution should succeed");
+        // The substituted variable must be fully gone (pattern positions AND filter).
+        let dbg = format!("{:?}", out);
+        assert!(dbg.contains("paul"), "result must carry the substituted IRI");
+        assert!(!dbg.contains("prin"), "substituted variable ?prin must be gone: {}", dbg);
+        assert!(dbg.contains("\"a\""), "the untouched ?a must remain");
+    }
+
+    #[test]
+    fn subst_pattern_bails_on_bound_of_substituted_var() {
+        let inner = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
+        let filt = GraphPattern::Filter { expr: Expression::Bound(var("x")), inner: Box::new(inner) };
+        let mut sub = FxHashMap::default();
+        sub.insert(var("x"), nn("http://e/c"));
+        assert!(
+            subst_pattern(&filt, &sub).is_none(),
+            "BOUND(?x) on a substituted variable must force the cold fallback"
+        );
     }
 }

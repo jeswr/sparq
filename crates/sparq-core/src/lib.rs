@@ -62,6 +62,15 @@ pub struct Graph {
     /// FILTER / ORDER BY / MIN/MAX read the timeline value O(1) from the cache
     /// instead of materialising the term and re-parsing its lexical per row.
     temporals: TempData,
+    /// [OPUS-4.8] (sq-lr2ii) Memoised guard against the engine's f64 sargable-FILTER fast
+    /// path deciding a comparison wrongly for an f64-INEXACT decimal. `0` = not yet computed,
+    /// `1` = known to hold NO such decimal (fast path safe), `2` = holds at least one (the
+    /// engine must decline the fast path and use the exact evaluator). Lazily filled by
+    /// [`has_high_precision_decimal`](Self::has_high_precision_decimal); reset to `0` by a
+    /// delta that appends terms (`apply_delta_mem`) so it is recomputed over the grown
+    /// dictionary. Interior-mutable so a shared `&Graph` can populate it; never observable in
+    /// results (pure correctness gate).
+    high_precision_decimal: std::sync::atomic::AtomicU8,
     /// Named graphs (each a self-contained `Graph`), keyed by their name term. Empty for the
     /// usual single-default-graph load; populated by [`load_dataset`](Self::load_dataset) from
     /// N-Quads / TriG so the engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`.
@@ -613,6 +622,39 @@ fn numeric_of(term: &Term) -> f64 {
     match term {
         Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
         _ => f64::NAN,
+    }
+}
+
+/// [OPUS-4.8] (sq-lr2ii) `true` iff dict id `id` is an `xsd:decimal` literal whose lexical
+/// form carries MORE than 15 significant digits — i.e. its f64 image may be inexact, so the
+/// engine's f64 sargable FILTER fast path is unsafe for it. Only `xsd:decimal` is checked:
+/// integer exactness is handled by the engine's constant-side guard and float/double values
+/// are their own f64. See [`Graph::has_high_precision_decimal`].
+fn is_high_precision_decimal(dict: &Dict, id: Id) -> bool {
+    matches!(dict.term_parts(id),
+        dict::TermParts::Lit { value, datatype, lang: None }
+            if datatype == xsd::DECIMAL.as_str() && decimal_significant_digits(value) > 15)
+}
+
+/// Significant decimal digits of a plain decimal lexical `[+-]?digits(.digits)?`: leading
+/// integer zeros and leading fractional zeros (for a value `< 1`) are not significant, e.g.
+/// `007.50` -> 3, `0.00123` -> 3, `1.000000000000000001` -> 19. `usize::MAX` for a lexical that
+/// is not a plain decimal (treated as unsafe by the `> 15` guard). Kept LOCAL to sparq-core:
+/// this crate is the leanest tier and cannot depend on `sparq-substrate`; the count mirrors the
+/// engine's `sig_digits` (constant-side guard) so the two round-trip decisions stay consistent.
+fn decimal_significant_digits(s: &str) -> usize {
+    let s = s.trim();
+    let s = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+        return usize::MAX;
+    }
+    let int = int.trim_start_matches('0');
+    let frac = frac.trim_end_matches('0');
+    if int.is_empty() {
+        frac.trim_start_matches('0').len()
+    } else {
+        int.len() + frac.len()
     }
 }
 
@@ -1425,6 +1467,7 @@ impl Graph {
             store,
             numerics,
             temporals,
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named: Vec::new(),
             graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
@@ -1460,6 +1503,8 @@ impl Graph {
             // numeric literals when sparse, freeing the dense f64-per-term Vec.
             numerics: self.numerics.into_sparse_if_worthwhile(),
             temporals: self.temporals.into_sparse_if_worthwhile(),
+            // sq-lr2ii: re-encoding keeps the same values; recompute the guard lazily.
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named: self.named,
             graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
@@ -1673,6 +1718,7 @@ impl Graph {
             store,
             numerics,
             temporals,
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named,
             graph_prefix_index: std::sync::Mutex::new(None),
             wal: None,
@@ -2455,6 +2501,37 @@ impl Graph {
         }
     }
 
+    /// [OPUS-4.8] (sq-lr2ii) `true` if the graph holds any `xsd:decimal` literal with MORE
+    /// than 15 significant digits — a value the f64 `numerics` cache CANNOT represent exactly,
+    /// so the engine's f64-based sargable FILTER fast path could decide `=`/`<`/`>`/`<=`/`>=`
+    /// WRONGLY for it (e.g. `"1.000000000000000001"^^xsd:decimal` shares the f64 `1.0` with the
+    /// constant `1`, yet is not equal to it). The engine consults this at the sargable-decision
+    /// point to DECLINE that fast path and fall back to the exact general evaluator; a graph
+    /// without any such decimal keeps the fast path (a decimal of `<= 15` significant digits
+    /// round-trips through f64 unambiguously, and a large-integer collision needs a `> 15`-digit
+    /// CONSTANT, which the engine already declines). Integers/float/double are exempt: an
+    /// integer's exactness is the constant-side guard's job and a float/double's value IS its f64.
+    ///
+    /// Memoised (see `high_precision_decimal`): the first call scans the graph's numeric terms
+    /// once (short-circuiting on the first offender); later calls are an atomic load. A delta
+    /// that appends terms resets the memo so it is recomputed over the grown dictionary. This is
+    /// a CONSERVATIVE, graph-wide gate — one offending decimal declines the numeric fast path for
+    /// every comparison on the graph — chosen for safety (correctness is never at risk; only the
+    /// pushdown optimisation is skipped for affected graphs).
+    pub fn has_high_precision_decimal(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        match self.high_precision_decimal.load(Relaxed) {
+            2 => true,
+            1 => false,
+            _ => {
+                let found = (1..=self.dict.len() as Id)
+                    .any(|id| self.numerics.lookup(id).is_some() && is_high_precision_decimal(&self.dict, id));
+                self.high_precision_decimal.store(if found { 2 } else { 1 }, Relaxed);
+                found
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.store.len()
     }
@@ -2553,6 +2630,8 @@ impl Graph {
             store: self.store.fork(),
             numerics: self.numerics.fork(),
             temporals: self.temporals.fork(),
+            // sq-lr2ii: the fork shares the same values; recompute the guard lazily.
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named: self.named.iter().map(|(name, g)| (name.clone(), g.fork())).collect(),
             // A fork is a fresh logical copy; rebuild the prefix index lazily on first use.
             graph_prefix_index: std::sync::Mutex::new(None),
@@ -3047,6 +3126,15 @@ impl Graph {
         // Keep the numeric- and temporal-filter caches covering the grown dictionary.
         self.numerics.extend_for(&self.dict, old_len);
         self.temporals.extend_for(&self.dict, old_len);
+        // sq-lr2ii: an inserted term may be an f64-inexact decimal. If the sargable-safety
+        // guard was memoised as "no such decimal" (1), reset it to recompute over the grown
+        // dictionary; a "found" (2) verdict is monotonic (terms are never removed) and stays.
+        let _ = self.high_precision_decimal.compare_exchange(
+            1,
+            0,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.store.apply_delta(&ins_ids, &del_ids);
     }
 
@@ -3912,16 +4000,29 @@ fn parse_nt_record(bytes: &[u8]) -> Option<[Term; 3]> {
 
 /// The numeric-value cache for a dictionary: `numerics[id-1]` is the f64 value of term
 /// `id` (NaN for non-numeric). Parallel when the `parallel` feature is on.
+///
+/// [SONNET-4.6] (sq-7d3dj.6) Rebuilt from borrowed `TermParts` — no per-id owned `Term`
+/// allocation. Uses the `is_numeric_datatype_str` borrowed-component path already proven
+/// by the spill build (`dictspill.rs`), removing O(distinct-terms) allocations from
+/// `Graph::build`.
 fn numerics_of(dict: &Dict) -> Vec<f64> {
     let n = dict.len();
+    let numeric_of_parts = |i: usize| -> f64 {
+        match dict.term_parts(i as Id + 1) {
+            dict::TermParts::Lit { value, datatype, lang: None } if is_numeric_datatype_str(datatype) => {
+                value.parse::<f64>().unwrap_or(f64::NAN)
+            }
+            _ => f64::NAN,
+        }
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        (0..n).into_par_iter().map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+        (0..n).into_par_iter().map(numeric_of_parts).collect()
     }
     #[cfg(not(feature = "parallel"))]
     {
-        (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+        (0..n).map(numeric_of_parts).collect()
     }
 }
 
@@ -8873,6 +8974,66 @@ mod tests {
         assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s"))).unwrap()), None);
     }
 
+    /// [OPUS-4.8] sq-lr2ii — `decimal_significant_digits` counts significant digits, ignoring
+    /// leading integer zeros and leading fractional zeros, and rejects non-decimals.
+    #[test]
+    fn decimal_significant_digits_counts() {
+        assert_eq!(decimal_significant_digits("1"), 1);
+        assert_eq!(decimal_significant_digits("1.5"), 2);
+        assert_eq!(decimal_significant_digits("007.50"), 2, "leading int zeros + trailing frac zeros dropped: 7.5");
+        assert_eq!(decimal_significant_digits("0.00123"), 3, "leading fractional zeros are not significant");
+        assert_eq!(decimal_significant_digits("-1.000000000000000001"), 19, "sign stripped; 19 sig digits");
+        assert_eq!(decimal_significant_digits("+2.5"), 2);
+        assert_eq!(decimal_significant_digits("0.0"), 0, "zero has no significant digits");
+        // Non-decimal lexicals are treated as unsafe (usize::MAX > 15).
+        assert_eq!(decimal_significant_digits("1e5"), usize::MAX);
+        assert_eq!(decimal_significant_digits(""), usize::MAX);
+        assert_eq!(decimal_significant_digits("abc"), usize::MAX);
+    }
+
+    /// [OPUS-4.8] sq-lr2ii — `has_high_precision_decimal` is the engine's sargable-safety gate:
+    /// TRUE iff the graph holds an `xsd:decimal` with > 15 significant digits (an f64-inexact
+    /// value). Integers past 2^53, floats/doubles, and <=15-digit decimals do NOT set it.
+    #[test]
+    fn has_high_precision_decimal_flags_only_inexact_decimals() {
+        let xsd_ = |ty: &str| format!("http://www.w3.org/2001/XMLSchema#{ty}");
+        let build = |obj: &str| {
+            let nt = format!("<http://ex/s> <http://ex/p> {obj} .\n");
+            Graph::load_str(&nt, "ntriples").unwrap()
+        };
+
+        // The bug value: 19-sig-digit decimal collapsing onto f64 1.0.
+        assert!(build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+        // A <1 high-precision decimal.
+        assert!(build(&format!("\"0.1234567890123456789\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+
+        // NOT flagged: an exactly-representable decimal (<=15 sig digits).
+        assert!(!build(&format!("\"1.5\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+        assert!(!build(&format!("\"123456789012345\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal(), "15 sig digits round-trips");
+        // NOT flagged: a big integer (constant-side guard's job, not this one).
+        assert!(!build(&format!("\"9007199254740993\"^^<{}>", xsd_("integer"))).has_high_precision_decimal());
+        // NOT flagged: a high-precision double — its value IS its f64.
+        assert!(!build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("double"))).has_high_precision_decimal());
+        // NOT flagged: an empty / non-numeric graph.
+        assert!(!build("\"hello\"").has_high_precision_decimal());
+        assert!(!Graph::new().has_high_precision_decimal());
+    }
+
+    /// [OPUS-4.8] sq-lr2ii — the memoised flag must NOT go stale: inserting an f64-inexact
+    /// decimal via a delta AFTER the flag was computed as `false` must flip it to `true`.
+    #[test]
+    fn has_high_precision_decimal_memo_survives_delta_insert() {
+        let mut g = Graph::load_str("<http://ex/s> <http://ex/p> \"3\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", "ntriples").unwrap();
+        // Compute (and memoise) the flag as false over the integer-only graph.
+        assert!(!g.has_high_precision_decimal());
+        // Insert a high-precision decimal; the memo must be invalidated + recomputed to true.
+        let s = Term::NamedNode(NamedNode::new_unchecked("http://ex/s"));
+        let p = Term::NamedNode(NamedNode::new_unchecked("http://ex/d"));
+        let o = Term::Literal(Literal::new_typed_literal("2.000000000000000003", xsd::DECIMAL));
+        g.apply_delta(&[[s, p, o]], &[]).unwrap();
+        assert!(g.has_high_precision_decimal(), "delta-inserted inexact decimal must flip the memo");
+    }
+
     /// The full sorted term-triple set of a graph (overlay merged), for state comparison.
     fn dump_terms(g: &Graph) -> Vec<(String, String, String)> {
         let scan = g.store.scan(&[None, None, None]);
@@ -9868,6 +10029,43 @@ mod tests {
                 assert_eq!(temporal_count, 2, "both temporal literals survive (sparse={sparse} compressed={compressed})");
                 std::fs::remove_dir_all(&dir).ok();
             }
+        }
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.6) The borrowed-path `numerics_of` must produce the SAME f64 cache
+    /// as the old owned-path for every dictionary id — including numerics (xsd:decimal/double/float/
+    /// integer-subtypes), temporals, plain IRIs, strings, and lang-tagged literals. This is the
+    /// load-bearing invariant for the allocation-removal optimisation: the cache bytes are identical
+    /// whether built via `dict.term(id)` (old) or `dict.term_parts(id)` (new borrowed path).
+    #[test]
+    fn numerics_of_borrowed_path_byte_identical_to_owned() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix ex: <http://ex/> .\n\
+            ex:a ex:v \"1.5\"^^xsd:decimal .\n\
+            ex:b ex:v \"2.5\"^^xsd:double .\n\
+            ex:c ex:v \"3.0\"^^xsd:float .\n\
+            ex:d ex:v \"42\"^^xsd:integer .\n\
+            ex:e ex:v \"100\"^^xsd:long .\n\
+            ex:f ex:v \"hello\" .\n\
+            ex:g ex:v \"bonjour\"@fr .\n\
+            ex:h ex:v ex:iri .\n\
+            ex:i ex:v \"2020-01-01T00:00:00Z\"^^xsd:dateTime .";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let dict = &g.dict;
+        let n = dict.len();
+        // Owned-path reference: the old `numerics_of` logic byte-for-byte.
+        let owned: Vec<f64> = (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect();
+        // Borrowed-path: current `numerics_of`.
+        let borrowed = numerics_of(dict);
+        assert_eq!(owned.len(), borrowed.len(), "length mismatch");
+        for (idx, (a, b)) in owned.iter().zip(borrowed.iter()).enumerate() {
+            let id = idx as Id + 1;
+            // Compare as bits: NaN == NaN in the cache (we want byte-identical, not IEEE equality).
+            assert_eq!(
+                a.to_bits(), b.to_bits(),
+                "id {}: owned bits {:016x} != borrowed bits {:016x}",
+                id, a.to_bits(), b.to_bits()
+            );
         }
     }
 

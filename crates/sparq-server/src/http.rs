@@ -4991,14 +4991,31 @@ async fn run_query_pinned(
                 Err(_) => return not_acceptable_response(head_only),
             };
             let is_ask = prepared.form == QueryForm::Ask;
-            let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
             let cfg = config.clone();
             let allow = allow.clone();
+            // [OPUS-4.8] (sq-7d3dj.34.2) SELECT → SPARQL-results JSON streams its body: the
+            // engine runs on a blocking worker and feeds a bounded channel, so the results
+            // header + early solutions reach the socket before the whole result is
+            // serialised (TTFB). ASK and the XML/CSV/TSV SELECT forms keep the buffered
+            // worker path below (their serialisers are `&QueryResult`-driven).
+            // [OPUS-4.8] (sq-7d3dj.34.1) The floor path (JSON SELECT stream + ASK) runs the
+            // algebra already parsed in `prepare` via the engine's `*_prepared` entry points —
+            // no second parse per request.
+            if !is_ask && fmt == Format::Json {
+                return stream_select_json(gen, prepared.query, budget, head_only, allow, &config)
+                    .await;
+            }
+            let pquery = prepared.query;
+            let select = prepared.runnable;
             let task = tokio::task::spawn_blocking(move || {
                 with_engine_scope_allow(&allow, || {
                     if is_ask {
-                        match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
+                        match sparq_engine::ask_prepared_with_budget(
+                            gen.snapshot(),
+                            &pquery,
+                            &budget,
+                        ) {
                             Ok(value) => {
                                 let (body, ct) = match fmt {
                                     Format::Xml => {
@@ -5244,6 +5261,148 @@ fn render_select(
         }
     };
     text_response(StatusCode::OK, ct, body, head_only)
+}
+
+/// [OPUS-4.8] (sq-7d3dj.34.2) Bounded chunk buffer between the engine worker and the HTTP
+/// response body. Small on purpose: a slow client back-pressures the worker (which blocks on
+/// `blocking_send`) rather than letting a large serialised result pile up in server memory.
+const STREAM_CHANNEL_CAP: usize = 4;
+
+/// [OPUS-4.8] (sq-7d3dj.34.2) Streams a SELECT result as SPARQL-results JSON.
+///
+/// The engine runs on a `spawn_blocking` worker and hands each ~64 KiB chunk
+/// ([`sparq_engine::query_json_stream_with_budget`]) to a bounded channel; the HTTP body
+/// drains the channel, so the results header + early solutions reach the socket **before the
+/// whole result is serialised** (TTFB). The concatenation of the streamed body is
+/// byte-identical to the buffered [`render_select`] JSON path.
+///
+/// **Status vs. first byte.** We await the FIRST channel item before committing a status, so
+/// a failure detected *before any byte is written* — a parse error, or a cooperative budget /
+/// deadline trip that fires before the header — still produces the correct HTTP status (400 /
+/// 413 / 503). A **single-chunk** (small) result is returned buffered with a `Content-Length`
+/// (the sub-millisecond floor path is unchanged in shape); a **multi-chunk** result streams
+/// under chunked transfer-encoding with no `Content-Length` (the length is unknown until the
+/// last row).
+///
+/// **Error mid-stream.** Once the header has been flushed the status is committed and cannot
+/// change; a later budget / deadline trip is surfaced as a body error, which aborts the
+/// chunked stream WITHOUT its terminating zero-length chunk, so the client observes a
+/// truncated / broken response. This is the honest default (documented in the crate docs +
+/// the `http-server` SKILL): a streamed body cannot retroactively become a 413/503.
+async fn stream_select_json(
+    gen: PinnedGen,
+    // [OPUS-4.8] (sq-7d3dj.34.1) The query PARSED ONCE in `prepare` — the engine runs it via
+    // `query_json_stream_prepared_with_budget` without re-parsing (the HTTP floor win).
+    query: sparq_engine::PreparedQuery,
+    budget: QueryBudget,
+    head_only: bool,
+    allow: crate::service_config::ServiceAllowlist,
+    config: &ServerConfig,
+) -> Response {
+    let ct = Format::Json.select_content_type();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(STREAM_CHANNEL_CAP);
+    tokio::task::spawn_blocking(move || {
+        with_engine_scope_allow(&allow, || {
+            let graph = gen.snapshot();
+            let mut sink = |chunk: String| match tx.blocking_send(Ok(Bytes::from(chunk.into_bytes()))) {
+                Ok(()) => std::ops::ControlFlow::Continue(()),
+                // The receiver was dropped — the client disconnected (or a HEAD request
+                // stopped reading). Abandon the rest of the work.
+                Err(_) => std::ops::ControlFlow::Break(()),
+            };
+            if let Err(e) = sparq_engine::query_json_stream_prepared_with_budget(graph, &query, &budget, &mut sink) {
+                let _ = tx.blocking_send(Err(e));
+            }
+            // `gen` (the generation pin) is held until the worker returns, so every snapshot
+            // borrow above is valid for the whole streamed evaluation.
+        });
+    });
+
+    // Await the first item under the same wall-clock cap the buffered path uses, so a
+    // pre-first-byte failure still maps to the right status.
+    let first = match recv_first_chunk(&mut rx, config).await {
+        Ok(Some(Ok(bytes))) => bytes,
+        Ok(Some(Err(e))) => return engine_error_response(&e, config, true),
+        Ok(None) => return execution_error("query produced no result stream"),
+        Err(()) => return timeout_response(config),
+    };
+
+    // Peek the second item: a single-chunk result is returned buffered (Content-Length);
+    // a multi-chunk result streams.
+    match rx.recv().await {
+        None => {
+            let len = first.len();
+            let body = if head_only {
+                axum::body::Body::empty()
+            } else {
+                axum::body::Body::from(first)
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ct)
+                .header(header::CONTENT_LENGTH, len)
+                .body(body)
+                .unwrap()
+        }
+        // [OPUS-4.8] (sq-7d3dj.34.2) The engine produced the (only) chunk and THEN failed —
+        // e.g. a row/byte cap that the single-pattern scan only confirms after emitting the
+        // document, or a cooperative deadline trip. Because we buffer the first chunk before
+        // committing a status, NOTHING has been flushed to the socket yet, so we still return
+        // the correct refusal (413 / 503), exactly like the buffered path — never a truncated
+        // 200. (A cap tripped on a genuinely multi-chunk result — first two items both `Ok` —
+        // cannot be un-committed and is truncated mid-stream; see below.)
+        Some(Err(e)) => engine_error_response(&e, config, true),
+        Some(Ok(second)) => {
+            if head_only {
+                // HEAD: status + headers only. Dropping the receiver stops the worker.
+                drop(rx);
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, ct)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+            }
+            // Stream first + second + the remaining channel items under chunked
+            // transfer-encoding. A channel `Err` (a post-header budget/deadline trip) is
+            // mapped to a body error → the chunked stream aborts without its terminating
+            // zero-length chunk (truncated response; the 200 status is already committed).
+            let mut prefix: std::collections::VecDeque<Result<Bytes, String>> =
+                std::collections::VecDeque::with_capacity(2);
+            prefix.push_back(Ok(first));
+            prefix.push_back(Ok(second));
+            let body = axum::body::Body::from_stream(futures_util::stream::unfold(
+                (prefix, rx),
+                |(mut prefix, mut rx)| async move {
+                    let item = match prefix.pop_front() {
+                        Some(it) => Some(it),
+                        None => rx.recv().await,
+                    };
+                    item.map(|it| (it.map_err(std::io::Error::other), (prefix, rx)))
+                },
+            ));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ct)
+                .body(body)
+                .unwrap()
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-7d3dj.34.2) Awaits the first streamed chunk (or the pre-first-byte error)
+/// under the read wall-clock cap (`query_timeout + TIMEOUT_GRACE`), mirroring
+/// [`await_worker`]. `Err(())` means the cap elapsed before the worker produced anything.
+async fn recv_first_chunk(
+    rx: &mut tokio::sync::mpsc::Receiver<Result<Bytes, String>>,
+    config: &ServerConfig,
+) -> Result<Option<Result<Bytes, String>>, ()> {
+    match config.query_timeout {
+        Some(t) => match tokio::time::timeout(t + TIMEOUT_GRACE, rx.recv()).await {
+            Ok(item) => Ok(item),
+            Err(_elapsed) => Err(()),
+        },
+        None => Ok(rx.recv().await),
+    }
 }
 
 /// Maps an engine error string onto the HTTP guard semantics: budget timeout → 503,

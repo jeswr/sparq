@@ -58,15 +58,15 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `rsp-ql`, `vectors-throughput`, `kge-ablation`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
-| **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `rsp-ql`, `vectors-throughput`, `kge-ablation`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics`, `federation-fedshop` |
+| **parse** | text-format parse throughput (MB/s) | `parse-baseline`, `parse-competitors`, `serialize-bench` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `dict-baseline`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
-| **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle` |
+| **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench`, `wasm-compare`, `graphalytics` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle`, `reason-el-real`, `reason-ql-npd`, `reason-dl-ore`, `materialize-competitors` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
-| **serve** | canonical loopback HTTP throughput harness; concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-throughput`, `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
-| **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
+| **serve** | canonical loopback HTTP throughput harness; concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-throughput`, `serve-spikes`, `memtier-spikes`, `pss-update-parity`, `gsp-bench`, `python-bindings-bench` |
+| **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance`, `jsonld-bench`, `canon-bench`, `rif-conformance` |
 | **competitors** | versioned external-engine comparison (Oxigraph / QLever / Fuseki+TDB2 / eye + the SHACL/geo/FTS/vector peers) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 
 Notes on a few that need care:
@@ -158,9 +158,15 @@ Notes on a few that need care:
   counts ALSO encode the **three-EvalMode-equivalence**) and `rsp_srbench_<q>_w<k>_rows` (the
   **SRBench correctness ORACLE**: a multi-window observation⋈station-metadata join) vs
   `expected.tsv` (exit 1 on drift). CI emits `rsp_persistentdict_triples_per_s` (trend-only,
-  advisory). **NO competitor perf column** — the RSP peers (C-SPARQL / CQELS / RSP4J) are
-  wall-clock service engines, so a throughput head-to-head is apples-to-oranges (different time
-  model); perf comparison is explicitly **out of scope**.
+  advisory). **Bounded count-matched-replay RSP comparison** — per the program design
+  record `research/comparative-benchmarking-everything.md` §5.2, a blanket
+  NOT-COMPARABLE verdict is too strong; a bounded honest comparison is adopted:
+  drive RSP4J with the *identical* timestamped replay, require **per-window
+  result-count agreement** with sparq's deterministic oracle *first*, then report
+  sustained triples/s side-by-side with a **machine-attached time-model caveat on
+  every emitted row** (the caveat travels in the envelope, not just prose). Windows
+  that cannot be count-matched are **excluded and the exclusion reported**. Implemented
+  by `sq-hmd7l.20`; RSP4J/YASPER registered in `bench/competitors.json` (id: `rsp4j-yasper`).
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).
@@ -275,6 +281,18 @@ Notes on a few that need care:
   a Docker EC2 box; cross-check result-set SIZE before timing), and **PostGIS** as a LOOSE non-SPARQL
   lower bound (relational `rstar`-style sub-component, NOT a `geof:`/graph-join competitor — match
   CRS/op semantics or omit).
+  **sq-hmd7l.1 (2026-07-07) added 24 new competitor entries** (registry-only, no
+  measured numbers, all `unverified_pin: true`): **serd / raptor / jena-riot** ↔
+  `parse-competitors` + `serialize-bench`; **cwm / jen3** ↔ `inference-eye-comparison`
+  (N3 reasoner columns 3+4); **vlog / nemo** ↔ `materialize-competitors` (Datalog
+  peers); **elk** ↔ `reason-el-real`; **ontop** ↔ `reason-ql-npd`; **hermit-openllet**
+  ↔ `reason-dl-ore`; **titanium-json-ld / jsonld-js** ↔ `jsonld-bench`; **rdf-canonize-js
+  / rdf-canon-rust** ↔ `canon-bench`; **comunica** ↔ `federation-fedshop`; **rsp4j-yasper**
+  ↔ `rsp-throughput` (bounded count-matched-replay per §5.2); **igraph / networkit** ↔
+  `graphalytics`; **pyoxigraph / rdflib** ↔ `python-bindings-bench`; **oxigraph-wasm /
+  n3js-quadstore** ↔ `wasm-compare`; **css-gsp** ↔ `gsp-bench` (GSP-LOOSE, reference
+  kind, not a dashboard column); **pykeen** ↔ `kge-ablation` (quality oracle, not
+  throughput). Versions to be pinned at first gather run.
   HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
   comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
   flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).

@@ -102,6 +102,7 @@ Thm = "Thm"             # "Theorem" abbreviation
 IST = "IST"             # acronym in a table
 Rotat = "Rotat"         # "RotatE" KG-embedding model name (wraps to "Rotat")
 struc = "struc"         # [OPUS-4.8] "struc2vec" structural-role embedding method name (typos splits on the digit, flags "struc"->"struct")
+Networ = "Networ"       # [SONNET-4.6 sq-hmd7l.1] "NetworKit" graph-analytics library (typos splits at case boundary → "Networ"/"Kit"; NetworKit is the official project name)
 criticals = "criticals"  # audit jargon: "the audit's criticals"
 unparseable = "unparseable" # accepted variant spelling used in skills docs
 unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional

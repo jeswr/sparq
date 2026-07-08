@@ -1,0 +1,13 @@
+# [FABLE-5] sq-hmd7l.3 — PINNED jena-geosparql rendering of the `nearest_k100`
+# workload for scripts/bench/geo-same-box.sh. Same rendering rationale + oracle
+# as nearest_k10.rq (standard GeoSPARQL has no k-nearest function; ORDER BY
+# distance + LIMIT k is the standard-visible form; result-set SIZE == k is the
+# only cross-checked value).
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT ?e WHERE {
+  ?e geo:asWKT ?wkt .
+}
+ORDER BY ASC(geof:distance(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre)) ?e
+LIMIT 100

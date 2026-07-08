@@ -84,6 +84,9 @@ SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` varia
 - `query_json(&Graph, &str) -> Result<String, String>` — SELECT/ASK as SPARQL-1.1 JSON.
 - `query_json_chunks_with_budget(&Graph, &str, &QueryBudget) -> Result<Vec<String>, String>` —
   streamed JSON (concatenation is byte-identical to `query_json`; for HTTP bodies).
+- `query_json_stream_with_budget(&Graph, &str, &QueryBudget, sink)` (+ the
+  `query_json_stream_prepared_with_budget` no-re-parse variant over a `PreparedQuery`) —
+  emits each JSON chunk to `sink` AS produced (TTFB streaming; the HTTP server's read path).
 - `ask(&Graph, &str) -> Result<bool, String>` — requires an ASK query.
 - `count(&Graph, &str) -> Result<usize, String>` — solution count without materialising terms.
 
@@ -379,6 +382,16 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   (a vendored) `spargebra` with `sparql-12` + `sep-0006`.
 - **Only SELECT/ASK** go through `query`/`query_json`/`count`; CONSTRUCT/DESCRIBE have their own
   functions, and a form mismatch is a clean `Err` (e.g. `ask()` on a SELECT).
+- **Numeric FILTER comparisons are VALUE-EXACT, incl. high-precision `xsd:decimal`** (`sq-lr2ii`).
+  A single-pattern `?v OP const` numeric FILTER is normally pushed into the scan and decided via the
+  O(1) f64 `numerics` cache (`extract_sargable`). Because an f64 cannot represent a decimal with
+  `> 15` significant digits exactly (e.g. `"1.000000000000000001"^^xsd:decimal` shares the f64 `1.0`
+  with the integer `1`), that fast path is **declined** whenever the graph holds such a decimal
+  (`Graph::has_high_precision_decimal`) OR the constant itself has `> 15` significant digits — the
+  comparison then falls back to the exact evaluator (`=`/`<`/`>`/`<=`/`>=` decided by exact decimal
+  string arithmetic, matching the `BIND((?v = c) AS ?b)` expression path). The decline is
+  graph-wide/conservative (correctness first): a graph carrying one high-precision decimal skips the
+  numeric-pushdown optimisation for all its numeric FILTERs, never the wrong answer.
 - **`SELECT *`** never exposes blank-node "variables" (`_:x` in a pattern is an existential var).
 - **`update` vs `update_in_place` vs `update_in_place_atomic`** — `update` returns a fresh `Graph`
   (input borrowed, untouched, atomic by construction); `update_in_place(&mut g, …)` mutates via the
@@ -556,6 +569,42 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   global atomics) so parallel test threads don't interfere. The counters are **not semver-stable** —
   external callers must not build stable logic on them; they exist only for the acceptance gate in
   `tests/differentials/vectorized_byte_identity.rs` (T1–T4).
+- **Sideways information passing (SIP) — correlated graph-pattern join** is a DEFAULT-ON,
+  semantics-preserving optimisation (bead `sq-7d3dj.30.3`; research/sp2bench-complex-shape-deficit.md
+  §2.2). When a `Join(A, B)` is evaluated and the already-evaluated side `A` is **small** (≤ 64 rows),
+  the executor evaluates the big child `B` **correlated** on A's bindings instead of cold: for each
+  distinct binding of A's variables that are **certainly bound** in `B` and bound to an **IRI** in `A`,
+  that IRI is substituted as a constant into `B`'s patterns — pushing *into UNION branches, BGP scans,
+  property paths and filters* — so a scan seeds from the constant rather than running blind. Results are
+  recombined preserving **multiplicity** (bag semantics). It is **conservative**: it fires only for
+  IRI-valued correlation variables that are certain in `B` (never a variable that a solution may leave
+  unbound — e.g. inside an OPTIONAL right side, or MINUS, or a projecting sub-`SELECT`), and any
+  scope/threshold failure falls back to the **cold** evaluation bit-for-bit. The answer is identical
+  either way (proven on-vs-off by `tests/sip_join.rs`, incl. an anti-vacuity trace assertion that the
+  correlated child actually collapsed). SP2Bench q08/q12b: the 1-row `?erdoes` side seeds the Union's
+  `?document dc:creator ?erdoes` scan instead of a whole-corpus creator self-join. Payoff on complex-shape
+  workloads is a measurable hypothesis for the canonical perf host, not a baked-in number.
+- **DISTINCT-projection loose (skip) index scan** is a DEFAULT-ON, semantics-preserving optimisation
+  (bead `sq-7d3dj.30.4`; research/sp2bench-complex-shape-deficit.md §2.3). For `SELECT DISTINCT ?p`
+  over a BGP / **UNION** of BGPs where `?p` is the **single** projected variable, the executor
+  enumerates the DISTINCT `?p` values **directly** from an existing permutation sorted by `?p` — a
+  loose/skip scan that gallops (binary-search) past each value's block — instead of materialising every
+  full-width join row and de-duplicating post-hoc. It is the general form of qlever's "pattern trick"
+  over sparq's six permutations, and builds **NO new index**. Two branch shapes are enumerated: a single
+  BGP triple (every distinct `?p` is a solution) and an **anchor + probe** pair joined on one variable
+  (distinct `?p` from the probe kept iff its `[P, J]`-ordered block intersects the anchor's join set — a
+  loose semi-join with an O(1) id-range-disjointness fast reject). A **global already-seen `?p` set**
+  makes later branches near-free. It is **conservative**: it fires only for that exact single-variable
+  DISTINCT shape and only when a built permutation exposes the required column order (the compact/wasm
+  index {SPO, POS, OSP} lacks PSO, so a subject-side probe declines there); every other shape — REDUCED,
+  multi-variable projections, filters, three-pattern branches, `?p` used as the join variable, a pattern
+  with a variable repeated across S/P/O (`?x ?p ?x`), and any pattern embedding an RDF 1.2 quoted-triple
+  term (`<<?s ?p "o">> …`, decomposed by the general BGP planner) — falls back to the full
+  materialise-then-dedup path **bit-for-bit** (never erroring). The answer is DISTINCT-set identical
+  either way (proven on-vs-off by `tests/distinct_pushdown.rs`, incl. a q09-shaped anti-vacuity assertion
+  that the scanned rows collapse to a small fraction of the full join). SP2Bench q09: the 2-branch
+  `DISTINCT ?predicate` over persons answers a handful of predicates without materialising the ~77 k-row
+  join. Payoff on the canonical perf host is a measurable hypothesis, not a baked-in number.
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
   pattern, the executor first builds a membership filter over the already-materialised side's
@@ -617,6 +666,24 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-
   the-DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical,
   and no new dependencies are added (no `unsafe`).
+- **Pre-execution algebra rewrite pass** is the non-default `algebra-rewrite` cargo feature (bead
+  `sq-7d3dj.30.1`; design record `research/sp2bench-complex-shape-deficit.md` §2.1/§2.5/§4). With it ON,
+  `PreparedQuery::parse` (the single seam every string query entry point funnels through) and the two
+  EXPLAIN parse sites run the parsed `spargebra` algebra through `sparq_engine::rewrite::rewrite_query`
+  BEFORE evaluation. Two rewrites: **(a) equality substitution** — a `FILTER(?v = <iri>)` (also
+  `<iri> = ?v` / `sameTerm(?v, <iri>)`) whose `?v` occurs in the group's triple patterns folds the IRI
+  constant INTO those patterns (turning a post-join FILTER over every enumerated row into a
+  constant-seeded indexed scan; `?v` is re-bound via `Extend` so it stays in scope), and **(b)
+  anti-join** — `FILTER(!bound(?v), LeftJoin(A, B))` becomes `Minus(A, B)` when `?v` is certain in `B`,
+  absent from `A`, and `A`/`B` share a certain variable. **IRI-only:** rewrite (a) fires ONLY for
+  `NamedNode` constants (`=` on IRIs is term-identity, so the substitution is exact); a **literal**
+  equality (`?v = 1`, `?v = "1"^^xsd:decimal`) is NEVER rewritten — this is the deliberate avoidance
+  contract for the open value-equality/decimal bug `sq-lr2ii`. Every rewrite is **bag-result-equivalent**
+  (`query`/`ask`/`count`/`query_json` return the SAME answers on vs off — proven by
+  `tests/rewrite_pass.rs` plus the W3C conformance suite run with the feature ON), and a shape that does
+  not exactly meet a rewrite's conditions is left **verbatim** (conservative). Note `From<Query>` does
+  NOT rewrite (it takes an already-built algebra as-is). When off, zero rewrite code compiles, the
+  default native + wasm builds are byte-identical, and no new dependencies are added (no `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through
