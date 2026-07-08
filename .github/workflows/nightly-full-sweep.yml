@@ -152,9 +152,17 @@ jobs:
           SPARQ_NIGHTLY_A11Y: "1"
         run: npx playwright test --list e2e/a11y.spec.ts e2e/surface-sweep.spec.ts e2e/nightly/a11y-full-inventory.spec.ts
 
-      # FULL mode: the real suite. Build the lean wasm bundle (mirrors site-visual.yml) so the
-      # in-tab-engine a11y/render states run, then the pinned Typst → spec/paper fragments the
-      # surface-sweep asserts on (mirrors site-e2e.yml), then the chromium suite.
+      # FULL mode: the real suite. Build the FULL-featured wasm bundle (shacl,jsonld,…) — NOT the
+      # lean one — because the a11y-sweep runs the WHOLE site e2e suite (`npm run test:e2e`), which
+      # includes the SHACL-validator specs (e2e/shacl-validator.spec.ts, e2e/shacl-rerun-
+      # regression.spec.ts). [FABLE-5] sq-0rbfn: those specs `test.skip` only when the wasm FILE is
+      # absent — a presence check, not a feature check. The lean bundle omits the `shacl` feature,
+      # so `sparqShaclValidate` is undefined at runtime → the validator can't run → the report
+      # never renders → the specs fail (this was the a11y-sweep red, issue #1738). The full bundle
+      # (js `build:wasm`, features shacl,jsonld,serialize-rdf,scs,canon) makes those engine-gated
+      # SHACL states actually execute — exactly the wider net this nightly lane is meant to be. The
+      # Typst → spec/paper fragments the surface-sweep asserts on (mirrors site-e2e.yml) build
+      # below, then the chromium suite runs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         if: needs.config.outputs.mode == 'full'
         with:
@@ -171,9 +179,9 @@ jobs:
             ${{ github.workspace }}/target
           key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
-      - name: Build lean wasm bundle
+      - name: Build full-featured wasm bundle (shacl,jsonld,… — the SHACL specs need it)
         if: needs.config.outputs.mode == 'full'
-        run: cd ../js && npm run build:wasm:lean
+        run: cd ../js && npm run build:wasm
       - name: Sync wasm bundle into site/public/wasm/
         if: needs.config.outputs.mode == 'full'
         run: npm run sync-wasm
