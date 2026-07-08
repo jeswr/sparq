@@ -52,9 +52,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 - **Opt-in features** (a build without a feature carries zero code for it) — `time-travel`
   (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
-  `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
-  (`POST /shacl/validate`), `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic
-  `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl` (`POST /shacl/validate`),
+  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
   `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
   disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
@@ -63,6 +62,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
   directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via
   `--no-default-features --features server` (→ 406 read, 415 write). Full conneg ratcheting is roadmap.
+- **Default-on algebra rewrite** ([FABLE-5] sq-7d3dj.30.13) — `algebra-rewrite` is in the default set too: the engine's result-equivalent pre-execution rewrite (#1735 — `FILTER(?v = <iri>)` constant folding + `!bound` anti-join), so the shipped binary runs the same plans the CLI/canonical benchmarks measure. Drop via `--no-default-features --features server,jsonld`.
 
 ## Security posture (essentials — full detail in the SKILL)
 
