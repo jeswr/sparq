@@ -684,6 +684,27 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   not exactly meet a rewrite's conditions is left **verbatim** (conservative). Note `From<Query>` does
   NOT rewrite (it takes an already-built algebra as-is). When off, zero rewrite code compiles, the
   default native + wasm builds are byte-identical, and no new dependencies are added (no `unsafe`).
+- **Equality-FILTER → value join** is the non-default `value-join` cargo feature (bead
+  `sq-7d3dj.30.7`; the SP2Bench q05a/q12a star-intersection shape). With it ON, a conjunctive group
+  whose triple patterns form variable-DISJOINT connected components glued only by a top-level
+  `FILTER(?a = ?b)` conjunct evaluates each component separately and joins them with a hash join
+  keyed on the equality, instead of materialising the cross product and evaluating `=` per row.
+  **SPARQL `=` is VALUE equality, not term identity** (`"01"^^xsd:integer = "1.0"^^xsd:decimal` is
+  TRUE across two dictionary ids; incompatible types are a type error; high-precision
+  `xsd:decimal`s sharing an `f64` must stay unequal — `sq-lr2ii`), so a plain id-keyed join would
+  be wrong. Soundness is two-layer: the per-term-class key never misses an `=`-TRUE pair (id for
+  IRI/bnode/unknown classes, the `numeric_value` cache's canonicalised `f64` for numerics, value
+  for `xsd:string`/language-tagged/boolean), rows with no provable key (local-vocab ids, triple
+  terms, value-comparable temporals, numeric-datatype lexicals the numeric cache rejected — the
+  evaluator's trimming fallback can still pair those) pair through the EXACT evaluator, and the
+  original FILTER is re-applied verbatim over the joined rows — the exact recheck that eliminates any key collision
+  through the same `sq-lr2ii` machinery that runs today. Anything not provably eligible — a filter
+  with any function call (`RAND`/`BNODE` are row-nondeterministic, custom functions can error),
+  quoted-triple patterns, an armed query budget or `zk` trace, no cross-component equality —
+  DECLINES to the verbatim plan. Result-identical on eligible shapes (per-term-class kill-switch
+  differentials in `exec::eqjoin::tests` + an independent `!(?a != ?b)` oracle in
+  `tests/eqjoin_value_join.rs`, both run by the `opt-in sparq-engine (value-join)` CI leg). When
+  off, zero of this code compiles, the conjunctive path is byte-identical, no new dependencies.
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through

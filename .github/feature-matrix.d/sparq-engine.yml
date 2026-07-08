@@ -236,3 +236,18 @@
   crate: "sparq-engine"
   features: "dp-planner"
   test: true
+
+# [FABLE-5] sq-7d3dj.30.7: the `value-join` opt-in equality-FILTER → value-join
+# pass gates ALL of its tests behind `#[cfg(feature = "value-join")]` — the in-src
+# differential suite (`exec::eqjoin::tests`: per-term-class kill-switch
+# differentials incl. the sq-lr2ii high-precision-decimal witness, decline witnesses
+# with a FIRED anti-vacuity counter, direct unit tests for `key_of`/`expr_total`/
+# `pattern_components`) and the e2e acceptance suite `tests/eqjoin_value_join.rs`
+# (q05a-shape row-identity vs an independent `!(?a != ?b)` oracle + the q12a ASK twin).
+# Without this leg they run ZERO times in CI (ci.yml's --all-features lanes are
+# clippy/rustdoc only). No new dep (`value-join = []`); feature-OFF path byte-identical
+# (the module does not compile, the conjunctive arm is the verbatim pre-pass body).
+- name: "sparq-engine (value-join)"
+  crate: "sparq-engine"
+  features: "value-join"
+  test: true
