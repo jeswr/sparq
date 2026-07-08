@@ -5974,7 +5974,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     // DECLINES (returns None → unchanged greedy plan) on any non-matching shape. The
     // whole block compiles away when the feature is off (default + wasm byte-identical).
     #[cfg(feature = "cluster-materialize")]
-    if let Some(plan) = crate::cluster::detect(&prepared, crate::cluster::Thresholds::PROD, |i| pfilter(i).is_some()) {
+    if let Some(plan) = crate::cluster::detect(&prepared, crate::cluster::active_thresholds(), |i| pfilter(i).is_some()) {
         return eval_bgp_cluster(graph, patterns, pat_filters, &plan);
     }
 

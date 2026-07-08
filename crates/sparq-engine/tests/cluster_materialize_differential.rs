@@ -35,9 +35,22 @@ const UNBOUND: &str = "\0\u{1}unbound\u{1}\0";
 
 type Row = Vec<(String, String)>;
 
-/// Order-independent bag of `(variable, value)` rows for a query result.
-fn result_bag(graph: &Graph, q: &str) -> Vec<Row> {
-    let r = query(graph, &format!("{}{}", PFX, q)).unwrap();
+/// Order-independent bag of `(variable, value)` rows. When the `cluster-materialize`
+/// feature is compiled, `force_cluster` installs the permissive test thresholds so the
+/// small-graph query actually TRIGGERS the cluster path (`eval_bgp_cluster`) — exercising
+/// the REAL executor path, not just the pure `detect` shape test. Feature-off, the flag is
+/// inert and both queries run the naive plan (still a valid equivalence check that the file
+/// compiles + runs in BOTH states).
+fn result_bag_opt(graph: &Graph, q: &str, force_cluster: bool) -> Vec<Row> {
+    let full = format!("{}{}", PFX, q);
+    let run = || query(graph, &full).unwrap();
+    #[cfg(feature = "cluster-materialize")]
+    let r = if force_cluster { sparq_engine::with_test_thresholds(run) } else { run() };
+    #[cfg(not(feature = "cluster-materialize"))]
+    let r = {
+        let _ = force_cluster;
+        run()
+    };
     let vars: Vec<String> = r.vars.iter().map(|v| v.as_str().to_string()).collect();
     let mut bag: Vec<Row> = r
         .rows
@@ -59,6 +72,16 @@ fn result_bag(graph: &Graph, q: &str) -> Vec<Row> {
         .collect();
     bag.sort();
     bag
+}
+
+/// Naive (un-forced) bag — used for the bound-predicate reference side.
+fn result_bag(graph: &Graph, q: &str) -> Vec<Row> {
+    result_bag_opt(graph, q, false)
+}
+
+/// Cluster-forced bag — used for the unbound-predicate side so the cluster path fires.
+fn result_bag_clustered(graph: &Graph, q: &str) -> Vec<Row> {
+    result_bag_opt(graph, q, true)
 }
 
 /// A cheap deterministic LCG so the "randomised" shapes are reproducible without a
@@ -143,7 +166,7 @@ fn cluster_path_matches_unclustered_across_random_shapes() {
         let n_docs = 8 + (seed as usize % 40);
         let n_bags = 4 + (seed as usize % 30);
         let g = build_graph(n_classes, n_docs, n_bags, seed.wrapping_mul(2654435761).wrapping_add(1));
-        let unbound = result_bag(&g, q_unbound());
+        let unbound = result_bag_clustered(&g, q_unbound());
         let bound = result_bag(&g, q_bound());
         assert_eq!(
             unbound, bound,
@@ -158,7 +181,7 @@ fn cluster_path_matches_unclustered_across_random_shapes() {
 #[test]
 fn cluster_path_matches_in_nested_optional_shape() {
     let g = build_graph(3, 30, 20, 99);
-    let unbound = result_bag(
+    let unbound = result_bag_clustered(
         &g,
         "SELECT DISTINCT ?title WHERE { \
            ?class rdfs:subClassOf foaf:Document . \
@@ -203,7 +226,7 @@ fn cluster_path_preserves_multiplicity() {
 <http://ex/r3> <http://purl.org/dc/terms/references> <http://ex/bag2> .
 "#;
     let g = Graph::load_reader(nt.as_bytes(), "ntriples").unwrap();
-    let unbound = result_bag(&g, q_unbound());
+    let unbound = result_bag_clustered(&g, q_unbound());
     let bound = result_bag(&g, q_bound());
     // Expect 3 rows (bag1 referenced twice → 2, bag2 once → 1) all binding ?doc=a.
     assert_eq!(unbound.len(), 3, "multiplicity: expected 3 rows, got {}", unbound.len());

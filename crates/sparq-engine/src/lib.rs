@@ -12,6 +12,11 @@ pub mod cache;
 // join-order choice; results are identical either way (differentially tested).
 #[cfg(feature = "cluster-materialize")]
 pub(crate) mod cluster;
+// [FABLE-5] (sq-7d3dj.30.14) Test-only hook so an integration differential can force the
+// membership-cluster planner path on a small graph. Not part of the stable query API.
+#[cfg(feature = "cluster-materialize")]
+#[doc(hidden)]
+pub use cluster::with_test_thresholds;
 mod construct;
 #[cfg(feature = "cs-planner")]
 pub mod cs;

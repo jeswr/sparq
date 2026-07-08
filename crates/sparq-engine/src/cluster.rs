@@ -95,6 +95,44 @@ impl Thresholds {
         member_anchor_ratio: 16,
         anchor_max_est: 10_000,
     };
+
+    /// Test-only permissive thresholds: fire the cluster path on the small graphs an
+    /// integration test can build, so the REAL executor path (`eval_bgp_cluster`) is
+    /// exercised — not merely the pure `detect` shape test. Installed thread-locally by
+    /// [`with_test_thresholds`]; only meaningful under `cfg(test)`/the doc-hidden hook.
+    #[cfg(any(test, feature = "cluster-materialize"))]
+    const PERMISSIVE: Thresholds = Thresholds { member_min_est: 1, member_anchor_ratio: 1, anchor_max_est: usize::MAX };
+}
+
+#[cfg(feature = "cluster-materialize")]
+thread_local! {
+    /// When `true`, the executor uses [`Thresholds::PERMISSIVE`] instead of `PROD`, so
+    /// a small-graph integration differential can force the cluster path. Test-only; the
+    /// production query API never touches it. [FABLE-5]
+    static USE_TEST_THRESHOLDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The thresholds the executor should use on this thread: `PERMISSIVE` while a
+/// [`with_test_thresholds`] scope is active, else `PROD`.
+#[cfg(feature = "cluster-materialize")]
+pub(crate) fn active_thresholds() -> Thresholds {
+    if USE_TEST_THRESHOLDS.with(|c| c.get()) {
+        Thresholds::PERMISSIVE
+    } else {
+        Thresholds::PROD
+    }
+}
+
+/// Test-only hook (`#[doc(hidden)]`): run `f` with the permissive thresholds installed,
+/// so a small-graph query actually TRIGGERS the cluster path. Restores the prior value
+/// on the way out (nestable). Not part of the stable query API. [FABLE-5]
+#[cfg(feature = "cluster-materialize")]
+#[doc(hidden)]
+pub fn with_test_thresholds<R>(f: impl FnOnce() -> R) -> R {
+    let prev = USE_TEST_THRESHOLDS.with(|c| c.replace(true));
+    let r = f();
+    USE_TEST_THRESHOLDS.with(|c| c.set(prev));
+    r
 }
 
 /// Set of the (up to three) variables of a prepared pattern.
