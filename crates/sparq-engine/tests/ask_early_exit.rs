@@ -425,6 +425,35 @@ fn limit_through_join_returns_a_subset_of_the_full_result() {
     assert_eq!(got, want, "LIMIT >= N must be the complete result");
 }
 
+/// LIMIT + a residual (late) FILTER through the capped chain: a row counts toward
+/// the cap only after the FILTER, so every returned row satisfies it and the count
+/// is `min(limit, N_filtered)` — never padded with pre-FILTER candidates.
+#[test]
+fn limit_with_late_filter_returns_only_filtered_rows() {
+    let mut ttl = String::new();
+    for i in 0..2000 {
+        // ?v = ?w only for multiples of 3 (667 subjects).
+        let w = if i % 3 == 0 { i } else { i + 1 };
+        ttl.push_str(&format!(":s{i} :p {i} ; :q {w} .\n"));
+    }
+    let g = load(&ttl);
+    let body = "?s :p ?v . ?s :q ?w . FILTER(?v + 0 = ?w)";
+    let full = query(&g, &format!("{PFX}SELECT ?s ?v ?w WHERE {{ {body} }}")).expect("full");
+    assert_eq!(full.rows.len(), 667);
+    let key = |row: &Vec<Option<oxrdf::Term>>| -> String {
+        row.iter().map(|c| c.as_ref().map_or(String::new(), |t| t.to_string())).collect::<Vec<_>>().join("|")
+    };
+    let full_set: std::collections::HashSet<String> = full.rows.iter().map(key).collect();
+    for (limit, offset) in [(5usize, 0usize), (5, 3), (667, 0), (9999, 0)] {
+        let q = format!("{PFX}SELECT ?s ?v ?w WHERE {{ {body} }} LIMIT {limit} OFFSET {offset}");
+        let r = query(&g, &q).expect("limited");
+        assert_eq!(r.rows.len(), limit.min(667usize.saturating_sub(offset)), "LIMIT {limit} OFFSET {offset}");
+        for row in &r.rows {
+            assert!(full_set.contains(&key(row)), "row failed the FILTER or is not in the full result (LIMIT {limit})");
+        }
+    }
+}
+
 /// LIMIT 0 through the capped shapes stays empty and never panics.
 #[test]
 fn limit_zero_through_capped_shapes() {
