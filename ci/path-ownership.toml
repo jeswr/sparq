@@ -220,3 +220,14 @@ safe = true
 [[map]]
 pattern = ".beads/**"
 safe = true
+
+# [FABLE-5] sq-63ups: the formal-verification manifest (proof suites -> verified
+# paths + the alarmed lanes). Consumed ONLY by the formal-verification.yml /
+# formal-alarm.yml workflows via scripts/fv_select.py / check-fv-manifest.py /
+# formal_lane_alarm.py — no workspace crate reads it, so it is inert for the Rust
+# test matrix. It is NOT inert for the FV workflow itself: scripts/fv_select.py
+# treats a change to this file as an FV full trigger (every pr_gate proof suite
+# runs on that PR), so this safe-listing weakens nothing.
+[[map]]
+pattern = "ci/formal-verification.toml"
+safe = true
