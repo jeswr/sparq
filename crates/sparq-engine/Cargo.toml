@@ -132,6 +132,25 @@ vectorized = []
 # the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies
 # (rustc-hash is already a direct dep) and contains no `unsafe`.
 dp-planner = []
+# [FABLE-5] (sq-7d3dj.30.14) Membership-cluster PRE-MATERIALISATION for the greedy BGP
+# planner (SP2Bench q07, research/sp2bench-complex-shape-deficit.md §5). When a BGP has the
+# q07 shape — one UNBOUND-predicate container-membership pattern (`?bag ?member ?doc`, the
+# `rdf:_n` bag idiom) plus a small BOUND-predicate anchor (`?doc2 dcterms:references ?bag`)
+# sharing exactly ONE variable with it — `cluster::detect` returns a partition and the
+# executor evaluates that {anchor, membership} pair STANDALONE (bounding the shared variable
+# from the small anchor → a few-thousand-row relation) and NATURAL-JOINS it to the rest,
+# instead of letting greedy GOO bind-join the ~250k-row unbound-predicate relation per driver
+# binding through the widest permutation. A BGP is a commutative/associative natural join, so
+# partitioning into two connected sub-BGPs and joining yields the SAME row bag as any greedy
+# order — this is a pure JOIN-ORDER choice, RESULT-IDENTICAL to the feature-off plan
+# (differentially tested in BOTH feature states, tests/cluster_materialize_differential.rs; the
+# thresholds never affect results). `detect` DECLINES (unchanged greedy plan) on any
+# non-matching shape: not exactly one membership pattern, an anchor variable that leaks into
+# the rest, a pushed-down scan filter on a cluster pattern, or the cost gate unmet. OPT-IN and
+# OFF by default: when off, zero of this code compiles and the default native + wasm builds are
+# byte-identical. Pulls in ZERO new dependencies and contains no `unsafe`. The end-to-end q07
+# win is a measured HYPOTHESIS for the canonical perf host (sq-7d3dj.30.6), NOT a baked-in number.
+cluster-materialize = []
 # [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
 # LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
 # query algebra, caller graph-version)`. Vendor-parity operational-perf feature for
