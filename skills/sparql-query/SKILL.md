@@ -666,7 +666,10 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-
   the-DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical,
   and no new dependencies are added (no `unsafe`).
-- **Pre-execution algebra rewrite pass** is the non-default `algebra-rewrite` cargo feature (bead
+- **Pre-execution algebra rewrite pass** is the `algebra-rewrite` cargo feature — non-default in the
+  sparq-engine LIBRARY, but lit BY DEFAULT in the shipped `sparq-cli` + `sparq-server` binaries and in
+  the conformance/differential-fuzz harnesses ([FABLE-5] sq-7d3dj.30.13), so it is what real users and
+  the canonical benchmarks execute (bead
   `sq-7d3dj.30.1`; design record `research/sp2bench-complex-shape-deficit.md` §2.1/§2.5/§4). With it ON,
   `PreparedQuery::parse` (the single seam every string query entry point funnels through) and the two
   EXPLAIN parse sites run the parsed `spargebra` algebra through `sparq_engine::rewrite::rewrite_query`
@@ -680,7 +683,9 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   equality (`?v = 1`, `?v = "1"^^xsd:decimal`) is NEVER rewritten — this is the deliberate avoidance
   contract for the open value-equality/decimal bug `sq-lr2ii`. Every rewrite is **bag-result-equivalent**
   (`query`/`ask`/`count`/`query_json` return the SAME answers on vs off — proven by
-  `tests/rewrite_pass.rs` plus the W3C conformance suite run with the feature ON), and a shape that does
+  `tests/rewrite_pass.rs` plus the W3C conformance ratchet, which CI runs with the feature ON — the
+  `sparq-conformance` harness lights it, and the nightly sparq-vs-oxigraph differential fuzzer covers
+  the `FILTER(?v = <iri>)` trigger shape ON too since sq-7d3dj.30.13), and a shape that does
   not exactly meet a rewrite's conditions is left **verbatim** (conservative). Note `From<Query>` does
   NOT rewrite (it takes an already-built algebra as-is). When off, zero rewrite code compiles, the
   default native + wasm builds are byte-identical, and no new dependencies are added (no `unsafe`).

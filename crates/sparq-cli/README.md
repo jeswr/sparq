@@ -60,6 +60,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   (the same contract the server's `POST /terse/transpile` returns). It never executes the query —
   pipe `canonical_sparql` into `query`. Loud-fails (exit 2) on an unknown keyword or a `V(...)`
   construct rather than guessing. Lean build — depends only on `spargebra`. `--features terse`.
+- **Engine features the default CLI build lights** — the CLI's `sparq-engine` dependency enables
+  `dp-planner` (DPccp cost-optimal join ordering, sq-7d3dj.30.5) and `algebra-rewrite` (the
+  result-equivalent pre-execution rewrite of #1735 — `FILTER(?v = <iri>)` constant folding +
+  `!bound` anti-join; [FABLE-5] sq-7d3dj.30.13), so the shipped binary and every canonical
+  benchmark run the same plans. The engine **library** defaults stay lean (both OFF there).
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.
   The gzip path defaults to the pure-Rust `miniz_oxide` backend; the opt-in, native-only
   `zlib-ng` cargo feature (`cargo build -p sparq-cli --features zlib-ng`, or
