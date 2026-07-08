@@ -2365,9 +2365,15 @@ fn try_distinct_pushdown(
     let mut seen: FxHashSet<Id> = FxHashSet::default();
     let mut out_ids: Vec<Id> = Vec::new();
     let mut total_scanned = 0usize;
+    // [FABLE-5] (sq-7d3dj.30.10) Cache the sorted anchor membership set across branches:
+    // UNION branches frequently share the same anchor pattern (SP2Bench q09's two branches
+    // both anchor on `?person rdf:type foaf:Person`), so building the ~20k-member set once
+    // instead of per-branch removes the second full anchor scan+sort. Keyed by the anchor's
+    // prepared id-pattern + join position, which fully determines the set.
+    let mut anchor_cache: AnchorCache = FxHashMap::default();
 
     for branch in &branches {
-        match branch_distinct_values(graph, branch, pvar, &seen)? {
+        match branch_distinct_values(graph, branch, pvar, &seen, &mut anchor_cache)? {
             Some((new_ids, scanned)) => {
                 total_scanned = total_scanned.saturating_add(scanned);
                 for id in new_ids {
@@ -2430,22 +2436,103 @@ fn perm_for_order(order: [usize; 3]) -> Option<sparq_core::store::Perm> {
     sparq_core::store::Perm::ALL.into_iter().find(|p| p.order() == order)
 }
 
-/// The distinct ids appearing at canonical position `target_pos` of `id_pat`'s matching
-/// triples (a variable position — the membership set for a semi-join). `None` declines
-/// under budget pressure so the caller falls back.
-fn collect_var_ids(graph: &Graph, id_pat: &IdPattern, target_pos: usize) -> Option<FxHashSet<Id>> {
-    let scan = graph.store.scan(id_pat);
+/// [FABLE-5] (sq-7d3dj.30.10) The distinct ids at canonical position `target_pos` of
+/// `id_pat`'s matching triples, returned SORTED ASCENDING and deduped. The membership set
+/// for a semi-join, returned as a sorted `Vec<Id>` (rather than a hash set):
+/// it lets the per-predicate existence check gallop the anchor (skipping large
+/// disjoint id runs on the anchor side) instead of a per-join-value hash probe, and it
+/// avoids the `HashMap` rehash cost that dominated the anchor build for a 20k-member
+/// anchor (SP2Bench q09 profile). When the chosen permutation already yields
+/// `target_pos` as its first unbound (leading) column the rows arrive grouped, so we
+/// skip-scan the distinct values directly in sorted order (no post-sort); otherwise we
+/// collect then `sort_unstable`. `None` declines under budget pressure so the caller
+/// falls back to the general path.
+fn collect_var_ids_sorted(graph: &Graph, id_pat: &IdPattern, target_pos: usize) -> Option<Vec<Id>> {
+    // A permutation sorted by `target_pos` as its first UNBOUND column yields the join
+    // values already grouped and ascending — enumerate the distinct run heads directly.
+    let scan = graph.store.scan_sorted(id_pat, target_pos);
     let order = scan.perm.order();
     let k = order.iter().position(|&c| c == target_pos)?;
     let rows = scan.rows.as_ref();
-    let mut set: FxHashSet<Id> = FxHashSet::default();
+    if order.into_iter().find(|&c| id_pat[c].is_none()) == Some(target_pos) {
+        let mut out: Vec<Id> = Vec::new();
+        let mut i = 0usize;
+        while i < rows.len() {
+            if budget::exhausted(out.len()) {
+                return None;
+            }
+            let v = rows[i][k];
+            out.push(v);
+            i += rows[i..].partition_point(|r| r[k] <= v).max(1);
+        }
+        // `out` is strictly increasing by construction (each pushed value exceeds the
+        // previous block's) — already sorted + deduped.
+        return Some(out);
+    }
+    // Not sorted by `target_pos`: collect then sort+dedup.
+    let mut out: Vec<Id> = Vec::with_capacity(rows.len());
     for (n, r) in rows.iter().enumerate() {
-        if n & 4095 == 0 && budget::exhausted(set.len()) {
+        if n & 4095 == 0 && budget::exhausted(out.len()) {
             return None;
         }
-        set.insert(r[k]);
+        out.push(r[k]);
     }
-    Some(set)
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
+/// [FABLE-5] (sq-7d3dj.30.10) Existence check for the loose semi-join: does the
+/// join-sorted `block` (join value at column `jk`) share ANY id with `anchor`? Drives from
+/// whichever side is shorter and early-exits on the first common id:
+/// * anchor ≥ block: gallop the block's DISTINCT join values, O(1) hash-probe each into
+///   the anchor (the original per-value probe — best when the block is short or hits fast);
+/// * anchor <  block: walk the (shorter) sorted anchor, binary-searching each member into
+///   the block's join column over a monotonically shrinking window (`O(|anchor|·log|block|)`
+///   — best when a large no-hit block is checked against a smaller anchor).
+///
+/// Both strategies are exact and order-independent; the choice only affects work, never the
+/// boolean. `examined` (distinct values touched) feeds the diagnostic scan counter.
+fn block_intersects_anchor(block: &[[Id; 3]], jk: usize, anchor: &AnchorSet) -> (bool, usize) {
+    // Cost model: the hash gallop touches ~`distinct(block)` values at O(1) each; the
+    // anchor walk does `|anchor|` binary searches at O(log|block|) each. Prefer the anchor
+    // walk only when it is strictly cheaper — i.e. when the anchor is small enough that
+    // `|anchor|·log|block|` beats the block's distinct-value count (bounded by `block.len()`).
+    // A conservative proxy: anchor smaller than `block.len() / ilog2(block.len())`.
+    let block_len = block.len();
+    let log_block = usize::BITS as usize - block_len.leading_zeros() as usize; // ~ceil(log2)
+    let anchor_driven = block_len > 0 && anchor.sorted.len().saturating_mul(log_block.max(1)) < block_len;
+    if !anchor_driven {
+        // Gallop the block's distinct join values; O(1) hash membership.
+        let mut examined = 0usize;
+        let mut bi = 0usize;
+        while bi < block.len() {
+            let jv = block[bi][jk];
+            examined += 1;
+            if anchor.hash.contains(&jv) {
+                return (true, examined);
+            }
+            bi += block[bi..].partition_point(|r| r[jk] <= jv).max(1);
+        }
+        (false, examined)
+    } else {
+        // Walk the shorter sorted anchor; binary-search each member into the block.
+        let mut examined = 0usize;
+        let mut lo = 0usize; // block window shrinks monotonically (both sorted ascending)
+        for &av in &anchor.sorted {
+            examined += 1;
+            let rel = block[lo..].partition_point(|r| r[jk] < av);
+            let at = lo + rel;
+            if at < block.len() && block[at][jk] == av {
+                return (true, examined);
+            }
+            lo = at;
+            if lo >= block.len() {
+                break;
+            }
+        }
+        (false, examined)
+    }
 }
 
 /// Enumerates the DISTINCT ids at canonical position `target_pos` via a loose/skip scan
@@ -2526,6 +2613,7 @@ fn branch_distinct_values(
     branch: &GraphPattern,
     pvar: &Variable,
     seen: &FxHashSet<Id>,
+    anchor_cache: &mut AnchorCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     if !is_conjunctive(branch) {
         return Ok(None);
@@ -2558,7 +2646,7 @@ fn branch_distinct_values(
     }
     match patterns.len() {
         1 => single_pattern_distinct(graph, &patterns[0], pvar, seen),
-        2 => two_pattern_distinct(graph, &patterns, pvar, seen),
+        2 => two_pattern_distinct(graph, &patterns, pvar, seen, anchor_cache),
         _ => Ok(None),
     }
 }
@@ -2596,6 +2684,7 @@ fn two_pattern_distinct(
     patterns: &[TriplePattern],
     pvar: &Variable,
     seen: &FxHashSet<Id>,
+    anchor_cache: &mut AnchorCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (idp0, pv0, uns0) = prepare_pattern(graph, &patterns[0])?;
     let (idp1, pv1, uns1) = prepare_pattern(graph, &patterns[1])?;
@@ -2603,18 +2692,155 @@ fn two_pattern_distinct(
     let in1 = var_positions_of(&pv1, pvar);
     // `?p` must appear EXACTLY ONCE, in exactly one of the two patterns (that is the probe).
     match (in0.as_slice(), in1.as_slice()) {
-        ([ppos], []) => {
-            probe_anchor_distinct(graph, (&idp0, &pv0, uns0), (&idp1, &pv1, uns1), *ppos, seen)
-        }
-        ([], [ppos]) => {
-            probe_anchor_distinct(graph, (&idp1, &pv1, uns1), (&idp0, &pv0, uns0), *ppos, seen)
-        }
+        ([ppos], []) => probe_anchor_distinct(
+            graph,
+            (&idp0, &pv0, uns0),
+            (&idp1, &pv1, uns1),
+            *ppos,
+            seen,
+            anchor_cache,
+        ),
+        ([], [ppos]) => probe_anchor_distinct(
+            graph,
+            (&idp1, &pv1, uns1),
+            (&idp0, &pv0, uns0),
+            *ppos,
+            seen,
+            anchor_cache,
+        ),
         _ => Ok(None),
     }
 }
 
 /// Prepared-pattern triple `(id_pat, pos_vars, unsat)` passed by reference.
 type PreparedRef<'a> = (&'a IdPattern, &'a [Option<Variable>; 3], bool);
+
+/// [FABLE-5] (sq-7d3dj.30.10) The anchor membership set, in BOTH forms needed by the
+/// per-predicate existence probe: a `hash` set for O(1) membership, and the same ids
+/// `sorted` ascending so a large block can be clipped to the anchor's id window and the
+/// smaller side can drive a galloping intersection.
+struct AnchorSet {
+    hash: FxHashSet<Id>,
+    sorted: Vec<Id>,
+}
+
+/// [FABLE-5] (sq-7d3dj.30.10) Per-pushdown cache of anchor membership sets, keyed by the
+/// anchor's prepared id-pattern plus its join position (which together fully determine the
+/// set). Shared across a DISTINCT pushdown's UNION branches so a repeated anchor
+/// (e.g. SP2Bench q09's shared `?person rdf:type foaf:Person`) is materialised once.
+type AnchorCache = FxHashMap<(IdPattern, usize), std::rc::Rc<AnchorSet>>;
+
+/// The anchor membership set for `(anchor_ip, anchor_jpos)`, memoised in `cache`. Returns
+/// `None` under budget pressure (the pushdown then declines). The set is wrapped in `Rc`
+/// so a cache hit is a cheap clone, not a re-materialisation.
+fn cached_anchor_ids(
+    graph: &Graph,
+    anchor_ip: &IdPattern,
+    anchor_jpos: usize,
+    cache: &mut AnchorCache,
+) -> Option<std::rc::Rc<AnchorSet>> {
+    let key = (*anchor_ip, anchor_jpos);
+    if let Some(v) = cache.get(&key) {
+        return Some(v.clone());
+    }
+    let sorted = collect_var_ids_sorted(graph, anchor_ip, anchor_jpos)?;
+    let hash: FxHashSet<Id> = sorted.iter().copied().collect();
+    let set = std::rc::Rc::new(AnchorSet { hash, sorted });
+    cache.insert(key, set.clone());
+    Some(set)
+}
+
+/// [FABLE-5] (sq-7d3dj.30.10) The "pattern-trick" strategy for the loose semi-join: iterate
+/// the ANCHOR members and, for each member `m`, enumerate the distinct `?p` (at `ppos`) on
+/// probe triples whose join column (`jpos`) equals `m` — accumulating a running result set
+/// that terminates the instant it covers the whole `?p` UNIVERSE (the distinct `?p` in the
+/// probe's range ignoring the join, a superset the answer can never exceed). Returns the new
+/// `?p` values (those not already in `seen`) plus a diagnostic touched-row count, or `None`
+/// to DECLINE — in which case the caller falls back to the per-`?p`-block existence scan.
+///
+/// Correctness: the union over all anchor members `m` of `{ ?p : ∃ probe triple with
+/// jpos=m }` is EXACTLY `{ ?p : ∃ a solution of the (anchor ⋈ probe) branch }` — binding the
+/// join column to each anchor member and taking the union is the definition of the semi-join
+/// projected onto `?p`. The universe early-exit is sound because the collected set is
+/// monotonically growing and bounded above by the universe, so once they are equal no further
+/// member can add a value. Declines when the required per-member permutation is not built or
+/// when a per-member scan cannot skip-enumerate `?p` (so the general block scan answers it).
+fn maybe_anchor_driven(
+    graph: &Graph,
+    probe_ip: &IdPattern,
+    ppos: usize,
+    jpos: usize,
+    anchor: &AnchorSet,
+    seen: &FxHashSet<Id>,
+) -> Result<Option<(Vec<Id>, usize)>, String> {
+    // COST GATE: the per-member scan touches only the anchor's incident probe triples, so it
+    // is a clear win when the anchor is SMALL — then we sweep a handful of members instead of
+    // every candidate `?p`-block. For a LARGE anchor (q09's 20,602 persons) the per-member
+    // machinery dominates, so we decline here and let the caller's cost-aware block scan run.
+    // The threshold is a strategy choice only — either path returns the identical `?p` set.
+    if anchor.sorted.len() > ANCHOR_DRIVEN_MAX {
+        return Ok(None);
+    }
+    anchor_driven_distinct(graph, probe_ip, ppos, jpos, anchor, seen)
+}
+
+/// The largest anchor cardinality for which the per-member ("pattern trick") enumeration is
+/// preferred over the per-`?p`-block existence scan. Above it, sweeping every anchor member
+/// costs more than the block scan (measured: SP2Bench q09's 20k-person anchor is faster on
+/// the block scan). A strategy threshold only — never affects the computed answer.
+const ANCHOR_DRIVEN_MAX: usize = 256;
+
+/// Per-member ("pattern trick") enumeration: for each anchor member `m`, bind the join column
+/// to `m` and skip-enumerate the distinct `?p`, unioning across members and stopping once the
+/// `?p` universe is covered. Declines (→ block-scan fallback) when a per-member scan cannot
+/// skip-enumerate `?p` for the bound join position.
+fn anchor_driven_distinct(
+    graph: &Graph,
+    probe_ip: &IdPattern,
+    ppos: usize,
+    jpos: usize,
+    anchor: &AnchorSet,
+    seen: &FxHashSet<Id>,
+) -> Result<Option<(Vec<Id>, usize)>, String> {
+    // The `?p` universe (distinct `?p` in the probe range, ignoring the join) — a cheap
+    // superset the answer can never exceed, so once we have collected it we can stop reading.
+    let (universe_vals, _) = match skipscan_distinct(graph, probe_ip, ppos) {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let universe_len = universe_vals.len();
+    if universe_len == 0 {
+        return Ok(Some((Vec::new(), 0)));
+    }
+    let mut found: FxHashSet<Id> = FxHashSet::default();
+    let mut out: Vec<Id> = Vec::new();
+    let mut scanned = 0usize;
+    for (idx, &m) in anchor.sorted.iter().enumerate() {
+        if idx & 63 == 0 && budget::exhausted(out.len()) {
+            return Ok(None);
+        }
+        // Bind the join column to this anchor member; keep the probe's other positions.
+        let mut member_pat = *probe_ip;
+        member_pat[jpos] = Some(m);
+        let (vals, s) = match skipscan_distinct(graph, &member_pat, ppos) {
+            Some(x) => x,
+            None => return Ok(None),
+        };
+        scanned = scanned.saturating_add(s);
+        for v in vals {
+            if found.insert(v) {
+                if !seen.contains(&v) {
+                    out.push(v);
+                }
+                // Whole `?p` universe covered → no later member can add anything. Stop.
+                if found.len() == universe_len {
+                    return Ok(Some((out, scanned)));
+                }
+            }
+        }
+    }
+    Ok(Some((out, scanned)))
+}
 
 /// The loose semi-join for `{ anchor, probe }`: `probe` binds `?p` (at `ppos`) and the
 /// join variable; `anchor` constrains the join variable. Enumerates distinct `?p` from a
@@ -2626,6 +2852,7 @@ fn probe_anchor_distinct(
     anchor: PreparedRef<'_>,
     ppos: usize,
     seen: &FxHashSet<Id>,
+    anchor_cache: &mut AnchorCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (probe_ip, probe_pv, probe_uns) = probe;
     let (anchor_ip, anchor_pv, anchor_uns) = anchor;
@@ -2648,6 +2875,29 @@ fn probe_anchor_distinct(
     if jpos == ppos {
         return Ok(None);
     }
+    // The anchor's join-variable membership set (hash + sorted), shared across the
+    // pushdown's UNION branches (SP2Bench q09's two branches share the same anchor).
+    let a = match cached_anchor_ids(graph, anchor_ip, anchor_jpos, anchor_cache) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    if a.sorted.is_empty() {
+        // Empty anchor → the join is empty → no `?p` qualifies.
+        return Ok(Some((Vec::new(), 0)));
+    }
+    // [FABLE-5] (sq-7d3dj.30.10) ANCHOR-DRIVEN predicate enumeration (the "pattern trick"):
+    // walk the probe range grouped by join value and only descend into the ANCHOR blocks'
+    // `?p` values, terminating once the `?p` universe is covered. This wins when the join
+    // axis is LOW-cardinality (few distinct join values → few blocks to skip): a bound anchor
+    // member set is then cheaper to sweep than the candidate `?p`-blocks. It is NOT a
+    // universal win — when the distinct join values are as numerous as the `?p`-blocks
+    // (SP2Bench q09: ~tens of thousands of distinct subjects/objects) walking every join
+    // block costs as much as the block existence scan — so we gate it on the join axis being
+    // low-cardinality relative to the `?p` universe, else fall through to the (cost-aware,
+    // clipped) block scan below. Both paths return the identical `?p` set.
+    if let Some((new, scanned)) = maybe_anchor_driven(graph, probe_ip, ppos, jpos, &a, seen)? {
+        return Ok(Some((new, scanned)));
+    }
     // We need a permutation ordered `[.., P, J, third]` so a `?p`-block is sorted by the
     // join variable (bounding the per-block existence scan). `scan_sorted(ppos)` only
     // pins the FIRST unbound column, so choose the exact permutation ourselves.
@@ -2669,17 +2919,8 @@ fn probe_anchor_distinct(
     let mut out: Vec<Id> = Vec::new();
     let mut scanned = 0usize;
     let mut i = 0usize;
-    // The anchor's join-variable membership set, with its id range for the O(1)
-    // range-disjointness fast-reject below.
-    let a = match collect_var_ids(graph, anchor_ip, anchor_jpos) {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    let (a_min, a_max) = match (a.iter().min().copied(), a.iter().max().copied()) {
-        (Some(lo), Some(hi)) => (lo, hi),
-        // Empty anchor → the join is empty → no `?p` qualifies.
-        _ => return Ok(Some((Vec::new(), 0))),
-    };
+    // `a.sorted` is non-empty (checked above) and sorted, so min/max are its ends.
+    let (a_min, a_max) = (a.sorted[0], a.sorted[a.sorted.len() - 1]);
     while i < rows.len() {
         if budget::exhausted(out.len()) {
             return Ok(None);
@@ -2701,20 +2942,22 @@ fn probe_anchor_distinct(
         if bmax < a_min || bmin > a_max {
             continue;
         }
-        // Existence: does any join-variable id in this block belong to the anchor set?
-        // Gallop distinct join values (block is join-sorted), early-exit on the first hit.
-        let mut bi = 0usize;
-        let mut hit = false;
-        while bi < block.len() {
-            let jv = block[bi][jk];
-            scanned += 1;
-            if a.contains(&jv) {
-                hit = true;
-                break;
-            }
-            let jlen = block[bi..].partition_point(|r| r[jk] <= jv).max(1);
-            bi += jlen;
-        }
+        // [FABLE-5] (sq-7d3dj.30.10) CLIP the join-sorted block to the anchor's id window
+        // `[a_min, a_max]` with two binary searches: every anchor member lies in that
+        // window, so no join value OUTSIDE it can be a hit — dropping them cannot change
+        // the answer. When the anchor entities occupy a narrow id band this discards the
+        // bulk of a large no-hit block in O(log n); when they do not it is two cheap
+        // binary searches and the full gallop below still runs.
+        let cs = block.partition_point(|r| r[jk] < a_min);
+        let ce = block.partition_point(|r| r[jk] <= a_max);
+        let clipped = &block[cs..ce];
+        // Existence: does any join value in the clipped block belong to the anchor set?
+        // Drive from whichever side is shorter: gallop the clipped block's distinct values
+        // with an O(1) hash probe when the block (post-clip) is the shorter side; otherwise
+        // walk the sorted anchor and binary-search each member into the block. Early-exit
+        // on the first common id. [FABLE-5] (sq-7d3dj.30.10)
+        let (hit, examined) = block_intersects_anchor(clipped, jk, &a);
+        scanned += examined;
         if hit {
             out.push(pv_id);
         }
