@@ -2006,20 +2006,66 @@ pub fn eval_select_json_emit(
     Ok(())
 }
 
-/// ASK evaluation: `true` iff `pattern` has at least one solution. The pattern is
-/// wrapped in a `LIMIT 1` slice so the early-terminating single-pattern scan path
-/// stops at the first row; shapes without a streaming path evaluate normally (the
-/// row count is irrelevant — only emptiness is observed).
+/// ASK evaluation: `true` iff `pattern` has at least one solution. ASK observes only
+/// solution EXISTENCE, so the plan is first simplified shape-locally (`ask_simplify`:
+/// ORDER BY / DISTINCT stripped where provably emptiness-neutral) and then wrapped in
+/// a `LIMIT 1` slice so the capped paths — the early-terminating single-pattern scan
+/// AND the block-driven conjunctive join chain plus the capped UNION / OPTIONAL /
+/// Join arms of `try_capped` — stop at the first complete solution instead of
+/// materialising the full result. Shapes without a capped path evaluate normally
+/// (the row count is irrelevant — only emptiness is observed). [FABLE-5]
+/// (sq-7d3dj.30.8)
 pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
-    // Exact-count fast path first (a single-pattern BGP answers from the index).
-    if let Some(n) = try_count(graph, pattern) {
+    // Fail-closed: an armed zk-trace recorder keeps the ORIGINAL plan (its operator
+    // markers reference the unsimplified tree; every capped path below already
+    // declines while recording, so the recorded evaluation is the full one).
+    #[cfg(feature = "zk")]
+    let simplified = if crate::zk::enabled() { pattern.clone() } else { ask_simplify(pattern) };
+    #[cfg(not(feature = "zk"))]
+    let simplified = ask_simplify(pattern);
+    // Exact-count fast path (a single-pattern BGP answers from the index).
+    if let Some(n) = try_count(graph, &simplified) {
         return Ok(n > 0);
     }
-    let sliced = GraphPattern::Slice { inner: Box::new(pattern.clone()), start: 0, length: Some(1) };
+    let sliced = GraphPattern::Slice { inner: Box::new(simplified), start: 0, length: Some(1) };
     let mut local = LocalVocab::default();
     let b = eval_modified(graph, &mut local, &sliced)?;
     budget::check(b.rows.len())?;
     Ok(!b.rows.is_empty())
+}
+
+/// Shape-local ASK plan simplification (sq-7d3dj.30.8): strips solution modifiers
+/// that provably cannot change solution EXISTENCE, along the top "modifier spine"
+/// only — `Project` / `Distinct` / `Reduced` / `OrderBy` chains and `Union`
+/// branches, exactly the operators through which emptiness of the root is a function
+/// of emptiness of the subtree. `ORDER BY` only reorders rows and `DISTINCT` only
+/// removes duplicates, so neither turns an empty result non-empty or vice versa;
+/// stripping them lets the LIMIT-1 capped evaluation stop at the first solution
+/// instead of sorting / deduplicating a full result nothing observes.
+///
+/// Deliberately conservative — the recursion STOPS (subtree kept verbatim) at:
+/// * `Slice` — OFFSET observes the inner COUNT (`DISTINCT` below an `OFFSET 2` can
+///   flip the boolean) and which rows survive a slice depends on the inner order, so
+///   everything below a `Slice` stays exactly as written;
+/// * every non-modifier operator (`Join` / `Filter` / `Group` / …) whose output
+///   depends on the actual rows. In particular aggregation / HAVING is NEVER
+///   touched: an empty-group aggregate still yields a solution, so `Group` must
+///   evaluate as-is.
+fn ask_simplify(p: &GraphPattern) -> GraphPattern {
+    match p {
+        GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner } => ask_simplify(inner),
+        GraphPattern::Project { inner, variables } => GraphPattern::Project {
+            inner: Box::new(ask_simplify(inner)),
+            variables: variables.clone(),
+        },
+        GraphPattern::Union { left, right } => GraphPattern::Union {
+            left: Box::new(ask_simplify(left)),
+            right: Box::new(ask_simplify(right)),
+        },
+        other => other.clone(),
+    }
 }
 
 /// Evaluates a SELECT but returns only the solution count. When the count can be
@@ -2174,14 +2220,17 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
         }
         GraphPattern::Reduced { inner } => eval_modified(graph, local, inner),
         GraphPattern::Slice { inner, start, length } => {
-            // LIMIT early-termination: a bare LIMIT over a single-pattern scan
-            // (no ORDER BY / DISTINCT / aggregation / join, which all need the full
-            // result) can stop after start+length rows instead of materialising the
-            // whole relation — true streaming. LIMIT-without-ORDER-BY is
-            // order-insensitive so any rows are valid.
+            // LIMIT early-termination: a bare LIMIT (no ORDER BY / DISTINCT /
+            // aggregation above it, which all need the full result) can stop after
+            // start+length rows instead of materialising the whole relation — a
+            // single-pattern scan stops mid-scan, and a conjunctive / UNION /
+            // OPTIONAL / Join shape stops at the first seed blocks yielding enough
+            // fully-FILTERed rows (`try_capped`, sq-7d3dj.30.8; ASK evaluates as
+            // LIMIT 1 through here). LIMIT-without-ORDER-BY is order-insensitive so
+            // any rows are valid.
             if let Some(len) = length {
                 if let Some(cap) = start.checked_add(*len) {
-                    if let Some(mut b) = try_capped(graph, inner, cap)? {
+                    if let Some(mut b) = try_capped(graph, local, inner, cap)? {
                         slice_bindings(&mut b, *start, *length);
                         return Ok(b);
                     }
@@ -2673,13 +2722,32 @@ fn probe_anchor_distinct(
     Ok(Some((out, scanned)))
 }
 
-/// Evaluates a pattern producing at most `cap` rows by stopping the scan early,
-/// when that is safe: a single-pattern scan (optionally with a pushed-down
-/// sargable numeric filter) under projection. Returns `None` for anything that
-/// needs the full result first (joins, ORDER BY, DISTINCT, aggregation, residual
-/// filters), so the caller falls back to full evaluation.
-fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<Bindings>, String> {
-    // zk-trace: LIMIT early-termination would scan only the first `cap` rows,
+/// Evaluates a pattern with an early-termination row cap, when that is safe. The
+/// contract every arm preserves (and the `Slice` caller relies on): the returned
+/// rows are a sub-multiset of the full result, and a return of FEWER than `cap`
+/// rows is the COMPLETE result. Under that contract a caller that observes only
+/// `min(cap, ·)` rows (LIMIT) or emptiness (ASK evaluates as `LIMIT 1`) gets the
+/// same answer as full evaluation — differentially asserted by
+/// `tests/ask_early_exit.rs`. [FABLE-5] (sq-7d3dj.30.8)
+///
+/// Covered shapes: a single-pattern scan (optionally with a pushed-down sargable
+/// numeric filter) under projection — the scan itself stops at `cap` rows; a
+/// conjunctive multi-pattern BGP (+ FILTERs) — the block-driven join chain
+/// (`eval_bgp_binary_capped`); UNION — left branch first, the right branch is not
+/// evaluated when the left already satisfies the cap; OPTIONAL — capping the LEFT
+/// side caps the output, since no left row is ever dropped; Join — a capped-left
+/// probe joined through the SIP correlated path, declining when the probe misses;
+/// BIND — row-count preserving. Everything else returns `None` and the caller falls
+/// back to full evaluation — in particular DISTINCT / ORDER BY / aggregation need
+/// the full result, and a bare FILTER over a non-conjunctive inner cannot count
+/// capped rows soundly (a row may only count once it has passed every filter).
+fn try_capped(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    inner: &GraphPattern,
+    cap: usize,
+) -> Result<Option<Bindings>, String> {
+    // zk-trace: early termination would consume only part of each scan range,
     // recording a TRUNCATED input set — but the completeness witness (the
     // linear-sweep circuit) must see the whole scan range. Disable the cap
     // while recording; the full path is result-equivalent (LIMIT is
@@ -2693,39 +2761,293 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
     }
     match inner {
         GraphPattern::Project { inner, variables } => {
-            Ok(try_capped(graph, inner, cap)?.map(|b| project_bindings(b, variables)))
+            Ok(try_capped(graph, local, inner, cap)?.map(|b| project_bindings(b, variables)))
         }
-        GraphPattern::Reduced { inner } => try_capped(graph, inner, cap),
+        GraphPattern::Reduced { inner } => try_capped(graph, local, inner, cap),
         p if is_conjunctive(p) => {
             let mut patterns = Vec::new();
             let mut filters = Vec::new();
             flatten_conjunction(p, &mut patterns, &mut filters);
-            if patterns.len() != 1 {
-                return Ok(None);
+            if patterns.is_empty() {
+                return Ok(None); // the unit relation: nothing to cap
             }
-            let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
-            if !residual.is_empty() {
-                return Ok(None);
+            if patterns.len() == 1 {
+                let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
+                if residual.is_empty() {
+                    // Single pattern, every FILTER pushed into the scan: stop the
+                    // SCAN itself at `cap` rows (the cheapest capped form).
+                    let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0])?;
+                    if unsat {
+                        return Ok(Some(Bindings::unsorted(collect_vars(&patterns), vec![])));
+                    }
+                    let filt = pat_filters[0];
+                    let sort_col = filt.map(|(c, _)| c);
+                    return Ok(Some(scan_to_bindings(
+                        graph,
+                        &id_pat,
+                        &pos_vars,
+                        sort_col,
+                        filt,
+                        Some(cap),
+                        #[cfg(feature = "semijoin-bitmap")]
+                        None,
+                    )));
+                }
             }
-            let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0])?;
-            if unsat {
-                return Ok(Some(Bindings::unsorted(collect_vars(&patterns), vec![])));
+            // Multi-pattern (or residual-FILTER) conjunctive shape: the block-driven
+            // capped join chain.
+            eval_bgp_binary_capped(graph, local, &patterns, &filters, cap)
+        }
+        GraphPattern::Union { left, right } => {
+            // Left branch first; the right branch is only touched when the left did
+            // not already satisfy the cap (the ASK short-circuit: a non-empty left
+            // branch answers the query alone).
+            let l = match try_capped(graph, local, left, cap)? {
+                Some(b) => b,
+                None => eval_graph_pattern(graph, local, left)?,
+            };
+            if l.rows.len() >= cap {
+                // The rows are genuine union solutions (right-only variables are
+                // unbound); align the header with the un-evaluated right branch's
+                // in-scope variables, exactly as `union_bindings` would have.
+                return Ok(Some(union_bindings(l, Bindings::unsorted(in_scope_vars(right), vec![]))));
             }
-            let filt = pat_filters[0];
-            let sort_col = filt.map(|(c, _)| c);
-            Ok(Some(scan_to_bindings(
-                graph,
-                &id_pat,
-                &pos_vars,
-                sort_col,
-                filt,
-                Some(cap),
-                #[cfg(feature = "semijoin-bitmap")]
-                None,
-            )))
+            // Fewer than `cap` rows ⇒ `l` is the COMPLETE left result (the
+            // contract): the union needs only `cap - |l|` further rows.
+            let r = match try_capped(graph, local, right, cap - l.rows.len())? {
+                Some(b) => b,
+                None => eval_graph_pattern(graph, local, right)?,
+            };
+            Ok(Some(union_bindings(l, r)))
+        }
+        GraphPattern::Join { left, right } => {
+            let l = match try_capped(graph, local, left, cap)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            // Fewer than `cap` rows ⇒ the COMPLETE left result (the contract); the
+            // join below is then the full join. Otherwise `l` is a first-rows PROBE.
+            let l_complete = l.rows.len() < cap;
+            if l.rows.is_empty() {
+                // Empty complete left: the full join is empty.
+                return Ok(Some(union_bindings(l, Bindings::unsorted(in_scope_vars(right), vec![]))));
+            }
+            // Correlated (SIP) evaluation of the right child seeded from the capped
+            // left — the same machinery as the full Join arm (sq-7d3dj.30.3). Joins
+            // are per-left-row local, so the joined rows are exactly the full join's
+            // rows originating from `l`'s rows.
+            let joined = match try_sip_join(graph, local, &l, right)? {
+                Some(j) => j,
+                None => {
+                    let r = eval_graph_pattern(graph, local, right)?;
+                    join_bindings(l, r)
+                }
+            };
+            if l_complete || joined.rows.len() >= cap {
+                return Ok(Some(joined));
+            }
+            // The capped-left probe joined to fewer than `cap` rows, but more left
+            // rows might join: decline, the caller runs the full path.
+            Ok(None)
+        }
+        GraphPattern::LeftJoin { left, right, expression } => {
+            // OPTIONAL never drops a left row (each yields >= 1 output row, joined
+            // or kept with the right unbound), so capping the LEFT side caps the
+            // output. The right side is still evaluated in full so every emitted row
+            // is a genuine LeftJoin solution (v1 boundary: no correlated OPTIONAL).
+            let l = match try_capped(graph, local, left, cap)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let r = eval_graph_pattern(graph, local, right)?;
+            Ok(Some(left_outer_join(graph, local, l, r, expression.as_ref())?))
+        }
+        GraphPattern::Extend { inner, variable, expression } => {
+            // BIND is row-count preserving (an expression error leaves the variable
+            // unbound, the row is kept), so extending a capped subset is sound.
+            let b = match try_capped(graph, local, inner, cap)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            Ok(Some(extend_bindings(graph, local, b, variable, expression)?))
         }
         _ => Ok(None),
     }
+}
+
+/// The syntactic in-scope variables of a pattern (spargebra's authoritative
+/// `on_in_scope_variable` set, first-occurrence order, deduplicated) — used by the
+/// capped UNION / Join arms to shape a header whose right branch was never evaluated.
+fn in_scope_vars(p: &GraphPattern) -> Vec<Variable> {
+    let mut vars: Vec<Variable> = Vec::new();
+    p.on_in_scope_variable(|v| {
+        if !vars.contains(v) {
+            vars.push(v.clone());
+        }
+    });
+    vars
+}
+
+/// First seed block of the capped conjunctive chain: small enough that an ASK /
+/// LIMIT-1 hit in the first block costs a fraction of the full join, large enough
+/// to amortise the per-block chain setup.
+const CAPPED_SEED_BLOCK: usize = 1024;
+/// Second-tier block: one escalation before the remainder is processed whole, so a
+/// first-block miss still avoids the full chain when a solution lives within the
+/// first ~64k seed rows. Exactly two escalations bound the per-step rhs re-scan
+/// overhead of a NO-solution (ASK false) query at 3x the single-pass scans.
+const CAPPED_SEED_BLOCK_2: usize = 65_536;
+
+/// Capped conjunctive (BGP + FILTER) evaluation — the ASK / LIMIT-k first-solutions
+/// short-circuit THROUGH JOINS (sq-7d3dj.30.8). Runs the same greedy (GOO) binary
+/// join chain as `eval_bgp_binary`, but drives it from at most three geometrically
+/// growing SLICES of the seed scan (`CAPPED_SEED_BLOCK` rows, then up to
+/// `CAPPED_SEED_BLOCK_2`, then the remainder), applying the residual FILTERs per
+/// block and stopping as soon as `cap` fully-FILTERed rows exist.
+///
+/// SOUNDNESS. Every chain step is per-seed-row local — a join (bind / merge / hash /
+/// cross) or a row-wise FILTER over a seed subset yields exactly the full result's
+/// rows that originate from that subset — so the blocks are disjoint, their
+/// concatenation over the whole seed IS the full result, and stopping early only
+/// truncates it (the `try_capped` contract). A row counts toward `cap` only after
+/// the WHOLE chain including every residual FILTER, so a first candidate eliminated
+/// by a late FILTER never satisfies the cap. The join ORDER is re-derived per block
+/// from the planner estimates (a block's size can change the bind-join admission),
+/// which affects row order only — the contract is multiset-level and a BGP join is
+/// order-independent.
+///
+/// Returns `None` (caller falls back to full evaluation) for the shapes the binary
+/// chain does not cover: cyclic (WCOJ / LFTJ) BGPs and quoted-triple (RDF 1.2)
+/// constraint decompositions.
+fn eval_bgp_binary_capped(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    patterns: &[TriplePattern],
+    filters: &[Expression],
+    cap: usize,
+) -> Result<Option<Bindings>, String> {
+    if !bgp_uses_binary(patterns) {
+        return Ok(None); // cyclic -> LFTJ: no capped variant (v1 boundary)
+    }
+    let (_, constraints) = extract_quoted_constraints(patterns);
+    if !constraints.is_empty() {
+        return Ok(None); // triple-term decomposition: keep the full path
+    }
+    let (pat_filters, residual) = split_sargable(graph, patterns, filters);
+    let pfilter = |i: usize| -> Option<(usize, ScanCmp)> { pat_filters.get(i).copied().flatten() };
+    let prepared = prepare_bgp(graph, patterns)?;
+    if prepared.iter().any(|p| p.unsatisfiable) {
+        return Ok(Some(Bindings::unsorted(collect_vars(patterns), vec![])));
+    }
+    if cap == 0 {
+        // Zero rows requested: an empty partial answer is valid under the contract
+        // (`|result| >= cap` — the caller's slice truncates to nothing either way).
+        return Ok(Some(Bindings::unsorted(collect_vars(patterns), vec![])));
+    }
+    let seed = goo_seed(&prepared);
+    let seed_sort_col = goo_seed_sort(&prepared, seed, pfilter(seed).map(|(c, _)| c));
+    let seed_all = scan_to_bindings(
+        graph,
+        &prepared[seed].id_pat,
+        &prepared[seed].pos_vars,
+        seed_sort_col,
+        pfilter(seed),
+        None,
+        #[cfg(feature = "semijoin-bitmap")]
+        None,
+    );
+
+    let mut acc: Option<Bindings> = None;
+    let mut start = 0usize;
+    while start < seed_all.rows.len() {
+        let end = if start == 0 {
+            CAPPED_SEED_BLOCK.min(seed_all.rows.len())
+        } else if start == CAPPED_SEED_BLOCK {
+            CAPPED_SEED_BLOCK_2.min(seed_all.rows.len())
+        } else {
+            seed_all.rows.len()
+        };
+        // One seed slice through the whole chain. A contiguous slice of a sorted
+        // scan stays sorted, so merge-join eligibility is preserved.
+        let mut result = Bindings {
+            vars: seed_all.vars.clone(),
+            rows: seed_all.rows[start..end].to_vec(),
+            sorted_by: seed_all.sorted_by.clone(),
+        };
+        let mut cs_ctx = CsCtx::new(&prepared);
+        let mut done = vec![false; prepared.len()];
+        done[seed] = true;
+        cs_ctx.note_done(seed);
+        let mut cur_card = prepared[seed].est as f64;
+        let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
+        record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
+        for _ in 1..prepared.len() {
+            let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+            cur_card = new_card;
+            done[i] = true;
+            cs_ctx.note_done(i);
+            // Same step selection as `eval_bgp_binary`: bind-join when the running
+            // block is much smaller than the pattern; else merge / hash / cross.
+            let connecting: Vec<Variable> =
+                result.vars.iter().filter(|v| prepared[i].var_pos(v).is_some()).cloned().collect();
+            if connecting.len() == 1
+                && distinct_pattern_vars(&prepared[i].pos_vars)
+                && result.rows.len().saturating_mul(8) < prepared[i].est
+            {
+                let jv = &connecting[0];
+                let rk = result.col(jv).unwrap();
+                let pp = prepared[i].var_pos(jv).unwrap();
+                result = bind_join(graph, result, &prepared[i].id_pat, &prepared[i].pos_vars, rk, pp, pfilter(i));
+            } else {
+                let filt = pfilter(i);
+                let merge_var = result.sorted_by.clone().filter(|sv| prepared[i].var_pos(sv).is_some());
+                let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| prepared[i].var_pos(jv).unwrap()));
+                let rhs = scan_to_bindings(
+                    graph,
+                    &prepared[i].id_pat,
+                    &prepared[i].pos_vars,
+                    scan_sort,
+                    filt,
+                    None,
+                    #[cfg(feature = "semijoin-bitmap")]
+                    None,
+                );
+                let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
+                if let Some(jv) = merge_var.filter(|jv| rhs.sorted_by.as_ref() == Some(jv)) {
+                    result = merge_join(result, rhs, &jv);
+                } else if connected {
+                    result = hash_join(result, rhs);
+                } else {
+                    result = cross_product(result, rhs);
+                }
+            }
+            record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
+            if result.rows.is_empty() {
+                break;
+            }
+        }
+        // Residual FILTERs per block — a row only counts toward the cap once it has
+        // passed EVERY filter (the late-FILTER safety property: a partial solution
+        // never fires the early exit).
+        for f in &residual {
+            if result.rows.is_empty() {
+                break;
+            }
+            apply_filter(graph, local, &mut result, f)?;
+        }
+        let merged = match acc.take() {
+            None => result,
+            Some(a) => union_bindings(a, result),
+        };
+        budget::check(merged.rows.len())?;
+        let satisfied = merged.rows.len() >= cap;
+        acc = Some(merged);
+        if satisfied {
+            break;
+        }
+        start = end;
+    }
+    Ok(Some(acc.unwrap_or_else(|| Bindings::unsorted(collect_vars(patterns), vec![]))))
 }
 
 /// Distinct (non-repeated) variable positions of a prepared pattern, or `None` if

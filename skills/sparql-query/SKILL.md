@@ -605,6 +605,28 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   that the scanned rows collapse to a small fraction of the full join). SP2Bench q09: the 2-branch
   `DISTINCT ?predicate` over persons answers a handful of predicates without materialising the ~77 k-row
   join. Payoff on the canonical perf host is a measurable hypothesis, not a baked-in number.
+- **ASK / LIMIT first-solutions early exit through joins** is a DEFAULT-ON, semantics-preserving
+  optimisation (bead `sq-7d3dj.30.8`; research/sp2bench-complex-shape-deficit.md §5). `ASK` is
+  evaluated under an implicit `LIMIT 1`, and any `LIMIT k` (no ORDER BY / DISTINCT / aggregation
+  above it) now stops early for JOIN shapes, not just single-pattern scans: a conjunctive BGP (+
+  FILTERs) is driven in growing **seed-scan blocks** (1024 → 64 k → rest) through the same greedy
+  binary join chain, counting a row toward the cap only after **every** residual FILTER has passed
+  (a first candidate eliminated by a late FILTER never fires the exit); `UNION` evaluates its left
+  branch first and skips the right when the cap is already met; `OPTIONAL` caps its left side (no
+  left row is ever dropped by OPTIONAL); `Join(A, B)` probes with a capped `A` through the SIP
+  correlated path and falls back when the probe misses. Under ASK the plan is additionally
+  simplified where provably emptiness-neutral: `ORDER BY` and `DISTINCT` are stripped along the top
+  modifier spine only — NEVER below a `Slice` (`DISTINCT` under `OFFSET` changes the visible count)
+  and NEVER touching aggregation/HAVING (an empty-group aggregate still yields a solution). It is
+  **conservative**: cyclic (LFTJ) BGPs, quoted-triple patterns, MINUS, property paths, GRAPH,
+  bare FILTERs over non-conjunctive groups, and an armed zk-trace recorder all fall back to full
+  evaluation bit-for-bit. The boolean is identical to the unoptimized path on every query (oracle
+  differential + budget-bounded revert-witness in `tests/ask_early_exit.rs`: an ASK over a join
+  whose full materialisation exceeds a row budget must still answer instead of tripping it).
+  Honest boundary: an ASK whose answer is `false` still sweeps the whole seed (bounded at ~3x the
+  single-pass scans by the three-block schedule), and the right side of `OPTIONAL` is still
+  evaluated in full. Payoff (SP2Bench q12a/q12b-class) is a measurable hypothesis for the canonical
+  perf host, not a baked-in number.
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
   pattern, the executor first builds a membership filter over the already-materialised side's
