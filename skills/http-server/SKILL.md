@@ -412,6 +412,17 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > — byte-identical to a JSON-LD-disabled build. What is default-on now: JSON-LD parse + serialise
 > (flattened) + content-negotiation; full conneg-conformance ratcheting is on the sq-oy1f roadmap.
 
+<!-- [FABLE-5] sq-7d3dj.30.13: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **Default-on algebra rewrite (`algebra-rewrite` feature — [FABLE-5] sq-7d3dj.30.13).** The
+> server's default set also lights sparq-engine's pre-execution algebra rewrite pass (#1735): a
+> result-equivalent `FILTER(?v = <iri>)` IRI-constant folding + `FILTER(!bound)` anti-join applied
+> at parse time, so the shipped server executes the same plans the CLI and the canonical benchmarks
+> measure. IRI constants only (a literal equality is never rewritten — the `sq-lr2ii` avoidance
+> contract); zero new dependencies. Drop it with `--no-default-features --features server,jsonld`
+> for an explicitly rewrite-dark build; the sparq-engine LIBRARY default remains OFF for lean
+> library consumers.
+
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
 for the dry run, `explain=analyze` to run + trace (SELECT/ASK only):
