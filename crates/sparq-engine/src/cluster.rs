@@ -163,6 +163,20 @@ pub(crate) fn detect(
         }
         let shared_var = shared[0];
 
+        // The shared variable must be the membership pattern's INNER (bag) variable —
+        // the one that does NOT connect to the rest — and the OTHER membership variable
+        // must be the one that connects to the rest. This is what makes the hoist a WIN
+        // (the anchor bounds the bag variable to a small set, so the standalone cluster
+        // is small) and keeps the trigger tight to the q07 shape: a `?doc rdf:type
+        // ?class` pattern that shares the OUTER `?doc` variable is NOT a bag anchor and
+        // must not be picked (partitioning there is still result-correct but not the
+        // profiled win). `shared_var` connects to the rest ⇒ wrong anchor, skip.
+        let shared_connects_rest = (0..prepared.len())
+            .any(|j| j != m && j != a && pattern_vars(&prepared[j]).contains(&shared_var));
+        if shared_connects_rest {
+            continue;
+        }
+
         // The membership pattern must still connect to the REST through a variable
         // other than the shared one (else the cluster IS the whole join component).
         let m_connects_rest = m_vars.iter().any(|&v| {
