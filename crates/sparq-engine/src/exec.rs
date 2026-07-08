@@ -728,6 +728,135 @@ fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
     }
 }
 
+/// [FABLE-5] (sq-7d3dj.30.11) Static term-kind analysis for the id-level FILTER fast path:
+/// the REAL variables a graph pattern proves can never bind to a LITERAL — i.e. every place
+/// the variable is (or could be) bound is a subject or predicate slot of a triple/path pattern.
+/// Subjects are IRIs / blank nodes (or RDF 1.2 quoted triples) and predicates are always IRIs;
+/// none of those is a literal. A variable is EXCLUDED the moment it appears anywhere it could
+/// take a literal: an OBJECT slot, a `BIND` target, a `VALUES` column, or under any construct we
+/// do not analyse (`SERVICE`, a sub-`SELECT` projecting it, …). Sound UNDER-approximation: it
+/// only reports a variable when literal-binding is provably impossible, so a `=`/`!=` over two
+/// reported variables (or a reported variable and a constant IRI) is exactly id (in)equality.
+///
+/// Implementation: collect `nonlit_positioned` (appears in a subject/predicate slot at least
+/// once) and `lit_possible` (appears in a literal-capable position, or is produced by an
+/// unanalysable construct), then return `nonlit_positioned \ lit_possible`.
+#[cfg(feature = "id-filter-fastpath")]
+fn nonliteral_vars(p: &GraphPattern) -> FxHashSet<Variable> {
+    let mut nonlit_positioned = FxHashSet::default();
+    let mut lit_possible = FxHashSet::default();
+    collect_kind_positions(p, &mut nonlit_positioned, &mut lit_possible);
+    nonlit_positioned.retain(|v| !lit_possible.contains(v));
+    nonlit_positioned
+}
+
+/// Walks `p`, recording each REAL variable into `nonlit` if it appears in a subject/predicate
+/// slot and into `maybe_lit` if it appears anywhere it could be bound to a literal (an object
+/// slot, a `BIND`/`VALUES` binding, or any un-analysed construct that could bind it).
+#[cfg(feature = "id-filter-fastpath")]
+fn collect_kind_positions(
+    p: &GraphPattern,
+    nonlit: &mut FxHashSet<Variable>,
+    maybe_lit: &mut FxHashSet<Variable>,
+) {
+    use GraphPattern as G;
+    fn real(t: &TermPattern) -> Option<&Variable> {
+        if let TermPattern::Variable(v) = t {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    match p {
+        G::Bgp { patterns } => {
+            for tp in patterns {
+                // Subject / predicate slots are IRI / bnode / (RDF 1.2) quoted-triple — never a
+                // literal. The object slot is the only one that can bind a literal.
+                if let Some(v) = real(&tp.subject) {
+                    nonlit.insert(v.clone());
+                }
+                if let Some(v) = nnp_var_ref(&tp.predicate) {
+                    nonlit.insert(v.clone());
+                }
+                if let Some(v) = real(&tp.object) {
+                    maybe_lit.insert(v.clone());
+                }
+            }
+        }
+        // A property-path binds subject and object; both are IRI / bnode ends (paths cannot
+        // traverse to a literal node), so both slots are non-literal.
+        G::Path { subject, object, .. } => {
+            if let Some(v) = real(subject) {
+                nonlit.insert(v.clone());
+            }
+            if let Some(v) = real(object) {
+                nonlit.insert(v.clone());
+            }
+        }
+        G::Join { left, right } | G::Union { left, right } => {
+            collect_kind_positions(left, nonlit, maybe_lit);
+            collect_kind_positions(right, nonlit, maybe_lit);
+        }
+        // OPTIONAL / MINUS: the right side still POSITIONS its variables, so its subject/predicate
+        // occurrences remain non-literal evidence and its object occurrences remain literal-risk.
+        G::LeftJoin { left, right, .. } => {
+            collect_kind_positions(left, nonlit, maybe_lit);
+            collect_kind_positions(right, nonlit, maybe_lit);
+        }
+        G::Minus { left, right } => {
+            collect_kind_positions(left, nonlit, maybe_lit);
+            collect_kind_positions(right, nonlit, maybe_lit);
+        }
+        G::Filter { inner, .. }
+        | G::OrderBy { inner, .. }
+        | G::Distinct { inner }
+        | G::Reduced { inner }
+        | G::Slice { inner, .. } => collect_kind_positions(inner, nonlit, maybe_lit),
+        G::Graph { name, inner } => {
+            // A GRAPH-name variable binds a graph IRI — non-literal.
+            if let NamedNodePattern::Variable(v) = name {
+                nonlit.insert(v.clone());
+            }
+            collect_kind_positions(inner, nonlit, maybe_lit);
+        }
+        // A BIND target can evaluate to a literal — literal-risk.
+        G::Extend { inner, variable, .. } => {
+            maybe_lit.insert(variable.clone());
+            collect_kind_positions(inner, nonlit, maybe_lit);
+        }
+        // Every VALUES column can carry a literal — literal-risk for all of them.
+        G::Values { variables, .. } => {
+            for v in variables {
+                maybe_lit.insert(v.clone());
+            }
+        }
+        // Projection / grouping: a projected/grouped variable keeps the inner analysis; a fresh
+        // aggregate/group-key output variable could be a literal (e.g. `(SUM(?x) AS ?s)`), so the
+        // OUTPUT variables not present in the inner analysis are conservatively literal-risk. We
+        // simply recurse into the inner and add all listed output variables as literal-risk unless
+        // proven non-literal by the inner (the `\` in `nonliteral_vars` drops any that are risk).
+        G::Project { inner, variables } => {
+            collect_kind_positions(inner, nonlit, maybe_lit);
+            // A projection only renames/restricts columns; variables that survive keep the inner
+            // verdict. Nothing new to add — the inner recursion already classified them.
+            let _ = variables;
+        }
+        G::Group { inner, variables, aggregates } => {
+            collect_kind_positions(inner, nonlit, maybe_lit);
+            let _ = variables;
+            // Aggregate result variables (SUM/COUNT/… AS ?v) are computed literals.
+            for (v, _) in aggregates {
+                maybe_lit.insert(v.clone());
+            }
+        }
+        // SERVICE, sub-SELECT (Project handled above), and anything else: we cannot prove any of
+        // its variables non-literal, so record NONE as non-literal. We do NOT need to add them to
+        // `maybe_lit` (a variable is reported only if it also appears in `nonlit`), but recursing
+        // is harmless and future-proof for nested analysable sub-patterns. Conservatively skip.
+        _ => {}
+    }
+}
+
 /// A borrow of a predicate-slot variable (predicates are never blank/quoted).
 fn nnp_var_ref(p: &NamedNodePattern) -> Option<&Variable> {
     match p {
@@ -3922,11 +4051,25 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
                         ginner,
                         Some(&prefix),
                     )?;
+                    // [FABLE-5] (sq-7d3dj.30.11) Install the static non-literal column set for the
+                    // id-level FILTER fast path, scoped to this one dispatch.
+                    #[cfg(feature = "id-filter-fastpath")]
+                    {
+                        let cols = nonliteral_filter_cols(inner, &b);
+                        with_idfast_nonlit_cols(cols, || apply_filter(graph, local, &mut b, expr))?;
+                    }
+                    #[cfg(not(feature = "id-filter-fastpath"))]
                     apply_filter(graph, local, &mut b, expr)?;
                     return Ok(b);
                 }
             }
             let mut b = eval_graph_pattern(graph, local, inner)?;
+            #[cfg(feature = "id-filter-fastpath")]
+            {
+                let cols = nonliteral_filter_cols(inner, &b);
+                with_idfast_nonlit_cols(cols, || apply_filter(graph, local, &mut b, expr))?;
+            }
+            #[cfg(not(feature = "id-filter-fastpath"))]
             apply_filter(graph, local, &mut b, expr)?;
             Ok(b)
         }
@@ -8685,6 +8828,15 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     apply_filter_scalar(graph, local, b, expr)
 }
 
+/// [FABLE-5] (sq-7d3dj.30.11) The set of `b` column indices proven NON-LITERAL by the static
+/// term-kind analysis over the FILTER's inner pattern (the id-level fast-path enabler). Empty
+/// when the feature is off. Called once at the FILTER dispatch, before the row loop.
+#[cfg(feature = "id-filter-fastpath")]
+fn nonliteral_filter_cols(inner: &GraphPattern, b: &Bindings) -> FxHashSet<usize> {
+    let vars = nonliteral_vars(inner);
+    vars.iter().filter_map(|v| b.col(v)).collect()
+}
+
 /// The columnar residual-FILTER attempt (M4 Phase 5 dispatcher-wired Seam A).
 ///
 /// Returns `Some(new_rows)` (the surviving rows, in the scalar path's order) when the
@@ -9036,9 +9188,47 @@ fn columnar_aggregate(
     Some(rows)
 }
 
+// [FABLE-5] (sq-7d3dj.30.11) The columns the FILTER dispatch proved non-literal, handed to
+// `apply_filter_scalar` for the id-level fast-path rewrite. Set (and cleared) around the single
+// `apply_filter` call on the DISPATCHING thread, read once before the row loop — rayon workers
+// evaluate the already-rewritten expression, so they never read this. A missing/empty value
+// means "no static non-literal columns known" (every other FILTER caller), so the rewrite is a
+// no-op there and the exact path is unchanged.
+#[cfg(feature = "id-filter-fastpath")]
+thread_local! {
+    static IDFAST_NONLIT_COLS: std::cell::RefCell<FxHashSet<usize>> =
+        std::cell::RefCell::new(FxHashSet::default());
+}
+
+/// Runs `f` with the id-fast non-literal column set installed, restoring the previous set after
+/// (also on unwind). Only wraps the FILTER dispatch that computed a set from its inner pattern.
+#[cfg(feature = "id-filter-fastpath")]
+fn with_idfast_nonlit_cols<R>(cols: FxHashSet<usize>, f: impl FnOnce() -> R) -> R {
+    let prev = IDFAST_NONLIT_COLS.with(|c| c.replace(cols));
+    struct Restore(FxHashSet<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IDFAST_NONLIT_COLS.with(|c| *c.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+    let _restore = Restore(prev);
+    f()
+}
+
 fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
     // Pre-resolve Variable → column index once before the row loop. [OPUS-4.8] sq-7d3dj.4.
-    let compiled = compile_expr(expr, b);
+    #[cfg_attr(not(feature = "id-filter-fastpath"), allow(unused_mut))]
+    let mut compiled = compile_expr(expr, b);
+    // [FABLE-5] (sq-7d3dj.30.11) Rewrite eligible `=` nodes into the id-level fast path using the
+    // non-literal columns the FILTER dispatch computed for THIS operator (empty for every other
+    // caller → no-op). Done ONCE, before the row loop; rayon workers see the rewritten program.
+    #[cfg(feature = "id-filter-fastpath")]
+    IDFAST_NONLIT_COLS.with(|cols| {
+        let cols = cols.borrow();
+        if !cols.is_empty() {
+            idfast_rewrite(&mut compiled, &cols);
+        }
+    });
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
     // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
@@ -9149,6 +9339,13 @@ enum CompiledExpr {
     Or(Box<Self>, Box<Self>),
     Not(Box<Self>),
     Equal(Box<Self>, Box<Self>),
+    /// [FABLE-5] (sq-7d3dj.30.11) `=` where BOTH operands are statically proven non-literal (a
+    /// column bound only in subject/predicate positions, or a constant IRI). Evaluated by RAW-ID
+    /// (in)equality — skips the per-row term materialisation the general `Equal` arm performs.
+    /// Result-identical to `Equal` for these operands (canonicalising dict: IRI/bnode `=` is id
+    /// equality; unbound operand is a type error). Only produced under `id-filter-fastpath`.
+    #[cfg(feature = "id-filter-fastpath")]
+    IdEqNonLit(IdOperand, IdOperand),
     SameTerm(Box<Self>, Box<Self>),
     Greater(Box<Self>, Box<Self>),
     GreaterOrEqual(Box<Self>, Box<Self>),
@@ -9166,6 +9363,86 @@ enum CompiledExpr {
     FunctionCall(spargebra::algebra::Function, Vec<Self>),
     /// `EXISTS` is kept uncompiled: it re-evaluates the inner graph pattern per row.
     Exists(Box<GraphPattern>),
+}
+
+/// [FABLE-5] (sq-7d3dj.30.11) A `=`/`!=` operand resolved to a single RAW ID at eval time:
+/// a bound column, or a constant IRI (resolved once against the graph dictionary). Both forms
+/// are statically non-literal (columns proven so by `nonliteral_vars`; a NamedNode is an IRI).
+#[cfg(feature = "id-filter-fastpath")]
+#[derive(Clone, Debug)]
+enum IdOperand {
+    /// `row[c]` — a column proven non-literal by the static analysis.
+    Col(usize),
+    /// A constant IRI. Its raw id (or `NO_ID` if the IRI is absent from the dictionary, in which
+    /// case it can never equal any bound id) is resolved once at rewrite time.
+    ConstIri(oxrdf::NamedNode),
+}
+
+/// Rewrites eligible `Equal(a, c)` nodes of a compiled FILTER expression into the id-level
+/// [`CompiledExpr::IdEqNonLit`] fast path, in place. A node is eligible iff BOTH operands are
+/// statically non-literal — a `Var(Some(c))` whose column `c` is in `nonlit_cols`, or a constant
+/// `NamedNode` (always an IRI). `!=` is `Not(Equal(..))`, so rewriting the inner `Equal` covers it.
+/// Everything else (numeric / temporal / possibly-literal operands, unresolved columns) is left
+/// untouched and takes the existing exact path. [FABLE-5] (sq-7d3dj.30.11).
+#[cfg(feature = "id-filter-fastpath")]
+fn idfast_rewrite(e: &mut CompiledExpr, nonlit_cols: &FxHashSet<usize>) {
+    use CompiledExpr as C;
+    // A non-literal operand descriptor, or `None` if the operand could be a literal / is not a
+    // single-id term (arithmetic, function call, …).
+    fn nonlit_operand(e: &CompiledExpr, nonlit_cols: &FxHashSet<usize>) -> Option<IdOperand> {
+        match e {
+            C::Var(Some(c)) if nonlit_cols.contains(c) => Some(IdOperand::Col(*c)),
+            C::NamedNode(n) => Some(IdOperand::ConstIri(n.clone())),
+            _ => None,
+        }
+    }
+    match e {
+        C::Equal(a, c) => {
+            // Recurse first so nested Equals inside operands are handled uniformly (operands of an
+            // Equal are never themselves the (in)equality we fast-path, but keep the walk total).
+            idfast_rewrite(a, nonlit_cols);
+            idfast_rewrite(c, nonlit_cols);
+            if let (Some(l), Some(r)) =
+                (nonlit_operand(a, nonlit_cols), nonlit_operand(c, nonlit_cols))
+            {
+                *e = C::IdEqNonLit(l, r);
+            }
+        }
+        C::And(a, c)
+        | C::Or(a, c)
+        | C::Greater(a, c)
+        | C::GreaterOrEqual(a, c)
+        | C::Less(a, c)
+        | C::LessOrEqual(a, c)
+        | C::Add(a, c)
+        | C::Subtract(a, c)
+        | C::Multiply(a, c)
+        | C::Divide(a, c)
+        | C::SameTerm(a, c) => {
+            idfast_rewrite(a, nonlit_cols);
+            idfast_rewrite(c, nonlit_cols);
+        }
+        C::Not(a) | C::UnaryPlus(a) | C::UnaryMinus(a) => idfast_rewrite(a, nonlit_cols),
+        C::If(a, b, c) => {
+            idfast_rewrite(a, nonlit_cols);
+            idfast_rewrite(b, nonlit_cols);
+            idfast_rewrite(c, nonlit_cols);
+        }
+        C::Coalesce(es) | C::In(_, es) | C::FunctionCall(_, es) => {
+            // `In(a, list)` keeps `a` unchanged (its top-level shape is not an Equal), but its list
+            // items are ordinary expressions; only the list items recurse here (a is not rewritten
+            // because `IN` is not an `=`; leaving it exact is correct and simplest).
+            for x in es {
+                idfast_rewrite(x, nonlit_cols);
+            }
+        }
+        C::IdEqNonLit(..)
+        | C::Var(_)
+        | C::BoundCol(_)
+        | C::NamedNode(_)
+        | C::Literal(_)
+        | C::Exists(_) => {}
+    }
 }
 
 /// Walk `e` once, resolving all `Variable`/`Bound` nodes to column indices. [OPUS-4.8] sq-7d3dj.4.
@@ -10661,6 +10938,44 @@ fn cmp_compiled(
     })
 }
 
+/// [FABLE-5] (sq-7d3dj.30.11) The single RAW ID an operand resolves to, if it is a bound column
+/// or a constant IRI — else `None` (arithmetic, function call, literal cast, unbound column).
+/// A constant IRI absent from the dictionary yields `NO_ID`, which never equals a bound id.
+#[cfg(feature = "id-filter-fastpath")]
+#[inline]
+fn operand_single_id(graph: &Graph, row: &[Id], e: &CompiledExpr) -> Option<Id> {
+    match e {
+        CompiledExpr::Var(Some(c)) => Some(row[*c]),
+        CompiledExpr::NamedNode(n) => Some(graph.id_of(&Term::NamedNode(n.clone())).unwrap_or(NO_ID)),
+        _ => None,
+    }
+}
+
+/// [FABLE-5] (sq-7d3dj.30.11) Evaluates `=` between two STATICALLY NON-LITERAL operands by raw-id
+/// (in)equality. Both operands are IRI/bnode (or absent-const → `NO_ID`); the canonicalising dict
+/// gives each such term one id, so `=` is id equality — result-identical to the general path (which
+/// decides IRI/bnode pairs by `p == q` term identity). An UNBOUND operand (`NO_ID` FROM A COLUMN)
+/// is a type error, exactly as the exact path treats an unbound variable. A constant-IRI operand is
+/// never unbound; its `NO_ID` (IRI absent from the dict) legitimately means "never equal".
+#[cfg(feature = "id-filter-fastpath")]
+#[inline]
+fn equal_idfast(graph: &Graph, row: &[Id], a: &IdOperand, c: &IdOperand) -> Value {
+    let resolve = |op: &IdOperand| -> (Id, bool) {
+        match op {
+            // A column can be unbound (NO_ID); that is a type error in `=`.
+            IdOperand::Col(col) => (row[*col], true),
+            // A constant IRI is always "bound"; NO_ID here means the IRI is not in the dict.
+            IdOperand::ConstIri(n) => (graph.id_of(&Term::NamedNode(n.clone())).unwrap_or(NO_ID), false),
+        }
+    };
+    let (ida, from_col_a) = resolve(a);
+    let (idc, from_col_c) = resolve(c);
+    if (from_col_a && ida == NO_ID) || (from_col_c && idc == NO_ID) {
+        return Value::Error; // unbound operand -> type error (matches the exact path)
+    }
+    Value::Bool(ida == idc)
+}
+
 fn equal_compiled(
     graph: &Graph,
     local: &LocalVocab,
@@ -10669,6 +10984,19 @@ fn equal_compiled(
     a: &CompiledExpr,
     c: &CompiledExpr,
 ) -> Result<Value, String> {
+    // [FABLE-5] (sq-7d3dj.30.11) Fast path (b): EQUAL ids of ANY kind are the SAME term (the
+    // canonicalising dict gives each term one id), so `=` is `true` — mirroring the `p == q`
+    // sameTerm short-circuit `values_equal` takes today, which is safe even for ill-typed
+    // literals (sameTerm returns a boolean, never a type error). Requires both operands to be
+    // single-id terms and BOTH bound (an unbound `NO_ID` column would be a type error, not
+    // equal). UNEQUAL ids fall through to the exact path unchanged — crucially, unequal ids of
+    // value-equal literals (`"1"^^integer` = `"1.0"^^decimal`, sq-lr2ii) must NOT be decided here.
+    #[cfg(feature = "id-filter-fastpath")]
+    if let (Some(ida), Some(idc)) = (operand_single_id(graph, row, a), operand_single_id(graph, row, c)) {
+        if ida != NO_ID && ida == idc {
+            return Ok(Value::Bool(true));
+        }
+    }
     if compiled_expr_has_arith(a) || compiled_expr_has_arith(c) {
         if let (Some(da), Some(db)) =
             (eval_compiled_dec(graph, local, row, a), eval_compiled_dec(graph, local, row, c))
@@ -10767,6 +11095,8 @@ fn eval_compiled(
             None => Value::Error,
         }),
         Equal(a, c) => equal_compiled(graph, local, b, row, a, c),
+        #[cfg(feature = "id-filter-fastpath")]
+        IdEqNonLit(a, c) => Ok(equal_idfast(graph, row, a, c)),
         SameTerm(a, c) => {
             let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
             Ok(Value::Bool(matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q)))
@@ -16012,6 +16342,359 @@ mod sip_unit {
         assert!(
             subst_pattern(&filt, &sub).is_none(),
             "BOUND(?x) on a substituted variable must force the cold fallback"
+        );
+    }
+}
+
+// ── id-level term-identity FILTER fast path (sq-7d3dj.30.11) ──────────────────────────────
+#[cfg(all(test, feature = "id-filter-fastpath"))]
+mod idfast_unit {
+    //! Differential + unit tests for the id-level `=`/`!=` FILTER fast path. [FABLE-5]
+    //! (sq-7d3dj.30.11). The load-bearing invariant: for EVERY row and EVERY operand pair the
+    //! fast path (path (a) static-non-literal id (in)equality + path (b) equal-id short-circuit)
+    //! returns the IDENTICAL three-valued verdict as the exact term-materialising path
+    //! (`term_of` + `values_equal`), which is the ground-truth SPARQL `=` semantics.
+    use super::*;
+    use oxrdf::{NamedNode, Variable};
+
+    fn var(s: &str) -> Variable {
+        Variable::new(s).unwrap()
+    }
+    fn nn(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+    fn bgp(tps: Vec<TriplePattern>) -> GraphPattern {
+        GraphPattern::Bgp { patterns: tps }
+    }
+    fn tp_svo(s: &str, p: &str, o: TermPattern) -> TriplePattern {
+        TriplePattern {
+            subject: TermPattern::Variable(var(s)),
+            predicate: NamedNodePattern::NamedNode(nn(p)),
+            object: o,
+        }
+    }
+
+    /// GROUND TRUTH for SPARQL `=`: materialise both operand terms and run the exact evaluator.
+    /// `None` = type error (unbound / cross-family / ill-typed), `Some(b)` = decided boolean.
+    fn reference_equal(graph: &Graph, local: &LocalVocab, ida: Id, idc: Id) -> Option<bool> {
+        let x = match term_of(graph, local, ida) {
+            Some(t) => Value::Term(t),
+            None => Value::Unbound,
+        };
+        let y = match term_of(graph, local, idc) {
+            Some(t) => Value::Term(t),
+            None => Value::Unbound,
+        };
+        values_equal(&x, &y)
+    }
+
+    /// Run a `?a OP ?b` FILTER through the FULL compiled pipeline WITH the fast-path rewrite
+    /// applied for the given non-literal column set, returning the per-row three-valued verdict.
+    fn eval_filter_fast(
+        graph: &Graph,
+        local: &LocalVocab,
+        b: &Bindings,
+        expr: &Expression,
+        nonlit_cols: &FxHashSet<usize>,
+    ) -> Vec<Option<bool>> {
+        let mut compiled = compile_expr(expr, b);
+        idfast_rewrite(&mut compiled, nonlit_cols);
+        b.rows
+            .iter()
+            .map(|row| ebv3(&eval_compiled(graph, local, b, row, &compiled).unwrap()))
+            .collect()
+    }
+
+    /// A three-column table of ids: `?a`, `?b` (both compared), `?s` (an IRI subject anchor).
+    /// Columns 0 and 1 are the compared operands; the test varies their id contents.
+    fn table(rows: &[[Id; 2]]) -> Bindings {
+        Bindings::unsorted(
+            vec![var("a"), var("b")],
+            rows.iter().map(|r| Row::from_slice(&[r[0], r[1]])).collect(),
+        )
+    }
+
+    fn eq_expr() -> Expression {
+        Expression::Equal(Box::new(Expression::Variable(var("a"))), Box::new(Expression::Variable(var("b"))))
+    }
+    fn ne_expr() -> Expression {
+        Expression::Not(Box::new(eq_expr()))
+    }
+
+    /// A literal-heavy, mixed graph: IRIs, blank nodes, and literals including numeric-promotion
+    /// pairs, whitespace-padded numerics, language tags, and cross-datatype pairs.
+    fn mixed_graph() -> Graph {
+        let nt = concat!(
+            "<http://ex/s1> <http://ex/p> <http://ex/o1> .\n",
+            "<http://ex/s2> <http://ex/p> _:b1 .\n",
+            "<http://ex/s3> <http://ex/p> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s4> <http://ex/p> \"1.0\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+            "<http://ex/s5> <http://ex/p> \" 1 \"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s6> <http://ex/p> \"hi\" .\n",
+            "<http://ex/s7> <http://ex/p> \"hi\"@en .\n",
+            "<http://ex/s8> <http://ex/p> \"1.0\"^^<http://www.w3.org/2001/XMLSchema#double> .\n",
+            "<http://ex/s9> <http://ex/p> \"01\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s10> <http://ex/p> \"foo\"^^<http://ex/weird> .\n",
+        );
+        Graph::load_str(nt, "ntriples").unwrap()
+    }
+
+    /// Every object id in the mixed graph, so the differential test can pair each id with each.
+    fn object_ids(g: &Graph) -> Vec<Id> {
+        let mk = |t: Term| g.id_of(&t).unwrap();
+        vec![
+            mk(Term::NamedNode(nn("http://ex/o1"))),
+            mk(Term::Literal(Literal::new_typed_literal("1", xsd::INTEGER))),
+            mk(Term::Literal(Literal::new_typed_literal("1.0", xsd::DECIMAL))),
+            mk(Term::Literal(Literal::new_typed_literal(" 1 ", xsd::INTEGER))),
+            mk(Term::Literal(Literal::new_simple_literal("hi"))),
+            mk(Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap())),
+            mk(Term::Literal(Literal::new_typed_literal("1.0", xsd::DOUBLE))),
+            mk(Term::Literal(Literal::new_typed_literal("01", xsd::INTEGER))),
+            mk(Term::Literal(Literal::new_typed_literal("foo", nn("http://ex/weird")))),
+        ]
+    }
+
+    // ---- Static analysis (nonliteral_vars) -------------------------------------------------
+
+    #[test]
+    fn nonliteral_vars_subject_and_predicate_are_nonliteral() {
+        // ?s in subject, ?p in predicate, ?o in object.
+        let p = bgp(vec![TriplePattern {
+            subject: TermPattern::Variable(var("s")),
+            predicate: NamedNodePattern::Variable(var("p")),
+            object: TermPattern::Variable(var("o")),
+        }]);
+        let nl = nonliteral_vars(&p);
+        assert!(nl.contains(&var("s")), "subject var is non-literal");
+        assert!(nl.contains(&var("p")), "predicate var is non-literal");
+        assert!(!nl.contains(&var("o")), "object var CAN be a literal");
+    }
+
+    #[test]
+    fn nonliteral_vars_subject_then_object_is_literal_risk() {
+        // ?x in subject of pattern 1 AND object of pattern 2 -> could be a literal -> EXCLUDED.
+        let p = bgp(vec![
+            tp_svo("x", "http://ex/p", TermPattern::Variable(var("y"))),
+            tp_svo("z", "http://ex/q", TermPattern::Variable(var("x"))),
+        ]);
+        let nl = nonliteral_vars(&p);
+        assert!(!nl.contains(&var("x")), "a var used as an OBJECT anywhere is literal-risk");
+        assert!(nl.contains(&var("z")), "?z only ever a subject -> non-literal");
+    }
+
+    #[test]
+    fn nonliteral_vars_bind_and_values_are_literal_risk() {
+        let inner = bgp(vec![tp_svo("s", "http://ex/p", TermPattern::Variable(var("o")))]);
+        let ext = GraphPattern::Extend {
+            inner: Box::new(inner),
+            variable: var("s"), // BIND target shadows the subject -> literal-risk wins.
+            expression: Expression::Literal(Literal::new_simple_literal("x")),
+        };
+        let nl = nonliteral_vars(&ext);
+        assert!(!nl.contains(&var("s")), "a BIND target could be a literal");
+
+        let values = GraphPattern::Values {
+            variables: vec![var("v")],
+            bindings: vec![vec![Some(GroundTerm::Literal(Literal::new_simple_literal("x")))]],
+        };
+        let j = GraphPattern::Join {
+            left: Box::new(bgp(vec![tp_svo("v", "http://ex/p", TermPattern::Variable(var("o2")))])),
+            right: Box::new(values),
+        };
+        let nl2 = nonliteral_vars(&j);
+        assert!(!nl2.contains(&var("v")), "a VALUES column could be a literal");
+    }
+
+    #[test]
+    fn nonliteral_vars_graph_name_is_nonliteral() {
+        let inner = bgp(vec![tp_svo("s", "http://ex/p", TermPattern::Variable(var("o")))]);
+        let g = GraphPattern::Graph { name: NamedNodePattern::Variable(var("g")), inner: Box::new(inner) };
+        let nl = nonliteral_vars(&g);
+        assert!(nl.contains(&var("g")), "a GRAPH-name var binds an IRI");
+    }
+
+    // ---- equal_idfast unit behaviour -------------------------------------------------------
+
+    #[test]
+    fn equal_idfast_unbound_column_is_type_error() {
+        let g = mixed_graph();
+        let row = [NO_ID, 5u32];
+        // A COLUMN holding NO_ID is unbound -> type error, not false.
+        let v = equal_idfast(&g, &row, &IdOperand::Col(0), &IdOperand::Col(1));
+        assert!(matches!(v, Value::Error), "unbound operand must be a type error");
+    }
+
+    #[test]
+    fn equal_idfast_absent_const_iri_is_false_not_error() {
+        let g = mixed_graph();
+        let ids = object_ids(&g);
+        let row = [ids[0], 0]; // ids[0] = <http://ex/o1>
+        // A constant IRI absent from the dict resolves to NO_ID but is NOT unbound -> "never equal".
+        let absent = IdOperand::ConstIri(nn("http://ex/NOT_IN_GRAPH"));
+        let v = equal_idfast(&g, &row, &IdOperand::Col(0), &absent);
+        assert!(matches!(v, Value::Bool(false)), "absent const IRI compares as not-equal, not error");
+    }
+
+    #[test]
+    fn equal_idfast_iri_identity() {
+        let g = mixed_graph();
+        let ids = object_ids(&g);
+        let row = [ids[0], ids[0]];
+        assert!(matches!(equal_idfast(&g, &row, &IdOperand::Col(0), &IdOperand::Col(1)), Value::Bool(true)));
+        let row2 = [ids[0], ids[7]]; // o1 vs "01"^^integer literal id — different ids
+        assert!(matches!(equal_idfast(&g, &row2, &IdOperand::Col(0), &IdOperand::Col(1)), Value::Bool(false)));
+    }
+
+    // ---- DIFFERENTIAL: fast path vs ground-truth exact semantics, every id pair --------------
+
+    #[test]
+    fn differential_static_nonliteral_pairs_iri_only() {
+        // When both columns are STATICALLY non-literal, only IRI/bnode ids ever appear. Pair the
+        // IRI/bnode ids of the mixed graph and assert fast == exact for `=` and `!=`.
+        let g = mixed_graph();
+        let local = LocalVocab::default();
+        let iri_bnode: Vec<Id> = {
+            let s = |t: Term| g.id_of(&t).unwrap();
+            vec![
+                s(Term::NamedNode(nn("http://ex/s1"))),
+                s(Term::NamedNode(nn("http://ex/o1"))),
+                s(Term::NamedNode(nn("http://ex/p"))),
+                s(Term::NamedNode(nn("http://ex/s2"))),
+            ]
+        };
+        let mut rows = Vec::new();
+        for &a in &iri_bnode {
+            for &c in &iri_bnode {
+                rows.push([a, c]);
+            }
+        }
+        let b = table(&rows);
+        // Columns 0 and 1 are both non-literal.
+        let nonlit: FxHashSet<usize> = [0usize, 1usize].into_iter().collect();
+
+        for expr in [eq_expr(), ne_expr()] {
+            let negated = matches!(expr, Expression::Not(_));
+            let fast = eval_filter_fast(&g, &local, &b, &expr, &nonlit);
+            for (i, row) in b.rows.iter().enumerate() {
+                let mut want = reference_equal(&g, &local, row[0], row[1]);
+                if negated {
+                    want = want.map(|x| !x);
+                }
+                assert_eq!(fast[i], want, "row {} ids ({},{}) negated={}", i, row[0], row[1], negated);
+            }
+        }
+    }
+
+    #[test]
+    fn differential_equal_id_shortcircuit_all_kinds() {
+        // Path (b): when both columns hold the SAME id (any kind, incl. weird/ill-typed literals),
+        // `=` must be true and `!=` false — matching the ground-truth sameTerm decision. Here the
+        // columns are NOT declared non-literal (empty nonlit set), so ONLY path (b) can fire.
+        let g = mixed_graph();
+        let local = LocalVocab::default();
+        let ids = object_ids(&g);
+        let rows: Vec<[Id; 2]> = ids.iter().map(|&x| [x, x]).collect();
+        let b = table(&rows);
+        let empty: FxHashSet<usize> = FxHashSet::default();
+
+        for expr in [eq_expr(), ne_expr()] {
+            let negated = matches!(expr, Expression::Not(_));
+            let fast = eval_filter_fast(&g, &local, &b, &expr, &empty);
+            for (i, row) in b.rows.iter().enumerate() {
+                let mut want = reference_equal(&g, &local, row[0], row[1]);
+                if negated {
+                    want = want.map(|x| !x);
+                }
+                assert_eq!(fast[i], want, "equal-id row {} id {}", i, row[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn differential_unequal_literal_ids_take_exact_path() {
+        // The sq-lr2ii caution: unequal ids of VALUE-EQUAL literals ("1"^^integer, "1.0"^^decimal,
+        // " 1 "^^integer, "01"^^integer, "1.0"^^double) must NOT be decided by the id fast path —
+        // they must fall through to the exact value comparison. Columns are literal-capable (empty
+        // nonlit set), so path (a) is off and path (b) can't fire on unequal ids; the result must
+        // match the exact numeric-promotion semantics.
+        let g = mixed_graph();
+        let local = LocalVocab::default();
+        let ids = object_ids(&g);
+        let mut rows = Vec::new();
+        for &a in &ids {
+            for &c in &ids {
+                if a != c {
+                    rows.push([a, c]);
+                }
+            }
+        }
+        let b = table(&rows);
+        let empty: FxHashSet<usize> = FxHashSet::default();
+
+        for expr in [eq_expr(), ne_expr()] {
+            let negated = matches!(expr, Expression::Not(_));
+            let fast = eval_filter_fast(&g, &local, &b, &expr, &empty);
+            for (i, row) in b.rows.iter().enumerate() {
+                let mut want = reference_equal(&g, &local, row[0], row[1]);
+                if negated {
+                    want = want.map(|x| !x);
+                }
+                assert_eq!(
+                    fast[i], want,
+                    "unequal-id literal row {} ids ({},{}) must match exact semantics",
+                    i, row[0], row[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn differential_end_to_end_q08_shape() {
+        // A q08-like UNION-branch FILTER over IRI subject vars, run through the PUBLIC query
+        // entry point (which installs the static analysis + fast path). The answer must be
+        // correct regardless of the fast path — an independent recompute of the expected set.
+        let nt = concat!(
+            "<http://ex/d1> <http://ex/creator> <http://ex/alice> .\n",
+            "<http://ex/d1> <http://ex/creator> <http://ex/bob> .\n",
+            "<http://ex/d2> <http://ex/creator> <http://ex/alice> .\n",
+        );
+        let g = Graph::load_str(nt, "ntriples").unwrap();
+        // Pairs of DISTINCT co-creators of the same document (?a != ?b over IRI subjects/objects
+        // of a creator triple — the != is exactly id inequality here).
+        let q = concat!(
+            "SELECT ?a ?b WHERE { ",
+            "?doc <http://ex/creator> ?a . ?doc <http://ex/creator> ?b . ",
+            "FILTER(?a != ?b) }"
+        );
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(r.rows.len(), 2, "alice/bob and bob/alice for d1 only");
+        for row in &r.rows {
+            assert_ne!(row[0], row[1], "the != filter must exclude self-pairs");
+        }
+    }
+
+    // ---- MUTATION check: a deliberately-wrong fast result must be caught by the differential ---
+
+    #[test]
+    fn mutation_wrong_shortcircuit_would_be_caught() {
+        // Sanity that the differential oracle is non-vacuous: an INVERTED fast verdict on an
+        // equal-id pair disagrees with the reference. (We assert the disagreement directly rather
+        // than mutate production code.)
+        let g = mixed_graph();
+        let local = LocalVocab::default();
+        let ids = object_ids(&g);
+        let id = ids[4]; // "hi" simple literal
+        let correct = equal_idfast(&g, &[id, id], &IdOperand::Col(0), &IdOperand::Col(1));
+        assert!(matches!(correct, Value::Bool(true)));
+        // The reference agrees with the correct verdict...
+        assert_eq!(reference_equal(&g, &local, id, id), Some(true));
+        // ...so an inverted verdict (false) would be a detectable mismatch.
+        let mutated = Value::Bool(false);
+        assert_ne!(
+            ebv3(&mutated),
+            reference_equal(&g, &local, id, id),
+            "an inverted equal-id verdict must disagree with the oracle"
         );
     }
 }

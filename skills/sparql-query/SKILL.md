@@ -584,6 +584,23 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   correlated child actually collapsed). SP2Bench q08/q12b: the 1-row `?erdoes` side seeds the Union's
   `?document dc:creator ?erdoes` scan instead of a whole-corpus creator self-join. Payoff on complex-shape
   workloads is a measurable hypothesis for the canonical perf host, not a baked-in number.
+- **Id-level term-identity FILTER fast path** is the non-default `id-filter-fastpath` cargo feature
+  (bead `sq-7d3dj.30.11`). It removes the per-row term MATERIALIZATION the compiled FILTER evaluator
+  otherwise performs for `=`/`!=`, by two id-level short-circuits: **(a)** a static term-kind analysis
+  (`nonliteral_vars`) proves a variable is bound ONLY in subject/predicate positions (never object /
+  BIND / VALUES / SERVICE) and so can never be a literal — for two such operands (or a constant IRI)
+  SPARQL `=` is exactly dictionary-id equality and `!=` id inequality (the canonicalising dict gives
+  each IRI/bnode one id); **(b)** EQUAL ids of ANY kind are the same term, so `=` short-circuits `true`
+  and `!=` `false` (mirroring the `sameTerm` decision the exact path already takes — safe even for
+  ill-typed literals, which return a boolean not a type error). UNEQUAL ids of possibly-LITERAL
+  operands (numeric promotion `"1"^^integer` = `"1.0"^^decimal`, whitespace-padded lexicals — the
+  `sq-lr2ii` class) and `=` cases that can be a TYPE ERROR fall through to the exact value path
+  unchanged. Result-identical whether on or off — a differential test pairs every id kind (IRIs,
+  bnodes, numeric-promotion pairs, language-tagged, ill-typed literals) and asserts the fast verdict
+  equals the exact `term_of` + `values_equal` oracle row-for-row. When off, zero of this code compiles
+  and the default build is byte-identical (no new dependencies; no `unsafe`). SP2Bench q08/q12b (whose
+  UNION-branch `?a != ?b` FILTERs over IRI subject/object variables are the motivating shape) is the
+  measurable target, not a baked-in number.
 - **DISTINCT-projection loose (skip) index scan** is a DEFAULT-ON, semantics-preserving optimisation
   (bead `sq-7d3dj.30.4`; research/sp2bench-complex-shape-deficit.md §2.3). For `SELECT DISTINCT ?p`
   over a BGP / **UNION** of BGPs where `?p` is the **single** projected variable, the executor
