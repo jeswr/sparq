@@ -8298,7 +8298,64 @@ enum SortCell {
     /// `cmp_sort_cells` can then directly compare two `&str` slices — no allocation.
     /// [SONNET-4.6] sq-7d3dj.30.2
     Iri(Box<str>),
-    Val(Value),
+    /// Any other key value (a plain / typed / language-tagged literal, a blank node, a
+    /// quoted triple term, a computed value, or an unbound / error). Extends the `Iri`
+    /// fast-path idea to EVERY `SortCell` kind (bead sq-7d3dj.30.12): the SPARQL
+    /// total-order dispatch is HOISTED to cell-CONSTRUCTION time so a heap comparison is
+    /// an integer / byte-slice compare, never a per-comparison `lit_kind` +
+    /// `is_numeric_dt` + `value_str`-allocation re-derivation.
+    ///
+    /// - `class` — the [`TermClass`] rank (cross-class compares reduce to `class.cmp`).
+    /// - `kind` — the within-Literal [`LiteralKind`] rank (cross-kind compares reduce to
+    ///   `kind.cmp`); a fixed filler for non-literal classes (never consulted there).
+    /// - `key` — the PRECOMPUTED lexical collation key (`value_str`), present for exactly
+    ///   the kinds whose within-kind order IS the lexical `value()` order — the `String`,
+    ///   `Lang` and `Other` literal kinds and the `Blank` class (see `cmp_sort_cells`'s
+    ///   `(Val, Val)` arm for why this reproduces `compare_terms` exactly there). `None`
+    ///   for the VALUE-ordered kinds (numeric exact-tie / boolean / temporal timeline) and
+    ///   for triple terms, which keep `v`'s full `compare_values` semantics.
+    /// - `v` — retained so a value-ordered same-kind pair (and the triple-term recursion)
+    ///   stays byte-identical to `compare_terms`.
+    ///
+    /// All ranks + the key are taken ONCE, from the very `CompareTerm` observations
+    /// `compare_terms` would otherwise recompute on every comparison. [FABLE-5] sq-7d3dj.30.12
+    Val { class: u8, kind: u8, key: Option<Box<str>>, v: Value },
+}
+
+/// Builds a `SortCell::Val`, precomputing its `(TermClass, LiteralKind)` collation ranks
+/// AND — for the lexically-ordered kinds only — the `value_str` collation key, from the
+/// SAME `CompareTerm` observations `compare_terms` reads. So a `Val`↔`Val` comparison is
+/// an integer rank compare (cross-class / cross-kind) or a precomputed byte-slice compare
+/// (same lexical kind), never a per-comparison `lit_kind` / `is_numeric_dt` /
+/// `value_str`-allocation re-derivation. [FABLE-5] sq-7d3dj.30.12
+#[inline]
+fn sort_cell_val(v: Value) -> SortCell {
+    let class = v.term_class() as u8;
+    // Only the literal class consults the kind rank; skip the (cheap but non-trivial)
+    // `lit_kind` dispatch entirely for the non-literal classes.
+    let kind = if class == TermClass::Literal as u8 { v.literal_kind() as u8 } else { 0 };
+    // Precompute the lexical key for EXACTLY the kinds whose within-kind (and, for the
+    // literal kinds, same-KIND) order is the `value_str` lexical order — so a same-kind
+    // compare is a direct slice compare with NO per-comparison allocation, reproducing
+    // `compare_terms`' within-kind result (proven byte-identical by the differential test):
+    //   • String / Lang / Other literal kinds — `compare_terms`' `strict_cmp` arm (where it
+    //     decides: same-tag / same-other-XSD) yields the SAME `value()` order as its
+    //     `value_str` fallback (cross-tag / cross-other-XSD), so the whole kind orders by
+    //     `value_str` (`value()`);
+    //   • the Blank class — `compare_terms` orders blanks by their `value_str` label.
+    // Numeric (exact-tie recheck), Boolean and the temporal kinds are VALUE-ordered, and
+    // triple terms recurse — those keep `None` and defer to `compare_values`.
+    let key = if class == TermClass::Blank as u8
+        || (class == TermClass::Literal as u8
+            && (kind == LiteralKind::String as u8
+                || kind == LiteralKind::Lang as u8
+                || kind == LiteralKind::Other as u8))
+    {
+        value_str(&v).map(String::into_boxed_str)
+    } else {
+        None
+    };
+    SortCell::Val { class, kind, key, v }
 }
 
 /// Compares two ORDER BY key cells under the lenient total order, reproducing
@@ -8332,10 +8389,10 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         (SortCell::Num { f: fa, id: ia }, SortCell::Num { f: fb, id: ib }) => {
             cmp_sort_num(graph, *fa, *ia, *fb, *ib)
         }
-        (SortCell::Temp { id, .. }, SortCell::Val(v)) => {
+        (SortCell::Temp { id, .. }, SortCell::Val { v, .. }) => {
             compare_values(&sort_cell_term(graph, local, *id), v).unwrap_or(Ordering::Equal)
         }
-        (SortCell::Val(v), SortCell::Temp { id, .. }) => {
+        (SortCell::Val { v, .. }, SortCell::Temp { id, .. }) => {
             compare_values(v, &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
         }
         // A numeric cell against a temporal or a general Value (a MIXED-type column, cold):
@@ -8348,10 +8405,10 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         (SortCell::Temp { id, .. }, SortCell::Num { f, .. }) => {
             compare_values(&sort_cell_term(graph, local, *id), &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
         }
-        (SortCell::Num { f, .. }, SortCell::Val(v)) => {
+        (SortCell::Num { f, .. }, SortCell::Val { v, .. }) => {
             compare_values(&Value::Num(Num::Double(*f)), v).unwrap_or(Ordering::Equal)
         }
-        (SortCell::Val(v), SortCell::Num { f, .. }) => {
+        (SortCell::Val { v, .. }, SortCell::Num { f, .. }) => {
             compare_values(v, &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
         }
         // Two IRI sort cells: direct string comparison — no allocation, no term_class
@@ -8367,19 +8424,52 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         // IRI against a generic Val: dispatch on the Val variant to determine rank.
         // Val can hold Unbound (rank 0), BlankNode (rank 1), NamedNode/IRI (rank 2),
         // Literal/Num/Bool (rank 3), Triple (rank 4).
-        (SortCell::Iri(a), SortCell::Val(v)) => match v {
+        (SortCell::Iri(a), SortCell::Val { v, .. }) => match v {
             Value::Unbound | Value::Error => Ordering::Greater, // IRI after unbound
             Value::Term(Term::BlankNode(_)) => Ordering::Greater, // IRI after blank node
             Value::Term(Term::NamedNode(n)) => a.as_ref().cmp(n.as_str()), // same class
             _ => Ordering::Less, // IRI before literals and triple terms
         },
-        (SortCell::Val(v), SortCell::Iri(a)) => match v {
+        (SortCell::Val { v, .. }, SortCell::Iri(a)) => match v {
             Value::Unbound | Value::Error => Ordering::Less,
             Value::Term(Term::BlankNode(_)) => Ordering::Less,
             Value::Term(Term::NamedNode(n)) => n.as_str().cmp(a.as_ref()),
             _ => Ordering::Greater,
         },
-        (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
+        // Two generic key values: compare the PRECOMPUTED class rank, then (within the
+        // literal class) the PRECOMPUTED kind rank — both integer compares, no per-comparison
+        // `lit_kind` / `is_numeric_dt` re-derivation. Only when the ranks tie (same class,
+        // and same literal kind if literal) do we fall through to `compare_values` for the
+        // within-kind value order — which, given equal class+kind, reaches EXACTLY the same
+        // within-kind arm `compare_terms` would (the numeric exact-tie recheck, the
+        // timeline / strict compare, or the lexical fallback). So the total order is
+        // byte-identical to `compare_values(av, cv)`, just with the cross-class / cross-kind
+        // dispatch hoisted to construction time. [FABLE-5] sq-7d3dj.30.12
+        (
+            SortCell::Val { class: ca, kind: ka, key: ka_key, v: av },
+            SortCell::Val { class: cb, kind: kb, key: kb_key, v: cv },
+        ) => match ca.cmp(cb) {
+            Ordering::Equal => {
+                // Same class. Within the literal class, rank by kind first; other classes
+                // (blank / IRI / triple / error-or-unbound) have no kind split.
+                if *ca == TermClass::Literal as u8 && ka != kb {
+                    return ka.cmp(kb);
+                }
+                // Same class (and same literal kind, if literal). When BOTH cells carry a
+                // precomputed lexical key — the `String` / `Lang` / `Other` literal kinds
+                // and the `Blank` class — the within-kind order IS the `value_str` (lexical
+                // `value()`) order, so compare the precomputed slices directly: no
+                // per-comparison `value_str` allocation, no re-dispatch. This is byte-
+                // identical to `compare_values(av, cv)` for those kinds (the differential
+                // test proves it). Anything else (numeric exact-tie, boolean, temporal,
+                // triple, error/unbound) keeps `None` and defers to the shared comparator.
+                match (ka_key, kb_key) {
+                    (Some(la), Some(lb)) => la.cmp(lb),
+                    _ => compare_values(av, cv).unwrap_or(Ordering::Equal),
+                }
+            }
+            ord => ord,
+        },
     }
 }
 
@@ -8520,12 +8610,12 @@ fn order_bindings(
                 if let Term::NamedNode(n) = &term {
                     return Ok(SortCell::Iri(n.as_str().into()));
                 }
-                return Ok(SortCell::Val(Value::Term(term)));
+                return Ok(sort_cell_val(Value::Term(term)));
             }
         }
         Ok(match eval_compiled_numeric(graph, local, row, e) {
-            Some(n) => SortCell::Val(Value::Num(Num::Double(n))),
-            None => SortCell::Val(eval_compiled(graph, local, b, row, e)?),
+            Some(n) => sort_cell_val(Value::Num(Num::Double(n))),
+            None => sort_cell_val(eval_compiled(graph, local, b, row, e)?),
         })
     };
     // The sort key (vector of (descending, SortCell)) for one row.
@@ -8662,6 +8752,207 @@ fn order_bindings(
     b.rows = keyed.into_iter().map(|(_, r)| r).collect();
     b.sorted_by = None;
     Ok(())
+}
+
+/// [FABLE-5] sq-7d3dj.30.12 — DIFFERENTIAL property test for the precomputed sort-collation
+/// keys. The `SortCell::Val` arm of `cmp_sort_cells` now hoists the SPARQL total-order class
+/// / literal-kind dispatch to cell-CONSTRUCTION time (`val_ranks`) and only falls back to the
+/// full `compare_values` within a tied class+kind. This suite pins the load-bearing
+/// invariant: for EVERY pair of key values, the precomputed-key ordering equals the current
+/// comparator's ordering EXACTLY — including the sq-lr2ii f64-collision trap (high-precision
+/// decimals / integers past 2^53 that share one f64 image), NaN/INF spellings, and mixed
+/// kinds. A wrong rank, or a fall-through that reordered a within-kind tie, goes red here.
+#[cfg(test)]
+mod sort_collation_key_differential {
+    use super::*;
+    use oxrdf::{vocab::xsd, BlankNode, Literal, NamedNode, NamedNodeRef};
+
+    /// A `Value::Term(Literal)` of the given lexical + datatype IRI.
+    fn typed(lex: &str, dt: NamedNodeRef<'_>) -> Value {
+        Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)))
+    }
+    fn lang(lex: &str, tag: &str) -> Value {
+        Value::Term(Term::Literal(Literal::new_language_tagged_literal(lex, tag).unwrap()))
+    }
+    fn iri(s: &str) -> Value {
+        Value::Term(Term::NamedNode(NamedNode::new(s).unwrap()))
+    }
+    fn bnode(s: &str) -> Value {
+        Value::Term(Term::BlankNode(BlankNode::new(s).unwrap()))
+    }
+
+    /// A curated corpus spanning EVERY total-order class and literal kind, plus the exact
+    /// adversarial pairs the sq-lr2ii / sq-rikm7 / sq-wjl8i traps care about.
+    fn corpus() -> Vec<Value> {
+        let mut v = vec![
+            Value::Unbound,
+            Value::Error,
+            bnode("b0"),
+            bnode("b1"),
+            iri("http://ex/a"),
+            iri("http://ex/b"),
+            // Numeric kind — computed and lexical, across the tower.
+            Value::Num(Num::Double(1.0)),
+            Value::Num(Num::Double(f64::NAN)),
+            Value::Num(Num::Double(f64::INFINITY)),
+            Value::Num(Num::Double(f64::NEG_INFINITY)),
+            typed("0", xsd::INTEGER),
+            typed("1", xsd::INTEGER),
+            typed("-5", xsd::INTEGER),
+            typed("1.5", xsd::DECIMAL),
+            typed("1.50", xsd::DECIMAL),
+            typed("NaN", xsd::DOUBLE),
+            typed("INF", xsd::DOUBLE),
+            typed("-INF", xsd::DOUBLE),
+            typed("1.0E0", xsd::DOUBLE),
+            // The sq-lr2ii f64-COLLISION trap: distinct exact values that share one f64.
+            typed("9007199254740992", xsd::INTEGER), // 2^53
+            typed("9007199254740993", xsd::INTEGER), // 2^53+1 — collapses onto 2^53 as f64
+            typed("9007199254740993", xsd::DECIMAL),
+            // High-precision decimals differing past f64 mantissa resolution.
+            typed("0.100000000000000005", xsd::DECIMAL),
+            typed("0.100000000000000006", xsd::DECIMAL),
+            // Ill-formed numeric lexical → LiteralKind::Other, orders lexically.
+            typed("notanumber", xsd::INTEGER),
+            // Boolean kind.
+            Value::Bool(false),
+            Value::Bool(true),
+            typed("true", xsd::BOOLEAN),
+            typed("0", xsd::BOOLEAN),
+            // Temporal kinds.
+            typed("2020-01-01T00:00:00Z", xsd::DATE_TIME),
+            typed("2020-01-02T00:00:00Z", xsd::DATE_TIME),
+            typed("2020-01-01", xsd::DATE),
+            typed("2020-06-15", xsd::DATE),
+            typed("garbage", xsd::DATE_TIME), // ill-formed temporal → Other
+            // String kind.
+            typed("apple", xsd::STRING),
+            typed("banana", xsd::STRING),
+            typed("10", xsd::STRING), // lexical "10" < "2" (the sq-wjl8i witness domain)
+            typed("2", xsd::STRING),
+            // Language-tagged.
+            lang("hello", "en"),
+            lang("hello", "fr"),
+            lang("world", "en"),
+            // Other XSD + unknown datatype.
+            typed("PT1H", xsd::DURATION),
+            typed("PT2H", xsd::DURATION),
+            Value::Term(Term::Literal(Literal::new_typed_literal(
+                "x",
+                NamedNode::new("http://ex/customdt").unwrap(),
+            ))),
+        ];
+        // A few RDF-1.2 triple terms (sort after literals, component-wise).
+        v.push(Value::Term(Term::Triple(Box::new(oxrdf::Triple::new(
+            NamedNode::new("http://ex/s").unwrap(),
+            NamedNode::new("http://ex/p").unwrap(),
+            Literal::new_typed_literal("1", xsd::INTEGER),
+        )))));
+        v.push(Value::Term(Term::Triple(Box::new(oxrdf::Triple::new(
+            NamedNode::new("http://ex/s").unwrap(),
+            NamedNode::new("http://ex/p").unwrap(),
+            Literal::new_typed_literal("2", xsd::INTEGER),
+        )))));
+        v
+    }
+
+    /// The reference ordering: the pre-existing comparator over raw `Value`s.
+    fn reference(a: &Value, c: &Value) -> Ordering {
+        compare_values(a, c).unwrap_or(Ordering::Equal)
+    }
+
+    /// The precomputed-key ordering: build `SortCell::Val` cells (ranks precomputed) and
+    /// compare via `cmp_sort_cells`' `(Val, Val)` arm. The graph / local are never consulted
+    /// by that arm, so an empty graph is sufficient.
+    fn keyed(a: &Value, c: &Value, g: &Graph, l: &LocalVocab) -> Ordering {
+        let ca = sort_cell_val(a.clone());
+        let cc = sort_cell_val(c.clone());
+        cmp_sort_cells(g, l, &ca, &cc)
+    }
+
+    #[test]
+    fn precomputed_key_order_equals_comparator_on_every_pair() {
+        let g = Graph::load_str("", "turtle").unwrap();
+        let l = LocalVocab::default();
+        let vs = corpus();
+        for a in &vs {
+            for c in &vs {
+                let want = reference(a, c);
+                let got = keyed(a, c, &g, &l);
+                assert_eq!(
+                    got, want,
+                    "precomputed-key order diverged from comparator for ({}, {}): got {:?} want {:?}",
+                    value_key(a),
+                    value_key(c),
+                    got,
+                    want
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn precomputed_key_reproduces_antisymmetry_and_reflexivity() {
+        let g = Graph::load_str("", "turtle").unwrap();
+        let l = LocalVocab::default();
+        let vs = corpus();
+        for a in &vs {
+            assert_eq!(keyed(a, a, &g, &l), Ordering::Equal, "reflexivity: {}", value_key(a));
+            for c in &vs {
+                let ac = keyed(a, c, &g, &l);
+                let ca = keyed(c, a, &g, &l);
+                assert_eq!(ac, ca.reverse(), "antisymmetry ({}, {})", value_key(a), value_key(c));
+            }
+        }
+    }
+
+    /// A deterministic pseudo-random fuzz over randomly-generated numeric lexicals — the
+    /// class the sq-lr2ii trap lives in — asserting the precomputed key never disagrees with
+    /// the comparator on any generated pair (including f64-colliding and NaN/INF spellings).
+    #[test]
+    fn precomputed_key_matches_comparator_on_random_numeric_lexicals() {
+        let g = Graph::load_str("", "turtle").unwrap();
+        let l = LocalVocab::default();
+        // A tiny LCG — no external rand dep, fully deterministic.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state >> 11
+        };
+        let dts = [xsd::INTEGER, xsd::DECIMAL, xsd::DOUBLE, xsd::FLOAT];
+        let specials = ["NaN", "INF", "-INF", "0", "-0", "0.0"];
+        let mk = |n: &mut dyn FnMut() -> u64| -> Value {
+            let choice = n() % 10;
+            let dt = dts[(n() % dts.len() as u64) as usize];
+            if choice == 0 {
+                // A special spelling (some ill-formed for INTEGER → Other kind).
+                return typed(specials[(n() % specials.len() as u64) as usize], dt);
+            }
+            // Values near the 2^53 f64-collapse boundary + high-precision decimals.
+            let base = 9007199254740990u64 + (n() % 8);
+            let frac = n() % 1_000_000_000;
+            let lex = if choice.is_multiple_of(2) {
+                format!("{}", base)
+            } else {
+                format!("{}.{:018}", base, frac)
+            };
+            typed(&lex, dt)
+        };
+        for _ in 0..4000 {
+            let a = mk(&mut next);
+            let c = mk(&mut next);
+            let want = reference(&a, &c);
+            let got = keyed(&a, &c, &g, &l);
+            assert_eq!(
+                got, want,
+                "random numeric divergence ({}, {}): got {:?} want {:?}",
+                value_key(&a),
+                value_key(&c),
+                got,
+                want
+            );
+        }
+    }
 }
 
 // ---- FILTER + expression evaluation ------------------------------------------
