@@ -7,12 +7,22 @@
 //!
 //! REVERT-WITNESSES (each fails if the early exit is broken or removed):
 //!
-//! * `ask_join_early_exit_fires_under_budget` — an ASK over a join whose FULL
-//!   materialisation exceeds a row budget must still answer `true`, because the
-//!   capped block-driven chain stops at the first solution long before the
+//! * `ask_join_early_exit_fires_under_budget` — an ASK over a FILTERed join whose
+//!   FULL materialisation exceeds a row budget must still answer `true`, because
+//!   the capped block-driven chain stops at the first solution long before the
 //!   budget trips. The SELECT twin under the same budget errors — asserted in
 //!   the same test — so the witness is non-vacuous: remove the capped join path
-//!   and the ASK errors exactly like the twin (RED).
+//!   and the ASK errors exactly like the twin (RED — verified by mutation:
+//!   compiling `eval_bgp_binary_capped` out turns exactly these witnesses red).
+//!   The witness bodies carry a residual FILTER deliberately: a FILTER-FREE
+//!   conjunctive BGP under ASK is answered exactly by the `try_count` index
+//!   pushdown (never reaching `try_capped`), so a filter-free body would witness
+//!   the count path, not the capped chain — and the SP2Bench q12a evidence shape
+//!   is a FILTERed join anyway.
+//! * `ask_union_skips_expensive_right_branch` / `ask_optional_caps_expensive_left`
+//!   — the same budget construction through the capped UNION arm (left branch
+//!   satisfies the cap, so the over-budget right branch is never evaluated) and
+//!   the capped OPTIONAL arm (over-budget left side, capped at the first block).
 //! * `ask_late_filter_never_fires_on_partial_solutions` — the first seed block's
 //!   candidate rows are all eliminated by a residual (non-sargable) FILTER; the
 //!   only passing row lives beyond the first block. Early exit on a PARTIAL
@@ -66,34 +76,75 @@ fn ask_through_joins_true_and_false() {
     assert_ask_matches_select(&g, "?s :p ?m . ?m :q ?o . ?b :p :z", true);
 }
 
-/// THE core revert-witness: the full join materialises 80 000 rows, the budget
-/// allows 60 000 — the SELECT twin trips the budget, the ASK must not, because
-/// the capped chain answers from the first ~1024-row seed block.
-#[test]
-fn ask_join_early_exit_fires_under_budget() {
+/// The budget witness graph: 3000 subjects, `?s :p ?x . ?s :q ?y` joins to
+/// 3000 × 2 × 2 = 12 000 rows, and ~10 subjects also carry a `:name`.
+fn budget_witness_graph() -> Graph {
     let mut ttl = String::new();
     for i in 0..3000 {
         ttl.push_str(&format!(":s{i} :p :a{i}, :b{i} ; :q :c{i}, :d{i} .\n"));
+        if i % 300 == 0 {
+            ttl.push_str(&format!(":s{i} :name \"n{i}\" .\n"));
+        }
     }
-    let g = load(&ttl);
-    // Sized so that every capped block stays comfortably below the budget (first
-    // block 1024 seed rows -> 2048 joined rows; even a 4096-row block -> 8192)
-    // while the FULL join exceeds it.
-    let budget = QueryBudget { max_rows: Some(9_500), ..Default::default() };
-    let body = "?s :p ?x . ?s :q ?y";
-    // Non-vacuity: the FULL evaluation genuinely exceeds the budget (join output
-    // is 3000 subjects x 2 x 2 = 12 000 rows > 9 500).
-    let twin = query_with_budget(&g, &format!("{PFX}SELECT * WHERE {{ {body} }}"), &budget);
+    load(&ttl)
+}
+
+/// The 12 000-row full join exceeds this; every capped block stays comfortably
+/// below it (first block 1024 seed rows -> 2048 joined rows).
+fn witness_budget() -> QueryBudget {
+    QueryBudget { max_rows: Some(9_500), ..Default::default() }
+}
+
+/// The over-budget FILTERed join body. The residual `FILTER(?x != ?y)` passes
+/// every row (`:aN`/`:bN` vs `:cN`/`:dN` never collide) but forces the capped
+/// chain: a filter-free BGP is answered exactly by the `try_count` index pushdown
+/// and would never reach `try_capped` (verified by mutation).
+const EXPENSIVE_JOIN: &str = "?s :p ?x . ?s :q ?y . FILTER(?x != ?y)";
+
+/// Asserts the witness pair: the SELECT twin of `body` trips the row budget
+/// (non-vacuity — the full materialisation genuinely exceeds it), while the ASK
+/// under the same budget early-exits and answers `expected` without erroring.
+fn assert_budget_witness(g: &Graph, budget: &QueryBudget, body: &str, expected: bool) {
+    let twin = query_with_budget(g, &format!("{PFX}SELECT * WHERE {{ {body} }}"), budget);
     assert!(
         twin.as_ref().is_err_and(|e| e.contains("budget")),
-        "the SELECT twin must trip the row budget (got {:?} rows / err)",
+        "the SELECT twin must trip the row budget (got {:?} rows / err) for: {body}",
         twin.as_ref().map(|r| r.rows.len())
     );
-    // The witness: ASK stops at the first solution, far below the budget.
-    let a = ask_with_budget(&g, &format!("{PFX}ASK {{ {body} }}"), &budget);
-    assert_eq!(a, Ok(true), "ASK must early-exit through the join instead of materialising it");
+    let a = ask_with_budget(g, &format!("{PFX}ASK {{ {body} }}"), budget);
+    assert_eq!(a, Ok(expected), "ASK must early-exit instead of materialising: {body}");
     // And the boolean is right (unlimited oracle).
-    assert_ask_matches_select(&g, body, true);
+    assert_ask_matches_select(g, body, expected);
+}
+
+/// THE core revert-witness: the full FILTERed join materialises 12 000 rows, the
+/// budget allows 9 500 — the SELECT twin trips the budget, the ASK must not,
+/// because the capped chain answers from the first ~1024-row seed block.
+#[test]
+fn ask_join_early_exit_fires_under_budget() {
+    let g = budget_witness_graph();
+    assert_budget_witness(&g, &witness_budget(), EXPENSIVE_JOIN, true);
+}
+
+/// Capped-UNION revert-witness: the LEFT branch satisfies the cap from a cheap
+/// single-pattern scan, so the over-budget right branch must never be evaluated.
+#[test]
+fn ask_union_skips_expensive_right_branch() {
+    let g = budget_witness_graph();
+    let body = format!("{{ ?s :name ?n }} UNION {{ {EXPENSIVE_JOIN} }}");
+    assert_budget_witness(&g, &witness_budget(), &body, true);
+}
+
+/// Capped-OPTIONAL revert-witness: the over-budget LEFT side is capped at its
+/// first seed block; the (cheap, full) right side never drops a left row.
+#[test]
+fn ask_optional_caps_expensive_left() {
+    let g = budget_witness_graph();
+    // Braces keep the FILTER inside the LEFT group: without them SPARQL scopes the
+    // FILTER over the whole group, i.e. Filter(LeftJoin(...)) — a shape with no
+    // capped path (fail-closed full evaluation, which correctly trips the budget).
+    let body = format!("{{ {EXPENSIVE_JOIN} }} OPTIONAL {{ ?s :name ?n }}");
+    assert_budget_witness(&g, &witness_budget(), &body, true);
 }
 
 // ---- late residual FILTER ------------------------------------------------------
@@ -242,6 +293,38 @@ fn ask_distinct_under_offset_is_not_stripped() {
     // DISTINCT with no OFFSET above it is emptiness-neutral (strippable).
     assert_ask_matches_select(&g, "{ SELECT DISTINCT ?v WHERE { ?s :p ?v } }", true);
     assert_ask_matches_select(&g, "{ SELECT DISTINCT ?v WHERE { ?s :r ?v } }", false);
+}
+
+// ---- fail-closed shapes (no capped path: full evaluation, same boolean) ----------
+
+/// Shapes `try_capped` declines (cyclic BGPs, MINUS, property paths, VALUES) must
+/// still answer through the full path — the ASK/SELECT differential holds on every
+/// decline branch, not just the optimised ones. [FABLE-5]
+#[test]
+fn ask_fail_closed_shapes_match_oracle() {
+    let g = load(":a :p :b . :b :p :c . :c :p :a . :a :q :b . :a :name \"x\" .");
+    // Cyclic (triangle) BGP: the binary chain declines to LFTJ.
+    assert_ask_matches_select(&g, "?x :p ?y . ?y :p ?z . ?z :p ?x", true);
+    assert_ask_matches_select(&g, "?x :q ?y . ?y :q ?z . ?z :q ?x", false);
+    // MINUS.
+    assert_ask_matches_select(&g, "?s :p ?o MINUS { ?s :q ?o }", true);
+    assert_ask_matches_select(&g, "?s :q ?o MINUS { ?s :p ?o }", false);
+    // Property path.
+    assert_ask_matches_select(&g, "?s :p+ :c", true);
+    assert_ask_matches_select(&g, ":b :q+ ?o", false);
+    // VALUES joined to a pattern.
+    assert_ask_matches_select(&g, "VALUES ?s { :a } ?s :q ?o", true);
+    assert_ask_matches_select(&g, "VALUES ?s { :c } ?s :q ?o", false);
+}
+
+/// GRAPH is another decline branch: no capped path, full evaluation, same boolean.
+#[test]
+fn ask_graph_pattern_matches_oracle() {
+    let mut g = Graph::load_str("", "turtle").expect("empty graph");
+    sparq_engine::update_in_place(&mut g, "INSERT DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> 1 } }")
+        .expect("insert");
+    assert_ask_matches_select(&g, "GRAPH ?g { ?s :p ?v }", true);
+    assert_ask_matches_select(&g, "GRAPH ?g { ?s :r ?v }", false);
 }
 
 // ---- aggregation / HAVING (never stripped, never capped) -------------------------
