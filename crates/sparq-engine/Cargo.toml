@@ -249,6 +249,24 @@ yannakakis = ["semijoin-bitmap"]
 # spargebra are already direct deps) and contains no `unsafe`.
 algebra-rewrite = []
 
+# [FABLE-5] (sq-7d3dj.30.7) EQUALITY-FILTER → VALUE-JOIN unification (`exec::eqjoin`):
+# a conjunctive group whose triple patterns form variable-DISJOINT connected components glued
+# only by `FILTER(?a = ?b)` (SP2Bench q05a/q12a's star-intersection shape) evaluates each
+# component separately and joins them with a hash join keyed on the equality, instead of
+# materialising the cross product and evaluating `=` per row. SPARQL `=` is VALUE equality
+# (numeric promotion across datatypes, type errors eliminate, high-precision xsd:decimal must
+# not collapse through f64 — sq-lr2ii), so the key is NOT the dictionary id in general: the
+# per-term-class keys mirror the evaluator's own dispatch (id for IRI/bnode/unknown classes,
+# the `numeric_value` cache's f64 for numerics, value for strings/lang-tagged/booleans),
+# value-comparable temporals and triple terms pair through the EXACT evaluator, and the
+# original FILTER is re-applied verbatim over the joined rows as the exact recheck (key
+# collisions eliminated by the same sq-lr2ii machinery that runs today). Anything not
+# provably eligible — non-total filter expressions (function calls), quoted-triple patterns,
+# an armed budget or zk trace, no cross-component equality conjunct — DECLINES to the
+# verbatim path. OPT-IN and OFF by default: when off, zero of this code compiles and the
+# conjunctive path is byte-identical. No new dependencies, no `unsafe`.
+value-join = []
+
 # [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
 # numeric column — the perf baseline every later vectorized (M4) phase measures against.
 # `required-features` gates it behind `vectorized`, so the DEFAULT build (and
