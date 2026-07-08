@@ -46,6 +46,16 @@ use smallvec::SmallVec;
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
 use std::cmp::Ordering;
 
+// [FABLE-5] (sq-7d3dj.30.7) Equality-FILTER → value-join unification, behind the opt-in
+// `value-join` feature. Declared as a CHILD module of `exec` (via `#[path]`, the file
+// lives at `src/eqjoin.rs`) so it reuses the private evaluation machinery — `Bindings`,
+// `LocalVocab`, `equal_expr`, `eval_flat_conjunctive`, the query budget — without
+// widening any item's visibility. When the feature is off, zero of this code compiles
+// and the conjunctive path below is byte-identical to before.
+#[cfg(feature = "value-join")]
+#[path = "eqjoin.rs"]
+mod eqjoin;
+
 // ---- Cooperative query budget (T15 server hardening) -------------------------
 //
 // A thread-local, cooperatively-checked budget installed by the
@@ -3316,36 +3326,17 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         let mut patterns = Vec::new();
         let mut filters = Vec::new();
         flatten_conjunction(p, &mut patterns, &mut filters);
-        // Push sargable numeric FILTERs down into the binary-plan scans (the WCOJ
-        // path applies them afterwards); apply the rest normally.
-        let (mut b, residual) = if bgp_uses_binary(&patterns) {
-            let (pat_filters, residual) = split_sargable(graph, &patterns, &filters);
-            // [OPUS-4.8] (sq-5zf8i / §A4) Acyclic BGP: run the Yannakakis full-semijoin
-            // prepass before the binary join when the opt-in `yannakakis` feature is on
-            // (it internally cost-gates + falls back to `eval_bgp_binary`, threading the
-            // same pushed-down `pat_filters` through the materialising scans so the result
-            // — and the FILTER semantics — are identical). OFF by default => the next line
-            // is the only code that compiles, byte-identical to before.
-            #[cfg(feature = "yannakakis")]
-            let bound = eval_bgp_yannakakis(graph, &patterns, &pat_filters)?;
-            #[cfg(not(feature = "yannakakis"))]
-            let bound = eval_bgp_binary(graph, &patterns, &pat_filters)?;
-            (bound, residual)
-        } else {
-            (eval_bgp(graph, &patterns)?, filters)
-        };
-        for f in &residual {
-            // Spatial pushdown (sq-mg9): if this residual FILTER is a pushable geof:
-            // predicate and a SpatialProvider is installed, pre-restrict the rows to the
-            // index's candidate superset over the geometry variable. The FILTER below
-            // STILL runs and does the exact refinement, so the result is unchanged — the
-            // pushdown only shrinks how many rows the exact `geof:` check examines.
-            if let Some(pd) = recognise_spatial(f) {
-                apply_spatial_pushdown(graph, &mut b, &pd);
-            }
-            apply_filter(graph, local, &mut b, f)?;
+        // [FABLE-5] (sq-7d3dj.30.7) Equality-FILTER → value-join unification (opt-in
+        // `value-join` feature): a `FILTER(?a = ?b)` whose operands come from otherwise
+        // DISCONNECTED components of the pattern set executes as a value-keyed hash join
+        // between the components instead of a cross-product-then-filter. Any shape not
+        // provably safe declines (`Ok(None)`) to the verbatim path below — see the
+        // `eqjoin` module docs for the eligibility conditions and the soundness argument.
+        #[cfg(feature = "value-join")]
+        if let Some(b) = eqjoin::try_eq_component_join(graph, local, &patterns, &filters)? {
+            return Ok(b);
         }
-        return Ok(b);
+        return eval_flat_conjunctive(graph, local, &patterns, filters);
     }
     match p {
         GraphPattern::Bgp { patterns } => eval_bgp(graph, patterns),
@@ -3471,6 +3462,50 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         | GraphPattern::Group { .. } => eval_modified(graph, local, p),
         other => Err(format!("unsupported graph pattern: {other:?}")),
     }
+}
+
+/// Evaluates a flattened conjunctive group (triple `patterns` + group `filters`).
+///
+/// Extracted VERBATIM from the `is_conjunctive` arm of [`eval_graph_pattern_inner`]
+/// (sq-7d3dj.30.7) so the `value-join` component path can evaluate each connected
+/// component through EXACTLY the machinery the whole group would have used; with the
+/// feature off this is simply the old inline body. Sargable numeric FILTERs are pushed
+/// down into the binary-plan scans (the WCOJ path applies them afterwards); the rest
+/// run as residual filters over the joined result. [FABLE-5]
+fn eval_flat_conjunctive(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    patterns: &[TriplePattern],
+    filters: Vec<Expression>,
+) -> Result<Bindings, String> {
+    let (mut b, residual) = if bgp_uses_binary(patterns) {
+        let (pat_filters, residual) = split_sargable(graph, patterns, &filters);
+        // [OPUS-4.8] (sq-5zf8i / §A4) Acyclic BGP: run the Yannakakis full-semijoin
+        // prepass before the binary join when the opt-in `yannakakis` feature is on
+        // (it internally cost-gates + falls back to `eval_bgp_binary`, threading the
+        // same pushed-down `pat_filters` through the materialising scans so the result
+        // — and the FILTER semantics — are identical). OFF by default => the next line
+        // is the only code that compiles, byte-identical to before.
+        #[cfg(feature = "yannakakis")]
+        let bound = eval_bgp_yannakakis(graph, patterns, &pat_filters)?;
+        #[cfg(not(feature = "yannakakis"))]
+        let bound = eval_bgp_binary(graph, patterns, &pat_filters)?;
+        (bound, residual)
+    } else {
+        (eval_bgp(graph, patterns)?, filters)
+    };
+    for f in &residual {
+        // Spatial pushdown (sq-mg9): if this residual FILTER is a pushable geof:
+        // predicate and a SpatialProvider is installed, pre-restrict the rows to the
+        // index's candidate superset over the geometry variable. The FILTER below
+        // STILL runs and does the exact refinement, so the result is unchanged — the
+        // pushdown only shrinks how many rows the exact `geof:` check examines.
+        if let Some(pd) = recognise_spatial(f) {
+            apply_spatial_pushdown(graph, &mut b, &pd);
+        }
+        apply_filter(graph, local, &mut b, f)?;
+    }
+    Ok(b)
 }
 
 /// SPARQL 1.1 federated query (`SERVICE`) — the VERBATIM path. [OPUS-4.8]
