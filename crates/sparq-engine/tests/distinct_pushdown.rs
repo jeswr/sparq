@@ -518,3 +518,42 @@ fn slice_over_distinct_preserved() {
         assert_eq!(on_rows, want, "pushdown slice count differs from naive for off={off_n} lim={lim}");
     }
 }
+
+/// [FABLE-5] (sq-7d3dj.30.10) DIRECT coverage of the block-scan strategy's ANCHOR-DRIVEN
+/// intersection side: a LARGE anchor (> the small-anchor threshold, so the block scan runs)
+/// that is nonetheless much smaller than a candidate `?p`-block, so `block_intersects_anchor`
+/// takes its "walk the shorter sorted anchor, binary-search into the block" branch. The
+/// invariant is unchanged — on == off — and the exact predicate set is asserted.
+#[test]
+fn block_scan_anchor_driven_side_equivalence() {
+    // 300 persons (> 256 threshold → block scan) but a huge `ex:bulk` predicate whose 6000
+    // distinct subjects/objects are documents, not persons (a large no-hit block that the
+    // anchor-driven intersection side sweeps by binary-searching the 300 persons into it).
+    let mut ttl = String::new();
+    for p in 0..300 {
+        ttl.push_str(&format!("ex:p{p} rdf:type foaf:Person .\n"));
+        ttl.push_str(&format!("ex:p{p} foaf:name \"N{p}\" .\n"));
+    }
+    for d in 0..6000 {
+        // Documents (higher ids) with a bulk predicate; none is a person.
+        ttl.push_str(&format!("ex:doc{d} ex:bulk ex:val{d} .\n"));
+        // A few documents cite a person as OBJECT (so ex:cites qualifies via the object join).
+        if d % 500 == 0 {
+            ttl.push_str(&format!("ex:doc{d} ex:cites ex:p{} .\n", d % 300));
+        }
+    }
+    let g = load(&ttl);
+    let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+    let (off, on) = on_off(&g, &q);
+    assert_eq!(off, on, "block-scan anchor-driven side differs on vs off");
+    let mut got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
+    got.sort();
+    // name + rdf:type (person subject); cites (person object). ex:bulk must be EXCLUDED.
+    let mut want = vec![
+        "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string(),
+        "<http://xmlns.com/foaf/0.1/name>".to_string(),
+        "<http://example.org/cites>".to_string(),
+    ];
+    want.sort();
+    assert_eq!(got, want, "block-scan anchor-driven side predicate set wrong (ex:bulk leaked?)");
+}

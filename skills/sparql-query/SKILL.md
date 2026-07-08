@@ -591,9 +591,14 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   loose/skip scan that gallops (binary-search) past each value's block — instead of materialising every
   full-width join row and de-duplicating post-hoc. It is the general form of qlever's "pattern trick"
   over sparq's six permutations, and builds **NO new index**. Two branch shapes are enumerated: a single
-  BGP triple (every distinct `?p` is a solution) and an **anchor + probe** pair joined on one variable
-  (distinct `?p` from the probe kept iff its `[P, J]`-ordered block intersects the anchor's join set — a
-  loose semi-join with an O(1) id-range-disjointness fast reject). A **global already-seen `?p` set**
+  BGP triple (every distinct `?p` is a solution) and an **anchor + probe** pair joined on one variable.
+  For the anchor+probe branch the executor picks between two equivalent semi-join strategies by anchor
+  cardinality (bead `sq-7d3dj.30.10`): a **small** anchor uses the per-member *pattern trick* (bind the
+  join column to each anchor member, skip-enumerate its few `?p`, stopping once the `?p` universe is
+  covered); a **large** anchor uses a per-`?p`-block existence scan whose `[P, J]`-ordered block is first
+  **clipped to the anchor's id window** and then intersected by galloping the **shorter** of block/anchor
+  (an O(1) id-range-disjointness fast reject still precedes it). The **sorted anchor set is cached across
+  UNION branches** (q09's two branches share one anchor, built once). A **global already-seen `?p` set**
   makes later branches near-free. It is **conservative**: it fires only for that exact single-variable
   DISTINCT shape and only when a built permutation exposes the required column order (the compact/wasm
   index {SPO, POS, OSP} lacks PSO, so a subject-side probe declines there); every other shape — REDUCED,
