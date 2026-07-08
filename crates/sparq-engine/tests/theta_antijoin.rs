@@ -296,6 +296,67 @@ fn nested_optional_equivalence() {
 }
 
 #[test]
+fn hash_path_large_cardinality_equivalence() {
+    // > SIP_MAX_SMALL_ROWS (64) distinct IRI correlations forces the HASH anti-join
+    // strategy (evaluate B once, partition by ?inner). Must equal the cold path AND
+    // the SIP-seed path. 200 authors, each with 3 documents at distinct years.
+    let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
+    for a in 0..200usize {
+        ttl.push_str(&format!("ex:a{} foaf:name \"A{}\" .\n", a, a));
+        for i in 0..3usize {
+            let yr = 2000 + i;
+            ttl.push_str(&format!(
+                "ex:d{}_{} rdf:type ex:Article . ex:d{}_{} dcterms:issued \"{}\"^^xsd:integer . ex:d{}_{} dc:creator ex:a{} .\n",
+                a, i, a, i, yr, a, i, a
+            ));
+        }
+    }
+    let g = load(&ttl);
+    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"));
+    assert_eq!(off, on, "hash-path large-cardinality differs from cold path");
+    // One earliest document per author.
+    assert_eq!(on.len(), 200, "one surviving earliest document per author");
+    // Confirm the hash path actually fired (>64 distinct correlations).
+    theta_antijoin_testing::set_enabled(true);
+    theta_antijoin_testing::reset_stats();
+    let _ = query(&g, &format!("{PFX}SELECT ?document WHERE {{\n{Q06_BODY}\n}}")).unwrap();
+    let (fired, _rows, bindings) = theta_antijoin_testing::stats();
+    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
+}
+
+#[test]
+fn blank_node_correlation_equivalence() {
+    // The REAL SP2Bench q06 shape correlates on `?author`, which is a BLANK NODE (the
+    // dataset's `dc:creator` targets are mostly blank-node persons). SPARQL `=` on two
+    // DISTINCT blank nodes is a TYPE ERROR (not false), so an anti-join match requires
+    // the SAME blank node. The id-bucket probe reproduces this exactly (same id = match;
+    // different id = no match = survive). Uses >64 distinct authors → the hash path.
+    let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
+    for a in 0..80usize {
+        // Each author is a BLANK NODE with a name; give each 2 documents at years a, a+1.
+        for i in 0..2usize {
+            let yr = 2000 + i;
+            ttl.push_str(&format!(
+                "ex:d{}_{} rdf:type ex:Article . ex:d{}_{} dcterms:issued \"{}\"^^xsd:integer . ex:d{}_{} dc:creator _:auth{} .\n",
+                a, i, a, i, yr, a, i, a
+            ));
+        }
+        ttl.push_str(&format!("_:auth{} foaf:name \"Author {}\" .\n", a, a));
+    }
+    let g = load(&ttl);
+    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"));
+    assert_eq!(off, on, "blank-node correlation differs on vs off");
+    // One earliest document per author (80 authors).
+    assert_eq!(on.len(), 80, "one surviving earliest document per blank-node author");
+    // The hash path with blank-node keys fired.
+    theta_antijoin_testing::set_enabled(true);
+    theta_antijoin_testing::reset_stats();
+    let _ = query(&g, &format!("{PFX}SELECT ?document WHERE {{\n{Q06_BODY}\n}}")).unwrap();
+    let (fired, _rows, bindings) = theta_antijoin_testing::stats();
+    assert!(fired && bindings > 64, "expected hash path on blank-node keys: {}", bindings);
+}
+
+#[test]
 fn randomised_differential() {
     // Fuzz randomised graphs (deterministic LCG) against the cold path: mix IRI
     // correlations, a literal-keyed variant, and error-producing (non-numeric) years.
@@ -304,24 +365,37 @@ fn randomised_differential() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (state >> 33) % m
     };
-    for trial in 0..40u64 {
+    for trial in 0..48u64 {
+        // Alternate between the SIP-seed regime (few authors) and the hash regime
+        // (> 64 authors), and between IRI-typed and BLANK-NODE authors, so both
+        // strategies AND both id-hashable term kinds are fuzzed against the cold path.
+        let big = trial % 2 == 0;
+        let bnode_authors = trial % 3 == 0;
+        let n_auth = if big { 70 + next(30) as usize } else { 1 + next(4) as usize };
         let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
-        let n_auth = 1 + next(4) as usize;
+        let author = |a: usize| {
+            if bnode_authors {
+                format!("_:a{}", a)
+            } else {
+                format!("ex:a{}", a)
+            }
+        };
         for a in 0..n_auth {
-            ttl.push_str(&format!("ex:a{a} foaf:name \"A{a}\" .\n"));
+            ttl.push_str(&format!("{} foaf:name \"A{}\" .\n", author(a), a));
         }
-        let n_doc = 1 + next(8) as usize;
+        let n_doc = 1 + next(if big { 200 } else { 8 }) as usize;
         for d in 0..n_doc {
             let a = next(n_auth as u64) as usize;
             ttl.push_str(&format!(
-                "ex:d{d} rdf:type ex:Article . ex:d{d} dc:creator ex:a{a} .\n"
+                "ex:d{} rdf:type ex:Article . ex:d{} dc:creator {} .\n",
+                d, d, author(a)
             ));
             // 1 in 6 documents gets a non-numeric year (error-producing residual).
             if next(6) == 0 {
-                ttl.push_str(&format!("ex:d{d} dcterms:issued \"bad{d}\" .\n"));
+                ttl.push_str(&format!("ex:d{} dcterms:issued \"bad{}\" .\n", d, d));
             } else {
                 let yr = 1990 + next(20);
-                ttl.push_str(&format!("ex:d{d} dcterms:issued \"{yr}\"^^xsd:integer .\n"));
+                ttl.push_str(&format!("ex:d{} dcterms:issued \"{}\"^^xsd:integer .\n", d, yr));
             }
         }
         let g = load(&ttl);
@@ -369,10 +443,12 @@ fn q06_measure_250k() {
     let d_off = t.elapsed();
 
     theta_antijoin_testing::set_enabled(true);
+    theta_antijoin_testing::reset_stats();
     let t = std::time::Instant::now();
     let on = sparq_engine::query(&g, q06).expect("q06 on");
     let d_on = t.elapsed();
-
+    let (fired, child_rows, bindings) = theta_antijoin_testing::stats();
+    eprintln!("theta stats: fired={} child_rows={} correlations={}", fired, child_rows, bindings);
     eprintln!("q06 rows: off={} on={}", off.rows.len(), on.rows.len());
     eprintln!("q06 OFF (cold left_outer_join): {:?}", d_off);
     eprintln!("q06 ON  (correlated theta anti-join): {:?}", d_on);

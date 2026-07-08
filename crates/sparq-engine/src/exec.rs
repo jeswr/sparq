@@ -7722,9 +7722,7 @@ fn try_theta_antijoin(
         return Ok(None);
     }
 
-    // Group left rows by their correlation tuple (dedup for EVALUATION only). A group
-    // whose correlation values are all IRIs takes the SIP fast path; a group with any
-    // non-IRI correlation value routes to the value-correct cold anti-join.
+    // Distinct correlation tuples on the LEFT (dedup for evaluation planning only).
     let mut order: Vec<Vec<Id>> = Vec::new();
     let mut groups: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
     for (ri, row) in left_b.rows.iter().enumerate() {
@@ -7738,21 +7736,115 @@ fn try_theta_antijoin(
         }
     }
 
-    // The residual theta, evaluated on the merged (A-row ⊕ B'-row) tuple via full
-    // SPARQL 3-valued semantics. We build a merged row per candidate and run each
-    // residual conjunct; a conjunct that is not effectively-true (false OR error OR
+    // The residual theta, evaluated on the merged (A-row ⊕ B-row) tuple via full SPARQL
+    // 3-valued semantics; a conjunct that is not effectively-true (false OR error OR
     // unbound) means this `b` does NOT match, so the left row is NOT eliminated by it.
     let residual_owned: Vec<Expression> = residual.into_iter().cloned().collect();
 
+    // STRATEGY SELECTION.
+    //  * Large correlation cardinality → HASH ANTI-JOIN: evaluate `B` ONCE cold,
+    //    partition its rows by the `?inner` id tuple, then probe each left row's bucket
+    //    for a theta match. One `B` scan, O(|A| + |B|) — the q06 win. A left row whose
+    //    correlation values are all IRIs id-probes its bucket EXACTLY (IRI value-
+    //    equality IS id-equality); a left row with a non-IRI (literal) correlation value
+    //    can NOT be id-probed (the sq-lr2ii value-equality class), so it takes a
+    //    VALUE-CORRECT full scan over `B` with the correlation `=` re-checked verbatim.
+    //  * Small correlation cardinality (≤ SIP_MAX_SMALL_ROWS) → SIP-SEED: evaluate a
+    //    tiny correlated `B'` per distinct correlation (few evals amortise well, and
+    //    seeding restricts each scan).
+    let use_hash = order.len() > SIP_MAX_SMALL_ROWS;
+
     let mut result_rows: Vec<Row> = Vec::with_capacity(left_b.rows.len());
     let mut total_child_rows = 0usize;
-    let mut fired = false;
 
+    if use_hash {
+        // ---- Hash anti-join (evaluate B once, partition by ?inner id) ----
+        let b_all = eval_graph_pattern(graph, local, right)?;
+        total_child_rows += b_all.rows.len();
+        // `?inner` id columns in `b_all` (certain in B ⇒ present and bound).
+        let inner_cols: Option<Vec<usize>> =
+            correlations.iter().map(|c| b_all.col(&c.inner_var)).collect();
+        let Some(inner_cols) = inner_cols else {
+            // A correlation `?inner` unexpectedly missing from B's header — decline.
+            return Ok(None);
+        };
+        // Partition B rows by their ?inner id tuple (exact for IRI keys).
+        let mut buckets: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+        for (bi, brow) in b_all.rows.iter().enumerate() {
+            let key: Vec<Id> = inner_cols.iter().map(|&c| brow[c]).collect();
+            buckets.entry(key).or_default().push(bi);
+        }
+        let all_b: Vec<usize> = (0..b_all.rows.len()).collect();
+        let (out_src, tmp_vars) = merged_row_plan(&out_vars, &left_b, &b_all);
+        let shared: Vec<(usize, usize)> = left_b
+            .vars
+            .iter()
+            .enumerate()
+            .filter_map(|(lc, v)| b_all.col(v).map(|bc| (lc, bc)))
+            .collect();
+        // The correlation `=` re-checks, for the value-correct scan of a literal-keyed
+        // left row (an IRI-keyed row's equality is already exact via the id bucket).
+        let eq_checks: Vec<Expression> = correlations
+            .iter()
+            .map(|c| {
+                Expression::Equal(
+                    Box::new(Expression::Variable(out_vars[c.left_col].clone())),
+                    Box::new(Expression::Variable(c.inner_var.clone())),
+                )
+            })
+            .collect();
+        let mut value_checks: Vec<Expression> = eq_checks.clone();
+        value_checks.extend(residual_owned.iter().cloned());
+
+        for lrow in &left_b.rows {
+            if budget::exhausted(result_rows.len()) {
+                break;
+            }
+            // Every correlation value id-hashable (a NamedNode OR BlankNode, never a
+            // literal)? Then an exact id-bucket probe is sound: for IRIs and blank nodes
+            // SPARQL `=` coincides with term identity (two DISTINCT blank nodes `=` is a
+            // type error ⇒ no match, which an id-bucket non-match reproduces exactly).
+            // A LITERAL value is the sq-lr2ii value-equality hazard → value-correct scan.
+            let id_hashable = correlations.iter().all(|c| {
+                matches!(
+                    term_of(graph, local, lrow[c.left_col]),
+                    Some(Term::NamedNode(_) | Term::BlankNode(_))
+                )
+            });
+            let matched = if id_hashable {
+                let key: Vec<Id> = correlations.iter().map(|c| lrow[c.left_col]).collect();
+                match buckets.get(&key) {
+                    None => false,
+                    Some(cands) => antijoin_row_matches(
+                        graph, local, lrow, &b_all, cands, &shared, &out_src, &tmp_vars,
+                        &residual_owned,
+                    )?,
+                }
+            } else {
+                // Literal-keyed left row: value-correct full scan with `=` re-checked.
+                antijoin_row_matches(
+                    graph, local, lrow, &b_all, &all_b, &shared, &out_src, &tmp_vars,
+                    &value_checks,
+                )?
+            };
+            if !matched {
+                let mut combined: Row = lrow.clone();
+                combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
+                result_rows.push(combined);
+            }
+        }
+        theta_antijoin::record(total_child_rows, order.len());
+        return Ok(Some(Bindings::unsorted(out_vars, result_rows)));
+    }
+
+    // ---- SIP-seed anti-join (small correlation cardinality / literal keys) ----
+    let mut fired = false;
     for key in &order {
         let members = &groups[key];
         let ri0 = members[0];
 
-        // Decide the group's path: SIP-seed iff every correlation value is an IRI.
+        // Seed iff every correlation value in this group is an IRI (`=` IS term
+        // identity for IRIs). A literal value routes to the cold `B` + value `=` recheck.
         let mut smap: FxHashMap<Variable, oxrdf::NamedNode> = FxHashMap::default();
         let mut all_iri = true;
         for c in &correlations {
@@ -7766,17 +7858,9 @@ fn try_theta_antijoin(
                 }
             }
         }
-
-        // Evaluate the right side for this correlation group.
-        //  * SIP fast path (all IRIs): seed `?inner := <iri>` into `B`, evaluating a
-        //    tiny correlated `B'`. Sound because for an IRI, `=` IS term identity.
-        //  * Value-correct cold path (any non-IRI, or non-substitutable `B`): evaluate
-        //    `B` once uncorrelated; the equality is re-checked below via `eval_expr`.
         let (b_prime, seeded) = if all_iri {
             match subst_pattern(right, &smap) {
                 Some(subst) => (eval_graph_pattern(graph, local, &subst)?, true),
-                // Non-substitutable right (SERVICE, sub-SELECT projecting a seeded var,
-                // …): fall back to the cold right for this group.
                 None => (eval_graph_pattern(graph, local, right)?, false),
             }
         } else {
@@ -7785,121 +7869,52 @@ fn try_theta_antijoin(
         total_child_rows += b_prime.rows.len();
         fired = true;
 
-        // Per-group column maps relative to THIS `b_prime` (its var order is its own):
-        //  * `shared` — (left_col, bprime_col) pairs for variables present on both
-        //    sides (join-compatibility must hold on them);
-        //  * `out_src[i]` — how to fill `out_vars[i]` in a merged candidate row: from
-        //    the left row, the b_prime row, or `NO_ID`. The merged row is built in the
-        //    STATIC `out_vars` order so `eval_expr` (with `tmp.vars = out_vars`)
-        //    resolves every variable — including the seeded `?inner` and the residual's
-        //    outer vars — correctly.
+        let (mut out_src, tmp_vars) = merged_row_plan(&out_vars, &left_b, &b_prime);
+        // When seeded, `?inner` was folded to a constant inside `B`, so `b_prime` no
+        // longer binds it — re-materialise its id so a residual referencing `?inner`
+        // still sees the seeded value on the merged row.
+        if seeded {
+            for c in &correlations {
+                if let Some(nn) = smap.get(&c.inner_var) {
+                    if let Some(oi) = out_vars.iter().position(|v| v == &c.inner_var) {
+                        if matches!(out_src[oi], MergeSrc::Unbound) {
+                            let t = Term::NamedNode(nn.clone());
+                            let id = graph.id_of(&t).unwrap_or_else(|| local.intern(t));
+                            out_src[oi] = MergeSrc::Const(id);
+                        }
+                    }
+                }
+            }
+        }
         let shared: Vec<(usize, usize)> = left_b
             .vars
             .iter()
             .enumerate()
             .filter_map(|(lc, v)| b_prime.col(v).map(|bc| (lc, bc)))
             .collect();
-        enum Src {
-            Left(usize),
-            Right(usize),
-            Unbound,
-        }
-        // When seeded, `?inner` was folded to a CONSTANT inside `B`, so `b_prime` no
-        // longer binds it. Re-materialise its id here so a residual conjunct that
-        // references `?inner` still sees the seeded value on the merged row.
-        // `Src::Seeded(id)` supplies it directly.
-        enum Seed {
-            None,
-            Value(Id),
-        }
-        let mut seeded_ids: FxHashMap<Variable, Id> = FxHashMap::default();
-        if seeded {
+        // When NOT seeded, the correlation equalities were not enforced by substitution
+        // — prepend them to the theta so they are re-checked with full value `=`.
+        let mut checks: Vec<Expression> = Vec::new();
+        if !seeded {
             for c in &correlations {
-                if let Some(nn) = smap.get(&c.inner_var) {
-                    let t = Term::NamedNode(nn.clone());
-                    let id = graph.id_of(&t).unwrap_or_else(|| local.intern(t));
-                    seeded_ids.insert(c.inner_var.clone(), id);
-                }
+                checks.push(Expression::Equal(
+                    Box::new(Expression::Variable(out_vars[c.left_col].clone())),
+                    Box::new(Expression::Variable(c.inner_var.clone())),
+                ));
             }
         }
-        let out_src: Vec<(Src, Seed)> = out_vars
-            .iter()
-            .map(|v| {
-                let seed = match seeded_ids.get(v) {
-                    Some(id) => Seed::Value(*id),
-                    None => Seed::None,
-                };
-                let src = if let Some(lc) = left_b.col(v) {
-                    Src::Left(lc)
-                } else if let Some(bc) = b_prime.col(v) {
-                    Src::Right(bc)
-                } else {
-                    Src::Unbound
-                };
-                (src, seed)
-            })
-            .collect();
+        checks.extend(residual_owned.iter().cloned());
 
-        // For each left member row, test whether ANY b' matches (compatibility on
-        // shared vars ∧ every residual conjunct effectively-true ∧ — when NOT seeded —
-        // every correlation equality effectively-true via full value `=`). If a match
-        // exists the row is DROPPED; otherwise it SURVIVES padded with NO_ID.
+        let all_cands: Vec<usize> = (0..b_prime.rows.len()).collect();
         for &ri in members {
             let lrow = &left_b.rows[ri];
             if budget::exhausted(result_rows.len()) {
                 break;
             }
-            let mut matched = false;
-            for rrow in &b_prime.rows {
-                if !compatible(lrow, rrow, &shared) {
-                    continue;
-                }
-                // Build the merged candidate in static out_vars order.
-                let combined: Row = out_src
-                    .iter()
-                    .map(|(src, seed)| match (src, seed) {
-                        // A seeded `?inner` supplies its constant even though `b_prime`
-                        // no longer binds it (it was folded into `B`).
-                        (Src::Unbound, Seed::Value(id)) => *id,
-                        (Src::Left(lc), _) => lrow[*lc],
-                        (Src::Right(bc), _) => rrow[*bc],
-                        (Src::Unbound, Seed::None) => NO_ID,
-                    })
-                    .collect();
-                let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
-                // When NOT seeded, the correlation equalities were NOT enforced by
-                // substitution, so re-check them here (verbatim value `=`).
-                if !seeded {
-                    let mut eq_ok = true;
-                    for c in &correlations {
-                        let lhs = Expression::Variable(out_vars[c.left_col].clone());
-                        let rhs = Expression::Variable(c.inner_var.clone());
-                        let e = Expression::Equal(Box::new(lhs), Box::new(rhs));
-                        if !effective_boolean(&eval_expr(graph, local, &tmp, &combined, &e)?) {
-                            eq_ok = false;
-                            break;
-                        }
-                    }
-                    if !eq_ok {
-                        continue;
-                    }
-                }
-                // Residual theta (e.g. `?yr2 < ?yr`): every conjunct must be
-                // effectively TRUE for this b to match (error/false ⇒ no match).
-                let mut theta_ok = true;
-                for e in &residual_owned {
-                    if !effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?) {
-                        theta_ok = false;
-                        break;
-                    }
-                }
-                if theta_ok {
-                    matched = true;
-                    break; // one match is enough to eliminate; multiplicity: emit ≤once.
-                }
-            }
+            let matched = antijoin_row_matches(
+                graph, local, lrow, &b_prime, &all_cands, &shared, &out_src, &tmp_vars, &checks,
+            )?;
             if !matched {
-                // Survives: left row padded with NO_ID for each right-only variable.
                 let mut combined: Row = lrow.clone();
                 combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 result_rows.push(combined);
@@ -7911,6 +7926,83 @@ fn try_theta_antijoin(
         theta_antijoin::record(total_child_rows, order.len());
     }
     Ok(Some(Bindings::unsorted(out_vars, result_rows)))
+}
+
+/// How to fill each `out_vars` slot in a merged (left ⊕ right) candidate row.
+enum MergeSrc {
+    Left(usize),
+    Right(usize),
+    /// A seeded `?inner` constant (its id) that the right side no longer binds.
+    Const(Id),
+    Unbound,
+}
+
+/// Builds the per-`(left, right)` merge plan for the static `out_vars` layout: how to
+/// source each output column, plus the `tmp_vars` header for `eval_expr`.
+fn merged_row_plan(
+    out_vars: &[Variable],
+    left: &Bindings,
+    right: &Bindings,
+) -> (Vec<MergeSrc>, Vec<Variable>) {
+    let out_src = out_vars
+        .iter()
+        .map(|v| {
+            if let Some(lc) = left.col(v) {
+                MergeSrc::Left(lc)
+            } else if let Some(bc) = right.col(v) {
+                MergeSrc::Right(bc)
+            } else {
+                MergeSrc::Unbound
+            }
+        })
+        .collect();
+    (out_src, out_vars.to_vec())
+}
+
+/// `true` iff SOME candidate right row (`cands` = indices into `b.rows`) is compatible
+/// with `lrow` on the shared columns AND makes every `checks` conjunct effectively-true
+/// (correlation `=` re-checks — when present — and the residual theta), evaluated on the
+/// merged row in `out_vars` order. This is the anti-join elimination test: a `true`
+/// result DROPS the left row. Multiplicity: the caller emits each surviving row once.
+#[allow(clippy::too_many_arguments)]
+fn antijoin_row_matches(
+    graph: &Graph,
+    local: &LocalVocab,
+    lrow: &[Id],
+    b: &Bindings,
+    cands: &[usize],
+    shared: &[(usize, usize)],
+    out_src: &[MergeSrc],
+    tmp_vars: &[Variable],
+    checks: &[Expression],
+) -> Result<bool, String> {
+    let tmp = Bindings { vars: tmp_vars.to_vec(), rows: vec![], sorted_by: None };
+    for &bi in cands {
+        let rrow = &b.rows[bi];
+        if !compatible(lrow, rrow, shared) {
+            continue;
+        }
+        let combined: Row = out_src
+            .iter()
+            .map(|s| match s {
+                MergeSrc::Left(lc) => lrow[*lc],
+                MergeSrc::Right(bc) => rrow[*bc],
+                MergeSrc::Const(id) => *id,
+                MergeSrc::Unbound => NO_ID,
+            })
+            .collect();
+        let mut ok = true;
+        for e in checks {
+            if !effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?) {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Ok(true); // one match eliminates the left row.
+        }
+    }
+    Ok(false)
 }
 
 /// Does `var` occur ANYWHERE in `p` (any triple position, any expression including
