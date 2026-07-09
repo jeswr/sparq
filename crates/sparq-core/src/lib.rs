@@ -4722,10 +4722,10 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
             }
             b'<' => {
                 i += 1;
-                match memchr::memchr(b'>', &bytes[i..]) {
-                    Some(off) => i += off + 1,
-                    None => return None,
-                }
+                // clippy::question_mark (rust-clippy 1.97): an unterminated `<` (no closing
+                // `>`) means the input is malformed → bail out with None via `?`. [FABLE-5]
+                let off = memchr::memchr(b'>', &bytes[i..])?;
+                i += off + 1;
             }
             q @ (b'"' | b'\'') => {
                 let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
