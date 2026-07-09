@@ -203,6 +203,22 @@
   features: "yannakakis"
   test: true
 
+# [FABLE-5] sq-7d3dj.30.14 (#1787): the `cluster-materialize` opt-in planner path gates ALL
+# of its code (`src/cluster.rs`, the `eval_bgp_binary` hook + `eval_bgp_cluster` in exec.rs)
+# and its tests — 6 in-src `cluster::tests` unit tests + the whole-file result-equivalence
+# suite `tests/cluster_materialize_differential.rs` (which drives the REAL `eval_bgp_cluster`
+# via the doc-hidden `with_test_thresholds` hook) — behind `#[cfg(feature = "cluster-materialize")]`.
+# Without this leg the feature-ON tests (the ONLY CI executions of the cluster path) run ZERO
+# times. No new dep (`cluster-materialize = []`, only the already-direct sparq-core + rustc-hash;
+# no `unsafe`); the off path compiles the module away and is byte-identical, so a single isolated
+# leg covers it. Verified `cargo test -p sparq-engine --features cluster-materialize` runs the
+# suite and `cargo clippy -p sparq-engine --all-targets --features cluster-materialize -- -D warnings`
+# is clean.
+- name: "sparq-engine (cluster-materialize)"
+  crate: "sparq-engine"
+  features: "cluster-materialize"
+  test: true
+
 # sq-7d3dj.30.1 (#1735): the `algebra-rewrite` opt-in pass gates ALL of its unit tests
 # (11 in `src/rewrite.rs`, incl. the soundness revert-witnesses
 # `certain_vars_group_excludes_aggregate_output` + the anti-join decline tests) and the
