@@ -1,16 +1,60 @@
 # miri — undefined-behaviour lane over sparq-core's pure-Rust `unsafe` surface (bead sq-fo28).
-# [OPUS-4.8] authored while Fable unavailable — re-review when Fable returns.
+# [OPUS-4.8] authored while Fable unavailable. [FABLE-5] sq-63ups: SHARDED — see the DEAD-LANE
+# POST-MORTEM below; the single-process form of this lane never produced a verdict.
 #
 # WHY: `sparq-core` is the repo's only crate with `unsafe` (threat-model boundary B5 —
 # `research/threat-model.md`). The closed sq-ky2a corruption sweep + the `fuzz` lane catch
 # slice-bound PANICS / OOM on a hostile on-disk index, but they do NOT detect UNDEFINED
 # BEHAVIOUR — aliasing / pointer-provenance violations / data races. Miri does. This lane
-# interprets `cargo test -p sparq-core` under Miri so a regression that introduces UB in the
+# interprets the sparq-core test suite under Miri so a regression that introduces UB in the
 # pure-Rust unsafe paths (the parallel dict-build scatter writes in `dict.rs`, the POD↔bytes
 # transmutes, the `from_utf8_unchecked` over in-memory buffers, the `set_len`-after-
 # `MaybeUninit` fill) fails a standing check. NOTE: the dict-spill scatter writes
 # (`dictspill.rs`) are NOT in scope here — that module is `#[cfg(feature = "dict-spill")]`,
 # which pulls in `mmap`, and neither feature is enabled in this lane (see below).
+#
+# DEAD-LANE POST-MORTEM ([FABLE-5] sq-63ups, 2026-07-07): the original single job ran
+# `cargo miri test -p sparq-core` under a 90-minute ceiling. EVERY scheduled run since the
+# lane's first night (2026-06-16 — 22 consecutive nights) was CANCELLED at exactly that
+# ceiling: the lane never produced a verdict, and nothing alarmed on it (conclusion
+# `cancelled`, not `failure`). The 2026-07-07 run's log shows the shape of the failure: the
+# lib binary's 97 tests started at 08:36, 45 had completed by 08:50 (~15 min), then the run
+# produced NO further output for the remaining ~75 minutes — one long-lived Miri interpreter
+# process runs every test serially, and its per-test cost inflates dramatically as the
+# process ages (rayon's global pool + crossbeam-epoch state persist across tests, and Miri's
+# borrow-tracking metadata grows monotonically per allocation). The stall is a property of
+# the SINGLE PROCESS, not of any one test: the test at the stall point
+# (store::tests::build_raw_perms_no_capacity_slack, 400 triples) passes in ~44s in a FRESH
+# Miri process on the work box.
+#
+# THE FIX (this file): process-per-test + sharding, coverage IDENTICAL.
+#   1. `cargo miri nextest run` — nextest executes every test in its OWN process, so each
+#      test gets a fresh interpreter (kills the state-accumulation failure mode at the root)
+#      and the runner's cores actually parallelise interpretation (a single `cargo miri
+#      test` process interprets everything on one core, whatever test-threads says).
+#   2. `--partition count:<k>/12` — twelve matrix shards, each a disjoint round-robin slice
+#      of the SAME test list; the union over shards is exactly the old single-run test set
+#      (nextest count-partitioning assigns every test to exactly one shard, and round-robin
+#      spreads the alphabetically-clustered heavy modules across shards).
+#   3. Per-test hard cap (`[profile.default-miri]` slow-timeout in .config/nextest.toml —
+#      the profile nextest selects automatically under Miri, so normal ci.yml nextest runs
+#      are untouched): a test that exceeds the cap is TERMINATED and reported RED BY NAME.
+#      A pathological test now yields a loud, attributable failure verdict instead of
+#      silently eating the job ceiling — cancelled-at-ceiling with no verdict is the one
+#      outcome this lane must never repeat.
+#   4. Doctests: nextest does not run doctests, so the `miri-doctests` job keeps them
+#      covered (`cargo miri test --doc`; sparq-core has one; measured seconds under Miri).
+#      Coverage relative to the old `cargo miri test -p sparq-core` is therefore identical:
+#      same lib/integration test binaries (partitioned exhaustively), same doctests.
+#   Shard count: 12, calibrated from a work-box run of shard 1-of-6 (sq-63ups PR): the test
+#   set is BIMODAL under Miri — most tests are ms..seconds, but ~30% are heavy end-to-end
+#   loader tests at ~50-70 min EACH in a fresh interpreter (the accumulation bug above made
+#   them look infinitely worse in-process, but they are genuinely expensive too). Twelve
+#   round-robin shards put ~2-3 heavies per shard; run in parallel inside the shard they
+#   bound the wall near max(single heavy) ≈ 50-70+ min, inside the 130-minute ceiling with
+#   the 100-min per-test cap guaranteeing a named verdict either way. The REAL cost fix is
+#   cfg(miri)-scaling the heavy tests' input sizes (standard Miri practice) — a crates/
+#   change tracked by follow-up bead sq-0s15k, after which the shard count can drop again.
 #
 # WHAT MIRI COVERS vs CAN'T (measured — see the PR for sq-fo28):
 #   • COVERED (default features = `parallel`): the pure-Rust unsafe sites reachable WITHOUT
@@ -26,9 +70,7 @@
 #     `mmap` / `dict-spill` features are NOT enabled here — they would only abort on the first
 #     `Mmap::map`. That mmap B5 surface is covered instead by the DETERMINISTIC
 #     `mmap_corruption_oracle` test (run in ci.yml under `--features mmap,dict-spill`) + the
-#     `fuzz` lane's mmap-loader target, and is the intended target of a future ASan lane
-#     (deferred — bead noted in the sq-fo28 PR; ASan needs `-Zsanitizer=address` + a non-musl
-#     target and is left out here to keep this lane clean + non-flaky).
+#     `fuzz` lane's mmap-loader target + the standalone ASan lane (asan.yml).
 #
 # MIRIFLAGS (documented, load-bearing):
 #   -Zmiri-tree-borrows  : `rayon` pulls in `crossbeam-epoch`, which violates the default
@@ -37,7 +79,9 @@
 #                          aliasing model). Without this flag Miri aborts inside
 #                          crossbeam-epoch's `internal.rs`, NOT in sparq-core code. Tree
 #                          Borrows is the correct aliasing model for this dependency graph
-#                          and still detects real UB in sparq-core's own unsafe.
+#                          and still detects real UB in sparq-core's own unsafe. (Verified
+#                          again on the work box: the doctest FAILS under Stacked Borrows in
+#                          crossbeam-epoch and PASSES under Tree Borrows.)
 #   -Zmiri-ignore-leaks  : `rayon`'s global thread pool keeps daemon worker threads alive at
 #                          process exit; Miri otherwise fails the run with "the main thread
 #                          terminated without waiting for all remaining threads". This is a
@@ -55,7 +99,9 @@
 # therefore creates NO check-run on a PR head or merge-queue ref, so the required
 # `ci-summary / gate` aggregator (which POLLS sibling check-runs on the head commit) never
 # discovers it and never waits on it — exactly the "nightly safety net, not a per-PR tax"
-# posture of the zk-toolchain / fuzz-nightly lanes.
+# posture of the zk-toolchain / fuzz-nightly lanes. A lane with no verdict for >48h is
+# alarmed by scripts/formal_lane_alarm.py (formal-alarm.yml, [FABLE-5] sq-63ups) — the
+# 22-night silent-cancel streak above is exactly what that alarm exists to catch.
 #
 # Third-party actions are pinned by full commit SHA (supply-chain hardening); the trailing
 # `# vX.Y.Z` comment is what Dependabot follows to bump the pin.
@@ -85,13 +131,23 @@ env:
 
 jobs:
   miri:
-    name: miri (sparq-core unsafe surface, UB)
+    name: miri (sparq-core unsafe surface, UB, shard ${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
-    # Miri interprets every instruction; the parallel dict-build tests are the long pole.
-    # Generous ceiling so a regression that hangs fails with a clear timeout, not a runaway.
-    timeout-minutes: 90
+    # Backstop only: each shard's real ceiling is the 100-min per-test terminate cap in
+    # .config/nextest.toml [profile.default-miri] — a hung/pathological test reds its shard
+    # BY NAME long before this fires. (The old single job hit its ceiling every night and
+    # produced nothing; see the post-mortem in the header.) 130 = the 100-min cap + setup
+    # (checkout/toolchain/sysroot) + the light-test tail, with margin.
+    timeout-minutes: 130
+    strategy:
+      # A pathological test in one shard must not cancel the other shards' verdicts.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       # Miri ships ONLY on nightly. Pin the nightly channel by DATE so the lane is
       # reproducible and a future nightly regression cannot silently break it; bump the date
       # deliberately (same pinned dtolnay action + nightly the `fuzz` lane uses). The `miri`
@@ -101,20 +157,53 @@ jobs:
         with:
           toolchain: nightly-2026-06-11
           components: miri, rust-src
+      # nextest = the process-per-test runner (see THE FIX above). Same pinned installer
+      # action + tool the ci.yml test shards use.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: nextest
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Miri uses its own `target/miri` tree + a built-from-source sysroot; key the cache
-          # so it is not confused with the stable workspace build in ci.yml.
-          key: miri
+          # One cache shared by every shard (identical build artifacts — the shards differ
+          # only in which tests they EXECUTE); Swatinem races on save are first-wins + benign.
+          shared-key: miri
       # Build the Miri sysroot once up front so a sysroot/toolchain problem is reported
       # distinctly from a test failure, and the test run below reuses it.
       - name: Build Miri sysroot
         run: cargo +nightly-2026-06-11 miri setup
       # Default features (= `parallel`). The `mmap` / `dict-spill` features are deliberately
-      # NOT enabled: Miri cannot run file-backed memory mappings (see the header), so they
-      # would only abort on the first `Mmap::map`. This run exercises the pure-Rust unsafe
-      # surface — the parallel scatter writes, POD transmutes, `from_utf8_unchecked`, and the
-      # `MaybeUninit`+`set_len` remap — for aliasing / provenance / data-race UB.
-      - name: cargo miri test -p sparq-core
-        run: cargo +nightly-2026-06-11 miri test -p sparq-core
+      # NOT enabled: Miri cannot run file-backed memory mappings (see the header). nextest
+      # auto-selects its built-in `default-miri` profile under Miri, which picks up the
+      # per-test terminate cap from .config/nextest.toml. --no-fail-fast: a shard reports
+      # EVERY test's verdict even after a failure (this is a verdict lane, not a smoke lane).
+      - name: cargo miri nextest run (shard ${{ matrix.shard }}/12)
+        run: >-
+          cargo +nightly-2026-06-11 miri nextest run -p sparq-core
+          --partition count:${{ matrix.shard }}/12 --no-fail-fast
+
+  # nextest does not execute doctests; keep them covered so this lane's coverage stays
+  # identical to the original `cargo miri test -p sparq-core` (which ran them last —
+  # or would have, had it ever got there). Seconds-cheap: sparq-core has one doctest.
+  miri-doctests:
+    name: miri doctests (sparq-core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly, pinned) + miri
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly via toolchain input
+        with:
+          toolchain: nightly-2026-06-11
+          components: miri, rust-src
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: miri
+      - name: Build Miri sysroot
+        run: cargo +nightly-2026-06-11 miri setup
+      - name: cargo miri test --doc
+        run: cargo +nightly-2026-06-11 miri test -p sparq-core --doc

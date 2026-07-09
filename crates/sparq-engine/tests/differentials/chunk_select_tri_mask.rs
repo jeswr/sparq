@@ -137,32 +137,40 @@ fn t1_mixed_column_both_populations_probe() {
 
 // ==== T2: tie-exactness witness ===================================================
 
-/// T2 (sq-y5ew5): end-to-end decimal tie-exactness witness.
+/// T2 (sq-y5ew5): end-to-end decimal tie-exactness witness + the `sq-lr2ii` guard
+/// interaction (reconciled after merging main). [FABLE-5]
 ///
-/// The integer-2^53 route (9007199254740992 / 9007199254740993) is unreachable through
-/// this test because `extract_sargable`'s `sig_digits` guard rejects constants with > 15
-/// significant digits, and both integers are 16 digits. The unit test
-/// `tie_exactness_2_to_53_classified_as_tie` in `chunk_select.rs` proves that the
-/// classification kernel is correct for that pair.
+/// The witness is the decimal `"0.99999999999999995"^^xsd:decimal` (= 1 − 5×10⁻¹⁷):
 ///
-/// This test uses a **decimal** witness that is reachable within the guard:
-///
-/// - Stored value: `"0.99999999999999995"^^xsd:decimal` (= 1 − 5×10⁻¹⁷; 17 fractional
-///   digits — the sig_digits guard applies to the filter *constant* `1`, not the stored
-///   value, so 1 significant digit passes the ≤ 15 guard)
-/// - Filter constant: `1`
 /// - `f64("0.99999999999999995") = 1.0` (rounds UP: 1 − 5×10⁻¹⁷ lies ABOVE the midpoint
 ///   1 − 2⁻⁵⁴ ≈ 1 − 5.55×10⁻¹⁷ between pred(1.0) and 1.0, so nearest-even rounds up)
 /// - Exact comparison: `0.99999999999999995 < 1` → `true`
 ///
-/// A naive pure-f64 path would classify this as a **confident fail** (1.0 < 1.0 = false)
-/// and drop the row. The tri-mask classifies it as a **tie** (f64 values equal →
-/// delegated), after which the scalar exact-lexical comparison correctly returns `true`.
+/// It is a genuine **tie** with the constant `1`: the f64 values are equal (1.0 == 1.0),
+/// yet the exact values differ, so a naive pure-f64 path would confident-FAIL (1.0 < 1.0 =
+/// false) and drop the row, while the exact comparison keeps it.
+///
+/// **Why the vectorized seam does NOT engage here (and why that is correct).** Every value
+/// capable of producing a genuine f64 tie needs > 15 significant decimal digits (this
+/// witness has 17). Two independent, result-equivalent guards steer exactly that class
+/// away from the f64 fast path *before* the vectorized `columnar_filter` seam is reached:
+/// the pre-existing constant-side `sig_digits > 15` guard (`lit_num` in `extract_sargable`),
+/// and — added on main (`sq-lr2ii`, `Graph::has_high_precision_decimal`) — a graph-side
+/// guard that declines the sargable path whenever the graph HOLDS an f64-inexact decimal.
+/// This graph does hold one (the witness), so `extract_sargable` returns `None`, the seam
+/// records a decline (`chunks_built == 0`), and the exact **scalar** path evaluates the
+/// FILTER. The tie is therefore delivered to the tri-mask ONLY at the kernel unit level
+/// (`tie_exactness_2_to_53_classified_as_tie` in `chunk_select.rs`, which pins the
+/// `x == c` tie classification directly); no end-to-end query can both engage the seam and
+/// carry a genuine tie, because the very property that makes a value a tie also trips these
+/// > 15-digit guards.
 ///
 /// Asserts: (1) the witness f64 equals 1.0 (tie precondition — if this regresses the
-/// witness becomes a confident lane and the test logic is invalid), (2) the witness row
-/// survives FILTER(?fval < 1) in the columnar result, and (3) `rows_delegated > 0`
-/// (genuinely attributable: the witness IS a tie). [OPUS-4.8]
+/// witness becomes a confident lane and the test logic is invalid); (2) the witness row
+/// survives FILTER(?fval < 1) and the result is **byte-identical** to the scalar reference
+/// (result-equivalence across the guard); (3) `chunks_built == 0` — the `sq-lr2ii` /
+/// `sig_digits` high-precision-decimal guard declines the sargable/vectorized path for this
+/// graph, so the exact scalar path handles it. [OPUS-4.8] [FABLE-5]
 #[test]
 fn t2_tie_exactness_decimal_witness() {
     let mut nt = String::new();
@@ -234,19 +242,20 @@ fn t2_tie_exactness_decimal_witness() {
          (exact < 1, but f64 rounds to 1.0 — tri-mask must delegate, not confident-fail)"
     );
 
-    // Unconditional delegation check: the witness is always a tie (f64 = 1.0 = constant),
-    // so whenever the columnar path engaged, it must have delegated at least one row.
-    // The precondition assert above ensures this is genuinely attributable to the witness.
-    assert!(
-        snap.chunks_built >= 1,
-        "T2: columnar path must engage (chunks_built={}); need > VEC_MIN_BATCH rows",
+    // Guard interaction (reconciled after merging main). The witness is a genuine tie, but a
+    // genuine tie needs > 15 significant digits, and a graph holding an f64-inexact decimal
+    // trips the `sq-lr2ii` graph-side guard (`Graph::has_high_precision_decimal`, added on
+    // main) — plus the pre-existing constant-side `sig_digits > 15` guard — so
+    // `extract_sargable` returns `None` and the vectorized seam DECLINES before it runs. The
+    // exact scalar path handles the FILTER instead; the byte-identity + witness-survival
+    // assertions above prove that is result-correct. The tie CLASSIFICATION kernel is pinned
+    // directly by `tie_exactness_2_to_53_classified_as_tie` in `chunk_select.rs`. [FABLE-5]
+    assert_eq!(
+        snap.chunks_built, 0,
+        "T2: the `sq-lr2ii`/`sig_digits` high-precision-decimal guard must DECLINE the \
+         sargable/vectorized path for a graph holding an f64-inexact decimal \
+         (chunks_built={}); the exact scalar path handles it (result byte-identical above)",
         snap.chunks_built
-    );
-    assert!(
-        snap.rows_delegated > 0,
-        "T2: rows_delegated must be > 0; the witness (f64=1.0) is a genuine tie with \
-         constant 1 and must be delegated to exact-lexical recheck (rows_delegated={})",
-        snap.rows_delegated
     );
 }
 

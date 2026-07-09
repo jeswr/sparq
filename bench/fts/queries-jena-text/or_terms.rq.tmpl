@@ -1,0 +1,8 @@
+# [FABLE-5] sq-hmd7l.2 — jena-text translation of the sparq-text `or_terms` workload:
+# `text:matchesAny "a b"` (docs containing AT LEAST ONE term) => Lucene explicit-OR
+# query string (OR is also the Lucene QueryParser default operator; explicit for
+# pin-clarity). See and_terms.rq.tmpl for the COUNT + result-limit rationale.
+PREFIX text: <http://jena.apache.org/text#>
+SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {
+  ?s text:query ( <http://example.org/comment> '%%A%% OR %%B%%' 10000000 ) .
+}

@@ -132,6 +132,28 @@ records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (
 featured    = false
 status      = "ok"
 
+# [SONNET-4.6] sq-7d3dj.22 (epic sq-7d3dj) — deterministic allocation-count instrument.
+# 🤖 SPARQ agent. Standalone bench-only harness that fills the "no counting allocator"
+# gap cited by measurement plans sq-7d3dj.6/.7/.19/.16. The `quiet_box_sensitive = false`
+# flag reflects that alloc COUNTS are deterministic (not wall-clock) — the series is
+# reproducible on any box. The `featured = false` escape-hatch marks it as an internal
+# micro-bench (no perf claim, no dashboard card required).
+[[benchmark]]
+id          = "alloc-track"
+name        = "Allocation-count instrument — counting allocator over op_* corpus"
+category    = "query"
+measures    = "per-operator allocation count (allocs) and peak live bytes (peak_bytes) over the same 28-query op_* corpus as operator-coverage, for EACH full sparq_engine::query(…) call; emitted as a TREND-ONLY series"
+invoke      = "cd bench/alloc-track && cargo run --release --bin alloc_track -- --scale 2000 --iters 3   # --smoke for a fast smoke run (scale=200 iters=2)"
+source      = "bench/alloc-track/src/main.rs (CountingAlloc #[global_allocator] + measure_once); bench/operators/queries/*.rq (embedded via include_str!)"
+dataset     = "SYNTHETIC in-process: same WatDiv-flavoured social graph as operator-coverage (deterministic fixed seed); 2 000 entities by default (all 28 queries reference subjects in 0..=99, so 200 entities suffices for --smoke)"
+quiet_box_sensitive = false  # alloc COUNTS are deterministic (code-path-dependent, not wall-clock); values are stable on the same binary regardless of box load
+pinning     = "scale (2000 default); dataset and all queries are deterministic (fixed SplitMix64 seed + committed query files embedded via include_str!); the harness asserts its own reproducibility (two measured iters must agree)"
+records_to  = "stdout (TSV: op / allocs / peak_bytes / rows / status); status = 'ok' (deterministic) or 'band[min,max]' (variance); exit 1 on variance so a caller notices non-determinism"
+# Internal micro-bench for the optimization-program delta gap; not a head-to-head competitor
+# card — featured = false exempts it from the dashboard-row requirement (escape hatch §2.1).
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-pntvh.1 (epic sq-pntvh) — M4 Phase 1 vectorized FILTER/aggregate baseline.
 [[benchmark]]
 id          = "vectorized-eval-micro"
@@ -145,6 +167,26 @@ quiet_box_sensitive = true  # wall-clock micro-latency; trend-only, NOT in the d
 pinning     = "n_rows + iters (pin both for comparable numbers); corpus is deterministic (i in 0..n). No baked-in number — work-box timings are non-canonical (run on a quiet host)"
 records_to  = "stdout (metric_us lines)"
 featured    = false  # in-crate micro-bench for an opt-in capability; a relative baseline, not a dashboard series
+status      = "ok"
+
+# [SONNET-4.6] sq-pntvh.9 (epic sq-pntvh) — M4 Phase 9: Seam-A end-to-end A/B measurement.
+# Tests the exec.rs columnar_filter seam (Phase 5 wired, sq-pntvh.5) end-to-end via two
+# sparq-cli builds: feature-OFF (scalar path) vs feature-ON (columnar dispatch active).
+# WIN/NO-WIN verdict gates sq-pntvh.6 (morsel pull-pipeline); NO-WIN honestly defers
+# Phases 6/7 per research/vector-at-a-time-m4-completion-design.md §8.2. Results go to the
+# sq-pntvh bead comment — no numbers committed to the repo (non-canonical wall-clock).
+[[benchmark]]
+id          = "seam-a-e2e"
+name        = "Seam-A end-to-end A/B: feature-ON vs feature-OFF for join->FILTER + GROUP-BY shapes"
+category    = "query"
+measures    = "feature-ON vs feature-OFF min-of-iters wall-clock (metric_us) for two eligible shapes: (1) join->residual-FILTER on an inline-integer column — the exec.rs columnar_filter seam (Phase 5, Seam A) targets this shape; (2) join->GROUP-BY reducer — Phase 4 columnar aggregate NOT yet wired, expected equal timing across feature states (Phase-4 honest baseline). WIN criterion: seam_a_filter_on_us < seam_a_filter_off_us"
+invoke      = "bench/scripts/seam_a_e2e.sh 500000 5   # N=500000 >> VEC_MIN_BATCH=256; iters=5; builds two sparq-cli binaries (feature-OFF in target/release; feature-ON in /tmp/seam-a-vec); emits metric_us lines + seam_a_verdict summary"
+source      = "bench/scripts/seam_a_e2e.sh; crates/sparq-engine/src/exec.rs (columnar_filter seam, apply_filter); crates/sparq-engine/src/vec_dispatch.rs (VEC_MIN_BATCH=256, VEC_MORSEL=2048); design research/vector-at-a-time-m4-completion-design.md (sec4 Seam A, sec7 dispatch table row3)"
+dataset     = "SYNTHETIC, generated in-script by an inline Python stdlib generator (no external data): N `(ex:s{i}, ex:age, i)` + N `(ex:s{i}, ex:tag, i%10)` integer-literal triples; join of the two patterns yields N rows, all with inline-integer ?age ids — satisfying VEC_MIN_BATCH and dtype-precheck eligibility gates; FILTER threshold = N*0.7 (keeps ~30% rows, always >> VEC_MIN_BATCH for N>=1000); corpus deterministic (sequential i in 0..N, no RNG)"
+quiet_box_sensitive = true  # wall-clock A/B comparison; verdict only meaningful on a quiet dedicated box; non-canonical on work-boxes
+pinning     = "N + ITERS (pin both for comparable numbers); FILTER threshold = N*7/10 (deterministic function of N); two builds: feature-OFF default sparq-cli + feature-ON --features sparq-engine/vectorized; corpus byte-deterministic (sequential integers)"
+records_to  = "stdout (metric_us lines + seam_a_verdict); EC2 timing numbers in sq-pntvh bead comment — not committed to repo"
+featured    = false  # internal M4 measurement for an opt-in capability; A/B verdict gates further work, not a dashboard series
 status      = "ok"
 
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
@@ -227,7 +269,7 @@ name        = "SHACL validation — LUBM ABox x 5 hand-authored shape graphs"
 category    = "query"
 measures    = "per-workload validate time (us) for the 5 committed shape graphs (cardinality, datatype_range, class_nodekind, node_paths, sparql_constraint) over the LUBM(1) ABox. run.sh carries a HARD self-asserting gate on each workload's violations (report.results.len()), conforms (0/1) and focus_nodes vs expected.tsv (deterministic at the pinned corpus+shapes; exit 1 on drift). The W3C core pass-count ratchet (98/98) lives in crates/sparq-shacl/tests/w3c_core.rs (BASELINE_PASS, only-tightens). Timing is ADVISORY (mode:noise, trend-only)"
 invoke      = "cargo build --release -p sparq-shacl --example bench_shacl && bench/shacl/run.sh   # self-contained: reuse the LUBM(1) ABox (bench/shacl/gen.sh -> bench/lubm/gen.sh), validate x shapes/*.ttl, assert expected.tsv; CI runs it via scripts/ci-bench.sh -> shacl_<workload>_validate_us"
-source      = "bench/shacl/{gen.sh,run.sh,shapes/*.ttl,expected.tsv,README.md}; crates/sparq-shacl/examples/bench_shacl.rs (the G1 TSV-emitting runner); scripts/ci-bench.sh (shacl hook); competitors bench/competitors.json (jena-shacl/pyshacl/rdf-validate-shacl via scripts/bench-adapters/)"
+source      = "bench/shacl/{gen.sh,run.sh,shapes/*.ttl,expected.tsv,README.md}; crates/sparq-shacl/examples/bench_shacl.rs (the G1 TSV-emitting runner); scripts/ci-bench.sh (shacl hook); competitors bench/competitors.json (jena-shacl/pyshacl/rdf-validate-shacl via scripts/bench-adapters/) + the same-box comparison harness scripts/bench/shacl-same-box.sh (sq-7d3dj.33; canonical-competitor-results-shaped envelopes; first read research/shacl-baseline-2026-07.md)"
 dataset     = "REUSES the LUBM(1) ABox (-univ 1 -seed 0, ~103k N-Triples, sha256-pinned UBA generator; see the lubm entry) as the SHACL data graph, x 5 hand-authored shape graphs committed under bench/shacl/shapes/. The shapes' violation counts are deterministic constants at the pinned corpus (each independently cross-checked against the raw ABox; see bench/shacl/expected.tsv). gitignored+regenerable corpus (/tmp/lubm); shapes are committed"
 quiet_box_sensitive = true  # wall-clock validate/load time trend-only, NOT in scripts/perf-gate.py; the violations/conforms/focus_nodes diff IS a hard correctness gate (deterministic, load-robust)
 pinning     = "LUBM(1) -univ 1 -seed 0 (the ABox PIN; shapes + expected.tsv bind to it); shapes/*.ttl committed verbatim; sparq-shacl does NOT dedup results across traversal routes, so cross-engine #violations comparison uses PER-ENGINE expected counts (scripts/bench-adapters/cross_check_shacl.sh), not the single sparq constant"
@@ -1386,3 +1428,219 @@ quiet_box_sensitive = true
 pinning     = "oxigraph version from Cargo.lock; qlever image DIGEST resolved+recorded at run time (Qleverfile IMAGE is :latest — pin a digest for a fixed reference); eye = pinned binary version in bench/inference/eye-comparison.md; QUIET_BOX=true only on a dedicated quiet box"
 records_to  = "bench/competitor-results/<engine>-<suite>-<UTC>.json (git-ignored, regenerable); a maintainer maps a reviewed result into the dashboard seam (engines/values) of bench/competitors.json deliberately"
 status      = "ok"
+
+# =============================================================================
+# COMPARATIVE BENCHMARKING — new per-axis suites (sq-hmd7l.1 registry stubs)
+# Pre-registered by sq-hmd7l.1; implemented by the named child beads.
+# `status = "planning"` and `featured = false` until the implementing bead lands.
+# =============================================================================
+
+# [SONNET-4.6] sq-hmd7l.6 — external parser competitor columns (serd/rapper/Jena riot)
+[[benchmark]]
+id          = "parse-competitors"
+name        = "Parse-throughput competitor comparison (serd / rapper / Jena riot)"
+category    = "parse"
+measures    = "MB/s parse throughput on a pinned N-Triples corpus for serd/serdi, raptor/rapper, and Jena riot vs sparq's custom NT parser; triple-count oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.6"
+source      = "TBD — bench/parse/ (extending the parse-baseline harness); scripts/bench-adapters/parse_cli_adapter.py"
+dataset     = "TBD — same pinned N-Triples corpus as parse-baseline; sha256-pinned"
+quiet_box_sensitive = true
+pinning     = "TBD — corpus sha256 + competitor pinned version at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-parse-<UTC>.json (git-ignored)"
+featured    = false  # registry stub — no perf claim; implementing bead sq-hmd7l.6 promotes
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.14 — new serialization-throughput harness
+[[benchmark]]
+id          = "serialize-bench"
+name        = "Serialization throughput (sparq writers vs oxrdfio / Jena riot / serd)"
+category    = "parse"
+measures    = "MB/s serialize throughput for NT->Turtle, NT->NQuads, NT->RDF/XML round-trips vs serd, rapper, Jena riot, and oxrdfio; triple-count round-trip oracle"
+invoke      = "TBD — implementing bead sq-hmd7l.14"
+source      = "TBD — bench/parse/ (new serialize harness); scripts/bench-adapters/parse_cli_adapter.py"
+dataset     = "TBD — same pinned NT corpus as parse-competitors; sha256-pinned"
+quiet_box_sensitive = true
+pinning     = "TBD — corpus sha256 + competitor pinned version at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-serialize-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.14
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.15 — JSON-LD comparison
+[[benchmark]]
+id          = "jsonld-bench"
+name        = "JSON-LD conformance + throughput (vs jsonld.js / titanium-json-ld)"
+category    = "conformance"
+measures    = "W3C JSON-LD 1.1 test-suite pass-rate + expand/compact/serialize throughput vs jsonld.js and Titanium JSON-LD; triple-count oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.15"
+source      = "TBD — bench/jsonld-bench/; scripts/bench-adapters/jsonld_adapter.{py,mjs}"
+dataset     = "TBD — W3C JSON-LD 1.1 test suite + a synthetic throughput corpus"
+quiet_box_sensitive = true
+pinning     = "TBD — W3C test-suite commit + synthetic corpus sha256 + competitor pinned versions"
+records_to  = "TBD — bench/competitor-results/<engine>-jsonld-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.15
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.16 — RDFC-1.0 canonicalization comparison
+[[benchmark]]
+id          = "canon-bench"
+name        = "RDFC-1.0 canonicalization (vs rdf-canonize JS / rdf-canon Rust)"
+category    = "conformance"
+measures    = "W3C RDFC-1.0 conformance pass-rate + canonical-output throughput + poison-graph DoS-resistance (capped wall-clock) vs rdf-canonize and rdf-canon; byte-identical oracle"
+invoke      = "TBD — implementing bead sq-hmd7l.16"
+source      = "TBD — bench/canon-bench/; scripts/bench-adapters/canon_adapter.{sh,mjs}"
+dataset     = "TBD — W3C RDFC-1.0 test suite + poison-graph stress cases"
+quiet_box_sensitive = true
+pinning     = "TBD — W3C test-suite commit + poison-graph sha256 + competitor pinned versions"
+records_to  = "TBD — bench/competitor-results/<engine>-canon-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.16
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.17 — browser/WASM comparison
+[[benchmark]]
+id          = "wasm-compare"
+name        = "Browser/WASM comparison (bundle bytes + in-browser latency vs @oxigraph/oxigraph)"
+category    = "scaling"
+measures    = "WASM bundle bytes (deterministic, load-robust) vs @oxigraph/oxigraph npm WASM + N3.js+quadstore stack; in-browser query latency (quiet-box advisory); result-count oracle"
+invoke      = "TBD — implementing bead sq-hmd7l.17"
+source      = "TBD — bench/wasm-compare/; scripts/bench-adapters/wasm_compare_adapter.mjs"
+dataset     = "TBD — same synthetic corpus as sparq-bench-compare (in-process, no external download)"
+quiet_box_sensitive = true  # in-browser latency is wall-clock; bundle bytes comparison is load-robust
+pinning     = "TBD — competitor npm versions pinned at gather time; sparq WASM bundle sha256 from CI"
+records_to  = "TBD — bench/competitor-results/<engine>-wasm-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.17
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.18 — Python bindings overhead comparison
+[[benchmark]]
+id          = "python-bindings-bench"
+name        = "Python binding overhead (sparq-py vs pyoxigraph vs rdflib)"
+category    = "serve"
+measures    = "Python-API round-trip time: load + query from Python for a pinned NT corpus and a set of queries; result-count oracle before timing; binding overhead = total - engine-only time"
+invoke      = "TBD — implementing bead sq-hmd7l.18"
+source      = "TBD — bench/python-bindings-bench/; scripts/bench-adapters/python_rdf_adapter.py"
+dataset     = "TBD — pinned NT corpus + query set; synthetic, deterministic"
+quiet_box_sensitive = true
+pinning     = "TBD — corpus sha256 + competitor pinned versions at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-python-bindings-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.18
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.21 — Graph Store Protocol same-box panel
+[[benchmark]]
+id          = "gsp-bench"
+name        = "Graph Store Protocol same-box panel (sparq-server vs Fuseki GSP / Oxigraph GSP + CSS loose)"
+category    = "serve"
+measures    = "GSP PUT/GET/PATCH throughput (req/s) and latency (ms) for a pinned RDF corpus over HTTP; result-count oracle (GET triple count) before trusting timing"
+invoke      = "TBD — implementing bead sq-hmd7l.21"
+source      = "TBD — bench/gsp-bench/; scripts/bench-adapters/http_gsp_adapter.py"
+dataset     = "TBD — pinned NT corpus uploaded via GSP PUT; same corpus used for each engine"
+quiet_box_sensitive = true
+pinning     = "TBD — corpus sha256 + competitor pinned version/digest at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-gsp-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.21
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.12 — federation harness (FedShop vs Comunica + Jena SERVICE)
+[[benchmark]]
+id          = "federation-fedshop"
+name        = "Federation comparison — FedShop vs Comunica + Jena SERVICE over local member endpoints"
+category    = "query"
+measures    = "per-query result count + federation latency (ms) for FedShop-shaped queries over local member SPARQL endpoints; source-selection precision (members contacted vs correct members); result-count oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.12"
+source      = "TBD — bench/federation-fedshop/; scripts/bench-adapters/comunica_adapter.mjs + http_sparql_adapter.py"
+dataset     = "TBD — FedShop-shaped corpus split across local member endpoints; member data generated in-repo"
+quiet_box_sensitive = true
+pinning     = "TBD — corpus sha256 + Comunica + Jena pinned versions at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-federation-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.12
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.13 — LDBC Graphalytics comparison
+[[benchmark]]
+id          = "graphalytics"
+name        = "LDBC Graphalytics validation-gated comparison (sparq-algos vs igraph / NetworKit)"
+category    = "scaling"
+measures    = "per-algorithm wall time for PageRank / BFS / WCC / LPA on a pinned graph corpus, validated against LDBC Graphalytics ground truth; LDBC validation oracle required before trusting timing; export cost reported separately"
+invoke      = "TBD — implementing bead sq-hmd7l.13"
+source      = "TBD — bench/graphalytics/; scripts/bench-adapters/graph_analytics_adapter.py"
+dataset     = "TBD — LDBC Graphalytics datagen corpus (pinned seed + scale); ground-truth files committed or sha256-pinned"
+quiet_box_sensitive = true
+pinning     = "TBD — corpus sha256 + igraph + NetworKit pinned versions at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-graphalytics-<UTC>.json (git-ignored)"
+featured    = false  # registry stub; implementing bead sq-hmd7l.13
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.8 — EL classification vs ELK on real ontologies
+[[benchmark]]
+id          = "reason-el-real"
+name        = "OWL 2 EL classification on real ontologies (GO / OpenGALEN) vs ELK"
+category    = "inference"
+measures    = "EL classification wall time + subsumption count on the Gene Ontology (GO) and OpenGALEN ontologies vs ELK; subsumption-count oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.8"
+source      = "TBD — bench/reason-el-real/; scripts/bench-adapters/ (ELK adapter)"
+dataset     = "TBD — Gene Ontology OWL release (sha256-pinned) + OpenGALEN OWL (sha256-pinned); downloaded at gather time"
+quiet_box_sensitive = true
+pinning     = "TBD — GO + OpenGALEN release SHA or URL + sha256; ELK jar pinned version"
+records_to  = "TBD — bench/competitor-results/elk-reason-el-<UTC>.json (git-ignored); research/gap-reason-el-2026-07.md"
+featured    = false  # registry stub; implementing bead sq-hmd7l.8
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.9 — QL rewriting vs Ontop on NPD + Requiem suites
+[[benchmark]]
+id          = "reason-ql-npd"
+name        = "OWL 2 QL rewriting comparison vs Ontop (NPD + Requiem suites)"
+category    = "inference"
+measures    = "PerfectRef rewrite time + UCQ size (disjunct count) for the Norwegian Petroleum Directorate (NPD) TBox and Requiem benchmark queries vs Ontop's rewriter; UCQ size oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.9"
+source      = "TBD — bench/reason-ql-npd/; scripts/bench-adapters/ (Ontop adapter)"
+dataset     = "TBD — NPD TBox + Requiem query suite (sha256-pinned); Ontop mapping stubs"
+quiet_box_sensitive = true
+pinning     = "TBD — NPD + Requiem sha256 + Ontop pinned version at gather time"
+records_to  = "TBD — bench/competitor-results/ontop-reason-ql-<UTC>.json (git-ignored); research/gap-reason-ql-2026-07.md"
+featured    = false  # registry stub; implementing bead sq-hmd7l.9
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.10 — OWL DL tableau harness + HermiT/Openllet columns
+[[benchmark]]
+id          = "reason-dl-ore"
+name        = "OWL DL tableau harness (ORE corpora) + HermiT / Openllet columns"
+category    = "inference"
+measures    = "OWL DL classification / consistency wall time + classification verdict on the ORE (OWL Reasoner Evaluation) corpora vs HermiT / Openllet; classification verdict oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.10"
+source      = "TBD — bench/reason-dl-ore/; scripts/bench-adapters/ (Openllet adapter)"
+dataset     = "TBD — ORE ontology corpus (sha256-pinned; available from the ORE dataset repository)"
+quiet_box_sensitive = true
+pinning     = "TBD — ORE corpus sha256 + Openllet jar pinned version at gather time"
+records_to  = "TBD — bench/competitor-results/openllet-reason-dl-<UTC>.json (git-ignored); research/gap-reason-dl-2026-07.md"
+featured    = false  # registry stub; implementing bead sq-hmd7l.10
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.7 — materialization same-box comparison vs Jena / VLog / Nemo
+[[benchmark]]
+id          = "materialize-competitors"
+name        = "Materialization same-box comparison — sparq OWL-RL/RDFS closure vs Jena / VLog / Nemo on LUBM"
+category    = "inference"
+measures    = "OWL-RL/RDFS closure materialization wall time + closure triple count on LUBM(1) ABox vs Apache Jena (OWL-RL), VLog, and Nemo; closure-triple-count oracle before timing"
+invoke      = "TBD — implementing bead sq-hmd7l.7"
+source      = "TBD — scripts/bench/materialize-same-box.sh; scripts/bench-adapters/{jena,vlog,nemo}_adapter.{sh,py}"
+dataset     = "REUSES bench/lubm/ LUBM(1) ABox (-univ 1 -seed 0, ~100k ABox triples; sha256-pinned UBA generator)"
+quiet_box_sensitive = true
+pinning     = "LUBM(1) -univ 1 -seed 0 (same PIN as the lubm suite); competitor versions pinned at gather time"
+records_to  = "TBD — bench/competitor-results/<engine>-materialize-<UTC>.json (git-ignored); research/gap-materialize-2026-07.md"
+featured    = false  # registry stub; implementing bead sq-hmd7l.7
+status      = "planning"
+
+# [SONNET-4.6] sq-hmd7l.24 — RIF NOT-COMPARABLE verdict + conformance runner
+[[benchmark]]
+id          = "rif-conformance"
+name        = "RIF conformance — W3C RIF suite pass-rate runner (NOT-COMPARABLE verdict)"
+category    = "conformance"
+measures    = "W3C RIF Core + BLD test-suite pass-rate (pass/fail counts; NOT a throughput measure); backs the 'only maintained open-source RIF consumer' claim; failures listed, never rounded up"
+invoke      = "TBD — implementing bead sq-hmd7l.24"
+source      = "TBD — bench/rif-conformance/; W3C RIF test suite fetched at gather time"
+dataset     = "TBD — W3C RIF Core + BLD test suite (sha256-pinned or commit-pinned)"
+quiet_box_sensitive = false  # pass-rate is deterministic (correctness, not wall-clock)
+pinning     = "TBD — W3C RIF test-suite commit sha256"
+records_to  = "TBD — bench/rif-conformance/results.tsv (pass/fail counts); NOT a perf number"
+featured    = false  # registry stub; implementing bead sq-hmd7l.24. NOT-COMPARABLE perf verdict
+status      = "planning"

@@ -1,0 +1,14 @@
+# [FABLE-5] sq-hmd7l.3 — PINNED jena-geosparql rendering of the `geof_within`
+# workload for scripts/bench/geo-same-box.sh. Verbatim copy of
+# bench/geo/queries/geof_within.rq (standard GeoSPARQL dialect; no translation
+# needed for Jena); pinned per-engine so the competitor replay cannot drift.
+# This is the planar degree-space geof:sfWithin filter-function path (distinct
+# from the great-circle within* workloads). Oracle: COUNT == sparq's
+# expected.tsv `geof_within` size before any timing is trusted.
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (geof:sfWithin(?wkt,
+    "POLYGON((-0.5 50.5, 0.5 50.5, 0.5 51.5, -0.5 51.5, -0.5 50.5))"^^geo:wktLiteral))
+}

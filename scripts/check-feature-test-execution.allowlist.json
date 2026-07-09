@@ -1,0 +1,86 @@
+{
+  "schema": "sparq-check-fte-allowlist/v1",
+  "note": "Each entry documents a known gap: a feature-gated test with no CI executor. Every entry MUST have a written reason. Remove an entry only by ADDING a CI executor that covers it (a feature-matrix leg or coverage.sh case arm). Do NOT use this file to silence a new test's coverage requirement — add the executor instead.",
+  "allowlist": [
+    {
+      "crate": "sparq-canon",
+      "features": ["rdf12-triple-terms"],
+      "reason": "No feature-matrix leg for rdf12-triple-terms yet (tracked gap). The feature is non-standard, off by default, and the test is the only consumer. A future leg will close this gap."
+    },
+    {
+      "crate": "sparq-cli",
+      "features": ["hdt"],
+      "reason": "hdt excluded from the feature-matrix lane by design: the wrapped hdt crate declares MSRV 1.87 and pulls a heavy C/cmake decode stack (see feature-matrix.yml SCOPE comment). Gating it needs its own toolchain lane — tracked as a future bead."
+    },
+    {
+      "crate": "sparq-hdt",
+      "features": ["write"],
+      "reason": "sparq-hdt write excluded from the feature-matrix lane by the same MSRV 1.87 / heavy-C rationale as sparq-cli/hdt (see feature-matrix.yml SCOPE comment)."
+    },
+    {
+      "crate": "sparq-kb",
+      "features": ["literature-live"],
+      "reason": "literature-live opens a real network connection to the Anthropic API. Live-network tests are never run in CI by contract (the eval harness uses recorded fixtures). Excluded by the same policy as nlq/live and embeddings (see feature-matrix.yml SCOPE comment)."
+    },
+    {
+      "crate": "sparq-reason-dl",
+      "features": ["dispatch"],
+      "reason": "sparq-reason-dl is not yet wired into any CI executor: it is absent from PER_COMMIT_CRATES in coverage.sh and has no feature-matrix fragment. The dispatch feature drives the L4 fragment-dispatch checker (sq-pbz04.4.4). Tracked gap: add a sparq-reason-dl fragment with a dispatch leg."
+    },
+    {
+      "crate": "sparq-reason-el",
+      "features": ["hasse", "rbox"],
+      "reason": "snomed_go_scale.rs requires BOTH rbox and hasse simultaneously (a combined SNOMED/GO scaling test). Separate legs exist for rbox alone and hasse alone, but no combined leg covers the AND requirement. Tracked gap: add a combined rbox,hasse leg to sparq-reason-el fragment."
+    },
+    {
+      "crate": "sparq-serve",
+      "features": ["result-cache"],
+      "reason": "sparq-serve is in coverage.sh PER_COMMIT_CRATES but measured with default features only (no result-cache case arm). No feature-matrix leg for result-cache in sparq-serve exists. Tracked gap: add a sparq-serve (result-cache) leg to the fragment."
+    },
+    {
+      "crate": "sparq-server",
+      "features": ["backup"],
+      "reason": "No feature-matrix leg for sparq-server backup yet. The backup feature is off by default (sq-o5bi). Tracked gap: add a sparq-server (backup) leg."
+    },
+    {
+      "crate": "sparq-server",
+      "features": ["shacl"],
+      "reason": "No feature-matrix leg for sparq-server shacl yet. The shacl feature is off by default. Tracked gap: add a sparq-server (shacl) leg."
+    },
+    {
+      "crate": "sparq-shacl",
+      "features": ["scs"],
+      "reason": "No feature-matrix leg for sparq-shacl scs (SHACL Compact Syntax). The existing shacl-af leg does not cover scs. Tracked gap: add a sparq-shacl (scs) leg to the fragment."
+    },
+    {
+      "crate": "sparq-solid",
+      "features": ["trust-graph"],
+      "reason": "No feature-matrix leg for sparq-solid trust-graph yet. The trust-graph feature is off by default. Tracked gap: add a sparq-solid (trust-graph) leg."
+    },
+    {
+      "crate": "sparq-trust",
+      "features": ["framework-vocab"],
+      "reason": "No feature-matrix leg for sparq-trust framework-vocab yet. The trust_framework_ttl.rs integration suite is gated on it. Tracked gap: add a sparq-trust (framework-vocab) leg."
+    },
+    {
+      "crate": "sparq-vectors",
+      "features": ["approx-ann"],
+      "reason": "No feature-matrix leg for sparq-vectors approx-ann yet. The feature pulls the heavy instant-distance HNSW crate; building it in the feature-matrix lane requires verifying it stays within the CI wall-clock budget. Tracked gap: add a sparq-vectors (approx-ann) leg. Affected tests: hybrid.rs, hybrid_olympics.rs, olympics.rs, recall.rs, throughput.rs."
+    },
+    {
+      "crate": "sparq-vectors",
+      "features": ["approx-ann", "filtered-ann"],
+      "reason": "No feature-matrix leg covers both approx-ann and filtered-ann together (overfetch.rs). The existing vec-predicate,filtered-ann leg lacks approx-ann. Tracked gap: extend an existing leg or add a new one."
+    },
+    {
+      "crate": "sparq-vectors",
+      "features": ["approx-ann", "vec-predicate"],
+      "reason": "No feature-matrix leg covers both approx-ann and vec-predicate (vec_predicate_approx.rs). The existing vec-predicate legs lack approx-ann. Tracked gap: add a combined leg."
+    },
+    {
+      "crate": "sparq-vectors",
+      "features": ["delta"],
+      "reason": "No feature-matrix leg for sparq-vectors delta yet. The delta feature gates the in-RAM VectorDelta sidecar and the persisted .spqd format. Tracked gap: add a sparq-vectors (delta) leg. Affected tests: delta.rs, delta_persist.rs."
+    }
+  ]
+}

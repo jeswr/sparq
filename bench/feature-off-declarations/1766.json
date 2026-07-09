@@ -1,0 +1,5 @@
+{
+  "pr": 1766,
+  "date": "2026-07-07",
+  "reason": "sq-lr2ii: always-compiled sparq-core Graph::has_high_precision_decimal + helpers/field and the sparq-engine extract_sargable/split_sargable &Graph guard move the feature-OFF sparq-wasm bundle bytes"
+}

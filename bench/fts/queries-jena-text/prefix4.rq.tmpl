@@ -1,0 +1,10 @@
+# [FABLE-5] sq-hmd7l.2 — jena-text translation of the sparq-text `prefix4` workload:
+# `text:matches "abcd*"` (docs with any term matching the 4-char prefix of term a)
+# => Lucene prefix query. %%P4%% is the first 4 characters of pair term a (always 4
+# alphabetic stem characters for this corpus — the driver validates). The 10000000
+# result-limit override matters MOST here: prefix hits are the largest sets in the
+# suite and jena-text's 10000 default would truncate every one of them.
+PREFIX text: <http://jena.apache.org/text#>
+SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {
+  ?s text:query ( <http://example.org/comment> '%%P4%%*' 10000000 ) .
+}

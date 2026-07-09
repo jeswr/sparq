@@ -1,7 +1,7 @@
 # bench/serve-throughput — canonical loopback HTTP-throughput harness
 
-> 🤖 SPARQ agent. sq-7d3dj.5 (epic sq-7d3dj, roadmap item 5 of
-> `research/optimization-audit-2026-07.md`).
+> 🤖 SPARQ agent. sq-7d3dj.5 (prerequisite; epic sq-7d3dj) + sq-7d3dj.23 (TTFB instrumentation;
+> epic sq-7d3dj, roadmap items 5 & 23 of `research/optimization-audit-2026-07.md`).
 
 The sparq HTTP surface had **no throughput metric** anywhere in `bench/`, so every
 HTTP-lane optimisation (sq-7d3dj.10 / .12 / .13) was unmeasurable. This harness is the
@@ -9,7 +9,7 @@ HTTP-lane optimisation (sq-7d3dj.10 / .12 / .13) was unmeasurable. This harness 
 `sparq_server::serve` + `router` + `AppState`, the exact stack the `sparq` binary runs —
 on an ephemeral `127.0.0.1:0` loopback port over a small fixed synthetic corpus, drives
 concurrent SPARQL SELECT/ASK queries against it with a dependency-free keep-alive HTTP/1.1
-client, and reports **{req/s, p50/p99 latency (ms), peak RSS}**.
+client, and reports **{req/s, p50/p99 latency (ms), peak RSS, p50/p99 TTFB (time-to-first-byte) ms}**.
 
 It changes **no server behaviour** — it is measurement infrastructure only. Like
 `bench/serve` and `bench/memtier`, it is a deliberately *standalone* cargo project (own
@@ -31,11 +31,14 @@ comment line (`# …`) on the text summary, and as a top-level `"note"` field (p
 | series | what | why |
 |---|---|---|
 | throughput | a fixed small SELECT (bound-subject point query) + an ASK, at concurrency **1/8/32** (the server's default `max_concurrent` is 32), closed-loop | req/s + p50/p99 ms per concurrency level — the HTTP-lane baseline |
+| TTFB (time-to-first-byte) | p50/p99 ms from request-sent to first response body byte, collected across all queries + concurrency levels | measures latency of the first-byte streaming path, critical for the pull-streaming beads (sq-7d3dj.12 / .13) — a declared win metric (trend-only, non-canonical like throughput) |
 | peak RSS | process `VmHWM` high-water mark while serving one **large** SELECT (full-graph scan, whole result materialised) | captures the whole-result materialisation cost the streaming beads (sq-7d3dj.12 / .13) target |
 
 Closed-loop (each connection fires back-to-back) measures the server's **saturation
 throughput** at a concurrency level; latency is interpreted relative to that level (the
-classic closed-loop caveat).
+classic closed-loop caveat). TTFB is **additive** — all samples report p50/p99 TTFB
+alongside existing metrics; it incurs negligible measurement overhead (read timestamp on
+first socket-read).
 
 ## Run
 

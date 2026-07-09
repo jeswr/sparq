@@ -1,0 +1,5 @@
+{
+  "pr": 1782,
+  "date": "2026-07-08",
+  "reason": "sq-7d3dj.30.10: exec.rs adds always-compiled anchor-driven + clipped DISTINCT-projection semijoin machinery (collect_var_ids_sorted, AnchorSet/AnchorCache/cached_anchor_ids, block_intersects_anchor, maybe_anchor_driven/anchor_driven_distinct, clipped block scan) under the default-on distinct_pushdown — moves the feature-OFF sparq-wasm bundle bytes; feature-OFF invariant preserved"
+}

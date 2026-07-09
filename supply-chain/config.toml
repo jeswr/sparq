@@ -91,19 +91,19 @@ version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-array]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-buffer]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-data]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arrow-schema]]
-version = "55.2.0"
+version = "59.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-trait]]
@@ -252,12 +252,7 @@ criteria = "safe-to-deploy"
 [[exemptions.criterion]]
 version = "0.5.1"
 criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
-
-[[exemptions.criterion-plot]]
-version = "0.5.0"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+notes = "LOAD-BEARING trust anchor, NOT the in-tree version. The tree has criterion 0.8.2 (dev-only bench dep, not in the shipped/wasm build), which is certified via the isrg upstream safe-to-run DELTA-audit chain 0.5.1 -> 0.6.0 -> 0.7.0 -> 0.8.0 -> 0.8.1 -> 0.8.2 (supply-chain/imports.lock). That chain needs a base at 0.5.1; this exemption is that base. Removing it un-vets criterion 0.8.2 and fails `cargo vet --frozen` — verified 2026-07-07 (sq-57zih). Keep until a full audit of a later criterion base lands upstream. [OPUS-4.8]"
 
 [[exemptions.crossbeam-deque]]
 version = "0.8.6"
@@ -575,11 +570,6 @@ criteria = "safe-to-deploy"
 [[exemptions.ipnet]]
 version = "2.12.0"
 criteria = "safe-to-deploy"
-
-[[exemptions.is-terminal]]
-version = "0.4.17"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
 
 [[exemptions.itertools]]
 version = "0.14.0"
@@ -1416,9 +1406,19 @@ criteria = "safe-to-deploy"
 version = "29.0.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.winapi-i686-pc-windows-gnu]]
+version = "0.4.0"
+criteria = "safe-to-run"
+notes = "IN-TREE (Windows targets only, --target all) via criterion 0.8.2 -> page_size -> winapi 0.3.9; a dev-only bench-toolchain leaf, not in the shipped/wasm build. Import-stubs with no upstream trusted audit; safe-to-run exemption keeps `cargo vet --frozen` green. Not stale — verified 2026-07-07 (sq-57zih). [OPUS-4.8]"
+
 [[exemptions.winapi-util]]
 version = "0.1.11"
 criteria = "safe-to-deploy"
+
+[[exemptions.winapi-x86_64-pc-windows-gnu]]
+version = "0.4.0"
+criteria = "safe-to-run"
+notes = "IN-TREE (Windows targets only, --target all) via criterion 0.8.2 -> page_size -> winapi 0.3.9; a dev-only bench-toolchain leaf, not in the shipped/wasm build. Import-stubs with no upstream trusted audit; safe-to-run exemption keeps `cargo vet --frozen` green. Not stale — verified 2026-07-07 (sq-57zih). [OPUS-4.8]"
 
 [[exemptions.windows]]
 version = "0.62.2"

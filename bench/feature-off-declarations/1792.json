@@ -1,0 +1,5 @@
+{
+  "pr": 1792,
+  "date": "2026-07-09",
+  "reason": "[FABLE-5] sq-9781x: routing the always-compiled sparq-core numeric-value cache (numerics_of / numeric_of / the dict-spill build) through the new shared sparq_core::parse_xsd_f64 (trim + XSD lexical space) instead of a raw str::parse::<f64> changes always-compiled core ingest code, so the feature-OFF wasm bundle bytes move from base by design (+507 B, +0.032%). SIZE stays governed by the wasm_bundle_bytes +/-2% floor ratchet."
+}
