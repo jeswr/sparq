@@ -1953,10 +1953,10 @@ fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
             let split = date_tz_split(v);
             (&v[..split], &v[split..])
         }
-        _ => match v.find('T') {
-            Some(i) => (&v[..i], &v[i + 1..]),
-            None => return None,
-        },
+        _ => {
+            let i = v.find('T')?;
+            (&v[..i], &v[i + 1..])
+        }
     };
     let (y, m, d) = parse_date(date_part)?;
     let (mut rest, mut secs) = (rest, 0.0f64);
