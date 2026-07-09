@@ -2621,6 +2621,14 @@ impl Graph {
     ///
     /// `predicate` is a raw dictionary id. An absent predicate (no triples) returns `false`
     /// (vacuously literal-free), which is correct: the object variable is then unbound anyway.
+    ///
+    /// SCOPE (load-bearing): this answers for the RECEIVER graph ONLY — it scans `self.store`,
+    /// the receiver's own triples (a named graph is a self-contained sub-`Graph` with its own
+    /// `store`/`dict`), and never `self.named`. A caller must invoke it on the SAME graph the
+    /// object variable is bound from: an object under a `GRAPH <g>`/`GRAPH ?g` block is bound
+    /// from the named sub-graph, so classifying it off the enclosing (default) graph's column is
+    /// UNSOUND. The engine enforces this by staying conservative for object slots under any GRAPH
+    /// block at an outer dispatch (see `collect_kind_positions`' `G::Graph` arm).
     pub fn predicate_has_literal_object(&self, predicate: Id) -> bool {
         if predicate == dict::NO_ID {
             return false;

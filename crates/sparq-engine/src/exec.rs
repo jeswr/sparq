@@ -868,7 +868,18 @@ fn collect_kind_positions(
             if let NamedNodePattern::Variable(v) = name {
                 nonlit.insert(v.clone());
             }
-            collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal);
+            // [FABLE-5] (sq-1ivw7) Recurse with the ALWAYS-CONSERVATIVE classifier (`&|_| true`),
+            // NOT the caller's `obj_may_be_literal`. The predicate-range object credit is scoped to
+            // ONE graph's object column: `obj_may_be_literal` is built by `nonliteral_filter_cols`
+            // against the graph the OUTER dispatch executes on (default graph for a FILTER sitting
+            // OUTSIDE the GRAPH block), but a plain object variable inside `GRAPH <g>`/`GRAPH ?g`
+            // is bound from a DIFFERENT store (the named sub-graph). Crediting it off the outer
+            // graph's column would be unsound (a named-graph literal object gets id-compared for
+            // `=`/`!=`). So object slots under ANY GRAPH block stay literal-risk at an outer
+            // dispatch. The INSIDE-GRAPH dispatch is already correct and needs no widening here:
+            // when the FILTER sits inside the block, `eval_translated` evaluates `inner` with
+            // `graph = sub`, so its own `nonliteral_filter_cols` scans the right (named) store.
+            collect_kind_positions(inner, nonlit, maybe_lit, &|_| true);
         }
         // A BIND target can evaluate to a literal — literal-risk.
         G::Extend { inner, variable, .. } => {
@@ -17429,6 +17440,69 @@ mod idfast_unit {
         for row in &r.rows {
             assert_ne!(row[0], row[1], "!= still excludes self-pairs post-update");
         }
+    }
+
+    /// A default graph whose `creator` predicate is LITERAL-FREE, plus a named graph `<http://ex/g>`
+    /// whose `creator` objects are a `xsd:integer`/`xsd:decimal` pair that are `=`-equal by VALUE.
+    /// Loaded via TriG so `.named` is populated (a named graph is a self-contained sub-`Graph`).
+    fn cross_graph_dataset() -> Graph {
+        let trig = concat!(
+            "<http://ex/d0> <http://ex/creator> <http://ex/alice> .\n",
+            "<http://ex/g> {\n",
+            "  <http://ex/d1> <http://ex/creator> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "  <http://ex/d1> <http://ex/creator> \"1.0\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+            "}\n",
+        );
+        Graph::load_dataset(trig, "trig").unwrap()
+    }
+
+    #[test]
+    fn predrange_graph_block_declines_object_credit_at_outer_dispatch() {
+        // ANALYSIS-LEVEL decline witness for the cross-graph hole (PR #1795 reviewer counterexample).
+        // The FILTER sits OUTSIDE the GRAPH block, so `nonliteral_filter_cols` classifies against the
+        // DEFAULT graph — whose `creator` column is literal-free. But `?a`/`?b` are bound from INSIDE
+        // `GRAPH <http://ex/g>`, a DIFFERENT store carrying literal objects. Crediting them off the
+        // default column would be unsound. After the fix (`G::Graph` recurses with `&|_| true`), the
+        // outer dispatch gives an object var under any GRAPH block NO credit.
+        let g = cross_graph_dataset();
+        let inner = GraphPattern::Graph {
+            name: NamedNodePattern::NamedNode(nn("http://ex/g")),
+            inner: Box::new(bgp(vec![
+                tp_svo("d", "http://ex/creator", TermPattern::Variable(var("a"))),
+                tp_svo("d", "http://ex/creator", TermPattern::Variable(var("b"))),
+            ])),
+        };
+        let b = Bindings::unsorted(vec![var("d"), var("a"), var("b")], vec![]);
+        let cols = nonliteral_filter_cols(&g, &inner, &b);
+        assert!(
+            !cols.contains(&b.col(&var("a")).unwrap()),
+            "?a bound under GRAPH must NOT be credited at the outer (default-graph) dispatch"
+        );
+        assert!(
+            !cols.contains(&b.col(&var("b")).unwrap()),
+            "?b bound under GRAPH must NOT be credited at the outer (default-graph) dispatch"
+        );
+    }
+
+    #[test]
+    fn predrange_cross_graph_filter_result_identical() {
+        // END-TO-END differential (feature ON) for the reviewer's exact counterexample. `?a`/`?b`
+        // are `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` bound inside `GRAPH <http://ex/g>`; the
+        // FILTER sits outside. `=` is VALUE equality, so `1 = 1.0` holds and all 4 ordered pairs
+        // (2×2) qualify. Before the fix the object credit fired off the default graph's literal-free
+        // column, the pair was id-compared, and only the 2 self-pairs survived (RED: 2 != 4).
+        let g = cross_graph_dataset();
+        let q = concat!(
+            "SELECT ?a ?b WHERE { ",
+            "GRAPH <http://ex/g> { ?d <http://ex/creator> ?a . ?d <http://ex/creator> ?b } ",
+            "FILTER(?a = ?b) }"
+        );
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(
+            r.rows.len(),
+            4,
+            "value `=` matches the integer/decimal pair: all 4 ordered pairs qualify (feature ON must equal OFF)"
+        );
     }
 
     // ---- MUTATION check: a deliberately-wrong fast result must be caught by the differential ---
