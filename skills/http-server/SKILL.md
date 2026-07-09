@@ -272,6 +272,11 @@ and the Graph-Store-Protocol read path keeps its lenient default):
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
 | CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
 
+<!-- [SONNET-4.6] sq-7d3dj.12: CSV/TSV SELECT responses are now streamed as row-oriented
+chunks (mirrors the JSON T16 path): Content-Length is known up-front (chunks are fully
+evaluated first), the body streams chunk-by-chunk via hyper, and peak memory never holds a
+second full-result copy. XML stays buffered (prefix compaction). -->
+
 <!-- [OPUS-4.8] sq-u79ee (survey §C1 / FINDINGS F21) -->
 Per the W3C SPARQL Results TSV format, the **TSV** serialiser abbreviates an
 `xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literal whose lexical form is
