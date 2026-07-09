@@ -140,7 +140,8 @@ selection-logic PR therefore always validates against the full matrix.
 
 ### 4.2 The ownership map — `ci/path-ownership.toml`
 
-A small, checked-in, audited policy file with exactly three verdict forms:
+A small, checked-in, audited policy file. Three ownership-verdict forms plus the
+monotone `readers` union (below):
 
 ```toml
 # Attribute a non-crate path to the crates whose tests read it:
@@ -152,6 +153,12 @@ crates = ["sparq-conformance"]
 [[map]]
 pattern = "research/**"
 safe = true
+
+# Additional-readers: union extra reader crates for a CRATE-OWNED path where a
+# real dep edge would be a cycle (monotone; see below):
+[[map]]
+pattern = "crates/sparq-solid/rules/**"
+readers = ["sparq-reason"]
 
 # Everything unmapped and unowned => mode=full (implicit default).
 ```
@@ -168,6 +175,37 @@ Rules:
 - A map-validity unit test asserts every `crates` name is a current workspace
   member and every literal pattern root exists — the map cannot silently rot
   when crates move.
+
+**Additional-readers (monotone union)** — sq-m4bxc [FABLE-5]. A fourth verdict
+form, `readers = [...]`, added as a *deliberate deviation from pure
+input-relocation*. The two closed residuals were sibling reads across a boundary
+where the "attribute the shared input to both crates" fix is not available: the
+input lives *inside* a crate dir (so crate-prefix ownership, steps 1–2, wins
+before the map is ever consulted for a `crates` attribution) **and** the reading
+crate is not in the owner's reverse-dependency closure. Relocation was rejected
+because it would move a *vendored crypto ontology*
+(`crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl`) and a *crate's core
+authorization rule corpus* (`crates/sparq-solid/rules/*.n3`) out of their owning
+crates and rewrite production `include_str!` / runtime include paths in
+`sparq-trust`, `sparq-solid`, `sparq-zk` and `sparq-reason`. The dep-edge
+alternative is a **cargo cycle** in both cases (`sparq-trust` depends on
+`sparq-zk`; `sparq-solid` depends on `sparq-reason`), so `reason -> solid` /
+`zk -> trust` edges are impossible.
+
+`readers` is the one verdict form consulted **even for a crate-owned path**: it
+UNIONS the listed crates into the changed-crate set *in addition to* the path's
+normal prefix owner, without changing the ownership verdict. This makes it
+strictly **monotone / fail-safe** — adding a `readers` entry can only ENLARGE the
+affected set (it never rescues an unowned/unmapped path from `mode=full`), so it
+cannot introduce the unsound skip §2 forbids; a unit test pins that monotonicity
+property. The out-of-crate-input audit (bead 2) treats a sibling read as covered
+iff the reader is listed in a matching `readers` entry, and the map-validity test
+extends to `readers` names. Residual 3 (`sparq-conformance`'s
+`scoreboard_floors.rs` reading sibling **test sources** at a statically
+unresolvable runtime path) is *not* coverable by `readers` — it stays
+acknowledged, backstopped by the nightly full run, and is tracked for a shared
+floors-crate refactor in its own bead (sq-z1xv8), which conflicts with the
+"no shared test edits" constraint here and so needs its own design pass.
 
 ### 4.3 Fail-closed mechanics
 

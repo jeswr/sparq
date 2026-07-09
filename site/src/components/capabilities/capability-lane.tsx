@@ -3,15 +3,19 @@
 // Faithful to the approved mockup (web-capabilities.html §LANE): each theme is a horizontal
 // "lane" with a sticky NUMBERED spine (01 / 05) + a per-theme accent (chart-1…5) + a tile grid,
 // so the five capability areas read as five distinct places — scannable without reading every
-// blurb. The tiles are the existing CapabilityRowItem (lazy-mount machinery preserved); the
-// query-data lane carries the "open the workbench" affordance, and the privacy lane carries the
-// explicit research-grade caveat strip (LIVE privacy-claims honesty, made loud not hidden).
+// blurb. The query-data lane carries the "open the workbench" affordance.
+//
+// [OPUS-4.8] sq-67qji (issue #1675) — the interactive tile grid + the expanded demo bodies are
+// delegated to the CapabilityLaneGrid client component. It renders an opened demo's body at full
+// lane width (a `lg:col-span-2` row that reclaims this spine's column) instead of expanding it
+// inside a half-column tile, and carries the privacy lane's research-grade caveat strip. The
+// lazy-mount machinery + honesty caveats are preserved there verbatim.
 
-import { AlertTriangle, PlayCircle } from "lucide-react";
+import { PlayCircle } from "lucide-react";
 
 import { type CapabilityTheme } from "@/data/capabilities";
 import { withBasePath } from "@/lib/base-path";
-import { CapabilityRowItem } from "@/components/capabilities/capability-row";
+import { CapabilityLaneGrid } from "@/components/capabilities/capability-lane-grid";
 import { laneAccent } from "@/components/capabilities/lane-accents";
 
 export function CapabilityLane({
@@ -63,36 +67,15 @@ export function CapabilityLane({
         )}
       </div>
 
-      {/* The tile grid. */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {rows.map(({ surface, kind }) => (
-          <CapabilityRowItem
-            key={surface.slug}
-            slug={surface.slug}
-            kind={kind}
-            accent={accent}
-          />
-        ))}
-
-        {/* Privacy lane: the explicit research-grade caveat strip (made loud, not a footnote). */}
-        {group.id === "privacy" && (
-          <div className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-dashed border-[color-mix(in_oklch,var(--warning)_45%,var(--border))] bg-[color-mix(in_oklch,var(--warning)_7%,transparent)] px-4 py-3 text-[12.7px] text-muted-foreground sm:col-span-2">
-            <AlertTriangle
-              className="mt-0.5 size-4 shrink-0 text-[var(--warning)]"
-              aria-hidden
-            />
-            <span>
-              <span className="font-semibold text-foreground">
-                Research-grade, labelled as such.
-              </span>{" "}
-              The v1 ZK verifier is not externally audited — sound as landed under its
-              stated threat model, pending re-review. MPC runs as a faithful in-tab
-              simulation of the native protocol, not a proof of correctness. Indicative
-              engineering, not an audited cryptographic guarantee.
-            </span>
-          </div>
-        )}
-      </div>
+      {/* The interactive tile grid + full-width demo bodies (client). A Surface's lucide `icon`
+          is not serializable across the RSC boundary, so we hand down the slug + kind and the
+          client resolves the surface. The fragment it returns lands its children as direct grid
+          items of this section, so an opened demo body can span `lg:col-span-2` (sq-67qji). */}
+      <CapabilityLaneGrid
+        rows={rows.map(({ surface, kind }) => ({ slug: surface.slug, kind }))}
+        accent={accent}
+        groupId={group.id}
+      />
     </section>
   );
 }

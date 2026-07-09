@@ -503,9 +503,11 @@ function ImportPanel({
               host must allow the cross-origin request.
             </p>
             <div className="flex gap-2">
+              {/* [FABLE-5] accessible name for the URL input (label critical, sq-0rbfn) */}
               <input
                 type="url"
                 inputMode="url"
+                aria-label="Credential URL"
                 placeholder="https://example.org/credential.jsonld"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}

@@ -38,8 +38,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
   GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
-  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
-  SELECT bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
+  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); TTFB-streamed
+  SELECT-JSON bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
   keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**, and a **`Sparq-Generation`** header + **`?generation=N`** snapshot pin (default build, bounded to the ring's concurrency-retention window; aged-out → `410`).
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
@@ -52,9 +52,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 - **Opt-in features** (a build without a feature carries zero code for it) — `time-travel`
   (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
-  `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
-  (`POST /shacl/validate`), `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic
-  `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl` (`POST /shacl/validate`),
+  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
   `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
   disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
@@ -63,6 +62,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
   directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via
   `--no-default-features --features server` (→ 406 read, 415 write). Full conneg ratcheting is roadmap.
+- **Default-on algebra rewrite** ([FABLE-5] sq-7d3dj.30.13) — `algebra-rewrite` is in the default set too: the engine's result-equivalent pre-execution rewrite (#1735 — `FILTER(?v = <iri>)` constant folding + `!bound` anti-join), so the shipped binary runs the same plans the CLI/canonical benchmarks measure. Drop via `--no-default-features --features server,jsonld`.
 
 ## Security posture (essentials — full detail in the SKILL)
 

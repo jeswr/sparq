@@ -1,0 +1,4 @@
+0<http://ex/s> <http://ex/p> "o" .
+<http://ex/s> <http://ex/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://ex/s> <http://ex/name> "nm"@en .
+_:b0 <http://ex/p> <http://ex/s> .

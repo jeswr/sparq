@@ -463,6 +463,11 @@ export interface FullSuiteGroup {
   rows: MetricRow[];
   summary: CompetitiveSummary;
   sameBox?: SameBoxComparison;
+  // [OPUS-4.8] sq-7d3dj.34.3 — the canonical HTTP-mode panel (all engines over HTTP,
+  // full-request + TTFB, keep-alive + fresh-connect) for this suite, plus its own honest
+  // same-mode wins/losses summary. Present only for suites with a `<base>-http` gather.
+  httpSameBox?: SameBoxComparison;
+  httpSummary?: CompetitiveSummary;
   references: ReferenceBaseline[];
   // sq-hsyg: per-suite trend series (one per metric) + scaling families (size-parametrised).
   trends: TrendSeries[];
@@ -474,15 +479,22 @@ export function fullSuiteGroupsForFamily(key: string): FullSuiteGroup[] {
   // is small). Trend/scaling carry a `suite` so the per-suite filter is exact.
   const allTrends = trendSeriesForFamily(key);
   const allScaling = scalingFamiliesForFamily(key);
-  return suiteGroupsForFamily(key).map((g) => ({
-    suite: g.suite,
-    rows: g.rows,
-    summary: g.summary,
-    sameBox: sameBoxFor(g.suite),
-    references: referencesForSuite(g.suite),
-    trends: allTrends.filter((t) => t.suite === g.suite),
-    scaling: allScaling.filter((s) => s.suite === g.suite),
-  }));
+  return suiteGroupsForFamily(key).map((g) => {
+    const httpSameBox = httpSameBoxFor(g.suite);
+    return {
+      suite: g.suite,
+      rows: g.rows,
+      summary: g.summary,
+      sameBox: sameBoxFor(g.suite),
+      httpSameBox,
+      // Computed server-side (no fabrication client-side) — same honesty path as the CLI
+      // matrix, so a SP2Bench HTTP loss shows as a loss, never spun.
+      httpSummary: httpSameBox ? summarizeSameBox(httpSameBox) : undefined,
+      references: referencesForSuite(g.suite),
+      trends: allTrends.filter((t) => t.suite === g.suite),
+      scaling: allScaling.filter((s) => s.suite === g.suite),
+    };
+  });
 }
 
 // ---- LIVE competitive summary (the load-bearing honesty computation) ------------------
@@ -548,7 +560,9 @@ function median(xs: number[]): number {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
-// Find the same_box_comparisons entry whose suite matches (case-insensitive).
+// Find the same_box_comparisons entry whose suite matches (case-insensitive). The
+// fuzzy match deliberately does NOT match the `<base>-http` panel suites (e.g. "sp2b-http"),
+// so a CLI suite group ("SP2Bench") binds to the CLI matrix ("sp2b"), not the HTTP panel.
 function sameBoxFor(suite: string): SameBoxComparison | undefined {
   const norm = suite.toLowerCase();
   return (COMPETITORS.same_box_comparisons || []).find(
@@ -557,6 +571,21 @@ function sameBoxFor(suite: string): SameBoxComparison | undefined {
       norm.includes(c.suite.toLowerCase()) ||
       c.suite.toLowerCase().includes(norm.split(" ")[0]),
   );
+}
+
+// [OPUS-4.8] sq-7d3dj.34.3 — find the canonical HTTP-mode panel (`<base>-http`) for a CLI
+// suite group, so the SP2Bench / WatDiv groups can render the same-mode HTTP full-request +
+// TTFB panel BELOW the CLI matrix. We strip the "-http" suffix and reuse the same fuzzy
+// suite match ("sp2b-http" → "sp2b" matches the "SP2Bench" group). Returns undefined when
+// no HTTP panel exists for the suite, so groups without one are unaffected.
+function httpSameBoxFor(suite: string): SameBoxComparison | undefined {
+  const norm = suite.toLowerCase();
+  return (COMPETITORS.same_box_comparisons || []).find((c) => {
+    const cs = c.suite.toLowerCase();
+    if (!cs.endsWith("-http")) return false;
+    const base = cs.slice(0, -"-http".length);
+    return norm === base || norm.includes(base) || base.includes(norm.split(" ")[0]);
+  });
 }
 
 export function competitiveSummary(
@@ -611,85 +640,95 @@ export function competitiveSummary(
   //     not comparable). We also record the mode asymmetry (in-process CLI vs HTTP adapter)
   //     and any failed engine so the UI can caveat, never a bald "N× faster" headline.
   const sb = sameBoxFor(suite);
-  if (sb) {
-    const ratios: number[] = [];
-    const diffQueries: string[] = [];
-    const engines = new Set<string>();
-    let wins = 0;
-    let losses = 0;
-    for (const row of sb.rows) {
-      const sparq = row.values["sparq"];
-      if (typeof sparq !== "number" || sparq <= 0) continue;
-      if (row.count_match === false) {
-        diffQueries.push(row.query);
-        continue; // engines disagreed on the count — timing not comparable
-      }
-      let best = Infinity;
-      for (const [eng, v] of Object.entries(row.values)) {
-        if (eng === "sparq") continue;
-        if (typeof v === "number" && v > 0) {
-          engines.add(eng);
-          if (v < best) best = v;
-        }
-      }
-      if (best !== Infinity) {
-        const ratio = best / sparq;
-        ratios.push(ratio);
-        if (ratio > 1) wins += 1;
-        else if (ratio < 1) losses += 1;
-      }
-    }
-    // Label + mode grouping comes from THIS comparison's own engines (not the top-level
-    // registry), so a competitor absent from the registry still gets its proper label, and
-    // the CLI-vs-HTTP asymmetry is classified from each engine's recorded `mode`.
-    const isHttp = (e: { mode?: string }) => /http/i.test(e.mode || "");
-    const isCli = (e: { mode?: string }) => /in-process/i.test(e.mode || "");
-    const failedEngines = sb.engines
-      .filter((e) => e.status === "failed")
-      .map((e) => e.label);
-    const competitors = sb.engines
-      .filter((e) => e.id !== "sparq" && engines.has(e.id))
-      .map((e) => e.label);
-    const cliCompetitors = sb.engines
-      .filter((e) => e.id !== "sparq" && isCli(e))
-      .map((e) => e.label);
-    const httpEngines = sb.engines.filter((e) => isHttp(e)).map((e) => e.label);
-    if (ratios.length > 0) {
-      return {
-        kind: "same-box",
-        competitors,
-        cliCompetitors,
-        httpEngines,
-        failedEngines,
-        total: ratios.length,
-        wins,
-        losses,
-        median: round1(median(ratios)),
-        min: round1(Math.min(...ratios)),
-        max: round1(Math.max(...ratios)),
-        diffQueries,
-        canonical: sb.canonical === true,
-        host: sb.env.host_class || "quiet box",
-        scale: sb.scale,
-        gitCommit: sb.git_commit,
-      };
-    }
-    // a same-box gather EXISTS but every competitor cell is null → honest pending
-    return {
-      kind: "pending",
-      reason:
-        "A same-box " +
-        sb.suite +
-        " comparison was run, but competitor timings were not captured this run, so no comparison can be computed yet.",
-      provenance: sb.env.host_class,
-    };
-  }
+  if (sb) return summarizeSameBox(sb);
 
   // (3) nothing comparable on the same box.
   return {
     kind: "sparq-only",
     reason:
       "No same-box competitor baseline has been gathered for this suite yet — sparq's absolute numbers are shown below.",
+  };
+}
+
+// [FABLE-5]-authored data, this UI by [OPUS-4.8] sq-7d3dj.34.3 — the honest same-box
+// summary for ONE comparison (CLI matrix OR HTTP-mode panel). Extracted from
+// competitiveSummary so both the CLI cross-engine table and the HTTP/TTFB panel share the
+// identical count-checked wins/losses computation (no fabrication; a query whose solution
+// count disagreed across engines is EXCLUDED from the ratio, never spun into a win). The
+// ratio is fastest-competitor / sparq per query; wins = queries where sparq was fastest.
+export function summarizeSameBox(sb: SameBoxComparison): CompetitiveSummary {
+  const ratios: number[] = [];
+  const diffQueries: string[] = [];
+  const engines = new Set<string>();
+  let wins = 0;
+  let losses = 0;
+  for (const row of sb.rows) {
+    const sparq = row.values["sparq"];
+    if (typeof sparq !== "number" || sparq <= 0) continue;
+    if (row.count_match === false) {
+      diffQueries.push(row.query);
+      continue; // engines disagreed on the count — timing not comparable
+    }
+    let best = Infinity;
+    for (const [eng, v] of Object.entries(row.values)) {
+      if (eng === "sparq") continue;
+      if (typeof v === "number" && v > 0) {
+        engines.add(eng);
+        if (v < best) best = v;
+      }
+    }
+    if (best !== Infinity) {
+      const ratio = best / sparq;
+      ratios.push(ratio);
+      if (ratio > 1) wins += 1;
+      else if (ratio < 1) losses += 1;
+    }
+  }
+  // Label + mode grouping comes from THIS comparison's own engines (not the top-level
+  // registry), so a competitor absent from the registry still gets its proper label, and
+  // the CLI-vs-HTTP asymmetry is classified from each engine's recorded `mode`. In the
+  // HTTP-mode panel every engine's mode is HTTP, so cliCompetitors is empty and httpEngines
+  // is all — that is the point: the panel measures every engine in the SAME mode.
+  const isHttp = (e: { mode?: string }) => /http/i.test(e.mode || "");
+  const isCli = (e: { mode?: string }) => /in-process/i.test(e.mode || "");
+  const failedEngines = sb.engines
+    .filter((e) => e.status === "failed")
+    .map((e) => e.label);
+  const competitors = sb.engines
+    .filter((e) => e.id !== "sparq" && engines.has(e.id))
+    .map((e) => e.label);
+  const cliCompetitors = sb.engines
+    .filter((e) => e.id !== "sparq" && isCli(e))
+    .map((e) => e.label);
+  const httpEngines = sb.engines.filter((e) => isHttp(e)).map((e) => e.label);
+  if (ratios.length > 0) {
+    return {
+      kind: "same-box",
+      competitors,
+      cliCompetitors,
+      httpEngines,
+      failedEngines,
+      total: ratios.length,
+      wins,
+      losses,
+      median: round1(median(ratios)),
+      min: round1(Math.min(...ratios)),
+      max: round1(Math.max(...ratios)),
+      diffQueries,
+      canonical: sb.canonical === true,
+      host: sb.env.host_class || "quiet box",
+      scale: sb.scale,
+      gitCommit: sb.git_commit,
+    };
+  }
+  // a same-box gather EXISTS but every competitor cell is null → honest pending
+  return {
+    kind: "pending",
+    reason:
+      "A same-box " +
+      sb.suite +
+      " comparison was run, but competitor timings were not captured this run, so no comparison can be computed yet.",
+    provenance: sb.env.host_class,
   };
 }
 

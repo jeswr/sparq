@@ -1,0 +1,28 @@
+# [FABLE-5] sq-hmd7l.2 — standalone corpus/query-pair generator for the FTS same-box
+# comparison harness (scripts/bench/fts-same-box.sh). NOT a workspace member (the empty
+# [workspace] table below detaches it): it exists only so the competitor side of the
+# comparison (Fuseki + jena-text) can be loaded with EXACTLY the corpus that
+# crates/sparq-text/examples/bench_text.rs generates in-process, without modifying
+# sparq-text (read-only for this bead) and without adding a dump mode to the gated
+# bench_text contract.
+#
+# `rand` is pinned EXACTLY (=0.10.1) to the version in the root Cargo.lock: the corpus
+# and the fixed query set are functions of rand's StdRng (ChaCha12) stream, which rand
+# does NOT guarantee across versions. If the workspace upgrades rand and the stream
+# shifts, bench/fts/expected.tsv shifts with it — and this pin (plus the committed
+# bench/fts/queries-jena-text/pairs.tsv) must be re-derived. The harness's
+# count_crosscheck + pairs_pinned_check surface such a drift as a recorded mismatch;
+# they never adjust for it.
+[package]
+name = "fts-corpus-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rand = "=0.10.1"
+
+# Detach from the sparq root workspace: this is a run-time bench tool (the Rust analogue
+# of scripts/bench/JenaShaclBench.java), built on demand by fts-same-box.sh via
+# `cargo build --manifest-path`, never by the workspace gates.
+[workspace]

@@ -83,7 +83,15 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # (the canonical bench binary) uses the cost-optimal bushy join tree by default for
 # small BGPs. sparq-engine's default features are unchanged; the feature is ON only for
 # the CLI, keeping the core lean per the opt-in feature architecture.
-sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner"] }
+# [FABLE-5] sq-7d3dj.30.13: also enable the opt-in pre-execution ALGEBRA-REWRITE pass
+# (#1735 — result-equivalent FILTER `?v = <iri>` constant substitution + `!bound` anti-join)
+# the same way, so the shipped CLI and every canonical benchmark measure the rewritten
+# plans instead of a rewrite-dark binary. sparq-engine's LIBRARY default stays OFF (library
+# consumers choose explicitly); the pass adds zero deps and no `unsafe`. Its soundness
+# witnesses run in the `sparq-engine (algebra-rewrite)` feature-matrix leg, and
+# `tests/cli_contract.rs::algebra_rewrite_*` is the compile-time + behavioral tripwire
+# that this dep line keeps the pass lit.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner", "algebra-rewrite"] }
 # [OPUS-4.8] (sq-l4ki) `query` reuses sparq-server's W3C SELECT result serialisers
 # (XML/CSV/TSV) for its `--format` flag instead of re-implementing them. We take ONLY
 # the pure serialiser library (`results`) — `default-features = false` drops the `server`

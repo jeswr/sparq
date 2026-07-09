@@ -1,0 +1,3 @@
+3@prefix ex: <http://ex/> .
+ex:g1 { ex:s ex:p "o" ; ex:age 7 . }
+{ ex:s ex:q ex:o . }

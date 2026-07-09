@@ -99,18 +99,18 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
 - **Semi-join reducers** *(opt-in `semijoin-bitmap` / `yannakakis` features, OFF by default)* — `semijoin-bitmap`
   prefilters binary-join scans with an exact membership bitmap; `yannakakis` adds a bottom-up full-semijoin prepass
-  for acyclic BGPs (cost-gated; cyclic BGPs keep LFTJ). Result-identical to off (proven by the on-vs-off
-  differential); off, byte-identical, no new deps.
-- **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER and aggregate
-  operators use a columnar path for ≥ 256-row all-inline-integer batches; byte-identical to the scalar path. I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
+  for acyclic BGPs (cost-gated; cyclic keep LFTJ). Result-identical to off (proven differentially); off, no new deps.
+- **Algebra rewrite pass** *(opt-in `algebra-rewrite` feature, OFF by default in this library; the shipped `sparq-cli`/`sparq-server` binaries and the conformance/differential harnesses light it by default — sq-7d3dj.30.13)* — `PreparedQuery::parse` folds a `FILTER(?v = <iri>)` IRI constant into the group's triple patterns (an indexed constant-seeded scan, not a post-join filter) and rewrites `OPTIONAL … FILTER(!bound(?v))` to an anti-join (`Minus`); IRI-only (never a literal — the `sq-lr2ii` avoidance contract), bag-result-equivalent, off byte-identical, no new deps.
+- **Equality-FILTER value join** *(opt-in `value-join` feature, OFF by default)* — pattern components glued only by a `FILTER(?a = ?b)` equality join on a per-term-class **value** key (SPARQL `=` is value equality, not term identity) instead of cross-product-then-filter, with the original FILTER re-applied as the exact recheck (the `sq-lr2ii` high-precision-decimal class stays exact) and temporals/triple terms paired by the exact evaluator; anything not provably eligible declines to the verbatim plan. Result-identical (kill-switch differentials + an independent oracle); off, zero code compiles, no new deps.
+- **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER/aggregate operators use a columnar path for ≥ 256-row all-inline-integer batches; byte-identical to the scalar path. I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
+- **Id-level term-identity FILTER fast path** *(opt-in `id-filter-fastpath` feature, OFF by default)* — a compiled `=`/`!=` over operands a static analysis proves non-literal (subject/predicate-only variables, constant IRIs) is decided by dictionary-id (in)equality, and equal ids of ANY kind short-circuit `=` true (canonicalising dict → sameTerm), skipping the per-row term materialisation. Unequal-id literals (numeric-promotion, the `sq-lr2ii` class) and possible type-errors fall through to the exact path. Result-identical (differential vs the exact oracle); off byte-identical, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
 
 - **How-to** — [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **API reference** — [docs.rs/sparq-engine](https://docs.rs/sparq-engine).
-- **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning /
-  parallelism verdicts in [`research/`](../../research).
+- **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning / parallelism verdicts in [`research/`](../../research).
 - **Performance** — numbers live on the
   [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
