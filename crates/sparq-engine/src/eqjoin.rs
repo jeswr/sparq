@@ -451,16 +451,24 @@ fn key_of(graph: &Graph, id: Id) -> JKey {
                 };
             }
             // A NUMERIC datatype reaching here missed the `numeric_value` cache. As of
-            // sq-9781x the cache is ALIGNED with the evaluator: it parses through the shared
-            // `parse_xsd_f64` on the TRIMMED lexical (the same XSD acceptance set + trimming
-            // as `Num::of_literal`, which decides `values_equal`), so a whitespace-padded
-            // `" 1"^^xsd:integer` now HITS the cache above (→ `JKey::Num`) and the `inf`/`nan`
-            // Rust-only spellings the raw parse wrongly cached now MISS. A numeric datatype
-            // reaching THIS branch is therefore a genuinely ILL-FORMED numeric lexical (or a
-            // `NaN` value, the cache's not-cached sentinel) — which the exact evaluator also
-            // type-errors — so `Hard` (defer to the exact evaluator) stays the correct,
-            // no-false-negative key. (The alignment removed the former latent asymmetry;
-            // `Hard` remains a sound backstop.)
+            // sq-9781x the cache is aligned with the evaluator's datatype-AGNOSTIC f64 seam:
+            // it parses through the shared `parse_xsd_f64` on the TRIMMED lexical (the same
+            // XSD f64 acceptance set + trimming the `as_num`/`as_f64` seam uses), so a
+            // whitespace-padded `" 1"^^xsd:integer` now HITS the cache above (→ `JKey::Num`)
+            // and the `inf`/`nan` Rust-only spellings the raw parse wrongly cached now MISS.
+            //
+            // SCOPE: this alignment is with the f64 seam, NOT the datatype-AWARE
+            // `Num::of_literal` set that `values_equal` uses. The cache is thus still too
+            // LENIENT per-datatype: a lexical f64-parseable but ill-formed for its datatype
+            // (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, an i128-overflow `xsd:decimal`)
+            // cache-HITS → `JKey::Num` here (and includes rows on the sargable `=` fast path)
+            // while `values_equal`/`of_literal` type-errors it — a residual `JKey::Num`-vs-
+            // `values_equal` divergence, PRE-EXISTING on main and tracked in the sq-74oy4-
+            // sibling bead (candidate fix: datatype-aware cache parse). A numeric datatype
+            // reaching THIS `Hard` branch is a lexical that misses even the lenient f64 seam
+            // (a genuinely ill-formed numeric or the `NaN` cache sentinel) — which the exact
+            // evaluator also type-errors — so `Hard` (defer to the exact evaluator) stays a
+            // correct, no-false-negative backstop.
             if is_numeric_datatype(datatype) {
                 return JKey::Hard;
             }

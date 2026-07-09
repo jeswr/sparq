@@ -1501,4 +1501,72 @@ mod tests {
         // ±0.0 are equal (f64 comparison)
         assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
     }
+
+    /// [FABLE-5] (sq-9781x) TRUE cross-seam differential: the sparq-core numeric-value CACHE
+    /// seam (`parse_xsd_f64(value.trim())` — the EXACT expression `numerics_of`/`numeric_of`
+    /// call in sparq-core) vs the datatype-AWARE evaluator `as_numeric` (`Num::of_literal`,
+    /// which decides `values_equal`). Unlike the sparq-core plumbing test
+    /// (`numeric_cache_hit_matches_shared_parse_xsd_f64_plumbing`, which models "acceptance"
+    /// with the same `parse_xsd_f64` the cache calls and so is circular against `of_literal`),
+    /// this asserts the two seams against EACH OTHER and pins the KNOWN, still-open
+    /// per-datatype divergence (bead sq-6b1lj): the datatype-agnostic cache accepts some
+    /// lexicals that are ill-formed FOR THEIR DATATYPE and that `as_numeric` type-errors.
+    ///
+    /// The `expect_divergent` flag documents each case's status; when the datatype-aware
+    /// cache fix (sq-6b1lj) lands, the divergent cases become AGREE and this test's
+    /// expectations flip (drop the flag). Until then a NEW unexpected divergence — or an
+    /// unexpected AGREEMENT on a case marked divergent (meaning sq-6b1lj shipped) — fails
+    /// here, so the invariant can never silently drift on the plumbing test alone.
+    #[test]
+    fn cache_f64_seam_vs_as_numeric_differential() {
+        // (lexical, datatype, expect_divergent). `expect_divergent = true` == cache HITS but
+        // `as_numeric` type-errors (or vice versa) — the sq-6b1lj residual, expected today.
+        let cases: &[(&str, oxrdf::NamedNodeRef<'_>, bool)] = &[
+            // ---- AGREE: both accept (well-formed for datatype), same f64 image ----
+            ("42", xsd::INTEGER, false),
+            (" 7 ", xsd::DECIMAL, false),      // whitespace collapse — both trim
+            ("+3", xsd::INTEGER, false),
+            ("1.5", xsd::DECIMAL, false),
+            ("1.5E2", xsd::DOUBLE, false),
+            ("INF", xsd::DOUBLE, false),
+            ("3.0", xsd::FLOAT, false),
+            // ---- AGREE: both reject ----
+            ("inf", xsd::DOUBLE, false),       // Rust-only spelling: both reject
+            ("nan", xsd::DOUBLE, false),
+            ("abc", xsd::INTEGER, false),
+            ("", xsd::INTEGER, false),
+            // ---- DIVERGE (sq-6b1lj): cache HITS via f64 seam, as_numeric type-errors ----
+            ("1.5", xsd::INTEGER, true),       // fraction on an integer
+            ("1E2", xsd::DECIMAL, true),       // exponent on a decimal
+            ("1E2", xsd::INTEGER, true),       // exponent on an integer
+            // >38-digit decimal: i128 overflow -> of_literal None, but parse_xsd_f64 -> Some
+            ("123456789012345678901234567890123456789.5", xsd::DECIMAL, true),
+        ];
+        for (lex, dt, expect_divergent) in cases {
+            // CACHE seam: exactly what sparq-core `numerics_of`/`numeric_of` compute — the
+            // datatype-agnostic shared parser on the trimmed lexical, NaN folding to "miss".
+            let cache_hit = parse_xsd_f64(lex.trim()).filter(|v| !v.is_nan()).is_some();
+            // EVALUATOR seam: datatype-aware acceptance (also NaN-as-not-a-value: a NaN Double
+            // value is "accepted" as a term but is the cache's not-cached sentinel, so exclude
+            // it symmetrically to compare acceptance-as-a-cacheable-value).
+            let eval_accepts = matches!(as_numeric(&typed(lex, *dt)), Some(n) if !n.f64().is_nan());
+            let divergent = cache_hit != eval_accepts;
+            assert_eq!(
+                divergent, *expect_divergent,
+                "seam divergence status for {:?}^^{:?}: cache_hit={} eval_accepts={} \
+                 (expected divergent={}). If a divergent case now AGREES, the sq-6b1lj \
+                 datatype-aware cache fix has landed — flip this case to expect_divergent=false.",
+                lex, dt.as_str(), cache_hit, eval_accepts, expect_divergent
+            );
+            // Where BOTH accept, the f64 images MUST match bit-for-bit (the cache stores that f64).
+            if cache_hit && eval_accepts {
+                let cache_f64 = parse_xsd_f64(lex.trim()).unwrap();
+                let eval_f64 = as_numeric(&typed(lex, *dt)).unwrap().f64();
+                assert_eq!(
+                    cache_f64.to_bits(), eval_f64.to_bits(),
+                    "f64 image mismatch for {:?}^^{:?}", lex, dt.as_str()
+                );
+            }
+        }
+    }
 }
