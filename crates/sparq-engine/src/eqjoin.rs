@@ -450,13 +450,25 @@ fn key_of(graph: &Graph, id: Id) -> JKey {
                     _ => JKey::Term(id),
                 };
             }
-            // A NUMERIC datatype reaching here missed the `numeric_value` cache — but
-            // the cache (a raw `str::parse::<f64>`) is STRICTER than the evaluator's
-            // `values_equal` fallback (`Num::of_literal`, which TRIMS the lexical): a
-            // whitespace-padded `" 1"^^xsd:integer` is a cache miss yet value-equal to
-            // `"1"^^xsd:integer` under a different id. No provable key ⇒ Hard (the
-            // exact evaluator pairs it; genuinely ill-formed lexicals then type-error
-            // exactly as today).
+            // A NUMERIC datatype reaching here missed the `numeric_value` cache. As of
+            // sq-9781x the cache is aligned with the evaluator's datatype-AGNOSTIC f64 seam:
+            // it parses through the shared `parse_xsd_f64` on the TRIMMED lexical (the same
+            // XSD f64 acceptance set + trimming the `as_num`/`as_f64` seam uses), so a
+            // whitespace-padded `" 1"^^xsd:integer` now HITS the cache above (→ `JKey::Num`)
+            // and the `inf`/`nan` Rust-only spellings the raw parse wrongly cached now MISS.
+            //
+            // SCOPE: this alignment is with the f64 seam, NOT the datatype-AWARE
+            // `Num::of_literal` set that `values_equal` uses. The cache is thus still too
+            // LENIENT per-datatype: a lexical f64-parseable but ill-formed for its datatype
+            // (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, an i128-overflow `xsd:decimal`)
+            // cache-HITS → `JKey::Num` here (and includes rows on the sargable `=` fast path)
+            // while `values_equal`/`of_literal` type-errors it — a residual `JKey::Num`-vs-
+            // `values_equal` divergence, PRE-EXISTING on main and tracked in the sq-74oy4-
+            // sibling bead (candidate fix: datatype-aware cache parse). A numeric datatype
+            // reaching THIS `Hard` branch is a lexical that misses even the lenient f64 seam
+            // (a genuinely ill-formed numeric or the `NaN` cache sentinel) — which the exact
+            // evaluator also type-errors — so `Hard` (defer to the exact evaluator) stays a
+            // correct, no-false-negative backstop.
             if is_numeric_datatype(datatype) {
                 return JKey::Hard;
             }
@@ -947,9 +959,13 @@ mod tests {
         assert_eq!(key_of(&g, id_of("\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>")), JKey::Bool(true));
         // Value-comparable temporals are the Hard class.
         assert_eq!(key_of(&g, id_of("2020-01-01T00:00:00Z")), JKey::Hard);
-        // A cache-missing numeric-datatype lexical (whitespace-padded) is Hard, NOT
-        // an identity key: the evaluator's trimming fallback can still pair it.
-        assert_eq!(key_of(&g, id_of("\" 7\"")), JKey::Hard);
+        // [FABLE-5] (sq-9781x) A whitespace-padded numeric lexical now HITS the aligned
+        // numeric cache (trim-then-parse via the shared `parse_xsd_f64`) and keys as
+        // `JKey::Num(7.0)` — the SAME key the inline id `7` gets — instead of the former
+        // `Hard` (the cache/evaluator acceptance sets are now aligned, so it no longer needs
+        // the exact-evaluator backstop for the whitespace case).
+        assert_eq!(key_of(&g, id_of("\" 7\"")), JKey::Num(7.0f64.to_bits()));
+        assert_eq!(key_of(&g, id_of("\" 7\"")), key_of(&g, dict::INLINE_BASE + 7));
         // Unknown datatype: identity key. IRIs: identity key.
         let uid = id_of("unknownDt");
         assert_eq!(key_of(&g, uid), JKey::Term(uid));
