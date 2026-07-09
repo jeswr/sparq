@@ -370,10 +370,12 @@ fn hash_path_large_cardinality_equivalence() {
 #[test]
 fn blank_node_correlation_equivalence() {
     // The REAL SP2Bench q06 shape correlates on `?author`, which is a BLANK NODE (the
-    // dataset's `dc:creator` targets are mostly blank-node persons). SPARQL `=` on two
-    // DISTINCT blank nodes is a TYPE ERROR (not false), so an anti-join match requires
-    // the SAME blank node. The id-bucket probe reproduces this exactly (same id = match;
-    // different id = no match = survive). Uses >64 distinct authors → the hash path.
+    // dataset's `dc:creator` targets are mostly blank-node persons). Per SPARQL 1.1
+    // §17.4.1.7 (RDFterm-equal), `=` on two DISTINCT non-literal terms (here blank nodes)
+    // returns FALSE — a type error arises only when BOTH arguments are literals — and
+    // FALSE and error both mean NO MATCH under the anti-join, so an anti-join match
+    // requires the SAME blank node. The id-bucket probe reproduces this exactly (same id =
+    // match; different id = no match = survive). Uses >64 distinct authors → the hash path.
     let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
     for a in 0..80usize {
         // Each author is a BLANK NODE with a name; give each 2 documents at years a, a+1.
