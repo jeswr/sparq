@@ -439,6 +439,18 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 
 **Import cycles always terminate (with a LIVE resolver).** N3 is Turing-complete, so a `log:semantics` document whose closure re-imports a document active up the resolution stack — directly (`A→A`), indirectly (`A→B→A`), or via a re-used node in a diamond — would otherwise spin forever once a real (filesystem/network) resolver is wired (the offline conformance harness never hit it). The engine tracks the formulae whose closure is in progress; re-entering one already in progress returns it **unclosed** (cwm's "a document already being loaded is not re-loaded") instead of recursing, so reasoning terminates. A diamond that re-uses a shared document across **sibling** branches is not a cycle and still resolves on every branch — only the pathological cyclic case changes; valid acyclic imports are byte-identical to before.
 
+**Same-box materialization comparison (sparq vs Jena / VLog / Nemo).** To compare
+sparq's closure materialization against other reasoners on the LUBM `(ABox+TBox)`
+corpus, run `scripts/bench/materialize-same-box.sh` (`ONLY=sparq LUBM_UNIVS=1 …`
+for the fast self-check). The oracle is the **closure size** (pinned at `univ=1`:
+`owl=150589`, `rdfs=126732`). Critical honesty caveat: sparq `reason owl` is the
+**full W3C OWL 2 RL/RDF** rule table, whereas Jena has no full OWL 2 RL reasoner
+(its `OWL_MICRO`/`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic
+triples), and VLog/Nemo are general Datalog engines needing a separately-validated
+OWL-RL encoding — so the closure *sizes differ by construction* and the harness
+records this per column (`count_crosscheck.profile_caveat`) rather than reconciling
+them. Never read a raw closure-size delta as a correctness gap without the profile.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Not in the *lean* wasm bundle, but wasm-portable.** `sparq-reason` pulls `regex` and (by default) `rayon`; it is never in the **lean** `sparq-wasm` triplestore bundle. For wasm or single-threaded builds use `default-features = false` (disables the `parallel`/rayon feature). The crate itself compiles to `wasm32-unknown-unknown` — `regex` (the N3 `string:matches` builtin) is pure-Rust and wasm-portable — and ships as the **tier-b `sparq-reason-wasm` ("W-reason") bundle** ([OPUS-4.8] sq-6qw3): a `Reasoner` exposing `materialize` / `entailed` / `materializeStats` / `reasonN3` (and, behind the bundle's opt-in `explain` feature, `why()` proof trees) for in-tab live inference, lazy-loaded on the showcase site's `/surface/inference` page. There is no Noir/ZK toolchain requirement here — proofs are plain Rust structs.
