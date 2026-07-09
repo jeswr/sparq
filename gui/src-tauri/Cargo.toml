@@ -54,6 +54,14 @@ tauri-build = { version = "2", features = [] }
 # cannot. The webview-target build (Pages "Try the GUI live") never links this crate at all.
 default = []
 hdt = ["dep:sparq-hdt"]
+# [FABLE-5] sq-t6492 — embed + serve the frontendDist static export instead of connecting to
+# `devUrl` (http://localhost:3001). Tauri's build script sets `cfg(dev) = !custom-protocol`
+# (tauri build.rs: `let dev = !custom_protocol`), and in dev mode the webview navigates to
+# `devUrl`; a plain `cargo build` (no `custom-protocol`) therefore shows "Could not connect to
+# localhost: Connection refused" when no dev server is running. `cargo tauri build` enables this
+# feature automatically; a plain `cargo build` (e2e/CI) must pass `--features custom-protocol` so
+# the webview loads the embedded assets. Independent of the debug/release profile.
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 tauri = { version = "2", features = [] }

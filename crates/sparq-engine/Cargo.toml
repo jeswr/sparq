@@ -286,6 +286,24 @@ algebra-rewrite = []
 # conjunctive path is byte-identical. No new dependencies, no `unsafe`.
 value-join = []
 
+# [FABLE-5] (sq-7d3dj.30.11) ID-LEVEL TERM-IDENTITY FAST PATH for `=` / `!=` in the COMPILED
+# FILTER evaluator (`exec::equal_compiled`). Two id-level short-circuits that skip the per-row
+# term MATERIALIZATION #1718's `eval_compiled` left in place, without changing any result:
+#   (a) STATIC non-literal operands — a variable that a `nonliteral_filter_cols` analysis proves
+#       is bound ONLY in subject/predicate positions (never object / BIND / VALUES / SERVICE) can
+#       never be a literal, and neither can a constant IRI operand; for two such operands SPARQL
+#       `=` is exactly dictionary-id equality and `!=` id inequality (the canonicalising dict gives
+#       each IRI/bnode one id, and `values_equal` already decides IRI/bnode pairs by identity).
+#   (b) EQUAL ids of ANY kind — equal ids are the SAME term (canonicalising dict), so `=` is `true`
+#       and `!=` `false`, exactly mirroring the `p == q` sameTerm short-circuit `values_equal` takes
+#       today (safe even for ill-typed literals: sameTerm returns a boolean, never a type error).
+# CAUTION mirrored in code: UNEQUAL ids of possible LITERALS do NOT imply value-inequality (numeric
+# promotion `"1"^^integer` vs `"1.0"^^decimal`, whitespace-padded lexicals — the sq-lr2ii class) and
+# `=` on two ill-typed literals can be a TYPE ERROR, not `false`; both DECLINE to the existing exact
+# path unchanged. OPT-IN and OFF by default: when off, zero of this code compiles and the FILTER path
+# is byte-identical. No new dependencies, no `unsafe`.
+id-filter-fastpath = []
+
 # [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
 # numeric column — the perf baseline every later vectorized (M4) phase measures against.
 # `required-features` gates it behind `vectorized`, so the DEFAULT build (and

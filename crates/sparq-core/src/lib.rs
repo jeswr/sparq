@@ -617,10 +617,60 @@ fn write_temporals(path: &std::path::Path, flags: &[u8], instants: &[f64]) -> st
     f.flush()
 }
 
-/// The f64 value of a term if it is a numeric XSD literal, else NaN.
+/// [FABLE-5] (sq-9781x) Parse a numeric-literal lexical to its f64 image using the XSD
+/// lexical space — the SINGLE shared routine that the numeric-value CACHE
+/// (`numerics_of`/`numeric_of`) and the evaluator's **datatype-AGNOSTIC f64 seam**
+/// (`as_num` / `as_f64` / substrate `parse_xsd_f64`) agree on, so a cache HIT is
+/// equivalent to acceptance on THAT seam for the same numeric value.
+///
+/// SCOPE (important): this alignment is with the datatype-agnostic f64 seam, NOT with the
+/// full datatype-AWARE `sparq_substrate::numeric::as_numeric` / `Num::of_literal`
+/// acceptance set. `of_literal` is per-datatype: integers must be scale-0, decimals carry
+/// no exponent, and an integer beyond i128 is not representable. `parse_xsd_f64` ignores
+/// the datatype, so it ACCEPTS some lexicals that are ill-formed FOR THEIR DATATYPE and
+/// that `of_literal` rejects with a type error. Counterexamples that cache-HIT here yet
+/// `of_literal`-reject: `"1.5"^^xsd:integer` (fraction on an integer), `"1E2"^^xsd:decimal`
+/// (exponent on a decimal), a >38-digit `xsd:decimal` (i128 overflow → `of_literal` None).
+/// This residual per-datatype over-leniency is PRE-EXISTING (the old raw parse accepted the
+/// same lexicals) and tracked in the residual bead sibling of sq-74oy4; see the eqjoin
+/// `JKey::Num` comment and the substrate differential test `cache_f64_seam_vs_as_numeric`.
+///
+/// It is the lowest-tier home of the parser `sparq_substrate::numeric::parse_xsd_f64`
+/// re-exports (the substrate depends on `sparq-core`, not the reverse, so the shared body
+/// must live here). The acceptance set is XSD's, not Rust's:
+///
+/// - The XSD specials `NaN` / `INF` / `+INF` / `-INF` parse; Rust-`FromStr`-only spellings
+///   the XSD lexical space FORBIDS (`inf` / `infinity` / `-inf` / `nan` / `Infinity` …) are
+///   REJECTED, even though `str::parse::<f64>` would accept them. This is load-bearing: the
+///   old raw `str::parse::<f64>` cache stored `inf` for `"inf"^^xsd:double`, which the
+///   evaluator type-errors — a cache MORE lenient than the evaluator.
+/// - No trimming here (byte-identical to the substrate re-export, which the lenient engine
+///   `as_num`/`as_f64` seam and the reasoner `as_f64` route through UN-trimmed). Callers
+///   that must match the evaluator's TRIMMING equality path (`Num::of_literal`) trim the
+///   lexical themselves before calling — `numerics_of` does exactly that.
+///
+/// `None` for an ill-formed lexical.
+#[inline]
+pub fn parse_xsd_f64(v: &str) -> Option<f64> {
+    match v {
+        "NaN" => Some(f64::NAN),
+        "INF" | "+INF" => Some(f64::INFINITY),
+        "-INF" => Some(f64::NEG_INFINITY),
+        // Only ASCII digits / sign / point / exponent letters reach Rust's parser, which
+        // excludes every non-XSD spelling (`inf`/`infinity`/`nan`/hex/`_` separators …).
+        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// The f64 value of a term if it is a numeric XSD literal, else NaN. Routes the lexical
+/// through the shared [`parse_xsd_f64`] (XSD f64 acceptance set) on the TRIMMED value so it
+/// agrees with the evaluator's datatype-AGNOSTIC f64 seam. It does NOT reproduce the
+/// datatype-AWARE `Num::of_literal` acceptance set (see [`parse_xsd_f64`] SCOPE note: e.g.
+/// `"1.5"^^xsd:integer` parses here yet `of_literal` type-errors). [FABLE-5] (sq-9781x)
 fn numeric_of(term: &Term) -> f64 {
     match term {
-        Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+        Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value().trim()).unwrap_or(f64::NAN),
         _ => f64::NAN,
     }
 }
@@ -4009,8 +4059,18 @@ fn numerics_of(dict: &Dict) -> Vec<f64> {
     let n = dict.len();
     let numeric_of_parts = |i: usize| -> f64 {
         match dict.term_parts(i as Id + 1) {
+            // [FABLE-5] (sq-9781x) Route through the shared XSD-lexical-space parser on the
+            // TRIMMED value — NOT a raw `str::parse::<f64>` — so a cache HIT is equivalent to
+            // acceptance on the evaluator's datatype-AGNOSTIC f64 seam (`parse_xsd_f64`, which
+            // trims here to match `Num::of_literal`'s trim), for exactly the same f64. This
+            // both admits the whitespace-padded lexical (` 1`^^xsd:integer) the raw parse
+            // missed AND rejects the Rust-only `inf`/`infinity`/`nan` spellings the raw parse
+            // wrongly cached. It does NOT reproduce the datatype-AWARE `of_literal` set: a
+            // per-datatype-ill-formed lexical (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`,
+            // an i128-overflow decimal) still caches its f64 here while `of_literal`
+            // type-errors — a PRE-EXISTING residual tracked in the sq-74oy4-sibling bead.
             dict::TermParts::Lit { value, datatype, lang: None } if is_numeric_datatype_str(datatype) => {
-                value.parse::<f64>().unwrap_or(f64::NAN)
+                parse_xsd_f64(value.trim()).unwrap_or(f64::NAN)
             }
             _ => f64::NAN,
         }
@@ -4722,10 +4782,10 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
             }
             b'<' => {
                 i += 1;
-                match memchr::memchr(b'>', &bytes[i..]) {
-                    Some(off) => i += off + 1,
-                    None => return None,
-                }
+                // clippy::question_mark (rust-clippy 1.97): an unterminated `<` (no closing
+                // `>`) means the input is malformed → bail out with None via `?`. [FABLE-5]
+                let off = memchr::memchr(b'>', &bytes[i..])?;
+                i += off + 1;
             }
             q @ (b'"' | b'\'') => {
                 let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
@@ -10067,6 +10127,149 @@ mod tests {
                 id, a.to_bits(), b.to_bits()
             );
         }
+    }
+
+    /// [FABLE-5] (sq-9781x) Direct unit test for the shared public `parse_xsd_f64`: the XSD
+    /// lexical space (specials `NaN`/`INF`/`+INF`/`-INF`), the Rust-only spellings it MUST
+    /// reject, ordinary decimals/exponents, and untrimmed padding (this fn does NOT trim —
+    /// callers trim). Kept in lock-step with the substrate re-export's own test.
+    #[test]
+    fn parse_xsd_f64_shared_acceptance_set() {
+        assert_eq!(parse_xsd_f64("NaN").map(f64::to_bits), Some(f64::NAN.to_bits()));
+        assert_eq!(parse_xsd_f64("INF"), Some(f64::INFINITY));
+        assert_eq!(parse_xsd_f64("+INF"), Some(f64::INFINITY));
+        assert_eq!(parse_xsd_f64("-INF"), Some(f64::NEG_INFINITY));
+        assert_eq!(parse_xsd_f64("6"), Some(6.0));
+        assert_eq!(parse_xsd_f64("+1"), Some(1.0));
+        assert_eq!(parse_xsd_f64("1.5E2"), Some(150.0));
+        assert_eq!(parse_xsd_f64("-0.0").map(f64::to_bits), Some((-0.0f64).to_bits()));
+        // Rust-`FromStr`-only spellings the XSD lexical space forbids: rejected.
+        for bad in ["inf", "+inf", "-inf", "infinity", "-infinity", "Infinity", "nan", "NAN"] {
+            // Positional arg (not inline `{bad}`) to dodge the CodeQL false positive. [FABLE-5]
+            assert_eq!(parse_xsd_f64(bad), None, "must reject {:?}", bad);
+        }
+        // Ill-formed / non-numeric: rejected.
+        for bad in ["", "abc", "1_000", "0x1p4", " 1", "1 "] {
+            assert_eq!(parse_xsd_f64(bad), None, "must reject {:?}", bad);
+        }
+    }
+
+    /// [FABLE-5] (sq-9781x) SHARED-PARSER PLUMBING check (NOT a differential vs the real
+    /// datatype-aware evaluator). It pins that the numeric-value cache actually routes every
+    /// numeric datatype through the shared `parse_xsd_f64` on the TRIMMED lexical: a cache HIT
+    /// (`numeric_value(id).is_some()`) is EQUIVALENT to `parse_xsd_f64(value.trim())` being
+    /// `Some` non-NaN, and the cached f64 is EXACTLY that value. Because the "evaluator model"
+    /// here is the SAME function the cache calls, this cannot detect divergence from the real
+    /// datatype-AWARE `Num::of_literal` — that cross-seam check is
+    /// `sparq_substrate::compare` `cache_f64_seam_vs_as_numeric`, which asserts the KNOWN
+    /// per-datatype divergence (`"1.5"^^xsd:integer` etc., bead sq-6b1lj). A stored-NaN value
+    /// folds to a cache MISS (the cache uses NaN as its "not cached" sentinel, so a genuine
+    /// `NaN`^^xsd:double falls through to the evaluator). Covers whitespace padding, leading
+    /// `+`, the XSD specials, the Rust-only spellings, exponent forms, empty/`abc`,
+    /// high-precision decimals and `2^53 ± 1`.
+    #[test]
+    fn numeric_cache_hit_matches_shared_parse_xsd_f64_plumbing() {
+        // (lexical, datatype-suffix). Each becomes one distinct dictionary literal.
+        let cases: &[(&str, &str)] = &[
+            (" 1", "xsd:integer"),      // whitespace-padded (leading) — trim-then-parse
+            ("1 ", "xsd:integer"),      // whitespace-padded (trailing)
+            ("\t2\n", "xsd:integer"),   // other whitespace
+            ("+3", "xsd:integer"),      // leading +
+            ("INF", "xsd:double"),      // XSD special
+            ("-INF", "xsd:double"),     // XSD special
+            ("+INF", "xsd:double"),     // XSD special
+            ("NaN", "xsd:double"),      // XSD special -> NaN value -> cache MISS (sentinel)
+            ("inf", "xsd:double"),      // Rust-only spelling -> REJECTED
+            ("infinity", "xsd:double"), // Rust-only spelling -> REJECTED
+            ("Infinity", "xsd:double"), // Rust-only spelling -> REJECTED
+            ("nan", "xsd:double"),      // Rust-only spelling -> REJECTED
+            ("1.5E2", "xsd:double"),    // exponent
+            ("-2.5e-1", "xsd:double"),  // exponent, negative
+            ("abc", "xsd:integer"),     // not a number -> REJECTED
+            ("", "xsd:integer"),        // empty -> REJECTED
+            ("1.000000000000000001", "xsd:decimal"), // high-precision decimal
+            ("9007199254740993", "xsd:integer"),     // 2^53 + 1
+            ("9007199254740991", "xsd:integer"),     // 2^53 - 1
+            ("3.0", "xsd:float"),       // ordinary float
+            ("007.50", "xsd:decimal"),  // leading zeros
+        ];
+        let mut ttl = String::from(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n",
+        );
+        // Use a fresh subject per case so every literal is a distinct object term (equal
+        // (lexical, datatype) pairs would intern to one id, but ours are all distinct).
+        for (i, (lex, dt)) in cases.iter().enumerate() {
+            // Escape the lexical for a Turtle string literal (only \, ", \t, \n occur here).
+            let esc: String = lex
+                .chars()
+                .flat_map(|c| match c {
+                    '\\' => vec!['\\', '\\'],
+                    '"' => vec!['\\', '"'],
+                    '\t' => vec!['\\', 't'],
+                    '\n' => vec!['\\', 'n'],
+                    other => vec![other],
+                })
+                .collect();
+            ttl.push_str(&format!("ex:s{} ex:v \"{}\"^^{} .\n", i, esc, dt));
+        }
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        // For each object literal, compare the cache decision to the evaluator model.
+        for (id, tp) in g.dict.iter() {
+            let dict::TermParts::Lit { value, datatype, lang: None } = tp else { continue };
+            if !is_numeric_datatype_str(datatype) {
+                continue;
+            }
+            // Evaluator model: accept iff parse_xsd_f64(trimmed) is Some AND non-NaN (a NaN
+            // value is stored but folds to a cache miss via the sentinel).
+            let model = parse_xsd_f64(value.trim()).filter(|v| !v.is_nan());
+            let cached = g.numeric_value(id);
+            match (model, cached) {
+                (Some(m), Some(c)) => assert_eq!(
+                    m.to_bits(),
+                    c.to_bits(),
+                    "id {}: lexical {:?} cache f64 {:016x} != evaluator f64 {:016x}",
+                    id,
+                    value,
+                    c.to_bits(),
+                    m.to_bits()
+                ),
+                (None, None) => {}
+                (m, c) => panic!(
+                    "cache/evaluator disagree on acceptance for lexical {:?}: model={:?} cache={:?}",
+                    value,
+                    m,
+                    c
+                ),
+            }
+        }
+    }
+
+    /// [FABLE-5] (sq-9781x) The specific latent bugs the alignment fixes, asserted directly
+    /// against the pre-fix raw `str::parse::<f64>` behaviour: (a) a whitespace-padded numeric
+    /// literal now HITS the cache (was a miss); (b) a Rust-only `inf`/`nan` spelling now MISSES
+    /// the cache (the raw parse wrongly cached `inf`/`NaN`), matching the evaluator's rejection.
+    #[test]
+    fn numeric_cache_alignment_fixes_both_divergences() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix ex: <http://ex/> .\n\
+            ex:pad  ex:v \" 7 \"^^xsd:decimal .\n\
+            ex:inf  ex:v \"inf\"^^xsd:double .\n\
+            ex:nan  ex:v \"nan\"^^xsd:double .\n\
+            ex:good ex:v \"INF\"^^xsd:double .";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let by_val = |needle: &str| -> Option<f64> {
+            g.dict.iter().find_map(|(id, tp)| match tp {
+                dict::TermParts::Lit { value, .. } if value == needle => Some(g.numeric_value(id)),
+                _ => None,
+            }).flatten()
+        };
+        // (a) previously a raw-parse MISS, now a value-7.0 HIT (trim-then-parse).
+        assert_eq!(by_val(" 7 "), Some(7.0), "padded decimal must now hit the cache");
+        // (b) previously a raw-parse HIT storing inf/NaN, now a MISS (XSD rejects the spelling).
+        assert_eq!(by_val("inf"), None, "'inf'^^xsd:double must NOT hit the cache");
+        assert_eq!(by_val("nan"), None, "'nan'^^xsd:double must NOT hit the cache");
+        // The genuine XSD spelling still hits with the infinity value.
+        assert_eq!(by_val("INF"), Some(f64::INFINITY), "'INF'^^xsd:double still hits");
     }
 
     /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff
