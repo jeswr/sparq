@@ -169,6 +169,17 @@ async function main() {
   // Open a WebDriver session through tauri-driver. `tauri:options.application` tells
   // tauri-driver which native binary to launch. connectionRetryCount / connectionRetryTimeout
   // cover transient HTTP hiccups — webdriverio's own retry policy, not arbitrary sleeps.
+  //
+  // CAPABILITIES — DO NOT re-add `browserName: "wry"` (bead sq-t6492 / issue #1740).
+  // WebKit's matchCapabilities (Source/WebDriver/WebDriverService.cpp) rejects a session with
+  // "Failed to match capabilities" whenever a NON-NULL `browserName` is supplied that does not
+  // equal the driver's own reported name. Newer WebKitGTK (the runner's webkit2gtk 2.5x) reports
+  // `browserName: "MiniBrowser"`, so the historic tauri#8828 workaround `browserName: "wry"` now
+  // BACKFIRES: "wry" != "MiniBrowser" → hard reject before any session log (the 0-byte-log
+  // signature). tauri-driver 2.0.6 forwards the client browserName verbatim on Linux (it only
+  // rewrites it to "webview2" on Windows), so the fix is client-side: OMIT browserName entirely.
+  // The guard only fires when a mismatching name is SUPPLIED, so omitting it matches on BOTH old
+  // and new WebKitGTK. tauri:options.application is what actually selects the wry webview binary.
   const browser = await remote({
     hostname: TAURI_DRIVER_HOST,
     port: TAURI_DRIVER_PORT,
@@ -177,7 +188,6 @@ async function main() {
     connectionRetryCount: 5,
     capabilities: {
       "tauri:options": { application: APP_BINARY },
-      browserName: "wry",
     },
   });
 
