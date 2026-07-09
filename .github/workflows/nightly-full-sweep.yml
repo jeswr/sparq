@@ -463,6 +463,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
+            dbus-x11 \
             xvfb
       # Drift tripwire + regression guard (bead sq-t6492 / issue #1740). The lane's persistent red
       # was WebKitGTK 2.5x rejecting the client's `browserName: "wry"` capability ("Failed to match
@@ -512,17 +513,24 @@ jobs:
         if: needs.config.outputs.mode == 'full'
         working-directory: gui/e2e
         run: bash support/no-sleep-gate.sh
-      - name: Run the tauri-driver smoke (headless under xvfb; retry once on failure)
+      # Run under dbus-run-session + NO_AT_BRIDGE=1 (bead sq-t6492): WebKitGTK under xvfb warns
+      # "AT-SPI: Error retrieving accessibility bus address … org.a11y.Bus was not provided" and can
+      # stall webview/session startup when no session D-Bus / a11y bus exists. dbus-run-session gives
+      # the app a private session bus and NO_AT_BRIDGE=1 disables the AT-SPI bridge it was reaching
+      # for — clearing the warning and the stall. (SESSION_CREATE_TIMEOUT_MS raises the cold-launch
+      # session-create ceiling; see run-e2e.mjs.)
+      - name: Run the tauri-driver smoke (headless under xvfb + dbus; retry once on failure)
         if: needs.config.outputs.mode == 'full'
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+          NO_AT_BRIDGE: "1"
         run: |
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
-            xvfb-run --auto-servernum npm run test:e2e && exit 0
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e && exit 0
           echo "[tauri-e2e-nightly] first attempt failed; retrying once (xvfb startup flake check)…"
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
-            xvfb-run --auto-servernum npm run test:e2e
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e
       - name: Upload failure artifacts
         if: always() && needs.config.outputs.mode == 'full'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

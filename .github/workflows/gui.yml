@@ -498,6 +498,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
+            dbus-x11 \
             xvfb
 
       # Drift tripwire + regression guard (bead sq-t6492 / issue #1740). The lane's persistent red
@@ -575,19 +576,23 @@ jobs:
       # first-attempt failures; a single retry keeps the job honest (a pass-on-retry is still
       # logged as a defect to investigate, per §6.3 quarantine policy) without masking real bugs.
       # Failure artifacts are written by the harness on both attempts (artifacts/ dir).
-      - name: Run the tauri-driver smoke (headless under xvfb; retry once on failure)
+      # Run under dbus-run-session + NO_AT_BRIDGE=1 (bead sq-t6492): WebKitGTK under xvfb reaches
+      # for an AT-SPI accessibility bus that does not exist and can stall webview/session startup
+      # ("org.a11y.Bus was not provided"). A private session bus + disabled AT-SPI bridge clears it.
+      - name: Run the tauri-driver smoke (headless under xvfb + dbus; retry once on failure)
         id: tauri-smoke
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+          NO_AT_BRIDGE: "1"
         run: |
           # [SONNET-4.6] Give each attempt its own artifacts subdir so a second failure does
           # not overwrite the first attempt's screenshot/driver-log evidence.
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
-            xvfb-run --auto-servernum npm run test:e2e && exit 0
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e && exit 0
           echo "[tauri-e2e-ci] first attempt failed; retrying once (xvfb startup flake check)…"
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
-            xvfb-run --auto-servernum npm run test:e2e
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e
 
       # Upload failure artifacts (screenshot + driver log) even if the step above succeeded on
       # the retry — the artifacts are only written by the harness when an assertion fails, so
@@ -629,6 +634,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
+            dbus-x11 \
             xvfb
 
       # Drift tripwire + regression guard (bead sq-t6492 / issue #1740): same as tauri-e2e — guards
@@ -685,6 +691,7 @@ jobs:
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+          NO_AT_BRIDGE: "1"
         run: |
           RUNS=${{ inputs.probe_runs }}
           GREENS=0
@@ -692,7 +699,7 @@ jobs:
           for i in $(seq 1 "$RUNS"); do
             echo "--- probe run $i / $RUNS ---"
             if ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/probe-run-$i" \
-                xvfb-run --auto-servernum npm run test:e2e; then
+                xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e; then
               GREENS=$((GREENS + 1))
             else
               FAILS=$((FAILS + 1))
