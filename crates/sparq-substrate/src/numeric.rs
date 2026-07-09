@@ -759,16 +759,15 @@ fn round_half_to_pos_inf(x: f64) -> f64 {
 
 /// Parse an xsd:float/xsd:double lexical: the XSD spellings of the specials, plus the
 /// ordinary scientific notation Rust's parser shares with XSD. `None` = ill-formed.
+///
+/// [FABLE-5] (sq-9781x) Delegates to the lowest-tier `sparq_core::parse_xsd_f64` — the
+/// SINGLE shared body of this parser — so the numeric-value CACHE (`Graph::numeric_value`,
+/// built in `sparq-core`) and this evaluator seam can never diverge on which double/float
+/// lexicals are numeric. `sparq-substrate` depends on `sparq-core`, so the shared body
+/// lives there; this re-export keeps the substrate's public `parse_xsd_f64` API stable.
 #[inline]
 pub fn parse_xsd_f64(v: &str) -> Option<f64> {
-    match v {
-        "NaN" => Some(f64::NAN),
-        "INF" | "+INF" => Some(f64::INFINITY),
-        "-INF" => Some(f64::NEG_INFINITY),
-        // Rust accepts "inf"/"infinity"/"nan" spellings XSD does not; exclude them.
-        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
-        _ => None,
-    }
+    sparq_core::parse_xsd_f64(v)
 }
 
 /// Parse an xsd:float lexical (the [`parse_xsd_f64`] spellings, narrowed to `f32`).
