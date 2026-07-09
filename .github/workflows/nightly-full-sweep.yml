@@ -498,10 +498,15 @@ jobs:
         run: |
           npm install
           (cd gui/app && npm run build:tauri)
-      - name: Build the GUI shell (debug, embeds the frontend)
+      # --features custom-protocol (bead sq-t6492): a plain `cargo build` sets Tauri's cfg(dev),
+      # which makes the webview load `devUrl` (http://localhost:3001) — "Connection refused" under
+      # the e2e (no dev server). custom-protocol embeds + serves frontendDist (../app/out, built
+      # above). See gui/src-tauri/Cargo.toml. `cargo tauri build` sets this automatically; a plain
+      # cargo build must pass it.
+      - name: Build the GUI shell (debug, embeds the frontend via custom-protocol)
         if: needs.config.outputs.mode == 'full'
         working-directory: gui/src-tauri
-        run: cargo build
+        run: cargo build --features custom-protocol
       - name: Install tauri-driver@2.0.6 (pinned)
         if: needs.config.outputs.mode == 'full'
         run: cargo install tauri-driver@2.0.6 --locked

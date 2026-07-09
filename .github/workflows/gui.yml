@@ -550,11 +550,14 @@ jobs:
           npm install
           (cd gui/app && npm run build:tauri)
 
-      # Build the desktop shell binary (debug). With gui/app/out present, tauri_build embeds
-      # the frontend into the `sparq-gui` binary tauri-driver will launch.
-      - name: Build the GUI shell (debug, embeds the frontend)
+      # Build the desktop shell binary (debug). --features custom-protocol (bead sq-t6492) embeds
+      # + serves the frontendDist static export (gui/app/out, built above) instead of Tauri's
+      # cfg(dev) devUrl (http://localhost:3001) — a plain `cargo build` would make the webview
+      # show "Could not connect to localhost: Connection refused" with no dev server. See
+      # gui/src-tauri/Cargo.toml. `cargo tauri build` sets this automatically; plain cargo must pass it.
+      - name: Build the GUI shell (debug, embeds the frontend via custom-protocol)
         working-directory: gui/src-tauri
-        run: cargo build
+        run: cargo build --features custom-protocol
 
       # Pin tauri-driver to 2.0.6 — the version published for Tauri 2.x (workspace uses 2.11.x).
       # Pinning prevents a crates.io update from silently changing driver behaviour mid-run.
@@ -673,9 +676,11 @@ jobs:
           npm install
           (cd gui/app && npm run build:tauri)
 
-      - name: Build the GUI shell (debug)
+      # --features custom-protocol (bead sq-t6492): embed + serve frontendDist instead of cfg(dev)
+      # devUrl, so the launched binary shows the real UI (not "Connection refused"). See Cargo.toml.
+      - name: Build the GUI shell (debug, embeds the frontend via custom-protocol)
         working-directory: gui/src-tauri
-        run: cargo build
+        run: cargo build --features custom-protocol
 
       - name: Install tauri-driver@2.0.6 (pinned)
         run: cargo install tauri-driver@2.0.6 --locked
