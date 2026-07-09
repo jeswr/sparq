@@ -500,14 +500,14 @@ jobs:
             webkit2gtk-driver \
             xvfb
 
-      # Log the installed WebKitWebDriver version. The apt package is matched to the runner
-      # image's webkit2gtk — not independently pinned, but logged here so any drift across
-      # runner image updates is immediately visible in the CI log.
-      - name: Log WebKitWebDriver version
-        run: |
-          WKVER=$(WebKitWebDriver --version 2>&1 || echo "unknown")
-          echo "WebKitWebDriver: $WKVER"
-          echo "webkit2gtk-driver apt: $(dpkg -l webkit2gtk-driver 2>/dev/null | tail -1)"
+      # Drift tripwire (bead sq-t6492 / issue #1740): logs the webkit2gtk + tauri-driver versions
+      # and, on the KNOWN-INCOMPATIBLE pair (tauri-driver 2.0.x + webkit2gtk 2.5x), emits a loud
+      # annotation naming the bead/issue — so the next runner-image webkit2gtk drift is a one-line
+      # diagnosis instead of a 0-byte-driver-log hunt during POST /session capability negotiation.
+      # Diagnostic only (exits 0); this lane is advisory (continue-on-error), so the actual smoke
+      # still decides pass/fail.
+      - name: Drift tripwire — log + detect tauri-driver ↔ webkit2gtk incompatibility
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
 
       # wasm32 target is needed to build the lean WASM bundle the in-tab REPL runs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -631,9 +631,10 @@ jobs:
             webkit2gtk-driver \
             xvfb
 
-      - name: Log WebKitWebDriver version
-        run: |
-          echo "WebKitWebDriver: $(WebKitWebDriver --version 2>&1 || echo 'unknown')"
+      # Drift tripwire (bead sq-t6492 / issue #1740): same diagnostic as tauri-e2e — logs the
+      # webkit2gtk + tauri-driver versions and flags the known-incompatible pair. Diagnostic only.
+      - name: Drift tripwire — log + detect tauri-driver ↔ webkit2gtk incompatibility
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:

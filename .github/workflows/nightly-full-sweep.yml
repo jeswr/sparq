@@ -464,11 +464,15 @@ jobs:
             patchelf \
             webkit2gtk-driver \
             xvfb
-      - name: Log WebKitWebDriver version
+      # Drift tripwire (bead sq-t6492 / issue #1740): logs the webkit2gtk + tauri-driver versions
+      # and, on the KNOWN-INCOMPATIBLE pair (tauri-driver 2.0.x + webkit2gtk 2.5x), emits a loud
+      # annotation so the next runner-image drift is a one-line diagnosis instead of a 0-byte-log
+      # hunt. Runs EARLY (right after the webkit2gtk apt install, before the ~6-min build) with the
+      # pinned tauri-driver version passed explicitly, so the drift is diagnosed fail-fast. Diagnostic
+      # only — it exits 0, keeping this advisory lane's verdict with the actual smoke (§5, advisory-forever).
+      - name: Drift tripwire — log + detect tauri-driver ↔ webkit2gtk incompatibility
         if: needs.config.outputs.mode == 'full'
-        run: |
-          echo "WebKitWebDriver: $(WebKitWebDriver --version 2>&1 || echo unknown)"
-          echo "webkit2gtk-driver apt: $(dpkg -l webkit2gtk-driver 2>/dev/null | tail -1)"
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
       - name: Cache cargo (gui e2e)
         if: needs.config.outputs.mode == 'full'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
