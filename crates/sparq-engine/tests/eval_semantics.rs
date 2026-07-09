@@ -982,3 +982,52 @@ mod dp_planner_result_equivalence {
         assert!(s.as_deref().map(|s| s.contains("/a")).unwrap_or(false), "ex:a must be the result, got {s:?}");
     }
 }
+
+/// [FABLE-5] (sq-9781x) The numeric-value cache is aligned with the evaluator's XSD
+/// acceptance set, so a whitespace-padded numeric lexical (`" 1 "^^xsd:integer`) — valid
+/// under XSD's `collapse` whitespace facet, value 1 — is treated CONSISTENTLY as the value
+/// 1 by every numeric seam: the relational FILTER fast path (`?o < 5`, reads the cache), the
+/// equality FILTER (`?o = 1`), and BIND arithmetic (`?o + 0`). Before the alignment the cache
+/// (a raw `str::parse::<f64>`) missed the padded lexical, so the fast `<`/`=` paths rejected
+/// it as a type error while arithmetic (via the trimming `Num::of_literal`) accepted it — a
+/// self-inconsistency this pins closed.
+mod numeric_whitespace_collapse_consistency {
+    use super::*;
+
+    fn padded_graph() -> Graph {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix ex: <http://ex/> .\n\
+            ex:a ex:v \" 1 \"^^xsd:integer .\n\
+            ex:b ex:v \"1\"^^xsd:integer .\n";
+        Graph::load_str(ttl, "turtle").unwrap()
+    }
+
+    #[test]
+    fn padded_integer_is_value_one_for_relational_equality_and_arithmetic() {
+        let g = padded_graph();
+        // Relational FILTER fast path reads the numeric cache.
+        let lt = query(&g, "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o < 5) }").unwrap();
+        assert_eq!(lt.rows.len(), 2, "both the padded and plain integer are < 5");
+        // Equality: the padded lexical equals the value 1.
+        let eq = query(&g, "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o = 1) }").unwrap();
+        assert_eq!(eq.rows.len(), 2, "both the padded and plain integer = 1");
+        // Arithmetic (through the trimming Num::of_literal) already accepted it — assert the
+        // three seams now AGREE.
+        let arith = query(&g, "SELECT ?s WHERE { ?s <http://ex/v> ?o BIND(?o + 0 AS ?n) FILTER(?n < 5) }").unwrap();
+        assert_eq!(arith.rows.len(), 2, "arithmetic path agrees: both rows survive");
+    }
+
+    #[test]
+    fn padded_and_plain_integer_are_value_equal_across_ids() {
+        // A join on value equality pairs the padded and plain integers (distinct dict ids,
+        // same value 1) — the cache-hit ⟺ evaluator-accept alignment in action.
+        let g = padded_graph();
+        let r = query(
+            &g,
+            "SELECT ?s1 ?s2 WHERE { ?s1 <http://ex/v> ?o1 . ?s2 <http://ex/v> ?o2 FILTER(?o1 = ?o2) }",
+        )
+        .unwrap();
+        // 2x2 value-equal pairs (a=a, a=b, b=a, b=b) — all four since both are value 1.
+        assert_eq!(r.rows.len(), 4, "all four ordered pairs are value-equal (both are 1)");
+    }
+}
