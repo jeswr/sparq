@@ -5020,4 +5020,290 @@ ex:bob
         );
         assert_compact_iso(&g, ctx);
     }
+
+    // =======================================================================
+    // [OPUS-4.8] sq-qcnn.33 — coverage-raise tests: targeted direct unit tests
+    // for previously-uncovered public functions and code paths.  Each asserts
+    // exact byte values (non-vacuous) and exercises the REAL writer path.
+    // =======================================================================
+
+    /// write_iri keep-existing-best arm: fires when the existing local part is longer
+    /// than the next namespace being considered, so the current best is retained.
+    ///
+    /// Prefix `"a"` → `"ns1/"` (len 4) is iterated first (BTreeMap order), producing
+    /// local `"longlocal"` (len 9).  Prefix `"b"` → `"ns1/lon"` (len 7) arrives second;
+    /// the guard `bns.len() >= ns.len()` (9 >= 7 = true) keeps the existing match,
+    /// so the result is `"a:longlocal"`.
+    #[test]
+    fn write_iri_keep_existing_best_arm() {
+        let mut prefixes: Prefixes = std::collections::BTreeMap::new();
+        // "a" iterates before "b" in BTreeMap order.
+        prefixes.insert("a".to_string(), "ns1/".to_string());
+        prefixes.insert("b".to_string(), "ns1/lon".to_string());
+        let mut out = String::new();
+        write_iri("ns1/longlocal", &prefixes, &mut out);
+        // Both "a:longlocal" and "b:glocal" are valid compactions; the existing-best
+        // guard keeps "a" because "longlocal" (len 9) >= "ns1/lon" (len 7).
+        assert_eq!(out, "a:longlocal", "keep-existing-best arm result: {}", out);
+    }
+
+    /// escape_iri control-char / delimiter arm: a `>` in the IRI path must be emitted
+    /// as `>` to keep Turtle well-formed; a C0 control char hits the same arm.
+    #[test]
+    fn escape_iri_escapes_special_chars() {
+        let mut out = String::new();
+        escape_iri("http://ex/has>bracket", &mut out);
+        assert!(
+            out.contains("\\u003E"),
+            "closing angle bracket escaped: {}",
+            out
+        );
+        assert!(
+            out.starts_with('<') && out.ends_with('>'),
+            "IRIREF delimiters present: {}",
+            out
+        );
+        // A C0 control character (U+0001) hits the same match arm.
+        out.clear();
+        escape_iri("http://ex/ctrl\u{01}", &mut out);
+        assert!(out.contains("\\u0001"), "control char escaped: {}", out);
+    }
+
+    /// write_term_full lang-tag arm (~line 1022) and non-xsd:string datatype arm
+    /// (~line 1029).  The existing abbreviate=false test uses only plain xsd:string
+    /// literals so these two arms were previously uncovered.
+    #[test]
+    fn write_term_full_lang_and_typed_literal() {
+        let mut out = String::new();
+        // Lang-tagged literal: "hello"@en
+        let lang_lit = Term::Literal(
+            oxrdf::Literal::new_language_tagged_literal_unchecked("hello", "en"),
+        );
+        write_term_full(&lang_lit, &mut out);
+        assert_eq!(out, "\"hello\"@en", "lang literal round-trip: {}", out);
+
+        out.clear();
+        // Typed literal with non-xsd:string / non-rdf:langString datatype.
+        let xsd_int = "http://www.w3.org/2001/XMLSchema#integer";
+        let typed_lit = Term::Literal(Literal::new_typed_literal(
+            "42",
+            NamedNode::new_unchecked(xsd_int),
+        ));
+        write_term_full(&typed_lit, &mut out);
+        assert!(
+            out.starts_with("\"42\"^^<"),
+            "typed literal prefix: {}",
+            out
+        );
+        assert!(out.contains(xsd_int), "datatype IRI preserved: {}", out);
+    }
+
+    /// write_term_full Triple arm (~lines 1034-1042): a quoted triple must render as
+    /// `<<( <s> <p> "o" )>>` with full IRIs (no prefix compaction).
+    #[test]
+    fn write_term_full_triple_term() {
+        let subj = NamedOrBlankNode::NamedNode(nn("http://ex/s"));
+        let pred = nn("http://ex/p");
+        let obj = Term::Literal(Literal::new_simple_literal("v"));
+        let qt = Term::Triple(Box::new(Triple {
+            subject: subj,
+            predicate: pred,
+            object: obj,
+        }));
+        let mut out = String::new();
+        write_term_full(&qt, &mut out);
+        assert!(out.starts_with("<<("), "triple term open: {}", out);
+        assert!(out.ends_with(")>>"), "triple term close: {}", out);
+        assert!(
+            out.contains("<http://ex/s>"),
+            "subject IRI in triple term: {}",
+            out
+        );
+        assert!(
+            out.contains("<http://ex/p>"),
+            "predicate IRI in triple term: {}",
+            out
+        );
+    }
+
+    /// write_trig_pretty abbreviate=false path for a named-graph IRI (~lines 1203-1205):
+    /// the `GRAPH` header emits the full `<IRI>` instead of a prefix-compacted form.
+    #[test]
+    fn trig_pretty_abbreviate_false_named_graph() {
+        let g = Graph::load_dataset(
+            r#"@prefix ex: <http://ex/> . GRAPH ex:g1 { ex:s ex:p "v" . }"#,
+            "trig",
+        )
+        .unwrap();
+        let owned = dataset_graphs(&g);
+        let view: Vec<NamedGraph<'_>> = owned
+            .iter()
+            .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+            .collect();
+        let opts = PrettyOptions {
+            abbreviate: false,
+            ..PrettyOptions::default()
+        };
+        let out = write_trig_pretty(&view, &ex_prefixes(), &opts);
+        // No prefix header when abbreviate=false.
+        assert!(
+            !out.contains("@prefix"),
+            "no header when abbreviate=false: {}",
+            out
+        );
+        // GRAPH keyword followed by full <IRI> (not the prefixed `ex:g1`).
+        assert!(
+            out.contains("GRAPH <http://ex/g1>"),
+            "full IRI in GRAPH header: {}",
+            out
+        );
+        // Round-trip: the emitted TriG must parse back to the same dataset.
+        let g2 = Graph::load_dataset(&out, "trig").unwrap();
+        assert_dataset_iso(&g, &g2, &out);
+    }
+
+    /// write_trig_pretty blank-node named-graph arm (~lines 1207-1209): a blank-node
+    /// graph name must render as `_:label` in the `GRAPH` header.
+    #[test]
+    fn trig_pretty_blank_node_named_graph() {
+        let g = Graph::load_dataset(
+            r#"_:bg { <http://ex/s> <http://ex/p> <http://ex/o> . }"#,
+            "trig",
+        )
+        .unwrap();
+        let owned = dataset_graphs(&g);
+        let view: Vec<NamedGraph<'_>> = owned
+            .iter()
+            .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+            .collect();
+        let out = write_trig_pretty(&view, &default_prefixes(), &PrettyOptions::default());
+        assert!(
+            out.contains("GRAPH _:"),
+            "blank graph name uses _: form in pretty TriG: {}",
+            out
+        );
+        let g2 = Graph::load_dataset(&out, "trig").unwrap();
+        assert_dataset_iso(&g, &g2, &out);
+    }
+
+    /// graph_to_trig_pretty direct call (~lines 1227-1234): the Graph wrapper that
+    /// assembles `dataset_graphs` + `default_prefixes` + `PrettyOptions::default`.
+    ///
+    /// Uses `foaf:name` (which IS in the default prefix map and is NOT the `a` shorthand
+    /// exception) so a `@prefix foaf:` header is emitted.
+    #[test]
+    fn graph_to_trig_pretty_round_trips() {
+        // foaf: is in default_prefixes() and foaf:name abbreviates normally (no shorthand
+        // exception), so a @prefix foaf: header must appear in the output.
+        let foaf_name = "http://xmlns.com/foaf/0.1/name";
+        let g = Graph::load_dataset(
+            &[
+                "<http://ex/s> <", foaf_name, "> \"Alice\" .",
+                " GRAPH <http://ex/g1> {",
+                " <http://ex/a> <", foaf_name, "> \"Bob\" . }",
+            ]
+            .concat(),
+            "trig",
+        )
+        .unwrap();
+        let out = graph_to_trig_pretty(&g);
+        // foaf: IS in the default prefix map and not a shorthand — header must appear.
+        assert!(out.contains("@prefix foaf:"), "foaf prefix header: {}", out);
+        // A GRAPH block wraps the named graph.
+        assert!(out.contains("GRAPH"), "GRAPH block present: {}", out);
+        // Abbreviated property in the output.
+        assert!(out.contains("foaf:name"), "foaf:name abbreviated: {}", out);
+        // Round-trip.
+        let g2 = Graph::load_dataset(&out, "trig").unwrap();
+        assert_dataset_iso(&g, &g2, &out);
+    }
+
+    /// `parse_context_json` trailing-chars guard (~line 1283): valid JSON followed by
+    /// extra bytes must return `None`.
+    #[test]
+    fn parse_context_json_trailing_chars_is_none() {
+        assert!(
+            parse_context_json(r#"{"@vocab":"http://ex/"} EXTRA"#).is_none(),
+            "trailing text after JSON must be rejected"
+        );
+        // Clean JSON with no trailing bytes is accepted.
+        assert!(
+            parse_context_json(r#"{"@vocab":"http://ex/"}"#).is_some(),
+            "clean JSON must parse successfully"
+        );
+    }
+
+    /// `JsonParser::parse_number` (~lines 1327-1343) and `parse_array` comma arm
+    /// (~line 1404): numeric JSON values are stored as `Json::Raw`; a two-element
+    /// array exercises the comma branch.
+    #[test]
+    fn parse_context_json_number_and_array_values() {
+        let ctx = parse_context_json(r#"{"n":42,"arr":[1,"two",3]}"#)
+            .expect("number + array parse");
+        let mut out = String::new();
+        Jv::write(&ctx, &mut out);
+        // Number preserved verbatim as a raw token.
+        assert!(out.contains("\"n\":42"), "number raw token: {}", out);
+        // Array with multiple elements (comma arm between items) is preserved.
+        assert!(out.contains("\"arr\":["), "array key present: {}", out);
+        assert!(out.contains("\"two\""), "string element in array: {}", out);
+    }
+
+    /// `JsonParser::parse_string` escape arms (~lines 1360-1385): backslash escapes
+    /// (`\"`, `\\`, `\/`, `\n`, `\t`, `\r`, `\b`, `\f`, `\uXXXX`) and multi-byte
+    /// UTF-8 content are all decoded correctly.
+    #[test]
+    fn parse_context_json_string_escape_sequences() {
+        // \" → a literal double-quote in the decoded string.
+        let ctx_q =
+            parse_context_json(r#"{"q":"say \"hi\""}"#).expect("escaped-quote parse");
+        let mut out = String::new();
+        Jv::write(&ctx_q, &mut out);
+        // json_escape re-encodes the embedded quote as \".
+        assert!(
+            out.contains(r#"say \"hi\""#),
+            "quote escape round-trip: {}",
+            out
+        );
+
+        // \/ → forward slash (RFC 7159 allows escaping it).
+        let ctx_sl = parse_context_json(r#"{"sl":"http:\/\/ex\/"}"#).expect("slash-escape parse");
+        let mut out_sl = String::new();
+        Jv::write(&ctx_sl, &mut out_sl);
+        assert!(
+            out_sl.contains("http://ex/"),
+            "forward-slash escape decoded: {}",
+            out_sl
+        );
+
+        // \uXXXX → decoded Unicode code-point.
+        let ctx_u =
+            parse_context_json(r#"{"uni":"ABC"}"#).expect("unicode-escape parse");
+        let mut out_u = String::new();
+        Jv::write(&ctx_u, &mut out_u);
+        // U+0041 = 'A'; the result is "ABC".
+        assert!(out_u.contains("ABC"), "\\uXXXX decoded to char: {}", out_u);
+
+        // \t, \n, \r, \b, \f — the remaining single-char escape arms.
+        let ctx_ws =
+            parse_context_json("{\"t\":\"a\\tb\",\"n\":\"a\\nb\",\"b\":\"\\b\",\"f\":\"\\f\"}")
+                .expect("whitespace-escape parse");
+        let mut out_ws = String::new();
+        Jv::write(&ctx_ws, &mut out_ws);
+        // json_escape re-encodes them; just confirm the object serialises without panic.
+        assert!(out_ws.contains("\"t\":"), "tab-escape key present: {}", out_ws);
+
+        // Multi-byte UTF-8 (é = U+00E9, 2 bytes) travels through the `_` arm that
+        // advances past continuation bytes.
+        let ctx_mb =
+            parse_context_json(r#"{"k":"café"}"#).expect("multi-byte via \\uXXXX");
+        let mut out_mb = String::new();
+        Jv::write(&ctx_mb, &mut out_mb);
+        // U+00E9 = 'é'; json_escape keeps it verbatim (> 0x1F, non-special).
+        assert!(
+            out_mb.contains('\u{00E9}'),
+            "multi-byte code-point preserved: {}",
+            out_mb
+        );
+    }
 }

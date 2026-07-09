@@ -1,0 +1,5 @@
+{
+  "pr": 1718,
+  "date": "2026-07-08",
+  "reason": "exec.rs adds always-compiled expression-compilation machinery (CompiledExpr, compile_expr, eval_compiled + numeric/temporal/dec/exact-lexical mirrors, eval_function_inner) and rewires apply_filter_scalar / extend_bindings / order_bindings onto it — moves feature-OFF wasm bytes"
+}

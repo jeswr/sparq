@@ -74,6 +74,38 @@ def test_http():
     except ValueError:
         check("http.non-bool-boolean-raises", True, True)
 
+    # [FABLE-5] sq-7d3dj.34: --profile helpers (the offline-testable half).
+    check(
+        "http.split_endpoint.plain",
+        http.split_endpoint("http://localhost:3030/ds/query"),
+        ("localhost", 3030, "/ds/query"),
+    )
+    check(
+        "http.split_endpoint.default-port+query",
+        http.split_endpoint("http://h/sparql?default-graph-uri=g"),
+        ("h", 80, "/sparql?default-graph-uri=g"),
+    )
+    check(
+        "http.split_endpoint.https-default",
+        http.split_endpoint("https://h/q"),
+        ("h", 443, "/q"),
+    )
+    try:
+        http.split_endpoint("ftp://h/x")
+        check("http.split_endpoint.non-http-raises", False, True)
+    except ValueError:
+        check("http.split_endpoint.non-http-raises", True, True)
+    check(
+        "http.format_profile_tsv",
+        http.format_profile_tsv(
+            "fuseki",
+            452,
+            {"best_us": 1200, "ttfb_us": 800, "reconnects": 0},
+            {"best_us": 1500, "ttfb_us": 1100},
+        ),
+        "fuseki\t452\t1200\t800\t1500\t1100",
+    )
+
 
 # --- vector recall scoring ---------------------------------------------------
 def test_vector():

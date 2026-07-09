@@ -1,0 +1,5 @@
+{
+  "pr": 1784,
+  "date": "2026-07-08",
+  "reason": "sq-7d3dj.30.12: always-compiled sparq-engine exec.rs ORDER BY change — SortCell::Val now carries precomputed (class, kind, value_str) collation keys and cmp_sort_cells' Val arms compare those precomputed ranks/slices. NOT feature-gated (unconditional strict improvement), so it links into the feature-OFF sparq-wasm bundle. Default path, semantics-preserving: the precomputed-key ordering is byte-identical to the prior compare_values order (differential property test proves it over all term kinds incl. the 2^53 f64-collapse trap); NOT accidental vectorization (feature-OFF invariant vectorized-ON==OFF preserved)."
+}

@@ -169,15 +169,33 @@ async function main() {
   // Open a WebDriver session through tauri-driver. `tauri:options.application` tells
   // tauri-driver which native binary to launch. connectionRetryCount / connectionRetryTimeout
   // cover transient HTTP hiccups — webdriverio's own retry policy, not arbitrary sleeps.
+  //
+  // CAPABILITIES — DO NOT re-add `browserName: "wry"` (bead sq-t6492 / issue #1740).
+  // WebKit's matchCapabilities (Source/WebDriver/WebDriverService.cpp) rejects a session with
+  // "Failed to match capabilities" whenever a NON-NULL `browserName` is supplied that does not
+  // equal the driver's own reported name. Newer WebKitGTK (the runner's webkit2gtk 2.5x) reports
+  // `browserName: "MiniBrowser"`, so the historic tauri#8828 workaround `browserName: "wry"` now
+  // BACKFIRES: "wry" != "MiniBrowser" → hard reject before any session log (the 0-byte-log
+  // signature). tauri-driver 2.0.6 forwards the client browserName verbatim on Linux (it only
+  // rewrites it to "webview2" on Windows), so the fix is client-side: OMIT browserName entirely.
+  // The guard only fires when a mismatching name is SUPPLIED, so omitting it matches on BOTH old
+  // and new WebKitGTK. tauri:options.application is what actually selects the wry webview binary.
+  // SESSION-CREATE TIMEOUT (bead sq-t6492): a cold DEBUG shell launching a WebKitGTK webview under
+  // xvfb can take well over 30 s to complete POST /session (the webview + native engine cold-start).
+  // The original 30 s ceiling timed out AFTER the capability fix let the session proceed (the app
+  // process did launch — the driver log shows its startup output — but /session did not return in
+  // time). 120 s gives the cold debug launch head-room; overridable via SESSION_CREATE_TIMEOUT_MS.
+  const SESSION_CREATE_TIMEOUT_MS = Number(
+    process.env.SESSION_CREATE_TIMEOUT_MS || 120_000,
+  );
   const browser = await remote({
     hostname: TAURI_DRIVER_HOST,
     port: TAURI_DRIVER_PORT,
     logLevel: "error",
-    connectionRetryTimeout: 30_000,
-    connectionRetryCount: 5,
+    connectionRetryTimeout: SESSION_CREATE_TIMEOUT_MS,
+    connectionRetryCount: 3,
     capabilities: {
       "tauri:options": { application: APP_BINARY },
-      browserName: "wry",
     },
   });
 

@@ -1,0 +1,16 @@
+# [FABLE-5] sq-hmd7l.3 — PINNED jena-geosparql rendering of the `within10km`
+# workload for scripts/bench/geo-same-box.sh. Verbatim copy of
+# bench/geo/queries/within10km.rq (the standard GeoSPARQL dialect needs no
+# translation for Jena); pinned per-engine so an edit to the sparq-side file
+# cannot silently change the competitor replay — keep the two in sync on purpose.
+# Oracle: the COUNT must equal sparq's expected.tsv `within10km` size before any
+# timing is trusted (counts-not-coordinates). Metric caveat: sparq computes
+# spherical great-circle, Jena/Apache-SIS geof:distance is ellipsoidal geodesic
+# — a radius-boundary count disagreement is a recorded result, never adjusted.
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (geof:distance(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre) <= 10000)
+}

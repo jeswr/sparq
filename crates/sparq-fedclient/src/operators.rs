@@ -493,10 +493,8 @@ fn join_key(row: &[Option<Term>], shared: &[(usize, usize)], from_left: bool) ->
     let mut key = Vec::with_capacity(shared.len());
     for &(li, ri) in shared {
         let col = if from_left { li } else { ri };
-        match row.get(col).cloned().flatten() {
-            Some(t) => key.push(t),
-            None => return None,
-        }
+        let t = row.get(col).cloned().flatten()?;
+        key.push(t);
     }
     Some(key)
 }

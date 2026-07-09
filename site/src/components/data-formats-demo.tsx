@@ -187,7 +187,8 @@ export function DataFormatsDemo() {
                 onClick={() => pickFormat(f.format)}
               >
                 {f.label}
-                <span className="ml-1 font-mono text-[11px] opacity-70">
+                {/* [FABLE-5] opacity-90 (was 70): the extension text on the selected teal button was 4.34:1, below WCAG AA 4.5:1 (color-contrast, sq-0rbfn) */}
+                <span className="ml-1 font-mono text-[11px] opacity-90">
                   {f.ext}
                 </span>
               </Button>

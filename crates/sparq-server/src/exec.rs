@@ -29,7 +29,16 @@ pub struct Prepared {
     pub form: QueryForm,
     /// The query string the engine runs (the engine re-parses internally and has a
     /// native entry point per form: `query*` / `ask*` / `construct*` / `describe*`).
+    /// Retained for the CONSTRUCT / DESCRIBE / EXPLAIN string entry points (off the hot
+    /// floor path) and for the dataset-override rewrite assertions in the unit tests.
     pub runnable: String,
+    /// [OPUS-4.8] (sq-7d3dj.34.1) The query PARSED ONCE here, ready to hand to the engine's
+    /// `*_prepared` entry points without a second parse. `prepare` already runs the full
+    /// `spargebra` parse to classify the form and (when a protocol dataset override is present)
+    /// rewrite the dataset clause; carrying the resulting algebra lets the SELECT / ASK floor
+    /// path skip the engine's redundant re-parse of `runnable` — the per-request parse is paid
+    /// exactly once instead of twice, for ARBITRARY novel queries (no cross-request cache).
+    pub query: sparq_engine::PreparedQuery,
 }
 
 /// A failure classified for the HTTP layer.
@@ -135,10 +144,19 @@ pub fn prepare_with_dataset(
     } else {
         set_query_dataset(&mut parsed, over.to_query_dataset()?);
         // Re-serialise the rewritten algebra: spargebra's `Display` re-emits the FROM / FROM
-        // NAMED clauses, and the engine re-parses this string.
+        // NAMED clauses, and the engine re-parses this string (the CONSTRUCT / DESCRIBE path).
         parsed.to_string()
     };
-    Ok(Prepared { form, runnable })
+    // [OPUS-4.8] (sq-7d3dj.34.1) Carry the algebra we JUST parsed (the original query, or — under
+    // a dataset override — the rewritten one, which `runnable` was serialised FROM, so the two
+    // denote the same query) so the SELECT / ASK floor path executes it prepared, without the
+    // engine re-parsing `runnable`.
+    let query = sparq_engine::PreparedQuery::from(parsed);
+    Ok(Prepared {
+        form,
+        runnable,
+        query,
+    })
 }
 
 /// Overwrites the dataset specification of a parsed query (every form carries the same

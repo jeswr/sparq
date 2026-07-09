@@ -1,0 +1,9 @@
+1@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://ex/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:PersonShape a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:age ; sh:minCount 1 ; sh:datatype xsd:integer ; sh:minInclusive 0 ] ;
+  sh:property [ sh:path ex:name ; sh:or ( [ sh:datatype xsd:string ] [ sh:nodeKind sh:IRI ] ) ] .
+ex:alice a ex:Person ; ex:age 30 ; ex:name "alice" .
+ex:bob a ex:Person ; ex:name ex:BobName .

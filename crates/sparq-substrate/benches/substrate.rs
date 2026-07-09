@@ -15,11 +15,13 @@
 //! - `numeric::Num::binop` — `+` / `*` arithmetic on the `Int` / `Dec` / `Double`
 //!   tiers.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+// [OPUS-4.8] criterion 0.8 deprecated its own black_box in favour of std::hint::black_box.
+use std::hint::black_box;
 use sparq_substrate::{
-    join::{build_table, hash_probe_serial, merge_join, JoinKeys, NoBudget},
+    join::{build_table, hash_probe_serial, lftj_recurse, merge_join, JoinKeys, NoBudget, Trie, TrieIter},
     numeric::{ArithOp, Dec, Num},
-    rows::Row,
+    rows::{Row, NO_ID},
 };
 
 // ---------------------------------------------------------------------------
@@ -188,9 +190,109 @@ fn bench_num_arithmetic(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Bench: LFTJ triangle query (k=2 per level, classic cyclic WCO path)
+// ---------------------------------------------------------------------------
+//
+// Triangle query: edge(a,b) ∧ edge(b,c) ∧ edge(a,c) on a complete graph K_n.
+// At each of the 3 variable levels (a, b, c) exactly two tries participate (k=2),
+// exercising the generic leapfrog path.  The result set has C(n,3) = n(n-1)(n-2)/6
+// rows; the measurement captures LFTJ hot-loop throughput on a cyclic pattern.
+//
+// Variable order: [a=0, b=1, c=2].  Tries:
+//   0 = R(a,b): tuples (a,b) for all 0 ≤ a < b < n, sorted (a,b).
+//   1 = S(b,c): tuples (b,c) for all 0 ≤ b < c < n, sorted (b,c).
+//   2 = T(a,c): tuples (a,c) for all 0 ≤ a < c < n, sorted (a,c).
+// parts_at_level: level 0 → [0,2]; level 1 → [0,1]; level 2 → [1,2].
+//
+// [SONNET-4.6] sq-7d3dj.20
+
+fn bench_lftj_triangle(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lftj_triangle");
+    for n in [10u32, 30, 100] {
+        // Complete-graph edges: (i,j) for all 0 ≤ i < j < n, sorted lexicographically.
+        let edges: Vec<(u32, u32)> =
+            (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect();
+        let r0 = Trie { tuples: edges.iter().map(|&(a, b)| vec![a, b]).collect() };
+        let r1 = Trie { tuples: edges.iter().map(|&(b, c)| vec![b, c]).collect() };
+        let r2 = Trie { tuples: edges.iter().map(|&(a, c)| vec![a, c]).collect() };
+        // level 0 (?a): tries 0 and 2; level 1 (?b): tries 0 and 1; level 2 (?c): tries 1 and 2.
+        let parts_at_level = vec![vec![0usize, 2], vec![0usize, 1], vec![1usize, 2]];
+        let expected = n * (n.saturating_sub(1)) * (n.saturating_sub(2)) / 6;
+        group.throughput(Throughput::Elements(expected as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let mut iters =
+                    vec![TrieIter::new(&r0), TrieIter::new(&r1), TrieIter::new(&r2)];
+                let mut current = vec![NO_ID; 3];
+                let mut out = Vec::new();
+                lftj_recurse(
+                    &mut iters,
+                    &parts_at_level,
+                    0,
+                    3,
+                    &mut current,
+                    &NoBudget,
+                    &mut out,
+                );
+                black_box(out.len())
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Bench: LFTJ 3-way set intersection (k=3, monomorphized search_k3 path)
+// ---------------------------------------------------------------------------
+//
+// Query: R(x) ∧ S(x) ∧ T(x) — all three tries participate at level 0 (k=3),
+// routing through the monomorphized search_k3 fast path.  Three sets with
+// controlled overlap: even values (R), multiples-of-3 (S), multiples-of-5 (T)
+// in 0..n.  The intersection is multiples of lcm(2,3,5)=30 — easy to verify.
+//
+// [SONNET-4.6] sq-7d3dj.20
+
+fn bench_lftj_intersection_k3(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lftj_intersection_k3");
+    for n in [1_000u32, 10_000, 100_000] {
+        let r = Trie { tuples: (0..n).step_by(2).map(|v| vec![v]).collect() };
+        let s = Trie { tuples: (0..n).step_by(3).map(|v| vec![v]).collect() };
+        let t = Trie { tuples: (0..n).step_by(5).map(|v| vec![v]).collect() };
+        // All three tries participate at level 0: k=3.
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        // multiples of lcm(2,3,5)=30 in 0..n — 0 IS included, so the count is
+        // ceil(n/30), not floor.  E.g. n=1000 → {0,30,...,990} = 34 values.
+        // [OPUS-4.8] off-by-one fix sq-7d3dj.20
+        let expected = n.div_ceil(30);
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let mut iters =
+                    vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+                let mut current = vec![NO_ID; 1];
+                let mut out = Vec::new();
+                lftj_recurse(
+                    &mut iters,
+                    &parts_at_level,
+                    0,
+                    1,
+                    &mut current,
+                    &NoBudget,
+                    &mut out,
+                );
+                // Light sanity check so the result is observed (prevent elision).
+                debug_assert_eq!(out.len() as u32, expected);
+                black_box(out.len())
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
-criterion_group!(join_benches, bench_merge_join, bench_hash_build, bench_hash_probe);
+criterion_group!(join_benches, bench_merge_join, bench_hash_build, bench_hash_probe, bench_lftj_triangle, bench_lftj_intersection_k3);
 criterion_group!(numeric_benches, bench_num_arithmetic);
 criterion_main!(join_benches, numeric_benches);

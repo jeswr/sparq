@@ -1,0 +1,5 @@
+{
+  "pr": 1781,
+  "date": "2026-07-08",
+  "reason": "sq-7d3dj.30.8: always-compiled sparq-engine exec.rs additions (try_capped capped UNION/OPTIONAL/Join/BIND arms, eval_bgp_binary_capped block-driven capped conjunctive chain, ask_simplify, in_scope_vars) for ASK/LIMIT-k first-solution early exit — NOT feature-gated, so they link into the feature-OFF sparq-wasm bundle (+14973 bytes, +0.97%, within the +/-2% band). Default path, semantics-preserving; NOT accidental vectorization (feature-OFF invariant vectorized-ON==OFF preserved)."
+}

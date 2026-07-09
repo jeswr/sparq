@@ -87,9 +87,10 @@ export default function VerifiableCredentialsPage() {
             &ldquo;verified&rdquo; affordance as a research demonstration, not a production
             guarantee.
           </p>
+          {/* [FABLE-5] persistent underline: distinguishable without color (link-in-text-block, sq-0rbfn) */}
           <p className="flex flex-wrap gap-4">
             <a
-              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              className="inline-flex items-center gap-1 text-primary underline underline-offset-4"
               href={`${REPO_URL}/tree/main/crates/sparq-zk`}
               target="_blank"
               rel="noopener noreferrer"
@@ -97,7 +98,7 @@ export default function VerifiableCredentialsPage() {
               sparq-zk on GitHub <ExternalLink className="size-3.5" />
             </a>
             <a
-              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              className="inline-flex items-center gap-1 text-primary underline underline-offset-4"
               href={`${REPO_URL}/blob/main/SECURITY.md`}
               target="_blank"
               rel="noopener noreferrer"

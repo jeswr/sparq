@@ -83,6 +83,13 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   `Classifier::classify` / `classify_graph` stay **byte-identical** (they never internalize
   assertions). Data-property assertions and non-EL class expressions stay counted skips
   (`Report::skipped_assertions`, fail-closed — never a guessed typing).
+- **Keys, negative assertions & differentFrom** *(also `abox`)* — `owl:hasKey` merges two DISTINCT
+  named individuals in the key class that share a value on EVERY key property (`owl:sameAs`);
+  a PARTIAL key match cannot fire (object keys match a shared nominal successor, data keys a
+  shared literal term — sound). An `owl:NegativePropertyAssertion` is a clash iff the positive is
+  asserted/derived; `owl:differentFrom` is read off only from a derived nominal clash
+  (`{a} ⊓ {b} ⊑ ⊥`) or asserted-inequality symmetry, and a `sameAs`/`differentFrom` coincidence is
+  inconsistent. Unsupported key/NPA shapes stay counted skips (fail-closed).
 - **Honest fragment reporting** — class axioms outside the active fragment are counted in
   `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
   concrete-domain shapes; with it, only the unsupported remainder above.

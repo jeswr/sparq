@@ -13,7 +13,7 @@
 //! triple path is unchanged: a triple term is only looked for when the object byte is `<`
 //! AND the next two bytes are `<(`, so a plain `<…>` IRI pays just two extra byte peeks.
 
-use crate::dict::{Dict, Id};
+use crate::dict::{Dict, Id, NO_ID};
 use std::borrow::Cow;
 
 /// [OPUS-4.8] (sq-7d3dj.2) Rough average N-Triples line length, in bytes, used ONLY to pre-size
@@ -280,6 +280,17 @@ fn span_literal(b: &[u8], i: usize) -> Result<usize, String> {
     }
 }
 
+/// [SONNET-4.6] (sq-7d3dj.31.3) Maximum byte length of a subject/predicate token stored
+/// in the inline intern caches of [`parse_chunk`]. Tokens longer than this threshold fall
+/// through to the normal `term()` intern path with no caching overhead.
+///
+/// 128 bytes covers virtually all realistic N-Triples subjects and predicates (Wikidata
+/// entities are ~42 bytes, DBpedia resources ~50 bytes, SP2Bench articles ~55 bytes).
+/// The inline copy is stack-allocated (two 128-byte arrays) and stays in L1 cache across
+/// the hot inner loop, avoiding the cache-hostile read-from-file-position that a plain
+/// `bytes[old_start..old_end]` comparison would cause on shuffled (non-grouped) input.
+pub(crate) const SUBJ_PRED_CACHE_LEN: usize = 128;
+
 /// Parses a slice of complete N-Triples lines, interning each term and returning the
 /// id-triples. Errors carry the byte offset.
 pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
@@ -291,6 +302,36 @@ pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String
     let mut out = Vec::with_capacity(bytes.len() / AVG_NT_LINE_BYTES);
     let n = bytes.len();
     let mut i = 0;
+    // [SONNET-4.6] (sq-7d3dj.31.3) Subject and predicate intern caches. Grouped N-Triples
+    // (the common dump shape: SP2Bench, WatDiv, DBpedia) repeat the same subject across
+    // consecutive lines; the same small predicate set recurs throughout. Caching the last-seen
+    // raw bytes and their interned id lets us skip the hash_iri + hash-table probe on a
+    // run-length hit.
+    //
+    // KEY DESIGN: the cached bytes are stored in a FIXED STACK BUFFER, not compared against
+    // `bytes[old_start..]`. A file-position comparison would cause L3 cache misses on
+    // shuffled (non-grouped) input (the previous subject is at a random position in a
+    // potentially 100s-of-MB file). The stack buffer is always in L1 — hits and misses are
+    // both cache-friendly, keeping the shuffled path at baseline cost.
+    //
+    // Correctness invariants:
+    //   • Exact byte equality: cache_s_buf[..cache_s_len] == bytes[s_start..s_after]
+    //     is the HIT condition — no hash collisions, no false positives.
+    //   • Boundary byte (whitespace or EOB) after the matched bytes is required for
+    //     blank-node subjects (no closing delimiter): prevents `_:b0` (4 bytes) from
+    //     falsely matching `_:b0extra` whose first 4 bytes are identical.
+    //   • For IRI subjects/predicates, the `>` delimiter makes the token end unambiguous;
+    //     the boundary check is always satisfied for valid N-Triples and adds no cost.
+    //   • Cache miss: normal `term()` path, id-assignment order unchanged.
+    //   • Subjects/predicates longer than SUBJ_PRED_CACHE_LEN bytes fall through to
+    //     normal intern on every line (cache disabled for that token).
+    //   • `NO_ID` (= 0) is the "empty" sentinel; `term()` never returns id 0.
+    let mut cache_s_buf = [0u8; SUBJ_PRED_CACHE_LEN];
+    let mut cache_s_len: usize = 0; // 0 = empty (also see NO_ID guard)
+    let mut cache_s_id: Id = NO_ID;
+    let mut cache_p_buf = [0u8; SUBJ_PRED_CACHE_LEN];
+    let mut cache_p_len: usize = 0;
+    let mut cache_p_id: Id = NO_ID;
     while i < n {
         i = skip_ws(bytes, i);
         if i >= n {
@@ -300,17 +341,74 @@ pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String
             i = next_line(bytes, i);
             continue;
         }
-        let (s, j) = term(bytes, i, dict)?;
-        i = skip_ws(bytes, j);
-        let (p, j) = term(bytes, i, dict)?;
-        i = skip_ws(bytes, j);
+        // Subject: consult the stack-buffer cache before interning.
+        let s_start = i;
+        let s = {
+            let s_after = s_start + cache_s_len;
+            // `cache_s_id != NO_ID` guards both the non-empty check and prevents the
+            // `cache_s_len == 0` (invalidated) path from spuriously matching an empty range.
+            if cache_s_id != NO_ID
+                && s_after <= n
+                && bytes[s_start..s_after] == cache_s_buf[..cache_s_len]
+                && (s_after >= n
+                    || matches!(bytes[s_after], b' ' | b'\t' | b'\r' | b'\n'))
+            {
+                // Cache hit: same raw bytes → same interned id.
+                i = s_after;
+                cache_s_id
+            } else {
+                // Cache miss: intern normally, update the stack buffer.
+                let (sid, j) = term(bytes, i, dict)?;
+                let raw = &bytes[s_start..j];
+                if raw.len() <= SUBJ_PRED_CACHE_LEN {
+                    cache_s_buf[..raw.len()].copy_from_slice(raw);
+                    cache_s_len = raw.len();
+                    cache_s_id = sid;
+                } else {
+                    // Token too long for the inline buffer: disable the cache.
+                    cache_s_len = 0;
+                    cache_s_id = NO_ID;
+                }
+                i = j;
+                sid
+            }
+        };
+        i = skip_ws(bytes, i);
+        // Predicate: same stack-buffer cache (predicates repeat even more than subjects).
+        let p_start = i;
+        let p = {
+            let p_after = p_start + cache_p_len;
+            if cache_p_id != NO_ID
+                && p_after <= n
+                && bytes[p_start..p_after] == cache_p_buf[..cache_p_len]
+                && (p_after >= n
+                    || matches!(bytes[p_after], b' ' | b'\t' | b'\r' | b'\n'))
+            {
+                i = p_after;
+                cache_p_id
+            } else {
+                let (pid, j) = term(bytes, i, dict)?;
+                let raw = &bytes[p_start..j];
+                if raw.len() <= SUBJ_PRED_CACHE_LEN {
+                    cache_p_buf[..raw.len()].copy_from_slice(raw);
+                    cache_p_len = raw.len();
+                    cache_p_id = pid;
+                } else {
+                    cache_p_len = 0;
+                    cache_p_id = NO_ID;
+                }
+                i = j;
+                pid
+            }
+        };
+        i = skip_ws(bytes, i);
         // [OPUS-4.8] (sq-hxgb) Only the OBJECT position may be an RDF 1.2 triple term
         // `<<( s p o )>>` (matching the Turtle loader / RDF 1.2 grammar — triple terms
         // are object-only and may nest through their own object).
         let (o, j) = object_term(bytes, i, dict)?;
         i = skip_ws(bytes, j);
         if i >= n || bytes[i] != b'.' {
-            return Err(format!("N-Triples: expected '.' at byte {i}"));
+            return Err(format!("N-Triples: expected '.' at byte {}", i));
         }
         i += 1;
         out.push([s, p, o]);
@@ -965,6 +1063,180 @@ mod tests {
                 id
             );
         }
+    }
+
+    // [SONNET-4.6] (sq-7d3dj.31.3) Subject/predicate intern-cache tests.
+
+    /// A grouped N-Triples corpus (many triples per subject) exercises the cache hit path.
+    /// We verify: (a) the correct triples are parsed, (b) the subject cache produces the same
+    /// id for each occurrence of the same subject, and (c) distinct subjects get distinct ids.
+    #[test]
+    fn subject_run_cache_hits_produce_correct_ids() {
+        // Three subjects, each with three predicates — a genuine subject run.
+        let nt = concat!(
+            "<http://ex/s1> <http://ex/p1> <http://ex/o1> .\n",
+            "<http://ex/s1> <http://ex/p2> <http://ex/o2> .\n",
+            "<http://ex/s1> <http://ex/p3> <http://ex/o3> .\n",
+            "<http://ex/s2> <http://ex/p1> <http://ex/o4> .\n",
+            "<http://ex/s2> <http://ex/p2> <http://ex/o5> .\n",
+            "<http://ex/s3> <http://ex/p1> <http://ex/o6> .\n",
+        );
+        let mut d = Dict::new();
+        let triples = parse_chunk(nt.as_bytes(), &mut d).unwrap();
+        assert_eq!(triples.len(), 6);
+        // All three triples whose subject is s1 share the same subject id.
+        let s1_id = triples[0][0];
+        assert_eq!(triples[1][0], s1_id, "s1 second triple has wrong subject id");
+        assert_eq!(triples[2][0], s1_id, "s1 third triple has wrong subject id");
+        // s2 and s3 have distinct ids from s1 and each other.
+        let s2_id = triples[3][0];
+        let s3_id = triples[5][0];
+        assert_ne!(s1_id, s2_id, "s1 and s2 must have distinct ids");
+        assert_ne!(s1_id, s3_id, "s1 and s3 must have distinct ids");
+        assert_ne!(s2_id, s3_id, "s2 and s3 must have distinct ids");
+        // Predicate p1 is used for all three subjects — verify the predicate cache returns
+        // the same id for both occurrences of p1.
+        let p1_id_s1 = triples[0][1];
+        let p1_id_s2 = triples[3][1];
+        let p1_id_s3 = triples[5][1];
+        assert_eq!(p1_id_s1, p1_id_s2, "predicate p1 must have the same id across subjects");
+        assert_eq!(p1_id_s1, p1_id_s3, "predicate p1 must have the same id across subjects");
+        // Verify via dict round-trip.
+        use oxrdf::{NamedNode, Term};
+        assert_eq!(d.term(s1_id), Term::NamedNode(NamedNode::new_unchecked("http://ex/s1")));
+        assert_eq!(d.term(s2_id), Term::NamedNode(NamedNode::new_unchecked("http://ex/s2")));
+        assert_eq!(d.term(s3_id), Term::NamedNode(NamedNode::new_unchecked("http://ex/s3")));
+    }
+
+    /// A blank-node subject run exercises the blank-node boundary check — `_:b0` must NOT
+    /// collide with `_:b0extra` even though their first four bytes are identical.
+    #[test]
+    fn blank_node_subject_cache_no_false_hit_on_prefix_match() {
+        let nt = concat!(
+            "_:b0 <http://ex/p> <http://ex/o1> .\n",
+            "_:b0extra <http://ex/p> <http://ex/o2> .\n",
+            "_:b0 <http://ex/p> <http://ex/o3> .\n",
+        );
+        let mut d = Dict::new();
+        let triples = parse_chunk(nt.as_bytes(), &mut d).unwrap();
+        assert_eq!(triples.len(), 3);
+        let b0_id = triples[0][0];
+        let b0extra_id = triples[1][0];
+        let b0_again_id = triples[2][0];
+        // _:b0 and _:b0extra must be distinct.
+        assert_ne!(b0_id, b0extra_id, "_:b0 and _:b0extra must have different ids");
+        // The third line (_:b0) must re-use the first line's id (cache hit after eviction).
+        assert_eq!(b0_id, b0_again_id, "_:b0 in third line must share id with first line");
+        // Dict round-trip.
+        assert_eq!(
+            d.term(b0_id),
+            oxrdf::Term::BlankNode(oxrdf::BlankNode::new_unchecked("b0"))
+        );
+        assert_eq!(
+            d.term(b0extra_id),
+            oxrdf::Term::BlankNode(oxrdf::BlankNode::new_unchecked("b0extra"))
+        );
+    }
+
+    /// Shuffled input (no consecutive subject runs) must produce the SAME interned store as
+    /// the grouped input — the cache only affects speed, never correctness.
+    #[test]
+    fn shuffled_input_store_matches_grouped() {
+        // Build a small grouped corpus: 4 subjects × 3 predicates each.
+        let grouped = concat!(
+            "<http://ex/s1> <http://ex/p1> <http://ex/o11> .\n",
+            "<http://ex/s1> <http://ex/p2> <http://ex/o12> .\n",
+            "<http://ex/s1> <http://ex/p3> <http://ex/o13> .\n",
+            "<http://ex/s2> <http://ex/p1> <http://ex/o21> .\n",
+            "<http://ex/s2> <http://ex/p2> <http://ex/o22> .\n",
+            "<http://ex/s2> <http://ex/p3> <http://ex/o23> .\n",
+            "<http://ex/s3> <http://ex/p1> <http://ex/o31> .\n",
+            "<http://ex/s3> <http://ex/p2> <http://ex/o32> .\n",
+            "<http://ex/s3> <http://ex/p3> <http://ex/o33> .\n",
+        );
+        // Same triples, adversarially re-ordered (no two consecutive same-subject lines).
+        let shuffled = concat!(
+            "<http://ex/s1> <http://ex/p1> <http://ex/o11> .\n",
+            "<http://ex/s2> <http://ex/p1> <http://ex/o21> .\n",
+            "<http://ex/s3> <http://ex/p1> <http://ex/o31> .\n",
+            "<http://ex/s1> <http://ex/p2> <http://ex/o12> .\n",
+            "<http://ex/s2> <http://ex/p2> <http://ex/o22> .\n",
+            "<http://ex/s3> <http://ex/p2> <http://ex/o32> .\n",
+            "<http://ex/s1> <http://ex/p3> <http://ex/o13> .\n",
+            "<http://ex/s2> <http://ex/p3> <http://ex/o23> .\n",
+            "<http://ex/s3> <http://ex/p3> <http://ex/o33> .\n",
+        );
+        let mut d_grouped = Dict::new();
+        let t_grouped = parse_chunk(grouped.as_bytes(), &mut d_grouped).unwrap();
+        let mut d_shuffled = Dict::new();
+        let t_shuffled = parse_chunk(shuffled.as_bytes(), &mut d_shuffled).unwrap();
+
+        // Both must yield the same number of triples.
+        assert_eq!(t_grouped.len(), t_shuffled.len(), "triple counts must match");
+
+        // Both dicts must contain the same terms (same count, same term set).
+        assert_eq!(d_grouped.len(), d_shuffled.len(), "distinct-term counts must match");
+
+        // All nine triples must appear in both outputs (order may differ due to dict internment
+        // order, so compare via term reconstruction).
+        use oxrdf::{NamedNode, Term};
+        let grouped_set: std::collections::HashSet<[Term; 3]> = t_grouped
+            .iter()
+            .map(|&[s, p, o]| [d_grouped.term(s), d_grouped.term(p), d_grouped.term(o)])
+            .collect();
+        let shuffled_set: std::collections::HashSet<[Term; 3]> = t_shuffled
+            .iter()
+            .map(|&[s, p, o]| [d_shuffled.term(s), d_shuffled.term(p), d_shuffled.term(o)])
+            .collect();
+        assert_eq!(
+            grouped_set, shuffled_set,
+            "grouped and shuffled parse must produce the same triple set"
+        );
+        // Verify one concrete triple is present in both.
+        let triple_s1_p2_o12 = [
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/s1")),
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/p2")),
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/o12")),
+        ];
+        assert!(grouped_set.contains(&triple_s1_p2_o12), "grouped must contain s1/p2/o12");
+        assert!(shuffled_set.contains(&triple_s1_p2_o12), "shuffled must contain s1/p2/o12");
+    }
+
+    #[test]
+    // [SONNET-4.6] (sq-7d3dj.31.3) Verify that subjects/predicates longer than
+    // SUBJ_PRED_CACHE_LEN bytes are parsed correctly even though they bypass the stack-buffer
+    // cache (the else branch that sets cache_s_len=0 / cache_s_id=NO_ID).  Two consecutive
+    // triples with the same oversized subject must receive the SAME interned id.
+    fn oversized_subject_bypasses_cache_parses_correctly() {
+        // Build a subject IRI of exactly SUBJ_PRED_CACHE_LEN+1 bytes (the `<…>` delimiters add 2,
+        // but the raw bytes stored in the buffer include the delimiters, so the test subject IRI
+        // must produce raw bytes > SUBJ_PRED_CACHE_LEN in the parser).
+        // Each inner char is 'a', giving us SUBJ_PRED_CACHE_LEN+1 'a's inside "<http://…>".
+        let inner: String = "a".repeat(SUBJ_PRED_CACHE_LEN + 1);
+        let subj = format!("<http://ex/{}>", inner);
+        // Two consecutive triples share the same oversized subject and predicate.
+        let input = format!(
+            "{} <http://ex/p> <http://ex/o1> .\n{} <http://ex/p> <http://ex/o2> .\n",
+            subj, subj
+        );
+        let mut dict = Dict::new();
+        let triples = parse_chunk(input.as_bytes(), &mut dict).expect("parse should succeed");
+        assert_eq!(triples.len(), 2, "expected two triples");
+        // Both triples must share the SAME subject id (intern de-duplication).
+        assert_eq!(
+            triples[0][0], triples[1][0],
+            "oversized subject must be interned to the same id on each occurrence"
+        );
+        // Both triples must share the same predicate id.
+        assert_eq!(
+            triples[0][1], triples[1][1],
+            "predicate id must match across both triples"
+        );
+        // Object ids must differ.
+        assert_ne!(
+            triples[0][2], triples[1][2],
+            "distinct objects must get distinct ids"
+        );
     }
 }
 

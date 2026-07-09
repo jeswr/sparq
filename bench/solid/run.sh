@@ -54,23 +54,29 @@ trap 'rm -rf "$TMP"' EXIT
 
 # ---- 2. extract the DETERMINISTIC counts from the stdout (pure function of the fixture) ----
 # Each grep targets a stable, anchored phrase the example prints. A missing capture leaves the
-# var empty so the expected.tsv cross-check below fails loudly (never a silent skip).
+# var empty so the expected.tsv cross-check below fails loudly (never a silent skip). NB: each
+# capture ends `|| true` so that under `set -euo pipefail` a NON-matching grep (format drift)
+# yields an empty var + a LOUD expected.tsv failure below, instead of a silent `set -e` abort
+# of the whole script with no diagnostic (the exact bug this file hit after #1629, sq-yxtkm).
 emit() { printf '%s\t%s\t%s\n' "$1" "$2" "count" >> "$TMP/solid.tsv"; }
 : > "$TMP/solid.tsv"
 
 # "WAC fixture: <G> named graphs, <Q> quads"
-wac_graphs=$(grep -oE 'WAC fixture: [0-9]+ named graphs' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1)
-wac_quads=$(grep -oE 'WAC fixture: [0-9]+ named graphs, [0-9]+ quads' "$TMP/solid.out" | grep -oE '[0-9]+ quads' | grep -oE '[0-9]+' | head -1)
+wac_graphs=$(grep -oE 'WAC fixture: [0-9]+ named graphs' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1 || true)
+wac_quads=$(grep -oE 'WAC fixture: [0-9]+ named graphs, [0-9]+ quads' "$TMP/solid.out" | grep -oE '[0-9]+ quads' | grep -oE '[0-9]+' | head -1 || true)
 # The first "auth view: <T> triples" line is the WAC materialisation; the second is ACP.
-mapfile -t auth_triples < <(grep -oE 'auth view: [0-9]+ triples' "$TMP/solid.out" | grep -oE '[0-9]+')
+mapfile -t auth_triples < <(grep -oE 'auth view: [0-9]+ triples' "$TMP/solid.out" | grep -oE '[0-9]+' || true)
 wac_auth=${auth_triples[0]:-}
 acp_auth=${auth_triples[1]:-}
 # "alice readable graphs: <N>"
-alice_graphs=$(grep -oE 'alice readable graphs: [0-9]+' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1)
+alice_graphs=$(grep -oE 'alice readable graphs: [0-9]+' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1 || true)
 # The FULL-dataset GRAPH-?g query row count (first "rows: <N>" line) and the authorized-subset
-# row count (the "rows: <N> (authorized subset)" line — v1 and v2 assert-equal in the example).
-full_rows=$(grep -oE '    rows: [0-9]+' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1)
-auth_rows=$(grep -oE 'rows: [0-9]+ \(authorized subset\)' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1)
+# row count (the "rows: <N> (authorized subset...)" line — v1 and v2 assert-equal in the
+# example). The parenthetical may carry a trailing annotation (e.g. "(authorized subset,
+# union-always)" / "(authorized subset, union)" since #1629), so match up to the closing paren
+# rather than requiring ")" immediately after "subset".
+full_rows=$(grep -oE '    rows: [0-9]+' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1 || true)
+auth_rows=$(grep -oE 'rows: [0-9]+ \(authorized subset[^)]*\)' "$TMP/solid.out" | grep -oE '[0-9]+' | head -1 || true)
 
 [ -n "$wac_graphs" ]  && emit solid_wac_named_graphs      "$wac_graphs"
 [ -n "$wac_quads" ]   && emit solid_wac_quads             "$wac_quads"

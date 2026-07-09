@@ -164,6 +164,11 @@ case "${NTRIP:-0}" in ''|0) die "bulk load produced 0 triples in <$VIRTUOSO_GRAP
 # honest cross-check is COUNT/result-size vs sparq FIRST — a truncated Virtuoso count shows up as a
 # mismatch, not a silent pass. (Row cap raising is a Virtuoso-config concern documented in the
 # registry note; for the small same-box corpus the default cap is not hit for most queries.)
+# [FABLE-5] sq-7d3dj.34: HTTP_PROFILE=1 switches the adapter to --profile (6-col rows:
+# keep-alive + fresh-connect full-request latency AND TTFB); the awk renames col1 and
+# reprints ALL columns, serving both the 3-col and 6-col contracts.
+PROFILE_FLAG=""
+[ "${HTTP_PROFILE:-0}" = "1" ] && PROFILE_FLAG="--profile"
 : > "$OUT_TSV"
 shopt -s nullglob
 any_ok=0
@@ -173,8 +178,9 @@ for q in "$QUERIES_DIR"/*.rq; do
   # note in fuseki-same-box.sh: a per-query `timeout` (rc=124) would otherwise propagate via
   # pipefail + set -e and abort the whole loop instead of recording one ERROR row and continuing.
   row="$({ timeout "$VIRTUOSO_QUERY_TIMEOUT" python3 "$ADAPTER" \
-             --endpoint "$ENDPOINT" --query-file "$q" --engine virtuoso --iters "$ITERS" 2>/dev/null || true; } \
-         | awk -F'\t' -v n="$name" 'NR==1{printf "%s\t%s\t%s\n", n, $2, $3}')"
+             --endpoint "$ENDPOINT" --query-file "$q" --engine virtuoso --iters "$ITERS" \
+             $PROFILE_FLAG 2>/dev/null || true; } \
+         | awk -F'\t' -v n="$name" 'NR==1{$1=n; print}' OFS='\t')"
   [ -n "$row" ] || row="$name	ERROR	virtuoso"
   printf '%s\n' "$row" >> "$OUT_TSV"
   case "$row" in *$'\tERROR\t'*) ;; *) any_ok=1 ;; esac
