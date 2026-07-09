@@ -769,6 +769,366 @@ impl Drop for CompressedPermWriter {
     }
 }
 
+/// [FABLE-5] sq-7d3dj.32.2.4 — SPIKE-ONLY per-field byte attribution over the
+/// [`encode_block`] stream. This whole module is `#[cfg(test)]`: it adds ZERO bytes to
+/// the shipped `SPQCPRM1` stream and does not touch the encode/decode hot path (the
+/// `wasm_bundle_bytes` `feature_off_exact` floor is unmoved). It exists to adjudicate the
+/// §4 root-cause hypotheses (H1/H2/H3) of `research/compressed-memory-profile.md` for why
+/// the compressed store's B/triple grows 36.75 (1M) → 48.75 (10M) then plateaus at 48.75
+/// (50M): it mirrors `encode_block` field-for-field and attributes each emitted varint's
+/// byte length to the field class that produced it. All numbers this module prints are
+/// NON-canonical work-box measurements (never a doc/test perf number).
+#[cfg(test)]
+mod byte_attribution {
+    use super::{encode_block, Id, BLOCK};
+
+    /// Byte length of the unsigned LEB128 varint that `put_varint` would emit for `x`
+    /// (mirrors its `while x >= 0x80 { x >>= 7 }` loop exactly): `⌈bits/7⌉`, min 1.
+    #[inline]
+    fn varint_len(x: u64) -> usize {
+        let mut x = x;
+        let mut n = 1usize;
+        while x >= 0x80 {
+            x >>= 7;
+            n += 1;
+        }
+        n
+    }
+
+    /// The disjoint field classes the block stream's bytes are attributed to. These are
+    /// exactly the write sites in [`encode_block`]; every byte the encoder emits lands in
+    /// exactly one class, so `total()` equals the real encoded block-stream length.
+    #[derive(Clone, Copy, Default, Debug)]
+    struct FieldBytes {
+        /// The per-block `count` varint (one per block).
+        count: u64,
+        /// The block's FIRST row, written as three absolute varints (col0/col1/col2).
+        first_row_abs: u64,
+        /// col1+col2 written ABSOLUTE because the leading column changed (`d0 != 0`).
+        reset_d0: u64,
+        /// col2 written ABSOLUTE because the middle column changed (`d0 == 0 && d1 != 0`).
+        reset_d1: u64,
+        /// The `d0` (leading-column) delta varint on every non-first row.
+        d0: u64,
+        /// The `d1` (middle-column) delta varint, emitted only when `d0 == 0`.
+        d1: u64,
+        /// The `d2` (trailing-column) delta varint, emitted only when `d0 == 0 && d1 == 0`.
+        d2: u64,
+    }
+
+    impl FieldBytes {
+        fn total(&self) -> u64 {
+            self.count + self.first_row_abs + self.reset_d0 + self.reset_d1 + self.d0 + self.d1 + self.d2
+        }
+
+        fn add(&mut self, o: &FieldBytes) {
+            self.count += o.count;
+            self.first_row_abs += o.first_row_abs;
+            self.reset_d0 += o.reset_d0;
+            self.reset_d1 += o.reset_d1;
+            self.d0 += o.d0;
+            self.d1 += o.d1;
+            self.d2 += o.d2;
+        }
+    }
+
+    /// Attributes the bytes of ONE block (`chunk`, sorted, 1..=`BLOCK` rows) to field
+    /// classes, mirroring [`encode_block`] write-site for write-site. This is a pure
+    /// re-derivation of the same varint lengths — no bytes are emitted — so its `total()`
+    /// is asserted equal to the real `encode_block` output length in a self-check test.
+    fn attribute_block(chunk: &[[Id; 3]], fb: &mut FieldBytes) {
+        fb.count += varint_len(chunk.len() as u64) as u64;
+        fb.first_row_abs += (varint_len(chunk[0][0] as u64)
+            + varint_len(chunk[0][1] as u64)
+            + varint_len(chunk[0][2] as u64)) as u64;
+        for w in chunk.windows(2) {
+            let (p, r) = (w[0], w[1]);
+            let d0 = r[0] - p[0];
+            fb.d0 += varint_len(d0 as u64) as u64;
+            if d0 == 0 {
+                let d1 = r[1] - p[1];
+                fb.d1 += varint_len(d1 as u64) as u64;
+                if d1 == 0 {
+                    fb.d2 += varint_len((r[2] - p[2]) as u64) as u64; // strictly increasing
+                } else {
+                    fb.reset_d1 += varint_len(r[2] as u64) as u64; // col2 resets → absolute
+                }
+            } else {
+                // cols 1,2 reset → absolute
+                fb.reset_d0 += (varint_len(r[1] as u64) + varint_len(r[2] as u64)) as u64;
+            }
+        }
+    }
+
+    /// Attributes a whole permutation (sorted rows in this permutation's column order),
+    /// blocking exactly as [`CompressedPerm::encode`] does (`rows.chunks(BLOCK)`), and
+    /// adding the resident directory cost (16 B/block: one `([Id;3], u32)` per block).
+    fn attribute_perm(rows: &[[Id; 3]]) -> (FieldBytes, u64) {
+        let mut fb = FieldBytes::default();
+        let mut n_blocks = 0u64;
+        for chunk in rows.chunks(BLOCK) {
+            attribute_block(chunk, &mut fb);
+            n_blocks += 1;
+        }
+        let dir_bytes = n_blocks * 16;
+        (fb, dir_bytes)
+    }
+
+    /// A deterministic xorshift PRNG (same family as the file's `sample`), seeded so runs
+    /// are reproducible across hosts.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+        #[inline]
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        /// A Zipf-ish skewed draw in `1..=n`: bias toward small ids (frequent terms get
+        /// small, insertion-ordered ids — the H3 mechanism). Squaring a uniform in [0,1)
+        /// concentrates mass near 0; `1 +` maps to `1..=n`.
+        #[inline]
+        fn skewed(&mut self, n: u64) -> u64 {
+            let u = (self.next() >> 11) as f64 / (1u64 << 53) as f64; // uniform [0,1)
+            1 + ((u * u) * (n.saturating_sub(1)) as f64) as u64
+        }
+    }
+
+    /// Synthesises `n_triples` canonical `[s, p, o]` triples over a term space of
+    /// `n_terms` distinct ids, mimicking WatDiv skew: a small predicate vocabulary,
+    /// skewed (Zipf-ish) subjects and objects so frequent terms take small ids — the
+    /// insertion-order-gives-small-ids property H3 turns on. Deduplicated + returned
+    /// UNSORTED (the caller re-sorts per permutation).
+    fn synth_watdiv(n_triples: usize, n_terms: u64, seed: u64) -> Vec<[Id; 3]> {
+        let mut rng = Rng::new(seed);
+        // Reserve the low id band for predicates (WatDiv has ~85 predicates); subjects &
+        // objects range across the whole term space but skewed toward small ids.
+        let n_preds: u64 = 85;
+        let mut set = std::collections::HashSet::with_capacity(n_triples);
+        let mut v = Vec::with_capacity(n_triples);
+        let mut guard = 0usize;
+        while v.len() < n_triples && guard < n_triples * 4 {
+            guard += 1;
+            let s = rng.skewed(n_terms) as Id;
+            let p = (1 + (rng.next() % n_preds)) as Id;
+            let o = rng.skewed(n_terms) as Id;
+            let t = [s, p, o];
+            if set.insert(t) {
+                v.push(t);
+            }
+        }
+        v
+    }
+
+    /// Sorts a copy of `triples` into `perm`'s column order (the exact rows
+    /// `from_triples_compressed` would hand `CompressedPerm::encode` for that permutation).
+    fn perm_rows(triples: &[[Id; 3]], order: [usize; 3]) -> Vec<[Id; 3]> {
+        let mut rows: Vec<[Id; 3]> =
+            triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows
+    }
+
+    /// The six permutation column orders (kept local so the spike does not depend on
+    /// `store::Perm`, which is out of this module's scope).
+    const PERM_ORDERS: [(&str, [usize; 3]); 6] = [
+        ("SPO", [0, 1, 2]),
+        ("SOP", [0, 2, 1]),
+        ("PSO", [1, 0, 2]),
+        ("POS", [1, 2, 0]),
+        ("OSP", [2, 0, 1]),
+        ("OPS", [2, 1, 0]),
+    ];
+
+    /// SELF-CHECK: the attribution's `total()` must equal the REAL `encode_block` output
+    /// length for every block, byte-for-byte — otherwise the attribution table is a
+    /// fiction. Runs across block boundaries and both reset shapes.
+    #[test]
+    fn attribution_total_equals_real_encoded_length() {
+        for &n_terms in &[100_000u64, 1_000_000, 5_000_000] {
+            let triples = synth_watdiv(20_000, n_terms, 0xA5A5);
+            for (_, order) in PERM_ORDERS {
+                let rows = perm_rows(&triples, order);
+                // Real encoded block-stream length.
+                let mut real = Vec::new();
+                for chunk in rows.chunks(BLOCK) {
+                    encode_block(chunk, &mut real);
+                }
+                // Attributed length.
+                let (fb, _dir) = attribute_perm(&rows);
+                assert_eq!(
+                    fb.total(),
+                    real.len() as u64,
+                    "attribution total != real encoded length (n_terms={}, order={:?})",
+                    n_terms,
+                    order
+                );
+            }
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.4 — the MEASUREMENT. Prints a per-field, per-permutation
+    /// byte-attribution table at three id-density regimes (100K / 1M / 5M distinct terms),
+    /// each with the same triple:term ratio so the ONLY moving variable is term-space bits.
+    /// Run with `cargo test -p sparq-core --lib byte_attribution -- --nocapture` to see the
+    /// tables. All numbers are NON-canonical work-box measurements. `#[ignore]` so the
+    /// default `cargo test` stays fast (the 5M-term regime allocates a few hundred MB); the
+    /// self-check test above runs unconditionally and pins the attribution's correctness.
+    #[test]
+    #[ignore = "spike measurement: run explicitly with --ignored --nocapture (allocates ~hundreds of MB)"]
+    fn measure_byte_attribution_across_id_density() {
+        // Fixed triple:term ratio (~10 triples/term, roughly WatDiv's density) so the id
+        // count grows with the term space and the regimes are comparable per-triple.
+        let regimes: [(&str, usize, u64); 3] = [
+            ("100K-term", 1_000_000, 100_000),
+            ("1M-term", 10_000_000, 1_000_000),
+            ("5M-term", 50_000_000, 5_000_000),
+        ];
+
+        println!("\n===== sq-7d3dj.32.2.4 per-field byte attribution (NON-canonical work-box) =====");
+        for (label, want_triples, n_terms) in regimes {
+            let triples = synth_watdiv(want_triples, n_terms, 0x5EED);
+            let n = triples.len() as f64;
+            let bits = (64 - (n_terms).leading_zeros()) as usize;
+            println!(
+                "\n--- regime {} : {} distinct triples, {} terms (~{} term-space bits) ---",
+                label, triples.len(), n_terms, bits
+            );
+            println!(
+                "{:<5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9}",
+                "perm", "count", "first", "reset_d0", "reset_d1", "d0", "d1", "d2", "dir", "blk_tot", "B/triple"
+            );
+
+            let mut agg = FieldBytes::default();
+            let mut agg_dir = 0u64;
+            let mut agg_rows = 0u64;
+            for (name, order) in PERM_ORDERS {
+                let rows = perm_rows(&triples, order);
+                let (fb, dir) = attribute_perm(&rows);
+                let blk_tot = fb.total();
+                let bpt = (blk_tot + dir) as f64 / rows.len().max(1) as f64;
+                println!(
+                    "{:<5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9.3}",
+                    name, fb.count, fb.first_row_abs, fb.reset_d0, fb.reset_d1, fb.d0, fb.d1, fb.d2, dir, blk_tot, bpt
+                );
+                agg.add(&fb);
+                agg_dir += dir;
+                agg_rows += rows.len() as u64;
+            }
+            // Per-triple attribution summed across the six permutations (the store's
+            // block-stream B/triple = sum over perms / #triples). This is the quantity the
+            // §4 table (6.125 → 8.125 B/triple/perm) is about.
+            let per_triple = |b: u64| b as f64 / n;
+            println!(
+                "sum/triple  count={:.3}  first={:.3}  reset_d0={:.3}  reset_d1={:.3}  d0={:.3}  d1={:.3}  d2={:.3}  dir={:.3}  ALL={:.3}",
+                per_triple(agg.count),
+                per_triple(agg.first_row_abs),
+                per_triple(agg.reset_d0),
+                per_triple(agg.reset_d1),
+                per_triple(agg.d0),
+                per_triple(agg.d1),
+                per_triple(agg.d2),
+                per_triple(agg_dir),
+                per_triple(agg.total() + agg_dir),
+            );
+            let _ = agg_rows;
+        }
+        println!("\n===== end attribution — verdict adjudicated in the bead note =====\n");
+    }
+
+    /// A UNIFORM (non-skewed) id draw in `1..=n`, for the H3 discriminator: if the growth
+    /// were purely LEB128 quantization of the term space (H1/H2, blind to id assignment),
+    /// swapping skewed→uniform ids at the SAME term-space size would not change B/triple.
+    /// If frequent-terms-get-small-ids (H3) is what holds the plateau, uniform ids should
+    /// be MORE expensive (they spread mass across the whole bit width).
+    fn synth_uniform(n_triples: usize, n_terms: u64, seed: u64) -> Vec<[Id; 3]> {
+        let mut rng = Rng::new(seed);
+        let n_preds: u64 = 85;
+        let mut set = std::collections::HashSet::with_capacity(n_triples);
+        let mut v = Vec::with_capacity(n_triples);
+        let mut guard = 0usize;
+        while v.len() < n_triples && guard < n_triples * 4 {
+            guard += 1;
+            let s = (1 + rng.next() % n_terms) as Id;
+            let p = (1 + (rng.next() % n_preds)) as Id;
+            let o = (1 + rng.next() % n_terms) as Id;
+            let t = [s, p, o];
+            if set.insert(t) {
+                v.push(t);
+            }
+        }
+        v
+    }
+
+    fn agg_per_triple(triples: &[[Id; 3]]) -> (FieldBytes, u64, u64) {
+        let mut agg = FieldBytes::default();
+        let mut agg_dir = 0u64;
+        let mut rows_tot = 0u64;
+        for (_, order) in PERM_ORDERS {
+            let rows = perm_rows(triples, order);
+            let (fb, dir) = attribute_perm(&rows);
+            agg.add(&fb);
+            agg_dir += dir;
+            rows_tot += rows.len() as u64;
+        }
+        (agg, agg_dir, rows_tot)
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.4 — H1/H2/H3 DISCRIMINATOR. Two controlled sweeps at a
+    /// FIXED triple count so the only variable is (a) term-space bits and (b) skewed vs
+    /// uniform id assignment. NON-canonical work-box. Run with `--ignored --nocapture`.
+    ///
+    /// Sweep A (bit-width, skewed): fixed 4M triples, term space 250K → 4M (18→22 bits).
+    /// Isolates how B/triple moves with term-space bits when frequent terms keep small ids.
+    ///
+    /// Sweep B (skew vs uniform): fixed 4M triples, 4M terms, skewed vs uniform id draw.
+    /// If uniform is materially costlier, the plateau is H3 (small-ids-for-frequent-terms),
+    /// not pure H1/H2 bit-width quantization.
+    #[test]
+    #[ignore = "spike discriminator: run explicitly with --ignored --nocapture"]
+    fn discriminate_h1_h2_h3() {
+        const N: usize = 4_000_000;
+        println!("\n===== sq-7d3dj.32.2.4 H1/H2/H3 discriminator (NON-canonical work-box) =====");
+
+        println!("\n--- Sweep A: fixed {} triples, vary term-space bits (SKEWED ids) ---", N);
+        println!("{:<10} {:>6} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}", "terms", "bits", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple");
+        for &n_terms in &[250_000u64, 500_000, 1_000_000, 2_000_000, 4_000_000] {
+            let triples = synth_watdiv(N, n_terms, 0xC0FFEE);
+            let n = triples.len().max(1) as f64;
+            let bits = 64 - n_terms.leading_zeros();
+            let (agg, dir, _) = agg_per_triple(&triples);
+            let pt = |b: u64| b as f64 / n;
+            println!(
+                "{:<10} {:>6} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>10.3}",
+                n_terms, bits, pt(agg.reset_d0), pt(agg.reset_d1), pt(agg.d0), pt(agg.d1), pt(agg.d2), pt(agg.first_row_abs), pt(agg.total() + dir)
+            );
+        }
+
+        println!("\n--- Sweep B: fixed {} triples, 4M terms, SKEWED vs UNIFORM ids ---", N);
+        println!("{:<10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}", "assign", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple");
+        for (label, triples) in [
+            ("skewed", synth_watdiv(N, 4_000_000, 0xC0FFEE)),
+            ("uniform", synth_uniform(N, 4_000_000, 0xC0FFEE)),
+        ] {
+            let n = triples.len().max(1) as f64;
+            let (agg, dir, _) = agg_per_triple(&triples);
+            let pt = |b: u64| b as f64 / n;
+            println!(
+                "{:<10} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>10.3}",
+                label, pt(agg.reset_d0), pt(agg.reset_d1), pt(agg.d0), pt(agg.d1), pt(agg.d2), pt(agg.first_row_abs), pt(agg.total() + dir)
+            );
+        }
+        println!("\n===== end discriminator =====\n");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
