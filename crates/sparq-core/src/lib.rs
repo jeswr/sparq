@@ -4722,10 +4722,11 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
             }
             b'<' => {
                 i += 1;
-                match memchr::memchr(b'>', &bytes[i..]) {
-                    Some(off) => i += off + 1,
-                    None => return None,
-                }
+                // [FABLE-5] clippy 1.97's `question_mark` lint rejects the `match … { Some(off)
+                // => …, None => return None }` shape here; the `?` early-return is behaviour-
+                // identical (unterminated IRI ⇒ `None`).
+                let off = memchr::memchr(b'>', &bytes[i..])?;
+                i += off + 1;
             }
             q @ (b'"' | b'\'') => {
                 let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
