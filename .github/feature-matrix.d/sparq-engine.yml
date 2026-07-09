@@ -251,3 +251,25 @@
   crate: "sparq-engine"
   features: "value-join"
   test: true
+
+# [FABLE-5] sq-7d3dj.30.11 (#1785): the `id-filter-fastpath` opt-in id-level `=`/`!=`
+# FILTER fast path gates ALL 19 of its tests behind
+# `#[cfg(all(test, feature = "id-filter-fastpath"))]` — the `idfast_unit` module in
+# exec.rs (the load-bearing differential suite that pairs EVERY id kind — IRIs, bnodes,
+# numeric-promotion pairs, language-tagged, ill-typed literals — and asserts the fast
+# verdict equals the exact `term_of` + `values_equal` oracle row-for-row, plus the static
+# non-literal analysis witnesses, the `equal_idfast` edge cases, the q08-shape e2e query,
+# the EXISTS-re-entry column-set-leak regression test, and the non-vacuity mutation check).
+# Without this leg they run ZERO times in CI (ci.yml's `--workspace --all-targets` archive
+# passes NO `--features`, and its `--all-features` lanes are clippy/rustdoc only) — the
+# silent "compiled EMPTY ... tests never ran" gap this lane closes. No new dep
+# (`id-filter-fastpath = []`, only the already-direct sparq-core + rustc-hash; no `unsafe`).
+# Verified `cargo nextest list -p sparq-engine --features id-filter-fastpath` shows the 19
+# `idfast_unit` tests and `cargo test -p sparq-engine --features id-filter-fastpath` runs
+# them green. (The feature-OFF path is NOT byte-identical to base — an always-compiled
+# EXISTS-re-entry refactor moved bytes, declared in bench/feature-off-declarations/1785.json —
+# but is behaviour-identical.)
+- name: "sparq-engine (id-filter-fastpath)"
+  crate: "sparq-engine"
+  features: "id-filter-fastpath"
+  test: true
