@@ -616,7 +616,14 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   bnode ids are identity-comparable exactly like IRIs for `=`/`!=` (distinct non-literals compare
   FALSE per §17.4.1.7), so a bnode-object predicate still fires. Any literal object for the predicate,
   or a VARIABLE predicate, or MIXED use of the variable (also an object of a literal-having predicate)
-  → decline. **Snapshot soundness:** a prepared query in sparq is parse-only (`PreparedQuery` carries
+  → decline. **Graph scoping (soundness):** the credit is scoped to ONE graph's object column, so an
+  object variable bound under a `GRAPH <g>`/`GRAPH ?g` block stays literal-risk at an OUTER dispatch —
+  a FILTER sitting outside the GRAPH block classifies against the default graph, but the object is
+  bound from a self-contained named sub-graph with its own store/dict, so crediting it off the default
+  column would be unsound (a named-graph literal would be id-compared). The inside-GRAPH dispatch is
+  correct and unaffected (it evaluates against the named sub-graph, so its own classifier scans the
+  right store). `Graph::predicate_has_literal_object` answers for the receiver graph only.
+  **Snapshot soundness:** a prepared query in sparq is parse-only (`PreparedQuery` carries
   algebra, no plan); each evaluation borrows an immutable `&Graph` snapshot (a server request pins a
   generation), so the check is re-run against the LIVE graph every eval — an UPDATE inserting a
   literal object publishes a new snapshot the next query re-checks; the verdict never outlives its
