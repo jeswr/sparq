@@ -1611,7 +1611,7 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::UnattestedCommitment { proof, commitment } => write!(
                 f,
-                "scan sub-proof {proof}: commitment {commitment} has no issuer attestation (unsigned / prover-invented commitment — no credential provenance)"
+                "sub-proof {proof}: commitment {commitment} has no issuer attestation (unsigned / prover-invented commitment — no credential provenance); applies to a BGP scan or an extended-fragment path sub-proof alike"
             ),
             CheckError::InvalidIssuerSignature { commitment } => write!(
                 f,
@@ -1643,7 +1643,7 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::ScanCommitmentSaltMissing { proof, commitment } => write!(
                 f,
-                "scan sub-proof {proof}: the attestation covering commitment {commitment} carries no salt (audit #9 / codex 2221 HIGH: a scan-covering attestation MUST be salt-bound — a salt-less legacy attestation bypasses salt-separation)"
+                "sub-proof {proof}: the attestation covering commitment {commitment} carries no salt (audit #9 / codex 2221 HIGH: a scan- or path-covering attestation MUST be salt-bound — a salt-less legacy attestation bypasses salt-separation)"
             ),
             CheckError::AttributionMalformed { proof, expected, got } => write!(
                 f,
@@ -1668,11 +1668,11 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::ScanCommitmentStatusMissing { proof, commitment } => write!(
                 f,
-                "scan sub-proof {proof}: the attestation covering commitment {commitment} carries no issuer-bound status reference (audit #12: a scan-covering attestation MUST bind a status-list reference — a status-unbound attestation lets a revoked credential be presented unchecked)"
+                "sub-proof {proof}: the attestation covering commitment {commitment} carries no issuer-bound status reference (audit #12: a scan- or path-covering attestation MUST bind a status-list reference — a status-unbound attestation lets a revoked credential be presented unchecked)"
             ),
             CheckError::RevocationReferenceMissing { proof } => write!(
                 f,
-                "scan sub-proof {proof}: an issuer-bound status reference is present but manifest.revocation is absent (audit #12: the prover dropped the disclosed revocation reference needed to check the issuer-signed status digest)"
+                "sub-proof {proof}: an issuer-bound status reference is present but manifest.revocation is absent (audit #12: the prover dropped the disclosed revocation reference needed to check the issuer-signed status digest)"
             ),
             CheckError::RevocationReferenceMismatch { commitment } => write!(
                 f,
@@ -2353,9 +2353,13 @@ fn prefilter_manifest_structure_impl(
     Ok(required)
 }
 
-/// Stage 2d: bind every scan commitment to an issuer signature whose key is in
-/// the EXTERNAL trusted key-set `K` (audit #3, soundness fix for codex #1). For
-/// each `commitments[g]` of each scan sub-proof:
+/// Stage 2d: bind every committed graph a verified sub-proof draws triples from to
+/// an issuer signature whose key is in the EXTERNAL trusted key-set `K` (audit #3,
+/// soundness fix for codex #1). For each `commitments[g]` of each `Scan` and — in
+/// the `extended-fragment` regime — each bounded-path `PathReach` sub-proof
+/// (sq-nlulr; a path graph is attested + salt-recorded on the same footing as a
+/// scan graph, so the flat cross-graph non-bnode discipline extends to a
+/// scan↔single-graph-path join):
 /// - there MUST be a `commitment_attestations` entry over that commitment value
 ///   OR a hidden-issuer proof covering it (sq-xxg, see below),
 /// - its signature MUST verify under its declared `issuer_public_key`,
@@ -2420,22 +2424,40 @@ fn bind_issuer_attestations(
         }
     }
 
-    // [OPUS-4.8] codex 2223 LOW: the verified per-graph salt for every commitment
-    // ACTUALLY REFERENCED by a verified scan sub-proof. The salt-uniqueness check
-    // (step 3) runs ONLY over this referenced set, not over every declared
-    // attestation: the #9 security property only concerns committed graphs a
-    // verified scan drew triples from, so an unrelated extra attestation reusing a
-    // salt must NOT false-reject a valid proof. Keyed by canonical commitment hex
-    // (so the same graph referenced by several scans records once); the value is
-    // the verified salt hex. Populated only after the attestation over `c` has
-    // fully verified (key ∈ K, signature valid, salt present + salt-bound), so a
-    // recorded salt is always issuer-attested.
+    // [OPUS-4.8] codex 2223 LOW / sq-nlulr: the verified per-graph salt for every
+    // commitment ACTUALLY REFERENCED by a verified SCAN or (extended-fragment) PATH
+    // sub-proof. The salt-uniqueness check (step 3) runs ONLY over this referenced
+    // set, not over every declared attestation: the #9 security property only
+    // concerns committed graphs a verified sub-proof drew triples from, so an
+    // unrelated extra attestation reusing a salt must NOT false-reject a valid
+    // proof. Keyed by canonical commitment hex (so the same graph referenced by
+    // several scans/paths records once); the value is the verified salt hex.
+    // Populated only after the attestation over `c` has fully verified (key ∈ K,
+    // signature valid, salt present + salt-bound), so a recorded salt is always
+    // issuer-attested.
     let mut referenced_salt: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
 
     for (pi, sp) in manifest.sub_proofs.iter().enumerate() {
-        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
-            continue;
+        // [OPUS-4.8] sq-nlulr: the audit-#9 issuer-attestation + salt-uniqueness
+        // requirement covers EVERY committed graph a VERIFIED sub-proof draws
+        // triples from. A BGP `Scan` and, in the extended fragment, a bounded
+        // property-path `PathReach` both expose `commitments` (each with a
+        // proof-bound `attribution`), so a path commitment is attested and
+        // salt-recorded on the SAME footing as a scan commitment. This is what
+        // makes a cross-graph scan<->single-graph-PATH join's non-bnode COROLLARY
+        // (`bind_fragment_join_coherence`) carry the flat path's distinct-salt
+        // discipline: the path graph now contributes an issuer-attested,
+        // distinctly-salted commitment to `referenced_salt`, so the salt-uniqueness
+        // gate (step 3) rejects a path graph reusing a scan graph's salt. Flat
+        // manifests carry NO `PathReach` sub-proof (that variant is
+        // `extended-fragment`-gated), so the default build is byte-identical: the
+        // match collapses to the original `Scan`-or-continue.
+        let commitments: &[FieldHex] = match &sp.inputs {
+            ProofInputs::Scan { commitments, .. } => commitments,
+            #[cfg(feature = "extended-fragment")]
+            ProofInputs::PathReach { commitments, .. } => commitments,
+            _ => continue,
         };
         for c in commitments {
             // Find an attestation declared over this exact commitment value
@@ -2619,26 +2641,28 @@ fn bind_issuer_attestations(
                     commitment: c.0.clone(),
                 });
             }
-            // [OPUS-4.8] codex 2223 LOW: record the now-verified salt for this
-            // SCAN-REFERENCED commitment. Keyed by canonical commitment hex so the
-            // same graph referenced by multiple scans records a single entry; the
-            // salt-uniqueness gate (step 3) iterates only this set, so an unrelated
-            // extra attestation never participates.
+            // [OPUS-4.8] codex 2223 LOW / sq-nlulr: record the now-verified salt for
+            // this SCAN- or PATH-REFERENCED commitment. Keyed by canonical commitment
+            // hex so the same graph referenced by multiple scans/paths records a
+            // single entry; the salt-uniqueness gate (step 3) iterates only this set,
+            // so an unrelated extra attestation never participates.
             referenced_salt.insert(field_to_hex(&commitment_fr), field_to_hex(&salt_fr));
         }
     }
 
     // (3) Salt uniqueness (audit #9): no two DISTINCT committed graphs USED BY A
-    // VERIFIED SCAN may share a salt. A reused salt is the Q6 cross-graph
-    // bnode-correlation channel — a same-label canonical bnode then encodes
-    // identically across both graphs. [OPUS-4.8] codex 2223 LOW: this check is
-    // scoped to `referenced_salt` (commitments an actually-verified scan drew from)
-    // rather than every `manifest.commitment_attestations` entry. The #9 property
-    // only concerns committed graphs a verified scan used, so an UNRELATED extra
-    // attestation that happens to reuse a salt must NOT false-reject an otherwise
-    // valid proof. Each recorded salt is already issuer-attested (recorded only
-    // after the signature verified above). A salt reused across two distinct
-    // SCAN-referenced commitments still REJECTS. (Two attestations over the SAME
+    // VERIFIED SCAN OR PATH sub-proof may share a salt. A reused salt is the Q6
+    // cross-graph bnode-correlation channel — a same-label canonical bnode then
+    // encodes identically across both graphs. [OPUS-4.8] codex 2223 LOW / sq-nlulr:
+    // this check is scoped to `referenced_salt` (commitments an actually-verified
+    // scan or path drew from) rather than every `manifest.commitment_attestations`
+    // entry. The #9 property only concerns committed graphs a verified sub-proof
+    // used, so an UNRELATED extra attestation that happens to reuse a salt must NOT
+    // false-reject an otherwise valid proof. Each recorded salt is already
+    // issuer-attested (recorded only after the signature verified above). A salt
+    // reused across two distinct SCAN- or PATH-referenced commitments still REJECTS
+    // — including a scan graph and a single-graph path graph, which is the
+    // sq-nlulr cross-graph scan<->path corollary. (Two attestations over the SAME
     // commitment collapse to one entry by the commitment-keyed map and so are
     // fine: the same graph attested twice.)
     let mut salt_to_commitment: std::collections::BTreeMap<String, String> =
@@ -5924,13 +5948,14 @@ fn pattern_slot_consts(slots: &[SlotPattern; 3]) -> [Option<oxrdf::Term>; 3] {
 /// a variable shared between a scan slot and a `PathReach` endpoint (`src_enc` /
 /// `dst_enc`) — are enforced by [`bind_fragment_join_coherence`] (sq-ygk6x), run as
 /// the next layer of [`verify_fragment_manifest`]. What still remains after BOTH
-/// gates (documented on [`bind_fragment_join_coherence`]): the salt-uniqueness gate
-/// covers only SCAN-referenced committed graphs (so a cross-graph join through a
-/// single-graph PATH graph is an agreement check pending path-graph salt coverage —
-/// a multi-graph path is refused fail-closed), and an EXISTENTIAL (non-projected)
-/// path endpoint's value stays hidden by design. The whole verifier stack is
-/// internally re-audited but NOT externally audited (sq-qhy4). NO soundness /
-/// privacy property is asserted as achieved.
+/// gates (documented on [`bind_fragment_join_coherence`]): since sq-nlulr the
+/// salt-uniqueness gate covers PATH-referenced committed graphs too, so a cross-graph
+/// join through a single-graph PATH graph carries the same distinct-salt non-bnode
+/// discipline as a scan↔scan join (a multi-graph path is still refused fail-closed);
+/// the only remaining BY-DESIGN item is that an EXISTENTIAL (non-projected) path
+/// endpoint's value stays hidden. The whole verifier stack is internally re-audited
+/// but NOT externally audited (sq-qhy4). NO soundness / privacy property is asserted
+/// as achieved.
 // [OPUS-4.8] sq-qyfth: BGP scan-slot binding. Opt-in (`extended-fragment`),
 // research-grade, NOT-yet-sound (sq-qhy4).
 #[cfg(feature = "extended-fragment")]
@@ -6203,7 +6228,11 @@ impl std::error::Error for FragmentJoinError {}
 ///    the ALWAYS-ACTIVE salt-uniqueness gate (audit #9 — a same-label canonical
 ///    blank node encodes DIFFERENTLY across two distinctly-salted graphs), an equal
 ///    encoding across a cross-graph edge cannot be a blank node, so the flat
-///    non-bnode obligation holds branch-locally for BGP scan joins.
+///    non-bnode obligation holds branch-locally. Since sq-nlulr the salt-uniqueness
+///    gate (`bind_issuer_attestations`) records PATH-referenced committed graphs
+///    too, so this holds for scan↔scan, scan↔single-graph-path, AND
+///    path↔single-graph-path edges alike (a single-graph path graph is now
+///    issuer-attested + distinctly salted on the same footing as a scan graph).
 /// 3. **Multi-graph paths (fail-closed).** A `PathReach` whose proof-bound
 ///    attribution admits more than one committed graph
 ///    ([`branch_obligations`]'s `path_link_non_bnode`) has interior chain nodes that
@@ -6212,21 +6241,27 @@ impl std::error::Error for FragmentJoinError {}
 ///    disclosed data — so such a path is refused fail-closed
 ///    ([`FragmentJoinError::MultiGraphPath`]).
 ///
-/// # Honest scope — the RESIDUAL still deferred (load-bearing)
+/// # Honest scope (load-bearing)
 /// After this gate, the extended regime enforces the SAME cross-graph non-bnode
-/// obligation as the flat path for BGP scan↔scan joins (branch-locally, via the
-/// coherence enc-equality + the active salt-uniqueness gate — the identical
-/// mechanism), and additionally binds scan↔path / path↔path existential endpoints
-/// for coherence. What is NOT yet complete: the salt-uniqueness gate (audit #9)
-/// records only SCAN-referenced committed graphs, so for a cross-graph join between
-/// a scan graph and a (single-graph) PATH graph the enc-equality is an AGREEMENT
-/// check whose non-bnode COROLLARY additionally needs the path graph to be
-/// distinctly salted — extending salt-uniqueness (and the required issuer
-/// attestation) to path commitments is a follow-up bead. An EXISTENTIAL
-/// (non-projected) path endpoint's VALUE remains hidden by design (a privacy
-/// choice, not a non-bnode gap). The whole verifier stack is internally re-audited
-/// but NOT externally audited (sq-qhy4). NO soundness / privacy property is
-/// asserted as achieved.
+/// obligation as the flat path — branch-locally, via the coherence enc-equality +
+/// the active salt-uniqueness gate (the identical mechanism) — for BGP scan↔scan,
+/// scan↔single-graph-path, AND path↔single-graph-path joins, and additionally binds
+/// every existential scan/path endpoint for coherence. sq-nlulr CLOSED the residual
+/// that #1684 enumerated here: the salt-uniqueness gate (audit #9,
+/// `bind_issuer_attestations`) now records PATH-referenced committed graphs on the
+/// SAME footing as SCAN-referenced ones (each path commitment carries the issuer-
+/// attestation requirement AND participates in the distinct-salt record), so a
+/// cross-graph scan↔single-graph-path join's enc-equality is no longer a bare
+/// AGREEMENT check: its non-bnode COROLLARY is discharged by the two graphs being
+/// distinctly salted, exactly as for a scan↔scan join. An unattested or
+/// salt-colliding path commitment is refused fail-closed
+/// ([`CheckError::UnattestedCommitment`] / [`CheckError::SaltReused`]) before any
+/// `bb` sub-proof runs. A MULTI-graph path is still refused fail-closed (item 3:
+/// its interior-chain non-bnode obligation is not verifier-dischargeable from
+/// disclosed data). What remains BY DESIGN — not a non-bnode gap: an EXISTENTIAL
+/// (non-projected) path endpoint's VALUE stays hidden (a privacy choice). The whole
+/// verifier stack is internally re-audited but NOT externally audited (sq-qhy4). NO
+/// soundness / privacy property is asserted as achieved.
 // [OPUS-4.8] sq-ygk6x: per-branch join coherence + cross-graph Q6. Opt-in
 // (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
 #[cfg(feature = "extended-fragment")]
@@ -6489,18 +6524,20 @@ fn intern_attribution(
 /// existential variable shared across scan↔scan / scan↔path / path↔path atoms. So an
 /// accepted proof's disclosed path endpoints, VALUES-constrained variables, and
 /// BGP-scan-bound variables ARE tied to the specific disclosed terms, and its
-/// per-branch cross-graph scan joins carry the same non-bnode obligation as the flat
-/// path. What remains (documented on [`bind_fragment_join_coherence`]): (a) the
-/// salt-uniqueness gate (audit #9) covers only SCAN-referenced committed graphs, so
-/// a cross-graph join between a scan graph and a single-graph PATH graph is an
-/// AGREEMENT check whose non-bnode corollary additionally needs the path graph
-/// distinctly salted (a follow-up bead) — a multi-graph path is refused fail-closed;
-/// and (b) an EXISTENTIAL (non-projected) path endpoint's value stays hidden by
-/// design. So an accepted extended-fragment proof is **more bound than #1665, with
-/// the flat cross-graph obligation now branch-local for scans** — the residual is
-/// enumerated, not hidden. The whole verifier stack is internally re-audited but
-/// **NOT externally audited** (sq-qhy4). NO soundness / privacy property is asserted
-/// as achieved.
+/// per-branch cross-graph scan AND single-graph-path joins carry the same non-bnode
+/// obligation as the flat path. sq-nlulr CLOSED the #1684 residual: the
+/// salt-uniqueness gate (audit #9, `bind_issuer_attestations`) now covers
+/// PATH-referenced committed graphs as well as SCAN-referenced ones, so a cross-graph
+/// join between a scan graph and a single-graph PATH graph is no longer a bare
+/// AGREEMENT check — the path graph carries the issuer-attestation requirement AND
+/// the distinct-salt record, so its non-bnode corollary is discharged exactly as for
+/// a scan↔scan join, and an unattested / salt-colliding path commitment is refused
+/// fail-closed. A MULTI-graph path is still refused fail-closed. What remains BY
+/// DESIGN (not a gap): an EXISTENTIAL (non-projected) path endpoint's value stays
+/// hidden. So the extended regime now carries the SAME attestation + salt discipline
+/// as the flat path for scan↔scan / scan↔path / path↔path cross-graph joins. The
+/// whole verifier stack is internally re-audited but **NOT externally audited**
+/// (sq-qhy4). NO soundness / privacy property is asserted as achieved.
 // [OPUS-4.8] sq-h732x: extended-fragment end-to-end routing. Opt-in
 // (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
 #[cfg(feature = "extended-fragment")]
@@ -6922,6 +6959,60 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         i += 2;
     }
     Some(out)
+}
+
+// [OPUS-4.8] sq-nlulr: shared test fixtures for the audit-#9 issuer-attestation +
+// salt-uniqueness gate. Kept at parent scope (compiled only under `#[cfg(test)]`)
+// so BOTH the flat `mod tests` and the `extended-fragment` `fragment_dispatch_tests`
+// build an attestation of the IDENTICAL shape — the scan- and path-covering paths
+// exercise the same attestation discipline. `commitment` is an arbitrary field
+// element (the gate verifies the signature over the given commitment value; it does
+// not recompute it from triples), so tests can pick distinct commitments/salts.
+#[cfg(test)]
+const TEST_STATUS_LIST: &str = "http://ex/status/1";
+#[cfg(test)]
+const TEST_STATUS_INDEX: u64 = 3;
+#[cfg(test)]
+const TEST_STATUS_VERSION: u64 = 1;
+
+/// A valid salt- AND status-bound issuer attestation over `commitment` (the
+/// scan-/path-verify path requires a salt+status-bound attestation).
+#[cfg(test)]
+fn test_attestation(
+    commitment: Fr,
+    salt: Fr,
+    sk: &sparq_zk::sig::SecretKey,
+) -> crate::manifest::CommitmentAttestation {
+    let list_id = sparq_zk::sig::status_list_id_to_field(TEST_STATUS_LIST);
+    let status_ref =
+        sparq_zk::sig::status_ref_digest(&list_id, TEST_STATUS_INDEX, TEST_STATUS_VERSION);
+    crate::manifest::CommitmentAttestation {
+        commitment: FieldHex::from_field(&commitment),
+        issuer_public_key: sparq_zk::sig::public_key_to_hex(&sk.public_key()),
+        signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
+        cryptosuite: sparq_zk::sig::SignatureScheme::Poseidon2SchnorrV1
+            .cryptosuite_iri()
+            .to_string(),
+        salt: Some(FieldHex::from_field(&salt)),
+        status: Some(crate::manifest::AttestedStatusRef {
+            index: Some(TEST_STATUS_INDEX),
+            version: TEST_STATUS_VERSION,
+            index_commitment: None,
+        }),
+        holder: None,
+    }
+}
+
+/// The disclosed revocation reference matching [`test_attestation`]'s signed status
+/// reference (required so the issuer gate can recompute the signed status digest).
+#[cfg(test)]
+fn test_revocation() -> crate::manifest::RevocationStatus {
+    crate::manifest::RevocationStatus {
+        status_list: TEST_STATUS_LIST.to_string(),
+        index: Some(TEST_STATUS_INDEX),
+        version: TEST_STATUS_VERSION,
+        index_commitment: None,
+    }
 }
 
 #[cfg(test)]
@@ -7472,6 +7563,49 @@ mod tests {
             }
             other => panic!("flat stage-1 must still reject UNION, got {other:?}"),
         }
+    }
+
+    /// [OPUS-4.8] sq-nlulr: FLAT-PATH INVARIANCE. The audit-#9 issuer-attestation +
+    /// salt-uniqueness gate over a FLAT (scan-only) manifest must behave IDENTICALLY
+    /// whether or not `extended-fragment` is compiled in — the new `PathReach` match
+    /// arm is cfg-gated and a flat manifest never reaches it (no `PathReach`
+    /// sub-proof exists in the default build). This test lives in the
+    /// always-compiled `mod tests`, so it runs in BOTH `cargo test` and `cargo test
+    /// --features extended-fragment` and must give the SAME verdict in each.
+    #[test]
+    fn bind_issuer_attestations_flat_scan_is_feature_state_invariant() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let commit = Fr::from(100u64);
+        let scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        };
+        // Attested + salt-bound => the flat scan passes the issuer + salt gate.
+        let mut ok = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        ok.sub_proofs =
+            vec![crate::manifest::SubProof { inputs: scan, proof_hex: String::new() }];
+        ok.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        ok.revocation = Some(test_revocation());
+        assert!(
+            bind_issuer_attestations(&ok, &k, &std::collections::BTreeSet::new()).is_ok(),
+            "a flat attested scan must pass the issuer gate identically in both feature states"
+        );
+        // Drop the attestation => the flat scan is refused (deterministic, both states).
+        let mut bad = ok.clone();
+        bad.commitment_attestations.clear();
+        assert!(
+            matches!(
+                bind_issuer_attestations(&bad, &k, &std::collections::BTreeSet::new()),
+                Err(CheckError::UnattestedCommitment { proof: 0, .. })
+            ),
+            "an unattested flat scan must be refused identically in both feature states"
+        );
     }
 }
 
@@ -8921,5 +9055,106 @@ mod fragment_dispatch_tests {
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
         }
+    }
+
+    // --- sq-nlulr: issuer-attestation + salt-uniqueness (audit #9) over PATH
+    // commitments (bind_issuer_attestations). Non-vacuous, no nargo/bb: these call
+    // the REAL issuer gate directly over a manifest carrying a `PathReach`
+    // sub-proof — the same gate `verify_manifest`/`verify_fragment_manifest` run.
+
+    /// A single-graph `PathReach` sub-proof over a CHOSEN committed graph (so the
+    /// attestation / salt tests can attest or collide specific commitments; the
+    /// gate verifies the signature over the commitment value, never recomputes it).
+    fn path_with_commit(commit: Fr) -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        }
+    }
+
+    /// A single-graph BGP `Scan` sub-proof over a CHOSEN committed graph.
+    fn scan_with_commit(commit: Fr) -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    #[test]
+    fn bind_issuer_attestations_refuses_an_unattested_path_commitment() {
+        // A PathReach commitment with NO issuer attestation is refused on the SAME
+        // footing as an unattested scan commitment. Before sq-nlulr the issuer gate
+        // silently skipped path sub-proofs, so this passed unattested.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = base_manifest(PLUS, vec![sub(path_with_commit(Fr::from(100u64)))]);
+        m.revocation = Some(test_revocation());
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::UnattestedCommitment { proof: 0, .. }),
+            "an unattested PATH commitment must be refused at the issuer gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_issuer_attestations_refuses_a_scan_path_salt_collision() {
+        // A scan graph and a single-graph PATH graph, distinctly committed but
+        // SHARING a salt, are the audit-#9 cross-graph bnode-correlation channel.
+        // Both attestations verify, so the gate reaches the salt-uniqueness step and
+        // REFUSES SaltReused — the load-bearing sq-nlulr corollary.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let salt = Fr::from(7u64);
+        let c_scan = Fr::from(100u64);
+        let c_path = Fr::from(200u64); // distinct commitment, SAME salt.
+        let mut m = base_manifest(
+            SCANPATH_SRC,
+            vec![sub(scan_with_commit(c_scan)), sub(path_with_commit(c_path))],
+        );
+        m.commitment_attestations =
+            vec![test_attestation(c_scan, salt, &sk), test_attestation(c_path, salt, &sk)];
+        m.revocation = Some(test_revocation());
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::SaltReused { .. }),
+            "a scan-graph <-> single-graph-path-graph salt collision must be refused (audit #9), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_issuer_attestations_accepts_an_attested_distinctly_salted_scan_path() {
+        // With DISTINCT salts the attested scan AND path both record their salt and
+        // the gate passes to the downstream stage — proving the path commitment is
+        // attested + salt-recorded (not merely ignored) and only COLLISIONS refuse.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let c_scan = Fr::from(100u64);
+        let c_path = Fr::from(200u64);
+        let mut m = base_manifest(
+            SCANPATH_SRC,
+            vec![sub(scan_with_commit(c_scan)), sub(path_with_commit(c_path))],
+        );
+        m.commitment_attestations = vec![
+            test_attestation(c_scan, Fr::from(7u64), &sk),
+            test_attestation(c_path, Fr::from(9u64), &sk),
+        ];
+        m.revocation = Some(test_revocation());
+        assert!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()).is_ok(),
+            "an attested, distinctly-salted scan+path must pass the issuer + salt gate"
+        );
     }
 }

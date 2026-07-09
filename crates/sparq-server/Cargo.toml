@@ -42,7 +42,23 @@ required-features = ["server"]
 # binary has no bundle-size floor. Still TOGGLEABLE: `--no-default-features --features server`
 # (or just `server`) drops JSON-LD and `application/ld+json` becomes unrecognised (406/415) as
 # before. The `--no-default-features` (pure serialiser library) build is unaffected.
-default = ["server", "jsonld"]
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` is in the default set too: the shipped server
+# binary executes the same rewritten plans the CLI and the canonical benchmarks measure
+# (#1735 — result-equivalent, zero new deps; see the feature's own comment below). Like
+# `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
+# `--no-default-features --features server,jsonld` drops it for an explicit rewrite-dark build.
+default = ["server", "jsonld", "algebra-rewrite"]
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` (default ON, see above): forwards sparq-engine's
+# opt-in pre-execution algebra rewrite pass (#1735 / sq-7d3dj.30.1) — the result-equivalent
+# FILTER `?v = <iri>` constant substitution + `FILTER(!bound) → Minus` anti-join applied by
+# `PreparedQuery::parse` before evaluation. IRI-constants only (the sq-lr2ii literal-equality
+# avoidance contract); a non-matching shape is left verbatim. Pulls ZERO new dependencies
+# (`algebra-rewrite = []` in sparq-engine) and no `unsafe`; the pass's soundness revert-witnesses
+# run in the `sparq-engine (algebra-rewrite)` feature-matrix leg, and
+# `tests/algebra_rewrite_default.rs` is this crate's tripwire that the default set keeps it lit.
+# The pure serialiser library build (`--no-default-features`) is unaffected either way — this
+# only changes which sparq-engine the QUERY path compiles against.
+algebra-rewrite = ["sparq-engine/algebra-rewrite"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation

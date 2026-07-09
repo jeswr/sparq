@@ -24,6 +24,20 @@
 # Output: `<engine>\t<count>\t<query_us>` TSV on stdout (the same 3-col contract
 # the rest of the adapters + the ci-bench hook use). Non-zero exit only on a
 # transport/parse ERROR.
+# [FABLE-5] sq-7d3dj.34: --profile mode. The plain 3-col contract above is unchanged;
+# --profile ADDITIONALLY measures TTFB (time to first response byte, i.e. status line +
+# headers received) and runs the query in BOTH connection regimes:
+#   keep-alive : one persistent http.client.HTTPConnection reused across iters (the
+#                steady-state server-performance measure; iter 1 pays the TCP connect,
+#                min-of-N discards it once any later iter reuses the socket).
+#   fresh      : a NEW TCP connection per iter (cold-client regime; includes connect).
+# Emitting BOTH answers the keep-alive-vs-fresh fairness question with data instead of a
+# methodology argument. Profile stdout contract (6-col):
+#   <engine>\t<count>\t<ka_best_us>\t<ka_ttfb_us>\t<fresh_best_us>\t<fresh_ttfb_us>
+# best_us and ttfb_us are independent per-mode minima over iters (each is the honest
+# floor of its own distribution). A server that closes the connection mid-series is
+# transparently reconnected (recorded in the --json sidecar as keepalive_reconnects).
+import http.client
 import json
 import sys
 import time
@@ -96,14 +110,133 @@ def run_http_sparql(endpoint, query, engine="engine", iters=1, timeout=300):
     }
 
 
+def split_endpoint(endpoint):
+    """Split an http(s) endpoint URL into (host, port, path-with-query).
+
+    Pure function (offline-testable). Raises ValueError on a non-http(s) scheme
+    or a missing host."""
+    parts = urllib.parse.urlsplit(endpoint)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("profile mode needs an http(s) endpoint: %r" % (endpoint,))
+    if not parts.hostname:
+        raise ValueError("endpoint has no host: %r" % (endpoint,))
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    return parts.hostname, port, path
+
+
+def format_profile_tsv(engine, count, ka, fresh):
+    """Format the 6-col profile stdout line from two {'best_us','ttfb_us'} dicts.
+
+    Pure function (offline-testable)."""
+    return "%s\t%d\t%d\t%d\t%d\t%d" % (
+        engine,
+        count,
+        ka["best_us"],
+        ka["ttfb_us"],
+        fresh["best_us"],
+        fresh["ttfb_us"],
+    )
+
+
+def _profile_once(conn, path, body, headers):
+    """One timed request on an (possibly already-connected) HTTPConnection.
+
+    Returns (ttfb_us, full_us, response_text). TTFB = first response byte
+    received (status line + headers parsed by getresponse())."""
+    t0 = time.perf_counter()
+    conn.request("POST", path, body=body, headers=headers)
+    resp = conn.getresponse()
+    ttfb_us = (time.perf_counter() - t0) * 1e6
+    data = resp.read()
+    full_us = (time.perf_counter() - t0) * 1e6
+    if resp.status != 200:
+        raise ValueError("HTTP %d: %s" % (resp.status, data[:200]))
+    return ttfb_us, full_us, data.decode("utf-8")
+
+
+def profile_http_sparql(
+    endpoint, query, engine="engine", iters=1, timeout=300,
+    accept="application/sparql-results+json",
+):
+    """Measure the query in keep-alive AND fresh-connect regimes with TTFB.
+
+    Returns {"engine","count","boolean","count_value",
+             "keepalive":{"best_us","ttfb_us","reconnects"},
+             "fresh":{"best_us","ttfb_us"}}.
+    The parsed COUNT is asserted identical across every iteration of both
+    regimes (a drift would mean a non-deterministic answer — fail loudly)."""
+    host, port, path = split_endpoint(endpoint)
+    body = urllib.parse.urlencode({"query": query})
+    headers = {
+        "Accept": accept,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    counts = set()
+    parsed = None
+
+    # --- keep-alive: ONE connection reused across iters (reconnect on server close) ---
+    ka_best = ka_ttfb = None
+    reconnects = 0
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        for _ in range(max(1, iters)):
+            try:
+                ttfb_us, full_us, text = _profile_once(conn, path, body, headers)
+            except (http.client.NotConnected, http.client.RemoteDisconnected,
+                    BrokenPipeError, ConnectionResetError):
+                # server closed the persistent connection: reconnect once for this iter
+                conn.close()
+                conn = http.client.HTTPConnection(host, port, timeout=timeout)
+                reconnects += 1
+                ttfb_us, full_us, text = _profile_once(conn, path, body, headers)
+            parsed = parse_sparql_json(text)
+            counts.add(parsed["count"])
+            ka_best = full_us if ka_best is None else min(ka_best, full_us)
+            ka_ttfb = ttfb_us if ka_ttfb is None else min(ka_ttfb, ttfb_us)
+    finally:
+        conn.close()
+
+    # --- fresh: a NEW TCP connection per iter (connect cost included) ---
+    fr_best = fr_ttfb = None
+    for _ in range(max(1, iters)):
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            ttfb_us, full_us, text = _profile_once(conn, path, body, headers)
+        finally:
+            conn.close()
+        parsed = parse_sparql_json(text)
+        counts.add(parsed["count"])
+        fr_best = full_us if fr_best is None else min(fr_best, full_us)
+        fr_ttfb = ttfb_us if fr_ttfb is None else min(fr_ttfb, ttfb_us)
+
+    if len(counts) != 1:
+        raise ValueError("count drifted across iterations: %s" % sorted(counts))
+    return {
+        "engine": engine,
+        "count": parsed["count"],
+        "boolean": parsed["boolean"],
+        "count_value": parsed["count_value"],
+        "keepalive": {
+            "best_us": int(round(ka_best)),
+            "ttfb_us": int(round(ka_ttfb)),
+            "reconnects": reconnects,
+        },
+        "fresh": {"best_us": int(round(fr_best)), "ttfb_us": int(round(fr_ttfb))},
+    }
+
+
 def main(argv):
     """CLI: http_sparql_adapter.py --endpoint URL (--query Q | --query-file F)
-            [--engine NAME] [--iters N] [--json]
+            [--engine NAME] [--iters N] [--json] [--profile]
        OR : --parse-only <json-file>   (offline: just run the parser, for tests)"""
     endpoint = query = None
     engine = "engine"
     iters = 1
     want_json = False
+    want_profile = False
     parse_only = None
     i = 0
     while i < len(argv):
@@ -129,6 +262,8 @@ def main(argv):
             parse_only = argv[i]
         elif a == "--json":
             want_json = True
+        elif a == "--profile":
+            want_profile = True
         else:
             sys.stderr.write("http_sparql_adapter: unknown arg %s\n" % a)
             return 2
@@ -144,9 +279,23 @@ def main(argv):
     if not (endpoint and query):
         sys.stderr.write(
             "usage: http_sparql_adapter.py --endpoint URL (--query Q|--query-file F) "
-            "[--engine NAME] [--iters N] [--json]   |   --parse-only <json-file>\n"
+            "[--engine NAME] [--iters N] [--json] [--profile]   |   "
+            "--parse-only <json-file>\n"
         )
         return 2
+    if want_profile:
+        try:
+            res = profile_http_sparql(endpoint, query, engine=engine, iters=iters)
+        except Exception as e:  # noqa: BLE001 — adapter boundary
+            sys.stderr.write("http_sparql_adapter: %s\n" % e)
+            return 1
+        sys.stdout.write(
+            format_profile_tsv(res["engine"], res["count"], res["keepalive"], res["fresh"])
+            + "\n"
+        )
+        if want_json:
+            sys.stderr.write(json.dumps(res) + "\n")
+        return 0
     try:
         res = run_http_sparql(endpoint, query, engine=engine, iters=iters)
     except Exception as e:  # noqa: BLE001 — adapter boundary

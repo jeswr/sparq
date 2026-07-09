@@ -636,6 +636,30 @@
     color: var(--muted-foreground);
     font-size: 0.9em;
   }
+
+  /* [FABLE-5] sq-0rbfn — WCAG 2.1 AA link-in-text-block: Typst emits inline body <a> links
+     with no persistent underline, so they were distinguishable from surrounding prose by colour
+     alone (axe serious). Give every inline body link in generated spec/paper prose a persistent
+     underline. The structural nav (.spec-toc a) and inline cross-refs (a.spec-ref) keep their
+     intended no-underline-until-hover styling via their higher specificity (0,2,1 > this 0,1,1). */
+  .spec-prose a,
+  .paper-prose a {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* [FABLE-5] sq-0rbfn — WCAG 2.1 AA color-contrast in generated code blocks. Typst's HTML
+     syntax-highlight palette (inline `style="color:#..."` on tokens, e.g. #d73948 keywords in
+     typc, JSON highlight spans in zksparql) does not clear WCAG AA 4.5:1 on the dark code-block
+     background (measured 3.36:1). Rather than ship a serious contrast violation, force those
+     tokens to inherit the AA-compliant code foreground. This drops syntax colouring inside
+     generated code blocks but guarantees AA; the code stays fully readable (monospace on the
+     muted code background). Scoped to `pre` only, so inline `<code>` prose is unaffected. The
+     `!important` is required to override the inline `style` attribute. */
+  .spec-prose pre code span[style],
+  .paper-prose pre code span[style] {
+    color: inherit !important;
+  }
 }
 
 /* [OPUS-4.8] sq-ymr2e.4 / sq-ymr2e.14 — WCAG 2.1 AA color-contrast on the Sonner `richColors`

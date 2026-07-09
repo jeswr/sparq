@@ -62,6 +62,15 @@ pub struct Graph {
     /// FILTER / ORDER BY / MIN/MAX read the timeline value O(1) from the cache
     /// instead of materialising the term and re-parsing its lexical per row.
     temporals: TempData,
+    /// [OPUS-4.8] (sq-lr2ii) Memoised guard against the engine's f64 sargable-FILTER fast
+    /// path deciding a comparison wrongly for an f64-INEXACT decimal. `0` = not yet computed,
+    /// `1` = known to hold NO such decimal (fast path safe), `2` = holds at least one (the
+    /// engine must decline the fast path and use the exact evaluator). Lazily filled by
+    /// [`has_high_precision_decimal`](Self::has_high_precision_decimal); reset to `0` by a
+    /// delta that appends terms (`apply_delta_mem`) so it is recomputed over the grown
+    /// dictionary. Interior-mutable so a shared `&Graph` can populate it; never observable in
+    /// results (pure correctness gate).
+    high_precision_decimal: std::sync::atomic::AtomicU8,
     /// Named graphs (each a self-contained `Graph`), keyed by their name term. Empty for the
     /// usual single-default-graph load; populated by [`load_dataset`](Self::load_dataset) from
     /// N-Quads / TriG so the engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`.
@@ -608,11 +617,94 @@ fn write_temporals(path: &std::path::Path, flags: &[u8], instants: &[f64]) -> st
     f.flush()
 }
 
-/// The f64 value of a term if it is a numeric XSD literal, else NaN.
+/// [FABLE-5] (sq-9781x) Parse a numeric-literal lexical to its f64 image using the XSD
+/// lexical space — the SINGLE shared routine that the numeric-value CACHE
+/// (`numerics_of`/`numeric_of`) and the evaluator's **datatype-AGNOSTIC f64 seam**
+/// (`as_num` / `as_f64` / substrate `parse_xsd_f64`) agree on, so a cache HIT is
+/// equivalent to acceptance on THAT seam for the same numeric value.
+///
+/// SCOPE (important): this alignment is with the datatype-agnostic f64 seam, NOT with the
+/// full datatype-AWARE `sparq_substrate::numeric::as_numeric` / `Num::of_literal`
+/// acceptance set. `of_literal` is per-datatype: integers must be scale-0, decimals carry
+/// no exponent, and an integer beyond i128 is not representable. `parse_xsd_f64` ignores
+/// the datatype, so it ACCEPTS some lexicals that are ill-formed FOR THEIR DATATYPE and
+/// that `of_literal` rejects with a type error. Counterexamples that cache-HIT here yet
+/// `of_literal`-reject: `"1.5"^^xsd:integer` (fraction on an integer), `"1E2"^^xsd:decimal`
+/// (exponent on a decimal), a >38-digit `xsd:decimal` (i128 overflow → `of_literal` None).
+/// This residual per-datatype over-leniency is PRE-EXISTING (the old raw parse accepted the
+/// same lexicals) and tracked in the residual bead sibling of sq-74oy4; see the eqjoin
+/// `JKey::Num` comment and the substrate differential test `cache_f64_seam_vs_as_numeric`.
+///
+/// It is the lowest-tier home of the parser `sparq_substrate::numeric::parse_xsd_f64`
+/// re-exports (the substrate depends on `sparq-core`, not the reverse, so the shared body
+/// must live here). The acceptance set is XSD's, not Rust's:
+///
+/// - The XSD specials `NaN` / `INF` / `+INF` / `-INF` parse; Rust-`FromStr`-only spellings
+///   the XSD lexical space FORBIDS (`inf` / `infinity` / `-inf` / `nan` / `Infinity` …) are
+///   REJECTED, even though `str::parse::<f64>` would accept them. This is load-bearing: the
+///   old raw `str::parse::<f64>` cache stored `inf` for `"inf"^^xsd:double`, which the
+///   evaluator type-errors — a cache MORE lenient than the evaluator.
+/// - No trimming here (byte-identical to the substrate re-export, which the lenient engine
+///   `as_num`/`as_f64` seam and the reasoner `as_f64` route through UN-trimmed). Callers
+///   that must match the evaluator's TRIMMING equality path (`Num::of_literal`) trim the
+///   lexical themselves before calling — `numerics_of` does exactly that.
+///
+/// `None` for an ill-formed lexical.
+#[inline]
+pub fn parse_xsd_f64(v: &str) -> Option<f64> {
+    match v {
+        "NaN" => Some(f64::NAN),
+        "INF" | "+INF" => Some(f64::INFINITY),
+        "-INF" => Some(f64::NEG_INFINITY),
+        // Only ASCII digits / sign / point / exponent letters reach Rust's parser, which
+        // excludes every non-XSD spelling (`inf`/`infinity`/`nan`/hex/`_` separators …).
+        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// The f64 value of a term if it is a numeric XSD literal, else NaN. Routes the lexical
+/// through the shared [`parse_xsd_f64`] (XSD f64 acceptance set) on the TRIMMED value so it
+/// agrees with the evaluator's datatype-AGNOSTIC f64 seam. It does NOT reproduce the
+/// datatype-AWARE `Num::of_literal` acceptance set (see [`parse_xsd_f64`] SCOPE note: e.g.
+/// `"1.5"^^xsd:integer` parses here yet `of_literal` type-errors). [FABLE-5] (sq-9781x)
 fn numeric_of(term: &Term) -> f64 {
     match term {
-        Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+        Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value().trim()).unwrap_or(f64::NAN),
         _ => f64::NAN,
+    }
+}
+
+/// [OPUS-4.8] (sq-lr2ii) `true` iff dict id `id` is an `xsd:decimal` literal whose lexical
+/// form carries MORE than 15 significant digits — i.e. its f64 image may be inexact, so the
+/// engine's f64 sargable FILTER fast path is unsafe for it. Only `xsd:decimal` is checked:
+/// integer exactness is handled by the engine's constant-side guard and float/double values
+/// are their own f64. See [`Graph::has_high_precision_decimal`].
+fn is_high_precision_decimal(dict: &Dict, id: Id) -> bool {
+    matches!(dict.term_parts(id),
+        dict::TermParts::Lit { value, datatype, lang: None }
+            if datatype == xsd::DECIMAL.as_str() && decimal_significant_digits(value) > 15)
+}
+
+/// Significant decimal digits of a plain decimal lexical `[+-]?digits(.digits)?`: leading
+/// integer zeros and leading fractional zeros (for a value `< 1`) are not significant, e.g.
+/// `007.50` -> 3, `0.00123` -> 3, `1.000000000000000001` -> 19. `usize::MAX` for a lexical that
+/// is not a plain decimal (treated as unsafe by the `> 15` guard). Kept LOCAL to sparq-core:
+/// this crate is the leanest tier and cannot depend on `sparq-substrate`; the count mirrors the
+/// engine's `sig_digits` (constant-side guard) so the two round-trip decisions stay consistent.
+fn decimal_significant_digits(s: &str) -> usize {
+    let s = s.trim();
+    let s = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+        return usize::MAX;
+    }
+    let int = int.trim_start_matches('0');
+    let frac = frac.trim_end_matches('0');
+    if int.is_empty() {
+        frac.trim_start_matches('0').len()
+    } else {
+        int.len() + frac.len()
     }
 }
 
@@ -1425,6 +1517,7 @@ impl Graph {
             store,
             numerics,
             temporals,
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named: Vec::new(),
             graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
@@ -1460,6 +1553,8 @@ impl Graph {
             // numeric literals when sparse, freeing the dense f64-per-term Vec.
             numerics: self.numerics.into_sparse_if_worthwhile(),
             temporals: self.temporals.into_sparse_if_worthwhile(),
+            // sq-lr2ii: re-encoding keeps the same values; recompute the guard lazily.
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named: self.named,
             graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
@@ -1673,6 +1768,7 @@ impl Graph {
             store,
             numerics,
             temporals,
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named,
             graph_prefix_index: std::sync::Mutex::new(None),
             wal: None,
@@ -2455,6 +2551,37 @@ impl Graph {
         }
     }
 
+    /// [OPUS-4.8] (sq-lr2ii) `true` if the graph holds any `xsd:decimal` literal with MORE
+    /// than 15 significant digits — a value the f64 `numerics` cache CANNOT represent exactly,
+    /// so the engine's f64-based sargable FILTER fast path could decide `=`/`<`/`>`/`<=`/`>=`
+    /// WRONGLY for it (e.g. `"1.000000000000000001"^^xsd:decimal` shares the f64 `1.0` with the
+    /// constant `1`, yet is not equal to it). The engine consults this at the sargable-decision
+    /// point to DECLINE that fast path and fall back to the exact general evaluator; a graph
+    /// without any such decimal keeps the fast path (a decimal of `<= 15` significant digits
+    /// round-trips through f64 unambiguously, and a large-integer collision needs a `> 15`-digit
+    /// CONSTANT, which the engine already declines). Integers/float/double are exempt: an
+    /// integer's exactness is the constant-side guard's job and a float/double's value IS its f64.
+    ///
+    /// Memoised (see `high_precision_decimal`): the first call scans the graph's numeric terms
+    /// once (short-circuiting on the first offender); later calls are an atomic load. A delta
+    /// that appends terms resets the memo so it is recomputed over the grown dictionary. This is
+    /// a CONSERVATIVE, graph-wide gate — one offending decimal declines the numeric fast path for
+    /// every comparison on the graph — chosen for safety (correctness is never at risk; only the
+    /// pushdown optimisation is skipped for affected graphs).
+    pub fn has_high_precision_decimal(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        match self.high_precision_decimal.load(Relaxed) {
+            2 => true,
+            1 => false,
+            _ => {
+                let found = (1..=self.dict.len() as Id)
+                    .any(|id| self.numerics.lookup(id).is_some() && is_high_precision_decimal(&self.dict, id));
+                self.high_precision_decimal.store(if found { 2 } else { 1 }, Relaxed);
+                found
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.store.len()
     }
@@ -2553,6 +2680,8 @@ impl Graph {
             store: self.store.fork(),
             numerics: self.numerics.fork(),
             temporals: self.temporals.fork(),
+            // sq-lr2ii: the fork shares the same values; recompute the guard lazily.
+            high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
             named: self.named.iter().map(|(name, g)| (name.clone(), g.fork())).collect(),
             // A fork is a fresh logical copy; rebuild the prefix index lazily on first use.
             graph_prefix_index: std::sync::Mutex::new(None),
@@ -3047,6 +3176,15 @@ impl Graph {
         // Keep the numeric- and temporal-filter caches covering the grown dictionary.
         self.numerics.extend_for(&self.dict, old_len);
         self.temporals.extend_for(&self.dict, old_len);
+        // sq-lr2ii: an inserted term may be an f64-inexact decimal. If the sargable-safety
+        // guard was memoised as "no such decimal" (1), reset it to recompute over the grown
+        // dictionary; a "found" (2) verdict is monotonic (terms are never removed) and stays.
+        let _ = self.high_precision_decimal.compare_exchange(
+            1,
+            0,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.store.apply_delta(&ins_ids, &del_ids);
     }
 
@@ -3912,16 +4050,39 @@ fn parse_nt_record(bytes: &[u8]) -> Option<[Term; 3]> {
 
 /// The numeric-value cache for a dictionary: `numerics[id-1]` is the f64 value of term
 /// `id` (NaN for non-numeric). Parallel when the `parallel` feature is on.
+///
+/// [SONNET-4.6] (sq-7d3dj.6) Rebuilt from borrowed `TermParts` — no per-id owned `Term`
+/// allocation. Uses the `is_numeric_datatype_str` borrowed-component path already proven
+/// by the spill build (`dictspill.rs`), removing O(distinct-terms) allocations from
+/// `Graph::build`.
 fn numerics_of(dict: &Dict) -> Vec<f64> {
     let n = dict.len();
+    let numeric_of_parts = |i: usize| -> f64 {
+        match dict.term_parts(i as Id + 1) {
+            // [FABLE-5] (sq-9781x) Route through the shared XSD-lexical-space parser on the
+            // TRIMMED value — NOT a raw `str::parse::<f64>` — so a cache HIT is equivalent to
+            // acceptance on the evaluator's datatype-AGNOSTIC f64 seam (`parse_xsd_f64`, which
+            // trims here to match `Num::of_literal`'s trim), for exactly the same f64. This
+            // both admits the whitespace-padded lexical (` 1`^^xsd:integer) the raw parse
+            // missed AND rejects the Rust-only `inf`/`infinity`/`nan` spellings the raw parse
+            // wrongly cached. It does NOT reproduce the datatype-AWARE `of_literal` set: a
+            // per-datatype-ill-formed lexical (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`,
+            // an i128-overflow decimal) still caches its f64 here while `of_literal`
+            // type-errors — a PRE-EXISTING residual tracked in the sq-74oy4-sibling bead.
+            dict::TermParts::Lit { value, datatype, lang: None } if is_numeric_datatype_str(datatype) => {
+                parse_xsd_f64(value.trim()).unwrap_or(f64::NAN)
+            }
+            _ => f64::NAN,
+        }
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        (0..n).into_par_iter().map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+        (0..n).into_par_iter().map(numeric_of_parts).collect()
     }
     #[cfg(not(feature = "parallel"))]
     {
-        (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+        (0..n).map(numeric_of_parts).collect()
     }
 }
 
@@ -4621,10 +4782,10 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
             }
             b'<' => {
                 i += 1;
-                match memchr::memchr(b'>', &bytes[i..]) {
-                    Some(off) => i += off + 1,
-                    None => return None,
-                }
+                // clippy::question_mark (rust-clippy 1.97): an unterminated `<` (no closing
+                // `>`) means the input is malformed → bail out with None via `?`. [FABLE-5]
+                let off = memchr::memchr(b'>', &bytes[i..])?;
+                i += off + 1;
             }
             q @ (b'"' | b'\'') => {
                 let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
@@ -8873,6 +9034,66 @@ mod tests {
         assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s"))).unwrap()), None);
     }
 
+    /// [OPUS-4.8] sq-lr2ii — `decimal_significant_digits` counts significant digits, ignoring
+    /// leading integer zeros and leading fractional zeros, and rejects non-decimals.
+    #[test]
+    fn decimal_significant_digits_counts() {
+        assert_eq!(decimal_significant_digits("1"), 1);
+        assert_eq!(decimal_significant_digits("1.5"), 2);
+        assert_eq!(decimal_significant_digits("007.50"), 2, "leading int zeros + trailing frac zeros dropped: 7.5");
+        assert_eq!(decimal_significant_digits("0.00123"), 3, "leading fractional zeros are not significant");
+        assert_eq!(decimal_significant_digits("-1.000000000000000001"), 19, "sign stripped; 19 sig digits");
+        assert_eq!(decimal_significant_digits("+2.5"), 2);
+        assert_eq!(decimal_significant_digits("0.0"), 0, "zero has no significant digits");
+        // Non-decimal lexicals are treated as unsafe (usize::MAX > 15).
+        assert_eq!(decimal_significant_digits("1e5"), usize::MAX);
+        assert_eq!(decimal_significant_digits(""), usize::MAX);
+        assert_eq!(decimal_significant_digits("abc"), usize::MAX);
+    }
+
+    /// [OPUS-4.8] sq-lr2ii — `has_high_precision_decimal` is the engine's sargable-safety gate:
+    /// TRUE iff the graph holds an `xsd:decimal` with > 15 significant digits (an f64-inexact
+    /// value). Integers past 2^53, floats/doubles, and <=15-digit decimals do NOT set it.
+    #[test]
+    fn has_high_precision_decimal_flags_only_inexact_decimals() {
+        let xsd_ = |ty: &str| format!("http://www.w3.org/2001/XMLSchema#{ty}");
+        let build = |obj: &str| {
+            let nt = format!("<http://ex/s> <http://ex/p> {obj} .\n");
+            Graph::load_str(&nt, "ntriples").unwrap()
+        };
+
+        // The bug value: 19-sig-digit decimal collapsing onto f64 1.0.
+        assert!(build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+        // A <1 high-precision decimal.
+        assert!(build(&format!("\"0.1234567890123456789\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+
+        // NOT flagged: an exactly-representable decimal (<=15 sig digits).
+        assert!(!build(&format!("\"1.5\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+        assert!(!build(&format!("\"123456789012345\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal(), "15 sig digits round-trips");
+        // NOT flagged: a big integer (constant-side guard's job, not this one).
+        assert!(!build(&format!("\"9007199254740993\"^^<{}>", xsd_("integer"))).has_high_precision_decimal());
+        // NOT flagged: a high-precision double — its value IS its f64.
+        assert!(!build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("double"))).has_high_precision_decimal());
+        // NOT flagged: an empty / non-numeric graph.
+        assert!(!build("\"hello\"").has_high_precision_decimal());
+        assert!(!Graph::new().has_high_precision_decimal());
+    }
+
+    /// [OPUS-4.8] sq-lr2ii — the memoised flag must NOT go stale: inserting an f64-inexact
+    /// decimal via a delta AFTER the flag was computed as `false` must flip it to `true`.
+    #[test]
+    fn has_high_precision_decimal_memo_survives_delta_insert() {
+        let mut g = Graph::load_str("<http://ex/s> <http://ex/p> \"3\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", "ntriples").unwrap();
+        // Compute (and memoise) the flag as false over the integer-only graph.
+        assert!(!g.has_high_precision_decimal());
+        // Insert a high-precision decimal; the memo must be invalidated + recomputed to true.
+        let s = Term::NamedNode(NamedNode::new_unchecked("http://ex/s"));
+        let p = Term::NamedNode(NamedNode::new_unchecked("http://ex/d"));
+        let o = Term::Literal(Literal::new_typed_literal("2.000000000000000003", xsd::DECIMAL));
+        g.apply_delta(&[[s, p, o]], &[]).unwrap();
+        assert!(g.has_high_precision_decimal(), "delta-inserted inexact decimal must flip the memo");
+    }
+
     /// The full sorted term-triple set of a graph (overlay merged), for state comparison.
     fn dump_terms(g: &Graph) -> Vec<(String, String, String)> {
         let scan = g.store.scan(&[None, None, None]);
@@ -9869,6 +10090,186 @@ mod tests {
                 std::fs::remove_dir_all(&dir).ok();
             }
         }
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.6) The borrowed-path `numerics_of` must produce the SAME f64 cache
+    /// as the old owned-path for every dictionary id — including numerics (xsd:decimal/double/float/
+    /// integer-subtypes), temporals, plain IRIs, strings, and lang-tagged literals. This is the
+    /// load-bearing invariant for the allocation-removal optimisation: the cache bytes are identical
+    /// whether built via `dict.term(id)` (old) or `dict.term_parts(id)` (new borrowed path).
+    #[test]
+    fn numerics_of_borrowed_path_byte_identical_to_owned() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix ex: <http://ex/> .\n\
+            ex:a ex:v \"1.5\"^^xsd:decimal .\n\
+            ex:b ex:v \"2.5\"^^xsd:double .\n\
+            ex:c ex:v \"3.0\"^^xsd:float .\n\
+            ex:d ex:v \"42\"^^xsd:integer .\n\
+            ex:e ex:v \"100\"^^xsd:long .\n\
+            ex:f ex:v \"hello\" .\n\
+            ex:g ex:v \"bonjour\"@fr .\n\
+            ex:h ex:v ex:iri .\n\
+            ex:i ex:v \"2020-01-01T00:00:00Z\"^^xsd:dateTime .";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let dict = &g.dict;
+        let n = dict.len();
+        // Owned-path reference: the old `numerics_of` logic byte-for-byte.
+        let owned: Vec<f64> = (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect();
+        // Borrowed-path: current `numerics_of`.
+        let borrowed = numerics_of(dict);
+        assert_eq!(owned.len(), borrowed.len(), "length mismatch");
+        for (idx, (a, b)) in owned.iter().zip(borrowed.iter()).enumerate() {
+            let id = idx as Id + 1;
+            // Compare as bits: NaN == NaN in the cache (we want byte-identical, not IEEE equality).
+            assert_eq!(
+                a.to_bits(), b.to_bits(),
+                "id {}: owned bits {:016x} != borrowed bits {:016x}",
+                id, a.to_bits(), b.to_bits()
+            );
+        }
+    }
+
+    /// [FABLE-5] (sq-9781x) Direct unit test for the shared public `parse_xsd_f64`: the XSD
+    /// lexical space (specials `NaN`/`INF`/`+INF`/`-INF`), the Rust-only spellings it MUST
+    /// reject, ordinary decimals/exponents, and untrimmed padding (this fn does NOT trim —
+    /// callers trim). Kept in lock-step with the substrate re-export's own test.
+    #[test]
+    fn parse_xsd_f64_shared_acceptance_set() {
+        assert_eq!(parse_xsd_f64("NaN").map(f64::to_bits), Some(f64::NAN.to_bits()));
+        assert_eq!(parse_xsd_f64("INF"), Some(f64::INFINITY));
+        assert_eq!(parse_xsd_f64("+INF"), Some(f64::INFINITY));
+        assert_eq!(parse_xsd_f64("-INF"), Some(f64::NEG_INFINITY));
+        assert_eq!(parse_xsd_f64("6"), Some(6.0));
+        assert_eq!(parse_xsd_f64("+1"), Some(1.0));
+        assert_eq!(parse_xsd_f64("1.5E2"), Some(150.0));
+        assert_eq!(parse_xsd_f64("-0.0").map(f64::to_bits), Some((-0.0f64).to_bits()));
+        // Rust-`FromStr`-only spellings the XSD lexical space forbids: rejected.
+        for bad in ["inf", "+inf", "-inf", "infinity", "-infinity", "Infinity", "nan", "NAN"] {
+            // Positional arg (not inline `{bad}`) to dodge the CodeQL false positive. [FABLE-5]
+            assert_eq!(parse_xsd_f64(bad), None, "must reject {:?}", bad);
+        }
+        // Ill-formed / non-numeric: rejected.
+        for bad in ["", "abc", "1_000", "0x1p4", " 1", "1 "] {
+            assert_eq!(parse_xsd_f64(bad), None, "must reject {:?}", bad);
+        }
+    }
+
+    /// [FABLE-5] (sq-9781x) SHARED-PARSER PLUMBING check (NOT a differential vs the real
+    /// datatype-aware evaluator). It pins that the numeric-value cache actually routes every
+    /// numeric datatype through the shared `parse_xsd_f64` on the TRIMMED lexical: a cache HIT
+    /// (`numeric_value(id).is_some()`) is EQUIVALENT to `parse_xsd_f64(value.trim())` being
+    /// `Some` non-NaN, and the cached f64 is EXACTLY that value. Because the "evaluator model"
+    /// here is the SAME function the cache calls, this cannot detect divergence from the real
+    /// datatype-AWARE `Num::of_literal` — that cross-seam check is
+    /// `sparq_substrate::compare` `cache_f64_seam_vs_as_numeric`, which asserts the KNOWN
+    /// per-datatype divergence (`"1.5"^^xsd:integer` etc., bead sq-6b1lj). A stored-NaN value
+    /// folds to a cache MISS (the cache uses NaN as its "not cached" sentinel, so a genuine
+    /// `NaN`^^xsd:double falls through to the evaluator). Covers whitespace padding, leading
+    /// `+`, the XSD specials, the Rust-only spellings, exponent forms, empty/`abc`,
+    /// high-precision decimals and `2^53 ± 1`.
+    #[test]
+    fn numeric_cache_hit_matches_shared_parse_xsd_f64_plumbing() {
+        // (lexical, datatype-suffix). Each becomes one distinct dictionary literal.
+        let cases: &[(&str, &str)] = &[
+            (" 1", "xsd:integer"),      // whitespace-padded (leading) — trim-then-parse
+            ("1 ", "xsd:integer"),      // whitespace-padded (trailing)
+            ("\t2\n", "xsd:integer"),   // other whitespace
+            ("+3", "xsd:integer"),      // leading +
+            ("INF", "xsd:double"),      // XSD special
+            ("-INF", "xsd:double"),     // XSD special
+            ("+INF", "xsd:double"),     // XSD special
+            ("NaN", "xsd:double"),      // XSD special -> NaN value -> cache MISS (sentinel)
+            ("inf", "xsd:double"),      // Rust-only spelling -> REJECTED
+            ("infinity", "xsd:double"), // Rust-only spelling -> REJECTED
+            ("Infinity", "xsd:double"), // Rust-only spelling -> REJECTED
+            ("nan", "xsd:double"),      // Rust-only spelling -> REJECTED
+            ("1.5E2", "xsd:double"),    // exponent
+            ("-2.5e-1", "xsd:double"),  // exponent, negative
+            ("abc", "xsd:integer"),     // not a number -> REJECTED
+            ("", "xsd:integer"),        // empty -> REJECTED
+            ("1.000000000000000001", "xsd:decimal"), // high-precision decimal
+            ("9007199254740993", "xsd:integer"),     // 2^53 + 1
+            ("9007199254740991", "xsd:integer"),     // 2^53 - 1
+            ("3.0", "xsd:float"),       // ordinary float
+            ("007.50", "xsd:decimal"),  // leading zeros
+        ];
+        let mut ttl = String::from(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n",
+        );
+        // Use a fresh subject per case so every literal is a distinct object term (equal
+        // (lexical, datatype) pairs would intern to one id, but ours are all distinct).
+        for (i, (lex, dt)) in cases.iter().enumerate() {
+            // Escape the lexical for a Turtle string literal (only \, ", \t, \n occur here).
+            let esc: String = lex
+                .chars()
+                .flat_map(|c| match c {
+                    '\\' => vec!['\\', '\\'],
+                    '"' => vec!['\\', '"'],
+                    '\t' => vec!['\\', 't'],
+                    '\n' => vec!['\\', 'n'],
+                    other => vec![other],
+                })
+                .collect();
+            ttl.push_str(&format!("ex:s{} ex:v \"{}\"^^{} .\n", i, esc, dt));
+        }
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        // For each object literal, compare the cache decision to the evaluator model.
+        for (id, tp) in g.dict.iter() {
+            let dict::TermParts::Lit { value, datatype, lang: None } = tp else { continue };
+            if !is_numeric_datatype_str(datatype) {
+                continue;
+            }
+            // Evaluator model: accept iff parse_xsd_f64(trimmed) is Some AND non-NaN (a NaN
+            // value is stored but folds to a cache miss via the sentinel).
+            let model = parse_xsd_f64(value.trim()).filter(|v| !v.is_nan());
+            let cached = g.numeric_value(id);
+            match (model, cached) {
+                (Some(m), Some(c)) => assert_eq!(
+                    m.to_bits(),
+                    c.to_bits(),
+                    "id {}: lexical {:?} cache f64 {:016x} != evaluator f64 {:016x}",
+                    id,
+                    value,
+                    c.to_bits(),
+                    m.to_bits()
+                ),
+                (None, None) => {}
+                (m, c) => panic!(
+                    "cache/evaluator disagree on acceptance for lexical {:?}: model={:?} cache={:?}",
+                    value,
+                    m,
+                    c
+                ),
+            }
+        }
+    }
+
+    /// [FABLE-5] (sq-9781x) The specific latent bugs the alignment fixes, asserted directly
+    /// against the pre-fix raw `str::parse::<f64>` behaviour: (a) a whitespace-padded numeric
+    /// literal now HITS the cache (was a miss); (b) a Rust-only `inf`/`nan` spelling now MISSES
+    /// the cache (the raw parse wrongly cached `inf`/`NaN`), matching the evaluator's rejection.
+    #[test]
+    fn numeric_cache_alignment_fixes_both_divergences() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix ex: <http://ex/> .\n\
+            ex:pad  ex:v \" 7 \"^^xsd:decimal .\n\
+            ex:inf  ex:v \"inf\"^^xsd:double .\n\
+            ex:nan  ex:v \"nan\"^^xsd:double .\n\
+            ex:good ex:v \"INF\"^^xsd:double .";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let by_val = |needle: &str| -> Option<f64> {
+            g.dict.iter().find_map(|(id, tp)| match tp {
+                dict::TermParts::Lit { value, .. } if value == needle => Some(g.numeric_value(id)),
+                _ => None,
+            }).flatten()
+        };
+        // (a) previously a raw-parse MISS, now a value-7.0 HIT (trim-then-parse).
+        assert_eq!(by_val(" 7 "), Some(7.0), "padded decimal must now hit the cache");
+        // (b) previously a raw-parse HIT storing inf/NaN, now a MISS (XSD rejects the spelling).
+        assert_eq!(by_val("inf"), None, "'inf'^^xsd:double must NOT hit the cache");
+        assert_eq!(by_val("nan"), None, "'nan'^^xsd:double must NOT hit the cache");
+        // The genuine XSD spelling still hits with the infinity value.
+        assert_eq!(by_val("INF"), Some(f64::INFINITY), "'INF'^^xsd:double still hits");
     }
 
     /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff

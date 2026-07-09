@@ -17,13 +17,21 @@
 //!   subjects, so predicates over the optional variable hit **unbound-variable
 //!   errors**; and
 //! * the predicate grammar spans comparisons, arithmetic, `BOUND`/`COALESCE`
-//!   (unbound-tolerant forms), `STR`/`LANG`/`DATATYPE`/`isIRI`/`isLiteral`, and the
-//!   error-absorbing connectives `&&`/`||`/`!`.
+//!   (unbound-tolerant forms), the term-inspection functions `STR`/`DATATYPE`/`isIRI`,
+//!   and the error-absorbing connectives `&&`/`||`/`!`.
 //!
 //! The grammar deliberately excludes everything that voids the metamorphic relations
 //! (TLP scope preconditions): no `RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE`
 //! (nondeterminism), no `EXISTS`/`NOT EXISTS` (spec ambiguity), and no blank nodes in
 //! the data (cross-engine label comparison is meaningless — see [`crate::differential`]).
+//!
+//! Grammar note: the term-inspection atoms are exactly the ones `predicate_atom`
+//! emits — `STR`, `DATATYPE`, and `isIRI`. The generator already produces
+//! language-tagged literals (`"…"@fr`) as EBV/type-error fuel, but no atom yet
+//! inspects them via `LANG` or `isLiteral`; any new function must be added in
+//! `predicate_atom` so this list, the TLP scope preconditions, and the exclusion
+//! list above stay in lockstep. (The matching §6.1 paper grammar overclaim is
+//! tracked for the `sq-gum8.7` revision pass.) [OPUS-4.8] sq-b89wc
 
 /// Minimal deterministic PRNG: SplitMix64. Chosen over a `rand` dependency because its
 /// output for a given seed is a *fixed function* specified by three constants — the

@@ -60,20 +60,20 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   their XSD spellings `INF` / `-INF` / `NaN`, which are not scientific) and `lexical` (the plain
   form the W3C SPARQL expected-result files use for computed arithmetic, e.g. `6`) — and the
   shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
-  `parse_xsd_f64`/`f32` accept the XSD `INF` / `+INF` / `-INF` / `NaN` spellings and reject the
-  Rust-`FromStr`-only `inf` / `infinity` / `nan`. `Num::cmp_relational` is the XPath relational
-  comparison (`<`/`>` FILTER, value-space equality) — partial (NaN → `None`), vs `cmp_total`
-  which totalises NaN for `ORDER BY` [OPUS-4.8] sq-v5evr.
+  `parse_xsd_f64`/`f32` accept the XSD `INF`/`+INF`/`-INF`/`NaN`, reject Rust-only `inf`/`infinity`/`nan`,
+  and (sq-9781x) delegate to `sparq_core::parse_xsd_f64` — one shared body with the `sparq-core`
+  numeric cache (cache-hit ⟺ evaluator-accepts). `Num::cmp_relational` is the XPath relational
+  comparison (`<`/`>` FILTER, value-space equality) — partial (NaN → `None`), vs `cmp_total` (NaN totalised for `ORDER BY`) [OPUS-4.8] sq-v5evr.
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
-  `hash_probe_serial` / `build_table` / `build_partitioned` / `probe_emit` (hash, with a
-  radix-partitioned parallel build), `bind_combine` (index-nested-loop), and `lftj_recurse`
-  over `Trie` / `TrieIter` (leapfrog trie-join / WCOJ), plus the `compatible` / `merge_rows` /
-  `any_unbound` solution-compatibility helpers. Also `join::delta::DeltaTable` — a persistent,
-  extendable build-side table (`build` / `extend` / `rebuild` / `probe_emit`) with an
-  insertion-order-deterministic match enumeration guarantee for the OWL-RL semi-naive Δ⋈full
-  fixpoint (sq-qonbz.1). Each kernel is generic over a `JoinKeys` column descriptor and a
-  `Budget` cooperative-cancel hook (both monomorphised, never a trait object). Pulls only
-  `rustc-hash` when enabled; implies `rows`.
+  `build_table` / `build_partitioned` / `probe_emit` / `probe_gather_indices` / `hash_probe_serial`
+  (hash, `JoinTable` type alias backed by `hashbrown::HashMap<Key, Posting, FxBuildHasher>`,
+  single-hash probe + batch-reserve), `bind_combine` (index-nested-loop), `lftj_recurse` over
+  `Trie` / `TrieIter` (WCOJ), plus `compatible` / `merge_rows` / `any_unbound` helpers.
+  `probe_gather_indices` is the M4 batch-emission contract: gather build indices, materialise
+  once per output chunk (sq-pntvh.7). Also `join::delta::DeltaTable` — persistent build-side
+  table with insertion-order-deterministic enumeration for the OWL-RL Δ⋈full fixpoint
+  (sq-qonbz.1). Each kernel is generic over `JoinKeys` + `Budget` (monomorphised, no vtable).
+  Pulls `rustc-hash` + `hashbrown` when enabled; implies `rows`. [SONNET-4.6] sq-7d3dj.19
 - **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
   the spec-fixed class precedence error/unbound < blank < IRI < literal < triple, then a
   **kind-first** literal order (sq-wjl8i): a fixed `LiteralKind` rank BETWEEN literal kinds

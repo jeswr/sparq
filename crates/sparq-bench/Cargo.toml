@@ -7,7 +7,15 @@ publish = false
 
 [dependencies]
 sparq-core = { path = "../sparq-core", features = ["mmap", "dict-spill"] }
-sparq-engine = { path = "../sparq-engine" }
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` ON: the nightly differential fuzzer
+# (sparq-vs-oxigraph value-level compare, .github/workflows/differential.yml) must fuzz the
+# SHIPPED configuration — the sparq-cli / sparq-server binaries default-light the engine's
+# pre-execution algebra rewrite pass (#1735). The fuzzer's `equality` category generates the
+# exact `FILTER(?v = <iri>)` trigger shape (fuzz.rs gen_query, IRI arm), so the rewrite-ON
+# path is oracle-checked every night. (`FILTER(!bound)` — rewrite (b)'s trigger — is not
+# generated yet; its coverage is tests/rewrite_pass.rs via the feature-matrix leg.) Harness
+# crate, `publish = false`; the engine LIBRARY default stays OFF.
+sparq-engine = { path = "../sparq-engine", features = ["algebra-rewrite"] }
 # Reference engine to compare against (in-memory; no RocksDB).
 oxigraph = { version = "0.5", default-features = false, features = ["rdf-12"] }
 libc = "0.2"

@@ -228,6 +228,21 @@ jobs:
         # the full leg), never a silent demotion. Stdlib + the PyYAML installed above; it
         # scans crates/ (checked out above). At ZERO annotations this is a no-op green.
         run: python3 scripts/feature-matrix-tiers.py --enforce
+      - name: Structural guard C1 — feature-gated test execution (sq-qcnn.31)
+        # [SONNET-4.6] sq-qcnn.31: Fail-closed guard — every feature-gated test module or
+        # target (tests/ files with #![cfg(feature = "F")] inner attributes, OR [[test]]/
+        # [[bench]] Cargo.toml entries with required-features) MUST map to a CI executor
+        # (a feature-matrix leg, a coverage.sh case arm) or an explicit entry in
+        # scripts/check-feature-test-execution.allowlist.json. A gated test with no
+        # executor and no allowlist entry fails this gating job immediately — silently-
+        # never-running tests are structurally impossible from the first commit they are
+        # added. The --self-test run verifies the detector is not broken (exits 1 if the
+        # negative fixture is unexpectedly clean, i.e. the guard would be dark). PyYAML
+        # already installed by the step above.
+        run: |
+          set -euo pipefail
+          python3 scripts/check-feature-test-execution.py --self-test
+          python3 scripts/check-feature-test-execution.py --check
       - name: Assemble matrix from .github/feature-matrix.d/*.yml
         id: assemble
         # Emit the leg set as a one-line JSON object on the `matrix` output. The

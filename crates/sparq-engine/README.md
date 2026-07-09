@@ -97,20 +97,20 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **Structured EXPLAIN** *(opt-in `explain-json` feature, OFF by default)* — `explain_plan` /
   `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
-- **Semi-join reducers** *(opt-in `semijoin-bitmap` / `yannakakis` features, OFF by default)* — `semijoin-
-  bitmap` prefilters the next binary-join scan by an EXACT membership filter (`KeyFilter`: a flat bitmap over
-  dense `u32` ids, or a hash set when sparse+huge); `yannakakis` adds the complementary bottom-up
-  full-semijoin **prepass** reducing every relation of an *acyclic* BGP against its join-tree neighbours before
-  the join (cost-gated; cyclic BGPs keep LFTJ). Both drop only rows that cannot match, so the RESULT is
-  **identical** to off (proven by the on-vs-off differential); off, the default build is byte-identical, no new deps.
+- **Semi-join reducers + membership-cluster planning** *(opt-in `semijoin-bitmap` / `yannakakis` / `cluster-materialize` features, OFF by default)* — `semijoin-bitmap`
+  prefilters binary-join scans with an exact membership bitmap; `yannakakis` adds a bottom-up full-semijoin prepass
+  for acyclic BGPs (cost-gated; cyclic keep LFTJ); `cluster-materialize` (SP2Bench q07) evaluates an unbound-predicate container-membership pattern together with its small bound-predicate anchor STANDALONE and natural-joins it to the rest, instead of bind-joining the wide relation per driver binding. Pure join-order; result-identical to off (proven differentially); off, no new deps.
+- **Algebra rewrite pass** *(opt-in `algebra-rewrite` feature, OFF by default in this library; the shipped `sparq-cli`/`sparq-server` binaries and the conformance/differential harnesses light it by default — sq-7d3dj.30.13)* — `PreparedQuery::parse` folds a `FILTER(?v = <iri>)` IRI constant into the group's triple patterns (an indexed constant-seeded scan, not a post-join filter) and rewrites `OPTIONAL … FILTER(!bound(?v))` to an anti-join (`Minus`); IRI-only (never a literal — the `sq-lr2ii` avoidance contract), bag-result-equivalent, off byte-identical, no new deps.
+- **Equality-FILTER value join** *(opt-in `value-join` feature, OFF by default)* — pattern components glued only by a `FILTER(?a = ?b)` equality join on a per-term-class **value** key (SPARQL `=` is value equality, not term identity) instead of cross-product-then-filter, with the original FILTER re-applied as the exact recheck (the `sq-lr2ii` high-precision-decimal class stays exact) and temporals/triple terms paired by the exact evaluator; anything not provably eligible declines to the verbatim plan. Result-identical (kill-switch differentials + an independent oracle); off, zero code compiles, no new deps.
+- **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER/aggregate operators use a columnar path for ≥ 256-row all-inline-integer batches; byte-identical to the scalar path. I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
+- **Id-level term-identity FILTER fast path** *(opt-in `id-filter-fastpath` feature, OFF by default)* — a compiled `=`/`!=` over operands a static analysis proves non-literal (subject/predicate-only variables, constant IRIs) is decided by dictionary-id (in)equality, and equal ids of ANY kind short-circuit `=` true (canonicalising dict → sameTerm), skipping the per-row term materialisation. Unequal-id literals (numeric-promotion, the `sq-lr2ii` class) and possible type-errors fall through to the exact path. Result-identical (differential vs the exact oracle); off byte-identical, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
 
 - **How-to** — [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **API reference** — [docs.rs/sparq-engine](https://docs.rs/sparq-engine).
-- **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning /
-  parallelism verdicts in [`research/`](../../research).
+- **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning / parallelism verdicts in [`research/`](../../research).
 - **Performance** — numbers live on the
   [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).

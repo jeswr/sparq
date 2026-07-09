@@ -102,10 +102,15 @@
 //! returns `MalformedXml` rather than being silently dropped by a `.first()`-style read.
 //! This is a soundness property, not merely a diagnostic: dropping a second `<if>`
 //! conjunct would WEAKEN the rule body → over-derivation (sq-anuo9). Nothing within a
-//! wrapper is silently skipped or dropped; one known residual class — a duplicate
-//! single-cardinality wrapper under a parent (first-wins via `child()`, e.g. two
-//! `<object>` under a `<Frame>`; the `<if>`/`<then>` subset is already rejected) — is
-//! tracked in sq-4l1fj.
+//! wrapper is silently skipped or dropped, and — the twin class — a **duplicate
+//! single-cardinality wrapper under a parent** (two `<object>`/`<slot>` under a
+//! `<Frame>`, `<instance>`/`<class>` under `<Member>`, `<sub>`/`<sup>` under a
+//! `<Subclass>`, `<left>`/`<right>` under an `<Equal>`, `<content>`/`<op>`/`<args>` under
+//! an `<External>` call, the `<formula>` under a `<Forall>`/`<Exists>`, or the `<items>`
+//! under a `<List>` term) is rejected via `unique_child` rather than first-wins-dropped by
+//! `child()` (sq-4l1fj, closing the
+//! residual class sq-anuo9's `only_child` left; the `<if>`/`<then>` subset was already
+//! guarded inline in `parse_implies`).
 //!
 //! 1. `ImportError::ImportDirective` — any `Import` element (remote imports: fail-closed).
 //! 2. `ImportError::NonCoreElement { element, reason }` — non-Core dialect elements:
@@ -256,6 +261,36 @@ impl XmlNode {
     /// Return all children with the given tag name.
     fn children_named<'a>(&'a self, tag: &'a str) -> impl Iterator<Item = &'a XmlNode> {
         self.children.iter().filter(move |c| c.tag == tag)
+    }
+
+    /// Return the UNIQUE child with the given tag, failing closed if the parent holds
+    /// **more than one**. RIF-XML single-cardinality wrappers appear at most once under
+    /// their parent — `<object>`/`<slot>` under `<Frame>`, `<instance>`/`<class>` under
+    /// `<Member>`, `<sub>`/`<sup>` under `<Subclass>`, `<left>`/`<right>` under `<Equal>`,
+    /// `<content>`/`<op>`/`<args>` under an `<External>` call, and the `<formula>` under a
+    /// `<Forall>`/`<Exists>`.
+    ///
+    /// The old `child()` (find-first) silently DROPPED the second wrapper on non-schema-valid
+    /// input: a dropped `<formula>` under a `<Forall>` loses a whole rule; a dropped `<object>`
+    /// changes the atom; a dropped `<slot>`/`<sup>`/`<right>` loses a conjunct. This is the
+    /// parent-level twin of `only_child` (which guards a wrapper's surplus grandchildren) and
+    /// mirrors the `<if>`/`<then>` duplicate guard already inlined in `parse_implies`; together
+    /// they keep the module's fail-closed "nothing is silently skipped or dropped" contract
+    /// airtight. `Ok(None)` is returned when the wrapper is ABSENT so each caller keeps its own
+    /// "missing" diagnostic. Conformant RIF-XML has at most one of each wrapper, so this rejects
+    /// only malformed input. `ctx` names the parent for the diagnostic. [OPUS-4.8] sq-4l1fj
+    fn unique_child(&self, tag: &str, ctx: &str) -> Result<Option<&XmlNode>, ImportError> {
+        // Iterate `self.children` directly (not via `children_named`, whose returned
+        // iterator borrows `tag`) so the returned `&XmlNode` binds to `&self`.
+        let mut matching = self.children.iter().filter(|c| c.tag == tag);
+        let first = matching.next();
+        if matching.next().is_some() {
+            return Err(ImportError::MalformedXml(format!(
+                "{} has duplicate <{}> elements (expected exactly one)",
+                ctx, tag
+            )));
+        }
+        Ok(first)
     }
 
     /// Return this node's single element child, failing closed if it has zero **or
@@ -646,7 +681,10 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
         }
         "List" => {
             // <List><items><...term...><...term...></items></List>
-            let items_node = node.child("items");
+            // Fail-closed on a DUPLICATE <items> wrapper (sq-4l1fj): the same
+            // single-cardinality-wrapper class — first-wins would silently drop a
+            // second <items>, changing the list term.
+            let items_node = node.unique_child("items", "List")?;
             let items = match items_node {
                 Some(items) => items
                     .children
@@ -955,12 +993,14 @@ fn parse_frame(node: &XmlNode) -> Result<Atom, ImportError> {
     //   <object>TERM</object>
     //   <slot>TERM TERM</slot>   (predicate, value)
     // </Frame>
-    let obj_node = node.child("object").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE single-cardinality wrapper (sq-4l1fj): the old
+    // `child()` first-wins dropped a second <object>/<slot>, changing the atom.
+    let obj_node = node.unique_child("object", "Frame")?.ok_or_else(|| ImportError::MalformedXml(
         "Frame missing <object>".to_string(),
     ))?;
     let obj = parse_first_term(obj_node)?;
 
-    let slot = node.child("slot").ok_or_else(|| ImportError::MalformedXml(
+    let slot = node.unique_child("slot", "Frame")?.ok_or_else(|| ImportError::MalformedXml(
         "Frame missing <slot>".to_string(),
     ))?;
 
@@ -986,10 +1026,11 @@ fn parse_frame(node: &XmlNode) -> Result<Atom, ImportError> {
 
 fn parse_member(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Member><instance>TERM</instance><class>TERM</class></Member>
-    let inst = node.child("instance").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <instance>/<class> wrapper (sq-4l1fj).
+    let inst = node.unique_child("instance", "Member")?.ok_or_else(|| ImportError::MalformedXml(
         "Member missing <instance>".to_string(),
     ))?;
-    let cls = node.child("class").ok_or_else(|| ImportError::MalformedXml(
+    let cls = node.unique_child("class", "Member")?.ok_or_else(|| ImportError::MalformedXml(
         "Member missing <class>".to_string(),
     ))?;
     Ok(Atom::Member { obj: parse_first_term(inst)?, class: parse_first_term(cls)? })
@@ -997,10 +1038,11 @@ fn parse_member(node: &XmlNode) -> Result<Atom, ImportError> {
 
 fn parse_subclass(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Subclass><sub>TERM</sub><sup>TERM</sup></Subclass>
-    let sub = node.child("sub").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <sub>/<sup> wrapper (sq-4l1fj).
+    let sub = node.unique_child("sub", "Subclass")?.ok_or_else(|| ImportError::MalformedXml(
         "Subclass missing <sub>".to_string(),
     ))?;
-    let sup = node.child("sup").ok_or_else(|| ImportError::MalformedXml(
+    let sup = node.unique_child("sup", "Subclass")?.ok_or_else(|| ImportError::MalformedXml(
         "Subclass missing <sup>".to_string(),
     ))?;
     Ok(Atom::Subclass { sub: parse_first_term(sub)?, sup: parse_first_term(sup)? })
@@ -1008,10 +1050,11 @@ fn parse_subclass(node: &XmlNode) -> Result<Atom, ImportError> {
 
 fn parse_equal(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Equal><left>TERM</left><right>TERM</right></Equal>
-    let left = node.child("left").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <left>/<right> wrapper (sq-4l1fj).
+    let left = node.unique_child("left", "Equal")?.ok_or_else(|| ImportError::MalformedXml(
         "Equal missing <left>".to_string(),
     ))?;
-    let right = node.child("right").ok_or_else(|| ImportError::MalformedXml(
+    let right = node.unique_child("right", "Equal")?.ok_or_else(|| ImportError::MalformedXml(
         "Equal missing <right>".to_string(),
     ))?;
     Ok(Atom::Equal { left: parse_first_term(left)?, right: parse_first_term(right)? })
@@ -1029,7 +1072,8 @@ fn parse_first_term(wrapper: &XmlNode) -> Result<Term, ImportError> {
 /// Parse an `<External>` builtin call. Returns an `Atom::Builtin`.
 fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     // <External><content><Atom><op><Const type="rif:iri">IRI</Const></op><args>...</args></Atom></content></External>
-    let content = node.child("content").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <content> wrapper (sq-4l1fj).
+    let content = node.unique_child("content", "External")?.ok_or_else(|| ImportError::MalformedXml(
         "External missing <content>".to_string(),
     ))?;
     // The child of <content> should be <Atom> (for predicates) or <Expr> (for functions).
@@ -1041,7 +1085,8 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     }
 
     // Get the operator IRI from <op><Const type="rif:iri">IRI</Const></op>
-    let op_node = inner.child("op").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <op> wrapper (sq-4l1fj).
+    let op_node = inner.unique_child("op", "External Atom/Expr")?.ok_or_else(|| ImportError::MalformedXml(
         "External Atom/Expr missing <op>".to_string(),
     ))?;
     // Single-cardinality: the <op> wrapper holds exactly one <Const> (sq-anuo9).
@@ -1055,7 +1100,9 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     let builtin = iri_to_builtin(&op_iri)?;
 
     // Collect args from <args><...term...><...term...></args>
-    let args = match inner.child("args") {
+    // Fail-closed on a DUPLICATE <args> wrapper (sq-4l1fj) — a second <args> would
+    // otherwise be silently dropped, changing the builtin's argument list.
+    let args = match inner.unique_child("args", "External Atom/Expr")? {
         Some(args_node) => args_node
             .children
             .iter()
@@ -1132,7 +1179,9 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
                     }
                 }
             }
-            let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
+            // Fail-closed on a DUPLICATE <formula> wrapper (sq-4l1fj): a dropped second
+            // <formula> under <Exists> silently loses a conjunct of the existential body.
+            let formula = node.unique_child("formula", "Exists")?.ok_or_else(|| ImportError::MalformedXml(
                 "Exists missing <formula>".to_string(),
             ))?;
             let sub = parse_formula_child(formula)?;
@@ -1224,7 +1273,9 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
             }
             let forall_vars: BTreeSet<String> = forall_vars_vec.into_iter().collect();
 
-            let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
+            // Fail-closed on a DUPLICATE <formula> wrapper (sq-4l1fj): a dropped second
+            // <formula> under <Forall> silently loses a whole rule.
+            let formula = node.unique_child("formula", "Forall")?.ok_or_else(|| ImportError::MalformedXml(
                 "Forall missing <formula>".to_string(),
             ))?;
             // Single-cardinality: the Forall <formula> holds exactly one body element
@@ -3047,5 +3098,365 @@ mod tests {
             matches!(resolve_xml_entity("undefined"), Err(ImportError::MalformedXml(_))),
             "unknown entity must produce MalformedXml"
         );
+    }
+
+    // ---- sq-4l1fj: fail-closed on a DUPLICATE single-cardinality WRAPPER under a parent ----
+    //
+    // sq-anuo9 (`only_child`) closed the SURPLUS-GRANDCHILDREN class — one wrapper holding two
+    // element children. A distinct twin remained: TWO copies of the SAME single-cardinality
+    // wrapper under one parent, read via `child()` (find-first), silently took the first and
+    // DROPPED the second. A dropped `<formula>` under a `<Forall>` loses a WHOLE RULE; a dropped
+    // `<object>`/`<slot>` changes the atom. `unique_child` now rejects the duplicate fail-closed
+    // (the parent-level twin of the `<if>`/`<then>` guard already inlined in `parse_implies`).
+    //
+    // Each test is a MUTATION-CHECK: reverting `unique_child`'s body to the pre-fix first-wins
+    // (`Ok(self.children.iter().find(|c| c.tag == tag))`) makes every `import` below return `Ok`
+    // (silently taking the first wrapper), flipping the `unwrap_err`/`expect_err` RED. Conformant
+    // RIF-XML has at most one of each wrapper, so every valid-document test stays green (the
+    // paired controls below import cleanly). [OPUS-4.8]
+
+    /// Assert `xml` is rejected with a `MalformedXml` DUPLICATE-wrapper diagnostic naming `tag`.
+    /// Asserts the word "duplicate" so the test pins the `unique_child` path specifically (the
+    /// `only_child` surplus path says "must have exactly one child element" instead).
+    fn assert_duplicate_wrapper_rejected(xml: &[u8], tag: &str) {
+        let err = import(xml).unwrap_err();
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml (duplicate single-cardinality wrapper), got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate") && msg.contains(tag),
+            "MalformedXml must be a DUPLICATE-wrapper diagnostic naming {}: {}",
+            tag,
+            msg
+        );
+    }
+
+    /// Parent `<Frame>` — a duplicate `<object>` OR a duplicate `<slot>` is rejected. The old
+    /// `child()` kept only the first and dropped the second, changing the atom. Paired control:
+    /// the single-wrapper Frame fact imports as exactly one rule.
+    #[test]
+    fn test_duplicate_frame_object_and_slot_rejected() {
+        let dup_object = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s2</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_object, "<object>");
+
+        let dup_slot = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_slot, "<slot>");
+
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-wrapper Frame fact is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control Frame fact must import as exactly one rule");
+    }
+
+    /// Parent `<Member>` — a duplicate `<instance>` OR a duplicate `<class>` is rejected.
+    #[test]
+    fn test_duplicate_member_wrappers_rejected() {
+        let dup_instance = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Member>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://ex/i</Const></instance>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://ex/i2</Const></instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></class>
+    </Member>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_instance, "<instance>");
+
+        let dup_class = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Member>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://ex/i</Const></instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></class>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/D</Const></class>
+    </Member>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_class, "<class>");
+    }
+
+    /// Parent `<Subclass>` — a duplicate `<sub>` OR a duplicate `<sup>` is rejected.
+    #[test]
+    fn test_duplicate_subclass_wrappers_rejected() {
+        let dup_sub = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Subclass>
+      <sub><Const type="http://www.w3.org/2007/rif#iri">http://ex/A</Const></sub>
+      <sub><Const type="http://www.w3.org/2007/rif#iri">http://ex/A2</Const></sub>
+      <sup><Const type="http://www.w3.org/2007/rif#iri">http://ex/B</Const></sup>
+    </Subclass>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_sub, "<sub>");
+
+        let dup_sup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Subclass>
+      <sub><Const type="http://www.w3.org/2007/rif#iri">http://ex/A</Const></sub>
+      <sup><Const type="http://www.w3.org/2007/rif#iri">http://ex/B</Const></sup>
+      <sup><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></sup>
+    </Subclass>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_sup, "<sup>");
+    }
+
+    /// Parent `<Equal>` (in a rule body) — a duplicate `<left>` OR `<right>` is rejected. The
+    /// duplicate guard fires at PARSE time, before `Document::validate()` runs, so it is the
+    /// error surfaced even though a bare Equal would also fail range/equality validation.
+    #[test]
+    fn test_duplicate_equal_wrappers_rejected() {
+        let dup_left = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Equal>
+        <left><Var>x</Var></left>
+        <left><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></left>
+        <right><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const></right>
+      </Equal></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_left, "<left>");
+
+        let dup_right = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Equal>
+        <left><Var>x</Var></left>
+        <right><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></right>
+        <right><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const></right>
+      </Equal></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_right, "<right>");
+    }
+
+    /// Parent `<External>` call — a duplicate `<content>`, `<op>`, OR `<args>` is rejected. The
+    /// `<args>` case uses a recognised builtin (`pred:numeric-equal`) so parsing reaches the
+    /// args lookup past operator resolution.
+    #[test]
+    fn test_duplicate_external_wrappers_rejected() {
+        let dup_content = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op><args><Var>x</Var><Var>x</Var></args></Atom></content>
+        <content><Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op><args><Var>x</Var><Var>x</Var></args></Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_content, "<content>");
+
+        let dup_op = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom>
+          <op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op>
+          <op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-less-than</Const></op>
+          <args><Var>x</Var><Var>x</Var></args>
+        </Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_op, "<op>");
+
+        let dup_args = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom>
+          <op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op>
+          <args><Var>x</Var><Var>x</Var></args>
+          <args><Var>x</Var><Var>x</Var></args>
+        </Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_args, "<args>");
+    }
+
+    /// Parent `<Forall>` — a duplicate `<formula>` is rejected. This is the highest-severity
+    /// case: `child("formula")` first-wins silently DROPPED the second whole rule. Paired
+    /// control: a single-`<formula>` Forall imports as exactly one rule.
+    #[test]
+    fn test_duplicate_forall_formula_rejected_whole_rule_loss() {
+        let dup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup, "<formula>");
+
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-<formula> Forall is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control Forall must import as exactly one rule");
+    }
+
+    /// Parent `<Exists>` (in a rule body) — a duplicate `<formula>` is rejected. A dropped
+    /// second `<formula>` silently loses a conjunct of the existential body.
+    #[test]
+    fn test_duplicate_exists_formula_rejected() {
+        let dup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Exists>
+        <declare><Var>z</Var></declare>
+        <formula><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>z</Var></slot></Frame></formula>
+        <formula><Frame><object><Var>z</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Var>x</Var></slot></Frame></formula>
+      </Exists></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup, "<formula>");
+    }
+
+    /// Parent `<List>` term — a duplicate `<items>` wrapper is rejected (`parse_term`). Not one
+    /// of the bead's originally-enumerated seven parents, but the IDENTICAL residual class
+    /// (`child("items")` first-wins would silently drop a second `<items>`, changing the list
+    /// term); closed here to keep the module-doc universal claim airtight. The `<List>` sits in a
+    /// Frame slot value position so `parse_term` reaches it.
+    #[test]
+    fn test_duplicate_list_items_rejected() {
+        let dup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <List>
+          <items><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></items>
+          <items><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const></items>
+        </List>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup, "<items>");
+
+        // Control: a single-<items> List value imports cleanly (List term is supported).
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <List>
+          <items><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></items>
+        </List>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-<items> List value is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control List-valued Frame fact must import as one rule");
+    }
+
+    /// Direct unit test of the `unique_child` helper — covers all three branches (zero → `None`,
+    /// one → `Some`, more-than-one → `Err`) without routing through `import`, so the new code is
+    /// directly (not only integration-) covered.
+    #[test]
+    fn test_unique_child_helper_branches() {
+        fn leaf(tag: &str) -> XmlNode {
+            XmlNode { tag: tag.to_string(), text: String::new(), attrs: Vec::new(), children: Vec::new() }
+        }
+        // Children: two <a>, one <b>, zero <c>.
+        let parent = XmlNode {
+            tag: "Parent".to_string(),
+            text: String::new(),
+            attrs: Vec::new(),
+            children: vec![leaf("a"), leaf("b"), leaf("a")],
+        };
+        // Exactly one <b> → Ok(Some(<b>)).
+        assert!(
+            matches!(parent.unique_child("b", "Parent"), Ok(Some(n)) if n.tag == "b"),
+            "exactly one <b> must return Ok(Some)"
+        );
+        // Zero <c> → Ok(None) (caller keeps its own "missing" diagnostic).
+        assert!(
+            matches!(parent.unique_child("c", "Parent"), Ok(None)),
+            "absent <c> must return Ok(None), not an error"
+        );
+        // Two <a> → Err(MalformedXml) naming the tag + "duplicate".
+        match parent.unique_child("a", "Parent") {
+            Err(ImportError::MalformedXml(msg)) => {
+                assert!(msg.contains("duplicate"), "message must say 'duplicate': {}", msg);
+                assert!(msg.contains("<a>"), "message must name <a>: {}", msg);
+                assert!(msg.contains("Parent"), "message must name the parent ctx: {}", msg);
+            }
+            Err(e) => panic!("expected MalformedXml, got a different error: {}", e),
+            Ok(_) => panic!("two <a> must be rejected, got Ok"),
+        }
     }
 }

@@ -353,23 +353,71 @@ impl TripleStore {
         TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None }
     }
 
-    /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all
-    /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
-    /// parallel) and deduplicated first; the rest are independent and built concurrently.
+    /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all six
+    /// by default; just SPO/POS/OSP under `compact-index`). Two `cfg`-selected bodies: the
+    /// PARALLEL build builds every permutation concurrently; the NO-THREADS build keeps the
+    /// single SPO sort+dedup and maps the rest from it. They are separate `fn` definitions so
+    /// the no-threads (wasm) codegen is byte-for-byte the historical body — this change adds
+    /// NOTHING to the feature-off bundle.
+    ///
+    /// [OPUS-4.8 sq-7d3dj.31] Concurrent-N (parallel body): build EVERY BUILT permutation (SPO
+    /// included) concurrently via the O(n) LSD radix sort, each mapping+sorting+deduping its
+    /// OWN copy straight from the raw input. This removes the serial critical-path dependency
+    /// the prior path had — where SPO was `par_sort_unstable`+deduped FIRST and the other five
+    /// could not start until that finished. Measured on this box (8T, 8 M triples, drift-
+    /// cancelled interleaved A/B): the index build (`from_triples`) is ~13-16% faster, because
+    /// the five non-SPO perms no longer wait on the SPO sort — the parallelism gain outweighs
+    /// re-deriving SPO by radix instead of reusing the deduped array. Numbers are non-canonical
+    /// (this box's thermal/contention noise); the *ratio* + the structural reason (no serial
+    /// pre-phase) are the load-bearing points.
+    ///
+    /// Correctness: each perm deduped INDEPENDENTLY yields the identical multiset — a duplicate
+    /// `[s,p,o]` is a duplicate in every column order, and `Vec::dedup` after a full sort
+    /// removes exactly the consecutive equals, so every BUILT perm is byte-identical to the
+    /// reference `sort_unstable`+dedup+permute. Gated by the
+    /// `from_triples_perms_match_reference_sort` differential test.
+    #[cfg(feature = "parallel")]
+    fn build_raw_perms(triples: Vec<[Id; 3]>) -> [PermData; 6] {
+        let built: Vec<(Perm, Vec<[Id; 3]>)> = BUILT
+            .par_iter()
+            .map(|&p| {
+                let order = p.order();
+                // Pre-sized exactly from the known triple count (the mapped iterator is
+                // ExactSize, so `collect` reserves `triples.len()` up front — no grow tail).
+                let mut v: Vec<[Id; 3]> =
+                    triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+                radix_sort_rows(&mut v);
+                v.dedup();
+                // [SONNET-4.6 sq-7d3dj.32.1] Eliminate dedup capacity slack: after dedup the Vec
+                // retains its pre-dedup allocation.  shrink_to_fit realigns len == capacity so
+                // heap_bytes() (which counts capacity()) returns zero slack per permutation.
+                // ~8 B/triple recoverable at 10 M WatDiv across 6 perms.
+                v.shrink_to_fit();
+                (p, v)
+            })
+            .collect();
+        let mut perms: [PermData; 6] = std::array::from_fn(|_| PermData::default());
+        for (p, v) in built {
+            perms[p as usize] = PermData::Owned(v);
+        }
+        perms
+    }
+
+    /// No-threads build of the permutation indexes (wasm / no-rayon path). Deduplicates via
+    /// the SPO ordering first (radix — no parallel sort to beat it here), then maps the rest
+    /// from the deduped array, reusing that array for the SPO slot. [SONNET-4.6 sq-7d3dj.32.1]
+    /// shrink_to_fit added after dedup so the SPO slot carries zero capacity slack (the five
+    /// non-SPO perms are collected from the already-deduped iterator and are already exact).
+    /// The wasm bundle byte count changes from the historical value — declared in
+    /// bench/feature-off-declarations/ and bench/perf-baseline.json feature_off_exact.
+    #[cfg(not(feature = "parallel"))]
     fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
-        // Deduplicate via the SPO ordering first. This single large array keeps the
-        // parallel comparison sort: measured on this box, `par_sort_unstable` beats the
-        // sequential radix for one 2M-row array (all cores vs one), so radix here would
-        // REGRESS the SPO/dedup step. The win is below — the FIVE non-SPO permutations move
-        // to the O(n) LSD radix (sq-7d3dj.17), which beats the sequential comparison sort
-        // and is where the flagged sort-family self-time lives (they build concurrently via
-        // par_iter, each a sequential radix). The no-threads build has no parallel sort, so
-        // radix wins the SPO step there too. [OPUS-4.8]
-        #[cfg(feature = "parallel")]
-        triples.par_sort_unstable();
-        #[cfg(not(feature = "parallel"))]
         radix_sort_rows(&mut triples);
         triples.dedup();
+        // [SONNET-4.6 sq-7d3dj.32.1] Release the pre-dedup capacity so the SPO slot is
+        // exact-sized.  heap_bytes() counts capacity(); without this call it would count
+        // the full pre-dedup allocation even after duplicates are removed.
+        triples.shrink_to_fit();
 
         let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
             // Pre-sized exactly from the known triple count (the mapped iterator is
@@ -384,9 +432,6 @@ impl TripleStore {
 
         // Build every BUILT permutation except SPO (which is the deduped `triples`).
         let to_build: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
-        #[cfg(feature = "parallel")]
-        let built: Vec<Vec<[Id; 3]>> = to_build.par_iter().map(|p| build(p.order())).collect();
-        #[cfg(not(feature = "parallel"))]
         let built: Vec<Vec<[Id; 3]>> = to_build.iter().map(|p| build(p.order())).collect();
 
         // Place each built permutation at its canonical slot; the rest stay empty.
@@ -771,6 +816,32 @@ impl TripleStore {
         self.scan_with(pattern, perm, lead)
     }
 
+    /// [OPUS-4.8] (sq-7d3dj.30.4) Scans a SPECIFIC permutation `perm`, for callers that
+    /// need a particular SECONDARY column order rather than just a primary sort column
+    /// (e.g. the DISTINCT loose skip-scan wants the layout `[..bound.., P, J, ..]` so each
+    /// `P`-block is `J`-sorted). Returns `None` when `perm` is not built (e.g. the compact
+    /// index) or when the pattern's bound positions do not form a leading prefix of `perm`
+    /// (so a contiguous range scan is impossible). The returned rows are identical to what
+    /// `scan`/`scan_sorted` would yield had they chosen `perm` — only the choice differs.
+    pub fn scan_perm(&self, pattern: &Pattern, perm: Perm) -> Option<Scan<'_>> {
+        if !BUILT.contains(&perm) {
+            return None;
+        }
+        let order = perm.order();
+        let bound = |i: usize| pattern[i].is_some();
+        let total_bound = (0..3).filter(|&i| bound(i)).count();
+        let mut lead = 0;
+        while lead < 3 && bound(order[lead]) {
+            lead += 1;
+        }
+        // Every bound position must be within the leading prefix, else this permutation
+        // cannot answer the pattern with one contiguous range.
+        if lead != total_bound {
+            return None;
+        }
+        Some(self.scan_with(pattern, perm, lead))
+    }
+
     /// The inclusive [lo, hi] key bounds for a pattern's bound prefix in `perm` order.
     #[inline]
     fn bounds(pattern: &Pattern, perm: Perm, lead: usize) -> ([Id; 3], [Id; 3]) {
@@ -974,6 +1045,88 @@ mod tests {
                 let got = store.perms[perm as usize].as_slice();
                 assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
             }
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.30.4) `scan_perm` returns the rows for a SPECIFIC built
+    /// permutation (with the pattern's bound positions as a leading prefix), and `None`
+    /// when the permutation is not built or the bound positions are not a prefix.
+    #[test]
+    fn scan_perm_selects_named_permutation() {
+        let triples: Vec<[Id; 3]> = vec![
+            [10, 1, 100],
+            [10, 2, 100],
+            [11, 1, 100],
+            [12, 1, 101],
+        ];
+        let store = TripleStore::from_triples(triples.clone());
+
+        // Fully-unbound: a built predicate-first permutation must be selectable, and its rows
+        // sorted in that permutation's column order. Which predicate-first perm is BUILT
+        // differs by index set: the default 6-perm build has PSO; the 3-perm `compact-index`
+        // build ({SPO, POS, OSP}) has POS instead — where `scan_perm(Perm::Pso)` correctly
+        // returns `None` because PSO is not built (the documented contract). [OPUS-4.8]
+        #[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
+        {
+            let scan = store.scan_perm(&[None, None, None], Perm::Pso).expect("PSO is built");
+            assert_eq!(scan.perm, Perm::Pso);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[0], t[2])); // predicate, subject, object
+            assert_eq!(spo, want, "PSO scan not sorted by (predicate, subject, object)");
+        }
+        #[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
+        {
+            // PSO is NOT built under compact-index → `scan_perm` declines it (the contract).
+            assert!(
+                store.scan_perm(&[None, None, None], Perm::Pso).is_none(),
+                "PSO is not built under compact-index; scan_perm must return None"
+            );
+            // POS IS built there and serves the fully-unbound pattern, sorted (predicate, object, subject).
+            let scan = store.scan_perm(&[None, None, None], Perm::Pos).expect("POS is built");
+            assert_eq!(scan.perm, Perm::Pos);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[2], t[0])); // predicate, object, subject
+            assert_eq!(spo, want, "POS scan not sorted by (predicate, object, subject)");
+        }
+
+        // Object bound: OSP places the object as the leading prefix → Some. (OSP is built in
+        // both the default and the compact index set.)
+        let obj = store.scan_perm(&[None, None, Some(100)], Perm::Osp).expect("OSP built");
+        assert!(obj.rows.iter().all(|r| obj.to_spo(r)[2] == 100), "OSP range must be object=100");
+        assert_eq!(obj.rows.len(), 3);
+
+        // Object bound but SPO does NOT put the bound object in the leading prefix → None.
+        assert!(
+            store.scan_perm(&[None, None, Some(100)], Perm::Spo).is_none(),
+            "SPO cannot serve an object-only bound pattern as a prefix range"
+        );
+    }
+
+    /// [OPUS-4.8 sq-7d3dj.31] Direct gate on the concurrent-N build's INDEPENDENT per-perm
+    /// dedup: with the parallel build, SPO is no longer deduped-first-then-mapped — every perm
+    /// dedups its own sorted copy. On a heavily-duplicated input (the same handful of triples
+    /// repeated thousands of times) each BUILT perm must still hold EXACTLY the distinct set,
+    /// sorted, with no residual duplicate row — proving independent dedup equals the SPO-first
+    /// dedup it replaced. Non-vacuous: the expected length is the true distinct count.
+    #[test]
+    fn from_triples_independent_dedup_removes_all_duplicates() {
+        let base: [[Id; 3]; 5] = [[3, 1, 9], [1, 2, 2], [1, 2, 8], [7, 4, 4], [3, 1, 5]];
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        // Repeat the whole set 4000× (20 000 rows, only 5 distinct) plus one lone triple.
+        for _ in 0..4000 {
+            triples.extend_from_slice(&base);
+        }
+        triples.push([9, 9, 9]);
+        let distinct = 6; // the 5 in `base` plus [9,9,9]
+
+        let store = TripleStore::from_triples(triples);
+        for &perm in BUILT {
+            let rows = store.perms[perm as usize].as_slice();
+            assert_eq!(rows.len(), distinct, "permutation {perm:?} still holds duplicate rows");
+            // Fully sorted in this perm's column order, and strictly increasing (no dup).
+            assert!(rows.windows(2).all(|w| w[0] < w[1]), "permutation {perm:?} not strictly sorted/deduped");
         }
     }
 
@@ -1292,5 +1445,38 @@ mod tests {
         assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
         assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
         assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
+    }
+
+    /// [SONNET-4.6 sq-7d3dj.32.1] Each built raw-mode permutation Vec must carry zero
+    /// capacity slack after construction.  heap_bytes() uses capacity(), so any excess
+    /// inflates the reported B/triple; shrink_to_fit() (called in both build_raw_perms
+    /// bodies) must leave len == capacity.  The input has heavy duplicates so the pre-dedup
+    /// allocation is larger than the post-dedup len — without shrink_to_fit the test fails.
+    #[test]
+    fn build_raw_perms_no_capacity_slack() {
+        // Build a Vec with heavy duplicates to maximise pre/post-dedup slack.
+        // 4 unique triples repeated 100x each → capacity starts at 400, len after dedup = 4.
+        let unique: Vec<[Id; 3]> = vec![
+            [1, 1, 1],
+            [2, 2, 2],
+            [3, 3, 3],
+            [4, 4, 4],
+        ];
+        let mut triples: Vec<[Id; 3]> = Vec::with_capacity(400);
+        for _ in 0..100 {
+            triples.extend_from_slice(&unique);
+        }
+        let store = TripleStore::from_triples(triples);
+        for &perm in BUILT {
+            if let PermData::Owned(ref v) = store.perms[perm as usize] {
+                assert_eq!(
+                    v.len(),
+                    v.capacity(),
+                    "permutation {perm:?}: capacity ({}) > len ({}) — dedup slack not eliminated",
+                    v.capacity(),
+                    v.len(),
+                );
+            }
+        }
     }
 }

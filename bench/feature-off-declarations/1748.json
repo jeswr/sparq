@@ -1,0 +1,5 @@
+{
+  "pr": 1748,
+  "date": "2026-07-07",
+  "reason": "engine lib.rs adds always-compiled public query_json_stream_prepared_with_budget (PreparedQuery streaming JSON entry point, single-parse HTTP floor) — moves feature-OFF wasm bytes"
+}
