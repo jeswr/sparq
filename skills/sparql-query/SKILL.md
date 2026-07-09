@@ -605,12 +605,28 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   (no new dependencies; no `unsafe`) — the bytes are NOT identical, because the always-compiled
   EXISTS-re-entry refactor (splitting `eval_exists` into a thin wrapper + an always-compiled
   `eval_exists_inner`) MOVED bytes and shifted panic locations; this byte-move is declared in
-  `bench/feature-off-declarations/1785.json` per the feature-OFF-declaration mechanism. On SP2Bench
-  q08/q12b (whose UNION-branch `?a != ?b` FILTERs over IRI subject/object variables are the motivating
-  shape) the measured before/after was INCONCLUSIVE — an honest NULL finding, not a claimed win: those
-  queries' FILTER variables also appear in `dc:creator` OBJECT positions, so the static non-literal
-  analysis conservatively declines them and path (a) does not fire on this shape (row counts identical).
-  Widening the fast path to that shape needs predicate-range term-kind inference, filed as `sq-1ivw7`.
+  `bench/feature-off-declarations/1785.json` per the feature-OFF-declaration mechanism.
+  **Predicate-range widening (`sq-1ivw7`)** closes #1785's honest null result on the q08/q12b shape,
+  whose FILTER variables (`?author`, `?erdoes`) appear only as `dc:creator` OBJECT positions (which
+  the position-only analysis declined). The widened analysis credits an OBJECT-position variable as
+  non-literal when its predicate is a CONSTANT IRI whose object column has NO literal in the CURRENT
+  store snapshot — computed at query-execution time by `Graph::predicate_has_literal_object` (an
+  overlay-aware, early-exit scan of the predicate's objects; `dict::is_literal_id` classifies each
+  object id, with inline integers always literal). The requirement is NO LITERALS, not IRI-only:
+  bnode ids are identity-comparable exactly like IRIs for `=`/`!=` (distinct non-literals compare
+  FALSE per §17.4.1.7), so a bnode-object predicate still fires. Any literal object for the predicate,
+  or a VARIABLE predicate, or MIXED use of the variable (also an object of a literal-having predicate)
+  → decline. **Snapshot soundness:** a prepared query in sparq is parse-only (`PreparedQuery` carries
+  algebra, no plan); each evaluation borrows an immutable `&Graph` snapshot (a server request pins a
+  generation), so the check is re-run against the LIVE graph every eval — an UPDATE inserting a
+  literal object publishes a new snapshot the next query re-checks; the verdict never outlives its
+  snapshot (there is no plan/inference cache across snapshots; the result cache is keyed by
+  `(query, version)`). The same snapshot-aware column set is now also installed at the FUSED
+  conjunctive residual-FILTER sites (`eval_flat_conjunctive`, `eval_bgp_binary_capped`), drain-safe
+  via `with_idfast_nonlit_cols` (the set drains on the first consuming `apply_filter`, so a nested
+  EXISTS on a different `Bindings` layout sees the empty default). A differential test witnesses the
+  q08 shape now compiles `?a = ?b` to `IdEqNonLit` (fires), an update-then-requery flips the credit,
+  and the end-to-end answer is an independent recompute.
 - **DISTINCT-projection loose (skip) index scan** is a DEFAULT-ON, semantics-preserving optimisation
   (bead `sq-7d3dj.30.4`; research/sp2bench-complex-shape-deficit.md §2.3). For `SELECT DISTINCT ?p`
   over a BGP / **UNION** of BGPs where `?p` is the **single** projected variable, the executor

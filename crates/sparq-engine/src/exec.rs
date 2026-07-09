@@ -741,23 +741,33 @@ fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
 /// Implementation: collect `nonlit_positioned` (appears in a subject/predicate slot at least
 /// once) and `lit_possible` (appears in a literal-capable position, or is produced by an
 /// unanalysable construct), then return `nonlit_positioned \ lit_possible`.
+///
+/// [FABLE-5] (sq-1ivw7) The `obj_may_be_literal` classifier extends the reach to OBJECT-position
+/// variables: a BGP object slot with a CONSTANT predicate whose object column is provably
+/// literal-free in the CURRENT store snapshot is treated as a non-literal slot (like a subject),
+/// rather than poisoned to literal-risk. `obj_may_be_literal(p)` returns `true` when predicate `p`
+/// MIGHT have a literal object (the conservative default), so the object stays literal-risk. It is
+/// snapshot-scoped: the caller must build it against the same `&Graph` the query executes on, and
+/// the whole analysis is re-run per evaluation (see `predicate_has_literal_object`).
 #[cfg(feature = "id-filter-fastpath")]
-fn nonliteral_vars(p: &GraphPattern) -> FxHashSet<Variable> {
+fn nonliteral_vars(p: &GraphPattern, obj_may_be_literal: &dyn Fn(&oxrdf::NamedNode) -> bool) -> FxHashSet<Variable> {
     let mut nonlit_positioned = FxHashSet::default();
     let mut lit_possible = FxHashSet::default();
-    collect_kind_positions(p, &mut nonlit_positioned, &mut lit_possible);
+    collect_kind_positions(p, &mut nonlit_positioned, &mut lit_possible, obj_may_be_literal);
     nonlit_positioned.retain(|v| !lit_possible.contains(v));
     nonlit_positioned
 }
 
 /// Walks `p`, recording each REAL variable into `nonlit` if it appears in a subject/predicate
-/// slot and into `maybe_lit` if it appears anywhere it could be bound to a literal (an object
-/// slot, a `BIND`/`VALUES` binding, or any un-analysed construct that could bind it).
+/// slot (or a literal-free constant-predicate object slot) and into `maybe_lit` if it appears
+/// anywhere it could be bound to a literal (a literal-capable object slot, a `BIND`/`VALUES`
+/// binding, or any un-analysed construct that could bind it).
 #[cfg(feature = "id-filter-fastpath")]
 fn collect_kind_positions(
     p: &GraphPattern,
     nonlit: &mut FxHashSet<Variable>,
     maybe_lit: &mut FxHashSet<Variable>,
+    obj_may_be_literal: &dyn Fn(&oxrdf::NamedNode) -> bool,
 ) {
     use GraphPattern as G;
     // A quoted-triple slot (`TermPattern::Triple`) recurses: its INNER object can itself be a
@@ -802,8 +812,20 @@ fn collect_kind_positions(
                 if let Some(v) = nnp_var_ref(&tp.predicate) {
                     nonlit.insert(v.clone());
                 }
-                // The object slot can bind a literal (directly or inside a quoted triple).
-                poison_slot(&tp.object, maybe_lit);
+                // The object slot can bind a literal (directly or inside a quoted triple) — UNLESS
+                // the predicate is a CONSTANT IRI proven literal-free in this snapshot, in which
+                // case a plain object VARIABLE is non-literal (an IRI or bnode), like a subject.
+                // [FABLE-5] (sq-1ivw7) A quoted-triple object still poisons (its inner object can be
+                // a literal regardless of the outer predicate), so the credit applies only to the
+                // bare `TermPattern::Variable` object form.
+                match (&tp.predicate, &tp.object) {
+                    (NamedNodePattern::NamedNode(pred), TermPattern::Variable(ov))
+                        if !obj_may_be_literal(pred) =>
+                    {
+                        nonlit.insert(ov.clone());
+                    }
+                    _ => poison_slot(&tp.object, maybe_lit),
+                }
             }
         }
         // A property-path binds subject and object, but the OBJECT end can be a literal (the final
@@ -816,42 +838,42 @@ fn collect_kind_positions(
             poison_slot(object, maybe_lit);
         }
         G::Join { left, right } | G::Union { left, right } => {
-            collect_kind_positions(left, nonlit, maybe_lit);
-            collect_kind_positions(right, nonlit, maybe_lit);
+            collect_kind_positions(left, nonlit, maybe_lit, obj_may_be_literal);
+            collect_kind_positions(right, nonlit, maybe_lit, obj_may_be_literal);
         }
         // LATERAL binds its right side correlated on the left; the right can be any construct
         // (incl. a sub-SELECT projecting a computed literal), so poison the right's in-scope vars
         // and analyse the left normally.
         G::Lateral { left, right } => {
-            collect_kind_positions(left, nonlit, maybe_lit);
+            collect_kind_positions(left, nonlit, maybe_lit, obj_may_be_literal);
             poison_all(right, maybe_lit);
         }
         // OPTIONAL / MINUS: the right side still POSITIONS its variables, so its subject/predicate
         // occurrences remain non-literal evidence and its object occurrences remain literal-risk.
         G::LeftJoin { left, right, .. } => {
-            collect_kind_positions(left, nonlit, maybe_lit);
-            collect_kind_positions(right, nonlit, maybe_lit);
+            collect_kind_positions(left, nonlit, maybe_lit, obj_may_be_literal);
+            collect_kind_positions(right, nonlit, maybe_lit, obj_may_be_literal);
         }
         G::Minus { left, right } => {
-            collect_kind_positions(left, nonlit, maybe_lit);
-            collect_kind_positions(right, nonlit, maybe_lit);
+            collect_kind_positions(left, nonlit, maybe_lit, obj_may_be_literal);
+            collect_kind_positions(right, nonlit, maybe_lit, obj_may_be_literal);
         }
         G::Filter { inner, .. }
         | G::OrderBy { inner, .. }
         | G::Distinct { inner }
         | G::Reduced { inner }
-        | G::Slice { inner, .. } => collect_kind_positions(inner, nonlit, maybe_lit),
+        | G::Slice { inner, .. } => collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal),
         G::Graph { name, inner } => {
             // A GRAPH-name variable binds a graph IRI — non-literal.
             if let NamedNodePattern::Variable(v) = name {
                 nonlit.insert(v.clone());
             }
-            collect_kind_positions(inner, nonlit, maybe_lit);
+            collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal);
         }
         // A BIND target can evaluate to a literal — literal-risk.
         G::Extend { inner, variable, .. } => {
             maybe_lit.insert(variable.clone());
-            collect_kind_positions(inner, nonlit, maybe_lit);
+            collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal);
         }
         // Every VALUES column can carry a literal — literal-risk for all of them.
         G::Values { variables, .. } => {
@@ -866,7 +888,7 @@ fn collect_kind_positions(
         G::Project { inner, variables } => {
             let mut inner_nl = FxHashSet::default();
             let mut inner_ml = FxHashSet::default();
-            collect_kind_positions(inner, &mut inner_nl, &mut inner_ml);
+            collect_kind_positions(inner, &mut inner_nl, &mut inner_ml, obj_may_be_literal);
             let proj: FxHashSet<&Variable> = variables.iter().collect();
             for v in inner_nl.into_iter().filter(|v| proj.contains(v)) {
                 nonlit.insert(v);
@@ -882,7 +904,7 @@ fn collect_kind_positions(
         G::Group { inner, variables, aggregates } => {
             let mut inner_nl = FxHashSet::default();
             let mut inner_ml = FxHashSet::default();
-            collect_kind_positions(inner, &mut inner_nl, &mut inner_ml);
+            collect_kind_positions(inner, &mut inner_nl, &mut inner_ml, obj_may_be_literal);
             let keys: FxHashSet<&Variable> = variables.iter().collect();
             for v in inner_nl.into_iter().filter(|v| keys.contains(v)) {
                 nonlit.insert(v);
@@ -3446,10 +3468,21 @@ fn eval_bgp_binary_capped(
         // Residual FILTERs per block — a row only counts toward the cap once it has
         // passed EVERY filter (the late-FILTER safety property: a partial solution
         // never fires the early exit).
+        // [FABLE-5] (sq-1ivw7) Install the snapshot-aware non-literal column set (indexing THIS
+        // block's `result` layout — the BGP variables) so the id fast path fires on capped fused
+        // BGP+FILTER shapes too. Drain-safe as in `eval_flat_conjunctive`.
+        #[cfg(feature = "id-filter-fastpath")]
+        let idfast_cols = {
+            let bgp = GraphPattern::Bgp { patterns: patterns.to_vec() };
+            nonliteral_filter_cols(graph, &bgp, &result)
+        };
         for f in &residual {
             if result.rows.is_empty() {
                 break;
             }
+            #[cfg(feature = "id-filter-fastpath")]
+            with_idfast_nonlit_cols(idfast_cols.clone(), || apply_filter(graph, local, &mut result, f))?;
+            #[cfg(not(feature = "id-filter-fastpath"))]
             apply_filter(graph, local, &mut result, f)?;
         }
         let merged = match acc.take() {
@@ -4100,7 +4133,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
                     // id-level FILTER fast path, scoped to this one dispatch.
                     #[cfg(feature = "id-filter-fastpath")]
                     {
-                        let cols = nonliteral_filter_cols(inner, &b);
+                        let cols = nonliteral_filter_cols(graph, inner, &b);
                         with_idfast_nonlit_cols(cols, || apply_filter(graph, local, &mut b, expr))?;
                     }
                     #[cfg(not(feature = "id-filter-fastpath"))]
@@ -4111,7 +4144,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             let mut b = eval_graph_pattern(graph, local, inner)?;
             #[cfg(feature = "id-filter-fastpath")]
             {
-                let cols = nonliteral_filter_cols(inner, &b);
+                let cols = nonliteral_filter_cols(graph, inner, &b);
                 with_idfast_nonlit_cols(cols, || apply_filter(graph, local, &mut b, expr))?;
             }
             #[cfg(not(feature = "id-filter-fastpath"))]
@@ -4247,6 +4280,17 @@ fn eval_flat_conjunctive(
     } else {
         (eval_bgp(graph, patterns)?, filters)
     };
+    // [FABLE-5] (sq-1ivw7) The non-literal column set for the residual FILTERs of THIS fused BGP.
+    // Its columns index `b`'s layout (the BGP variables); an object of a literal-free constant
+    // predicate is proven non-literal by the snapshot-aware analysis, unblocking the id fast path
+    // for flat BGP+FILTER shapes too (previously only the wrapped `Filter` dispatch installed a
+    // set). Drain-safe: `with_idfast_nonlit_cols` drains on the first consuming `apply_filter`, so
+    // a nested EXISTS on a different layout sees the empty default. Built once (cheap) and reused.
+    #[cfg(feature = "id-filter-fastpath")]
+    let idfast_cols = {
+        let bgp = GraphPattern::Bgp { patterns: patterns.to_vec() };
+        nonliteral_filter_cols(graph, &bgp, &b)
+    };
     for f in &residual {
         // Spatial pushdown (sq-mg9): if this residual FILTER is a pushable geof:
         // predicate and a SpatialProvider is installed, pre-restrict the rows to the
@@ -4256,6 +4300,9 @@ fn eval_flat_conjunctive(
         if let Some(pd) = recognise_spatial(f) {
             apply_spatial_pushdown(graph, &mut b, &pd);
         }
+        #[cfg(feature = "id-filter-fastpath")]
+        with_idfast_nonlit_cols(idfast_cols.clone(), || apply_filter(graph, local, &mut b, f))?;
+        #[cfg(not(feature = "id-filter-fastpath"))]
         apply_filter(graph, local, &mut b, f)?;
     }
     Ok(b)
@@ -9167,9 +9214,33 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
 /// [FABLE-5] (sq-7d3dj.30.11) The set of `b` column indices proven NON-LITERAL by the static
 /// term-kind analysis over the FILTER's inner pattern (the id-level fast-path enabler). Empty
 /// when the feature is off. Called once at the FILTER dispatch, before the row loop.
+///
+/// [FABLE-5] (sq-1ivw7) The analysis is SNAPSHOT-AWARE: it also credits an OBJECT-position variable
+/// of a constant-predicate BGP triple as non-literal when that predicate's object column is proven
+/// literal-free in the CURRENT store snapshot (`graph.predicate_has_literal_object` is false). This
+/// is what unblocks q08/q12b-shaped FILTERs (`?author`/`?erdoes` appear only as `dc:creator`
+/// objects, an IRI-only column). The classifier reads the LIVE `graph` handed to THIS eval, so an
+/// UPDATE that inserted a literal object publishes a new snapshot the next eval re-checks — the
+/// verdict never outlives its snapshot. A per-predicate memo caches the (early-exit) scan so a
+/// predicate probed by several object slots of the same FILTER is scanned at most once.
 #[cfg(feature = "id-filter-fastpath")]
-fn nonliteral_filter_cols(inner: &GraphPattern, b: &Bindings) -> FxHashSet<usize> {
-    let vars = nonliteral_vars(inner);
+fn nonliteral_filter_cols(graph: &Graph, inner: &GraphPattern, b: &Bindings) -> FxHashSet<usize> {
+    let memo = std::cell::RefCell::new(FxHashMap::<oxrdf::NamedNode, bool>::default());
+    let obj_may_be_literal = |pred: &oxrdf::NamedNode| -> bool {
+        if let Some(&v) = memo.borrow().get(pred) {
+            return v;
+        }
+        // Conservative default when the predicate IRI is absent from the dictionary: it matches no
+        // triple, so the object variable is unbound — treating it as literal-risk simply declines
+        // the fast path (safe, and correct: an unbound operand is a type error, not id equality).
+        let has_lit = match graph.id_of(&oxrdf::Term::NamedNode(pred.clone())) {
+            Some(pid) => graph.predicate_has_literal_object(pid),
+            None => true,
+        };
+        memo.borrow_mut().insert(pred.clone(), has_lit);
+        has_lit
+    };
+    let vars = nonliteral_vars(inner, &obj_may_be_literal);
     vars.iter().filter_map(|v| b.col(v)).collect()
 }
 
@@ -16826,7 +16897,7 @@ mod idfast_unit {
             predicate: NamedNodePattern::Variable(var("p")),
             object: TermPattern::Variable(var("o")),
         }]);
-        let nl = nonliteral_vars(&p);
+        let nl = nonliteral_vars(&p, &|_| true);
         assert!(nl.contains(&var("s")), "subject var is non-literal");
         assert!(nl.contains(&var("p")), "predicate var is non-literal");
         assert!(!nl.contains(&var("o")), "object var CAN be a literal");
@@ -16839,7 +16910,7 @@ mod idfast_unit {
             tp_svo("x", "http://ex/p", TermPattern::Variable(var("y"))),
             tp_svo("z", "http://ex/q", TermPattern::Variable(var("x"))),
         ]);
-        let nl = nonliteral_vars(&p);
+        let nl = nonliteral_vars(&p, &|_| true);
         assert!(!nl.contains(&var("x")), "a var used as an OBJECT anywhere is literal-risk");
         assert!(nl.contains(&var("z")), "?z only ever a subject -> non-literal");
     }
@@ -16852,7 +16923,7 @@ mod idfast_unit {
             variable: var("s"), // BIND target shadows the subject -> literal-risk wins.
             expression: Expression::Literal(Literal::new_simple_literal("x")),
         };
-        let nl = nonliteral_vars(&ext);
+        let nl = nonliteral_vars(&ext, &|_| true);
         assert!(!nl.contains(&var("s")), "a BIND target could be a literal");
 
         let values = GraphPattern::Values {
@@ -16863,7 +16934,7 @@ mod idfast_unit {
             left: Box::new(bgp(vec![tp_svo("v", "http://ex/p", TermPattern::Variable(var("o2")))])),
             right: Box::new(values),
         };
-        let nl2 = nonliteral_vars(&j);
+        let nl2 = nonliteral_vars(&j, &|_| true);
         assert!(!nl2.contains(&var("v")), "a VALUES column could be a literal");
     }
 
@@ -16871,7 +16942,7 @@ mod idfast_unit {
     fn nonliteral_vars_graph_name_is_nonliteral() {
         let inner = bgp(vec![tp_svo("s", "http://ex/p", TermPattern::Variable(var("o")))]);
         let g = GraphPattern::Graph { name: NamedNodePattern::Variable(var("g")), inner: Box::new(inner) };
-        let nl = nonliteral_vars(&g);
+        let nl = nonliteral_vars(&g, &|_| true);
         assert!(nl.contains(&var("g")), "a GRAPH-name var binds an IRI");
     }
 
@@ -16891,7 +16962,7 @@ mod idfast_unit {
             ),
             object: TermPattern::Variable(var("name")),
         };
-        let nl = nonliteral_vars(&path);
+        let nl = nonliteral_vars(&path, &|_| true);
         assert!(!nl.contains(&var("name")), "a path OBJECT can be a literal");
         assert!(!nl.contains(&var("x")), "a path endpoint is not credited non-literal on its own");
     }
@@ -16906,7 +16977,7 @@ mod idfast_unit {
             )))),
             object: TermPattern::Variable(var("o")),
         };
-        let nl = nonliteral_vars(&path);
+        let nl = nonliteral_vars(&path, &|_| true);
         assert!(!nl.contains(&var("s")), "a Reverse-path subject end can be a literal");
         assert!(!nl.contains(&var("o")), "a Reverse-path object end can be a literal");
     }
@@ -16922,7 +16993,7 @@ mod idfast_unit {
             silent: false,
         };
         let u = GraphPattern::Union { left: Box::new(left), right: Box::new(service) };
-        let nl = nonliteral_vars(&u);
+        let nl = nonliteral_vars(&u, &|_| true);
         assert!(!nl.contains(&var("x")), "a SERVICE-bound var must not be claimed non-literal via a sibling subject slot");
     }
 
@@ -16940,7 +17011,7 @@ mod idfast_unit {
             predicate: NamedNodePattern::NamedNode(nn("http://ex/q")),
             object: TermPattern::Variable(var("o")),
         }]);
-        let nl = nonliteral_vars(&p);
+        let nl = nonliteral_vars(&p, &|_| true);
         assert!(!nl.contains(&var("lit")), "an inner quoted-triple object can be a literal");
         assert!(!nl.contains(&var("s")), "a quoted-triple inner subject is not credited here");
     }
@@ -17192,6 +17263,171 @@ mod idfast_unit {
         assert_eq!(r.rows.len(), 2, "alice/bob and bob/alice for d1 only");
         for row in &r.rows {
             assert_ne!(row[0], row[1], "the != filter must exclude self-pairs");
+        }
+    }
+
+    // ---- sq-1ivw7: predicate-range object term-kind widening -------------------------------
+
+    /// The q08/q12b-shaped store: `creator` is IRI-only (unblockable), `title`/`year` carry
+    /// literal objects (must decline). Includes a bnode creator object (still literal-free).
+    fn predrange_graph() -> Graph {
+        let nt = concat!(
+            "<http://ex/d1> <http://ex/creator> <http://ex/alice> .\n",
+            "<http://ex/d1> <http://ex/creator> <http://ex/bob> .\n",
+            "<http://ex/d2> <http://ex/creator> _:anon .\n",
+            "<http://ex/d1> <http://ex/title> \"A Paper\" .\n",
+            "<http://ex/d1> <http://ex/year> \"2020\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        );
+        Graph::load_str(nt, "ntriples").unwrap()
+    }
+
+    /// Does `nonliteral_filter_cols` prove `col` (a column of `b`) non-literal for the FILTER over
+    /// `inner`, in the snapshot `g`? Exercises the REAL snapshot-aware analysis path.
+    fn col_is_nonliteral(g: &Graph, inner: &GraphPattern, b: &Bindings, col: usize) -> bool {
+        nonliteral_filter_cols(g, inner, b).contains(&col)
+    }
+
+    #[test]
+    fn predrange_credits_iri_only_object_declines_literal() {
+        let g = predrange_graph();
+        // `?a` bound ONLY as the object of a constant literal-free predicate `creator`.
+        let inner = bgp(vec![tp_svo("doc", "http://ex/creator", TermPattern::Variable(var("a")))]);
+        let b = Bindings::unsorted(vec![var("doc"), var("a")], vec![]);
+        // `?a` is column 1; the snapshot-aware analysis must prove it non-literal.
+        assert!(
+            col_is_nonliteral(&g, &inner, &b, b.col(&var("a")).unwrap()),
+            "an object of a literal-free constant predicate must be credited non-literal"
+        );
+        // `?t` bound as object of `title` (has a literal object) must DECLINE.
+        let inner_t = bgp(vec![tp_svo("doc", "http://ex/title", TermPattern::Variable(var("t")))]);
+        let bt = Bindings::unsorted(vec![var("doc"), var("t")], vec![]);
+        assert!(
+            !col_is_nonliteral(&g, &inner_t, &bt, bt.col(&var("t")).unwrap()),
+            "an object of a literal-having predicate must NOT be credited"
+        );
+        // `?y` bound as object of `year` (inline-integer literal object) must DECLINE.
+        let inner_y = bgp(vec![tp_svo("doc", "http://ex/year", TermPattern::Variable(var("y")))]);
+        let by = Bindings::unsorted(vec![var("doc"), var("y")], vec![]);
+        assert!(
+            !col_is_nonliteral(&g, &inner_y, &by, by.col(&var("y")).unwrap()),
+            "an inline-integer literal object predicate must NOT be credited"
+        );
+    }
+
+    #[test]
+    fn predrange_mixed_use_of_same_var_declines() {
+        // `?x` is the object of literal-free `creator` in one triple but the object of `title`
+        // (literal-having) in another. It CAN be a literal, so it must NOT be credited — the
+        // `nonlit \ maybe_lit` difference must exclude it.
+        let g = predrange_graph();
+        let inner = bgp(vec![
+            tp_svo("d1", "http://ex/creator", TermPattern::Variable(var("x"))),
+            tp_svo("d2", "http://ex/title", TermPattern::Variable(var("x"))),
+        ]);
+        let b = Bindings::unsorted(vec![var("d1"), var("d2"), var("x")], vec![]);
+        assert!(
+            !col_is_nonliteral(&g, &inner, &b, b.col(&var("x")).unwrap()),
+            "a var used as a literal-having-predicate object anywhere must decline"
+        );
+    }
+
+    #[test]
+    fn predrange_variable_predicate_declines() {
+        // A VARIABLE predicate is not a constant IRI, so the snapshot check cannot apply and the
+        // object stays literal-risk (the store could bind ?p to a literal-having predicate).
+        let g = predrange_graph();
+        let inner = bgp(vec![TriplePattern {
+            subject: TermPattern::Variable(var("doc")),
+            predicate: NamedNodePattern::Variable(var("p")),
+            object: TermPattern::Variable(var("a")),
+        }]);
+        let b = Bindings::unsorted(vec![var("doc"), var("p"), var("a")], vec![]);
+        assert!(
+            !col_is_nonliteral(&g, &inner, &b, b.col(&var("a")).unwrap()),
+            "a variable-predicate object must stay literal-risk"
+        );
+    }
+
+    #[test]
+    fn predrange_fires_on_q08_shape_witness() {
+        // WITNESS that path (a) now FIRES on the q08/q12b shape: `?a`/`?b` are objects of the
+        // literal-free `creator` predicate, so `nonliteral_filter_cols` proves both columns
+        // non-literal and `idfast_rewrite` rewrites `?a = ?b` into `IdEqNonLit`. (Under #1785 this
+        // declined — the honest null result this bead closes.)
+        let g = predrange_graph();
+        let inner = bgp(vec![
+            tp_svo("doc", "http://ex/creator", TermPattern::Variable(var("a"))),
+            tp_svo("doc", "http://ex/creator", TermPattern::Variable(var("b"))),
+        ]);
+        let b = Bindings::unsorted(vec![var("doc"), var("a"), var("b")], vec![]);
+        let cols = nonliteral_filter_cols(&g, &inner, &b);
+        assert!(cols.contains(&b.col(&var("a")).unwrap()), "?a credited");
+        assert!(cols.contains(&b.col(&var("b")).unwrap()), "?b credited");
+        // The rewrite converts `?a = ?b` into the id fast path.
+        let expr = Expression::Equal(
+            Box::new(Expression::Variable(var("a"))),
+            Box::new(Expression::Variable(var("b"))),
+        );
+        let mut compiled = compile_expr(&expr, &b);
+        idfast_rewrite(&mut compiled, &cols);
+        assert!(
+            matches!(compiled, CompiledExpr::IdEqNonLit(..)),
+            "the q08-shape `=` must compile to the id fast path; got {:?}",
+            compiled
+        );
+    }
+
+    #[test]
+    fn predrange_end_to_end_q08_result_unchanged() {
+        // Full public-entry differential: the fast path fires (previous test), yet the ANSWER is an
+        // independent recompute — distinct co-creator IRI pairs of the same document.
+        let g = predrange_graph();
+        let q = concat!(
+            "SELECT ?a ?b WHERE { ",
+            "?doc <http://ex/creator> ?a . ?doc <http://ex/creator> ?b . ",
+            "FILTER(?a != ?b) }"
+        );
+        let r = crate::query(&g, q).unwrap();
+        // d1 has {alice, bob}; d2 has {_:anon} alone. Distinct ordered pairs for d1: (alice,bob),(bob,alice).
+        assert_eq!(r.rows.len(), 2, "distinct co-creator pairs of d1 only");
+        for row in &r.rows {
+            assert_ne!(row[0], row[1], "!= excludes self-pairs");
+        }
+    }
+
+    #[test]
+    fn predrange_snapshot_update_flips_credit() {
+        // The snapshot-lifecycle invariant end-to-end: `creator` is literal-free -> credited; an
+        // UPDATE inserting a literal creator object publishes a new snapshot in which the same
+        // analysis DECLINES. Proves the credit never outlives the snapshot it was computed against.
+        let mut g = predrange_graph();
+        let inner = bgp(vec![tp_svo("doc", "http://ex/creator", TermPattern::Variable(var("a")))]);
+        let b = Bindings::unsorted(vec![var("doc"), var("a")], vec![]);
+        let a_col = b.col(&var("a")).unwrap();
+        assert!(col_is_nonliteral(&g, &inner, &b, a_col), "literal-free before update -> credited");
+        // UPDATE: a literal object now exists for `creator`.
+        g.apply_delta(
+            &[[
+                Term::NamedNode(nn("http://ex/d3")),
+                Term::NamedNode(nn("http://ex/creator")),
+                Term::Literal(Literal::new_simple_literal("Anonymous")),
+            ]],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            !col_is_nonliteral(&g, &inner, &b, a_col),
+            "after the update the same analysis must DECLINE against the new snapshot"
+        );
+        // And the end-to-end result stays correct across the update (exact path now runs for `!=`).
+        let q = concat!(
+            "SELECT ?a ?b WHERE { ",
+            "?doc <http://ex/creator> ?a . ?doc <http://ex/creator> ?b . ",
+            "FILTER(?a != ?b) }"
+        );
+        let r = crate::query(&g, q).unwrap();
+        for row in &r.rows {
+            assert_ne!(row[0], row[1], "!= still excludes self-pairs post-update");
         }
     }
 

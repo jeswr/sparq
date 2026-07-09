@@ -74,6 +74,12 @@ zlib-ng = ["flate2/zlib-ng", "sparq-hdt?/zlib-ng"]
 # the feature carries no terse code and the subcommand is absent. Enable with
 # `cargo build -p sparq-cli --features terse`.
 terse = ["dep:sparq-terse"]
+# [FABLE-5] (sq-1ivw7) Forward sparq-engine's opt-in `id-filter-fastpath` — the id-level `=`/`!=`
+# FILTER fast path (subject/predicate-only + snapshot-aware predicate-range non-literal object
+# operands decided by dictionary-id (in)equality). OFF by default (the default CLI build carries
+# none of the fast-path machinery and is behaviour-identical). Enable to bench the fast path, e.g.
+# `cargo build --release -p sparq-cli --features id-filter-fastpath`.
+id-filter-fastpath = ["sparq-engine/id-filter-fastpath"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
