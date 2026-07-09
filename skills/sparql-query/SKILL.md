@@ -600,10 +600,17 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `sq-lr2ii` class) and `=` cases that can be a TYPE ERROR fall through to the exact value path
   unchanged. Result-identical whether on or off — a differential test pairs every id kind (IRIs,
   bnodes, numeric-promotion pairs, language-tagged, ill-typed literals) and asserts the fast verdict
-  equals the exact `term_of` + `values_equal` oracle row-for-row. When off, zero of this code compiles
-  and the default build is byte-identical (no new dependencies; no `unsafe`). SP2Bench q08/q12b (whose
-  UNION-branch `?a != ?b` FILTERs over IRI subject/object variables are the motivating shape) is the
-  measurable target, not a baked-in number.
+  equals the exact `term_of` + `values_equal` oracle row-for-row. When off, the fast-path column-set
+  machinery does not compile and the feature-OFF path is BEHAVIOUR-identical to the prior default build
+  (no new dependencies; no `unsafe`) — the bytes are NOT identical, because the always-compiled
+  EXISTS-re-entry refactor (splitting `eval_exists` into a thin wrapper + an always-compiled
+  `eval_exists_inner`) MOVED bytes and shifted panic locations; this byte-move is declared in
+  `bench/feature-off-declarations/1785.json` per the feature-OFF-declaration mechanism. On SP2Bench
+  q08/q12b (whose UNION-branch `?a != ?b` FILTERs over IRI subject/object variables are the motivating
+  shape) the measured before/after was INCONCLUSIVE — an honest NULL finding, not a claimed win: those
+  queries' FILTER variables also appear in `dc:creator` OBJECT positions, so the static non-literal
+  analysis conservatively declines them and path (a) does not fire on this shape (row counts identical).
+  Widening the fast path to that shape needs predicate-range term-kind inference, filed as `sq-1ivw7`.
 - **DISTINCT-projection loose (skip) index scan** is a DEFAULT-ON, semantics-preserving optimisation
   (bead `sq-7d3dj.30.4`; research/sp2bench-complex-shape-deficit.md §2.3). For `SELECT DISTINCT ?p`
   over a BGP / **UNION** of BGPs where `?p` is the **single** projected variable, the executor
