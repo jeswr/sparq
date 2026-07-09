@@ -164,6 +164,30 @@ pub fn count_focus_nodes(data: &Graph, model: &ShapesModel) -> usize {
     eval::count_focus_nodes(data, model)
 }
 
+/// [OPUS-4.8] (sq-7d3dj.33.1) The calling thread's monotonically-increasing count of
+/// `sh:sparql` constraint query executions the validator has run (one per engine
+/// query). Thread-local so a `validate` on one thread is not perturbed by a
+/// concurrent `validate` on another; snapshot and read the delta on the SAME thread.
+///
+/// Its purpose is a perf / anti-vacuity check: with focus-node batching the delta
+/// across one [`validate`] call is ~O(number of `sh:sparql` shapes) — one query per
+/// ~10 000-focus chunk — instead of O(number of focus nodes). A test / benchmark can
+/// snapshot it before and after [`validate`] and assert the batched path fired (a
+/// small delta for a large focus set), guarding against a silent regression back to
+/// the per-focus loop. The absolute value is not meaningful — only the delta.
+///
+/// ```
+/// # use sparq_shacl::{sparql_constraint_executions, validate, graph_from_triples};
+/// let before = sparql_constraint_executions();
+/// // ... run validate() over a shapes graph with sh:sparql constraints ...
+/// let executions = sparql_constraint_executions() - before;
+/// # let _ = executions;
+/// ```
+#[must_use]
+pub fn sparql_constraint_executions() -> u64 {
+    sparql::exec_count()
+}
+
 /// Loads a Turtle document into a [`Graph`], resolving relative IRIs against
 /// `base`.
 pub fn load_turtle_with_base(text: &str, base: &str) -> Result<Graph, String> {
@@ -921,6 +945,192 @@ mod tests {
         .unwrap();
         let r = validate(&data, &shapes);
         assert!(r.conforms, "{}", r.to_text());
+    }
+
+    // --- [OPUS-4.8] (sq-7d3dj.33.1) sh:sparql focus-node batching --------------
+
+    /// A stable, order-independent key for one result, covering every field the
+    /// W3C suite compares (focus / value / path / component / source shape+constraint
+    /// / severity / message). Two reports are report-equivalent iff their sorted key
+    /// multisets are equal.
+    fn result_keys(r: &ValidationReport) -> Vec<String> {
+        let mut ks: Vec<String> = r
+            .results
+            .iter()
+            .map(|x| {
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}",
+                    x.focus_node,
+                    x.value.as_ref().map(|v| v.to_string()).unwrap_or_default(),
+                    x.path.as_ref().map(Path::to_turtle).unwrap_or_default(),
+                    x.source_component,
+                    x.source_shape,
+                    x.source_constraint
+                        .as_ref()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default(),
+                    x.severity,
+                    x.default_message,
+                )
+            })
+            .collect();
+        ks.sort();
+        ks
+    }
+
+    /// Data + shapes with a `sh:sparql` constraint over MANY focus nodes, a mix of
+    /// violating and conforming, plus a non-`sh:sparql` (core) constraint on the same
+    /// shape so batching must interleave correctly with the per-focus components.
+    fn batch_case() -> (Graph, Graph) {
+        let mut data = String::from("@prefix ex: <http://example.org/> .\n");
+        for i in 0..60 {
+            // Even i => age negative (violates the sh:sparql); every 7th also lacks a
+            // name (violates the core minCount) — exercising mixed components/foci.
+            let age = if i % 2 == 0 { -(i as i64) - 1 } else { i as i64 };
+            data.push_str(&format!("ex:n{} a ex:Person ; ex:age {} .\n", i, age));
+            if i % 7 != 0 {
+                data.push_str(&format!("ex:n{} ex:name \"n{}\" .\n", i, i));
+            }
+        }
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] ;
+              sh:sparql [
+                a sh:SPARQLConstraint ;
+                sh:prefixes ex:p ;
+                sh:message "age must not be negative" ;
+                sh:select """SELECT $this ?value WHERE { $this <http://example.org/age> ?value . FILTER(?value < 0) }""" ;
+              ] .
+            ex:p sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+        "#;
+        (
+            Graph::load_str(&data, "turtle").unwrap(),
+            Graph::load_str(shapes, "turtle").unwrap(),
+        )
+    }
+
+    /// HARD invariant: the batched `sh:sparql` path produces a byte-for-byte
+    /// report-equivalent result set (and `conforms`) to the per-focus path, over a
+    /// many-focus mixed-component workload.
+    #[test]
+    fn batched_equals_per_focus_report() {
+        let (data, shapes) = batch_case();
+        let batched = validate(&data, &shapes);
+        let per_focus = eval::with_sparql_batching_disabled(|| validate(&data, &shapes));
+        assert_eq!(
+            batched.conforms, per_focus.conforms,
+            "conforms diverged between batched and per-focus"
+        );
+        assert_eq!(
+            batched.results.len(),
+            per_focus.results.len(),
+            "result count diverged"
+        );
+        assert_eq!(
+            result_keys(&batched),
+            result_keys(&per_focus),
+            "batched vs per-focus reports differ"
+        );
+        // The sh:sparql constraint alone flags the 30 even-index nodes.
+        let sparql_hits = batched
+            .results
+            .iter()
+            .filter(|r| r.source_component.ends_with("SPARQLConstraintComponent"))
+            .count();
+        assert_eq!(sparql_hits, 30, "expected 30 negative-age violations");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Local, NON-canonical measurement of the batched vs
+    /// per-focus `sh:sparql` wall time on a synthetic workload shaped like the LUBM
+    /// `sparql_constraint`/`sparql_heavy` benchmarks (a `SELECT $this ?value` with a
+    /// two-triple BGP + type check, one solution per violating focus). Prints the
+    /// speed-up ratio; run with `cargo test -p sparq-shacl --lib -- --ignored
+    /// --nocapture perf_batched`. `#[ignore]` because it is a timing harness, not a
+    /// pass/fail gate (the box is shared → numbers are directional only). It still
+    /// asserts the reports match and the execution-count contrast holds.
+    #[test]
+    #[ignore = "local timing harness; non-canonical, run with --ignored --nocapture"]
+    fn perf_batched_vs_per_focus() {
+        use std::time::Instant;
+        const N: usize = 2000;
+        let mut data = String::from("@prefix ex: <http://example.org/> .\n");
+        for i in 0..N {
+            data.push_str(&format!("ex:s{} a ex:Student ; ex:takesCourse ex:c{} .\n", i, i));
+            // Half the courses are graduate courses → half the students violate.
+            if i % 2 == 0 {
+                data.push_str(&format!("ex:c{} a ex:GraduateCourse .\n", i));
+            }
+        }
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Student ;
+              sh:sparql [ a sh:SPARQLConstraint ; sh:prefixes ex:p ; sh:message "grad course" ;
+                sh:select """SELECT $this ?value WHERE { $this <http://example.org/takesCourse> ?value . ?value a <http://example.org/GraduateCourse> }""" ] .
+            ex:p sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+        "#;
+        let data = Graph::load_str(&data, "turtle").unwrap();
+        let shapes = Graph::load_str(shapes, "turtle").unwrap();
+
+        // Warm up (parse/plan caches) then time each path best-of-3.
+        let mut batched_ns = u128::MAX;
+        let mut per_focus_ns = u128::MAX;
+        let mut batched_report = None;
+        let mut per_focus_report = None;
+        for _ in 0..3 {
+            let t = Instant::now();
+            let r = validate(&data, &shapes);
+            batched_ns = batched_ns.min(t.elapsed().as_nanos());
+            batched_report = Some(r);
+
+            let t = Instant::now();
+            let r = eval::with_sparql_batching_disabled(|| validate(&data, &shapes));
+            per_focus_ns = per_focus_ns.min(t.elapsed().as_nanos());
+            per_focus_report = Some(r);
+        }
+        let batched = batched_report.unwrap();
+        let per_focus = per_focus_report.unwrap();
+        assert_eq!(result_keys(&batched), result_keys(&per_focus));
+        let ratio = per_focus_ns as f64 / batched_ns as f64;
+        println!(
+            "[sq-7d3dj.33.1] N={N} foci  batched={:.3}ms  per_focus={:.3}ms  speed-up={:.1}x  (violations={})",
+            batched_ns as f64 / 1e6,
+            per_focus_ns as f64 / 1e6,
+            ratio,
+            batched.results.len(),
+        );
+    }
+
+    /// Anti-vacuity: the batched path FIRES — one query execution for 60 focus nodes,
+    /// not 60. Uses the public per-thread execution counter.
+    #[test]
+    fn batched_path_fires_once_for_many_foci() {
+        let (data, shapes) = batch_case();
+        let before = sparql_constraint_executions();
+        let _ = validate(&data, &shapes);
+        let batched_execs = sparql_constraint_executions() - before;
+        assert_eq!(
+            batched_execs, 1,
+            "expected ONE batched sh:sparql execution for 60 foci, got {}",
+            batched_execs
+        );
+        // And the per-focus path really does run one query per focus (the contrast
+        // that makes the '1' meaningful, not an artefact of e.g. zero executions).
+        let before_pf = sparql_constraint_executions();
+        eval::with_sparql_batching_disabled(|| {
+            let _ = validate(&data, &shapes);
+        });
+        let per_focus_execs = sparql_constraint_executions() - before_pf;
+        assert_eq!(
+            per_focus_execs, 60,
+            "per-focus path should run one query per focus node"
+        );
     }
 }
 

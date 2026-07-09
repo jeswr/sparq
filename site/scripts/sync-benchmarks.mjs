@@ -108,7 +108,17 @@ for (const k of Object.keys(competitorsRaw)) {
   competitors[k] = competitorsRaw[k];
 }
 
-const dataJs = readBranchDataJs();
+// [OPUS-4.8] sq-1sa9r — `--competitors-only` (env SYNC_BENCHMARKS_COMPETITORS_ONLY=1)
+// refreshes ONLY labels + competitors from the working tree and KEEPS the committed
+// latest/history. Use it for a competitor-focused ingest (e.g. adding a canonical
+// same_box_comparisons row) so the PR does not also drag in an unrelated refresh of the
+// sparq CI series from the benchmark-data branch. Never fabricates: it simply preserves the
+// already-committed latest/history exactly as the branch-absent fallback does.
+const competitorsOnly =
+  process.argv.includes("--competitors-only") ||
+  process.env.SYNC_BENCHMARKS_COMPETITORS_ONLY === "1";
+
+const dataJs = competitorsOnly ? null : readBranchDataJs();
 let latest;
 let history;
 let source;
@@ -122,9 +132,18 @@ if (dataJs) {
   // `latest` so the trend charts still render (one marker) on a fork without the branch.
   history =
     Array.isArray(prev.history) && prev.history.length ? prev.history : [latest];
-  source = prev.source + " (kept — benchmark-data ref unavailable this run)";
+  // [FABLE-5] sq-7d3dj.34: strip any prior "(kept — …)" suffixes before appending, so
+  // repeated --competitors-only runs stay idempotent instead of accumulating the marker.
+  const baseSource = prev.source.replace(/( \(kept — [^)]*\))+$/, "");
+  source =
+    baseSource +
+    (competitorsOnly
+      ? " (kept — --competitors-only: refreshed labels+competitors only)"
+      : " (kept — benchmark-data ref unavailable this run)");
   console.warn(
-    "[sync-benchmarks] origin/benchmark-data not found — keeping committed latest+history, refreshing labels+competitors only.",
+    competitorsOnly
+      ? "[sync-benchmarks] --competitors-only: keeping committed latest+history, refreshing labels+competitors from the working tree."
+      : "[sync-benchmarks] origin/benchmark-data not found — keeping committed latest+history, refreshing labels+competitors only.",
   );
 } else {
   console.error(

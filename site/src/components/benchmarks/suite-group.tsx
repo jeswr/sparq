@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { MetricTable } from "@/components/benchmarks/metric-table";
 import { SameBoxTable } from "@/components/benchmarks/same-box-table";
+import { HttpPanelTable } from "@/components/benchmarks/http-panel-table";
 import { ReferencesNote } from "@/components/benchmarks/references-note";
 import { TrendCharts } from "@/components/benchmarks/trend-charts";
 import { ScalingCharts } from "@/components/benchmarks/scaling-charts";
@@ -34,6 +35,10 @@ export interface SuiteGroupData {
   rows: MetricRow[];
   summary: CompetitiveSummary;
   sameBox?: SameBoxComparison;
+  // [OPUS-4.8] sq-7d3dj.34.3 — the canonical same-mode HTTP panel (full-request + TTFB) +
+  // its own honest wins/losses summary, rendered below the CLI matrix when present.
+  httpSameBox?: SameBoxComparison;
+  httpSummary?: CompetitiveSummary;
   references: ReferenceBaseline[];
   trends: TrendSeries[];
   scaling: ScalingFamily[];
@@ -84,6 +89,17 @@ export function SuiteGroup({
             <div className="space-y-2">
               <h4 className="text-sm font-medium">Same-box cross-engine comparison</h4>
               <SameBoxTable comparison={data.sameBox} />
+            </div>
+          )}
+          {data.httpSameBox && (
+            <div className="space-y-2">
+              <h4 className="text-sm font-medium">
+                Same-box HTTP-server panel — full-request + TTFB
+              </h4>
+              <HttpPanelTable
+                comparison={data.httpSameBox}
+                summary={data.httpSummary}
+              />
             </div>
           )}
           <ReferencesNote references={data.references} />

@@ -1,0 +1,14 @@
+# [FABLE-5] sq-hmd7l.2 — jena-text translation of the sparq-text `phrase` workload:
+# `text:phrase "a b"` (docs with a, b ADJACENT and IN ORDER) => Lucene quoted phrase
+# (slop 0: adjacent, in order — the same result-set semantics). The SPARQL string is
+# single-quoted so the embedded Lucene double quotes need no escaping. See
+# and_terms.rq.tmpl for the COUNT + result-limit rationale.
+#
+# NOTE: near_slop2 is deliberately NOT translated: Lucene's '"a b"~2' proximity is
+# transposition-tolerant (unordered within slop), sparq-text's text:near is ordered-
+# within-gap — different result SETS, so a column would be apples-to-oranges. The
+# absence is recorded in the envelope, per the absent-tool=>absent-column rule.
+PREFIX text: <http://jena.apache.org/text#>
+SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {
+  ?s text:query ( <http://example.org/comment> '"%%A%% %%B%%"' 10000000 ) .
+}

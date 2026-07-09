@@ -40,7 +40,9 @@ The XSD numeric value tower: `Num` (`Int(i64)` / `Dec(Dec)` / `Float(f32)` / `Do
 the fixed-point `Dec` struct (EXACT integer/decimal arithmetic, no f64 rounding), `ArithOp`
 (`Add`/`Sub`/`Mul`/`Div`), `RoundMode`, `as_numeric` (classifies an `oxrdf::Literal` into the
 tower), and the XSD lexical helpers `split_decimal`, `parse_xsd_f64`, `parse_xsd_f32`,
-`fmt_xsd_double`. Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
+`fmt_xsd_double`. `parse_xsd_f64` delegates to `sparq_core::parse_xsd_f64` (sq-9781x) — one
+shared body with the `sparq-core` numeric-value cache, so cache-hit ⟺ evaluator-accepts.
+Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
 - `Num::cmp_total` — ORDER BY / MIN/MAX total order; NaN totalised FIRST.
 - `Num::cmp_relational` — SPARQL `<`/`>` / D-entailment / RIF numeric equality; NaN → `None`
   (type error). [OPUS-4.8] sq-v5evr.
@@ -77,15 +79,23 @@ The four id-tuple join kernels over `&[Row]` slices. Requires `rows`; pulls `rus
 | Function | Kind |
 |----------|------|
 | `merge_join` | sorted merge join — one shared key column |
-| `build_table` + `hash_probe_serial` | serial hash join — build `FxHashMap`, then probe |
-| `build_partitioned` | radix-partitioned hash build for parallel workers |
-| `probe_emit` | per-row probe emit (used by both serial and parallel paths) |
+| `build_table` + `build_partitioned` | build `JoinTable` (serial) or `Vec<JoinTable>` (radix-partitioned for parallel workers) |
+| `probe_emit` | per-row probe emit — single-hash (FxHash once for partition + `raw_entry().from_hash`), `reserve` before materialising (batch-emission contract) |
+| `probe_gather_indices` | M4 batch-emission primitive — collect build-row indices WITHOUT materialising `Row`s; morsel pipeline calls this, then materialises per output chunk (sq-pntvh.7) |
+| `hash_probe_serial` | probe loop: calls `probe_emit` per row with a `Budget` cooperative-cancel poll |
 | `bind_combine` | index-nested-loop combine step |
 | `lftj_recurse` over `Trie`/`TrieIter` | leapfrog trie-join (WCOJ) |
 | `join::delta::DeltaTable` | persistent build-side table for semi-naive Δ-vs-full shapes (built for the OWL-RL fixpoint; drives `sparq-rsp`'s Delta/Snapshot window diff) |
 
+`JoinTable` is a public type alias for `hashbrown::HashMap<Key, Posting, FxBuildHasher>`.
 All kernels are generic over a `JoinKeys` column descriptor and a `Budget` cooperative-cancel
 hook — both monomorphised, never a trait object. Use `NoBudget` for an unbounded join.
+
+**Single-hash optimisation ([SONNET-4.6] sq-7d3dj.19):** `probe_emit` and `probe_gather_indices`
+compute `key_hash` ONCE — it selects the radix partition AND drives `raw_entry().from_hash` on
+the `JoinTable`, eliminating the previous double-hash in the partitioned probe path. `probe_emit`
+calls `out.reserve(matches.len())` before the emit loop (batch-emission contract the sq-pntvh M4
+morsel pipeline inherits: reserve then materialise, not per-match).
 
 ```toml
 [dependencies]
@@ -161,7 +171,7 @@ beyond ~38 significant digits (beaded).
 |---------|---------|------------|
 | `rows` | `sparq_substrate::rows` | — |
 | `numeric` | `sparq_substrate::numeric` | `oxrdf` |
-| `join` | `sparq_substrate::join` (implies `rows`) | `rustc-hash` |
+| `join` | `sparq_substrate::join` (implies `rows`) | `rustc-hash`, `hashbrown` |
 | `compare` | `sparq_substrate::compare` | — |
 
 All features are off by default. The default build compiles nothing from this crate (byte-

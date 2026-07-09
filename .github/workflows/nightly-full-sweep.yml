@@ -152,9 +152,17 @@ jobs:
           SPARQ_NIGHTLY_A11Y: "1"
         run: npx playwright test --list e2e/a11y.spec.ts e2e/surface-sweep.spec.ts e2e/nightly/a11y-full-inventory.spec.ts
 
-      # FULL mode: the real suite. Build the lean wasm bundle (mirrors site-visual.yml) so the
-      # in-tab-engine a11y/render states run, then the pinned Typst → spec/paper fragments the
-      # surface-sweep asserts on (mirrors site-e2e.yml), then the chromium suite.
+      # FULL mode: the real suite. Build the FULL-featured wasm bundle (shacl,jsonld,…) — NOT the
+      # lean one — because the a11y-sweep runs the WHOLE site e2e suite (`npm run test:e2e`), which
+      # includes the SHACL-validator specs (e2e/shacl-validator.spec.ts, e2e/shacl-rerun-
+      # regression.spec.ts). [FABLE-5] sq-0rbfn: those specs `test.skip` only when the wasm FILE is
+      # absent — a presence check, not a feature check. The lean bundle omits the `shacl` feature,
+      # so `sparqShaclValidate` is undefined at runtime → the validator can't run → the report
+      # never renders → the specs fail (this was the a11y-sweep red, issue #1738). The full bundle
+      # (js `build:wasm`, features shacl,jsonld,serialize-rdf,scs,canon) makes those engine-gated
+      # SHACL states actually execute — exactly the wider net this nightly lane is meant to be. The
+      # Typst → spec/paper fragments the surface-sweep asserts on (mirrors site-e2e.yml) build
+      # below, then the chromium suite runs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         if: needs.config.outputs.mode == 'full'
         with:
@@ -171,9 +179,9 @@ jobs:
             ${{ github.workspace }}/target
           key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
-      - name: Build lean wasm bundle
+      - name: Build full-featured wasm bundle (shacl,jsonld,… — the SHACL specs need it)
         if: needs.config.outputs.mode == 'full'
-        run: cd ../js && npm run build:wasm:lean
+        run: cd ../js && npm run build:wasm
       - name: Sync wasm bundle into site/public/wasm/
         if: needs.config.outputs.mode == 'full'
         run: npm run sync-wasm
@@ -455,12 +463,18 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
+            dbus-x11 \
             xvfb
-      - name: Log WebKitWebDriver version
+      # Drift tripwire + regression guard (bead sq-t6492 / issue #1740). The lane's persistent red
+      # was WebKitGTK 2.5x rejecting the client's `browserName: "wry"` capability ("Failed to match
+      # capabilities", 0-byte driver log); the fix is client-side — gui/e2e/run-e2e.mjs now OMITS
+      # browserName. This step (1) FAILS if that regression is re-introduced, and (2) logs the
+      # webkit2gtk + tauri-driver versions so the next runner-image drift is a one-line diagnosis.
+      # Runs EARLY (right after the webkit2gtk apt install, before the ~6-min build) so a regression
+      # is caught fail-fast; the version tripwire is diagnostic (does not gate the advisory lane, §5).
+      - name: Drift tripwire — browserName regression guard + version log
         if: needs.config.outputs.mode == 'full'
-        run: |
-          echo "WebKitWebDriver: $(WebKitWebDriver --version 2>&1 || echo unknown)"
-          echo "webkit2gtk-driver apt: $(dpkg -l webkit2gtk-driver 2>/dev/null | tail -1)"
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
       - name: Cache cargo (gui e2e)
         if: needs.config.outputs.mode == 'full'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -484,10 +498,15 @@ jobs:
         run: |
           npm install
           (cd gui/app && npm run build:tauri)
-      - name: Build the GUI shell (debug, embeds the frontend)
+      # --features custom-protocol (bead sq-t6492): a plain `cargo build` sets Tauri's cfg(dev),
+      # which makes the webview load `devUrl` (http://localhost:3001) — "Connection refused" under
+      # the e2e (no dev server). custom-protocol embeds + serves frontendDist (../app/out, built
+      # above). See gui/src-tauri/Cargo.toml. `cargo tauri build` sets this automatically; a plain
+      # cargo build must pass it.
+      - name: Build the GUI shell (debug, embeds the frontend via custom-protocol)
         if: needs.config.outputs.mode == 'full'
         working-directory: gui/src-tauri
-        run: cargo build
+        run: cargo build --features custom-protocol
       - name: Install tauri-driver@2.0.6 (pinned)
         if: needs.config.outputs.mode == 'full'
         run: cargo install tauri-driver@2.0.6 --locked
@@ -499,17 +518,24 @@ jobs:
         if: needs.config.outputs.mode == 'full'
         working-directory: gui/e2e
         run: bash support/no-sleep-gate.sh
-      - name: Run the tauri-driver smoke (headless under xvfb; retry once on failure)
+      # Run under dbus-run-session + NO_AT_BRIDGE=1 (bead sq-t6492): WebKitGTK under xvfb warns
+      # "AT-SPI: Error retrieving accessibility bus address … org.a11y.Bus was not provided" and can
+      # stall webview/session startup when no session D-Bus / a11y bus exists. dbus-run-session gives
+      # the app a private session bus and NO_AT_BRIDGE=1 disables the AT-SPI bridge it was reaching
+      # for — clearing the warning and the stall. (SESSION_CREATE_TIMEOUT_MS raises the cold-launch
+      # session-create ceiling; see run-e2e.mjs.)
+      - name: Run the tauri-driver smoke (headless under xvfb + dbus; retry once on failure)
         if: needs.config.outputs.mode == 'full'
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+          NO_AT_BRIDGE: "1"
         run: |
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
-            xvfb-run --auto-servernum npm run test:e2e && exit 0
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e && exit 0
           echo "[tauri-e2e-nightly] first attempt failed; retrying once (xvfb startup flake check)…"
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
-            xvfb-run --auto-servernum npm run test:e2e
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e
       - name: Upload failure artifacts
         if: always() && needs.config.outputs.mode == 'full'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

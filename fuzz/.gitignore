@@ -1,6 +1,9 @@
 # cargo-fuzz generated, machine-local dirs — never committed. [OPUS-4.8]
 #   target/    : the fuzz crate's own build output (separate from the workspace target)
 #   corpus/    : the accumulated input corpus libFuzzer grows during a run
+#                (persisted across CI runs via actions/cache — sq-0iqzw; the
+#                COMMITTED minimal seed corpus lives in seeds/<target>/, which is
+#                tracked and passed as a second corpus dir on every run) [FABLE-5]
 #   artifacts/ : crash/leak/timeout reproducers libFuzzer writes on a finding
 #   coverage/  : `cargo fuzz coverage` output
 # Cargo.lock IS committed (it is tracked, not listed here) so CI runs are reproducible.

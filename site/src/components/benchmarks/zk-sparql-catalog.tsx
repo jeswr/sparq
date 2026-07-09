@@ -126,11 +126,12 @@ function CatalogRow({ entry }: { entry: CatalogEntry }) {
     >
       <td className="px-3 py-2.5">
         <span className="block text-[13px] font-medium">{entry.feature}</span>
-        <code className="mt-0.5 block whitespace-pre-wrap break-words font-mono text-[11.5px] text-muted-foreground">
+        {/* [FABLE-5] text-foreground/70 (not muted-foreground) clears WCAG AA 4.5:1 on the dark card bg; muted-foreground was 3.29:1 here (color-contrast, sq-0rbfn) */}
+        <code className="mt-0.5 block whitespace-pre-wrap break-words font-mono text-[11.5px] text-foreground/70">
           {entry.sparql}
         </code>
         {isGap && (
-          <span className="mt-1 inline-block text-[11px] italic text-muted-foreground">
+          <span className="mt-1 inline-block text-[11px] italic text-foreground/70">
             not yet ZK-provable
           </span>
         )}
