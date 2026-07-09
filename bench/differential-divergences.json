@@ -1,0 +1,24 @@
+{
+  "$comment": "Machine-readable registry of the ADJUDICATED cross-engine semantic divergence classes for sparq's differential fuzzing (bead sq-0iqzw). [FABLE-5] Consumed by crates/sparq-bench/src/fuzz.rs (DivergenceAllowlist): a mismatch that falls in a class listed here is SKIPPED-WITH-COUNT (reported in the run summary) instead of failing; any mismatch outside these classes FAILS. Removing an entry re-enables the strict differential for that class. Do NOT widen a class beyond its adjudication: each entry cites the spec clause + the bead where the adjudication was performed. The 'engines' field is provenance (which reference engine's reading diverges from sparq's) — the fuzzer consults every entry regardless, so a reference-engine behaviour change cannot silently re-open an adjudicated class as a false positive.",
+  "version": 1,
+  "classes": [
+    {
+      "id": "cross-family-eq-type-error",
+      "bead": "sq-eibog",
+      "engines": ["oxigraph"],
+      "spec": "SPARQL 1.1 §17.3 (Operator Mapping) + §17.4.1.7 (RDFterm-equal)",
+      "shape": "FILTER(?x = C) / FILTER(?x != C) where ?x and the constant C are literals of DIFFERENT comparison families (numeric vs string vs boolean vs ...)",
+      "adjudication": "Cross-family literal =/!= is a TYPE ERROR per RDFterm-equal ('produces a type error if the arguments are both literal but are not the same RDF term'), so the FILTER drops the row. sparq implements this (passes 15/15 W3C sparql10/expr-equals evaluation tests). Oxigraph 0.5 leniently resolves cross-family = to FALSE (!= to TRUE) and KEEPS the row. Adjudicated in bead sq-eibog; fuzzer oracle fixed in PR #1631 (engine untouched — sparq was spec-correct).",
+      "handling": "NOT a blind skip: the comparator re-derives the SPEC-correct count independently of both engines (spec_filter_count in fuzz.rs) and absorbs the mismatch ONLY when sparq equals that spec-derived count; a residual disagreement with the spec-derived count still FAILS."
+    },
+    {
+      "id": "bnode-iri-inequality",
+      "bead": "sq-ai2wa",
+      "engines": ["qlever"],
+      "spec": "SPARQL 1.1 §17.4.1.7 (RDFterm-equal) — genuinely ambiguous for non-literal cross-type terms (cf. w3c/sparql-dev#112)",
+      "shape": "FILTER(?x != <iri>) / FILTER(?x = <iri>) where ?x is bound to a BLANK NODE (or vice versa): one side a bnode, the other an IRI",
+      "adjudication": "sparq (and Virtuoso, and the SP2Bench published expected results) read two different non-literal terms as = FALSE / != TRUE (identity semantics); QLever reads the cross-type comparison as a TYPE ERROR and drops the row (SP2Bench q08/q12b return empty there). Adjudicated in bead sq-ai2wa (2026-07-07): sparq's reading held correct for the benchmark's expected results; the QLever divergence is timing-disqualifying, not a computation error in either engine. Oxigraph agrees with sparq's reading today, and the sparq-bench generator emits no blank nodes, so this class is currently INERT in the Oxigraph differential — it is encoded so that generator/oracle growth (or an Oxigraph behaviour change) surfaces as an adjudicated skip, not a false positive.",
+      "handling": "Skip-with-count when the mismatching case's =/!= comparison has a blank node on one side and an IRI on the other; anything else fails."
+    }
+  ]
+}

@@ -76,10 +76,18 @@
 # to this repo (`gh api /repos/sparq-org/sparq/actions/runners` == 0; every other workflow uses
 # `ubuntu-latest`), so option "beefier runner" is not currently reachable — recorded in the PR.
 #
-# ADDING A SUITE (bead sq-sqtk2.5 wires four new Phase-1 harness suites in): append ONE entry to
+# ADDING A SUITE ([FABLE-5] sq-63ups — the Phase-1 suites are wired in): append ONE entry to
 # the `matrix.suite` list below — `{ name, crate, features, harnesses }`. `harnesses` is the
 # space-separated list of `#[kani::proof]` fn names in that crate. Nothing else changes: the
-# per-harness timeout loop + summary apply uniformly to every suite.
+# per-harness timeout loop + summary apply uniformly to every suite. This matrix is
+# DRIFT-CHECKED: ci/formal-verification.toml is the manifest of every proof suite (name /
+# crate / features / harnesses / the source paths each suite proves), and the gating
+# `fv-manifest` job (.github/workflows/formal-verification.yml, scripts/check-fv-manifest.py)
+# REDs any PR on which this matrix, that manifest and the source `#[kani::proof]` inventory
+# disagree — so a new harness can no longer silently run in no lane. The same manifest drives
+# the change-coupled PR selector (scripts/fv_select.py): PRs touching a suite's `proves`
+# paths run that suite's proofs as a GATING check; this nightly lane stays the full-matrix
+# backstop.
 #
 # HOW (the documented Kani flow — https://model-checking.github.io/kani/install-guide.html):
 #   cargo install --locked kani-verifier              (the cargo-kani driver from crates.io)
@@ -159,15 +167,73 @@ jobs:
             harnesses: >-
               open_from_bytes_never_panics
               open_validated_v2_tail_never_panics
-          - name: "sparq-core (dict validator + id partition)"
+          # [FABLE-5] sq-63ups: the former single sparq-core entry is SPLIT so the five
+          # fast id-partition/domain harnesses (all pass in seconds) report an honest
+          # GREEN job instead of being dragged red every night by the two mmap-validator
+          # totality harnesses, which exceed the per-harness CBMC budget on this runner
+          # class (sq-og8u8). The split also adds the two PR #1536 domain self-checks
+          # (domain_id_partition_regions_are_all_nonempty,
+          # domain_dict_validator_accepts_the_empty_dict) that were present in source but
+          # absent from this list — they previously ran in NO CI lane.
+          - name: "sparq-core (dict id partition + domain self-checks)"
             crate: sparq-core
             features: "--features mmap"
             harnesses: >-
               inline_id_round_trip
               inline_id_out_of_domain_is_none
               id_partition_disjoint
+              domain_id_partition_regions_are_all_nonempty
+              domain_dict_validator_accepts_the_empty_dict
+          - name: "sparq-core (dict mmap validator totality)"
+            crate: sparq-core
+            features: "--features mmap"
+            harnesses: >-
               validate_dict_bytes_never_panics
               validate_dict_bytes_sized_tail_never_panics
+          # [FABLE-5] sq-63ups: the two Phase-1 suites (sq-sqtk2.3 / sq-sqtk2.4) that ran
+          # in no CI lane since merge. Local evidence (61 GB aarch64 work box, Kani 0.67,
+          # suites run concurrently so wall times are upper bounds): every reducer harness
+          # PASSes (slowest ~10 min), every compare harness PASSes (most in seconds).
+          - name: "sparq-engine (vectorized reducer kernels)"
+            crate: sparq-engine
+            features: "--features vectorized"
+            harnesses: >-
+              reduce_sum_equals_reference_fold
+              reduce_count_equals_reference
+              reduce_min_id_equals_reference
+              reduce_max_id_equals_reference
+              narrow_sum_to_i64_iff_in_range
+              domain_reducer_slice_is_adversarial_and_survives_the_bound
+          - name: "sparq-substrate (compare ORDER laws)"
+            crate: sparq-substrate
+            features: "--features compare"
+            harnesses: >-
+              domain_exhibits_the_2p53_collapse
+              reflexivity_numeric_literals_incl_nan
+              reflexivity_nonnumeric_scalars
+              reflexivity_triple_terms
+              antisymmetry_numeric_pairs_incl_nan
+              antisymmetry_numeric_vs_nonnumeric_incl_nan
+              antisymmetry_nonnumeric_scalar_pairs
+              antisymmetry_triple_vs_scalar
+              antisymmetry_triple_pairs
+              within_class_totality_literals_incl_nan
+              within_class_totality_nonliterals
+              transitivity_exact_int_literals_incl_2p53_collapse
+              transitivity_nonliteral_scalars
+              transitivity_int_with_nonliteral_scalars
+              transitivity_double_literals
+              transitivity_mixed_numeric_collapse_free_range
+              domain_cf_numeric_is_collapse_free_with_signed_zero_pair
+              transitivity_string_literals
+              transitivity_strict_typed_literals
+              transitivity_mixed_literal_kinds_incl_nan
+              transitivity_triple_terms_recursive
+              exact_int_order_agreement_incl_2p53_collapse
+              domain_x2_doubles_are_exact
+              witness_mixed_tier_collapse_now_exact
+              witness_numeric_vs_string_now_ranked_by_kind
+              witness_nan_now_totalised_first
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host

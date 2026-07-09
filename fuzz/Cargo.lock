@@ -723,6 +723,7 @@ dependencies = [
  "smallvec",
  "spargebra",
  "sparq-core",
+ "sparq-substrate",
  "uuid",
 ]
 
@@ -748,6 +749,17 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+]
+
+[[package]]
+name = "sparq-substrate"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "oxrdf",
+ "rustc-hash",
+ "smallvec",
+ "sparq-core",
 ]
 
 [[package]]

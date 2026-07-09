@@ -516,7 +516,7 @@ impl ClassFeatureIdx {
         }
         self.lists_dirty = false;
         self.lists.clear();
-        for (&head, _) in self.first.iter() {
+        for &head in self.first.keys() {
             let mut members = Vec::new();
             let mut cur = head;
             for _ in 0..self.first.len() + 1 {

@@ -1,0 +1,5 @@
+{
+  "pr": 1745,
+  "date": "2026-07-07",
+  "reason": "exec.rs adds eval_select_json_emit / query_json_stream_with_budget streaming JSON path — always-compiled engine change moves feature-OFF wasm bytes"
+}

@@ -214,7 +214,13 @@ sparq-server = { path = "../sparq-server", optional = true }
 # signal). OFF by default (optional, behind `service-loopback`).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"], optional = true }
 sparq-core = { path = "../sparq-core" }
-sparq-engine = { path = "../sparq-engine" }
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` ON: the W3C conformance ratchet validates the
+# SHIPPED configuration — the sparq-cli / sparq-server binaries default-light the engine's
+# pre-execution algebra rewrite pass (#1735), so the ratchet must run the same rewritten
+# plans real users execute (a rewrite that broke a W3C test would otherwise merge green).
+# The pass is result-equivalent by design; this harness crate is `publish = false` and the
+# engine LIBRARY default stays OFF, so no lean-consumer surface changes.
+sparq-engine = { path = "../sparq-engine", features = ["algebra-rewrite"] }
 sparq-reason = { path = "../sparq-reason" }
 # [OPUS-4.8] sq-kuvu3 — the EXPERIMENTAL OWL 2 QL query-rewriting reasoner, used ONLY
 # by the `ql-experimental` arm to rewrite each QL-tagged entailment test's conjunctive
