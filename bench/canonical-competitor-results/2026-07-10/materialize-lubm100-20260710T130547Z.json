@@ -1,0 +1,72 @@
+{
+  "gather": "materialize-same-box-comparison",
+  "wave": "materialize-competitor-baseline (sq-hmd7l.7)",
+  "canonical": true,
+  "canonical_note": "CANONICAL: dedicated quiet box, one engine active at a time on the SAME LUBM (ABox+TBox) input; timed = materialize-on-a-loaded-graph best-of-N.",
+  "git_commit": "e9e72412",
+  "suite": "materialize-competitors-lubm100",
+  "scale": "LUBM(100) ABox+TBox, 13880276 input triples (/tmp/materialize-same-box.zyYOMT/combined-u100.nt)",
+  "iters": 3,
+  "profiles": [
+    "owl",
+    "rdfs"
+  ],
+  "tsv_format": "<profile>\\t<closure_triples|ERROR|NOT-RUN-LOCALLY>\\t<materialize_best_us|reason>[\\t<timed=basis>]",
+  "engines": {
+    "sparq": {
+      "version": "e9e72412",
+      "rule_set": "FULL W3C OWL 2 RL/RDF rule table (owl) / RDFS subset (rdfs) \u2014 crates/sparq-reason",
+      "mode": "sparq-cli reason best-of-N; timed = self-reported materialize (parse excluded)"
+    },
+    "jena": {
+      "version": "apache-jena-5.4.0",
+      "rule_set": "Jena's OWN rule reasoners \u2014 NOT full OWL 2 RL. Mapping: sparq owl -> Jena OWL_MICRO (fast OWL subset); sparq rdfs -> Jena RDFS ruleset. Jena adds axiomatic/reflexive triples + de-dups the ABox on load, so closure size DIFFERS by construction (documented PROFILE difference, not a bug). Jena profiles enabled: rdfs owl-micro.",
+      "mode": "scripts/bench-adapters/jena_reason_adapter.java: load once (advisory), time InfModel materialize best-of-N; one JVM per profile under `timeout`"
+    },
+    "vlog": {
+      "version": "karmaresearch/vlog@10e23c7453b9 (source build)",
+      "rule_set": "general Datalog running the VALIDATED bench/reason-encodings/vlog/{owl-rl,rdfs}.dlog \u2014 the SAME rule set as sparq's compared profile, reproducing its closure SET-FOR-SET (sq-hmd7l.30). If the vlog binary or the encoding is absent, the column is NOT-RUN-LOCALLY.",
+      "mode": "scripts/bench-adapters/vlog_adapter.py: writes an INMEMORY edb.conf binding the .nt to TE, runs `mat --storemat`, counts the materialized T relation; timed = VLog's SELF-REPORTED `Runtime materialization` (EDB load + storemat write EXCLUDED \u2014 same loaded-graph basis as sparq/Jena; per-row `timed=` basis column, wall fallback declared)"
+    },
+    "nemo": {
+      "version": "knowsys/nemo v0.9.1 (source build)",
+      "rule_set": "general Datalog (Rust-native) running the VALIDATED bench/reason-encodings/nemo/{owl-rl,rdfs}.rls \u2014 the SAME rule set as sparq's compared profile, reproducing its closure SET-FOR-SET (sq-hmd7l.31). If the nmo binary or the encoding is absent, the column is NOT-RUN-LOCALLY.",
+      "mode": "scripts/bench-adapters/nemo_adapter.py: substitutes the corpus path into the .rls, runs `nmo --report short`, counts the exported `closed` relation; timed = Nemo's SELF-REPORTED `Reasoning:` breakdown (import + export EXCLUDED \u2014 same loaded-graph basis as sparq/Jena; per-row `timed=` basis column, wall fallback declared)"
+    }
+  },
+  "statuses": {
+    "sparq": "ok",
+    "jena": "ok",
+    "vlog": "ok",
+    "nemo": "ok"
+  },
+  "count_crosscheck": {
+    "owl": {
+      "sparq": "19952524",
+      "jena": "ERROR",
+      "vlog": "19952524",
+      "nemo": "19952524",
+      "same_ruleset_agree": true,
+      "profile_caveat": "sparq + VLog + Nemo (where present with the validated encoding) run the SAME compared rule set and their closure sizes are expected to AGREE (folded into same_ruleset_agree). A Jena column runs a DIFFERENT (OWL-subset/RDFS) rule set; its closure size is a documented profile difference, not an agreement, and is NEVER reconciled to sparq's."
+    },
+    "rdfs": {
+      "sparq": "16753096",
+      "jena": "18933227",
+      "vlog": "16753096",
+      "nemo": "16753096",
+      "same_ruleset_agree": true,
+      "profile_caveat": "sparq + VLog + Nemo (where present with the validated encoding) run the SAME compared rule set and their closure sizes are expected to AGREE (folded into same_ruleset_agree). A Jena column runs a DIFFERENT (OWL-subset/RDFS) rule set; its closure size is a documented profile difference, not an agreement, and is NEVER reconciled to sparq's."
+    }
+  },
+  "count_crosscheck_note": "per-profile closure size. same_ruleset_agree = the engines running the EXACT compared rule set \u2014 sparq PLUS VLog/Nemo with the validated encodings (bench/reason-encodings/, sq-hmd7l.30/.31) \u2014 agree on the closure count (the acceptance oracle pins univ=1: owl=150589, rdfs=126732; the validated encodings reproduce it SET-FOR-SET). A Jena column runs a DIFFERENT (OWL-subset/RDFS) rule set, recorded HONESTLY as a profile caveat, NEVER reconciled to sparq's. This is why COUNT is checked before any timing.",
+  "env": {
+    "host": "ip-172-31-15-13",
+    "machine": "x86_64",
+    "os": "Linux-6.17.0-1019-aws-x86_64-with-glibc2.39",
+    "timeout_s_per_engine": 3600
+  },
+  "sparq_tsv": "owl\t19952524\t13075000.0\nrdfs\t16753096\t1682000.0",
+  "jena_tsv": "owl\tERROR\ttimeout(owl-micro)\nrdfs\t18933227\t94806506.6",
+  "vlog_tsv": "owl\t19952524\t28420013.1\ttimed=vlog-self-reported-materialize\nrdfs\t16753096\t13372922.2\ttimed=vlog-self-reported-materialize",
+  "nemo_tsv": "owl\t19952524\t55088000.0\ttimed=nemo-self-reported-reasoning\nrdfs\t16753096\t10970000.0\ttimed=nemo-self-reported-reasoning"
+}

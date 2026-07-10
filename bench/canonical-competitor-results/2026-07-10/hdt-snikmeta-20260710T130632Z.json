@@ -1,0 +1,95 @@
+{
+  "gather": "hdt-same-box-decode-only",
+  "wave": "hdt-competitor-baseline (sq-hmd7l.4)",
+  "canonical": true,
+  "canonical_note": "CANONICAL: dedicated quiet box, one engine active at a time on the SAME HDT archive; decode-only, best-of-N on a loaded archive.",
+  "git_commit": "e9e72412",
+  "suite": "hdt",
+  "scale": "snikmeta.hdt (328 triples, /root/sparq/crates/sparq-hdt/tests/fixtures/snikmeta.hdt)",
+  "archive_path": "/root/sparq/crates/sparq-hdt/tests/fixtures/snikmeta.hdt",
+  "iters": 1,
+  "mode": "decode-only (load+decode wall-clock); query-over-HDT is OUT OF SCOPE (not like-for-like)",
+  "caveat": "HARD COMPARABILITY CAVEAT: load-and-decode-to-native is the ONLY like-for-like axis. sparq-hdt decodes HDT into sparq's own Dict/Graph (HDT as an ingest format) then queries its own permutation indexes. hdt-cpp/java query the compressed BitmapTriples IN PLACE (HDT as a queryable store). A query-over-HDT head-to-head (hdtSearch) is NOT like-for-like and is OUT OF SCOPE.",
+  "tsv_format": "sparq: <metric>\\t<value>\\t<unit> (from bench_oracle); hdt-cpp: decoded N-Triples file line count",
+  "engines": {
+    "sparq": {
+      "version": "e9e72412",
+      "mode": "in-process (crates/sparq-hdt/examples/bench_oracle: load+decode from .hdt to native Graph, decode_s + optional triple-pattern resolution)"
+    },
+    "hdt-cpp": {
+      "version": "rdfhdt/hdt-cpp@sha256:36682e1d0202371ba06f50c187a5244f5cf8276c2be59286ec2ab07b9b63b073",
+      "mode": "Docker container (rdfhdt/hdt-cpp:latest, hdt2rdf <archive> <out.nt>): decode .hdt to an N-Triples file in a rw scratch mount. decode_us = best-of-5 IN-CONTAINER hdt2rdf process wall-clock (docker container spawn EXCLUDED; hdt2rdf process start + N-Triples file serialisation INCLUDED \u2014 hdt2rdf is a CLI tool with no in-process harness)"
+    }
+  },
+  "decode_triple_count_crosscheck": {
+    "sparq_triples": "328",
+    "hdt_cpp_triples": "328"
+  },
+  "count_agreement": {
+    "expected": "328",
+    "observed": {
+      "sparq": "328",
+      "hdt_cpp": "328"
+    },
+    "all_agree": true,
+    "note": "Decoded triple count must equal snikmeta's 328. Only time if counts agree."
+  },
+  "env": {
+    "host": "ip-172-31-15-13",
+    "machine": "x86_64",
+    "os": "Linux-6.17.0-1019-aws-x86_64-with-glibc2.39",
+    "timeout_s_per_run": 3600
+  },
+  "sparq_metrics": {
+    "snikmeta_triples": {
+      "value": "328",
+      "unit": "count"
+    },
+    "snikmeta_terms": {
+      "value": "205",
+      "unit": "count"
+    },
+    "snikmeta_distinct_predicates": {
+      "value": "23",
+      "unit": "count"
+    },
+    "snikmeta_rdf_type_triples": {
+      "value": "49",
+      "unit": "count"
+    },
+    "snikmeta_direct_eq_upstream": {
+      "value": "1",
+      "unit": "count"
+    },
+    "snikmeta_decode_s": {
+      "value": "0.000527",
+      "unit": "s"
+    },
+    "hdt_load_s": {
+      "value": "0.093259",
+      "unit": "s"
+    },
+    "hdt_vs_ntgz_load_s": {
+      "value": "3.7536",
+      "unit": "ratio"
+    }
+  },
+  "hdt_cpp_metrics": {
+    "decode_us": {
+      "value": "10579.4",
+      "unit": "us",
+      "note": "best-of-5 in-container hdt2rdf process wall-clock: docker container spawn EXCLUDED; hdt2rdf process start + N-Triples file serialisation INCLUDED (CLI tool, no in-process harness)"
+    }
+  },
+  "hdt_cpp_decode_wall_s_advisory": {
+    "value": "8.840",
+    "unit": "s",
+    "note": "whole `docker run` incl. container spawn (and all HDT_ITERS decodes when the in-container loop ran); advisory only"
+  },
+  "hdt_cpp_nt_sample_first_5": "_:b1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Restriction> .\n_:b1 <http://www.w3.org/2002/07/owl#allValuesFrom> <http://www.snik.eu/ontology/meta/Method> .\n_:b1 <http://www.w3.org/2002/07/owl#onProperty> <http://www.snik.eu/ontology/meta/uses> .\n<http://www.snik.eu/ontology/meta/ApplicationComponent> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .\n<http://www.snik.eu/ontology/meta/ApplicationComponent> <http://www.w3.org/2000/01/rdf-schema#label> \"application component\"@en .\n",
+  "hdt_cpp_nt_sample_last_5": "<http://www.snik.eu/ontology/meta/typicalFeature> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#ObjectProperty> .\n<http://www.snik.eu/ontology/meta/typicalFeature> <http://www.w3.org/2000/01/rdf-schema#domain> <http://www.snik.eu/ontology/meta/ComputerBasedApplicationComponent> .\n<http://www.snik.eu/ontology/meta/typicalFeature> <http://www.w3.org/2000/01/rdf-schema#label> \"typical feature\"@en .\n<http://www.snik.eu/ontology/meta/typicalFeature> <http://www.w3.org/2000/01/rdf-schema#range> <http://www.snik.eu/ontology/meta/Feature> .\n<http://www.snik.eu/ontology/meta/\\u0445\\u043E\\u0431\\u0431\\u0438-N-0> <http://www.w3.org/2000/01/rdf-schema#label> \"\\u0425\\u041E\\u0411\\u0411\\u0418\"@ru .\n",
+  "statuses": {
+    "sparq": "ok",
+    "hdt-cpp": "ok"
+  }
+}
