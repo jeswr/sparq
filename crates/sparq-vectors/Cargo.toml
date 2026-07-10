@@ -231,6 +231,12 @@ serde_json = "1"
 name = "bench_vectors"
 required-features = ["approx-ann"]
 
+# [SONNET-4.6] sq-z2z18: the SIFT1M ef_search sweep uses `VectorIndex` + `HnswConfig`, so it needs
+# `approx-ann`. Gating it keeps `cargo build --all-targets` (default features) green.
+[[example]]
+name = "sift_ef_sweep"
+required-features = ["approx-ann"]
+
 # [OPUS-4.8] sq-dwdm: the site /surface/vector capture harness exercises the `vec:`
 # magic predicate (query_vec), so it needs `vec-predicate`. Registering the requirement
 # keeps `cargo build --all-targets` (default features) green when the feature is out of

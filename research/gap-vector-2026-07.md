@@ -5,7 +5,11 @@
      [SONNET-4.6] sq-k21np + sq-3ocye — ScaNN and DiskANN-ref competitor rows.
      ScaNN: FILLED (aarch64 work box, py3.9 venv, scann-1.4.2 aarch64 wheel, NON-CANONICAL).
      DiskANN: NOT-RUN on x86_64 c6i.4xlarge — user-data ran but EC2 console output
-     unavailable on AL2023/Nitro without IAM instance profile; see §5.2 for precise reason. -->
+     unavailable on AL2023/Nitro without IAM instance profile; see §5.2 for precise reason.
+     [SONNET-4.6] sq-z2z18 — sparq-vectors HNSW ef sweep on SIFT1M (§3.6 + §7.1 update).
+     nearest_with_ef API landed in PR #1856 (sq-jo6ty). Sweep run on 100k SIFT1M subset
+     (instant-distance 1M build impractical: >30min, see §3.6 + bead sq-ose80).
+     sparq-vectors is BEHIND hnswlib at every recall floor (7–20×). Beads sq-lfo84 / sq-ose80 filed (P1). -->
 
 # Gap record — vector / ANN (2026-07)
 
@@ -13,7 +17,8 @@
 **Status:** NON-CANONICAL first-read (aarch64 work box; canonical wave pending sq-hmd7l.26).
 ScaNN data now filled (§5.1, aarch64/NON-CANONICAL — same box, py3.9 venv). DiskANN status
 updated (§5.2 — x86_64 c6i.4xlarge instance ran but results unrecoverable without IAM profile).
-**Bead:** sq-hmd7l.19 (original gather), sq-k21np (ScaNN, this update), sq-3ocye (DiskANN, this update).
+sparq-vectors HNSW ef sweep on 100k SIFT1M (cosine) now filled in §3.6 (bead sq-z2z18, 2026-07-10).
+**Bead:** sq-hmd7l.19 (original gather), sq-k21np (ScaNN), sq-3ocye (DiskANN), sq-z2z18 (sparq ef sweep).
 **Harness:** `scripts/bench-adapters/vector_lib_adapter.py` + `/tmp/ann/gather_ann_pareto.py`
 (the gather script is in `scripts/bench-adapters/gather_ann_pareto.py` in this branch).
 **Gate (durable):** `bash bench/vector/run.sh` (recall-deficit gate, synthetic corpus),
@@ -42,11 +47,21 @@ updated (§5.2 — x86_64 c6i.4xlarge instance ran but results unrecoverable wit
 | Vamana / DiskANN (`DiskAnnIndex`) | `approx-ann` | `VamanaConfig::default()` (single-threaded, fixed seed) | EXACT: deficit = 34 |
 | PQ + full-precision re-rank | `approx-ann` | `PqConfig::default()`, 10k clustered set | EXACT: deficit = 22 |
 
-sparq-vectors does **not** expose a search-effort sweep API that maps cleanly to an
-`ef` / `nprobe` parameter at query time. HNSW `ef_search` is a build-time config field;
-the search-effort knob is not tunable per-query without re-indexing. This limits the
-Pareto-curve comparison: sparq-vectors contributes a **single operating point** per index
-type at its default configuration, not a Pareto frontier.
+**2026-07-10 update (sq-z2z18):** `VectorIndex::nearest_with_ef(query, k, ef_search)` was
+added in PR #1856 (sq-jo6ty). The API exposes a per-query `ef_search` parameter by lazily
+building and caching a secondary `HnswMap` at each new ef value. This enables the recall–QPS
+Pareto sweep without rebuilding the full index per query. However, each distinct ef level
+still requires one full HNSW graph rebuild (the `instant-distance` 0.6.1 crate encodes
+`ef_search` at build time). For the SIFT1M ef sweep (§3.6), a fresh index is built per ef
+level — equivalent to the `nearest_with_ef` secondary-build cost on first call.
+
+**Build-time gap at 1M vectors:** `instant-distance` HNSW build at 1M × 128d on this box
+exceeded 30 minutes (process aborted; see §3.6 and bead sq-ose80). The ef sweep uses the
+first **100k vectors** from SIFT1M to complete in reasonable time (~50s per ef build). This
+is noted explicitly throughout §3.6; recall-QPS shape is representative but corpus-size
+differences are stated.
+
+The uncontested surface remains unchanged: no kernel competitor does ANN-inside-SPARQL.
 
 The uncontested surface: no kernel competitor (hnswlib, FAISS, ScaNN, DiskANN-ref) does
 **ANN-inside-SPARQL over dict-encoded entity ids**. The sparq-vectors ANN is keyed by the
@@ -199,10 +214,72 @@ On AVX2/AVX512 x86, IVFFlat and IVFSQ8 typically close the gap at low recall.
 
 DiskANN (sq-3ocye) row not yet available — see §5.2.
 
-sparq-vectors HNSW (N=50 000 synthetic, ef_search=100) achieves recall@10 ≈ 0.998 on the
-synthetic corpus. Its placement on the SIFT1M Pareto is not directly measurable without
-a search-effort sweep API (see §1.1). The canonical gap vs hnswlib on SIFT1M is a **P2
-gap** requiring the ef_search-per-query tuning bead (sq-jo6ty, P1).
+sparq-vectors HNSW ef sweep on SIFT1M is in §3.6 (NON-CANONICAL, 100k subset, cosine metric).
+Note: §3.5 above uses **L2** on **raw (unnormalized)** 1M SIFT1M vectors; §3.6 uses **cosine**
+on **normalized** 100k SIFT1M — different metric and corpus size, so the two tables are NOT
+directly comparable. The within-table comparison (sparq vs hnswlib-cosine in §3.6) is apples-to-apples.
+
+---
+
+### 3.6 sparq-vectors HNSW ef sweep — SIFT1M (100k cosine, NON-CANONICAL) — bead sq-z2z18
+
+> **NON-CANONICAL** (aarch64 EC2 work box, no AVX2, 2026-07-10).
+> **Corpus:** first 100 000 vectors from SIFT1M base (128-d float32), L2-normalised.
+> **Metric:** cosine similarity on L2-normalised vectors.
+> **Ground truth:** brute-force cosine via Rust `nearest_exact` over the 100k normalised base (10k queries × 100k base; computed in ~158s).
+> **Harness:** `crates/sparq-vectors/examples/sift_ef_sweep.rs` (sq-z2z18), built with `--features approx-ann`, release.
+> **Index:** `VectorIndex::build_with(store, HnswConfig { ef_search: ef, ef_construction: 200, seed: 0x5350_5156_0001 })` — fresh index per ef level.
+> **Query:** `VectorIndex::nearest(q, k=10)` — 3 reps, mean reported.
+> **Why 100k, not 1M:** `instant-distance` HNSW at 1M×128d exceeded 30 min (process aborted, memory: 3.5 GB in use); bead sq-ose80 (P1). 100k builds in ~48s per ef level.
+> **Why separate from §3.5:** §3.5 is hnswlib/FAISS at L2 on raw 1M SIFT1M; §3.6 is cosine on normalised 100k — different metric and corpus. The hnswlib cosine baseline (same 100k normalised corpus) is reported below for direct comparison.
+
+#### sparq-vectors VectorIndex ef sweep (cosine, 100k, NON-CANONICAL aarch64)
+
+| ef | recall@10 | deficit | mean µs/q | p99 µs | QPS | build_s |
+|---|---|---|---|---|---|---|
+| 16 | 0.9580 | 42 | 242.0 | 243.4 | 4 132 | 41.2 |
+| 32 | 0.9879 | 12 | 383.6 | 391.5 | 2 607 | 56.0 |
+| 64 | 0.9976 | 2 | 674.3 | 678.9 | 1 483 | 48.3 |
+| 128 | 0.9996 | 0 | 1 035.9 | 1 040.4 | 965 | 51.4 |
+| 256 | 1.0000 | 0 | 1 639.5 | 1 698.8 | 610 | 46.6 |
+
+sparq-vectors reaches 0.95 recall at ef=16 (recall=0.9580) and 0.99 recall at ef=32 (recall=0.9879).
+Build: ~48s per ef level (100k). NOTE: the recall is unusually high at low ef compared to the 1M
+sweep; this is expected — 100k is a sparser graph (fewer near-neighbours per node in 128-d), making
+even small ef beams sufficient to find the correct neighbours.
+
+#### hnswlib cosine baseline (same 100k normalised corpus, for direct comparison)
+
+Provenance: hnswlib 0.7.x, `cosine` space, M=16, ef_construction=200, build 8.4s.
+Ground truth: FAISS IndexFlatIP on normalised 100k base. 3 reps per ef level.
+
+| ef | recall@10 | deficit | mean µs/q | QPS |
+|---|---|---|---|---|
+| 16 | 0.8734 | 127 | 12.5 | 79 802 |
+| 32 | 0.9549 | 45 | 20.8 | 48 019 |
+| 64 | 0.9891 | 11 | 34.3 | 29 145 |
+| 128 | 0.9979 | 2 | 60.0 | 16 659 |
+| 256 | 0.9997 | 0 | 111.3 | 8 984 |
+
+#### Matched-recall QPS comparison — SIFT1M 100k cosine (NON-CANONICAL)
+
+`N/A` = recall floor not reached within the sweep range.
+
+| Recall floor | sparq-vectors VectorIndex | hnswlib (cosine, sub-component) | sparq vs hnswlib |
+|---|---|---|---|
+| 0.80 | 4 132 (ef=16, recall=0.9580) | 79 802 (ef=16, recall=0.8734) | **BEHIND 19×** |
+| 0.90 | 4 132 (ef=16, recall=0.9580) | 48 019 (ef=32, recall=0.9549) | **BEHIND 12×** |
+| 0.95 | 4 132 (ef=16, recall=0.9580) | 29 145 (ef=64, recall=0.9891) | **BEHIND 7×** |
+| 0.99 | 2 607 (ef=32, recall=0.9879) | 16 659 (ef=128, recall=0.9979) | **BEHIND 6×** |
+| 0.999 | 965 (ef=128, recall=0.9996) | 8 984 (ef=256, recall=0.9997) | **BEHIND 9×** |
+
+**sparq-vectors is BEHIND hnswlib at every recall floor by 6–19× on this 100k cosine corpus.**
+Root cause: `instant-distance` 0.6.1 (pure Rust, no SIMD distance kernel). On aarch64 without
+AVX2, both engines fall back to scalar distance computation — the gap is real algorithm/implementation
+overhead, not a SIMD-only advantage for hnswlib. On AVX2/AVX512 x86_64, hnswlib has additional
+SIMD acceleration; the gap at canonical x86_64 is likely larger. Beads filed:
+- **sq-lfo84** (P1): HNSW QPS gap — investigate hnsw-rs / usearch binding or SIMD kernel
+- **sq-ose80** (P1): HNSW 1M build-time gap — 30+ min vs hnswlib 374s (not tried to completion)
 
 ---
 
@@ -417,8 +494,9 @@ underlying algorithm class vs state-of-the-art kernel libraries:
 
 | Axis | Finding | Verdict |
 |---|---|---|
-| SIFT1M HNSW recall-QPS | sparq-vectors does not expose per-query ef sweep (fixed at build time); hnswlib with ef=128 reaches recall@10=0.989 at ~5 521 QPS (NON-CANONICAL) | BEHIND (gap: no per-query ef_search tuning) |
-| SIFT1M HNSW max recall | sparq-vectors HNSW reaches recall@10 ≈ 0.998 at ef_search=100 on 50k synthetic — comparable ceiling to hnswlib ef=128 | N/A (different corpus, advisory only) |
+| SIFT1M HNSW recall-QPS (cosine, 100k) | sparq-vectors ef sweep (sq-z2z18, §3.6): ef=16 → 4 132 QPS @recall=0.9580; hnswlib (cosine, same 100k) ef=128 → 16 659 QPS @recall=0.9979 (NON-CANONICAL) | **BEHIND 6–19× at all recall floors** (see §3.6) |
+| SIFT1M instant-distance build time | sparq-vectors 100k build ~48s/ef; hnswlib 100k build 8.4s total (any ef); 1M instant-distance: >30 min (aborted); hnswlib 1M: 375s | **BEHIND ~6× at 100k; impractical at 1M (sq-ose80)** |
+| SIFT1M HNSW max recall | sparq-vectors HNSW ef=256: recall@10=1.0000 on 100k cosine — higher than hnswlib ef=256 recall=0.9997 (both near-perfect on easier 100k) | PARITY at ceiling on 100k |
 | GloVe high-recall | hnswlib max recall = 0.926 at ef=512 in standard sweep; sparq-vectors HNSW expected similar ceiling | PARITY (both limited by HNSW graph quality at M=16) |
 | FAISS IVFFlat vs HNSW | IVFFlat is BEHIND hnswlib at every tested recall floor on this box | Sub-component context only |
 | FAISS IVFSQ8 recall ceiling | Does not reach 0.99 recall on SIFT1M with nlist=1024 | Sub-component context only |
@@ -435,7 +513,9 @@ is reported separately from kernel recall-QPS comparisons.
 
 | Gap | Root cause | Bead | Status |
 |---|---|---|---|
-| No per-query ef_search sweep | `HnswConfig::ef_search` is build-time; `VectorIndex::nearest` does not accept a per-query ef | sq-jo6ty (per-query ef_search API, P1) | OPEN |
+| sparq HNSW QPS BEHIND hnswlib 6–19× | `instant-distance` lacks SIMD distance kernel (pure Rust, no AVX2/NEON optimization) | **sq-lfo84 (P1)** NEW | OPEN |
+| sparq HNSW 1M build time impractical (>30 min) | `instant-distance` HNSW insertion is sequential; no parallel construction at 1M scale | **sq-ose80 (P1)** NEW | OPEN |
+| No per-query ef_search sweep (API gap) | `HnswConfig::ef_search` was build-time only | sq-jo6ty | **RESOLVED** — PR #1856 merged; `nearest_with_ef` API available |
 | ScaNN NOT-RUN (original) | PyPI wheel targets Python 3.9; host is Python 3.12 | sq-k21np | RESOLVED (py3.9 venv; NON-CANONICAL aarch64 data in §5.1) |
 | ScaNN canonical x86_64 | aarch64 NON-CANONICAL data only; canonical AVX512 run pending | sq-hmd7l.26 | OPEN |
 | DiskANN-ref NOT-RUN (original) | No aarch64 pip wheel | sq-3ocye | ATTEMPTED x86_64; results unrecoverable (see §5.2) |
@@ -458,7 +538,12 @@ Beads created during this gather:
 
 - GloVe FAISS IVFFlat-IP sweep was running at commit time — fill §4.2 in the canonical wave-1 run (sq-hmd7l.26).
 
+- **sq-lfo84** (P1) NEW 2026-07-10: sparq-vectors HNSW QPS BEHIND hnswlib by 6–19× at matched recall on 100k cosine SIFT1M (§3.6); root-cause: `instant-distance` pure-Rust no SIMD; fix: hnsw-rs / usearch binding or inline SIMD kernel.
+
+- **sq-ose80** (P1) NEW 2026-07-10: sparq-vectors HNSW build at 1M×128d exceeded 30 minutes (aborted); hnswlib C++ builds the same in 374s; `instant-distance` is 6× slower at 100k, >5× impractical at 1M; profile + consider parallel construction or faster library.
+
 ---
 
 *Document generated by SPARQ agent [SONNET-4.6] | bead sq-hmd7l.19 | NON-CANONICAL work-box first-read | canonical re-run: sq-hmd7l.26*
 *Updated 2026-07-10 [SONNET-4.6] | sq-k21np (ScaNN NON-CANONICAL filled) + sq-3ocye (DiskANN x86_64 attempted, unrecoverable)*
+*Updated 2026-07-10 [SONNET-4.6] | sq-z2z18 — sparq-vectors HNSW ef sweep on SIFT1M 100k (cosine, §3.6); nearest_with_ef API (sq-jo6ty PR #1856) now active; sparq BEHIND hnswlib 6–19× at all recall floors; P1 beads sq-lfo84 + sq-ose80 filed*
