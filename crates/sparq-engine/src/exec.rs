@@ -9890,14 +9890,14 @@ mod sort_collation_key_differential {
 /// skipped; otherwise the scalar row path (`apply_filter_scalar`) runs verbatim. When the
 /// feature is OFF this compiles to exactly the scalar body — byte-identical, zero overhead.
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
-    // [SONNET-4.6] (sq-pntvh.5, M4 Phase 5) Dispatcher-gated columnar residual-FILTER seam
-    // (Seam A): the `columnar_filter` helper now runs through the shared `vec_dispatch`
-    // eligibility gate (VEC_MIN_BATCH threshold, I2/I3 checks, dtype precheck) and executes
-    // morsel-by-morsel (VEC_MORSEL rows per decode buffer) — extracting only the one tested
-    // column, not a full-width transpose. Declines (→ scalar path) for anything not provably
+    // [SONNET-4.6] (sq-pntvh.5, M4 Phase 5 / sq-y5ew5, M4 hybrid tri-mask) Dispatcher-gated
+    // columnar residual-FILTER seam (Seam A): the `columnar_filter` helper runs through the
+    // shared `vec_dispatch` eligibility gate (VEC_MIN_BATCH threshold, I2/I3 checks) and
+    // executes morsel-by-morsel (VEC_MORSEL rows per decode buffer), now with tri-mask
+    // delegation for tie/unknown lanes. Declines (→ scalar path) for anything not provably
     // byte-identical to `apply_filter_scalar`. I5 probe counters updated on each call.
     #[cfg(feature = "vectorized")]
-    if let Some(rows) = columnar_filter(graph, b, expr) {
+    if let Some(rows) = columnar_filter(graph, local, b, expr)? {
         b.rows = rows;
         return Ok(());
     }
@@ -9937,12 +9937,12 @@ fn nonliteral_filter_cols(graph: &Graph, inner: &GraphPattern, b: &Bindings) -> 
     vars.iter().filter_map(|v| b.col(v)).collect()
 }
 
-/// The columnar residual-FILTER attempt (M4 Phase 5 dispatcher-wired Seam A).
+/// The columnar residual-FILTER attempt (M4 Phase 5 / sq-y5ew5 hybrid tri-mask, Seam A).
 ///
-/// Returns `Some(new_rows)` (the surviving rows, in the scalar path's order) when the
-/// dispatcher admits the operator invocation, or `None` to fall through to
-/// `apply_filter_scalar`. The returned rows are **byte-identical** to
-/// `apply_filter_scalar`'s output.
+/// Returns `Ok(Some(new_rows))` (the surviving rows, in the scalar path's order) when the
+/// dispatcher admits the operator invocation, `Ok(None)` to fall through to
+/// `apply_filter_scalar`, or `Err(e)` if scalar delegation on a tie/unknown lane fails.
+/// The returned rows are **byte-identical** to `apply_filter_scalar`'s output.
 ///
 /// ## Decline hierarchy (I1–I5, owned by `vec_dispatch`)
 ///
@@ -9958,44 +9958,57 @@ fn nonliteral_filter_cols(graph: &Graph, inner: &GraphPattern, b: &Bindings) -> 
 ///    fallback is: budget-armed ⇒ decline. This is zero-risk; revisit when budget tracking
 ///    is uniform-per-row.
 /// 3. **Operator shape:** only a single sargable `NUMERIC` comparison `?v OP const` (temporal
-///    comparisons have no vector kernel yet).
-/// 4. **`VEC_MIN_BATCH` (I4):** the batch must have at least `vec_dispatch::VEC_MIN_BATCH`
+///    comparisons have no vector kernel yet). A NaN threshold (e.g. from an XSD double `NaN`
+///    literal constant) is also declined: a NaN threshold makes all lanes Unknown, producing
+///    a delegated fraction of 100% with no columnar benefit.
+/// 4. **`VEC_MIN_BATCH`:** the batch must have at least `vec_dispatch::VEC_MIN_BATCH`
 ///    rows. Smaller batches are cheaper on the scalar path.
-/// 5. **Column-dtype precheck:** every id in the filter column must be an inline integer
-///    (`dict::is_inline`). This is the provable byte-identity gate: an inline-integer id
-///    encodes its exact numeric value (value = id − INLINE_BASE), so the columnar f64
-///    comparison agrees with the scalar `numeric_value` comparison on every cell — including
-///    the f64-tie exact-lexical recheck, which for exact small integers can only agree.
-///    This gate ALSO excludes local-vocab (computed) ids and unbound (`NO_ID`) cells.
 ///
-/// ## Execution (morsel-by-morsel, single-column extract)
+/// ## Execution (hybrid tri-mask, morsel-by-morsel, single-column extract)
 ///
 /// For eligible invocations the function iterates morsels of `VEC_MORSEL` rows. Each morsel:
-/// - Extracts only the filter column c (O(morsel × 1), not a full-width transpose).
-/// - Builds a single-column `DataChunk` and calls the Phase-2/3 decode + select kernels.
-/// - Records the morsel via `vec_dispatch::record_chunk`.
-/// - Appends global survivor indices.
+/// - Extracts only the filter column (O(morsel × 1), not a full-width transpose).
+/// - Decodes to a contiguous `f64` column via `decode_numeric_column`.
+/// - Runs `chunk_select::tri_mask_select` to split lanes into Confident and Delegated.
+/// - Delegated (Tie + Unknown) lanes are evaluated by the full scalar `eval_expr` per row.
+/// - Confident-passes and delegated-passes are merged (ascending) for this morsel.
+/// - Records the morsel via `vec_dispatch::record_chunk` and delegated count via
+///   `vec_dispatch::record_delegated`.
 ///
 /// After all morsels, survivors are gathered from the original `b.rows` (order-preserving).
 ///
+/// ## Byte-identity argument (§3 of the completion-design record, by construction)
+///
+/// - Confident lanes: the scalar predicate on the same row sees the same two f64 values;
+///   no exact-lexical recheck applies (non-tie), so `cmp.test(x)` gives the correct answer.
+/// - Tie / Unknown lanes: the hybrid's verdict IS the scalar predicate's verdict.
+/// - Order: both index lists are ascending; the merge is ascending; `apply_selection` is
+///   order-preserving.
+///
 /// **ZK coupling (soundness-relevant):** see I2 above and `research/vector-at-a-time-m4.md`
-/// §3.2. [SONNET-4.6] (sq-pntvh.5)
+/// §3.2. [SONNET-4.6] (sq-y5ew5)
 #[cfg(feature = "vectorized")]
-fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec<Row>> {
+fn columnar_filter(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    expr: &Expression,
+) -> Result<Option<Vec<Row>>, String> {
     use crate::chunk::{DataChunk, VecCmp};
+    use crate::chunk_select;
     use crate::vec_dispatch;
 
     // I2: ZK trace armed ⇒ decline so the scalar path records the FILTER obligation set.
     #[cfg(feature = "zk")]
     if crate::zk::enabled() {
         vec_dispatch::record_decline();
-        return None;
+        return Ok(None);
     }
 
     // I3: budget armed ⇒ decline (fallback rule — debit schedule is not uniform-per-row).
     if budget::active() {
         vec_dispatch::record_decline();
-        return None;
+        return Ok(None);
     }
 
     // Operator-shape check: only a single sargable NUMERIC comparison is eligible.
@@ -10004,35 +10017,23 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
     let (var, cmp) = match extract_sargable(graph, expr) {
         None => {
             vec_dispatch::record_decline();
-            return None;
+            return Ok(None);
         }
         Some((v, ScanCmp::Num(c))) => (v, c),
         Some((_, ScanCmp::Temp(..))) => {
             vec_dispatch::record_decline();
-            return None;
-        }
-    };
-    let c = match b.col(&var) {
-        Some(col) => col,
-        None => {
-            vec_dispatch::record_decline();
-            return None;
+            return Ok(None);
         }
     };
 
-    // VEC_MIN_BATCH: batches below the threshold are cheaper on the scalar path.
-    if b.rows.len() < vec_dispatch::VEC_MIN_BATCH {
-        vec_dispatch::record_decline();
-        return None;
-    }
-
-    // Column-dtype precheck: the whole filter column must be inline integers (I4-equivalent).
-    if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
-        vec_dispatch::record_decline();
-        return None;
-    }
-
+    // Decline a NaN threshold: all lanes would be Unknown → 100% delegation, no benefit.
+    // Also ensures the tri-mask tie check (x == c) is well-defined (NaN == anything is false).
     let veccmp = match cmp {
+        NumCmp::Gt(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Ge(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Lt(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Le(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Eq(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
         NumCmp::Gt(t) => VecCmp::Gt(t),
         NumCmp::Ge(t) => VecCmp::Ge(t),
         NumCmp::Lt(t) => VecCmp::Lt(t),
@@ -10040,8 +10041,23 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
         NumCmp::Eq(t) => VecCmp::Eq(t),
     };
 
+    let col_idx = match b.col(&var) {
+        Some(col) => col,
+        None => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
+    };
+
+    // VEC_MIN_BATCH: batches below the threshold are cheaper on the scalar path.
+    if b.rows.len() < vec_dispatch::VEC_MIN_BATCH {
+        vec_dispatch::record_decline();
+        return Ok(None);
+    }
+
     // Morsel-by-morsel execution: extract only the filter column (not a full-width
-    // transpose), decode it, select survivors, and collect global indices.
+    // transpose), decode it, run the tri-mask, delegate tie/unknown lanes to scalar,
+    // and merge the passing indices.
     let morsel_size = vec_dispatch::VEC_MORSEL;
     let mut survivor_indices: Vec<usize> = Vec::new();
     let rows = &b.rows;
@@ -10051,30 +10067,51 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
         let morsel_len = end - start;
 
         // Extract just the filter column for this morsel (O(morsel × 1), not O(morsel × width)).
-        let col: Vec<sparq_core::dict::Id> = rows[start..end].iter().map(|r| r[c]).collect();
+        let col: Vec<sparq_core::dict::Id> = rows[start..end].iter().map(|r| r[col_idx]).collect();
         let morsel_chunk = match DataChunk::from_columns(vec![col], morsel_len) {
             Some(mc) => mc,
             None => {
                 // Should not happen: col.len() == morsel_len by construction.
                 vec_dispatch::record_decline();
-                return None;
+                return Ok(None);
             }
         };
 
-        // Phase-2/3 primitives: decode once → compare over the decoded column.
+        // Decode the column once (gather-free fast path for all-inline columns, general
+        // path for mixed columns — NaN sentinel for non-numeric / local-vocab / unbound ids).
         let decoded = morsel_chunk.decode_numeric_column(graph, 0);
-        let local_sel = DataChunk::select_decoded(&decoded, veccmp);
 
-        // Record this morsel (I5 counter).
+        // Tri-mask pass: classify each lane as Confident (unambiguous f64 verdict) or
+        // Delegated (tie or unknown). Returns confident-passes and delegated indices
+        // in ascending order.
+        let tri = chunk_select::tri_mask_select(&decoded, veccmp);
+
+        // Record I5 counters for this morsel.
         vec_dispatch::record_chunk(morsel_len);
+        vec_dispatch::record_delegated(tri.delegated.len());
 
-        // Translate local morsel indices to global row indices.
-        survivor_indices.extend(local_sel.iter().map(|&i| start + i));
+        // Evaluate the full scalar predicate for each delegated (tie / unknown) lane.
+        // The scalar predicate handles the exact-lexical recheck for ties and the
+        // type-error path for unknowns — byte-identical to `apply_filter_scalar`.
+        let mut delegated_passes: Vec<usize> = Vec::with_capacity(tri.delegated.len());
+        for &local_idx in &tri.delegated {
+            let global_idx = start + local_idx;
+            let row = &rows[global_idx];
+            let val = eval_expr(graph, local, b, row.as_ref(), expr)?;
+            if effective_boolean(&val) {
+                delegated_passes.push(local_idx);
+            }
+        }
+
+        // Merge confident-passes and delegated-passes (both ascending) for this morsel,
+        // then translate to global row indices.
+        let morsel_sel = chunk_select::merge_ascending(&tri.confident_passes, &delegated_passes);
+        survivor_indices.extend(morsel_sel.iter().map(|&i| start + i));
     }
 
     // Materialise survivors from the original rows (order-preserving, full-width).
-    let result: Vec<Row> = survivor_indices.iter().map(|&r| Row::from_slice(b.rows[r].as_ref())).collect();
-    Some(result)
+    let result: Vec<Row> = survivor_indices.iter().map(|&r| Row::from_slice(rows[r].as_ref())).collect();
+    Ok(Some(result))
 }
 
 /// The columnar per-group aggregate attempt (M4 Phase 4, `sq-pntvh.4`). Returns `Some(rows)`
@@ -16190,6 +16227,7 @@ mod columnar_filter_seam {
     #[test]
     fn columnar_seam_is_byte_identical_to_scalar_on_inline_column() {
         // n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_filter engages.
+        // [SONNET-4.6] (sq-y5ew5) Updated for the new 4-arg signature and Result return type.
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
@@ -16203,9 +16241,9 @@ mod columnar_filter_seam {
         ] {
             let expr = mk_filter(op, &age_var, int_lit(t));
 
-            // The seam ENGAGES for an all-inline column.
-            let via_columnar = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
-            assert!(via_columnar.is_some(), "all-inline column must be columnar-eligible ({op} {t})");
+            // The seam ENGAGES for an all-inline column: Result is Ok(Some(rows)).
+            let via_columnar = columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
+            assert!(via_columnar.as_ref().unwrap().is_some(), "all-inline column must be columnar-eligible ({op} {t})");
 
             // Scalar reference (the real row path).
             let mut scalar = Bindings::unsorted(vars.clone(), rows.clone());
@@ -16217,7 +16255,7 @@ mod columnar_filter_seam {
 
             // BYTE-IDENTICAL: same rows (incl. the NON-inline subject column), same order.
             assert_eq!(disp.rows, scalar.rows, "dispatcher rows != scalar for {op} {t}");
-            assert_eq!(via_columnar.as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
+            assert_eq!(via_columnar.as_ref().unwrap().as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
         }
     }
 
@@ -16226,26 +16264,30 @@ mod columnar_filter_seam {
         // Non-vacuous: pin the EXACT surviving age sequence (content + ascending order) so a
         // wrong mask (off-by-one / inverted / column desync) turns this red.
         // n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_filter engages.
+        // [SONNET-4.6] (sq-y5ew5) Updated for new signature and Result<Option<Vec<Row>>> return.
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let local = LocalVocab::default();
         let age_var = var("age");
 
-        let out = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap();
+        let out = columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap().unwrap();
         let expected: Vec<f64> = (21..300).map(f64::from).collect();
         assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=299, ascending");
 
         // A DIFFERENT filter must select a DIFFERENT set (the mask does real work).
-        let other = columnar_filter(&g, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap();
+        let other = columnar_filter(&g, &local, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap().unwrap();
         assert_ne!(age_values(&g, &other), expected, "distinct filters must select distinct rows");
     }
 
     #[test]
-    fn columnar_seam_declines_and_matches_scalar_on_non_eligible_columns() {
-        // A non-inline dict integer, a negative integer, a non-numeric literal, and an unbound
-        // cell each break the all-inline gate → the seam DECLINES and the row path runs, still
-        // byte-identical.
+    fn columnar_seam_declines_small_batches_regardless_of_column_type() {
+        // A batch of 2 rows is below VEC_MIN_BATCH (256), so the seam DECLINES regardless
+        // of the column type (non-inline ints, negatives, strings, unbound). The scalar path
+        // runs in all cases and produces correct results. [SONNET-4.6] (sq-y5ew5) Updated:
+        // non-inline columns no longer cause decline for large batches (they use the tri-mask);
+        // decline here is due to VEC_MIN_BATCH only.
         let big = 2_000_000_000u32.to_string(); // > INLINE_MAX (2^30-1): a NON-inline dict integer
         let nt = format!(
             "<http://ex/a> <http://ex/age> \"5\"^^<{XSD_INT}> .\n\
@@ -16273,10 +16315,11 @@ mod columnar_filter_seam {
         let local = LocalVocab::default();
 
         for age_cell in [big_id, neg, hello, NO_ID] {
+            // 2 rows < VEC_MIN_BATCH=256 → seam declines.
             let rows: Vec<Row> = vec![Row::from_slice(&[five, five]), Row::from_slice(&[five, age_cell])];
             assert!(
-                columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).is_none(),
-                "a non-inline / unbound column cell must make the seam DECLINE"
+                columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).unwrap().is_none(),
+                "batch of 2 rows must decline (VEC_MIN_BATCH)"
             );
             let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
             let mut scalar = Bindings::unsorted(vars.clone(), rows);
@@ -16288,11 +16331,13 @@ mod columnar_filter_seam {
 
     #[test]
     fn columnar_seam_declines_non_sargable_and_temporal_filters() {
+        // [SONNET-4.6] (sq-y5ew5) Updated for new 4-arg signature and Result return.
         let n = 8u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
         let b = Bindings::unsorted(vars, rows);
+        let local = LocalVocab::default();
         let age_var = var("age");
 
         // var-vs-var: not sargable → decline.
@@ -16300,7 +16345,7 @@ mod columnar_filter_seam {
             Box::new(Expression::Variable(age_var.clone())),
             Box::new(Expression::Variable(var("s"))),
         );
-        assert!(columnar_filter(&g, &b, &var_var).is_none());
+        assert!(columnar_filter(&g, &local, &b, &var_var).unwrap().is_none());
 
         // A temporal comparison is sargable but has NO vector kernel yet → decline.
         let dt = Expression::Literal(Literal::new_typed_literal(
@@ -16308,7 +16353,7 @@ mod columnar_filter_seam {
             oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#dateTime").unwrap(),
         ));
         let temporal = Expression::Greater(Box::new(Expression::Variable(age_var)), Box::new(dt));
-        assert!(columnar_filter(&g, &b, &temporal).is_none(), "temporal comparison has no vector kernel");
+        assert!(columnar_filter(&g, &local, &b, &temporal).unwrap().is_none(), "temporal comparison has no vector kernel");
     }
 
     #[cfg(feature = "zk")]
@@ -16318,19 +16363,21 @@ mod columnar_filter_seam {
         // while the recorder is armed and the scalar path records it
         // (research/vector-at-a-time-m4.md §3.2, open question 2 — simplest-safe rule).
         // n=300 to exceed VEC_MIN_BATCH (256) so the sanity check can confirm eligibility.
+        // [SONNET-4.6] (sq-y5ew5) Updated for new 4-arg signature and Result return.
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
         let b = Bindings::unsorted(vars, rows);
+        let local = LocalVocab::default();
         let expr = mk_filter(">", &var("age"), int_lit("0"));
 
         // Sanity: eligible (and firing) when zk is NOT armed.
-        assert!(columnar_filter(&g, &b, &expr).is_some(), "eligible without zk armed");
+        assert!(columnar_filter(&g, &local, &b, &expr).unwrap().is_some(), "eligible without zk armed");
         // Armed ⇒ decline (I2 fires before VEC_MIN_BATCH, so batch size is irrelevant here).
         let _guard = crate::zk::install();
         assert!(crate::zk::enabled());
-        assert!(columnar_filter(&g, &b, &expr).is_none(), "columnar seam must decline while zk is armed");
+        assert!(columnar_filter(&g, &local, &b, &expr).unwrap().is_none(), "columnar seam must decline while zk is armed");
     }
 }
 

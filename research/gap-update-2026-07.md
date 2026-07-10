@@ -6,9 +6,11 @@ Part of the comparative-benchmarking-everything program
 
 ## Status
 
-**NON-canonical first read.** The harness (`scripts/bench/update-same-box.sh`) is the
-durable deliverable. Numbers from the shared work box are directional only — do not bake
-into docs or dashboards. Canonical numbers ride sq-hmd7l.26 (quiet EC2 run).
+**CANONICAL wave-1 rows recorded** (sq-hmd7l.26, quiet EC2 box — see the canonical
+section below). Headline: **sparq is BEHIND oxigraph** on the PSS interactive-CRUD
+update set (p99 ~6.6×, throughput ~8.2×); fuseki column absent (container readiness
+failure, harness bead filed). The harness (`scripts/bench/update-same-box.sh`)
+remains the durable deliverable.
 
 ## Harness
 
@@ -61,10 +63,47 @@ exercises only the sparq loopback path.
 
 ## First-read rows
 
-**NON-canonical — work box, not a quiet EC2 instance.** All numbers below are
-directional only.
+No first-read rows were recorded; the canonical wave-1 rows below are the first
+measured numbers in this record.
 
-No canonical rows yet. See sq-hmd7l.26 for the scheduled quiet-box harvest.
+## CANONICAL wave-1 rows (`sq-hmd7l.26`)
+
+Provenance: dedicated quiet box `i-01a735e27b1764317` (c6i.4xlarge, eu-west-2, tag
+`sparq-bench`, self-terminated, orphan-check clean), commit `cb1fc98c`
+(= `origin/main` `343aee547` + wave-1 runner-only fixes), envelope UTC
+`2026-07-10T00:47:07Z`, `CANONICAL=1`, 200 interactive PSS LDP-CRUD updates,
+loopback HTTP for every engine (symmetric surface). Count crosscheck: **green** —
+post-workload named-graph quad COUNT sparq 350 = oxigraph 350, `all_agree: True`.
+Rows transcribed from the harness `compare.py` table in
+`axis-results/update/run.log` (the envelope's row-ingest dropped them on the
+parity-gate failure exit — harness bug, bead filed below; the log rows carry the
+same provenance as the envelope in the same pulled directory).
+
+| engine | p50 (ms) | p99 (ms) | max (ms) | throughput (/s) | status |
+|---|---|---|---|---|---|
+| sparq | 3.50 | 4.01 | 24.91 | 275 | ok |
+| oxigraph | 0.45 | 0.61 | 0.84 | 2245 | ok |
+| fuseki | — | — | — | — | absent (container never became ready — bead filed below) |
+
+**Verdict: BEHIND.** sparq p99 4.01 ms vs oxigraph p99 0.61 ms (~6.6× behind); p50
+3.50 ms vs 0.45 ms (~7.8×); throughput 275/s vs 2245/s (~8.2×). The harness parity
+gate (`sparq p99 ≤ competitor p99 × 1.0`) FAILED. This is an honest engine-side gap:
+both engines were measured over the same loopback HTTP POST surface, so server
+framing does not explain it. Root-cause is unprofiled as of this record — plausible
+directions for the profiling-first fix bead (to be filed by `sq-hmd7l.27`): per-update
+parse/plan overhead, index maintenance on small interleaved DELETE/INSERT/DROP ops,
+or allocation churn in the update path; max 24.91 ms also shows a long-tail outlier
+absent in oxigraph (0.84 ms max). No spin: sparq loses this axis today.
+
+Harness follow-ups filed from wave-1:
+
+- **sq-do5fx** — `update-same-box.sh` envelope drops `latency_ms` /
+  `count_crosscheck` when `compare.py` exits non-zero on a parity-gate FAIL — a
+  measured FAIL is a valid result and must still be ingested into the envelope.
+- **sq-l7diu** — the `stain/jena-fuseki` container did not become ready within the
+  30 s window on a fresh box, leaving the fuseki column absent; switch the leg to
+  the direct `apache-jena-fuseki` 5.4.0 distribution already proven by
+  `fts-same-box.sh` on the same box (or extend readiness + surface the container log).
 
 ## BSBM Explore-and-Update
 
