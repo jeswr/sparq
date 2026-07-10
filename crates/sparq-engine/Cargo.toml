@@ -39,6 +39,12 @@ digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 # OFF by default (the wasm bundle and the default native build carry zero CS code);
 # results are identical either way — only join order is affected.
 cs-planner = []
+# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` (SPQCPRM2 frame-of-reference
+# on-disk format). OFF by default so the default engine build is unchanged; enabling it lets
+# the storage cross-version differentials (`v2_saved_store_is_query_equivalent_to_v1`,
+# `cross_version_resave_round_trips_losslessly`) drive `save_compressed` in V2 emit mode
+# through the real open/query path. Implies `sparq-core/spqcprm2` (which implies mmap).
+spqcprm2 = ["sparq-core/spqcprm2"]
 # zk-trace seam (research/zkp-query-proofs-plan.md §4.E): records per-obligation
 # witness input sets (matched triples per BGP pattern, executed join order,
 # FILTER operand bindings) for the sparq-zk derived-credential prover. OPT-IN

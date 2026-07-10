@@ -277,20 +277,30 @@ impl CompareTerm for IdTerm<'_> {
             return None;
         }
         match self.dict.term_parts(self.id) {
-            // The engine's lenient `as_num` arm: numeric-datatype literals through
-            // `parse_xsd_f64` (the XSD acceptance set — INF/-INF/NaN, not inf/infinity).
-            TermParts::Lit { value, datatype, lang: None } if is_numeric_dt(datatype) => parse_xsd_f64(value),
+            // [FABLE-5] sq-74oy4 / sq-6b1lj: the engine's lenient `as_num` arm, now
+            // DATATYPE-AWARE and TRIMMED to match `Num::of_literal`: accept iff the lexical is
+            // well-formed FOR its datatype (`num_of_parts` — the borrowed-parts twin of
+            // `of_literal`), imaged by `parse_xsd_f64` on the trimmed value. A padded
+            // `" 1"^^xsd:integer` is value-1; a per-datatype-ill-formed `"1.5"^^xsd:integer`
+            // is `None` (type error), mirroring the engine seam and the graph cache. The XSD
+            // f64 spellings (INF/-INF/NaN, not inf/infinity) are enforced by `parse_xsd_f64`.
+            TermParts::Lit { value, datatype, lang: None }
+                if is_numeric_dt(datatype) && num_of_parts(value, datatype).is_some() =>
+            {
+                parse_xsd_f64(value.trim())
+            }
             _ => None,
         }
     }
 
     #[inline]
     fn literal_kind(&self) -> LiteralKind {
-        // [FABLE-5] sq-wjl8i: the kind-first rank — mirrors the engine's
-        // `Value::literal_kind` exactly: Numeric tracks the LENIENT `as_f64` membership
-        // (so a lexical the exact classifier rejects but `parse_xsd_f64` accepts still
-        // sorts numerically); ill-formed numeric/temporal lexicals classify as Other
-        // (a kind mixing value-ordered and lexical-fallback pairs is intransitive).
+        // [FABLE-5] sq-wjl8i / sq-74oy4: the kind-first rank — mirrors the engine's
+        // `Value::literal_kind` exactly: Numeric tracks the `as_f64` membership, now
+        // DATATYPE-AWARE (a lexical ill-formed FOR its datatype like "1.5"^^xsd:integer is
+        // NOT numeric and sorts as Other/lexical, matching `of_literal`); ill-formed
+        // numeric/temporal lexicals classify as Other (a kind mixing value-ordered and
+        // lexical-fallback pairs is intransitive).
         if is_inline(self.id) {
             return LiteralKind::Numeric; // an inline id IS a well-formed xsd:integer
         }

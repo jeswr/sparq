@@ -28,6 +28,15 @@
   features: "zk"
   test: true
 
+# [FABLE-5] sq-7d3dj.32.2.7: runs the SPQCPRM2 format-migration cross-version storage
+# differentials (v2_saved_store_is_query_equivalent_to_v1 / cross_version_resave_round_trips_
+# losslessly) through the real save_compressed → open → query path in V2 emit mode. `spqcprm2`
+# forwards to sparq-core/spqcprm2 (which implies mmap), so the store/open paths compile.
+- name: "sparq-engine (spqcprm2)"
+  crate: "sparq-engine"
+  features: "spqcprm2"
+  test: true
+
 # [OPUS-4.8] (sq-6vshe.4) Seam A2: the `service` MODULE + its in-src unit tests moved to the
 # internal sparq-engine-service sub-crate (see .github/feature-matrix.d/sparq-engine-service.yml).
 # This engine leg STAYS (unlike the serialize legs, which fully moved) because it still runs the

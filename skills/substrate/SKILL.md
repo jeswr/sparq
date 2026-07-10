@@ -40,8 +40,13 @@ The XSD numeric value tower: `Num` (`Int(i64)` / `Dec(Dec)` / `Float(f32)` / `Do
 the fixed-point `Dec` struct (EXACT integer/decimal arithmetic, no f64 rounding), `ArithOp`
 (`Add`/`Sub`/`Mul`/`Div`), `RoundMode`, `as_numeric` (classifies an `oxrdf::Literal` into the
 tower), and the XSD lexical helpers `split_decimal`, `parse_xsd_f64`, `parse_xsd_f32`,
-`fmt_xsd_double`. `parse_xsd_f64` delegates to `sparq_core::parse_xsd_f64` (sq-9781x) — one
-shared body with the `sparq-core` numeric-value cache, so cache-hit ⟺ evaluator-accepts.
+`fmt_xsd_double`. `parse_xsd_f64` delegates to `sparq_core::parse_xsd_f64` (sq-9781x) — the
+shared XSD f64 SPELLING body. The `sparq-core` numeric-value cache layers a DATATYPE-AWARE
+gate on top (`sparq_core::numeric_cache_value`, sq-74oy4/sq-6b1lj: integers scale-0, decimals
+no-exponent, i128-fit, trimmed), so a cache-hit ⟺ `Num::of_literal` accepts — a lexical
+ill-formed for its datatype (`"1.5"^^xsd:integer`) misses the cache exactly as `of_literal`
+type-errors it, uniformly on `=`/`<`/`>`. The differential test
+`cache_f64_seam_vs_as_numeric_differential` pins that agreement.
 Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
 - `Num::cmp_total` — ORDER BY / MIN/MAX total order; NaN totalised FIRST.
 - `Num::cmp_relational` — SPARQL `<`/`>` / D-entailment / RIF numeric equality; NaN → `None`

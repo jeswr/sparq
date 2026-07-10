@@ -3200,7 +3200,18 @@ dependencies = [
  "smallvec",
  "spargebra",
  "sparq-core",
+ "sparq-engine-serialize",
+ "sparq-substrate",
  "uuid",
+]
+
+[[package]]
+name = "sparq-engine-serialize"
+version = "0.1.0"
+dependencies = [
+ "oxrdf",
+ "sparq-core",
+ "sparq-jsonld",
 ]
 
 [[package]]
@@ -3232,6 +3243,21 @@ dependencies = [
  "rayon",
  "sparq-core",
  "zstd",
+]
+
+[[package]]
+name = "sparq-jsonld"
+version = "0.1.0"
+
+[[package]]
+name = "sparq-substrate"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "oxrdf",
+ "rustc-hash",
+ "smallvec",
+ "sparq-core",
 ]
 
 [[package]]
