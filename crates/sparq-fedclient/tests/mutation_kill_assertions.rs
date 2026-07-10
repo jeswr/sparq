@@ -46,8 +46,8 @@
 use oxrdf::{Literal, Term as RdfTerm};
 use sparq_fedclient::{
     bind_block_size, is_forbidden_ip, lower_leaf, parse_srj, push_group, BindJoin, Capability,
-    EgressGuard, ExclusiveGroup, FedError, Filter, FilterClass, ResolveError, SourceResolver,
-    WireError,
+    EgressGuard, ExclusiveGroup, FedError, Filter, FilterClass, InterpError, ResolveError,
+    SourceResolver, WireError,
 };
 use sparq_fedplan::{Bgp, Term, TriplePattern, Var};
 use std::net::IpAddr;
@@ -132,6 +132,36 @@ fn resolve_error_display_pins_both_variants() {
         }
         .to_string(),
         "planner bridge: source index 3 out of range (1 sources)"
+    );
+}
+
+#[test]
+fn interp_error_display_pins_every_variant() {
+    // A `fmt` replaced by `Ok(Default::default())` prints nothing; pin each variant's text.
+    assert_eq!(
+        InterpError::Resolve(ResolveError::PatternOutOfRange {
+            index: 2,
+            patterns: 1
+        })
+        .to_string(),
+        "interpreter: planner bridge: pattern index 2 out of range (BGP has 1 patterns)"
+    );
+    assert_eq!(
+        InterpError::Source(FedError::Transport("down".into())).to_string(),
+        "interpreter: source error: federated source: transport error: down"
+    );
+    assert_eq!(
+        InterpError::BadSrj("not json".into()).to_string(),
+        "interpreter: malformed SRJ: not json"
+    );
+    assert_eq!(
+        InterpError::MultiSource {
+            pattern: 3,
+            sources: 2
+        }
+        .to_string(),
+        "interpreter: pattern 3 has 2 retained sources; the Phase-3 single-source \
+         interpreter answers one source per leaf (multi-source UNION is Phase 5)"
     );
 }
 
@@ -601,6 +631,35 @@ fn sd_update_only_language_sets_update_flag_not_a_version() {
     assert_eq!(
         cap.sparql_version, None,
         "an update-only SD advertises no QUERY language version"
+    );
+}
+
+#[test]
+fn sd_non_update_language_does_not_set_update_flag() {
+    // The update flag is set ONLY by the EXACT SPARQL11Update IRI. cargo-mutants showed the
+    // SPARQL11Update match guard mutated to `true` survived — no test asserted that a language
+    // IRI reaching that arm but NOT equal to SPARQL11Update leaves update=false. The IRI must
+    // NOT match the earlier SPARQL11Query / SPARQL10Query arms (those are tried first), so use
+    // an UNKNOWN language IRI that falls THROUGH to the update arm — with the guard forced true
+    // it would wrongly flip update; unmutated it is ignored. Pair it with a real SPARQL11Query
+    // triple so the capability still parses and the version is asserted. (Read-only vs
+    // read-write is a real capability distinction the planner keys on.)
+    let nt = concat!(
+        "<http://host/sparql> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/sparql-service-description#Service> .\n",
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedLanguage> <http://www.w3.org/ns/sparql-service-description#SPARQL11Query> .\n",
+        // An UNKNOWN language IRI (not Query, not Update) — reaches the update arm and must be ignored.
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedLanguage> <http://example.org/some-other-language> .\n",
+    );
+    let cap = sparq_fedclient::discovery::parse_service_description(nt)
+        .expect("well-formed SD parses")
+        .expect("document has an sd:Service");
+    assert!(
+        !cap.update,
+        "only the exact SPARQL11Update IRI sets update; an unknown language must not"
+    );
+    assert_eq!(
+        cap.sparql_version,
+        Some(sparq_fedclient::discovery::SparqlVersion::Sparql11)
     );
 }
 
