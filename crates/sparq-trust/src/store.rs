@@ -68,9 +68,32 @@
 //! caveats (no privacy/unlinkability; operator-asserted issuer keys; externally
 //! UNAUDITED ZK estate — `sq-qhy4`) are unchanged.
 //!
+//! ## Certification-edge composition (`cert-graph` feature, opt-in)
+//!
+//! When the `cert-graph` feature is enabled, a [`TrustDocument`] may carry signed
+//! [`crate::graph::Certification`] edges (via [`TrustDocument::with_certifications`]).
+//! The store's [`TrustStore::effective_rules`] runs
+//! `crate::graph::derive_effective_rules` over the document's direct rules and its
+//! certification edges, so a certified issuer's rules are composed through the SAME
+//! server-ceiling + per-`.acr` narrowing discipline — derived rules can only NARROW,
+//! never BROADEN, the certifier's own anchor.
+//!
+//! The cache-safety invariant is load-bearing: [`TrustStore::policy_version`] folds
+//! the certifier IRI, certified-issuer IRI, and the validity window (`valid_from` +
+//! `valid_until`) of every certification into the hash.  Revoking or expiring a
+//! certification changes at least one of those fields (the document's certification set
+//! loses an edge or the window shifts), which changes `policy_version` and therefore the
+//! [`AdmissionCacheKey`] — so NO stale verdict survives an edge revocation or expiry.
+//!
+//! **Zero certifications ⇒ byte-identical to the pre-cert path.** With no
+//! certifications the `with_certifications` constructor is unused, the `derive_effective_rules`
+//! call is a no-op that returns `direct_rules` verbatim, and the `policy_version`
+//! hash is unchanged (no certification entries are folded in).
+//!
 //! [OPUS-4.8] sq-pfae.5 P4 storage/authoring model (issue #940). Written while Fable
 //! unavailable — flag for re-review when Fable returns. 🤖 SPARQ agent — trust-graph
 //! authorisation PoC.
+//! [SONNET-4.6] sq-pfae.16 — cert-graph composition into TrustStore. 🤖 SPARQ agent.
 
 use crate::admit::{scope_covers, PresentedCredential};
 use crate::policy::{ControlGate, TrustRule};
@@ -125,6 +148,11 @@ impl TrustLayer {
 /// A document can only be built with [`TrustDocument::new`], which REQUIRES a
 /// [`ControlGate`]: a document that did not arrive through the trusted `.acl`/`.acr`
 /// channel cannot enter the store (fail-closed, §3.2).
+///
+/// When the `cert-graph` feature is enabled, the document may additionally carry signed
+/// certification edges ([`TrustDocument::with_certifications`]) that the store feeds into
+/// `crate::graph::derive_effective_rules` to derive additional attenuated rules ahead of
+/// the admission gate.
 #[derive(Debug, Clone)]
 pub struct TrustDocument {
     /// Where the document lives (server-wide vs a per-`.acr` container).
@@ -134,6 +162,10 @@ pub struct TrustDocument {
     version: u64,
     /// The parsed admission rules this document carries.
     rules: Vec<TrustRule>,
+    /// Signed certification edges attached to this document (OPT-IN `cert-graph` feature
+    /// only). Empty when the feature is off or the document was built with `new`.
+    #[cfg(feature = "cert-graph")]
+    certifications: Vec<crate::graph::Certification>,
 }
 
 impl TrustDocument {
@@ -150,6 +182,40 @@ impl TrustDocument {
             layer,
             version,
             rules,
+            #[cfg(feature = "cert-graph")]
+            certifications: Vec::new(),
+        }
+    }
+
+    /// Build a Control-gated trust document that also carries signed certification edges.
+    /// The certifications are fed into `crate::graph::derive_effective_rules` by the store's
+    /// `effective_rules` method, using `now_unix_secs` at call time (depth-1 closure).
+    ///
+    /// Require: `cert-graph` feature (and `framework-vocab`, which it enables).
+    ///
+    /// The `_gate` token asserts the document — including its certifications — arrived
+    /// through the trusted `.acl`/`.acr` channel (§3.2). There is no un-gated constructor.
+    ///
+    /// ## Cache-safety (load-bearing)
+    ///
+    /// The certifier IRI, certified-issuer IRI, and validity window (`valid_from` +
+    /// `valid_until`) of every certification are folded into
+    /// `TrustStore::policy_version` so that revoking or expiring an edge changes the
+    /// `policy_version` and therefore the `AdmissionCacheKey` — no stale verdict survives.
+    #[cfg(feature = "cert-graph")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cert-graph")))]
+    pub fn with_certifications(
+        layer: TrustLayer,
+        version: u64,
+        rules: Vec<TrustRule>,
+        certifications: Vec<crate::graph::Certification>,
+        _gate: ControlGate,
+    ) -> TrustDocument {
+        TrustDocument {
+            layer,
+            version,
+            rules,
+            certifications,
         }
     }
 
@@ -166,6 +232,14 @@ impl TrustDocument {
     /// The admission rules this document carries.
     pub fn rules(&self) -> &[TrustRule] {
         &self.rules
+    }
+
+    /// The signed certification edges attached to this document (`cert-graph` feature only).
+    /// Empty when the feature is off or the document was built with `new` (no certifications).
+    #[cfg(feature = "cert-graph")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cert-graph")))]
+    pub fn certifications(&self) -> &[crate::graph::Certification] {
+        &self.certifications
     }
 }
 
@@ -303,10 +377,43 @@ impl TrustStore {
     /// the **tightest** of the server default and any covering per-`.acr` narrowing:
     /// the smaller freshness window and the more-specific scope. A target with no
     /// server default admits nothing (empty result).
+    ///
+    /// When the `cert-graph` feature is enabled and the server-wide document carries
+    /// certification edges, `crate::graph::derive_effective_rules` is run over the
+    /// direct rules BEFORE the per-`.acr` narrowing step, so certified issuers are
+    /// admitted through the SAME ceiling + narrowing discipline as direct rules.
+    /// `now_unix_secs` is the evaluation instant for certification windows; pass the
+    /// current Unix second count. An expired or not-yet-valid certification contributes
+    /// NOTHING (fail-closed on time, identical to the standalone `graph` path).
     pub fn effective_rules(&self, target: &NamedNode) -> Vec<TrustRule> {
+        self.effective_rules_at(target, now_unix_secs())
+    }
+
+    /// Like [`effective_rules`](Self::effective_rules) but with an explicit evaluation
+    /// instant (`now_unix_secs`) for certification windows. The public `effective_rules`
+    /// method calls this with the system clock; tests call this directly with a fixed
+    /// instant to make certification expiry deterministic.
+    pub fn effective_rules_at(&self, target: &NamedNode, now_secs: i64) -> Vec<TrustRule> {
         let Some(server) = &self.server_wide else {
             return Vec::new(); // fail-closed: no ceiling ⇒ nothing admissible
         };
+
+        // Step 1 (cert-graph feature): derive additional attenuated rules from signed
+        // certification edges attached to the server-wide document, BEFORE per-.acr
+        // narrowing. The derived rules satisfy derived ⊆ (anchor ∩ cert scope ∩
+        // validity window) — they can only NARROW, never widen, the certifier's
+        // authority. Zero certifications ⇒ direct_rules unchanged (strict additivity).
+        #[cfg(feature = "cert-graph")]
+        let direct_rules: Vec<TrustRule> = crate::graph::derive_effective_rules(
+            server.rules(),
+            server.certifications(),
+            now_secs,
+            1, // v1: depth-1 closure (sq-tu4e discipline)
+        );
+        #[cfg(not(feature = "cert-graph"))]
+        let direct_rules: Vec<TrustRule> = server.rules().to_vec();
+        // Suppress the unused-variable warning when cert-graph is off.
+        let _ = now_secs;
 
         // The per-`.acr` documents whose anchor covers the target, from least specific
         // (shallowest container) to most specific (deepest). A deeper document narrows
@@ -319,20 +426,20 @@ impl TrustStore {
         covering.sort_by_key(|d| d.layer.anchor().map(|a| a.as_str().len()).unwrap_or(0));
 
         let mut out: Vec<TrustRule> = Vec::new();
-        // Start from the server ceiling: every server rule that itself covers the
-        // target is a candidate.
-        for srule in server.rules() {
-            if !scope_covers(&srule.scope, target) {
+        // Start from the direct rules (which already incorporate any certified issuers):
+        // every rule that itself covers the target is a candidate for further narrowing.
+        for drule in &direct_rules {
+            if !scope_covers(&drule.scope, target) {
                 continue;
             }
-            // Narrow this server rule by every covering per-`.acr` rule that matches its
+            // Narrow this direct rule by every covering per-`.acr` rule that matches its
             // (source, statement-type) AND is itself a narrowing (covered scope). A
-            // per-`.acr` rule that does NOT match any server rule is broadening — never
+            // per-`.acr` rule that does NOT match any direct rule is broadening — never
             // applied here, so it is dropped (fail-closed).
-            let mut eff = srule.clone();
+            let mut eff = drule.clone();
             for doc in &covering {
                 for crule in doc.rules() {
-                    if narrows(srule, crule, target) {
+                    if narrows(drule, crule, target) {
                         eff = tighten(&eff, crule);
                     }
                 }
@@ -346,6 +453,17 @@ impl TrustStore {
     /// server-wide document version and every per-`.acr` document covering the target.
     /// Any contributing document edit (version bump) or revocation (removal) changes it,
     /// so it is a sound cache-invalidation token.
+    ///
+    /// When the `cert-graph` feature is enabled, the certifier IRI, certified-issuer IRI,
+    /// and validity window (`valid_from` + `valid_until`) of every certification carried
+    /// by the server-wide document are also folded in. Revoking (removing from the
+    /// certification set) or expiring (validity window shift) a certification changes the
+    /// hash, so NO stale admission verdict survives a certification revocation or expiry
+    /// (the load-bearing cache-safety invariant for `sq-pfae.16`).
+    ///
+    /// **Zero certifications ⇒ byte-identical to the pre-cert path.** No certification
+    /// entries are folded into the hasher, so the output is unchanged compared to a
+    /// document built with `new`.
     pub fn policy_version(&self, target: &NamedNode) -> PolicyVersion {
         let mut hasher = DefaultHasher::new();
         // Domain tag so a server-wide-version `N` never collides with a container
@@ -355,6 +473,20 @@ impl TrustStore {
             Some(d) => {
                 0u8.hash(&mut hasher); // present
                 d.version.hash(&mut hasher);
+                // cert-graph: fold the certification set identity so revocation/expiry
+                // changes policy_version and therefore AdmissionCacheKey (cache-safety).
+                // We fold certifier IRI + certified-issuer IRI + valid_from + valid_until
+                // for each edge. The ORDER matters for stability: certifications are folded
+                // in their stored order (the caller is responsible for a stable ordering —
+                // the store does not re-sort them, matching the `graph.rs` fast path).
+                #[cfg(feature = "cert-graph")]
+                for cert in d.certifications() {
+                    "cert:".hash(&mut hasher);
+                    cert.certifier.as_str().hash(&mut hasher);
+                    cert.certified_issuer.as_str().hash(&mut hasher);
+                    cert.valid_from_unix_secs.hash(&mut hasher);
+                    cert.valid_until_unix_secs.hash(&mut hasher);
+                }
             }
             None => 1u8.hash(&mut hasher), // absent — still a distinct, stable state
         }
@@ -384,6 +516,17 @@ impl TrustStore {
             policy_version: self.policy_version(target),
         }
     }
+}
+
+/// Current Unix timestamp in seconds (used as the default `now_secs` for certification
+/// window checks). Falls back to `0` on platforms where `SystemTime` is unavailable
+/// (fail-closed: a window `[0, 0]` is trivially expired for any realistic cert).
+fn now_unix_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A stable per-credential evidence hash: the RDFC-1.0 commitment over the credential

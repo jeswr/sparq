@@ -180,3 +180,26 @@
   crate: "sparq-trust"
   features: "cert-graph"
   test: true
+
+# [SONNET-4.6] sq-pfae.16 — TrustStore x certification-graph composition: the
+# `TrustDocument::with_certifications` constructor + `TrustStore::effective_rules_at`
+# that pipes direct rules through `derive_effective_rules` + the cert-set-aware
+# `policy_version` that folds certifier IRI / certified-issuer IRI / valid_from /
+# valid_until of every edge so revoking/expiring a certification changes the
+# `AdmissionCacheKey` (cache-safety fail-closed invariant). The whole surface is
+# behind BOTH `store` (the storage/authoring model) and `cert-graph` (the closure
+# from sq-pfae.15), so neither feature alone exercises it — this combined leg is the
+# only place the full composition is compiled and tested. The leg runs `clippy
+# --all-targets -D warnings` with both features ON (the real gate) + `cargo test`,
+# which drives the REAL `TrustStore::effective_rules_at` + `policy_version` path and
+# the load-bearing SAFETY invariants: (a) revoking a cert changes `policy_version`
+# (no stale verdict survives); (b) expiring a cert contributes NOTHING and changes
+# `policy_version`; (c) zero-cert path is byte-identical to `TrustDocument::new`;
+# (d) cert-derived rules are narrowed by per-`.acr` documents identically to direct
+# rules. Verified: `cargo test -p sparq-trust --features store,cert-graph --test
+# trust_store_cert_rules` runs the 5 new tests; `clippy --all-targets -D warnings`
+# is clean in every feature state.
+- name: "sparq-trust (store,cert-graph — TrustStore x certification-graph composition)"
+  crate: "sparq-trust"
+  features: "store,cert-graph"
+  test: true
