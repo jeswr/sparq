@@ -32,7 +32,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 # The crates under test. sparq-core needs `mmap` (for `Graph::open` over an on-disk
 # store) and `parallel` (for `load_reader_parallel`'s pipelined N-Triples path).
-sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel"] }
+# The `jsonld` feature wires in oxjsonld so Graph::load_str("jsonld") exercises the
+# real oxjsonld toRdf parser path — the same path attacker-controlled GSP PUT bodies
+# reach in sparq-server. [SONNET-4.6] (sq-oy1f.46)
+sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel", "jsonld"] }
 sparq-engine = { path = "../crates/sparq-engine" }
 # SHACL validation under test (bead sq-o4pi). Opt-in crate (the sparq-reason isolation
 # pattern). Used by the `validate_shacl` target. Like every entry here it is a
@@ -40,6 +43,11 @@ sparq-engine = { path = "../crates/sparq-engine" }
 # out of the workspace default build because this fuzz crate is excluded from the root
 # workspace (see the header note). [OPUS-4.8]
 sparq-shacl = { path = "../crates/sparq-shacl" }
+# sparq-jsonld: the native W3C JSON-LD 1.1 document pipeline (bead sq-oy1f.46). The
+# `jsonld_pipeline` fuzz target exercises Json::parse + expand + flatten_expanded
+# directly. Published = false (scaffold phase), path dep resolves in the fuzz crate's
+# standalone workspace. [SONNET-4.6]
+sparq-jsonld = { path = "../crates/sparq-jsonld" }
 # Temp store directories for the `Graph::open` hostile-bytes target.
 tempfile = "3"
 
@@ -93,6 +101,19 @@ bench = false
 [[bin]]
 name = "validate_shacl"
 path = "fuzz_targets/validate_shacl.rs"
+test = false
+doc = false
+bench = false
+
+# bead sq-oy1f.46 (security: attacker-reachable application/ld+json ingest, default-on
+# in sparq-server/sparq-py/sparq-cli). Exercises:
+#   - sparq-jsonld: Json::parse → expand() → flatten_expanded() — the native pipeline
+#   - oxjsonld leg: sparq_core::Graph::load_str(text, "jsonld") → the Oxigraph
+#     JSON-LD-to-RDF parser that GSP PUT/POST bodies reach in production
+# Auto-discovered by CI `cargo fuzz list`; no workflow edit needed. [SONNET-4.6]
+[[bin]]
+name = "jsonld_pipeline"
+path = "fuzz_targets/jsonld_pipeline.rs"
 test = false
 doc = false
 bench = false
