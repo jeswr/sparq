@@ -1,0 +1,7 @@
+{
+  "pr": 1847,
+  "bead": "sq-7jt80",
+  "date": "2026-07-10",
+  "reason": "sparq-engine's spatial FILTER pushdown gains an always-compiled id-level answer-safety fast path: the SpatialProvider trait grows a default indexed_ids(dict_ptr) -> Option<Arc<FxHashSet<Id>>> method (lib.rs) and apply_spatial_pushdown adds a pure integer-lookup retain branch guarded by it (exec.rs), both in the default/feature-OFF build. This intentionally moves the feature-OFF wasm bundle bytes (+~1217 bytes, +~0.077%). Result is byte-identical to the prior per-row path (answer-safety invariant held); the delta is well within the 2% bench.yml band, so no metrics.wasm_bundle_bytes floor raise is required.",
+  "author": "[OPUS-4.8]"
+}
