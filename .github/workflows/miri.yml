@@ -38,10 +38,25 @@
 #      spreads the alphabetically-clustered heavy modules across shards).
 #   3. Per-test hard cap (`[profile.default-miri]` slow-timeout in .config/nextest.toml —
 #      the profile nextest selects automatically under Miri, so normal ci.yml nextest runs
-#      are untouched): a test that exceeds the cap is TERMINATED and reported RED BY NAME.
-#      A pathological test now yields a loud, attributable failure verdict instead of
-#      silently eating the job ceiling — cancelled-at-ceiling with no verdict is the one
-#      outcome this lane must never repeat.
+#      are untouched): a test that exceeds the cap is TERMINATED and reported BY NAME.
+#      A pathological test now yields a loud, attributable verdict instead of silently
+#      eating the job ceiling — cancelled-at-ceiling with no verdict is the one outcome
+#      this lane must never repeat.
+#   3b. Timeout-vs-UB verdict classification ([FABLE-5] formal-lanes fix): the ~20 heavy
+#      end-to-end loader tests genuinely exceed the per-test cap under Miri's ~100× slowdown
+#      (a COST problem, tracked by sq-0s15k — cfg(miri)-scale their inputs). `cargo miri
+#      nextest` exits 100 for a TIMEOUT and for a real UB/assertion FAILURE alike, so the raw
+#      exit code made the whole `miri` workflow conclude `failure` every night on pre-existing
+#      cost debt — and the no-verdict alarm (formal-alarm.yml) fired forever, masking whether
+#      Miri found real UB. Fix: nextest emits its machine-readable `libtest-json-plus` events
+#      to a file; scripts/miri_classify_verdict.py splits failures into TIMEOUT (reason ==
+#      "time limit exceeded"; known cost debt, LOUD but non-fatal) vs a GENUINE failure (a real
+#      Miri UB abort / assertion; ALWAYS fatal — the finding this lane exists for). A healthy
+#      night (all completed tests clean, only heavies timing out) now produces a real GREEN UB
+#      verdict; a single genuine UB regression still reds the shard + the workflow + re-fires
+#      the alarm. The UB guarantee is unchanged — only the pre-existing cost debt stops
+#      poisoning the verdict. When sq-0s15k lands there are no timeouts and the classifier is a
+#      transparent pass-through.
 #   4. Doctests: nextest does not run doctests, so the `miri-doctests` job keeps them
 #      covered (`cargo miri test --doc`; sparq-core has one; measured seconds under Miri).
 #      Coverage relative to the old `cargo miri test -p sparq-core` is therefore identical:
@@ -169,6 +184,11 @@ jobs:
           # One cache shared by every shard (identical build artifacts — the shards differ
           # only in which tests they EXECUTE); Swatinem races on save are first-wins + benign.
           shared-key: miri
+      # Guard the verdict CLASSIFIER before trusting it to judge a ~2-hour shard: a regression
+      # in scripts/miri_classify_verdict.py (e.g. it stops treating a real UB failure as fatal)
+      # would silently turn this UB lane green. Its hermetic self-test reds the shard first if so.
+      - name: Self-test the Miri verdict classifier (timeout-vs-UB logic)
+        run: python3 scripts/miri_classify_verdict.py --self-test
       # Build the Miri sysroot once up front so a sysroot/toolchain problem is reported
       # distinctly from a test failure, and the test run below reuses it.
       - name: Build Miri sysroot
@@ -178,10 +198,39 @@ jobs:
       # auto-selects its built-in `default-miri` profile under Miri, which picks up the
       # per-test terminate cap from .config/nextest.toml. --no-fail-fast: a shard reports
       # EVERY test's verdict even after a failure (this is a verdict lane, not a smoke lane).
+      #
+      # VERDICT CLASSIFICATION (formal-lanes fix — [FABLE-5]): `cargo miri nextest` exits 100
+      # whether a test TIMED OUT (the ~20 heavy end-to-end loader tests over the per-test cap —
+      # a COST problem tracked by sq-0s15k) or GENUINELY FAILED (a real Miri UB abort / assertion
+      # — the finding this lane exists for). The raw exit code cannot tell those apart, so the
+      # whole `miri` workflow concluded `failure` EVERY night on pre-existing, already-tracked
+      # cost debt and the no-verdict alarm (formal-alarm.yml) fired forever — masking whether
+      # Miri actually found UB. Fix: emit nextest's machine-readable `libtest-json-plus` event
+      # stream to a file (nextest's own non-zero exit is absorbed by `|| true`), then let
+      # scripts/miri_classify_verdict.py decide the shard verdict — it reds the shard the instant
+      # a GENUINE (non-timeout) failure appears (full UB guarantee preserved), but tolerates
+      # timeout-only shards so a healthy night produces a real UB verdict. Every timed-out +
+      # failed test is written to the step summary + annotations, so the cost debt stays LOUD and
+      # under standing pressure (sq-0s15k). When sq-0s15k cfg(miri)-scales the heavy tests there
+      # are no timeouts and the classifier is a transparent pass-through.
       - name: cargo miri nextest run (shard ${{ matrix.shard }}/12)
+        env:
+          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
         run: >-
           cargo +nightly-2026-06-11 miri nextest run -p sparq-core
           --partition count:${{ matrix.shard }}/12 --no-fail-fast
+          --message-format libtest-json-plus --message-format-version 0.1
+          > "miri-shard-${{ matrix.shard }}.jsonl" 2> "miri-shard-${{ matrix.shard }}.stderr"
+          || true
+      # Classify: a genuine UB/assertion failure reds the shard (exit 1); timeout-only debt is
+      # tolerated (exit 0). This step's exit code IS the shard verdict, so a real UB regression
+      # still reds the workflow and re-fires the no-verdict alarm.
+      - name: Classify shard verdict (UB failure = fatal, timeout debt = non-fatal)
+        run: |
+          cat "miri-shard-${{ matrix.shard }}.stderr" || true
+          python3 scripts/miri_classify_verdict.py \
+            --shard "${{ matrix.shard }}/12" \
+            --events "miri-shard-${{ matrix.shard }}.jsonl"
 
   # nextest does not execute doctests; keep them covered so this lane's coverage stays
   # identical to the original `cargo miri test -p sparq-core` (which ran them last —
