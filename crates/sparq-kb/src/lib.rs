@@ -124,6 +124,11 @@ pub mod query {
     /// and return the executed SPARQL + resolved IRIs + grounding confidence so the
     /// caller can verify the answer was computed, not guessed. [OPUS-4.8] sq-ve5dy
     pub mod nl_tool;
+    /// Citation renderer for PKG-native canned-query answers (sq-2489d.11):
+    /// renders `prov:wasDerivedFrom` source citations beside `FINDING_PROVENANCE`
+    /// rows and reports citation-resolution-rate + fabricated-citation count.
+    /// [SONNET-4.6] sq-2489d.11
+    pub mod citations;
 
     /// Load the PKG ontology + the ingested instances into one queryable [`Graph`].
     /// The `kb:` instances use absolute IRIs, so no base is needed.
