@@ -85,6 +85,23 @@ pub fn is_inline(id: Id) -> bool {
     id >= INLINE_BASE && id - INLINE_BASE <= INLINE_MAX
 }
 
+/// [FABLE-5] (sq-1ivw7) Whether `id` denotes an RDF LITERAL, given the dictionary that owns
+/// it. An inline-integer id is always an `xsd:integer` literal; any other id is classified by
+/// its stored record (`TermParts::Lit`). `NO_ID` is not a literal. This is the id-level term-kind
+/// predicate the engine's predicate-range non-literal inference is built on: an object column of a
+/// constant predicate is provably non-literal for a snapshot iff NONE of that predicate's object
+/// ids satisfy this. IRIs, blank nodes and triple terms all return `false`.
+#[inline]
+pub fn is_literal_id(dict: &Dict, id: Id) -> bool {
+    if id == NO_ID {
+        return false;
+    }
+    if is_inline(id) {
+        return true;
+    }
+    matches!(dict.term_parts(id), TermParts::Lit { .. })
+}
+
 /// The inline id of an integer VALUE in the inline range — the id the canonical
 /// `xsd:integer` literal of that value interns/looks up to. The engine's fast path for
 /// resolving COMPUTED (BIND/aggregate) integer values to ids without constructing a
