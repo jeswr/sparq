@@ -568,6 +568,39 @@ pinning     = "dataset + optional query"
 records_to  = "stdout; research/compressed-perms-verdict.md, research/dict-compression-measured.md"
 status      = "ok"
 
+# [SONNET-4.6] sq-7d3dj.32.2.2 — bytes-per-triple: deterministic B/triple footprint at scale
+# in BOTH in-RAM storage modes (raw six-permutation + block-compressed), plus on-disk indexes
+# and bounded-RAM external-build peak RSS. Canonical runs: dedicated quiet EC2 (sq-7d3dj.32.2.3).
+[[benchmark]]
+id          = "bytes-per-triple"
+name        = "Bytes-per-triple footprint (in-RAM raw vs compressed, on-disk, external-build)"
+category    = "compression"
+measures    = "heap B/triple (store / dict / caches / rss / hwm) for raw and SPARQ_STORE_PROFILE=compressed in-RAM modes; on-disk index directory B/triple raw + compressed (save); bounded-RAM external-build peak RSS B/triple; all at scale (1M/10M/50M triples via WatDiv SF)"
+invoke      = "scripts/bench/bytes-per-triple.sh [out.json]   # env: SCALES='1000000 10000000 50000000' SKIP_EXTERNAL=0"
+source      = "scripts/bench/bytes-per-triple.sh; crates/sparq-cli/src/main.rs (memstat, save, build); bench/watdiv/gen.sh"
+dataset     = "REAL WatDiv v0.6 generator at SF=SCALE/100000 (same sha256-pinned tarball as the watdiv suite); bench/watdiv/gen.sh deterministic seed-1; disk discipline: corpus cleaned per-scale unless KEEP_CORPUS=1"
+quiet_box_sensitive = false  # byte-counts (B/triple) are deterministic; timing arms (load_s) are not; the canonical series separates these axes
+pinning     = "watdiv tarball sha256 + seed-1 RNG PIN (same as watdiv suite); SCALES env pins the target triple counts"
+records_to  = "stdout (MEMBPT lines + MEMBPT_JSON single-line envelope); optional [out.json] arg; canonical EC2 numbers in sq-7d3dj.32.2.3 envelope"
+featured    = false  # internal footprint measurement for the compression programme; not a head-to-head competitor card
+status      = "ok"
+
+# [SONNET-4.6] sq-7d3dj.32.2.2 — compressed-query-delta: per-query latency A/B
+# raw vs SPARQ_STORE_PROFILE=compressed on WatDiv, with correctness cross-check.
+[[benchmark]]
+id          = "compressed-query-delta"
+name        = "Compressed-store per-query latency delta (raw vs SPARQ_STORE_PROFILE=compressed)"
+category    = "compression"
+measures    = "per-query min-of-N latency (us) in raw mode and compressed mode on the WatDiv Basic-Testing suite (16 queries); solution-count agreement in BOTH modes vs bench/watdiv/expected-rows.tsv (correctness gate); raw_us + comp_us per query in the JSON envelope"
+invoke      = "scripts/bench/compressed-query-delta.sh [out.json]   # env: SF=1 ITERS=3"
+source      = "scripts/bench/compressed-query-delta.sh; crates/sparq-cli/src/main.rs (cmd_bench + SPARQ_STORE_PROFILE env, sq-7d3dj.32.2.1); bench/watdiv/{gen.sh,queries,expected-rows.tsv}"
+dataset     = "REAL WatDiv v0.6 generator at SF=1 (same sha256-pinned tarball as the watdiv suite); bench/watdiv/gen.sh deterministic seed-1; ~106k distinct N-Triples"
+quiet_box_sensitive = true  # wall-clock latency; canonical numbers from a quiet EC2 box (sq-7d3dj.32.2.3)
+pinning     = "watdiv tarball sha256 + seed-1 RNG PIN; SF (default 1); ITERS (default 3); query dir bench/watdiv/queries; expected-rows.tsv"
+records_to  = "stdout (single-line JSON envelope with rows array); optional [out.json] arg; canonical EC2 timings in sq-7d3dj.32.2.3 envelope"
+featured    = false  # internal A/B harness for the compression programme; not a dashboard series (work-box timings are non-canonical)
+status      = "ok"
+
 # =============================================================================
 # SCALING — parallel thread sweep
 # =============================================================================
