@@ -8,8 +8,24 @@
 # N-Triples that sparq `reason` closes, then reports the materialized triple count
 # (correctness oracle) + best-of-N wall time.
 #
-# TSV OUTPUT (stdout, one line):
-#   nemo\t<closure_triples|NOT-RUN-LOCALLY|ERROR>\t<materialize_best_us|reason>
+# TSV OUTPUT (stdout, one line; the 4th column records the TIMING BASIS honestly):
+#   nemo\t<closure_triples|NOT-RUN-LOCALLY|ERROR>\t<materialize_best_us|reason>\t<timed=...>
+#
+# ── TIMING BASIS (load-bearing for comparability, sq-hmd7l.32) ────────────────
+# sparq's compared figure is its SELF-REPORTED materialize time (parse excluded) and
+# Jena's is InfModel-materialize-on-a-loaded-graph — so timing Nemo's whole `nmo`
+# subprocess (N-Triples import + reasoning + the multi-GB closed.csv export at scale)
+# would OVERSTATE Nemo (the 4th-col basis makes that visible, never silent). Nemo's
+# CLI reports the loaded-graph figure itself with `--report short` (stdout):
+#     Reasoning completed in <total>ms. Derived <n> facts.
+#        Data import:   <x>ms
+#        Reasoning:     <y>ms      <-- execution MINUS table-load: the compared figure
+#        Data export:   <z>ms
+# (nemo-cli/src/main.rs print_finished_message, v0.9.1). This adapter parses the
+# `Reasoning:` breakdown line per run and reports best-of-N of it (basis
+# `timed=nemo-self-reported-reasoning`); only if the line is absent does it fall
+# back to the whole-process wall (basis `timed=whole-process-wall
+# (import+export INCLUDED)` — an upper bound, biased AGAINST Nemo, never for it).
 #
 # ── VALIDATED ENCODING (sq-hmd7l.31) ──────────────────────────────────────────
 # Nemo is a GENERAL Datalog engine, NOT a native OWL 2 RL reasoner. A like-for-like
@@ -41,6 +57,7 @@
 #     <profile> in {rdfs, owl}; <rules_file> = a Nemo .rls program (defaults to the
 #     validated bench/reason-encodings/nemo/<profile-or-owl-rl>.rls).
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,9 +66,26 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# The breakdown line is plain println! ("   Reasoning:     <y>ms"), but tolerate ANSI
+# colour codes anywhere on the line (the summary line's numbers ARE coloured, and a
+# future Nemo may colour the breakdown too). "Reasoning completed in" does NOT match
+# (that is the total incl. import/export) — only the `Reasoning:` breakdown row does.
+REASONING_RE = re.compile(r"^\s*(?:\x1b\[[0-9;]*m)*Reasoning:\s*(?:\x1b\[[0-9;]*m)*(\d+)\s*ms", re.M)
 
-def emit(count, us):
-    print("nemo\t{}\t{}".format(count, us))
+
+def parse_reasoning_us(text):
+    """Nemo's self-reported `Reasoning:` breakdown (ms) in µs, or None if absent."""
+    matches = REASONING_RE.findall(text or "")
+    if not matches:
+        return None
+    return float(matches[-1]) * 1000.0
+
+
+def emit(count, us, basis=None):
+    if basis:
+        print("nemo\t{}\t{}\t{}".format(count, us, basis))
+    else:
+        print("nemo\t{}\t{}".format(count, us))
 
 
 def default_rules(profile):
@@ -95,7 +129,8 @@ def main():
         with open(local_rls, "w") as fh:
             fh.write(program)
 
-        best_us = None
+        best_wall_us = None
+        best_self_us = None
         count = "ERROR"
         for _ in range(iters):
             outdir = os.path.join(workdir, "results")
@@ -103,8 +138,11 @@ def main():
                 shutil.rmtree(outdir)
             t0 = time.perf_counter()
             try:
-                subprocess.run(
-                    [nemo_bin, local_rls, "--export-dir", outdir, "--overwrite-results"],
+                # `--report short` forces the finished-message breakdown even when
+                # stdout is a pipe (the default `auto` may suppress it).
+                proc = subprocess.run(
+                    [nemo_bin, local_rls, "--export-dir", outdir, "--overwrite-results",
+                     "--report", "short"],
                     capture_output=True, text=True, cwd=workdir,
                     timeout=int(os.environ.get("TIMEOUT_S", "900")),
                 )
@@ -112,7 +150,10 @@ def main():
                 emit("ERROR", "timeout")
                 return
             dt_us = (time.perf_counter() - t0) * 1e6
-            best_us = dt_us if best_us is None else min(best_us, dt_us)
+            best_wall_us = dt_us if best_wall_us is None else min(best_wall_us, dt_us)
+            self_us = parse_reasoning_us((proc.stdout or "") + (proc.stderr or ""))
+            if self_us is not None:
+                best_self_us = self_us if best_self_us is None else min(best_self_us, self_us)
             # Closure size = exported `closed` facts. The encoding @exports ONLY closed,
             # so summing lines across the output dir counts exactly the closure.
             total = 0
@@ -124,7 +165,16 @@ def main():
                     except OSError:
                         pass
             count = str(total) if total else "ERROR"
-        emit(count, "{:.1f}".format(best_us) if best_us is not None else "na")
+        if best_self_us is not None:
+            emit(count, "{:.1f}".format(best_self_us), "timed=nemo-self-reported-reasoning")
+        elif best_wall_us is not None:
+            sys.stderr.write(
+                "nemo_adapter: WARNING — `Reasoning:` breakdown line absent; "
+                "falling back to whole-process wall (import+export INCLUDED)\n"
+            )
+            emit(count, "{:.1f}".format(best_wall_us), "timed=whole-process-wall(import+export-INCLUDED)")
+        else:
+            emit(count, "na")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

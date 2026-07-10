@@ -41,7 +41,7 @@
 # the SAME rule set and agree. INVARIANT: no throughput row without a closure-count agreement
 # or an explicitly-recorded semantic-difference caveat.
 #
-# METHODOLOGY:
+# METHODOLOGY (every engine's timed figure = MATERIALIZE-ON-A-LOADED-GRAPH, same basis):
 #   * sparq: `sparq-cli reason <combined> ntriples <profile> <out.nt>` best-of-N; the timed
 #     figure is sparq's SELF-REPORTED materialize time (parse EXCLUDED — comparable to the
 #     other engines' timed-materialize-on-a-loaded-graph). Load is recorded separately.
@@ -51,6 +51,12 @@
 #   * VLog / Nemo: python adapters run the VALIDATED bench/reason-encodings/{vlog,nemo}/
 #     program (default per profile); if the binary is absent an honest NOT-RUN-LOCALLY row
 #     (never a fabricated number). Their closure count AGREES with sparq set-for-set.
+#     [FABLE-5 sq-hmd7l.32] their timed figure is the ENGINE'S OWN loaded-graph
+#     materialization report (VLog `Runtime materialization`, Nemo's `Reasoning:` breakdown)
+#     — NOT the whole-subprocess wall, which at univ>=100 would fold the multi-GB .nt load
+#     + closure export into the competitor's time (an overstatement biased for sparq). The
+#     per-row TSV carries a 4th `timed=` basis column; if the self-report is ever absent the
+#     adapters fall back to whole-process wall and SAY SO in that column, never silently.
 #
 # USAGE
 #   scripts/bench/materialize-same-box.sh                 # both scales, all engines
@@ -70,7 +76,12 @@
 #   JENA_VERSION  default 5.4.0 (archive.apache.org)
 #   JENA_PROFILES Jena reasoner profiles to run (default "rdfs owl-micro"); owl-mini/owl are
 #                 SLOW on LUBM(1) and typically time out — add them explicitly if wanted.
+#   JAVA_XMX      JVM max heap for the Jena driver, e.g. 24g (default: JVM default — at
+#                 univ>=100 the default ~25%-of-RAM heap OOMs the InfModel; set it)
 #   VLOG / NEMO   paths to the vlog / nmo binaries (adapters emit NOT-RUN-LOCALLY if absent)
+#   VLOG_VERSION / NEMO_VERSION   engine version strings recorded in the envelope's
+#                 engines map (e.g. the pinned git commit / release tag a canonical
+#                 gather built — provenance for citable numbers; default empty)
 #
 # SCRATCH: the Jena tarball lives under /tmp/jena-reason (gather-only dep, NOT committed —
 # engines stay out of git per AGENTS.md); the LUBM corpus is gitignored + regenerable. Delete
@@ -91,6 +102,9 @@ CANONICAL="${CANONICAL:-0}"
 JENA_VERSION="${JENA_VERSION:-5.4.0}"
 JENA_HOME="${JENA_HOME:-/tmp/jena-reason/apache-jena-$JENA_VERSION}"
 JENA_PROFILES="${JENA_PROFILES:-rdfs owl-micro}"
+JAVA_XMX="${JAVA_XMX:-}"
+VLOG_VERSION="${VLOG_VERSION:-}"
+NEMO_VERSION="${NEMO_VERSION:-}"
 CLI="${CLI:-$ROOT/target/release/sparq-cli}"
 
 # Pinned KNOWN closure counts for the deterministic LUBM(1) corpus — the acceptance oracle.
@@ -206,8 +220,8 @@ for i in "${!UNIVS_ARR[@]}"; do
       jp="$(jena_profile_for "$prof")"
       # only run Jena for profiles it is registered as running (from $JENA_PROFILES)
       if [ -n "$jp" ] && [[ " $JENA_PROFILES " == *" $jp "* ]]; then
-        log "jena: $jp (for sparq '$prof') x$ITERS (cap ${TIMEOUT_S}s)"
-        if row="$(timeout "$TIMEOUT_S" java -cp "$JENA_HOME/lib/*:$TMP/jena-classes" \
+        log "jena: $jp (for sparq '$prof') x$ITERS (cap ${TIMEOUT_S}s${JAVA_XMX:+, -Xmx$JAVA_XMX})"
+        if row="$(timeout "$TIMEOUT_S" java ${JAVA_XMX:+-Xmx"$JAVA_XMX"} -cp "$JENA_HOME/lib/*:$TMP/jena-classes" \
             JenaReasonAdapter "$COMBINED" "$jp" "$ITERS" 2>>"$SCALE_TMP/jena.err")"; then
           # rewrite the leading column from the Jena profile name to the sparq profile
           # name so the crosscheck aligns rows; keep the Jena profile in jena.err meta.
@@ -218,20 +232,21 @@ for i in "${!UNIVS_ARR[@]}"; do
       fi
     fi
 
-    # -- VLog: python adapter (NOT-RUN-LOCALLY if binary/encoding absent).
+    # -- VLog: python adapter (NOT-RUN-LOCALLY if binary/encoding absent). The optional
+    # 4th column is the adapter's honest `timed=` basis — preserve it.
     if want vlog; then
       log "vlog: $prof x$ITERS"
       TIMEOUT_S="$TIMEOUT_S" python3 "$ROOT/scripts/bench-adapters/vlog_adapter.py" \
         "$COMBINED" "$prof" "$ITERS" 2>>"$SCALE_TMP/vlog.err" \
-        | awk -F'\t' -v p="$prof" '{printf "%s\t%s\t%s\n", p, $2, $3}' >> "$SCALE_TMP/vlog.tsv"
+        | awk -F'\t' -v p="$prof" '{printf "%s\t%s\t%s%s\n", p, $2, $3, (NF>=4 ? "\t"$4 : "")}' >> "$SCALE_TMP/vlog.tsv"
     fi
 
-    # -- Nemo: python adapter (NOT-RUN-LOCALLY if binary/encoding absent).
+    # -- Nemo: python adapter (NOT-RUN-LOCALLY if binary/encoding absent). 4th col as above.
     if want nemo; then
       log "nemo: $prof x$ITERS"
       TIMEOUT_S="$TIMEOUT_S" python3 "$ROOT/scripts/bench-adapters/nemo_adapter.py" \
         "$COMBINED" "$prof" "$ITERS" 2>>"$SCALE_TMP/nemo.err" \
-        | awk -F'\t' -v p="$prof" '{printf "%s\t%s\t%s\n", p, $2, $3}' >> "$SCALE_TMP/nemo.tsv"
+        | awk -F'\t' -v p="$prof" '{printf "%s\t%s\t%s%s\n", p, $2, $3, (NF>=4 ? "\t"$4 : "")}' >> "$SCALE_TMP/nemo.tsv"
     fi
   done
 
@@ -241,7 +256,7 @@ for i in "${!UNIVS_ARR[@]}"; do
   CANONICAL="$CANONICAL" UNIV="$UNIV" ITERS="$ITERS" COMBINED="$COMBINED" NTRIPLES="$NTRIPLES" \
   GIT_COMMIT="$GIT_COMMIT" SCALE_TMP="$SCALE_TMP" OUT="$OUT" ONLY="$ONLY" \
   JENA_VER="${JENA_VER:-}" JENA_PROFILES="$JENA_PROFILES" TIMEOUT_S="$TIMEOUT_S" \
-  MAT_PROFILES="$MAT_PROFILES" \
+  MAT_PROFILES="$MAT_PROFILES" VLOG_VERSION="$VLOG_VERSION" NEMO_VERSION="$NEMO_VERSION" \
   python3 - <<'PYEOF'
 import json, os, platform
 
@@ -258,7 +273,8 @@ def read_tsv(engine):
         for line in open(path):
             f = line.rstrip("\n").split("\t")
             if len(f) >= 3:
-                rows[f[0]] = dict(closure=f[1], us=f[2])
+                # optional 4th col = the adapter's honest `timed=` basis (vlog/nemo).
+                rows[f[0]] = dict(closure=f[1], us=f[2], basis=(f[3] if len(f) > 3 else ""))
     return rows
 
 
@@ -286,15 +302,15 @@ if "jena" in engines:
     }
 if "vlog" in engines:
     engines_meta["vlog"] = {
-        "version": "",
+        "version": os.environ.get("VLOG_VERSION", ""),
         "rule_set": "general Datalog running the VALIDATED bench/reason-encodings/vlog/{owl-rl,rdfs}.dlog — the SAME rule set as sparq's compared profile, reproducing its closure SET-FOR-SET (sq-hmd7l.30). If the vlog binary or the encoding is absent, the column is NOT-RUN-LOCALLY.",
-        "mode": "scripts/bench-adapters/vlog_adapter.py: writes an INMEMORY edb.conf binding the .nt to TE, runs `mat --storemat`, counts the materialized T relation",
+        "mode": "scripts/bench-adapters/vlog_adapter.py: writes an INMEMORY edb.conf binding the .nt to TE, runs `mat --storemat`, counts the materialized T relation; timed = VLog's SELF-REPORTED `Runtime materialization` (EDB load + storemat write EXCLUDED — same loaded-graph basis as sparq/Jena; per-row `timed=` basis column, wall fallback declared)",
     }
 if "nemo" in engines:
     engines_meta["nemo"] = {
-        "version": "",
+        "version": os.environ.get("NEMO_VERSION", ""),
         "rule_set": "general Datalog (Rust-native) running the VALIDATED bench/reason-encodings/nemo/{owl-rl,rdfs}.rls — the SAME rule set as sparq's compared profile, reproducing its closure SET-FOR-SET (sq-hmd7l.31). If the nmo binary or the encoding is absent, the column is NOT-RUN-LOCALLY.",
-        "mode": "scripts/bench-adapters/nemo_adapter.py: substitutes the corpus path into the .rls, runs `nmo`, counts the exported `closed` relation",
+        "mode": "scripts/bench-adapters/nemo_adapter.py: substitutes the corpus path into the .rls, runs `nmo --report short`, counts the exported `closed` relation; timed = Nemo's SELF-REPORTED `Reasoning:` breakdown (import + export EXCLUDED — same loaded-graph basis as sparq/Jena; per-row `timed=` basis column, wall fallback declared)",
     }
 
 note_canonical = (
@@ -349,11 +365,14 @@ envelope = {
     "canonical": canonical,
     "canonical_note": note_canonical,
     "git_commit": os.environ["GIT_COMMIT"],
-    "suite": "materialize-competitors",
+    # [FABLE-5] sq-hmd7l.32 — the suite id carries the SCALE so envelopes gathered at
+    # different LUBM(univ) never fold into one ingest group (the ingest's cross-gather
+    # count assertion would rightly refuse two scales' differing closure counts).
+    "suite": f"materialize-competitors-lubm{os.environ['UNIV']}",
     "scale": f"LUBM({os.environ['UNIV']}) ABox+TBox, {os.environ['NTRIPLES']} input triples ({os.environ['COMBINED']})",
     "iters": int(os.environ["ITERS"]),
     "profiles": profiles,
-    "tsv_format": "<profile>\\t<closure_triples|ERROR|NOT-RUN-LOCALLY>\\t<materialize_best_us|reason>",
+    "tsv_format": "<profile>\\t<closure_triples|ERROR|NOT-RUN-LOCALLY>\\t<materialize_best_us|reason>[\\t<timed=basis>]",
     "engines": engines_meta,
     "statuses": {
         e: ("ok" if any(v.get("closure") not in (None, "ERROR", "NOT-RUN-LOCALLY") for v in data[e].values()) else "not-run/failed")
@@ -374,6 +393,7 @@ envelope = {
 for e in engines:
     envelope[f"{e}_tsv"] = "\n".join(
         f"{p}\t{data[e][p]['closure']}\t{data[e][p]['us']}"
+        + (f"\t{data[e][p]['basis']}" if data[e][p].get("basis") else "")
         for p in profiles if p in data[e]
     )
 

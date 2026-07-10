@@ -281,12 +281,73 @@ def test_shacl():
     check("shacl.report.conforming.conforms", rc["conforms"], True)
 
 
+# --- vlog / nemo self-reported-materialization parsers ([FABLE-5] sq-hmd7l.32) ----
+# The materialize timing basis: both adapters prefer the engine's OWN loaded-graph
+# materialization figure over whole-process wall (which would include the .nt load
+# + closure export — an overstatement at LUBM(100) scale). These tests pin the parse
+# of the exact upstream formats (VLog src/launcher/main.cpp, nemo-cli v0.9.1
+# print_finished_message).
+def test_reason_parsers():
+    import nemo_adapter as nemo
+    import vlog_adapter as vlog
+
+    # VLog: ostream double — plain, fractional, and 6-sig-fig scientific forms.
+    check(
+        "vlog.parse.plain",
+        vlog.parse_materialize_us("... Runtime materialization = 227 milliseconds ..."),
+        227000.0,
+    )
+    check(
+        "vlog.parse.fractional",
+        vlog.parse_materialize_us("Runtime materialization = 226.885 milliseconds"),
+        226885.0,
+    )
+    check(
+        "vlog.parse.scientific",
+        vlog.parse_materialize_us("Runtime materialization = 1.23457e+06 milliseconds"),
+        1.23457e9,
+    )
+    # last occurrence wins; unrelated runtimes (total / pre-mat / store) never match.
+    multi = (
+        "Runtime pre-materialization = 5 milliseconds\n"
+        "Runtime materialization = 100 milliseconds\n"
+        "Runtime materialization = 90 milliseconds\n"
+        "Time to index and store the materialization on disk = 3 seconds\n"
+        "Runtime = 5000 milliseconds\n"
+    )
+    check("vlog.parse.last_of_multi", vlog.parse_materialize_us(multi), 90000.0)
+    check("vlog.parse.absent", vlog.parse_materialize_us("Runtime = 5000 milliseconds"), None)
+    check("vlog.parse.empty", vlog.parse_materialize_us(""), None)
+
+    # Nemo: the `Reasoning:` breakdown row (right-aligned ms), NOT the coloured
+    # "Reasoning completed in <total>ms" summary (that total includes import/export).
+    report = (
+        "Reasoning completed in \x1b[1;32m2650\x1b[0mms. Derived 47179 facts.\n"
+        "   Data import:      450ms\n"
+        "   Reasoning:       2100ms\n"
+        "   Data export:      100ms\n"
+    )
+    check("nemo.parse.breakdown", nemo.parse_reasoning_us(report), 2100000.0)
+    check(
+        "nemo.parse.no_export_row",
+        nemo.parse_reasoning_us("Reasoning completed in 10ms. Derived 1 facts.\n   Data import:   4ms\n   Reasoning:   6ms\n"),
+        6000.0,
+    )
+    check(
+        "nemo.parse.summary_only_is_absent",
+        nemo.parse_reasoning_us("Reasoning completed in 2650ms. Derived 47179 facts.\n"),
+        None,
+    )
+    check("nemo.parse.empty", nemo.parse_reasoning_us(""), None)
+
+
 def main():
     test_http()
     test_vector()
     test_pareto()
     test_beir()
     test_shacl()
+    test_reason_parsers()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 
