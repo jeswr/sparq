@@ -34,26 +34,21 @@ let g = Graph::from_parts(dict, triples);
 ## ✨ Features
 
 - **RDFS entailment** — the non-explosive subset (rdfs2/3/5/7/9/11), materialized in one pass.
-- **OWL 2 RL** — property/class axioms (`sameAs`, `inverseOf`, Transitive / Symmetric,
-  `equivalentClass` / `equivalentProperty`, …) over the same fixpoint engine. Complete for the
-  assertion-style RL/RDF rules (W3C OWL-RL conformance row is at the profile ceiling — the
-  documented divergences are conclusions provably outside RL, not missing rules); use
-  `sparq-reason-el` for complete class classification.
-- **D-entailment** (opt-in `d-entail`) — `Profile::D`: the rdfD1 datatype-typing rule under
-  a recognized datatype map, with **correct typed value-space equality**
-  (`"1"^^xsd:integer` is the same value as `"1.0"^^xsd:decimal`, never an f64 fast path).
-- **Notation3** — `{ … } => { … }` rules with EYE-validated builtins (a separate subsystem).
-- **RIF-Core** (opt-in `rif-core`) — the W3C RIF **Core** dialect (the **monotone Horn**
-  common subset of RIF-BLD/PRD) as a `rif::Document` rule front-end over the N3 chainer:
-  frame/membership/subclass atoms + numeric/string/list builtins with **range-restriction
-  safety** enforced (unsafe rules are rejected, never looped). **Equal-atom semantics
-  (sq-pbz04.5.4 + sq-26vwp):** Equal in a rule head is rejected (Core syntactic restriction);
-  body Equal is resolved at **compile time by substitution/unification** (not an `owl:sameAs`
-  triple) — `t=t` eliminated, `?x=t` substituted (binds `?x`), `?x=?y` unified — so same-node
-  reflexivity fires without a `sameAs` assertion and an asserted `sameAs` never over-derives;
-  distinct **ground** constants stay rejected fail-closed pending the value-space comparator
-  (sq-v5evr/#1646). **Monotone, NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF
-  entailment regime are documented out-of-scope (`rif::UNIMPLEMENTED`), not faked.
+- **OWL 2 RL** — property/class axioms over the same fixpoint engine; use `sparq-reason-el`
+  for complete class classification.
+- **D-entailment** (opt-in `d-entail`) — `Profile::D`: rdfD1 datatype-typing rule under a
+  recognized 23-XSD-datatype map (string, boolean, 12 integer types, decimal, double, float,
+  date/dateTime/dateTimeStamp, language, anyURI, hexBinary/base64Binary) with **correct
+  typed value-space equality** (`"1"^^xsd:integer` = `"1.0"^^xsd:decimal`, never f64).
+  Fail-closed: unmapped datatypes/facet-invalid literals rejected; `xsd:time`, durations,
+  XML datatypes deferred.
+- **Notation3** — user-supplied `{ … } => { … }` rules with EYE-validated builtins.
+- **RIF-Core** (opt-in `rif-core`) — W3C RIF **Core** dialect (monotone Horn subset of
+  RIF-BLD/PRD) as `rif::Document` over the N3 chainer. Atoms: frame/membership/subclass
+  plus numeric/string/list builtins. **Range-restriction safety enforced** (unsafe rules
+  rejected). **Body `Equal` resolved at compile time** (substitution/unification, not
+  `owl:sameAs` triples); Equal in heads rejected. Distinct ground constants fail-closed
+  pending value-space comparator. SPARQL-RIF entailment and larger RIF dialects deferred.
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
