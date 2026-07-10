@@ -143,6 +143,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         lines = sys.stdin.readlines()
     timed_out, failed, n_ok = classify(lines)
+    # "Silence must not look like green": an event stream with NO test outcomes at all means
+    # nextest never ran the tests (build break / miri sysroot failure / crash before emitting),
+    # NOT a clean shard. Treat it as FATAL so a setup failure cannot masquerade as a pass.
+    # (A shard legitimately assigned zero tests still emits nothing here — but every one of the
+    # 12 round-robin shards over sparq-core's ~130 tests receives tests, so an empty stream is a
+    # real failure signal, not an empty partition. If the partition scheme ever changes, revisit.)
+    if not timed_out and not failed and n_ok == 0:
+        print(f"::error title=Miri shard produced no test outcomes (shard {args.shard})::"
+              "the libtest-json-plus stream carried no ok/failed/timeout events — nextest likely "
+              "failed to build/run the shard (see the .stderr above). Failing the shard: an empty "
+              "verdict is NOT a clean pass.")
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        msg = (f"### 🤖 Miri UB verdict — shard {args.shard}\n\n"
+               "**Verdict: ❌ FAIL** — no test outcomes in the event stream (build/run failure, "
+               "not a clean pass). See the step log's `.stderr` dump.\n")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write(msg)
+        else:
+            sys.stdout.write(msg)
+        return 1
     return _emit(args.shard, timed_out, failed, n_ok)
 
 
@@ -192,6 +213,20 @@ def _self_test() -> int:
     # 5. non-test / malformed lines ignored, don't crash.
     t, f, ok = classify(["not json", json.dumps({"type": "suite", "event": "started"}), ""])
     ck((t, f, ok) == ([], [], 0), "non-test lines ignored")
+
+    # 6. empty / no-test-outcome stream via main() => FATAL (silence != green).
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        empty = os.path.join(td, "empty.jsonl")
+        with open(empty, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "suite", "event": "started"}) + "\n")
+        ck(main(["--shard", "Z", "--events", empty]) == 1,
+           "no test outcomes => fatal exit 1")
+        # a stream WITH a passing test via main() => exit 0.
+        good = os.path.join(td, "good.jsonl")
+        with open(good, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "test", "event": "ok", "name": "a::x"}) + "\n")
+        ck(main(["--shard", "Z", "--events", good]) == 0, "a real pass via main => exit 0")
 
     if fails:
         for x in fails:
