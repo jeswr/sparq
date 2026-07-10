@@ -43,7 +43,13 @@ let g = Graph::from_parts(dict, triples);
   `rdf:langString`) with **correct typed value-space equality** (`"1"^^xsd:integer` =
   `"1.0"^^xsd:decimal`, never f64). Fail-closed: unmapped datatypes/facet-invalid literals
   rejected; `xsd:time`, durations, XML datatypes deferred.
-- **Notation3** — user-supplied `{ … } => { … }` rules with EYE-validated builtins.
+- **Notation3** — user-supplied `{ … } => { … }` rules with EYE-validated builtins. The
+  exact `math:` add/subtract/multiply/negate/abs core is the SHARED
+  `sparq-substrate::numeric` `Dec` tower (a base, non-optional `numeric`-slice dep), so the
+  N3 chainer and the SPARQL engine never diverge on exact-decimal arithmetic; the EYE-specific
+  edges (quotient scale/type rule, divisor-sign remainder, integer-quotient, exponentiation,
+  floor/ceiling rendering, `i128` integer tier) stay in a thin EYE-compat adapter — closures
+  byte-identical (`sq-pbz04.5.1`).
 - **RIF-Core** (opt-in `rif-core`) — W3C RIF **Core** dialect (monotone Horn subset of
   RIF-BLD/PRD) as `rif::Document` over the N3 chainer. Atoms: frame/membership/subclass
   plus numeric/string/list builtins. **Range-restriction safety enforced** (unsafe rules
