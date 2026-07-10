@@ -184,6 +184,11 @@ jobs:
           # One cache shared by every shard (identical build artifacts — the shards differ
           # only in which tests they EXECUTE); Swatinem races on save are first-wins + benign.
           shared-key: miri
+      # Guard the verdict CLASSIFIER before trusting it to judge a ~2-hour shard: a regression
+      # in scripts/miri_classify_verdict.py (e.g. it stops treating a real UB failure as fatal)
+      # would silently turn this UB lane green. Its hermetic self-test reds the shard first if so.
+      - name: Self-test the Miri verdict classifier (timeout-vs-UB logic)
+        run: python3 scripts/miri_classify_verdict.py --self-test
       # Build the Miri sysroot once up front so a sysroot/toolchain problem is reported
       # distinctly from a test failure, and the test run below reuses it.
       - name: Build Miri sysroot
