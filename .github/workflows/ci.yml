@@ -2902,6 +2902,17 @@ jobs:
           # honest and matches scripts/coverage.sh's PER-CRATE QUIRKS.
           - crate: sparq-prov
             features: reason
+          # [FABLE-5] sq-3dyje.6: sparq-fedclient QUIRK — the ENTIRE crate surface is
+          # `#[cfg(feature = "fedclient")]`-gated (empty crate by default, mirroring
+          # sparq-fedplan), and every test file is gated the same way. Without the
+          # features, cargo-mutants generated 553 mutants from the source but built +
+          # tested an EMPTY crate, so ALL of them trivially "survived" — the committed
+          # 0-caught/553-survived baseline was this artifact, NOT a missing-assertion
+          # gap (the crate's inline + integration suites pin exact values and kill the
+          # bulk of the set once compiled). Same class as the sparq-canon/sparq-prov
+          # quirks above; matches scripts/coverage.sh's PER-CRATE QUIRKS feature set.
+          - crate: sparq-fedclient
+            features: fedclient,fedclient-adaptive
           # [SONNET-4.6] sq-qcnn.28: HEAVY-CRATE TIMEOUT OVERRIDES.
           # Run 28776460517 (2026-07-06): sparq-engine, sparq-solid, sparq-zk-compose,
           # sparq-vectors all cancelled at the old 120min ceiling. Raise to 360min.

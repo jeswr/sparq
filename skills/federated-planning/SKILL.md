@@ -432,6 +432,37 @@ pushed-down streaming bind-join, and the ANAPSID "adaptive operator" refinement 
 leaf's cardinality from a prefix of its rows while still streaming it). See
 `crates/sparq-fedclient/README.md`.
 
+**Test-quality note — the mutation ratchet is measured features-ON (`sq-3dyje.6`).** The whole
+`sparq-fedclient` surface (and every test file) is `#[cfg(feature = "fedclient")]`-gated, so
+`cargo-mutants` MUST run it with `--features fedclient,fedclient-adaptive` — a features-off run
+builds an EMPTY crate and reports every mutant as a spurious survivor (the same per-crate quirk
+`.github/workflows/ci.yml` applies to `sparq-canon`'s `rdf12-triple-terms` and `sparq-prov`'s
+`reason`). The feature-on suite pins EXACT observable values — rendered pushdown sub-queries,
+error-variant `Display` strings, SRJ/Service-Description parse outputs, both SSRF
+`is_forbidden_ip` boundary tables, and native-transport observables driven over a raw in-process
+loopback TCP server (a configured timeout actually bounds a stalled request; a >3 MiB body
+round-trips under the real byte cap) — so a mutated return value is *caught*, not merely
+executed. A small residue of genuinely-**equivalent** mutants remains and is documented rather
+than papered over: in `wire.rs` the `|`↔`^` bit-op mutations are all equivalent — the header /
+`read_varint` flag-set `|=`→`^=` (each distinct flag bit is set at most once from a zero start /
+LEB128 groups occupy non-overlapping shift windows) and the `write_varint` continuation-bit
+`byte | 0x80`→`byte ^ 0x80` (`byte` is masked to `& 0x7f`, so bit 7 is provably clear), so
+XOR ≡ OR on every reachable input; `EgressGuard::deny_private`→`Default::default()` is
+equivalent because the struct derives `Default` and `deny_private` constructs exactly the empty
+allowlist the default does (its own doc says "Equivalent to `EgressGuard::default`"); the
+`exclusive_groups` union-find inner-loop bound `(i + 1)..n`→`(i * 1)..n` is equivalent (the extra
+`j == i` iteration does an idempotent self-union — same source, self-shares-var, `union(i,i)` is a
+no-op — so the group set is unchanged); and the `push_group` SubQuery-`project`-FIELD
+`&&`→`||` (line ~486) is equivalent because both branches yield an empty `Vec` in the only case
+they differ (`output_vars` empty ⇒ `project` empty). The `proj_clause` `&&` (line ~449) is NOT
+equivalent — it is killed by `push_group_projection_clause_by_output_var_membership`. Finally the
+`ScatterPool` `Drop::drop`→`()` is equivalent: after any drop body Rust drops the struct's fields,
+and the `tx: Option<SyncSender>` field-drop closes the channel exactly as the explicit
+`self.tx.take()` does, so detached workers still exit (the un-joined `JoinHandle`s make drop order
+unobservable). (`ScatterPool::join`→`()` is a DIFFERENT method and is NOT equivalent — its
+blocking drain is killed by `scatter_pool_join_blocks_until_all_jobs_complete`.) These
+equivalents are noted, not asserted on — a test that "kills" an equivalent mutant would be vacuous.
+
 ## Deferred (NOT here)
 
 **Mid-*operator* adaptivity** (tearing down a join while it is producing output and resuming
