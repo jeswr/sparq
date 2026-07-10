@@ -82,6 +82,9 @@
 
 use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
 use crate::spqv_provenance::EmbeddingProvenance;
+// [FABLE-5] (sq-98c) memmap2 is a native-only dependency (target-gated out of wasm32 builds in
+// Cargo.toml); on wasm the read paths use the owned-bytes backing below instead of a map.
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use sparq_core::dict::Id;
@@ -112,7 +115,7 @@ const HEADER_LEN: usize = HEADER_LEN_V1 + FINGERPRINT_LEN;
 /// `&[f32]` via `from_raw_parts`, which is UNDEFINED BEHAVIOR on an unaligned pointer. Backing the
 /// owned bytes with a `Vec<u32>` (alignment 4) guarantees the base — and therefore every
 /// `HEADER_LEN + slot·dim·4` offset (all multiples of 4) — is f32-aligned. See review 1874.
-struct AlignedBytes {
+pub(crate) struct AlignedBytes {
     /// Backing storage; only `len` bytes are logically valid (the last word may be padding).
     words: Vec<u32>,
     len: usize,
@@ -142,17 +145,55 @@ impl AlignedBytes {
 /// Read-phase backing bytes: a memory map ([`VectorStore::open`]) or an owned
 /// buffer ([`VectorStore::open_from_bytes`] — environments without a
 /// filesystem). Both deref to `[u8]`; every read path is shared.
-enum Bytes {
+/// `pub(crate)` so [`crate::diskann`] shares the same backing for `.spqg` files. [FABLE-5]
+pub(crate) enum Bytes {
+    /// [FABLE-5] (sq-98c) Native-only: memmap2 is target-gated out of wasm32 builds, where
+    /// the owned-bytes backing serves every read instead.
+    #[cfg(not(target_arch = "wasm32"))]
     Map(Mmap),
     /// [OPUS-4.8] f32-aligned owned bytes (see `AlignedBytes`) so the `slot_vector` f32 cast is
     /// always aligned — a plain `Vec<u8>` is alignment 1 and would risk UB. Review 1874.
     Owned(AlignedBytes),
 }
 
+impl Bytes {
+    /// Copies `bytes` into the f32-aligned owned backing. Shared by the `open_from_bytes`
+    /// entry points here and in [`crate::diskann`]. [FABLE-5]
+    pub(crate) fn owned(bytes: Vec<u8>) -> Bytes {
+        Bytes::Owned(AlignedBytes::from_vec(bytes))
+    }
+}
+
+/// [FABLE-5] (sq-98c) Opens the read backing for a store/index file: a read-only memory map on
+/// native targets, a buffered `std::fs::read` into the f32-aligned owned backing on wasm32
+/// (memmap2 is target-gated out of wasm builds; a wasm target WITH a filesystem, e.g. WASI,
+/// reads the whole file — on `wasm32-unknown-unknown` the read fails with a clean I/O error,
+/// and [`VectorStore::open_from_bytes`] / [`DiskAnnIndex::open_from_bytes`] are the
+/// filesystem-less paths). Validation downstream is identical for both backings.
+///
+/// [`DiskAnnIndex::open_from_bytes`]: crate::diskann::DiskAnnIndex::open_from_bytes
+pub(crate) fn open_backing(path: &Path) -> Result<Bytes, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        // SAFETY: read-only map of a regular file; we treat concurrent external
+        // modification of the file as out of contract (same stance as sparq-core's
+        // mmap'd dictionary/indexes).
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
+        Ok(Bytes::Map(map))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        Ok(Bytes::owned(bytes))
+    }
+}
+
 impl std::ops::Deref for Bytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Bytes::Map(m) => m,
             Bytes::Owned(v) => v.as_bytes(),
         }
@@ -282,14 +323,15 @@ impl VectorStore {
     /// file (32-byte header, no fingerprint) still opens — its `fingerprint` is `None`, so
     /// `check_graph` reports it as unverifiable rather than silently passing. Rebuild such a store to
     /// enable the staleness check.
+    ///
+    /// [FABLE-5] (sq-98c) On wasm32 (memmap2 target-gated out) this reads the whole file into
+    /// the same f32-aligned owned backing [`open_from_bytes`](Self::open_from_bytes) uses —
+    /// identical validation, no map. `wasm32-unknown-unknown` has no filesystem, so there the
+    /// read fails with a clean I/O error and `open_from_bytes` is the supported path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<VectorStore, String> {
         let path = path.as_ref();
-        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        // SAFETY: read-only map of a regular file; we treat concurrent external
-        // modification of the file as out of contract (same stance as sparq-core's
-        // mmap'd dictionary/indexes).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
-        Self::open_validated(Bytes::Map(map), path.to_path_buf(), &path.display().to_string())
+        let backing = open_backing(path)?;
+        Self::open_validated(backing, path.to_path_buf(), &path.display().to_string())
     }
 
     /// Opens a `.spqv` document held entirely in memory — for environments
@@ -300,7 +342,7 @@ impl VectorStore {
     pub fn open_from_bytes(bytes: Vec<u8>) -> Result<VectorStore, String> {
         // [OPUS-4.8] Copy into a 4-byte-aligned backing so the read-phase f32 casts are aligned
         // (a plain Vec<u8> is alignment 1 — casting its slices to &[f32] is UB). Review 1874.
-        Self::open_validated(Bytes::Owned(AlignedBytes::from_vec(bytes)), PathBuf::new(), "<bytes>")
+        Self::open_validated(Bytes::owned(bytes), PathBuf::new(), "<bytes>")
     }
 
     /// Shared header/index validation behind [`open`](Self::open) and
@@ -497,6 +539,10 @@ impl VectorStore {
             .and_then(|()| file.write_all(&index_bytes))
             .and_then(|()| file.flush())
             .map_err(|e| format!("write {}: {e}", self.path.display()))?;
+        // [FABLE-5] (sq-98c) Explicit close before the reopen below. On wasm32 the `File` stub
+        // has no `Drop` impl, which trips clippy's `drop_non_drop` there — the close is still
+        // intentional on every target that can reach this path (native + WASI).
+        #[allow(clippy::drop_non_drop)]
         drop(file);
 
         let reopened = VectorStore::open(&self.path)?;
@@ -1294,6 +1340,9 @@ impl StreamingWriter {
                 .and_then(|()| file.write_all(&count.to_le_bytes()))
                 .and_then(|()| file.sync_all())
                 .map_err(|e| format!("write {}: {e}", path.display()))?;
+            // [FABLE-5] (sq-98c) See `finalize`: intentional close-before-reopen; on wasm32 the
+            // `File` stub has no `Drop` impl and clippy's `drop_non_drop` fires there.
+            #[allow(clippy::drop_non_drop)]
             drop(file);
             std::fs::remove_file(&ids_path).ok();
             VectorStore::open(&path)

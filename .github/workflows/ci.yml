@@ -607,7 +607,8 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-text-wasm"') ||
        contains(needs.select.outputs.affected, '"sparq-shacl-wasm"') ||
        contains(needs.select.outputs.affected, '"sparq-introspect"') ||
-       contains(needs.select.outputs.affected, '"sparq-solid"'))
+       contains(needs.select.outputs.affected, '"sparq-solid"') ||
+       contains(needs.select.outputs.affected, '"sparq-vectors"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -795,6 +796,24 @@ jobs:
         run: cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: Headless wasm tests (sparq-solid materialize, wasm-pack test --node)
         run: wasm-pack test --node crates/sparq-solid
+      # [FABLE-5] sq-98c: sparq-vectors wasm-safety — memmap2 is target-gated out of wasm32
+      # builds (`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`), so the crate must
+      # keep compiling to wasm32 with the default features and its wasm graph must stay
+      # memmap2-free (the bead's acceptance criterion, asserted below with `cargo tree`).
+      # `open_from_bytes` (`.spqv` AND `.spqg`) is the filesystem-less read path there. clippy
+      # is LIB-ONLY (no --all-targets): the dev-deps pull sparq-core's `mmap` feature, whose
+      # wasm32 lint surface is out of this lane's scope — the crate's own wasm-cfg'd code is
+      # fully covered by the lib check.
+      - name: Build sparq-vectors for the wasm32 target
+        run: cargo build -p sparq-vectors --target wasm32-unknown-unknown
+      - name: Assert memmap2 is absent from the sparq-vectors wasm32 graph
+        run: |
+          if cargo tree -p sparq-vectors --target wasm32-unknown-unknown -e normal | grep -q memmap2; then
+            echo "::error::memmap2 leaked into the sparq-vectors wasm32 dependency graph"
+            exit 1
+          fi
+      - name: clippy (wasm32 target, sparq-vectors, deny warnings)
+        run: cargo clippy -p sparq-vectors --target wasm32-unknown-unknown -- -D warnings
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
