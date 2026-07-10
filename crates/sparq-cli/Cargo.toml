@@ -85,6 +85,12 @@ terse = ["dep:sparq-terse"]
 # none of the fast-path machinery and is behaviour-identical). Enable to bench the fast path, e.g.
 # `cargo build --release -p sparq-cli --features id-filter-fastpath`.
 id-filter-fastpath = ["sparq-engine/id-filter-fastpath"]
+# [FABLE-5] (sq-jnb1e) Forward sparq-engine's opt-in `cs-anchor-incidence` — the
+# characteristic-set anchor-incidence prune for the DISTINCT predicate-projection semijoin
+# (SP2Bench q09). OFF by default (the default CLI build carries none of the incidence
+# machinery and is behaviour-identical). Enable to bench the prune, e.g.
+# `cargo build --release -p sparq-cli --features cs-anchor-incidence`.
+cs-anchor-incidence = ["sparq-engine/cs-anchor-incidence"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the

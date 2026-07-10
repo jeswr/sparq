@@ -735,6 +735,56 @@ pub(crate) mod distinct_pushdown {
     }
 }
 
+/// [FABLE-5] (sq-jnb1e) Runtime toggle + telemetry for the OPT-IN characteristic-set
+/// anchor-incidence prune (the `cs-anchor-incidence` feature). Lets the differential
+/// acceptance test compare the incidence-pruned block scan against the exact scan WITHIN one
+/// feature-ON binary, and read whether the prune fired plus how many candidate predicates it
+/// eliminated. Enabled by default when the feature is compiled in.
+#[cfg(feature = "cs-anchor-incidence")]
+pub(crate) mod anchor_incidence {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static BUILT: Cell<bool> = const { Cell::new(false) };
+        static PRUNED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether the incidence prune is active on this thread (default on with the feature).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables the prune on this thread, returning the previous value. The
+    /// differential test flips it to compare pruned vs exact within one binary.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query incidence statistics.
+    pub(crate) fn reset_stats() {
+        BUILT.with(|b| b.set(false));
+        PRUNED.with(|c| c.set(0));
+    }
+
+    /// Records that an incidence set was BUILT (a set was available for at least one branch).
+    pub(crate) fn note_built() {
+        BUILT.with(|b| b.set(true));
+    }
+
+    /// Records `n` candidate predicates pruned by the incidence set (block scan skipped).
+    pub(crate) fn note_pruned(n: usize) {
+        PRUNED.with(|c| c.set(c.get().saturating_add(n)));
+    }
+
+    /// `(incidence_built, predicates_pruned)` since the last [`reset_stats`]. The acceptance
+    /// test asserts the set was built AND pruned the value-typed no-hit predicates.
+    pub(crate) fn stats() -> (bool, usize) {
+        (BUILT.with(|b| b.get()), PRUNED.with(|c| c.get()))
+    }
+}
+
 /// Maximum size of the already-evaluated (small) join side for which correlated
 /// evaluation of the other child is attempted; above it the cold path is used.
 const SIP_MAX_SMALL_ROWS: usize = 64;
@@ -2672,9 +2722,21 @@ fn try_distinct_pushdown(
     // instead of per-branch removes the second full anchor scan+sort. Keyed by the anchor's
     // prepared id-pattern + join position, which fully determines the set.
     let mut anchor_cache: AnchorCache = FxHashMap::default();
+    // [FABLE-5] (sq-jnb1e) Opt-in predicate-incidence cache: shared across branches so the two
+    // q09 semijoins (subject- and object-join) each build their incidence set at most once.
+    #[cfg(feature = "cs-anchor-incidence")]
+    let mut incidence_cache: IncidenceCache = FxHashMap::default();
 
     for branch in &branches {
-        match branch_distinct_values(graph, branch, pvar, &seen, &mut anchor_cache)? {
+        match branch_distinct_values(
+            graph,
+            branch,
+            pvar,
+            &seen,
+            &mut anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            &mut incidence_cache,
+        )? {
             Some((new_ids, scanned)) => {
                 total_scanned = total_scanned.saturating_add(scanned);
                 for id in new_ids {
@@ -2915,6 +2977,7 @@ fn branch_distinct_values(
     pvar: &Variable,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     if !is_conjunctive(branch) {
         return Ok(None);
@@ -2947,7 +3010,15 @@ fn branch_distinct_values(
     }
     match patterns.len() {
         1 => single_pattern_distinct(graph, &patterns[0], pvar, seen),
-        2 => two_pattern_distinct(graph, &patterns, pvar, seen, anchor_cache),
+        2 => two_pattern_distinct(
+            graph,
+            &patterns,
+            pvar,
+            seen,
+            anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
+        ),
         _ => Ok(None),
     }
 }
@@ -2986,6 +3057,7 @@ fn two_pattern_distinct(
     pvar: &Variable,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (idp0, pv0, uns0) = prepare_pattern(graph, &patterns[0])?;
     let (idp1, pv1, uns1) = prepare_pattern(graph, &patterns[1])?;
@@ -3000,6 +3072,8 @@ fn two_pattern_distinct(
             *ppos,
             seen,
             anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
         ),
         ([], [ppos]) => probe_anchor_distinct(
             graph,
@@ -3008,6 +3082,8 @@ fn two_pattern_distinct(
             *ppos,
             seen,
             anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
         ),
         _ => Ok(None),
     }
@@ -3049,6 +3125,110 @@ fn cached_anchor_ids(
     let set = std::rc::Rc::new(AnchorSet { hash, sorted });
     cache.insert(key, set.clone());
     Some(set)
+}
+
+/// [FABLE-5] (sq-jnb1e) Per-pushdown cache of anchor PREDICATE-INCIDENCE sets, keyed by the
+/// anchor membership set (identified by the anchor's prepared id-pattern + join position) and
+/// the probe's canonical JOIN position (0=subject, 2=object; a predicate never joins). The
+/// value is `Some(set)` where `set` is exactly the predicates that relate SOME anchor member
+/// at that position, or `None` when the set could not be computed (budget / overlay / no built
+/// permutation) — cached so the two q09 branches never recompute the same incidence.
+#[cfg(feature = "cs-anchor-incidence")]
+type IncidenceCache = FxHashMap<(IdPattern, usize, usize), Option<std::rc::Rc<FxHashSet<Id>>>>;
+
+/// [FABLE-5] (sq-jnb1e) The set of predicates that relate ANY anchor member at the probe's
+/// canonical join position `probe_jpos` (0=subject or 2=object) — a characteristic-set-style
+/// incidence summary. Computed by ONE range-restricted scan over the anchor's id window: the
+/// permutation sorted by `probe_jpos` groups triples by that column, so restricting to
+/// `[a_min, a_max]` (every anchor member lies in that window) and, for each row whose join
+/// value is an actual anchor member, recording its predicate, yields exactly
+/// `{ predicate(t) : t is a triple with t[probe_jpos] ∈ anchor }`.
+///
+/// SOUNDNESS. This set is EXACT on the base index: a predicate P is in it iff some triple uses
+/// P with an anchor member at `probe_jpos`, i.e. iff the (anchor ⋈ probe-on-P) branch is
+/// non-empty. So `P ∉ set` ⇒ that branch contributes no solution ⇒ P can be pruned WITHOUT
+/// scanning P's block, and `P ∈ set` still takes the exact per-block scan. Pruning only
+/// provably-empty checks makes the DISTINCT answer identical to the block-scan path.
+///
+/// Returns `None` (caller keeps the exact block scan for every P) when:
+/// * the graph carries a pending-update overlay — the derived set is built against the base
+///   index only, and incremental maintenance is out of scope, so we DECLINE conservatively
+///   rather than risk a stale prune;
+/// * `probe_jpos` is the predicate slot (1) — a predicate never joins to the anchor here;
+/// * no permutation sorted by `probe_jpos` is built (e.g. the compact wasm index);
+/// * the scan exceeds the query budget.
+#[cfg(feature = "cs-anchor-incidence")]
+fn anchor_probe_incidence(
+    graph: &Graph,
+    anchor: &AnchorSet,
+    probe_jpos: usize,
+) -> Option<FxHashSet<Id>> {
+    // Conservative invalidation: a delta-overlay means the base-index incidence may be stale
+    // (an inserted triple could add a predicate; a deleted one could remove the last member
+    // relation). We do not maintain the set incrementally, so decline and let the exact scan
+    // (which reads the overlay-merged rows) answer every candidate.
+    if graph.store.has_overlay() {
+        return None;
+    }
+    if probe_jpos == 1 || anchor.sorted.is_empty() {
+        return None;
+    }
+    let (a_min, a_max) = (anchor.sorted[0], anchor.sorted[anchor.sorted.len() - 1]);
+    // A permutation whose FIRST column is `probe_jpos` so the anchor id window is one
+    // contiguous range and the predicate sits at a fixed column. Bind nothing; sort by the
+    // join column. `scan_sorted` picks such a perm when built; if the chosen perm is not
+    // actually led by `probe_jpos`, we cannot range-restrict soundly — decline.
+    let all_unbound: IdPattern = [None, None, None];
+    let scan = graph.store.scan_sorted(&all_unbound, probe_jpos);
+    let order = scan.perm.order();
+    if order[0] != probe_jpos {
+        return None;
+    }
+    // Predicate lives at whichever column of this perm is canonical position 1.
+    let pk = order.iter().position(|&c| c == 1)?;
+    let jk = 0usize; // join column is the leading column (== probe_jpos)
+    let rows = scan.rows.as_ref();
+    // Restrict to the anchor id window `[a_min, a_max]` with two binary searches: rows outside
+    // it can never carry an anchor member at the join column, so they cannot contribute a
+    // predicate to the incidence set.
+    let lo = rows.partition_point(|r| r[jk] < a_min);
+    let hi = rows.partition_point(|r| r[jk] <= a_max);
+    let window = &rows[lo..hi];
+    let mut inc: FxHashSet<Id> = FxHashSet::default();
+    for (n, r) in window.iter().enumerate() {
+        if n & 4095 == 0 && budget::exhausted(inc.len()) {
+            return None;
+        }
+        // Only rows whose join value is an ACTUAL anchor member contribute (the window can
+        // include non-member ids that merely fall inside `[a_min, a_max]`).
+        if anchor.hash.contains(&r[jk]) {
+            inc.insert(r[pk]);
+        }
+    }
+    Some(inc)
+}
+
+/// [FABLE-5] (sq-jnb1e) The predicate-incidence set for `(anchor, probe_jpos)`, memoised in
+/// `cache`. Keyed by the anchor identity (`anchor_ip` + `anchor_jpos`) and the probe join
+/// position, so q09's two branches share one computation per position. The cached value is an
+/// `Option` (a computed-and-failed decline is cached too, so a second branch on the same
+/// position does not retry a scan that already declined).
+#[cfg(feature = "cs-anchor-incidence")]
+fn cached_incidence(
+    graph: &Graph,
+    anchor_ip: &IdPattern,
+    anchor_jpos: usize,
+    anchor: &AnchorSet,
+    probe_jpos: usize,
+    cache: &mut IncidenceCache,
+) -> Option<std::rc::Rc<FxHashSet<Id>>> {
+    let key = (*anchor_ip, anchor_jpos, probe_jpos);
+    if let Some(v) = cache.get(&key) {
+        return v.clone();
+    }
+    let computed = anchor_probe_incidence(graph, anchor, probe_jpos).map(std::rc::Rc::new);
+    cache.insert(key, computed.clone());
+    computed
 }
 
 /// [FABLE-5] (sq-7d3dj.30.10) The "pattern-trick" strategy for the loose semi-join: iterate
@@ -3154,6 +3334,7 @@ fn probe_anchor_distinct(
     ppos: usize,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (probe_ip, probe_pv, probe_uns) = probe;
     let (anchor_ip, anchor_pv, anchor_uns) = anchor;
@@ -3217,6 +3398,30 @@ fn probe_anchor_distinct(
     debug_assert_eq!(scan.perm.order()[kp], ppos);
     debug_assert_eq!(scan.perm.order()[jk], jpos);
     let rows = scan.rows.as_ref();
+    // [FABLE-5] (sq-jnb1e) OPT-IN characteristic-set anchor-incidence prune. When the probe
+    // pattern constrains ONLY the projected predicate and the join variable (every other
+    // position free — the q09 shape `?subject ?predicate ?person` / `?person ?predicate
+    // ?object`), a candidate predicate `pv_id` qualifies iff it relates SOME anchor member at
+    // the join position — exactly the precomputed incidence set. A `pv_id` NOT in that set is
+    // pruned by an O(1) membership test instead of the clip+gallop block scan. The prune is
+    // sound ONLY when the probe has no OTHER bound position (else a predicate could relate an
+    // anchor member on a DIFFERENT triple than the one satisfying the bound constraint); we
+    // decline the incidence set otherwise and every candidate takes the exact scan.
+    #[cfg(feature = "cs-anchor-incidence")]
+    let incidence: Option<std::rc::Rc<FxHashSet<Id>>> = {
+        // "Bound only P and J" ⇔ the probe id-pattern binds no position (both P and J are
+        // variables, so a bound slot would be the third position).
+        let probe_only_pj = probe_ip.iter().all(|s| s.is_none());
+        if anchor_incidence::enabled() && probe_only_pj {
+            let inc = cached_incidence(graph, anchor_ip, anchor_jpos, &a, jpos, incidence_cache);
+            if inc.is_some() {
+                anchor_incidence::note_built();
+            }
+            inc
+        } else {
+            None
+        }
+    };
     let mut out: Vec<Id> = Vec::new();
     let mut scanned = 0usize;
     let mut i = 0usize;
@@ -3233,6 +3438,19 @@ fn probe_anchor_distinct(
         // Already emitted by an earlier branch — no re-check needed.
         if seen.contains(&pv_id) {
             continue;
+        }
+        // [FABLE-5] (sq-jnb1e) Incidence prune: when the precomputed set is available and does
+        // NOT contain this predicate, the (anchor ⋈ probe-on-`pv_id`) branch is provably empty
+        // — skip the whole block WITHOUT the clip+gallop scan (one metadata consultation counts
+        // as one unit of examination). A `pv_id` IN the set falls through to the exact block
+        // scan below, so the emitted answer is bit-for-bit identical to the feature-off path.
+        #[cfg(feature = "cs-anchor-incidence")]
+        if let Some(inc) = incidence.as_ref() {
+            if !inc.contains(&pv_id) {
+                scanned += 1;
+                anchor_incidence::note_pruned(1);
+                continue;
+            }
         }
         // The block is join-variable-sorted, so its join range is [first, last]. When that
         // range is DISJOINT from the anchor set's id range, no anchor member can occur in
