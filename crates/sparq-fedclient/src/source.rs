@@ -1784,6 +1784,20 @@ mod tests {
             Some(("host.example".to_string(), 9000))
         );
         assert_eq!(endpoint_host_port("http:///nohost"), None);
+        // [FABLE-5] sq-3dyje.6: a BARE (unbracketed) multi-colon IPv6 authority must NOT be
+        // split on its last colon into host + port — the `!h.contains(':')` guard keeps the
+        // whole thing as the host with the scheme default port. Mutating that guard to `true`
+        // would wrongly split `fe80::1` into host `fe80:` + port 1. (No earlier test exercised
+        // a bare multi-colon authority, so the guard survived.)
+        assert_eq!(
+            endpoint_host_port("http://fe80::1/sparql"),
+            Some(("fe80::1".to_string(), 80)),
+            "a bare multi-colon IPv6 authority keeps the whole host + default port, never split"
+        );
+        assert_eq!(
+            endpoint_host_port("https://2001:db8::dead:beef/q"),
+            Some(("2001:db8::dead:beef".to_string(), 443))
+        );
     }
 
     // ── DENY: default guard refuses a loopback / private endpoint ─────────────────
