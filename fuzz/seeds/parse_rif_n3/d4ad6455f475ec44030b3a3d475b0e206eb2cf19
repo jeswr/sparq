@@ -1,0 +1,2 @@
+@prefix ex: <hžžžžžžžžžžttp://example.ozg/> .
+{ ex:a a ex:B } => {ÿÿ ex:a ex:type ex:B} .

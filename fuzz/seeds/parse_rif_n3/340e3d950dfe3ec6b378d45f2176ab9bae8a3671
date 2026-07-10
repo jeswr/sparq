@@ -1,0 +1,2 @@
+@prefix ex: <httÅÐÐš‡ž˜“šÑ˜Î> .
+{ ex:a a eÿÿx:B } => { ex:a ex:type ex:B} .

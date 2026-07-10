@@ -1,0 +1,1 @@
+SELECT ?s WHERE { 5 ?o }s a <http://example.org/]T aWHERE
