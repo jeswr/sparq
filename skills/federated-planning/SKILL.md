@@ -432,6 +432,21 @@ pushed-down streaming bind-join, and the ANAPSID "adaptive operator" refinement 
 leaf's cardinality from a prefix of its rows while still streaming it). See
 `crates/sparq-fedclient/README.md`.
 
+**Test-quality note — the mutation ratchet is measured features-ON (`sq-3dyje.6`).** The whole
+`sparq-fedclient` surface (and every test file) is `#[cfg(feature = "fedclient")]`-gated, so
+`cargo-mutants` MUST run it with `--features fedclient,fedclient-adaptive` — a features-off run
+builds an EMPTY crate and reports every mutant as a spurious survivor (the same per-crate quirk
+`.github/workflows/ci.yml` applies to `sparq-canon`'s `rdf12-triple-terms` and `sparq-prov`'s
+`reason`). The feature-on suite pins EXACT observable values — rendered pushdown sub-queries,
+error-variant `Display` strings, SRJ/Service-Description parse outputs, both SSRF
+`is_forbidden_ip` boundary tables, and native-transport observables driven over a raw in-process
+loopback TCP server (a configured timeout actually bounds a stalled request; a >3 MiB body
+round-trips under the real byte cap) — so a mutated return value is *caught*, not merely
+executed. A small residue of genuinely-**equivalent** mutants remains and is documented rather
+than papered over: the header/varint `|=`→`^=` flag-set mutations in `wire.rs` are equivalent
+(each distinct flag bit is set at most once from a zero start / LEB128 groups occupy
+non-overlapping shift windows, so XOR ≡ OR on every reachable input).
+
 ## Deferred (NOT here)
 
 **Mid-*operator* adaptivity** (tearing down a join while it is producing output and resuming
