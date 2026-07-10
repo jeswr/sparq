@@ -1,0 +1,7 @@
+{
+  "pr": 1859,
+  "bead": "sq-4r8uy",
+  "date": "2026-07-10",
+  "reason": "The single-column JoinKeys::left_key/right_key fast path (single_key) is always-compiled substrate/join.rs code — NOT behind any #[cfg(feature = ...)] and reached via sparq-engine's non-optional sparq-substrate dep (features numeric/join/compare), so it is in the feature-OFF sparq-wasm bundle regardless of the vectorized feature state. Feature-OFF behaviour is unchanged: it is a pure internal specialization — for key_cols.len() == 1 the key derivation pushes exactly the one projected id via single_key (a direct one-element Key::new()+push) instead of the general key_cols.iter().collect(), and the result is byte-identical to the general path (same length 1, same id, same order — proven result-identical by the differential fast-path-vs-general-path tests and cleared by the escalated Opus review as a transparent, result-identical specialization). The +213-byte / +0.013% feature-OFF move is the specialized codegen of the always-compiled single_key branch (plus the overhead.rs root_cause diagnostic string update), not a default-path/vectorized code leak and not a semantic change. The move is far inside the wasm_bundle_bytes 2% bench.yml band, so no metrics.wasm_bundle_bytes floor raise is required.",
+  "author": "[FABLE-5]"
+}
