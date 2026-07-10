@@ -6,6 +6,17 @@
 // wasm builds are byte-identical (no new deps).
 #[cfg(feature = "result-cache")]
 pub mod cache;
+// [FABLE-5] (sq-7d3dj.30.14) Membership-cluster pre-materialisation for the greedy BGP
+// planner (SP2Bench q07). NON-DEFAULT `cluster-materialize` feature — when off, zero of
+// this code compiles and the default native + wasm builds are byte-identical. Pure
+// join-order choice; results are identical either way (differentially tested).
+#[cfg(feature = "cluster-materialize")]
+pub(crate) mod cluster;
+// [FABLE-5] (sq-7d3dj.30.14) Test-only hook so an integration differential can force the
+// membership-cluster planner path on a small graph. Not part of the stable query API.
+#[cfg(feature = "cluster-materialize")]
+#[doc(hidden)]
+pub use cluster::with_test_thresholds;
 mod construct;
 #[cfg(feature = "cs-planner")]
 pub mod cs;

@@ -6150,6 +6150,22 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         }
     }
 
+    // [FABLE-5] (sq-7d3dj.30.14) Membership-cluster pre-materialisation (opt-in
+    // `cluster-materialize`). When the BGP has the SP2Bench-q07 shape — one
+    // unbound-predicate container-membership pattern + a small bound-predicate anchor
+    // sharing exactly one variable — evaluate that {anchor, membership} pair STANDALONE
+    // (bounding the shared variable from the small anchor) and natural-join it to the
+    // rest, instead of letting greedy GOO bind-join the wide membership relation per
+    // driver binding. A BGP is a commutative/associative natural join, so partitioning
+    // into two connected sub-BGPs and joining yields the SAME rows as any greedy order
+    // (differentially tested, tests/cluster_materialize_differential.rs). `detect`
+    // DECLINES (returns None → unchanged greedy plan) on any non-matching shape. The
+    // whole block compiles away when the feature is off (default + wasm byte-identical).
+    #[cfg(feature = "cluster-materialize")]
+    if let Some(plan) = crate::cluster::detect(&prepared, crate::cluster::active_thresholds(), |i| pfilter(i).is_some()) {
+        return eval_bgp_cluster(graph, patterns, pat_filters, &plan);
+    }
+
     let var_pos = |i: usize, v: &Variable| -> Option<usize> { prepared[i].var_pos(v) };
 
     // Cost-based greedy (GOO): seed with the smallest single-pattern cardinality,
@@ -6864,6 +6880,50 @@ fn eval_bgp_dp(
     let qg = crate::dp::QueryGraph::build(est, var_pats, var_ndv);
     let tree = crate::dp::plan(&qg, cfg.max_subgraphs)?;
     Some(eval_join_tree(graph, prepared, &tree, pat_filters))
+}
+
+// ---- [FABLE-5] (sq-7d3dj.30.14) membership-cluster pre-materialisation ---------
+//
+// Given a `crate::cluster::ClusterPlan` partition of the BGP, evaluate the two
+// sub-BGPs (the standalone {anchor, membership} cluster and the driver `rest`)
+// INDEPENDENTLY with the ordinary greedy `eval_bgp_binary`, then NATURAL-JOIN them
+// with the shared `join_bindings`. Both sides are evaluated UNCORRELATED, so the
+// materialised cluster is the full union-compatible relation greedy would also have
+// produced — there is no cross-site sideways-information hazard (there is only one
+// evaluation of the cluster). A BGP is a commutative/associative natural join, so the
+// result bag is IDENTICAL to the flat greedy plan for any partition — the win is
+// purely that bounding the shared variable from the small anchor avoids driving the
+// wide unbound-predicate relation per `rest` binding. Only compiled under the opt-in
+// `cluster-materialize` feature.
+//
+// `pat_filters[i]` is a (COLUMN-position, cmp) pushed-down sargable filter for pattern
+// `i`; the column position is intrinsic to the pattern (not a BGP-relative index), so
+// re-slicing per sub-BGP needs no remapping. `detect` has already declined any cluster
+// pattern that carries a filter, so a cluster pattern's slot is always `None` here; the
+// `rest` slots carry through verbatim.
+#[cfg(feature = "cluster-materialize")]
+fn eval_bgp_cluster(
+    graph: &Graph,
+    patterns: &[TriplePattern],
+    pat_filters: &[Option<(usize, ScanCmp)>],
+    plan: &crate::cluster::ClusterPlan,
+) -> Result<Bindings, String> {
+    let sub = |idxs: &[usize]| -> (Vec<TriplePattern>, Vec<Option<(usize, ScanCmp)>>) {
+        (
+            idxs.iter().map(|&i| patterns[i].clone()).collect(),
+            idxs.iter().map(|&i| pat_filters.get(i).copied().flatten()).collect(),
+        )
+    };
+    let (cluster_pats, cluster_filts) = sub(&plan.cluster);
+    let (rest_pats, rest_filts) = sub(&plan.rest);
+    let cluster = eval_bgp_binary(graph, &cluster_pats, &cluster_filts)?;
+    // An empty cluster makes the whole (inner) BGP empty — short-circuit like the
+    // greedy loop does when a bind join empties the running result.
+    if cluster.rows.is_empty() {
+        return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
+    }
+    let rest = eval_bgp_binary(graph, &rest_pats, &rest_filts)?;
+    Ok(join_bindings(cluster, rest))
 }
 
 /// Evaluates a DP `JoinTree`: a `Leaf` scans its pattern (applying any pushed-down
