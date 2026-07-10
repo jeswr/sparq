@@ -425,6 +425,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (it never executes it). Off by default (env SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             "--terse" => config.terse = true,
+            // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization
+            // surface — POST /authz/decide, /authz/wac-allow, /authz/query, a thin HTTP shell over
+            // the sparq-solid library authoriser. Fail-closed on every error path. Off by default
+            // (env SPARQ_SOLID_AUTHZ=1).
+            #[cfg(feature = "solid-authz")]
+            "--solid-authz" => config.solid_authz = true,
             // [OPUS-4.8] sq-2999l (gh-906): OPT-IN durable CDC change-stream at DIR. Enables both
             // RECORDING every committed update to the segmented, fsync'd append-only log AND the
             // Neptune-GetRecords-shaped poll endpoint GET /streams over it. Resumes the same stream
