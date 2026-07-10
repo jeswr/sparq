@@ -312,7 +312,10 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     ("W3C JSON-LD 1.1 fromRdf", 51),
     ("W3C JSON-LD 1.1 compact", 186),
     ("W3C JSON-LD 1.1 frame", 61),
-    ("W3C JSON-LD 1.1 expand", 240),
+    // [FABLE-5] sq-oy1f.37 — raised 240 → 259 (expand() correctness: value-object
+    // @type collapse + empty-array-property retention + free-floating value/list
+    // drop). Bumped in the SAME commit as src/floors/expand.rs::FLOOR (rise-only).
+    ("W3C JSON-LD 1.1 expand", 259),
     ("W3C JSON-LD 1.1 flatten", 50),
 ];
 
