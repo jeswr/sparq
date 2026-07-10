@@ -117,6 +117,12 @@ if want hdt-cpp && [ "$HDT_CPP_AVAILABLE" -eq 1 ]; then
       rdfhdt/hdt-cpp:latest hdt2rdf "$HDT_ARCHIVE" \
       > "$SCALE_TMP/hdt-cpp.nt" 2> "$SCALE_TMP/hdt-cpp.err"; then
     log "hdt-cpp FAILED/timeout (see $SCALE_TMP/hdt-cpp.err)"; : > "$SCALE_TMP/hdt-cpp.nt"
+    # Surface the failure reason into the run log itself: $SCALE_TMP is /tmp
+    # scratch that between-axis cleanup prunes, so "see the err file" is a
+    # dead pointer on a self-terminating gather box (bit sq-hmd7l.26 wave-1).
+    head -5 "$SCALE_TMP/hdt-cpp.err" 2>/dev/null | while IFS= read -r ln; do
+      log "hdt-cpp.err: $ln"
+    done
   fi
 elif want hdt-cpp; then
   log "hdt-cpp: SKIPPED (Docker not available or image not found)"
