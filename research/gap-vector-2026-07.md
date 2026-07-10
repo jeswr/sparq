@@ -189,7 +189,7 @@ cluster scoring) but hnswlib remains competitive at high recall.
 sparq-vectors HNSW (N=50 000 synthetic, ef_search=100) achieves recall@10 ≈ 0.998 on the
 synthetic corpus. Its placement on the SIFT1M Pareto is not directly measurable without
 a search-effort sweep API (see §1.1). The canonical gap vs hnswlib on SIFT1M is a **P2
-gap** requiring the ef_search-per-query tuning bead (sq-1ivw7 and bead filed below).
+gap** requiring the ef_search-per-query tuning bead (sq-jo6ty, P1).
 
 ---
 
@@ -332,7 +332,7 @@ is reported separately from kernel recall-QPS comparisons.
 
 | Gap | Root cause | Bead |
 |---|---|---|
-| No per-query ef_search sweep | `HnswConfig::ef_search` is build-time; `VectorIndex::nearest` does not accept a per-query ef | sq-1ivw7 (fused-route wiring, P2) |
+| No per-query ef_search sweep | `HnswConfig::ef_search` is build-time; `VectorIndex::nearest` does not accept a per-query ef | sq-jo6ty (per-query ef_search API, P1) |
 | ScaNN NOT-RUN | PyPI wheel targets Python 3.9; host is Python 3.12 | file below |
 | DiskANN-ref NOT-RUN | No aarch64 pip wheel | file below |
 | GloVe FAISS NOT-MEASURED | Gather running at commit time | sq-hmd7l.26 (canonical box) |
