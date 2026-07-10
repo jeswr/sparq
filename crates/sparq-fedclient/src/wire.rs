@@ -562,6 +562,48 @@ mod tests {
         );
     }
 
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): position_key must map EACH of the three brTPF
+    // slots, in BOTH long and short spellings. cargo-mutants showed the `"predicate" | "p"`
+    // arm could be deleted with no test noticing: no existing test binds a predicate slot,
+    // so a predicate binding silently vanished from the text wire (and the header flag from
+    // the binary wire). Pin every slot with a term unique to it so a dropped/misrouted arm
+    // is observable in the exact rendered output.
+    #[test]
+    fn text_wire_renders_all_three_position_slots_both_spellings() {
+        // Short spellings s/p/o, out of order — deterministic s→p→o output, every slot present.
+        let short = vec![vec![
+            ("o".to_string(), iri("http://ex/obj")),
+            ("p".to_string(), iri("http://ex/pred")),
+            ("s".to_string(), iri("http://ex/subj")),
+        ]];
+        assert_eq!(
+            encode_bindings_text(&short),
+            "s=<http://ex/subj> p=<http://ex/pred> o=<http://ex/obj>",
+            "each of s/p/o must render; deleting the predicate arm drops p="
+        );
+        // Long spellings subject/predicate/object map to the SAME s/p/o slots.
+        let long = vec![vec![
+            ("subject".to_string(), iri("http://ex/subj")),
+            ("predicate".to_string(), iri("http://ex/pred")),
+            ("object".to_string(), iri("http://ex/obj")),
+        ]];
+        assert_eq!(
+            encode_bindings_text(&long),
+            "s=<http://ex/subj> p=<http://ex/pred> o=<http://ex/obj>",
+            "long forms subject/predicate/object route to the s/p/o slots"
+        );
+    }
+
+    #[test]
+    fn binary_wire_predicate_only_mapping_round_trips() {
+        // A mapping that binds ONLY the predicate position: the header's PREDICATE flag must
+        // be set and the term decode back under the "p" key. If position handling dropped the
+        // predicate, this would decode empty (EmptyMapping) — a hard failure.
+        let block = vec![vec![("p".to_string(), iri("http://ex/pred"))]];
+        let back = decode_bindings(&encode_bindings(&block)).expect("decode");
+        assert_eq!(back, block, "a predicate-only mapping round-trips exactly");
+    }
+
     #[test]
     fn text_wire_drops_non_position_variables() {
         // A binding over a variable that is not a brTPF position has no text-wire slot, so the
