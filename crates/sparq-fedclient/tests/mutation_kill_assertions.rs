@@ -758,7 +758,9 @@ fn binary_wire_duplicate_position_pairs_ride_extra_not_overwrite() {
 mod loopback {
     use super::*;
     use sparq_fedclient::discovery::{Fetcher, HttpFetcher};
-    use sparq_fedclient::{HttpTransport, Transport};
+    use sparq_fedclient::{
+        FragPattern, FragmentTransport, HttpFragmentTransport, HttpTransport, PatternTerm, Transport,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -944,6 +946,84 @@ mod loopback {
             .recv_timeout(Duration::from_secs(5))
             .expect("the 200 ms timeout must fire well inside 5 s (with_timeout not applied?)");
         let err = result.expect_err("a stalled endpoint must not succeed");
+        assert!(
+            err.contains("timeout"),
+            "the failure must be the configured timeout, not an egress refusal: {}",
+            err
+        );
+        assert!(
+            !err.contains("private/internal"),
+            "the allowlist must survive the with_timeout builder: {}",
+            err
+        );
+    }
+
+    fn all_var_pattern() -> FragPattern {
+        FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        )
+    }
+
+    #[test]
+    fn fragment_transport_returns_parsed_page_from_a_turtle_fragment() {
+        // A real GET → Turtle fragment body → parsed FragmentPage: one data triple, the
+        // hydra:totalItems count, no next page. Drives the whole native fragment path (URL
+        // build + GET + body parse) over the loopback, killing the `fetch_fragment → Ok("")`
+        // class and pinning the parse output exactly.
+        let body = concat!(
+            "<http://frag> <http://www.w3.org/ns/hydra/core#totalItems> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/a> <http://ex/p> <http://ex/b> .\n",
+        );
+        let addr = one_shot_server(http_ok(body.as_bytes()));
+        let guard = EgressGuard::deny_private().allow_host("127.0.0.1");
+        let transport = HttpFragmentTransport::from_guard(&guard);
+        let url = format!("http://127.0.0.1:{}/fragment", addr.port());
+        let page = transport
+            .fetch_fragment(&url, &all_var_pattern(), &[], None)
+            .expect("a 200 Turtle fragment parses");
+        assert_eq!(page.total_items, 1);
+        assert_eq!(page.next, None);
+        assert_eq!(page.triples.len(), 1);
+    }
+
+    #[test]
+    fn fragment_transport_maps_non_2xx_to_exact_error_string() {
+        let addr = one_shot_server(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let guard = EgressGuard::deny_private().allow_host("127.0.0.1");
+        let transport = HttpFragmentTransport::from_guard(&guard);
+        let url = format!("http://127.0.0.1:{}/fragment", addr.port());
+        let err = transport
+            .fetch_fragment(&url, &all_var_pattern(), &[], None)
+            .expect_err("a 404 is a transport error");
+        assert!(
+            err.contains("returned HTTP 404"),
+            "the exact non-2xx error string must be reported: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fragment_transport_with_timeout_bounds_a_stalled_request() {
+        // The fragment transport's with_timeout must bound a stalled request AND preserve the
+        // allowlist chained in by from_guard — kills the `with_timeout → Default::default()`
+        // survivor (which drops both the timeout and the allowlist).
+        let addr = stalling_server();
+        let guard = EgressGuard::deny_private().allow_host("127.0.0.1");
+        let transport =
+            HttpFragmentTransport::from_guard(&guard).with_timeout(Duration::from_millis(200));
+        let url = format!("http://127.0.0.1:{}/fragment", addr.port());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(transport.fetch_fragment(&url, &all_var_pattern(), &[], None));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the 200 ms timeout must fire well inside 5 s (with_timeout not applied?)");
+        let err = result.expect_err("a stalled fragment server must not succeed");
         assert!(
             err.contains("timeout"),
             "the failure must be the configured timeout, not an egress refusal: {}",
