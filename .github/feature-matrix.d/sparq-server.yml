@@ -129,3 +129,19 @@
   crate: "sparq-server"
   features: "solid-authz"
   test: true
+
+# [SONNET-4.6] sq-pfae.17: `solid-authz-trust` (default OFF) — the DOUBLE-OPT-IN stateless
+# trust-graph extension to `POST /authz/decide`. The `solid_authz_trust` config field, the
+# `trust_authz_decide` handler, and the 11-test gated `tests/solid_authz_trust.rs` integration
+# suite are ALL `#[cfg(feature = "solid-authz-trust")]`, so the DEFAULT build never compiled,
+# clippy'd or tested this code. This leg builds it, runs `clippy --all-targets -D warnings`
+# with the feature ON, and runs the crate's tests — including the 11 gated tests that cover
+# the fail-closed invariant, the double-opt-in config flag, the trust-block parse gates, and
+# the WAC fallthrough paths. `solid-authz-trust` implies `solid-authz` + pulls `sparq-trust`
+# (with `cert-graph`) + `sparq-zk` (for key-parsing), all workspace crates.
+# HONEST SCOPE: tests exercise the HTTP plumbing and fail-closed gates; the cryptographic path
+# is covered by sparq-trust's own unit tests (the ZK estate is externally UNAUDITED, sq-qhy4).
+- name: "sparq-server (solid-authz-trust — stateless trust-graph /authz/decide extension)"
+  crate: "sparq-server"
+  features: "solid-authz-trust"
+  test: true

@@ -704,6 +704,21 @@ pub struct ServerConfig {
     /// cost. Set by the binary's `--solid-authz` flag / `SPARQ_SOLID_AUTHZ=1` env.
     #[cfg(feature = "solid-authz")]
     pub solid_authz: bool,
+    /// [SONNET-4.6] (sq-pfae.17) OPT-IN stateless trust-graph extension to `POST /authz/decide`.
+    ///
+    /// When both this flag AND the `solid-authz-trust` cargo feature are active, the endpoint
+    /// accepts an optional `"trust"` JSON block carrying credential graphs + a trust policy +
+    /// signed certification edges. It runs the cert-graph closure
+    /// (`sparq_trust::derive_effective_rules`) then the UNCHANGED WAC/ACP admission gate, and
+    /// returns a minimal admission justification alongside the decision. FAIL-CLOSED: ANY
+    /// malformed/unverifiable/stale/revoked/over-depth/broadening trust input => 403 DENY.
+    /// Feature OFF => byte-identical to the `solid-authz` path. Double-opt-in: activates ONLY
+    /// when BOTH (a) this feature is compiled AND (b) the request carries a `"trust"` block.
+    ///
+    /// This field exists only with the `solid-authz-trust` cargo feature. Set by
+    /// `SPARQ_SOLID_AUTHZ_TRUST=1`.
+    #[cfg(feature = "solid-authz-trust")]
+    pub solid_authz_trust: bool,
 }
 
 impl Default for ServerConfig {
@@ -838,6 +853,11 @@ impl Default for ServerConfig {
             // --solid-authz / SPARQ_SOLID_AUTHZ=1). Fail-closed: `/authz/*` is 404 until set.
             #[cfg(feature = "solid-authz")]
             solid_authz: false,
+            // [SONNET-4.6] sq-pfae.17: safe default — the OPT-IN stateless trust-graph extension
+            // is OFF even when the feature is compiled in. The operator opts in deliberately via
+            // SPARQ_SOLID_AUTHZ_TRUST=1. Fail-closed: trust block is ignored until set.
+            #[cfg(feature = "solid-authz-trust")]
+            solid_authz_trust: false,
         }
     }
 }
@@ -1124,6 +1144,13 @@ impl ServerConfig {
         #[cfg(feature = "solid-authz")]
         if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ") {
             cfg.solid_authz = env_truthy(&v);
+        }
+        // [SONNET-4.6] sq-pfae.17: SPARQ_SOLID_AUTHZ_TRUST truthy ("1"/"true"/"yes"/"on") enables
+        // the OPT-IN stateless trust-graph extension to POST /authz/decide. Off by default. Only
+        // present with the `solid-authz-trust` feature.
+        #[cfg(feature = "solid-authz-trust")]
+        if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ_TRUST") {
+            cfg.solid_authz_trust = env_truthy(&v);
         }
         Ok(cfg)
     }

@@ -298,6 +298,23 @@ change-stream = ["server", "sparq-serve/change-stream"]
 # already surfaces `governing_acl` / `aclLink` in the decision BODY, so that wiring only needs to
 # lift it into a header.
 solid-authz = ["server", "dep:sparq-solid"]
+# [SONNET-4.6] (sq-pfae.17) `solid-authz-trust` (default OFF): extends the OPT-IN
+# `POST /authz/decide` endpoint (from `solid-authz`) to accept a stateless trust block —
+# presented credential graphs + a trust policy + signed certification edges IN THE REQUEST
+# (stateless: no server-side trust store needed; the request carries the full trust graph).
+# The handler derives effective rules via the cert-graph closure (`sparq_trust::derive_effective_rules`,
+# `sq-pfae.15/16`) then runs the UNCHANGED WAC/ACP admission and decision gates; the response
+# carries a minimal admission justification (which rule/edge admitted the deciding fact).
+# FAIL-CLOSED is the soundness invariant: ANY malformed/unverifiable/stale/revoked/over-depth/
+# broadening trust input => 403 DENY with justification; feature OFF => byte-identical to `solid-authz`.
+# The trust extension is DOUBLE-OPT-IN: it activates only when BOTH this feature is compiled AND
+# the request carries a "trust" JSON block (no trust block => falls through to the existing path).
+# HONEST SCOPE: this is a clear-path admission mechanism (anchored-not-proven); it is NOT a ZK/MPC
+# or unlinkability claim. The ZK estate it touches is internally re-audited but has NO external
+# accredited-cryptographer sign-off (sq-qhy4 pending); sparq-mpc is semi-honest only.
+# Needs `solid-authz` + enables sparq-trust with the `cert-graph` feature for the closure.
+# [SONNET-4.6] POSITIONAL format args used throughout (CodeQL rust/unused-variable guard).
+solid-authz-trust = ["solid-authz", "dep:sparq-trust", "dep:sparq-zk"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -344,6 +361,16 @@ sparq-terse = { path = "../sparq-terse", version = "0.1.0", optional = true }
 # so terms flow through. OFF by default — a build WITHOUT the `solid-authz` feature carries ZERO
 # Solid/access-control code (the standard server build never sees sparq-solid or sparq-reason).
 sparq-solid = { path = "../sparq-solid", version = "0.1.0", optional = true }
+# [SONNET-4.6] (sq-pfae.17) Behind the opt-in `solid-authz-trust` feature only: the trust-graph
+# authorisation admission gate (`sparq_trust::derive_effective_rules` + `sparq_trust::admit`),
+# with the `cert-graph` feature for the certification-edge closure. OFF by default — a build
+# WITHOUT the `solid-authz-trust` feature carries ZERO trust-graph code.
+sparq-trust = { path = "../sparq-trust", version = "0.1.0", optional = true, features = ["cert-graph"] }
+# [SONNET-4.6] (sq-pfae.17) Behind `solid-authz-trust` only: the ZK signature primitive used to
+# parse verifying keys from hex (`sparq_zk::sig::public_key_from_hex`). The `sparq-trust`
+# crate already pulls `sparq-zk` transitively, but `sparq-server` needs it directly so the
+# handler code can import `public_key_from_hex` without an extra re-export layer.
+sparq-zk = { path = "../sparq-zk", version = "0.1.0", optional = true }
 oxrdf.workspace = true
 # [OPUS-4.8] sq-rt6v: prefix-compacting Turtle + RDF/XML graph serialisation, and RDF/XML
 # request-body parsing, for the GSP read/write + CONSTRUCT/DESCRIBE surface. Both crates are
