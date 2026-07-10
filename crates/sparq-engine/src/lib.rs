@@ -230,6 +230,16 @@ pub mod theta_antijoin_testing {
     pub fn stats() -> (bool, usize, usize) {
         crate::exec::theta_antijoin::stats()
     }
+
+    /// [OPUS-4.8] (sq-7d3dj.30.20) Number of anti-join shapes the STATIC early-decline gate
+    /// (opt-in `antijoin-static-decline`) rejected BEFORE evaluating the mandatory left side
+    /// since the last [`reset_stats`] — i.e. the redundant left evaluations the feature saved.
+    /// Compiled only with the feature on; the differential test asserts it is `> 0` on the
+    /// SP2Bench-q07 shape (the gate fired) and `0` on a correlated (q06) shape (it did not).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub fn early_declined() -> usize {
+        crate::exec::theta_antijoin::early_declined()
+    }
 }
 
 use oxrdf::{Term, Variable};
