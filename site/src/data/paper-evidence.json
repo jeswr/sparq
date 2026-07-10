@@ -500,6 +500,30 @@
       "family": "single-prover zkSPARQL architecture",
       "source": "crates/sparq-zk-compose/tests/audit_forge_map.rs (bead sq-1gir): one named forge-and-verify regression test per historical audit finding #1-#12, each constructing that finding's specific forgery and asserting the mapped verifier reject path",
       "note": "Number of historical single-prover audit findings (research/zk-soundness-audit.md) that carry a standing 1:1 forge-negative regression test pinning the remediation closed. A deterministic structural count over the committed test file; the map is internal evidence and does NOT substitute for the open external audit (sq-qhy4). [FABLE-5 sq-3kd2g.1]"
+    },
+    "compare.sp2b_answer_agreement": {
+      "value": 12,
+      "unit": "queries (of 14)",
+      "environment": "canonical",
+      "kind": "answer-equivalence-oracle",
+      "family": "comparative benchmarking (same-box)",
+      "total": 14,
+      "diff": 2,
+      "competitors": ["Oxigraph", "QLever", "Virtuoso"],
+      "source": "bench/dashboard/competitors.json same_box_comparisons[suite='sp2b'] (git 0ab87b2a) — per-query count_crosscheck.all_agree, computed by scripts/bench/ingest-canonical-competitors.mjs from the raw envelopes at bench/canonical-competitor-results/2026-07-07/",
+      "note": "Number of SP2Bench queries whose sparq solution COUNT agrees with every independent engine (Oxigraph / QLever / Virtuoso) AND the pinned expected-rows oracle. A count comparison is machine-INDEPENDENT (a deterministic answer-equivalence check, not a timing), so environment=canonical. The 2 non-agreeing queries (q08 / q12b) are recorded HONESTLY as a DIFF, never suppressed — they are the known OPTIONAL/negation optional-semantics divergences, not a sparq correctness gap; a paper citing this must present it as an answer-equivalence rate, NOT a speed claim. [FABLE-5 sq-hmd7l.28]"
+    },
+    "compare.watdiv_answer_agreement": {
+      "value": 16,
+      "unit": "queries (of 16)",
+      "environment": "canonical",
+      "kind": "answer-equivalence-oracle",
+      "family": "comparative benchmarking (same-box)",
+      "total": 16,
+      "diff": 0,
+      "competitors": ["Oxigraph", "QLever", "Virtuoso"],
+      "source": "bench/dashboard/competitors.json same_box_comparisons[suite='watdiv'] (git 0ab87b2a) — per-query count_crosscheck.all_agree, computed by scripts/bench/ingest-canonical-competitors.mjs from the raw envelopes at bench/canonical-competitor-results/2026-07-07/",
+      "note": "Number of WatDiv queries whose sparq solution COUNT agrees with every independent engine (Oxigraph / QLever / Virtuoso) AND the pinned expected-rows oracle — full agreement, 16/16. Machine-INDEPENDENT (a deterministic answer-equivalence check, not a timing), so environment=canonical. A paper citing this must present it as an answer-equivalence rate, NOT a speed claim. [FABLE-5 sq-hmd7l.28]"
     }
   }
 }

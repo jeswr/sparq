@@ -78,9 +78,60 @@ const ENGINE_META = {
     label: "QLever",
     mode: "HTTP SPARQL adapter (qlever-index → qlever-server)",
   },
+  // [FABLE-5] sq-hmd7l.28 — the new comparative axes' competitor engines. Each axis'
+  // same-box harness (scripts/bench/{fts,geo,hdt,update,materialize}-same-box.sh) records
+  // these ids in its envelope `engines` map; adding them here gives the site a stable human
+  // label + measurement-MODE string per column. A brand-new competitor a harness adds later
+  // still surfaces automatically (see engineIdsOf below) — this table is only for the label.
+  "jena-text": {
+    label: "Apache Jena (jena-text / Lucene)",
+    mode: "HTTP SPARQL adapter (jena-text Lucene index over a Fuseki endpoint)",
+  },
+  "jena-geosparql": {
+    label: "Apache Jena (GeoSPARQL)",
+    mode: "HTTP SPARQL adapter (jena-fuseki-geosparql spatial index)",
+  },
+  "hdt-cpp": {
+    label: "hdt-cpp (rdfhdt)",
+    mode: "in-process decode (Docker rdfhdt/hdt-cpp, hdt2rdf: decode .hdt → N-Triples)",
+  },
+  jena: {
+    label: "Apache Jena (rule reasoner)",
+    mode: "in-process (Jena InfModel materialisation — a profile-DIFFERENT rule set; see note)",
+  },
+  vlog: {
+    label: "VLog (Datalog)",
+    mode: "in-process (VLog Datalog; needs a validated OWL-RL/RDFS encoding — else NOT-RUN)",
+  },
+  nemo: {
+    label: "Nemo (Datalog)",
+    mode: "in-process (Nemo Datalog; needs a validated OWL-RL/RDFS encoding — else NOT-RUN)",
+  },
 };
-// Column order (sparq first, then the same order the gather records).
+// Column order (sparq first, then the SPARQL matrix's fixed order; any engine not listed
+// here — e.g. a new-axis competitor — is appended in the envelope's own key order via
+// engineIdsOf, so a new competitor never gets silently dropped).
 const ENGINE_ORDER = ["sparq", "oxigraph", "fuseki", "virtuoso", "qlever"];
+
+// [FABLE-5] sq-hmd7l.28 — the engine ids to render for ONE envelope, sparq first, then the
+// fixed SPARQL-matrix order for any of those present, then any REMAINING engine the envelope
+// declares (a new-axis competitor like jena-text / hdt-cpp / vlog) in its own key order. This
+// is what makes a new competitor column flow through WITHOUT editing this script per gather.
+function engineIdsOf(envelope) {
+  const declared = Object.keys(envelope.engines || {});
+  const ordered = ENGINE_ORDER.filter((id) => declared.includes(id));
+  const extra = declared.filter((id) => !ENGINE_ORDER.includes(id));
+  return [...ordered, ...extra];
+}
+
+// Per-row count agreement can be recorded as `all_agree` (sp2b/watdiv/materialize) OR a plain
+// boolean `agree` (geo) OR left absent (fts, which cross-checks engine-vs-engine differently).
+// Read whichever is present; a missing flag stays null (renders "—", never a fabricated ✓).
+function rowCountMatch(cc) {
+  if (typeof cc.all_agree === "boolean") return cc.all_agree;
+  if (typeof cc.agree === "boolean") return cc.agree;
+  return null;
+}
 
 function parseTsv(tsv) {
   // 3-col "<query>\t<rows|ERROR>\t<best_us|engine>" per line → { query: { rows, us|null } }.
@@ -102,6 +153,18 @@ function parseTsv(tsv) {
   return out;
 }
 
+// [FABLE-5] sq-hmd7l.28 — an envelope's per-engine TSV key is `<id>_tsv`, but some harnesses
+// (fts, geo) sanitise hyphenated ids to underscores (`jena-text` → `jena_text_tsv`). Resolve
+// whichever form the envelope actually carries so a hyphenated competitor id is not read as an
+// all-null column.
+function tsvFor(envelope, id) {
+  const direct = envelope[id + "_tsv"];
+  if (typeof direct === "string") return direct;
+  const under = envelope[id.replace(/-/g, "_") + "_tsv"];
+  if (typeof under === "string") return under;
+  return "";
+}
+
 function shortDigest(engine) {
   const d = engine && engine.image_digest;
   if (!d) return null;
@@ -113,12 +176,12 @@ function buildEntry(gathers) {
   // gathers: array of envelope objects for ONE suite (>=1; expect 2 canonical gathers).
   const primary = gathers[gathers.length - 1]; // latest for the metadata/version fields
   const suite = primary.suite;
-  const engineIds = ENGINE_ORDER.filter((id) => primary.engines && primary.engines[id]);
+  const engineIds = engineIdsOf(primary);
 
   // Parse every gather's per-engine TSV once.
   const parsed = gathers.map((g) => {
     const p = {};
-    for (const id of engineIds) p[id] = parseTsv(g[id + "_tsv"]);
+    for (const id of engineIds) p[id] = parseTsv(tsvFor(g, id));
     return { g, p };
   });
 
@@ -167,7 +230,7 @@ function buildEntry(gathers) {
       unit: "µs",
       rows: ccCount,
       values,
-      count_match: typeof cc.all_agree === "boolean" ? cc.all_agree : null,
+      count_match: rowCountMatch(cc),
     };
     if (anyExtended) {
       // HTTP-profile extras: values = keep-alive full-request best (primary, above);
@@ -224,8 +287,15 @@ function buildEntry(gathers) {
     git_commit: primary.git_commit,
     gathered_at_utc: (primary.env && primary.env.gathered_at_utc) || primary.gathered_at_utc,
     canonical: primary.canonical === true,
-    combine: `best-of the ${gathers.length} back-to-back canonical gathers (${tsList}): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-${gathers.length}×${primary.iters}, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.`,
-    source: `canonical gather '${primary.gather}' (${primary.wave}) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs`,
+    // [FABLE-5] sq-hmd7l.28 — the sp2b/watdiv matrix keeps its exact reviewed prose (incl. the
+    // real virtuoso-q09 example) for a byte-stable committed snapshot; other axes get a generic,
+    // accurate combine string (no fabricated engine/query name) + the gather's OWN dated dir.
+    combine: /^(sp2b|watdiv)(-http)?$/i.test(suite)
+      ? `best-of the ${gathers.length} back-to-back canonical gathers (${tsList}): per-engine per-query MIN best_us; solution COUNTS are identical across the gathers. best-of = min-of-${gathers.length}×${primary.iters}, the least-contended estimate; it also removes transient contention spikes (e.g. a virtuoso q09 blip) uniformly for every engine.`
+      : `best-of the ${gathers.length} back-to-back canonical gather${gathers.length === 1 ? "" : "s"} (${tsList}): per-engine per-query MIN best_us; solution COUNTS are cross-checked across the gathers. best-of = min-of-${gathers.length}×${primary.iters}, the least-contended estimate.`,
+    source: /^(sp2b|watdiv)(-http)?$/i.test(suite)
+      ? `canonical gather '${primary.gather}' (${primary.wave}) — raw envelopes committed at bench/canonical-competitor-results/2026-07-07/, ingested by scripts/bench/ingest-canonical-competitors.mjs`
+      : `canonical gather '${primary.gather}' (${primary.wave}) — raw envelopes committed under bench/canonical-competitor-results/, ingested by scripts/bench/ingest-canonical-competitors.mjs`,
     count_crosscheck_note: primary.count_crosscheck_note,
     env: {
       host_class: primary.env.host_class,
@@ -239,6 +309,119 @@ function buildEntry(gathers) {
     rows,
   };
 }
+
+// ---- [FABLE-5] sq-hmd7l.28 — bespoke-shape axis adapters ----------------------------
+// A few axes do NOT emit the query-row `<engine>_tsv` + `count_crosscheck` layout the
+// generic buildEntry consumes. Rather than hand-transcribe them, we normalise each into the
+// SAME same_box_comparison shape (engines + rows) here, keyed off the envelope `suite`, so a
+// new canonical gather of these axes flows to the site with no further edit. Every adapter is
+// DEFENSIVE: if a gather's documented fields are absent (a shape the parallel wave has not
+// finalised) it returns null and the ingest SKIPS that suite with a warning — it never
+// fabricates a row and never crashes the build.
+
+// Common env/meta projection shared by the bespoke adapters (mirrors buildEntry's tail).
+function commonMeta(primary, gathers) {
+  return {
+    suite: primary.suite,
+    scale: primary.scale,
+    iters: primary.iters,
+    git_commit: primary.git_commit,
+    gathered_at_utc: (primary.env && primary.env.gathered_at_utc) || primary.gathered_at_utc,
+    canonical: primary.canonical === true,
+    combine:
+      gathers.length > 1
+        ? `best-of ${gathers.length} back-to-back gathers (per-engine MIN); counts cross-checked engine-vs-engine.`
+        : "single gather; counts cross-checked engine-vs-engine.",
+    source: `canonical gather '${primary.gather}' (${primary.wave}) — raw envelope committed under bench/canonical-competitor-results/, ingested by scripts/bench/ingest-canonical-competitors.mjs`,
+    count_crosscheck_note: primary.count_crosscheck_note || primary.caveat,
+    env: {
+      host_class: (primary.env && (primary.env.host_class || primary.env.host)) || "quiet box",
+      quiet_box: !!(primary.env && primary.env.quiet_box),
+      gathered_at_utc: primary.env && primary.env.gathered_at_utc,
+      cpu_model: primary.env && primary.env.cpu_model,
+      kernel: primary.env && primary.env.kernel,
+      note: primary.mode || primary.caveat,
+    },
+  };
+}
+
+function metaEngines(primary, ids) {
+  return ids.map((id) => {
+    const src = (primary.engines && primary.engines[id]) || {};
+    const meta = ENGINE_META[id] || { label: id, mode: src.mode || "" };
+    return {
+      id,
+      label: meta.label,
+      version: src.version || "n/a",
+      mode: meta.mode || src.mode || "",
+      status: src.status === "absent" || src.status === "failed" ? "failed" : "ok",
+    };
+  });
+}
+
+// HDT decode-only (suite "hdt"): sparq decodes .hdt → native Graph, hdt-cpp decodes → N-Triples;
+// the ONE like-for-like metric is decode wall-clock, cross-checked on the decoded triple count.
+function normalizeHdt(primary, gathers) {
+  const sm = primary.sparq_metrics || {};
+  const decodeCell = sm.decode_s || sm.load_decode_s || sm.snikmeta_decode_s;
+  const sparqDecodeS = decodeCell && typeof decodeCell.value !== "undefined" ? Number(decodeCell.value) : null;
+  const cc = primary.count_agreement || {};
+  const ids = engineIdsOf(primary).length ? engineIdsOf(primary) : ["sparq", "hdt-cpp"];
+  // decode seconds → µs for a uniform unit with the other axes; hdt-cpp wall-clock is on the
+  // envelope only as a raw N-Triples sample (no committed numeric us yet) → null (renders n/a).
+  const values = { sparq: sparqDecodeS != null ? Math.round(sparqDecodeS * 1e6) : null };
+  const row = {
+    query: "decode",
+    unit: "µs",
+    rows: cc.expected != null ? Number(cc.expected) : null,
+    values,
+    count_match: typeof cc.all_agree === "boolean" ? cc.all_agree : null,
+  };
+  return {
+    ...commonMeta(primary, gathers),
+    engines: metaEngines(primary, ids),
+    rows: [row],
+  };
+}
+
+// PSS update parity (suite "pss-update-parity"): per-engine p99 update latency over the LDP-CRUD
+// stream, cross-checked on the post-workload quad count. One row per recorded latency metric.
+function normalizeUpdate(primary, gathers) {
+  const lat = primary.latency_ms || {};
+  const ids = engineIdsOf(primary).length ? engineIdsOf(primary) : Object.keys(lat);
+  if (!ids.length) return null;
+  const cc = primary.count_crosscheck || {};
+  const mkRow = (query, pick) => {
+    const values = {};
+    for (const id of ids) {
+      const cell = lat[id];
+      const v = cell && typeof cell === "object" ? cell[pick] : undefined;
+      values[id] = typeof v === "number" ? Math.round(v * 1000) : null; // ms → µs
+    }
+    return {
+      query,
+      unit: "µs",
+      rows: cc.sparq != null && /^-?\d/.test(String(cc.sparq)) ? Number(cc.sparq) : null,
+      values,
+      count_match: typeof cc.all_agree === "boolean" ? cc.all_agree : null,
+    };
+  };
+  const rows = ["p50", "p99", "max"]
+    .filter((p) => ids.some((id) => lat[id] && typeof lat[id][p] === "number"))
+    .map((p) => mkRow(`update ${p}`, p));
+  if (!rows.length) return null;
+  return {
+    ...commonMeta(primary, gathers),
+    engines: metaEngines(primary, ids),
+    rows,
+  };
+}
+
+// suite → bespoke adapter. Any suite not listed uses the generic query-row buildEntry.
+const BESPOKE_ADAPTERS = {
+  hdt: normalizeHdt,
+  "pss-update-parity": normalizeUpdate,
+};
 
 // ---- load envelopes (across every results dir), group by suite ----------------------
 const bySuite = new Map();
@@ -258,13 +441,16 @@ if (!fileCount) {
 }
 
 // Assert counts identical across gathers of a suite (fail loud, never silently pick one).
+// Bespoke-shape suites (hdt/update) carry no per-query `<engine>_tsv`, so this TSV-level
+// assertion does not apply; their adapters do their own cross-check. Skip them here.
 for (const [suite, gathers] of bySuite) {
   gathers.sort((a, b) => (a.__file < b.__file ? -1 : 1));
+  if (BESPOKE_ADAPTERS[suite]) continue;
   const ref = gathers[0];
   for (const g of gathers.slice(1)) {
-    for (const id of ENGINE_ORDER) {
-      const a = parseTsv(ref[id + "_tsv"]);
-      const b = parseTsv(g[id + "_tsv"]);
+    for (const id of engineIdsOf(ref)) {
+      const a = parseTsv(tsvFor(ref, id));
+      const b = parseTsv(tsvFor(g, id));
       for (const q of Object.keys(a)) {
         // [FABLE-5] sq-7d3dj.34: an ERROR row (rows=null, e.g. a per-query timeout that
         // fired in only one of the gathers) is a MISSING count, not a DISAGREEING count —
@@ -285,7 +471,17 @@ const suiteOrder = [...bySuite.keys()].sort((a, b) => {
   const rank = (s) => (/sp2b/i.test(s) ? 0 : /watdiv/i.test(s) ? 1 : 2);
   return rank(a) - rank(b) || (a < b ? -1 : 1);
 });
-const sameBox = suiteOrder.map((s) => buildEntry(bySuite.get(s)));
+// [FABLE-5] sq-hmd7l.28 — dispatch each suite to its bespoke adapter or the generic query-row
+// buildEntry. A defensive adapter that returns null (an unfinalised gather shape) is skipped
+// with a warning so the ingest never crashes and never fabricates a row.
+const sameBox = [];
+for (const s of suiteOrder) {
+  const gathers = bySuite.get(s);
+  const adapter = BESPOKE_ADAPTERS[s];
+  const entry = adapter ? adapter(gathers[gathers.length - 1], gathers) : buildEntry(gathers);
+  if (entry) sameBox.push(entry);
+  else console.warn(`[ingest-canonical] suite '${s}': adapter produced no comparable rows (unfinalised gather shape) — skipped, not fabricated.`);
+}
 
 // ---- rewrite ONLY same_box_comparisons in competitors.json --------------------------
 const competitors = JSON.parse(readFileSync(competitorsPath, "utf8"));
