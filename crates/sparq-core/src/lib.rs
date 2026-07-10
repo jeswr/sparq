@@ -4926,8 +4926,24 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
         // (string / IRI / comment skipping, the `.`-terminator and `\`-escape tests) are
         // UNCHANGED, so behaviour — including the review-1398 PN_LOCAL_ESC `\#` fix — is
         // identical; this only fast-forwards over the runs the old `_ => i += 1` arm crawled.
+        //
+        // [OPUS-4.8] (sq-98w7z.1 hang fix) The scan-byte set has SIX members but `memchr` tops
+        // out at three needles, so this needs two passes. The earlier form ran BOTH `memchr3`
+        // calls over the SAME full tail `bytes[i..]` and took `x.min(y)` — which is O(tail) work
+        // per state-change even when one class of byte is entirely absent. On a document with no
+        // string literals or PN_LOCAL escapes (e.g. an all-IRI N-Triples-shaped body), the
+        // quote/backslash `memchr3` found NOTHING and re-walked the whole remaining buffer once
+        // per `<`/`.`, making `next_terminator` O(statement · tail) ⇒ the whole parse O(n²) and a
+        // 55k-triple load hang for minutes. Fix: find the FIRST `. < #` (the class that ends a
+        // scan region), then look for a quote/backslash ONLY in the window BEFORE it. Each byte
+        // is now examined by the bounded second pass at most once, restoring O(n).
         let a = memchr::memchr3(b'.', b'<', b'#', &bytes[i..]);
-        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..]);
+        // Second pass is bounded: if `a` found a byte at offset `x`, a quote/backslash can only
+        // matter if it occurs strictly before `x` (otherwise `a`'s byte wins the `min`); if `a`
+        // found nothing, the region to the end is the whole tail (unchanged behaviour, but now it
+        // is the ONLY full-tail scan and it terminates the statement search via `None`).
+        let bound = a.map_or(bytes.len() - i, |x| x);
+        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..i + bound]);
         i += match (a, b) {
             (None, None) => return None, // no interesting byte before EOF → incomplete statement
             (Some(x), None) => x,
@@ -6507,6 +6523,41 @@ mod tests {
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
 
+    /// [OPUS-4.8] (sq-98w7z.1) Regression: the parallel Turtle terminator scan must be LINEAR in
+    /// document size, not quadratic. `next_terminator` used to run a full-tail `memchr3` for
+    /// `" ' \` on EVERY state-change byte; on a body with NO string literals or PN_LOCAL escapes
+    /// (an all-IRI N-Triples-shaped document — exactly what a wide synthetic graph produces) that
+    /// scan found nothing and re-walked the whole remaining buffer once per statement, making the
+    /// splitter O(n²): a 55k-triple load hung for ~19 minutes. The fix bounds the second pass to
+    /// the window before the next `. < #`.
+    ///
+    /// NON-VACUOUS: this is a hard wall-clock ceiling, not a ratio. On the pre-fix code a 20k-row
+    /// quote-free parse takes ~600 s (measured: 10k rows = 150 s, scaling ~4× per doubling); the
+    /// fixed code does it in well under a second. A 20 s ceiling would be blown by >30× on the
+    /// broken code yet leaves ~100× slack for the fixed code on the slowest CI runner, so it
+    /// cannot flake on a slow-but-linear machine and cannot pass on a quadratic one. Work-box
+    /// timings are non-canonical — only the coarse linear/quadratic distinction is asserted.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_terminator_scan_is_linear_not_quadratic() {
+        // A quote/backslash-free body forces the bounded second-pass arm (`b == None`) — the exact
+        // shape that triggered the quadratic full-tail re-scan. 20k statements ⇒ ~1 MB, comfortably
+        // over the fan-out threshold, and large enough that O(n²) is minutes while O(n) is < 1 s.
+        let rows = 20_000usize;
+        let ttl: String =
+            (0..rows).map(|i| format!("<http://ex/s{}> <http://ex/p> <http://ex/o> .\n", i)).collect();
+        assert!(turtle_chunks(ttl.as_bytes(), 32).is_some(), "quote-free body should fan out");
+        let t = std::time::Instant::now();
+        let (_d, triples) = parse_turtle_parallel(ttl.as_bytes()).unwrap();
+        let elapsed = t.elapsed();
+        assert_eq!(triples.len(), rows, "every quote-free statement must parse");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "quote-free parse took {:?} — the terminator scan has regressed to quadratic",
+            elapsed
+        );
+    }
+
     // [SONNET-4.6] (sq-wrn61) The Turtle triple-Vec / Dict pre-sizing (`estimate_turtle_triples`)
     // is a PURE capacity hint. These pin its two load-bearing invariants: (a) it never returns
     // zero (a zero capacity would defeat the hint but not corrupt output) and never SHRINKS with
@@ -7795,6 +7846,12 @@ mod tests {
             "",
             ".",                                            // bare dot at EOF is a terminator
             ".5 .\n",                                       // leading decimal then real terminator
+            // [OPUS-4.8] (sq-98w7z.1) Quote/backslash-FREE bodies: the bounded second `memchr3`
+            // pass (introduced with the O(n²) fix) takes the `b == None` arm here, so the split
+            // offset must still match the scalar oracle exactly. An all-IRI N-Triples-shaped run
+            // is precisely the shape that used to trigger the quadratic full-tail re-scan.
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s2> <http://ex/p> <http://ex/o2> .\n",
+            ":a :b :c . :d :e :f . :g :h :i .\n",           // several quote-free statements in a row
         ];
         for (k, c) in cases.iter().enumerate() {
             let b = c.as_bytes();

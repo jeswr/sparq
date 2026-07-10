@@ -12732,9 +12732,26 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 }
             }
         }
-        // NOW(): the current UTC instant as xsd:dateTime. RAND(): xsd:double in [0, 1)
-        // (sourced from the same OS RNG as UUID, avoiding a new wasm-hostile dep) —
-        // both native-only for the same reason as UUID()/STRUUID().
+        // ---- Builtin memoisation policy (sq-98w7z.1) [FABLE-5] ----------------------
+        // ALLOW (memoised, keyed on the argument VALUES — pure, so a hit is
+        //   result-identical to a fresh evaluation): the REGEX()/REPLACE() compiled
+        //   `(pattern, flags)` via `regex_cache`, the one per-row builtin cost worth a
+        //   memo (compile is µs-scale vs ns-scale match). Compile FAILURES are memoised
+        //   too — an invalid pattern stays a per-row type error.
+        // PINNED (not memoised — spec-MANDATED constancy): NOW() formats the
+        //   execution-scoped `query_now` instant (SPARQL 1.1 §17.4.5.1); the next
+        //   execution re-samples.
+        // DENY (non-deterministic — MUST re-evaluate on every call; memoising any of
+        //   these would silently collapse per-row freshness): RAND(), UUID(), STRUUID(),
+        //   no-arg BNODE() (fresh label per call), and every REGISTERED custom function
+        //   (`FunctionRegistry` makes no purity promise). The freshness-per-row test is
+        //   `nondeterministic_builtins_fresh_per_call_never_memoised`.
+        // Everything else (UCASE, STR, numeric ops, …) evaluates directly: value-keyed
+        // memoisation of ns-scale pure builtins costs more in key hashing than it saves.
+        //
+        // NOW(): the execution's pinned instant as xsd:dateTime. RAND(): xsd:double in
+        // [0, 1) from a per-thread splitmix64 seeded once from the OS RNG (see
+        // `rand_unit`) — both native-only for the same reason as UUID()/STRUUID().
         #[cfg(not(target_arch = "wasm32"))]
         F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(now_lexical(), xsd::DATE_TIME))),
         #[cfg(not(target_arch = "wasm32"))]
@@ -14280,6 +14297,9 @@ mod function_tests {
 mod builtin_memo_tests {
     use super::*;
 
+    // [OPUS-4.8] (sq-98w7z.1) Used only by the `regex`-gated REGEX/REPLACE tests, so gate the
+    // helper too — otherwise it is dead code under `--no-default-features` (feature-OFF clippy).
+    #[cfg(feature = "regex")]
     fn names_graph() -> Graph {
         Graph::load_str(
             "@prefix : <http://ex/> .\n\
@@ -14451,6 +14471,26 @@ mod builtin_memo_tests {
         );
     }
 
+    /// DENY-list guard (the memoisation-policy block in `eval_function_inner`):
+    /// every non-deterministic builtin — UUID(), STRUUID(), no-arg BNODE() —
+    /// must yield a FRESH value on every call. A value-keyed memo wired around
+    /// any of them (they take zero arguments, so a memo collapses ALL calls to
+    /// one value) fails this immediately: all 50 rows would bind one term.
+    #[test]
+    fn nondeterministic_builtins_fresh_per_call_never_memoised() {
+        let g = wide_graph(50);
+        for (expr, what) in
+            [("UUID()", "UUID"), ("STRUUID()", "STRUUID"), ("BNODE()", "no-arg BNODE")]
+        {
+            let q = format!("SELECT ?v WHERE {{ ?s <http://ex/p> ?o BIND({expr} AS ?v) }}");
+            let r = crate::query(&g, &q).unwrap();
+            assert_eq!(r.len(), 50);
+            let distinct: std::collections::HashSet<String> =
+                r.rows.iter().map(|row| row[0].clone().unwrap().to_string()).collect();
+            assert_eq!(distinct.len(), 50, "{what} must be fresh per call, never memoised");
+        }
+    }
+
     // ---- (C) NOW() query-constancy (SPARQL 1.1 §17.4.5.1) -----------------------
 
     /// Deterministic guard mechanics (no clock dependence): outermost-wins
@@ -14539,10 +14579,20 @@ mod builtin_memo_tests {
     /// `worker_install` wiring the workers' evaluations fall back to fresh clock
     /// samples and the counter goes hot even when every sample lands in the same
     /// second.
+    // [OPUS-4.8] (sq-98w7z.1) Gated on `parallel`: the test's whole point is the rayon
+    // `worker_install` NOW-snapshot wiring, and it references `PAR_THRESHOLD` — both of which only
+    // exist under the `parallel` feature. Without it there is no worker path to guard and the
+    // constant reference would not compile (feature-OFF clippy caught this).
+    #[cfg(feature = "parallel")]
     #[test]
     fn now_parallel_rows_single_instant_no_fallback() {
         use std::sync::atomic::Ordering;
-        let rows = PAR_THRESHOLD + 5_000;
+        // Just past PAR_THRESHOLD: the FILTER/BIND parallel branches activate on a
+        // `>= PAR_THRESHOLD` row count (independent of per-row cost), so a thin
+        // over-threshold graph exercises the exact rayon worker paths this test
+        // guards while staying cheap on a contended box. `+ 200` keeps a healthy
+        // margin so the branch fires deterministically.
+        let rows = PAR_THRESHOLD + 200;
         let g = wide_graph(rows);
         let f0 = query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed);
         let q = "SELECT ?n WHERE { ?s <http://ex/p> ?o BIND(NOW() AS ?n) FILTER(STR(?n) = STR(NOW())) }";

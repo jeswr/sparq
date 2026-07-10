@@ -399,6 +399,8 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   by the next execution (each UPDATE operation's WHERE is its own execution; second granularity).
   `RAND()` stays fresh per call, drawn from a per-thread splitmix64 PRNG seeded once from OS
   entropy — NOT cryptographic (SPARQL imposes no such requirement); don't derive secrets from it.
+  `UUID()`/`STRUUID()`/no-arg `BNODE()` are likewise fresh per call — the engine never memoises a
+  non-deterministic builtin (the allow/deny policy is spelled out in `eval_function_inner`).
   `REGEX()`/`REPLACE()` memoise the compiled `(pattern, flags)` per thread (capped at 64 entries),
   so a constant-pattern FILTER compiles once instead of per row; an invalid pattern/flag is still a
   per-row type error — the failure outcome is memoised, the semantics are unchanged.
