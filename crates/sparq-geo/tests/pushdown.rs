@@ -289,6 +289,206 @@ fn no_index_installed_is_unchanged() {
     assert_eq!(counter.load(Ordering::Relaxed), 25, "every one of the 25 features is exact-checked");
 }
 
+/// A [`SpatialProvider`] that delegates `candidates`/`is_indexed` to an inner
+/// [`GeoIndexProvider`] but FORCES the engine onto the per-row `is_indexed`
+/// fallback by overriding `indexed_ids` to `None`. Lets one query be run BOTH
+/// ways (id-level fast path vs per-row slow path) so the differential test proves
+/// they agree byte-for-byte. [OPUS-4.8] sq-7jt80
+struct NoIdLevelProvider(GeoIndexProvider);
+
+impl SpatialProvider for NoIdLevelProvider {
+    fn candidates(&self, query: &sparq_engine::SpatialQuery) -> Option<Vec<oxrdf::Term>> {
+        self.0.candidates(query)
+    }
+    fn is_indexed(&self, term: &oxrdf::Term) -> bool {
+        self.0.is_indexed(term)
+    }
+    // Deliberately NOT overriding `indexed_ids` -> inherits the trait default
+    // `None`, forcing the engine's per-row fallback path.
+}
+
+/// Runs `sparql` THREE ways and asserts the sorted rows are byte-identical:
+/// (a) no index (post-hoc), (b) the real provider (id-level FAST retain path),
+/// (c) `NoIdLevelProvider` (per-row SLOW retain fallback). Both retain branches
+/// must produce the same rows as the post-hoc plan, by construction.
+fn compare3(graph: &Graph, sparql: &str) -> Vec<Vec<String>> {
+    let reg = geof_registry();
+
+    let posthoc = with_functions(&reg, || query(graph, sparql)).unwrap();
+
+    let fast: Arc<dyn SpatialProvider> = Arc::new(GeoIndexProvider::new(GeoIndex::build(graph)));
+    let fast_r = with_spatial_index(fast, || with_functions(&reg, || query(graph, sparql))).unwrap();
+
+    let slow: Arc<dyn SpatialProvider> =
+        Arc::new(NoIdLevelProvider(GeoIndexProvider::new(GeoIndex::build(graph))));
+    let slow_r = with_spatial_index(slow, || with_functions(&reg, || query(graph, sparql))).unwrap();
+
+    let a = rows_sorted(&posthoc);
+    let b = rows_sorted(&fast_r);
+    let c = rows_sorted(&slow_r);
+    assert_eq!(a, b, "id-level FAST path diverged from post-hoc\nquery: {sparql}");
+    assert_eq!(a, c, "per-row SLOW fallback diverged from post-hoc\nquery: {sparql}");
+    a
+}
+
+#[test]
+fn id_level_and_per_row_paths_agree_pure_aswkt_column() {
+    // The fast path FIRES here: the geometry variable is bound purely by geo:asWKT
+    // (every binding is in the id-level indexed universe), so retain is pure id
+    // lookups. It must equal both the post-hoc and per-row-fallback results.
+    let g = grid(15); // 225 features
+    let q = format!(
+        "{PREFIXES} SELECT ?f WHERE {{ \
+           ?f geo:hasGeometry ?n . ?n geo:asWKT ?wkt . \
+           FILTER(geof:sfWithin(?wkt, \"POLYGON((-0.1 -0.1, 1.1 -0.1, 1.1 1.1, -0.1 1.1, -0.1 -0.1))\"^^geo:wktLiteral)) \
+         }}"
+    );
+    let rows = compare3(&g, &q);
+    assert_eq!(rows.len(), 9, "3x3 points inside the box");
+}
+
+#[test]
+fn id_level_and_per_row_paths_agree_mixed_indexed_and_unindexed() {
+    // A UNION of an indexed (geo:asWKT) column and a non-indexed (ex:loc) column:
+    // the pushdown may restrict the indexed binding but MUST keep the non-indexed
+    // one for the exact FILTER. Both retain branches must agree with post-hoc —
+    // discriminating: a fast path that wrongly treated the ex:loc literal as
+    // indexed-but-not-candidate would drop a true match.
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:idx geo:hasGeometry ex:g . ex:g geo:asWKT "POINT(0 0)"^^geo:wktLiteral .
+        ex:far geo:hasGeometry ex:gf . ex:gf geo:asWKT "POINT(40 40)"^^geo:wktLiteral .
+        ex:other ex:loc "POINT(0.1 0.1)"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    let q = format!(
+        "{PREFIXES} SELECT ?wkt WHERE {{ \
+           {{ ?s geo:asWKT ?wkt }} UNION {{ ?s ex:loc ?wkt }} \
+           FILTER(geof:distance(?wkt, \"POINT(0 0)\"^^geo:wktLiteral, uom:kilometre) < 50) \
+         }} ORDER BY ?wkt"
+    );
+    let rows = compare3(&g, &q);
+    // POINT(0 0) (indexed, in window) + POINT(0.1 0.1) (NOT indexed, kept and matched);
+    // POINT(40 40) (indexed, NOT a candidate) dropped. Two near points.
+    assert_eq!(rows.len(), 2, "both near points kept; got {rows:?}");
+}
+
+#[test]
+fn id_level_and_per_row_paths_agree_non_geographic_aswkt_literal_kept() {
+    // CRS-SAFETY: a NON-GEOGRAPHIC geo:asWKT literal is SKIPPED by the index (build
+    // only indexes geographic-CRS literals), so it is NOT in the id-level universe:
+    // `indexed_ids`/`is_indexed` must both say "not indexed" so the row is KEPT for
+    // the exact geof: FILTER to judge — NEVER dropped by the pushdown. The exact
+    // sfWithin then declines it (CrsMismatch: a projected geometry is not comparable
+    // to a geographic box), so it is absent from the answer — but crucially, ALL
+    // THREE paths agree, proving neither retain branch drops the non-indexed literal
+    // on a fast-path-specific code route. A geographic sibling in the box IS matched.
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:geo geo:hasGeometry ex:gg . ex:gg geo:asWKT "POINT(0.5 0.5)"^^geo:wktLiteral .
+        ex:proj geo:hasGeometry ex:gp . ex:gp geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/3857> POINT(0.5 0.5)"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    let q = format!(
+        "{PREFIXES} SELECT ?f WHERE {{ \
+           ?f geo:hasGeometry ?n . ?n geo:asWKT ?wkt . \
+           FILTER(geof:sfWithin(?wkt, \"POLYGON((-0.1 -0.1, 1.1 -0.1, 1.1 1.1, -0.1 1.1, -0.1 -0.1))\"^^geo:wktLiteral)) \
+         }} ORDER BY ?f"
+    );
+    let rows = compare3(&g, &q);
+    // Only the geographic point is inside AND CRS-comparable; the projected one is
+    // declined by the exact FILTER (kept by the pushdown, then dropped by geof:).
+    assert_eq!(rows, vec![vec!["<http://ex/geo>".to_string()]], "only the geographic sibling matches");
+}
+
+#[test]
+fn id_level_path_keeps_non_indexed_matching_binding_single_column() {
+    // DISCRIMINATING for the fast path: the index is NON-EMPTY (so `indexed_ids`
+    // returns a fresh, populated set and the FAST retain runs), but the query's
+    // geometry variable is bound on a SINGLE scan column by ex:loc — a predicate
+    // the index never indexes — to GEOGRAPHIC literals INSIDE the box. Those ids
+    // are absent from the id-level universe, so the fast retain must KEEP them
+    // (`!indexed.contains(&id)`) for the exact FILTER, which then MATCHES them.
+    // A fast path that dropped non-candidate rows would lose them -> divergence.
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        # Indexed universe (geo:asWKT) — populates indexed_ids, all OUTSIDE the box.
+        ex:i1 geo:asWKT "POINT(40 40)"^^geo:wktLiteral .
+        ex:i2 geo:asWKT "POINT(41 41)"^^geo:wktLiteral .
+        # The queried column is ex:loc (NOT indexed) with points INSIDE the box.
+        ex:a ex:loc "POINT(0.2 0.2)"^^geo:wktLiteral .
+        ex:b ex:loc "POINT(0.8 0.8)"^^geo:wktLiteral .
+        ex:c ex:loc "POINT(9 9)"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    let q = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ \
+           ?s ex:loc ?wkt . \
+           FILTER(geof:sfWithin(?wkt, \"POLYGON((-0.1 -0.1, 1.1 -0.1, 1.1 1.1, -0.1 1.1, -0.1 -0.1))\"^^geo:wktLiteral)) \
+         }} ORDER BY ?s"
+    );
+    let rows = compare3(&g, &q);
+    assert_eq!(
+        rows,
+        vec![vec!["<http://ex/a>".to_string()], vec!["<http://ex/b>".to_string()]],
+        "the two non-indexed in-box points must survive the pushdown and match"
+    );
+}
+
+#[test]
+fn id_level_path_stays_consistent_after_apply_delta() {
+    // After a graph.apply_delta the id-level FAST retain path must still be
+    // byte-identical to the post-hoc + per-row paths. (compare3 builds the index
+    // fresh over the post-delta graph; the SEPARATE proof that the INCREMENTAL
+    // GeoIndex::apply_delta keeps the id-set equal to a fresh build lives in
+    // tests/index.rs::assert_matches_fresh_build.) [OPUS-4.8] sq-7jt80
+    let iri = |s: &str| oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s.to_string()));
+    let lit = |s: &str| {
+        oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+            s.to_string(),
+            oxrdf::NamedNode::new_unchecked(WKT),
+        ))
+    };
+    let as_wkt = "http://www.opengis.net/ont/geosparql#asWKT";
+    let mut g = Graph::load_str(
+        r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+           @prefix ex:  <http://ex/> .
+           ex:a geo:asWKT "POINT(0 0)"^^geo:wktLiteral .
+           ex:b geo:asWKT "POINT(50 50)"^^geo:wktLiteral ."#,
+        "turtle",
+    )
+    .unwrap();
+    // Insert a new indexed point inside the box; delete the far one.
+    let ins = [[iri("http://ex/c"), iri(as_wkt), lit("POINT(0.5 0.5)")]];
+    let del = [[iri("http://ex/b"), iri(as_wkt), lit("POINT(50 50)")]];
+    g.apply_delta(&ins, &del).unwrap();
+
+    let q = format!(
+        "{PREFIXES} SELECT ?f WHERE {{ \
+           ?f geo:asWKT ?wkt . \
+           FILTER(geof:sfWithin(?wkt, \"POLYGON((-0.1 -0.1, 1.1 -0.1, 1.1 1.1, -0.1 1.1, -0.1 -0.1))\"^^geo:wktLiteral)) \
+         }} ORDER BY ?f"
+    );
+    let rows = compare3(&g, &q);
+    assert_eq!(
+        rows,
+        vec![vec!["<http://ex/a>".to_string()], vec!["<http://ex/c>".to_string()]],
+        "the two in-box points after the delta"
+    );
+}
+
 #[test]
 fn provider_candidates_are_a_superset() {
     // Direct unit test of the provider contract: the candidate set is a SUPERSET
