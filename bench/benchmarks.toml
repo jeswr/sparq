@@ -1587,20 +1587,20 @@ records_to  = "bench/competitor-results/python-bindings-*-<UTC>.json (git-ignore
 featured    = false
 status      = "active"  # first-read record: research/gap-python-binding-2026-07.md
 
-# [SONNET-4.6] sq-hmd7l.21 — Graph Store Protocol same-box panel
+# [FABLE-5] sq-hmd7l.21 — Graph Store Protocol same-box panel
 [[benchmark]]
 id          = "gsp-bench"
 name        = "Graph Store Protocol same-box panel (sparq-server vs Fuseki GSP / Oxigraph GSP + CSS loose)"
 category    = "serve"
-measures    = "GSP PUT/GET/PATCH throughput (req/s) and latency (ms) for a pinned RDF corpus over HTTP; result-count oracle (GET triple count) before trusting timing"
-invoke      = "TBD — implementing bead sq-hmd7l.21"
-source      = "TBD — bench/gsp-bench/; scripts/bench-adapters/http_gsp_adapter.py"
-dataset     = "TBD — pinned NT corpus uploaded via GSP PUT; same corpus used for each engine"
+measures    = "GSP PUT/GET/DELETE latency (p50/p99 ms per op) over a deterministic 1KB-10MB resource-size sweep + the PSS LDP-CRUD stream projected onto GSP verbs; HARD round-trip content gate BEFORE timing (returned triple SET must equal the PUT set exactly; CRUD final state must match a client-side reference model); loopback-only (the driver refuses non-loopback URLs)"
+invoke      = "bash bench/gsp/run.sh --smoke   # acceptance: sparq loopback, exit 0 = gates green\n              GSP_FUSEKI_URL=http://127.0.0.1:3030/ds GSP_OXIGRAPH_URL=http://127.0.0.1:7878 GSP_CSS_URL=http://127.0.0.1:3000 bash bench/gsp/run.sh   # full panel (competitors already running)"
+source      = "bench/gsp/{run.sh,compare.py,README.md}; CRUD shapes mirror bench/pss-update-set (gh-47/gh-52)"
+dataset     = "none fetched — deterministic bnode-free ASCII N-Triples generated in-driver per size target; identical payload bytes fed to every engine in the same run"
 quiet_box_sensitive = true
-pinning     = "TBD — corpus sha256 + competitor pinned version/digest at gather time"
-records_to  = "TBD — bench/competitor-results/<engine>-gsp-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.21
-status      = "planning"
+pinning     = "payloads deterministic by construction (seed-free counter form); competitor versions (Fuseki distribution / Oxigraph release sha256 / @solid/community-server npm version) recorded in the results JSON at gather time; CSS rows labelled LOOSE (Solid/LDP overhead included) and never averaged with the like-for-like columns"
+records_to  = "bench/competitor-results/gsp-<UTC>.json via GSP_JSON_OUT (git-ignored); first-read record: research/gap-gsp-2026-07.md"
+featured    = false  # external-competitor differential harness, not a dashboard-promoted capability suite
+status      = "ok"  # smoke (sparq loopback) is self-contained; competitor columns are gather-time external cost
 
 # [SONNET-4.6] sq-hmd7l.12 — federation harness (FedShop vs Comunica + Jena SERVICE)
 [[benchmark]]

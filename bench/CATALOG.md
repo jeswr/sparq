@@ -83,6 +83,14 @@ Notes on a few that need care:
   numbers come only from a quiet EC2 runner, and it is deliberately NOT wired into
   `scripts/ci-bench.sh` / `scripts/perf-gate.py` (req/s is a trend/EC2 metric). It is the
   prerequisite that unblocks the HTTP opt lane (sq-7d3dj.10/.12/.13).
+- **`gsp-bench` (`bench/gsp`) is the Graph Store Protocol same-box panel** — see
+  [`bench/gsp/README.md`](./gsp/README.md). GSP PUT/GET/DELETE round-trips (1 KB–10 MB
+  size sweep + the PSS LDP-CRUD stream projected onto GSP verbs) against sparq-server /
+  Fuseki / Oxigraph server, plus Community Solid Server as a **LOOSE** LDP-architecture
+  column (labelled, never averaged). A HARD round-trip content gate (returned triple set
+  must equal the PUT set exactly) runs BEFORE any timing; the driver is loopback-only
+  (refuses non-loopback URLs). `bash bench/gsp/run.sh --smoke` is the self-contained
+  acceptance run. First-read record: `research/gap-gsp-2026-07.md`. [FABLE-5]
 - **`sp2b` (SP2Bench) is tiered** — see [`bench/sp2b/README.md`](./sp2b/README.md).
   The per-commit path builds+caches the real Freiburg generator (BSD; sha256-pinned, g++
   `-O2` not `-O3`) and runs 14 sub-second queries on a fixed 250k-triple corpus, emitting

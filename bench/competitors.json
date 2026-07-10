@@ -84,6 +84,10 @@
         {
           "sparq_suite": "lubm",
           "note": "comparable on the LUBM extensional tier (Oxigraph has no OWL-RL reasoner — entailed tier is NOT comparable)"
+        },
+        {
+          "sparq_suite": "gsp-bench",
+          "note": "[FABLE-5 sq-hmd7l.21] like-for-like GSP column via the Oxigraph SERVER (not the embedded crate): `oxigraph serve` exposes a Graph Store Protocol endpoint at /store?graph=<iri>; binary pin per scripts/oxigraph-serve-same-box.sh. Round-trip content gate before timing (bench/gsp/)."
         }
       ],
       "version_env_metadata": "captured at gather time from Cargo.lock (exact resolved oxigraph version) + host env block; the sparq-bench compare path already prints both engines' load/query timings and peak RSS to stdout.",
@@ -166,6 +170,10 @@
         {
           "sparq_suite": "dbpsb",
           "note": "DBPSB/FEASIBLE DBpedia cut; the suite Jena/Fuseki is most-reported on in the literature."
+        },
+        {
+          "sparq_suite": "gsp-bench",
+          "note": "[FABLE-5 sq-hmd7l.21] like-for-like GSP column: a Fuseki dataset exposes the Graph Store Protocol at <dataset>/data?graph=<iri>. Round-trip content gate before timing (bench/gsp/)."
         }
       ],
       "version_env_metadata": "gather records the Fuseki Docker image DIGEST (or the distribution version / `fuseki --version`) + java -version + the host env block. Results land git-ignored in bench/competitor-results/fuseki-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
