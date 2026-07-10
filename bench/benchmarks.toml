@@ -1258,6 +1258,35 @@ pinning     = "row counts {100, 1000, 10000} and value counts (1000) are fixed i
 records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
 status      = "ok"
 
+# [FABLE-5] sq-atjue — the ZERO-OVERHEAD DELTA harness: the substrate half of the
+# sparq-engine-systems paper's §8 protocol (site/papers/sparq-engine-systems.typ,
+# evidence key substrate.overhead_<kernel>, environment="canonical" ONLY). Measures
+# each shared kernel (merge_join / hash_probe / Num int+double / compare_terms)
+# against a hand-SPECIALISED pre-extraction equivalent — the SAME algorithm over the
+# SAME data structure with only the extraction's generalisation removed — and emits
+# the house JSON envelope with one substrate.overhead_<kernel> record per kernel. It
+# MEASURES the title-level "zero measured marginal overhead" claim; a non-zero delta
+# is reported with an honest root_cause, never bent to the claim. HONESTY: a
+# wall-clock ratio is meaningful only on a quiet dedicated host; the envelope's
+# `canonical` flag is true ONLY for a `--canonical` run on such a box (a work-box run
+# is environment="indicative", PR-body-only, never a paper headline). The leapfrog
+# trie-join (WCOJ) is deliberately excluded — net-new in the substrate, it has no
+# hand-specialised pre-extraction predecessor to form an honest delta against.
+# `featured = false`: an internal micro-instrument, not a head-to-head dashboard card.
+[[benchmark]]
+id          = "substrate-overhead-delta"
+name        = "sparq-substrate zero-overhead delta (substrate.overhead_<kernel>)"
+category    = "query"
+measures    = "per-kernel wall-clock overhead_ratio = (substrate_ns - handrolled_ns)/handrolled_ns, min-of-N reps, for merge_join / hash_probe / num_int_add / num_double_add / compare_terms; the hand-rolled side is the pre-extraction hand-specialised equivalent (same algorithm, generalisation removed); every kernel result-equivalence-checked (agree)"
+invoke      = "cargo run -p sparq-substrate --example substrate_overhead --features overhead --release -- --json    # add --canonical --reps 15 on the dedicated quiet host"
+source      = "crates/sparq-substrate/src/overhead.rs, crates/sparq-substrate/examples/substrate_overhead.rs"
+dataset     = "synthetic in-harness (deterministic sorted Row enumeration + Num value pairs + a mixed int/double/string literal stream; no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "workload sizes fixed in overhead.rs (join 20000 rows, numeric 100000 pairs, compare 50000 terms); corpus deterministic; environment=canonical ONLY on a dedicated quiet EC2 box"
+records_to  = "stdout house JSON envelope (substrate.overhead_<kernel>); a CANONICAL envelope commits under bench/canonical-substrate-overhead/"
+status      = "ok"
+
 # [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-fedplan in-crate criterion
 # micro-bench for select_sources + plan_bgp. Closes the bench-missing drift
 # item for sparq-fedplan (GitHub #1648). The bench already existed in
