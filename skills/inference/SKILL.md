@@ -163,7 +163,7 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 - **Builtins (`rif::Builtin`).** Numeric predicates (`NumericEqual`/`LessThan`/`GreaterThan`/`NotLessThan`/`NotGreaterThan`/`NumericNotEqual`) + functions (`NumericAdd`/`Subtract`/`Multiply`/`Divide`), string predicates (`StringContains`/`StartsWith`/`EndsWith`) + functions (`StringConcat`/`StringLength`/`StringUpperCase`/`StringLowerCase`/`StringEncodeForUri`), and list `ListContains`/`ListLength`/`ListConcatenate` (variadic — `is_variadic()` returns `true`; `arity()` is the minimum). `is_filter()` distinguishes a predicate (all args inputs) from a function (last arg = computed output). Each lowers to the equivalent `math:`/`string:`/`list:` N3 builtin. A **deferral ledger** (`rif::UNIMPLEMENTED`) records builtins that are NOT mapped because no sound N3 target exists today (e.g. `func:numeric-integer-divide` truncation semantics, `pred:matches` XSD-regex vs Rust-regex dialect gap, date/time builtins lacking a temporal tower); those entries are tracked, never silently dropped.
 - **Builtin SAFETY / range-restriction (enforced).** `Document::validate()` (also called by `to_n3_source`/`closure`) **rejects** an unsafe rule with a `RifError` rather than letting the chainer loop or over-derive: a head variable not bound by a positive body atom (`UnboundHeadVar`), a builtin *input* not range-restricted (`UnboundBuiltinInput`), a builtin in a head (`BuiltinInHead`), wrong arity (`BadBuiltinArity`), Equal in a head (`EqualInConclusion`), or distinct ground constants in a body Equal (`DistinctGroundEqual`).
 - **MONOTONE — NAF is EXCLUDED by design.** RIF-Core is monotone Horn; negation-as-failure / RIF-PRD actions / aggregation are **not in the dialect** and are not representable in the `Atom` model. Adding facts only ever *adds* conclusions. Larger-RIF surface (RIF-BLD function symbols, the SPARQL-RIF Core Entailment Regime) is documented out-of-scope in `rif::UNIMPLEMENTED` — tracked, never faked. The expressivity ratchet is `sparq-conformance`'s `rif_core_suite` (opt-in `rif-core` feature; `RIF_CORE_FLOOR`, a sparq-EXTENSION row in the central scoreboard).
-- **RIF/XML importer** (`rif-xml` feature, `rif_xml::import()`): parses the W3C RIF-Core XML
+- **RIF/XML importer** (`rif-xml` feature, `rif_xml::import()` / `rif_xml::import_with_closure()`): parses the W3C RIF-Core XML
   presentation syntax into a `rif::Document`. Applies three sound desugarings at import: body
   `Or` → rule-splitting (Lloyd-Topor, one rule per disjunct); body `Exists` → existential
   vars become ordinary body vars (range-restriction validated by `Document::validate`);
@@ -182,6 +182,20 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   `Rule::fact` entries are produced. Fail-closed: zero slots → `MalformedXml`; named-arg slot →
   `NamedArgUniterm`; duplicate `<object>` → `MalformedXml`. `<slot>` is multi-cardinality;
   `<object>` remains single-cardinality.
+  **Imports-closure consistency check** (`import_with_closure(xml_bytes, resolver)`, sq-wbql1):
+  unlike `import()` which blanket-refuses any `<Import>` directive, `import_with_closure` accepts
+  a caller-supplied `resolver: impl Fn(&str) -> Option<Vec<u8>>` and performs a GENUINE consistency
+  check: (1) profile-checks the `<Import>` `profile` attribute — a non-Core profile IRI (BLD, PRD,
+  OWL-Direct, …) → `ImportError::InconsistentImport` (a NON-VACUOUS detection, distinct from a
+  blanket refusal); (2) if the resolver returns bytes for the import location, the imported document
+  is parsed as RIF-Core and its rules are merged; the combined rule set is then validated — a
+  validation failure → `ImportError::InconsistentImport`; (3) if the resolver returns `None`, the
+  import is still rejected fail-closed with `ImportError::ImportDirective`. The fail-closed
+  invariant: an inconsistent/unresolvable/incompatible import is ALWAYS rejected; a consistent
+  import (resolvable, Core-compatible profile, combined rules pass `validate()`) is accepted and
+  the merged `Document` returned. The W3C RIF ImportRejectionTests target profile-mismatch
+  invalidity; with a file-system resolver wired to the fetched `Core_v1.22` archive, tests using
+  non-Core `profile` attributes graduate from `skip:imports` to `Outcome::Pass`.
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
