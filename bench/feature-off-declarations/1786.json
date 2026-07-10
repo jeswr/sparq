@@ -1,0 +1,5 @@
+{
+  "pr": 1786,
+  "date": "2026-07-08",
+  "reason": "always-compiled default-on correlated (theta) anti-join for OPTIONAL+FILTER(!bound) added to sparq-engine exec.rs (sq-7d3dj.30.9) moves the feature-OFF bundle bytes"
+}

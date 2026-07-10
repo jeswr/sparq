@@ -2607,6 +2607,42 @@ impl Graph {
         }
     }
 
+    /// [FABLE-5] (sq-1ivw7) Whether ANY triple with predicate `predicate` in the CURRENT store
+    /// snapshot (base index MERGED with the pending update overlay) has a LITERAL object.
+    ///
+    /// Answers, against the live snapshot, the term-kind question the engine's predicate-range
+    /// non-literal inference asks: a variable bound only as the OBJECT of patterns whose predicate
+    /// is this constant IRI can be treated as non-literal (id-comparable for `=`/`!=`) for a query
+    /// execution iff this returns `false`. It scans the predicate's object column with an EARLY
+    /// EXIT on the first literal found — cheap when a literal is near the front, O(matches) when the
+    /// predicate is genuinely literal-free (the case that fires the fast path). The result is only
+    /// valid for THIS snapshot: an UPDATE inserting a literal object publishes a NEW generation, so
+    /// a fresh evaluation re-checks against the new snapshot (there is no cross-snapshot memo).
+    ///
+    /// `predicate` is a raw dictionary id. An absent predicate (no triples) returns `false`
+    /// (vacuously literal-free), which is correct: the object variable is then unbound anyway.
+    ///
+    /// SCOPE (load-bearing): this answers for the RECEIVER graph ONLY — it scans `self.store`,
+    /// the receiver's own triples (a named graph is a self-contained sub-`Graph` with its own
+    /// `store`/`dict`), and never `self.named`. A caller must invoke it on the SAME graph the
+    /// object variable is bound from: an object under a `GRAPH <g>`/`GRAPH ?g` block is bound
+    /// from the named sub-graph, so classifying it off the enclosing (default) graph's column is
+    /// UNSOUND. The engine enforces this by staying conservative for object slots under any GRAPH
+    /// block at an outer dispatch (see `collect_kind_positions`' `G::Graph` arm).
+    pub fn predicate_has_literal_object(&self, predicate: Id) -> bool {
+        if predicate == dict::NO_ID {
+            return false;
+        }
+        let scan = self.store.scan(&[None, Some(predicate), None]);
+        for row in scan.rows.iter() {
+            let o = scan.to_spo(row)[2];
+            if dict::is_literal_id(&self.dict, o) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Builds an id pattern from optional terms; returns `None` if any bound
     /// term is absent from the dictionary.
     pub fn pattern(
@@ -5852,6 +5888,119 @@ mod build_timing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- sq-1ivw7: predicate-range object term-kind (predicate_has_literal_object) ----
+    //
+    // Direct unit tests for the two new public fns the engine's predicate-range non-literal
+    // inference is built on: `dict::is_literal_id` (pure id classification) and
+    // `Graph::predicate_has_literal_object` (live-snapshot object-column scan, overlay-aware).
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new(s).unwrap())
+    }
+    fn lit_int(v: &str) -> Term {
+        Term::Literal(oxrdf::Literal::new_typed_literal(v, oxrdf::vocab::xsd::INTEGER))
+    }
+    fn lit_str(v: &str) -> Term {
+        Term::Literal(oxrdf::Literal::new_simple_literal(v))
+    }
+    fn bnode(l: &str) -> Term {
+        Term::BlankNode(oxrdf::BlankNode::new(l).unwrap())
+    }
+
+    #[test]
+    fn is_literal_id_classifies_each_kind() {
+        let mut g = Graph::from_parts(Dict::new(), Vec::new());
+        g.apply_delta(
+            &[
+                [iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o")],
+                [iri("http://ex/s"), iri("http://ex/plain"), lit_str("hi")],
+                [iri("http://ex/s"), iri("http://ex/n"), lit_int("7")], // NON-inline? 7 inlines.
+                [iri("http://ex/s"), iri("http://ex/big"), lit_int("99999999999")], // dict literal
+                [iri("http://ex/s"), iri("http://ex/b"), bnode("b0")],
+            ],
+            &[],
+        )
+        .unwrap();
+        // IRI object -> not a literal.
+        let iri_id = g.id_of(&iri("http://ex/o")).unwrap();
+        assert!(!dict::is_literal_id(&g.dict, iri_id), "IRI id is not a literal");
+        // bnode -> not a literal.
+        let bn_id = g.id_of(&bnode("b0")).unwrap();
+        assert!(!dict::is_literal_id(&g.dict, bn_id), "bnode id is not a literal");
+        // plain string literal -> literal (dictionary record).
+        let s_id = g.id_of(&lit_str("hi")).unwrap();
+        assert!(dict::is_literal_id(&g.dict, s_id), "string literal id is a literal");
+        // inline integer -> literal (tagged-id path).
+        let inline_id = g.id_of(&lit_int("7")).unwrap();
+        assert!(dict::is_inline(inline_id), "small integer should inline");
+        assert!(dict::is_literal_id(&g.dict, inline_id), "inline integer is a literal");
+        // large integer -> dictionary literal.
+        let big_id = g.id_of(&lit_int("99999999999")).unwrap();
+        assert!(!dict::is_inline(big_id), "out-of-range integer stays in dict");
+        assert!(dict::is_literal_id(&g.dict, big_id), "dict integer literal is a literal");
+        // NO_ID -> not a literal.
+        assert!(!dict::is_literal_id(&g.dict, dict::NO_ID), "NO_ID is not a literal");
+    }
+
+    #[test]
+    fn predicate_has_literal_object_iri_only_vs_literal_vs_bnode() {
+        let mut g = Graph::from_parts(Dict::new(), Vec::new());
+        g.apply_delta(
+            &[
+                // creator: IRI-only objects (the SP2Bench dc:creator shape).
+                [iri("http://ex/paper1"), iri("http://ex/creator"), iri("http://ex/alice")],
+                [iri("http://ex/paper2"), iri("http://ex/creator"), iri("http://ex/bob")],
+                // creator also with a bnode object -> still literal-free.
+                [iri("http://ex/paper3"), iri("http://ex/creator"), bnode("anon")],
+                // title: literal objects.
+                [iri("http://ex/paper1"), iri("http://ex/title"), lit_str("A Paper")],
+                // year: inline-integer literal object.
+                [iri("http://ex/paper1"), iri("http://ex/year"), lit_int("2020")],
+            ],
+            &[],
+        )
+        .unwrap();
+        let creator = g.id_of(&iri("http://ex/creator")).unwrap();
+        let title = g.id_of(&iri("http://ex/title")).unwrap();
+        let year = g.id_of(&iri("http://ex/year")).unwrap();
+        assert!(
+            !g.predicate_has_literal_object(creator),
+            "creator has only IRI/bnode objects -> literal-free"
+        );
+        assert!(g.predicate_has_literal_object(title), "title has a string literal object");
+        assert!(g.predicate_has_literal_object(year), "year has an inline-integer literal object");
+        // An absent predicate id is vacuously literal-free.
+        assert!(!g.predicate_has_literal_object(dict::NO_ID), "NO_ID predicate is literal-free");
+        let absent = g.id_of(&iri("http://ex/creator")).unwrap() + 1_000_000;
+        assert!(!g.predicate_has_literal_object(absent), "unknown predicate has no objects");
+    }
+
+    #[test]
+    fn predicate_has_literal_object_reflects_overlay_update() {
+        // The SNAPSHOT-lifecycle invariant: a predicate literal-free at load becomes literal-HAVING
+        // the instant an UPDATE inserts a literal object for it (through the overlay), so a fresh
+        // check against the mutated snapshot must flip. This is why the engine re-checks the LIVE
+        // graph every eval rather than memoising across snapshots.
+        let mut g = Graph::from_parts(Dict::new(), Vec::new());
+        g.apply_delta(
+            &[[iri("http://ex/paper1"), iri("http://ex/creator"), iri("http://ex/alice")]],
+            &[],
+        )
+        .unwrap();
+        let creator = g.id_of(&iri("http://ex/creator")).unwrap();
+        assert!(!g.predicate_has_literal_object(creator), "literal-free before the update");
+        // UPDATE: insert a literal object for the same predicate.
+        g.apply_delta(
+            &[[iri("http://ex/paper2"), iri("http://ex/creator"), lit_str("Anon Author")]],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            g.predicate_has_literal_object(creator),
+            "the overlay-inserted literal object must be seen by the live-snapshot check"
+        );
+    }
 
     // ---- sq-dvyi: engine-side JSON-LD ingest (the lean WASM build's `load`) ----
     //

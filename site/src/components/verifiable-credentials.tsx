@@ -442,9 +442,14 @@ function ImportPanel({
                 remote context fetch); or import the VC as Turtle / N-Quads.
               </p>
             </div>
+            {/* [FABLE-5] sq-mcsbp — the sr-only file input is a real focusable form
+                element, so axe's `label` rule (critical) requires it to carry its own
+                accessible name; the aria-label on the visible dropzone div does not name
+                this input. Give the input an explicit aria-label. */}
             <input
               ref={fileInputRef}
               type="file"
+              aria-label="Choose credential file(s) to import (JSON-LD, Turtle, N-Quads, TriG or N-Triples)"
               accept=".jsonld,.json,.ttl,.turtle,.nq,.nquads,.trig,.nt,.ntriples,application/ld+json,text/turtle"
               multiple
               className="sr-only"
@@ -860,8 +865,12 @@ function HonestyNote() {
           guarantee, and external accredited-cryptographer sign-off is pending (
           <code className="font-mono">sq-qhy4</code>). Treat any future &ldquo;verified&rdquo;
           affordance accordingly. See the{" "}
+          {/* [FABLE-5] sq-mcsbp — persistent underline (not hover-only): this link sits inline
+              inside a muted card paragraph where its --primary teal is only ~1.03:1 against the
+              surrounding muted text, so axe's link-in-text-block (serious) requires a non-colour
+              distinguisher. */}
           <a
-            className="text-primary underline-offset-4 hover:underline"
+            className="text-primary underline underline-offset-4"
             href={withBasePath("/showcase/zk-car-hire")}
           >
             ZK car-hire demo
