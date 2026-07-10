@@ -257,12 +257,15 @@ Materialize the authorization view from the access-control documents, then enfor
   `Link: rel="acl"` surface (above). **Honest scope:** Phase-1 implements
   the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
   (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk. The **HTTP shell**
-  over this library surface (FR-4, sq-snopa.6) has now LANDED as `sparq-server`'s opt-in
+  over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
   `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
-  that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split); see the
-  `http-server` skill. That HTTP layer does NOT authenticate — it takes an already-resolved
-  session, exactly as this library does. The `decide` `scope` is the ACL-*document* discovery
-  scope, while whether a grant within that ACL applies is the verdict the oracle computes.
+  that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split). The
+  **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
+  and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
+  was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
+  does NOT authenticate — it takes an already-resolved session, exactly as this library does. The
+  `decide` `scope` is the ACL-*document* discovery scope, while whether a grant within that ACL
+  applies is the verdict the oracle computes.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
