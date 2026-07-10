@@ -1,0 +1,13 @@
+{
+  "_comment": "Fixture-only committed results JSON for the paper-evidence verifier self-test. NOT real project data.",
+  "conformance": {
+    "sparql_floor": 1229,
+    "shacl_core": 98
+  },
+  "recall": {
+    "at_10_floor": 0.95
+  },
+  "flags": {
+    "prefilter_equals_postfilter": true
+  }
+}

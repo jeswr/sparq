@@ -107,16 +107,18 @@ Paper-bound numbers live in a **dedicated evidence file, `site/src/data/paper-ev
   `environment: "indicative"`** (folded in by `site/scripts/sync-benchmarks.mjs` from the
   `benchmark-data` branch). It feeds the site's benchmark widgets, **never** a paper headline.
 
-A paper-evidence record:
+A paper-evidence record (a `binding` upgrades its `source` from asserted to machine-verified —
+see gate 4):
 
 ```json
-{ "value": 0.90, "unit": "recall@10", "environment": "canonical",
-  "kind": "deterministic-floor",
-  "source": "crates/sparq-vectors/tests/filtered.rs::filtered_traversal_recall_vs_exact_on_broad_mask",
-  "note": "machine-independent: a deterministic seed + an assertion threshold, not a timing." }
+{ "value": 98, "unit": "passing-assertions", "environment": "canonical",
+  "kind": "conformance-ratchet-floor",
+  "source": "crates/sparq-shacl/tests/w3c_core.rs::BASELINE_PASS (mirrored in scoreboard.rs)",
+  "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_core.rs", "anchor": "BASELINE_PASS" },
+  "note": "machine-independent: a const a CI test asserts, not a timing." }
 ```
 
-**The honesty gate (two layers, both as-built in PR #336):**
+**The honesty gate (as-built; PR #336 landed layers 1–3, sq-gum8.13 added the binding layer 4):**
 
 1. **Data layer — `site/scripts/build-papers.mjs::runHonestyGate()` runs FIRST**, before any
    compile: it schema-checks `paper-evidence.json` (every record needs a valid `environment`
@@ -145,6 +147,24 @@ canonical today and are exactly what `paper-evidence.json` holds.
    (`scripts/honesty-phrases.json`), and `build-papers.mjs` re-runs both at the build
    boundary. This is a **COARSE** class only — see Stage 5 for what it does and does **not**
    catch; do not read its green as a semantic-correctness guarantee.
+4. **Value↔source binding gate — `scripts/verify-paper-evidence.py`** (bead sq-gum8.13, F1).
+   Layer 1 checks a `source` is *present*; this layer checks the value still *matches* it.
+   Each canonical record carries a machine-checkable `binding`, one of:
+   - `json-pointer` `{file, pointer}` — the value must EQUAL the RFC-6901-pointed scalar in a
+     committed JSON (derivation-strength);
+   - `rust-anchor` `{file, anchor}` — the anchor (const/test-fn name) must EXIST in the file AND
+     the value must appear within its window (**honest limitation: literal-adjacency only** —
+     it can in principle false-pass if the same literal sits nearby for another reason; strictly
+     weaker than json-pointer, strictly stronger than unchecked free text);
+   - `doc-anchor` `{file, quote}` — the exact quote must be present (existence-strength only).
+
+   **Fail-closed:** a canonical record without a passing binding aborts the paper build unless
+   it is on the shrink-only allowlist (`scripts/paper-evidence-binding-allowlist.json`); the
+   verifier fails if that allowlist ever GROWS (F3/sq-gum8.15 drives it to empty; F2/sq-gum8.14
+   exports the scoreboard consts so the conformance floors become `json-pointer`s). Wired into
+   `build-papers.mjs`; `--self-test` is the CI gate (a value-DRIFT fixture and a missing-anchor
+   fixture each exit non-zero). Like gate 3 it is **MECHANICAL** — value↔source match only; a
+   *semantic* overclaim (a true number framed misleadingly) stays the Stage-5 human review.
 
 ---
 
