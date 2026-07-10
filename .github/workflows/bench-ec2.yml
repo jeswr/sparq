@@ -1,21 +1,43 @@
 name: Benchmarks (EC2)
 
-# Cost-capped EC2-deferred heavy benchmark (roadmap G3). The cost PROTECTIONS live here:
-#   * rate limit  — runs ONLY weekly (cron) + manual dispatch; NEVER on push or pull_request,
-#                   so no per-commit and no fork-PR triggers.
-#   * fork guard  — the job is skipped unless it's the canonical repo.
+# Cost-capped EC2-deferred benchmark (roadmap G3). The cost PROTECTIONS live here:
+#   * rate limit  — runs ONLY on cron (weekly heavy + nightly full-suite) + manual dispatch; NEVER on
+#                   push or pull_request, so no per-commit and no fork-PR triggers.
+#   * fork guard  — the jobs are skipped unless it's the canonical repo.
 #   * OIDC        — assumes a short-lived, tag-scoped IAM role (no long-lived AWS keys); see
 #                   research/ci-ec2-design.md for the trust + permissions policies to create.
 #   * hard caps   — spot instance, a job timeout, and scripts/ec2-bench.sh's always-run cleanup
 #                   trap (terminate instance + delete key/SG) so a run can't leak compute.
-# Estimated spend ~$0.80/month (≈4-5 short spot runs), far under the $5/month cap; back it with an
-# AWS Budgets alarm on the purpose=sparq-ci-bench tag.
 #
-# NOT LIVE until `AWS_BENCH_ROLE_ARN` (repo variable) points at the IAM role; until then the run
-# fails harmlessly at the OIDC step (no instance launched, no cost).
+# TWO LANES (both on the SAME cost-capped EC2 rails — spot + tag purpose=sparq-ci-bench + the
+# always-run terminate/delete cleanup trap; NEVER touch prod i-090531b4ede8f2d3f / dev
+# i-00f76802f345b6b77):
+#   * ec2-bench (WEEKLY, Mondays 06:00 UTC) — the HEAVY campaign at the ~2M-triple scale (the
+#     roadmap-G3 large-hardware run). Publishes to dev/bench-ec2. UNCHANGED.
+#   * nightly-full-bench (NIGHTLY, 06:41 UTC) — [FABLE-5] sq-6vshe.6, MAINTAINER-DIRECTED. Runs the
+#     FULL NOISY TIMING SUITE (query latencies + well-known sp2b/dbpsb/watdiv/bsbm/lubm + the cargo-only
+#     fts/geo/vector/rsp/hdt/solid/nlq/zk hooks) at the SAME 200k CI scale the per-commit series used, on
+#     a quiet dedicated spot instance (contention-free wall-clock, unlike a shared GitHub runner). This is
+#     the lane the flaky/slow benchmark timing was MOVED TO: it was dragging the merge queue + flapping
+#     the gate on shared runners, so the per-PR bench lane now runs ONLY the fast deterministic byte-count
+#     ratchet (bench.yml `--deterministic-only`) and this nightly EC2 lane carries the full perf-tracking
+#     series. Publishes to dev/bench-nightly (a distinct dashboard dir, so it collides with neither the
+#     per-commit dev/bench nor the weekly heavy dev/bench-ec2). The perf-tracking is NOT lost — only moved.
+#
+# COST BASIS (why NIGHTLY is affordable):
+#   * The nightly runs the full suite at the 200k CI scale (NOT the 2M heavy scale), so a run is a short
+#     spot session on a c7g.4xlarge (arm64, spot ~$0.30-0.40/hr): build + full suite ~10-20 min ≈
+#     ~$0.07-0.14/run. 30 nights/month ≈ $2-4/month. Together with the weekly heavy (~$0.80/month) the
+#     EC2 bench total stays UNDER the $5/month cap. Back it with an AWS Budgets alarm on the
+#     purpose=sparq-ci-bench tag. If a future scale-up pushes over budget, drop the nightly cron to
+#     `weekly` (state the new cost basis in this header) — the design does not depend on the cadence.
+#
+# NOT LIVE until `AWS_BENCH_ROLE_ARN` (repo variable) points at the IAM role; until then the runs
+# fail harmlessly at the OIDC step (no instance launched, no cost).
 on:
   schedule:
-    - cron: '0 6 * * 1'      # Mondays 06:00 UTC
+    - cron: '0 6 * * 1'      # ec2-bench: Mondays 06:00 UTC (weekly heavy)
+    - cron: '41 6 * * *'     # nightly-full-bench: 06:41 UTC daily (offset off other nightly lanes)
   workflow_dispatch:
 
 # [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): top-level read-only;
@@ -30,7 +52,12 @@ concurrency:
 jobs:
   ec2-bench:
     name: heavy benchmark on EC2 (spot)
-    if: github.repository == 'sparq-org/sparq'
+    # [FABLE-5] sq-6vshe.6: the WEEKLY heavy campaign. Runs on the Monday cron OR a manual dispatch
+    # (unchanged manual behavior); the nightly '41 6 * * *' cron routes to nightly-full-bench instead,
+    # so a nightly tick never launches this heavy 2M-scale instance.
+    if: >-
+      github.repository == 'sparq-org/sparq' &&
+      (github.event_name != 'schedule' || github.event.schedule == '0 6 * * 1')
     runs-on: ubuntu-latest
     # [OPUS-4.8] Job-scoped writes (least privilege):
     #   id-token: write — assume the short-lived, tag-scoped IAM role via OIDC
@@ -87,3 +114,102 @@ jobs:
           comment-on-alert: true
           fail-on-alert: false
           alert-comment-cc-users: '@jeswr'
+
+  # [FABLE-5] (sq-6vshe.6 heavy-lane placement, MAINTAINER-DIRECTED) The NIGHTLY FULL-SUITE lane —
+  # the destination for the noisy timing benchmarks moved OFF the per-PR / merge_group bench gate. It
+  # runs ci-bench.sh's FULL suite (query latencies + all well-known + cargo-only latency suites) at the
+  # 200k CI scale on a QUIET dedicated spot instance (contention-free wall-clock, unlike a shared GitHub
+  # runner), reusing the SAME cost-capped EC2 rails as ec2-bench (spot + purpose=sparq-ci-bench tag + the
+  # always-run terminate/delete cleanup trap in scripts/ec2-bench.sh). Publishes the full series to
+  # dev/bench-nightly so the perf-tracking dashboard keeps its trend — the tracking is MOVED, not lost.
+  nightly-full-bench:
+    name: nightly full-suite benchmark on EC2 (spot)
+    # Nightly cron only (the '41 6 * * *' tick). A weekly-cron tick or a manual dispatch routes to the
+    # heavy ec2-bench job above instead, so this job never double-launches alongside it.
+    if: >-
+      github.repository == 'sparq-org/sparq' &&
+      github.event_name == 'schedule' && github.event.schedule == '41 6 * * *'
+    runs-on: ubuntu-latest
+    # Job-scoped writes (least privilege), identical to ec2-bench:
+    #   id-token: write — assume the short-lived, tag-scoped IAM role via OIDC
+    #   contents: write — github-action-benchmark pushes to the benchmark-data branch
+    permissions:
+      id-token: write
+      contents: write
+    timeout-minutes: 45        # hard wall-clock cap (backstop to the script's own cleanup trap)
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_BENCH_ROLE_ARN }}
+          aws-region: eu-west-2
+      - name: Launch spot, run FULL suite at 200k, always-terminate
+        run: bash scripts/ec2-bench.sh
+        env:
+          # Reuse the SAME script (single source of truth); the FULL-suite knobs make it install the
+          # well-known-suite toolchains + wasm target and run ci-bench.sh with GITHUB_REF=refs/heads/main
+          # (so every main-tier suite runs) at the 200k CI scale, writing nightly-bench-results.json.
+          BENCH_FULL_SUITE: '1'
+          BENCH_SCALE: '200000'
+          BENCH_OUT: nightly-bench-results.json
+      # First-run bootstrap: create the shared benchmark-data history branch on origin if it does not
+      # exist yet, so github-action-benchmark's `git fetch ... benchmark-data:benchmark-data` does not
+      # hard-fail with "couldn't find remote ref". Idempotent (mirrors ec2-bench + bench.yml).
+      - name: Ensure benchmark-data history branch exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin benchmark-data >/dev/null 2>&1; then
+            echo "benchmark-data branch already exists on origin — nothing to do."
+          else
+            echo "benchmark-data branch missing on origin — creating an orphan branch."
+            tmp="$(mktemp -d)"
+            git -C "$tmp" init -q
+            git -C "$tmp" checkout -q --orphan benchmark-data
+            git -C "$tmp" -c user.name=github-actions[bot] \
+                          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                          commit -q --allow-empty -m "chore(bench): initialise benchmark-data history branch"
+            git -C "$tmp" push -q \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              benchmark-data:benchmark-data
+            echo "Created and pushed orphan benchmark-data branch."
+          fi
+      - name: Track nightly full-suite series
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        with:
+          name: sparq engine (nightly full suite)
+          tool: customSmallerIsBetter
+          output-file-path: nightly-bench-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: benchmark-data
+          benchmark-data-dir-path: dev/bench-nightly
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false
+          alert-comment-cc-users: '@jeswr'
+      # [FABLE-5] DEMOTION AUTO-BEAD PROTOCOL (research/ci-structural-speedup.md §7; mirrors fuzz.yml +
+      # differential.yml). The full noisy timing suite was DEMOTED off per-PR/merge_group to this nightly
+      # lane. If the nightly run FAILS (a suite correctness diff regressed, or the run itself broke) that
+      # failure must not silently rot — it auto-files a standing P1 bead + a GitHub issue naming the lane
+      # + run, so a finding the fast per-PR deterministic slice could not have caught is tracked to
+      # closure. gh failures degrade to warnings (the lane is already red); the JSONL append is
+      # best-effort (protected-main GH013 push may decline — the issue is the reliable channel).
+      - name: File a demoted-lane bead + issue on nightly failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo "nightly full-suite benchmark failed — see run ${{ github.run_id }}" > nightly-bench-fail.log
+          python3 scripts/ci-file-demoted-lane-failure.py \
+            --lane bench-nightly-full-suite \
+            --full-form "full ci-bench.sh timing suite at 200k on nightly EC2 (bench-ec2.yml nightly-full-bench)" \
+            --per-pr-form "deterministic byte-count ratchet only (bench.yml --deterministic-only)" \
+            --bead-prefix bnf \
+            --log nightly-bench-fail.log \
+            --jsonl .beads/issues.jsonl \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || echo "::warning::demoted-lane filer failed (non-fatal; the lane is already red)"

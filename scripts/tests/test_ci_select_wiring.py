@@ -411,13 +411,25 @@ class TestPhase2LaneScoping(unittest.TestCase):
         self.assertNotIn("if", job, "select must be unconditional (gate needs it green)")
         self.assertNotIn("needs", job)
 
-    def test_bench_runs_on_schedule_backstop(self):
+    def test_bench_runs_on_pr_and_schedule_but_not_merge_group(self):
         # sq-mel85 added a nightly schedule to bench.yml as the full-run backstop: a
         # schedule event carries no PR diff => selector mode=full => the fail-closed
-        # disjunct RUNS the whole suite. merge_group is retained for the perf gate.
+        # disjunct RUNS the whole suite.
+        # [FABLE-5] sq-6vshe.6 (MAINTAINER-DIRECTED): merge_group is REMOVED. On a PR the
+        # bench job runs the FAST DETERMINISTIC byte-count ratchet only (--deterministic-only),
+        # which still gates; the merged-tree deterministic ratchet is a pure function of the code
+        # (already ran on the PR head + re-runs on push-to-main), and the merged-tree wasm-
+        # feature-OFF invariant is independently guarded on merge_group by vectorized-feature-off.yml,
+        # so re-running bench on the merge_group ref only dragged the queue. The full NOISY timing
+        # suite moved to the nightly EC2 lane (bench-ec2.yml nightly-full-bench).
         on = _on_block(self.bench)
         self.assertIn("schedule", on, "bench.yml must have the nightly schedule backstop")
-        self.assertIn("merge_group", on, "bench.yml must run on merge_group for the gate")
+        self.assertIn("pull_request", on,
+                      "bench.yml must run on pull_request (the deterministic byte-count ratchet still gates)")
+        self.assertNotIn("merge_group", on,
+                         "bench.yml must NOT run on merge_group (sq-6vshe.6: the deterministic ratchet "
+                         "already gated the PR head + re-runs on push-to-main; the noisy timing suite "
+                         "moved to the nightly EC2 lane — keeping it on merge_group only dragged the queue)")
 
     def test_bench_main_history_and_ratchet_exclude_schedule(self):
         # CRITICAL (design §6.1 continuity, criterion (d)): the auto-ratchet + history +
