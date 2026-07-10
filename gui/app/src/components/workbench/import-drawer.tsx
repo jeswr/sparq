@@ -35,6 +35,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useEngine, type ImportKind, type ImportMode } from "@/lib/engine-context";
+import { runImportBatch, type BatchSummary } from "@/lib/import-batch";
 import { useWorkspace } from "@/lib/workspace-context";
 import {
   FORMAT_OPTIONS,
@@ -98,6 +99,40 @@ interface FeedbackErr {
   message: string;
 }
 type Feedback = FeedbackOk | FeedbackErr | null;
+
+/**
+ * (sq-810a0) Build the batch-import completion feedback from a {@link BatchSummary}.
+ *
+ * Beyond the ok/failed counts, it now SIGNALS when a `replace` the user selected was NOT applied
+ * because every file that could have replaced the store failed — the old dataset was left intact.
+ * Before this fix that outcome was silent (the user could believe the store had been cleared).
+ */
+function batchFeedback(summary: BatchSummary): Feedback {
+  const { okCount, errCount, totalAdded, replaceRequested, replaceApplied } = summary;
+  const quads = `${totalAdded.toLocaleString()} quad${totalAdded === 1 ? "" : "s"}`;
+  // Replace was asked for but never landed on a file (all replace-eligible files failed).
+  const replaceNotApplied = replaceRequested && !replaceApplied && okCount > 0;
+
+  if (errCount === 0) {
+    return {
+      kind: "ok",
+      message: `Imported ${okCount} file${okCount === 1 ? "" : "s"} — ${quads} added.`,
+    };
+  }
+  if (okCount > 0) {
+    const replaceNote = replaceNotApplied
+      ? " The replace was NOT applied (the file(s) meant to replace the store failed); existing data was kept and the imported file(s) were added."
+      : "";
+    return {
+      kind: "error",
+      message: `${okCount} file${okCount === 1 ? "" : "s"} imported (${quads}); ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.${replaceNote}`,
+    };
+  }
+  return {
+    kind: "error",
+    message: `All ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.${replaceRequested ? " The store was left unchanged (replace not applied)." : ""}`,
+  };
+}
 
 function ImportDrawer({
   open,
@@ -200,59 +235,29 @@ function ImportDrawer({
     setFileStatuses({});
 
     void (async () => {
-      let totalAdded = 0;
-      const statuses: Record<string, FileItemStatus> = {};
-
-      for (let i = 0; i < webFiles.length; i++) {
-        const file = webFiles[i];
-        // First file uses the selected mode (may replace); subsequent files always add so the
-        // batch merges rather than having each file clobber the previous one.
-        const fileMode: ImportMode = i === 0 ? mode : "add";
-        const format = guessFormat(file.name);
-        try {
-          const result = await importRdf({
+      // Sequence the batch: the selected mode is applied to the FIRST file that imports
+      // SUCCESSFULLY (not to array index 0), 'add' thereafter (sq-810a0). Update each row
+      // incrementally so it lights up as it completes.
+      const { summary } = await runImportBatch(
+        webFiles,
+        mode,
+        (file) => file.name,
+        (file, fileMode) =>
+          importRdf({
             kind: "paste",
             mode: fileMode,
             preserveGraphs,
             label: file.name,
-            format,
+            format: guessFormat(file.name),
             text: file.text,
-          });
-          statuses[file.name] = { kind: "ok", added: result.added };
-          totalAdded += result.added;
-        } catch (err) {
-          // A single-file failure MUST NOT abort the batch — invariant from sq-eydh9.
-          statuses[file.name] = {
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
-          };
-        }
-        // Update incrementally so each row lights up as it completes.
-        setFileStatuses({ ...statuses });
-      }
+          }),
+        (_key, _status, statuses) => setFileStatuses({ ...statuses }),
+      );
 
-      const okCount = Object.values(statuses).filter((s) => s.kind === "ok").length;
-      const errCount = Object.values(statuses).filter((s) => s.kind === "error").length;
-
-      if (errCount === 0) {
-        setFeedback({
-          kind: "ok",
-          message: `Imported ${okCount} file${okCount === 1 ? "" : "s"} — ${totalAdded.toLocaleString()} quad${totalAdded === 1 ? "" : "s"} added.`,
-        });
-      } else if (okCount > 0) {
-        setFeedback({
-          kind: "error",
-          message: `${okCount} file${okCount === 1 ? "" : "s"} imported (${totalAdded.toLocaleString()} quads); ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.`,
-        });
-      } else {
-        setFeedback({
-          kind: "error",
-          message: `All ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.`,
-        });
-      }
+      setFeedback(batchFeedback(summary));
 
       // Record the batch in workspace history.
-      if (okCount > 0) {
+      if (summary.okCount > 0) {
         const label =
           webFiles.length === 1 ? fileLabel(webFiles[0].name) : `${webFiles.length} files`;
         await recordImport(
@@ -282,25 +287,24 @@ function ImportDrawer({
     setFileStatuses({});
 
     void (async () => {
-      let totalAdded = 0;
-      const statuses: Record<string, FileItemStatus> = {};
-
-      for (let i = 0; i < nativePaths.length; i++) {
-        const path = nativePaths[i];
-        const label = fileLabel(path);
-        const format = guessFormat(path);
-        const fileMode: ImportMode = i === 0 ? mode : "add";
-        try {
+      // Sequence the batch: the selected mode is applied to the FIRST path that imports
+      // SUCCESSFULLY (not to array index 0), 'add' thereafter (sq-810a0). Each successful path is
+      // recorded in workspace history inside the importer callback, so a failed leading file that
+      // does NOT clear the store is never recorded — mirroring the pre-fix per-success recording.
+      const { summary } = await runImportBatch(
+        nativePaths,
+        mode,
+        (path) => path,
+        async (path, fileMode) => {
+          const label = fileLabel(path);
           const result = await importRdf({
             kind: "file",
             mode: fileMode,
             preserveGraphs,
             label,
-            format,
+            format: guessFormat(path),
             path,
           });
-          statuses[path] = { kind: "ok", added: result.added };
-          totalAdded += result.added;
           await recordImport(
             {
               kind: "local",
@@ -312,34 +316,12 @@ function ImportDrawer({
             snapshotStore(),
           );
           refreshDiskUsage();
-        } catch (err) {
-          statuses[path] = {
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
-          };
-        }
-        setFileStatuses({ ...statuses });
-      }
+          return { added: result.added };
+        },
+        (_key, _status, statuses) => setFileStatuses({ ...statuses }),
+      );
 
-      const okCount = Object.values(statuses).filter((s) => s.kind === "ok").length;
-      const errCount = Object.values(statuses).filter((s) => s.kind === "error").length;
-
-      if (errCount === 0) {
-        setFeedback({
-          kind: "ok",
-          message: `Imported ${okCount} file${okCount === 1 ? "" : "s"} — ${totalAdded.toLocaleString()} quads added.`,
-        });
-      } else if (okCount > 0) {
-        setFeedback({
-          kind: "error",
-          message: `${okCount} file${okCount === 1 ? "" : "s"} ok, ${errCount} failed — see errors above.`,
-        });
-      } else {
-        setFeedback({
-          kind: "error",
-          message: `All ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.`,
-        });
-      }
+      setFeedback(batchFeedback(summary));
     })().finally(() => setBusy(false));
   }, [nativePaths, mode, preserveGraphs, importRdf, recordImport, snapshotStore, refreshDiskUsage]);
 
