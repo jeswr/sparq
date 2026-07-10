@@ -447,10 +447,16 @@ than papered over: in `wire.rs` the `|`↔`^` bit-op mutations are all equivalen
 `read_varint` flag-set `|=`→`^=` (each distinct flag bit is set at most once from a zero start /
 LEB128 groups occupy non-overlapping shift windows) and the `write_varint` continuation-bit
 `byte | 0x80`→`byte ^ 0x80` (`byte` is masked to `& 0x7f`, so bit 7 is provably clear), so
-XOR ≡ OR on every reachable input; and `EgressGuard::deny_private`→`Default::default()` is
+XOR ≡ OR on every reachable input; `EgressGuard::deny_private`→`Default::default()` is
 equivalent because the struct derives `Default` and `deny_private` constructs exactly the empty
-allowlist the default does (its own doc says "Equivalent to `EgressGuard::default`"). These are
-noted, not asserted on — a test that "kills" an equivalent mutant would be vacuous.
+allowlist the default does (its own doc says "Equivalent to `EgressGuard::default`"); the
+`exclusive_groups` union-find inner-loop bound `(i + 1)..n`→`(i * 1)..n` is equivalent (the extra
+`j == i` iteration does an idempotent self-union — same source, self-shares-var, `union(i,i)` is a
+no-op — so the group set is unchanged); and the `push_group` SubQuery-`project`-FIELD
+`&&`→`||` (line ~486) is equivalent because both branches yield an empty `Vec` in the only case
+they differ (`output_vars` empty ⇒ `project` empty). The `proj_clause` `&&` (line ~449) is NOT
+equivalent — it is killed by `push_group_projection_clause_by_output_var_membership`. These
+equivalents are noted, not asserted on — a test that "kills" an equivalent mutant would be vacuous.
 
 ## Deferred (NOT here)
 
