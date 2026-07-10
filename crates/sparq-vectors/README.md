@@ -53,7 +53,9 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   persistent on-disk `DiskAnnIndex` in the default build; the in-RAM HNSW `VectorIndex`
   behind the **opt-in `approx-ann`** feature, the **only** third-party-ANN dependency
   (`instant-distance`). `VectorIndex::nearest_with_ef(q, k, ef)` sweeps `ef_search` at
-  query time (recall–QPS Pareto; monotone-non-decreasing recall as `ef` grows). **Approximate search has recall `< 1.0`** (measured against `nearest_exact`) — only the exact path is answer-exact.
+  query time (recall–QPS Pareto; monotone-non-decreasing recall as `ef` grows). The HNSW distance
+  kernel is **explicit SIMD** (runtime-detected NEON / AVX2+FMA, scalar fallback, no new dependency —
+  cuts build time + lifts QPS; recall **floor-preserved**, not bit-identical: FMA differs ≤1 ULP, absorbed by the recall floor gate). **Approximate search has recall `< 1.0`** (measured against `nearest_exact`) — only the exact path is answer-exact.
 - **Predicate-constrained ANN (opt-in `filtered-ann`)** — restrict the search to the
   dict-ids a SPARQL BGP admits via an `IdMask` (lean, no new dependency). Composed with
   `approx-ann`, filtered over-fetch fills `k` whenever `k` admitted vectors exist *and the
@@ -103,16 +105,14 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 
 - **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md) (label /
   verbalized / hybrid pipelines, DiskANN, quantization, bulk import, API surface, `.spqv`/`.spqg`).
-- **API reference** — [docs.rs/sparq-vectors](https://docs.rs/sparq-vectors).
-- **Design** — [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
-- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput gates
-  are `cargo test`s (`tests/recall.rs`, `diskann.rs`, `quant.rs`, `throughput.rs`), with live
-  numbers on the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
+- **API reference** — [docs.rs/sparq-vectors](https://docs.rs/sparq-vectors); **design** —
+  [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
+- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput gates are
+  `cargo test`s, with live numbers on the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs` anchors
   recall against **hnswlib** via a committed capture (`tests/fixtures/hnswlib_ref.tsv`):
-  `nearest_exact` reproduces the numpy exact-kNN oracle, and DiskANN (and HNSW under `approx-ann`)
-  clears hnswlib's recall. Runs in CI with **no native deps** (deterministic corpus); the live
-  re-capture (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d. Recall figures NON-CANONICAL.
+  `nearest_exact` reproduces the numpy exact-kNN oracle, and DiskANN / HNSW clear hnswlib's recall.
+  Runs in CI with no native deps; the live re-capture is `#[ignore]`d. Recall figures NON-CANONICAL.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
