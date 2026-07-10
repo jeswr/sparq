@@ -159,6 +159,21 @@ pub mod secprop;
 #[cfg(feature = "framework-vocab")]
 #[cfg_attr(docsrs, doc(cfg(feature = "framework-vocab")))]
 pub mod framework_vocab;
+/// The depth-bounded certification-edge trust-graph closure (`graph` module): a pure,
+/// **fail-closed, attenuation-only** pre-processing step that derives additional
+/// `TrustRule`s from signed `trustx:Certification` edges AHEAD of — and consumed verbatim
+/// by — the UNCHANGED admission gate. Every derived rule is `⊆ (anchor ∩ cert scope ∩
+/// validity window)`: a certification can only NARROW, never widen, the certifier's own
+/// authority, and any unverifiable / expired / cyclic / over-depth / broadening edge
+/// contributes NOTHING; zero certifications ⇒ output is the direct rules byte-identical.
+/// Behind the default-OFF `cert-graph` feature (which enables `framework-vocab` for the
+/// vocabulary): pure Rust over the RDFC-1.0 signature primitive this crate already carries
+/// — NO new dependency, strictly additive (`sq-pfae.15`). A plain code-span (not an
+/// intra-doc link) for `TrustRule` so the default-feature doc build does not reference a
+/// feature-gated item.
+#[cfg(feature = "cert-graph")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cert-graph")))]
+pub mod graph;
 /// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
 /// versioning, revocation, and the admission cache key that composes with the
 /// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
@@ -202,6 +217,11 @@ pub use delegation_prov::{
 #[cfg(feature = "did")]
 pub use did::{
     did_key_for, Did, DidDocumentFetcher, DidError, DidKeyResolver, DidResolver, DidWebResolver,
+};
+#[cfg(feature = "cert-graph")]
+pub use graph::{
+    certification_message, derive_effective_rules, explain_edge, Certification, CertScope,
+    EdgeRejection,
 };
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
 #[cfg(feature = "did")]
