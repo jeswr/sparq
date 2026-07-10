@@ -347,6 +347,18 @@ export const FAMILIES: Family[] = [
     suites: ["hdt"],
     prefixes: ["hdt"],
   },
+  // [FABLE-5] sq-hmd7l.28 — the SPARQL 1.1 Update parity axis (PSS LDP-CRUD stream). Its
+  // canonical same-box gather (suite `pss-update-parity`, competitors Fuseki / Oxigraph over
+  // an HTTP update endpoint) surfaces here via SAMEBOX_SUITE_FAMILY even before a CI-feed
+  // `update_*` metric emits, so the competitor columns render as soon as the gather merges.
+  {
+    key: "update",
+    title: "SPARQL Update (LDP-CRUD parity)",
+    blurb:
+      "SPARQL 1.1 Update latency over a Solid-pod LDP-CRUD stream (INSERT / DELETE / DROP), with same-box Apache Jena Fuseki + Oxigraph baselines; the post-workload quad count is cross-checked engine-vs-engine before any latency row is trusted.",
+    suites: ["update", "sparql update", "pss-update-parity", "pss update"],
+    prefixes: ["update", "pss"],
+  },
   {
     key: "rsp",
     title: "RDF Stream Processing (continuous queries)",
@@ -384,6 +396,7 @@ const CAPABILITY_KEYS = new Set([
   "zk",
   "solid",
   "hdt",
+  "update",
   "rsp",
   "genai",
   "gpu",
@@ -479,7 +492,7 @@ export function fullSuiteGroupsForFamily(key: string): FullSuiteGroup[] {
   // is small). Trend/scaling carry a `suite` so the per-suite filter is exact.
   const allTrends = trendSeriesForFamily(key);
   const allScaling = scalingFamiliesForFamily(key);
-  return suiteGroupsForFamily(key).map((g) => {
+  const groups = suiteGroupsForFamily(key).map((g) => {
     const httpSameBox = httpSameBoxFor(g.suite);
     return {
       suite: g.suite,
@@ -495,6 +508,53 @@ export function fullSuiteGroupsForFamily(key: string): FullSuiteGroup[] {
       scaling: allScaling.filter((s) => s.suite === g.suite),
     };
   });
+
+  // [FABLE-5] sq-hmd7l.28 — surface same-box comparisons whose FAMILY is this one but which
+  // have NO CI-feed metric yet (so suiteGroupsForFamily produced no group for them). Without
+  // this a canonical fts/geo/hdt/update/materialize gather would land in competitors.json and
+  // stay INVISIBLE on the site (the group list is bench-driven). We synthesize a group per
+  // such comparison carrying the same-box table + its honest live summary, zero metric rows.
+  // A `-http` twin is NOT synthesized standalone: it attaches to its base via httpSameBoxFor.
+  const alreadyRendered = new Set<string>();
+  for (const g of groups) {
+    if (g.sameBox) alreadyRendered.add(g.sameBox.suite.toLowerCase());
+    if (g.httpSameBox) alreadyRendered.add(g.httpSameBox.suite.toLowerCase());
+  }
+  const extra: FullSuiteGroup[] = [];
+  for (const c of COMPETITORS.same_box_comparisons || []) {
+    if (familyForComparison(c) !== key) continue;
+    const sid = c.suite.toLowerCase();
+    if (alreadyRendered.has(sid)) continue;
+    if (sid.endsWith("-http")) continue; // attaches to a base group, not standalone
+    alreadyRendered.add(sid);
+    const httpSameBox = httpSameBoxFor(c.suite);
+    if (httpSameBox) alreadyRendered.add(httpSameBox.suite.toLowerCase());
+    extra.push({
+      suite: sameBoxDisplaySuite(c),
+      rows: [],
+      summary: summarizeSameBox(c),
+      sameBox: c,
+      httpSameBox,
+      httpSummary: httpSameBox ? summarizeSameBox(httpSameBox) : undefined,
+      references: referencesForSuite(c.suite),
+      trends: [],
+      scaling: [],
+    });
+  }
+  return [...groups, ...extra];
+}
+
+// A human display label for a comparison-only suite group header (the raw suite id like
+// `pss-update-parity` is machine-ish; render a friendlier title, provenance stays in the table).
+function sameBoxDisplaySuite(c: SameBoxComparison): string {
+  const map: Record<string, string> = {
+    fts: "Full-text search — same-box vs Jena-text",
+    geo: "GeoSPARQL — same-box vs Jena GeoSPARQL",
+    hdt: "HDT decode — same-box vs hdt-cpp",
+    "pss-update-parity": "SPARQL Update — same-box parity",
+    "materialize-competitors": "Materialisation — same-box vs Jena / VLog / Nemo",
+  };
+  return map[c.suite.toLowerCase()] || `${c.suite} — same-box comparison`;
 }
 
 // ---- LIVE competitive summary (the load-bearing honesty computation) ------------------
@@ -586,6 +646,31 @@ function httpSameBoxFor(suite: string): SameBoxComparison | undefined {
     const base = cs.slice(0, -"-http".length);
     return norm === base || norm.includes(base) || base.includes(norm.split(" ")[0]);
   });
+}
+
+// [FABLE-5] sq-hmd7l.28 — map a same_box_comparison's `suite` id (as the ingest emits it) to
+// the capability FAMILY whose page should render it. This is the seam that lets a new-axis
+// canonical gather surface on the site WITHOUT hand-editing the page: the ingest writes the
+// entry into competitors.json under a known suite id, and this table routes it to a family.
+// A comparison whose suite is not listed (a brand-new axis) still renders on the SPARQL-suite
+// pages via the existing fuzzy sameBoxFor() bind, so it is never dropped silently.
+const SAMEBOX_SUITE_FAMILY: { match: RegExp; family: string }[] = [
+  { match: /^fts$/i, family: "fts" },
+  { match: /^geo$/i, family: "geo" },
+  { match: /^hdt$/i, family: "hdt" },
+  { match: /^pss-update-parity$/i, family: "update" },
+  { match: /^update/i, family: "update" },
+  { match: /^materialize/i, family: "reasoning" },
+  { match: /^parse/i, family: "core" },
+];
+
+// The family a same_box_comparison belongs to (or null if it is a SPARQL-suite comparison
+// already surfaced by the per-suite fuzzy bind — sp2b / watdiv and their -http twins).
+function familyForComparison(c: SameBoxComparison): string | null {
+  for (const { match, family } of SAMEBOX_SUITE_FAMILY) {
+    if (match.test(c.suite)) return family;
+  }
+  return null;
 }
 
 export function competitiveSummary(

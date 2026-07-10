@@ -88,6 +88,7 @@ const BENCHMARK_FAMILY_KEYS = [
   "zk",
   "solid",
   "hdt",
+  "update",
   "rsp",
   "genai",
   "gpu",

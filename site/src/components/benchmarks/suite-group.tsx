@@ -73,7 +73,11 @@ export function SuiteGroup({
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="font-semibold">{data.suite}</span>
           <span className="text-xs text-muted-foreground">
-            {data.rows.length} benchmark{data.rows.length === 1 ? "" : "s"}
+            {data.rows.length > 0
+              ? `${data.rows.length} benchmark${data.rows.length === 1 ? "" : "s"}`
+              : data.sameBox
+                ? `${data.sameBox.rows.length} same-box quer${data.sameBox.rows.length === 1 ? "y" : "ies"}`
+                : "0 benchmarks"}
           </span>
         </div>
         <SummaryPill summary={data.summary} />
@@ -82,7 +86,10 @@ export function SuiteGroup({
       {open && (
         <div id={bodyId} className="space-y-4 border-t px-4 py-4">
           <SummaryDetail suite={data.suite} summary={data.summary} />
-          <MetricTable rows={data.rows} />
+          {/* [FABLE-5] sq-hmd7l.28 — a comparison-only group (a new-axis same-box gather with
+              no CI-feed metric yet) carries zero metric rows; skip the empty per-metric table
+              and let the same-box cross-engine table below be the group's content. */}
+          {data.rows.length > 0 && <MetricTable rows={data.rows} />}
           <TrendCharts series={data.trends} />
           <ScalingCharts families={data.scaling} />
           {data.sameBox && (
