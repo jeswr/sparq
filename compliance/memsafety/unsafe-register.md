@@ -63,7 +63,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 45 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 50 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -112,6 +112,11 @@ Recurring invariant shorthands used below:
 | `src/extsort.rs:100` | slice reinterpret (read) | page-align; whole `[u32;3]` triples | `n = len/12` per run. |
 | `src/extsort.rs:232` | `Mmap::map` | own-for-lifetime | `map_perm` read-only map of a perm file we own for the call. |
 | `src/compress.rs:646` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] stream_writer_byte_identical_to_encode_write_to`, sq-vkz7): read-only map of a perm file the test just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates the file during the test, so the subsequent `CompressedPerm::from_mmap` read stays in-bounds over a stable region. [OPUS-4.8] |
+| `src/compress.rs:1800` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] v2_reader_ships_with_mmap_roundtrips`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:1987` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] write_to_v2_roundtrips_through_from_mmap`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:2017` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] v1_file_decodes_byte_identically_forever`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:2104` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the loud-error `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:2120` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a second temp perm file the same test created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
 
 ### `sparq-vectors` — 9 sites (aligned vector blobs + mmap'd `.spqv` / DiskANN)
 

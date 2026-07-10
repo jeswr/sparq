@@ -402,7 +402,7 @@ fn encode_block(chunk: &[[Id; 3]], out: &mut Vec<u8>) {
 /// [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7 — magic prefix of the `SPQCPRM2` on-disk format
 /// (frame-of-reference col2 reset), auto-detected on [`from_mmap`](CompressedPerm::from_mmap)
 /// alongside [`FILE_MAGIC`] (`SPQCPRM1`). Ships with `mmap` so any V2 file always decodes; whether
-/// this build *writes* it is a separate config gate ([`EmitFormat`], behind `spqcprm2`). Held here
+/// this build *writes* it is a separate config gate (`EmitFormat`, behind `spqcprm2`). Held here
 /// alongside the V1 magic so the two markers stay adjacent and distinct.
 #[cfg(feature = "mmap")]
 pub const FILE_MAGIC_V2: [u8; 8] = *b"SPQCPRM2";
