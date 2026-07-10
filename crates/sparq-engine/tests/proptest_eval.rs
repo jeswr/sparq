@@ -75,10 +75,13 @@
 //! * `STR(?v)` (inside the STRLEN BIND form) masks blank nodes out of the generated
 //!   graph: the engine extends STR to bnodes (an engine-internal label) where SPARQL
 //!   makes it a type error — same bead (sq-qeltv).
-//! * `?v + k` masks xsd:double literals out of the generated graph: a computed
-//!   double's rendered lexical would require replicating the engine's float
-//!   formatter inside the oracle (an independence-trap violation). Widening bead
-//!   sq-ilweo.
+//! * `?v + k` masks xsd:double literals out of the generated graph AND rewrites any
+//!   constant xsd:double in the query's own pattern positions to an integer
+//!   (`strip_const_doubles`): a computed double's rendered lexical would require
+//!   replicating the engine's float formatter inside the oracle (an independence-trap
+//!   violation), and a pattern-const double is otherwise injected into the data by
+//!   `instantiate` where a variable could match it and reach the `PlusK` var.
+//!   Widening bead sq-ilweo.
 //! * xsd:double NaN is not generated: `<` is not a total order under NaN, so the
 //!   ORDER BY law has no spec-defined expectation (substrate-level NaN ordering is
 //!   covered by sparq-substrate/tests/proptest_order_numeric.rs). ±INF IS generated.
@@ -1101,7 +1104,32 @@ fn arb_qseed() -> impl Strategy<Value = QSeed> {
         })
 }
 
-fn build_query(seed: QSeed) -> Q {
+/// Rewrite every constant xsd:double in the body's pattern positions to a fixed
+/// non-double integer constant. Used only under a `PlusK` bind (see `build_query`):
+/// it is the query-const complement of the `no_doubles` DataMask, closing the one
+/// path by which a double could reach the PlusK var (a const-double pattern object
+/// injected into the data and then matched by a variable). Vars are untouched, so
+/// `body.vars()` is unchanged.
+fn strip_const_doubles(body: &mut Body) {
+    fn fix(tps: &mut [Tp]) {
+        for tp in tps {
+            for p in [&mut tp.s, &mut tp.p, &mut tp.o] {
+                if matches!(p, Pos::Const(T::Dbl(..))) {
+                    *p = Pos::Const(T::Int(0));
+                }
+            }
+        }
+    }
+    match body {
+        Body::Bgp(tps) => fix(tps),
+        Body::Opt(l, r) | Body::Union(l, r) => {
+            fix(l);
+            fix(r);
+        }
+    }
+}
+
+fn build_query(mut seed: QSeed) -> Q {
     let body_vars = seed.body.vars();
     let certain = seed.body.certain_vars();
     let bind = seed.bind.map(|(form, vs, k)| {
@@ -1112,6 +1140,19 @@ fn build_query(seed: QSeed) -> Q {
             _ => Bind::StrLenOf(v),
         }
     });
+    // `?v + k` cannot render a computed double's lexical without replicating the
+    // engine's float formatter in the oracle (header narrowing note + bead
+    // sq-ilweo). The `no_doubles` DataMask keeps doubles out of the RANDOM graph,
+    // but a `Pos::Const(T::Dbl)` in a PATTERN object is injected verbatim into the
+    // data by `instantiate` (which copies constants unmasked) — a `?v` in another
+    // pattern on the same (s,p) can then match it and bind the PlusK var to a
+    // double, tripping the oracle's `PlusK over a double` guard. So when the bind
+    // is `PlusK`, also strip constant doubles from the body patterns: this is the
+    // query-const half of the same documented no-doubles narrowing, and it keeps
+    // the oracle independent of the engine's double formatter.
+    if matches!(bind, Some(Bind::PlusK(..))) {
+        strip_const_doubles(&mut seed.body);
+    }
     let mut scope = body_vars.clone();
     if bind.is_some() {
         scope.push(BIND_VAR);
