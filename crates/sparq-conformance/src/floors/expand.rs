@@ -72,4 +72,28 @@
 ///   - 19 fewer skips (128→109): the old 1.0-mode and empty-RDF skip buckets are gone
 ///     (the new oracle forwards processingMode and doesn't require a non-empty RDF
 ///     projection); the 109 that remain are the NegativeEvaluationTests (deferred)
-pub const FLOOR: usize = 240;
+///
+/// ## [FABLE-5] sq-oy1f.37 — expand() correctness raise 240 → 259
+///
+/// Three spec-faithful expander fixes (`crates/sparq-jsonld/src/expand.rs`) flip 19
+/// previously-failing positive cases to pass (measured 259 pass / 17 fail / 109 skip):
+///
+/// * **value-object `@type` collapse** — a value object's `@type` is a SINGLE value in
+///   the JSON-LD data model; the general keyword path arrayifies it, so cleanup now
+///   collapses a single-element `@type` array back to a scalar. This cleared the false
+///   `invalid typed value` errors on positive cases (W3C expand/0002, 0013, 0014, 0028,
+///   0036, 0046, 0077, c020, js15/16/19/20, tn02).
+/// * **empty-array-property retention** — the forward-property add now uses the
+///   `addValue` `asArray = true` rule (per the reference `_addValue(..., propertyIsArray
+///   true)`), so a `@set`/`@list`/plain-array term whose value expands to `[]` RETAINS
+///   the property as an empty array instead of dropping it (W3C expand/0004, 0015, 0016,
+///   plus the flatten cases that inherit `expand()`).
+/// * **free-floating value/list drop** — the null/`@graph` active-property drop (step 19)
+///   now reaches value objects (any map with `@value`) and list objects, not just
+///   empty/`@id`-only node objects (W3C expand/0045, 0046).
+///
+/// The 17 remaining fails are 7 remote-`@context` positives (need an `FsLoader` — no
+/// network under `NoopLoader`) and 10 deeper divergences deferred to follow-up beads
+/// (`@id: null` retention t0122, relative-IRI-with-colon t0109, rdf-star reverse
+/// `@index` t0131, `invalid IRI mapping` / `invalid scoped context` shapes).
+pub const FLOOR: usize = 259;
