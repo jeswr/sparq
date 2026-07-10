@@ -595,24 +595,32 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   OPTIONAL condition `F` effectively **true**. The default-off `algebra-rewrite` pass turns the simpler
   `F = None` case into `Minus`, but declines when `F` references **outer** variables (q06's
   `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` scans the whole corpus. This
-  eval-time path instead splits `F` into a correlation equality `?outer = ?inner` (with `?inner` certain
-  in `B`) and a residual theta (`?yr2 < ?yr`), and picks between two strategies. **Large** correlation
-  cardinality → a **hash anti-join**: evaluate `B` **once**, partition it by the `?inner` id, then probe
-  each left row's bucket — one `B` scan, O(|A|+|B|) (SP2Bench q06's win). **Small** cardinality →
-  **SIP-seed**: seed the outer correlation term sideways into `B` so each distinct correlation evaluates
-  a tiny `B'`. Either way the residual theta is re-checked verbatim per candidate with full 3-valued
-  semantics (a **type error ⇒ no match**, so the outer row **survives** — never spuriously eliminated).
-  Id-hashing is exact for **IRI and blank-node** correlations (for both, SPARQL `=` coincides with term
-  identity — per SPARQL 1.1 §17.4.1.7 RDFterm-equal, `=` on two distinct non-literal terms returns
-  **false** (a type error arises only when both arguments are literals), and false and error alike mean
-  **no match** under the anti-join, which an id non-match reproduces);
-  a **literal**-valued correlation (the `sq-lr2ii` value-equality class: high-precision decimals,
-  whitespace-padded numerics) routes through a **value-correct** scan that re-checks the equality with
-  SPARQL `=`, never a term-identity probe that could miss a value-equal partner. Each surviving row is
-  emitted **once** (multiplicity preserved), and any shape/scope miss (e.g. `?nb` also bound on the left,
-  or no seedable equality) **declines** to the identical prior plan. Proven on-vs-off by
-  `tests/theta_antijoin.rs` (type-error-survives, literal value-equality, blank-node, large-cardinality
-  hash, and a randomised differential across both strategies); toggle/stats behind `theta_antijoin_testing`.
+  eval-time path instead splits `F` into var-to-var **correlation** conjuncts `?outer θ ?inner` (with
+  `?inner` certain in `B`) and a residual theta (`?yr2 < ?yr`), and picks between two strategies. The
+  correlation relation `θ` may be value `=`, `sameTerm`, or a single-variable `?a IN (?b)` membership
+  (which desugars to `?a = ?b`); a constant / multi-element `IN` list stays in the residual (`sq-3cmr4`).
+  **Large** correlation cardinality → a **hash anti-join**: evaluate `B` **once**, partition it by the
+  `?inner` id, then probe each left row's bucket — one `B` scan, O(|A|+|B|) (SP2Bench q06's win); for a
+  **very large** anchor side the per-left-row probe is **fanned out over cores** with rayon under the
+  `parallel` feature, and only the boolean verdicts are parallelised so the result stays byte-identical
+  to the serial probe (`sq-f1emb`). **Small** cardinality → **SIP-seed**: seed the outer correlation term
+  sideways into `B` so each distinct correlation evaluates a tiny `B'`. Either way the residual theta is
+  re-checked verbatim per candidate with full 3-valued semantics (a **type error ⇒ no match**, so the
+  outer row **survives** — never spuriously eliminated). The relation `θ` is **load-bearing**: value `=`,
+  `sameTerm` and id-equality differ on value-equal id-distinct literals (`"1"` vs `"01"`). Id-hashing is
+  exact for a value-`=` correlation only on **IRI and blank-node** keys (for both, SPARQL `=` coincides
+  with term identity — per SPARQL 1.1 §17.4.1.7 RDFterm-equal, `=` on two distinct non-literal terms
+  returns **false**, a type error arising only when both arguments are literals, and false and error alike
+  mean **no match**, which an id non-match reproduces); a **literal**-valued `=` correlation (the
+  `sq-lr2ii` value-equality class) routes through a **value-correct** scan that re-checks with SPARQL `=`.
+  A **`sameTerm`** correlation is **term identity** for every kind, so a literal key is itself id-probeable
+  and any value-correct scan re-checks with `sameTerm`, never `=`. Each surviving row is emitted **once**
+  (multiplicity preserved), and any shape/scope miss (e.g. `?nb` also bound on the left, or no seedable
+  correlation) **declines** to the identical prior plan. Proven on-vs-off by `tests/theta_antijoin.rs`
+  (type-error-survives, literal value-equality, blank-node, large-cardinality hash, `sameTerm`/`IN`
+  correlation + a `=`-vs-`sameTerm` divergence witness, a `PAR_THRESHOLD`-crossing parallel probe, and a
+  randomised differential rotating all three relations across both strategies); toggle/stats behind
+  `theta_antijoin_testing`.
 - **Id-level term-identity FILTER fast path** is the non-default `id-filter-fastpath` cargo feature
   (bead `sq-7d3dj.30.11`). It removes the per-row term MATERIALIZATION the compiled FILTER evaluator
   otherwise performs for `=`/`!=`, by two id-level short-circuits: **(a)** a static term-kind analysis

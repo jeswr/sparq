@@ -1,0 +1,5 @@
+{
+  "pr": 1813,
+  "date": "2026-07-10",
+  "reason": "sq-3cmr4 + sq-f1emb: the theta anti-join correlation-detector extensions (sameTerm/IN CorrKind arms in as_correlation_pair, corr_recheck_expr, corr_id_probeable) and the rayon-parallel hash-probe are intentional ALWAYS-COMPILED engine code — the theta anti-join is not feature-gated (it shipped unconditional in #1786), so the feature-OFF wasm bundle legitimately grows by +1619 bytes (+0.103%). This is a declared intentional engine change, NOT a leak of an opt-in feature into the OFF build. Escalated review (sq-reviewer) verified soundness for head a71a99fe9 across all correlation kinds (=/sameTerm/id-equality on value-equal id-distinct literals), the single-var IN scoping, and the fe93caf8c thread-local drain discipline under the rayon fan-out; mutation witnesses re-run red. Delta is under the ±2% band, so no bench/perf-baseline.json floor change accompanies this declaration."
+}
