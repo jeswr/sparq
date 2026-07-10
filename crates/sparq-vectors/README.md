@@ -52,8 +52,8 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 - **Exact vs approximate search** — `nearest_exact` (answer-exact ground truth) and the
   persistent on-disk `DiskAnnIndex` in the default build; the in-RAM HNSW `VectorIndex`
   behind the **opt-in `approx-ann`** feature, the **only** third-party-ANN dependency
-  (`instant-distance`). **Approximate search has recall `< 1.0`** (measured against
-  `nearest_exact`) — only the exact path is answer-exact, never the approximate one.
+  (`instant-distance`). `VectorIndex::nearest_with_ef(q, k, ef)` sweeps `ef_search` at
+  query time (recall–QPS Pareto; monotone-non-decreasing recall as `ef` grows). **Approximate search has recall `< 1.0`** (measured against `nearest_exact`) — only the exact path is answer-exact.
 - **Predicate-constrained ANN (opt-in `filtered-ann`)** — restrict the search to the
   dict-ids a SPARQL BGP admits via an `IdMask` (lean, no new dependency). Composed with
   `approx-ann`, filtered over-fetch fills `k` whenever `k` admitted vectors exist *and the
