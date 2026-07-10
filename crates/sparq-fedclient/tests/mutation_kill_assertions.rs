@@ -255,6 +255,40 @@ fn push_group_keeps_uncovered_filter_local_with_exact_indices() {
     );
 }
 
+#[test]
+fn push_group_without_order_limit_capability_pushes_neither() {
+    // A source whose capability does NOT advertise order_limit must get NO ORDER BY / LIMIT
+    // even when the caller supplies keys + a limit (the `!fragment && cap.order_limit`
+    // guard; its `&&`→`||` mutation pushes them for every non-fragment source).
+    let bgp = Bgp {
+        patterns: vec![TriplePattern {
+            subject: v("s"),
+            predicate: iri("http://ex/p"),
+            object: v("o"),
+        }],
+    };
+    let group = ExclusiveGroup {
+        source: 0,
+        patterns: vec![0],
+    };
+    let mut cap = Capability::endpoint();
+    cap.order_limit = false;
+    let pushed = push_group(
+        &group,
+        &bgp,
+        &cap,
+        &["s".to_string()],
+        &[],
+        &["?s".to_string()],
+        Some(9),
+    )
+    .expect("a well-formed group pushes");
+    assert_eq!(
+        pushed.sub.sparql, "SELECT ?s WHERE { ?s <http://ex/p> ?o }",
+        "no ORDER BY / LIMIT may be pushed to a source that cannot evaluate them"
+    );
+}
+
 // ─── SRJ its:dir "ltr" arm (the inline suite pinned only "rtl") ───────────────────────────
 
 #[test]
