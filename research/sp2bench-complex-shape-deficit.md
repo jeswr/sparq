@@ -219,8 +219,15 @@ they are constructed so the fix there and the work here cannot conflict semantic
   `try_capped`, plus emptiness-neutral ASK plan simplification; witnesses in
   `crates/sparq-engine/tests/ask_early_exit.rs`.)* [FABLE-5]
 - **UNION common-subexpression sharing** (q07/q09 both re-scan shared subpatterns):
-  measured secondary to the fixes above; fold into a later bead only if .30.6 shows a
-  residual gap.
+  **DISCONFIRMED by profiling (2026-07-10, PR #1842)** — the two inner 4-pattern BGPs in q07
+  cost only ~2 ms each; sharing recovers ≤ 2 ms, not the residual. The actual q07 residual
+  is a redundant re-evaluation of the outer 5-pattern BGP itself: `try_theta_antijoin` eagerly
+  evaluated the mandatory left side (~30 ms), found no seedable var-to-var correlation (bare `!bound`),
+  declined and discarded it, so the cold Filter{LeftJoin} fallback re-evaluated the same left side.
+  **FIXED (PR #1842, merged 2026-07-10)** via opt-in `antijoin-static-decline` — a static pre-check
+  lets `try_theta_antijoin` decline before eager evaluation when no correlation can seed, eliminating
+  the redundant re-eval. Result: bag-equivalent (W3C + differential, both feature states). *(SUPERSEDED
+  2026-07-10: the cross-level CSE hypothesis below in §7.3 is also disconfirmed; see that section.)*
 - **A new object/range index**: the gap record's original hypothesis for q03b/c —
   disconfirmed by profiling (§2.1); no new index is needed for this query class.
 
@@ -310,16 +317,17 @@ retire the residual (folded into the follow-up beads below).
 
 Still behind (real compute gaps, all LOWER bounds given QLever's uncorrected HTTP floor):
 
-- **q07 — BEHIND 3.8× (and 1.3× WORSE than §0; the sole non-improver).** Root-cause
-  hypothesis: q07's three nested `OPTIONAL { … } FILTER(!bound)` anti-join levels re-scan the
-  shared `subClassOf`/`type`/`references` membership subplan at every nesting level, and the
-  #1787 membership-cluster pre-materialisation covers only the innermost unbound-predicate
-  probe, not the CROSS-level sharing; the small regression is consistent with the extra plan
-  machinery (theta anti-join + cluster materialise) adding fixed overhead that the tiny 48-row
-  result cannot amortise. Fix bead: **sq-7d3dj.30.20** (q07 CSE — share the membership subplan
-  across the OPTIONAL nesting levels) already exists — this re-measure CONFIRMS it is the live
-  residual and it is re-pointed at the canonical number here (no new bead; profiling-first work
-  belongs there).
+- **q07 — BEHIND 3.8× (and 1.3× WORSE than §0; the sole non-improver).** **SUPERSEDED 2026-07-10:**
+  The root-cause hypothesis stated in §5 (cross-level CSE of membership subplans) was **DISCONFIRMED
+  by profiling** (PR #1842, sq-7d3dj.30.20, merged 2026-07-10; see GitHub issue #1843). **Real cause:**
+  `try_theta_antijoin` eagerly evaluated the mandatory left side (q07's outer 5-pattern BGP, the dominant
+  cost ~30 ms), found no seedable var-to-var correlation (bare `!bound`), declined the anti-join, and
+  discarded the result — so the Filter{LeftJoin} fallback re-evaluated the same left side redundantly.
+  **FIXED** via opt-in `antijoin-static-decline` (PR #1842): a static pre-check lets `try_theta_antijoin`
+  decline before evaluating the left side when no correlation can seed, bag-result-equivalent (W3C + differential,
+  both feature states). The small regression (~1.3×) is consistent with the extra plan machinery (theta anti-join
+  recognizer + cluster materialise) adding fixed overhead that the tiny 48-row result cannot amortise; profiling-first
+  follow-up work (if q07 needs further optimisation) is noted in the bead sq-7d3dj.30.20 notes.
 - **q09 — BEHIND 9.5× (halved from 16.4×).** Root-cause hypothesis: the DISTINCT-projection
   anchor+probe semijoin (#1782) still pays O(min(block, anchor)) to PROVE a large value-typed
   predicate (dc:title / foaf:homepage / rdfs:seeAlso, 17k–27k distinct objects) has no anchor
@@ -342,5 +350,6 @@ two headline selective-FILTER deficits (q03b/q03c) are CLOSED; q08/q09/q11/q12b 
 still clearly behind and is the sole non-improver**. The gap-record D3 row is updated to reflect
 this (see `research/perf-dominance-gap-2026-07.md` §3 addendum). The order-of-magnitude-vs-parity
 mandate question (§6) is unchanged: sparq is at or beyond parity on the whole class except q07/q09,
-where an order-of-magnitude target still needs the CSE (sq-7d3dj.30.20) and characteristic-set
-(sq-jnb1e) work.
+where an order-of-magnitude target still needs profiling-first follow-up work (q07's redundant anti-join
+re-eval was fixed in PR #1842, but the fixed machinery still carries overhead; q09 needs the characteristic-set
+(sq-jnb1e) work to compete on per-predicate incidence metadata).
