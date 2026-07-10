@@ -341,6 +341,14 @@ jobs:
       # self-test in differential.yml).
       - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
         run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
+      # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
+      # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion
+      # failure (always fatal — the finding the lane exists for). A regression here could turn
+      # the UB lane silently green, so its hermetic self-test (timeout-vs-real-failure split +
+      # exit codes) runs on every PR — same stdlib-only, no-deps pattern as the lints above.
+      - name: Self-test Miri verdict classifier (timeout-vs-UB split + exit codes)
+        run: python3 scripts/miri_classify_verdict.py --self-test
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the

@@ -16,6 +16,11 @@ pub mod extsort;
 #[cfg(feature = "iri-fast")]
 pub mod iri;
 mod nt;
+// [OPUS-4.8] sq-jocpn: the opt-in native byte-level Turtle parser. OFF by default (it names
+// `oxiri` as a dep for byte-identical base resolution) so the lean default / wasm build never
+// links it and the incumbent oxttl Turtle path stays shipped until this drop-in is A/B-validated.
+#[cfg(feature = "native-ttl")]
+mod ttl;
 // [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
 // default so the lean default / wasm build never links it (it is `std::sync` only — no new
 // dep — but the surface stays out of the default API).
@@ -947,7 +952,14 @@ impl Graph {
                 {
                     return parse_turtle_parallel(bytes);
                 }
-                #[cfg(not(feature = "parallel"))]
+                // [OPUS-4.8] (sq-jocpn) The non-parallel build (e.g. wasm) also routes through the
+                // native parser under `native-ttl` — a whole-document parse with no base.
+                #[cfg(all(not(feature = "parallel"), feature = "native-ttl"))]
+                {
+                    let ids = ttl::parse(bytes, None, &mut dict)?;
+                    triples.extend_from_slice(&ids);
+                }
+                #[cfg(all(not(feature = "parallel"), not(feature = "native-ttl")))]
                 {
                     for t in TurtleParser::new().for_slice(bytes) {
                         let t = t.map_err(|e| e.to_string())?;
@@ -1036,12 +1048,26 @@ impl Graph {
             // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set, mirroring
             // `parse_to_triples`; an unknown `format` errors instead of parsing as Turtle.
             _ if is_turtle_format(format) => {
-                let parser = TurtleParser::new()
-                    .with_base_iri(base)
-                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
-                for t in parser.for_slice(bytes) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                // [OPUS-4.8] (sq-jocpn) Under `native-ttl`, the WITH-BASE serial Turtle path — the
+                // one the W3C TurtleTests conformance ratchet drives (`turtle_suite.rs` calls
+                // `parse_to_triples_with_base`) — runs through the native parser too, so the ratchet
+                // pins the native parser's accept/reject + resolved-term set against oxttl's on the
+                // whole W3C suite. Base resolution is delegated to the same `oxiri` automaton oxttl
+                // uses, so resolved IRIs are byte-identical.
+                #[cfg(feature = "native-ttl")]
+                {
+                    let ids = ttl::parse(bytes, Some(base), &mut dict)?;
+                    triples.extend_from_slice(&ids);
+                }
+                #[cfg(not(feature = "native-ttl"))]
+                {
+                    let parser = TurtleParser::new()
+                        .with_base_iri(base)
+                        .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                    for t in parser.for_slice(bytes) {
+                        let t = t.map_err(|e| e.to_string())?;
+                        push_triple!(&t.subject, &t.predicate, &t.object);
+                    }
                 }
             }
             _ => return Err(unknown_format_err(format)),
@@ -4778,6 +4804,18 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
 /// heap churn between oxttl's output and the dict.
 #[cfg(feature = "parallel")]
 fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
+    // [OPUS-4.8] (sq-jocpn) When the opt-in `native-ttl` feature is on, parse this chunk with the
+    // native byte-level Turtle parser instead of oxttl. It is a byte-identical drop-in (same
+    // resolved terms — IRI resolution is delegated to the same `oxiri` automaton oxttl uses — same
+    // triple set, same accept/reject), pinned by the `native_ttl_matches_oxttl` differential and
+    // the W3C TurtleTests ratchet. Anonymous blank-node LABELS differ (as they already do between
+    // two oxttl runs), which the blank-node-isomorphic differential/merge accommodates. No base:
+    // the parallel loader only routes here for base-less documents (the with-base entry point is
+    // its own serial path below), and each chunk carries its own directive snapshot.
+    #[cfg(feature = "native-ttl")]
+    {
+        ttl::parse(bytes, None, dict)
+    }
     // [SONNET-4.6] (sq-wrn61) Pre-size the output triple Vec to a capacity HINT derived
     // from the input size, so the append loop does not repeatedly `grow_amortized`
     // (each growth is a realloc + memcpy of the whole Vec). Profiling the single-thread
@@ -4787,15 +4825,18 @@ fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, Str
     // of which the un-pre-sized triple Vec's realloc/memcpy is a measurable slice. This is
     // a PURE capacity hint: it never bounds the parsed count — the Vec still grows if the
     // estimate is low — so the parse result is byte-for-byte identical.
-    let mut triples = Vec::with_capacity(estimate_turtle_triples(bytes.len()));
-    for t in TurtleParser::new().for_slice(bytes) {
-        let t = t.map_err(|e| e.to_string())?;
-        let s = intern_subject_ref(dict, &t.subject);
-        let p = dict.intern_iri(t.predicate.as_str());
-        let o = intern_object_ref(dict, &t.object);
-        triples.push([s, p, o]);
+    #[cfg(not(feature = "native-ttl"))]
+    {
+        let mut triples = Vec::with_capacity(estimate_turtle_triples(bytes.len()));
+        for t in TurtleParser::new().for_slice(bytes) {
+            let t = t.map_err(|e| e.to_string())?;
+            let s = intern_subject_ref(dict, &t.subject);
+            let p = dict.intern_iri(t.predicate.as_str());
+            let o = intern_object_ref(dict, &t.object);
+            triples.push([s, p, o]);
+        }
+        Ok(triples)
     }
-    Ok(triples)
 }
 
 /// [SONNET-4.6] (sq-wrn61) Estimate the triple count of a Turtle document from its byte
