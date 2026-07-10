@@ -52,10 +52,11 @@ use sparq_core::dict::{Dict, Id};
 use sparq_reason_dl::check::{ConsistencyVerdict, DirectChecker, EntailmentVerdict, UnknownReason};
 use sparq_reason_dl::profile::{profiles_from_extraction, Membership};
 use sparq_reason_dl::tableau::Budget;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const T: &str = "http://www.w3.org/2007/OWL/testOntology#";
+const OWL: &str = "http://www.w3.org/2002/07/owl#";
 const OWL_ONTOLOGY: &str = "http://www.w3.org/2002/07/owl#Ontology";
 const OWL_IMPORTS: &str = "http://www.w3.org/2002/07/owl#imports";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -152,6 +153,14 @@ pub struct DlReport {
     /// Profile-identification lane: one row per POSITIVE `test:profile` EL/QL/RL tag on
     /// a selected `ProfileIdentificationTest` (positive-only — module docs).
     pub profile: LaneTally,
+    /// EXPLICIT-NEGATIVE profile lane: one row per checkable
+    /// `owl:NegativePropertyAssertion(case, test:profile, {EL|QL|RL})` in the DIRECT arm —
+    /// the export's assertion that the case is NOT in that profile. Driven with
+    /// `expect_in = false`: a `NotIn`/`Unknown` verdict is a Pass/abstention, an `In` is a
+    /// Fail (the checker could not refute the full-profile membership). Separated from
+    /// [`DlReport::profile`] so the positive lane's pin never moves when the negative lane
+    /// grows. [FABLE-5] sq-pbz04.4.16
+    pub profile_negative: LaneTally,
     /// Reasoning lane, per declared check kind.
     pub consistency: LaneTally,
     /// See [`DlReport::consistency`].
@@ -185,6 +194,7 @@ impl DlReport {
         let mut out = Vec::new();
         for lane in [
             &self.profile,
+            &self.profile_negative,
             &self.consistency,
             &self.inconsistency,
             &self.positive_entailment,
@@ -215,6 +225,27 @@ impl DlReport {
             self.profile.out_of_fragment_total(),
             self.profile.out_of_scope_total(),
         );
+        // The explicit-negative profile lane (owl:NegativePropertyAssertion on test:profile).
+        // A `fail` HERE is an honest MEASURED gap — L2's In is axiom-grammar membership over
+        // the ALCH shadow and cannot always refute full-profile membership — NOT a soundness
+        // bug; it is pinned as a gap floor, never asserted to zero. [FABLE-5] sq-pbz04.4.16
+        let neg_total = self.profile_negative.total();
+        let neg_in_gap = self.profile_negative.fails.len();
+        let _ = writeln!(
+            md,
+            "  profile-identification (explicit-negative NPAs): {} rows — refuted (pass) {}, In-gap {}, abstained {}, out-of-scope {}",
+            neg_total,
+            self.profile_negative.pass,
+            neg_in_gap,
+            self.profile_negative.out_of_fragment_total(),
+            self.profile_negative.out_of_scope_total(),
+        );
+        let _ = writeln!(
+            md,
+            "  In-vs-negative gap (checkable): {} of {}",
+            neg_in_gap,
+            self.profile_negative.pass + neg_in_gap,
+        );
         for (kind, lane) in [
             ("consistency", &self.consistency),
             ("inconsistency", &self.inconsistency),
@@ -236,6 +267,7 @@ impl DlReport {
         let mut oos: BTreeMap<String, usize> = BTreeMap::new();
         for lane in [
             &self.profile,
+            &self.profile_negative,
             &self.consistency,
             &self.inconsistency,
             &self.positive_entailment,
@@ -364,6 +396,10 @@ struct Case {
     checks: Vec<&'static str>,
     profile_test: bool,
     positive_profiles: Vec<String>,
+    /// EL/QL/RL profiles the export EXPLICITLY negates for this case via a top-level
+    /// `owl:NegativePropertyAssertion(case, test:profile, profile)` — the negative lane's
+    /// expectations (checked with `expect_in = false`). [FABLE-5] sq-pbz04.4.16
+    negative_profiles: Vec<String>,
     premise: Option<String>,
     input: Option<String>,
     conclusion: Option<String>,
@@ -386,6 +422,14 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
         triples.push(t.map_err(|e| format!("all.rdf: {}", e))?);
     }
     let g = MiniGraph { triples };
+
+    // Pre-scan the top-level `owl:NegativePropertyAssertion` nodes for the EXPLICIT-NEGATIVE
+    // profile lane (sq-pbz04.4.16). A manifest-level profile negation is an NPA whose
+    // `assertionProperty` is `test:profile`, `sourceIndividual` is a TestCase IRI, and
+    // `targetIndividual` is one of {EL, QL, RL} — "case X is NOT in profile Y". NPAs embedded
+    // in premise/input ontology LITERALS are test DATA (parsed later, per case) and never seen
+    // here, so this only picks the manifest metadata. Keyed by the source (case) IRI.
+    let negated_profiles: HashMap<String, Vec<String>> = collect_profile_negations(&g);
 
     let mut report = DlReport::default();
     for case_node in g.subjects_with_type(&format!("{}TestCase", T)) {
@@ -456,6 +500,7 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
                 .filter(|p| known(p))
                 .map(|p| profile_name(p))
                 .collect(),
+            negative_profiles: negated_profiles.get(&case_iri).cloned().unwrap_or_default(),
             premise: lit("rdfXmlPremiseOntology"),
             input: lit("rdfXmlInputOntology"),
             conclusion: lit("rdfXmlConclusionOntology"),
@@ -468,9 +513,54 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
     Ok(report)
 }
 
+/// Collect the manifest-level EXPLICIT-NEGATIVE profile assertions
+/// (`owl:NegativePropertyAssertion(case, test:profile, {EL|QL|RL})`) keyed by the source
+/// (case) IRI. [FABLE-5] sq-pbz04.4.16
+///
+/// Only a top-level NPA whose `assertionProperty` is `test:profile` and whose
+/// `targetIndividual` is one of the three tractable profiles is collected — every other NPA
+/// (data-level negations in premise/input literals, non-profile assertion properties) is
+/// ignored. The result preserves EL/QL/RL encounter order per case for deterministic keys.
+fn collect_profile_negations(g: &MiniGraph) -> HashMap<String, Vec<String>> {
+    let assertion_prop = format!("{}assertionProperty", OWL);
+    let source_ind = format!("{}sourceIndividual", OWL);
+    let target_ind = format!("{}targetIndividual", OWL);
+    let profile_prop = format!("{}profile", T);
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for npa in g.subjects_with_type(&format!("{}NegativePropertyAssertion", OWL)) {
+        // assertionProperty must be exactly test:profile.
+        let is_profile = matches!(
+            g.object(&npa, &assertion_prop),
+            Some(Term::NamedNode(n)) if n.as_str() == profile_prop
+        );
+        if !is_profile {
+            continue;
+        }
+        let Some(Term::NamedNode(src)) = g.object(&npa, &source_ind) else {
+            continue;
+        };
+        let Some(Term::NamedNode(tgt)) = g.object(&npa, &target_ind) else {
+            continue;
+        };
+        let Some(profile) = tgt.as_str().strip_prefix(T) else {
+            continue;
+        };
+        if !matches!(profile, "EL" | "QL" | "RL") {
+            continue;
+        }
+        let case = src.as_str().to_string();
+        let list = out.entry(case).or_default();
+        // De-duplicate a repeated (case, profile) negation — one row per pair.
+        if !list.iter().any(|p| p == profile) {
+            list.push(profile.to_string());
+        }
+    }
+    out
+}
+
 /// Run both lanes' checks for one selected case.
 fn run_case(case: &Case, report: &mut DlReport) {
-    if case.profile_test {
+    if case.profile_test || !case.negative_profiles.is_empty() {
         run_profile_lane(case, report);
     }
     if !case.checks.is_empty() {
@@ -478,31 +568,63 @@ fn run_case(case: &Case, report: &mut DlReport) {
     }
 }
 
-/// The profile-identification lane — POSITIVE `test:profile` tags only (module docs).
+/// Pick the membership verdict for a named profile from a computed [`ProfileSet`].
+fn membership_of<'a>(
+    ps: &'a sparq_reason_dl::profile::ProfileSet,
+    name: &str,
+) -> &'a Membership {
+    match name {
+        "EL" => &ps.el,
+        "QL" => &ps.ql,
+        _ => &ps.rl,
+    }
+}
+
+/// The profile-identification lane — POSITIVE `test:profile` tags AND EXPLICIT-NEGATIVE
+/// `owl:NegativePropertyAssertion` negations. The positive tags feed [`DlReport::profile`]
+/// (checked `expect_in = true`); the negations feed [`DlReport::profile_negative`] (checked
+/// `expect_in = false`). Both directions share ONE extraction of the input ontology. The
+/// negative lane (sq-pbz04.4.16) unlocks the 322-row explicit-negative direction the module
+/// docs' MEASUREMENT deferred; an `In` verdict there is an honest gap (L2 cannot refute
+/// full-profile membership from axiom-grammar membership over the ALCH shadow alone), pinned
+/// as a gap floor, never asserted to zero.
 fn run_profile_lane(case: &Case, report: &mut DlReport) {
-    report.profile_cases += 1;
-    let assertions = &case.positive_profiles;
-    if assertions.is_empty() {
-        // No positive EL/QL/RL tag: either a species-only case (test:species DL/FULL —
-        // the design record's deferred species check) or an explicit-negatives-only
-        // case (the direction this lane measured and does not check — module docs).
+    let pos = &case.positive_profiles;
+    let neg = &case.negative_profiles;
+    if case.profile_test {
+        report.profile_cases += 1;
+    }
+    if case.profile_test && pos.is_empty() && neg.is_empty() {
+        // A ProfileIdentificationTest with no positive tag AND no explicit negation: either a
+        // species-only case (test:species DL/FULL — the deferred species check) or otherwise
+        // untagged — nothing to check in either direction.
         report
             .profile
-            .record_out_of_scope("no positive EL/QL/RL tag (species check deferred; explicit-negative direction not checked)");
+            .record_out_of_scope("no positive EL/QL/RL tag and no explicit negation (species check deferred)");
         return;
     }
     if case.imports {
-        for _ in assertions {
+        for _ in pos {
             report
                 .profile
+                .record_out_of_scope("uses owl:imports (no dereferencing in the harness)");
+        }
+        for _ in neg {
+            report
+                .profile_negative
                 .record_out_of_scope("uses owl:imports (no dereferencing in the harness)");
         }
         return;
     }
     let Some(input_xml) = case.input.clone().or_else(|| case.premise.clone()) else {
-        for _ in assertions {
+        for _ in pos {
             report
                 .profile
+                .record_out_of_scope("input only available in functional syntax");
+        }
+        for _ in neg {
+            report
+                .profile_negative
                 .record_out_of_scope("input only available in functional syntax");
         }
         return;
@@ -518,32 +640,43 @@ fn run_profile_lane(case: &Case, report: &mut DlReport) {
     let profile_set = match profile_set {
         Ok(Ok(ps)) => ps,
         Ok(Err(e)) => {
-            for name in assertions {
+            let observed = format!("input RDF/XML parse error: {}", e);
+            for name in pos {
                 let key = format!("owl2-dl/profile-{}: {}", name, case.ident);
-                report
-                    .profile
-                    .record(&key, TriState::Fail(format!("input RDF/XML parse error: {}", e)));
+                report.profile.record(&key, TriState::Fail(observed.clone()));
+            }
+            for name in neg {
+                let key = format!("owl2-dl/profile-neg-{}: {}", name, case.ident);
+                report.profile_negative.record(&key, TriState::Fail(observed.clone()));
             }
             return;
         }
         Err(_) => {
-            for name in assertions {
+            let observed = "profile pipeline panicked".to_string();
+            for name in pos {
                 let key = format!("owl2-dl/profile-{}: {}", name, case.ident);
-                report
-                    .profile
-                    .record(&key, TriState::Fail("profile pipeline panicked".to_string()));
+                report.profile.record(&key, TriState::Fail(observed.clone()));
+            }
+            for name in neg {
+                let key = format!("owl2-dl/profile-neg-{}: {}", name, case.ident);
+                report.profile_negative.record(&key, TriState::Fail(observed.clone()));
             }
             return;
         }
     };
-    for name in assertions {
-        let membership = match name.as_str() {
-            "EL" => &profile_set.el,
-            "QL" => &profile_set.ql,
-            _ => &profile_set.rl,
-        };
+    // Positive tags (expect In).
+    for name in pos {
         let key = format!("owl2-dl/profile-{}: {}", name, case.ident);
-        report.profile.record(&key, membership_tri(membership, true));
+        report
+            .profile
+            .record(&key, membership_tri(membership_of(&profile_set, name), true));
+    }
+    // Explicit negations (expect NotIn). An `In` here is the honest measured gap.
+    for name in neg {
+        let key = format!("owl2-dl/profile-neg-{}: {}", name, case.ident);
+        report
+            .profile_negative
+            .record(&key, membership_tri(membership_of(&profile_set, name), false));
     }
 }
 
@@ -832,16 +965,25 @@ mod tests {
         assert_eq!(report.inconsistency.pass, 1);
         assert!(report.all_fails().is_empty(), "{:?}", report.all_fails());
         assert_eq!(report.reasoning_pass(), 2);
-        // Profile lane (positive tags only): the ∀-restriction TBox is RL, so the
-        // positive RL tag passes; the mini export's explicit owl:NegativePropertyAssertion
-        // (NOT in EL) is deliberately NOT checked (module docs) — exactly one row.
+        // Positive profile lane: the ∀-restriction TBox is RL, so the positive RL tag passes
+        // — exactly one positive row.
         assert_eq!(report.profile_cases, 1);
         assert_eq!(report.profile.total(), 1);
         assert_eq!(report.profile.pass, 1);
-        // The render is counts-only and names the honest scope label.
+        // Explicit-negative profile lane (sq-pbz04.4.16): the mini export's
+        // `owl:NegativePropertyAssertion(case-profile, test:profile, EL)` asserts the case is
+        // NOT in EL. The input is an ∀R.B TBox — genuinely NotIn EL (EL forbids
+        // ObjectAllValuesFrom), so L2 REFUTES the membership and the negative row is a Pass
+        // (refuted). Exactly one negative row, no In-gap.
+        assert_eq!(report.profile_negative.total(), 1);
+        assert_eq!(report.profile_negative.pass, 1);
+        assert_eq!(report.profile_negative.fails.len(), 0);
+        // The render is counts-only, names the honest scope label, and prints the negative
+        // lane's In-vs-negative gap line.
         let md = report.render();
         assert!(md.contains("NOT full OWL 2 DL"));
         assert!(md.contains("NEVER counted as pass"));
+        assert!(md.contains("In-vs-negative gap"));
     }
 
     #[test]
@@ -864,5 +1006,51 @@ mod tests {
         let report = run_direct_arm(&fs_only).expect("mini export parses");
         assert_eq!(report.consistency.out_of_scope_total(), 1);
         assert_eq!(report.consistency.pass, 0);
+    }
+
+    /// Direct unit test of `collect_profile_negations` (sq-pbz04.4.16): a top-level
+    /// `owl:NegativePropertyAssertion(case, test:profile, EL)` is collected keyed by the
+    /// source case IRI; a NON-profile assertion property and a non-{EL,QL,RL} target are
+    /// ignored; a repeated (case, profile) pair is de-duplicated to one row.
+    #[test]
+    fn collect_profile_negations_filters_and_dedups() {
+        let export = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xmlns:test="http://www.w3.org/2007/OWL/testOntology#">
+  <owl:NegativePropertyAssertion>
+    <owl:sourceIndividual rdf:resource="http://ex/case-a"/>
+    <owl:assertionProperty rdf:resource="http://www.w3.org/2007/OWL/testOntology#profile"/>
+    <owl:targetIndividual rdf:resource="http://www.w3.org/2007/OWL/testOntology#EL"/>
+  </owl:NegativePropertyAssertion>
+  <owl:NegativePropertyAssertion>
+    <owl:sourceIndividual rdf:resource="http://ex/case-a"/>
+    <owl:assertionProperty rdf:resource="http://www.w3.org/2007/OWL/testOntology#profile"/>
+    <owl:targetIndividual rdf:resource="http://www.w3.org/2007/OWL/testOntology#EL"/>
+  </owl:NegativePropertyAssertion>
+  <owl:NegativePropertyAssertion>
+    <owl:sourceIndividual rdf:resource="http://ex/case-a"/>
+    <owl:assertionProperty rdf:resource="http://www.w3.org/2007/OWL/testOntology#profile"/>
+    <owl:targetIndividual rdf:resource="http://www.w3.org/2007/OWL/testOntology#DL"/>
+  </owl:NegativePropertyAssertion>
+  <owl:NegativePropertyAssertion>
+    <owl:sourceIndividual rdf:resource="http://ex/case-b"/>
+    <owl:assertionProperty rdf:resource="http://ex/notProfile"/>
+    <owl:targetIndividual rdf:resource="http://www.w3.org/2007/OWL/testOntology#RL"/>
+  </owl:NegativePropertyAssertion>
+</rdf:RDF>"#;
+        let parser = oxrdfxml::RdfXmlParser::new()
+            .with_base_iri("http://ex/")
+            .unwrap();
+        let triples: Vec<_> = parser
+            .for_slice(export.as_bytes())
+            .map(|t| t.unwrap())
+            .collect();
+        let g = MiniGraph { triples };
+        let map = collect_profile_negations(&g);
+        // case-a: EL (de-duplicated to one), DL ignored (not EL/QL/RL).
+        assert_eq!(map.get("http://ex/case-a"), Some(&vec!["EL".to_string()]));
+        // case-b: the assertion property is not test:profile → ignored entirely.
+        assert!(!map.contains_key("http://ex/case-b"));
     }
 }
