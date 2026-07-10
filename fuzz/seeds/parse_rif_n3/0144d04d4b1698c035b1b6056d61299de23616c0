@@ -1,0 +1,3 @@
+@prefix ex: <=tt<?xml-8"?>
+<Document xmlns="http://www.p://www.w3.org/2007/rif#"><payw3.org/20> .
+{ ex:a üex:ex:b }

@@ -55,6 +55,12 @@ path = "src/bin/served-conformance-report.rs"
 # [SONNET-4.6] sq-kk1mq — also enables dep:sparq-jsonld so the expand lane can call
 # the native expand() algorithm directly instead of going through the RDF writer.
 jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld", "dep:sparq-jsonld"]
+# [OPUS-4.8] sq-jocpn — run the whole conformance lane (including the W3C rdf-turtle suite in
+# `turtle_suite.rs`, which parses THROUGH `sparq_core::Graph::parse_to_triples_with_base`) with the
+# native byte-level Turtle parser instead of oxttl. OFF by default; enabling it forwards to
+# `sparq-core/native-ttl` so the ratchet proves the native parser's accept/reject + resolved-term
+# set is IDENTICAL to oxttl's on the entire suite (the load-bearing conformance-set-identical claim).
+native-ttl-suite = ["sparq-core/native-ttl"]
 # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the D-entailment (datatype / value-space)
 # conformance lane (the crate-local `tests/d_entail_suite.rs` runner + the `Regime::D`
 # arm in `inference::entail`). OPT-IN and OFF by default so the default

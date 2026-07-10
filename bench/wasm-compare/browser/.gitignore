@@ -1,0 +1,4 @@
+# [FABLE-5] sq-3ul2n.1 — measurement outputs are scratch (advisory, regenerable),
+# never committed; Playwright + its browsers stay scoped to this dir.
+node_modules/
+results/

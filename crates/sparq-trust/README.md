@@ -90,6 +90,7 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
 - **Verified status-list issuer signature** (`VerifyingLiveStatusCheck`, **`status-list`**, `sq-pfae.13`) — verify the status-list VC's OWN issuer
   signature (the SAME `sparq-zk` Schnorr-over-RDFC-1.0 path the admit gate uses) against a trusted status-authority key (or a `did:key`/`did:web` issuer
   via `with_did_issuer`, `did` feature) **before** trusting its bits. **Fail-closed**: an unsigned / bad-sig / wrong-key / unresolvable-issuer list VC is `Unknown` (deny).
+- **Public-key re-exports** (`public_key_from_hex`, `PublicKey`, `sq-0hu2w`) — downstream crates reach the issuer-key helpers via `sparq-trust` directly, avoiding a separate `sparq-zk` dependency.
 
 ## Honest scope — what this does and does NOT do
 

@@ -1,0 +1,2 @@
+@prefix ex: <http://examplm.org/> .
+{a x:e => { ex:b }

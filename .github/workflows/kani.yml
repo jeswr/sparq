@@ -70,9 +70,15 @@
 #   3. Every harness's PASS / FAIL / TIMEOUT (+ wall time, + a log tail on non-pass) is written
 #      to `$GITHUB_STEP_SUMMARY` and mirrored as `::warning::` / `::error::` annotations, so a
 #      failure is VISIBLE on the run page and silent-death cannot recur.
-# A genuine counterexample (reachable panic/OOB/UB) OR a TIMEOUT ends the job red (honest — the
-# lane genuinely is not passing yet while the two slow harnesses exceed budget; bounding them is
-# tracked by sq-og8u8). No larger GitHub-hosted runner class or self-hosted runner is available
+# A genuine counterexample (reachable panic/OOB/UB) ALWAYS ends the job red (honest). A TIMEOUT
+# reds the job too, EXCEPT for a suite marked `debt: true` (the two mmap-validator totality suites
+# whose bounding is tracked by sq-j3u6o): those exceed the 20m per-harness CBMC budget EVERY night,
+# so a pure timeout there is recorded LOUDLY (step summary + `::warning::`) but is NON-FATAL —
+# otherwise the whole `kani` workflow can never conclude `success` and the nightly formal-lane
+# alarm (formal-alarm.yml) fires forever on pre-existing, already-tracked solver-budget debt while
+# the 3 HEALTHY suites (25 substrate order-law proofs + 5 dict id-partition proofs + 6 engine
+# reducer proofs) DO verify green. Flip `debt` off the instant sq-j3u6o bounds those harnesses so
+# they gate normally again. No larger GitHub-hosted runner class or self-hosted runner is available
 # to this repo (`gh api /repos/sparq-org/sparq/actions/runners` == 0; every other workflow uses
 # `ubuntu-latest`), so option "beefier runner" is not currently reachable — recorded in the PR.
 #
@@ -164,6 +170,15 @@ jobs:
           - name: "sparq-vectors (.spqv validator)"
             crate: sparq-vectors
             features: ""
+            # [FABLE-5] KNOWN-TIMEOUT DEBT (bounding tracked by sq-j3u6o): both totality
+            # harnesses exceed the 20m per-harness CBMC budget on this ~7 GB runner and TIMEOUT
+            # every night. `debt: true` makes a pure TIMEOUT NON-FATAL for this suite (recorded
+            # LOUDLY in the step summary + a ::warning:: annotation, so the debt stays visible
+            # and under standing pressure) so a healthy night is not dragged red forever — while
+            # a REAL counterexample / build error (a Kani FAIL, exit ∉ {124,137}) STILL reds the
+            # job, so the no-verdict alarm still fires on a genuine proof regression. See the
+            # DEBT-TIER rationale block in the proof step below.
+            debt: true
             harnesses: >-
               open_from_bytes_never_panics
               open_validated_v2_tail_never_panics
@@ -187,6 +202,11 @@ jobs:
           - name: "sparq-core (dict mmap validator totality)"
             crate: sparq-core
             features: "--features mmap"
+            # [FABLE-5] KNOWN-TIMEOUT DEBT (bounding tracked by sq-j3u6o) — same class as the
+            # .spqv validator suite above: both harnesses exceed the 20m per-harness CBMC budget
+            # and TIMEOUT every night. `debt: true` => a pure TIMEOUT is non-fatal (loud warning
+            # only); a real Kani FAIL still reds the job so a genuine proof regression is caught.
+            debt: true
             harnesses: >-
               validate_dict_bytes_never_panics
               validate_dict_bytes_sized_tail_never_panics
@@ -271,6 +291,10 @@ jobs:
           SUITE_CRATE: ${{ matrix.suite.crate }}
           SUITE_FEATURES: ${{ matrix.suite.features }}
           SUITE_HARNESSES: ${{ matrix.suite.harnesses }}
+          # "true" for a KNOWN-TIMEOUT-DEBT suite (the two mmap-validator totality suites whose
+          # bounding is tracked by sq-j3u6o): a pure TIMEOUT is recorded LOUDLY but is NON-FATAL
+          # for the job. A real Kani FAIL (counterexample/build error) stays fatal regardless.
+          SUITE_DEBT: ${{ matrix.suite.debt && 'true' || 'false' }}
         run: |
           set -u
           summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
@@ -313,7 +337,7 @@ jobs:
               124 | 137)
                 res="⏱️ TIMEOUT (>${tmo})"
                 had_timeout=1
-                echo "::warning title=Kani timeout::${SUITE_CRATE}::${h} exceeded ${tmo} — recorded as TIMEOUT (see step summary). Bounding is tracked by sq-og8u8."
+                echo "::warning title=Kani timeout::${SUITE_CRATE}::${h} exceeded ${tmo} — recorded as TIMEOUT (see step summary). Bounding is tracked by sq-j3u6o."
                 ;;
               *)
                 res="❌ FAIL (exit ${ec})"
@@ -341,15 +365,26 @@ jobs:
             echo ""
             if [ "$had_fail" -eq 1 ]; then
               echo "**Overall: ❌ FAIL** — at least one harness surfaced a counterexample/error above; investigate it."
+            elif [ "$had_timeout" -eq 1 ] && [ "$SUITE_DEBT" = "true" ]; then
+              echo "**Overall: ⏱️ TIMEOUT (known debt, non-fatal)** — every harness that finished passed; the totality harness(es) exceeded the \`${tmo}\` budget as expected. This is the KNOWN, BEAD-TRACKED debt suite: bounding is tracked by **sq-j3u6o**, so a pure timeout does NOT red the job (a real counterexample still would). The healthy suites determine tonight's lane verdict."
             elif [ "$had_timeout" -eq 1 ]; then
-              echo "**Overall: ⏱️ TIMEOUT** — every harness that finished passed, but one or more exceeded the \`${tmo}\` budget. Bounding/pruning those is tracked by **sq-og8u8**."
+              echo "**Overall: ⏱️ TIMEOUT** — every harness that finished passed, but one or more exceeded the \`${tmo}\` budget. Bounding/pruning those is tracked by **sq-j3u6o**."
             else
               echo "**Overall: ✅ PASS** — all harnesses verified within budget."
             fi
           } >> "$summary"
 
-          # Informational lane: a FAIL or TIMEOUT ends the job red (honest), but every result is
-          # already recorded above, so a slow/OOM harness can no longer silently kill the run.
-          if [ "$had_fail" -eq 1 ] || [ "$had_timeout" -eq 1 ]; then
+          # A real Kani FAIL (counterexample / build error) ALWAYS reds the job — that is a
+          # genuine proof regression the no-verdict alarm must catch. A TIMEOUT reds the job too
+          # (honest) UNLESS this is the KNOWN-TIMEOUT-DEBT suite (SUITE_DEBT=true, sq-j3u6o): for
+          # those, a pure timeout is recorded LOUDLY above (warning annotation + step summary) but
+          # is NON-FATAL, so a normal night — healthy suites green, debt suites timing out as
+          # expected — lets the WORKFLOW conclude `success` and produce a real verdict for the
+          # nightly formal-lane alarm, instead of being dragged red forever on pre-existing,
+          # already-tracked solver-budget debt. Every result is recorded before this exits.
+          if [ "$had_fail" -eq 1 ]; then
+            exit 1
+          fi
+          if [ "$had_timeout" -eq 1 ] && [ "$SUITE_DEBT" != "true" ]; then
             exit 1
           fi

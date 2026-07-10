@@ -16,6 +16,11 @@ pub mod extsort;
 #[cfg(feature = "iri-fast")]
 pub mod iri;
 mod nt;
+// [OPUS-4.8] sq-jocpn: the opt-in native byte-level Turtle parser. OFF by default (it names
+// `oxiri` as a dep for byte-identical base resolution) so the lean default / wasm build never
+// links it and the incumbent oxttl Turtle path stays shipped until this drop-in is A/B-validated.
+#[cfg(feature = "native-ttl")]
+mod ttl;
 // [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
 // default so the lean default / wasm build never links it (it is `std::sync` only — no new
 // dep — but the surface stays out of the default API).
@@ -947,7 +952,14 @@ impl Graph {
                 {
                     return parse_turtle_parallel(bytes);
                 }
-                #[cfg(not(feature = "parallel"))]
+                // [OPUS-4.8] (sq-jocpn) The non-parallel build (e.g. wasm) also routes through the
+                // native parser under `native-ttl` — a whole-document parse with no base.
+                #[cfg(all(not(feature = "parallel"), feature = "native-ttl"))]
+                {
+                    let ids = ttl::parse(bytes, None, &mut dict)?;
+                    triples.extend_from_slice(&ids);
+                }
+                #[cfg(all(not(feature = "parallel"), not(feature = "native-ttl")))]
                 {
                     for t in TurtleParser::new().for_slice(bytes) {
                         let t = t.map_err(|e| e.to_string())?;
@@ -1036,12 +1048,26 @@ impl Graph {
             // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set, mirroring
             // `parse_to_triples`; an unknown `format` errors instead of parsing as Turtle.
             _ if is_turtle_format(format) => {
-                let parser = TurtleParser::new()
-                    .with_base_iri(base)
-                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
-                for t in parser.for_slice(bytes) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                // [OPUS-4.8] (sq-jocpn) Under `native-ttl`, the WITH-BASE serial Turtle path — the
+                // one the W3C TurtleTests conformance ratchet drives (`turtle_suite.rs` calls
+                // `parse_to_triples_with_base`) — runs through the native parser too, so the ratchet
+                // pins the native parser's accept/reject + resolved-term set against oxttl's on the
+                // whole W3C suite. Base resolution is delegated to the same `oxiri` automaton oxttl
+                // uses, so resolved IRIs are byte-identical.
+                #[cfg(feature = "native-ttl")]
+                {
+                    let ids = ttl::parse(bytes, Some(base), &mut dict)?;
+                    triples.extend_from_slice(&ids);
+                }
+                #[cfg(not(feature = "native-ttl"))]
+                {
+                    let parser = TurtleParser::new()
+                        .with_base_iri(base)
+                        .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                    for t in parser.for_slice(bytes) {
+                        let t = t.map_err(|e| e.to_string())?;
+                        push_triple!(&t.subject, &t.predicate, &t.object);
+                    }
                 }
             }
             _ => return Err(unknown_format_err(format)),
@@ -4778,6 +4804,18 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
 /// heap churn between oxttl's output and the dict.
 #[cfg(feature = "parallel")]
 fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
+    // [OPUS-4.8] (sq-jocpn) When the opt-in `native-ttl` feature is on, parse this chunk with the
+    // native byte-level Turtle parser instead of oxttl. It is a byte-identical drop-in (same
+    // resolved terms — IRI resolution is delegated to the same `oxiri` automaton oxttl uses — same
+    // triple set, same accept/reject), pinned by the `native_ttl_matches_oxttl` differential and
+    // the W3C TurtleTests ratchet. Anonymous blank-node LABELS differ (as they already do between
+    // two oxttl runs), which the blank-node-isomorphic differential/merge accommodates. No base:
+    // the parallel loader only routes here for base-less documents (the with-base entry point is
+    // its own serial path below), and each chunk carries its own directive snapshot.
+    #[cfg(feature = "native-ttl")]
+    {
+        ttl::parse(bytes, None, dict)
+    }
     // [SONNET-4.6] (sq-wrn61) Pre-size the output triple Vec to a capacity HINT derived
     // from the input size, so the append loop does not repeatedly `grow_amortized`
     // (each growth is a realloc + memcpy of the whole Vec). Profiling the single-thread
@@ -4787,15 +4825,18 @@ fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, Str
     // of which the un-pre-sized triple Vec's realloc/memcpy is a measurable slice. This is
     // a PURE capacity hint: it never bounds the parsed count — the Vec still grows if the
     // estimate is low — so the parse result is byte-for-byte identical.
-    let mut triples = Vec::with_capacity(estimate_turtle_triples(bytes.len()));
-    for t in TurtleParser::new().for_slice(bytes) {
-        let t = t.map_err(|e| e.to_string())?;
-        let s = intern_subject_ref(dict, &t.subject);
-        let p = dict.intern_iri(t.predicate.as_str());
-        let o = intern_object_ref(dict, &t.object);
-        triples.push([s, p, o]);
+    #[cfg(not(feature = "native-ttl"))]
+    {
+        let mut triples = Vec::with_capacity(estimate_turtle_triples(bytes.len()));
+        for t in TurtleParser::new().for_slice(bytes) {
+            let t = t.map_err(|e| e.to_string())?;
+            let s = intern_subject_ref(dict, &t.subject);
+            let p = dict.intern_iri(t.predicate.as_str());
+            let o = intern_object_ref(dict, &t.object);
+            triples.push([s, p, o]);
+        }
+        Ok(triples)
     }
-    Ok(triples)
 }
 
 /// [SONNET-4.6] (sq-wrn61) Estimate the triple count of a Turtle document from its byte
@@ -4926,8 +4967,24 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
         // (string / IRI / comment skipping, the `.`-terminator and `\`-escape tests) are
         // UNCHANGED, so behaviour — including the review-1398 PN_LOCAL_ESC `\#` fix — is
         // identical; this only fast-forwards over the runs the old `_ => i += 1` arm crawled.
+        //
+        // [OPUS-4.8] (sq-98w7z.1 hang fix) The scan-byte set has SIX members but `memchr` tops
+        // out at three needles, so this needs two passes. The earlier form ran BOTH `memchr3`
+        // calls over the SAME full tail `bytes[i..]` and took `x.min(y)` — which is O(tail) work
+        // per state-change even when one class of byte is entirely absent. On a document with no
+        // string literals or PN_LOCAL escapes (e.g. an all-IRI N-Triples-shaped body), the
+        // quote/backslash `memchr3` found NOTHING and re-walked the whole remaining buffer once
+        // per `<`/`.`, making `next_terminator` O(statement · tail) ⇒ the whole parse O(n²) and a
+        // 55k-triple load hang for minutes. Fix: find the FIRST `. < #` (the class that ends a
+        // scan region), then look for a quote/backslash ONLY in the window BEFORE it. Each byte
+        // is now examined by the bounded second pass at most once, restoring O(n).
         let a = memchr::memchr3(b'.', b'<', b'#', &bytes[i..]);
-        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..]);
+        // Second pass is bounded: if `a` found a byte at offset `x`, a quote/backslash can only
+        // matter if it occurs strictly before `x` (otherwise `a`'s byte wins the `min`); if `a`
+        // found nothing, the region to the end is the whole tail (unchanged behaviour, but now it
+        // is the ONLY full-tail scan and it terminates the statement search via `None`).
+        let bound = a.map_or(bytes.len() - i, |x| x);
+        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..i + bound]);
         i += match (a, b) {
             (None, None) => return None, // no interesting byte before EOF → incomplete statement
             (Some(x), None) => x,
@@ -6507,6 +6564,41 @@ mod tests {
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
 
+    /// [OPUS-4.8] (sq-98w7z.1) Regression: the parallel Turtle terminator scan must be LINEAR in
+    /// document size, not quadratic. `next_terminator` used to run a full-tail `memchr3` for
+    /// `" ' \` on EVERY state-change byte; on a body with NO string literals or PN_LOCAL escapes
+    /// (an all-IRI N-Triples-shaped document — exactly what a wide synthetic graph produces) that
+    /// scan found nothing and re-walked the whole remaining buffer once per statement, making the
+    /// splitter O(n²): a 55k-triple load hung for ~19 minutes. The fix bounds the second pass to
+    /// the window before the next `. < #`.
+    ///
+    /// NON-VACUOUS: this is a hard wall-clock ceiling, not a ratio. On the pre-fix code a 20k-row
+    /// quote-free parse takes ~600 s (measured: 10k rows = 150 s, scaling ~4× per doubling); the
+    /// fixed code does it in well under a second. A 20 s ceiling would be blown by >30× on the
+    /// broken code yet leaves ~100× slack for the fixed code on the slowest CI runner, so it
+    /// cannot flake on a slow-but-linear machine and cannot pass on a quadratic one. Work-box
+    /// timings are non-canonical — only the coarse linear/quadratic distinction is asserted.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_terminator_scan_is_linear_not_quadratic() {
+        // A quote/backslash-free body forces the bounded second-pass arm (`b == None`) — the exact
+        // shape that triggered the quadratic full-tail re-scan. 20k statements ⇒ ~1 MB, comfortably
+        // over the fan-out threshold, and large enough that O(n²) is minutes while O(n) is < 1 s.
+        let rows = 20_000usize;
+        let ttl: String =
+            (0..rows).map(|i| format!("<http://ex/s{}> <http://ex/p> <http://ex/o> .\n", i)).collect();
+        assert!(turtle_chunks(ttl.as_bytes(), 32).is_some(), "quote-free body should fan out");
+        let t = std::time::Instant::now();
+        let (_d, triples) = parse_turtle_parallel(ttl.as_bytes()).unwrap();
+        let elapsed = t.elapsed();
+        assert_eq!(triples.len(), rows, "every quote-free statement must parse");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "quote-free parse took {:?} — the terminator scan has regressed to quadratic",
+            elapsed
+        );
+    }
+
     // [SONNET-4.6] (sq-wrn61) The Turtle triple-Vec / Dict pre-sizing (`estimate_turtle_triples`)
     // is a PURE capacity hint. These pin its two load-bearing invariants: (a) it never returns
     // zero (a zero capacity would defeat the hint but not corrupt output) and never SHRINKS with
@@ -7795,6 +7887,12 @@ mod tests {
             "",
             ".",                                            // bare dot at EOF is a terminator
             ".5 .\n",                                       // leading decimal then real terminator
+            // [OPUS-4.8] (sq-98w7z.1) Quote/backslash-FREE bodies: the bounded second `memchr3`
+            // pass (introduced with the O(n²) fix) takes the `b == None` arm here, so the split
+            // offset must still match the scalar oracle exactly. An all-IRI N-Triples-shaped run
+            // is precisely the shape that used to trigger the quadratic full-tail re-scan.
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s2> <http://ex/p> <http://ex/o2> .\n",
+            ":a :b :c . :d :e :f . :g :h :i .\n",           // several quote-free statements in a row
         ];
         for (k, c) in cases.iter().enumerate() {
             let b = c.as_bytes();
