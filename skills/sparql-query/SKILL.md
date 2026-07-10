@@ -620,7 +620,16 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   (type-error-survives, literal value-equality, blank-node, large-cardinality hash, `sameTerm`/`IN`
   correlation + a `=`-vs-`sameTerm` divergence witness, a `PAR_THRESHOLD`-crossing parallel probe, and a
   randomised differential rotating all three relations across both strategies); toggle/stats behind
-  `theta_antijoin_testing`.
+  `theta_antijoin_testing`. The opt-in **`antijoin-static-decline`** feature (OFF by default, bead
+  `sq-7d3dj.30.20`) removes a redundant re-evaluation on the **no-seedable-correlation** decline path:
+  when the recogniser's shape gate matches but the OPTIONAL condition is a bare `!bound` (no var-to-var
+  correlation to seed — SP2Bench **q07**'s nested levels), the un-featured path evaluates the mandatory
+  left side, discovers `correlations.is_empty()`, and declines — after which the cold `Filter{LeftJoin}`
+  fallback **re-evaluates that same (dominant) left side**. The feature adds a purely **static** pre-check
+  (`in_scope_vars(left)` + `certain_vars(right)`, no graph access) that declines **before** the left side
+  is touched, so it is evaluated **once**. Pure evaluation-ordering, **bag-result-equivalent** to off
+  (`tests/antijoin_static_decline_differential.rs`, both feature states + the W3C ratchet); off,
+  byte-identical, no new deps.
 - **Id-level term-identity FILTER fast path** is the non-default `id-filter-fastpath` cargo feature
   (bead `sq-7d3dj.30.11`). It removes the per-row term MATERIALIZATION the compiled FILTER evaluator
   otherwise performs for `=`/`!=`, by two id-level short-circuits: **(a)** a static term-kind analysis
