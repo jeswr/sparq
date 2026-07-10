@@ -1545,6 +1545,105 @@ pub(crate) mod multiplicity {
     }
 }
 
+// ---- Query-execution NOW() instant (sq-98w7z.1) ---------------------------------
+//
+// [FABLE-5] SPARQL 1.1 §17.4.5.1: every `NOW()` within ONE query execution must
+// return the SAME `xsd:dateTime`. The instant is pinned by `scope()` at the top of
+// `eval_modified` — the single choke point all SELECT / ASK / JSON / count /
+// UPDATE-WHERE evaluation funnels through — with OUTERMOST-WINS semantics: the
+// guard samples the clock only when no instant is already active, so the recursive
+// `eval_modified` calls (solution modifiers, sub-SELECTs) and the `eval_exists`
+// re-entry all observe the OUTER execution's instant, and only the outermost
+// guard's drop clears the slot. The clear-on-drop is what makes the thread-local
+// safe: the NEXT execution on this thread re-samples instead of inheriting a stale
+// instant (a plain set-once thread-local would return the first query's time
+// forever). The rayon-parallel FILTER / BIND / aggregate branches evaluate
+// expressions on worker threads whose slot is empty; they snapshot the instant (a
+// `Copy`) and re-install it around each item exactly like the `functions` / `view`
+// / `spatial` registries above, restoring the previous value on drop (rayon runs
+// some items on the installing thread itself).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod query_now {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NOW: Cell<Option<i64>> = const { Cell::new(None) };
+    }
+
+    /// [`epoch_secs`] calls that found NO active instant and fell back to a fresh
+    /// clock sample (the pre-sq-98w7z.1 per-call behaviour). Under a correctly
+    /// scoped execution — including its rayon worker items — this never fires; the
+    /// parallel NOW-constancy test asserts a zero delta, which is what makes it a
+    /// probe for any expression-evaluation path missing the `worker_install`.
+    #[cfg(test)]
+    pub(crate) static UNSCOPED_FALLBACKS: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    /// Guard from [`scope`]: clears the slot on drop iff THIS guard installed it.
+    pub(crate) struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if self.0 {
+                NOW.with(|c| c.set(None));
+            }
+        }
+    }
+
+    /// Pins this execution's instant if none is active (outermost-wins).
+    pub(crate) fn scope() -> Guard {
+        NOW.with(|c| {
+            if c.get().is_some() {
+                Guard(false)
+            } else {
+                c.set(Some(sample()));
+                Guard(true)
+            }
+        })
+    }
+
+    /// The active execution's instant (unix seconds). An un-scoped call — no
+    /// execution in progress on this thread — falls back to a fresh sample.
+    pub(crate) fn epoch_secs() -> i64 {
+        NOW.with(Cell::get).unwrap_or_else(|| {
+            #[cfg(test)]
+            UNSCOPED_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            sample()
+        })
+    }
+
+    fn sample() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+
+    /// Snapshot for the rayon-parallel branches (`Copy`, free).
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<i64> {
+        NOW.with(Cell::get)
+    }
+
+    /// Scoped re-install of a snapshot inside a rayon worker item; restores the
+    /// PREVIOUS value on drop (rayon runs some items on the installing thread).
+    pub(crate) struct WorkerGuard(Option<Option<i64>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                NOW.with(|c| c.set(prev));
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: Option<i64>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(s) => WorkerGuard(Some(NOW.with(|c| c.replace(Some(s))))),
+        }
+    }
+}
+
 // ---- Spatial index (sq-mg9) ----------------------------------------------------
 //
 // The thread-local [`SpatialProvider`] installed by `with_spatial_index`. The
@@ -2563,6 +2662,11 @@ fn count_leftjoin(
 // ---- Algebra dispatch ---------------------------------------------------------
 
 fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+    // Pin NOW() for this execution (SPARQL 1.1 §17.4.5.1). Outermost call samples
+    // the clock once; the recursive / EXISTS re-entries see it active and keep the
+    // outer instant (a Cell read). [FABLE-5] sq-98w7z.1
+    #[cfg(not(target_arch = "wasm32"))]
+    let _query_now = query_now::scope();
     match p {
         GraphPattern::Project { inner, variables } => {
             let b = eval_modified(graph, local, inner)?;
@@ -8467,6 +8571,8 @@ fn try_theta_antijoin(
             let fns = functions::snapshot();
             let vw = view::snapshot();
             let spx = spatial::snapshot();
+            #[cfg(not(target_arch = "wasm32"))]
+            let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
             left_b
                 .rows
                 .par_iter()
@@ -8474,6 +8580,8 @@ fn try_theta_antijoin(
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _qn = query_now::worker_install(qn);
                     eliminated(lrow)
                 })
                 .collect::<Result<Vec<bool>, String>>()?
@@ -9016,6 +9124,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
             .par_iter()
             .enumerate()
@@ -9023,6 +9133,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(not(target_arch = "wasm32"))]
+                let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
                 let v = eval_compiled(graph, lv, bref, row, &compiled)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
@@ -9202,6 +9314,8 @@ fn group_aggregate(
         // (`self::` because the `aggregates` *parameter* below shadows the module name.)
         #[cfg(feature = "window-functions")]
         let aggs = self::aggregates::snapshot();
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
         // resolve each batch in parallel, then serially intern only that batch's genuinely
         // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
@@ -9216,6 +9330,8 @@ fn group_aggregate(
                     let _spx = spatial::worker_install(&spx);
                     #[cfg(feature = "window-functions")]
                     let _aggs = self::aggregates::worker_install(&aggs);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _qn = query_now::worker_install(qn);
                     aggregates
                         .iter()
                         .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
@@ -10152,10 +10268,16 @@ fn order_bindings(
             #[cfg(feature = "parallel")]
             let mut keyed: Vec<_> = if n >= PAR_THRESHOLD {
                 use rayon::prelude::*;
+                #[cfg(not(target_arch = "wasm32"))]
+                let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
                 b.rows
                     .par_iter()
                     .enumerate()
-                    .map(|(i, row)| Ok((key_of(row)?, i)))
+                    .map(|(i, row)| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let _qn = query_now::worker_install(qn);
+                        Ok((key_of(row)?, i))
+                    })
                     .collect::<Result<Vec<_>, String>>()?
             } else {
                 b.rows
@@ -10211,7 +10333,16 @@ fn order_bindings(
     #[cfg(feature = "parallel")]
     let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> = if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        b.rows.par_iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
+        b.rows
+            .par_iter()
+            .map(|row| {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _qn = query_now::worker_install(qn);
+                Ok((key_of(row)?, row.clone()))
+            })
+            .collect::<Result<_, String>>()?
     } else {
         b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
     };
@@ -11105,6 +11236,8 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
             .par_iter()
             .enumerate()
@@ -11112,6 +11245,8 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(not(target_arch = "wasm32"))]
+                let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
                 Ok(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?))
             })
@@ -12597,17 +12732,30 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 }
             }
         }
-        // NOW(): the current UTC instant as xsd:dateTime. RAND(): xsd:double in [0, 1)
-        // (sourced from the same OS RNG as UUID, avoiding a new wasm-hostile dep) —
-        // both native-only for the same reason as UUID()/STRUUID().
+        // ---- Builtin memoisation policy (sq-98w7z.1) [FABLE-5] ----------------------
+        // ALLOW (memoised, keyed on the argument VALUES — pure, so a hit is
+        //   result-identical to a fresh evaluation): the REGEX()/REPLACE() compiled
+        //   `(pattern, flags)` via `regex_cache`, the one per-row builtin cost worth a
+        //   memo (compile is µs-scale vs ns-scale match). Compile FAILURES are memoised
+        //   too — an invalid pattern stays a per-row type error.
+        // PINNED (not memoised — spec-MANDATED constancy): NOW() formats the
+        //   execution-scoped `query_now` instant (SPARQL 1.1 §17.4.5.1); the next
+        //   execution re-samples.
+        // DENY (non-deterministic — MUST re-evaluate on every call; memoising any of
+        //   these would silently collapse per-row freshness): RAND(), UUID(), STRUUID(),
+        //   no-arg BNODE() (fresh label per call), and every REGISTERED custom function
+        //   (`FunctionRegistry` makes no purity promise). The freshness-per-row test is
+        //   `nondeterministic_builtins_fresh_per_call_never_memoised`.
+        // Everything else (UCASE, STR, numeric ops, …) evaluates directly: value-keyed
+        // memoisation of ns-scale pure builtins costs more in key hashing than it saves.
+        //
+        // NOW(): the execution's pinned instant as xsd:dateTime. RAND(): xsd:double in
+        // [0, 1) from a per-thread splitmix64 seeded once from the OS RNG (see
+        // `rand_unit`) — both native-only for the same reason as UUID()/STRUUID().
         #[cfg(not(target_arch = "wasm32"))]
         F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(now_lexical(), xsd::DATE_TIME))),
         #[cfg(not(target_arch = "wasm32"))]
-        F::Rand => {
-            let bytes = *uuid::Uuid::new_v4().as_bytes();
-            let x = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
-            Value::Num(Num::Double((x >> 11) as f64 / (1u64 << 53) as f64))
-        }
+        F::Rand => Value::Num(Num::Double(rand_unit::next())),
         #[cfg(not(target_arch = "wasm32"))]
         F::Uuid => Value::Term(Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
             "urn:uuid:{}",
@@ -12631,7 +12779,7 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 _ => return Ok(Value::Error),
             };
             let flags = if nargs >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
-            match build_regex(&pat, &flags) {
+            match regex_cache::get(&pat, &flags) {
                 Some(re) => Value::Bool(re.is_match(&text)),
                 None => Value::Error,
             }
@@ -12643,7 +12791,7 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 _ => return Ok(Value::Error),
             };
             let flags = if nargs >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
-            match build_regex(&pat, &flags) {
+            match regex_cache::get(&pat, &flags) {
                 Some(re) => lit_with_lang(re.replace_all(&text, rep.as_str()).into_owned(), lang.as_deref()),
                 None => Value::Error,
             }
@@ -13291,12 +13439,14 @@ thread_local! {
     static ROW_SCOPE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-/// The current UTC instant as an `xsd:dateTime` lexical (civil-from-days conversion,
-/// no time-crate dependency).
+/// The query execution's `NOW()` instant as an `xsd:dateTime` lexical (civil-from-days
+/// conversion, no time-crate dependency). The instant comes from the `query_now`
+/// scope pinned in `eval_modified`, so every `NOW()` in one execution — across rows,
+/// rayon workers and `EXISTS` re-entry — formats the SAME value (SPARQL 1.1
+/// §17.4.5.1); an un-scoped call falls back to a fresh sample. [FABLE-5] sq-98w7z.1
 #[cfg(not(target_arch = "wasm32"))]
 fn now_lexical() -> String {
-    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs() as i64;
+    let secs = query_now::epoch_secs();
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -13312,6 +13462,41 @@ fn now_lexical() -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { y + 1 } else { y };
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+/// Thread-local PRNG behind `RAND()` (sq-98w7z.1). [FABLE-5]
+///
+/// The old arm drew `uuid::Uuid::new_v4()` — an OS-RNG syscall — PER ROW. SPARQL
+/// `RAND()` (§17.4.5.2) has no cryptographic requirement, only "a fresh value per
+/// call", so each thread seeds ONCE from the OS RNG (uuid v4, the crate's existing
+/// entropy source — no new dependency) and then advances a splitmix64 state: every
+/// call still yields a fresh, non-deterministic value (the seed is fresh entropy
+/// per thread per process), rayon workers get independent streams, and `EXISTS`
+/// re-entry merely draws the next value — there is no layout- or query-dependent
+/// state to leak. Deliberately NOT deterministic or query-constant.
+#[cfg(not(target_arch = "wasm32"))]
+mod rand_unit {
+    use std::cell::Cell;
+
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(u64::from_le_bytes(
+            uuid::Uuid::new_v4().as_bytes()[..8].try_into().expect("8 bytes"),
+        ));
+    }
+
+    /// The next value in `[0, 1)` — splitmix64 output through the same 53-bit
+    /// mantissa construction the old per-row OS draw used.
+    pub(super) fn next() -> f64 {
+        STATE.with(|s| {
+            let seed = s.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+            s.set(seed);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 53) as f64
+        })
+    }
 }
 
 /// 64-bit FxHash of a string (label material for BNODE(str)).
@@ -13443,10 +13628,79 @@ fn tz_to_duration(tz: &str) -> Option<String> {
     Some(out)
 }
 
+/// Per-thread `REGEX()`/`REPLACE()` compile memo (sq-98w7z.1). [FABLE-5]
+///
+/// `build_regex` used to run INSIDE the per-row scalar eval, so a constant-pattern
+/// FILTER recompiled the regex on every row (compile is µs-scale vs ns-scale match).
+/// The memo compiles each distinct `(pattern, flags)` ONCE per thread and hands out
+/// the same instance via `Rc` — sharing the INSTANCE (not clones of it) is what
+/// preserves the warmed lazy-DFA cache, the same bug class the SHACL fix (PR #1891)
+/// found. A compile FAILURE is memoised as `None`, so an invalid pattern or flag
+/// stays a per-row type error (`Value::Error`) exactly as before — the cache stores
+/// the error-or-regex OUTCOME, never swallows it.
+///
+/// Re-entry safety: the key `(pattern, flags)` fully determines the compiled regex
+/// independent of any `Bindings` layout or query context, so an `EXISTS`-nested
+/// FILTER re-entering this thread can only HIT the memo correctly — unlike a
+/// column-index thread-local, there is nothing execution-scoped to drain or reset,
+/// and for the same reason entries carrying over across queries cannot change any
+/// result. The `RefCell` borrow never spans user code (`build_regex` is pure), so
+/// re-entry cannot observe a live borrow.
+#[cfg(feature = "regex")]
+mod regex_cache {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Hard cap on memo entries; on overflow the memo is CLEARED, so a pathological
+    /// dynamic-pattern workload degrades to the old compile-per-row behaviour,
+    /// never to unbounded memory. Lookup is a linear scan — with ≤ CAP entries and
+    /// the typical one-or-two distinct patterns per query, that is an
+    /// allocation-free string compare, cheaper than hashing an owned key.
+    const CAP: usize = 64;
+
+    thread_local! {
+        #[allow(clippy::type_complexity)]
+        static MEMO: RefCell<Vec<((String, String), Option<Rc<regex::Regex>>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    // Compiles actually performed on this thread (memo misses) — the compile-once
+    // counter tests assert on deltas of this.
+    #[cfg(test)]
+    thread_local! {
+        static COMPILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn compile_count() -> u64 {
+        COMPILES.with(std::cell::Cell::get)
+    }
+
+    /// The compiled regex for `(pattern, flags)`, or `None` for an invalid
+    /// pattern/flag — both memoised.
+    pub(super) fn get(pattern: &str, flags: &str) -> Option<Rc<regex::Regex>> {
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some((_, re)) = m.iter().find(|((p, f), _)| p == pattern && f == flags) {
+                return re.clone();
+            }
+            #[cfg(test)]
+            COMPILES.with(|c| c.set(c.get() + 1));
+            let re = super::build_regex(pattern, flags).map(Rc::new);
+            if m.len() >= CAP {
+                m.clear();
+            }
+            m.push(((pattern.to_string(), flags.to_string()), re.clone()));
+            re
+        })
+    }
+}
+
 /// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`
 /// multi-line, `x` extended/ignore-whitespace, `q` literal-pattern mode per XPath F&O —
 /// every pattern character is matched literally, combinable with `i`).
 /// Returns `None` on an invalid pattern or an unknown flag (→ type error).
+/// Compile-per-call — go through [`regex_cache::get`] on any per-row path.
 #[cfg(feature = "regex")]
 fn build_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
     if !flags.chars().all(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'q')) {
@@ -14031,6 +14285,329 @@ mod function_tests {
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"BOB\", \"i\")) }"), 1);
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[0-9]+\")) }"), 1); // Carol123
         assert_eq!(n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]\", \"X\") AS ?g) }"), 3);
+    }
+}
+
+/// [FABLE-5] sq-98w7z.1 — per-row builtin memoisation: (A) the REGEX/REPLACE
+/// compile memo, (B) the RAND() thread-local PRNG, (C) NOW() query-constancy
+/// (SPARQL 1.1 §17.4.5.1). Every test here exercises the REAL evaluation path
+/// (`crate::query*` or the actual thread-local modules), never a mock.
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod builtin_memo_tests {
+    use super::*;
+
+    // [OPUS-4.8] (sq-98w7z.1) Used only by the `regex`-gated REGEX/REPLACE tests, so gate the
+    // helper too — otherwise it is dead code under `--no-default-features` (feature-OFF clippy).
+    #[cfg(feature = "regex")]
+    fn names_graph() -> Graph {
+        Graph::load_str(
+            "@prefix : <http://ex/> .\n\
+             :a :name \"Alice\" . :b :name \"bob\" . :c :name \"Carol123\" .\n",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn wide_graph(rows: usize) -> Graph {
+        let ttl: String =
+            (0..rows).map(|i| format!("<http://ex/s{i}> <http://ex/p> <http://ex/o> .\n")).collect();
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    // ---- (A) REGEX / REPLACE compile memo ---------------------------------------
+
+    /// Result-equivalence differential: over a mixed (pattern, flags) set — valid,
+    /// invalid pattern, unknown flag, each of i/s/m/x/q — the memoised regex must
+    /// behave IDENTICALLY to a fresh `build_regex` compile, on both the first
+    /// (miss) and second (hit) lookup, including the `None` outcome that maps to
+    /// `Value::Error` per row.
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_cache_fresh_equivalence_differential() {
+        let cases: &[(&str, &str)] = &[
+            ("^[A-Z]", ""),
+            ("bob", "i"),
+            ("a.c", "s"),
+            ("^b", "m"),
+            ("a b", "x"),
+            ("a.c", "q"),  // literal mode: the dot matches only a literal dot
+            ("A.C", "qi"), // q combined with i keeps case-insensitivity
+            ("[", ""),     // invalid pattern -> None
+            ("a", "z"),    // unknown flag -> None
+            ("(unclosed", "i"),
+        ];
+        let texts = ["Alice", "bob", "BOB", "a.c", "aXc", "abc\nbcd", "a b"];
+        for (pat, flags) in cases {
+            let fresh = build_regex(pat, flags);
+            for round in 0..2 {
+                let cached = regex_cache::get(pat, flags);
+                assert_eq!(
+                    cached.is_some(),
+                    fresh.is_some(),
+                    "compile outcome diverged for ({pat:?}, {flags:?}) round {round}"
+                );
+                if let (Some(c), Some(f)) = (&cached, &fresh) {
+                    for t in &texts {
+                        assert_eq!(c.is_match(t), f.is_match(t), "is_match diverged: ({pat:?}, {flags:?}) on {t:?}");
+                        assert_eq!(
+                            c.replace_all(t, "_").into_owned(),
+                            f.replace_all(t, "_").into_owned(),
+                            "replace_all diverged: ({pat:?}, {flags:?}) on {t:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compile-once counter (NON-VACUOUS: reverting the memo lookup in
+    /// `regex_cache::get` makes the first delta 100, one per row): a
+    /// constant-pattern FILTER over 100 rows compiles once; a SECOND execution
+    /// reusing the pattern compiles zero times (the key is query-independent);
+    /// REPLACE adds one compile for its distinct pattern; an INVALID pattern
+    /// memoises its failure once while still erroring per row (FILTER drops every
+    /// row, BIND leaves every row with the variable unbound — the pre-memo
+    /// semantics).
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_compiles_once_not_per_row() {
+        let ttl: String =
+            (0..100).map(|i| format!("<http://ex/s{i}> <http://ex/name> \"name{i}A\" .\n")).collect();
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        let filter_q = "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"e9[0-9]A$\")) }";
+
+        let c0 = regex_cache::compile_count();
+        assert_eq!(crate::query(&g, filter_q).unwrap().len(), 10); // name90A..name99A
+        let c1 = regex_cache::compile_count();
+        assert_eq!(c1 - c0, 1, "a constant-pattern FILTER over 100 rows must compile ONCE, not per row");
+
+        assert_eq!(crate::query(&g, filter_q).unwrap().len(), 10);
+        assert_eq!(regex_cache::compile_count(), c1, "a second execution reuses the memoised compile");
+
+        assert_eq!(
+            crate::query(&g, "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]+\", \"#\") AS ?r) }")
+                .unwrap()
+                .len(),
+            100
+        );
+        assert_eq!(regex_cache::compile_count(), c1 + 1, "REPLACE compiles its distinct pattern once");
+
+        // Invalid pattern: the FAILURE is memoised (one compile attempt), and the
+        // per-row semantics stay exactly the pre-memo ones.
+        assert_eq!(
+            crate::query(&g, "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[\")) }").unwrap().len(),
+            0,
+            "invalid pattern: type error per row -> FILTER drops every row"
+        );
+        assert_eq!(regex_cache::compile_count(), c1 + 2);
+        let r = crate::query(&g, "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[\", \"X\") AS ?r) }")
+            .unwrap();
+        assert_eq!(r.len(), 100, "invalid pattern under BIND keeps rows");
+        assert!(r.rows.iter().all(|row| row[0].is_none()), "…with ?r unbound on every row");
+        assert_eq!(regex_cache::compile_count(), c1 + 2, "the memoised failure is reused, not recompiled");
+    }
+
+    /// Overflowing the memo cap stays bounded and correct (the memo clears and
+    /// keeps compiling — degraded, never wrong).
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_cache_cap_overflow_stays_correct() {
+        for i in 0..131 {
+            let pat = format!("^p{i}$");
+            let re = regex_cache::get(&pat, "").expect("valid pattern");
+            assert!(re.is_match(&format!("p{i}")));
+            assert!(!re.is_match("nope"));
+        }
+    }
+
+    /// EXISTS-nested REGEX re-enters the memo on the SAME thread in the middle of
+    /// the outer FILTER's row loop. The `(pattern, flags)` key is independent of
+    /// any `Bindings` layout (unlike a column-index thread-local), so the
+    /// re-entry can only hit the memo correctly: both patterns coexist and each
+    /// compiles exactly once despite the interleaving.
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_cache_exists_reentry() {
+        let g = names_graph();
+        let c0 = regex_cache::compile_count();
+        let q = "SELECT ?n WHERE { ?s <http://ex/name> ?n \
+                 FILTER(REGEX(?n, \"^[A-Za-z]+[0-9]+$\") && EXISTS { ?s <http://ex/name> ?n2 FILTER(REGEX(?n2, \"^[A-Z]\")) }) }";
+        assert_eq!(crate::query(&g, q).unwrap().len(), 1); // Carol123
+        assert_eq!(
+            regex_cache::compile_count() - c0,
+            2,
+            "outer + EXISTS-nested pattern compile once each across the re-entry"
+        );
+    }
+
+    // ---- (B) RAND() thread-local PRNG -------------------------------------------
+
+    /// RAND() stays non-deterministic per SPARQL: every call yields a fresh
+    /// `xsd:double` in [0, 1), and two separate executions do not repeat.
+    #[test]
+    fn rand_fresh_per_call_in_unit_range() {
+        let g = wide_graph(100);
+        let q = "SELECT ?r WHERE { ?s <http://ex/p> ?o BIND(RAND() AS ?r) }";
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(r.len(), 100);
+        let mut seen = std::collections::HashSet::new();
+        for row in &r.rows {
+            let Some(Term::Literal(l)) = &row[0] else { panic!("RAND() must bind a literal") };
+            assert_eq!(l.datatype(), xsd::DOUBLE);
+            let v: f64 = l.value().parse().expect("xsd:double lexical");
+            assert!((0.0..1.0).contains(&v), "RAND() out of [0,1): {v}");
+            seen.insert(l.value().to_string());
+        }
+        // splitmix64 collides over 100 draws with probability ~2^-46; a constant
+        // or repeating stream (the failure mode this guards) collapses `seen`.
+        assert!(seen.len() >= 99, "RAND() must draw fresh per call; got {} distinct of 100", seen.len());
+        // Distinct executions draw from fresh state too (collision odds ~2^-53).
+        let one = |q: &str| crate::query(&g, q).unwrap().rows[0][0].clone();
+        assert_ne!(
+            one("SELECT ?r WHERE { ?s <http://ex/p> ?o BIND(RAND() AS ?r) } LIMIT 1"),
+            one("SELECT ?r WHERE { ?s <http://ex/p> ?o BIND(RAND() AS ?r) } LIMIT 1"),
+            "RAND() must not repeat across executions"
+        );
+    }
+
+    /// DENY-list guard (the memoisation-policy block in `eval_function_inner`):
+    /// every non-deterministic builtin — UUID(), STRUUID(), no-arg BNODE() —
+    /// must yield a FRESH value on every call. A value-keyed memo wired around
+    /// any of them (they take zero arguments, so a memo collapses ALL calls to
+    /// one value) fails this immediately: all 50 rows would bind one term.
+    #[test]
+    fn nondeterministic_builtins_fresh_per_call_never_memoised() {
+        let g = wide_graph(50);
+        for (expr, what) in
+            [("UUID()", "UUID"), ("STRUUID()", "STRUUID"), ("BNODE()", "no-arg BNODE")]
+        {
+            let q = format!("SELECT ?v WHERE {{ ?s <http://ex/p> ?o BIND({expr} AS ?v) }}");
+            let r = crate::query(&g, &q).unwrap();
+            assert_eq!(r.len(), 50);
+            let distinct: std::collections::HashSet<String> =
+                r.rows.iter().map(|row| row[0].clone().unwrap().to_string()).collect();
+            assert_eq!(distinct.len(), 50, "{what} must be fresh per call, never memoised");
+        }
+    }
+
+    // ---- (C) NOW() query-constancy (SPARQL 1.1 §17.4.5.1) -----------------------
+
+    /// Deterministic guard mechanics (no clock dependence): outermost-wins
+    /// nesting, worker-guard restore, clear on the OUTERMOST drop only.
+    #[test]
+    fn query_now_scope_mechanics() {
+        assert_eq!(query_now::snapshot(), None);
+        let g1 = query_now::scope();
+        let v = query_now::snapshot().expect("outermost scope samples the clock");
+        {
+            let g2 = query_now::scope(); // nested (sub-select / EXISTS re-entry)
+            assert_eq!(query_now::snapshot(), Some(v), "nested scope keeps the outer instant");
+            drop(g2);
+            assert_eq!(query_now::snapshot(), Some(v), "nested drop must NOT clear the outer instant");
+        }
+        {
+            let w = query_now::worker_install(Some(v + 999));
+            assert_eq!(query_now::snapshot(), Some(v + 999));
+            drop(w);
+            assert_eq!(query_now::snapshot(), Some(v), "worker guard restores the previous instant");
+        }
+        drop(g1);
+        assert_eq!(query_now::snapshot(), None, "outermost drop clears: the next execution re-samples");
+    }
+
+    /// A sleeping extension function forces a REAL ≥1 s clock advance INSIDE one
+    /// execution between two NOW() evaluations — they must still be equal (before
+    /// this fix each evaluation re-read the clock, so the seconds differed and
+    /// this test fails). A separate execution afterwards necessarily lands in a
+    /// LATER second, proving the pinned instant does not leak across executions.
+    #[test]
+    fn now_constant_within_execution_fresh_across_executions() {
+        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
+        let mut reg = crate::FunctionRegistry::new();
+        reg.register("http://test/sleep", |_args: &[Term]| {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            Ok(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)))
+        });
+        let q = "SELECT ?a ?b WHERE { ?s ?p ?o BIND(NOW() AS ?a) \
+                 BIND(<http://test/sleep>() AS ?x) BIND(NOW() AS ?b) }";
+        let r = crate::query_with_functions(&g, q, &reg).unwrap();
+        assert_eq!(r.len(), 1);
+        let (a, b) = (r.rows[0][0].clone().unwrap(), r.rows[0][1].clone().unwrap());
+        assert_eq!(a, b, "NOW() must be constant across a >=1s in-execution clock advance");
+        // This execution starts >=1.2s after the first one PINNED its instant, so
+        // its whole-second lexical is strictly later — a stale thread-local NOW
+        // reused across queries would return `a` here.
+        let r2 = crate::query(&g, "SELECT ?n WHERE { ?s ?p ?o BIND(NOW() AS ?n) }").unwrap();
+        assert_ne!(r2.rows[0][0].clone().unwrap(), a, "a NEW execution must sample a NEW instant");
+    }
+
+    /// EXISTS re-entry across a REAL clock tick. The EXISTS body sleeps >=1.2s and
+    /// evaluates `NOW()` inside its own FILTER expression path, so the nested
+    /// evaluation re-enters expression handling ON THE SAME THREAD while the outer
+    /// execution's instant is still pinned. `?a` (`NOW()` from BEFORE the EXISTS)
+    /// must therefore equal `?b` (`NOW()` from AFTER the EXISTS returns, >=1.2s of
+    /// real time later): a single pinned instant survives the whole
+    /// EXISTS-inclusive execution. Pre-fix, `?a` and `?b` re-read the clock and
+    /// land in different whole seconds.
+    ///
+    /// The EXISTS is CORRELATED on `?s` (a shared BOUND variable), so it runs the
+    /// per-row `eval_graph_pattern` re-entry rather than the uncorrelated ASK fast
+    /// path — the branch that actually re-enters expression evaluation for the
+    /// inner `NOW()`. An outer-only variable is deliberately NOT referenced inside
+    /// the EXISTS (spargebra does not substitute it into the inner scope).
+    #[test]
+    fn now_exists_reentry_same_instant() {
+        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
+        let mut reg = crate::FunctionRegistry::new();
+        reg.register("http://test/sleep", |_args: &[Term]| {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            Ok(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)))
+        });
+        let q = "SELECT ?a ?b WHERE { ?s ?p ?o BIND(NOW() AS ?a) \
+                 FILTER EXISTS { ?s ?p ?o2 BIND(<http://test/sleep>() AS ?x) FILTER(STR(NOW()) = STR(NOW())) } \
+                 BIND(NOW() AS ?b) }";
+        let r = crate::query_with_functions(&g, q, &reg).unwrap();
+        assert_eq!(r.len(), 1);
+        let (a, b) = (r.rows[0][0].clone().unwrap(), r.rows[0][1].clone().unwrap());
+        assert_eq!(a, b, "NOW() before and after a >=1.2s EXISTS re-entry must be the SAME pinned instant");
+    }
+
+    /// Parallel-threshold row count: a single NOW() instant across ALL rows AND a
+    /// zero un-scoped-fallback delta. The fallback counter is what makes this
+    /// non-vacuous at whole-second clock granularity: without the rayon
+    /// `worker_install` wiring the workers' evaluations fall back to fresh clock
+    /// samples and the counter goes hot even when every sample lands in the same
+    /// second.
+    // [OPUS-4.8] (sq-98w7z.1) Gated on `parallel`: the test's whole point is the rayon
+    // `worker_install` NOW-snapshot wiring, and it references `PAR_THRESHOLD` — both of which only
+    // exist under the `parallel` feature. Without it there is no worker path to guard and the
+    // constant reference would not compile (feature-OFF clippy caught this).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn now_parallel_rows_single_instant_no_fallback() {
+        use std::sync::atomic::Ordering;
+        // Just past PAR_THRESHOLD: the FILTER/BIND parallel branches activate on a
+        // `>= PAR_THRESHOLD` row count (independent of per-row cost), so a thin
+        // over-threshold graph exercises the exact rayon worker paths this test
+        // guards while staying cheap on a contended box. `+ 200` keeps a healthy
+        // margin so the branch fires deterministically.
+        let rows = PAR_THRESHOLD + 200;
+        let g = wide_graph(rows);
+        let f0 = query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed);
+        let q = "SELECT ?n WHERE { ?s <http://ex/p> ?o BIND(NOW() AS ?n) FILTER(STR(?n) = STR(NOW())) }";
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(r.len(), rows, "every row's FILTER NOW() must equal its BIND NOW()");
+        let mut distinct = std::collections::HashSet::new();
+        for row in &r.rows {
+            distinct.insert(row[0].clone().unwrap().to_string());
+        }
+        assert_eq!(distinct.len(), 1, "NOW() must be one instant across all rows");
+        assert_eq!(
+            query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed) - f0,
+            0,
+            "no evaluation path may fall back to an un-pinned clock sample"
+        );
     }
 }
 
