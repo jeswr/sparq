@@ -2505,4 +2505,53 @@ mod tests {
         assert!(peek.next().is_none(), "after close: drained");
         assert!(peek.is_done());
     }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): ScatterPool::join must BLOCK until every submitted
+    // job's side effect is visible — that blocking-drain is its whole contract (Drop only
+    // closes the queue and lets workers finish detached). cargo-mutants showed `join` replaced
+    // by `()` survived: no test observed that after join() returns, all work is DONE. Submit
+    // jobs that each sleep then bump a shared counter; a no-op join returns before the sleeping
+    // jobs finish, so the counter would be < N right after it returns.
+    #[test]
+    fn scatter_pool_join_blocks_until_all_jobs_complete() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::time::Duration;
+        const N: usize = 8;
+        let done = StdArc::new(AtomicUsize::new(0));
+        let pool = ScatterPool::new(4, N);
+        for _ in 0..N {
+            let done = StdArc::clone(&done);
+            pool.submit(move || {
+                // Sleep so a no-op join cannot have waited for this to finish.
+                std::thread::sleep(Duration::from_millis(40));
+                done.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        // Not yet joined: at least one job is still sleeping, so the count is below N.
+        pool.join();
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            N,
+            "join() must block until EVERY submitted job has completed its side effect"
+        );
+    }
+
+    #[test]
+    fn scatter_pool_runs_every_submitted_job_exactly_once() {
+        // Each of N distinct jobs records its own index; after join the recorded set is
+        // EXACTLY {0..N} — no job dropped, none run twice (submit → send → worker runs once).
+        use std::sync::Arc as StdArc;
+        const N: usize = 16;
+        let seen: StdArc<Mutex<Vec<usize>>> = StdArc::new(Mutex::new(Vec::new()));
+        let pool = ScatterPool::new(3, 4);
+        for i in 0..N {
+            let seen = StdArc::clone(&seen);
+            pool.submit(move || seen.lock().unwrap().push(i));
+        }
+        pool.join();
+        let mut got = StdArc::try_unwrap(seen).unwrap().into_inner().unwrap();
+        got.sort_unstable();
+        assert_eq!(got, (0..N).collect::<Vec<_>>(), "every job runs exactly once");
+    }
 }
