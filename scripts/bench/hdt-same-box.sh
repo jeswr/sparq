@@ -20,7 +20,7 @@
 #     328 triples, hdt-cpp/java-shaped FourSectionDictionary+BitmapTriples)
 #
 # METHODOLOGY:
-#   * ALL engines are timed in-process, decode-only (hdt2rdf <in.hdt> → N-Triples on stdout),
+#   * ALL engines are timed in-process, decode-only (hdt2rdf <in.hdt> <out.nt> → N-Triples file),
 #     best-of-N on the same archive: sparq-hdt via examples/bench_oracle, hdt-cpp via the
 #     registered Docker recipe (scripts/bench-adapters/report_cli_adapter.py +
 #     bench/competitors.json). Parse is OUTSIDE the timed section.
@@ -110,13 +110,29 @@ if want sparq; then
   fi
 fi
 
-# -- hdt-cpp: hdt2rdf <in.hdt> → N-Triples on stdout
+# -- hdt-cpp: hdt2rdf <in.hdt> <out.nt> — the tool REQUIRES an explicit output
+# operand ("ERROR: You must supply an input and output" observed verbatim on the
+# wave-1 canonical box when stdout-piping was attempted, sq-hmd7l.26); decode into
+# a rw-mounted scratch file instead. Wall-clock is recorded as ADVISORY only: it
+# includes docker container spawn overhead, which dominates on a tiny fixture.
+HDT_CPP_WALL_S="n/a"
 if want hdt-cpp && [ "$HDT_CPP_AVAILABLE" -eq 1 ]; then
   log "hdt-cpp: hdt2rdf decode"
+  T0="$(date +%s.%N)"
   if ! timeout "$TIMEOUT_S" docker run --rm -v "$HDT_ARCHIVE:$HDT_ARCHIVE:ro" \
-      rdfhdt/hdt-cpp:latest hdt2rdf "$HDT_ARCHIVE" \
-      > "$SCALE_TMP/hdt-cpp.nt" 2> "$SCALE_TMP/hdt-cpp.err"; then
+      -v "$SCALE_TMP:/hdt-out" \
+      rdfhdt/hdt-cpp:latest hdt2rdf "$HDT_ARCHIVE" /hdt-out/hdt-cpp.nt \
+      > "$SCALE_TMP/hdt-cpp.out" 2> "$SCALE_TMP/hdt-cpp.err"; then
     log "hdt-cpp FAILED/timeout (see $SCALE_TMP/hdt-cpp.err)"; : > "$SCALE_TMP/hdt-cpp.nt"
+    # Surface the failure reason into the run log itself: $SCALE_TMP is /tmp
+    # scratch that between-axis cleanup prunes, so "see the err file" is a
+    # dead pointer on a self-terminating gather box (bit sq-hmd7l.26 wave-1).
+    head -5 "$SCALE_TMP/hdt-cpp.err" 2>/dev/null | while IFS= read -r ln; do
+      log "hdt-cpp.err: $ln"
+    done
+  else
+    HDT_CPP_WALL_S="$(awk -v t0="$T0" -v t1="$(date +%s.%N)" 'BEGIN{printf "%.3f", t1-t0}')"
+    log "hdt-cpp decode ok: wall ${HDT_CPP_WALL_S}s ADVISORY (includes container spawn)"
   fi
 elif want hdt-cpp; then
   log "hdt-cpp: SKIPPED (Docker not available or image not found)"
@@ -129,7 +145,7 @@ OUT="$OUT_DIR/hdt-snikmeta-${TS}.json"
 CANONICAL="$CANONICAL" HDT_ARCHIVE="$HDT_ARCHIVE" NTRIPLES="328" \
 GIT_COMMIT="$GIT_COMMIT" SCALE_TMP="$SCALE_TMP" OUT="$OUT" ONLY="$ONLY" \
 TIMEOUT_S="$TIMEOUT_S" HDT_CPP_AVAILABLE="$HDT_CPP_AVAILABLE" \
-HDT_CPP_DIGEST="${HDT_CPP_DIGEST:-}" \
+HDT_CPP_DIGEST="${HDT_CPP_DIGEST:-}" HDT_CPP_WALL_S="$HDT_CPP_WALL_S" \
 python3 - <<'PYEOF'
 import json, os, platform
 
@@ -169,7 +185,7 @@ if "sparq" in only:
 if "hdt-cpp" in only:
     engines_meta["hdt-cpp"] = {
         "version": os.environ.get("HDT_CPP_DIGEST", "not-available"),
-        "mode": "Docker container (rdfhdt/hdt-cpp:latest, hdt2rdf <archive>: decode .hdt to N-Triples on stdout, wall-clock decode_s)" if hdt_cpp_available else "status:absent (Docker not available)",
+        "mode": "Docker container (rdfhdt/hdt-cpp:latest, hdt2rdf <archive> <out.nt>: decode .hdt to an N-Triples file in a rw scratch mount; wall-clock advisory)" if hdt_cpp_available else "status:absent (Docker not available)",
     }
 
 note_canonical = (
@@ -222,7 +238,7 @@ envelope = {
     "iters": 1,
     "mode": "decode-only (load+decode wall-clock); query-over-HDT is OUT OF SCOPE (not like-for-like)",
     "caveat": "HARD COMPARABILITY CAVEAT: load-and-decode-to-native is the ONLY like-for-like axis. sparq-hdt decodes HDT into sparq's own Dict/Graph (HDT as an ingest format) then queries its own permutation indexes. hdt-cpp/java query the compressed BitmapTriples IN PLACE (HDT as a queryable store). A query-over-HDT head-to-head (hdtSearch) is NOT like-for-like and is OUT OF SCOPE.",
-    "tsv_format": "sparq: <metric>\\t<value>\\t<unit> (from bench_oracle); hdt-cpp: N-Triples lines on stdout",
+    "tsv_format": "sparq: <metric>\\t<value>\\t<unit> (from bench_oracle); hdt-cpp: decoded N-Triples file line count",
     "engines": engines_meta,
     "decode_triple_count_crosscheck": count_check,
     "count_agreement": {
@@ -237,6 +253,15 @@ envelope = {
 # Add metric data from sparq
 if sparq_data:
     envelope["sparq_metrics"] = sparq_data
+
+# hdt-cpp decode wall-clock — ADVISORY ONLY (includes docker container spawn
+# overhead, which dominates on the tiny snikmeta fixture; never a headline).
+if os.environ.get("HDT_CPP_WALL_S", "n/a") != "n/a":
+    envelope["hdt_cpp_decode_wall_s_advisory"] = {
+        "value": os.environ["HDT_CPP_WALL_S"],
+        "unit": "s",
+        "note": "includes docker run container spawn; advisory only",
+    }
 
 # Add raw hdt-cpp output snippet (first 5 lines, last 5 lines for visibility)
 if os.path.exists(hdt_cpp_path) and os.path.getsize(hdt_cpp_path) > 0:

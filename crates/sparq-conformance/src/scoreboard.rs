@@ -157,8 +157,8 @@ pub struct Suite {
 ///   `FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
 ///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
 ///   suite, compared by re-parse RDF-equivalence to the normative expected output).
-/// * JSON-LD expand 240 — `sparq-conformance` `src/floors/expand.rs`
-///   `FLOOR = 240` (sq-kk1mq oracle-correction re-baseline; opt-in
+/// * JSON-LD expand 259 — `sparq-conformance` `src/floors/expand.rs`
+///   `FLOOR = 259` (sq-oy1f.37 expand() correctness raise from 240; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
 ///   directly and compares the result to the expected document via `json_ld_equal`
 ///   — a document-level JSON comparator measuring JSON-LD data-model (semantic)
@@ -528,12 +528,16 @@ pub const SUITES: &[Suite] = &[
     // The old floor was 247 under the RDF-equivalence oracle (sq-oy1f); the rebase
     // reveals a net 7 fewer passes (20 old-pass→new-fail flips minus 13 recoveries:
     // 8 old-fail→new-pass via oracle precision + 5 old-skip→new-pass via options
-    // forwarding) and 26 new honest failures.  The new floor 240 is the MEASURED pass
-    // count with the corrected oracle at the pinned suite revision (sq-kk1mq).
+    // forwarding) and 26 new honest failures.  The expand floor was 240 (the MEASURED
+    // pass count with the corrected oracle at the pinned suite revision, sq-kk1mq), then
+    // RAISED to 259 by sq-oy1f.37 (three expand() correctness fixes: value-object
+    // @type collapse, empty-array-property retention, free-floating value/list drop —
+    // rise-only ratchet).
     // [FABLE-5] sq-oy1f.26 — the flatten lane ALSO moved to the native document oracle
-    // (sparq_jsonld::flatten() = expand ∘ node-map ∘ fold, compared via json_ld_equal);
-    // re-pin 50 (old RDF-writer oracle) → 46 (native). The drop is inherited expand-lane
-    // gaps (owned by sq-oy1f.37), not flatten bugs — see src/floors/flatten.rs.
+    // (sparq_jsonld::flatten() = expand ∘ node-map ∘ fold, compared via json_ld_equal),
+    // re-pinned off the old RDF-writer oracle.  It composes over expand(), so it inherits
+    // the sq-oy1f.37 expand raises above (the flatten floor is the MEASURED native-oracle
+    // pass count on the merged tree) — see src/floors/flatten.rs.
     // Floors kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 expand",
@@ -621,6 +625,41 @@ pub const SUITES: &[Suite] = &[
         note: "D-only sparql11/entailment tests graduated from OutOfScope to Pass \
                through sparq-reason's opt-in Profile::D (rdfD1 typing + typed \
                value-space equality)",
+    },
+    // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm, a
+    // sparq EXTENSION ratchet tallied SEPARATELY from the W3C D-entailment row above
+    // (the W3C `sparql11/entailment` corpus is a SINGLE D-only test; the real value-space
+    // coverage is sparq's own hand-authored matrix). Mirrors the OWL 2 QL / EL / RIF-Core
+    // extension precedent — program honesty rule 4: the standards-conformance count is NOT
+    // padded with sparq's own cases. The floor const (`pub const D_VALUE_MATRIX_FLOOR`)
+    // lives in `tests/d_entail_suite.rs` (behind the opt-in `d-entail` feature, inside the
+    // `gated` module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting do not
+    // affect the match); `tests/scoreboard_floors.rs` pins this mirror to it so the two can
+    // never drift. The runner drives value-equal-distinct-lexical pairs (integer⊂decimal
+    // incl. the 2^53+1 non-aliasing guard, boolean true/1, the hex/base64 octet pair),
+    // facet-ill-formed negatives (rdfD1 must NOT type 200^^byte / a leading-space token),
+    // and disjoint-space negatives (decimal vs double, date vs dateTime) through the REAL
+    // `Profile::D` value-space comparator (now on the shared sparq-substrate seam,
+    // sq-pbz04.6.3) — plus broadened-map end-to-end cases through the same
+    // materialize→answer-restriction→engine-query path as the W3C lane.
+    Suite {
+        label: "D value-space matrix (integer/decimal/boolean/binary/temporal)",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "d_entail_suite",
+            feature: "d-entail",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 24,
+        floor_basis: "value-space assertions (sparq EXTENSION over the D datatype map, \
+                      NOT the W3C sparql11/entailment conformance count)",
+        note: "EXTENSION ratchet — sparq's own hand-authored D value-space matrix over the \
+               recognized datatype map (integer⊂decimal incl. 2^53+1 non-aliasing, boolean \
+               true/1, hex/base64 octet identity, facet-ill-formed negatives, decimal-vs-\
+               double + date-vs-dateTime disjoint-space negatives), driven through the REAL \
+               Profile::D value-space comparator + the materialize→answer-restriction→engine \
+               end-to-end path; tallied SEPARATELY, never faked as W3C conformance passes",
     },
     // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 `sparql11/service`
     // EVALUATION ratchet. The runner is crate-local here
@@ -1034,15 +1073,22 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 68,
+        ratchet_floor: 95,
         floor_basis: "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the \
                       L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT \
-                      a W3C ProfileIdentificationTest conformance claim)",
+                      a W3C ProfileIdentificationTest conformance claim); re-pinned by \
+                      sq-pbz04.4.16 (M7 singleton-intersection normalization: +27, 68 -> 95)",
         note: "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose \
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
-               REAL fail-closed L1 extraction + grammar walk; explicit-negative and species \
-               assertions are not checked (documented), abstentions are never passes, and \
-               the 27 singleton-intersection divergences are pinned by name",
+               REAL fail-closed L1 extraction + grammar walk; abstentions are never passes. \
+               The 27 singleton-intersection (M7) divergences are FIXED by sq-pbz04.4.16 (L1 \
+               normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
+               positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
+               a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
+               profile negations refuted where L2 can (139), with an honest measured In-gap \
+               (180 of 319 checkable) where axiom-grammar membership over the ALCH shadow \
+               cannot refute full-profile membership (deferred restrictions); species \
+               assertions remain unchecked (documented)",
     },
     Suite {
         label: "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
@@ -1053,21 +1099,24 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 190,
+        ratchet_floor: 182,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
                       re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, 192 -> 189); \
                       re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode existential-reading fix: \
-                      +1, 189 -> 190 — both M2 rows graduate to passes, one free-existential- \
-                      root conclusion bnode shifts to an honest abstention)",
+                      +1, 189 -> 190); re-pinned by sq-pbz04.4.16 (M7 singleton-intersection \
+                      normalization: -8, 190 -> 182 — 8 consistency cases re-route from the \
+                      ALCH tableau to the RL branch and honestly abstain via the documented \
+                      disjointWith divergence guard, never a wrong verdict; fail set unchanged)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
                passes, and all 5 remaining wrong-verdict divergences are pinned by name \
                with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
-               M2 FIXED sq-pbz04.4.13 — those rows now pass/abstain; remaining: M3/M5/M6)",
+               M2 FIXED sq-pbz04.4.13; M7 FIXED sq-pbz04.4.16 — those rows now pass/abstain; \
+               remaining: M3/M5/M6)",
     },
 ];
 

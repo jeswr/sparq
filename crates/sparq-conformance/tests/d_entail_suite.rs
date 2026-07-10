@@ -133,4 +133,255 @@ mod gated {
             D_ENTAIL_FLOOR
         );
     }
+
+    // ── [FABLE-5] sq-pbz04.6.4 — the crate-local D VALUE-SPACE MATRIX arm ────────────
+    //
+    // A sparq-EXTENSION ratchet, tallied SEPARATELY from the W3C `D_ENTAIL_FLOOR` above
+    // (mirroring the OWL 2 QL certain-answer-oracle precedent, program honesty rule 4:
+    // the standards-conformance count is NOT padded with sparq's own extension cases).
+    // The W3C `sparql11/entailment` corpus is a SINGLE D-only test; the real
+    // value-space coverage lives here, driven through the REAL `Profile::D` materializer
+    // + the same value-space comparator (`d_value_eq`/`d_value_key`, now on the shared
+    // `sparq-substrate` seam — sq-pbz04.6.3) + the same end-to-end
+    // materialize→answer-restriction→engine-query path as the W3C lane.
+    //
+    // FLOOR = the MEASURED assertion count (a sparq EXTENSION unit, never aspirational),
+    // may only RISE. Mirrored in the central scoreboard (`scoreboard::SUITES`) and pinned
+    // by `tests/scoreboard_floors.rs` (read textually).
+    pub const D_VALUE_MATRIX_FLOOR: usize = 24;
+
+    use sparq_core::dict::{Dict, Id};
+    use sparq_reason::{d_value_eq, d_value_key, materialize_d, Profile, Recognized};
+
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+    /// A value-space matrix case: two typed literals + whether they denote the SAME
+    /// D-value. Drives the REAL `d_value_eq` (the substrate-delegated value-space key).
+    struct EqCase {
+        a_lex: &'static str,
+        a_dt: &'static str,
+        b_lex: &'static str,
+        b_dt: &'static str,
+        equal: bool,
+        why: &'static str,
+    }
+
+    /// A well-formedness (rdfD1-typability) matrix case: a single typed literal + whether
+    /// it has a D-VALUE (is well-formed for its recognized datatype). An ill-formed literal
+    /// has NO value and rdfD1 must NOT type it.
+    struct WellFormedCase {
+        lex: &'static str,
+        dt: &'static str,
+        well_formed: bool,
+        why: &'static str,
+    }
+
+    fn dt(local: &str) -> String {
+        format!("{}{}", XSD, local)
+    }
+
+    /// The value-EQUALITY matrix: value-equal-distinct-lexical pairs (integer/decimal incl.
+    /// the 2^53+1 guard, boolean true/1, the hex/base64 octet pair) + disjoint-space
+    /// negatives (decimal vs double, date vs dateTime at a shared instant).
+    fn eq_cases() -> Vec<EqCase> {
+        vec![
+            // ── value-equal-distinct-lexical POSITIVES ──
+            EqCase { a_lex: "1", a_dt: "integer", b_lex: "1.0", b_dt: "decimal", equal: true,
+                     why: "integer ⊂ decimal: 1 == 1.0" },
+            EqCase { a_lex: "01", a_dt: "integer", b_lex: "+1", b_dt: "integer", equal: true,
+                     why: "leading zero / sign are the same value" },
+            EqCase { a_lex: "-0", a_dt: "integer", b_lex: "0", b_dt: "decimal", equal: true,
+                     why: "signed zero == zero" },
+            EqCase { a_lex: "1.50", a_dt: "decimal", b_lex: "1.5", b_dt: "decimal", equal: true,
+                     why: "trailing fraction zeros are insignificant" },
+            EqCase { a_lex: "true", a_dt: "boolean", b_lex: "1", b_dt: "boolean", equal: true,
+                     why: "boolean true == 1" },
+            EqCase { a_lex: "false", a_dt: "boolean", b_lex: "0", b_dt: "boolean", equal: true,
+                     why: "boolean false == 0" },
+            EqCase { a_lex: "61", a_dt: "hexBinary", b_lex: "YQ==", b_dt: "base64Binary", equal: true,
+                     why: "octet [0x61] is one value across hex/base64 (D2)" },
+            // ── DISJOINT-space + distinct-value NEGATIVES ──
+            EqCase { a_lex: "1.0", a_dt: "decimal", b_lex: "1.0", b_dt: "double", equal: false,
+                     why: "decimal and double are DISJOINT primitive value spaces" },
+            EqCase { a_lex: "1", a_dt: "integer", b_lex: "1.0", b_dt: "double", equal: false,
+                     why: "integer/decimal space is disjoint from IEEE double" },
+            EqCase { a_lex: "1.0", a_dt: "decimal", b_lex: "1.0", b_dt: "float", equal: false,
+                     why: "decimal and float are DISJOINT value spaces" },
+            EqCase { a_lex: "2004-04-12T13:20:00Z", a_dt: "dateTime",
+                     b_lex: "2004-04-12", b_dt: "date", equal: false,
+                     why: "date and dateTime are DISJOINT value spaces even at a shared instant" },
+            EqCase { a_lex: "1", a_dt: "integer", b_lex: "2", b_dt: "decimal", equal: false,
+                     why: "distinct numeric values" },
+            // ── the 2^53+1 NON-ALIASING guard (an f64 would wrongly equate these) ──
+            EqCase { a_lex: "9007199254740993", a_dt: "integer",
+                     b_lex: "9007199254740992", b_dt: "integer", equal: false,
+                     why: "2^53+1 must NOT alias 2^53 (unsound-f64 guard)" },
+            EqCase { a_lex: "9007199254740993", a_dt: "integer",
+                     b_lex: "9007199254740993.0", b_dt: "decimal", equal: true,
+                     why: "2^53+1 exactly equals its own decimal spelling" },
+        ]
+    }
+
+    /// The WELL-FORMEDNESS (facet) matrix: facet-ill-formed negatives (rdfD1 must NOT type
+    /// `200^^xsd:byte`, a leading-space `xsd:token`) + well-formed positives.
+    fn well_formed_cases() -> Vec<WellFormedCase> {
+        vec![
+            // ── facet-ill-formed NEGATIVES (rdfD1 must NOT type) ──
+            WellFormedCase { lex: "200", dt: "byte", well_formed: false,
+                             why: "200 is outside xsd:byte [-128,127] — no D-value" },
+            WellFormedCase { lex: " a", dt: "token", well_formed: false,
+                             why: "leading space is illegal for xsd:token" },
+            WellFormedCase { lex: "4294967296", dt: "unsignedInt", well_formed: false,
+                             why: "exceeds xsd:unsignedInt max" },
+            WellFormedCase { lex: "abc", dt: "integer", well_formed: false,
+                             why: "non-numeric lexical is ill-formed for xsd:integer" },
+            // ── well-formed POSITIVES ──
+            WellFormedCase { lex: "127", dt: "byte", well_formed: true, why: "xsd:byte max" },
+            WellFormedCase { lex: "a b", dt: "token", well_formed: true,
+                             why: "single internal space is a valid xsd:token" },
+            WellFormedCase { lex: "1", dt: "integer", well_formed: true, why: "valid integer" },
+            WellFormedCase { lex: "2004-04-12T13:20:00Z", dt: "dateTime", well_formed: true,
+                             why: "valid dateTime with tz" },
+            WellFormedCase { lex: "en-US", dt: "language", well_formed: true,
+                             why: "valid xsd:language" },
+            WellFormedCase { lex: "YQ==", dt: "base64Binary", well_formed: true,
+                             why: "valid base64 octet" },
+        ]
+    }
+
+    /// The crate-local D value-space matrix arm: every case classifies through the REAL
+    /// value-space comparator; the floor is the MEASURED assertion count. Feature-ON.
+    ///
+    /// MUTATION WITNESS: flip any `equal:`/`well_formed:` expectation (e.g. set the
+    /// `2^53+1 must NOT alias` case to `equal: true`) and this test goes RED — the arm is
+    /// non-vacuous over the value-space semantics, not a tautology.
+    #[test]
+    fn d_value_space_matrix() {
+        let eqs = eq_cases();
+        let wfs = well_formed_cases();
+        let mut asserted = 0usize;
+
+        for c in &eqs {
+            let got = d_value_eq(c.a_lex, &dt(c.a_dt), c.b_lex, &dt(c.b_dt));
+            assert_eq!(
+                got, c.equal,
+                "value-equality matrix: ({:?}^^{}, {:?}^^{}) expected equal={} ({}), got {}",
+                c.a_lex, c.a_dt, c.b_lex, c.b_dt, c.equal, c.why, got
+            );
+            asserted += 1;
+        }
+        for c in &wfs {
+            let got = d_value_key(c.lex, &dt(c.dt)).is_some();
+            assert_eq!(
+                got, c.well_formed,
+                "well-formedness (rdfD1-typability) matrix: {:?}^^{} expected well_formed={} \
+                 ({}), got {}",
+                c.lex, c.dt, c.well_formed, c.why, got
+            );
+            asserted += 1;
+        }
+
+        // The floor is the MEASURED count and may only RISE.
+        assert_eq!(
+            asserted,
+            D_VALUE_MATRIX_FLOOR,
+            "D value-space matrix asserted {} cases but the pinned floor is {} — raise the \
+             floor (and the scoreboard mirror) in the same commit when you add cases; a floor \
+             may only RISE",
+            asserted,
+            D_VALUE_MATRIX_FLOOR
+        );
+        println!("\nsparq D value-space matrix (EXTENSION, NOT W3C conformance)");
+        // Positional args per the CodeQL `rust/unused-variable` false-positive guard.
+        println!("TOTAL d-value-matrix {} (floor {})", asserted, D_VALUE_MATRIX_FLOOR);
+    }
+
+    /// Broadened-map END-TO-END case: a recognized well-formed literal is driven through
+    /// the REAL `Profile::D` materializer, then the closure is serialized DROPPING
+    /// literal-subject rows (the SPARQL Entailment-Regimes answer restriction — the same
+    /// path as the W3C lane) and queried through the REAL engine. rdfD1's typing triple
+    /// `"l"^^d rdf:type d` is GENERALIZED (literal subject), so it can NEVER be a SPARQL
+    /// answer — the query over the typed subject correctly returns NO rows, exactly why
+    /// `d-ent-01` returns no rows. This proves the closure + restriction end-to-end.
+    #[test]
+    fn d_materialize_answer_restriction_end_to_end() {
+        let mut dict = Dict::new();
+        // Data: <s> <p> "1"^^xsd:integer .   (a recognized, well-formed literal object)
+        let s = dict.intern(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://e/s")));
+        let p = dict.intern(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://e/p")));
+        let one = dict.intern(&oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+            "1",
+            oxrdf::NamedNode::new_unchecked(dt("integer")),
+        )));
+        let mut ids: Vec<[Id; 3]> = vec![[s, p, one]];
+
+        // Materialize the D closure through the REAL Profile::D (STANDARD recognized map).
+        let added = sparq_reason::materialize(Profile::D, &mut dict, &mut ids);
+        assert_eq!(added, 1, "rdfD1 types the recognized integer literal (generalized triple)");
+
+        // Serialize the closure DROPPING literal-subject rows — the answer restriction.
+        let mut nt = String::new();
+        for t in &ids {
+            let (so, po, oo) = (dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
+            if matches!(so, oxrdf::Term::Literal(_)) {
+                continue; // generalized triple: literal subject can never be an answer
+            }
+            nt.push_str(&format!("{} {} {} .\n", so, po, oo));
+        }
+
+        let graph = sparq_core::Graph::load_dataset(&nt, "nquads")
+            .unwrap_or_else(|e| panic!("load closure: {e}"));
+
+        // (a) The rdfD1 typing triple is NOT observable (literal subject dropped): a query
+        //     for `?x rdf:type xsd:integer` returns NO rows.
+        let type_q = format!(
+            "SELECT ?x WHERE {{ ?x <{}type> <{}integer> }}",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#", XSD
+        );
+        let r = sparq_engine::query(&graph, &type_q).unwrap_or_else(|e| panic!("query: {e}"));
+        assert!(
+            r.rows.is_empty(),
+            "the generalized rdfD1 typing triple must NOT surface as a SPARQL answer \
+             (answer restriction), but got rows: {:?}",
+            r.rows
+        );
+
+        // (b) The ORIGINAL asserted triple is still answerable end-to-end.
+        let data_q = "SELECT ?o WHERE { <http://e/s> <http://e/p> ?o }";
+        let r2 = sparq_engine::query(&graph, data_q).unwrap_or_else(|e| panic!("query: {e}"));
+        assert_eq!(r2.rows.len(), 1, "the asserted data triple is answerable");
+    }
+
+    /// Idempotence + unrecognized-datatype fail-closed, driven through the REAL
+    /// materializer (a second broadened-map end-to-end guard).
+    #[test]
+    fn d_materialize_idempotent_and_fail_closed() {
+        // Unrecognized-shaped datatype: the STANDARD map does not cover it → no typing.
+        let mut dict = Dict::new();
+        let s = dict.intern(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://e/s")));
+        let p = dict.intern(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://e/p")));
+        let custom = dict.intern(&oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+            "x",
+            oxrdf::NamedNode::new_unchecked("http://example.org/myType"),
+        )));
+        let mut ids: Vec<[Id; 3]> = vec![[s, p, custom]];
+        let added = sparq_reason::materialize(Profile::D, &mut dict, &mut ids);
+        assert_eq!(added, 0, "an unrecognized datatype is fail-closed: no rdfD1 typing");
+
+        // Idempotence over a custom recognized map: materialize_d twice adds nothing the
+        // second time.
+        let mut dict2 = Dict::new();
+        let s2 = dict2.intern(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://e/s")));
+        let p2 = dict2.intern(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://e/p")));
+        let two = dict2.intern(&oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+            "2",
+            oxrdf::NamedNode::new_unchecked(dt("integer")),
+        )));
+        let mut ids2: Vec<[Id; 3]> = vec![[s2, p2, two]];
+        let d = Recognized::new([dt("integer")]);
+        let a1 = materialize_d(&d, &mut dict2, &mut ids2);
+        let a2 = materialize_d(&d, &mut dict2, &mut ids2);
+        assert_eq!(a1, 1, "first materialize types the recognized literal");
+        assert_eq!(a2, 0, "second materialize is idempotent");
+    }
 }

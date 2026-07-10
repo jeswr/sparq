@@ -401,10 +401,233 @@ fn blank_node_correlation_equivalence() {
     assert!(fired && bindings > 64, "expected hash path on blank-node keys: {}", bindings);
 }
 
+// ── sq-3cmr4: sameTerm-correlated and IN-correlated OPTIONAL conditions ──────────
+//
+// The detector now recognises `sameTerm(?a, ?b)` and single-variable `?a IN (?b)` as
+// correlation conjuncts, alongside value `=`. The load-bearing soundness point: `=`,
+// `sameTerm` and id-equality are DIFFERENT relations on value-equal id-distinct literals
+// (`"1"^^xsd:integer` vs `"01"^^xsd:integer` are `=` but NOT `sameTerm`).
+
+/// Returns `(fired, distinct_correlations)` for `q` with the anti-join forced ON.
+fn fired_stats(g: &Graph, q: &str) -> (bool, usize) {
+    theta_antijoin_testing::set_enabled(true);
+    theta_antijoin_testing::reset_stats();
+    let _ = query(g, &format!("{PFX}{q}")).expect("query");
+    let (fired, _rows, bindings) = theta_antijoin_testing::stats();
+    (fired, bindings)
+}
+
+#[test]
+fn sameterm_correlation_equivalence_and_fires() {
+    // IRI-keyed q06 shape, but the OPTIONAL condition uses `sameTerm(?author, ?author2)`
+    // instead of `=`. For IRI authors sameTerm ≡ `=`, so the result is the SAME q06 answer
+    // (one earliest doc per author) AND the anti-join must FIRE (the new sameTerm arm).
+    let g = q06_dataset();
+    let body = Q06_BODY.replace("?author = ?author2", "sameTerm(?author, ?author2)");
+    let sel = format!("SELECT ?document ?yr ?name WHERE {{\n{body}\n}}");
+    let (off, on) = on_off(&g, &sel);
+    assert_eq!(off, on, "sameTerm-correlated q06 differs on vs off");
+    assert_eq!(on.len(), 5, "one surviving earliest document per author");
+    let (fired, bindings) = fired_stats(&g, &sel);
+    assert!(fired && bindings >= 1, "sameTerm correlation did not fire: {}", bindings);
+}
+
+#[test]
+fn sameterm_vs_eq_diverge_on_value_equal_literals() {
+    // THE non-vacuity red→green witness for the sameTerm arm. `"1"^^xsd:integer` and
+    // `"01"^^xsd:integer` are value-`=` but NOT sameTerm (distinct lexical forms). The
+    // `=`-correlated anti-join ELIMINATES d0 (there IS an earlier value-equal-key doc d1
+    // with lower rank); the `sameTerm`-correlated anti-join KEEPS d0 (no earlier doc with
+    // the IDENTICAL key term). If the sameTerm arm wrongly re-used the `=` recheck, both
+    // would give the same answer and this test would fail. on == off pins each relation.
+    let g = load(
+        "ex:d0 ex:key \"1\"^^xsd:integer .   ex:d0 ex:rank \"5\"^^xsd:integer .
+         ex:d1 ex:key \"01\"^^xsd:integer .  ex:d1 ex:rank \"3\"^^xsd:integer .",
+    );
+    let q_tmpl = |rel: &str| {
+        format!(
+            "SELECT ?d ?k WHERE {{
+               ?d ex:key ?k . ?d ex:rank ?r
+               OPTIONAL {{
+                 ?d2 ex:key ?k2 . ?d2 ex:rank ?r2
+                 FILTER ({rel} && ?r2 < ?r)
+               }} FILTER(!bound(?k2))
+             }}"
+        )
+    };
+    // `=`: value-equality — d0 is eliminated (d1 is an earlier value-equal-key doc), d1 survives.
+    let (eq_off, eq_on) = on_off(&g, &q_tmpl("?k = ?k2"));
+    assert_eq!(eq_off, eq_on, "eq correlation differs on vs off");
+    assert_eq!(eq_on.len(), 1, "under `=` only d1 survives");
+    assert_eq!(eq_on[0][0].as_deref(), Some("<http://example.org/d1>"));
+    // `sameTerm`: term-identity — "1" and "01" are DISTINCT terms, so neither doc has an
+    // earlier same-TERM-key partner: BOTH survive. The divergence from `=` is the witness.
+    let (st_off, st_on) = on_off(&g, &q_tmpl("sameTerm(?k, ?k2)"));
+    assert_eq!(st_off, st_on, "sameTerm correlation differs on vs off");
+    assert_eq!(st_on.len(), 2, "under sameTerm BOTH docs survive (distinct key terms)");
+    assert_ne!(eq_on.len(), st_on.len(), "= and sameTerm MUST diverge on value-equal literals");
+}
+
+#[test]
+fn sameterm_literal_hash_path_equivalence() {
+    // sameTerm correlation on a LITERAL key, at hash-path cardinality (>64 distinct keys).
+    // Under `=` a literal key takes the value-correct scan; under sameTerm a literal key is
+    // ITSELF id-probeable (id-equality IS sameTerm), so the id-bucket probe fires. Both must
+    // equal the cold path. Each "author" here is a distinct string literal name.
+    let mut ttl = String::new();
+    for a in 0..90usize {
+        for i in 0..2usize {
+            let yr = 2000 + i;
+            ttl.push_str(&format!(
+                "ex:d{}_{} ex:name \"Name{}\" . ex:d{}_{} ex:yr \"{}\"^^xsd:integer .\n",
+                a, i, a, a, i, yr
+            ));
+        }
+    }
+    let g = load(&ttl);
+    let body = "\
+      ?doc ex:name ?nm . ?doc ex:yr ?yr
+      OPTIONAL {
+        ?doc2 ex:name ?nm2 . ?doc2 ex:yr ?yr2
+        FILTER (sameTerm(?nm, ?nm2) && ?yr2 < ?yr)
+      } FILTER(!bound(?nm2))";
+    let sel = format!("SELECT ?doc ?yr WHERE {{\n{body}\n}}");
+    let (off, on) = on_off(&g, &sel);
+    assert_eq!(off, on, "sameTerm literal hash-path differs from cold path");
+    assert_eq!(on.len(), 90, "one surviving earliest doc per literal name");
+    let (fired, bindings) = fired_stats(&g, &sel);
+    assert!(fired && bindings > 64, "expected hash path on literal sameTerm keys: {}", bindings);
+}
+
+#[test]
+fn in_single_var_correlation_equivalence_and_fires() {
+    // `?author IN (?author2)` desugars to `?author = ?author2` — a value-equality
+    // correlation. The detector must treat it as such (fire) and stay bag-equivalent.
+    let g = q06_dataset();
+    let body = Q06_BODY.replace("?author = ?author2", "?author IN (?author2)");
+    let sel = format!("SELECT ?document ?yr ?name WHERE {{\n{body}\n}}");
+    let (off, on) = on_off(&g, &sel);
+    assert_eq!(off, on, "IN-correlated q06 differs on vs off");
+    assert_eq!(on.len(), 5, "one surviving earliest document per author");
+    let (fired, bindings) = fired_stats(&g, &sel);
+    assert!(fired && bindings >= 1, "single-var IN correlation did not fire: {}", bindings);
+}
+
+#[test]
+fn in_constant_list_is_not_a_correlation_but_still_correct() {
+    // `?author2 IN (ex:a0, ex:a1)` references NO outer variable → NOT a seedable
+    // correlation (the brief's rule). The residual keeps it verbatim; the plan stays
+    // correct (on == off) whether or not the fast path declines on this shape.
+    let g = load(
+        "ex:Article rdfs:subClassOf foaf:Document .
+         ex:a0 foaf:name \"A0\" . ex:a1 foaf:name \"A1\" . ex:a2 foaf:name \"A2\" .
+         ex:d0 rdf:type ex:Article . ex:d0 dcterms:issued \"2001\"^^xsd:integer . ex:d0 dc:creator ex:a0 .
+         ex:d1 rdf:type ex:Article . ex:d1 dcterms:issued \"2002\"^^xsd:integer . ex:d1 dc:creator ex:a0 .
+         ex:d2 rdf:type ex:Article . ex:d2 dcterms:issued \"2003\"^^xsd:integer . ex:d2 dc:creator ex:a2 .",
+    );
+    let body = "\
+      ?class rdfs:subClassOf foaf:Document .
+      ?document rdf:type ?class .
+      ?document dcterms:issued ?yr .
+      ?document dc:creator ?author .
+      ?author foaf:name ?name
+      OPTIONAL {
+        ?class2 rdfs:subClassOf foaf:Document .
+        ?document2 rdf:type ?class2 .
+        ?document2 dcterms:issued ?yr2 .
+        ?document2 dc:creator ?author2
+        FILTER (?author = ?author2 && ?yr2 < ?yr && ?author2 IN (ex:a0, ex:a1))
+      } FILTER (!bound(?author2))";
+    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr WHERE {{\n{body}\n}}"));
+    assert_eq!(off, on, "constant-list IN residual differs on vs off");
+}
+
+#[test]
+fn parallel_hash_path_result_identical() {
+    // sq-f1emb: the parallel probe path (native `parallel` feature) must be result-
+    // identical to the cold plan on a large anchor side. This fixture stays under the
+    // 50k PAR_THRESHOLD (a 50k-row anchor is impractical in a unit test), but the
+    // parallel path and the serial verdict path share the SAME per-row closure, so the
+    // hash-path equivalence tests above already exercise both branches; here we pin the
+    // large-cardinality, mixed-kind (IRI + blank-node authors) hash path once more with a
+    // deterministic order-insensitive multiset assertion, guarding the rayon collect's
+    // order preservation. (The 250k end-to-end measurement lives in `q06_measure_250k`.)
+    let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
+    for a in 0..120usize {
+        let author = if a % 2 == 0 { format!("ex:a{}", a) } else { format!("_:a{}", a) };
+        ttl.push_str(&format!("{} foaf:name \"A{}\" .\n", author, a));
+        for i in 0..3usize {
+            let yr = 2000 + i;
+            ttl.push_str(&format!(
+                "ex:d{}_{} rdf:type ex:Article . ex:d{}_{} dcterms:issued \"{}\"^^xsd:integer . ex:d{}_{} dc:creator {} .\n",
+                a, i, a, i, yr, a, i, author
+            ));
+        }
+    }
+    let g = load(&ttl);
+    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"));
+    assert_eq!(off, on, "parallel/serial hash path differs from cold path");
+    assert_eq!(on.len(), 120, "one surviving earliest document per author");
+}
+
+/// sq-f1emb: cross the real `PAR_THRESHOLD` (50k) so the hash-path probe genuinely
+/// runs on the RAYON fan-out (not just the serial verdict closure). A >50k-row fixture is
+/// the only way to reach the `#[cfg(feature="parallel")]` branch. This is `#[ignore]`d out
+/// of the per-commit budget (like `q06_measure_250k`): the sub-threshold
+/// `parallel_hash_path_result_identical` / `hash_path_large_cardinality_equivalence`
+/// tests already pin OFF-vs-ON result-identity of the SHARED verdict closure, and the
+/// parallel branch merely fans the SAME closure over cores. Run explicitly with:
+///   cargo test -p sparq-engine --release --test theta_antijoin -- --ignored \
+///     parallel_hash_path_crosses_threshold
+/// It validates the parallel ON path AGAINST A CLOSED-FORM EXPECTATION (not the cold OFF
+/// plan — the cold `left_outer_join` at 50k distinct keys is the QUADRATIC blow-up this
+/// optimisation exists to avoid, so re-running it here would dominate the test): each item
+/// has a distinct key `?k`, so the OPTIONAL's same-key-lower-rank partner never exists →
+/// EVERY one of the `n` anchor rows must survive the anti-join, and the parallel hash
+/// strategy must have fired (> 64 distinct correlations over a > 50k-row anchor).
+#[test]
+#[ignore]
+#[cfg(feature = "parallel")]
+fn parallel_hash_path_crosses_threshold() {
+    let n: usize = 50_001; // minimally > PAR_THRESHOLD (50k), one distinct key per item.
+    let mut ttl = String::with_capacity(n * 48);
+    // Minimal per-item shape: an item with a distinct key and a rank. Two triples/item.
+    for i in 0..n {
+        ttl.push_str(&format!("ex:i{i} ex:key ex:k{i} . ex:i{i} ex:rank \"1\"^^xsd:integer .\n"));
+    }
+    let g = load(&ttl);
+    // Anti-join: an item with NO OTHER item of the SAME key and a lower rank. Keys are
+    // all distinct, so every item survives; the `?k = ?k2` correlation drives the hash
+    // strategy (>64 distinct keys) over a >50k-row anchor (the parallel fan-out).
+    let q = format!(
+        "{PFX}SELECT ?i WHERE {{
+            ?i ex:key ?k . ?i ex:rank ?r
+            OPTIONAL {{
+              ?i2 ex:key ?k2 . ?i2 ex:rank ?r2
+              FILTER (?k = ?k2 && ?r2 < ?r)
+            }} FILTER(!bound(?k2))
+        }}"
+    );
+    // Only the O(n) parallel ON path is timed here (the cold OFF baseline is quadratic).
+    theta_antijoin_testing::set_enabled(true);
+    theta_antijoin_testing::reset_stats();
+    let on = query(&g, &q).expect("on query");
+    let (fired, _rows, bindings) = theta_antijoin_testing::stats();
+    // Closed-form expectation: every distinct-key item survives the anti-join.
+    assert_eq!(on.rows.len(), n, "each of the {} distinct-key items must survive", n);
+    // The parallel hash strategy fired (> 64 distinct correlations, > 50k anchor rows →
+    // the `left_b.rows.len() >= PAR_THRESHOLD` rayon fan-out branch).
+    assert!(fired && bindings > 64, "parallel hash path did not fire: {}", bindings);
+}
+
 #[test]
 fn randomised_differential() {
     // Fuzz randomised graphs (deterministic LCG) against the cold path: mix IRI
     // correlations, a literal-keyed variant, and error-producing (non-numeric) years.
+    // Also rotates the correlation RELATION across `=`, `sameTerm`, and single-var `IN`
+    // (sq-3cmr4) so all three detector arms are fuzzed against the cold oracle. For IRI /
+    // blank-node authors the three relations coincide semantically, but they exercise
+    // DIFFERENT code paths (recheck-expr kind, id-probe eligibility, seed vs scan).
     let mut state: u64 = 0x9E3779B97F4A7C15;
     let mut next = |m: u64| {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -416,6 +639,12 @@ fn randomised_differential() {
         // strategies AND both id-hashable term kinds are fuzzed against the cold path.
         let big = trial % 2 == 0;
         let bnode_authors = trial % 3 == 0;
+        // Rotate the correlation relation across the three detector arms (sq-3cmr4).
+        let rel = match trial % 3 {
+            0 => "?author = ?author2",
+            1 => "sameTerm(?author, ?author2)",
+            _ => "?author IN (?author2)",
+        };
         // Every 4th trial ALSO adds a PARTIALLY-BOUND shared var `?tag` (bound on only
         // some documents via an OPTIONAL in A, certain in B) referenced by the residual
         // via `BOUND(?tag)` — the failing class the pre-fix generator could not produce
@@ -475,8 +704,10 @@ fn randomised_differential() {
     FILTER (?author = ?author2 && ?yr2 < ?yr && BOUND(?tag))
   } FILTER (!bound(?author2))
 "
+            .to_string()
         } else {
-            Q06_BODY
+            // Rotate the correlation relation across the three detector arms.
+            Q06_BODY.replace("?author = ?author2", rel)
         };
         let q = format!("SELECT ?document ?yr ?name ?tag WHERE {{\n{body}\n}}");
         let (off, on) = on_off(&g, &q);

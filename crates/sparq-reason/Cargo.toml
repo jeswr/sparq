@@ -38,8 +38,18 @@ explain = []
 # correct typed value-space comparison (`dtype` module). NON-DEFAULT by design — when off
 # the `dtype` module + `Profile::D` variant are cfg'd out entirely (the lean default build
 # carries zero D-entailment code; the byte/bundle ratchets are unchanged, and sparq-reason
-# is never in the wasm dependency graph anyway). Pure-Rust, no new deps.
-d-entail = []
+# is never in the wasm dependency graph anyway).
+# [FABLE-5] sq-pbz04.6.3 (epic sq-pbz04.6, substrate seam 2): D-entailment's typed
+# numeric value-space keys now DELEGATE to the SHARED `sparq-substrate::numeric`
+# comparator (the same `Dec`/`Num`/`split_decimal`/`parse_xsd_f64` the SPARQL engine
+# FILTER path uses), so the reasoner and the engine can never diverge on numeric
+# value equality. Pulls the substrate `numeric` slice ONLY when `d-entail` is enabled
+# — it depends only on `sparq-core` (NOT `sparq-engine`), so the crate's sparq-core-only
+# dependency posture is preserved and no planner/serializer enters the bundle. The
+# integer subtype-range facets + the double/float lexical acceptance set STAY LOCAL
+# (facet validation is dtype-resident by design, per the design record §4 seam
+# decision) — see the module doc for the byte-identical-behaviour ledger.
+d-entail = ["dep:sparq-substrate", "sparq-substrate/numeric"]
 # [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — OPT-IN RIF-Core front-end: the W3C RIF
 # *Core* dialect (the MONOTONE Horn-rule common subset of RIF-BLD/PRD) as a rule
 # front-end over the existing N3 forward chainer. `rif::Document` validates a

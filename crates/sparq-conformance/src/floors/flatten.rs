@@ -17,25 +17,30 @@
 /// an RDF round-trip, so it detects JSON-LD structure the RDF oracle could not.
 ///
 /// * **Old oracle (RDF round-trip, `graph_to_jsonld(Flattened)`): 50 pass / 0 fail / 8 skip.**
-/// * **New oracle (native `flatten()`): MEASURED 46 pass / 7 fail / 5 skip** at the
-///   pinned suite revision.
+/// * **New oracle (native `flatten()`): MEASURED 53 pass / 0 fail / 5 skip** at the
+///   pinned suite revision, ON THE MERGED TREE.
 ///
-/// The re-pin goes DOWN (50 → 46) because the native oracle is stricter AND the native
-/// flatten pipeline inherits the current gaps of the native `expand()` it composes over
-/// (flatten = expand ∘ node-map ∘ fold). The 7 honest fails are ALL upstream expand-lane
-/// gaps, NOT flatten-algorithm bugs, and each is owned by a different (file-disjoint) bead:
+/// ## [FABLE-5] sq-oy1f.26 rebase note — native oracle now BEATS the RDF-writer oracle
 ///
-/// * `#t0002/#t0013/#t0028/#t0036` — expand raises `invalid typed value` on inputs the
-///   expand lane also fails today (owned by the expand-lane correctness bead sq-oy1f.37,
-///   which owns `src/expand.rs`).
-/// * `#t0004/#t0015/#t0016` — native `expand()` drops empty-array properties
-///   (`"…set1": []`) a spec-conformant expander retains; the retained-but-empty property
-///   is what the expected flattened document keeps (same `src/expand.rs` surface).
+/// When this branch was first cut the native lane measured 46 pass / 7 fail (below the
+/// old writer oracle's 50), because the 7 fails were ALL inherited gaps of the native
+/// `expand()` it composes over (flatten = expand ∘ node-map ∘ fold), NOT flatten-algorithm
+/// bugs. Those exact gaps were the ones `sq-oy1f.37` fixed on `main` (value-object `@type`
+/// collapse + empty-array-property retention, raising the expand floor 240 → 259):
+///
+/// * `#t0002/#t0013/#t0028/#t0036` — the old `invalid typed value` errors (fixed by the
+///   `@type`-collapse expand fix).
+/// * `#t0004/#t0015/#t0016` — the dropped empty-array properties `"…set1": []` (fixed by
+///   the empty-array-property-retention expand fix).
+///
+/// Merging `main` (sq-oy1f.37) into this branch flips all 7 inherited fails to passes, so
+/// the native flatten oracle now MEASURES 53 pass / 0 fail — ABOVE the old writer oracle's
+/// 50. The oracle re-pin is therefore a net RISE (50 → 53), taking the union: the native
+/// document-level oracle AND the sq-oy1f.37 expand raises it composes over.
 ///
 /// The 5 SKIP are the documented buckets: 1 NegativeEvaluationTest, the JSON-LD-1.0-only
 /// positives, and 1 compaction case (`#t0044`, which supplies a `context` member —
 /// post-flatten compaction is the separate document-level Compaction bead sq-oy1f.27).
 ///
-/// RATCHET after this re-pin: rise-only. As sq-oy1f.37 lands the expand fixes, the
-/// inherited fails flip to passes and this floor rises.
-pub const FLOOR: usize = 46;
+/// RATCHET after this re-pin: rise-only.
+pub const FLOOR: usize = 53;

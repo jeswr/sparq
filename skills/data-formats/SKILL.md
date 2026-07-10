@@ -578,6 +578,21 @@ cargo build -p sparq-cli --features serialize-rdf
   `SPQCPRM1` format, so a perm built with the feature on persists byte-identically to one built
   with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
   win materialises is to be confirmed on the canonical perf host (no number is asserted here).
+- **`spqcprm2` (opt-in EXPERIMENT, OFF by default).** A block-encoding SPIKE, not a shipped
+  format. The default save/open path still writes and auto-detects ONLY the `SPQCPRM1` on-disk
+  format (`compress::FILE_MAGIC`); `CompressedPerm::encode` / `from_mmap` always produce a `V1`
+  perm. The feature adds an alternate col2-reset encoding under a frame-of-reference scheme: where
+  `SPQCPRM1` writes a middle-column-reset col2 id ABSOLUTE, `SPQCPRM2` writes it as a zigzag signed
+  delta from the block's first-row col2 (the frame origin the decoder recovers at block start), so
+  clustered objects encode as short varints. It surfaces three public items on `sparq_core::compress`
+  **only when the feature is on**: `enum Format { V1, V2 }` (which block reader a `CompressedPerm`
+  decodes through — a perm tracks its own `format`), `fn encode_v2` (builds a `V2` perm; the only
+  producer of one), and `const FILE_MAGIC_V2: [u8; 8]` = `b"SPQCPRM2"` — a RESERVED version marker
+  (feature-gated with `mmap`) that the default path NEVER writes; it reserves the marker so a future
+  migration can write/auto-detect V2 without colliding with the shipped `SPQCPRM1` magic. A V2 block
+  with no middle-column reset is byte-identical to its V1 block. Whether the frame-of-reference
+  encoding shrinks the stream enough to adopt is an open question to be settled on the canonical perf
+  host (no number is asserted here); until then it stays an opt-in spike behind the feature flag.
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
   JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19 + sq-oy1f) drives the official
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:

@@ -332,6 +332,15 @@ jobs:
       # No compile / no files / no subprocess (mirrors perf-gate.py --self-test in bench.yml).
       - name: Self-test coverage-gate.py (ratchet + monotonicity aggregation logic)
         run: python3 scripts/coverage-gate.py --self-test
+      # [FABLE-5] sq-6vshe.6: the demotion auto-bead filer's PURE logic (id derivation +
+      # per-lane dedupe + append-only JSONL + log-tail truncation + issue-body assembly).
+      # It fires from fuzz.yml's randomized-run failure path (and any future demoted lane),
+      # so a regression in the filer must be caught HERE — on every PR — not only when a
+      # lane finally fails. Hermetic: no gh, no repo writes (mirrors coverage-gate.py
+      # --self-test; same stdlib-only, no-deps pattern as the differential filer's inline
+      # self-test in differential.yml).
+      - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
+        run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the

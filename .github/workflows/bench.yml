@@ -159,17 +159,26 @@ jobs:
       # is logged per CI run (see ci-bench.sh wasm_opt_bundle_bytes block).
       - name: Install binaryen (wasm-opt for shipped-size trend metric)
         run: sudo apt-get update -q && sudo apt-get install -y binaryen
-      # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN ONLY. On push to
-      # main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install these, so the
-      # ci-bench.sh suite hooks SKIP gracefully (each is guarded on `command -v <tool>`) and PR perf
-      # feedback stays lean (synthetic + operator + memory/bundle metrics only). The full SF/scale
-      # tiers are EC2/nightly (beads sq-uubq/xin1/8lgn/yc1q/z31u), NOT here.
+      # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN + `bench-full` PRs.
+      # On push to main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install
+      # these BY DEFAULT, so the ci-bench.sh suite hooks SKIP gracefully (each is guarded on
+      # `command -v <tool>`) and PR perf feedback stays lean (synthetic + operator + memory/bundle
+      # metrics only). The full SF/scale tiers are EC2/nightly (beads sq-uubq/xin1/8lgn/yc1q/z31u).
       #   g++ is preinstalled on ubuntu-latest (watdiv). default-jre = java (bsbm) + JRE for lubm's
       #   javac comes from default-jdk... but default-jre has NO javac, so install default-jdk for
       #   lubm's `javac` guard; libboost-all-dev = watdiv's Boost; raptor2-utils = lubm's `rapper`;
       #   unzip = bsbm's distribution unpack.
-      - name: Install well-known-suite toolchains (main only)
-        if: github.ref == 'refs/heads/main'
+      #
+      # [FABLE-5] sq-6vshe.6 heavy-lane placement: the per-PR bench lane is the LEAN form
+      # (synthetic + operator + the DETERMINISTIC byte-count ratchet — see the Hard-gate step
+      # below; that ratchet is UNCHANGED and always runs on PRs) — the multi-minute well-known
+      # suites are the demoted heavy work and stay off the per-PR default. The `bench-full` PR
+      # LABEL opts BACK IN: a perf-sensitive PR installs the suite toolchains here so the full
+      # well-known series runs pre-merge too (mirroring the `ci-full` / `fuzz-full` label pattern).
+      # NOTE: this only RELOCATES the noisy latency suites; the hard perf-gate ratchet (deterministic
+      # store/dict/wasm byte counts) is NEVER demoted — it gates every PR regardless of this label.
+      - name: Install well-known-suite toolchains (main + bench-full PRs)
+        if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'bench-full')
         run: sudo apt-get update && sudo apt-get install -y libboost-all-dev default-jdk raptor2-utils unzip
       # [OPUS-4.8] Per-suite generator-cache restore/save so the steady state does NO rebuild/refetch:
       # each suite's gen.sh/fetch.sh/run.sh build-once-and-cache their generator binary + the fixed
