@@ -1,0 +1,5 @@
+{
+  "pr": 1795,
+  "date": "2026-07-09",
+  "reason": "sq-1ivw7: adds always-compiled sparq-core public helpers (dict::is_literal_id, Graph::predicate_has_literal_object) and edits the always-compiled fused-conjunctive residual-FILTER sites in sparq-engine (eval_flat_conjunctive / eval_bgp_binary_capped) so the feature-OFF arm is a #[cfg(not(feature=\"id-filter-fastpath\"))] branch textually adjacent to the feature-ON install. These always-compiled additions/edits can move bytes and shift panic-location line numbers in the feature-OFF sparq-wasm bundle. Behaviour-identical with the feature OFF: the new sparq-core fns are unreferenced from the wasm graph, and the fused-conjunctive feature-OFF arm calls apply_filter exactly as base (no thread-local install, no fast-path column set compiled). No new dependencies, no unsafe."
+}
