@@ -1106,6 +1106,7 @@ dependencies = [
 name = "sparq-substrate"
 version = "0.1.0"
 dependencies = [
+ "hashbrown 0.17.1",
  "oxrdf",
  "rustc-hash",
  "smallvec",
