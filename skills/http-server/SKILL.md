@@ -143,14 +143,19 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   generation snapshot (`PinnedGen = Arc<sparq_serve::Generation<Graph>>`; call
   `.snapshot() -> &Graph`, `.number() -> u64`, `.published_at()`, `.epochs()`).
 - `AppState::apply_update(&self, sparql: &str) -> Result<u64, String>` — submit a SPARQL
-  Update through the sequenced group-commit writer; **blocks** until the containing
-  generation is published; returns that generation number (read-your-writes token). Call
-  off the async workers (`spawn_blocking`).
+  Update through the sequenced writer; **blocks** until the containing generation is
+  published; returns that generation number (read-your-writes token). Call off the async
+  workers (`spawn_blocking`). With **adaptive group-commit** (default; `adaptive_commit`),
+  a serial interactive client commits in engine-time (µs) — the writer drains only the
+  already-queued backlog and commits, instead of paying a fixed group-commit window;
+  concurrent load still batches. FIFO order, per-update atomicity and durability are
+  unchanged (`sq-p7kk5`).
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
   (**`time-travel` feature only**; the HTTP `?generation=N` pin does NOT need this — it
   resolves against the ring's concurrency-retention window directly, so it works in the
   default build via `sq-ci2d6`).
 - `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
+  adaptive_commit: bool,
   max_body_bytes: usize,
   max_concurrent: usize, header_read_timeout: Option<Duration>, body_read_timeout: Option<Duration>, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_query_bytes: Option<usize>,
@@ -160,7 +165,12 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`update_where_timeout` = separate, typically-SHORTER writer-side WHERE deadline for SPARQL
   UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
-  use `query_timeout`, `sq-nulp`; `max_query_rows` = coarse memory cap; `max_query_bytes` =
+  use `query_timeout`, `sq-nulp`;
+  `adaptive_commit` = **adaptive group-commit** (default `true`): a serial interactive client
+  commits in engine-time (µs) rather than paying a fixed group-commit window; concurrent load
+  still batches. Pure latency change — FIFO/atomicity/durability unchanged. `false` = always
+  windowed. `--no-adaptive-commit` / `SPARQ_ADAPTIVE_COMMIT=0` — `sq-p7kk5`;
+  `max_query_rows` = coarse memory cap; `max_query_bytes` =
   byte-accounted memory cap that also prices row WIDTH + computed-literal size — `sq-s5is`;
   `max_decompress_ratio` = zip-bomb guard — `sq-ebii`;
   `header_read_timeout` = **slow-loris guard**: max time a connection may take to send its
@@ -1065,6 +1075,7 @@ env overrides the default.
 | --- | --- | --- | --- |
 | `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0`=off) | per-request timeout → `503` |
 | `--update-where-timeout SECS` | `SPARQ_UPDATE_WHERE_TIMEOUT` | unset (`0`/unset = use `--query-timeout`) | **separate, typically-SHORTER writer-side WHERE deadline for SPARQL UPDATE** — bounds writer-queue **head-of-line blocking** from a slow update (the single sequenced writer is released within this window instead of holding it for the full read timeout); the update WHERE budget is `min(query_timeout, update_where_timeout)` → slow update `503` (`sq-nulp`) |
+| `--no-adaptive-commit` | `SPARQ_ADAPTIVE_COMMIT` (`0` disables) | adaptive **on** | **adaptive group-commit**: a serial interactive client commits in engine-time (µs) instead of paying a fixed group-commit window; concurrent load still batches. Pure latency change — FIFO/atomicity/durability unchanged. `--no-adaptive-commit` restores the always-windowed writer (`sq-p7kk5`) |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
 | `--header-read-timeout SECS` | `SPARQ_HEADER_READ_TIMEOUT` | `15` (`0`=off) | **slow-loris guard**: max time a connection may take to send its complete request-header block — enforced at hyper's HTTP/1 connection layer by `sparq_server::serve` (NOT `axum::serve`, which never installs a timer so its header deadline is inert), so it fires BEFORE a handler and frees the concurrency slot a dribbling client would otherwise hold forever; connection closed when exceeded (`sq-2gqr`) |
