@@ -7,15 +7,34 @@
 # or UB"; libFuzzer reports any crash and (in CI) the run fails with the reproducer.
 #
 # TRIGGER + BUDGET (kept BOUNDED + non-flaky so it is a real but fast gate):
-#   - pull_request : SHORT per-target smoke (`SMOKE_SECS`, default 30s each). This job
-#     is auto-discovered by `ci-summary / gate` (its name has no "advisory"/
-#     "informational" token) so a crash on a PR BLOCKS the merge — the gate sq-ovnf
-#     wants. ~4 targets × 30s + build ≈ a few minutes on a warm cache.
-#   - push to main : LONGER per-target run (`MAIN_SECS`, default 120s each) for deeper
-#     coverage on the integration branch, where a few extra minutes are affordable.
-#   - schedule (nightly) : HEAVY per-target run (`NIGHTLY_SECS`, default 600s each) to
-#     let coverage accumulate well past what per-PR CI can afford.
-#   - workflow_dispatch : manual run at the push (main) budget.
+#   - pull_request / merge_group : DETERMINISTIC CORPUS-REPLAY only (heavy-lane
+#     placement, bead sq-6vshe.6). libFuzzer `-runs=0` executes every committed seed
+#     (fuzz/seeds/<t>) + every cached-corpus input EXACTLY ONCE and generates NO new
+#     inputs — so a reintroduced known crasher (or a seed that a code change now makes
+#     panic) replays RED in seconds, but the multi-minute randomized-fuzzing pole is
+#     removed from the per-PR critical path. This job is auto-discovered by
+#     `ci-summary / gate` (its name has no "advisory"/"informational" token) so a
+#     replay crash on a PR BLOCKS the merge — the deterministic slice of the sq-ovnf
+#     gate is preserved; the randomized-search slice moves to push/nightly below.
+#     RATIONALE (design §7): a few minutes of per-PR *random* fuzzing has near-zero
+#     marginal detection probability, so it was pole, not net; replay keeps every
+#     deterministic guarantee. The `fuzz-full` PR label restores randomized fuzzing on
+#     a specific PR (see the budget step) for a fuzz-sensitive change.
+#   - push to main : RANDOMIZED per-target run (`MAIN_SECS`, default 120s each) for
+#     deeper coverage on the integration branch, where a few extra minutes are
+#     affordable. This is a full-form randomized lane (design §7 "full form" column).
+#   - schedule (nightly) : HEAVY randomized per-target run (`NIGHTLY_SECS`, default
+#     600s each) — the continuous randomized-fuzzing full form with corpus persistence.
+#   - workflow_dispatch : manual randomized run at the push (main) budget.
+#
+# DEMOTION AUTO-BEAD PROTOCOL (design §7; mirrors the fmx4u §6.1 / differential.yml
+# nightly-failure protocol). Because the per-PR leg is now the DETERMINISTIC slice
+# only, the randomized-search net moves to the push-to-main + nightly full-form runs.
+# If either of those RANDOMIZED runs finds a crash, the failure path below auto-files a
+# standing P1 bead + GitHub issue (scripts/ci-file-demoted-lane-failure.py) naming the
+# lane + run, so a lane demoted off per-push cannot silently rot: a crash that the
+# per-PR replay could not have caught (a genuinely new randomized finding) is still
+# tracked to closure. The bead is the durable record that the full form ran + found it.
 # The fuzz crate is OUTSIDE the cargo workspace (root `Cargo.toml` `exclude = [...,
 # "fuzz"]`) and needs NIGHTLY (libFuzzer codegen), so it never touches the stable
 # `cargo build`/`test`/`clippy --workspace` gate in ci.yml.
@@ -120,6 +139,14 @@ jobs:
       contains(needs.select.outputs.affected, '"sparq-engine"') ||
       contains(needs.select.outputs.affected, '"sparq-shacl"')
     runs-on: ubuntu-latest
+    # [FABLE-5] sq-6vshe.6: the demotion auto-bead step (randomized-run finding on
+    # push/nightly) files a GitHub issue + appends a P1 bead. Least-privilege, scoped
+    # to this job only (the top-level default stays contents:read):
+    #   contents: write — append the bead line to .beads/issues.jsonl + best-effort push
+    #   issues:   write — file/comment the standing GitHub issue (the reliable channel)
+    permissions:
+      contents: write
+      issues: write
     # Generous ceiling above the worst case (nightly: 4 targets × 600s + build) so a
     # hung target fails with a clear timeout rather than running away.
     timeout-minutes: 60
@@ -181,19 +208,40 @@ jobs:
           key: fuzz-corpus-v1-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-v1-
-      - name: Pick the per-target budget for this trigger
+      # [FABLE-5] sq-6vshe.6: emit BOTH the per-target budget AND the run MODE.
+      #   mode=replay : deterministic corpus-replay only (`-runs=0`, no randomized
+      #                 search) — the per-PR / merge_group default. Seconds, no pole.
+      #   mode=fuzz   : randomized fuzzing for `-max_total_time=<secs>` — push-to-main,
+      #                 nightly, workflow_dispatch, AND any PR carrying the `fuzz-full`
+      #                 label (the per-PR opt-back-in for a fuzz-sensitive change,
+      #                 mirroring the `ci-full` / `bench-full` label pattern).
+      # FUZZ_FULL_LABEL is evaluated by the Actions expression (true iff the PR carries
+      # the label); on non-pull_request events github.event.pull_request is null and the
+      # expression is false, so only the event-name switch below applies there.
+      - name: Pick the per-target budget + mode for this trigger
         id: budget
+        env:
+          FUZZ_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'fuzz-full') }}
         run: |
           set -euo pipefail
           case "${{ github.event_name }}" in
-            schedule)                     secs="$NIGHTLY_SECS" ;;
-            # [OPUS-4.8] merge_group (the merge queue) takes the same fast SMOKE budget
-            # as a PR — a pre-merge gate wants quick coverage, not the nightly soak.
-            pull_request|merge_group)     secs="$SMOKE_SECS" ;;
-            push|workflow_dispatch|*)     secs="$MAIN_SECS" ;;
+            schedule)                     secs="$NIGHTLY_SECS"; mode="fuzz" ;;
+            # [FABLE-5] sq-6vshe.6: per-PR + merge_group default to deterministic
+            # corpus-replay only — the multi-minute randomized pole moves to push +
+            # nightly. A `fuzz-full`-labelled PR opts BACK IN to the SMOKE randomized
+            # budget so a fuzz-sensitive change can still get per-PR randomized search.
+            pull_request|merge_group)
+              if [ "${FUZZ_FULL_LABEL}" = "true" ]; then
+                secs="$SMOKE_SECS"; mode="fuzz"
+              else
+                secs="0"; mode="replay"
+              fi
+              ;;
+            push|workflow_dispatch|*)     secs="$MAIN_SECS"; mode="fuzz" ;;
           esac
           echo "secs=$secs" >> "$GITHUB_OUTPUT"
-          echo "Per-target fuzz budget for '${{ github.event_name }}': ${secs}s"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Per-target fuzz for '${{ github.event_name }}': mode=${mode} budget=${secs}s (fuzz-full label: ${FUZZ_FULL_LABEL})"
       # Build every target ONCE up front so a compile error is reported distinctly
       # from a fuzzing crash, and the per-target runs below reuse the artifacts.
       - name: Build fuzz targets
@@ -204,34 +252,53 @@ jobs:
       # deliberately run-all-then-fail rather than break-on-first: one CI run then
       # surfaces EVERY crashing target + uploads EVERY reproducer in one pass, instead
       # of hiding later findings behind the first failure. [OPUS-4.8]
-      - name: Run each target (bounded; run all, fail at end if any crashed)
+      - name: Run each target (replay or randomized; run all, fail at end if any crashed)
         working-directory: fuzz
         env:
           SECS: ${{ steps.budget.outputs.secs }}
+          MODE: ${{ steps.budget.outputs.mode }}
+          # Capture the combined per-target output so the failure step below can hand
+          # the log to the demoted-lane auto-bead filer on a randomized-run finding.
+          RUN_LOG: ${{ runner.temp }}/fuzz-run-log.txt
         run: |
           set -euo pipefail
           # `cargo fuzz list` enumerates the targets so adding a new fuzz_target file
           # is picked up automatically (no list to keep in sync here).
           targets="$(cargo +nightly-2026-06-11 fuzz list)"
           echo "Targets: $targets"
+          # [FABLE-5] sq-6vshe.6: assemble the libFuzzer runner flags from the mode.
+          #   replay : `-runs=0` executes each corpus/seed input EXACTLY ONCE and
+          #            generates NO new inputs, then exits — a deterministic regression
+          #            replay (seconds). A committed/cached known crasher still panics =>
+          #            nonzero exit => the gate goes RED (validated locally, sq-6vshe.6).
+          #   fuzz   : `-max_total_time=<secs>` runs randomized search for the budget.
+          # -rss_limit_mb caps an allocator OOM so a hostile-bytes mega-allocation is a
+          # finding not a runner kill; -print_final_stats surfaces coverage/exec counts.
+          if [ "$MODE" = "replay" ]; then
+            libfuzzer_args=(-runs=0 -rss_limit_mb=2048 -print_final_stats=1)
+            echo "MODE=replay — deterministic corpus-replay (no randomized fuzzing)."
+          else
+            libfuzzer_args=(-max_total_time="${SECS}" -rss_limit_mb=2048 -print_final_stats=1)
+            echo "MODE=fuzz — randomized fuzzing at ${SECS}s/target."
+          fi
+          : > "$RUN_LOG"
           status=0
           for t in $targets; do
-            echo "::group::fuzz $t (-max_total_time=${SECS}s)"
+            echo "::group::fuzz $t (mode=$MODE, args=${libfuzzer_args[*]})"
             # [FABLE-5] sq-0iqzw: pass the corpus dirs EXPLICITLY — the cached,
-            # accumulating corpus/<t> first (libFuzzer writes new coverage there)
+            # accumulating corpus/<t> first (libFuzzer replays/writes coverage there)
             # and the committed minimal seed corpus seeds/<t> second (read as
             # additional inputs). mkdir -p keeps a brand-new target (no cache, no
-            # committed seeds yet) from failing on a missing dir.
+            # committed seeds yet) from failing on a missing dir. In replay mode BOTH
+            # dirs are executed input-by-input; nothing is written.
             mkdir -p "corpus/$t" "seeds/$t"
-            # -max_total_time bounds wall-clock; -rss_limit_mb caps an allocator OOM so
-            # a hostile-bytes mega-allocation is reported as a finding, not a runner
-            # kill; -print_final_stats surfaces coverage/exec counts in the log. A
-            # nonzero exit (a crash/leak/timeout) is a genuine finding: we RECORD it in
+            # A nonzero exit (a crash/leak/timeout) is a genuine finding: RECORD it in
             # `status` and keep going so the remaining targets still run, then fail the
-            # gate once at the end (`exit "$status"`). [OPUS-4.8]
+            # gate once at the end (`exit "$status"`). Tee to $RUN_LOG so the
+            # randomized-run failure path can auto-file the demoted-lane bead. [FABLE-5]
             if ! cargo +nightly-2026-06-11 fuzz run --target "$FUZZ_BUILD_TARGET" "$t" \
                   "corpus/$t" "seeds/$t" -- \
-                  -max_total_time="${SECS}" -rss_limit_mb=2048 -print_final_stats=1; then
+                  "${libfuzzer_args[@]}" 2>&1 | tee -a "$RUN_LOG"; then
               echo "::error::fuzz target '$t' reported a crash/leak/timeout — see the log + the saved reproducer artifact."
               status=1
             fi
@@ -250,6 +317,57 @@ jobs:
         with:
           path: fuzz/corpus
           key: fuzz-corpus-v1-${{ github.run_id }}
+      # [FABLE-5] sq-6vshe.6 DEMOTION AUTO-BEAD PROTOCOL (design §7). The per-PR fuzz
+      # leg is now deterministic corpus-replay only; the randomized-search net moved to
+      # this workflow's push-to-main + nightly runs (mode=fuzz). If a RANDOMIZED run
+      # crashes — a finding the per-PR replay could not have caught — auto-file a
+      # standing P1 bead + GitHub issue naming the lane + run so the demoted randomized
+      # form cannot silently rot. Guarded on failure() AND a randomized full-form run
+      # (push-to-main or schedule); a PR/merge_group replay failure is a NORMAL blocking
+      # gate finding, not a demotion-rot event, so it does NOT fire here. Deduped +
+      # append-only + fail-soft on the GH013 protected-main push, exactly like the
+      # differential.yml nightly filer this mirrors (the GitHub issue is the reliable
+      # channel; the orchestrator beads from it if the push is declined).
+      - name: Auto-file demoted randomized-fuzz finding (P1 bead + issue, deduped)
+        if: failure() && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-file-demoted-lane-failure.py --self-test
+          python3 scripts/ci-file-demoted-lane-failure.py \
+            --lane fuzz-randomized \
+            --full-form "randomized cargo-fuzz (${{ github.event_name }})" \
+            --per-pr-form "deterministic corpus-replay (-runs=0)" \
+            --bead-prefix fz \
+            --log "${{ runner.temp }}/fuzz-run-log.txt" \
+            --jsonl .beads/issues.jsonl \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Commit the demoted-lane bead back to main (best-effort; fail-soft)
+        if: failure() && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .beads/issues.jsonl; then
+            echo "no bead appended (deduped or filing skipped) — nothing to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .beads/issues.jsonl
+          git commit -m "chore(beads): auto-file demoted fuzz-randomized P1 bead [skip ci]" \
+                     -m "Randomized-run finding on the full-form fuzz lane (sq-6vshe.6 demotion protocol). [FABLE-5]"
+          set +e
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          push_rc=$?
+          set -e
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=demoted-lane bead push declined::Could not push the auto-filed bead to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection). The GitHub issue filed in the previous step is the durable record; the orchestrator beads it on the next issue sweep."
+            exit 0
+          fi
+          echo "pushed the demoted-lane bead to main."
       # On a crash, libFuzzer writes the reproducing input to fuzz/artifacts/<target>/.
       # Upload it so the failing case can be replayed locally with `cargo fuzz run
       # <target> <artifact>`.

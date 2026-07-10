@@ -595,9 +595,10 @@ pub(crate) mod sip {
 // because `F` references OUTER variables (SP2Bench q06:
 // `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` evaluates the
 // full right side against the whole document set. This path instead:
-//   (a) partitions `F` into EQUALITY conjuncts `?outer = ?inner` (correlation) whose
-//       `?inner` is certain-in-`B` and `?outer` is a left variable, and a RESIDUAL
-//       theta remainder (everything else, e.g. `?yr2 < ?yr`);
+//   (a) partitions `F` into var-to-var CORRELATION conjuncts `?outer θ ?inner` whose
+//       `?inner` is certain-in-`B` and `?outer` is a left variable — where θ is value
+//       `=`, `sameTerm`, or a single-variable `?a IN (?b)` membership (sq-3cmr4) — and a
+//       RESIDUAL theta remainder (everything else, e.g. `?yr2 < ?yr`);
 //   (b) for each distinct left correlation tuple, SEEDS the `B` scan sideways with the
 //       outer IRI bound into `?inner`'s position (extending the #1741 SIP machinery to
 //       the anti-join), evaluating a tiny correlated `B'` instead of the cold corpus;
@@ -605,14 +606,21 @@ pub(crate) mod sip {
 //       `eval_expr` (3-valued: an error / false does NOT match, so the left row
 //       SURVIVES); the left row is dropped iff some `b` makes the whole condition true.
 //
+// For a very large anchor side the hash-path per-left-row probe is fanned out over
+// cores under the `parallel` feature (sq-f1emb): only the boolean elimination VERDICTS
+// are parallelised — the ordered output build + budget truncation stay serial — so the
+// result is byte-identical to the serial probe.
+//
 // Soundness / semantic traps (each has a witness test):
-//   * `?outer = ?inner` is SPARQL `=` (VALUE equality), not `sameTerm`. Seeding by term
-//     identity is exact ONLY when the pushed outer value is an IRI (IRI value-equality
-//     IS term identity). A left row whose correlation value is a LITERAL routes through
-//     the value-correct COLD anti-join (B evaluated once, full `F` re-checked per pair
-//     via `eval_expr`) — never the id-seeding fast path (the sq-lr2ii class: high-
-//     precision decimals, whitespace-padded numerics — a term-identity probe would miss
-//     a value-equal-but-not-identical literal and SPURIOUSLY KEEP a row that must drop).
+//   * The correlation relation θ is load-bearing: value `=`, `sameTerm` and id-equality
+//     are DIFFERENT relations on value-equal id-distinct literals (`"1"` vs `"01"`). A
+//     value-`=` correlation (including single-var `IN`) seeds / id-probes EXACTLY only
+//     when the outer value is an IRI or blank node (where `=` IS term identity); a
+//     LITERAL routes through the value-correct COLD anti-join with `=` re-checked (the
+//     sq-lr2ii class — a term-identity probe would miss a value-equal-but-not-identical
+//     literal and SPURIOUSLY KEEP a row that must drop). A `sameTerm` correlation is
+//     TERM IDENTITY for EVERY kind, so a literal key is itself id-probeable and any
+//     value-correct scan re-checks with `sameTerm`, never `=`.
 //   * Multiplicity: each surviving left row is emitted ONCE (with its original
 //     multiplicity), never multiplied by the number of `B` matches it lacks.
 //   * Output layout is the LeftJoin's: surviving left rows padded with `NO_ID` for every
@@ -7936,14 +7944,37 @@ fn left_outer_merge(
 // [FABLE-5] See the `theta_antijoin` module comment near the top of this file for the
 // shape, the SIP seeding, and the full soundness argument.
 
-/// One correlation conjunct `?outer = ?inner` extracted from the OPTIONAL condition,
-/// where `?inner` is certain-in-`B` and `?outer` is a left variable. The remaining
-/// conjuncts (residual theta) are re-checked verbatim per candidate right row.
+/// Which equality RELATION a correlation conjunct expresses. This is load-bearing for
+/// soundness: value `=`, `sameTerm`, and id-equality are DIFFERENT relations on RDF
+/// literals (a value-equal but id-distinct pair of literals exists), so the id-bucket
+/// probe eligibility AND the per-candidate re-check expression differ by kind. [FABLE-5]
+/// (sq-3cmr4)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CorrKind {
+    /// SPARQL value equality `?outer = ?inner` (also the desugaring of a single-variable
+    /// `?outer IN (?inner)`). Value-equality (sq-lr2ii): an id-bucket probe is exact ONLY
+    /// when the correlation value is a NamedNode/BlankNode (where `=` coincides with term
+    /// identity); a LITERAL key must take the value-correct scan with `=` re-checked.
+    Eq,
+    /// SPARQL `sameTerm(?outer, ?inner)` — TERM IDENTITY. Two terms are `sameTerm` iff
+    /// identical (same IRI / same blank id / same lexical+datatype+language literal),
+    /// which under dictionary interning is EXACTLY id-equality — for EVERY term kind,
+    /// literals included. So an id-bucket probe is exact even for a literal key, and the
+    /// per-candidate re-check (when a scan is taken) must be `sameTerm`, never `=`.
+    SameTerm,
+}
+
+/// One correlation conjunct `?outer θ ?inner` extracted from the OPTIONAL condition,
+/// where `?inner` is certain-in-`B` and `?outer` is a left variable and `θ` is the
+/// relation named by `kind`. The remaining conjuncts (residual theta) are re-checked
+/// verbatim per candidate right row.
 struct Correlation {
     /// Column of `?outer` in the LEFT bindings.
     left_col: usize,
     /// The certain-in-`B` variable `?inner` seeded sideways into the right scan.
     inner_var: Variable,
+    /// The equality relation `θ` this conjunct expresses (`=` or `sameTerm`). [FABLE-5]
+    kind: CorrKind,
 }
 
 /// Attempts the correlated theta anti-join for `Filter(!bound(?nb), LeftJoin(A, B, F))`.
@@ -7994,17 +8025,19 @@ fn try_theta_antijoin(
         return Ok(Some(Bindings::unsorted(out_vars, Vec::new())));
     }
 
-    // Partition the OPTIONAL condition into correlation equalities and a residual.
-    // A correlation conjunct is `?outer = ?inner` (either orientation) with `?inner`
-    // certain in `B` and `?outer` a LEFT variable. Everything else is residual theta,
-    // re-checked verbatim on the merged row. `sameTerm` is NOT treated as a
-    // correlation (it is term identity, but keeping it in the residual is always
-    // sound and it is not the q06 idiom). [FABLE-5]
+    // Partition the OPTIONAL condition into correlation conjuncts and a residual.
+    // A correlation conjunct is a var-to-var equality `?outer θ ?inner` (either
+    // orientation) with `?inner` certain in `B` and `?outer` a LEFT variable, where θ is
+    // value `=`, `sameTerm`, OR a single-variable `?a IN (?b)` membership (which
+    // desugars to `?a = ?b`). Everything else — a constant, a multi-element `IN`, a
+    // non-var operand, an inequality — is residual theta, re-checked VERBATIM on the
+    // merged row (always sound). A `?a IN (const, …)` list with no in/outer variable is
+    // NOT a correlation (nothing to seed sideways). [FABLE-5] (sq-3cmr4)
     let conjuncts = split_and(cond);
     let mut correlations: Vec<Correlation> = Vec::new();
     let mut residual: Vec<&Expression> = Vec::new();
     for c in &conjuncts {
-        if let Some((va, vb)) = as_var_equality(c) {
+        if let Some((va, vb, kind)) = as_correlation_pair(c) {
             // Orient: the certain-in-B side is `?inner`, the left side is `?outer`.
             let (outer, inner_var) = if b_certain.contains(&vb) && left_b.col(&va).is_some() {
                 (va.clone(), vb.clone())
@@ -8025,7 +8058,7 @@ fn try_theta_antijoin(
                 residual.push(c);
                 continue;
             };
-            correlations.push(Correlation { left_col, inner_var });
+            correlations.push(Correlation { left_col, inner_var, kind });
         } else {
             residual.push(c);
         }
@@ -8096,55 +8129,96 @@ fn try_theta_antijoin(
             .enumerate()
             .filter_map(|(lc, v)| b_all.col(v).map(|bc| (lc, bc)))
             .collect();
-        // The correlation `=` re-checks, for the value-correct scan of a literal-keyed
-        // left row (an IRI-keyed row's equality is already exact via the id bucket).
-        let eq_checks: Vec<Expression> = correlations
-            .iter()
-            .map(|c| {
-                Expression::Equal(
-                    Box::new(Expression::Variable(out_vars[c.left_col].clone())),
-                    Box::new(Expression::Variable(c.inner_var.clone())),
-                )
-            })
-            .collect();
-        let mut value_checks: Vec<Expression> = eq_checks.clone();
+        // The correlation re-checks, for the value-correct scan of a NON-id-probeable
+        // left row (an id-probeable row's correlation is already exact via the id bucket).
+        // Each conjunct uses ITS OWN relation: `=` for a value-equality correlation, but
+        // `sameTerm` for a sameTerm correlation (they DIFFER on value-equal id-distinct
+        // literals). [FABLE-5] (sq-3cmr4)
+        let corr_checks: Vec<Expression> =
+            correlations.iter().map(|c| corr_recheck_expr(c, &out_vars)).collect();
+        let mut value_checks: Vec<Expression> = corr_checks.clone();
         value_checks.extend(residual_owned.iter().cloned());
 
-        for lrow in &left_b.rows {
-            if budget::exhausted(result_rows.len()) {
-                break;
-            }
-            // Every correlation value id-hashable (a NamedNode OR BlankNode, never a
-            // literal)? Then an exact id-bucket probe is sound: for IRIs and blank nodes
-            // SPARQL `=` coincides with term identity. Per SPARQL 1.1 §17.4.1.7
-            // (RDFterm-equal), `=` on two DISTINCT non-literal terms returns FALSE (a type
-            // error arises only when BOTH arguments are literals) — and FALSE and error
-            // both mean NO MATCH under the anti-join, which an id-bucket non-match
-            // reproduces exactly. A LITERAL value is the sq-lr2ii value-equality hazard →
-            // value-correct scan. [FABLE-5]
-            let id_hashable = correlations.iter().all(|c| {
-                matches!(
-                    term_of(graph, local, lrow[c.left_col]),
-                    Some(Term::NamedNode(_) | Term::BlankNode(_))
-                )
-            });
-            let matched = if id_hashable {
+        // Per-left-row elimination verdict: `true` iff SOME right row eliminates `lrow`
+        // (so the row does NOT survive the anti-join). Every input it reads — `graph`,
+        // `local` (immutable), the buckets, the checks — is shared read-only, so this is
+        // safe to evaluate in parallel across left rows. `local` is `&LocalVocab` here
+        // (never mutated inside the probe): a probe interns nothing, so no per-row id
+        // divergence. [FABLE-5] (sq-3cmr4 / sq-f1emb)
+        let eliminated = |lrow: &Row| -> Result<bool, String> {
+            // Every correlation value id-bucket-probeable? Then an exact id-bucket probe
+            // is sound (see `corr_id_probeable` for the per-kind argument): for a value
+            // `=` correlation the value must be a NamedNode/BlankNode (where `=` coincides
+            // with term identity — per SPARQL 1.1 §17.4.1.7 `=` on two DISTINCT non-literal
+            // terms is FALSE, and FALSE/error both mean NO MATCH, which an id-bucket
+            // non-match reproduces); a LITERAL under `=` is the sq-lr2ii value-equality
+            // hazard → value-correct scan. For a `sameTerm` correlation EVERY kind is
+            // id-probeable (id-equality IS sameTerm for all term kinds, literals included).
+            // [FABLE-5] (sq-3cmr4)
+            let id_hashable = correlations
+                .iter()
+                .all(|c| corr_id_probeable(c.kind, term_of(graph, local, lrow[c.left_col]).as_ref()));
+            if id_hashable {
                 let key: Vec<Id> = correlations.iter().map(|c| lrow[c.left_col]).collect();
                 match buckets.get(&key) {
-                    None => false,
+                    None => Ok(false),
                     Some(cands) => antijoin_row_matches(
                         graph, local, lrow, &b_all, cands, &shared, &out_src, &tmp_vars,
                         &residual_owned,
-                    )?,
+                    ),
                 }
             } else {
-                // Literal-keyed left row: value-correct full scan with `=` re-checked.
+                // Literal-keyed left row: value-correct full scan with the correlation
+                // relation re-checked (`=` or `sameTerm` per kind).
                 antijoin_row_matches(
                     graph, local, lrow, &b_all, &all_b, &shared, &out_src, &tmp_vars,
                     &value_checks,
-                )?
-            };
-            if !matched {
+                )
+            }
+        };
+
+        // [FABLE-5] (sq-f1emb) For a VERY LARGE anchor side, the per-left-row probe is
+        // embarrassingly parallel (each verdict reads only shared read-only state).
+        // Mirror the parallel hash-join / BIND threshold (`PAR_THRESHOLD`): fan the
+        // VERDICT computation out over cores, collecting one `bool` per row IN ORDER, then
+        // build + budget-truncate the surviving output rows SERIALLY in the identical left
+        // order. Because only the verdicts are parallelised (never the ordered output
+        // build, never `local` interning), the result is byte-identical to the serial
+        // probe — the order-preserving `collect` + serial truncation reproduce exactly the
+        // serial loop's early-`break`-on-budget survivor prefix. The EXISTS residual re-
+        // enters the thread-local function / view / spatial state, so each worker installs
+        // the snapshot exactly like the FILTER / BIND parallel paths.
+        #[cfg(feature = "parallel")]
+        let verdicts: Vec<bool> = if left_b.rows.len() >= PAR_THRESHOLD {
+            use rayon::prelude::*;
+            let fns = functions::snapshot();
+            let vw = view::snapshot();
+            let spx = spatial::snapshot();
+            left_b
+                .rows
+                .par_iter()
+                .map(|lrow| {
+                    let _fns = functions::worker_install(&fns);
+                    let _vw = view::worker_install(&vw);
+                    let _spx = spatial::worker_install(&spx);
+                    eliminated(lrow)
+                })
+                .collect::<Result<Vec<bool>, String>>()?
+        } else {
+            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?
+        };
+        #[cfg(not(feature = "parallel"))]
+        let verdicts: Vec<bool> =
+            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?;
+
+        // Serial ordered build + budget truncation: identical to the serial probe loop's
+        // `if !matched { push } ; break on budget` — the survivor prefix and its order are
+        // reproduced exactly whether the verdicts were computed serially or in parallel.
+        for (lrow, &elim) in left_b.rows.iter().zip(&verdicts) {
+            if budget::exhausted(result_rows.len()) {
+                break;
+            }
+            if !elim {
                 let mut combined: Row = lrow.clone();
                 combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 result_rows.push(combined);
@@ -8210,14 +8284,13 @@ fn try_theta_antijoin(
             .filter_map(|(lc, v)| b_prime.col(v).map(|bc| (lc, bc)))
             .collect();
         // When NOT seeded, the correlation equalities were not enforced by substitution
-        // — prepend them to the theta so they are re-checked with full value `=`.
+        // — prepend them to the theta so they are re-checked with their FULL relation
+        // (`=` for a value-equality correlation, `sameTerm` for a sameTerm correlation:
+        // they differ on value-equal id-distinct literals). [FABLE-5] (sq-3cmr4)
         let mut checks: Vec<Expression> = Vec::new();
         if !seeded {
             for c in &correlations {
-                checks.push(Expression::Equal(
-                    Box::new(Expression::Variable(out_vars[c.left_col].clone())),
-                    Box::new(Expression::Variable(c.inner_var.clone())),
-                ));
+                checks.push(corr_recheck_expr(c, &out_vars));
             }
         }
         checks.extend(residual_owned.iter().cloned());
@@ -8430,16 +8503,69 @@ fn as_not_bound_var(e: &Expression) -> Option<Variable> {
     }
 }
 
-/// `Some((a, b))` iff `e` is `?a = ?b` (a variable-to-variable SPARQL `=` equality).
-/// `sameTerm` is intentionally NOT matched (it is term identity, not the correlation
-/// idiom — leaving it in the residual is always sound).
-fn as_var_equality(e: &Expression) -> Option<(Variable, Variable)> {
+/// `Some((a, b, kind))` iff `e` is a VAR-TO-VAR correlation conjunct the theta anti-join
+/// can seed sideways: `?a = ?b` (`CorrKind::Eq`), `sameTerm(?a, ?b)` (`CorrKind::SameTerm`),
+/// or a SINGLE-variable membership `?a IN (?b)` (which desugars to `?a = ?b`, so `Eq`).
+/// Returns `None` for a constant operand, an inequality, or a multi-element / constant
+/// `IN` list — those stay in the residual (always sound). Orientation (which is inner /
+/// outer) is decided by the caller from the certain-in-B / left-column sets. [FABLE-5]
+/// (sq-3cmr4)
+fn as_correlation_pair(e: &Expression) -> Option<(Variable, Variable, CorrKind)> {
     match e {
         Expression::Equal(a, b) => match (a.as_ref(), b.as_ref()) {
-            (Expression::Variable(va), Expression::Variable(vb)) => Some((va.clone(), vb.clone())),
+            (Expression::Variable(va), Expression::Variable(vb)) => {
+                Some((va.clone(), vb.clone(), CorrKind::Eq))
+            }
+            _ => None,
+        },
+        Expression::SameTerm(a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expression::Variable(va), Expression::Variable(vb)) => {
+                Some((va.clone(), vb.clone(), CorrKind::SameTerm))
+            }
+            _ => None,
+        },
+        // `?a IN (?b)` is exactly `?a = ?b` (SPARQL 1.1 §17.4.1.9): a single-variable
+        // membership. A list with a constant element, more than one element, or a
+        // non-variable target is NOT this seedable shape — decline (residual, sound).
+        Expression::In(target, list) => match (target.as_ref(), list.as_slice()) {
+            (Expression::Variable(va), [Expression::Variable(vb)]) => {
+                Some((va.clone(), vb.clone(), CorrKind::Eq))
+            }
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// The per-candidate re-check expression for a correlation, in `out_vars` order: `=`
+/// for a value-equality correlation, `sameTerm` for a sameTerm correlation. These are
+/// DIFFERENT relations on value-equal id-distinct literals, so the kind is load-bearing
+/// for soundness whenever a value-correct scan is taken (a non-id-probeable key, or the
+/// un-seeded SIP path). [FABLE-5] (sq-3cmr4)
+fn corr_recheck_expr(c: &Correlation, out_vars: &[Variable]) -> Expression {
+    let lhs = Box::new(Expression::Variable(out_vars[c.left_col].clone()));
+    let rhs = Box::new(Expression::Variable(c.inner_var.clone()));
+    match c.kind {
+        CorrKind::Eq => Expression::Equal(lhs, rhs),
+        CorrKind::SameTerm => Expression::SameTerm(lhs, rhs),
+    }
+}
+
+/// Is a left-row correlation value of the given `term` id-bucket-probeable under `kind`?
+///
+/// * `SameTerm` — YES for every term kind (a dictionary id equality IS `sameTerm`: two
+///   terms share an id iff identical). An `Unbound` (`None`) key is NOT probeable — an
+///   unbound operand makes `sameTerm` error, so route it through the scan where the
+///   3-valued residual decides (defensive: a correlation column is certain-in-A, so this
+///   is unreachable in practice).
+/// * `Eq` — YES only for a NamedNode/BlankNode (`=` coincides with term identity there);
+///   a literal is the sq-lr2ii value-equality hazard and an unbound is unprobeable.
+///
+/// [FABLE-5] (sq-3cmr4)
+fn corr_id_probeable(kind: CorrKind, term: Option<&Term>) -> bool {
+    match kind {
+        CorrKind::SameTerm => term.is_some(),
+        CorrKind::Eq => matches!(term, Some(Term::NamedNode(_) | Term::BlankNode(_))),
     }
 }
 
@@ -9898,14 +10024,14 @@ mod sort_collation_key_differential {
 /// skipped; otherwise the scalar row path (`apply_filter_scalar`) runs verbatim. When the
 /// feature is OFF this compiles to exactly the scalar body — byte-identical, zero overhead.
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
-    // [SONNET-4.6] (sq-pntvh.5, M4 Phase 5) Dispatcher-gated columnar residual-FILTER seam
-    // (Seam A): the `columnar_filter` helper now runs through the shared `vec_dispatch`
-    // eligibility gate (VEC_MIN_BATCH threshold, I2/I3 checks, dtype precheck) and executes
-    // morsel-by-morsel (VEC_MORSEL rows per decode buffer) — extracting only the one tested
-    // column, not a full-width transpose. Declines (→ scalar path) for anything not provably
+    // [SONNET-4.6] (sq-pntvh.5, M4 Phase 5 / sq-y5ew5, M4 hybrid tri-mask) Dispatcher-gated
+    // columnar residual-FILTER seam (Seam A): the `columnar_filter` helper runs through the
+    // shared `vec_dispatch` eligibility gate (VEC_MIN_BATCH threshold, I2/I3 checks) and
+    // executes morsel-by-morsel (VEC_MORSEL rows per decode buffer), now with tri-mask
+    // delegation for tie/unknown lanes. Declines (→ scalar path) for anything not provably
     // byte-identical to `apply_filter_scalar`. I5 probe counters updated on each call.
     #[cfg(feature = "vectorized")]
-    if let Some(rows) = columnar_filter(graph, b, expr) {
+    if let Some(rows) = columnar_filter(graph, local, b, expr)? {
         b.rows = rows;
         return Ok(());
     }
@@ -9945,12 +10071,12 @@ fn nonliteral_filter_cols(graph: &Graph, inner: &GraphPattern, b: &Bindings) -> 
     vars.iter().filter_map(|v| b.col(v)).collect()
 }
 
-/// The columnar residual-FILTER attempt (M4 Phase 5 dispatcher-wired Seam A).
+/// The columnar residual-FILTER attempt (M4 Phase 5 / sq-y5ew5 hybrid tri-mask, Seam A).
 ///
-/// Returns `Some(new_rows)` (the surviving rows, in the scalar path's order) when the
-/// dispatcher admits the operator invocation, or `None` to fall through to
-/// `apply_filter_scalar`. The returned rows are **byte-identical** to
-/// `apply_filter_scalar`'s output.
+/// Returns `Ok(Some(new_rows))` (the surviving rows, in the scalar path's order) when the
+/// dispatcher admits the operator invocation, `Ok(None)` to fall through to
+/// `apply_filter_scalar`, or `Err(e)` if scalar delegation on a tie/unknown lane fails.
+/// The returned rows are **byte-identical** to `apply_filter_scalar`'s output.
 ///
 /// ## Decline hierarchy (I1–I5, owned by `vec_dispatch`)
 ///
@@ -9966,44 +10092,57 @@ fn nonliteral_filter_cols(graph: &Graph, inner: &GraphPattern, b: &Bindings) -> 
 ///    fallback is: budget-armed ⇒ decline. This is zero-risk; revisit when budget tracking
 ///    is uniform-per-row.
 /// 3. **Operator shape:** only a single sargable `NUMERIC` comparison `?v OP const` (temporal
-///    comparisons have no vector kernel yet).
-/// 4. **`VEC_MIN_BATCH` (I4):** the batch must have at least `vec_dispatch::VEC_MIN_BATCH`
+///    comparisons have no vector kernel yet). A NaN threshold (e.g. from an XSD double `NaN`
+///    literal constant) is also declined: a NaN threshold makes all lanes Unknown, producing
+///    a delegated fraction of 100% with no columnar benefit.
+/// 4. **`VEC_MIN_BATCH`:** the batch must have at least `vec_dispatch::VEC_MIN_BATCH`
 ///    rows. Smaller batches are cheaper on the scalar path.
-/// 5. **Column-dtype precheck:** every id in the filter column must be an inline integer
-///    (`dict::is_inline`). This is the provable byte-identity gate: an inline-integer id
-///    encodes its exact numeric value (value = id − INLINE_BASE), so the columnar f64
-///    comparison agrees with the scalar `numeric_value` comparison on every cell — including
-///    the f64-tie exact-lexical recheck, which for exact small integers can only agree.
-///    This gate ALSO excludes local-vocab (computed) ids and unbound (`NO_ID`) cells.
 ///
-/// ## Execution (morsel-by-morsel, single-column extract)
+/// ## Execution (hybrid tri-mask, morsel-by-morsel, single-column extract)
 ///
 /// For eligible invocations the function iterates morsels of `VEC_MORSEL` rows. Each morsel:
-/// - Extracts only the filter column c (O(morsel × 1), not a full-width transpose).
-/// - Builds a single-column `DataChunk` and calls the Phase-2/3 decode + select kernels.
-/// - Records the morsel via `vec_dispatch::record_chunk`.
-/// - Appends global survivor indices.
+/// - Extracts only the filter column (O(morsel × 1), not a full-width transpose).
+/// - Decodes to a contiguous `f64` column via `decode_numeric_column`.
+/// - Runs `chunk_select::tri_mask_select` to split lanes into Confident and Delegated.
+/// - Delegated (Tie + Unknown) lanes are evaluated by the full scalar `eval_expr` per row.
+/// - Confident-passes and delegated-passes are merged (ascending) for this morsel.
+/// - Records the morsel via `vec_dispatch::record_chunk` and delegated count via
+///   `vec_dispatch::record_delegated`.
 ///
 /// After all morsels, survivors are gathered from the original `b.rows` (order-preserving).
 ///
+/// ## Byte-identity argument (§3 of the completion-design record, by construction)
+///
+/// - Confident lanes: the scalar predicate on the same row sees the same two f64 values;
+///   no exact-lexical recheck applies (non-tie), so `cmp.test(x)` gives the correct answer.
+/// - Tie / Unknown lanes: the hybrid's verdict IS the scalar predicate's verdict.
+/// - Order: both index lists are ascending; the merge is ascending; `apply_selection` is
+///   order-preserving.
+///
 /// **ZK coupling (soundness-relevant):** see I2 above and `research/vector-at-a-time-m4.md`
-/// §3.2. [SONNET-4.6] (sq-pntvh.5)
+/// §3.2. [SONNET-4.6] (sq-y5ew5)
 #[cfg(feature = "vectorized")]
-fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec<Row>> {
+fn columnar_filter(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    expr: &Expression,
+) -> Result<Option<Vec<Row>>, String> {
     use crate::chunk::{DataChunk, VecCmp};
+    use crate::chunk_select;
     use crate::vec_dispatch;
 
     // I2: ZK trace armed ⇒ decline so the scalar path records the FILTER obligation set.
     #[cfg(feature = "zk")]
     if crate::zk::enabled() {
         vec_dispatch::record_decline();
-        return None;
+        return Ok(None);
     }
 
     // I3: budget armed ⇒ decline (fallback rule — debit schedule is not uniform-per-row).
     if budget::active() {
         vec_dispatch::record_decline();
-        return None;
+        return Ok(None);
     }
 
     // Operator-shape check: only a single sargable NUMERIC comparison is eligible.
@@ -10012,35 +10151,23 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
     let (var, cmp) = match extract_sargable(graph, expr) {
         None => {
             vec_dispatch::record_decline();
-            return None;
+            return Ok(None);
         }
         Some((v, ScanCmp::Num(c))) => (v, c),
         Some((_, ScanCmp::Temp(..))) => {
             vec_dispatch::record_decline();
-            return None;
-        }
-    };
-    let c = match b.col(&var) {
-        Some(col) => col,
-        None => {
-            vec_dispatch::record_decline();
-            return None;
+            return Ok(None);
         }
     };
 
-    // VEC_MIN_BATCH: batches below the threshold are cheaper on the scalar path.
-    if b.rows.len() < vec_dispatch::VEC_MIN_BATCH {
-        vec_dispatch::record_decline();
-        return None;
-    }
-
-    // Column-dtype precheck: the whole filter column must be inline integers (I4-equivalent).
-    if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
-        vec_dispatch::record_decline();
-        return None;
-    }
-
+    // Decline a NaN threshold: all lanes would be Unknown → 100% delegation, no benefit.
+    // Also ensures the tri-mask tie check (x == c) is well-defined (NaN == anything is false).
     let veccmp = match cmp {
+        NumCmp::Gt(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Ge(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Lt(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Le(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Eq(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
         NumCmp::Gt(t) => VecCmp::Gt(t),
         NumCmp::Ge(t) => VecCmp::Ge(t),
         NumCmp::Lt(t) => VecCmp::Lt(t),
@@ -10048,8 +10175,23 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
         NumCmp::Eq(t) => VecCmp::Eq(t),
     };
 
+    let col_idx = match b.col(&var) {
+        Some(col) => col,
+        None => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
+    };
+
+    // VEC_MIN_BATCH: batches below the threshold are cheaper on the scalar path.
+    if b.rows.len() < vec_dispatch::VEC_MIN_BATCH {
+        vec_dispatch::record_decline();
+        return Ok(None);
+    }
+
     // Morsel-by-morsel execution: extract only the filter column (not a full-width
-    // transpose), decode it, select survivors, and collect global indices.
+    // transpose), decode it, run the tri-mask, delegate tie/unknown lanes to scalar,
+    // and merge the passing indices.
     let morsel_size = vec_dispatch::VEC_MORSEL;
     let mut survivor_indices: Vec<usize> = Vec::new();
     let rows = &b.rows;
@@ -10059,30 +10201,51 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
         let morsel_len = end - start;
 
         // Extract just the filter column for this morsel (O(morsel × 1), not O(morsel × width)).
-        let col: Vec<sparq_core::dict::Id> = rows[start..end].iter().map(|r| r[c]).collect();
+        let col: Vec<sparq_core::dict::Id> = rows[start..end].iter().map(|r| r[col_idx]).collect();
         let morsel_chunk = match DataChunk::from_columns(vec![col], morsel_len) {
             Some(mc) => mc,
             None => {
                 // Should not happen: col.len() == morsel_len by construction.
                 vec_dispatch::record_decline();
-                return None;
+                return Ok(None);
             }
         };
 
-        // Phase-2/3 primitives: decode once → compare over the decoded column.
+        // Decode the column once (gather-free fast path for all-inline columns, general
+        // path for mixed columns — NaN sentinel for non-numeric / local-vocab / unbound ids).
         let decoded = morsel_chunk.decode_numeric_column(graph, 0);
-        let local_sel = DataChunk::select_decoded(&decoded, veccmp);
 
-        // Record this morsel (I5 counter).
+        // Tri-mask pass: classify each lane as Confident (unambiguous f64 verdict) or
+        // Delegated (tie or unknown). Returns confident-passes and delegated indices
+        // in ascending order.
+        let tri = chunk_select::tri_mask_select(&decoded, veccmp);
+
+        // Record I5 counters for this morsel.
         vec_dispatch::record_chunk(morsel_len);
+        vec_dispatch::record_delegated(tri.delegated.len());
 
-        // Translate local morsel indices to global row indices.
-        survivor_indices.extend(local_sel.iter().map(|&i| start + i));
+        // Evaluate the full scalar predicate for each delegated (tie / unknown) lane.
+        // The scalar predicate handles the exact-lexical recheck for ties and the
+        // type-error path for unknowns — byte-identical to `apply_filter_scalar`.
+        let mut delegated_passes: Vec<usize> = Vec::with_capacity(tri.delegated.len());
+        for &local_idx in &tri.delegated {
+            let global_idx = start + local_idx;
+            let row = &rows[global_idx];
+            let val = eval_expr(graph, local, b, row.as_ref(), expr)?;
+            if effective_boolean(&val) {
+                delegated_passes.push(local_idx);
+            }
+        }
+
+        // Merge confident-passes and delegated-passes (both ascending) for this morsel,
+        // then translate to global row indices.
+        let morsel_sel = chunk_select::merge_ascending(&tri.confident_passes, &delegated_passes);
+        survivor_indices.extend(morsel_sel.iter().map(|&i| start + i));
     }
 
     // Materialise survivors from the original rows (order-preserving, full-width).
-    let result: Vec<Row> = survivor_indices.iter().map(|&r| Row::from_slice(b.rows[r].as_ref())).collect();
-    Some(result)
+    let result: Vec<Row> = survivor_indices.iter().map(|&r| Row::from_slice(rows[r].as_ref())).collect();
+    Ok(Some(result))
 }
 
 /// The columnar per-group aggregate attempt (M4 Phase 4, `sq-pntvh.4`). Returns `Some(rows)`
@@ -16252,6 +16415,7 @@ mod columnar_filter_seam {
     #[test]
     fn columnar_seam_is_byte_identical_to_scalar_on_inline_column() {
         // n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_filter engages.
+        // [SONNET-4.6] (sq-y5ew5) Updated for the new 4-arg signature and Result return type.
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
@@ -16265,9 +16429,9 @@ mod columnar_filter_seam {
         ] {
             let expr = mk_filter(op, &age_var, int_lit(t));
 
-            // The seam ENGAGES for an all-inline column.
-            let via_columnar = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
-            assert!(via_columnar.is_some(), "all-inline column must be columnar-eligible ({op} {t})");
+            // The seam ENGAGES for an all-inline column: Result is Ok(Some(rows)).
+            let via_columnar = columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
+            assert!(via_columnar.as_ref().unwrap().is_some(), "all-inline column must be columnar-eligible ({op} {t})");
 
             // Scalar reference (the real row path).
             let mut scalar = Bindings::unsorted(vars.clone(), rows.clone());
@@ -16279,7 +16443,7 @@ mod columnar_filter_seam {
 
             // BYTE-IDENTICAL: same rows (incl. the NON-inline subject column), same order.
             assert_eq!(disp.rows, scalar.rows, "dispatcher rows != scalar for {op} {t}");
-            assert_eq!(via_columnar.as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
+            assert_eq!(via_columnar.as_ref().unwrap().as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
         }
     }
 
@@ -16288,26 +16452,30 @@ mod columnar_filter_seam {
         // Non-vacuous: pin the EXACT surviving age sequence (content + ascending order) so a
         // wrong mask (off-by-one / inverted / column desync) turns this red.
         // n=300 ensures the batch exceeds VEC_MIN_BATCH (256) so columnar_filter engages.
+        // [SONNET-4.6] (sq-y5ew5) Updated for new signature and Result<Option<Vec<Row>>> return.
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let local = LocalVocab::default();
         let age_var = var("age");
 
-        let out = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap();
+        let out = columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap().unwrap();
         let expected: Vec<f64> = (21..300).map(f64::from).collect();
         assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=299, ascending");
 
         // A DIFFERENT filter must select a DIFFERENT set (the mask does real work).
-        let other = columnar_filter(&g, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap();
+        let other = columnar_filter(&g, &local, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap().unwrap();
         assert_ne!(age_values(&g, &other), expected, "distinct filters must select distinct rows");
     }
 
     #[test]
-    fn columnar_seam_declines_and_matches_scalar_on_non_eligible_columns() {
-        // A non-inline dict integer, a negative integer, a non-numeric literal, and an unbound
-        // cell each break the all-inline gate → the seam DECLINES and the row path runs, still
-        // byte-identical.
+    fn columnar_seam_declines_small_batches_regardless_of_column_type() {
+        // A batch of 2 rows is below VEC_MIN_BATCH (256), so the seam DECLINES regardless
+        // of the column type (non-inline ints, negatives, strings, unbound). The scalar path
+        // runs in all cases and produces correct results. [SONNET-4.6] (sq-y5ew5) Updated:
+        // non-inline columns no longer cause decline for large batches (they use the tri-mask);
+        // decline here is due to VEC_MIN_BATCH only.
         let big = 2_000_000_000u32.to_string(); // > INLINE_MAX (2^30-1): a NON-inline dict integer
         let nt = format!(
             "<http://ex/a> <http://ex/age> \"5\"^^<{XSD_INT}> .\n\
@@ -16335,10 +16503,11 @@ mod columnar_filter_seam {
         let local = LocalVocab::default();
 
         for age_cell in [big_id, neg, hello, NO_ID] {
+            // 2 rows < VEC_MIN_BATCH=256 → seam declines.
             let rows: Vec<Row> = vec![Row::from_slice(&[five, five]), Row::from_slice(&[five, age_cell])];
             assert!(
-                columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).is_none(),
-                "a non-inline / unbound column cell must make the seam DECLINE"
+                columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).unwrap().is_none(),
+                "batch of 2 rows must decline (VEC_MIN_BATCH)"
             );
             let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
             let mut scalar = Bindings::unsorted(vars.clone(), rows);
@@ -16350,11 +16519,13 @@ mod columnar_filter_seam {
 
     #[test]
     fn columnar_seam_declines_non_sargable_and_temporal_filters() {
+        // [SONNET-4.6] (sq-y5ew5) Updated for new 4-arg signature and Result return.
         let n = 8u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
         let b = Bindings::unsorted(vars, rows);
+        let local = LocalVocab::default();
         let age_var = var("age");
 
         // var-vs-var: not sargable → decline.
@@ -16362,7 +16533,7 @@ mod columnar_filter_seam {
             Box::new(Expression::Variable(age_var.clone())),
             Box::new(Expression::Variable(var("s"))),
         );
-        assert!(columnar_filter(&g, &b, &var_var).is_none());
+        assert!(columnar_filter(&g, &local, &b, &var_var).unwrap().is_none());
 
         // A temporal comparison is sargable but has NO vector kernel yet → decline.
         let dt = Expression::Literal(Literal::new_typed_literal(
@@ -16370,7 +16541,7 @@ mod columnar_filter_seam {
             oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#dateTime").unwrap(),
         ));
         let temporal = Expression::Greater(Box::new(Expression::Variable(age_var)), Box::new(dt));
-        assert!(columnar_filter(&g, &b, &temporal).is_none(), "temporal comparison has no vector kernel");
+        assert!(columnar_filter(&g, &local, &b, &temporal).unwrap().is_none(), "temporal comparison has no vector kernel");
     }
 
     #[cfg(feature = "zk")]
@@ -16380,19 +16551,21 @@ mod columnar_filter_seam {
         // while the recorder is armed and the scalar path records it
         // (research/vector-at-a-time-m4.md §3.2, open question 2 — simplest-safe rule).
         // n=300 to exceed VEC_MIN_BATCH (256) so the sanity check can confirm eligibility.
+        // [SONNET-4.6] (sq-y5ew5) Updated for new 4-arg signature and Result return.
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
         let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
         let b = Bindings::unsorted(vars, rows);
+        let local = LocalVocab::default();
         let expr = mk_filter(">", &var("age"), int_lit("0"));
 
         // Sanity: eligible (and firing) when zk is NOT armed.
-        assert!(columnar_filter(&g, &b, &expr).is_some(), "eligible without zk armed");
+        assert!(columnar_filter(&g, &local, &b, &expr).unwrap().is_some(), "eligible without zk armed");
         // Armed ⇒ decline (I2 fires before VEC_MIN_BATCH, so batch size is irrelevant here).
         let _guard = crate::zk::install();
         assert!(crate::zk::enabled());
-        assert!(columnar_filter(&g, &b, &expr).is_none(), "columnar seam must decline while zk is armed");
+        assert!(columnar_filter(&g, &local, &b, &expr).unwrap().is_none(), "columnar seam must decline while zk is armed");
     }
 }
 
@@ -17562,19 +17735,69 @@ mod theta_antijoin_unit {
     }
 
     #[test]
-    fn as_var_equality_matches_var_to_var_only() {
+    fn as_correlation_pair_classifies_eq_sameterm_and_single_var_in() {
+        // `?a = ?b` → Eq correlation.
         assert_eq!(
-            as_var_equality(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))),
-            Some((var("a"), var("b")))
+            as_correlation_pair(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))),
+            Some((var("a"), var("b"), CorrKind::Eq))
+        );
+        // `sameTerm(?a, ?b)` → SameTerm correlation (sq-3cmr4 extension).
+        assert_eq!(
+            as_correlation_pair(&Expression::SameTerm(Box::new(ev("a")), Box::new(ev("b")))),
+            Some((var("a"), var("b"), CorrKind::SameTerm))
+        );
+        // `?a IN (?b)` desugars to `?a = ?b` → Eq correlation.
+        assert_eq!(
+            as_correlation_pair(&Expression::In(Box::new(ev("a")), vec![ev("b")])),
+            Some((var("a"), var("b"), CorrKind::Eq))
         );
         // A var = IRI equality is NOT a correlation (one side is a constant).
-        assert!(as_var_equality(&Expression::Equal(
+        assert!(as_correlation_pair(&Expression::Equal(
             Box::new(ev("a")),
             Box::new(Expression::NamedNode(nn("http://e/x")))
         ))
         .is_none());
-        // `sameTerm` is intentionally not a correlation (kept in the residual).
-        assert!(as_var_equality(&Expression::SameTerm(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+        // A CONSTANT-list `IN` is NOT a correlation (nothing to seed) — brief's rule.
+        assert!(as_correlation_pair(&Expression::In(
+            Box::new(ev("a")),
+            vec![Expression::NamedNode(nn("http://e/x"))]
+        ))
+        .is_none());
+        // A MULTI-element `IN` (even all-vars) is NOT the single-target seedable shape.
+        assert!(
+            as_correlation_pair(&Expression::In(Box::new(ev("a")), vec![ev("b"), ev("c")])).is_none()
+        );
+        // An inequality is not a correlation.
+        assert!(as_correlation_pair(&Expression::Less(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+    }
+
+    #[test]
+    fn corr_recheck_expr_uses_the_correlations_own_relation() {
+        // An Eq correlation re-checks with `=`; a SameTerm correlation with `sameTerm`
+        // (they DIFFER on value-equal id-distinct literals — the soundness point).
+        let out = vec![var("outer"), var("inner")];
+        let eq = Correlation { left_col: 0, inner_var: var("inner"), kind: CorrKind::Eq };
+        assert!(matches!(corr_recheck_expr(&eq, &out), Expression::Equal(..)));
+        let st = Correlation { left_col: 0, inner_var: var("inner"), kind: CorrKind::SameTerm };
+        assert!(matches!(corr_recheck_expr(&st, &out), Expression::SameTerm(..)));
+    }
+
+    #[test]
+    fn corr_id_probeable_is_kind_and_term_aware() {
+        use oxrdf::{BlankNode, Literal};
+        let iri = Term::NamedNode(nn("http://e/x"));
+        let blank = Term::BlankNode(BlankNode::new("b0").unwrap());
+        let lit = Term::Literal(Literal::new_simple_literal("hi"));
+        // sameTerm: EVERY bound kind is id-probeable (id-equality IS sameTerm).
+        assert!(corr_id_probeable(CorrKind::SameTerm, Some(&iri)));
+        assert!(corr_id_probeable(CorrKind::SameTerm, Some(&blank)));
+        assert!(corr_id_probeable(CorrKind::SameTerm, Some(&lit)));
+        assert!(!corr_id_probeable(CorrKind::SameTerm, None), "unbound is not probeable");
+        // Eq: only NamedNode/BlankNode; a LITERAL is the value-equality hazard.
+        assert!(corr_id_probeable(CorrKind::Eq, Some(&iri)));
+        assert!(corr_id_probeable(CorrKind::Eq, Some(&blank)));
+        assert!(!corr_id_probeable(CorrKind::Eq, Some(&lit)), "literal Eq must take value scan");
+        assert!(!corr_id_probeable(CorrKind::Eq, None));
     }
 
     #[test]
