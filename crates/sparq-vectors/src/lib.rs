@@ -3,6 +3,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod ann;
+// [OPUS-4.8] (sq-lfo84) Explicit-SIMD (NEON/AVX2) squared-Euclidean distance kernel for the HNSW
+// ANN hot loop. `approx-ann` only (the HNSW backend it serves); no new dependency — pure
+// `core::arch` intrinsics with a scalar fallback bit-identical to the previous auto-vectorised loop.
+#[cfg(feature = "approx-ann")]
+mod simd;
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend seam (exact default vs approximate) + the iterative
 // over-fetch FILTERED path — `filtered-ann` only (the approximate impl is additionally `approx-ann`).
 #[cfg(feature = "filtered-ann")]

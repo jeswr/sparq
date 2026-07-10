@@ -155,21 +155,13 @@ struct NPoint(Vec<f32>);
 #[cfg(feature = "approx-ann")]
 impl Point for NPoint {
     fn distance(&self, other: &Self) -> f32 {
-        const LANES: usize = 8;
-        let (a, b) = (&self.0, &other.0);
-        let mut acc = [0f32; LANES];
-        let chunks = a.len() / LANES;
-        for c in 0..chunks {
-            for l in 0..LANES {
-                let d = a[c * LANES + l] - b[c * LANES + l];
-                acc[l] += d * d;
-            }
-        }
-        for i in chunks * LANES..a.len() {
-            let d = a[i] - b[i];
-            acc[0] += d * d;
-        }
-        acc.iter().sum::<f32>().sqrt()
+        // [OPUS-4.8] (sq-lfo84) The HNSW build + search call this millions of times — it is the
+        // dominant cost of both. Dispatch to the explicit NEON/AVX2 kernel (scalar fallback where
+        // the vector ISA is absent), which measurably cuts build time and lifts QPS vs the previous
+        // scalar-only loop. `instant-distance` wants the true Euclidean distance, so we `sqrt` the
+        // squared kernel; the graph ranking is unchanged (sqrt is monotone), and the reported cosine
+        // score is derived from `item.distance` exactly as before.
+        crate::simd::l2_sq_dist(&self.0, &other.0).sqrt()
     }
 }
 

@@ -289,6 +289,16 @@ HNSW (`VectorIndex`) is the APPROXIMATE backend behind the **opt-in `approx-ann`
 only thing pulling `instant-distance`, so the default build has NO third-party ANN dep (lean core).
 It is approximate: recall < 1.0 (NOT answer-exact). Build with `--features approx-ann`.
 
+[OPUS-4.8] (sq-lfo84) The HNSW squared-Euclidean distance is computed by an **explicit-SIMD kernel**
+(`src/simd.rs`, `approx-ann`-only, no new dependency): runtime-detected **NEON** on aarch64 and
+**AVX2+FMA** on x86_64, with a scalar fallback numerically bit-identical to the previous
+auto-vectorised loop. It measurably cuts the graph-build time and lifts query QPS; **recall is
+unchanged** because the rank order is identical (sqrt is monotone; the SIMD vs scalar sum differs
+only by f32 rounding, absorbed by the ±1-deficit floor gate). The deterministic exact / DiskANN /
+PQ paths keep the scalar reduction, so their EXACT-gated `bench/vector/expected.tsv` deficits are
+byte-stable. Full recall-QPS + build-time evaluation matrix (SIMD vs instant-distance-scalar vs
+hnsw_rs, NON-CANONICAL): `research/gap-vector-ann-simd-2026-07.md`.
+
 ```rust
 # #[cfg(feature = "approx-ann")] {
 use sparq_vectors::{nearest_exact, VectorIndex, HnswConfig};
