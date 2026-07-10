@@ -230,13 +230,31 @@ certification can only **NARROW**, never **WIDEN**, the certifier's own authorit
   the input `direct_rules` — only authority the pod already holds can be conferred. (This
   is the depth bound made concrete: a *derived* rule is never re-used as an anchor, so the
   closure is a single pass and cannot transitively chain.)
-- **Statement-type narrowing.** The derived shape is the certification scope's shape only
-  when a **root-anchored, injective structural match** proves it **contains** (⊇ as a
-  constraint set, so ⊆ as an admitted-node set) the anchor's shape. `AnyServiceScope`
-  imposes no narrowing of its own and inherits the anchor shape unchanged (never
-  broadening it). Where narrowing cannot be *proven*, the edge contributes **NOTHING**
-  (design §3.4: undecidable containment ⇒ NOT contained ⇒ contributes nothing — the
-  fail-closed side).
+- **Statement-type narrowing — target-set-CONTRAVARIANT, conformance-COVARIANT.** A SHACL
+  shape selects focus nodes by the **UNION** of its target predicates
+  (`sh:targetSubjectsOf` / `sh:targetObjectsOf` / `sh:targetNode` / `sh:targetClass` /
+  `sh:targetWhere`, and the implicit-class typing) and then requires each to satisfy every
+  **conformance** constraint (`sh:property` / `sh:minCount` / `sh:datatype` / …). These move
+  in OPPOSITE directions: adding a conformance constraint **narrows** the admitted set (fewer
+  nodes conform), but adding a target predicate **widens** it (more nodes are selected). So a
+  cert shape narrows the anchor **only** when — proven by a **root-anchored, injective
+  structural match** — its **selection/target set is a SUBSET** of the anchor's (targets may
+  only shrink) **AND** its **conformance-constraint set is a SUPERSET** of the anchor's
+  (constraints may only grow). Any **un-modelled selection predicate ⇒ fail-closed**
+  (contributes nothing). `AnyServiceScope` imposes no narrowing of its own and inherits the
+  anchor shape unchanged (never broadening it). Where narrowing cannot be *proven*, the edge
+  contributes **NOTHING** (design §3.4: undecidable containment ⇒ NOT contained ⇒ contributes
+  nothing — the fail-closed side).
+
+  > A prior version treated **any** injective structural superset as a narrowing ("⊇ as a
+  > constraint set ⇒ ⊆ as an admitted-node set"). That equivalence holds only for
+  > *conformance* constraints; it is **UNSOUND for target predicates**, where an extra
+  > `sh:targetSubjectsOf` triple is a **broadening**, not a narrowing. An escalated adversarial
+  > review (`sq-pfae.15`) found the bypass: a cert = anchor shape **+ an extra
+  > `sh:targetSubjectsOf schema:email`** was admitted as a "narrowing" and granted the
+  > certified issuer authority over `schema:email` the certifier never held. The containment
+  > check is now split into a contravariant target-set check and a covariant conformance
+  > check, and the additive-target case is denied `EdgeRejection::Broadening`.
 - **Resource-scope + freshness narrowing.** The derived rule keeps the anchor's resource
   `scope` (a cert narrows *who* and *what-type*, never widens *where*) and freshness
   `min(anchor.fresh_within, window)`.

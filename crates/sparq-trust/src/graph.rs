@@ -43,6 +43,18 @@
 //!   **NARROW**, never **WIDEN**, the certifier's own authority. Where narrowing cannot
 //!   be *proven* (undecidable SHACL-shape containment), the edge contributes **NOTHING**
 //!   (design §3.4: "undecidable containment ⇒ NOT contained ⇒ contributes nothing").
+//! - **Target-set-CONTRAVARIANT, conformance-COVARIANT shape containment.** SHACL shapes
+//!   have two kinds of statement: **selection/target** predicates (`sh:targetSubjectsOf`,
+//!   `sh:targetObjectsOf`, `sh:targetNode`, `sh:targetClass`, `sh:targetWhere`, the
+//!   implicit-class typing) that pick focus nodes by the **UNION** of targets, and
+//!   **conformance** constraints (`sh:property`/`sh:minCount`/`sh:datatype`/…) that a
+//!   selected node must satisfy. Adding a conformance constraint NARROWS (fewer nodes
+//!   conform); but adding a target predicate WIDENS (more nodes are selected). So a cert
+//!   shape narrows the anchor ONLY when its selection set is a **SUBSET** of the anchor's
+//!   (targets may only SHRINK) AND its conformance constraints are a **SUPERSET** of the
+//!   anchor's (constraints may only GROW). Any un-modelled selection predicate ⇒ FAIL
+//!   CLOSED. Treating "more edges ⇒ narrower" uniformly is UNSOUND: an extra
+//!   `sh:targetSubjectsOf` edge is a broadening, not a narrowing (`sq-pfae.15` review fix).
 //! - **A CHECKED signature, never a self-asserted one.** The edge is admitted only if a
 //!   signature over its domain-separated [`certification_message`] verifies under the
 //!   **certifier's** key — the key bound by the certifier's own anchor [`TrustRule`]
@@ -81,6 +93,7 @@
 //! re-review when Fable returns. 🤖 SPARQ agent — certification-edge trust-graph closure.
 
 use crate::policy::{ShapeRef, TrustRule};
+use crate::vocab::{RDF_TYPE, SH_NS};
 use oxrdf::{NamedNode, Term};
 use sparq_zk::encode::{encode_term, encode_triple, salt_from_bytes};
 use sparq_zk::field::Fr;
@@ -88,6 +101,15 @@ use sparq_zk::poseidon2;
 use sparq_zk::sig::{
     commitment_message, holder_key_digest, public_key_to_hex, signature_from_hex, verify, PublicKey,
 };
+
+/// `rdfs:Class` — a node typed this (with SHACL constraints) is an implicit-class SHACL
+/// target, so `root rdf:type rdfs:Class` is a SELECTION edge (the root becomes a class
+/// target), NOT a conformance constraint (the `sq-pfae.15` review fix, [`is_selection_edge`]).
+const RDFS_CLASS: &str = "http://www.w3.org/2000/01/rdf-schema#Class";
+/// `sh:ShapeClass` — SHACL 1.2 "a class that is also a node shape"; like `rdfs:Class` it
+/// makes the root an implicit-class target (`sparq-shacl` honours both; see
+/// `crates/sparq-shacl/src/model.rs` `focus_nodes`).
+const SH_SHAPE_CLASS: &str = "http://www.w3.org/ns/shacl#ShapeClass";
 
 /// The certification-scope a certification edge confers — a *statement-type* constraint
 /// plus the *resource* scope it applies over. The derived rule's authority is the
@@ -359,30 +381,49 @@ fn derive_one_explained(
 /// - `CertScope::AnyService` — imposes no statement-type narrowing of its own, so the
 ///   derived shape is the anchor's shape UNCHANGED (the anchor is the ceiling; this never
 ///   broadens).
-/// - `CertScope::Shape(s)` where `s` **contains** the anchor shape via a **root-anchored
-///   structural match** ([`shape_contains`]): every constraint reachable from the anchor
-///   shape's root is matched by a constraint reachable from the cert shape's root, with
-///   intermediate blank nodes matched by structural position (NOT by label). A shape with
-///   MORE constraints admits FEWER nodes, so `cert ⊇ anchor` (as constraint sets) is a
-///   *narrowing*; the derived shape is the CERT shape (the strictly-tighter one).
+/// - `CertScope::Shape(s)` where `s` **narrows** the anchor shape via the
+///   **target-set-CONTRAVARIANT, conformance-COVARIANT** containment check
+///   ([`shape_narrows`]): the cert's SELECTION/target predicates are a SUBSET of the
+///   anchor's (targets may only shrink — an extra target WIDENS the admitted set), AND its
+///   CONFORMANCE constraints are a SUPERSET of the anchor's (constraints may only grow, via
+///   the injective structural match [`conformance_contains`]). The derived shape is the CERT
+///   shape (the strictly-tighter one). If NOT provable ⇒ `None` (fail-closed).
 ///
-/// Every other case — a cert shape that DROPS an anchor constraint (broadening), or one
-/// whose containment cannot be structurally decided within the bounded matcher — returns
-/// `None`. This is the design's "undecidable containment ⇒ NOT contained ⇒ contributes
-/// nothing" rule (§3.4), the SAFE side for authorisation: a false `None` merely fails to
-/// admit; a false `Some` would escalate. The matcher is deliberately CONSERVATIVE — it
-/// proves narrowing only for shapes it can structurally match, never guesses.
+/// Every other case — a cert shape that DROPS an anchor constraint, ADDS a target predicate
+/// the anchor lacks (both broadenings), carries an UN-MODELLED selection predicate, or one
+/// whose conformance containment cannot be structurally decided within the bounded matcher —
+/// returns `None`. This is the design's "undecidable containment ⇒ NOT contained ⇒
+/// contributes nothing" rule (§3.4), the SAFE side for authorisation: a false `None` merely
+/// fails to admit; a false `Some` would escalate. The matcher is deliberately CONSERVATIVE —
+/// it proves narrowing only for shapes it can structurally match, never guesses.
+///
+/// ## Why "more edges ⇒ narrower" is UNSOUND (the `sq-pfae.15` review fix)
+///
+/// A SHACL shape selects focus nodes by the **UNION** of its target predicates and then
+/// requires each to satisfy every conformance constraint. Adding a CONFORMANCE constraint
+/// removes conforming nodes (narrows); but adding a TARGET predicate selects MORE nodes
+/// (widens). A prior version treated any injective structural superset as a narrowing — so a
+/// cert = anchor shape **+ an extra `sh:targetSubjectsOf schema:email`** passed as a
+/// "narrowing" and granted the certified issuer authority over `email` the certifier never
+/// held (privilege escalation). Selection vocab is therefore CONTRAVARIANT to conformance
+/// vocab, and the containment check splits the two ([`selection_only_shrinks`] +
+/// [`conformance_contains`]).
 fn narrowed_shape(anchor: &ShapeRef, cert_scope: &CertScope) -> Option<ShapeRef> {
     match cert_scope {
         // AnyService adds no statement-type constraint: the derived shape IS the anchor's
         // (the anchor remains the ceiling). No broadening is possible.
         CertScope::AnyService => Some(anchor.clone()),
         CertScope::Shape(cert_shape) => {
-            // The cert shape must CONTAIN the anchor shape (every anchor constraint is
-            // present in the cert, matched from the roots outward). If so, the cert admits a
-            // SUBSET of what the anchor admits ⇒ a narrowing; the derived shape is the cert's
-            // (strictly-tighter) shape. If NOT provable ⇒ None (fail-closed).
-            if shape_contains(cert_shape, anchor) {
+            // A cert shape narrows the anchor ONLY if BOTH hold:
+            //   (a) its SELECTION/target set is a SUBSET of the anchor's — targets may only
+            //       shrink; an extra target predicate WIDENS the admitted set (a broadening),
+            //       and an UN-MODELLED selection predicate fails closed; AND
+            //   (b) its CONFORMANCE constraints are a SUPERSET of the anchor's — constraints
+            //       may only grow (fewer nodes conform), proven by the injective structural
+            //       match.
+            // If BOTH hold, the cert admits a SUBSET of what the anchor admits ⇒ a narrowing;
+            // the derived shape is the cert's (strictly-tighter) shape. Otherwise ⇒ None.
+            if shape_narrows(cert_shape, anchor) {
                 Some(cert_shape.clone())
             } else {
                 None
@@ -391,32 +432,135 @@ fn narrowed_shape(anchor: &ShapeRef, cert_scope: &CertScope) -> Option<ShapeRef>
     }
 }
 
-/// Whether the `sup` (cert) shape CONTAINS the `sub` (anchor) shape as a constraint set,
-/// via a bounded, root-anchored, **injective** structural match: identifying `sub.root`
-/// with `sup.root`, every triple reachable from `sub.root` must have a DISTINCT matching
-/// triple reachable from `sup.root`, with blank-node objects matched RECURSIVELY (structural
-/// position, not label) under an injective blank-node assignment, and IRI/literal objects
-/// matched exactly.
+/// Whether the `cert` shape provably NARROWS the `anchor` shape as an admitted-node set:
+/// **selection-set-contravariant, conformance-set-covariant**. Both halves must hold:
 ///
-/// This is the decidable-containment core of [`narrowed_shape`]. **Injectivity is the
-/// soundness guarantee against a false positive:** each anchor constraint edge is matched to
-/// a *distinct* cert constraint edge, and each anchor blank node to a *distinct* cert blank
-/// node — so a cert with FEWER constraints can never be reported as containing an anchor with
-/// more (which would be a broadening reported as narrowing = escalation). It is SOUND for the
-/// SHACL node-shapes the crate mints (the `forPredicate`/`forShape` idiom: a root with a few
-/// direct constraints + one level of `sh:property` blank nodes) and conservative beyond them
-/// — it returns `true` only when it PROVES an injective embedding, so any un-provable case is
-/// the fail-closed (safe) `false`.
-fn shape_contains(sup: &ShapeRef, sub: &ShapeRef) -> bool {
+/// - [`selection_only_shrinks`] — the cert's SELECTION/target predicates are a subset of the
+///   anchor's (targets may only shrink; an extra target widens; an un-modelled selection
+///   predicate fails closed), AND
+/// - [`conformance_contains`] — the cert's CONFORMANCE constraints structurally contain the
+///   anchor's (constraints may only grow), via the injective, root-anchored structural match.
+///
+/// Returns `true` ONLY when it PROVES both — any un-decidable / broadening case is the
+/// fail-closed `false`. Splitting the two directions is the `sq-pfae.15` review fix: a
+/// uniform "more edges ⇒ narrower" is unsound because a target edge widens, not narrows.
+fn shape_narrows(cert: &ShapeRef, anchor: &ShapeRef) -> bool {
+    selection_only_shrinks(cert, anchor) && conformance_contains(cert, anchor)
+}
+
+/// Whether the cert's SELECTION/target set is a SUBSET of the anchor's — the CONTRAVARIANT
+/// half of narrowing. SHACL selects focus nodes by the UNION of a shape's target predicates,
+/// so a cert may narrow ONLY if it targets a subset of the nodes the anchor targets: every
+/// selection edge the cert declares at its root must also be declared at the anchor's root.
+///
+/// Fail-closed on TWO axes:
+/// - An **extra** cert selection edge the anchor lacks (a broadening, e.g. an additional
+///   `sh:targetSubjectsOf schema:email`) ⇒ `false`.
+/// - An **un-modelled** selection predicate (anything in the SHACL `sh:target*` family — or
+///   implicit-class typing — this check does not fully understand) ⇒ `false` regardless, so
+///   a future/unknown target vocab can never be silently treated as a conformance constraint
+///   and slip through the covariant half.
+///
+/// A selection edge is a root-level `(predicate, object)` whose predicate is a SHACL target
+/// predicate ([`is_selection_predicate`]), OR the implicit-class typing `root rdf:type
+/// {rdfs:Class | sh:ShapeClass}` (which makes the root itself a class target). Selection is
+/// compared as a SET of `(predicate, object)` root edges: the cert set must be `⊆` the anchor
+/// set (object equality is by [`term_id`]; a target object is always ground in the shapes the
+/// crate mints, so this is exact).
+fn selection_only_shrinks(cert: &ShapeRef, anchor: &ShapeRef) -> bool {
+    let anchor_sel = selection_edges(anchor);
+    for edge in selection_edges(cert) {
+        if !anchor_sel.contains(&edge) {
+            // The cert declares a selection edge the anchor does not — it targets a node the
+            // anchor never selected ⇒ a broadening ⇒ fail closed.
+            return false;
+        }
+    }
+    true
+}
+
+/// The set of a shape's ROOT-level selection/target edges, keyed as `(predicate, object-id)`.
+/// Includes every SHACL target predicate ([`is_selection_predicate`]) asserted on the root,
+/// plus the implicit-class typing (`root rdf:type {rdfs:Class | sh:ShapeClass}`) rendered as
+/// a synthetic `(rdf:type, <object-id>)` edge so it is compared like any other target. Only
+/// ROOT edges select focus nodes in SHACL; conformance constraints reachable through
+/// `sh:property` blank nodes never widen the target set, so they are excluded here (they are
+/// the covariant half, checked by [`conformance_contains`]).
+fn selection_edges(shape: &ShapeRef) -> std::collections::HashSet<(String, String)> {
+    let root_id = term_id(&shape.root);
+    shape
+        .triples
+        .iter()
+        .filter(|t| term_id(&Term::from(t.subject.clone())) == root_id)
+        .filter(|t| is_selection_edge(t.predicate.as_str(), &t.object))
+        .map(|t| (t.predicate.as_str().to_string(), term_id(&t.object)))
+        .collect()
+}
+
+/// Whether a root triple `(predicate, object)` is a SELECTION/target edge (contributes focus
+/// nodes), as opposed to a conformance constraint. A selection edge is:
+/// - any SHACL target predicate ([`is_selection_predicate`]) — `sh:targetNode` /
+///   `sh:targetClass` / `sh:targetSubjectsOf` / `sh:targetObjectsOf` / `sh:targetWhere` and
+///   ANY other `sh:target*` (fail-closed on un-modelled `sh:target*` names); OR
+/// - the implicit-class typing `rdf:type {rdfs:Class | sh:ShapeClass}` (the root becomes a
+///   class target). A plain `rdf:type sh:NodeShape` is NOT a target — it declares the node a
+///   shape without selecting any focus node — so it stays a (harmless) conformance edge.
+fn is_selection_edge(predicate: &str, object: &Term) -> bool {
+    if is_selection_predicate(predicate) {
+        return true;
+    }
+    // Implicit-class target: `root rdf:type rdfs:Class` (or SHACL-1.2 `sh:ShapeClass`) makes
+    // the root a class target. `rdf:type sh:NodeShape` does not select anything.
+    predicate == RDF_TYPE
+        && matches!(object, Term::NamedNode(n) if n.as_str() == RDFS_CLASS || n.as_str() == SH_SHAPE_CLASS)
+}
+
+/// Whether `predicate` is a SHACL target/selection predicate. Recognises the whole
+/// `sh:target*` family by prefix so an UN-MODELLED `sh:target…` (e.g. a future selection
+/// mechanism) is still treated as selection ⇒ fail-closed at [`selection_only_shrinks`],
+/// never silently admitted as a conformance constraint. This is the "any un-modelled
+/// selection predicate ⇒ fail-closed" rule (the `sq-pfae.15` review fix).
+fn is_selection_predicate(predicate: &str) -> bool {
+    predicate
+        .strip_prefix(SH_NS)
+        .is_some_and(|local| local.starts_with("target"))
+}
+
+/// Whether the `sup` (cert) shape's CONFORMANCE constraints CONTAIN the `sub` (anchor)
+/// shape's, via a bounded, root-anchored, **injective** structural match — the COVARIANT half
+/// of narrowing (more constraints ⇒ fewer conforming nodes). SELECTION/target root edges are
+/// EXCLUDED from this match (they are the contravariant half, [`selection_only_shrinks`]);
+/// this compares only conformance constraints.
+///
+/// Identifying `sub.root` with `sup.root`, every conformance triple reachable from `sub.root`
+/// must have a DISTINCT matching triple reachable from `sup.root`, with blank-node objects
+/// matched RECURSIVELY (structural position, not label) under an injective blank-node
+/// assignment, and IRI/literal objects matched exactly.
+///
+/// **Injectivity is the soundness guarantee against a false positive:** each anchor
+/// constraint edge is matched to a *distinct* cert constraint edge, and each anchor blank node
+/// to a *distinct* cert blank node — so a cert with FEWER constraints can never be reported as
+/// containing an anchor with more (a broadening reported as narrowing = escalation). It is
+/// SOUND for the SHACL node-shapes the crate mints (the `forPredicate`/`forShape` idiom: a
+/// root with a few direct constraints + one level of `sh:property` blank nodes) and
+/// conservative beyond them — it returns `true` only when it PROVES an injective embedding, so
+/// any un-provable case is the fail-closed (safe) `false`.
+fn conformance_contains(sup: &ShapeRef, sub: &ShapeRef) -> bool {
     let mut mapping: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     node_contains(&sup.root, sup, &sub.root, sub, &mut mapping)
 }
 
 /// Recursive node match with an injective blank-node `mapping` (anchor-node-id →
-/// cert-node-id): does the constraint sub-tree rooted at `sub_node` embed into the one
-/// rooted at `sup_node`? Every outgoing `(predicate, object)` edge of `sub_node` must be
-/// matched to a DISTINCT edge of `sup_node` (injective edge assignment), and any blank-node
-/// object must map injectively (consistently across the whole match) into a cert blank node.
+/// cert-node-id): does the CONFORMANCE constraint sub-tree rooted at `sub_node` embed into the
+/// one rooted at `sup_node`? Every outgoing CONFORMANCE `(predicate, object)` edge of
+/// `sub_node` must be matched to a DISTINCT conformance edge of `sup_node` (injective edge
+/// assignment), and any blank-node object must map injectively (consistently across the whole
+/// match) into a cert blank node.
+///
+/// At the ROOT node, SELECTION/target edges are filtered OUT (they are handled contravariantly
+/// by [`selection_only_shrinks`]); nested blank-node property shapes never carry a root target
+/// predicate, so the filter is a no-op below the root — but it is applied uniformly for
+/// safety.
 fn node_contains(
     sup_node: &Term,
     sup: &ShapeRef,
@@ -438,8 +582,18 @@ fn node_contains(
     }
     mapping.insert(sub_id.clone(), sup_id.clone());
 
-    let sup_edges = edges_of(sup, sup_node);
-    let sub_edge_list = edges_of(sub, sub_node);
+    // CONFORMANCE edges only: selection/target edges are excluded from the covariant match
+    // (they are compared contravariantly by `selection_only_shrinks`). Including a cert target
+    // edge here would let an extra target on the cert be treated as a mere "extra constraint"
+    // (superset ⇒ narrowing) — the exact unsound equivalence the review fixed.
+    let sup_edges: Vec<(&str, &Term)> = edges_of(sup, sup_node)
+        .into_iter()
+        .filter(|(p, o)| !is_selection_edge(p, o))
+        .collect();
+    let sub_edge_list: Vec<(&str, &Term)> = edges_of(sub, sub_node)
+        .into_iter()
+        .filter(|(p, o)| !is_selection_edge(p, o))
+        .collect();
     // Injective edge match: assign each sub edge to a DISTINCT sup edge (by index).
     let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let ok = sub_edge_list.iter().all(|(sub_pred, sub_obj)| {
@@ -816,5 +970,113 @@ mod tests {
             explain_edge(&[anchor2], &cert, 1_000, 0),
             Err(EdgeRejection::OverDepth)
         ));
+    }
+
+    // ── DIRECT unit tests: target-set contravariance (sq-pfae.15 review fix) ──────
+
+    /// `predicate_shape(p)` with an extra `root sh:targetSubjectsOf q` — an injective
+    /// structural superset that WIDENS the target set (a broadening).
+    fn additive_target(p: &str, extra: &str) -> ShapeRef {
+        let mut s = predicate_shape(p);
+        if let Term::BlankNode(root) = s.root.clone() {
+            s.triples.push(Triple::new(
+                root,
+                iri("http://www.w3.org/ns/shacl#targetSubjectsOf"),
+                iri(extra),
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn is_selection_predicate_recognises_all_sh_target_star() {
+        for p in [
+            "http://www.w3.org/ns/shacl#targetSubjectsOf",
+            "http://www.w3.org/ns/shacl#targetObjectsOf",
+            "http://www.w3.org/ns/shacl#targetNode",
+            "http://www.w3.org/ns/shacl#targetClass",
+            "http://www.w3.org/ns/shacl#targetWhere",
+            "http://www.w3.org/ns/shacl#targetFooBar", // un-modelled `sh:target*` ⇒ still selection
+        ] {
+            assert!(is_selection_predicate(p), "{} must be a selection predicate", p);
+        }
+        // Conformance predicates are NOT selection.
+        for p in [
+            "http://www.w3.org/ns/shacl#property",
+            "http://www.w3.org/ns/shacl#path",
+            "http://www.w3.org/ns/shacl#minCount",
+            "http://www.w3.org/ns/shacl#datatype",
+        ] {
+            assert!(!is_selection_predicate(p), "{} must NOT be a selection predicate", p);
+        }
+    }
+
+    #[test]
+    fn is_selection_edge_flags_implicit_class_typing_not_nodeshape() {
+        let rdfs_class = Term::NamedNode(iri("http://www.w3.org/2000/01/rdf-schema#Class"));
+        let shape_class = Term::NamedNode(iri("http://www.w3.org/ns/shacl#ShapeClass"));
+        let node_shape = Term::NamedNode(iri("http://www.w3.org/ns/shacl#NodeShape"));
+        // `rdf:type rdfs:Class` / `sh:ShapeClass` at the root is a class target (selection).
+        assert!(is_selection_edge(RDF_TYPE, &rdfs_class));
+        assert!(is_selection_edge(RDF_TYPE, &shape_class));
+        // `rdf:type sh:NodeShape` selects nothing — a conformance edge, not selection.
+        assert!(!is_selection_edge(RDF_TYPE, &node_shape));
+    }
+
+    #[test]
+    fn selection_edges_collects_only_root_targets() {
+        // The desugared `age` shape declares exactly one root target (`targetSubjectsOf age`);
+        // its `sh:property` / `sh:path` / `sh:minCount` are conformance, not selection.
+        let sel = selection_edges(&predicate_shape("https://schema.org/age"));
+        assert_eq!(sel.len(), 1, "exactly one root selection edge");
+        assert!(sel.iter().any(|(p, o)| p == "http://www.w3.org/ns/shacl#targetSubjectsOf"
+            && o == "Ihttps://schema.org/age"));
+    }
+
+    #[test]
+    fn selection_only_shrinks_rejects_additive_target_accepts_narrowing() {
+        let anchor = predicate_shape("https://schema.org/age");
+        // A genuine narrowing (same target, extra conformance) — selection is IDENTICAL ⇒ ok.
+        let mut narrowing = anchor.clone();
+        let prop = narrowing.triples[1].object.clone();
+        if let Term::BlankNode(bn) = prop {
+            narrowing.triples.push(Triple::new(
+                bn,
+                iri("http://www.w3.org/ns/shacl#datatype"),
+                iri("http://www.w3.org/2001/XMLSchema#integer"),
+            ));
+        }
+        assert!(selection_only_shrinks(&narrowing, &anchor), "same target set ⇒ selection shrinks (=)");
+        // An additive target (age + email) ⇒ selection GROWS ⇒ rejected.
+        let broadening = additive_target("https://schema.org/age", "https://schema.org/email");
+        assert!(
+            !selection_only_shrinks(&broadening, &anchor),
+            "an extra target predicate widens the selection set ⇒ rejected"
+        );
+    }
+
+    #[test]
+    fn shape_narrows_is_contravariant_on_targets() {
+        let anchor = predicate_shape("https://schema.org/age");
+        // Narrowing (add a datatype conformance constraint) ⇒ narrows.
+        let mut narrower = anchor.clone();
+        if let Term::BlankNode(bn) = narrower.triples[1].object.clone() {
+            narrower.triples.push(Triple::new(
+                bn,
+                iri("http://www.w3.org/ns/shacl#datatype"),
+                iri("http://www.w3.org/2001/XMLSchema#integer"),
+            ));
+        }
+        assert!(shape_narrows(&narrower, &anchor), "extra conformance constraint ⇒ narrows");
+        // Additive target ⇒ does NOT narrow (the escalation the review found).
+        let broadening = additive_target("https://schema.org/age", "https://schema.org/email");
+        assert!(
+            !shape_narrows(&broadening, &anchor),
+            "additive target predicate is a broadening, not a narrowing"
+        );
+        // AnyService path: narrowed_shape returns the anchor shape unchanged.
+        assert!(narrowed_shape(&anchor, &CertScope::AnyService).is_some());
+        // A Shape scope that adds a target ⇒ narrowed_shape yields None (fail-closed).
+        assert!(narrowed_shape(&anchor, &CertScope::Shape(broadening)).is_none());
     }
 }

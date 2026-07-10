@@ -157,3 +157,26 @@
   crate: "sparq-trust"
   features: "secprop-precheck"
   test: true
+
+# [OPUS-4.8] sq-pfae.15: the depth-bounded certification-edge trust-graph closure. The whole
+# `graph` module (`derive_effective_rules` + `certification_message` + the target-set-
+# contravariant / conformance-covariant shape-containment matcher) + its `graph::tests` unit
+# suite + the `tests/certification_graph_e2e.rs` adversarial matrix
+# (`#![cfg(feature = "cert-graph")]`) are behind the default-OFF `cert-graph` feature (which
+# enables `framework-vocab`), so ci.yml's default-feature `nextest archive --workspace
+# --all-targets` (which passes NO `--features`) compiles them EMPTY and runs ZERO of the
+# graph unit tests + the 27-case e2e forgery/broadening matrix — the silent-skip gap (#1171)
+# this leg closes. `cert-graph` is dependency-free (pure Rust over the RDFC-1.0 signature
+# primitive the crate already carries — NO new dep, strictly additive), so this is a fast
+# leg. The leg runs `clippy --all-targets -D warnings` with the feature ON (the real gate) +
+# `cargo test`, which drives the REAL closure and the load-bearing SAFETY invariant
+# (attenuation-only: a certification can only NARROW; an additive-target / partial / disjoint
+# / forged / expired / cyclic / over-depth edge contributes NOTHING) — including the
+# `sq-pfae.15` review-fix contravariance case: a cert = anchor shape + an extra
+# `sh:targetSubjectsOf` is denied `Broadening`, and every derived rule's target-predicate set
+# is asserted ⊆ its anchor's. Verified: `cargo test -p sparq-trust --features cert-graph`
+# runs the graph unit tests + the 27 certification_graph_e2e cases; clippy clean in every state.
+- name: "sparq-trust (cert-graph — certification-edge trust-graph closure)"
+  crate: "sparq-trust"
+  features: "cert-graph"
+  test: true

@@ -88,6 +88,53 @@ fn narrower_shape(p: &str) -> ShapeRef {
     s
 }
 
+/// A shape that ADDS an extra `sh:targetSubjectsOf q` root triple to `predicate_shape(p)`.
+/// Every constraint of `predicate_shape(p)` is present PLUS one more target predicate — an
+/// injective structural SUPERSET of `predicate_shape(p)`. It is a **broadening**, not a
+/// narrowing: SHACL selects focus nodes by the UNION of target predicates, so the extra
+/// `sh:targetSubjectsOf q` WIDENS the admitted set to subjects of `p` OR `q` (the
+/// privilege-escalation shape the `sq-pfae.15` review found). The containment check must
+/// treat selection vocab as CONTRAVARIANT and reject this.
+fn additive_target_shape(p: &str, extra_target: &str) -> ShapeRef {
+    let mut s = predicate_shape(p);
+    if let Term::BlankNode(root) = s.root.clone() {
+        s.triples.push(Triple::new(
+            root,
+            iri("http://www.w3.org/ns/shacl#targetSubjectsOf"),
+            iri(extra_target),
+        ));
+    }
+    s
+}
+
+/// The set of `sh:targetSubjectsOf` object IRIs a shape declares at its root — the
+/// target-predicate set the admission gate (`admit::shape_targets_subject`) selects focus
+/// nodes by (the UNION). Used to assert the actual consumed-by-admission invariant: a derived
+/// rule's target-predicate set must be `⊆` the anchor's.
+fn target_predicate_set(shape: &ShapeRef) -> std::collections::BTreeSet<String> {
+    let root = match &shape.root {
+        Term::BlankNode(b) => format!("B{}", b.as_str()),
+        Term::NamedNode(n) => format!("I{}", n.as_str()),
+        other => format!("{other:?}"),
+    };
+    shape
+        .triples
+        .iter()
+        .filter(|t| {
+            let subj = match &t.subject {
+                oxrdf::NamedOrBlankNode::BlankNode(b) => format!("B{}", b.as_str()),
+                oxrdf::NamedOrBlankNode::NamedNode(n) => format!("I{}", n.as_str()),
+            };
+            subj == root
+                && t.predicate.as_str() == "http://www.w3.org/ns/shacl#targetSubjectsOf"
+        })
+        .filter_map(|t| match &t.object {
+            Term::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn anchor(source: &str, key: PublicKey, shape: ShapeRef, scope: &str) -> TrustRule {
     TrustRule {
         source: iri(source),
@@ -659,4 +706,132 @@ fn derived_freshness_is_capped_by_the_certification_window() {
         d.fresh_within_secs
     );
     assert!(d.fresh_within_secs <= anchor_rule.fresh_within_secs);
+}
+
+// ── sq-pfae.15 REVIEW FIX: target-set contravariance (additive-target broadening) ──────
+
+#[test]
+fn additive_target_predicate_cert_is_denied_as_broadening() {
+    // THE escalation the escalated review found. The certifier is anchored ONLY for `age`.
+    // The cert scope shape = the `age` predicate-shape PLUS an extra
+    // `root sh:targetSubjectsOf schema:email` — an injective structural SUPERSET of the anchor
+    // shape. A uniform "more edges ⇒ narrower" matcher wrongly reports this as a narrowing;
+    // but SHACL selects focus nodes by the UNION of target predicates, so the extra target
+    // WIDENS the admitted set (subjects of `age` OR `email`). The certified issuer would gain
+    // authority over `email` the certifier never held — privilege escalation. Selection vocab
+    // is CONTRAVARIANT: the cert must be denied as `Broadening`.
+    let (gov_sk, gov_pk) = keypair(1);
+    let (_iss_sk, iss_pk) = keypair(2);
+    let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
+    let email = "https://schema.org/email";
+    let broadening = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::Shape(additive_target_shape(AGE, email)),
+        NOW - 10,
+        NOW + 10,
+    );
+    assert!(
+        matches!(
+            explain_edge(std::slice::from_ref(&anchor_rule), &broadening, NOW, 1),
+            Err(EdgeRejection::Broadening)
+        ),
+        "an ADDITIVE target predicate WIDENS the admitted set ⇒ broadening ⇒ denied"
+    );
+    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&broadening));
+}
+
+#[test]
+fn every_derived_rule_target_set_is_subset_of_the_anchor_target_set() {
+    // The actual CONSUMED-BY-ADMISSION invariant (not merely the matcher's internal verdict):
+    // the admission gate (`admit::shape_targets_subject`) selects focus nodes by the UNION of a
+    // rule shape's `sh:targetSubjectsOf` predicates, so a derived rule that targets a predicate
+    // OUTSIDE the certifier's anchor is a live escalation regardless of what the matcher
+    // reported. Drive a mix of edges (a genuine narrowing, an additive-target broadening, an
+    // AnyService edge) and assert EVERY derived rule's target-predicate set ⊆ its certifier
+    // anchor's. The anchor is `age` only, so the derived target set must be a subset of {age}.
+    let (gov_sk, gov_pk) = keypair(1);
+    let (_iss_sk, iss_pk) = keypair(2);
+    let (_iss2_sk, iss2_pk) = keypair(4);
+    let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
+    let anchor_targets = target_predicate_set(&anchor_rule.shape);
+
+    let email = "https://schema.org/email";
+    let broadening = signed_cert(
+        GOV, &gov_sk, ISSUER, iss_pk,
+        CertScope::Shape(additive_target_shape(AGE, email)),
+        NOW - 10, NOW + 10,
+    );
+    let narrowing = signed_cert(
+        GOV, &gov_sk, "https://issuer.example/two", iss2_pk,
+        CertScope::Shape(narrower_shape(AGE)),
+        NOW - 10, NOW + 10,
+    );
+    let anyservice = signed_cert(
+        GOV, &gov_sk, "https://issuer.example/three", keypair(5).1,
+        CertScope::AnyService, NOW - 10, NOW + 10,
+    );
+
+    let out = derive_effective_rules(
+        std::slice::from_ref(&anchor_rule),
+        &[broadening, narrowing, anyservice],
+        NOW,
+        1,
+    );
+    // The broadening edge must contribute nothing; the two legitimate narrowings do. Anchor +
+    // (narrowing, anyservice) = 3 rules; the additive-target broadening is dropped.
+    assert_eq!(out.len(), 3, "additive-target broadening dropped; two narrowings derived");
+    // EVERY derived rule (index ≥ 1) must target a SUBSET of the anchor's target predicates.
+    for derived in &out[1..] {
+        let derived_targets = target_predicate_set(&derived.shape);
+        assert!(
+            derived_targets.is_subset(&anchor_targets),
+            "derived rule for {} targets {:?} ⊄ anchor targets {:?} — escalation",
+            derived.source.as_str(),
+            derived_targets,
+            anchor_targets
+        );
+    }
+    // And no derived rule may target `email` (the predicate the broadening tried to smuggle).
+    assert!(
+        out[1..].iter().all(|r| !target_predicate_set(&r.shape).contains(email)),
+        "no derived rule may target the smuggled `email` predicate"
+    );
+}
+
+#[test]
+fn un_modelled_selection_predicate_cert_fails_closed() {
+    // Fail-closed on an UN-MODELLED selection predicate. The cert scope shape = the `age`
+    // predicate-shape PLUS a `root sh:targetObjectsOf schema:email` triple — a SHACL target
+    // predicate the matcher recognises by the `sh:target*` prefix but which the desugared
+    // anchor shape does not carry. Because it is a selection predicate the anchor lacks, it is
+    // a broadening (and any future/unknown `sh:target…` is likewise treated as selection ⇒
+    // fail-closed, never silently admitted as a conformance constraint).
+    let (gov_sk, gov_pk) = keypair(1);
+    let (_iss_sk, iss_pk) = keypair(2);
+    let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
+    // Add an unrelated SHACL target predicate at the root.
+    let mut shape = predicate_shape(AGE);
+    if let Term::BlankNode(root) = shape.root.clone() {
+        shape.triples.push(Triple::new(
+            root,
+            iri("http://www.w3.org/ns/shacl#targetObjectsOf"),
+            iri("https://schema.org/email"),
+        ));
+    }
+    let cert = signed_cert(
+        GOV, &gov_sk, ISSUER, iss_pk,
+        CertScope::Shape(shape),
+        NOW - 10, NOW + 10,
+    );
+    assert!(
+        matches!(
+            explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
+            Err(EdgeRejection::Broadening)
+        ),
+        "an un-modelled / extra SHACL target predicate ⇒ fail-closed (Broadening), never admitted"
+    );
+    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
 }
