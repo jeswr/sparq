@@ -341,6 +341,34 @@ def test_reason_parsers():
     check("nemo.parse.empty", nemo.parse_reasoning_us(""), None)
 
 
+def test_python_bindings():
+    # [FABLE-5] sq-hmd7l.18: the cross-engine row-count agreement gate + the
+    # binding-overhead column (python whole-call minus sparq-cli engine-internal).
+    # Stdlib-only: check_agreement takes parsed docs, no engine imports needed.
+    import python_rdf_adapter as pyb
+
+    def wdoc(engine, rows_q1, us_q1):
+        return {
+            "engine": engine,
+            "results": {"queries": [{"name": "q01", "rows": rows_q1, "min_us": us_q1}]},
+        }
+
+    cli = {"queries": [{"name": "q01", "rows": 5, "min_micros": 10.0}]}
+    ok, table = pyb.check_agreement([wdoc("sparq", 5, 17.5), wdoc("rdflib", 5, 900.0)], cli)
+    check("pyb.agree.ok", ok, True)
+    check("pyb.agree.rows", table[0]["rows"], 5)
+    approx("pyb.agree.overhead", table[0]["sparq_binding_overhead_us"], 7.5)
+
+    ok, table = pyb.check_agreement([wdoc("sparq", 5, 17.5), wdoc("rdflib", 4, 900.0)])
+    check("pyb.disagree.flagged", ok, False)
+    check("pyb.disagree.no_timing_row", table, [])  # invariant: no timing on disagreement
+
+    ok, _ = pyb.check_agreement(
+        [wdoc("sparq", 5, 17.5)], {"queries": [{"name": "q01", "error": "boom"}]}
+    )
+    check("pyb.cli_error.flagged", ok, False)
+
+
 def main():
     test_http()
     test_vector()
@@ -348,6 +376,7 @@ def main():
     test_beir()
     test_shacl()
     test_reason_parsers()
+    test_python_bindings()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 

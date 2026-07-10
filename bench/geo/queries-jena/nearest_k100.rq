@@ -1,13 +1,17 @@
-# [FABLE-5] sq-hmd7l.3 — PINNED jena-geosparql rendering of the `nearest_k100`
+# [FABLE-5] sq-a8anf — PINNED jena-geosparql rendering of the `nearest_k100`
 # workload for scripts/bench/geo-same-box.sh. Same rendering rationale + oracle
 # as nearest_k10.rq (standard GeoSPARQL has no k-nearest function; ORDER BY
-# distance + LIMIT k is the standard-visible form; result-set SIZE == k is the
-# only cross-checked value).
-PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
-PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
-PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+# distance + LIMIT k; result-set SIZE == k is the only cross-checked value),
+# and the same sq-a8anf sort-key correction: geof:distance(..., uom:metre)
+# throws per row on jena 5.4.0, which in ORDER BY silently degenerates the
+# ordering to the ?e tie-break (vacuously-green ==k crosscheck; wave-1 jena
+# nearest_k timings retracted — research/gap-geo-2026-07.md §6b/§6d).
+# spatialF:greatCircleGeom is Jena's working great-circle distance in metres.
+PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
+PREFIX spatialF: <http://jena.apache.org/function/spatial#>
+PREFIX uom:      <http://www.opengis.net/def/uom/OGC/1.0/>
 SELECT ?e WHERE {
   ?e geo:asWKT ?wkt .
 }
-ORDER BY ASC(geof:distance(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre)) ?e
+ORDER BY ASC(spatialF:greatCircleGeom(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre)) ?e
 LIMIT 100

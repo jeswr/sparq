@@ -36,9 +36,12 @@
 #   * NO TIMING WITHOUT RESULT-SET-SIZE AGREEMENT per query: a competitor timing
 #     enters the envelope's timing table ONLY where its count equals sparq's
 #     expected.tsv-gated count. A disagreement is itself a recorded RESULT
-#     (both counts kept, the timing withheld, nothing adjusted) — plausible here
-#     because sparq's within* metric is spherical great-circle while Jena/SIS is
-#     ellipsoidal geodesic, so radius-boundary membership may legitimately differ.
+#     (both counts kept, the timing withheld, nothing adjusted). Both engines'
+#     within* metric is spherical great-circle on the same mean sphere (sparq:
+#     haversine; jena: spatialF:nearby — the standard geof:distance+uom:metre
+#     form is non-executable on jena 5.4.0, root-caused in sq-a8anf /
+#     research/gap-geo-2026-07.md §6d), so only float-boundary edge points may
+#     legitimately differ.
 #   * per-workload wall-clock cap (TIMEOUT_S, covering the whole best-of-N
 #     series); a timeout/error degrades to an honest ERROR row, never a number.
 #   * a competitor that cannot run (no java, no jar, download or start-up
@@ -334,11 +337,14 @@ envelope = {
         "COUNTS-NOT-COORDINATES (bench/geo gate design): only result-set SIZES "
         "are compared — float geometry is not bit-stable. sparq counts are "
         "additionally hard-gated vs bench/geo/expected.tsv by run.sh. A "
-        "disagreement is a recorded RESULT (metric semantics may legitimately "
-        "differ: sparq within* is spherical great-circle, Jena/Apache-SIS "
-        "geof:distance is ellipsoidal geodesic — radius-boundary membership can "
-        "differ); the competitor timing for that workload is withheld, never "
-        "adjusted."
+        "disagreement is a recorded RESULT; the competitor timing for that "
+        "workload is withheld, never adjusted. Metric note (sq-a8anf): both "
+        "engines' within* is spherical great-circle on the same mean sphere "
+        "(sparq haversine; jena spatialF:nearby — jena 5.4.0 geof:distance is "
+        "planar SRS-native-unit Euclidean and its degree->metre conversion "
+        "throws, so the standard geof:distance+uom:metre rendering is "
+        "non-executable there; research/gap-geo-2026-07.md §6d), so only "
+        "float-boundary edge points may legitimately differ."
     ),
     "timings": timings,
     "timings_note": (

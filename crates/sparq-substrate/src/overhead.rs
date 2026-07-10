@@ -505,18 +505,22 @@ fn bench_hash_probe(reps: u32) -> Kernel {
         substrate_ns,
         handrolled_ns,
         agree,
-        // HONEST non-zero delta: the substrate probe projects the join key each row via
-        // `JoinKeys::right_key` — `key_cols.iter().map(...).collect()` over a heap
-        // `Vec<(usize,usize)>` — whereas a pre-extraction engine hard-codes a single-key
-        // probe as `Key::new(); key.push(row[0])`. Diagnosed component-wise: the same
-        // hashbrown table + same single-hash `raw_entry` lookup + same batch emit, so the
-        // whole delta is the descriptor's per-row key projection, NOT the join itself.
-        // This is the generic `JoinKeys` descriptor's cost for a single-column key.
-        // Follow-up (bead): special-case a single-column key to skip the descriptor
-        // iteration and recover the hand-specialised cost.
+        // [OPUS-4.8] sq-4r8uy: the descriptor's per-row single-column key projection —
+        // previously `key_cols.iter().map(...).collect()` over a heap `Vec<(usize,usize)>`,
+        // the whole measured delta in the #1810 canonical run — is now FAST-PATHED. For the
+        // dominant `key_cols.len() == 1` case `JoinKeys::right_key` special-cases to a direct
+        // one-element `Key::push` (`single_key`), matching the hand-specialised probe's key
+        // derivation, so the substrate probe and the hand-rolled loop now do the SAME key
+        // work. On the work box the substrate probe's wall-clock roughly halved after this
+        // change; whether the residual sits at zero within noise is the CANONICAL re-measure's
+        // to decide (a dedicated quiet host, min-of-K), so the honest disposition keeps a
+        // root_cause naming the only remaining structural difference rather than asserting
+        // ~0 from a noisy work-box run. Set to `None` once the canonical envelope confirms the
+        // residual is within noise (the bead's acceptance gate).
         root_cause: Some(
-            "JoinKeys descriptor per-row key projection (key_cols.iter().collect over a heap \
-             Vec) vs a hard-coded single-column Key::push; same table/lookup/emit otherwise",
+            "single-column JoinKeys key projection now fast-pathed (single_key: a direct \
+             one-element Key::push) so it matches the hand-specialised probe; any residual is \
+             the descriptor call + Budget type-param plumbing, pending the canonical re-measure",
         ),
     }
 }

@@ -256,6 +256,19 @@ pre-binding rules force it to group by `$this`). `sparq_shacl::sparql_constraint
 exposes a per-thread `sh:sparql` query-execution counter (snapshot the delta across a
 `validate` call) so a perf guard can assert the batched path fired.
 
+*Id-level core-constraint fast path (perf, sq-7d3dj.33.4).* Core constraints are
+evaluated at the **dictionary-id level**: each shape's `sh:path` is compiled once per
+`validate` (predicate IRIs → ids), the per-focus path walk and dedup run over `u32`
+ids, and the hot value checks (`sh:datatype` / `sh:pattern` / `sh:nodeKind` /
+`sh:minCount`·`maxCount` / `sh:minLength`·`maxLength` / `sh:node`, which also gets an
+id-keyed conformance memo) read the dictionary's zero-copy literal records — a term is
+materialised only for a VIOLATING value, at the report boundary. Compiled `sh:pattern`
+regexes are `Rc`-shared across focus nodes (a per-focus `Regex` clone would rebuild the
+lazy-DFA cache on every match). All of it is internal — no API or feature flag — and the
+report is byte-identical to the Term-level route: a focus node absent from the data
+dictionary (e.g. a `sh:targetNode` naming a ghost IRI) falls back to the Term-level walk,
+and the in-crate `idfast_*` differential tests diff full reports fast-vs-forced-slow.
+
 **SHACL-1.2 core constraints (always on, no feature flag).** The disjunctive
 *set* spellings of `sh:datatype` / `sh:nodeKind` — `sh:datatype ( xsd:string
 rdf:langString )`, `sh:nodeKind ( sh:BlankNode sh:IRI )` — conform a value node

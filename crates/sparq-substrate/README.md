@@ -69,8 +69,8 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   `probe_gather_indices` is the M4 batch-emission contract (gather indices, materialise once
   per chunk, sq-pntvh.7). Also `join::delta::DeltaTable` — persistent build-side table with
   insertion-order-deterministic enumeration for the OWL-RL Δ⋈full fixpoint (sq-qonbz.1). Each
-  kernel is generic over `JoinKeys` + `Budget` (monomorphised, no vtable). Pulls `rustc-hash` +
-  `hashbrown` when enabled; implies `rows`. [SONNET-4.6] sq-7d3dj.19
+  kernel is generic over `JoinKeys` + `Budget`; `JoinKeys` fast-paths the single-column key to a
+  direct push (result-identical, sq-4r8uy). Pulls `rustc-hash` + `hashbrown`; implies `rows`.
 - **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
   the spec-fixed class precedence error/unbound < blank < IRI < literal < triple, then a
   **kind-first** literal order (sq-wjl8i): a fixed `LiteralKind` rank BETWEEN literal kinds

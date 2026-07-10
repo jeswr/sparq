@@ -153,6 +153,8 @@ cosine(a: &[f32], b: &[f32]) -> f32
 // HNSW = the APPROXIMATE backend: feature = "approx-ann" ONLY [OPUS-4.8] sq-ip3a (the ONLY thing
 // pulling instant-distance; default build has NO third-party ANN dep). recall < 1.0 — NOT exact.
 VectorIndex::build(&store) / ::build_with(&store, HnswConfig{ef_search, ef_construction, seed})
+// [OPUS-4.8] sq-ose80: HnswConfig::fast_build() (efc=40, ~3x faster build) / ::high_recall() (efc=200) — pure config, default unchanged, recall floor-preserved
+HnswConfig::default() / ::fast_build() / ::high_recall()
 impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
                    fn nearest_with_ef(&self, query: &[f32], k, ef_search: usize) -> Vec<(Id, f32)>;  // [SONNET-4.6] sq-jo6ty: per-query ef_search sweep (Pareto API)
                    // nearest_with_ef: when ef==build_ef_search uses the primary map (zero overhead); other ef values
@@ -313,6 +315,18 @@ let hits = nearest_exact(&store, query, 10);          // Vec<(Id, f32)>
 // At higher query volume, build HNSW once (rayon-parallel inside instant-distance):
 let index = VectorIndex::build_with(&store, HnswConfig { ef_search: 100, ef_construction: 100, seed: 0 });
 let approx = index.nearest(query, 10);                // APPROXIMATE: ef_search must be >= k; recall@10 < 1.0 (run tests/recall.rs)
+
+// [OPUS-4.8] (sq-ose80) BUILD-TIME presets — ef_construction is the dominant build knob. The
+// instant-distance build is ALREADY rayon-parallel (per-layer into_par_iter); its cost is the
+// per-insert greedy distance search whose beam width IS ef_construction. fast_build (efc=40) built
+// ~3x faster than the default (efc=100) and ~4.4x faster than efc=200 on a 200k SIFT slice at
+// recall@10 = 0.9944 (NON-CANONICAL, above the 0.95 floor); high_recall (efc=200) is the opposite
+// trade. PURE CONFIG: no new dep, default UNCHANGED, deterministic for a fixed seed; query path +
+// nearest_with_ef monotone contract + exact/DiskANN/PQ paths untouched. Options-eval (hnsw_rs
+// re-weighed for BUILD then rejected — heavier AND slower here): research/gap-vector-ann-simd-2026-07.md §7.
+let fast = VectorIndex::build_with(&store, HnswConfig::fast_build());   // efc=40 — ~3x faster build, recall floor-preserved
+let dense = VectorIndex::build_with(&store, HnswConfig::high_recall()); // efc=200 — build-once, query-forever
+# let _ = (fast, dense);
 # }
 ```
 

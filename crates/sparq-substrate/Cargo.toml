@@ -105,6 +105,9 @@ oxrdf = { workspace = true, optional = true }
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 oxrdf = { workspace = true }
+# [SONNET-4.6] sq-3dyje.1: property-based tests for the term total-order and numeric tower.
+# Dev-dep ONLY — never reaches the shipped crate or any feature-OFF build.
+proptest = "1"
 
 # [SONNET-4.6] sq-qonbz.4: The micro-bench exercises merge_join + hash build/probe + Num
 # arithmetic. Feature-gated at bench time on `join` + `numeric` (which imply `rows`).

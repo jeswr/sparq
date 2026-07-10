@@ -55,7 +55,7 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   (`instant-distance`). `VectorIndex::nearest_with_ef(q, k, ef)` sweeps `ef_search` at
   query time (recall–QPS Pareto; monotone-non-decreasing recall as `ef` grows). The HNSW distance
   kernel is **explicit SIMD** (runtime-detected NEON / AVX2+FMA, scalar fallback, no new dependency —
-  cuts build time + lifts QPS; recall **floor-preserved**, not bit-identical: FMA differs ≤1 ULP, absorbed by the recall floor gate). **Approximate search has recall `< 1.0`** (measured against `nearest_exact`) — only the exact path is answer-exact.
+  cuts build time + lifts QPS; recall **floor-preserved**, not bit-identical: FMA differs ≤1 ULP, absorbed by the recall floor gate). `HnswConfig::fast_build()` / `high_recall()` trade `ef_construction` for build speed vs recall (pure config, default unchanged, floor-preserved — sq-ose80). **Approximate search has recall `< 1.0`** (measured against `nearest_exact`) — only the exact path is answer-exact.
 - **Predicate-constrained ANN (opt-in `filtered-ann`)** — restrict the search to the
   dict-ids a SPARQL BGP admits via an `IdMask` (lean, no new dependency). Composed with
   `approx-ann`, filtered over-fetch fills `k` whenever `k` admitted vectors exist *and the
