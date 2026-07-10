@@ -60,14 +60,20 @@ Harness: standalone `instant-distance` build with the scalar vs the NEON `Point:
 | Backend | Build (s) | recall@10 | QPS (µs/q) | Notes |
 |---|---|---|---|---|
 | instant-distance **scalar** (before) | 31.3 | 1.0000 | 2 873 (348 µs) | the committed baseline kernel |
-| instant-distance **NEON** (this PR) | **13.2** | 1.0000 | **3 431** (291 µs) | **~2.4× build, ~1.2× query**, recall unchanged |
+| instant-distance **NEON** (this PR) | **13.2** | 1.0000 | **3 431** (291 µs) | **~2.4× build, ~1.2× query**, recall equal on this corpus |
 | hnsw_rs 0.3.4 (reference) | 8.9 | ≤1.0 per ef | ef256: 1 356 | fastest build (parallel_insert) but **lower matched-recall QPS** here |
 
-**Honest reading.** The clustered corpus saturates recall (1.0), so this table shows the
+**Honest reading.** The clustered corpus saturates recall (1.0 both sides), so this table shows the
 **kernel-swap effect** (build + throughput), not a recall trade. The NEON kernel roughly **halves
-build time and lifts QPS ~1.2×** on the *search* path, with **recall bit-for-bit preserved** (rank
-order is identical; sqrt is monotone). The bigger win is on **build** because the build evaluates
-the distance far more often than search.
+build time and lifts QPS ~1.2×** on the *search* path. **Recall precision caveat:** the SIMD kernels
+use FMA (one rounding per term) while the scalar path does `d*d` then `+=` (two roundings), so a SIMD
+squared distance is **not bit-identical** to the scalar one — it differs by ≤1 ULP. Rankings are
+therefore stable *up to exact near-ties*, which a ≤1-ULP wobble can reorder; that residual is exactly
+what the HNSW workload's **floor gate** (recall@10 ≥ 0.95, `tests/recall.rs`) absorbs — the gate is a
+recall floor, not a bit-identity assertion. Measured recall was `1.0000` on both kernels here (a
+saturating corpus). The scalar *fallback* alone IS bit-identical to the previous auto-vectorised loop
+(so a non-SIMD target is numerically unchanged). The bigger win is on **build** because the build
+evaluates the distance far more often than search.
 
 **hnsw_rs did NOT win** on this box at matched recall — its per-query ef sweep gives a real Pareto
 curve (an advantage `instant-distance` lacks, cf. sq-jo6ty) but its QPS at ef≥64 sat below
