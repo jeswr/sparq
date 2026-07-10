@@ -1,0 +1,5 @@
+{
+  "pr": 1822,
+  "date": "2026-07-10",
+  "reason": "[FABLE-5] sq-74oy4 + sq-6b1lj: making the ALWAYS-COMPILED sparq-core numeric-value cache datatype-aware — new unconditional numeric_datatype_wellformed / cached_numeric_f64 / numeric_cache_value acceptance helpers (mirroring Num::of_literal) plus their four call sites (numerics_of in-RAM build, dictspill spill build, numeric_of/extend_for delta growth, and the engine as_num/intern/eval_numeric seams) — enlarges core ingest/eval code by design. None of it is behind the vectorized feature (the diff touches zero cfg(feature) lines), so the feature-OFF wasm bundle legitimately grows +1377 bytes (+0.087%). This is the direct successor to #1792 (sq-9781x, which declared the same numeric-cache class at +507 B); it is an intentional always-compiled correctness change (cache HIT now iff of_literal accepts), NOT an opt-in feature leaking into the OFF build. Delta is well under the +/-2% band, so no bench/perf-baseline.json wasm_bundle_bytes floor change accompanies this declaration."
+}
