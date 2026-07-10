@@ -1230,6 +1230,254 @@ mod gated {
         let _ = outcome; // outcome is Skip:imports here — confirmed by inspection
     }
 
+    // ---- [SONNET-4.6] sq-paxr0: positional-Atom conclusion path unit tests ----
+    //
+    // These tests pin the end-to-end positional-Atom conclusion path:
+    //   wrap_conclusion(<Atom …>) → import_or_skip → conclusion_ground_triples → entailment.
+    // Arity-1 → Atom::Member (unary predicate C(a) ≡ a # C), arity-2 → Atom::Frame
+    // (binary predicate P(a, b) ≡ a[P -> b]). Arity-0 / arity-3+ → SKIP (fail-closed).
+    //
+    // The mutation checks confirm the oracle is non-vacuous: a premise that DOESN'T
+    // entail the conclusion must FAIL (not pass silently).
+
+    /// A PositiveEntailmentTest whose conclusion is a bare ARITY-1 positional `<Atom>`
+    /// (a unary predicate C(a) ≡ a # C, which imports as `Atom::Member`). The premise
+    /// contains the corresponding triple. PASS iff the closure satisfies the conclusion.
+    ///
+    /// Exercises: `wrap_conclusion` + `parse_sentence("Atom")` → `parse_positional_atom`
+    /// (arity-1 → `Atom::Member`) → `conclusion_ground_triples(Atom::Member)` → closure
+    /// satisfier.
+    #[test]
+    fn positive_entailment_arity1_positional_atom_conclusion_passes() {
+        let tmp = std::env::temp_dir().join(format!("rif_wg_pe_a1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Premise: a ground frame fact that entails the arity-1 Atom conclusion
+        // C(a) ≡ a rdf:type C via the Atom::Member mapping. The premise uses a
+        // Member atom directly (importable, supported subset).
+        let premise = r#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Member>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://example.org/C</Const></class>
+    </Member></sentence>
+  </Group></payload>
+</Document>"#;
+        // Conclusion: a BARE arity-1 positional `<Atom>` root (C(a) — unary predicate).
+        // The real W3C conclusion-file shape is a bare atom root, not a <Document>.
+        // This exercises wrap_conclusion: <Atom> → import as Atom::Member {obj: a, class: C}.
+        let conclusion = r#"<Atom xmlns="http://www.w3.org/2007/rif#">
+  <op><Const type="http://www.w3.org/2007/rif#iri">http://example.org/C</Const></op>
+  <args ordered="yes">
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const>
+  </args>
+</Atom>"#;
+        std::fs::write(tmp.join(rif_name("a1pe", "premise")), premise).unwrap();
+        std::fs::write(tmp.join(rif_name("a1pe", "conclusion")), conclusion).unwrap();
+        let outcome = run_entailment(TestKind::PositiveEntailment, &tmp, "a1pe");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(
+            outcome,
+            Outcome::Pass,
+            "a PositiveEntailmentTest with an arity-1 positional-Atom conclusion \
+             (C(a) ≡ a # C → Atom::Member) must PASS when the premise entails it \
+             (sq-paxr0)"
+        );
+    }
+
+    /// A PositiveEntailmentTest whose conclusion is a bare ARITY-2 positional `<Atom>`
+    /// (a binary predicate P(a, b) ≡ a[P -> b], which imports as `Atom::Frame`). The
+    /// premise contains the corresponding triple. PASS iff the closure satisfies it.
+    ///
+    /// Exercises: `wrap_conclusion` + `parse_sentence("Atom")` → `parse_positional_atom`
+    /// (arity-2 → `Atom::Frame`) → `conclusion_ground_triples(Atom::Frame)` → closure
+    /// satisfier.
+    #[test]
+    fn positive_entailment_arity2_positional_atom_conclusion_passes() {
+        let tmp = std::env::temp_dir().join(format!("rif_wg_pe_a2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Premise: a ground frame fact a[P -> b] (importable, supported subset).
+        // The arity-2 conclusion P(a, b) maps to Atom::Frame {obj: a, pred: P, val: b},
+        // which the satisfier checks against the closure's triples.
+        let premise = r#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://example.org/P</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+      </slot>
+    </Frame></sentence>
+  </Group></payload>
+</Document>"#;
+        // Conclusion: a BARE arity-2 positional `<Atom>` root (P(a, b) — binary predicate).
+        // This exercises wrap_conclusion: <Atom> → import as Atom::Frame {obj: a, pred: P, val: b}.
+        let conclusion = r#"<Atom xmlns="http://www.w3.org/2007/rif#">
+  <op><Const type="http://www.w3.org/2007/rif#iri">http://example.org/P</Const></op>
+  <args ordered="yes">
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const>
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+  </args>
+</Atom>"#;
+        std::fs::write(tmp.join(rif_name("a2pe", "premise")), premise).unwrap();
+        std::fs::write(tmp.join(rif_name("a2pe", "conclusion")), conclusion).unwrap();
+        let outcome = run_entailment(TestKind::PositiveEntailment, &tmp, "a2pe");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(
+            outcome,
+            Outcome::Pass,
+            "a PositiveEntailmentTest with an arity-2 positional-Atom conclusion \
+             (P(a,b) ≡ a[P->b] → Atom::Frame) must PASS when the premise entails it \
+             (sq-paxr0)"
+        );
+    }
+
+    /// An arity-0 positional `<Atom>` conclusion (a bare propositional constant with no
+    /// args — no sound mapping in the Core model) must yield a SKIP (fail-closed), never
+    /// a vacuous pass. The run_entailment oracle skips an un-importable conclusion.
+    #[test]
+    fn positional_atom_conclusion_arity0_is_skip_not_pass() {
+        let tmp = std::env::temp_dir().join(format!("rif_wg_a0_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // An importable premise (ground frame fact).
+        let premise = r#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://example.org/p</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+      </slot>
+    </Frame></sentence>
+  </Group></payload>
+</Document>"#;
+        // Arity-0 <Atom>: no <args> child → arity-0. No sound mapping → import error
+        // (fail-closed) → run_entailment skips (condition-shape).
+        let conclusion_arity0 = r#"<Atom xmlns="http://www.w3.org/2007/rif#">
+  <op><Const type="http://www.w3.org/2007/rif#iri">http://example.org/Prop</Const></op>
+</Atom>"#;
+        std::fs::write(tmp.join(rif_name("a0", "premise")), premise).unwrap();
+        std::fs::write(tmp.join(rif_name("a0", "conclusion")), conclusion_arity0).unwrap();
+        let outcome = run_entailment(TestKind::PositiveEntailment, &tmp, "a0");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            matches!(outcome, Outcome::Skip(_)),
+            "an arity-0 positional-Atom conclusion must be a SKIP (fail-closed, no \
+             sound Core mapping), got {:?} (sq-paxr0)",
+            outcome
+        );
+        assert_ne!(
+            outcome,
+            Outcome::Pass,
+            "an arity-0 positional-Atom conclusion must NEVER be a (vacuous) pass (sq-paxr0)"
+        );
+    }
+
+    /// An arity-3 positional `<Atom>` conclusion (ternary predicate — no sound mapping
+    /// in the Core model) must yield a SKIP (fail-closed), never a vacuous pass.
+    #[test]
+    fn positional_atom_conclusion_arity3_is_skip_not_pass() {
+        let tmp = std::env::temp_dir().join(format!("rif_wg_a3_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // An importable premise (ground frame fact).
+        let premise = r#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://example.org/p</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+      </slot>
+    </Frame></sentence>
+  </Group></payload>
+</Document>"#;
+        // Arity-3 <Atom>: three args → no sound mapping → import error (fail-closed)
+        // → run_entailment skips (condition-shape).
+        let conclusion_arity3 = r#"<Atom xmlns="http://www.w3.org/2007/rif#">
+  <op><Const type="http://www.w3.org/2007/rif#iri">http://example.org/Q</Const></op>
+  <args ordered="yes">
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const>
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/c</Const>
+  </args>
+</Atom>"#;
+        std::fs::write(tmp.join(rif_name("a3", "premise")), premise).unwrap();
+        std::fs::write(tmp.join(rif_name("a3", "conclusion")), conclusion_arity3).unwrap();
+        let outcome = run_entailment(TestKind::PositiveEntailment, &tmp, "a3");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            matches!(outcome, Outcome::Skip(_)),
+            "an arity-3 positional-Atom conclusion must be a SKIP (fail-closed, no \
+             sound Core mapping), got {:?} (sq-paxr0)",
+            outcome
+        );
+        assert_ne!(
+            outcome,
+            Outcome::Pass,
+            "an arity-3 positional-Atom conclusion must NEVER be a (vacuous) pass (sq-paxr0)"
+        );
+    }
+
+    /// MUTATION check for the positional-Atom conclusion mapping (sq-paxr0): a
+    /// PositiveEntailmentTest whose premise does NOT contain the conclusion atom
+    /// must FAIL — proving the oracle is non-vacuous (it checks the actual entailment,
+    /// not always passing). Covers both arity-1 and arity-2.
+    #[test]
+    fn positional_atom_conclusion_not_entailed_fails() {
+        let tmp = std::env::temp_dir().join(format!("rif_wg_pe_mut_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // A premise that does NOT contain the arity-1 conclusion C(a) (it contains D(a)).
+        let premise = r#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Member>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://example.org/D</Const></class>
+    </Member></sentence>
+  </Group></payload>
+</Document>"#;
+        // Arity-1 conclusion C(a) — the premise has D(a), NOT C(a), so not entailed → FAIL.
+        let conclusion_a1 = r#"<Atom xmlns="http://www.w3.org/2007/rif#">
+  <op><Const type="http://www.w3.org/2007/rif#iri">http://example.org/C</Const></op>
+  <args ordered="yes">
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const>
+  </args>
+</Atom>"#;
+        std::fs::write(tmp.join(rif_name("mut", "premise")), premise).unwrap();
+        std::fs::write(tmp.join(rif_name("mut", "conclusion")), conclusion_a1).unwrap();
+        let outcome_a1 = run_entailment(TestKind::PositiveEntailment, &tmp, "mut");
+
+        // Same premise, arity-2 conclusion P(a, b) — the premise has no P triple → FAIL.
+        let conclusion_a2 = r#"<Atom xmlns="http://www.w3.org/2007/rif#">
+  <op><Const type="http://www.w3.org/2007/rif#iri">http://example.org/P</Const></op>
+  <args ordered="yes">
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const>
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+  </args>
+</Atom>"#;
+        std::fs::write(tmp.join(rif_name("mut", "conclusion")), conclusion_a2).unwrap();
+        let outcome_a2 = run_entailment(TestKind::PositiveEntailment, &tmp, "mut");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Both must FAIL (the conclusion is NOT entailed) — mutation verification that the
+        // oracle genuinely checks entailment, not just "conclusion imports cleanly".
+        assert!(
+            matches!(outcome_a1, Outcome::Fail(_)),
+            "a PositiveEntailmentTest with an arity-1 Atom conclusion NOT in the premise \
+             must FAIL (non-vacuous mutation check), got {:?} (sq-paxr0)",
+            outcome_a1
+        );
+        assert!(
+            matches!(outcome_a2, Outcome::Fail(_)),
+            "a PositiveEntailmentTest with an arity-2 Atom conclusion NOT in the premise \
+             must FAIL (non-vacuous mutation check), got {:?} (sq-paxr0)",
+            outcome_a2
+        );
+    }
+
     /// MUTATION check for the imports-closure consistency check (sq-wbql1): verifying
     /// the check is NON-VACUOUS — disabling it makes a non-Core-profile import be
     /// ACCEPTED (which it must NOT be), proving the check is load-bearing.
