@@ -332,7 +332,7 @@ enforces). Verdicts are the fixed vocabulary only.
 | D14c | **Turtle parse**, 1 thread (in-process) | incumbent chunked **0.81 Mt/s** (3.153 s / 60 MB) | **serd 1.65 Mt/s** (+serialize); rapper 1.17; riot 0.52 | **BEHIND** serd ~2.0× (rapper ~1.4×) — single-thread hot-loop deficit; the chunked parser sits at ~oxttl speed | **sq-wrn61** (NEW P1, profiling-first — Turtle tokenizer hot loop, per-statement prefix/base + bnode scope, or per-term intern). Same env; `research/gap-parse-2026-07.md` §Verdicts |
 | D14d | **Turtle parse**, 16 threads | 5.22 Mt/s (0.490 s) | serd 1.65 Mt/s | **AHEAD-BUT-NOT-OOM** (~3.2× — parallelism recovers the lead, not by OOM) | none (covered by the D14c single-thread fix once landed). Same env |
 | D15a | **GeoSPARQL k-NN** (`nearest_k10` / `_k100`) | 6.1 µs / 70.0 µs | jena-geosparql 1 517 437 / 1 635 714 µs (HTTP; standard `ORDER BY geof:distance LIMIT k` full scan-and-sort) | **CLEARLY-AHEAD** (~2.5·10⁵× / ~2.3·10⁴×; count-crosscheck GREEN 10=10 / 100=100; caveats in the record) | none. Env `axis-results/geo/geo-points100k-20260710T004536Z.json`; `research/gap-geo-2026-07.md` §6b |
-| D15b | **GeoSPARQL `geof:sfWithin`** COUNT | **90 458.9 µs** | jena-geosparql 137 888 µs (HTTP); count-crosscheck GREEN 1526=1526 | **AHEAD-BUT-NOT-OOM** (~1.5× vs jena) — but a **self-slow dominance gap**: sparq's own geof_within is ~600× slower than its own `within50km` (150 µs) on the same corpus/cardinality | **sq-7jt80** (NEW P1, profiling-first — geof:sfWithin evaluates as a full scan / per-point WKT parse instead of the GeoIndex R-tree that serves `within*`). Same env; `research/gap-geo-2026-07.md` §6b finding 3 |
+| D15b | **GeoSPARQL `geof:sfWithin`** COUNT | **90 458.9 µs** (PRE-FIX measurement) | jena-geosparql 137 888 µs (HTTP); count-crosscheck GREEN 1526=1526 | **AHEAD-BUT-NOT-OOM** (~1.5× vs jena, pre-fix) — the apparent self-slow ~600× vs `within50km` was **PARTLY a bench-harness artifact** (the `geof_within` workload in bench_geo.rs deliberate fully-scans every corpus point to test the lexical predicate, not the index) **PLUS a real answer-safety-guard defect** (the FILTER pushdown's retain guard materialized WKT Term + hashed per non-candidate row). **FIX MERGED:** PR #1847 (sq-7jt80) implemented an id-level indexed-universe fast path (FxHashSet elements, freshness-gated SpatialProvider hook), byte-identical result, per-row WKT materialization overhead ELIMINATED, answer-safety-guard now scan-floor-bound. Defect **CLOSED** | Same env; `research/gap-geo-2026-07.md` §6b finding 3; PR #1847 (sq-7jt80) |
 | D15c | **GeoSPARQL radius** (`within10km` / `within50km`) | 7.2 µs / 150.2 µs (counts hard-gated 51 / 1547) | jena-geosparql returned **0 hits** on both → count-crosscheck **RED**; timing WITHHELD | **NOT-MEASURED** (crosscheck red — per the invariant no comparative verdict; NOT a sparq win) | **CITE sq-a8anf** (P2, jena within* translation/units/axis-order root-cause — a harness fix, must land before a canonical radius verdict). Same env; `research/gap-geo-2026-07.md` §6b finding 1 + §6c |
 | D16 | **HDT load-and-decode-to-native** | decode-to-native GREEN 328=328; `hdt_load_s` 0.0898 s in-process | hdt-cpp `hdt2rdf` decode GREEN 328=328; wall 8.56 s incl. `docker run` spawn (different boundary) | **NOT-COMPARABLE at this scale** (328-triple fixture: container-spawn dominates; correctness axis is the gate and it is GREEN both engines) | **CITE sq-hmd7l.27** note: an OOM-scale archive gather is needed for a throughput verdict (no fix bead — correctness axis passes; throughput is a future gather, not a deficit). Env `axis-results/hdt/hdt-snikmeta-20260710T010720Z.json`; `research/gap-hdt-2026-07.md` |
 
@@ -343,8 +343,9 @@ Fixed vocabulary, counting the §9.1 rows (D3′ is counted by its three residua
 - **CLEARLY-AHEAD (4):** D12 FTS latency, D14b NT-16T, D15a geo k-NN, plus D3′-partial (10/14
   SP2Bench queries AHEAD incl. the closed q03b/c). *(§0-§8 additionally: D1 WatDiv, D2 SP2Bench
   vs oxigraph, D9e time-to-serving.)*
-- **AHEAD-BUT-NOT-OOM (3):** D14a NT-1T, D14d TTL-16T, D15b geo `geof:sfWithin` (vs jena; but
-  self-slow → carries **sq-7jt80**).
+- **AHEAD-BUT-NOT-OOM (3):** D14a NT-1T, D14d TTL-16T, D15b geo `geof:sfWithin` (vs jena; the
+  self-slow gap's answer-safety defect was fixed by **sq-7jt80** [PR #1847 merged], bench-harness
+  artifact is structural to the workload design).
 - **PARITY (0)** in this consolidation.
 - **BEHIND (4, each with a filed P1/P2 fix bead):** D13 SPARQL-UPDATE → **sq-p7kk5** (P1);
   D14c Turtle-1T → **sq-wrn61** (P1); D3′ q07 → **sq-7d3dj.30.20** (P1) + q09 → **sq-jnb1e**;
@@ -367,13 +368,17 @@ rows had **no** engine-side profiling-first fix bead and are filed here:
    alloc churn / the 24.9 ms long-tail) on the canonical box; targeted fix after the profile.
 2. **sq-wrn61** (NEW P1) — single-thread Turtle parse throughput BEHIND serd ~2.0× (D14c):
    profile the incumbent chunked TTL parser hot loop; targeted fix after the profile.
-3. **sq-7jt80** (NEW P1) — `geof:sfWithin` ~600× slower than `within*` on the same corpus
-   (D15b): confirm the full-scan hypothesis, wire sfWithin to the spatial-index prefilter.
 
 **Reused (existing) beads cited above:** sq-7d3dj.30.20 (q07), sq-jnb1e (q09), sq-7d3dj.30.21
 (q11), sq-7d3dj.30.22 (q08/q12b same-box virtuoso), sq-hmd7l.32 (D6 canonical), sq-tvzyi (BEIR),
 sq-a8anf (geo radius crosscheck), sq-do5fx / sq-l7diu (update harness bugs), and the §0-§8
 memory/HTTP beads (sq-7d3dj.32.*, sq-7d3dj.34.1/.2, sq-1s03r).
+
+**Closed since this consolidation:** **sq-7jt80** (D15b `geof:sfWithin` self-slow gap, PR #1847
+merged 2026-07-10) — the bench-harness artifact was correctly identified (deliberate full-scan
+workload tests the lexical predicate), and the real ~5× answer-safety-guard defect (per-row WKT
+materialization + hashing) was fixed via id-level indexed-universe fast path. No post-fix canonical
+re-measure yet; defect impact eliminated, scan-floor-bound.
 
 ### 9.4 Honesty ledger for this consolidation
 
@@ -389,5 +394,7 @@ memory/HTTP beads (sq-7d3dj.32.*, sq-7d3dj.34.1/.2, sq-1s03r).
 - **The D3 re-measure supersedes the §3 pre-fix verdict** (see the §3.1 addendum): q03b/c are
   now AHEAD; only q07/q09/q11 remain BEHIND, each with a filed bead.
 - **Self-slow dominance gaps are surfaced even when AHEAD of the competitor:** D15b is ~1.5×
-  ahead of jena yet ~600× slower than sparq's own `within*`, so it carries a P1 fix bead
-  (sq-7jt80) despite not being BEHIND a competitor.
+  ahead of jena yet was ~600× slower than sparq's own `within*` (now separated into bench-harness
+  artifact + answer-safety defect). The answer-safety defect was closed by sq-7jt80 (PR #1847);
+  the bench-harness artifact is intrinsic to how the workload is constructed (deliberate full-scan
+  to test the lexical predicate path).
