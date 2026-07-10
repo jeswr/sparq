@@ -256,6 +256,44 @@ fn push_group_keeps_uncovered_filter_local_with_exact_indices() {
 }
 
 #[test]
+fn push_group_projection_clause_by_output_var_membership() {
+    // The proj_clause decision has three arms driven by `project.is_empty() && output_vars.is_empty()`:
+    //   (a) both empty            → SELECT *            (caller wants whatever the group projects)
+    //   (b) output_vars NON-empty but names NO group var → project the GROUP's own vars (not *)
+    //   (c) project non-empty     → SELECT the intersection
+    // Arm (b) is the discriminator for the `&&`→`||` mutation at the proj_clause site: with `||`
+    // it collapses to `SELECT *`, over-returning columns the caller did not ask for.
+    let bgp = Bgp {
+        patterns: vec![TriplePattern {
+            subject: v("s"),
+            predicate: iri("http://ex/p"),
+            object: v("o"),
+        }],
+    };
+    let group = ExclusiveGroup {
+        source: 0,
+        patterns: vec![0],
+    };
+    let cap = Capability::endpoint();
+    // (a) empty output_vars ⇒ SELECT *.
+    let a = push_group(&group, &bgp, &cap, &[], &[], &[], None).expect("pushes");
+    assert_eq!(a.sub.sparql, "SELECT * WHERE { ?s <http://ex/p> ?o }");
+    assert_eq!(a.sub.project, Vec::<String>::new());
+    // (b) output_vars names ONLY a var the group does NOT produce ⇒ project the group's own
+    // vars (?s ?o), NOT `*`. Under `&&`→`||` this wrongly becomes `SELECT *`.
+    let b = push_group(&group, &bgp, &cap, &["absent".to_string()], &[], &[], None).expect("pushes");
+    assert_eq!(
+        b.sub.sparql, "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }",
+        "output_vars naming no group var ⇒ project the group's vars, never SELECT *"
+    );
+    assert_eq!(b.sub.project, Vec::<String>::new(), "no group var is in output_vars");
+    // (c) output_vars names a produced var ⇒ project exactly it.
+    let c = push_group(&group, &bgp, &cap, &["o".to_string()], &[], &[], None).expect("pushes");
+    assert_eq!(c.sub.sparql, "SELECT ?o WHERE { ?s <http://ex/p> ?o }");
+    assert_eq!(c.sub.project, vec!["o".to_string()]);
+}
+
+#[test]
 fn push_group_without_order_limit_capability_pushes_neither() {
     // A source whose capability does NOT advertise order_limit must get NO ORDER BY / LIMIT
     // even when the caller supplies keys + a limit (the `!fragment && cap.order_limit`

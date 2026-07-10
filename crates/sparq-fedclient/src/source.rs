@@ -2847,4 +2847,38 @@ mod tests {
         assert_eq!(page.total_items, 0, "no count metadata in this fragment");
         assert!(page.triples.is_empty(), "control-only fragment has no data");
     }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): the count comes from EITHER hydra:totalItems OR
+    // void:triples. The earlier fragment tests read the count from hydra:totalItems only, so
+    // the `pred == void:triples` half of the count predicate could be mutated to `!=` unnoticed
+    // (a void:triples-only fragment would then report count 0). Pin BOTH count predicates, and
+    // the recall-safe MAX when a fragment carries both.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_body_count_reads_void_triples_and_takes_max() {
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        );
+        // void:triples alone drives the count.
+        let void_only = concat!(
+            "<http://frag> <http://rdfs.org/ns/void#triples> \"77\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        );
+        assert_eq!(
+            parse_fragment_body(void_only, &pattern).unwrap().total_items,
+            77,
+            "void:triples must drive the count (kills the void== →!= survivor)"
+        );
+        // Both present: the recall-safe MAX wins regardless of order.
+        let both = concat!(
+            "<http://frag> <http://rdfs.org/ns/void#triples> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://frag> <http://www.w3.org/ns/hydra/core#totalItems> \"90\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        );
+        assert_eq!(
+            parse_fragment_body(both, &pattern).unwrap().total_items,
+            90,
+            "the max of the two counts is taken"
+        );
+    }
 }
