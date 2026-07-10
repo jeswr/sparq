@@ -153,7 +153,7 @@ model-quality numbers that differ by endpoint/model choice).
 
 Template for when run:
 
-```
+```text
 endpoint: <URL>  model: <MODEL>
 loaded <N> triples
 
