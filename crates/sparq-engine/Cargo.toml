@@ -304,6 +304,25 @@ value-join = []
 # is byte-identical. No new dependencies, no `unsafe`.
 id-filter-fastpath = []
 
+# [FABLE-5] (sq-7d3dj.30.21) LAZY STRING-LITERAL COLLATION KEY for the top-k ORDER BY
+# selection path (`exec::order_bindings`). Profiling SP2Bench q11
+# (`ORDER BY ?ee LIMIT 10 OFFSET 50` over 17663 `rdfs:seeAlso` objects — which are
+# `xsd:string` LITERALS, not IRIs) attributes ~1/3 of the query to building the sort key: the
+# default path calls `Dict::term`->`reconstruct_ref` (a `Literal` allocation) THEN `value_str`
+# (a second `Box<str>` allocation of the collation key) for EVERY input row, when only 60
+# survive. With this feature ON, a PLAIN `xsd:string` literal ORDER BY key becomes a
+# zero-allocation `SortCell::StrId(Id)` carrying only the dictionary id; the heap comparator
+# reads the literal's `value` slice via ZERO-COPY `Dict::term_parts` and byte-compares. Plain
+# strings are ordered by their `value()` lexical bytes both in `compare_terms` and in the
+# eager `SortCell::Val` key (proven byte-identical by the sq-7d3dj.30.12 differential test),
+# so the top-k output is UNCHANGED — a q11 full-output witness + tie/LIMIT-boundary cases +
+# the W3C ORDER BY conformance suite pin it. Only `xsd:string` literals take the lazy path;
+# every other term kind (IRI, lang-tagged, numeric, temporal, blank, triple) keeps the exact
+# existing key, so the total order is untouched. Trades N key allocations for ~O(N)
+# cache-friendly dict reads in the quickselect. OPT-IN and OFF by default: when off, zero of
+# this code compiles and the ORDER BY path is byte-identical. No new dependencies, no `unsafe`.
+topk-lazy-strkey = []
+
 # [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
 # numeric column — the perf baseline every later vectorized (M4) phase measures against.
 # `required-features` gates it behind `vectorized`, so the DEFAULT build (and

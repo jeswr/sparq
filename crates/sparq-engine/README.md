@@ -104,6 +104,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 - **Equality-FILTER value join** *(opt-in `value-join` feature, OFF by default)* — pattern components glued only by a `FILTER(?a = ?b)` equality join on a per-term-class **value** key (SPARQL `=` is value equality, not term identity) instead of cross-product-then-filter, with the original FILTER re-applied as the exact recheck (the `sq-lr2ii` high-precision-decimal class stays exact) and temporals/triple terms paired by the exact evaluator; anything not provably eligible declines to the verbatim plan. Result-identical (kill-switch differentials + an independent oracle); off, zero code compiles, no new deps.
 - **Vector-at-a-time columnar dispatch** *(opt-in `vectorized` feature, OFF by default)* — FILTER and aggregate operators use a columnar path for ≥ 256-row batches; the hybrid tri-mask delegates tie/unknown lanes to the scalar path (byte-identical). I5 probe counters (`reset_stats`/`stats_snapshot`/`VecStats`) are test-facing only. Off, zero code compiles, no new deps.
 - **Id-level term-identity FILTER fast path** *(opt-in `id-filter-fastpath` feature, OFF by default)* — a compiled `=`/`!=` over operands a static analysis proves non-literal (subject/predicate-only variables, constant IRIs, and — via a snapshot-aware predicate-range check — an object of a constant predicate whose object column has NO literals in the current store snapshot, the SP2Bench `dc:creator`/q08/q12b shape) is decided by dictionary-id (in)equality, and equal ids of ANY kind short-circuit `=` true (canonicalising dict → sameTerm), skipping the per-row term materialisation. The predicate-range verdict is re-checked against the LIVE graph every evaluation, so an UPDATE inserting a literal object simply declines the next query (never cross-snapshot). Unequal-id literals (numeric-promotion, the `sq-lr2ii` class) and possible type-errors fall through to the exact path. Result-identical (differential vs the exact oracle); off, no new deps.
+- **Lazy top-k string sort key** *(opt-in `topk-lazy-strkey` feature, OFF by default)* — an `ORDER BY` on a plain `xsd:string` column with a `LIMIT` builds a zero-allocation id-carrying sort key (compared via the literal's zero-copy value bytes) instead of reconstructing + re-allocating the literal value for every input row, so a top-k over a large scan pays no key allocation for the rows it discards. Byte-identical output (a full-output differential + W3C ORDER BY conformance); off, zero code compiles, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
@@ -111,8 +112,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 - **How-to** — [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **API reference** — [docs.rs/sparq-engine](https://docs.rs/sparq-engine).
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning / parallelism verdicts in [`research/`](../../research).
-- **Performance** — numbers live on the
-  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
+- **Performance** — numbers live on the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
