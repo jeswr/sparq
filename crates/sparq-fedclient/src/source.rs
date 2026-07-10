@@ -2853,9 +2853,8 @@ mod tests {
             PatternTerm::Var("p".to_string()),
             PatternTerm::Var("o".to_string()),
         );
-        let body = concat!(
-            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#nextPage> <http://frag/page2> .\n",
-        );
+        let body =
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#nextPage> <http://frag/page2> .\n";
         let page = parse_fragment_body(body, &pattern).expect("well-formed fragment parses");
         assert_eq!(page.next.as_deref(), Some("http://frag/page2"));
         assert_eq!(page.total_items, 0, "no count metadata in this fragment");
@@ -2876,9 +2875,8 @@ mod tests {
             PatternTerm::Var("o".to_string()),
         );
         // void:triples alone drives the count.
-        let void_only = concat!(
-            "<http://frag> <http://rdfs.org/ns/void#triples> \"77\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
-        );
+        let void_only =
+            "<http://frag> <http://rdfs.org/ns/void#triples> \"77\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
         assert_eq!(
             parse_fragment_body(void_only, &pattern).unwrap().total_items,
             77,
