@@ -169,10 +169,23 @@ pub(crate) fn decision_to_json(d: &WacDecision) -> String {
 
 /// A `text/json` response with the given status + body. The body is already-serialised JSON.
 fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
+    json_response_with_link(status, body, None)
+}
+
+/// A `text/json` response with the given status + body, and an OPTIONAL `Link: rel="acl"`
+/// header (FR-5, sq-snopa.7). When `acl_link` is `Some(value)` the RFC 8288 link-value
+/// (`<iri>; rel="acl"`) is emitted as the `Link` response header; `None` silently omits it
+/// (fail-closed — if there is no governing ACL there is nothing to advertise). [SONNET-4.6]
+fn json_response_with_link(status: StatusCode, body: String, acl_link: Option<&str>) -> Response {
+    let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-        .header(header::CONTENT_LENGTH, body.len())
+        .header(header::CONTENT_LENGTH, body.len());
+    if let Some(link_val) = acl_link {
+        // [SONNET-4.6] POSITIONAL format args (CodeQL rust/unused-variable guard).
+        builder = builder.header(header::LINK, link_val);
+    }
+    builder
         .body(body.into())
         // A well-formed status + valid header values never fails to build.
         .unwrap()
@@ -348,7 +361,12 @@ pub(crate) async fn decide_endpoint(
     } else {
         deny_status_code(decision.status)
     };
-    json_response(status, decision_to_json(&decision))
+    // [SONNET-4.6] sq-snopa.7 FR-5: emit the RFC 8288 `Link: <acl-iri>; rel="acl"` header from
+    // the decision's governing ACL. `acl_link_header()` returns `None` when no governing ACL was
+    // discovered (fail-closed — nothing to advertise). Safe on a deny: the link tells the client
+    // WHERE the ACL is, not that the request is allowed.
+    let acl_link = decision.acl_link_header();
+    json_response_with_link(status, decision_to_json(&decision), acl_link.as_deref())
 }
 
 /// A fail-closed [`WacDecision`] for an input the endpoint refuses to trust (e.g. an unknown mode):
@@ -407,9 +425,16 @@ pub(crate) async fn wac_allow_endpoint(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    // [SONNET-4.6] sq-snopa.7 FR-5: resolve the governing ACL for the Link header BEFORE
+    // `wac_allow` consumes the store. `resolve_acl` is a pure index lookup (no mode needed) and
+    // returns `None` when no ACL was discovered — fail-closed: no header emitted in that case.
+    // [SONNET-4.6] POSITIONAL format args (CodeQL rust/unused-variable guard).
+    let acl_link: Option<String> = store
+        .resolve_acl(&resource_iri)
+        .map(|eff| format!("<{}>; rel=\"acl\"", eff.acl.as_str()));
     let value = store.wac_allow(&req.session(), &resource);
     let body = serde_json::json!({ "wacAllow": value }).to_string();
-    json_response(StatusCode::OK, body)
+    json_response_with_link(StatusCode::OK, body, acl_link.as_deref())
 }
 
 /// `POST /authz/query` — an ACCESS-CONTROLLED SPARQL query as `session` (FR-4). Body:

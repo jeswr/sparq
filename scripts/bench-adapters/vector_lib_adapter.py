@@ -286,6 +286,9 @@ def run_hnswlib_sweep(data, queries, k, space, ef_values, m=16, ef_construction=
 
 def main(argv):
     """CLI:
+      vector_lib_adapter.py --smoke
+            light self-test: exercises recall_at_k, pareto_frontier, matched_recall_qps,
+            read_vecs (pure functions — no numpy/hnswlib). Exits 0 on pass, 1 on failure.
       vector_lib_adapter.py --score --approx <tsv> --exact <tsv> --k K [--engine N]
             offline: score two neighbour TSVs (fixture-testable, no numpy/hnswlib).
       vector_lib_adapter.py --hnswlib --npz <file.npz> --k K [--engine N]
@@ -309,7 +312,9 @@ def main(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--score":
+        if a == "--smoke":
+            mode = "smoke"
+        elif a == "--score":
             mode = "score"
         elif a == "--hnswlib":
             mode = "hnswlib"
@@ -350,7 +355,51 @@ def main(argv):
         i += 1
 
     try:
-        if mode == "score":
+        if mode == "smoke":
+            # [SONNET-4.6] sq-hmd7l.19: lightweight self-test for the pure (no-numpy/hnswlib)
+            # functions — recall_at_k, pareto_frontier, matched_recall_qps, read_vecs.
+            # Exits 0 on pass, 1 on failure.
+            import struct as _struct
+            _ok = True
+
+            def _check(label, got, want):
+                if got != want:
+                    sys.stderr.write("smoke FAIL %s: got %r want %r\n" % (label, got, want))
+                    nonlocal _ok
+                    _ok = False
+
+            # recall_at_k: trivial perfect recall
+            approx_sm = {"0": ["a", "b", "c"], "1": ["d", "e", "f"]}
+            exact_sm  = {"0": ["a", "b", "c"], "1": ["d", "e", "f"]}
+            r, n = recall_at_k(approx_sm, exact_sm, 3)
+            _check("smoke.recall.perfect", abs(r - 1.0) < 1e-9, True)
+            _check("smoke.recall.n", n, 2)
+
+            # recall_at_k: zero overlap
+            approx_z = {"0": ["x", "y", "z"]}
+            r_z, _ = recall_at_k(approx_z, {"0": ["a", "b", "c"]}, 3)
+            _check("smoke.recall.zero", abs(r_z) < 1e-9, True)
+
+            # pareto_frontier: a dominated point is removed
+            pts_sm = [(0.95, 300.0), (0.99, 500.0), (0.999, 100.0)]
+            front_sm = pareto_frontier(pts_sm)
+            _check("smoke.pareto.len", len(front_sm), 2)
+            _check("smoke.pareto.has_099", any(abs(r - 0.99) < 1e-9 for r, _ in front_sm), True)
+
+            # matched_recall_qps: returns best QPS at floor, None when unreachable
+            _check("smoke.matched.0_9", matched_recall_qps(pts_sm, 0.9), 500.0)
+            _check("smoke.matched.none", matched_recall_qps(pts_sm, 1.0), None)
+
+            # read_vecs: round-trip a tiny .fvecs payload
+            _raw = _struct.pack("<i", 2) + _struct.pack("<2f", 1.0, 2.0)
+            _rows = read_vecs(_raw, "f")
+            _check("smoke.read_vecs.row", _rows, [[1.0, 2.0]])
+
+            if _ok:
+                sys.stdout.write("vector_lib_adapter smoke OK\n")
+                return 0
+            return 1
+        elif mode == "score":
             if not (approx_f and exact_f):
                 raise ValueError("--score needs --approx <tsv> --exact <tsv>")
             with open(approx_f, encoding="utf-8") as fh:
@@ -400,7 +449,7 @@ def main(argv):
                 )
             return 0
         else:
-            sys.stderr.write("vector_lib_adapter: pick --score, --hnswlib or --pareto\n")
+            sys.stderr.write("vector_lib_adapter: pick --smoke, --score, --hnswlib or --pareto\n")
             return 2
     except Exception as e:  # noqa: BLE001 — adapter boundary
         sys.stderr.write("vector_lib_adapter: %s\n" % e)

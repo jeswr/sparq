@@ -1,10 +1,14 @@
 <!-- [OPUS-4.8] Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable
-returns). Bead sq-mk6wx. This is the PERF-DOMINANCE GAP TABLE: sparq MEASURED vs
-open-source competitors MEASURED on the same canonical box, plus RDFox's PUBLISHED claims
-(normalized, from research/rdfox-claims-inventory.md #1719). It records measured numbers
-with provenance; every dimension whose verdict is not CLEARLY-AHEAD carries a P1 fix or
-instrument bead. No fabricated numbers; canonical vs CI-trend vs work-box provenance is
-flagged per row. -->
+returns). Bead sq-mk6wx (§0-§8) + sq-hmd7l.27 (§9 v2 consolidation). This is the
+PERF-DOMINANCE GAP TABLE: sparq MEASURED vs open-source competitors MEASURED on the same
+canonical box, plus RDFox's PUBLISHED claims (normalized, from
+research/rdfox-claims-inventory.md #1719). It records measured numbers with provenance;
+every dimension whose verdict is not CLEARLY-AHEAD carries a P1 fix or instrument bead. No
+fabricated numbers; canonical vs CI-trend vs work-box provenance is flagged per row.
+v2 CONSOLIDATION: §9 (sq-hmd7l.27) folds in the canonical wave-1 axes (fts/geo/hdt/update/
+parse — #1809), the canonical SP2Bench D3 re-measure (#1827), the materialization axis
+(D6, #1799 + VLog/Nemo encodings #1823, canonical run in flight sq-hmd7l.32), and every
+research/gap-<axis>-2026-07.md record, under the fixed verdict vocabulary. -->
 
 # Performance-dominance gap table — 2026-07
 
@@ -62,8 +66,10 @@ cover (memory, SHACL, reasoning), from `bench/benchmarks.toml` and
 
 Columns: **dimension | sparq measured | best competitor measured | ratio | RDFox claim
 (normalized + caveat) | verdict | action**. Ratios are competitor ÷ sparq (>1 ⇒ sparq
-faster / better) unless noted. Verdicts: CLEARLY-AHEAD (≥~10× on the clean baseline) /
-AHEAD-BUT-NOT-OOM / PARITY / BEHIND / NOT-MEASURED.
+faster / better) unless noted. Verdicts use the **fixed vocabulary** (identical in §9):
+CLEARLY-AHEAD (≥~10× on the clean baseline) / AHEAD-BUT-NOT-OOM (a real lead under an
+order of magnitude) / PARITY / BEHIND / NOT-MEASURED / NOT-COMPARABLE (semantics or
+surface not like-for-like — an honest non-comparison, never a win).
 
 | # | dimension | sparq measured | best competitor measured | ratio | RDFox claim (normalized) | verdict | action |
 |---|---|---|---|---|---|---|---|
@@ -112,16 +118,16 @@ honest per-query challenger.
 | q01 | 1 | 10.7 | 14911.6 | 748 | 3048.7 | 1394× | virtuoso 748 → sparq **70× faster** | ahead |
 | q02 | 6067 | 6275.9 | 538638.6 | 340770 | 288550.7 | 85.8× | qlever 288551 → sparq **46× faster** | ahead |
 | q03a | 15823 | 12492.0 | 220493.3 | 95617 | 46471.2 | 17.7× | qlever 46471 → sparq **3.7× faster** | ahead |
-| q03b | 114 | 12124.5 | 128968.8 | **1443** | 1576.4 | 10.6× | virtuoso 1443 → sparq **8.4× SLOWER** | **BEHIND** |
-| q03c | 0 | 11697.3 | 127234.1 | **613** | 1246.6 | 10.9× | virtuoso 613 → sparq **19× SLOWER** | **BEHIND** |
+| q03b | 114 | 12124.5 | 128968.8 | **1443** | 1576.4 | 10.6× | virtuoso 1443 → sparq **8.4× SLOWER** | **BEHIND** — sq-7d3dj.30 (§3.1: now AHEAD) |
+| q03c | 0 | 11697.3 | 127234.1 | **613** | 1246.6 | 10.9× | virtuoso 613 → sparq **19× SLOWER** | **BEHIND** — sq-7d3dj.30 (§3.1: now AHEAD) |
 | q04 | 541911 | 358713.5 | 20904169.1 | 8407062 | 2927437.3 | 58.3× | qlever 2.93 M → sparq **8.2× faster** | ahead |
 | q05b | 6933 | 15409.2 | 643985.9 | 109939 | 33152.0 | 41.8× | qlever 33152 → sparq **2.2× faster** | ahead |
-| q07 | 48 | 23981.5 | ERROR | 508290 | **8277.3** | — | qlever 8277 → sparq **2.9× SLOWER** | **BEHIND** |
-| q08 | 358 | 153318.0 | ERROR | **13548** | 9051.7 (0) | — | virtuoso 13548 → sparq **11.3× SLOWER** (qlever count=0 wrong) | **BEHIND** |
-| q09 | 4 | 22356.7 | 185741.3 | 50365 | **1361.7** | 8.3× | qlever 1362 → sparq **16.4× SLOWER** | **BEHIND** |
+| q07 | 48 | 23981.5 | ERROR | 508290 | **8277.3** | — | qlever 8277 → sparq **2.9× SLOWER** | **BEHIND** — sq-7d3dj.30.20 |
+| q08 | 358 | 153318.0 | ERROR | **13548** | 9051.7 (0) | — | virtuoso 13548 → sparq **11.3× SLOWER** (qlever count=0 wrong) | **BEHIND** — sq-7d3dj.30.22 |
+| q09 | 4 | 22356.7 | 185741.3 | 50365 | **1361.7** | 8.3× | qlever 1362 → sparq **16.4× SLOWER** | **BEHIND** — sq-jnb1e |
 | q10 | 452 | 4.2 | 17102.7 | 5940 | 4740.1 | 4072× | qlever 4740 → sparq **1129× faster** | ahead |
-| q11 | 10 | 27236.1 | 760333.3 | 13710 | **1960.5** | 27.9× | qlever 1961 → sparq **13.9× SLOWER** | **BEHIND** |
-| q12b | 1 | 155611.0 | 49991323.8 | **9476** | 7409.2 (0) | 321× | virtuoso 9476 → sparq **16.4× SLOWER** (qlever count=0 wrong) | **BEHIND** |
+| q11 | 10 | 27236.1 | 760333.3 | 13710 | **1960.5** | 27.9× | qlever 1961 → sparq **13.9× SLOWER** | **BEHIND** — sq-7d3dj.30.21 |
+| q12b | 1 | 155611.0 | 49991323.8 | **9476** | 7409.2 (0) | 321× | virtuoso 9476 → sparq **16.4× SLOWER** (qlever count=0 wrong) | **BEHIND** — sq-7d3dj.30.22 |
 | q12c | 0 | 5.5 | 11290.4 | 601 | 1516.3 | 2053× | virtuoso 601 → sparq **109× faster** | ahead |
 
 **Reading.** Against the **clean CLI baseline (oxigraph)** sparq wins **every** SP2Bench
@@ -284,3 +290,104 @@ The brief's framing held up against the data, with three clarifications recorded
 - qlever's wrong counts on q08/q12b (0 vs 358/1) are recorded as disqualifications; whether
   they reflect a qlever config or a genuine engine difference on those shapes is not
   investigated here.
+
+## 9. v2 consolidation — canonical wave-1 + D3 re-measure + materialization (sq-hmd7l.27)
+
+<!-- [OPUS-4.8] sq-hmd7l.27. This section CONSOLIDATES committed evidence only (NO new
+     measurements). It merges every landed research/gap-<axis>-2026-07.md row, the canonical
+     wave-1 EC2 run (sq-hmd7l.26, #1809), the canonical SP2Bench D3 re-measure (sq-7d3dj.30.6,
+     #1827), the D9/D10 HTTP addendum (sq-7d3dj.34), and the materialization axis (D6, #1799 +
+     VLog/Nemo encodings #1823; canonical univ≥100 run in flight as sq-hmd7l.32). Fixed verdict
+     vocabulary only. Every BEHIND / PARITY / self-slow-dominance-gap row cites a filed P1
+     profiling-first fix bead; every NOT-MEASURED cites its blocking bead. Every cell cites its
+     envelope filename or the gap record that owns it. A failed / absent competitor run is a
+     re-run action, never a sparq win. RDFox published-claim columns are per-core-normalized
+     (see §0). This section supersedes the §3 pre-fix D3 verdict and adds the wave-1 axes. -->
+
+**What is new since §0-§8.** The original table (§0-§8, 2026-07-07) predates: (1) the
+canonical **wave-1** run (fts/geo/hdt/update/parse), envelopes under
+`bench/canonical-competitor-results/` + the per-axis `axis-results/<axis>/…json` pulls named
+in each `research/gap-<axis>-2026-07.md`; (2) the canonical **SP2Bench D3 re-measure** after
+the complex-shape fix wave (`bench/competitor-results/sparql-same-box-20260710T025117Z.json`,
+git `1190ca84`, #1827); (3) the **materialization** axis D6 (VLog/Nemo validated encodings in
+PR #1823, canonical univ≥100 in flight as `sq-hmd7l.32`). This §9 folds all of it in under
+one fixed-vocabulary table.
+
+### 9.1 Consolidated wave-1 + re-measure gap table
+
+Columns: **dimension | sparq measured | best competitor measured | verdict | fix / blocking
+bead + provenance**. Provenance is the envelope filename or the gap record that owns the row;
+every timing was count-crosschecked before it was trusted (the invariant each harness
+enforces). Verdicts are the fixed vocabulary only.
+
+| # | dimension | sparq measured | best competitor measured | verdict | fix / blocking bead + provenance |
+|---|---|---|---|---|---|
+| D3′ | **SP2Bench 250k complex-shape** (re-measure, same-box QLever) | wins **10/14**, correct+complete on **all 14**; q03b/c FLIPPED to AHEAD (38×/21×); residuals q07 30.9 ms, q09 12.9 ms, q11 5.3 ms | same-box QLever (HTTP, floor uncorrected → deficits are lower bounds); Oxigraph 0.5.9 CLI baseline | **MIXED, strongly improved** (was BEHIND): q07 **BEHIND 3.8×**, q09 **BEHIND 9.5×**, q11 **BEHIND 3.0×**; q08/q12b NO valid comparator (QLever wrong count 0) | q07 → **sq-7d3dj.30.20** (P1, CSE); q09 → **sq-jnb1e** (characteristic-set); q11 → **sq-7d3dj.30.21** (P2 top-k profile); q08/q12b same-box virtuoso → **sq-7d3dj.30.22** (P2). Env `bench/competitor-results/sparql-same-box-20260710T025117Z.json`; detail `research/sp2bench-complex-shape-deficit.md` §7 |
+| D6 | **Reasoning / materialization throughput** (LUBM closure) | work-box univ=1/10 directional only (non-canonical, sq-hmd7l.7 PR body); **canonical univ≥100 NOT YET RUN** | Jena (profile-different rule set, NOT like-for-like); VLog / Nemo now have **validated** OWL-RL/RDFS encodings reproducing sparq's closure set-for-set (rdfs 126732 / owl 150589, #1823) | **NOT-MEASURED** (canonical) — directional work-box read is sparq-ahead of Jena's smaller-profile reasoner but non-citable | **CITE sq-hmd7l.32** (P2, canonical univ≥100 EC2 run IN FLIGHT); encodings #1823 (sq-hmd7l.30/.31); vs RDFox published 6.1 M t/s ≈ **47.7 k t/s per core** (SPARC T5-8, per-core-normalized §0) → also NOT-MEASURED at scale, **sq-1s03r** (G2). Record `research/gap-materialize-2026-07.md` |
+| D12 | **Full-text search latency** (BM25 over SPARQL) | `and_terms` 11.9 µs / `or_terms` 20.3 µs / `prefix4` 3414.5 µs / `phrase` 1.4 µs | Fuseki + jena-text (Lucene), HTTP; count-crosscheck GREEN on all four translated workloads | **CLEARLY-AHEAD** (~75×–~1954×; survives a generous 500 µs HTTP-floor subtraction) | none needed (no deficit). Env `axis-results/fts/fts-n100000-20260710T004450Z.json`; `research/gap-fts-2026-07.md` §3 |
+| D12q | **FTS IR-quality** (BEIR Recall@100 / nDCG@10) | NOT-MEASURED | Lucene / Anserini oracle — NOT-MEASURED | **NOT-MEASURED** (quality claim can't be made either way) | **CITE sq-tvzyi** (P2, schedule the BEIR pyserini/beir gather — not part of the wave-1 box). `research/gap-fts-2026-07.md` §4 |
+| D13 | **SPARQL-UPDATE** (PSS interactive LDP-CRUD) | p50 3.50 ms / **p99 4.01 ms** / max 24.91 ms / **275/s** | **oxigraph** p50 0.45 / p99 0.61 / max 0.84 / **2245/s** (Docker, symmetric loopback HTTP); count-crosscheck GREEN 350=350; fuseki absent (container never ready — re-run action, not a win) | **BEHIND** (p99 ~6.6×, p50 ~7.8×, throughput ~8.2×; long-tail 24.9 ms outlier absent in oxigraph) | **sq-p7kk5** (NEW P1, profiling-first — per-update parse/plan, index maintenance on interleaved DELETE/INSERT/DROP, or alloc churn). Harness bugs (separate): sq-do5fx (envelope drop on parity FAIL), sq-l7diu (fuseki readiness). Rows `axis-results/update/run.log`; `research/gap-update-2026-07.md` §CANONICAL |
+| D14a | **N-Triples parse**, 1 thread (in-process) | custom NT parse+intern **2.00 Mt/s** (1.278 s / 170 MB) | serd 1.68 Mt/s (subprocess, +serialize); rapper 1.00; riot 0.52; count-ok on every row | **AHEAD-BUT-NOT-OOM** (~1.2× vs serd, which also serializes) | none (sub-OOM lead labelled honestly). Env `axis-results/parse/parse-rows.txt`; `research/gap-parse-2026-07.md` §CANONICAL |
+| D14b | **N-Triples parse**, 16 threads | 15.56 Mt/s (0.164 s) | serd 1.68 Mt/s (single-threaded by design) | **CLEARLY-AHEAD** (~9.3× — chunk-parallelism is the lever) | none. Same env |
+| D14c | **Turtle parse**, 1 thread (in-process) | incumbent chunked **0.81 Mt/s** (3.153 s / 60 MB) | **serd 1.65 Mt/s** (+serialize); rapper 1.17; riot 0.52 | **BEHIND** serd ~2.0× (rapper ~1.4×) — single-thread hot-loop deficit; the chunked parser sits at ~oxttl speed | **sq-wrn61** (NEW P1, profiling-first — Turtle tokenizer hot loop, per-statement prefix/base + bnode scope, or per-term intern). Same env; `research/gap-parse-2026-07.md` §Verdicts |
+| D14d | **Turtle parse**, 16 threads | 5.22 Mt/s (0.490 s) | serd 1.65 Mt/s | **AHEAD-BUT-NOT-OOM** (~3.2× — parallelism recovers the lead, not by OOM) | none (covered by the D14c single-thread fix once landed). Same env |
+| D15a | **GeoSPARQL k-NN** (`nearest_k10` / `_k100`) | 6.1 µs / 70.0 µs | jena-geosparql 1 517 437 / 1 635 714 µs (HTTP; standard `ORDER BY geof:distance LIMIT k` full scan-and-sort) | **CLEARLY-AHEAD** (~2.5·10⁵× / ~2.3·10⁴×; count-crosscheck GREEN 10=10 / 100=100; caveats in the record) | none. Env `axis-results/geo/geo-points100k-20260710T004536Z.json`; `research/gap-geo-2026-07.md` §6b |
+| D15b | **GeoSPARQL `geof:sfWithin`** COUNT | **90 458.9 µs** | jena-geosparql 137 888 µs (HTTP); count-crosscheck GREEN 1526=1526 | **AHEAD-BUT-NOT-OOM** (~1.5× vs jena) — but a **self-slow dominance gap**: sparq's own geof_within is ~600× slower than its own `within50km` (150 µs) on the same corpus/cardinality | **sq-7jt80** (NEW P1, profiling-first — geof:sfWithin evaluates as a full scan / per-point WKT parse instead of the GeoIndex R-tree that serves `within*`). Same env; `research/gap-geo-2026-07.md` §6b finding 3 |
+| D15c | **GeoSPARQL radius** (`within10km` / `within50km`) | 7.2 µs / 150.2 µs (counts hard-gated 51 / 1547) | jena-geosparql returned **0 hits** on both → count-crosscheck **RED**; timing WITHHELD | **NOT-MEASURED** (crosscheck red — per the invariant no comparative verdict; NOT a sparq win) | **CITE sq-a8anf** (P2, jena within* translation/units/axis-order root-cause — a harness fix, must land before a canonical radius verdict). Same env; `research/gap-geo-2026-07.md` §6b finding 1 + §6c |
+| D16 | **HDT load-and-decode-to-native** | decode-to-native GREEN 328=328; `hdt_load_s` 0.0898 s in-process | hdt-cpp `hdt2rdf` decode GREEN 328=328; wall 8.56 s incl. `docker run` spawn (different boundary) | **NOT-COMPARABLE at this scale** (328-triple fixture: container-spawn dominates; correctness axis is the gate and it is GREEN both engines) | **CITE sq-hmd7l.27** note: an OOM-scale archive gather is needed for a throughput verdict (no fix bead — correctness axis passes; throughput is a future gather, not a deficit). Env `axis-results/hdt/hdt-snikmeta-20260710T010720Z.json`; `research/gap-hdt-2026-07.md` |
+
+### 9.2 Verdict-count summary (this consolidation)
+
+Fixed vocabulary, counting the §9.1 rows (D3′ is counted by its three residual sub-verdicts):
+
+- **CLEARLY-AHEAD (4):** D12 FTS latency, D14b NT-16T, D15a geo k-NN, plus D3′-partial (10/14
+  SP2Bench queries AHEAD incl. the closed q03b/c). *(§0-§8 additionally: D1 WatDiv, D2 SP2Bench
+  vs oxigraph, D9e time-to-serving.)*
+- **AHEAD-BUT-NOT-OOM (3):** D14a NT-1T, D14d TTL-16T, D15b geo `geof:sfWithin` (vs jena; but
+  self-slow → carries **sq-7jt80**).
+- **PARITY (0)** in this consolidation.
+- **BEHIND (4, each with a filed P1/P2 fix bead):** D13 SPARQL-UPDATE → **sq-p7kk5** (P1);
+  D14c Turtle-1T → **sq-wrn61** (P1); D3′ q07 → **sq-7d3dj.30.20** (P1) + q09 → **sq-jnb1e**;
+  q11 → **sq-7d3dj.30.21** (P2). *(§0-§8 additionally: D7 memory vs RDFox best-in-class; D9c
+  TTFB streaming.)*
+- **NOT-MEASURED (3, each citing its blocking bead):** D6 materialization canonical →
+  **sq-hmd7l.32** (in flight); D12q BEIR IR-quality → **sq-tvzyi**; D15c geo radius (crosscheck
+  red) → **sq-a8anf**.
+- **NOT-COMPARABLE (1):** D16 HDT at the 328-triple fixture scale (container-spawn-dominated;
+  correctness gate GREEN). *(fts `near_slop2` is also NOT-COMPARABLE by design.)*
+
+### 9.3 New fix beads filed by this consolidation (all P1, profiling-first)
+
+The §0-§8 D3 residuals and the memory/HTTP beads already existed and are **reused, not
+duplicated** (checked via `bd list` / `bd show` before filing). Three wave-1 BEHIND / self-slow
+rows had **no** engine-side profiling-first fix bead and are filed here:
+
+1. **sq-p7kk5** (NEW P1) — SPARQL-UPDATE interactive-CRUD p99 BEHIND oxigraph ~6.6× (D13):
+   profile the per-update path (parse/plan, index maintenance on interleaved DELETE/INSERT/DROP,
+   alloc churn / the 24.9 ms long-tail) on the canonical box; targeted fix after the profile.
+2. **sq-wrn61** (NEW P1) — single-thread Turtle parse throughput BEHIND serd ~2.0× (D14c):
+   profile the incumbent chunked TTL parser hot loop; targeted fix after the profile.
+3. **sq-7jt80** (NEW P1) — `geof:sfWithin` ~600× slower than `within*` on the same corpus
+   (D15b): confirm the full-scan hypothesis, wire sfWithin to the spatial-index prefilter.
+
+**Reused (existing) beads cited above:** sq-7d3dj.30.20 (q07), sq-jnb1e (q09), sq-7d3dj.30.21
+(q11), sq-7d3dj.30.22 (q08/q12b same-box virtuoso), sq-hmd7l.32 (D6 canonical), sq-tvzyi (BEIR),
+sq-a8anf (geo radius crosscheck), sq-do5fx / sq-l7diu (update harness bugs), and the §0-§8
+memory/HTTP beads (sq-7d3dj.32.*, sq-7d3dj.34.1/.2, sq-1s03r).
+
+### 9.4 Honesty ledger for this consolidation
+
+- **No new measurements.** Every §9 number is transcribed from a committed envelope or gap
+  record with the filename cited in-cell.
+- **Failed / absent competitors are re-run actions, never wins.** fuseki-absent on D13 (harness
+  bugs sq-do5fx/sq-l7diu), jena 0-hits on D15c (crosscheck RED → NOT-MEASURED + sq-a8anf),
+  hdt-cpp only at fixture scale on D16 (NOT-COMPARABLE) — none is scored as a sparq win.
+- **Sub-order-of-magnitude leads are AHEAD-BUT-NOT-OOM, not CLEARLY-AHEAD:** D14a NT-1T (~1.2×),
+  D14d TTL-16T (~3.2×), D15b geo sfWithin vs jena (~1.5×).
+- **RDFox published columns are per-core-normalized** (D6: 6.1 M t/s → ~47.7 k t/s per core on
+  the SPARC T5-8, per §0), never absolute-vs-absolute.
+- **The D3 re-measure supersedes the §3 pre-fix verdict** (see the §3.1 addendum): q03b/c are
+  now AHEAD; only q07/q09/q11 remain BEHIND, each with a filed bead.
+- **Self-slow dominance gaps are surfaced even when AHEAD of the competitor:** D15b is ~1.5×
+  ahead of jena yet ~600× slower than sparq's own `within*`, so it carries a P1 fix bead
+  (sq-7jt80) despite not being BEHIND a competitor.

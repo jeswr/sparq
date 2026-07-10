@@ -735,6 +735,56 @@ pub(crate) mod distinct_pushdown {
     }
 }
 
+/// [FABLE-5] (sq-jnb1e) Runtime toggle + telemetry for the OPT-IN characteristic-set
+/// anchor-incidence prune (the `cs-anchor-incidence` feature). Lets the differential
+/// acceptance test compare the incidence-pruned block scan against the exact scan WITHIN one
+/// feature-ON binary, and read whether the prune fired plus how many candidate predicates it
+/// eliminated. Enabled by default when the feature is compiled in.
+#[cfg(feature = "cs-anchor-incidence")]
+pub(crate) mod anchor_incidence {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static BUILT: Cell<bool> = const { Cell::new(false) };
+        static PRUNED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether the incidence prune is active on this thread (default on with the feature).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables the prune on this thread, returning the previous value. The
+    /// differential test flips it to compare pruned vs exact within one binary.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query incidence statistics.
+    pub(crate) fn reset_stats() {
+        BUILT.with(|b| b.set(false));
+        PRUNED.with(|c| c.set(0));
+    }
+
+    /// Records that an incidence set was BUILT (a set was available for at least one branch).
+    pub(crate) fn note_built() {
+        BUILT.with(|b| b.set(true));
+    }
+
+    /// Records `n` candidate predicates pruned by the incidence set (block scan skipped).
+    pub(crate) fn note_pruned(n: usize) {
+        PRUNED.with(|c| c.set(c.get().saturating_add(n)));
+    }
+
+    /// `(incidence_built, predicates_pruned)` since the last [`reset_stats`]. The acceptance
+    /// test asserts the set was built AND pruned the value-typed no-hit predicates.
+    pub(crate) fn stats() -> (bool, usize) {
+        (BUILT.with(|b| b.get()), PRUNED.with(|c| c.get()))
+    }
+}
+
 /// Maximum size of the already-evaluated (small) join side for which correlated
 /// evaluation of the other child is attempted; above it the cold path is used.
 const SIP_MAX_SMALL_ROWS: usize = 64;
@@ -1769,11 +1819,13 @@ impl LocalVocab {
         }
         let id = LOCAL_BASE + self.terms.len() as Id;
         self.nums.push(match &t {
-            // [OPUS-4.8] sq-rkzhr: parse through `parse_xsd_f64` — the SAME acceptance set
-            // as `as_num` / `as_numeric` — so the local-vocab numeric cache agrees with the
-            // lenient/exact compare seams on the XSD spelling rules (INF/+INF/-INF/NaN yes;
-            // Rust-only inf/infinity/nan no). A rejected spelling folds to the NaN sentinel.
-            Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()).unwrap_or(f64::NAN),
+            // [FABLE-5] sq-74oy4 / sq-6b1lj: cache the DATATYPE-AWARE f64 (`numeric_cache_f64`)
+            // — the SAME acceptance the graph `numeric_value` cache and the lenient `as_num`
+            // seam use — so a computed (BIND/aggregate) numeric term joins/compares identically
+            // to a graph term. It TRIMS (XSD `collapse` facet) and rejects a per-datatype-
+            // ill-formed lexical (`"1.5"^^xsd:integer`); either folds to the NaN cache-miss
+            // sentinel, deferring `=`/`<`/`>` to the exact evaluator (which type-errors it).
+            Term::Literal(l) => numeric_cache_f64(l).unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
         // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
@@ -2670,9 +2722,21 @@ fn try_distinct_pushdown(
     // instead of per-branch removes the second full anchor scan+sort. Keyed by the anchor's
     // prepared id-pattern + join position, which fully determines the set.
     let mut anchor_cache: AnchorCache = FxHashMap::default();
+    // [FABLE-5] (sq-jnb1e) Opt-in predicate-incidence cache: shared across branches so the two
+    // q09 semijoins (subject- and object-join) each build their incidence set at most once.
+    #[cfg(feature = "cs-anchor-incidence")]
+    let mut incidence_cache: IncidenceCache = FxHashMap::default();
 
     for branch in &branches {
-        match branch_distinct_values(graph, branch, pvar, &seen, &mut anchor_cache)? {
+        match branch_distinct_values(
+            graph,
+            branch,
+            pvar,
+            &seen,
+            &mut anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            &mut incidence_cache,
+        )? {
             Some((new_ids, scanned)) => {
                 total_scanned = total_scanned.saturating_add(scanned);
                 for id in new_ids {
@@ -2913,6 +2977,7 @@ fn branch_distinct_values(
     pvar: &Variable,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     if !is_conjunctive(branch) {
         return Ok(None);
@@ -2945,7 +3010,15 @@ fn branch_distinct_values(
     }
     match patterns.len() {
         1 => single_pattern_distinct(graph, &patterns[0], pvar, seen),
-        2 => two_pattern_distinct(graph, &patterns, pvar, seen, anchor_cache),
+        2 => two_pattern_distinct(
+            graph,
+            &patterns,
+            pvar,
+            seen,
+            anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
+        ),
         _ => Ok(None),
     }
 }
@@ -2984,6 +3057,7 @@ fn two_pattern_distinct(
     pvar: &Variable,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (idp0, pv0, uns0) = prepare_pattern(graph, &patterns[0])?;
     let (idp1, pv1, uns1) = prepare_pattern(graph, &patterns[1])?;
@@ -2998,6 +3072,8 @@ fn two_pattern_distinct(
             *ppos,
             seen,
             anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
         ),
         ([], [ppos]) => probe_anchor_distinct(
             graph,
@@ -3006,6 +3082,8 @@ fn two_pattern_distinct(
             *ppos,
             seen,
             anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
         ),
         _ => Ok(None),
     }
@@ -3047,6 +3125,110 @@ fn cached_anchor_ids(
     let set = std::rc::Rc::new(AnchorSet { hash, sorted });
     cache.insert(key, set.clone());
     Some(set)
+}
+
+/// [FABLE-5] (sq-jnb1e) Per-pushdown cache of anchor PREDICATE-INCIDENCE sets, keyed by the
+/// anchor membership set (identified by the anchor's prepared id-pattern + join position) and
+/// the probe's canonical JOIN position (0=subject, 2=object; a predicate never joins). The
+/// value is `Some(set)` where `set` is exactly the predicates that relate SOME anchor member
+/// at that position, or `None` when the set could not be computed (budget / overlay / no built
+/// permutation) — cached so the two q09 branches never recompute the same incidence.
+#[cfg(feature = "cs-anchor-incidence")]
+type IncidenceCache = FxHashMap<(IdPattern, usize, usize), Option<std::rc::Rc<FxHashSet<Id>>>>;
+
+/// [FABLE-5] (sq-jnb1e) The set of predicates that relate ANY anchor member at the probe's
+/// canonical join position `probe_jpos` (0=subject or 2=object) — a characteristic-set-style
+/// incidence summary. Computed by ONE range-restricted scan over the anchor's id window: the
+/// permutation sorted by `probe_jpos` groups triples by that column, so restricting to
+/// `[a_min, a_max]` (every anchor member lies in that window) and, for each row whose join
+/// value is an actual anchor member, recording its predicate, yields exactly
+/// `{ predicate(t) : t is a triple with t[probe_jpos] ∈ anchor }`.
+///
+/// SOUNDNESS. This set is EXACT on the base index: a predicate P is in it iff some triple uses
+/// P with an anchor member at `probe_jpos`, i.e. iff the (anchor ⋈ probe-on-P) branch is
+/// non-empty. So `P ∉ set` ⇒ that branch contributes no solution ⇒ P can be pruned WITHOUT
+/// scanning P's block, and `P ∈ set` still takes the exact per-block scan. Pruning only
+/// provably-empty checks makes the DISTINCT answer identical to the block-scan path.
+///
+/// Returns `None` (caller keeps the exact block scan for every P) when:
+/// * the graph carries a pending-update overlay — the derived set is built against the base
+///   index only, and incremental maintenance is out of scope, so we DECLINE conservatively
+///   rather than risk a stale prune;
+/// * `probe_jpos` is the predicate slot (1) — a predicate never joins to the anchor here;
+/// * no permutation sorted by `probe_jpos` is built (e.g. the compact wasm index);
+/// * the scan exceeds the query budget.
+#[cfg(feature = "cs-anchor-incidence")]
+fn anchor_probe_incidence(
+    graph: &Graph,
+    anchor: &AnchorSet,
+    probe_jpos: usize,
+) -> Option<FxHashSet<Id>> {
+    // Conservative invalidation: a delta-overlay means the base-index incidence may be stale
+    // (an inserted triple could add a predicate; a deleted one could remove the last member
+    // relation). We do not maintain the set incrementally, so decline and let the exact scan
+    // (which reads the overlay-merged rows) answer every candidate.
+    if graph.store.has_overlay() {
+        return None;
+    }
+    if probe_jpos == 1 || anchor.sorted.is_empty() {
+        return None;
+    }
+    let (a_min, a_max) = (anchor.sorted[0], anchor.sorted[anchor.sorted.len() - 1]);
+    // A permutation whose FIRST column is `probe_jpos` so the anchor id window is one
+    // contiguous range and the predicate sits at a fixed column. Bind nothing; sort by the
+    // join column. `scan_sorted` picks such a perm when built; if the chosen perm is not
+    // actually led by `probe_jpos`, we cannot range-restrict soundly — decline.
+    let all_unbound: IdPattern = [None, None, None];
+    let scan = graph.store.scan_sorted(&all_unbound, probe_jpos);
+    let order = scan.perm.order();
+    if order[0] != probe_jpos {
+        return None;
+    }
+    // Predicate lives at whichever column of this perm is canonical position 1.
+    let pk = order.iter().position(|&c| c == 1)?;
+    let jk = 0usize; // join column is the leading column (== probe_jpos)
+    let rows = scan.rows.as_ref();
+    // Restrict to the anchor id window `[a_min, a_max]` with two binary searches: rows outside
+    // it can never carry an anchor member at the join column, so they cannot contribute a
+    // predicate to the incidence set.
+    let lo = rows.partition_point(|r| r[jk] < a_min);
+    let hi = rows.partition_point(|r| r[jk] <= a_max);
+    let window = &rows[lo..hi];
+    let mut inc: FxHashSet<Id> = FxHashSet::default();
+    for (n, r) in window.iter().enumerate() {
+        if n & 4095 == 0 && budget::exhausted(inc.len()) {
+            return None;
+        }
+        // Only rows whose join value is an ACTUAL anchor member contribute (the window can
+        // include non-member ids that merely fall inside `[a_min, a_max]`).
+        if anchor.hash.contains(&r[jk]) {
+            inc.insert(r[pk]);
+        }
+    }
+    Some(inc)
+}
+
+/// [FABLE-5] (sq-jnb1e) The predicate-incidence set for `(anchor, probe_jpos)`, memoised in
+/// `cache`. Keyed by the anchor identity (`anchor_ip` + `anchor_jpos`) and the probe join
+/// position, so q09's two branches share one computation per position. The cached value is an
+/// `Option` (a computed-and-failed decline is cached too, so a second branch on the same
+/// position does not retry a scan that already declined).
+#[cfg(feature = "cs-anchor-incidence")]
+fn cached_incidence(
+    graph: &Graph,
+    anchor_ip: &IdPattern,
+    anchor_jpos: usize,
+    anchor: &AnchorSet,
+    probe_jpos: usize,
+    cache: &mut IncidenceCache,
+) -> Option<std::rc::Rc<FxHashSet<Id>>> {
+    let key = (*anchor_ip, anchor_jpos, probe_jpos);
+    if let Some(v) = cache.get(&key) {
+        return v.clone();
+    }
+    let computed = anchor_probe_incidence(graph, anchor, probe_jpos).map(std::rc::Rc::new);
+    cache.insert(key, computed.clone());
+    computed
 }
 
 /// [FABLE-5] (sq-7d3dj.30.10) The "pattern-trick" strategy for the loose semi-join: iterate
@@ -3152,6 +3334,7 @@ fn probe_anchor_distinct(
     ppos: usize,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (probe_ip, probe_pv, probe_uns) = probe;
     let (anchor_ip, anchor_pv, anchor_uns) = anchor;
@@ -3215,6 +3398,30 @@ fn probe_anchor_distinct(
     debug_assert_eq!(scan.perm.order()[kp], ppos);
     debug_assert_eq!(scan.perm.order()[jk], jpos);
     let rows = scan.rows.as_ref();
+    // [FABLE-5] (sq-jnb1e) OPT-IN characteristic-set anchor-incidence prune. When the probe
+    // pattern constrains ONLY the projected predicate and the join variable (every other
+    // position free — the q09 shape `?subject ?predicate ?person` / `?person ?predicate
+    // ?object`), a candidate predicate `pv_id` qualifies iff it relates SOME anchor member at
+    // the join position — exactly the precomputed incidence set. A `pv_id` NOT in that set is
+    // pruned by an O(1) membership test instead of the clip+gallop block scan. The prune is
+    // sound ONLY when the probe has no OTHER bound position (else a predicate could relate an
+    // anchor member on a DIFFERENT triple than the one satisfying the bound constraint); we
+    // decline the incidence set otherwise and every candidate takes the exact scan.
+    #[cfg(feature = "cs-anchor-incidence")]
+    let incidence: Option<std::rc::Rc<FxHashSet<Id>>> = {
+        // "Bound only P and J" ⇔ the probe id-pattern binds no position (both P and J are
+        // variables, so a bound slot would be the third position).
+        let probe_only_pj = probe_ip.iter().all(|s| s.is_none());
+        if anchor_incidence::enabled() && probe_only_pj {
+            let inc = cached_incidence(graph, anchor_ip, anchor_jpos, &a, jpos, incidence_cache);
+            if inc.is_some() {
+                anchor_incidence::note_built();
+            }
+            inc
+        } else {
+            None
+        }
+    };
     let mut out: Vec<Id> = Vec::new();
     let mut scanned = 0usize;
     let mut i = 0usize;
@@ -3231,6 +3438,19 @@ fn probe_anchor_distinct(
         // Already emitted by an earlier branch — no re-check needed.
         if seen.contains(&pv_id) {
             continue;
+        }
+        // [FABLE-5] (sq-jnb1e) Incidence prune: when the precomputed set is available and does
+        // NOT contain this predicate, the (anchor ⋈ probe-on-`pv_id`) branch is provably empty
+        // — skip the whole block WITHOUT the clip+gallop scan (one metadata consultation counts
+        // as one unit of examination). A `pv_id` IN the set falls through to the exact block
+        // scan below, so the emitted answer is bit-for-bit identical to the feature-off path.
+        #[cfg(feature = "cs-anchor-incidence")]
+        if let Some(inc) = incidence.as_ref() {
+            if !inc.contains(&pv_id) {
+                scanned += 1;
+                anchor_incidence::note_pruned(1);
+                continue;
+            }
         }
         // The block is join-variable-sorted, so its join range is [first, last]. When that
         // range is DISJOINT from the anchor set's id range, no anchor member can occur in
@@ -5191,7 +5411,13 @@ fn extract_sargable(graph: &Graph, e: &Expression) -> Option<(Variable, ScanCmp)
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
-                let v: f64 = parse_xsd_f64(l.value())?;
+                // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant (`numeric_cache_f64`).
+                // A datatype-ill-formed threshold (`"1.5"^^xsd:integer`) yields `None`, so
+                // `extract_sargable` DECLINES the numeric fast path and the FILTER takes the
+                // exact general comparison — which type-errors the ill-formed constant,
+                // matching the reference semantics (a sargable f64 threshold would instead
+                // compare against it, over-including).
+                let v: f64 = numeric_cache_f64(l)?;
                 // A threshold f64 can't represent precisely (> 15 significant digits —
                 // large integers or high-precision decimals) makes the sargable f64 scan
                 // unsafe; decline so the filter takes the exact general comparison path.
@@ -11302,7 +11528,10 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
                 graph.numeric_value(id)
             }
         }
-        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-6b1lj: the CONSTANT operand is datatype-aware/trimmed too
+        // (`numeric_cache_f64`), so a datatype-ill-formed literal constant (`"1.5"^^xsd:integer`)
+        // is a type error on this fast comparison path exactly as the graph-term side is.
+        Literal(l) => numeric_cache_f64(l),
         Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
         Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
         Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
@@ -11411,7 +11640,8 @@ fn eval_compiled_numeric(graph: &Graph, local: &LocalVocab, row: &[Id], e: &Comp
             let id = row[c];
             if id == NO_ID { None } else if is_local(id) { local.numeric(id) } else { graph.numeric_value(id) }
         }
-        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant, matching `eval_numeric`.
+        Literal(l) => numeric_cache_f64(l),
         Add(a, d) => Some(eval_compiled_numeric(graph, local, row, a)? + eval_compiled_numeric(graph, local, row, d)?),
         Subtract(a, d) => {
             Some(eval_compiled_numeric(graph, local, row, a)? - eval_compiled_numeric(graph, local, row, d)?)
@@ -11889,16 +12119,19 @@ fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        // [OPUS-4.8] sq-rkzhr: route the lexical→f64 arm through `parse_xsd_f64` (the SAME
-        // parser the exact/typed `as_numeric` path uses) instead of Rust's `str::parse::<f64>`.
-        // Two reasons, both about keeping this LENIENT `as_f64` seam in lock-step with the
-        // exact `as_numeric` one that the sq-rikm7 `exact_cmp` recheck drives: (a) it accepts
-        // the XSD specials `INF`/`+INF`/`-INF`/`NaN`; (b) it REJECTS the non-XSD spellings
-        // Rust's parser also swallows (`inf`/`infinity`/`nan`), which `as_numeric` already
-        // rejects. Before this the two paths disagreed on those spellings, so a numeric compare
-        // could succeed via `as_f64` yet find no exact recheck value — the f64-collapse
-        // asymmetry sq-rikm7 set out to remove.
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-74oy4 / sq-6b1lj: route the lexical→f64 arm through the DATATYPE-AWARE
+        // `numeric_cache_f64` — the SAME acceptance the graph `numeric_value` cache and
+        // `LocalVocab::intern` use. This keeps the lenient relational `<`/`>` seam in lock-step
+        // with the equality reference `Num::of_literal` on BOTH residuals sq-9781x left open:
+        // (a) whitespace — the value is TRIMMED (XSD `collapse` facet), so a padded
+        // `" 1"^^xsd:integer` is value-1 on `<`/`>` exactly as it is on `=` (was: type-error
+        // on `<`/`>`, cache-miss, but value-1 on `=` via the trimming cache); (b) per-datatype
+        // well-formedness — a lexical ill-formed FOR its datatype (`"1.5"^^xsd:integer`,
+        // `"1E2"^^xsd:decimal`, an i128-overflow decimal) is `None` here, a type error on
+        // `<`/`>` matching `of_literal` (was: compared as f64). The XSD f64 SPELLINGS
+        // (INF/+INF/-INF/NaN yes; Rust-only inf/infinity/nan no) are still enforced by the
+        // underlying `parse_xsd_f64` image.
+        Value::Term(Term::Literal(l)) => numeric_cache_f64(l),
         _ => None,
     }
 }
@@ -11909,6 +12142,30 @@ fn is_numeric_dt(l: &Literal) -> bool {
         || dt == xsd::DECIMAL.as_str()
         || dt == xsd::DOUBLE.as_str()
         || dt == xsd::FLOAT.as_str()
+}
+
+/// The DATATYPE-AWARE cached/lenient f64 of a numeric literal, matching the graph's
+/// `Graph::numeric_value` cache acceptance (sparq-core `cached_numeric_f64`): `Some` iff the
+/// lexical is well-formed FOR ITS DATATYPE (`Num::of_literal` accepts it), imaged by the
+/// shared `parse_xsd_f64` on the TRIMMED lexical so the value is bit-identical to what the
+/// graph cache and `LocalVocab::intern` store for the same term. `None` (a datatype-ill-formed
+/// lexical like `"1.5"^^xsd:integer`, or a non-numeric) is a SPARQL type error.
+///
+/// [FABLE-5] (sq-74oy4 / sq-6b1lj) This is the single acceptance the lenient relational seam
+/// (`as_num`/`as_f64`), the local-vocab numeric cache (`LocalVocab::intern`), and the graph
+/// cache now all share — closing the pre-fix asymmetry where `as_num`/`intern` parsed
+/// datatype-agnostically (and un-trimmed) while `Num::of_literal` (the equality reference)
+/// did not, so a padded or per-datatype-ill-formed lexical compared numerically on `<`/`>`
+/// yet type-errored on `=`. Acceptance is gated on `Num::of_literal` (the strictest, so the
+/// datatype rules can never drift); the f64 image is `parse_xsd_f64` (every lexical
+/// `of_literal` accepts, `parse_xsd_f64` also accepts, for the same value).
+#[inline]
+fn numeric_cache_f64(l: &Literal) -> Option<f64> {
+    if is_numeric_dt(l) && Num::of_literal(l).is_some() {
+        parse_xsd_f64(l.value().trim())
+    } else {
+        None
+    }
 }
 
 // [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the engine implements the substrate's
@@ -11931,15 +12188,15 @@ impl CompareTerm for Value {
     }
     #[inline]
     fn literal_kind(&self) -> LiteralKind {
-        // [FABLE-5] sq-wjl8i: the kind-first rank of the total order. Numeric tracks the
-        // LENIENT `as_num` membership (the same set the numeric arm compares), so a
-        // lexical the exact classifier rejects but `parse_xsd_f64` accepts (e.g.
-        // "1.5"^^xsd:integer) still sorts numerically, exactly as it did pre-fix — with
-        // one exception: a computed boolean (whose lenient f64 view is 0.0/1.0)
-        // classifies as Boolean, keeping it in one kind with boolean LITERALS (both
-        // order `false < true` via `strict_cmp`). ILL-FORMED numeric/temporal lexicals
-        // classify as Other (lexical order): a kind mixing value-ordered and
-        // lexical-fallback pairs is intransitive — the very bug this rank removes.
+        // [FABLE-5] sq-wjl8i / sq-74oy4: the kind-first rank of the total order. Numeric
+        // tracks the `as_num` membership (the same set the numeric arm compares), which is
+        // now DATATYPE-AWARE (sq-74oy4): a lexical ill-formed FOR its datatype (e.g.
+        // "1.5"^^xsd:integer) is NOT numeric here and classifies as Other (lexical order) —
+        // matching `of_literal` and keeping the Numeric kind purely value-ordered (a kind
+        // mixing value-ordered and type-error pairs is intransitive — the very bug this rank
+        // removes; pre-sq-74oy4 the lenient `as_num` wrongly kept such a lexical Numeric).
+        // A computed boolean (whose f64 view is 0.0/1.0) classifies as Boolean, keeping it in
+        // one kind with boolean LITERALS (both order `false < true` via `strict_cmp`).
         match lit_kind(self) {
             LitKind::Bool(_) => LiteralKind::Boolean,
             LitKind::Num(_) if as_num(self).is_some() => LiteralKind::Numeric,
@@ -16432,6 +16689,29 @@ mod f64_collapse_order_agreement {
                 as_numeric(&dbl(s)).is_some(),
                 "as_num / as_numeric disagree on the validity of {:?}",
                 s
+            );
+        }
+
+        // [FABLE-5] sq-74oy4 / sq-6b1lj: the alignment now extends to PER-DATATYPE
+        // well-formedness AND whitespace. `as_num` is datatype-aware and trimming, so it
+        // agrees with `as_numeric` (`Num::of_literal`) on integer/decimal lexicals too — a
+        // padded lexical is its trimmed value; a lexical ill-formed FOR its datatype is None.
+        let ints = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::INTEGER)));
+        let decs = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DECIMAL)));
+        assert_eq!(as_num(&ints(" 1 ")), Some(1.0), "padded integer trims to 1");
+        assert_eq!(as_num(&decs(" 1.5 ")), Some(1.5), "padded decimal trims to 1.5");
+        assert_eq!(as_num(&ints("1.5")), None, "fraction on integer is a type error");
+        assert_eq!(as_num(&ints("1E2")), None, "exponent on integer is a type error");
+        assert_eq!(as_num(&decs("1E2")), None, "exponent on decimal is a type error");
+        // Every one agrees with the exact `as_numeric` seam.
+        for (v, _lbl) in [
+            (ints(" 1 "), "padded int"), (decs(" 1.5 "), "padded dec"),
+            (ints("1.5"), "int fraction"), (ints("1E2"), "int exp"), (decs("1E2"), "dec exp"),
+        ] {
+            assert_eq!(
+                as_num(&v).is_some(),
+                as_numeric(&v).is_some(),
+                "as_num / as_numeric disagree on datatype-aware validity"
             );
         }
     }

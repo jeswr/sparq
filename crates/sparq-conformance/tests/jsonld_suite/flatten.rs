@@ -1,47 +1,56 @@
-//! [FABLE-5] sq-oy1f.40 — the W3C JSON-LD 1.1 `flatten` lane runner (split out of
-//! the former monolithic `tests/jsonld_suite.rs`; behaviour byte-identical). The
-//! `flatten` category keeps the RDF-equivalence oracle over the shipping writer
-//! (`graph_to_jsonld(JsonLdForm::Flattened)`); the native flatten algorithm is a
-//! separate deferred bead.
+//! [FABLE-5] sq-oy1f.26 — the W3C JSON-LD 1.1 `flatten` lane runner. Moved to
+//! the NATIVE DOCUMENT-LEVEL oracle (`sparq_jsonld::flatten()` + `json_ld_equal`),
+//! matching the `expand` lane (sq-kk1mq). The former RDF-equivalence oracle over
+//! the shipping writer is retired here: the native Flattening Algorithm
+//! (JSON-LD 1.1 API §7.1, bead sq-oy1f.26) produces the flattened document
+//! directly, so the oracle compares against the suite's NORMATIVE expected
+//! document rather than round-tripping through RDF.
 
 use super::common::*;
-use sparq_core::Graph;
+// [FABLE-5] sq-oy1f.26 — native flatten() for the document-level flatten oracle.
+use sparq_jsonld::{flatten as jsonld_flatten, JsonLdOptions, NoopLoader, ProcessingMode};
 use std::path::Path;
 
-/// [OPUS-4.8] sq-oy1f — run a W3C JSON-LD `flatten` category against the
-/// ALREADY-SHIPPING native writer (`graph_to_jsonld(graph, form)`, the
-/// `serialize-rdf` feature). `form` = `JsonLdForm::Flattened` for `flatten`.
+/// [FABLE-5] sq-oy1f.26 — run the W3C JSON-LD `flatten` category with the NATIVE
+/// DOCUMENT-LEVEL oracle: call `sparq_jsonld::flatten()` directly on the input
+/// document and deep-compare the result to the suite's expected flattened
+/// document via `json_ld_equal`.
 ///
-/// ## Pipeline (the REAL writer path)
+/// ## Pipeline (the native flatten path)
 ///
-/// 1. Parse the case `input` (`.jsonld`) → RDF via the real oxjsonld ingest path
-///    (`parse_jsonld_dataset`).
-/// 2. Re-emit that dataset as N-Quads and load it into a sparq [`Graph`]
-///    (preserving named graphs) — the writer takes a `Graph`, not a JSON-LD doc,
-///    because sparq's expand/flatten OUTPUT is a projection of RDF (exactly the
-///    bridge `compact::run_compact` / `frame::run_frame` use).
-/// 3. Run `graph_to_jsonld(&graph, form)` — the shipping writer, NOT a stub.
-/// 4. **Invariant (normative answer-equivalence):** re-parse BOTH sparq's output
-///    AND the suite's NORMATIVE expected document (`*-out.jsonld`) to canonical
-///    [`Dataset`]s and require they are equal:
-///    `reparse(write(D, form)) ≡ reparse(expected)`. Flattening is a JSON-LD normal
-///    form (it merges nodes), so the oracle anchors on the W3C-expected document,
-///    NOT the input — the same posture as the frame lane. This is
-///    envelope-insensitive and value-faithful while NOT requiring sparq's JSON
-///    layout to match byte-for-byte.
+/// 1. Parse the case `input` (`.jsonld`) as a `sparq_jsonld::Json` AST — the
+///    flattener's native input type.
+/// 2. Build `JsonLdOptions` from the manifest entry (`base`,
+///    `processingMode`/`specVersion`).
+/// 3. Call `sparq_jsonld::flatten(&input_json, &opts, &NoopLoader)` (which expands
+///    then flattens). Remote `@context` / `@import` references raise `loading
+///    document failed` from the `NoopLoader` (deny-by-default).
+/// 4. Convert the `Result<Json, JsonLdError>` output to a `serde_json::Value` by
+///    writing and re-parsing (no structural loss — both ASTs are JSON).
+/// 5. Parse the suite's expected document as a `serde_json::Value`.
+/// 6. Compare with `json_ld_equal` (object key order insignificant; array order
+///    significant only inside `@list`; integers compared exactly, non-integral
+///    numbers compared as f64 so `1` ≡ `1.0`).
 ///
 /// ## Honest SKIP buckets (recorded, not passed, not failed) — see the `flatten` floor
-pub fn run_expand_or_flatten(
-    root: &Path,
-    cat: &str,
-    form: sparq_engine::serialize::JsonLdForm,
-) -> Score {
-    use sparq_engine::serialize::graph_to_jsonld;
+///
+/// * `requires` optional-feature cases (same as all other lanes).
+/// * NegativeEvaluationTests — flattener error-code completeness is unverified;
+///   deferred to a child bead of sq-oy1f. SKIP (honest), never a counted pass.
+/// * JSON-LD-1.0-only positives (processing-mode shape differences a 1.1 processor
+///   is not obliged to reproduce). SKIP.
+/// * Remote `input` URL — no network.
+/// * No `expect` file — nothing to compare.
+/// * A `context` member (post-flatten compaction to `{ "@context": …, "@graph": … }`)
+///   — document-level Compaction is a SEPARATE bead (sq-oy1f.27); the flatten lane
+///   emits the expanded flattened form only, so a compaction case is SKIPPED here
+///   (it becomes a pass once compaction composes onto this output).
+pub fn run_flatten_native(root: &Path) -> Score {
     let mut s = Score::default();
-    let entries = match read_manifest(root, cat) {
+    let entries = match read_manifest(root, "flatten") {
         Ok(e) => e,
         Err(why) => {
-            s.fail(&format!("{cat}-manifest"), why);
+            s.fail("flatten-manifest", why);
             return s;
         }
     };
@@ -50,18 +59,22 @@ pub fn run_expand_or_flatten(
             s.skip();
             continue;
         }
-        // NegativeEvaluationTest: sparq's writer is TOTAL and does not raise the
-        // spec's expansion/flattening errors, so a faithful 1.1 writer cannot
-        // "pass" by rejecting — SKIP (honest), never a counted pass.
+        // NegativeEvaluationTests: flattener raises some errors but error-code
+        // completeness is unverified — SKIP honestly (deferred).
         if e.is_negative {
             s.skip();
             continue;
         }
-        // JSON-LD-1.0-only positives (processing-mode shape differences a 1.1
-        // writer is not obliged to reproduce): SKIP.
+        // JSON-LD-1.0-only positives — SKIP.
         if e.spec_version.as_deref() == Some("json-ld-1.0")
             || e.processing_mode.as_deref() == Some("json-ld-1.0")
         {
+            s.skip();
+            continue;
+        }
+        // A compaction `context` member routes through document-level Compaction
+        // (bead sq-oy1f.27), not yet composed here — SKIP.
+        if e.context.is_some() {
             s.skip();
             continue;
         }
@@ -69,87 +82,82 @@ pub fn run_expand_or_flatten(
             s.skip();
             continue;
         };
-        // Remote input (no network) — guard (the toRdf lane already gates ingest).
+        // Remote input (no network) — guard.
         if e.input.starts_with("http://") || e.input.starts_with("https://") {
             s.skip();
             continue;
         }
 
-        // 1. Parse the input JSON-LD → RDF (the source dataset). An input the
-        //    real oxjsonld path rejects, or `option`-driven cases the writer does
-        //    not apply (e.g. `expandContext`), produce RDF that legitimately
-        //    differs from `expected`; those that fail to parse are SKIPPED (out of
-        //    the gated surface), those that parse but diverge are honest FAILs.
+        // 1. Read and parse the input document as sparq_jsonld::Json.
         let input_path = root.join(&e.input);
         let in_text = match std::fs::read_to_string(&input_path) {
             Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("read input: {why}"));
+                s.fail(&e.id, format!("read input: {}", why));
                 continue;
             }
         };
+        let input_json = match sparq_jsonld::Json::parse(&in_text) {
+            Ok(j) => j,
+            Err(why) => {
+                s.fail(&e.id, format!("parse input JSON: {}", why));
+                continue;
+            }
+        };
+
+        // 2. Build JsonLdOptions from the manifest entry.
         let base = doc_base(e);
-        let input_ds = match parse_jsonld_dataset(&in_text, &base) {
-            Ok(ds) => ds,
-            Err(_) => {
-                s.skip();
-                continue;
-            }
+        let processing_mode = match (e.processing_mode.as_deref(), e.spec_version.as_deref()) {
+            (Some("json-ld-1.0"), _) | (_, Some("json-ld-1.0")) => ProcessingMode::JsonLd10,
+            _ => ProcessingMode::JsonLd11,
         };
-        // No triples → nothing to project; the round-trip is vacuous. SKIP.
-        if input_ds.is_empty() {
-            s.skip();
-            continue;
-        }
+        // JsonLdOptions is #[non_exhaustive] — build via default() + field mutation.
+        let mut opts = JsonLdOptions::default();
+        opts.base = Some(base.clone());
+        opts.processing_mode = processing_mode;
 
-        // 2. Load the input RDF into a sparq Graph (named graphs preserved) and
-        //    run the REAL shipping writer in the requested form.
-        let nq = dataset_to_nquads(&input_ds);
-        let graph = match Graph::load_dataset(&nq, "nquads") {
-            Ok(g) => g,
+        // 3. Call the native flatten() algorithm (a remote-context input raises from
+        //    the NoopLoader — those cases surface as an honest FAIL below, matching
+        //    the expand lane's posture).
+        let flattened = match jsonld_flatten(&input_json, &opts, &NoopLoader) {
+            Ok(j) => j,
             Err(why) => {
-                s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                s.fail(&e.id, format!("flatten() error: {}", why));
                 continue;
             }
         };
-        let out_doc = graph_to_jsonld(&graph, form);
 
-        // 3. Re-parse sparq's output and the suite's NORMATIVE expected document,
-        //    require RDF-dataset equivalence (the normative answer-equivalence
-        //    invariant).
-        let got = match jsonld_to_canonical_dataset(&out_doc, &base) {
-            Ok(ds) => ds,
+        // 4. Convert the flatten() output to serde_json::Value.
+        let got = match sparq_json_to_serde(&flattened) {
+            Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("re-parse {cat} output: {why}"));
+                s.fail(&e.id, format!("convert flatten output: {}", why));
                 continue;
             }
         };
+
+        // 5. Read and parse the expected document.
         let expect_path = root.join(expect_rel);
         let exp_text = match std::fs::read_to_string(&expect_path) {
             Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("read expect: {why}"));
+                s.fail(&e.id, format!("read expect: {}", why));
                 continue;
             }
         };
-        let want = match jsonld_to_canonical_dataset(&exp_text, &base) {
-            Ok(ds) => ds,
+        let want = match serde_json::from_str::<serde_json::Value>(&exp_text) {
+            Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("re-parse expected output: {why}"));
+                s.fail(&e.id, format!("parse expect JSON: {}", why));
                 continue;
             }
         };
-        if got == want {
+
+        // 6. Document-level JSON-LD equality (same comparator as the expand lane).
+        if json_ld_equal(&got, &want) {
             s.pass();
         } else {
-            s.fail(
-                &e.id,
-                format!(
-                    "{cat} RDF != expected RDF ({} vs {} quads)",
-                    got.len(),
-                    want.len()
-                ),
-            );
+            s.fail(&e.id, format!("flatten JSON mismatch for {}", e.id));
         }
     }
     s

@@ -34,6 +34,11 @@ mmap = ["sparq-core/mmap"]
 # runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
 dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
+# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` so `save ... compressed` (and
+# `recompress`) honour `SPARQ_EMIT_FORMAT=v2` to write the SPQCPRM2 frame-of-reference on-disk
+# format. OFF by default (the default CLI emits SPQCPRM1 bit-for-bit); enabling it is how the
+# real-data B/triple comparison writes both formats from the same corpus.
+spqcprm2 = ["sparq-core/spqcprm2"]
 # [OPUS-4.8] (sq-oy1f.4, epic sq-oy1f) `jsonld` — JSON-LD ingest + re-serialisation, DEFAULT ON
 # (maintainer-directed exception to opt-in-by-default; see `default` above). Forwards
 # `sparq-core/jsonld` (the `oxjsonld` parser `dump <file> jsonld …` / `load <file> jsonld` use to
@@ -80,6 +85,12 @@ terse = ["dep:sparq-terse"]
 # none of the fast-path machinery and is behaviour-identical). Enable to bench the fast path, e.g.
 # `cargo build --release -p sparq-cli --features id-filter-fastpath`.
 id-filter-fastpath = ["sparq-engine/id-filter-fastpath"]
+# [FABLE-5] (sq-jnb1e) Forward sparq-engine's opt-in `cs-anchor-incidence` — the
+# characteristic-set anchor-incidence prune for the DISTINCT predicate-projection semijoin
+# (SP2Bench q09). OFF by default (the default CLI build carries none of the incidence
+# machinery and is behaviour-identical). Enable to bench the prune, e.g.
+# `cargo build --release -p sparq-cli --features cs-anchor-incidence`.
+cs-anchor-incidence = ["sparq-engine/cs-anchor-incidence"]
 # [FABLE-5] (sq-7d3dj.30.21) Forward sparq-engine's opt-in `topk-lazy-strkey` — the lazy
 # string-literal collation key for the top-k ORDER BY selection path (an ORDER-BY on a plain
 # `xsd:string` column + LIMIT builds a zero-allocation id-carrying sort key instead of

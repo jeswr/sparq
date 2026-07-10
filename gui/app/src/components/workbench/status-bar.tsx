@@ -105,7 +105,7 @@ export function StatusBar() {
     ingest,
     nativeLoaderAvailable,
   } = useEngine();
-  const { backend } = useWorkspace();
+  const { backend, saveError } = useWorkspace();
 
   // [OPUS-4.8] sq-cno90 — PREFER the OS-reported on-disk figure when the desktop probe returned one;
   // otherwise fall back to the snapshot-bytes estimate (the web target). Labelled honestly either
@@ -135,6 +135,15 @@ export function StatusBar() {
         loader: <span className="text-[var(--success)]">{nativeLoaderAvailable ? "native" : "in-tab"}</span>
       </span>
       <span title="Where the workspace persists">backend: {backendLabel(backend)}</span>
+
+      {/* (sq-w3dmj) A failed workspace save is SURFACED, not swallowed — e.g. the localStorage
+          quota exhausted by a large snapshot. Without this the app keeps its in-memory state but
+          the on-launch restore silently reloads an older snapshot. */}
+      {saveError !== null && (
+        <span className="text-destructive" title={saveError} data-workspace-save-error>
+          save failed — workspace not persisted
+        </span>
+      )}
 
       {/* push the #820 stats to the right edge. */}
       <span className="ml-auto" />
