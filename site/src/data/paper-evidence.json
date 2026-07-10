@@ -61,13 +61,18 @@
       "note": "Deterministic decision rule (not a measured latency): pre-filter is chosen iff m*scatter_penalty <= n, i.e. with the default scatter_penalty 2.0, iff the mask admits <= half the store. Whichever branch is picked the returned top-k is identical, so a mis-estimate costs throughput, never correctness."
     },
     "conformance.geosparql_topology_floor": {
-      "value": 119,
+      "value": 197,
       "unit": "passing-assertions",
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
       "family": "OGC GeoSPARQL",
       "source": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs::OGC_RATCHET_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
-      "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE. Deterministic and machine-independent (a const a test asserts), not a timing."
+      "binding": {
+        "kind": "rust-anchor",
+        "file": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
+        "anchor": "OGC_RATCHET_FLOOR"
+      },
+      "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE (raised 119 -> 158 -> 197 as coverage grew). Deterministic and machine-independent (a const a test asserts), not a timing."
     },
     "conformance.sparql_floor": {
       "value": 1229,
@@ -144,49 +149,74 @@
       "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL, Solid WAC decision parity, Solid ACP decision parity)."
     },
     "memsafety.unsafe_sites_total": {
-      "value": 59,
+      "value": 76,
       "unit": "unsafe-sites",
       "environment": "canonical",
       "kind": "unsafe-count-ratchet-ceiling",
       "family": "memory-safety attestation",
       "source": "bench/unsafe-snapshot.json::total (enforced by scripts/unsafe-gate.py --check; CI job 'unsafe-register (count ratchet)' in .github/workflows/ci.yml; per-site rows in compliance/memsafety/unsafe-register.md)",
+      "binding": {
+        "kind": "json-pointer",
+        "file": "bench/unsafe-snapshot.json",
+        "pointer": "/total"
+      },
       "note": "Total first-party unsafe sites across the whole crates/ workspace, as counted by a deterministic comment-/string-stripped keyword scan (scripts/unsafe-gate.py). This is a CI-ENFORCED RATCHET CEILING: the gate fails a PR whose live count RISES above this snapshot without a matching register row + a // SAFETY: comment + a re-seed; smaller is always allowed. Deterministic and machine-independent (a source scan over committed code, not a timing). It is a COUNT/COVERAGE discipline, NOT a proof of memory safety — it bounds and documents the unsafe surface, it does not prove the absence of undefined behaviour."
     },
     "memsafety.unsafe_crates": {
-      "value": 5,
+      "value": 7,
       "unit": "crates",
       "environment": "canonical",
       "kind": "unsafe-surface-partition",
       "family": "memory-safety attestation",
-      "source": "bench/unsafe-snapshot.json::crates (keys: sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench); accounting in compliance/memsafety/evidence.md MS-1",
-      "note": "Number of first-party crates that contain ANY unsafe code. Deterministic: the unsafe surface is confined to exactly these five crates; the snapshot carries a per-crate count for each, and a new unsafe block anywhere else fails to compile (forbid(unsafe_code)). Machine-independent partition of the workspace, not a measurement."
+      "source": "bench/unsafe-snapshot.json::crates (keys: sparq-core, sparq-vectors, sparq-engine, sparq-py, sparq-cli, sparq-zk-compose, sparq-bench); accounting in compliance/memsafety/evidence.md MS-1",
+      "binding": {
+        "kind": "doc-anchor",
+        "file": "compliance/memsafety/evidence.md",
+        "quote": "**7** are unsafe-bearing"
+      },
+      "note": "Number of first-party crates carrying at least one counted unsafe site in bench/unsafe-snapshot.json. Two of the seven (sparq-engine, sparq-py) ALSO carry a source forbid(unsafe_code): sparq-engine's counted sites are TEST-ONLY (a bench allocator that compiles as a separate crate the crate-root forbid does not cover) and sparq-py's are arrow-feature-gated (conditional forbid). The count is a machine-independent partition of the workspace, not a measurement. NOTE: doc-anchor is existence-strength only (the quote must be present verbatim in evidence.md — it does not parse the number); the snapshot key count is the machine source of truth."
     },
     "memsafety.forbid_crates": {
-      "value": 30,
+      "value": 43,
       "unit": "crates",
       "environment": "canonical",
       "kind": "unsafe-surface-partition",
       "family": "memory-safety attestation",
-      "source": "compliance/memsafety/evidence.md MS-1 (grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | de-duplicated by crate); 30 of 35 workspace crates",
-      "note": "Number of first-party crates carrying a crate-root #![forbid(unsafe_code)], which makes any unsafe block in that crate a COMPILE ERROR. Deterministic and machine-independent (a de-duplicated source grep over committed code). 30 forbid + 5 unsafe-bearing = 35 total workspace crates; no crate is unaccounted-for."
+      "source": "compliance/memsafety/evidence.md MS-1 (grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/.*##' | sort -u | wc -l); 43 of 52 workspace crates",
+      "binding": {
+        "kind": "doc-anchor",
+        "file": "compliance/memsafety/evidence.md",
+        "quote": "→ **43 crates** carry a `forbid(unsafe_code)` in their source"
+      },
+      "note": "Number of first-party crates carrying a source #![forbid(unsafe_code)] (42 unconditional crate-root; sparq-py is conditional — forbid without the arrow feature, deny-level with it), which makes any unsafe block in that crate a COMPILE ERROR. Deterministic and machine-independent (a de-duplicated source grep over committed code). The forbid set (43) and the unsafe-bearing set (7) OVERLAP on sparq-engine + sparq-py, so they do NOT sum to the 52 total — see evidence.md MS-1. NOTE: doc-anchor is existence-strength only (verbatim quote presence); the grep in `source` is the machine source of truth."
     },
     "memsafety.total_crates": {
-      "value": 35,
+      "value": 52,
       "unit": "crates",
       "environment": "canonical",
       "kind": "unsafe-surface-partition",
       "family": "memory-safety attestation",
-      "source": "compliance/memsafety/evidence.md MS-1 (ls -d crates/*/ | wc -l); accounting 30 forbid + 5 unsafe = 35",
-      "note": "Total first-party crates in the workspace. Deterministic structural count; the basis for the confinement accounting (30 forbid + 5 unsafe-bearing = 35, nothing unaccounted-for)."
+      "source": "compliance/memsafety/evidence.md MS-1 (ls -d crates/*/ | wc -l)",
+      "binding": {
+        "kind": "doc-anchor",
+        "file": "compliance/memsafety/evidence.md",
+        "quote": "ls -d crates/*/ | wc -l       # → 52 total crates"
+      },
+      "note": "Total first-party crates in the workspace. Deterministic structural count. The forbid-in-src set (43) and the unsafe-bearing set (7) overlap on sparq-engine + sparq-py and 4 crates carry neither, so the two do NOT partition the 52 cleanly — see evidence.md MS-1. NOTE: doc-anchor is existence-strength only (verbatim quote presence); the `ls -d` count in `source` is the machine source of truth."
     },
     "memsafety.unsafe_sites_core": {
-      "value": 45,
+      "value": 50,
       "unit": "unsafe-sites",
       "environment": "canonical",
       "kind": "unsafe-count-ratchet-ceiling",
       "family": "memory-safety attestation",
-      "source": "bench/unsafe-snapshot.json::crates['sparq-core']; 45 register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
-      "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 59; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
+      "source": "bench/unsafe-snapshot.json::crates['sparq-core']; register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
+      "binding": {
+        "kind": "json-pointer",
+        "file": "bench/unsafe-snapshot.json",
+        "pointer": "/crates/sparq-core"
+      },
+      "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 76-site total; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
     },
     "cozk.reaudit_lenses": {
       "value": 4,
@@ -380,22 +410,22 @@
       "note": "Number of seeds over which the grammar exclusion-list check asserts that no generated predicate contains a banned non-deterministic construct (RAND, NOW, UUID, STRUUID, BNODE, EXISTS). A deterministic range constant in the committed generate.rs test; ensures the seeded generator never produces non-reproducible predicates, making every campaign ledger entry's test case reproducible from its seed alone. [SONNET-4.6 sq-gum8.9]"
     },
     "zkarch.circuit_members": {
-      "value": 31,
+      "value": 35,
       "unit": "compiled-circuit-members",
       "environment": "canonical",
       "kind": "structural-count",
       "family": "single-prover zkSPARQL architecture",
-      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members (coverage enforced by tests/gate_count.rs::snapshot_covers_every_member)",
-      "note": "Number of compiled Noir proving members in the fixed zk/compose circuit family (the scan (k,n,r) lattice, the datatype-bucketed filter lanes, the join_eq (n_a,n_b) buckets, revocation, hidden-issuer, and the two hidden-holder members). A deterministic count over the committed, regression-gated gate-count snapshot; not a measurement. [FABLE-5 sq-3kd2g.1]"
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members (coverage enforced by tests/gate_count.rs::snapshot_covers_every_member) — count of member keys",
+      "note": "Number of compiled Noir proving members in the fixed zk/compose circuit family (the scan (k,n,r) lattice, the datatype-bucketed filter lanes, the join_eq (n_a,n_b) buckets, the path_reach members, revocation, hidden-issuer, and the two hidden-holder members). A deterministic count over the committed, regression-gated gate-count snapshot; not a measurement. Still allowlisted (unbound): a count-of-map-keys has no scalar the json-pointer tier can pin — a derived-count binding tier is F3 (sq-gum8.15) follow-up. [OPUS-4.8 sq-i6gj6: corrected 31->35 vs the live snapshot]"
     },
     "zkarch.circuit_kinds": {
-      "value": 13,
+      "value": 14,
       "unit": "circuit-identifier-kinds",
       "environment": "canonical",
       "kind": "structural-count",
       "family": "single-prover zkSPARQL architecture",
-      "source": "crates/sparq-zk-compose/src/manifest.rs::CircuitId (13 enum variants: Scan, FilterInt, FilterF64, FilterSignedInt, FilterDecimal, FilterValueDl, FilterValueDlF64, FilterValueDlDecimal, RevokeUnset, HiddenIssuer, HolderPok, HolderSet, JoinEq)",
-      "note": "Number of statement kinds in the fixed circuit-identifier space the verifier re-derives; each kind instantiates one or more compiled members on its size lattice. A deterministic enum-variant count over committed code. [FABLE-5 sq-3kd2g.1]"
+      "source": "crates/sparq-zk-compose/src/manifest.rs::CircuitId (14 enum variants: Scan, FilterInt, FilterF64, FilterSignedInt, FilterDecimal, FilterValueDl, FilterValueDlF64, FilterValueDlDecimal, RevokeUnset, HiddenIssuer, HolderPok, HolderSet, JoinEq, PathReach)",
+      "note": "Number of statement kinds in the fixed circuit-identifier space the verifier re-derives; each kind instantiates one or more compiled members on its size lattice. A deterministic enum-variant count over committed code. Still allowlisted (unbound): a variant COUNT is not a literal near the enum, so the rust-anchor literal-adjacency tier cannot pin it — a derived-count binding tier is F3 (sq-gum8.15) follow-up. [OPUS-4.8 sq-i6gj6: corrected 13->14 (PathReach added) vs the live enum]"
     },
     "zkarch.binding_obligations": {
       "value": 12,
