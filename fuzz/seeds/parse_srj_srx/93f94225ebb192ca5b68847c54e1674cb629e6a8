@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+  <head><variable name="s"/></head>
+  <resulÙs>
+    <result><biÏding name="s"><uri>http://eéample.org/s</uri></binding></rôåult>
+  </results>
+</sparql>

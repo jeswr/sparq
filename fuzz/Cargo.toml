@@ -51,6 +51,30 @@ sparq-jsonld = { path = "../crates/sparq-jsonld" }
 # Temp store directories for the `Graph::open` hostile-bytes target.
 tempfile = "3"
 
+# ── bead sq-3dyje.5: untrusted-input decode surfaces ─────────────────────────────────
+# SERVICE federation result parsers (SRJ + SRX). The `service` feature gates the entire
+# client; without it sparq-engine-service compiles to an empty crate and the
+# parse_srj_srx target would have nothing to exercise. [SONNET-4.6]
+sparq-engine-service = { path = "../crates/sparq-engine-service", features = ["service"] }
+# HDT binary container decode: `graph_from_reader` is the network/file entry point that
+# turns hostile bytes into an in-memory Graph. [SONNET-4.6]
+sparq-hdt = { path = "../crates/sparq-hdt" }
+# RDFC-1.0 canonicalization: parse_nquads + canonicalize_nquads. The upstream
+# rdf_canon crate enforces the HNDQ poison-graph call limit (default 4000) so the
+# target rejects poison graphs via Err rather than hanging. [SONNET-4.6]
+sparq-canon = { path = "../crates/sparq-canon" }
+# N3 rules + RIF-XML: reason_n3_terms (N3 parse + close) and rif_xml::import (RIF/XML
+# presentation-syntax parse). `rif-xml` implies `rif-core`; both are off by default.
+# [SONNET-4.6]
+sparq-reason = { path = "../crates/sparq-reason", features = ["rif-xml"] }
+# GeoSPARQL WKT literal parser: parse_wkt_literal + parse_geometry_literal. The
+# `engine` default feature is not needed here — the geometry library (literal parsing
+# + geof: as plain Rust) is always compiled. [SONNET-4.6]
+sparq-geo = { path = "../crates/sparq-geo", default-features = false }
+# Terse SPARQL parser: terse_to_sparql is the single public entry point that covers
+# keyword expansion + the underlying spargebra SPARQL parser. [SONNET-4.6]
+sparq-terse = { path = "../crates/sparq-terse" }
+
 # A fast-but-instrumentable profile: opt-level 3 keeps the fuzzer throughput high
 # while `debug-assertions = true` + `overflow-checks = true` turn latent UB / integer
 # overflow into a clean, catchable panic the fuzzer flags as a crash (exactly what we
@@ -114,6 +138,70 @@ bench = false
 [[bin]]
 name = "jsonld_pipeline"
 path = "fuzz_targets/jsonld_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+# ── bead sq-3dyje.5: untrusted-input fuzz targets ─────────────────────────────────────
+
+# SPARQL-Results-JSON (SRJ) + SPARQL-Results-XML (SRX) — the two wire formats consumed
+# by the SERVICE federation client from REMOTE endpoints (network-untrusted bytes). The
+# first byte picks SRJ vs SRX so a single corpus exercises both decoders; hostile input
+# must produce a clean Err — never a panic or UB. [SONNET-4.6]
+[[bin]]
+name = "parse_srj_srx"
+path = "fuzz_targets/parse_srj_srx.rs"
+test = false
+doc = false
+bench = false
+
+# HDT binary container decode: `sparq_hdt::graph_from_reader` fed hostile bytes over a
+# std::io::Cursor — the same path that loads a downloaded .hdt file. Must produce a
+# clean Err on any malformed input, never a panic or OOB. [SONNET-4.6]
+[[bin]]
+name = "hdt_open"
+path = "fuzz_targets/hdt_open.rs"
+test = false
+doc = false
+bench = false
+
+# RDFC-1.0 dataset canonicalization: hostile N-Quads text fed to
+# `sparq_canon::canonicalize_nquads`. The upstream rdf_canon crate enforces the HNDQ
+# poison-graph call limit (default 4000) — poison-graph inputs return Err, not hang.
+# [SONNET-4.6]
+[[bin]]
+name = "canonicalize_nquads"
+path = "fuzz_targets/canonicalize_nquads.rs"
+test = false
+doc = false
+bench = false
+
+# RIF-Core XML presentation syntax + N3 rules: feeds hostile bytes to
+# `sparq_reason::rif_xml::import` (RIF/XML) and arbitrary strings to
+# `sparq_reason::reason_n3_terms` (N3). Both must return Err — not panic — on any input.
+# [SONNET-4.6]
+[[bin]]
+name = "parse_rif_n3"
+path = "fuzz_targets/parse_rif_n3.rs"
+test = false
+doc = false
+bench = false
+
+# GeoSPARQL WKT geometry literal parser: `sparq_geo::parse_wkt_literal` +
+# `parse_geometry_literal` over hostile text. Must return Err on any malformed WKT,
+# never panic or OOB. [SONNET-4.6]
+[[bin]]
+name = "parse_wkt"
+path = "fuzz_targets/parse_wkt.rs"
+test = false
+doc = false
+bench = false
+
+# Terse SPARQL parser: `sparq_terse::terse_to_sparql` over hostile query text. Must
+# return Err on any invalid input, never panic. [SONNET-4.6]
+[[bin]]
+name = "parse_terse"
+path = "fuzz_targets/parse_terse.rs"
 test = false
 doc = false
 bench = false
