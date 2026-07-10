@@ -122,7 +122,11 @@ echo "[user-data] checked out \$(git rev-parse --short HEAD)" | tee /dev/console
 # cloud-init and gave zero telemetry (sq-hmd7l.32 wave-1/2). The gather streams to
 # /dev/console itself (recoverable via get-console-output even if SSH breaks); the
 # watchdog above is the orphan-proof backstop independent of this shell.
-setsid nohup env LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S=$TIMEOUT_S JAVA_XMX=$JAVA_XMX HDT=$HDT \
+# HOME/USER/LOGNAME are exported into the clean `env` so the gather (set -u) never trips on
+# a bare \$HOME and cargo/rustup/java find their ~/.cargo caches (sq-hmd7l.32 wave-2 stall:
+# the gather aborted at "HOME: unbound variable" under cloud-init's HOME-less root context).
+setsid nohup env HOME=/root USER=root LOGNAME=root \
+  LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S=$TIMEOUT_S JAVA_XMX=$JAVA_XMX HDT=$HDT \
   bash scripts/bench/canonical-materialize-gather-instance.sh >/var/log/gather.log 2>&1 < /dev/null &
 echo "[user-data] gather backgrounded (pid \$!); cloud-final returning" | tee /dev/console
 UD

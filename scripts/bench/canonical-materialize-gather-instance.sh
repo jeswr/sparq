@@ -30,6 +30,22 @@
 #   HDT=1               also run the HDT decode gather        OUT=<repo>/bench/gather-out
 set -uo pipefail   # NOT -e: one failed engine/build must never kill the gather
 
+# [FABLE-5] sq-hmd7l.32 — DEFINE HOME/USER/LOGNAME BEFORE ANYTHING ELSE. This script is
+# started by the launcher's user-data as `setsid nohup env LUBM_UNIVS=... bash <this>` —
+# cloud-init's root scripts_user context has NO HOME/USER/LOGNAME exported, and under
+# `set -u` the FIRST bare `$HOME` (the rustup PATH line) aborted the whole gather with
+# "line NN: HOME: unbound variable" (sq-hmd7l.32 wave-2 stall, diagnosed from console).
+# Beyond the set -u trip, cargo/rustup/java read $HOME at RUNTIME for their caches
+# (~/.cargo registry/config), so an unset HOME would also break the builds. This runs as
+# root on the box; compute the real home dir, default to /root, and export to children.
+: "${HOME:=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
+: "${HOME:=/root}"
+export HOME
+: "${USER:=$(id -un 2>/dev/null || echo root)}"; export USER
+: "${LOGNAME:=$USER}"; export LOGNAME
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+
 # [FABLE-5] sq-hmd7l.32 — MIRROR ALL OUTPUT TO THE SERIAL CONSOLE. On a self-terminating
 # gather box the ONLY zero-dependency telemetry channel is `aws ec2 get-console-output`
 # (SSH can break under a saturated build box; cloud-init's own console buffer stops when
