@@ -4,8 +4,10 @@
 //!
 //! (a) Revoking (removing) a certification from the document changes `policy_version`
 //!     and therefore the `AdmissionCacheKey` — no stale verdict survives revocation.
-//! (b) Expiring (shifting the `valid_until` window past `now`) a certification changes
-//!     `policy_version` — no stale verdict survives expiry.
+//! (b) Re-authoring a certification's validity window changes `policy_version`;
+//!     `effective_rules_at` re-derives fail-closed at the new instant.
+//!     NOTE: wall-clock expiry of an UNCHANGED cert does NOT flip the cache key on its
+//!     own — it propagates by re-materialise / epoch-bump (sq-l5og residue).
 //! (c) Zero certifications: `effective_rules_at` is byte-identical to the pre-cert
 //!     path (a document built with `TrustDocument::new` gives the same result as one
 //!     built with `TrustDocument::with_certifications` and an empty slice).
@@ -203,17 +205,28 @@ fn revocation_invalidates_policy_version() {
     );
 }
 
-// ── (b) Expiry invalidates cached verdict ────────────────────────────────────
+// ── (b) Re-authored validity window changes policy_version; fail-closed on time ──
 
-/// LOAD-BEARING: an expired certification (`valid_until < now`) contributes NOTHING to
-/// the effective rules (fail-closed on time), AND a change to the validity window
-/// changes `policy_version` so the cached key is invalidated.
+/// LOAD-BEARING: two scenarios are proved here:
 ///
-/// We test two scenarios:
-/// 1. Same cert but `valid_until` shifted: `policy_version` changes.
-/// 2. At `now > valid_until`: `effective_rules_at` returns only the direct rule.
+/// 1. **Re-authored validity window → different `policy_version`.** Two stores built from
+///    DIFFERENT stored `valid_until` values (i.e. the author re-authored the window to a
+///    new value) produce different `policy_version` hashes and therefore different
+///    `AdmissionCacheKey`s — a stale verdict from before the re-authoring is NOT reused.
+///    This is the mechanism: the *stored* window is folded into the hash, so any change
+///    to the stored document (including a window edit) is detected.
+///
+/// 2. **`effective_rules_at` fails closed on time.** When `now > valid_until` for the
+///    cert in the store, `effective_rules_at` re-derives and the expired cert contributes
+///    NOTHING (fail-closed on time, identical to the standalone `graph` path).
+///
+/// NOTE: this test does NOT prove that wall-clock expiry (time passing a fixed, unchanged
+/// `valid_until` in an unchanged store) invalidates a cached verdict on its own — it does
+/// NOT do so via `policy_version` alone.  That propagation path is re-materialise /
+/// epoch-bump, bounded by the host epoch cadence; the residual stale-authority window is
+/// the acknowledged open problem tracked by `sq-l5og`.
 #[test]
-fn expiry_changes_policy_version_and_contributes_nothing() {
+fn reauthored_window_changes_policy_version_and_rederive_fails_closed_on_time() {
     let (gov_sk, gov_pk) = keypair(0x123);
     let (_dvs_sk, dvs_pk) = keypair(0x456);
     let gov_key_hex = public_key_to_hex(&gov_pk);
@@ -258,7 +271,7 @@ fn expiry_changes_policy_version_and_contributes_nothing() {
     let v_short = store_short.policy_version(&target);
     assert_ne!(
         v_long, v_short,
-        "a different valid_until MUST change policy_version (expiry invalidates cache)"
+        "different stored valid_until (re-authored window) MUST change policy_version"
     );
 
     // Verify fail-closed on time: at now > cert_short.valid_until, the short cert

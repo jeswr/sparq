@@ -80,10 +80,14 @@
 //!
 //! The cache-safety invariant is load-bearing: [`TrustStore::policy_version`] folds
 //! the certifier IRI, certified-issuer IRI, and the validity window (`valid_from` +
-//! `valid_until`) of every certification into the hash.  Revoking or expiring a
-//! certification changes at least one of those fields (the document's certification set
-//! loses an edge or the window shifts), which changes `policy_version` and therefore the
-//! [`AdmissionCacheKey`] — so NO stale verdict survives an edge revocation or expiry.
+//! `valid_until`) of every certification into the hash.  Revoking a certification OR
+//! re-authoring its validity window changes at least one of those fields (the document's
+//! certification set loses an edge or the window shifts), which changes `policy_version`
+//! and therefore the [`AdmissionCacheKey`].  Wall-clock expiry of an UNCHANGED
+//! certification (time passing a fixed `valid_until` with no document edit) does NOT
+//! turn the cache key over on its own — it propagates by re-materialise / epoch-bump
+//! (like revocation), bounded by the host epoch cadence; the residual stale-authority
+//! window is the acknowledged open problem tracked by `sq-l5og`.
 //!
 //! **Zero certifications ⇒ byte-identical to the pre-cert path.** With no
 //! certifications the `with_certifications` constructor is unused, the `derive_effective_rules`
@@ -200,8 +204,12 @@ impl TrustDocument {
     ///
     /// The certifier IRI, certified-issuer IRI, and validity window (`valid_from` +
     /// `valid_until`) of every certification are folded into
-    /// `TrustStore::policy_version` so that revoking or expiring an edge changes the
-    /// `policy_version` and therefore the `AdmissionCacheKey` — no stale verdict survives.
+    /// `TrustStore::policy_version`.  Revoking a certification OR re-authoring its
+    /// validity window changes `policy_version` and therefore the `AdmissionCacheKey`.
+    /// Wall-clock expiry of an UNCHANGED cert (time passing a fixed `valid_until` with
+    /// no document edit) propagates by re-materialise / epoch-bump (like revocation),
+    /// bounded by the host epoch cadence — NOT by the cache key alone; the residual
+    /// stale-authority window is tracked by `sq-l5og`.
     #[cfg(feature = "cert-graph")]
     #[cfg_attr(docsrs, doc(cfg(feature = "cert-graph")))]
     pub fn with_certifications(
@@ -456,10 +464,14 @@ impl TrustStore {
     ///
     /// When the `cert-graph` feature is enabled, the certifier IRI, certified-issuer IRI,
     /// and validity window (`valid_from` + `valid_until`) of every certification carried
-    /// by the server-wide document are also folded in. Revoking (removing from the
-    /// certification set) or expiring (validity window shift) a certification changes the
-    /// hash, so NO stale admission verdict survives a certification revocation or expiry
-    /// (the load-bearing cache-safety invariant for `sq-pfae.16`).
+    /// by the server-wide document are also folded in.  Revoking a certification (removing
+    /// it from the set) OR re-authoring its validity window changes the hash and therefore
+    /// the `AdmissionCacheKey` — no stale admission verdict survives a certification
+    /// revocation or window re-authoring (the load-bearing cache-safety invariant for
+    /// `sq-pfae.16`).  Wall-clock expiry of an UNCHANGED cert propagates by
+    /// re-materialise / epoch-bump (like revocation), bounded by the host epoch cadence —
+    /// NOT by the cache key alone; the residual stale-authority window is tracked by
+    /// `sq-l5og`.
     ///
     /// **Zero certifications ⇒ byte-identical to the pre-cert path.** No certification
     /// entries are folded into the hasher, so the output is unchanged compared to a
@@ -932,5 +944,105 @@ mod tests {
             .unwrap();
         assert!(store.revoke(&TrustLayer::ServerWide), "removed");
         assert!(!store.revoke(&TrustLayer::ServerWide), "already gone");
+    }
+
+    // ── Direct coverage tests for new public fns (sq-pfae.16) ────────────────
+
+    /// Direct unit test: `TrustStore::effective_rules_at` with an explicit `now_secs`.
+    /// Verifies the fn is reachable (direct line coverage) and that its output matches
+    /// `effective_rules` (both should agree when rules are not time-gated, since the
+    /// only difference is the wall-clock source).  Also exercises `now_unix_secs` via
+    /// the `effective_rules` code path (system clock; we only check it is > 0).
+    #[cfg(feature = "store")]
+    #[test]
+    fn effective_rules_at_is_directly_exercised() {
+        let key = a_key_hex();
+        let rules = policy_rules(
+            "https://pod.ex/trust#cov-r",
+            "https://gov.example/issuer",
+            &key,
+            "http://schema.org/age",
+            "https://pod.ex/",
+            "P30D",
+        );
+        let mut store = TrustStore::new();
+        store
+            .put(TrustDocument::new(
+                TrustLayer::ServerWide,
+                1,
+                rules,
+                gate(),
+            ))
+            .unwrap();
+        let target = iri("https://pod.ex/docs/resource");
+        // Direct call with an explicit instant — exercises the `effective_rules_at` body.
+        let eff_at = store.effective_rules_at(&target, 1_700_000_000);
+        assert_eq!(eff_at.len(), 1, "one direct rule");
+        assert_eq!(eff_at[0].fresh_within_secs, 30 * 86_400);
+        // `effective_rules` (system-clock path) must produce the same count for a
+        // non-time-gated store — also exercises `now_unix_secs`.
+        let eff = store.effective_rules(&target);
+        assert_eq!(eff.len(), 1, "effective_rules agrees with effective_rules_at");
+    }
+
+    /// Direct unit test: `TrustDocument::with_certifications` constructor and
+    /// `TrustDocument::certifications()` accessor (`cert-graph` feature).
+    /// Verifies both are reachable (direct line coverage) and that the stored slice is
+    /// returned verbatim (round-trip identity).
+    #[cfg(feature = "cert-graph")]
+    #[test]
+    fn with_certifications_and_certifications_accessor_are_directly_exercised() {
+        use crate::graph::{CertScope, Certification};
+        use sparq_zk::sig::{SecretKey, public_key_to_hex};
+        let key = a_key_hex();
+        let rules = policy_rules(
+            "https://pod.ex/trust#cov-r2",
+            "https://gov.example/issuer",
+            &key,
+            "http://schema.org/age",
+            "https://pod.ex/",
+            "P30D",
+        );
+        let sk = SecretKey::from_seed(0xC0FF);
+        let pk = sk.public_key();
+        let dvs_sk = SecretKey::from_seed(0xBEEF);
+        let dvs_pk = dvs_sk.public_key();
+        let certifier_iri = iri("https://gov.example/framework");
+        let certified_iri = iri("https://dvs.example/issuer");
+        let mut cert = Certification {
+            certifier: certifier_iri.clone(),
+            certifier_key: pk,
+            certified_issuer: certified_iri.clone(),
+            certified_key: dvs_pk,
+            scope: CertScope::AnyService,
+            valid_from_unix_secs: 0,
+            valid_until_unix_secs: i64::MAX / 2,
+            signature_hex: String::new(),
+        };
+        let _ = public_key_to_hex(&sk.public_key()); // suppress unused import
+        cert.signature_hex = sk.sign_commitment(&crate::graph::certification_message(&cert));
+
+        // Exercise `with_certifications` directly.
+        let doc = TrustDocument::with_certifications(
+            TrustLayer::ServerWide,
+            1,
+            rules,
+            vec![cert.clone()],
+            gate(),
+        );
+
+        // Exercise `certifications()` directly — verify round-trip identity.
+        let stored = doc.certifications();
+        assert_eq!(stored.len(), 1, "one certification stored");
+        assert_eq!(
+            stored[0].certifier.as_str(),
+            certifier_iri.as_str(),
+            "certifier IRI round-trips"
+        );
+        assert_eq!(
+            stored[0].certified_issuer.as_str(),
+            certified_iri.as_str(),
+            "certified_issuer IRI round-trips"
+        );
     }
 }
