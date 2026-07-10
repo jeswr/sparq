@@ -145,6 +145,9 @@ _LANE_SEEDS: dict[str, list[str]] = {
         "sparq-shacl-wasm",
         "sparq-introspect",
         "sparq-solid",
+        # [FABLE-5] sq-98c: not a bundle crate — the wasm job build+clippy-gates that
+        # sparq-vectors keeps compiling on wasm32 with memmap2 target-gated out.
+        "sparq-vectors",
     ],
     # [SONNET-4.6] sq-mel85: perf-gate bench closure (see the `bench` bullet above).
     "bench": [

@@ -96,8 +96,10 @@
 
 use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
 use crate::quant::{DistanceTable, EncodedStore, PqConfig, ProductQuantizer};
-use crate::store::VectorStore;
-use memmap2::Mmap;
+// [FABLE-5] (sq-98c) The read backing is shared with `.spqv`: a memory map on native targets,
+// f32-aligned owned bytes on wasm32 / `open_from_bytes` (memmap2 is target-gated out of wasm
+// builds in Cargo.toml). Every record read derefs to `[u8]`, so the paths are identical.
+use crate::store::{open_backing, Bytes, VectorStore};
 use oxrdf::Term;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
@@ -477,13 +479,15 @@ fn write_graph(
 
 // ───────────────────────────── on-disk search ─────────────────────────────
 
-/// A **persistent on-disk Vamana index** opened over a `.spqg` file (memory-mapped) — the
-/// out-of-core counterpart to `VectorIndex`. Built once with
+/// A **persistent on-disk Vamana index** opened over a `.spqg` file (memory-mapped on native
+/// targets) — the out-of-core counterpart to `VectorIndex`. Built once with
 /// [`build`](Self::build) / [`build_with`](Self::build_with), reopened with [`open`](Self::open)
-/// at near-zero cost (mmap + header validation, no rebuild). Search reads node records directly
-/// from the map; see the module docs for the format and the honest scope vs. full DiskANN.
+/// at near-zero cost (mmap + header validation, no rebuild) or from fetched/embedded bytes with
+/// [`open_from_bytes`](Self::open_from_bytes) (the wasm/filesystem-less path — memmap2 is
+/// target-gated out of wasm32 builds). Search reads node records directly
+/// from the backing; see the module docs for the format and the honest scope vs. full DiskANN.
 pub struct DiskAnnIndex {
-    map: Mmap,
+    map: Bytes,
     dim: usize,
     degree: usize,
     count: usize,
@@ -603,16 +607,37 @@ impl DiskAnnIndex {
     /// [OPUS-4.8] (sq-32i5) A version-2 file's graph fingerprint is read for
     /// [`check_graph`](Self::check_graph). A legacy version-1 file (32-byte header, no fingerprint)
     /// still opens — its fingerprint is `None`, so `check_graph` reports it as unverifiable.
+    ///
+    /// [FABLE-5] (sq-98c) On wasm32 (memmap2 target-gated out) this reads the whole file into
+    /// the same f32-aligned owned backing [`open_from_bytes`](Self::open_from_bytes) uses —
+    /// identical validation, no map. `wasm32-unknown-unknown` has no filesystem, so there the
+    /// read fails with a clean I/O error and `open_from_bytes` is the supported path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<DiskAnnIndex, String> {
         let path = path.as_ref();
+        // [FABLE-5] (sq-98c) Memory map on native targets; on wasm32 (memmap2 target-gated out)
+        // `open_backing` reads the whole file into the f32-aligned owned backing instead —
+        // identical validation. `wasm32-unknown-unknown` has no filesystem, so there the read
+        // fails with a clean I/O error and [`open_from_bytes`](Self::open_from_bytes) is the
+        // supported path.
+        let map = open_backing(path)?;
+        Self::open_validated(map, &path.display().to_string())
+    }
+
+    /// Opens a `.spqg` document held entirely in memory — for environments without a
+    /// filesystem (the bytes were fetched, embedded, or decompressed by the caller), the
+    /// `.spqg` counterpart of [`VectorStore::open_from_bytes`]. Validation is identical to
+    /// [`open`](Self::open); record reads borrow the owned buffer (f32-aligned, so the vector
+    /// casts are as sound as on the page-aligned map) instead of a memory map. [FABLE-5] (sq-98c)
+    pub fn open_from_bytes(bytes: Vec<u8>) -> Result<DiskAnnIndex, String> {
+        Self::open_validated(Bytes::owned(bytes), "<bytes>")
+    }
+
+    /// Shared header/size validation behind [`open`](Self::open) and
+    /// [`open_from_bytes`](Self::open_from_bytes). [FABLE-5] (sq-98c)
+    fn open_validated(map: Bytes, origin: &str) -> Result<DiskAnnIndex, String> {
         if cfg!(target_endian = "big") {
             return Err(".spqg is a little-endian format; big-endian targets are unsupported".into());
         }
-        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        // SAFETY: read-only map of a regular file; external mutation is out of contract (same
-        // stance as `.spqv` and sparq-core's mmap'd indexes).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
-        let origin = path.display().to_string();
         if map.len() < HEADER_LEN_V1 {
             return Err(format!("{origin}: truncated header"));
         }
@@ -678,7 +703,7 @@ impl DiskAnnIndex {
                         map.len()
                     ));
                 }
-                Some(Self::parse_pq_section(&map[nodes_end..], count, dim, &origin)?)
+                Some(Self::parse_pq_section(&map[nodes_end..], count, dim, origin)?)
             }
             t => return Err(format!("{origin}: unsupported encoding tag {t}")),
         };
@@ -775,9 +800,11 @@ impl DiskAnnIndex {
         let start = self.data_offset + slot as usize * self.record_len + 8;
         let bytes = &self.map[start..start + self.dim * 4];
         debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<f32>(), 0);
-        // SAFETY: a memory map is page-aligned and `start` is a multiple of 4 (data_offset
-        // [32 or 56] + slot·record_len[a multiple of 4] + 8), so the pointer is f32-aligned; the
-        // range is in bounds (validated in `open`); f32 accepts any bit pattern; slice borrows map.
+        // SAFETY: the backing base is f32-aligned — a memory map is page-aligned, and the owned
+        // backing (`open_from_bytes` / wasm32) is 4-byte-aligned by construction (`AlignedBytes`,
+        // see store.rs) — and `start` is a multiple of 4 (data_offset [32 or 56] +
+        // slot·record_len[a multiple of 4] + 8), so the pointer is f32-aligned; the range is in
+        // bounds (validated in `open_validated`); f32 accepts any bit pattern; slice borrows map.
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim) }
     }
 

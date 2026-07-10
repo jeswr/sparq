@@ -168,6 +168,7 @@ DiskAnnIndex::build(&VectorStore, path) / ::build_with(&store, path, VamanaConfi
 DiskAnnIndex::build_for(&store, path, &Graph) / ::build_with_for(&store, path, cfg, &Graph)  // embeds the graph fingerprint
 DiskAnnIndex::build_with_pq(&store, path, cfg, PqConfig) -> Result<..>          // [OPUS-4.8] sq-qamd: + a PQ candidate cache (search on codes, re-rank off mmap); persisted as a trailing .spqg section (encoding tag 1)
 DiskAnnIndex::open(path) -> Result<DiskAnnIndex, String>                        // mmap + header check, NO rebuild (reloads any PQ section)
+DiskAnnIndex::open_from_bytes(bytes: Vec<u8>) -> Result<DiskAnnIndex, String>   // [FABLE-5] sq-98c: filesystem-less/wasm — identical validation, result-identical search
 impl DiskAnnIndex { fn nearest(&self, &[f32], k) -> Vec<(Id, f32)>; fn nearest_term(..) -> Vec<(Term, f32)>; fn len()/dim();
                     fn has_pq_cache() -> bool;                                  // [OPUS-4.8] sq-qamd: PQ-guided search when true
                     fn fingerprint() -> Option<Fingerprint>; fn check_graph(&store, &Graph) -> Result<(), String>;
@@ -423,7 +424,19 @@ let store = w.finalize()?;                                   // a normal, valida
 
 let bytes = std::fs::read("/tmp/big.spqv").unwrap();         // or fetched/embedded
 let store2 = VectorStore::open_from_bytes(bytes)?;           // identical validation, no filesystem
+let idx = sparq_vectors::DiskAnnIndex::open_from_bytes(std::fs::read("/tmp/big.spqg").unwrap())?; // .spqg counterpart
 ```
+
+**wasm32 (sq-98c):** the crate **compiles to wasm** with the default features — `memmap2` is
+**target-gated out** of every wasm32 build (a `[target.'cfg(not(target_arch = "wasm32"))']`
+dependency, NOT a cargo feature: features are additive, so a feature could never *remove* the
+dependency, and a target cfg can't leak into the native build via feature unification). On wasm
+`VectorStore::open` / `DiskAnnIndex::open` fall back to a buffered `std::fs::read` into the same
+f32-aligned owned backing (works on wasm targets WITH a filesystem, e.g. WASI; on browser
+`wasm32-unknown-unknown` the read fails with a clean I/O error) — `open_from_bytes` is the
+supported browser path for both file kinds. The CI `wasm` lane build+clippy-gates this and
+asserts the wasm graph stays memmap2-free. `import_*` still need `std::fs` and are compiled off
+the wasm target.
 
 ### 7. Bulk-import embeddings computed ELSEWHERE (NumPy `.npy` / flat dump)
 

@@ -158,7 +158,6 @@ embeddings = ["provider", "dep:reqwest"]
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
 oxrdf.workspace = true
 rustc-hash.workspace = true
-memmap2.workspace = true
 # HNSW (pure Rust, minimal deps, maintained). Evaluated against hnsw_rs 0.3 (heavier
 # dependency tree: anndists/simd feature plumbing); instant-distance is the smaller,
 # cleaner fit for an in-RAM index rebuilt from the mmap'd store on open.
@@ -193,6 +192,24 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional =
 # compile it — `sparq-vectors` stays free of any SHACL/engine dependency unless this reader is opted
 # in. sparq-shacl is itself an opt-in crate that nothing in the workspace depends on by default.
 sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
+
+# [FABLE-5] sq-98c: memmap2 is NATIVE-ONLY — target-gated out of every wasm32 build so the
+# crate compiles to wasm without a memory-map dependency. This is a TARGET cfg rather than a
+# cargo feature ON PURPOSE: cargo features are additive (enabling one can never REMOVE a
+# dependency), and the workspace's wasm crates already prefer `cfg(target_arch = "wasm32")`
+# gating over a feature so the choice never leaks into the native build via feature
+# unification (see crates/sparq-wasm/Cargo.toml). On wasm32 the file-open read paths
+# (`VectorStore::open`, `DiskAnnIndex::open`) fall back to a buffered `std::fs::read` into
+# the same validated owned-bytes backing `open_from_bytes` uses; native is unchanged (mmap).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2.workspace = true
+
+# oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so select
+# getrandom's browser backend (crypto.getRandomValues). The matching
+# `--cfg getrandom_backend="wasm_js"` is set in the workspace .cargo/config.toml — exactly
+# as the shipped wasm bundle crates (sparq-wasm / sparq-introspect / …) do. [FABLE-5]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # [OPUS-4.8] sq-88c6: DEV-only. The `hybrid_search` example/tests fuse this crate's ANN
 # (`VectorIndex::nearest_term`) with `sparq-sim`'s structural similarity
