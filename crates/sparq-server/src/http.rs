@@ -668,6 +668,21 @@ pub struct ServerConfig {
     /// as the backup family); a consumer needing an authentic feed wraps its own signing.
     #[cfg(feature = "change-stream")]
     pub change_stream_dir: Option<std::path::PathBuf>,
+    /// [FABLE-5] (sq-snopa.6, issue #992 FR-4) OPT-IN Solid WAC/ACP HTTP authorization surface.
+    /// When `true`, the server serves `POST /authz/decide`, `POST /authz/wac-allow` and
+    /// `POST /authz/query` — a THIN HTTP shell over the `sparq-solid` library authoriser
+    /// (`PodStore::decide` / `wac_allow` / `query_json_as`). Each endpoint takes an
+    /// already-resolved session + the pod dataset (N-Quads) in the request body and maps the
+    /// library verdict onto HTTP; it does NOT authenticate (mapping a WebID + a request path is the
+    /// caller's job — `sparq-solid` is a library authoriser with no HTTP surface,
+    /// `research/sparq-solid-scope.md` §4). FAIL-CLOSED: every error path DENIES. `false` (the
+    /// default) leaves all three off: `/authz/*` is `404`.
+    ///
+    /// This field exists only with the `solid-authz` cargo feature (like [`tpf`](Self::tpf) under
+    /// `tpf`); a build without that feature compiles no Solid/access-control code and pays zero
+    /// cost. Set by the binary's `--solid-authz` flag / `SPARQ_SOLID_AUTHZ=1` env.
+    #[cfg(feature = "solid-authz")]
+    pub solid_authz: bool,
 }
 
 impl Default for ServerConfig {
@@ -790,6 +805,11 @@ impl Default for ServerConfig {
             // SPARQ_CHANGE_STREAM).
             #[cfg(feature = "change-stream")]
             change_stream_dir: None,
+            // [FABLE-5] sq-snopa.6: safe default — the OPT-IN Solid WAC/ACP authorization surface is
+            // OFF even when the feature is compiled in (the operator opts in deliberately via
+            // --solid-authz / SPARQ_SOLID_AUTHZ=1). Fail-closed: `/authz/*` is 404 until set.
+            #[cfg(feature = "solid-authz")]
+            solid_authz: false,
         }
     }
 }
@@ -1064,6 +1084,13 @@ impl ServerConfig {
         #[cfg(feature = "change-stream")]
         if let Ok(v) = std::env::var("SPARQ_CHANGE_STREAM") {
             cfg.change_stream_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+        }
+        // [FABLE-5] sq-snopa.6: SPARQ_SOLID_AUTHZ truthy ("1"/"true"/"yes"/"on") serves the OPT-IN
+        // Solid WAC/ACP HTTP authorization surface (POST /authz/*). Off by default. Only present
+        // with the `solid-authz` feature.
+        #[cfg(feature = "solid-authz")]
+        if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ") {
+            cfg.solid_authz = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -2736,6 +2763,20 @@ pub fn router(state: AppState) -> Router {
     // [`streams_endpoint`].
     #[cfg(feature = "change-stream")]
     let routes = routes.route("/streams", get(streams_endpoint).head(streams_endpoint));
+    // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization surface.
+    // Compiled only with the `solid-authz` feature; even then each handler refuses (404) unless the
+    // config flag is set. POST only — a thin HTTP shell over the `sparq-solid` library authoriser
+    // (`PodStore::decide` / `wac_allow` / `query_json_as`), fail-closed on every error path. The
+    // handlers live in [`crate::solid_authz`] to keep the touch surface on this conflict-hot file
+    // minimal.
+    #[cfg(feature = "solid-authz")]
+    let routes = routes
+        .route("/authz/decide", post(crate::solid_authz::decide_endpoint))
+        .route(
+            "/authz/wac-allow",
+            post(crate::solid_authz::wac_allow_endpoint),
+        )
+        .route("/authz/query", post(crate::solid_authz::query_endpoint));
     // [OPUS-4.8] (sq-pj6u) Categorised unmatched-route 404. Without an explicit fallback,
     // axum answers an unmatched path with a 404 whose body is EMPTY; `json_error_bodies`
     // then wraps that into the uncategorised `{"error":""}` envelope — leak-free but with no

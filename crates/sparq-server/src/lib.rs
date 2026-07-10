@@ -119,6 +119,20 @@ pub mod streams;
 #[cfg(feature = "n3-patch")]
 pub mod n3_patch;
 
+/// [FABLE-5] (sq-snopa.6, issue #992 FR-4) OPT-IN Solid **WAC/ACP HTTP authorization** surface —
+/// the `POST /authz/decide`, `POST /authz/wac-allow` and `POST /authz/query` endpoints, a THIN
+/// HTTP shell over the `sparq-solid` library authoriser. Compiled ONLY behind the `solid-authz`
+/// feature (the deliberately-opt-in `sparq-server` -> `sparq-solid` workspace dependency the FR-4
+/// note flagged), and served only when [`ServerConfig::solid_authz`](http::ServerConfig) is also
+/// set (`--solid-authz` / `SPARQ_SOLID_AUTHZ=1`) — the same double-opt-in as `tpf` / `shacl` /
+/// `terse`. FAIL-CLOSED: every error path DENIES. `sparq-solid` is a LIBRARY authoriser with no
+/// HTTP surface (`research/sparq-solid-scope.md` §4); this is exactly that missing shell — it does
+/// NOT authenticate (it takes an already-resolved session + the pod dataset per request). With the
+/// feature off the module + the routes + the config field are `#[cfg]`-stripped, byte-identical to
+/// before. See the module docs.
+#[cfg(feature = "solid-authz")]
+pub mod solid_authz;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;
