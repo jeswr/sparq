@@ -85,6 +85,14 @@ set -euo pipefail
 BRANCH="${1:?usage: gather-ec2-sparql.sh <branch> [region]}"
 REGION="${2:-${AWS_REGION:-eu-west-2}}"
 ITYPE="${GATHER_ITYPE:-c7g.2xlarge}"     # 8 vCPU arm64 (more RAM for the QLever index; falls back below)
+# [FABLE-5] sq-7d3dj.30.6 — arch-parametric AMI + fallback so the CANONICAL c6i.4xlarge (x86_64)
+# re-measure can pin the SAME architecture as the 2026-07-07 §0 baseline (mixing arm64 vs x86_64
+# would make the per-query rows non-comparable). Defaults are the historical arm64 values, so an
+# unset environment reproduces the prior behaviour byte-for-byte. For the canonical x86_64 run:
+#   GATHER_ITYPE=c6i.4xlarge GATHER_ITYPE_FB=c6i.2xlarge \
+#   GATHER_AMI_NAME='ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*'
+ITYPE_FB="${GATHER_ITYPE_FB:-c7g.xlarge}"
+AMI_NAME="${GATHER_AMI_NAME:-ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*}"
 REPO="https://github.com/jeswr/sparq.git"
 SP2B_TRIPLES="${SP2B_TRIPLES:-100000}"   # [OPUS-4.8] sq-sxso: smaller smoke default (was 250000)
 ITERS="${GATHER_ITERS:-5}"
@@ -143,7 +151,7 @@ trap cleanup EXIT
 
 log "resolve AMI / network in $REGION"
 AMI=$(aws ec2 describe-images --region "$REGION" --owners 099720109477 \
-  --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" "Name=state,Values=available" \
+  --filters "Name=name,Values=$AMI_NAME" "Name=state,Values=available" \
   --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
 SUBNET=$(aws ec2 describe-subnets --region "$REGION" --filters Name=vpc-id,Values="$VPC" "Name=default-for-az,Values=true" --query 'Subnets[0].SubnetId' --output text)
@@ -195,10 +203,16 @@ if [ "$GATHER_QLEVER" = "1" ]; then
   step "apt docker.io (qlever opt-in)"
   apt-get install -y -qq docker.io || true
   # [OPUS-4.8] sq-vw3ax.12.1 — WAIT for the daemon (fixes the Wave-0 qlever fast-fail). Wave 0
-  # did `systemctl start docker || true` and moved on, so when the socket was not yet ready the
+  # did 'systemctl start docker || true' and moved on, so when the socket was not yet ready the
   # qlever recipe hit an instant "Cannot connect to the Docker daemon" cascade (~9s, recorded
-  # only as qlever_status:"failed"). enable --now + a bounded `docker info` poll makes the daemon
+  # only as qlever_status:"failed"). enable --now + a bounded 'docker info' poll makes the daemon
   # actually be up before scripts/qlever-same-box.sh runs (which itself now preflights the daemon).
+  # [FABLE-5] sq-7d3dj.30.6 — the backticks in these two comment lines were UNESCAPED inside the
+  # UNQUOTED '<<UD' heredoc, so on any launch host that has a 'docker' binary they were command-
+  # substituted AT RENDER TIME: the local 'docker info' printed docker's help text with an
+  # unbalanced paren straight into the user-data, syntax-erroring the instance-side script at boot
+  # (load=0, apt done, nothing else runs — the exact silent-death this bead's predecessor hit).
+  # Fixed by using plain quotes in the prose; keep backticks out of unquoted-heredoc comment text.
   systemctl enable --now docker || systemctl start docker || true
   for _ in \$(seq 1 30); do docker info >/dev/null 2>&1 && { step "docker daemon up"; break; }; sleep 2; done
   docker info >/dev/null 2>&1 || step "WARN: docker daemon still not reachable — qlever will stay honest-n/a"
@@ -430,7 +444,6 @@ case "$INSTANCE_ID" in
   i-*) ;;
   *)
     log "primary itype $ITYPE failed: $(cat "$LAUNCH_ERR" 2>/dev/null)"
-    ITYPE_FB="c7g.xlarge"
     log "retrying with fallback $ITYPE_FB"
     INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$ITYPE_FB" \
       --instance-initiated-shutdown-behavior terminate \
