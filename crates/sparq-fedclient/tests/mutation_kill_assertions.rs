@@ -510,6 +510,90 @@ fn source_resolver_range_checks_carry_exact_payloads() {
     );
 }
 
+// ─── Service-Description supportedLanguage arm precedence ────────────────────────────────
+
+#[test]
+fn sd_update_only_language_sets_update_flag_not_a_version() {
+    // An SD advertising ONLY SPARQL11Update: the update flag must be set and NO query
+    // version must be inferred. The `SPARQL10Query && version != Sparql11` match guard
+    // mutated to `||` makes the Sparql10 arm swallow ANY language IRI (including this
+    // Update one, which precedes the Update arm), flipping BOTH assertions.
+    let nt = concat!(
+        "<http://host/sparql> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/sparql-service-description#Service> .\n",
+        "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedLanguage> <http://www.w3.org/ns/sparql-service-description#SPARQL11Update> .\n",
+    );
+    let cap = sparq_fedclient::discovery::parse_service_description(nt)
+        .expect("well-formed SD parses")
+        .expect("document has an sd:Service");
+    assert!(cap.update, "SPARQL11Update must set the update flag");
+    assert_eq!(
+        cap.sparql_version, None,
+        "an update-only SD advertises no QUERY language version"
+    );
+}
+
+#[test]
+fn sd_sparql10_never_downgrades_an_advertised_11() {
+    // Both orders: SPARQL11Query wins over SPARQL10Query regardless of triple order (the
+    // `version != Sparql11` guard; `!=`→`==` or a deleted arm flips one of these).
+    for (first, second) in [
+        ("SPARQL11Query", "SPARQL10Query"),
+        ("SPARQL10Query", "SPARQL11Query"),
+    ] {
+        let nt = format!(
+            concat!(
+                "<http://host/sparql> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/sparql-service-description#Service> .\n",
+                "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedLanguage> <http://www.w3.org/ns/sparql-service-description#{}> .\n",
+                "<http://host/sparql> <http://www.w3.org/ns/sparql-service-description#supportedLanguage> <http://www.w3.org/ns/sparql-service-description#{}> .\n",
+            ),
+            first, second
+        );
+        let cap = sparq_fedclient::discovery::parse_service_description(&nt)
+            .expect("well-formed SD parses")
+            .expect("document has an sd:Service");
+        assert_eq!(
+            cap.sparql_version,
+            Some(sparq_fedclient::discovery::SparqlVersion::Sparql11),
+            "1.1 must win regardless of order ({} then {})",
+            first,
+            second
+        );
+    }
+}
+
+// ─── Binary wire: a DUPLICATED position pair must not be dropped or overwrite ─────────────
+
+#[test]
+fn binary_wire_duplicate_position_pairs_ride_extra_not_overwrite() {
+    use sparq_fedclient::{decode_bindings, encode_bindings, FragTerm};
+    // A mapping repeating each canonical position: the FIRST pair wins the header slot,
+    // every duplicate rides the EXTRA section — nothing dropped, nothing overwritten.
+    // The `subject.is_none()` (etc.) match-guard mutated to `true` lets the SECOND pair
+    // overwrite the first and drops it from the wire, breaking the exact round-trip.
+    let block = vec![vec![
+        ("s".to_string(), FragTerm::Iri("http://ex/first-s".into())),
+        ("s".to_string(), FragTerm::Iri("http://ex/second-s".into())),
+        ("p".to_string(), FragTerm::Iri("http://ex/first-p".into())),
+        ("p".to_string(), FragTerm::Iri("http://ex/second-p".into())),
+        ("o".to_string(), FragTerm::Literal("\"first-o\"".into())),
+        ("o".to_string(), FragTerm::Literal("\"second-o\"".into())),
+    ]];
+    let back = decode_bindings(&encode_bindings(&block)).expect("decode");
+    // Decode order: position slots in canonical s→p→o order (the FIRST pair of each), then
+    // the EXTRA pairs (the duplicates) in encoded order.
+    assert_eq!(
+        back,
+        vec![vec![
+            ("s".to_string(), FragTerm::Iri("http://ex/first-s".into())),
+            ("p".to_string(), FragTerm::Iri("http://ex/first-p".into())),
+            ("o".to_string(), FragTerm::Literal("\"first-o\"".into())),
+            ("s".to_string(), FragTerm::Iri("http://ex/second-s".into())),
+            ("p".to_string(), FragTerm::Iri("http://ex/second-p".into())),
+            ("o".to_string(), FragTerm::Literal("\"second-o\"".into())),
+        ]]
+    );
+}
+
 // ─── Native transport observables over a raw loopback TCP server ─────────────────────────
 //
 // No external network, no DNS: the server is an in-process std::net::TcpListener on
@@ -529,27 +613,50 @@ mod loopback {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// Serve exactly one connection: read the request (until idle), then write `response`
-    /// and close. Returns the bound address; the thread self-terminates.
+    /// Serve exactly one connection: consume the WHOLE request (headers, then exactly
+    /// `Content-Length` body bytes — responding before the client finishes writing would
+    /// race a TCP RST into its pending read), then write `response` and close. Returns the
+    /// bound address; the thread self-terminates.
     fn one_shot_server(response: Vec<u8>) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local_addr");
         std::thread::spawn(move || {
             if let Ok((mut sock, _)) = listener.accept() {
-                sock.set_read_timeout(Some(Duration::from_millis(300))).ok();
+                sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let mut req: Vec<u8> = Vec::new();
                 let mut buf = [0u8; 65536];
-                // Drain the request until the client pauses (headers + small form body).
-                while let Ok(n) = sock.read(&mut buf) {
-                    if n == 0 {
-                        break;
+                // Read until the header terminator is seen.
+                let header_end = loop {
+                    match sock.read(&mut buf) {
+                        Ok(0) | Err(_) => break None,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if let Some(pos) =
+                                req.windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                break Some(pos + 4);
+                            }
+                        }
                     }
-                    if n < buf.len() {
-                        // Heuristic: a short read after the initial burst — request done.
-                        break;
+                };
+                if let Some(header_end) = header_end {
+                    // Honour Content-Length so the whole body is drained before replying.
+                    let headers = String::from_utf8_lossy(&req[..header_end]).to_ascii_lowercase();
+                    let want_body: usize = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut have_body = req.len() - header_end;
+                    while have_body < want_body {
+                        match sock.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => have_body += n,
+                        }
                     }
+                    let _ = sock.write_all(&response);
+                    let _ = sock.flush();
                 }
-                let _ = sock.write_all(&response);
-                let _ = sock.flush();
             }
         });
         addr

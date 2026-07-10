@@ -2443,4 +2443,66 @@ mod tests {
             })
         );
     }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): DIRECT unit tests for the private ChannelPeek
+    // readiness probe. Its ready()/is_done() answers only steer the streaming feeder's
+    // side-preference, so no end-to-end result-equality test can observe them (the join
+    // result is order-independent) — cargo-mutants proved that by surviving BOTH
+    // `ready -> true` and `ready -> false`. Pin the probe's contract directly instead.
+    #[test]
+    fn channel_peek_ready_look_ahead_and_done_semantics() {
+        use crate::stream::{Solution, SolutionStream};
+        let (sink, stream) = SolutionStream::bounded(4);
+        let mut peek = ChannelPeek::over(stream);
+        assert!(!peek.ready(), "an empty open channel is NOT ready");
+        assert!(!peek.is_done(), "an open channel is not done");
+        let sol = Solution::new(vec!["s".to_string()], vec![None]);
+        assert!(sink.emit(sol.clone()));
+        assert!(peek.ready(), "an emitted item makes the side ready");
+        assert!(
+            peek.ready(),
+            "readiness is idempotent (the look-ahead buffers exactly one item)"
+        );
+        let got = peek
+            .next()
+            .expect("the buffered look-ahead is the next item")
+            .expect("a solution, not an error");
+        assert_eq!(got, sol, "next() consumes the look-ahead first");
+        assert!(!peek.ready(), "consumed: not ready again until a new emit");
+        drop(sink);
+        assert!(
+            !peek.ready(),
+            "a closed, drained channel is not ready (and marks done)"
+        );
+        assert!(peek.is_done(), "closed + no look-ahead ⇒ done");
+        assert!(peek.next().is_none(), "done ⇒ next() is None");
+    }
+
+    #[test]
+    fn channel_peek_next_blocks_through_to_a_late_item_and_close() {
+        use crate::stream::{Solution, SolutionStream};
+        // next() must return an item emitted AFTER the (empty) readiness probe — the
+        // blocking recv path — and then None once the sink drops.
+        let (sink, stream) = SolutionStream::bounded(1);
+        let mut peek = ChannelPeek::over(stream);
+        assert!(!peek.ready(), "nothing emitted yet");
+        let producer = std::thread::spawn(move || {
+            let ok = sink.emit(Solution::new(
+                vec!["s".to_string()],
+                vec![Some(oxrdf::Term::NamedNode(
+                    oxrdf::NamedNode::new("http://ex/late").unwrap(),
+                ))],
+            ));
+            assert!(ok, "consumer is alive");
+            // sink drops here → the channel closes.
+        });
+        let got = peek.next().expect("the late item arrives").expect("ok");
+        assert_eq!(
+            got.get("s").map(|t| t.to_string()),
+            Some("<http://ex/late>".to_string())
+        );
+        producer.join().unwrap();
+        assert!(peek.next().is_none(), "after close: drained");
+        assert!(peek.is_done());
+    }
 }
