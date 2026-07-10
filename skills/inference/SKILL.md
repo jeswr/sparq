@@ -442,14 +442,19 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 **Same-box materialization comparison (sparq vs Jena / VLog / Nemo).** To compare
 sparq's closure materialization against other reasoners on the LUBM `(ABox+TBox)`
 corpus, run `scripts/bench/materialize-same-box.sh` (`ONLY=sparq LUBM_UNIVS=1 …`
-for the fast self-check). The oracle is the **closure size** (pinned at `univ=1`:
-`owl=150589`, `rdfs=126732`). Critical honesty caveat: sparq `reason owl` is the
-**full W3C OWL 2 RL/RDF** rule table, whereas Jena has no full OWL 2 RL reasoner
-(its `OWL_MICRO`/`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic
-triples), and VLog/Nemo are general Datalog engines needing a separately-validated
-OWL-RL encoding — so the closure *sizes differ by construction* and the harness
-records this per column (`count_crosscheck.profile_caveat`) rather than reconciling
-them. Never read a raw closure-size delta as a correctness gap without the profile.
+for the fast self-check; supply `VLOG=`/`NEMO=` binary paths for those columns).
+The oracle is the **closure size** (pinned at `univ=1`: `owl=150589`,
+`rdfs=126732`). The VLog and Nemo columns run **validated Datalog encodings**
+(`bench/reason-encodings/{vlog/*.dlog,nemo/*.rls}`, `sq-hmd7l.30/.31`) that
+reproduce sparq's closure **set-for-set** — so all three engines' closure counts
+**AGREE** (folded into `count_crosscheck.same_ruleset_agree`). Critical honesty
+caveat: this holds because sparq `reason owl` is the **full W3C OWL 2 RL/RDF** rule
+table and the encodings transcribe exactly the rules the LUBM TBox exercises; a
+**Jena** column, by contrast, has no full OWL 2 RL reasoner (its `OWL_MICRO`/
+`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic triples) so its
+closure size *differs by construction* — recorded per column as a profile caveat,
+never reconciled. Never read a raw closure-size delta as a correctness gap without
+the profile.
 
 ## Gotchas / feature flags / prerequisites
 
