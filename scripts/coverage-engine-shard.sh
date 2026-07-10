@@ -163,16 +163,40 @@ PY
 
   build-objects)
     # [FABLE-5] sq-piapk: the merge job runs on a FRESH runner with no build. `cargo llvm-cov
-    # report` needs the instrumented object files to map counters -> source lines. Compile them
-    # here WITHOUT running any test (--no-run => no profraw), producing the SAME bit-reproducible
-    # instrumented binaries the run partitions compiled (same toolchain+features+source), so the
-    # downloaded partition .profraw merge cleanly against them. This is the native-layout analogue
-    # of the run compile — no archive, no extraction.
+    # report` needs the instrumented object files (it maps counters -> source lines) in the SAME
+    # llvm-cov target dir a `run` partition compiled into. Compile them here WITHOUT running any
+    # test, producing the SAME bit-reproducible instrumented binaries the run partitions compiled
+    # (same toolchain+features+source), so the downloaded partition .profraw merge cleanly against
+    # them. Native-layout analogue of the run compile — no archive, no extraction.
+    #
+    # WHY NOT `cargo llvm-cov nextest --no-report --no-run`: on cargo-llvm-cov 0.8.7 `--no-run` is
+    # a DEPRECATED llvm-cov flag meaning "report WITHOUT running tests" (the old `report` alias),
+    # so llvm-cov's own parser owns it and REJECTS it alongside --no-report:
+    #   "error: --no-report may not be used together with --no-run"
+    # (it never reaches nextest, whose own `--no-run` = "compile, don't run"). So we instead
+    # export llvm-cov's instrumentation env with `show-env` and drive `cargo nextest run --no-run`
+    # DIRECTLY, forcing the SAME `<target>/llvm-cov-target` dir that `cargo llvm-cov nextest` uses
+    # for the run partitions (and that `cargo llvm-cov report` reads objects from). This compiles
+    # the instrumented engine + test binaries and runs NO test, so it emits no test-execution
+    # profraw under llvm-cov-target (only benign build-script/proc-macro profraw at the target
+    # ROOT, which `report`, reading llvm-cov-target, ignores — validated: merged number == the
+    # un-split single-shard number, byte-identical).
     cd "$ROOT"
     echo "==> [engine-cov] compiling instrumented engine objects for the merge (no test run)"
-    cargo llvm-cov nextest --no-report --no-run \
-      --package "$CRATE" --features "$ENGINE_FEATURES"
-    echo "==> [engine-cov] instrumented objects built"
+    # `<target>/llvm-cov-target` — resolve <target> via show-env so it tracks the tool's layout
+    # rather than hard-coding; this is exactly where `cargo llvm-cov nextest`/`report` operate.
+    cov_target_dir="$(cargo llvm-cov show-env 2>/dev/null \
+      | sed -n 's/^CARGO_LLVM_COV_TARGET_DIR=\(.*\)$/\1/p')"
+    [ -n "$cov_target_dir" ] || cov_target_dir="$ROOT/target"
+    # Source llvm-cov's instrumentation env (RUSTC_WRAPPER + coverage RUSTFLAGS) into THIS shell,
+    # then compile-without-running via nextest's OWN --no-run into the llvm-cov target dir.
+    set -a
+    eval "$(cargo llvm-cov show-env --export-prefix 2>/dev/null)"
+    set +a
+    cargo nextest run --no-run \
+      --package "$CRATE" --features "$ENGINE_FEATURES" \
+      --target-dir "$cov_target_dir/llvm-cov-target"
+    echo "==> [engine-cov] instrumented objects built under $cov_target_dir/llvm-cov-target"
     ;;
 
   report)
