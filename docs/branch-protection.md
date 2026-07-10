@@ -78,12 +78,32 @@ From the binding/packaging workflows (when those surfaces are exercised):
 | `maturin build + pytest` | `.github/workflows/python.yml` | The `sparq-rdf` PyPI binding (`import sparq`) build + pytest parity suite. |
 | (js binding job) | `.github/workflows/js.yml` | The `@jeswr/sparq` npm build/tests. |
 
-> Heavy benchmarks (`bench.yml`, `bench-ec2.yml`) and release/dist workflows are **not**
-> aggregated as per-PR gates (bench runs on PRs for feedback but its own hard gate
-> self-fails; release/dist fire only on tags). The **Scorecard** workflow
+> **Benchmarks — the DETERMINISTIC ratchet gates on PRs; the NOISY timing is nightly (sq-6vshe.6,
+> maintainer-directed).** On a `pull_request` the `bench.yml` `run + track benchmarks` job runs the
+> FAST DETERMINISTIC form only (`ci-bench.sh --deterministic-only`): the byte-count / memory-layout
+> ratchet (store/dict/wasm bytes — a pure function of the code, immune to shared-runner noise) IS
+> aggregated by the gate (its name has no advisory token) and hard-fails the gate on a real
+> regression. `bench.yml` no longer triggers on `merge_group` at all — the deterministic ratchet
+> already ran on the PR head, re-runs on push-to-main, and the merged-tree wasm-feature-OFF invariant
+> is independently guarded on `merge_group` by `vectorized-feature-off.yml`'s `artifact-exact-equality`
+> leg — so the bench check simply does not appear on the merge_group ref and the gate never waits on
+> it (the required set is the single `gate` context, not this job by name). The NOISY wall-clock timing
+> suites (query latencies + the well-known sp2b/dbpsb/watdiv/bsbm/lubm + cargo-only latency suites)
+> were dragging the merge queue and flapping the gate on shared runners, so they are RELOCATED to the
+> nightly EC2 lane (`bench-ec2.yml` `nightly-full-bench`, cron, quiet dedicated spot instance) which
+> publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads — the
+> perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
+> release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
 > (`scorecard.yml`) re-scores posture on push to `main` and feeds the code-scanning
 > dashboard; **CodeQL** + **Scorecard** therefore both feed the gate/dashboard even
 > though only the per-commit `CodeQL analysis (rust)` check is a per-PR check-run.
+>
+> **No branch-protection ruleset change is required for this benchmark relocation.** The live ruleset
+> requires exactly one context (`gate`), never the `bench` job by name, and the aggregator discovers the
+> live check set at run time — so removing bench from `merge_group` and narrowing its PR run to the
+> deterministic ratchet needs no ruleset edit. (If the maintainer had ever added the bench job by name
+> to the required-checks list, THAT name would now need removing — but per the "select only
+> `ci-summary / gate`" rule above, it was never added.)
 
 ## Required reviews
 
