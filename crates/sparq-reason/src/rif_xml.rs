@@ -67,6 +67,23 @@
 //! # }
 //! ```
 //!
+//! ## Positional predicate atoms — `Atom(op args…)` [SONNET-4.6] sq-n7y15
+//!
+//! RIF-Core's XML presentation syntax uses `<Atom>` for **positional (ordered-argument)
+//! predicate calls** — the dominant form in real W3C RIF Core test files. This importer
+//! supports the two arities that have a sound, semantically-equivalent mapping to the
+//! existing `rif::Atom` variants (scope: rif_xml only; rif.rs is unchanged):
+//!
+//! | Arity | XML form | Mapped to | RIF-Core equivalence |
+//! |-------|----------|-----------|----------------------|
+//! | **1** | `<Atom><op>C</op><args>a</args></Atom>` | `Atom::Member { obj: a, class: C }` | Unary predicate = membership `a # C` |
+//! | **2** | `<Atom><op>P</op><args>a b</args></Atom>` | `Atom::Frame { obj: a, pred: P, val: b }` | Binary predicate = frame atom `a[P → b]` |
+//!
+//! **Fail-closed:** arity 0 and arity 3+ positional atoms are **rejected** with
+//! `ImportError::UnrecognizedElement` — there is no semantically equivalent existing
+//! atom form, so importing them silently into a wrong shape would be unsound.
+//! A non-IRI operator is rejected with `ImportError::MalformedXml`.
+//!
 //! ## Sound desugarings applied at import
 //!
 //! 1. **Body `Or` → rule-splitting (Lloyd–Topor):** a disjunctive body
@@ -641,6 +658,18 @@ fn is_whitespace_collapse_type(ty: &str) -> bool {
 /// The `rif:iri` type attribute value in `<Const type="…">`.
 const RIF_IRI_TYPE: &str = "http://www.w3.org/2007/rif#iri";
 
+/// The `rif:local` type attribute value in `<Const type="…">`.
+///
+/// RIF **local constants** are document-scoped: two `rif:local` constants with the
+/// same name in DIFFERENT documents denote DISTINCT individuals (they share no
+/// cross-document identity). This is a semantic property the current importer cannot
+/// faithfully represent — the `Term::Lit` representation makes them structurally
+/// equal across documents, which would cause a `NegativeEntailmentTest` to
+/// incorrectly report the non-conclusion as "entailed" (the `Local_Constant` W3C
+/// test demonstrates this exactly). We therefore reject `rif:local` constants
+/// fail-closed rather than silently mis-importing them. [SONNET-4.6] sq-n7y15
+const RIF_LOCAL_TYPE: &str = "http://www.w3.org/2007/rif#local";
+
 /// Parse a `<Const>` or `<Var>` node into a `Term`.
 ///
 /// # Whitespace handling (Fix-3)
@@ -655,6 +684,21 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
     match node.tag.as_str() {
         "Const" => {
             let ty = node.attr("type").unwrap_or("");
+            if ty == RIF_LOCAL_TYPE {
+                // rif:local constants are document-scoped: the same name in two different
+                // documents denotes two DISTINCT individuals. The Term::Lit representation
+                // would make them structurally equal across documents — a soundness hazard
+                // (a NegativeEntailmentTest with a rif:local non-conclusion would
+                // incorrectly report the non-conclusion as entailed). Reject fail-closed.
+                // [SONNET-4.6] sq-n7y15
+                return Err(ImportError::UnrecognizedElement {
+                    tag: format!(
+                        "Const(rif:local) — local constants are document-scoped; \
+                         cross-document identity cannot be faithfully represented \
+                         (fail-closed, not silently mis-imported)"
+                    ),
+                });
+            }
             if ty == RIF_IRI_TYPE {
                 // IRI: XSD whitespace-collapse; trim for safety.
                 Ok(Term::Iri(node.text.trim().to_string()))
@@ -968,23 +1012,129 @@ fn alpha_rename_cond(
 // Atom parsing
 // ---------------------------------------------------------------------------
 
-/// Parse an element that should be a positive atom (Frame/Member/Subclass/Equal).
+/// Parse an element that should be a positive atom (Frame/Member/Subclass/Equal/positional Atom).
 fn parse_positive_atom(node: &XmlNode) -> Result<Atom, ImportError> {
     match node.tag.as_str() {
         "Frame" => parse_frame(node),
         "Member" => parse_member(node),
         "Subclass" => parse_subclass(node),
         "Equal" => parse_equal(node),
-        "Atom" => {
-            // <Atom> in RIF/XML can be used for positional predicates.
-            // In Core, the only sanctioned use is as a builtin predicate inside External.
-            // A bare <Atom> in a head is unsupported (not a standard Core head form).
-            Err(ImportError::UnrecognizedElement { tag: "Atom (bare, outside External)".to_string() })
-        }
+        // [SONNET-4.6] sq-n7y15 — positional predicate Atom: Atom(op args...) import.
+        "Atom" => parse_positional_atom(node),
         other => {
             check_non_core(other)?;
             Err(ImportError::UnrecognizedElement { tag: other.to_string() })
         }
+    }
+}
+
+/// Parse a bare positional `<Atom>` — a RIF-Core n-ary predicate call `P(arg1, arg2, …)`.
+///
+/// ## RIF-Core XML structure
+///
+/// ```xml
+/// <Atom>
+///   <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+///   <args ordered="yes">
+///     <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+///     <Var>x</Var>
+///   </args>
+/// </Atom>
+/// ```
+///
+/// ## Soundly supported arities → existing `Atom` variants (scope: rif_xml only)
+///
+/// The RIF-Core internal model (`rif.rs`) has no first-class n-ary predicate variant.
+/// This function maps positional atoms to the semantically equivalent **existing** variants:
+///
+/// | Arity | Positional form | Mapped to | RIF-Core equivalence |
+/// |-------|-----------------|-----------|----------------------|
+/// | **2** | `P(arg1, arg2)` | `Atom::Frame { obj: arg1, pred: P, val: arg2 }` | Binary predicate = frame atom `arg1[P -> arg2]` (RIF-Core §2.3) |
+/// | **1** | `C(arg1)` | `Atom::Member { obj: arg1, class: C }` | Unary predicate = membership `arg1 # C` |
+///
+/// Arities **0** and **3+** are rejected fail-closed: there is no semantically equivalent
+/// existing atom form, so importing them silently into a wrong shape would be unsound.
+/// A non-IRI operator is similarly rejected.
+///
+/// ## Fail-closed invariant
+///
+/// Any positional atom that cannot be soundly mapped to an existing variant is rejected
+/// with a clear `ImportError` — never silently imported with altered semantics.
+/// [SONNET-4.6] sq-n7y15
+fn parse_positional_atom(node: &XmlNode) -> Result<Atom, ImportError> {
+    // <op> is a single-cardinality wrapper: fail-closed on duplicates (sq-4l1fj).
+    let op_node = node.unique_child("op", "positional Atom")?.ok_or_else(|| {
+        ImportError::MalformedXml("positional <Atom> missing <op>".to_string())
+    })?;
+    // The <op> child must be exactly one <Const> carrying the predicate IRI.
+    let op_const = op_node.only_child("positional Atom <op>")?;
+    if op_const.tag != "Const" {
+        return Err(ImportError::MalformedXml(format!(
+            "positional Atom <op> child must be <Const>, found <{}>",
+            op_const.tag
+        )));
+    }
+    // The predicate IRI — parsed by parse_term so the type attribute is validated.
+    let pred_term = parse_term(op_const)?;
+    let pred_iri = match &pred_term {
+        Term::Iri(iri) => iri.clone(),
+        _ => {
+            return Err(ImportError::MalformedXml(
+                "positional Atom operator must be an IRI-typed Const (rif:iri); \
+                 non-IRI operators are not supported (fail-closed)"
+                    .to_string(),
+            ));
+        }
+    };
+
+    // <args> is a single-cardinality wrapper: fail-closed on duplicates (sq-4l1fj).
+    let args: Vec<Term> = match node.unique_child("args", "positional Atom")? {
+        Some(args_node) => args_node
+            .children
+            .iter()
+            .map(parse_term)
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+
+    // Named-argument check: the <args> form is positional-only; a named-arg slot would
+    // use a different XML structure (bead-scope does not include named-arg Atoms since
+    // those are rejected at the Frame/<slot>/<Name> level). Guard defensively.
+    if node.child("slot").is_some() {
+        let name = node
+            .child("slot")
+            .and_then(|s| s.child("Name"))
+            .and_then(|n| n.children.first())
+            .map(|n| n.text.clone())
+            .unwrap_or_default();
+        return Err(ImportError::NamedArgUniterm { name });
+    }
+
+    // Map arity → semantically equivalent existing Atom variant.
+    // Fail-closed on unsupported arities — never silently mis-import.
+    match args.as_slice() {
+        // Arity 1: unary predicate C(arg1) ≡ arg1 # C (membership). [SONNET-4.6] sq-n7y15
+        [arg1] => Ok(Atom::Member {
+            obj: arg1.clone(),
+            class: Term::Iri(pred_iri),
+        }),
+        // Arity 2: binary predicate P(arg1, arg2) ≡ arg1[P -> arg2] (frame). [SONNET-4.6] sq-n7y15
+        [arg1, arg2] => Ok(Atom::Frame {
+            obj: arg1.clone(),
+            pred: Term::Iri(pred_iri),
+            val: arg2.clone(),
+        }),
+        // Arity 0 or 3+: no sound mapping in the existing Core model — reject fail-closed.
+        _ => Err(ImportError::UnrecognizedElement {
+            tag: format!(
+                "Atom (positional, arity {}) — only arity-1 and arity-2 \
+                 positional atoms are supported (arity-1 maps to membership, \
+                 arity-2 maps to frame); arity-{} has no sound mapping in \
+                 the Core model (fail-closed)",
+                args.len(),
+                args.len()
+            ),
+        }),
     }
 }
 
@@ -1192,6 +1342,8 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
         "Subclass" => Ok(BodyCond::Atom(parse_subclass(node)?)),
         "Equal" => Ok(BodyCond::Atom(parse_equal(node)?)),
         "External" => Ok(BodyCond::Atom(parse_external(node)?)),
+        // [SONNET-4.6] sq-n7y15 — positional Atom in body conditions.
+        "Atom" => Ok(BodyCond::Atom(parse_positional_atom(node)?)),
         other => {
             check_non_core(other)?;
             Err(ImportError::UnrecognizedElement { tag: other.to_string() })
@@ -1292,7 +1444,8 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
             }
         }
         // Bare fact (no Forall wrapper) — no existentials are possible.
-        "Frame" | "Member" | "Subclass" | "Equal" => {
+        // [SONNET-4.6] sq-n7y15 — "Atom" added: bare positional predicate fact.
+        "Frame" | "Member" | "Subclass" | "Equal" | "Atom" => {
             let atom = parse_positive_atom(node)?;
             Ok(vec![Rule::fact(atom)])
         }
@@ -3421,6 +3574,344 @@ mod tests {
 </Document>"#;
         let doc = import(control).expect("single-<items> List value is conformant and must import");
         assert_eq!(doc.rules.len(), 1, "control List-valued Frame fact must import as one rule");
+    }
+
+    // ---- Positional Atom tests (sq-n7y15) -----------------------------------
+
+    /// A binary positional Atom in a bare fact imports as `Atom::Frame`.
+    /// `Atom(http://ex/P, http://ex/a, http://ex/b)` ≡ `a[P → b]`.
+    #[test]
+    fn test_positional_atom_binary_fact_imports_as_frame() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("binary positional Atom fact must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert!(rule.body.is_empty(), "fact has no body");
+        assert_eq!(rule.head.len(), 1);
+        assert_eq!(
+            rule.head[0],
+            Atom::Frame {
+                obj: Term::Iri("http://ex/a".to_string()),
+                pred: Term::Iri("http://ex/P".to_string()),
+                val: Term::Iri("http://ex/b".to_string()),
+            },
+            "binary positional Atom must map to Frame{{obj=a, pred=P, val=b}}"
+        );
+    }
+
+    /// A unary positional Atom in a bare fact imports as `Atom::Member`.
+    /// `Atom(http://ex/C, http://ex/a)` ≡ `a # C`.
+    #[test]
+    fn test_positional_atom_unary_fact_imports_as_member() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("unary positional Atom fact must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert!(rule.body.is_empty(), "fact has no body");
+        assert_eq!(rule.head.len(), 1);
+        assert_eq!(
+            rule.head[0],
+            Atom::Member {
+                obj: Term::Iri("http://ex/a".to_string()),
+                class: Term::Iri("http://ex/C".to_string()),
+            },
+            "unary positional Atom must map to Member{{obj=a, class=C}}"
+        );
+    }
+
+    /// Positional Atoms in a rule body (body condition position) import correctly.
+    /// A Forall: head :- Atom(P x y) maps to Frame in the body.
+    #[test]
+    fn test_positional_atom_in_rule_body() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <declare><Var>y</Var></declare>
+      <formula><Implies>
+        <if>
+          <Atom>
+            <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/R</Const></op>
+            <args ordered="yes"><Var>x</Var><Var>y</Var></args>
+          </Atom>
+        </if>
+        <then>
+          <Frame>
+            <object><Var>x</Var></object>
+            <slot>
+              <Const type="http://www.w3.org/2007/rif#iri">http://ex/relatedTo</Const>
+              <Var>y</Var>
+            </slot>
+          </Frame>
+        </then>
+      </Implies></formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("positional Atom in body must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 1, "body has one positional Atom");
+        assert_eq!(
+            rule.body[0],
+            Atom::Frame {
+                obj: Term::Var("x".to_string()),
+                pred: Term::Iri("http://ex/R".to_string()),
+                val: Term::Var("y".to_string()),
+            },
+            "binary positional Atom in body must map to Frame"
+        );
+        assert_eq!(rule.head.len(), 1);
+    }
+
+    /// Positional Atom in the HEAD of a rule imports as Frame. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_in_rule_head() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <declare><Var>y</Var></declare>
+      <formula><Implies>
+        <if>
+          <Frame>
+            <object><Var>x</Var></object>
+            <slot>
+              <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+              <Var>y</Var>
+            </slot>
+          </Frame>
+        </if>
+        <then>
+          <Atom>
+            <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/Q</Const></op>
+            <args ordered="yes"><Var>x</Var><Var>y</Var></args>
+          </Atom>
+        </then>
+      </Implies></formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("positional Atom in head must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.head.len(), 1);
+        assert_eq!(
+            rule.head[0],
+            Atom::Frame {
+                obj: Term::Var("x".to_string()),
+                pred: Term::Iri("http://ex/Q".to_string()),
+                val: Term::Var("y".to_string()),
+            },
+            "binary positional Atom in head must map to Frame"
+        );
+    }
+
+    /// Arity-0 positional Atom is rejected fail-closed. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_arity_0_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes"></args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("arity-0 positional Atom must be rejected fail-closed");
+        assert!(
+            matches!(err, ImportError::UnrecognizedElement { ref tag } if tag.contains("arity 0")),
+            "expected UnrecognizedElement mentioning 'arity 0', got: {}",
+            err
+        );
+    }
+
+    /// Arity-3+ positional Atom is rejected fail-closed. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_arity_3_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/T</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/c</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("arity-3 positional Atom must be rejected fail-closed");
+        assert!(
+            matches!(err, ImportError::UnrecognizedElement { ref tag } if tag.contains("arity 3")),
+            "expected UnrecognizedElement mentioning 'arity 3', got: {}",
+            err
+        );
+    }
+
+    /// Non-IRI operator in a positional Atom is rejected fail-closed. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_non_iri_op_rejected() {
+        // Literal-typed Const (xsd:string) is not a valid predicate IRI.
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2001/XMLSchema#string">not-an-iri</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("non-IRI Atom operator must be rejected fail-closed");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for non-IRI Atom operator, got: {}",
+            err
+        );
+    }
+
+    /// Mutation check: swapping arg order (arg1 ↔ arg2) in a binary positional Atom
+    /// must change the parsed Frame (obj ≠ val). This proves that arg ORDER is preserved
+    /// and the mapping is not accidentally order-insensitive. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_arg_order_mutation() {
+        // Normal order: Atom(P, a, b) → Frame{obj=a, pred=P, val=b}
+        let normal_xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        // Swapped order: Atom(P, b, a) → Frame{obj=b, pred=P, val=a}
+        let swapped_xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc_normal = import(normal_xml).expect("normal-order binary Atom must import");
+        let doc_swapped = import(swapped_xml).expect("swapped-order binary Atom must import");
+
+        let atom_normal = &doc_normal.rules[0].head[0];
+        let atom_swapped = &doc_swapped.rules[0].head[0];
+
+        // Mutation check: the two documents must produce DIFFERENT atoms.
+        assert_ne!(
+            atom_normal, atom_swapped,
+            "mutation check FAILED: swapping arg order must produce a different Frame; \
+             arg-order mapping appears order-insensitive (this test must be RED if \
+             arg1/arg2 are reversed in parse_positional_atom)"
+        );
+        // Verify the exact mapping: normal → obj=a, val=b; swapped → obj=b, val=a.
+        assert_eq!(
+            atom_normal,
+            &Atom::Frame {
+                obj: Term::Iri("http://ex/a".to_string()),
+                pred: Term::Iri("http://ex/P".to_string()),
+                val: Term::Iri("http://ex/b".to_string()),
+            },
+            "normal order: first arg is obj, second is val"
+        );
+        assert_eq!(
+            atom_swapped,
+            &Atom::Frame {
+                obj: Term::Iri("http://ex/b".to_string()),
+                pred: Term::Iri("http://ex/P".to_string()),
+                val: Term::Iri("http://ex/a".to_string()),
+            },
+            "swapped order: first arg is obj (b), second is val (a)"
+        );
+    }
+
+    /// Positional Atom with variables round-trips through the rule engine (fact + rule).
+    /// Proves the REAL path works end-to-end: binary Atom fact asserted, binary Atom rule
+    /// body matches it, Frame head derived. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_end_to_end_rule_engine() {
+        use sparq_core::dict::Dict;
+        // Fact: Atom(http://ex/R, http://ex/a, http://ex/b) (binary predicate R(a,b))
+        // Rule: Forall ?x ?y: Frame{x relatedTo y} :- Atom(R, x, y)
+        // Expected: Frame{a relatedTo b} is derived.
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/R</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+      </args>
+    </Atom>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <declare><Var>y</Var></declare>
+      <formula><Implies>
+        <if>
+          <Atom>
+            <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/R</Const></op>
+            <args ordered="yes"><Var>x</Var><Var>y</Var></args>
+          </Atom>
+        </if>
+        <then>
+          <Frame>
+            <object><Var>x</Var></object>
+            <slot>
+              <Const type="http://www.w3.org/2007/rif#iri">http://ex/relatedTo</Const>
+              <Var>y</Var>
+            </slot>
+          </Frame>
+        </then>
+      </Implies></formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("end-to-end positional Atom document must import");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure must succeed");
+
+        // The triple (http://ex/a, http://ex/relatedTo, http://ex/b) must be in the closure.
+        // Use intern_iri — the IRIs are now in the dict after the closure run, so intern
+        // returns the existing Id (no new allocation needed). A closure triple [s,p,o]
+        // with all three Ids present proves the derivation fired. [SONNET-4.6] sq-n7y15
+        let s_id = dict.intern_iri("http://ex/a");
+        let p_id = dict.intern_iri("http://ex/relatedTo");
+        let o_id = dict.intern_iri("http://ex/b");
+
+        assert!(
+            closure.iter().any(|t| t[0] == s_id && t[1] == p_id && t[2] == o_id),
+            "end-to-end: the derived triple (a, relatedTo, b) must appear in the closure; \
+             this proves positional Atom R(a,b) was matched by the rule body and the \
+             conclusion Frame was derived"
+        );
     }
 
     /// Direct unit test of the `unique_child` helper — covers all three branches (zero → `None`,
