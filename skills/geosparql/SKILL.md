@@ -212,6 +212,18 @@ The four point-set operations dispatch on operand dimension:
 
 Results are the lowest-dimension geometry capturing the answer and serialise back to `geo:wktLiteral`; line/line and line/polygon **unions** are plain set-unions (not noded/dissolved). **Roll-your-own + upstream:** `geo 0.33`'s `BooleanOps` overlays only polygons, so the line cases are done locally (`i_overlay`'s `FloatClip::clip_by` + an in-crate linear-referencing subtraction); a `geo`-side `LineString` difference is queued upstream for [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`). GML's parser is likewise a roll-your-own profile (no maintained pure-Rust GML *geometry* crate exists) queued for [georust](https://github.com/georust) (bead `sq-zy0`).
 
+## Benchmarking the geo surface <!-- [FABLE-5] sq-hmd7l.29 -->
+
+- **Per-commit HARD gate:** `bench/geo/run.sh` (fixed 100k-point CRS84 corpus; result-set-size +
+  compliance counts asserted vs `bench/geo/expected.tsv` — COUNTS-NOT-COORDINATES).
+- **Same-box competitor comparison:** `scripts/bench/geo-same-box.sh` (vs jena-fuseki-geosparql;
+  opt-in `GEO_GEOGRAPHICA=1` adds the Geographica real-world LGD/GeoNames family — pinned recipe
+  `bench/geo/geographica.sh`, pinned queries `bench/geo/queries-geographica/`). No timing is
+  trusted without result-set-size agreement per query; see `bench/geo/README.md`.
+- **Ad-hoc query timing:** `bench_geo query <corpus.nt> <query.rq> [iters]` (the crate example,
+  default `engine` feature) — in-process `query_with_functions` + `geof_registry()`, emitting
+  `name\tcount\tus`.
+
 ## See also
 
 - `serve` / `sparql-query` sibling skills for running the engine and writing SPARQL.
