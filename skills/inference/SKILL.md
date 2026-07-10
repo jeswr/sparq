@@ -164,9 +164,10 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 - **Builtin SAFETY / range-restriction (enforced).** `Document::validate()` (also called by `to_n3_source`/`closure`) **rejects** an unsafe rule with a `RifError` rather than letting the chainer loop or over-derive: a head variable not bound by a positive body atom (`UnboundHeadVar`), a builtin *input* not range-restricted (`UnboundBuiltinInput`), a builtin in a head (`BuiltinInHead`), wrong arity (`BadBuiltinArity`), Equal in a head (`EqualInConclusion`), or distinct ground constants in a body Equal (`DistinctGroundEqual`).
 - **MONOTONE — NAF is EXCLUDED by design.** RIF-Core is monotone Horn; negation-as-failure / RIF-PRD actions / aggregation are **not in the dialect** and are not representable in the `Atom` model. Adding facts only ever *adds* conclusions. Larger-RIF surface (RIF-BLD function symbols, the SPARQL-RIF Core Entailment Regime) is documented out-of-scope in `rif::UNIMPLEMENTED` — tracked, never faked. The expressivity ratchet is `sparq-conformance`'s `rif_core_suite` (opt-in `rif-core` feature; `RIF_CORE_FLOOR`, a sparq-EXTENSION row in the central scoreboard).
 - **RIF/XML importer** (`rif-xml` feature, `rif_xml::import()`): parses the W3C RIF-Core XML
-  presentation syntax into a `rif::Document`. Applies two sound desugarings at import: body
+  presentation syntax into a `rif::Document`. Applies three sound desugarings at import: body
   `Or` → rule-splitting (Lloyd-Topor, one rule per disjunct); body `Exists` → existential
-  vars become ordinary body vars (range-restriction validated by `Document::validate`). Fail-closed:
+  vars become ordinary body vars (range-restriction validated by `Document::validate`);
+  multi-slot `Frame` → per-slot conjunction (see below, sq-jsgyn). Fail-closed:
   `Import` directives, non-Core elements, unknown `External` IRIs, named-argument uniterms,
   and malformed XML each produce a named `ImportError` variant. Parsing only — no new inference
   beyond the existing `rif-core` forward chainer. Unblocks sq-pbz04.5.5 (W3C RIF WG test-suite arm).
@@ -174,6 +175,13 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   form in real W3C RIF Core test files. Arity-1 maps to `Atom::Member` (membership `a # C`),
   arity-2 maps to `Atom::Frame` (frame atom `a[P → b]`). Arity-0 and arity-3+ are rejected
   fail-closed (`ImportError::UnrecognizedElement`) — no sound mapping exists in the Core model.
+  **Multi-slot Frame desugaring** (`obj[p1->v1 p2->v2 …]`, sq-jsgyn): a `<Frame>` with N `<slot>`
+  children desugars into N `Atom::Frame` atoms — one per `(pi, vi)` pair, sharing the same `obj`.
+  Under RIF-Core §2.3 a multi-slot frame is the conjunction of per-slot frames; in body position
+  this becomes a body `And`, in head position N head atoms are added, and as a bare fact N
+  `Rule::fact` entries are produced. Fail-closed: zero slots → `MalformedXml`; named-arg slot →
+  `NamedArgUniterm`; duplicate `<object>` → `MalformedXml`. `<slot>` is multi-cardinality;
+  `<object>` remains single-cardinality.
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 

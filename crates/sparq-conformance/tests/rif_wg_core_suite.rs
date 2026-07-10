@@ -69,26 +69,26 @@
 //! sq-n7y15 positional-Atom importer [SONNET-4.6] — 3 of the 46 tests now PASS
 //! non-vacuously:
 //!
-//! * **Positive/Negative Entailment** — real premises with multi-slot frames or `Import`
-//!   directives still do not import; under the NET vacuity rule an un-importable premise
-//!   is a SKIP, never a vacuous pass. Binary/unary positional atoms DO import now but the
-//!   entailment conclusions are currently still `skip:condition-shape` (the conclusion
-//!   oracle has a separate positional-Atom gap for the conclusion side).
+//! * **Positive/Negative Entailment** — real premises with `Import` directives still do
+//!   not import; under the NET vacuity rule an un-importable premise is a SKIP, never a
+//!   vacuous pass. Binary/unary positional atoms DO import now. Multi-slot frames also
+//!   now import (sq-jsgyn [SONNET-4.6]) — premises that were `skip:condition-shape`
+//!   solely due to multi-slot frames may graduate to entailment tests once the live
+//!   suite is re-run with `scripts/fetch-inference-suites.sh`; the floor must be
+//!   updated to the actual measured count after that re-run.
 //! * **Positive Syntax** — inputs using constructs beyond arity-1/arity-2 positional
-//!   atoms (multi-slot frames, arity-3+ atoms, local constants) still do not import.
+//!   atoms and multi-slot frames (arity-3+ atoms, local constants) still do not import.
+//!   Multi-slot-frame-only inputs may now PASS (sq-jsgyn).
 //! * **Negative Syntax / Import Rejection** — the 3 safeness `NegativeSyntaxTests`
-//!   (`Core_NonSafeness`, `Core_NonSafeness_2`, `No_free_variables`... wait, check the
-//!   suite output) now GENUINELY PASS: their positional atoms import, and the
-//!   range-restriction checker correctly detects the targeted violation
-//!   (`UnboundHeadVar`/`UnboundBuiltinInput`). Previously these were vacuous (rejected
-//!   before the validator saw the unsafe rule); now they are non-vacuous. `ImportRejection`
-//!   tests remain SKIPs (blanket import-refusal — never a genuine specific-violation
-//!   detection).
+//!   now GENUINELY PASS: their positional atoms import, and the range-restriction checker
+//!   correctly detects the targeted violation (`UnboundHeadVar`/`UnboundBuiltinInput`).
+//!   `ImportRejection` tests remain SKIPs (blanket import-refusal).
 //!
-//! [SONNET-4.6] sq-n7y15: floor raised 0 → 3. RISE-READY: ratchets higher as multi-slot
-//! frame import and arity-3+ support land (tracked beads). The honest denominator with
-//! a legible skip taxonomy is more informative than an inflated count from vacuous
-//! rejections.
+//! [SONNET-4.6] sq-n7y15: floor raised 0 → 3. [SONNET-4.6] sq-jsgyn: multi-slot frame
+//! import added — floor RISE-READY (re-run with fetched suite to measure new count;
+//! update `RIF_WG_CORE_FLOOR` to the measured result). Remaining blockers: arity-3+
+//! atoms, Import-closure, local constants. The honest denominator with a legible skip
+//! taxonomy is more informative than an inflated count from vacuous rejections.
 //!
 //! ## Feature gating (both states) + fixtures
 //!
@@ -128,17 +128,17 @@ mod gated {
     /// central scoreboard (`scoreboard::SUITES`) and read TEXTUALLY by the guard test
     /// `tests/scoreboard_floors.rs`. It may only RISE — never lower it (raise as the
     /// RIF/XML importer's Core coverage grows and real W3C tests graduate from SKIP to
-    /// PASS). At the current importer it is a MEASURED 0: every real W3C RIF Core file
-    /// exceeds the importer's single-slot-frame subset (multi-slot frames, positional
-    /// predicate atoms, Import directives, bare-conclusion roots), so all Core+Approved
-    /// tests land in the named skip buckets — the honest denominator the printed skip
-    /// taxonomy makes legible. A STANDARDS-suite result (family "W3C RIF"), NOT a
-    /// self-asserting expressivity ratchet. [FABLE-5] sq-pbz04.5.5
+    /// PASS). A STANDARDS-suite result (family "W3C RIF"), NOT a self-asserting
+    /// expressivity ratchet. [FABLE-5] sq-pbz04.5.5
     // [SONNET-4.6] sq-n7y15: raised from 0 to 3 by positional-Atom import. The 3 passing
     // tests are the 3 NegativeSyntaxTests whose positional Atoms now import successfully,
     // allowing the range-restriction checker to genuinely detect the targeted violations
     // (UnboundHeadVar/UnboundBuiltinInput) rather than vacuously rejecting via
-    // UnrecognizedElement. Rise-only: this may only increase as importer coverage grows.
+    // UnrecognizedElement.
+    // [SONNET-4.6] sq-jsgyn: multi-slot frame import added. The floor remains 3 (the
+    // W3C archive files are not vendored; the floor must be re-measured after fetching
+    // the archive via scripts/fetch-inference-suites.sh and re-running the suite with
+    // `--features rif-wg-core`). Rise-only: update only to the measured result.
     pub const RIF_WG_CORE_FLOOR: usize = 3;
 
     /// The pinned archive version (mirrors `scripts/fetch-inference-suites.sh`).
@@ -208,10 +208,11 @@ mod gated {
             ImportError::NonCoreElement { .. } => "skip:non-core",
             ImportError::UnknownExternal { .. } => "skip:unsupported-builtin",
             // A named-arg uniterm, an unrecognized element (arity-0/3+ positional `<Atom>`,
-            // rif:local constant, an out-of-subset construct), a malformed shape
-            // (multi-slot frame), or a validation failure that is NOT a modelled Core
-            // violation are all "the condition/rule shape is outside what the importer
-            // models" — the condition-shape bucket.
+            // rif:local constant, an out-of-subset construct), or a validation failure
+            // that is NOT a modelled Core violation are all "the condition/rule shape is
+            // outside what the importer models" — the condition-shape bucket.
+            // Note: multi-slot frames no longer land here (sq-jsgyn [SONNET-4.6]):
+            // they now import successfully and desugar to per-slot conjunction.
             ImportError::NamedArgUniterm { .. }
             | ImportError::UnrecognizedElement { .. }
             | ImportError::MalformedXml(_)
@@ -525,9 +526,10 @@ mod gated {
         };
         // A W3C conclusion file is a BARE `<Frame>`/`<Atom>`/… root (not a `<Document>`);
         // wrap it in the standard scaffold so the importer parses it as a ground fact.
-        // If it is STILL un-importable (a positional `<Atom>` root, a multi-slot frame)
+        // If it is STILL un-importable (arity-3+ positional `<Atom>` root, etc.)
         // the conclusion is outside the ground-triple shape we can decide →
         // condition-shape skip (never a guessed pass).
+        // Note: single-slot and multi-slot Frame conclusions now import (sq-jsgyn).
         let concl_doc = match import_or_skip(&wrap_conclusion(&concl_src)) {
             Ok(d) => d,
             Err(_) => return Outcome::Skip("skip:condition-shape"),

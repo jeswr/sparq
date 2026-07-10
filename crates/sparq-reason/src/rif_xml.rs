@@ -3,6 +3,19 @@
 // desugaring and a fail-closed taxonomy. Requires the `rif-core` feature (wired by
 // the `rif-xml` feature below). When off, zero rif_xml code is compiled.
 //
+// sq-jsgyn: multi-slot Frame desugaring. A <Frame> with N>=2 <slot> children
+// obj[p1->v1, p2->v2, …] desugars into N ground Frame atoms — obj[p1->v1],
+// obj[p2->v2], … — one per slot. In body position these become a conjunction
+// (BodyCond::And); in head position they extend the head-atom list; as a bare
+// fact they produce one Rule::fact per slot. This is the sound RIF-Core lowering:
+// a multi-slot frame is the conjunction of its per-slot single-slot frames
+// (RIF-Core §2.3). Fail-closed: a Frame with ZERO slots is MalformedXml; any
+// slot that is a named-argument uniterm is NamedArgUniterm; only the <object>
+// wrapper is still single-cardinality (duplicate <object> → MalformedXml). The
+// old unique_child("slot", …) check that made duplicate <slot> an error is
+// removed; the per-slot named-arg check replaces the former single-slot guard.
+// [SONNET-4.6] sq-jsgyn
+//
 // Opus adversarial-verify fixes applied (sq-pbz04.5.3 post-verify):
 // Fix-1: unconditional alpha-renaming of Exists-declared vars prevents variable
 //        capture in both shadow (Forall ?x … Exists ?x) and sibling (Exists ?y …
@@ -108,6 +121,20 @@
 //!    `Document::validate()` enforces the range-restriction invariant on every imported
 //!    document, so every renamed variable appears in at least one positive body atom.
 //!
+//! 3. **Multi-slot `Frame` → per-slot conjunction (sq-jsgyn):** a `Frame` carrying N
+//!    `<slot>` children `obj[p1->v1 p2->v2 …]` desugars into **N single-slot ground
+//!    `Frame` atoms** — one per `(pi, vi)` pair, each sharing the same `obj`. Under
+//!    RIF-Core §2.3 a multi-slot frame is the conjunction of its per-slot frames, so
+//!    this is the semantically equivalent Horn lowering:
+//!    - **Body position:** desugared to `BodyCond::And([obj[p1->v1], obj[p2->v2], …])`.
+//!    - **Head position (or conjunctive head `<And>`):** each slot adds one `Atom` to
+//!      the rule's head list (`Rule::head`).
+//!    - **Bare fact:** one `Rule::fact(obj[pi->vi])` per slot.
+//!    - **Fail-closed invariants:** zero slots → `MalformedXml`; a named-argument
+//!      `<slot>/<Name>` → `NamedArgUniterm`; duplicate `<object>` still →
+//!      `MalformedXml`. Only `<slot>` may appear multiple times under a `<Frame>`;
+//!      `<object>` remains single-cardinality.
+//!
 //! ## Fail-closed taxonomy
 //!
 //! Every element or construct outside the supported Core subset returns a named error
@@ -120,14 +147,17 @@
 //! This is a soundness property, not merely a diagnostic: dropping a second `<if>`
 //! conjunct would WEAKEN the rule body → over-derivation (sq-anuo9). Nothing within a
 //! wrapper is silently skipped or dropped, and — the twin class — a **duplicate
-//! single-cardinality wrapper under a parent** (two `<object>`/`<slot>` under a
-//! `<Frame>`, `<instance>`/`<class>` under `<Member>`, `<sub>`/`<sup>` under a
+//! single-cardinality wrapper under a parent** (two `<object>` under a `<Frame>`,
+//! `<instance>`/`<class>` under `<Member>`, `<sub>`/`<sup>` under a
 //! `<Subclass>`, `<left>`/`<right>` under an `<Equal>`, `<content>`/`<op>`/`<args>` under
 //! an `<External>` call, the `<formula>` under a `<Forall>`/`<Exists>`, or the `<items>`
 //! under a `<List>` term) is rejected via `unique_child` rather than first-wins-dropped by
 //! `child()` (sq-4l1fj, closing the
 //! residual class sq-anuo9's `only_child` left; the `<if>`/`<then>` subset was already
 //! guarded inline in `parse_implies`).
+//! **Exception:** multiple `<slot>` children under a `<Frame>` are VALID (RIF-Core
+//! multi-slot frames); they desugar to a per-slot conjunction rather than being rejected
+//! (sq-jsgyn). `<object>` remains single-cardinality under `<Frame>`.
 //!
 //! 1. `ImportError::ImportDirective` — any `Import` element (remote imports: fail-closed).
 //! 2. `ImportError::NonCoreElement { element, reason }` — non-Core dialect elements:
@@ -1011,15 +1041,22 @@ fn alpha_rename_cond(
 // Atom parsing
 // ---------------------------------------------------------------------------
 
-/// Parse an element that should be a positive atom (Frame/Member/Subclass/Equal/positional Atom).
-fn parse_positive_atom(node: &XmlNode) -> Result<Atom, ImportError> {
+/// Parse an element that should be a positive atom (or atoms — a multi-slot Frame
+/// desugars into N atoms). Returns the desugared list of atoms.
+///
+/// Multi-slot Frame desugaring (sq-jsgyn): a `<Frame>` with N `<slot>` children
+/// `obj[p1->v1 p2->v2 …]` returns N `Atom::Frame` values — one per slot. All
+/// other atom types are always single, so their list is a singleton. See
+/// `parse_frame_atoms` for the per-slot logic and fail-closed invariants.
+fn parse_positive_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
     match node.tag.as_str() {
-        "Frame" => parse_frame(node),
-        "Member" => parse_member(node),
-        "Subclass" => parse_subclass(node),
-        "Equal" => parse_equal(node),
+        // Multi-slot Frame: returns one Atom per slot (sq-jsgyn).
+        "Frame" => parse_frame_atoms(node),
+        "Member" => Ok(vec![parse_member(node)?]),
+        "Subclass" => Ok(vec![parse_subclass(node)?]),
+        "Equal" => Ok(vec![parse_equal(node)?]),
         // [SONNET-4.6] sq-n7y15 — positional predicate Atom: Atom(op args...) import.
-        "Atom" => parse_positional_atom(node),
+        "Atom" => Ok(vec![parse_positional_atom(node)?]),
         other => {
             check_non_core(other)?;
             Err(ImportError::UnrecognizedElement { tag: other.to_string() })
@@ -1137,40 +1174,75 @@ fn parse_positional_atom(node: &XmlNode) -> Result<Atom, ImportError> {
     }
 }
 
-fn parse_frame(node: &XmlNode) -> Result<Atom, ImportError> {
-    // <Frame>
-    //   <object>TERM</object>
-    //   <slot>TERM TERM</slot>   (predicate, value)
-    // </Frame>
-    // Fail-closed on a DUPLICATE single-cardinality wrapper (sq-4l1fj): the old
-    // `child()` first-wins dropped a second <object>/<slot>, changing the atom.
+/// Parse a `<Frame>` node into one `Atom::Frame` per `<slot>` child, desugaring
+/// a multi-slot frame `obj[p1->v1 p2->v2 …]` into the conjunction of single-slot
+/// frames `[obj[p1->v1], obj[p2->v2], …]`.
+///
+/// # RIF-Core §2.3 semantics
+///
+/// Under RIF-Core, `obj[p1->v1 p2->v2]` is syntactic sugar for the conjunction
+/// `obj[p1->v1] And obj[p2->v2]`. Each per-slot atom is a first-class `Atom::Frame`
+/// in the `rif::Document` model. The desugaring is sound and semantically equivalent
+/// to N single-slot frames.
+///
+/// # Fail-closed invariants (sq-jsgyn)
+///
+/// - **Zero `<slot>` children** → `MalformedXml` (a Frame must carry at least one slot).
+/// - **Duplicate `<object>`** → `MalformedXml` (single-cardinality; sq-4l1fj unchanged).
+/// - **Missing `<object>`** → `MalformedXml`.
+/// - **Named-argument slot** (`<slot><Name>…</Name>…</slot>`) → `NamedArgUniterm`
+///   (checked per slot; one bad slot rejects the whole Frame).
+/// - **`<slot>` with != 2 term children** → `MalformedXml` (checked per slot).
+/// - Multiple `<slot>` children are VALID and desugar to multiple atoms; a Frame
+///   document with only `<object>` and no `<slot>` is malformed — unlike the prior
+///   single-slot-only importer, the `<slot>` multiplicity guard is now `>= 1`.
+///
+/// [SONNET-4.6] sq-jsgyn
+fn parse_frame_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
+    // <object> is single-cardinality (sq-4l1fj): duplicate <object> → MalformedXml.
     let obj_node = node.unique_child("object", "Frame")?.ok_or_else(|| ImportError::MalformedXml(
         "Frame missing <object>".to_string(),
     ))?;
     let obj = parse_first_term(obj_node)?;
 
-    let slot = node.unique_child("slot", "Frame")?.ok_or_else(|| ImportError::MalformedXml(
-        "Frame missing <slot>".to_string(),
-    ))?;
+    // Collect ALL <slot> children — multiple slots are legal (multi-slot frame, sq-jsgyn).
+    let slots: Vec<&XmlNode> = node.children_named("slot").collect();
 
-    // Detect named-argument uniterms: a slot child with a <Name> child is a named arg.
-    if slot.child("Name").is_some() {
-        let name = slot
-            .child("Name")
-            .and_then(|n| n.children.first())
-            .map(|n| n.text.clone())
-            .unwrap_or_default();
-        return Err(ImportError::NamedArgUniterm { name });
+    // Fail-closed: a <Frame> must carry at least one <slot>.
+    if slots.is_empty() {
+        return Err(ImportError::MalformedXml(
+            "Frame missing <slot> (at least one <slot> is required)".to_string(),
+        ));
     }
 
-    let slot_terms: Vec<Term> = slot.children.iter().map(parse_term).collect::<Result<_, _>>()?;
-    if slot_terms.len() != 2 {
-        return Err(ImportError::MalformedXml(format!(
-            "Frame <slot> must have exactly 2 term children, got {}",
-            slot_terms.len()
-        )));
+    // Desugar each slot into a single Atom::Frame. Per-slot named-arg guard.
+    let mut atoms = Vec::with_capacity(slots.len());
+    for slot in slots {
+        // Detect named-argument uniterms: a slot child with a <Name> child is a named arg.
+        if slot.child("Name").is_some() {
+            let name = slot
+                .child("Name")
+                .and_then(|n| n.children.first())
+                .map(|n| n.text.clone())
+                .unwrap_or_default();
+            return Err(ImportError::NamedArgUniterm { name });
+        }
+
+        let slot_terms: Vec<Term> =
+            slot.children.iter().map(parse_term).collect::<Result<_, _>>()?;
+        if slot_terms.len() != 2 {
+            return Err(ImportError::MalformedXml(format!(
+                "Frame <slot> must have exactly 2 term children, got {}",
+                slot_terms.len()
+            )));
+        }
+        atoms.push(Atom::Frame {
+            obj: obj.clone(),
+            pred: slot_terms[0].clone(),
+            val: slot_terms[1].clone(),
+        });
     }
-    Ok(Atom::Frame { obj, pred: slot_terms[0].clone(), val: slot_terms[1].clone() })
+    Ok(atoms)
 }
 
 fn parse_member(node: &XmlNode) -> Result<Atom, ImportError> {
@@ -1336,7 +1408,20 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
             let sub = parse_formula_child(formula)?;
             Ok(BodyCond::Exists(declared_vars, Box::new(sub)))
         }
-        "Frame" => Ok(BodyCond::Atom(parse_frame(node)?)),
+        // Multi-slot Frame in body position: desugar to conjunction (sq-jsgyn).
+        // A single-slot frame produces BodyCond::Atom directly (no unnecessary And wrapper).
+        "Frame" => {
+            let atoms = parse_frame_atoms(node)?;
+            if atoms.len() == 1 {
+                Ok(BodyCond::Atom(atoms.into_iter().next().unwrap()))
+            } else {
+                // N-slot frame → And(obj[p1->v1], obj[p2->v2], …).
+                // Under RIF-Core §2.3 a multi-slot frame is the conjunction of per-slot
+                // frames; this is the semantically equivalent Horn-body lowering.
+                // [SONNET-4.6] sq-jsgyn
+                Ok(BodyCond::And(atoms.into_iter().map(BodyCond::Atom).collect()))
+            }
+        }
         "Member" => Ok(BodyCond::Atom(parse_member(node)?)),
         "Subclass" => Ok(BodyCond::Atom(parse_subclass(node)?)),
         "Equal" => Ok(BodyCond::Atom(parse_equal(node)?)),
@@ -1363,11 +1448,17 @@ fn parse_formula_child(formula: &XmlNode) -> Result<BodyCond, ImportError> {
 // ---------------------------------------------------------------------------
 
 /// Parse the head of an `<Implies>` (the `<then>` child). Head may be a single
-/// positive atom or an `<And>` of positive atoms.
+/// positive atom (or multi-slot Frame → multiple atoms) or an `<And>` of positive atoms.
 ///
 /// # Fail-closed children check (Fix-2)
 ///
 /// The `<And>` case now rejects any non-`<formula>` child element.
+///
+/// # Multi-slot Frame in head position (sq-jsgyn)
+///
+/// A `<Frame>` with N slots in head position adds N atoms to the rule head.
+/// This is the sound RIF-Core lowering: a multi-slot frame conclusion is the
+/// conjunction of per-slot atoms (all must be derived for the rule to fire).
 fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
     match node.tag.as_str() {
         "And" => {
@@ -1378,16 +1469,17 @@ fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
                     check_non_core(&c.tag)?;
                     return Err(ImportError::UnrecognizedElement { tag: c.tag.clone() });
                 }
-                // Single-cardinality: each head-<formula> holds exactly one atom;
+                // Single-cardinality: each head-<formula> holds exactly one atom element;
                 // a surplus sibling head atom is rejected, not dropped (sq-anuo9).
+                // A multi-slot Frame in a head-<formula> desugars to multiple atoms. [sq-jsgyn]
                 let child = c.only_child("<formula> in head And")?;
-                head.push(parse_positive_atom(child)?);
+                head.extend(parse_positive_atoms(child)?);
             }
             Ok(head)
         }
         _ => {
-            // Single positive atom.
-            Ok(vec![parse_positive_atom(node)?])
+            // Single positive atom (or multi-slot Frame → multiple atoms). [sq-jsgyn]
+            parse_positive_atoms(node)
         }
     }
 }
@@ -1436,17 +1528,19 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
                 "Implies" => parse_implies(body_node, &forall_vars),
                 other => {
                     // A bare atom as a Forall formula = universally closed fact.
+                    // Multi-slot Frame desugars to one Rule::fact per slot. [sq-jsgyn]
                     check_non_core(other)?;
-                    let atom = parse_positive_atom(body_node)?;
-                    Ok(vec![Rule::fact(atom)])
+                    let atoms = parse_positive_atoms(body_node)?;
+                    Ok(atoms.into_iter().map(Rule::fact).collect())
                 }
             }
         }
         // Bare fact (no Forall wrapper) — no existentials are possible.
         // [SONNET-4.6] sq-n7y15 — "Atom" added: bare positional predicate fact.
+        // Multi-slot Frame: one Rule::fact per slot. [sq-jsgyn]
         "Frame" | "Member" | "Subclass" | "Equal" | "Atom" => {
-            let atom = parse_positive_atom(node)?;
-            Ok(vec![Rule::fact(atom)])
+            let atoms = parse_positive_atoms(node)?;
+            Ok(atoms.into_iter().map(Rule::fact).collect())
         }
         other => {
             check_non_core(other)?;
@@ -3286,11 +3380,17 @@ mod tests {
         );
     }
 
-    /// Parent `<Frame>` — a duplicate `<object>` OR a duplicate `<slot>` is rejected. The old
-    /// `child()` kept only the first and dropped the second, changing the atom. Paired control:
-    /// the single-wrapper Frame fact imports as exactly one rule.
+    /// Parent `<Frame>` — a duplicate `<object>` is rejected; multiple `<slot>` children
+    /// are NOW VALID (multi-slot frame desugaring, sq-jsgyn). Paired control: the
+    /// single-slot Frame fact imports as exactly one rule.
+    ///
+    /// Note: the pre-sq-jsgyn behaviour rejected two `<slot>` elements with a
+    /// `MalformedXml("Frame has duplicate <slot>…")` error via `unique_child`.
+    /// That guard is removed; `<slot>` is now multi-cardinality under `<Frame>`.
+    /// `<object>` remains single-cardinality and its duplicate rejection is unchanged.
     #[test]
-    fn test_duplicate_frame_object_and_slot_rejected() {
+    fn test_duplicate_frame_object_rejected_multislot_accepted() {
+        // Duplicate <object> — STILL rejected (single-cardinality unchanged).
         let dup_object = br#"<Document xmlns="http://www.w3.org/2007/rif#">
   <payload><Group><sentences>
     <Frame>
@@ -3302,7 +3402,10 @@ mod tests {
 </Document>"#;
         assert_duplicate_wrapper_rejected(dup_object, "<object>");
 
-        let dup_slot = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+        // Two <slot> children — NOW ACCEPTED as a 2-slot frame (sq-jsgyn).
+        // Mutation-check: if parse_frame_atoms is reverted to unique_child("slot",…),
+        // this import fails instead of succeeding → expect() panics → test RED.
+        let two_slot = br#"<Document xmlns="http://www.w3.org/2007/rif#">
   <payload><Group><sentences>
     <Frame>
       <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
@@ -3311,8 +3414,11 @@ mod tests {
     </Frame>
   </sentences></Group></payload>
 </Document>"#;
-        assert_duplicate_wrapper_rejected(dup_slot, "<slot>");
+        let doc = import(two_slot).expect("2-slot Frame bare fact must now import (sq-jsgyn)");
+        // A bare 2-slot Frame produces 2 Rule::fact atoms (one per slot).
+        assert_eq!(doc.rules.len(), 2, "2-slot bare Frame desugars to 2 facts");
 
+        // Control: single-slot Frame fact imports as exactly one rule.
         let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
   <payload><Group><sentences>
     <Frame>
@@ -3321,8 +3427,343 @@ mod tests {
     </Frame>
   </sentences></Group></payload>
 </Document>"#;
-        let doc = import(control).expect("single-wrapper Frame fact is conformant and must import");
+        let doc = import(control).expect("single-slot Frame fact is conformant and must import");
         assert_eq!(doc.rules.len(), 1, "control Frame fact must import as exactly one rule");
+    }
+
+    // ---- sq-jsgyn: multi-slot Frame desugaring tests --------------------------
+    //
+    // These tests cover the multi-slot Frame desugaring introduced by sq-jsgyn.
+    // The RIF-Core semantic is: obj[p1->v1 p2->v2] ≡ obj[p1->v1] AND obj[p2->v2].
+    // Each test has a mutation-check annotation demonstrating what goes red if the
+    // desugaring is reverted (e.g., reverting to unique_child("slot",…) or failing
+    // to split into multiple atoms).
+
+    /// **Bare-fact position** — a 2-slot Frame produces 2 `Rule::fact` atoms.
+    /// The per-slot atoms share the same `obj` and carry distinct `pred`/`val`.
+    ///
+    /// Mutation-check: reverting `parse_sentence` bare-Frame arm from
+    /// `parse_positive_atoms` back to `parse_positive_atom` (single-atom) breaks
+    /// compilation OR causes the test to fail if a single-atom shim is inserted
+    /// (it returns one rule with only the first slot → `doc.rules.len() == 1` →
+    /// assertion `2` fails → RED). [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_bare_fact_desugars_to_per_slot_facts() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/obj</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v1</Const></slot>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p2</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v2</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("2-slot bare Frame must import (sq-jsgyn)");
+        // 2 slots → 2 Rule::fact entries.
+        assert_eq!(doc.rules.len(), 2, "2-slot Frame desugars to 2 facts");
+
+        // Both rules are ground facts (empty body).
+        for rule in &doc.rules {
+            assert!(rule.body.is_empty(), "each per-slot fact has an empty body");
+        }
+        // Both rules have exactly one head atom.
+        for rule in &doc.rules {
+            assert_eq!(rule.head.len(), 1, "each per-slot fact has one head atom");
+        }
+        // Collect head atoms and verify they are the expected per-slot frames.
+        let heads: Vec<&Atom> = doc.rules.iter().map(|r| &r.head[0]).collect();
+        let has_p1 = heads.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p1" && v == "http://ex/v1")
+        });
+        let has_p2 = heads.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p2" && v == "http://ex/v2")
+        });
+        assert!(has_p1, "per-slot fact for p1->v1 must be present");
+        assert!(has_p2, "per-slot fact for p2->v2 must be present");
+        // Both share the same object IRI.
+        let all_same_obj = heads.iter().all(|a| {
+            matches!(a, Atom::Frame { obj: Term::Iri(o), .. } if o == "http://ex/obj")
+        });
+        assert!(all_same_obj, "all per-slot atoms must share the same obj");
+    }
+
+    /// **Body position** — a 2-slot Frame in the body of a rule desugars to a
+    /// conjunction of 2 `Atom::Frame` in the rule body (one per slot).
+    ///
+    /// Mutation-check: reverting the `"Frame"` arm in `parse_condition` from
+    /// `parse_frame_atoms` + `BodyCond::And` back to `parse_frame` (single atom)
+    /// causes the rule body to contain only 1 atom → `rule.body.len() == 1` →
+    /// assertion `2` fails → RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_body_desugars_to_conjunction() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v1</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p2</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v2</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("2-slot Frame in body must import (sq-jsgyn)");
+        // Single rule (no Or-split, single head).
+        assert_eq!(doc.rules.len(), 1, "2-slot body Frame → 1 rule (no Or-split)");
+        let rule = &doc.rules[0];
+        // Body: 2 atoms (one per slot).
+        assert_eq!(rule.body.len(), 2, "2-slot body Frame desugars to 2 body atoms");
+        // Head: 1 atom (the head frame has a single slot).
+        assert_eq!(rule.head.len(), 1, "single-slot head produces 1 head atom");
+        // Verify the body contains both per-slot atoms.
+        let has_p1 = rule.body.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p1" && v == "http://ex/v1")
+        });
+        let has_p2 = rule.body.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p2" && v == "http://ex/v2")
+        });
+        assert!(has_p1, "body must contain the p1->v1 per-slot atom");
+        assert!(has_p2, "body must contain the p2->v2 per-slot atom");
+        // Both share the same object variable ?x.
+        let all_same_obj = rule.body.iter().all(|a| {
+            matches!(a, Atom::Frame { obj: Term::Var(v), .. } if v == "x")
+        });
+        assert!(all_same_obj, "all per-slot body atoms share obj=?x");
+    }
+
+    /// **Head position** — a 2-slot Frame in the head of a rule desugars to 2 head atoms.
+    ///
+    /// Mutation-check: reverting `parse_head` from `extend(parse_positive_atoms(…))`
+    /// back to `push(parse_positive_atom(…))` causes the head to contain only 1 atom
+    /// → `rule.head.len() == 1` → assertion `2` fails → RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_head_desugars_to_multiple_head_atoms() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w1</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q2</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w2</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("2-slot Frame in head must import (sq-jsgyn)");
+        assert_eq!(doc.rules.len(), 1, "single rule (single-slot body, no Or-split)");
+        let rule = &doc.rules[0];
+        // Head: 2 atoms (one per slot).
+        assert_eq!(rule.head.len(), 2, "2-slot head Frame desugars to 2 head atoms");
+        // Body: 1 atom (single-slot body Frame).
+        assert_eq!(rule.body.len(), 1, "single-slot body produces 1 body atom");
+        // Verify both head atoms are present with correct pred/val.
+        let has_q1 = rule.head.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/q1" && v == "http://ex/w1")
+        });
+        let has_q2 = rule.head.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/q2" && v == "http://ex/w2")
+        });
+        assert!(has_q1, "head must contain the q1->w1 per-slot atom");
+        assert!(has_q2, "head must contain the q2->w2 per-slot atom");
+    }
+
+    /// **Three-slot frame** — regression guard for N>2 slots.
+    ///
+    /// The desugaring is not limited to exactly 2 slots; a 3-slot frame in a rule
+    /// body must produce 3 body atoms. This test prevents a "only handle 2 slots"
+    /// regression. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_three_slots_in_body() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/1</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/2</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/c</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/3</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("3-slot Frame in body must import (sq-jsgyn)");
+        assert_eq!(doc.rules.len(), 1, "single rule");
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 3, "3-slot body Frame desugars to 3 body atoms");
+        assert_eq!(rule.head.len(), 1, "single-slot head produces 1 head atom");
+    }
+
+    /// **Fail-closed: Frame with zero slots** — must be rejected (MalformedXml).
+    ///
+    /// A `<Frame>` with an `<object>` but no `<slot>` is syntactically malformed
+    /// (a frame without slots is meaningless in RIF-Core). Fail-closed rejection.
+    ///
+    /// Mutation-check: removing the `slots.is_empty()` guard from `parse_frame_atoms`
+    /// causes this to return `Ok(vec![])` → a rule with an empty head atom list →
+    /// the `expect_err` panics → RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_frame_zero_slots_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/obj</Const></object>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("Frame with zero slots must be rejected (fail-closed)");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for zero-slot Frame, got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("slot"),
+            "error message must mention <slot>: {}",
+            msg
+        );
+    }
+
+    /// **Fail-closed: named-argument slot in a multi-slot Frame** — the whole Frame is
+    /// rejected when ANY slot is a named-argument uniterm, not just the bad slot.
+    ///
+    /// Mutation-check: removing the `slot.child("Name").is_some()` guard in
+    /// `parse_frame_atoms` would allow the named-arg slot to pass through as
+    /// a malformed term, corrupting the import silently → `expect_err` panics →
+    /// RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_named_arg_slot_rejected() {
+        // A 2-slot Frame where the second slot is a named-argument uniterm.
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v1</Const></slot>
+              <slot>
+                <Name><Const type="http://www.w3.org/2007/rif#iri">http://ex/named</Const></Name>
+                <Var>x</Var>
+              </slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml)
+            .expect_err("named-arg slot in multi-slot Frame must be rejected (fail-closed)");
+        assert!(
+            matches!(err, ImportError::NamedArgUniterm { .. }),
+            "expected NamedArgUniterm for named-arg slot, got: {}",
+            err
+        );
+    }
+
+    /// **Mutation-check (per-slot split is load-bearing):** verifies the desugaring
+    /// split is not bypassed by checking that the body atoms carry DIFFERENT predicates.
+    /// If the split collapsed to a single atom (e.g., returning only the last slot),
+    /// the `pred` distinctness assertion would fail → RED.
+    ///
+    /// This directly tests the per-slot `atoms.push(…)` loop in `parse_frame_atoms`
+    /// is called for EVERY slot, not just one. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_split_mutation_per_slot_distinctness() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/PRED_A</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/VAL_A</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/PRED_B</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/VAL_B</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("mutation-check: 2-slot body must import");
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 2, "must have 2 body atoms (per-slot split)");
+        // Collect the pred IRIs from body atoms.
+        let preds: Vec<String> = rule.body.iter().filter_map(|a| {
+            if let Atom::Frame { pred: Term::Iri(p), .. } = a { Some(p.clone()) } else { None }
+        }).collect();
+        assert_eq!(preds.len(), 2, "both body atoms must be Frame atoms with IRI predicates");
+        // The two predicates must be DISTINCT — the per-slot split is the load-bearing mechanism.
+        // If the loop was collapsed to a single atom, both preds would be the same → assertion fails.
+        assert_ne!(preds[0], preds[1],
+            "per-slot split mutation: predicates must differ (PRED_A vs PRED_B); \
+             a single-atom collapse would produce identical preds → this assertion fails → RED");
+        // Specifically the two expected predicates.
+        assert!(preds.contains(&"http://ex/PRED_A".to_string()), "PRED_A must be present");
+        assert!(preds.contains(&"http://ex/PRED_B".to_string()), "PRED_B must be present");
     }
 
     /// Parent `<Member>` — a duplicate `<instance>` OR a duplicate `<class>` is rejected.
