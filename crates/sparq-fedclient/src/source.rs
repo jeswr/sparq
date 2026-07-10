@@ -2732,4 +2732,61 @@ mod tests {
             "sparql.internal"
         );
     }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): the fragment-body control/data split must set
+    // `next` from EXACTLY the hydra:next / legacy hydra:nextPage predicates — cargo-mutants
+    // showed `pred == …nextPage` mutated to `!=` survived, i.e. no test pinned that another
+    // control link (hydra:first / hydra:last also pass is_control_predicate and carry
+    // NamedNode objects) must NOT become the pagination cursor. Walking a wrong "next" link
+    // would re-fetch page 1 forever or truncate the fragment — a real answer-safety bug class.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_body_control_links_other_than_next_do_not_paginate() {
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Bound(FragTerm::Iri("http://ex/p".to_string())),
+            PatternTerm::Var("o".to_string()),
+        );
+        // hydra:first + hydra:last are control links with IRI objects, but NOT next-page
+        // cursors; hydra:totalItems carries the count; one matching data triple.
+        let body = concat!(
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#first> <http://frag/page1> .\n",
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#last> <http://frag/page9> .\n",
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#totalItems> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/a> <http://ex/p> <http://ex/b> .\n",
+        );
+        let page = parse_fragment_body(body, &pattern).expect("well-formed fragment parses");
+        assert_eq!(
+            page.next, None,
+            "hydra:first/last are NOT pagination cursors — only hydra:next/nextPage are"
+        );
+        assert_eq!(page.total_items, 42, "hydra:totalItems drives the count");
+        assert_eq!(page.triples.len(), 1, "exactly the one matching data triple");
+        assert_eq!(
+            page.triples[0],
+            FragTriple::new(
+                FragTerm::Iri("http://ex/a".to_string()),
+                FragTerm::Iri("http://ex/p".to_string()),
+                FragTerm::Iri("http://ex/b".to_string()),
+            )
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_body_legacy_next_page_predicate_paginates() {
+        // The legacy hydra:nextPage spelling must set the cursor exactly like hydra:next.
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        );
+        let body = concat!(
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#nextPage> <http://frag/page2> .\n",
+        );
+        let page = parse_fragment_body(body, &pattern).expect("well-formed fragment parses");
+        assert_eq!(page.next.as_deref(), Some("http://frag/page2"));
+        assert_eq!(page.total_items, 0, "no count metadata in this fragment");
+        assert!(page.triples.is_empty(), "control-only fragment has no data");
+    }
 }
