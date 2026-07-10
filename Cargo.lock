@@ -4348,6 +4348,7 @@ dependencies = [
  "criterion",
  "hashbrown 0.17.1",
  "oxrdf 0.3.3",
+ "proptest",
  "rustc-hash 2.1.3",
  "smallvec",
  "sparq-core",

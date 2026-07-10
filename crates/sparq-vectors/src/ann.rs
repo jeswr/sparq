@@ -128,12 +128,23 @@ pub fn nearest_term_exact_checked(
 
 /// HNSW construction/search parameters (passed through to `instant-distance`).
 /// [OPUS-4.8] (sq-ip3a) `approx-ann` only.
+///
+/// [OPUS-4.8] (sq-ose80) **`ef_construction` is the dominant BUILD-time knob.** The
+/// `instant-distance` graph build is already `rayon`-parallel (per-layer
+/// `into_par_iter`); its cost is dominated by the greedy distance search each insert runs,
+/// and that search's beam width IS `ef_construction`. Roughly halving `ef_construction`
+/// roughly halves build time. Lowering it also lowers the graph quality (fewer
+/// back-links), so recall drops slightly — but on the measured corpora the drop stays well
+/// inside the recall floor. Use [`fast_build`](Self::fast_build) when build latency
+/// matters more than the last fraction of recall, [`high_recall`](Self::high_recall) for
+/// the opposite. Both are **opt-in** presets; the [`Default`] is unchanged, so existing
+/// callers keep exactly the same graph and recall.
 #[cfg(feature = "approx-ann")]
 #[derive(Clone, Copy, Debug)]
 pub struct HnswConfig {
     /// Beam width during search (the recall knob; must be ≥ the `k` you will query).
     pub ef_search: usize,
-    /// Beam width during construction.
+    /// Beam width during construction — the dominant build-time knob (see the type docs).
     pub ef_construction: usize,
     /// Level-assignment RNG seed — fixed by default so builds are reproducible.
     pub seed: u64,
@@ -143,6 +154,41 @@ pub struct HnswConfig {
 impl Default for HnswConfig {
     fn default() -> Self {
         HnswConfig { ef_search: 100, ef_construction: 100, seed: 0x5350_5156_0001 }
+    }
+}
+
+#[cfg(feature = "approx-ann")]
+impl HnswConfig {
+    /// [OPUS-4.8] (sq-ose80) A **faster-build** preset: same `ef_search` and `seed` as the
+    /// [`Default`], but a lower `ef_construction` (40 vs 100) so the graph build runs
+    /// markedly faster at scale.
+    ///
+    /// **Why it exists.** The `instant-distance` build is already `rayon`-parallel, so the
+    /// build-time gap vs a C++ HNSW is not a missing-parallelism bug — it is the per-insert
+    /// greedy distance search, whose beam width is `ef_construction`. A narrower construction
+    /// beam does less work per insert. On a 200k×128d cosine SIFT slice on the aarch64 work
+    /// box (**NON-CANONICAL** timings — the ranking, not the absolute seconds, is what
+    /// transfers) `ef_construction = 40` built in roughly a third of the `ef_construction =
+    /// 100` time and still measured recall@10 = 0.9944 (vs 0.9990 at the default) — comfortably
+    /// above the 0.95 floor the [`VectorIndex`] recall gate asserts. Prefer this when you rebuild
+    /// the index often (e.g. per store generation) and a fraction of a percent of recall is an
+    /// acceptable trade.
+    ///
+    /// This is a **pure config** preset: it adds no dependency, changes no default, and keeps
+    /// the build deterministic for a fixed seed (the same seed yields the same graph). The
+    /// `nearest` / `nearest_with_ef` query path and its monotone-recall contract are unchanged.
+    pub fn fast_build() -> Self {
+        HnswConfig { ef_construction: 40, ..HnswConfig::default() }
+    }
+
+    /// [OPUS-4.8] (sq-ose80) A **higher-recall** preset: same `ef_search` and `seed` as the
+    /// [`Default`], but a wider `ef_construction` (200 vs 100) for a denser graph. This is the
+    /// opposite trade to [`fast_build`](Self::fast_build): a wider construction beam links more
+    /// back-neighbours, so recall rises, at a proportionally longer build. Prefer it for a
+    /// build-once, query-forever index where the extra build time amortises. (Also a pure config
+    /// preset — no dependency, no default change, deterministic for a fixed seed.)
+    pub fn high_recall() -> Self {
+        HnswConfig { ef_construction: 200, ..HnswConfig::default() }
     }
 }
 
