@@ -170,6 +170,37 @@ kind the indeterminate mixed-timezone window still falls back lexically (residua
 beaded); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
 beyond ~38 significant digits (beaded).
 
+### `overhead` — `#[cfg(feature = "overhead")]` — the zero-overhead DELTA harness
+
+The **substrate half of the sparq-engine-systems paper's §8 protocol** (`site/papers/
+sparq-engine-systems.typ`, evidence key `substrate.overhead_<kernel>`, environment="canonical"
+ONLY). `overhead::OverheadReport::run(reps, environment, host_note)` times each shared kernel
+against a hand-**specialised** pre-extraction equivalent — the SAME algorithm over the SAME
+data structure, with ONLY the extraction's generalisation removed (the `JoinKeys` descriptor /
+generic `Budget` / `CompareTerm` trait replaced by hard-coded concrete access) — and reports
+the per-kernel `overhead_ratio = (substrate_ns − handrolled_ns)/handrolled_ns` plus the raw
+nanoseconds. It **measures** the title-level "zero measured marginal overhead" claim; a non-zero
+delta carries an honest `root_cause` and is reported as-measured, never bent to the claim. Every
+kernel's two implementations are asserted result-equivalent each rep (`agree`) so a fast-but-
+wrong baseline cannot flatter the ratio. Implies `join`+`numeric`+`compare`; links no new dep.
+
+Kernels measured: `merge_join`, `hash_probe`, `num_int_add`, `num_double_add`, `compare_terms`.
+The leapfrog trie-join (WCOJ) is **deliberately excluded** — net-new in the substrate, it has no
+hand-specialised pre-extraction predecessor to form an honest delta against (comparing a WCOJ to
+a nested-loop enumeration would measure an algorithm gap, not the extraction's overhead).
+
+```text
+# work box (non-canonical — PR-body only, never a paper headline):
+cargo run -p sparq-substrate --example substrate_overhead --features overhead --release -- --json
+# CANONICAL run on a dedicated quiet EC2 box (headline-eligible):
+cargo run -p sparq-substrate --example substrate_overhead --features overhead --release -- \
+    --canonical --reps 15 --host "c6i.4xlarge" --json
+```
+
+The envelope's `canonical` flag is true ONLY for a `--canonical` run; a work-box run is
+`environment="indicative"`. Registered in `bench/benchmarks.toml` as `substrate-overhead-delta`
+(`featured = false` — an internal micro-instrument). [FABLE-5] sq-atjue
+
 ## Cargo feature summary
 
 | Feature | Enables | Extra deps |
@@ -178,6 +209,7 @@ beyond ~38 significant digits (beaded).
 | `numeric` | `sparq_substrate::numeric` | `oxrdf` |
 | `join` | `sparq_substrate::join` (implies `rows`) | `rustc-hash`, `hashbrown` |
 | `compare` | `sparq_substrate::compare` | — |
+| `overhead` | `sparq_substrate::overhead` (implies `join`+`numeric`+`compare`) | — |
 
 All features are off by default. The default build compiles nothing from this crate (byte-
 identical wasm bundle). The crate is `forbid(unsafe_code)`.
