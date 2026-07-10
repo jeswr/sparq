@@ -39,6 +39,27 @@ digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 # OFF by default (the wasm bundle and the default native build carry zero CS code);
 # results are identical either way — only join order is affected.
 cs-planner = []
+# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` (SPQCPRM2 frame-of-reference
+# on-disk format). OFF by default so the default engine build is unchanged; enabling it lets
+# the storage cross-version differentials (`v2_saved_store_is_query_equivalent_to_v1`,
+# `cross_version_resave_round_trips_losslessly`) drive `save_compressed` in V2 emit mode
+# through the real open/query path. Implies `sparq-core/spqcprm2` (which implies mmap).
+spqcprm2 = ["sparq-core/spqcprm2"]
+# [FABLE-5] (sq-jnb1e) Characteristic-set ANCHOR-INCIDENCE metadata for the DISTINCT
+# predicate-projection semijoin (SP2Bench q09). The default-on anchor+probe block scan
+# (sq-7d3dj.30.10) proves each candidate predicate P relates NO anchor member by clipping
+# and galloping P's join-value block against the anchor set — for q09's value-typed
+# predicates (dc:title, foaf:homepage, rdfs:seeAlso …) that is a large no-hit scan
+# (~250k rows/query touched to answer 4 predicates). This feature precomputes, per anchor
+# join position, the SET of predicates that DO relate an anchor member (one range-restricted
+# scan over the anchor's id window), so a candidate P absent from that set is pruned by an
+# O(1) membership test instead of the block scan. RESULT-IDENTICAL: the set is exact, so it
+# only ever prunes a PROVABLY-EMPTY existence check; a P in the set still takes the exact
+# scan. Conservatively DECLINES on a graph with a pending update overlay (the derived set is
+# built against the base index only — incremental maintenance is out of scope). OPT-IN and
+# OFF by default: the default native build and the wasm bundle carry zero incidence code and
+# pull in ZERO new dependencies. [FABLE-5]
+cs-anchor-incidence = []
 # zk-trace seam (research/zkp-query-proofs-plan.md §4.E): records per-obligation
 # witness input sets (matched triples per BGP pattern, executed join order,
 # FILTER operand bindings) for the sparq-zk derived-credential prover. OPT-IN

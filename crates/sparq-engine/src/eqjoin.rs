@@ -31,9 +31,10 @@
 //!    with no provable key — local-vocab ids, RDF 1.2 triple terms,
 //!    value-comparable temporals (`xsd:dateTime`/`dateTimeStamp`/`date`, where
 //!    different lexicals can denote one instant), and numeric-DATATYPE literals
-//!    that missed the numeric cache (whose raw parse is STRICTER than the
-//!    evaluator's trimming `Num::of_literal` fallback, so a miss does not prove
-//!    the term unpairable) — fall into a [`JKey::Hard`]
+//!    that missed the numeric cache (as of sq-6b1lj the cache acceptance ⟺
+//!    `Num::of_literal`, so a miss is a genuinely ill-formed-for-datatype lexical
+//!    the exact evaluator also type-errors — `Hard` defers to it) — fall into a
+//!    [`JKey::Hard`]
 //!    class that is paired by running the EXACT evaluator (`equal_expr`) against
 //!    every row of the other side: exactly today's semantics for those rows.
 //! 2. **False positives are rechecked** — the pass NEVER consumes the FILTER: the
@@ -451,24 +452,19 @@ fn key_of(graph: &Graph, id: Id) -> JKey {
                 };
             }
             // A NUMERIC datatype reaching here missed the `numeric_value` cache. As of
-            // sq-9781x the cache is aligned with the evaluator's datatype-AGNOSTIC f64 seam:
-            // it parses through the shared `parse_xsd_f64` on the TRIMMED lexical (the same
-            // XSD f64 acceptance set + trimming the `as_num`/`as_f64` seam uses), so a
-            // whitespace-padded `" 1"^^xsd:integer` now HITS the cache above (→ `JKey::Num`)
-            // and the `inf`/`nan` Rust-only spellings the raw parse wrongly cached now MISS.
-            //
-            // SCOPE: this alignment is with the f64 seam, NOT the datatype-AWARE
-            // `Num::of_literal` set that `values_equal` uses. The cache is thus still too
-            // LENIENT per-datatype: a lexical f64-parseable but ill-formed for its datatype
+            // sq-9781x + sq-6b1lj the cache is aligned with the DATATYPE-AWARE
+            // `Num::of_literal` acceptance set (the same set `values_equal` uses): it trims
+            // (XSD `collapse` facet) and gates on per-datatype well-formedness, so a
+            // whitespace-padded `" 1"^^xsd:integer` HITS the cache above (→ `JKey::Num`), the
+            // `inf`/`nan` Rust-only spellings MISS, AND a lexical ill-formed FOR its datatype
             // (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, an i128-overflow `xsd:decimal`)
-            // cache-HITS → `JKey::Num` here (and includes rows on the sargable `=` fast path)
-            // while `values_equal`/`of_literal` type-errors it — a residual `JKey::Num`-vs-
-            // `values_equal` divergence, PRE-EXISTING on main and tracked in the sq-74oy4-
-            // sibling bead (candidate fix: datatype-aware cache parse). A numeric datatype
-            // reaching THIS `Hard` branch is a lexical that misses even the lenient f64 seam
-            // (a genuinely ill-formed numeric or the `NaN` cache sentinel) — which the exact
-            // evaluator also type-errors — so `Hard` (defer to the exact evaluator) stays a
-            // correct, no-false-negative backstop.
+            // now MISSES too — reaching THIS branch. Such a lexical is a SPARQL type error
+            // under `values_equal`/`of_literal`, so `Hard` (defer to the exact evaluator,
+            // which pairs it against nothing on `=`) is the correct backstop: the fast
+            // `JKey::Num` route and `values_equal` now AGREE for every numeric lexical (the
+            // pre-fix `JKey::Num`-vs-`values_equal` residual is closed). A numeric datatype
+            // reaching `Hard` is exactly the ill-formed/`NaN`-sentinel case the exact
+            // evaluator also type-errors — no false negative.
             if is_numeric_datatype(datatype) {
                 return JKey::Hard;
             }

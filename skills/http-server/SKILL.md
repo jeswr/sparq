@@ -1029,10 +1029,12 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
   "resource", "mode": "read"|"write"|"append"|"control", "view"? }`. Returns
   `{ "allow", "grantedModes", "governingAcl", "scope", "status", "aclLink" }`. An **allow** is `200`;
   a **deny** maps the FR-6 status — a definitive one (`resolved` without the mode / `noAcl`) is `403`,
-  a retryable one (`unloaded` / `transient`) is `503`. `aclLink` is the RFC-8288 `Link: rel="acl"`
-  header VALUE (FR-5), already in the body so `sq-snopa.7` need only lift it into a response header.
+  a retryable one (`unloaded` / `transient`) is `503`. When a governing ACL was discovered the
+  response also carries `Link: <acl-iri>; rel="acl"` (RFC 8288, FR-5, sq-snopa.7) — the `aclLink`
+  body field holds the same value. Fail-closed: no Link header when no governing ACL exists.
 - `POST /authz/wac-allow` — body `{ "dataset", "session", "resource", "view"? }` → `{ "wacAllow":
-  "user=\"…\",public=\"…\"" }`, the RFC permission advertisement.
+  "user=\"…\",public=\"…\"" }`, the RFC permission advertisement. Also emits `Link: <acl-iri>;
+  rel="acl"` when a governing ACL was discovered (FR-5, sq-snopa.7); omitted when none.
 - `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
   **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
   session sees ZERO rows (empty view), never the whole store.
@@ -1048,10 +1050,12 @@ materialised `PodStore` through the concurrent-serving `AppState`).
 
 ```sh
 cargo run -p sparq-server --features solid-authz -- data.ttl --solid-authz
-curl -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
+curl -si -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
   "dataset": "<https://pod.ex/n1#it> <https://ex.dev/ns#t> \"hi\" <https://pod.ex/n1> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .",
   "session": { "agent": "https://alice.ex/card#me" }, "resource": "https://pod.ex/n1", "mode": "read", "view": "wac" }'
-# → 200 {"allow":true,"grantedModes":["read"],"governingAcl":"https://pod.ex/.acl","scope":"http://www.w3.org/ns/auth/acl#default","status":"resolved","aclLink":"<https://pod.ex/.acl>; rel=\"acl\""}
+# HTTP/1.1 200 OK
+# link: <https://pod.ex/.acl>; rel="acl"
+# → {"allow":true,"grantedModes":["read"],"governingAcl":"https://pod.ex/.acl","scope":"http://www.w3.org/ns/auth/acl#default","status":"resolved","aclLink":"<https://pod.ex/.acl>; rel=\"acl\""}
 ```
 
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the

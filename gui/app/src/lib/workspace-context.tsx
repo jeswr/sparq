@@ -23,8 +23,11 @@
 
 import * as React from "react";
 import {
+  createSerializedWorkspaceSaver,
   createWorkspaceStore,
+  describeWorkspaceSaveError,
   newWorkspace,
+  type SerializedWorkspaceSaver,
   type Workspace,
   type WorkspaceBackend,
   type WorkspaceInferenceMode,
@@ -49,6 +52,13 @@ export interface WorkspaceContextValue {
   workspace: Workspace | null;
   /** Which concrete persistence backend resolved (for an honest "saved on device / in browser" label). */
   backend: WorkspaceBackend | null;
+  /**
+   * (sq-w3dmj) Human-readable description of the most recent FAILED workspace save — e.g. the
+   * localStorage quota exhausted by a large snapshot — or `null` while saves succeed. Surfaced
+   * in the status bar so a persistence failure is never silent (the old persist() swallowed it,
+   * which meant silent data loss on the next restore). Cleared by the next successful save.
+   */
+  saveError: string | null;
   /** The imported-source metadata list for the active workspace (drives the rail's Imports subgroup). */
   sources: WorkspaceSourceMeta[];
   /**
@@ -132,8 +142,13 @@ const WorkspaceContext = React.createContext<WorkspaceContextValue | null>(null)
 export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const [workspace, setWorkspaceState] = React.useState<Workspace | null>(null);
   const [backend, setBackend] = React.useState<WorkspaceBackend | null>(null);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
   const [workspaces, setWorkspaces] = React.useState<WorkspaceSummary[]>([]);
   const storeRef = React.useRef<WorkspaceStore | null>(null);
+  // (sq-9i1h9) EVERY save goes through this serializer (a per-workspace promise chain + a
+  // monotonic revision counter) so a slow older save can never land after — and overwrite — a
+  // newer one on the async Tauri fs backend (which sq-w3dmj makes reachable).
+  const saverRef = React.useRef<SerializedWorkspaceSaver | null>(null);
   // A synchronous mirror of the active workspace so async mutators (switch/delete) can read it
   // without a stale-closure functional-setState dance.
   const workspaceRef = React.useRef<Workspace | null>(null);
@@ -169,7 +184,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       const store = await createWorkspaceStore({ loadTauriFs });
       if (cancelled) return;
+      const saver = createSerializedWorkspaceSaver((w) => store.save(w));
       storeRef.current = store;
+      saverRef.current = saver;
       setBackend(store.backend);
       // Restore the last-opened workspace if there is one, else create a fresh default.
       let ws: Workspace | null = null;
@@ -184,7 +201,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         ws = newWorkspace("default workspace", STARTER_QUERY);
         freshDefault = true;
         try {
-          await store.save(ws);
+          await saver.save(ws);
           await store.setLastOpenedId(ws.id);
         } catch {
           /* in-memory / locked-down backend — keep the workspace for this session anyway */
@@ -204,17 +221,35 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     };
   }, [applyWorkspace, refreshList]);
 
-  // Persist a workspace (best-effort) + keep it as the last-opened, then refresh the switcher list.
+  // Persist a workspace + keep it as the last-opened, then refresh the switcher list.
+  //
+  // (sq-9i1h9) The save is SERIALIZED per workspace through `saverRef` (promise chain +
+  // monotonic revision counter), so concurrent persists can never land out of order on the
+  // async Tauri fs backend. (sq-w3dmj) A write failure no longer vanishes into a silent
+  // `.catch(() => {})`: it is surfaced via `saveError` (the status bar renders it) — the
+  // in-memory workspace stays intact either way. Returns the save promise so durability-
+  // sensitive callers can await it; it NEVER rejects and resolves `true` iff this state (or a
+  // newer one superseding it in the same chain) reached the backend.
   const persist = React.useCallback(
-    (ws: Workspace) => {
+    (ws: Workspace): Promise<boolean> => {
       const store = storeRef.current;
-      if (!store) return;
-      store
+      const saver = saverRef.current;
+      if (!store || !saver) return Promise.resolve(false);
+      return saver
         .save(ws)
         .then(() => store.setLastOpenedId(ws.id))
         .then(() => refreshList())
-        .catch(() => {
-          /* a write failure must not break the in-memory workspace */
+        .then(() => {
+          setSaveError((prev) => (prev === null ? prev : null));
+          return true;
+        })
+        .catch((err: unknown) => {
+          // A write failure must not break the in-memory workspace — but it must be VISIBLE
+          // (a swallowed QuotaExceededError meant the on-launch restore silently reloaded an
+          // older, smaller snapshot).
+          console.error("workspace save failed", err);
+          setSaveError(describeWorkspaceSaveError(err));
+          return false;
         });
     },
     [refreshList],
@@ -230,7 +265,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         updatedAt: Date.now(),
       };
       applyWorkspace(next);
-      persist(next);
+      await persist(next);
     },
     [applyWorkspace, persist],
   );
@@ -245,7 +280,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         updatedAt: Date.now(),
       };
       applyWorkspace(next);
-      persist(next);
+      await persist(next);
     },
     [applyWorkspace, persist],
   );
@@ -259,7 +294,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       if (base.inference === mode) return;
       const next: Workspace = { ...base, inference: mode, updatedAt: Date.now() };
       applyWorkspace(next);
-      persist(next);
+      await persist(next);
     },
     [applyWorkspace, persist],
   );
@@ -279,7 +314,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       const next: Workspace = { ...base, rulesDocs: nextDocs, updatedAt: Date.now() };
       applyWorkspace(next);
       engineRef.current.setN3Rules(nextDocs);
-      persist(next);
+      await persist(next);
     },
     [applyWorkspace, persist],
   );
@@ -292,7 +327,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       const next: Workspace = { ...base, rulesDocs: nextDocs, updatedAt: Date.now() };
       applyWorkspace(next);
       engineRef.current.setN3Rules(nextDocs);
-      persist(next);
+      await persist(next);
     },
     [applyWorkspace, persist],
   );
@@ -307,7 +342,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       const next: Workspace = { ...base, rulesDocs: nextDocs, updatedAt: Date.now() };
       applyWorkspace(next);
       engineRef.current.setN3Rules(nextDocs);
-      persist(next);
+      await persist(next);
     },
     [applyWorkspace, persist],
   );
@@ -321,24 +356,28 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     if (snapshot === null) return; // engine not ready — skip; a failed UPDATE never reaches here anyway
     const next: Workspace = { ...base, dataSnapshot: snapshot, updatedAt: Date.now() };
     applyWorkspace(next);
-    persist(next);
+    await persist(next);
   }, [applyWorkspace, persist]);
 
   // (sq-7gdfp) — belt-and-suspenders save: on page unload, snapshot the live engine store into
   // the active workspace one final time. This catches any in-flight state that was not yet
-  // persisted (e.g. if the debounce had not fired yet). For the localStorage backend the
-  // store.save() call completes synchronously before the page unloads; for the Tauri FS backend
-  // it is async and may not complete, but the explicit recordUpdateSnapshot after each UPDATE is
-  // the primary mechanism — this is a safety net only.
+  // persisted (e.g. if the debounce had not fired yet). For the localStorage backend the write
+  // lands in a microtask (the serializer chains it), which still flushes before the page is
+  // torn down; for the Tauri FS backend it is async and may not complete, but the explicit
+  // recordUpdateSnapshot after each UPDATE is the primary mechanism — this is a safety net only.
   React.useEffect(() => {
     const handleBeforeUnload = () => {
       const current = workspaceRef.current;
-      const store = storeRef.current;
-      if (!current || !store) return;
+      const saver = saverRef.current;
+      if (!current || !saver) return;
       const snapshot = engineRef.current.snapshotStore();
       if (snapshot === null) return;
       const next: Workspace = { ...current, dataSnapshot: snapshot, updatedAt: Date.now() };
-      void store.save(next).catch(() => {});
+      // (sq-9i1h9) through the serializer, so the final flush is ordered AFTER any in-flight
+      // save (an older in-flight save must not overwrite it). On the web backend the write
+      // still lands in a microtask before the page is torn down; nothing to surface here —
+      // the page is going away.
+      void saver.save(next).catch(() => {});
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -358,7 +397,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
             ? { ...current, dataSnapshot: snapshot, updatedAt: Date.now() }
             : current;
         try {
-          await store.save(saved);
+          // (sq-9i1h9) through the serializer, so this final flush of the OLD workspace can
+          // never be overwritten by one of its still-in-flight earlier saves.
+          await saverRef.current?.save(saved);
         } catch {
           /* best-effort — a save failure must not block the create */
         }
@@ -368,7 +409,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       applyWorkspace(ws);
       // A brand-new workspace is EMPTY (no sample) — an explicitly-created workspace stays empty.
       engineRef.current.hydrateFromSnapshot(null, { seedSampleWhenEmpty: false });
-      persist(ws);
+      await persist(ws);
       return ws;
     },
     [applyWorkspace, persist],
@@ -381,14 +422,15 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       if (active && active.id === id) {
         const next: Workspace = { ...active, name, updatedAt: Date.now() };
         applyWorkspace(next);
-        persist(next);
+        await persist(next);
         return;
       }
       if (!store) return;
       try {
         const ws = await store.load(id);
         if (!ws) return;
-        await store.save({ ...ws, name, updatedAt: Date.now() });
+        // (sq-9i1h9) through the serializer: same per-workspace chain as every other save.
+        await saverRef.current?.save({ ...ws, name, updatedAt: Date.now() });
         await refreshList();
       } catch {
         /* a rename of a stored (non-active) workspace is best-effort */
@@ -425,7 +467,8 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
             ? { ...current, dataSnapshot: snapshot, updatedAt: Date.now() }
             : current;
         try {
-          await store.save(saved);
+          // (sq-9i1h9) through the serializer — see createWorkspace step 1.
+          await saverRef.current?.save(saved);
         } catch {
           /* best-effort — a save failure must not block the switch */
         }
@@ -488,7 +531,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
           applyWorkspace(fresh);
           // A fresh default AFTER an explicit delete seeds the sample so the app is never blank.
           engineRef.current.hydrateFromSnapshot(null, { seedSampleWhenEmpty: true });
-          persist(fresh);
+          await persist(fresh);
         }
       }
       void refreshList();
@@ -500,6 +543,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     () => ({
       workspace,
       backend,
+      saveError,
       sources: workspace?.sources ?? [],
       workspaces,
       recordImport,
@@ -519,6 +563,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [
       workspace,
       backend,
+      saveError,
       workspaces,
       recordImport,
       setEditorQuery,

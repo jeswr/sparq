@@ -1674,69 +1674,82 @@ mod tests {
         );
     }
 
-    /// [FABLE-5] (sq-9781x) TRUE cross-seam differential: the sparq-core numeric-value CACHE
-    /// seam (`parse_xsd_f64(value.trim())` — the EXACT expression `numerics_of`/`numeric_of`
-    /// call in sparq-core) vs the datatype-AWARE evaluator `as_numeric` (`Num::of_literal`,
-    /// which decides `values_equal`). Unlike the sparq-core plumbing test
-    /// (`numeric_cache_hit_matches_shared_parse_xsd_f64_plumbing`, which models "acceptance"
-    /// with the same `parse_xsd_f64` the cache calls and so is circular against `of_literal`),
-    /// this asserts the two seams against EACH OTHER and pins the KNOWN, still-open
-    /// per-datatype divergence (bead sq-6b1lj): the datatype-agnostic cache accepts some
-    /// lexicals that are ill-formed FOR THEIR DATATYPE and that `as_numeric` type-errors.
-    ///
-    /// The `expect_divergent` flag documents each case's status; when the datatype-aware
-    /// cache fix (sq-6b1lj) lands, the divergent cases become AGREE and this test's
-    /// expectations flip (drop the flag). Until then a NEW unexpected divergence — or an
-    /// unexpected AGREEMENT on a case marked divergent (meaning sq-6b1lj shipped) — fails
-    /// here, so the invariant can never silently drift on the plumbing test alone.
+    /// [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj) TRUE cross-seam differential: the sparq-core
+    /// numeric-value CACHE acceptance (`sparq_core::numeric_cache_value` — the EXACT acceptance
+    /// `numerics_of`/`numeric_of`/`dictspill` compute, NOT a re-implementation, so this is not
+    /// circular) vs the datatype-AWARE evaluator `as_numeric` (`Num::of_literal`, which decides
+    /// `values_equal`). As of sq-6b1lj the cache is DATATYPE-AWARE, so the two seams AGREE for
+    /// every case: a lexical ill-formed FOR its datatype (`"1.5"^^xsd:integer`,
+    /// `"1E2"^^xsd:decimal`, an i128-overflow decimal) MISSES the cache exactly as `of_literal`
+    /// type-errors it. This test now pins that agreement: any NEW divergence — the cache
+    /// admitting a lexical `of_literal` rejects, or rejecting one it accepts — fails here.
     #[test]
     fn cache_f64_seam_vs_as_numeric_differential() {
-        // (lexical, datatype, expect_divergent). `expect_divergent = true` == cache HITS but
-        // `as_numeric` type-errors (or vice versa) — the sq-6b1lj residual, expected today.
-        let cases: &[(&str, oxrdf::NamedNodeRef<'_>, bool)] = &[
-            // ---- AGREE: both accept (well-formed for datatype), same f64 image ----
-            ("42", xsd::INTEGER, false),
-            (" 7 ", xsd::DECIMAL, false),      // whitespace collapse — both trim
-            ("+3", xsd::INTEGER, false),
-            ("1.5", xsd::DECIMAL, false),
-            ("1.5E2", xsd::DOUBLE, false),
-            ("INF", xsd::DOUBLE, false),
-            ("3.0", xsd::FLOAT, false),
-            // ---- AGREE: both reject ----
-            ("inf", xsd::DOUBLE, false),       // Rust-only spelling: both reject
-            ("nan", xsd::DOUBLE, false),
-            ("abc", xsd::INTEGER, false),
-            ("", xsd::INTEGER, false),
-            // ---- DIVERGE (sq-6b1lj): cache HITS via f64 seam, as_numeric type-errors ----
-            ("1.5", xsd::INTEGER, true),       // fraction on an integer
-            ("1E2", xsd::DECIMAL, true),       // exponent on a decimal
-            ("1E2", xsd::INTEGER, true),       // exponent on an integer
-            // >38-digit decimal: i128 overflow -> of_literal None, but parse_xsd_f64 -> Some
-            ("123456789012345678901234567890123456789.5", xsd::DECIMAL, true),
+        // (lexical, datatype). Post sq-6b1lj the cache acceptance ⟺ `Num::of_literal` acceptance
+        // (modulo the genuine-NaN-double sentinel, which both treat as a cache miss), so EVERY
+        // case must AGREE — the divergence surface is closed.
+        let cases: &[(&str, oxrdf::NamedNodeRef<'_>)] = &[
+            // ---- both accept (well-formed for datatype), same f64 image ----
+            ("42", xsd::INTEGER),
+            (" 7 ", xsd::DECIMAL),      // whitespace collapse — both trim
+            ("+3", xsd::INTEGER),
+            (" 1 ", xsd::INTEGER),      // padded integer: both value-1 (sq-74oy4)
+            ("1.5", xsd::DECIMAL),
+            ("1.5E2", xsd::DOUBLE),
+            ("INF", xsd::DOUBLE),
+            ("3.0", xsd::FLOAT),
+            // scale-0-after-normalisation integers `of_literal` accepts as `Dec` (mant, scale 0):
+            ("5.", xsd::INTEGER),        // trailing dot, no fraction -> value 5
+            ("5.0", xsd::INTEGER),       // trailing zero fraction -> normalised scale 0
+            ("5.00", xsd::INTEGER),      // ditto
+            ("-0", xsd::INTEGER),        // signed zero
+            (".5", xsd::DECIMAL),        // empty integer part
+            ("5.5", xsd::DECIMAL),       // ordinary decimal
+            ("007.50", xsd::DECIMAL),    // leading/trailing zeros
+            // ---- both reject (XSD f64 spellings) ----
+            ("inf", xsd::DOUBLE),       // Rust-only spelling: both reject
+            ("nan", xsd::DOUBLE),
+            ("abc", xsd::INTEGER),
+            ("", xsd::INTEGER),
+            // ---- both reject (per-datatype ill-formed) — the sq-6b1lj cases, now CLOSED ----
+            ("1.5", xsd::INTEGER),       // fraction on an integer (scale 1)
+            (".5", xsd::INTEGER),        // no integer part, scale 1 -> not an integer
+            ("1E2", xsd::DECIMAL),       // exponent on a decimal
+            ("1E2", xsd::INTEGER),       // exponent on an integer
+            // 40-digit decimal: beyond i128 -> of_literal None AND cache miss now.
+            ("9999999999999999999999999999999999999999.5", xsd::DECIMAL),
+            // 40-digit integer: beyond i128 -> of_literal None AND cache miss now.
+            ("9999999999999999999999999999999999999999", xsd::INTEGER),
+            // 39-digit integer that FITS i128 (i128::MAX ~1.7e38): both ACCEPT (large int).
+            ("123456789012345678901234567890123456789", xsd::INTEGER),
         ];
-        for (lex, dt, expect_divergent) in cases {
-            // CACHE seam: exactly what sparq-core `numerics_of`/`numeric_of` compute — the
-            // datatype-agnostic shared parser on the trimmed lexical, NaN folding to "miss".
-            let cache_hit = parse_xsd_f64(lex.trim()).filter(|v| !v.is_nan()).is_some();
-            // EVALUATOR seam: datatype-aware acceptance (also NaN-as-not-a-value: a NaN Double
-            // value is "accepted" as a term but is the cache's not-cached sentinel, so exclude
-            // it symmetrically to compare acceptance-as-a-cacheable-value).
+        for (lex, dt) in cases {
+            // CACHE seam: the ACTUAL cache acceptance (public wrapper over the fn `numerics_of`/
+            // `numeric_of`/`dictspill` call). NaN-double folds to `None` (cache-miss sentinel).
+            let cache_hit = sparq_core::numeric_cache_value(lex, dt.as_str()).is_some();
+            // EVALUATOR seam: datatype-aware acceptance (NaN-double excluded symmetrically —
+            // it is "accepted" as a term but is the cache's not-cached sentinel).
             let eval_accepts = matches!(as_numeric(&typed(lex, *dt)), Some(n) if !n.f64().is_nan());
-            let divergent = cache_hit != eval_accepts;
             assert_eq!(
-                divergent, *expect_divergent,
-                "seam divergence status for {:?}^^{:?}: cache_hit={} eval_accepts={} \
-                 (expected divergent={}). If a divergent case now AGREES, the sq-6b1lj \
-                 datatype-aware cache fix has landed — flip this case to expect_divergent=false.",
-                lex, dt.as_str(), cache_hit, eval_accepts, expect_divergent
+                cache_hit, eval_accepts,
+                "cache seam vs as_numeric MUST agree for {:?}^^{:?}: cache_hit={} eval_accepts={}. \
+                 The datatype-aware cache (sq-6b1lj) means cache acceptance ⟺ of_literal acceptance; \
+                 a mismatch is a regression of that invariant.",
+                lex, dt.as_str(), cache_hit, eval_accepts
             );
-            // Where BOTH accept, the f64 images MUST match bit-for-bit (the cache stores that f64).
+            // Where BOTH accept, the f64 images MUST be VALUE-equal (the cache stores that f64).
+            // Compared by `==` not bits: `"-0"^^xsd:integer` caches `parse_xsd_f64("-0") = -0.0`
+            // while `of_literal` yields `Int(0).f64() = +0.0` — the SAME value (`-0.0 == 0.0`),
+            // and every consumer canonicalises signed zero (the `JKey::Num` path folds `-0.0`
+            // into `+0.0`) or compares by value. That signed-zero bit-difference is the only
+            // permitted one; any real value drift still fails here.
             if cache_hit && eval_accepts {
-                let cache_f64 = parse_xsd_f64(lex.trim()).unwrap();
+                let cache_f64 = sparq_core::numeric_cache_value(lex, dt.as_str()).unwrap();
                 let eval_f64 = as_numeric(&typed(lex, *dt)).unwrap().f64();
-                assert_eq!(
-                    cache_f64.to_bits(), eval_f64.to_bits(),
-                    "f64 image mismatch for {:?}^^{:?}", lex, dt.as_str()
+                assert!(
+                    cache_f64 == eval_f64 || (cache_f64 == 0.0 && eval_f64 == 0.0),
+                    "f64 image mismatch for {:?}^^{:?}: cache={} eval={}",
+                    lex, dt.as_str(), cache_f64, eval_f64
                 );
             }
         }

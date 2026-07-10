@@ -72,9 +72,16 @@ container maps, `@nest`, `@reverse`, `@included`, `@json`, keyword aliases (bead
   preferred-value walk, consumed by `compact_iri` and by the document Compaction
   Algorithm (bead `sq-oy1f.27`, not yet landed).
 
-The remaining modules (`flatten`, `compact`, `frame`, `from_rdf`, `to_rdf`, `api`) are
-documented stubs, filled by dependency-ordered follow-on beads. The crate is
-`publish = false` until the pipeline is real.
+Bead `sq-oy1f.26` adds **Node Map Generation** (`generate_node_map`, §7.2) with a
+deterministic `_:bN` blank-node issuer, and the document-level **Flattening Algorithm**
+(`flatten`, §7.1 = expand ∘ node-map ∘ named-graph fold, sorted by `@id`, empty nodes
+dropped). The `flatten` conformance lane runs the native document oracle. Post-flatten
+compaction to the `{ "@context": …, "@graph": … }` shape composes the Compaction Algorithm
+(bead `sq-oy1f.27`).
+
+The remaining modules (`compact`, `frame`, `from_rdf`, `to_rdf`, `api`) are documented
+stubs, filled by dependency-ordered follow-on beads. The crate is `publish = false` until
+the pipeline is real.
 
 ## 📚 Learn more
 

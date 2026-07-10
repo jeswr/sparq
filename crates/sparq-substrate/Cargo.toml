@@ -69,6 +69,14 @@ join = ["rows", "dep:rustc-hash", "dep:hashbrown"]
 # stay behind the trait the consumer implements), so this feature links NOTHING new; the lean
 # default build compiles none of it.
 compare = []
+# [FABLE-5] sq-atjue: the zero-overhead DELTA harness (the substrate half of the
+# sparq-engine-systems paper §8, `site/papers/sparq-engine-systems.typ`). Measures each shared
+# kernel against a hand-rolled pre-extraction equivalent and emits the
+# `substrate.overhead_<kernel>` house JSON envelope. Implies `join` + `numeric` + `compare` (it
+# exercises all three kernel families). DEFAULT-OFF: the lean core/engine/wasm build compiles
+# none of it, and it links NO new dependency (the timing loop is `std::time::Instant` + a
+# hand-rolled JSON serialiser), so enabling it never bloats a consumer.
+overhead = ["join", "numeric", "compare"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -104,6 +112,14 @@ oxrdf = { workspace = true }
 name = "substrate"
 harness = false
 required-features = ["join", "numeric"]
+
+# [FABLE-5] sq-atjue: the zero-overhead DELTA runner — drives `overhead::OverheadReport::run`
+# and prints the human table + the `substrate.overhead_<kernel>` house JSON envelope. Pass
+# `--json` for the envelope only, `--canonical` on a dedicated quiet host (headline-eligible),
+# `--reps N` to set the min-of-N rep count. Gated on the `overhead` feature.
+[[example]]
+name = "substrate_overhead"
+required-features = ["overhead"]
 
 # [FABLE-5] sq-sqtk2.4: `compare.rs` hosts `#[cfg(kani)]` bounded-proof harnesses for the
 # term-total-order laws (run: `cargo kani -p sparq-substrate --features compare`). The Kani

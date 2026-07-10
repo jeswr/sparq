@@ -697,6 +697,25 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   that the scanned rows collapse to a small fraction of the full join). SP2Bench q09: the 2-branch
   `DISTINCT ?predicate` over persons answers a handful of predicates without materialising the ~77 k-row
   join. Payoff on the canonical perf host is a measurable hypothesis, not a baked-in number.
+- **Characteristic-set anchor-incidence prune** is the OPT-IN `cs-anchor-incidence` cargo feature (OFF
+  by default; bead `sq-jnb1e`) that accelerates the LARGE-anchor block scan above. For q09 the block
+  scan still proves each candidate predicate P relates NO anchor member by clipping and galloping P's
+  join-value block — for the value-typed predicates (`dc:title`, `foaf:homepage`, `rdfs:seeAlso`, 17k–27k
+  distinct objects each) that is a large no-hit scan (~250 k rows examined to answer 4 predicates). With
+  the feature on, the executor precomputes, per anchor join position, the SET of predicates that relate
+  SOME anchor member (one range-restricted scan over the anchor's id window), so a candidate P absent from
+  that set is pruned by an O(1) membership test instead of the block scan — QLever's "pattern-trick"
+  metadata answer, over sparq's permutations. It is a characteristic-set INCIDENCE summary (which
+  predicates touch a type at which position), distinct from the `cs-planner` predicate-set cardinality CS.
+  RESULT-IDENTICAL: the incidence set is EXACT on the base index, so it only ever prunes a
+  provably-empty existence check; a P in the set still takes the exact block scan, and the answer is
+  bit-for-bit the feature-off answer (differential on-vs-off in `tests/distinct_pushdown.rs`, incl. a
+  randomised straddle, a large no-hit-block prune, and answer-safety corners). It fires only when the
+  probe constrains **only** the projected predicate and the join variable (else it declines to the exact
+  scan), and **conservatively DECLINES on a graph with a pending-update overlay** (the derived set is built
+  against the base index; incremental maintenance is out of scope), so a query after an UPDATE simply
+  falls back to the exact scan. Off, zero incidence code compiles and no new deps. Payoff on the canonical
+  perf host is a measurable hypothesis, not a baked-in number.
 - **ASK / LIMIT first-solutions early exit through joins** is a DEFAULT-ON, semantics-preserving
   optimisation (bead `sq-7d3dj.30.8`; research/sp2bench-complex-shape-deficit.md §5). `ASK` is
   evaluated under an implicit `LIMIT 1`, and any `LIMIT k` (no ORDER BY / DISTINCT / aggregation

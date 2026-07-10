@@ -261,6 +261,13 @@ jobs:
         working-directory: gui/app
         run: npm run typecheck
 
+      # (sq-w3dmj) [FABLE-5] — the gui/app node:test unit suite (pure helpers: editor keys +
+      # the global-first Tauri fs plugin resolution). Build-free (on-the-fly TS loader); was
+      # previously never exercised in CI.
+      - name: GUI frontend unit tests
+        working-directory: gui/app
+        run: npm run test:unit
+
       # The hosted "Try the GUI live" web target (sub-path basePath).
       - name: GUI frontend static export (web target)
         working-directory: gui/app

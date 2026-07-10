@@ -133,10 +133,11 @@ crates = ["sparq-kb"]
 
 # W3C/RDF conformance corpus — FETCHED (gitignored) by scripts/fetch-conformance.sh
 # et al. into tests/w3c/. Read by sparq-conformance's suites via
-# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail).
+# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail),
+# and by sparq-jsonld's crate-local W3C flatten harness (tests/flatten.rs).
 [[map]]
 pattern = "tests/w3c/**"
-crates = ["sparq-conformance"]
+crates = ["sparq-conformance", "sparq-jsonld"]
 
 # W3C ODRL test suite — FETCHED by scripts/fetch-odrl-suite.sh into
 # tests/odrl-test-suite/. Read by sparq-policy's odrl_test_suite.rs.

@@ -168,10 +168,12 @@ pub struct Suite {
 ///   reordered vs. the W3C reference (strict-ordered count 222).  OLD floor was
 ///   247 under the RDF-equivalence oracle (sq-oy1f); the rebase reveals a net 7
 ///   fewer passes (20 flips minus 13 recoveries) and 26 new honest fails).
-/// * JSON-LD flatten 50 — `sparq-conformance` `src/floors/flatten.rs`
-///   `FLOOR = 50` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → flattened
-///   JSON-LD via the shipping `graph_to_jsonld(JsonLdForm::Flattened)` writer,
-///   compared by re-parse RDF-equivalence to the normative expected document).
+/// * JSON-LD flatten 46 — `sparq-conformance` `src/floors/flatten.rs`
+///   `FLOOR = 46` (sq-oy1f.26; opt-in `jsonld-suite` feature; native
+///   `sparq_jsonld::flatten()` Flattening Algorithm §7.1, compared to the
+///   normative expected document via the `json_ld_equal` document-level
+///   comparator; re-pin 50→46 from the retired RDF-writer oracle — the drop is
+///   inherited native-expand gaps owned by sq-oy1f.37).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
@@ -438,7 +440,8 @@ pub const SUITES: &[Suite] = &[
         ratchet_floor: crate::floors::to_rdf::FLOOR,
         floor_basis: "pass",
         note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
-               compact + frame are now gated; expand/flatten remain not-implemented buckets",
+               compact + frame + expand + flatten are all now gated lanes (html + \
+               remote-doc remain the not-implemented buckets)",
     },
     Suite {
         label: "W3C JSON-LD 1.1 fromRdf",
@@ -525,12 +528,16 @@ pub const SUITES: &[Suite] = &[
     // The old floor was 247 under the RDF-equivalence oracle (sq-oy1f); the rebase
     // reveals a net 7 fewer passes (20 old-pass→new-fail flips minus 13 recoveries:
     // 8 old-fail→new-pass via oracle precision + 5 old-skip→new-pass via options
-    // forwarding) and 26 new honest failures.  The floor was 240 (the MEASURED pass
-    // count with the corrected oracle at the pinned suite revision, sq-kk1mq), then
+    // forwarding) and 26 new honest failures.  The expand floor was 240 (the MEASURED
+    // pass count with the corrected oracle at the pinned suite revision, sq-kk1mq), then
     // RAISED to 259 by sq-oy1f.37 (three expand() correctness fixes: value-object
     // @type collapse, empty-array-property retention, free-floating value/list drop —
-    // rise-only ratchet).  The flatten lane keeps the old RDF-equivalence oracle
-    // (native flatten algorithm deferred; writer path is the correct oracle there).
+    // rise-only ratchet).
+    // [FABLE-5] sq-oy1f.26 — the flatten lane ALSO moved to the native document oracle
+    // (sparq_jsonld::flatten() = expand ∘ node-map ∘ fold, compared via json_ld_equal),
+    // re-pinned off the old RDF-writer oracle.  It composes over expand(), so it inherits
+    // the sq-oy1f.37 expand raises above (the flatten floor is the MEASURED native-oracle
+    // pass count on the merged tree) — see src/floors/flatten.rs.
     // Floors kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 expand",
@@ -561,9 +568,10 @@ pub const SUITES: &[Suite] = &[
         // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
         ratchet_floor: crate::floors::flatten::FLOOR,
         floor_basis: "pass",
-        note: "RDF → flattened JSON-LD through the shipping graph_to_jsonld(Flattened) \
-               writer (serialize-rdf), compared by a re-parse RDF-equivalence to the \
-               normative expected document",
+        note: "native sparq_jsonld::flatten() (Flattening Algorithm §7.1 = expand ∘ \
+               node-map ∘ named-graph fold) + json_ld_equal document-level comparator \
+               (sq-oy1f.26; re-pin 50→46 from the RDF-writer oracle — the 4 drop is \
+               inherited native-expand gaps owned by sq-oy1f.37, not flatten bugs)",
     },
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite, wired as a crate-local
     // decision-parity ratchet in sparq-policy (mirrors the Solid WAC/ACP pattern:
@@ -617,6 +625,44 @@ pub const SUITES: &[Suite] = &[
         note: "D-only sparql11/entailment tests graduated from OutOfScope to Pass \
                through sparq-reason's opt-in Profile::D (rdfD1 typing + typed \
                value-space equality)",
+    },
+    // [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG test-suite CONFORMANCE
+    // arm, Core subset. The runner is crate-local here (`tests/rif_wg_core_suite.rs`)
+    // but behind the OPT-IN `rif-wg-core` feature (forwards to sparq-reason/rif-xml — the
+    // RIF/XML importer + rif-core model — plus sparq-substrate/numeric for the
+    // value-aware conclusion compare) so the default + `--workspace` builds neither link
+    // the importer nor go red — the lean-core posture. DISTINCT from the sparq-EXTENSION
+    // `rif_core_suite.rs` expressivity ratchet (below): THIS drives the ACTUAL W3C RIF WG
+    // test cases (the pinned Core_v1.22 archive) end-to-end through the real path —
+    // RIF/XML import → validate → closure → conclusion oracle — as a STANDARDS-suite lane
+    // (family "W3C RIF") with an HONEST denominator: the printed per-category skip
+    // taxonomy IS the denominator's honesty. The FLOOR is the ACTUAL MEASURED pass count
+    // at the pinned archive — a MEASURED 0 at the current importer: every real RIF Core
+    // file exceeds the importer's single-slot-frame subset (multi-slot frames, positional
+    // predicate atoms) and the reject-kind tests reject only VACUOUSLY (blanket
+    // import-refusal / unsupported-construct — never a genuine detection), so all 46
+    // Core+Approved tests land in named skip buckets. The load-bearing NET vacuity rule
+    // (an un-importable premise is a SKIP, never a vacuous "not entailed") is enforced +
+    // tested. RISE-READY: the floor ratchets above 0 the moment the importer's Core
+    // coverage grows. The SPARQL RIF entailment regime (sparql11/entailment rif01..rif06)
+    // stays tracked-not-asserted out-of-scope. Floor kept in lock-step by
+    // `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C RIF WG Core test suite",
+        family: "W3C RIF",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "rif_wg_core_suite",
+            feature: "rif-wg-core",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 0,
+        floor_basis: "pass",
+        note: "the W3C RIF WG test cases (Core dialect, pinned Core_v1.22 archive) driven \
+               end-to-end through the real RIF/XML import -> validate -> closure -> \
+               conclusion oracle; an HONEST-denominator standards lane (the printed \
+               skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED \
+               pass count (0 at the current importer, rise-ready)",
     },
     // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm, a
     // sparq EXTENSION ratchet tallied SEPARATELY from the W3C D-entailment row above

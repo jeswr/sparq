@@ -39,7 +39,9 @@ use crate::GeoIndex;
 use geo_types::{Geometry, Point};
 use oxrdf::Term;
 use rustc_hash::FxHashSet;
+use sparq_core::dict::Id;
 use sparq_engine::{SpatialProvider, SpatialQuery};
+use std::sync::Arc;
 
 /// A [`GeoIndex`] wrapped as a [`SpatialProvider`] for the engine's spatial
 /// FILTER pushdown. Cheap to share (`Arc` it once, reuse across queries/threads);
@@ -53,12 +55,22 @@ pub struct GeoIndexProvider {
     /// via a non-`geo:asWKT` predicate, a non-geographic CRS, …) is left for the
     /// exact `geof:` FILTER instead of being silently dropped. Built once.
     indexed: FxHashSet<Term>,
+    /// The ID-LEVEL indexed universe — the same universe as `indexed`, keyed by
+    /// dictionary `Id` — pre-wrapped in an `Arc` so [`SpatialProvider::indexed_ids`]
+    /// hands it out with a cheap clone (no per-call reallocation). Its CONTENT is
+    /// the ids of the terms in `indexed`; the FRESHNESS gate (whether these ids
+    /// map to those terms for the caller's dict) is delegated to
+    /// [`GeoIndex::indexed_ids_for`]. Rebuilding / `apply_delta`-ing the inner
+    /// index requires wrapping afresh (per this type's contract), so this is
+    /// correct for the provider's lifetime. [OPUS-4.8]
+    indexed_ids: Arc<FxHashSet<Id>>,
 }
 
 impl GeoIndexProvider {
     pub fn new(index: GeoIndex) -> Self {
         let indexed = index.entries().map(|e| e.literal.clone()).collect();
-        Self { index, indexed }
+        let indexed_ids = Arc::new(index.entries().map(|e| e.literal_id).collect());
+        Self { index, indexed, indexed_ids }
     }
 
     /// Borrow the wrapped index (e.g. for the non-pushdown query methods).
@@ -113,6 +125,16 @@ impl SpatialProvider for GeoIndexProvider {
 
     fn is_indexed(&self, term: &Term) -> bool {
         self.indexed.contains(term)
+    }
+
+    fn indexed_ids(&self, dict_ptr: usize) -> Option<Arc<FxHashSet<Id>>> {
+        // Freshness is the index's authority: it hands out the id-set ONLY when
+        // `dict_ptr` matches the dict the ids were extracted from. On a match the
+        // cheap cached `Arc` is cloned; on any mismatch (`None`) the engine uses
+        // the per-row `is_indexed` fallback. The `Arc`'s CONTENT equals the ids of
+        // the terms `is_indexed` reports, so the engine's id-level and per-row
+        // checks return the SAME keep/drop verdict. [OPUS-4.8]
+        self.index.indexed_ids_for(dict_ptr).map(|_| Arc::clone(&self.indexed_ids))
     }
 }
 

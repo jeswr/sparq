@@ -107,7 +107,6 @@ mod gated {
             return;
         }
 
-        use sparq_engine::serialize::JsonLdForm;
         let tordf = to_rdf::run_tordf(&root);
         let fromrdf = from_rdf::run_fromrdf(&root);
         let compact = compact::run_compact(&root);
@@ -116,9 +115,12 @@ mod gated {
         // RDF-equivalence oracle.  See expand::run_expand_native() and the expand
         // floor doc for the oracle-correction rationale and old-vs-new breakdown.
         let expand = expand::run_expand_native(&root);
-        // flatten keeps the RDF-equivalence oracle (native flatten algorithm is
-        // deferred to a separate bead; the writer path is still the right oracle).
-        let flatten = flatten::run_expand_or_flatten(&root, "flatten", JsonLdForm::Flattened);
+        // [FABLE-5] sq-oy1f.26 — flatten now uses the NATIVE DOCUMENT-LEVEL oracle
+        // (sparq_jsonld::flatten() + json_ld_equal comparator) — the native
+        // Flattening Algorithm (§7.1) replaces the old RDF-writer round-trip. See
+        // flatten::run_flatten_native() and the flatten floor doc for the old-vs-new
+        // re-pin.
+        let flatten = flatten::run_flatten_native(&root);
         let not_impl = not_implemented_counts(&root);
 
         // [OPUS-4.8] sq-oy1f.19 — framing lives in the SEPARATE w3c/json-ld-framing

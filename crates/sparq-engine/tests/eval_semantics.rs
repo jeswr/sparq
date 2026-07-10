@@ -1031,3 +1031,189 @@ mod numeric_whitespace_collapse_consistency {
         assert_eq!(r.rows.len(), 4, "all four ordered pairs are value-equal (both are 1)");
     }
 }
+
+/// [FABLE-5] (sq-74oy4 + sq-6b1lj) FAST-PATH ⟺ SLOW-PATH numeric agreement.
+///
+/// The numeric cache / sargable FILTER / `JKey::Num` value-join FAST path and the exact
+/// general evaluator SLOW path (`values_equal`/`value_compare_strict` → `Num::of_literal`)
+/// must return the SAME answer for `=`, `<`, `>` over padded / per-datatype-ill-formed /
+/// well-formed lexicals across `xsd:integer`/`double`/`decimal`/`float`. The two beads pin:
+///   * sq-74oy4 — a whitespace-PADDED numeric lexical (XSD `collapse` facet) is its trimmed
+///     value on `<`/`>` too (not a `<`/`>`-only type error).
+///   * sq-6b1lj — a lexical ill-formed FOR its datatype (`"1.5"^^xsd:integer`, `"1E2"^^
+///     xsd:decimal`, an i128-overflow decimal) is a type error on ALL of `=`/`<`/`>` (the
+///     cache no longer over-includes it on the sargable `=`/`<` fast path).
+///
+/// Method: each case runs against a graph WITH the fast path (sargable numeric pushdown
+/// enabled) and a graph carrying a high-precision decimal that DISABLES sargable numeric
+/// pushdown (`Graph::has_high_precision_decimal` → the exact general comparison path), and
+/// asserts identical results — AND against the `of_literal` reference expectation.
+mod numeric_fast_slow_path_agreement {
+    use super::*;
+
+    /// Build a one-triple graph `ex:s ex:v <object>`; when `force_slow`, also add a
+    /// high-precision decimal object on a DIFFERENT subject/predicate so
+    /// `has_high_precision_decimal()` is true (which makes `extract_sargable` decline the
+    /// numeric fast path) WITHOUT changing the `ex:s ex:v ?o` row under test.
+    fn graph_with(object: &str, force_slow: bool) -> Graph {
+        let mut ttl = String::from(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n",
+        );
+        ttl.push_str(&format!("ex:s ex:v {} .\n", object));
+        if force_slow {
+            // 19 significant digits > 15 → high-precision decimal → sargable numeric declined.
+            ttl.push_str("ex:hp ex:w \"1.000000000000000001\"^^xsd:decimal .\n");
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    /// Rows returned by `SELECT ?s WHERE { ?s ex:v ?o FILTER(<expr>) }` under BOTH the fast
+    /// and slow paths; asserts they agree, then returns the (agreed) row count.
+    fn filter_rows(object: &str, filter: &str) -> usize {
+        let q = format!("SELECT ?s WHERE {{ ?s <http://ex/v> ?o FILTER({filter}) }}");
+        let fast = query(&graph_with(object, false), &q).unwrap().rows.len();
+        let slow = query(&graph_with(object, true), &q).unwrap().rows.len();
+        assert_eq!(
+            fast, slow,
+            "fast-path vs slow-path disagree for object {} filter {}: fast={} slow={}",
+            object, filter, fast, slow
+        );
+        fast
+    }
+
+    #[test]
+    fn wellformed_lexicals_pass_relational_and_equality_on_both_paths() {
+        // Well-formed value-1 lexicals in each datatype: `< 5`, `= 1`, `> 0` all include the
+        // row; `> 5` excludes it. Fast and slow paths must agree (asserted inside filter_rows).
+        for obj in [
+            "\"1\"^^xsd:integer",
+            "\"1.\"^^xsd:integer",   // trailing dot, no fraction: of_literal accepts as int 1
+            "\"1.0\"^^xsd:integer",  // trailing-zero fraction: normalised scale 0 -> int 1
+            "\"1.0\"^^xsd:decimal",
+            "\"1.0E0\"^^xsd:double",
+            "\"1.0\"^^xsd:float",
+        ] {
+            assert_eq!(filter_rows(obj, "?o < 5"), 1, "{obj} < 5");
+            assert_eq!(filter_rows(obj, "?o = 1"), 1, "{obj} = 1");
+            assert_eq!(filter_rows(obj, "?o > 0"), 1, "{obj} > 0");
+            assert_eq!(filter_rows(obj, "?o > 5"), 0, "{obj} > 5");
+        }
+    }
+
+    #[test]
+    fn padded_lexicals_are_their_trimmed_value_on_all_operators() {
+        // sq-74oy4: padding is collapsed on `<`/`>`/`=` alike (not a `<`/`>`-only type error).
+        for obj in [
+            "\" 1 \"^^xsd:integer",
+            "\" 1.0 \"^^xsd:decimal",
+            "\"\\t1.0E0\\n\"^^xsd:double",
+        ] {
+            assert_eq!(filter_rows(obj, "?o < 5"), 1, "{obj} < 5 (padded = value 1)");
+            assert_eq!(filter_rows(obj, "?o = 1"), 1, "{obj} = 1 (padded = value 1)");
+            assert_eq!(filter_rows(obj, "?o > 0"), 1, "{obj} > 0 (padded = value 1)");
+        }
+    }
+
+    #[test]
+    fn per_datatype_illformed_lexicals_are_type_errors_on_all_operators() {
+        // sq-6b1lj: ill-formed FOR the datatype → type error → row excluded on `<`, `>`, `=`
+        // — on BOTH paths (the fast path no longer over-includes them). A FILTER type error
+        // drops the row exactly like `false`.
+        for (obj, why) in [
+            ("\"1.5\"^^xsd:integer", "fraction on an integer"),
+            ("\"1E2\"^^xsd:integer", "exponent on an integer"),
+            ("\"1E2\"^^xsd:decimal", "exponent on a decimal"),
+            // 40-digit integer / decimal: beyond i128 (i128::MAX is a 39-digit number
+            // ~1.7e38) → of_literal None (not i128-representable), so a type error.
+            ("\"9999999999999999999999999999999999999999\"^^xsd:integer", "i128-overflow integer"),
+            ("\"9999999999999999999999999999999999999999.5\"^^xsd:decimal", "i128-overflow decimal"),
+        ] {
+            assert_eq!(filter_rows(obj, "?o < 999999"), 0, "{obj} < … excluded ({why})");
+            assert_eq!(filter_rows(obj, "?o > -999999"), 0, "{obj} > … excluded ({why})");
+            assert_eq!(filter_rows(obj, "?o = 100"), 0, "{obj} = … excluded ({why})");
+            // BOUND(?o) is still true (the row is a real term) — proves it is a numeric TYPE
+            // error on the comparison, not that the term vanished from the graph.
+            let bound = query(
+                &graph_with(obj, false),
+                "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(BOUND(?o)) }",
+            )
+            .unwrap();
+            assert_eq!(bound.rows.len(), 1, "{obj} still binds as a term ({why})");
+        }
+    }
+
+    #[test]
+    fn illformed_lexical_does_not_value_join_with_its_numeric_value() {
+        // sq-6b1lj value-join surface: `"1.5"^^xsd:integer` must NOT pair with 1.5 (a decimal)
+        // under `=` (it is a type error), on the `JKey::Num`/value-join path.
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n\
+            ex:a ex:v \"1.5\"^^xsd:integer .\n\
+            ex:b ex:w \"1.5\"^^xsd:decimal .\n";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let r = query(
+            &g,
+            "SELECT ?a ?b WHERE { ?a <http://ex/v> ?x . ?b <http://ex/w> ?y FILTER(?x = ?y) }",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "\"1.5\"^^xsd:integer is a type error, so it must not = the decimal 1.5"
+        );
+    }
+
+    #[test]
+    fn illformed_constant_operand_is_a_type_error_not_its_f64() {
+        // sq-6b1lj CONSTANT side: `FILTER(?o = "1.5"^^xsd:integer)` over a graph value 1.5
+        // (a well-formed DECIMAL) must EXCLUDE the row — the integer-typed constant `"1.5"` is
+        // ill-formed for its datatype (a type error), so it is NOT the value 1.5. Both the
+        // sargable fast path (which now DECLINES on the ill-formed constant) and the exact
+        // path must agree on exclusion. A datatype-agnostic constant parse would WRONGLY match
+        // (1.5 == 1.5). Uses xsd:integer for the FULL datatype IRI so the SPARQL parser is happy.
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n\
+            ex:s ex:v \"1.5\"^^xsd:decimal .\n";
+        let g = Graph::load_str(ttl, "turtle").unwrap();
+        let xi = "http://www.w3.org/2001/XMLSchema#integer";
+        for op in ["=", "<", ">"] {
+            let q = format!(
+                "SELECT ?s WHERE {{ ?s <http://ex/v> ?o FILTER(?o {op} \"1.5\"^^<{xi}>) }}"
+            );
+            let r = query(&g, &q).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                0,
+                "?o {op} \"1.5\"^^xsd:integer must be a type error (ill-formed constant), row excluded"
+            );
+        }
+        // Sanity: the SAME comparison against a WELL-FORMED decimal constant DOES match on `=`.
+        let ok = query(
+            &g,
+            "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o = \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>) }",
+        )
+        .unwrap();
+        assert_eq!(ok.rows.len(), 1, "well-formed decimal constant 1.5 matches the decimal 1.5");
+    }
+
+    /// MUTATION WITNESS (fast/cache seam): with the datatype-aware cache in force, the
+    /// per-datatype-ill-formed integer `"1.5"^^xsd:integer` is a cache MISS, so `?o = 100`
+    /// returns 0 rows. This assertion is 0-vs-nonzero: if the cache reverted to the
+    /// datatype-AGNOSTIC parse (accepting 1.5), the fast `=` path would still return 0 here
+    /// (1.5 ≠ 100) — so use `?o = 1.5` on the DECIMAL constant to make the witness bite: the
+    /// datatype-agnostic cache would include the row (1.5 == 1.5), the datatype-aware one
+    /// excludes it (integer "1.5" is a type error).
+    #[test]
+    fn mutation_witness_datatype_aware_cache_excludes_integer_fraction() {
+        let g = graph_with("\"1.5\"^^xsd:integer", false);
+        let r = query(
+            &g,
+            "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o = 1.5) }",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "datatype-aware cache: \"1.5\"^^xsd:integer is a type error, never = decimal 1.5 \
+             (a datatype-agnostic cache would WRONGLY return 1 row here)"
+        );
+    }
+}
