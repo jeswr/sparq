@@ -584,6 +584,31 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   correlated child actually collapsed). SP2Bench q08/q12b: the 1-row `?erdoes` side seeds the Union's
   `?document dc:creator ?erdoes` scan instead of a whole-corpus creator self-join. Payoff on complex-shape
   workloads is a measurable hypothesis for the canonical perf host, not a baked-in number.
+- **Correlated (theta) anti-join for `OPTIONAL … FILTER(!bound)`** is a DEFAULT-ON,
+  semantics-preserving optimisation (bead `sq-7d3dj.30.9`, SP2Bench q06). The negation idiom
+  `Filter(!bound(?nb), LeftJoin(A, B, F))` — where `?nb` is **certain** in `B` and **absent** from `A` —
+  is exactly an anti-join: a left row survives iff **no** `b ∈ B` is compatible with it **and** makes the
+  OPTIONAL condition `F` effectively **true**. The default-off `algebra-rewrite` pass turns the simpler
+  `F = None` case into `Minus`, but declines when `F` references **outer** variables (q06's
+  `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` scans the whole corpus. This
+  eval-time path instead splits `F` into a correlation equality `?outer = ?inner` (with `?inner` certain
+  in `B`) and a residual theta (`?yr2 < ?yr`), and picks between two strategies. **Large** correlation
+  cardinality → a **hash anti-join**: evaluate `B` **once**, partition it by the `?inner` id, then probe
+  each left row's bucket — one `B` scan, O(|A|+|B|) (SP2Bench q06's win). **Small** cardinality →
+  **SIP-seed**: seed the outer correlation term sideways into `B` so each distinct correlation evaluates
+  a tiny `B'`. Either way the residual theta is re-checked verbatim per candidate with full 3-valued
+  semantics (a **type error ⇒ no match**, so the outer row **survives** — never spuriously eliminated).
+  Id-hashing is exact for **IRI and blank-node** correlations (for both, SPARQL `=` coincides with term
+  identity — per SPARQL 1.1 §17.4.1.7 RDFterm-equal, `=` on two distinct non-literal terms returns
+  **false** (a type error arises only when both arguments are literals), and false and error alike mean
+  **no match** under the anti-join, which an id non-match reproduces);
+  a **literal**-valued correlation (the `sq-lr2ii` value-equality class: high-precision decimals,
+  whitespace-padded numerics) routes through a **value-correct** scan that re-checks the equality with
+  SPARQL `=`, never a term-identity probe that could miss a value-equal partner. Each surviving row is
+  emitted **once** (multiplicity preserved), and any shape/scope miss (e.g. `?nb` also bound on the left,
+  or no seedable equality) **declines** to the identical prior plan. Proven on-vs-off by
+  `tests/theta_antijoin.rs` (type-error-survives, literal value-equality, blank-node, large-cardinality
+  hash, and a randomised differential across both strategies); toggle/stats behind `theta_antijoin_testing`.
 - **Id-level term-identity FILTER fast path** is the non-default `id-filter-fastpath` cargo feature
   (bead `sq-7d3dj.30.11`). It removes the per-row term MATERIALIZATION the compiled FILTER evaluator
   otherwise performs for `=`/`!=`, by two id-level short-circuits: **(a)** a static term-kind analysis
