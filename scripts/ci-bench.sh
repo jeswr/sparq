@@ -252,6 +252,17 @@ btriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' 
 bterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
 [ -n "${bterm:-}" ] && add dict_bytes_per_term bytes "$bterm"
 
+# [SONNET-4.6] (sq-7d3dj.32.2.5) comp_store_bytes_per_triple — DETERMINISTIC compressed-profile
+# B/triple ratchet. Mirrors the raw store_bytes_per_triple stanza exactly, differing only in that
+# SPARQ_STORE_PROFILE=compressed instructs load_quiet to call into_compressed() after the raw
+# index-build, so the stderr load summary line reports the compressed store's heap_bytes()/len().
+# The {:.0} format in load() is an INTEGER (rounded) — runner-noise-immune, mode:auto gated.
+# Mode=auto, threshold=2%: floor seeded at 56 (SPQCPRM2 V2 post-#1824, 200k scale, 3 consecutive
+# runs, all identical). The floor auto-ratchets DOWN on a genuine improvement, never auto-raises.
+SPARQ_STORE_PROFILE=compressed "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e_comp" || true
+cbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e_comp" | head -1 | grep -oE '[0-9]+' | head -1)
+[ -n "${cbtriple:-}" ] && add comp_store_bytes_per_triple bytes "$cbtriple"
+
 # [OPUS-4.8] Two more DETERMINISTIC (runner-noise-immune) regression GATES on a FIXED corpus.
 # The bytes-per-triple figures vary with scale (fixed per-graph overhead amortises differently),
 # so a SECOND, fixed scale catches per-triple-overhead regressions that the primary scale hides;

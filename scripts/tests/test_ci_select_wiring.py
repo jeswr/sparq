@@ -618,6 +618,7 @@ class TestBenchMetricTierInvariant(unittest.TestCase):
         _EXPECTED_PR_TIER = frozenset({
             # ci-bench.sh measures these on EVERY tier (no GITHUB_REF guard); bench seeds cover:
             "store_bytes_per_triple",       # sparq-core (via sparq-cli + sparq-bench seeds)
+            "comp_store_bytes_per_triple",  # sparq-core compressed profile (via sparq-cli + sparq-bench seeds; sq-7d3dj.32.2.5)
             "store_bytes_per_triple_small", # sparq-core (via sparq-cli + sparq-bench seeds)
             "dict_bytes_per_term",          # sparq-core (via sparq-cli + sparq-bench seeds)
             "wasm_bundle_bytes",            # sparq-wasm (direct bench seed)
