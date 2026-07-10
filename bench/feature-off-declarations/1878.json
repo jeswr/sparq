@@ -1,0 +1,5 @@
+{
+  "pr": 1878,
+  "date": "2026-07-10",
+  "reason": "[OPUS-4.8] sq-7d3dj.30.23: the index-carry top-k selection in the always-compiled crates/sparq-engine/src/exec.rs order_bindings bounded path changes the `keyed` vector to carry (sort_key, input_idx) instead of (sort_key, input_idx, Row), eliminating n Row.clones at build time (only the final k-prefix gathers via b.rows[*i].clone()). This is an always-on internal optimization (no cfg(feature) lines touched), so recompiling the default order_bindings path legitimately SHRINKS the feature-OFF sparq-wasm bundle by -890 bytes (-0.056%). Query-result behaviour is byte-identical (proven by index_carry_topk_is_byte_identical_to_full_sort_truncated over all k with tie groups); the delta is well under the +/-2% wasm_bundle_bytes floor band, so no bench/perf-baseline.json floor change accompanies this declaration."
+}
