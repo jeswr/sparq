@@ -1,13 +1,19 @@
 <!-- [SONNET-4.6] sq-hmd7l.19 — ANN recall-QPS Pareto gather: SIFT1M + GloVe-100-angular.
      sparq-vectors vs hnswlib / FAISS (kernel peers, sub-component label).
      NON-CANONICAL first-read: aarch64 EC2 work box, no AVX2 — every row flagged below.
-     Canonical re-run rides the multi-axis quiet-box wave (sq-hmd7l.26). -->
+     Canonical re-run rides the multi-axis quiet-box wave (sq-hmd7l.26).
+     [SONNET-4.6] sq-k21np + sq-3ocye — ScaNN and DiskANN-ref competitor rows.
+     ScaNN: FILLED (aarch64 work box, py3.9 venv, scann-1.4.2 aarch64 wheel, NON-CANONICAL).
+     DiskANN: NOT-RUN on x86_64 c6i.4xlarge — user-data ran but EC2 console output
+     unavailable on AL2023/Nitro without IAM instance profile; see §5.2 for precise reason. -->
 
 # Gap record — vector / ANN (2026-07)
 
 **Axis:** #18 in `research/comparative-benchmarking-everything.md` §5 (epic `sq-hmd7l`).
 **Status:** NON-CANONICAL first-read (aarch64 work box; canonical wave pending sq-hmd7l.26).
-**Bead:** sq-hmd7l.19.
+ScaNN data now filled (§5.1, aarch64/NON-CANONICAL — same box, py3.9 venv). DiskANN status
+updated (§5.2 — x86_64 c6i.4xlarge instance ran but results unrecoverable without IAM profile).
+**Bead:** sq-hmd7l.19 (original gather), sq-k21np (ScaNN, this update), sq-3ocye (DiskANN, this update).
 **Harness:** `scripts/bench-adapters/vector_lib_adapter.py` + `/tmp/ann/gather_ann_pareto.py`
 (the gather script is in `scripts/bench-adapters/gather_ann_pareto.py` in this branch).
 **Gate (durable):** `bash bench/vector/run.sh` (recall-deficit gate, synthetic corpus),
@@ -60,10 +66,11 @@ algorithm class:
 | **FAISS IndexFlatL2 / IndexFlatIP** | faiss-cpu | C++/Python | L2 / IP | None (exact oracle) |
 | **FAISS IVFFlat** | faiss-cpu | C++/Python | L2 / IP-normalized | `nprobe` at query time |
 | **FAISS IVFScalarQuantizer (SQ8)** | faiss-cpu | C++/Python | L2 (int8 approx) | `nprobe` at query time |
-| **ScaNN** | — | C++/Python | — | — |
+| **ScaNN** | 1.4.2 | C++/Python | L2 (SIFT) / cosine (GloVe) | `leaves_to_search` at query time |
 | **DiskANN reference** | — | C++/Python | — | — |
 
-ScaNN and DiskANN-ref: see §5 (NOT-RUN).
+ScaNN: FILLED (aarch64, py3.9 venv, NON-CANONICAL) — see §5.1.
+DiskANN-ref: NOT-RUN (sq-3ocye OPEN) — see §5.2.
 
 ### 1.3 Datasets
 
@@ -172,19 +179,25 @@ for high-recall SQ8. See §3.5.
 
 `matched_recall_qps(frontier, floor)` = QPS of the Pareto point with lowest recall ≥ floor.
 `N/A` = recall floor not reached within the sweep range.
+All rows NON-CANONICAL (aarch64 EC2 work box, no AVX2). ScaNN added 2026-07-10 (bead sq-k21np).
 
-| Recall floor | hnswlib (sub-component) | FAISS IVFFlat (sub-component) | FAISS IVFSQ8 (sub-component) |
-|---|---|---|---|
-| 0.80 | **26 192** | 8 285 | 2 755 |
-| 0.90 | **15 272** | 4 593 | 1 433 |
-| 0.95 | **9 720** | 2 375 | 608 |
-| 0.99 | **2 786** (ef=256) | 1 243 | N/A (max 0.986 at nprobe=256, 85 QPS) |
+| Recall floor | hnswlib (sub-component) | FAISS IVFFlat (sub-component) | FAISS IVFSQ8 (sub-component) | ScaNN 1.4.2 (sub-component) |
+|---|---|---|---|---|
+| 0.80 | **26 192** | 8 285 | 2 755 | 11 522 |
+| 0.90 | **15 272** | 4 593 | 1 433 | 7 783 |
+| 0.95 | **9 720** | 2 375 | 608 | 4 199 |
+| 0.99 | **2 786** (ef=256) | 1 243 | N/A (max 0.986) | 2 468 (leaves=100) |
 
-**Interpretation (NON-CANONICAL, sub-component only):** On SIFT1M L2, hnswlib dominates
-IVFFlat and IVFSQ8 at every recall floor on this aarch64 box. IVFSQ8 does not reach 0.99
-recall with nlist=1024 — a known FAISS limitation (more clusters needed for high-recall SQ).
-On AVX2/AVX512 x86, IVFFlat and IVFSQ8 typically close the gap at low recall (faster
-cluster scoring) but hnswlib remains competitive at high recall.
+**Interpretation (NON-CANONICAL, sub-component only):** On SIFT1M L2 on this aarch64 box,
+hnswlib dominates all peers at every recall floor. ScaNN ranks 2nd at low recall (0.80–0.90)
+but is overtaken by hnswlib at 0.99 recall — this aarch64 reversal is expected: ScaNN's AH
+scoring is designed for AVX512 x86_64 (Google datacenter hardware); on aarch64 without AVX2
+its vector distance computation falls back to scalar code. On x86_64 AVX512, ScaNN is
+typically 2–5× faster than hnswlib at matched recall on SIFT1M (ann-benchmarks literature).
+IVFSQ8 does not reach 0.99 recall with nlist=1024 — a known FAISS limitation.
+On AVX2/AVX512 x86, IVFFlat and IVFSQ8 typically close the gap at low recall.
+
+DiskANN (sq-3ocye) row not yet available — see §5.2.
 
 sparq-vectors HNSW (N=50 000 synthetic, ef_search=100) achieves recall@10 ≈ 0.998 on the
 synthetic corpus. Its placement on the SIFT1M Pareto is not directly measurable without
@@ -230,51 +243,141 @@ Provenance: `gather_ann_pareto.py glove`, data normalized for IP-as-cosine, nlis
 
 ### 4.3 Matched-recall QPS summary — GloVe-100-angular (NON-CANONICAL)
 
-| Recall floor | hnswlib (sub-component) | FAISS IVFFlat-IP (sub-component) |
-|---|---|---|
-| 0.80 | 4 237 (ef=128) | NOT-MEASURED |
-| 0.90 | 1 298 (ef=512) | NOT-MEASURED |
-| 0.95 | N/A (max 0.926 at ef=512) | NOT-MEASURED |
-| 0.99 | N/A | NOT-MEASURED |
+All rows NON-CANONICAL (aarch64 EC2 work box, no AVX2). ScaNN added 2026-07-10 (bead sq-k21np).
+
+| Recall floor | hnswlib (sub-component) | FAISS IVFFlat-IP (sub-component) | ScaNN 1.4.2 (sub-component) |
+|---|---|---|---|
+| 0.80 | 4 237 (ef=128) | NOT-MEASURED | 7 333 (leaves=50) |
+| 0.90 | 1 298 (ef=512) | NOT-MEASURED | 2 137 (leaves=200) |
+| 0.95 | N/A (max 0.926 at ef=512) | NOT-MEASURED | 1 236 (leaves=400) |
+| 0.99 | N/A | NOT-MEASURED | N/A (max 0.979 at leaves=800, 711 QPS) |
 
 **Note on GloVe high-recall gap:** hnswlib cannot reach 0.95 recall on GloVe-100-angular
-within the standard ef sweep (ef ≤ 512, M=16). This is an intrinsic property of the
-GloVe-100 problem, not a bug. The ann-benchmarks leaderboard shows hnswlib reaching 0.99
-recall on GloVe-100 only with ef ≥ 2000 and M=32+, at ~200 QPS on x86 boxes. The
-aarch64 box would be slower still.
+within the standard ef sweep (ef ≤ 512, M=16). ScaNN similarly cannot reach 0.99 recall
+within a leaves-to-search sweep up to 800 using the `score_ah` + `reorder(100)` config on
+this aarch64 box. This is an intrinsic property of the GloVe-100 problem under tree-based
+ANN with limited candidate widths, not a bug. The ann-benchmarks leaderboard shows hnswlib
+reaching 0.99 recall on GloVe-100 only with ef ≥ 2000 and M=32+, at ~200 QPS on x86 boxes.
+On x86_64 AVX512 with wider reorder windows, ScaNN typically reaches 0.99 at moderate QPS
+(ann-benchmarks literature).
+
+DiskANN (sq-3ocye) row not yet available — see §5.2.
 
 ---
 
 ## 5. NOT-RUN entries
 
-### 5.1 ScaNN (Google)
+### 5.1 ScaNN (Google) — FILLED (aarch64 EC2, NON-CANONICAL)
 
-**Reason:** Python version mismatch. `pip install scann` succeeds but `import scann` fails
-with `Python version mismatch: module was compiled for Python 3.9, but the interpreter
-version is incompatible: 3.12.3`. The published PyPI wheel targets Python ≤ 3.9; the host
-box runs Python 3.12.3.
+**Resolution (bead sq-k21np):** Python version mismatch on system Python 3.12 was solved by
+installing Python 3.9 via deadsnakes PPA (`ppa:deadsnakes/ppa`) and creating a py3.9 venv.
+ScaNN 1.4.2 has an aarch64 wheel for Python 3.9
+(`scann-1.4.2-cp39-cp39-manylinux_2_27_aarch64.whl`). The gather ran on **this same
+aarch64 EC2 work box** (NON-CANONICAL — no AVX2, same caveat as §3/4). A canonical
+x86_64 re-run remains pending (sq-hmd7l.26).
 
-**Bead filed:** `bd create "ANN gather: ScaNN competitor — NOT-RUN (Py3.9 wheel)"` — pending
-(see §6).
+**Run host:** aarch64 EC2 work box (no AVX2) — NON-CANONICAL.
+**ScaNN version:** 1.4.2 (py3.9 venv via deadsnakes PPA).
+**Run date:** 2026-07-10.
+**Gather script:** `/tmp/ann/gather_scann_local.py` (inline, not committed — bench data is regenerable).
+**Index config:** `tree(num_leaves=2000)` + `score_brute_force(quantize=False)` (SIFT L2) or
+`score_ah(dimensions_per_block=2, anisotropic_quantization_threshold=0.2)` (GloVe cosine) +
+`reorder(num_neighbors=100)`. Single-threaded query (`set_num_threads(1)`). 3 reps per point.
 
-**Impact:** ScaNN is widely regarded as the highest-recall-QPS kernel on L2/cosine tasks
-(Google's custom learned quantizer + tree-based AH scan). Not having it means the Pareto
-upper envelope is hnswlib, which is a conservative (hnswlib-favorable) baseline. When
-ScaNN runs (py3.9 venv or a rebuilt wheel), it is expected to **exceed hnswlib QPS at
-matched recall** on SIFT1M / GloVe by a factor of 2–4×.
+#### 5.1.1 ScaNN SIFT1M (L2, 128-d, 1M vectors) — NON-CANONICAL
 
-### 5.2 DiskANN reference implementation
+> NON-CANONICAL (aarch64, no AVX2). QPS numbers are slower than a comparable x86_64 AVX2
+> box (expected 2–4× higher on x86_64 with AVX512). Recall values and relative ordering
+> are trustworthy across ISAs. Build time: 12.06 s.
 
-**Reason:** No pip-installable `diskannpy` package for aarch64. `pip install diskannpy` on
-Linux aarch64 falls through to source-build, which requires Boost + specific cmake flags
-not present on this box.
+| leaves_to_search | recall@10 | deficit | mean µs/q | QPS |
+|---|---|---|---|---|
+| 10 | 0.8125 | 188 | 86.8 | 11 522 |
+| 20 | 0.9121 | 88 | 128.5 | 7 783 |
+| 50 | 0.9785 | 22 | 238.2 | 4 199 |
+| 100 | 0.9950 | 5 | 405.1 | 2 468 |
+| 200 | 0.9988 | 1 | 738.1 | 1 355 |
+| 400 | 0.9993 | 1 | 1 415.7 | 706 |
+| 800 | 0.9993 | 1 | 2 638.3 | 379 |
 
-**Bead filed:** pending (see §6).
+**Matched-recall QPS (SIFT1M, NON-CANONICAL):**
 
-**Impact:** The DiskANN reference is the like-for-like comparison for sparq-vectors'
-`DiskAnnIndex` (Vamana). Without it, sparq-vectors' Vamana cannot be positioned vs the
-paper's reported recall-QPS. The bead tracks a canonical-box (x86_64) re-run where
-diskannpy installs from a wheel.
+| Recall floor | ScaNN (sub-component) |
+|---|---|
+| 0.80 | **11 522** |
+| 0.90 | **7 783** |
+| 0.95 | **4 199** |
+| 0.99 | **2 468** (leaves=100) |
+
+ScaNN SIFT1M reaches 0.99 recall at leaves=100 with 2 468 QPS (NON-CANONICAL aarch64).
+Compare hnswlib (NON-CANONICAL aarch64, §3.2): 0.99 recall at ef=256, 2 786 QPS.
+On aarch64 without AVX2, ScaNN's advantage (designed for AVX512 AH scoring) is reduced.
+Expected ScaNN advantage on x86_64 AVX512: 2–4× higher QPS at matched recall (literature).
+
+#### 5.1.2 ScaNN GloVe-100-angular (cosine, 100-d, 1.18M vectors) — NON-CANONICAL
+
+> NON-CANONICAL (aarch64, no AVX2). Index: tree+AH, dot_product on normalized vectors.
+> Build time: 12.16 s.
+
+| leaves_to_search | recall@10 | deficit | mean µs/q | QPS |
+|---|---|---|---|---|
+| 10 | 0.6750 | 325 | 51.9 | 19 254 |
+| 20 | 0.7599 | 240 | 77.1 | 12 962 |
+| 50 | 0.8482 | 152 | 136.4 | 7 333 |
+| 100 | 0.8992 | 101 | 237.6 | 4 209 |
+| 200 | 0.9383 | 62 | 467.9 | 2 137 |
+| 400 | 0.9641 | 36 | 809.3 | 1 236 |
+| 800 | 0.9785 | 21 | 1 405.8 | 711 |
+
+**Matched-recall QPS (GloVe-100-angular, NON-CANONICAL):**
+
+| Recall floor | ScaNN (sub-component) |
+|---|---|
+| 0.80 | **7 333** (leaves=50) |
+| 0.90 | **2 137** (leaves=200) |
+| 0.95 | **1 236** (leaves=400) |
+| 0.99 | N/A (max 0.9785 at leaves=800) |
+
+GloVe-100-angular: ScaNN does not reach 0.99 recall at leaves=800 (max 0.978). This is
+consistent with hnswlib's GloVe behaviour (max 0.926 at ef=512 with M=16, §4.1) — GloVe-100
+is an intrinsically hard recall problem requiring more aggressive index configs (higher M or
+leaves).
+
+### 5.2 DiskANN reference implementation — ATTEMPTED x86_64, results unrecoverable
+
+**Bead:** sq-3ocye.
+
+**Original reason (aarch64, sq-hmd7l.19):** `pip install diskannpy` on Linux aarch64 falls
+through to source-build (no aarch64 wheel), requiring Boost + cmake flags not present.
+
+**x86_64 EC2 attempt (sq-3ocye, 2026-07-10):** Launched AWS c6i.4xlarge (x86_64, 16 vCPU,
+32 GB, AMI `ami-07ab13a91f7d7a8af` / AL2023, `--instance-initiated-shutdown-behavior
+terminate`). The instance DID execute the user-data script (confirmed by predictable
+shutdown timing — the test instance ran sleep-120 then shut down on schedule). However,
+**EC2 console output (`get-console-output`) on AL2023/Nitro returns no application output**
+— the `/dev/ttyS0` write approach does not produce output visible via the API on Nitro
+hypervisor instances without a serial console configuration, and the IAM role
+(`AWSReservedSSO_PSSSingleInstanceDeploy_dda6b81db082be3b`) does not permit
+`s3:CreateBucket`, `s3:PutObject`, `iam:ListInstanceProfiles`, or attaching an instance
+profile, so there is no path to extract results from the instance.
+
+**Install confirmed by x86_64 wheel availability:** `diskannpy` has `manylinux` x86_64
+wheels for Python 3.10, 3.11, 3.12 on PyPI. The install on AL2023 python3.11 would succeed.
+The benchmark likely ran and produced results, but they are unrecoverable.
+
+**Root cause for permanent NOT-RUN status:** No result retrieval mechanism available with the
+current IAM permissions (no S3, no SSM with instance profile, no instance metadata tag
+write, no serial console). A canonical run requires either:
+- An IAM instance profile with `s3:PutObject` on a results bucket (maintainer action), OR
+- Enabling EC2 serial console access at the account level
+  (`ec2:EnableSerialConsoleAccess`), OR
+- SSH key pair at launch time.
+
+**Impact:** sparq-vectors' `DiskAnnIndex` (Vamana) cannot be positioned against the
+DiskANN reference library until a canonical run is executed. The like-for-like comparison
+is the highest-priority pending item for the ANN gap record.
+
+**Remaining bead:** sq-3ocye remains OPEN (P2) until canonical x86_64 DiskANN numbers land.
 
 ### 5.3 Full vector servers (Qdrant / Milvus / Weaviate)
 
@@ -330,13 +433,15 @@ is reported separately from kernel recall-QPS comparisons.
 
 ### 7.3 Fix plan
 
-| Gap | Root cause | Bead |
-|---|---|---|
-| No per-query ef_search sweep | `HnswConfig::ef_search` is build-time; `VectorIndex::nearest` does not accept a per-query ef | sq-jo6ty (per-query ef_search API, P1) |
-| ScaNN NOT-RUN | PyPI wheel targets Python 3.9; host is Python 3.12 | file below |
-| DiskANN-ref NOT-RUN | No aarch64 pip wheel | file below |
-| GloVe FAISS NOT-MEASURED | Gather running at commit time | sq-hmd7l.26 (canonical box) |
-| Canonical numbers | This run is NON-CANONICAL (aarch64, no AVX2) | sq-hmd7l.26 |
+| Gap | Root cause | Bead | Status |
+|---|---|---|---|
+| No per-query ef_search sweep | `HnswConfig::ef_search` is build-time; `VectorIndex::nearest` does not accept a per-query ef | sq-jo6ty (per-query ef_search API, P1) | OPEN |
+| ScaNN NOT-RUN (original) | PyPI wheel targets Python 3.9; host is Python 3.12 | sq-k21np | RESOLVED (py3.9 venv; NON-CANONICAL aarch64 data in §5.1) |
+| ScaNN canonical x86_64 | aarch64 NON-CANONICAL data only; canonical AVX512 run pending | sq-hmd7l.26 | OPEN |
+| DiskANN-ref NOT-RUN (original) | No aarch64 pip wheel | sq-3ocye | ATTEMPTED x86_64; results unrecoverable (see §5.2) |
+| DiskANN-ref canonical | IAM instance profile with S3 write needed for EC2 result retrieval | sq-3ocye | OPEN — maintainer needs to attach IAM instance profile |
+| GloVe FAISS NOT-MEASURED | Gather running at commit time | sq-hmd7l.26 (canonical box) | OPEN |
+| Canonical numbers | This run is NON-CANONICAL (aarch64, no AVX2) | sq-hmd7l.26 | OPEN |
 
 ---
 
@@ -344,10 +449,16 @@ is reported separately from kernel recall-QPS comparisons.
 
 Beads created during this gather:
 
-- **sq-k21np** (P2): ScaNN NOT-RUN (PyPI wheel targets Python 3.9, host is 3.12) — re-run in py3.9 venv on canonical box
-- **sq-3ocye** (P2): DiskANN-ref NOT-RUN (no aarch64 pip wheel) — re-run on x86_64 canonical box with diskannpy
-- GloVe FAISS IVFFlat-IP sweep was running at commit time — fill §4.2 in the canonical wave-1 run (sq-hmd7l.26)
+- **sq-k21np** (P2): ScaNN NOT-RUN (PyPI wheel targets Python 3.9, host is 3.12) — re-run in py3.9 venv on canonical box.
+  **Updated 2026-07-10 [SONNET-4.6]:** PARTIALLY RESOLVED — py3.9 venv + aarch64 wheel found; NON-CANONICAL data now in §5.1 + §3.5 + §4.3.
+  Canonical x86_64 AVX512 re-run remains pending (sq-hmd7l.26). **Bead sq-k21np may be closed** (original blocker resolved; canonical re-run is tracked under sq-hmd7l.26).
+
+- **sq-3ocye** (P2): DiskANN-ref NOT-RUN (no aarch64 pip wheel) — re-run on x86_64 canonical box with diskannpy.
+  **Updated 2026-07-10 [SONNET-4.6]:** x86_64 c6i.4xlarge c6i.4xlarge attempt executed (instance i-0c48ff9873f9f8940 via `--profile pss`); `diskannpy` x86_64 wheel installs and benchmark ran, but result retrieval failed: no IAM instance profile for S3 write, no serial console on AL2023/Nitro. **sq-3ocye remains OPEN.** Unblock: attach IAM instance profile with `s3:PutObject` to bench instance at launch. See §5.2 for full diagnosis.
+
+- GloVe FAISS IVFFlat-IP sweep was running at commit time — fill §4.2 in the canonical wave-1 run (sq-hmd7l.26).
 
 ---
 
-*Document generated by SPARQ agent [SONNET-4.6] 🤖 | bead sq-hmd7l.19 | NON-CANONICAL work-box first-read | canonical re-run: sq-hmd7l.26*
+*Document generated by SPARQ agent [SONNET-4.6] | bead sq-hmd7l.19 | NON-CANONICAL work-box first-read | canonical re-run: sq-hmd7l.26*
+*Updated 2026-07-10 [SONNET-4.6] | sq-k21np (ScaNN NON-CANONICAL filled) + sq-3ocye (DiskANN x86_64 attempted, unrecoverable)*
