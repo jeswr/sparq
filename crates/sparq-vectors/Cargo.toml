@@ -95,6 +95,20 @@ neuro-symbolic = ["structure-shacl"]
 # engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is wired in
 # `rewrite.rs` and activates when this composes with `vec-predicate` (sq-bvmd, follow-up to sq-1wc1).
 filtered-ann = []
+# [FABLE-5] sq-lhcot.1 (GenAI review gap 1; spec estate sq-rvgr2.4): the `.spqv` v3 EMBEDDING
+# PROVENANCE record — model id / model+content version / metric / normalization / dimension /
+# verbalization regime — plus the mandatory compatibility REJECTION (an incompatible query embedder
+# is a hard error, not silently-wrong neighbours). OPT-IN and OFF by default; a LEAN feature — it
+# adds NO new dependency (the block is a hand-rolled fixed-width LE codec, no serde) and pulls in
+# NEITHER the engine NOR any heavy crate. It gates the v3 WRITE path: with the feature OFF the store
+# writer emits v2 exactly as before (no behaviour change), so the default build's on-disk format is
+# unchanged. The v3 READ path is ALWAYS compiled (a v3 file written by a feature-on build still opens
+# on a feature-off build; the provenance is exposed but the demanding query APIs are feature-gated) —
+# mirroring how v1/v2 both open regardless of features. The extension point in the provenance block
+# stays a RESERVED, opaque, versioned area with NO fields defined here (extension fields: reserved
+# pending the cross-implementation profile #1746 — the KERN boundary), so this ships the core v3
+# record without privileging any encoder.
+spqv-provenance = []
 # [OPUS-4.8] sq-pi44: incremental add / remove / update of vectors against an already-finalized
 # store via an in-RAM DELTA SIDECAR (+ `compact` to fold it back into a fresh base), so a single
 # graph change no longer forces a full re-embed + file rebuild. OPT-IN and OFF by default; a LEAN
