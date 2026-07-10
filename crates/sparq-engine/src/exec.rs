@@ -10138,7 +10138,16 @@ fn order_bindings(
         // Invariant for the bounded-selection path below: 0 < k < n, so
         // `k - 1 < n = keyed.len()` and `select_nth_unstable_by(k - 1)` is in range.
         if k < n {
-            // Build (key, input_idx, row) — parallel for large sets.
+            // Build (key, input_idx) — parallel for large sets. INDEX-CARRY: the keyed
+            // vector holds only the sort key + the original `b.rows` index, NOT a cloned
+            // `Row`. `key_of` borrows each row read-only (via `cell_of`, which touches
+            // `graph`/`local` but never `b.rows`), so `b.rows` is still owned + intact
+            // after this build; only the k surviving rows are cloned when we gather the
+            // output below. This eliminates the n up-front `Row::clone`s of the previous
+            // `(key, input_idx, Row)` tuple — only k clones happen (n=17663 → k=60 on the
+            // SP2Bench q11 residual). Byte-identical output: the tuple index reproduces the
+            // same stable-sort tie order, and the gathered row is `b.rows[i]` unchanged.
+            // [SONNET-4.6] sq-7d3dj.30.23
             // Use Vec<_> to avoid the clippy::type_complexity lint on the explicit type.
             #[cfg(feature = "parallel")]
             let mut keyed: Vec<_> = if n >= PAR_THRESHOLD {
@@ -10146,13 +10155,13 @@ fn order_bindings(
                 b.rows
                     .par_iter()
                     .enumerate()
-                    .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                    .map(|(i, row)| Ok((key_of(row)?, i)))
                     .collect::<Result<Vec<_>, String>>()?
             } else {
                 b.rows
                     .iter()
                     .enumerate()
-                    .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                    .map(|(i, row)| Ok((key_of(row)?, i)))
                     .collect::<Result<Vec<_>, String>>()?
             };
             #[cfg(not(feature = "parallel"))]
@@ -10160,25 +10169,23 @@ fn order_bindings(
                 .rows
                 .iter()
                 .enumerate()
-                .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                .map(|(i, row)| Ok((key_of(row)?, i)))
                 .collect::<Result<_, String>>()?;
 
             // Strict total-order comparator: sort key first (descending as flagged),
             // then input_idx as tiebreaker (smaller index = appears earlier in the
             // stable sort, so it sorts LESS here — reproduces the stable sort exactly).
-            let cmp_total =
-                |a: &(Vec<(bool, SortCell)>, usize, Row),
-                 c: &(Vec<(bool, SortCell)>, usize, Row)| {
-                    for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
-                        let ord = cmp_sort_cells(graph, local, av, cv);
-                        let ord = if *desc { ord.reverse() } else { ord };
-                        if ord != Ordering::Equal {
-                            return ord;
-                        }
+            let cmp_total = |a: &(Vec<(bool, SortCell)>, usize), c: &(Vec<(bool, SortCell)>, usize)| {
+                for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
+                    let ord = cmp_sort_cells(graph, local, av, cv);
+                    let ord = if *desc { ord.reverse() } else { ord };
+                    if ord != Ordering::Equal {
+                        return ord;
                     }
-                    // Tiebreak: smaller input_idx wins (matches stable sort input order).
-                    a.1.cmp(&c.1)
-                };
+                }
+                // Tiebreak: smaller input_idx wins (matches stable sort input order).
+                a.1.cmp(&c.1)
+            };
 
             // Partition: after select_nth_unstable_by(k-1), keyed[..k] holds the k
             // smallest elements by cmp_total (not yet sorted within that prefix).
@@ -10189,7 +10196,10 @@ fn order_bindings(
             // Sort the selected prefix into the correct final order.
             keyed[..k].sort_by(|a, c| cmp_total(a, c));
 
-            b.rows = keyed.into_iter().take(k).map(|(_, _, r)| r).collect();
+            // Gather the k surviving rows by index — the ONLY `Row::clone`s in this path.
+            // `keyed[..k]` is now in final sorted order, so the gathered rows land in that
+            // exact order. [SONNET-4.6] sq-7d3dj.30.23
+            b.rows = keyed[..k].iter().map(|(_, i)| b.rows[*i].clone()).collect();
             b.sorted_by = None;
             return Ok(());
         }
@@ -18140,6 +18150,109 @@ mod compiled_expr_tests {
         assert_ne!(
             pre_sort_rows, b.rows,
             "pre-sort input happened to be sorted — test is vacuous"
+        );
+    }
+
+    /// [SONNET-4.6] sq-7d3dj.30.23 — INDEX-CARRY top-k byte-identity: the bounded
+    /// top-k path (`order_bindings(…, Some(k))`) now carries only the row INDEX in the
+    /// `keyed` vector (not a cloned `Row`) and gathers the k surviving rows from `b.rows`
+    /// by index. This test pins that the gathered result is BYTE-IDENTICAL to the full
+    /// stable sort (`order_bindings(…, None)`) truncated to `[..k]`, for a set with
+    /// deliberate ORDER BY tie groups (duplicate keys) and `k < n`. It also pins the
+    /// exact surviving key sequence so a wrong gather (wrong index, wrong prefix, dropped
+    /// tie-break) turns the test RED.
+    ///
+    /// MUTATION-VERIFICATION (non-vacuous): the `expected_keys` assertion pins the exact
+    /// ascending survivor sequence `[1,1,2,3,4]`. If the gather used the wrong index
+    /// (e.g. `b.rows[*i]` → `b.rows[0]`) or the prefix bound `[..k]` were off, or if the
+    /// stable-tie order were reversed, the surviving sequence changes and this assertion
+    /// fails. Reversing the pinned first element (say to `2`) also makes it fail — verified
+    /// by flipping the expected head and observing RED.
+    #[test]
+    fn index_carry_topk_is_byte_identical_to_full_sort_truncated() {
+        let g = one_row_graph();
+        let local = LocalVocab::default();
+        let n_var = oxrdf::Variable::new_unchecked("n");
+        let n_expr = Expression::Variable(n_var.clone());
+
+        // Inline-int keys with DELIBERATE tie groups: two 1s, two 4s, plus 3,2,3,4.
+        // 8 rows in scrambled input order → the full sort is non-trivial and ties exercise
+        // the index tie-breaker. The distinct SECOND column value tags each row so a wrong
+        // gather (right key, wrong row) is observable, not masked by identical rows.
+        let key = |v: i64| sparq_core::dict::inline_id_of_int(v).unwrap();
+        let tag = |v: i64| sparq_core::dict::inline_id_of_int(1000 + v).unwrap();
+        let tag_var = oxrdf::Variable::new_unchecked("tag");
+        let input_rows = vec![
+            Row::from_slice(&[key(3), tag(0)]),
+            Row::from_slice(&[key(1), tag(1)]),
+            Row::from_slice(&[key(4), tag(2)]),
+            Row::from_slice(&[key(1), tag(3)]),
+            Row::from_slice(&[key(2), tag(4)]),
+            Row::from_slice(&[key(4), tag(5)]),
+            Row::from_slice(&[key(3), tag(6)]),
+            Row::from_slice(&[key(4), tag(7)]),
+        ];
+        let n = input_rows.len();
+        let vars = vec![n_var.clone(), tag_var.clone()];
+        let order = [OrderExpression::Asc(n_expr.clone())];
+
+        // For each k in 1..n (all k < n exercise the bounded index-carry path), the
+        // top-k output must equal the full sort truncated to [..k], byte-for-byte.
+        let mut full = Bindings::unsorted(vars.clone(), input_rows.clone());
+        order_bindings(&g, &local, &mut full, &order, None).unwrap();
+        // Sanity: the full sort actually reorders (input was scrambled) — not vacuous.
+        assert_ne!(full.rows, input_rows, "full sort was a no-op — test is vacuous");
+
+        for k in 1..n {
+            let mut topk = Bindings::unsorted(vars.clone(), input_rows.clone());
+            order_bindings(&g, &local, &mut topk, &order, Some(k)).unwrap();
+            assert_eq!(
+                topk.rows,
+                full.rows[..k].to_vec(),
+                "index-carry top-k (k={}) diverged from full-sort truncated to [..k]",
+                k
+            );
+        }
+
+        // Pin the EXACT surviving ROWS for k=5 so a gather-index bug goes RED. The
+        // expected 5 smallest keys (ascending, ties kept) are [1,1,2,3,4]; the two tied
+        // `1` rows keep INPUT order (stable tie-break) — row idx 1 (tag 1) before row idx 3
+        // (tag 3) — and among the three `3`/`4` boundary the first `3` (tag 0 then tag 6)
+        // and first `4` (tag 2) are the picks. The distinct tag column pins the exact rows,
+        // not just the keys, so a right-key/wrong-row gather is caught.
+        let mut topk5 = Bindings::unsorted(vars.clone(), input_rows.clone());
+        order_bindings(&g, &local, &mut topk5, &order, Some(5)).unwrap();
+        let expected5 = vec![
+            Row::from_slice(&[key(1), tag(1)]), // first tied 1 (input idx 1)
+            Row::from_slice(&[key(1), tag(3)]), // second tied 1 (input idx 3)
+            Row::from_slice(&[key(2), tag(4)]),
+            Row::from_slice(&[key(3), tag(0)]), // first tied 3 (input idx 0)
+            Row::from_slice(&[key(3), tag(6)]), // second tied 3 (input idx 6)
+        ];
+        assert_eq!(
+            topk5.rows, expected5,
+            "top-5 must gather exactly these rows (keys [1,1,2,3,3], stable tie order)"
+        );
+
+        // DESC boundary: k=1 must gather the single MAX-key row. The three `4`s tie; the
+        // FIRST in input order (idx 2, tag 2) wins the stable tie-break. Byte-identical to
+        // the full DESC sort's head.
+        let tag_col = 1usize;
+        let desc = [OrderExpression::Desc(n_expr.clone())];
+        let mut full_desc = Bindings::unsorted(vars.clone(), input_rows.clone());
+        order_bindings(&g, &local, &mut full_desc, &desc, None).unwrap();
+        let mut top1_desc = Bindings::unsorted(vars, input_rows);
+        order_bindings(&g, &local, &mut top1_desc, &desc, Some(1)).unwrap();
+        assert_eq!(top1_desc.rows.len(), 1, "k=1 must yield exactly one row");
+        assert_eq!(
+            top1_desc.rows,
+            full_desc.rows[..1].to_vec(),
+            "DESC k=1 must gather the same head row as the full DESC sort"
+        );
+        assert_eq!(
+            top1_desc.rows[0][tag_col],
+            tag(2),
+            "DESC k=1 head must be the FIRST max-key (4) row in input order (tag 2)"
         );
     }
 
