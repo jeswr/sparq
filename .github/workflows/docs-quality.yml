@@ -428,6 +428,20 @@ jobs:
         run: shellcheck scripts/tests/test_build_papers_honesty_boundary.sh
       - name: Self-test the build-papers.mjs build-boundary honesty assertion (sq-mraf)
         run: bash scripts/tests/test_build_papers_honesty_boundary.sh
+      # [OPUS-4.8] sq-gum8.13 (epic sq-gum8, paper factory F1): the fail-closed EVIDENCE-BINDING
+      # verifier (scripts/verify-paper-evidence.py) upgrades every paper-evidence number's
+      # source-trace from ASSERTED to MACHINE-VERIFIED — a canonical record's value must still
+      # MATCH its committed source (json-pointer / rust-anchor / doc-anchor) or sit on the
+      # shrink-only allowlist, else the paper build aborts (a ratchet rise or a rename can no
+      # longer silently republish a stale headline). The verifier is also wired into the paper
+      # build boundary (site/scripts/build-papers.mjs). Its --self-test is NON-VACUOUS: a
+      # value-DRIFT fixture and a MISSING/renamed-anchor fixture each exit non-zero while the real
+      # evidence file passes; it also proves the shrink-only ratchet (allowlist-grew / stale-entry)
+      # and the unbound-canonical fail-closed case. Stdlib-only, no network — mirrors the other
+      # scripts/check-*.py --self-test lints above. HARD job (no "advisory" token) so a regression
+      # in the verifier's own logic reds the ci-summary gate before every paper build depends on it.
+      - name: Self-test the paper-evidence binding verifier (drift + missing-anchor FAIL; real evidence PASS — sq-gum8.13)
+        run: python3 scripts/verify-paper-evidence.py --self-test
       # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
       # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
       # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage

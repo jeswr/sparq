@@ -1,0 +1,20 @@
+{
+  "_comment": "ALLOWLIST-GREW fixture: two un-migrated canonical records, but the allowlist seed_count is 1, so listing both exceeds the shrink-only ceiling. MUST fail.",
+  "schemaVersion": 2,
+  "records": {
+    "demo.unmigrated_a": {
+      "value": 10,
+      "unit": "count",
+      "environment": "canonical",
+      "source": "not yet bound (a)",
+      "note": "un-migrated canonical record A."
+    },
+    "demo.unmigrated_b": {
+      "value": 20,
+      "unit": "count",
+      "environment": "canonical",
+      "source": "not yet bound (b)",
+      "note": "un-migrated canonical record B — added AFTER the seed, which the ratchet forbids."
+    }
+  }
+}

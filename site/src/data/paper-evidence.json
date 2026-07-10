@@ -1,6 +1,6 @@
 {
   "_comment": "[OPUS-4.8] sq-gum8 — paper-bound EVIDENCE for the academic paper factory. Distinct from benchmarks.generated.json (which is per-commit TIMING, all environment=indicative on the dev work-box). Every record here is a DETERMINISTIC, machine-INDEPENDENT metric (recall floor / answer-safety invariant / cost-model crossover / conformance ratchet floor) lifted from a real test or the central conformance scoreboard, so environment=canonical. The honesty gate in scripts/build-papers.mjs FAILS the build if a paper-bound headline table references an environment=indicative record. To add a number a paper may cite as a headline, it MUST appear here as environment=canonical and trace to a named test or const (the `source` field).",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "records": {
     "filtered_ann.recall_at_10_floor": {
       "value": 0.90,
@@ -94,6 +94,7 @@
       "kind": "conformance-ratchet-floor",
       "family": "W3C SHACL",
       "source": "crates/sparq-shacl/tests/w3c_core.rs::BASELINE_PASS (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_core.rs", "anchor": "BASELINE_PASS" },
       "note": "W3C SHACL core (data-shapes sht:Validate) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
     "conformance.shacl_sparql_floor": {
@@ -103,6 +104,7 @@
       "kind": "conformance-ratchet-floor",
       "family": "W3C SHACL",
       "source": "crates/sparq-shacl/tests/w3c_sparql.rs::SHACL_SPARQL_FLOOR (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_sparql.rs", "anchor": "SHACL_SPARQL_FLOOR" },
       "note": "W3C SHACL-SPARQL (sh:sparql node + property constraint sub-suites) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
     "conformance.solid_wac_floor": {
@@ -364,6 +366,7 @@
       "kind": "structural-count",
       "family": "SPARQL logic-bug testing instrument",
       "source": "crates/sparq-metamorph/tests/oracle_self_tests.rs::generated_cases_hold_on_pristine_sparq (for seed in 0..50)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-metamorph/tests/oracle_self_tests.rs", "anchor": "generated_cases_hold_on_pristine_sparq" },
       "note": "Number of seeds over which the generated_cases_hold_on_pristine_sparq self-test asserts that TLP and NoREC both hold on the pristine sparq engine (both oracles must return Pass for every generated case). A deterministic range constant in the committed test file, not a measurement. Establishes that the oracle passes on the real engine before any campaign dispatches generated cases to third-party engines. [SONNET-4.6 sq-gum8.9]"
     },
     "metamorph.grammar_exclusion_seeds": {
@@ -373,6 +376,7 @@
       "kind": "structural-count",
       "family": "SPARQL logic-bug testing instrument",
       "source": "crates/sparq-metamorph/src/generate.rs::generated_predicates_respect_the_exclusion_list (for seed in 0..200)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-metamorph/src/generate.rs", "anchor": "generated_predicates_respect_the_exclusion_list" },
       "note": "Number of seeds over which the grammar exclusion-list check asserts that no generated predicate contains a banned non-deterministic construct (RAND, NOW, UUID, STRUUID, BNODE, EXISTS). A deterministic range constant in the committed generate.rs test; ensures the seeded generator never produces non-reproducible predicates, making every campaign ledger entry's test case reproducible from its seed alone. [SONNET-4.6 sq-gum8.9]"
     },
     "zkarch.circuit_members": {

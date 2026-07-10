@@ -1,0 +1,14 @@
+{
+  "_comment": "DRIFT fixture: the json-pointer record's recorded value (1200) no longer equals the pointed scalar (1229) in bench/results.json — a stale hand-transcribed number. MUST fail (non-vacuity).",
+  "schemaVersion": 2,
+  "records": {
+    "demo.sparql_floor": {
+      "value": 1200,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "bench/results.json::conformance.sparql_floor",
+      "binding": { "kind": "json-pointer", "file": "bench/results.json", "pointer": "/conformance/sparql_floor" },
+      "note": "DRIFTED: the committed source now says 1229; this record still says 1200."
+    }
+  }
+}
