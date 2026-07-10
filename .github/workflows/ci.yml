@@ -2571,14 +2571,32 @@ jobs:
         with:
           pattern: coverage-engine-profraw-*   # every partition's profraw artifact
           path: engine-profraw
-          merge-multiple: true                 # flatten all partitions into one dir
+          # [FABLE-5] sq-piapk: NO `merge-multiple: true`. The profraw filename pattern
+          # `<prefix>-%p-%m.profraw` (LLVM_PROFILE_FILE) is NOT unique ACROSS RUNNERS —
+          # PIDs (%p) and the counter-signature hash (%m) collide between the three
+          # independently-scheduled partition runners. Under `merge-multiple` (flatten
+          # into one dir) those same-BASENAME-but-DIFFERENT-CONTENT files silently
+          # OVERWRITE each other on download, DROPPING one partition's distinct coverage
+          # counters — an undercount that fails the ratchet floor with a false regression
+          # (measured: 833 uploaded -> 782 after flatten = 51 counter files lost). Instead
+          # keep each artifact in its OWN subdir (engine-profraw/coverage-engine-profraw-<k>/)
+          # so all 833 survive; the restore step below re-namespaces them per partition.
       - name: Restore .profraw into the llvm-cov target dir
         # [FABLE-5] sq-piapk: coverage-engine-shard.sh report merges every *.profraw found
         # recursively under target/, and `cargo llvm-cov report` reads counters from
         # CARGO_LLVM_COV_TARGET_DIR/llvm-cov-target (where build-objects put the instrumented
-        # binaries + where a native run emits profraw). Place the downloaded partition profraw
+        # binaries + where a native run emits profraw). Move the downloaded partition profraw
         # THERE so report merges them against those objects. Resolve the dir via show-env
         # (CARGO_LLVM_COV_TARGET_DIR) so it tracks the tool's own layout rather than hard-coding.
+        #
+        # RE-NAMESPACE PER PARTITION (sq-piapk root fix): because cross-runner profraw
+        # basenames collide (see the download note), we must NOT `mv` them into one flat dir
+        # under their original names — that would re-introduce the very overwrite we avoided by
+        # dropping merge-multiple. Prefix each file with its source artifact-subdir name
+        # (coverage-engine-profraw-<k>) so every one of the 833 lands with a UNIQUE name and
+        # `report` merges the FULL union of all partitions' counters (coverage-identical to the
+        # un-split single-shard run). Assert the restored count equals the downloaded count so a
+        # future re-introduced collision fails LOUDLY instead of silently undercounting.
         run: |
           set -euo pipefail
           td="$(cargo llvm-cov show-env 2>/dev/null | sed -n 's/^CARGO_LLVM_COV_TARGET_DIR=\(.*\)$/\1/p')"
@@ -2588,7 +2606,23 @@ jobs:
           n=$(find engine-profraw -name '*.profraw' 2>/dev/null | wc -l)
           echo "downloaded $n .profraw file(s) across all partitions -> $pd"
           [ "$n" -ge 1 ] || { echo "::error::no partition .profraw downloaded"; exit 1; }
-          find engine-profraw -name '*.profraw' -exec mv {} "$pd/" \;
+          # Move each file to "<partition-subdir>__<original-basename>" so cross-runner
+          # basename collisions cannot overwrite. The subdir (relative to engine-profraw) is
+          # the artifact name coverage-engine-profraw-<k>, guaranteeing per-partition uniqueness.
+          moved=0
+          while IFS= read -r f; do
+            rel="${f#engine-profraw/}"            # e.g. coverage-engine-profraw-2/sparq-...profraw
+            tag="${rel%%/*}"                       # coverage-engine-profraw-2
+            base="$(basename "$f")"
+            mv "$f" "$pd/${tag}__${base}"
+            moved=$((moved + 1))
+          done < <(find engine-profraw -name '*.profraw')
+          restored=$(find "$pd" -maxdepth 1 -name '*.profraw' | wc -l)
+          echo "restored $moved profraw into $pd (unique-named); dir now holds $restored"
+          # Identity guard: every downloaded profraw must survive the move. A mismatch means a
+          # collision re-appeared (e.g. someone re-added merge-multiple) -> fail rather than
+          # emit a false-low coverage number.
+          [ "$moved" -eq "$n" ] || { echo "::error::restored $moved != downloaded $n profraw — collision/loss"; exit 1; }
       - name: Merge .profraw -> coverage-identical engine report
         run: ./scripts/coverage-engine-shard.sh report target/coverage/coverage-summary.json
       - name: Enforce the sparq-engine ratchet floor (--check)
