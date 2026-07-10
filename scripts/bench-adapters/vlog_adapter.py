@@ -7,8 +7,21 @@
 # the SAME LUBM (ABox + TBox) N-Triples that sparq `reason` closes, then reports the
 # materialized triple count (correctness oracle) + best-of-N wall time.
 #
-# TSV OUTPUT (stdout, one line):
-#   vlog\t<closure_triples|NOT-RUN-LOCALLY|ERROR>\t<materialize_best_us|reason>
+# TSV OUTPUT (stdout, one line; the 4th column records the TIMING BASIS honestly):
+#   vlog\t<closure_triples|NOT-RUN-LOCALLY|ERROR>\t<materialize_best_us|reason>\t<timed=...>
+#
+# ── TIMING BASIS (load-bearing for comparability, sq-hmd7l.32) ────────────────
+# sparq's compared figure is its SELF-REPORTED materialize time (parse excluded) and
+# Jena's is InfModel-materialize-on-a-loaded-graph — so timing VLog's whole `mat`
+# subprocess (EDB .nt load + materialization + --storemat write) would OVERSTATE
+# VLog at scale (the 4th-col basis makes that visible, never silent). VLog itself
+# reports the loaded-graph figure on stderr at `-l info`:
+#     Runtime materialization = <ms> milliseconds
+# (src/launcher/main.cpp launchFullMat; EDB load and the store step are logged
+# separately). This adapter parses that line per run and reports best-of-N of it
+# (basis `timed=vlog-self-reported-materialize`); only if the line is absent does
+# it fall back to the whole-process wall (basis `timed=whole-process-wall
+# (load+store INCLUDED)` — an upper bound, biased AGAINST VLog, never for it).
 #
 # ── VALIDATED ENCODING (sq-hmd7l.30) ──────────────────────────────────────────
 # VLog is a GENERAL Datalog engine, NOT a native OWL 2 RL reasoner. A like-for-like
@@ -41,6 +54,7 @@
 #     <profile> in {rdfs, owl}; <rules_file> = a VLog .dlog program (defaults to the
 #     validated bench/reason-encodings/vlog/<profile-or-owl-rl>.dlog).
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,9 +63,30 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# VLog prints a double via ostream default formatting — 6 significant digits, which
+# switches to scientific notation for large values (1.23457e+06) — so the number
+# pattern must accept both plain and exponent forms.
+MATERIALIZE_RE = re.compile(
+    r"Runtime materialization = ([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?) milliseconds"
+)
 
-def emit(count, us):
-    print("vlog\t{}\t{}".format(count, us))
+
+def parse_materialize_us(log_text):
+    """VLog's self-reported materialization runtime in µs, or None if absent.
+
+    Takes the LAST occurrence (one per `mat` run; last wins if a future VLog
+    logs intermediate figures)."""
+    matches = MATERIALIZE_RE.findall(log_text or "")
+    if not matches:
+        return None
+    return float(matches[-1]) * 1000.0
+
+
+def emit(count, us, basis=None):
+    if basis:
+        print("vlog\t{}\t{}\t{}".format(count, us, basis))
+    else:
+        print("vlog\t{}\t{}".format(count, us))
 
 
 def default_rules(profile):
@@ -107,7 +142,8 @@ def main():
                 if s and not s.startswith("#"):
                     dst.write(line)
 
-        best_us = None
+        best_wall_us = None
+        best_self_us = None
         count = "ERROR"
         for _ in range(iters):
             storedir = os.path.join(workdir, "inf")
@@ -115,11 +151,13 @@ def main():
                 shutil.rmtree(storedir)
             t0 = time.perf_counter()
             try:
-                subprocess.run(
+                # `-l info` so VLog logs its own per-phase runtimes (stderr); the
+                # materialization line is the compared loaded-graph figure.
+                proc = subprocess.run(
                     [
                         vlog_bin, "mat", "--edb", edb, "--rules", clean_rules,
                         "--storemat_path", storedir, "--storemat_format", "csv",
-                        "--decompressmat", "1", "-l", "error",
+                        "--decompressmat", "1", "-l", "info",
                     ],
                     capture_output=True, text=True,
                     timeout=int(os.environ.get("TIMEOUT_S", "900")),
@@ -128,7 +166,10 @@ def main():
                 emit("ERROR", "timeout")
                 return
             dt_us = (time.perf_counter() - t0) * 1e6
-            best_us = dt_us if best_us is None else min(best_us, dt_us)
+            best_wall_us = dt_us if best_wall_us is None else min(best_wall_us, dt_us)
+            self_us = parse_materialize_us((proc.stderr or "") + (proc.stdout or ""))
+            if self_us is not None:
+                best_self_us = self_us if best_self_us is None else min(best_self_us, self_us)
             # The closure size is the cardinality of the accumulated T relation, i.e.
             # the line count of the stored T file. (VLog stores one file per IDB pred;
             # the encodings put the whole materialized graph in T.)
@@ -136,7 +177,16 @@ def main():
             if os.path.exists(tfile):
                 with open(tfile, encoding="utf-8", errors="replace") as fh:
                     count = str(sum(1 for _ in fh))
-        emit(count, "{:.1f}".format(best_us) if best_us is not None else "na")
+        if best_self_us is not None:
+            emit(count, "{:.1f}".format(best_self_us), "timed=vlog-self-reported-materialize")
+        elif best_wall_us is not None:
+            sys.stderr.write(
+                "vlog_adapter: WARNING — 'Runtime materialization' line absent; "
+                "falling back to whole-process wall (load+store INCLUDED)\n"
+            )
+            emit(count, "{:.1f}".format(best_wall_us), "timed=whole-process-wall(load+store-INCLUDED)")
+        else:
+            emit(count, "na")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

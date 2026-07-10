@@ -94,6 +94,21 @@ fn main() {
         "snikmeta_direct_eq_upstream\t{direct_eq_upstream}\tcount"
     );
 
+    // (d) [FABLE-5] sq-hmd7l.33 — TIMED decode of the SAME vendored archive, min-of-RUNS:
+    //     the sparq cell of the same-box HDT decode comparison (scripts/bench/
+    //     hdt-same-box.sh → `snikmeta_decode_s` → the ingest's normalizeHdt). Timing row
+    //     (unit `s`), NEVER asserted by bench/hdt/run.sh (which gates only `count` rows);
+    //     work-box values are contended/advisory — canonical values come from the
+    //     dedicated quiet-box gather.
+    let mut best_decode_s = f64::MAX;
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let timed = sparq_hdt::load(&hdt_path).expect("timed snikmeta decode");
+        best_decode_s = best_decode_s.min(t.elapsed().as_secs_f64());
+        std::hint::black_box(&timed);
+    }
+    let _ = writeln!(out, "snikmeta_decode_s\t{best_decode_s:.6}\ts");
+
     // ---- 2. ADVISORY timing: synthetic archive load + the ntgz RATIO ---------------------
     // A unitless RATIO (hdt_vs_ntgz_load_s) survives box contention (CATALOG); the
     // absolute hdt_load_s is trend-only. Both are NEVER asserted in run.sh.
