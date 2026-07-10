@@ -171,6 +171,23 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   and malformed XML each produce a named `ImportError` variant. Parsing only — no new inference
   beyond the existing `rif-core` forward chainer. Unblocks sq-pbz04.5.5 (W3C RIF WG test-suite arm).
 
+## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
+
+The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 30-XSD-datatype map via `Recognized::standard()` — the `DTYPE_TABLE` single source of truth in `dtype.rs` — plus the always-recognized `rdf:langString` (or bring a custom map via `materialize_d(d, …, …)`):
+
+**Supported datatypes** (complete signed/unsigned integer family, exact decimals/temporal):
+- String family: `xsd:string`, `xsd:normalizedString`, `xsd:token`; pattern-restricted derived types `xsd:language`, `xsd:Name`, `xsd:NCName`, `xsd:NMTOKEN`.
+- Boolean: `xsd:boolean`.
+- Integer family (13 XSD types — `xsd:integer` + 12 derived): `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte` (signed); `xsd:unsignedLong`/`xsd:unsignedInt`/`xsd:unsignedShort`/`xsd:unsignedByte` (unsigned); `xsd:nonNegativeInteger`/`xsd:positiveInteger`/`xsd:nonPositiveInteger`/`xsd:negativeInteger` (restricted).
+- Numeric: `xsd:decimal` (exact, unbounded magnitude via canonical-decimal STRING comparison, never f64), `xsd:double`, `xsd:float` (IEEE 754, distinct value spaces).
+- Temporal: `xsd:dateTime`, `xsd:dateTimeStamp`, `xsd:date`.
+- URI: `xsd:anyURI`.
+- Binary: `xsd:hexBinary`, `xsd:base64Binary` (shared octet-sequence value space).
+
+**Value-space equality (the load-bearing invariant):** `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` denote THE SAME value and must compare equal in D-entailment. Integer/decimal are compared as a canonical-decimal STRING (sign + minimal integer/fraction digits), NEVER via f64 (which aliases integers past 2^53 and loses decimal precision — silent bugs in semantic equality). `xsd:float`/`xsd:double` are IEEE value spaces; `xsd:date` and `xsd:dateTime` are disjoint temporal families (even at the same instant).
+
+**Fail-closed posture:** unmapped datatypes are not typed; facet-invalid literals (`"200"^^xsd:byte`, `" a"^^xsd:token`) are rejected before value mapping; `xsd:time`, duration types, and XML datatypes (`rdf:XMLLiteral`) are deferred — tracked in the design record (`research/d-entailment-datatype-map.md` §3.2), never silently mapped. The `Recognized::default()` set carries ONLY the always-recognized `xsd:string` / `rdf:langString` pair — safe to materialize over arbitrary data.
+
 ## OWL 2 EL classification (`sparq-reason-el`, separate opt-in crate)
 
 OWL 2 RL is **sound but silently incomplete for class classification**: it has no rule that reasons *through* an existential successor, so `--reason owl` over an EL ontology (GO/ChEBI/SNOMED-style) returns a `rdfs:subClassOf` hierarchy that **silently omits** subsumptions like `A ⊑ D` from `A ⊑ ∃r.B`, `B ⊑ C`, `∃r.C ⊑ D` (Krötzsch, ISWC 2012). **`sparq-reason-el`** closes that gap — a consequence-based classifier that normalizes the TBox (Baader–Brandt–Lutz forms) and saturates `S(C)`/`R(r)` under completion rules **CR1–CR5** to compute the **complete** subsumption lattice, then emits it into the **same** `(Dict, Vec<[Id;3]>)` seam as the RL `scm-*` rules (queryable by plain BGP eval).
