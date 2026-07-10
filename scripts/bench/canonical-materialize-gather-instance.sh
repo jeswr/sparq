@@ -30,6 +30,16 @@
 #   HDT=1               also run the HDT decode gather        OUT=<repo>/bench/gather-out
 set -uo pipefail   # NOT -e: one failed engine/build must never kill the gather
 
+# [FABLE-5] sq-hmd7l.32 — MIRROR ALL OUTPUT TO THE SERIAL CONSOLE. On a self-terminating
+# gather box the ONLY zero-dependency telemetry channel is `aws ec2 get-console-output`
+# (SSH can break under a saturated build box; cloud-init's own console buffer stops when
+# scripts_user returns). Tee every step + child-process line to /dev/console so progress
+# and the final envelopes are recoverable even if SSH never works. Best-effort: if
+# /dev/console is not writable (e.g. a local test run) fall through untee'd.
+if [ -w /dev/console ] 2>/dev/null; then
+  exec > >(tee -a /dev/console) 2>&1
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$ROOT"

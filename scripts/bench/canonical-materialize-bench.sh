@@ -115,10 +115,16 @@ cd /root
 git clone -q "$REPO" sparq
 cd sparq
 git fetch -q origin "$BRANCH" && git checkout -q "$BRANCH"
-echo "[user-data] checked out \$(git rev-parse --short HEAD)"
+echo "[user-data] checked out \$(git rev-parse --short HEAD)" | tee /dev/console
 
-LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S=$TIMEOUT_S JAVA_XMX=$JAVA_XMX HDT=$HDT \
-  bash scripts/bench/canonical-materialize-gather-instance.sh
+# BACKGROUND the multi-hour gather (nohup + setsid) so cloud-final RETURNS promptly and
+# scripts_user succeeds — running the gather in the foreground of scripts_user wedged
+# cloud-init and gave zero telemetry (sq-hmd7l.32 wave-1/2). The gather streams to
+# /dev/console itself (recoverable via get-console-output even if SSH breaks); the
+# watchdog above is the orphan-proof backstop independent of this shell.
+setsid nohup env LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S=$TIMEOUT_S JAVA_XMX=$JAVA_XMX HDT=$HDT \
+  bash scripts/bench/canonical-materialize-gather-instance.sh >/var/log/gather.log 2>&1 < /dev/null &
+echo "[user-data] gather backgrounded (pid \$!); cloud-final returning" | tee /dev/console
 UD
 )
 
@@ -156,16 +162,38 @@ while :; do
   ELAPSED=$(( $(date +%s) - POLL_START ))
   [ "$ELAPSED" -ge "$POLL_DEADLINE_S" ] && { log "poll deadline reached without sentinel — giving up (cleanup terminates)"; break; }
   sleep "$POLL_INTERVAL_S"; i=$(( i + 1 ))
-  # incremental pull of any envelopes already written
+  # incremental pull of any envelopes already written (SSH — best effort; the console
+  # dump is the AUTHORITATIVE recovery channel since SSH broke on a saturated box).
   ssh $SSHO "ubuntu@$IP" "sudo tar -C /root/sparq/bench -cf - gather-out 2>/dev/null" 2>/dev/null | tar -C "$RESULTS_LOCAL" -xf - 2>/dev/null || true
   if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/GATHER_DONE" 2>/dev/null; then
     log "[$i / ${ELAPSED}s] sentinel present — final pull"; DONE=1; break
   fi
   STATE=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)
+  # PRIMARY telemetry: the serial console (the gather tees every STEP there). Snapshot it
+  # every tick so progress is visible even with SSH down, and the final envelopes (dumped
+  # between ===ENVELOPE-BEGIN/END=== markers) are recoverable from it.
+  aws ec2 get-console-output --region "$REGION" --instance-id "$INSTANCE_ID" --output text > "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
+  CON_STEP=$(grep -aoE '\[STEP [0-9TZ:-]+\] .*' "$RESULTS_LOCAL/console.txt" 2>/dev/null | tail -1)
   CUR_STEP=$(ssh $SSHO "ubuntu@$IP" "sudo tail -n1 /root/GATHER_STEP 2>/dev/null" 2>/dev/null || true)
-  log "[$i / ${ELAPSED}s] state=$STATE; step: ${CUR_STEP:-<not started>}"
+  log "[$i / ${ELAPSED}s] state=$STATE; step(ssh): ${CUR_STEP:-<none>}; step(console): ${CON_STEP:-<none>}"
+  if grep -qa 'STEP.*gather complete' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
+    log "[$i / ${ELAPSED}s] 'gather complete' on console — recovering envelopes from console"; DONE=1; break
+  fi
   [ "$STATE" = "terminated" ] && { log "instance terminated before sentinel — results may be partial"; break; }
 done
+
+# Recover the envelopes from the serial console (authoritative when SSH failed): each
+# envelope was cat'd between ===ENVELOPE-BEGIN <name>=== / ===ENVELOPE-END=== markers.
+aws ec2 get-console-output --region "$REGION" --instance-id "$INSTANCE_ID" --output text > "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
+if grep -qa 'ENVELOPE-BEGIN' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
+  log "extracting envelopes from serial console → $RESULTS_LOCAL/gather-out/"
+  mkdir -p "$RESULTS_LOCAL/gather-out"
+  awk '
+    /===ENVELOPE-BEGIN /   { name=$2; f="'"$RESULTS_LOCAL"'/gather-out/" name; capturing=1; next }
+    /===ENVELOPE-END===/   { capturing=0; close(f); next }
+    capturing               { print > f }
+  ' "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
+fi
 
 log "final result pull"
 ssh $SSHO "ubuntu@$IP" "sudo tar -C /root/sparq/bench -cf - gather-out 2>/dev/null" 2>/dev/null | tar -C "$RESULTS_LOCAL" -xf - 2>/dev/null || true
