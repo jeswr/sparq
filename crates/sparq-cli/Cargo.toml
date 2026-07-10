@@ -91,6 +91,13 @@ id-filter-fastpath = ["sparq-engine/id-filter-fastpath"]
 # machinery and is behaviour-identical). Enable to bench the prune, e.g.
 # `cargo build --release -p sparq-cli --features cs-anchor-incidence`.
 cs-anchor-incidence = ["sparq-engine/cs-anchor-incidence"]
+# [FABLE-5] (sq-7d3dj.30.21) Forward sparq-engine's opt-in `topk-lazy-strkey` — the lazy
+# string-literal collation key for the top-k ORDER BY selection path (an ORDER-BY on a plain
+# `xsd:string` column + LIMIT builds a zero-allocation id-carrying sort key instead of
+# reconstructing + re-allocating the literal value per input row). OFF by default (the default
+# CLI build carries none of it and is behaviour-identical). Enable to bench the fast path, e.g.
+# `cargo build --release -p sparq-cli --features topk-lazy-strkey`.
+topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the

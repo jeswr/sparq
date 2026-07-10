@@ -9673,6 +9673,21 @@ enum SortCell {
     /// `cmp_sort_cells` can then directly compare two `&str` slices — no allocation.
     /// [SONNET-4.6] sq-7d3dj.30.2
     Iri(Box<str>),
+    /// [FABLE-5] sq-7d3dj.30.21 — a PLAIN `xsd:string` LITERAL GRAPH term carried as its
+    /// DICTIONARY ID only, deferring the value materialisation the eager [`SortCell::Val`] arm
+    /// does at construction time (a `reconstruct_ref` `Literal` alloc + a `value_str`
+    /// collation-key alloc per input row). Under the `topk-lazy-strkey` feature the top-k
+    /// ORDER BY key build emits this instead of `Val{..}` for a plain-string column, so an
+    /// ORDER-BY on such a column over N input rows does ZERO key allocation up front (the
+    /// SP2Bench q11 residual: only k of the 17663 keyed rows survive). `cmp_sort_cells`
+    /// compares two `StrId` cells by their ZERO-COPY `Dict::term_parts` `value` bytes, which is
+    /// BYTE-IDENTICAL to comparing the two eager `value_str` keys (a plain string orders by its
+    /// `value()` lexical bytes — the sq-7d3dj.30.12 differential test proves it). Cross-kind /
+    /// cross-class comparisons use the fixed `String`-kind / `Literal`-class ranks (a plain
+    /// string literal is always Literal-class, String-kind), so those arms need no
+    /// materialisation either.
+    #[cfg(feature = "topk-lazy-strkey")]
+    StrId(Id),
     /// Any other key value (a plain / typed / language-tagged literal, a blank node, a
     /// quoted triple term, a computed value, or an unbound / error). Extends the `Iri`
     /// fast-path idea to EVERY `SortCell` kind (bead sq-7d3dj.30.12): the SPARQL
@@ -9811,6 +9826,48 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
             Value::Term(Term::NamedNode(n)) => n.as_str().cmp(a.as_ref()),
             _ => Ordering::Greater,
         },
+        // [FABLE-5] sq-7d3dj.30.21 — LAZY plain-string-literal cells. `StrId(id)` denotes a
+        // plain `xsd:string` literal: TermClass::Literal (rank 3), LiteralKind::String (rank
+        // 4), value = the literal's `value` slice (via `Dict::term_parts`). Every arm below
+        // reproduces the order the eager `Val{class:3, kind:4, key:Some(value)}` cell would
+        // give BYTE-IDENTICALLY, with no per-row `value_str` allocation. The homogeneous
+        // `(StrId, StrId)` arm is the hot q11 comparator; the cross-type arms cover a mixed key
+        // column (an ORDER BY expression that yields plain strings on some rows and other terms
+        // on others).
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(a), SortCell::StrId(b)) => {
+            // Same class (Literal) + same kind (String) → lexical value-byte order, exactly
+            // the eager `(Some(la), Some(lb)) => la.cmp(lb)` `Val` arm.
+            str_id_value(graph, *a).cmp(str_id_value(graph, *b))
+        }
+        // String literal (Literal-class rank 3) vs an IRI (rank 2): the literal sorts AFTER the
+        // IRI — regardless of value.
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(_), SortCell::Iri(_)) => Ordering::Greater,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Iri(_), SortCell::StrId(_)) => Ordering::Less,
+        // String literal (kind String rank 4) vs a numeric (kind Numeric rank 0) or temporal
+        // (kind DateTime rank 2 / Date rank 3) — all Literal-class, and String's kind rank is
+        // strictly greater than every one of those, so the string sorts AFTER, by kind rank.
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(_), SortCell::Num { .. }) => Ordering::Greater,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Num { .. }, SortCell::StrId(_)) => Ordering::Less,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(_), SortCell::Temp { .. }) => Ordering::Greater,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Temp { .. }, SortCell::StrId(_)) => Ordering::Less,
+        // String literal vs a generic Val — mirror the eager `Val` dispatch by the OTHER cell's
+        // precomputed class/kind ranks against the fixed (Literal=3, String=4) ranks of a plain
+        // string, then compare value bytes for the same-class-same-kind (String) case.
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(a), SortCell::Val { class: cb, kind: kb, key: kb_key, v: cv }) => {
+            cmp_strid_val(graph, *a, *cb, *kb, kb_key.as_deref(), cv)
+        }
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Val { class: ca, kind: ka, key: ka_key, v: av }, SortCell::StrId(b)) => {
+            cmp_strid_val(graph, *b, *ca, *ka, ka_key.as_deref(), av).reverse()
+        }
         // Two generic key values: compare the PRECOMPUTED class rank, then (within the
         // literal class) the PRECOMPUTED kind rank — both integer compares, no per-comparison
         // `lit_kind` / `is_numeric_dt` re-derivation. Only when the ranks tie (same class,
@@ -9929,6 +9986,52 @@ fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
     Value::Term(term_of(graph, local, id).expect("sort key id resolves"))
 }
 
+/// [FABLE-5] sq-7d3dj.30.21 — the ZERO-COPY value `&str` of a plain-string-literal dictionary
+/// id, borrowed straight from the record store (no allocation). Only called on ids `cell_of`
+/// already proved are plain `xsd:string` literals (`Dict::plain_string_value` returned `Some`),
+/// so the non-plain-string arm is unreachable; it returns the empty slice as a safe
+/// placeholder rather than panic (mirroring `cmp_sort_cells_lex`).
+#[cfg(feature = "topk-lazy-strkey")]
+#[inline]
+fn str_id_value(graph: &Graph, id: Id) -> &str {
+    graph.dict.plain_string_value(id).unwrap_or("")
+}
+
+/// [FABLE-5] sq-7d3dj.30.21 — order a lazy plain-string-literal cell (`StrId(a)`: fixed
+/// `TermClass::Literal` rank 3, `LiteralKind::String` rank 4, value = the literal's `value`
+/// slice) against an EAGER `Val` cell carrying its own precomputed `(class, kind, key, v)`.
+/// This is byte-identical to the `(Val, Val)` arm of [`cmp_sort_cells`] with the string's fixed
+/// ranks: compare class ranks first; within the Literal class compare kind ranks; only when
+/// BOTH are Literal-class String-kind (the string's kind) do we compare value bytes — the
+/// eager String-kind `Val` always carries `key = Some(value_str)` (see `sort_cell_val`), which
+/// for a plain string IS the `value()` bytes, so a direct slice compare against
+/// `str_id_value(a)` reproduces the eager `(Some, Some) => la.cmp(lb)` order exactly.
+#[cfg(feature = "topk-lazy-strkey")]
+#[inline]
+fn cmp_strid_val(graph: &Graph, a: Id, vclass: u8, vkind: u8, vkey: Option<&str>, v: &Value) -> Ordering {
+    let str_class = TermClass::Literal as u8;
+    let str_kind = LiteralKind::String as u8;
+    match str_class.cmp(&vclass) {
+        Ordering::Equal => {
+            // Both Literal-class. Rank by kind first (String vs the Val's kind).
+            if str_kind != vkind {
+                return str_kind.cmp(&vkind);
+            }
+            // Both Literal-class String-kind: value-byte order. A String-kind `Val` always
+            // carries a precomputed lexical key; fall back to `value_str` only if (unexpectedly)
+            // absent, so the comparison never silently mis-orders.
+            match vkey {
+                Some(lb) => str_id_value(graph, a).cmp(lb),
+                None => match value_str(v) {
+                    Some(lb) => str_id_value(graph, a).cmp(lb.as_str()),
+                    None => Ordering::Equal,
+                },
+            }
+        }
+        ord => ord,
+    }
+}
+
 /// Sort or bounded-select the bindings according to `exprs`.
 ///
 /// When `row_budget` is `Some(k)` AND `k < b.rows.len()`, uses bounded selection
@@ -9977,6 +10080,19 @@ fn order_bindings(
                 }
                 if let Some(t) = graph.temporal_value(id) {
                     return Ok(SortCell::Temp { t, id });
+                }
+                // [FABLE-5] sq-7d3dj.30.21 — LAZY STRING-LITERAL key: a plain `xsd:string`
+                // store-literal becomes a zero-allocation `SortCell::StrId(id)` (compared via
+                // the literal's ZERO-COPY `Dict::term_parts` `value` bytes) instead of eagerly
+                // reconstructing a `Literal` (`term_of`) AND allocating a `value_str` collation
+                // key (`sort_cell_val`) for every input row. `plain_string_value` is a single
+                // record probe that returns `Some` for EXACTLY the `LiteralKind::String` set
+                // (datatype `xsd:string`, no lang tag), so the SPARQL value-order is preserved.
+                // The eager `Val{..}` key remains the feature-OFF path (byte-identical order).
+                // This targets the SP2Bench q11 residual: N=17663 keyed, k=60 survive.
+                #[cfg(feature = "topk-lazy-strkey")]
+                if graph.dict.plain_string_value(id).is_some() {
+                    return Ok(SortCell::StrId(id));
                 }
                 // Neither numeric nor temporal: materialise the term once. For IRI terms,
                 // store the IRI string in SortCell::Iri so comparisons are direct &str
@@ -10326,6 +10442,151 @@ mod sort_collation_key_differential {
                 got,
                 want
             );
+        }
+    }
+}
+
+/// [FABLE-5] sq-7d3dj.30.21 — DIFFERENTIAL test for the LAZY plain-string-literal sort cell
+/// (`topk-lazy-strkey`). It pins the load-bearing invariant of the feature: a `SortCell::StrId`
+/// (an interned plain `xsd:string` literal carried as a dict id, compared via the ZERO-COPY
+/// `plain_string_value` bytes) orders BYTE-IDENTICALLY to the eager `SortCell::Val` cell the
+/// feature-OFF path builds for the SAME literal — for EVERY pair, both string-vs-string (the
+/// hot q11 case, incl. the `"10" < "2"` / empty-string ties) and string-vs-every-other-kind
+/// (the mixed-column cross-type arms). A wrong class/kind rank, a mis-read value slice, or a
+/// mis-ordered fall-through goes red here. If it agreed with itself but not with the eager
+/// path, the top-k output under the feature would silently differ.
+#[cfg(all(test, feature = "topk-lazy-strkey"))]
+mod lazy_strkey_differential {
+    use super::*;
+    use oxrdf::{vocab::xsd, BlankNode, Literal, NamedNode};
+
+    fn typed(lex: &str, dt: oxrdf::NamedNodeRef<'_>) -> Term {
+        Term::Literal(Literal::new_typed_literal(lex, dt))
+    }
+
+    /// The plain-`xsd:string` literals the lazy path handles — including the adversarial
+    /// lexical-order cases (`"10" < "2"`), the empty string, and duplicates (ties).
+    fn strings() -> Vec<Term> {
+        ["apple", "banana", "zebra", "", "10", "2", "apple", "Apple", "aardvark", "http://x/y"]
+            .iter()
+            .map(|s| Term::Literal(Literal::new_simple_literal(*s)))
+            .collect()
+    }
+
+    /// Non-string terms spanning every OTHER class + literal kind, to exercise the cross-type
+    /// arms (`StrId` vs `Iri` / `Num` / `Temp` / `Val`).
+    fn others() -> Vec<Term> {
+        vec![
+            Term::BlankNode(BlankNode::new("b0").unwrap()),
+            Term::NamedNode(NamedNode::new("http://ex/a").unwrap()),
+            Term::NamedNode(NamedNode::new("http://x/y").unwrap()), // same lexical as a string
+            typed("42", xsd::INTEGER),
+            typed("3.14", xsd::DOUBLE),
+            typed("true", xsd::BOOLEAN),
+            typed("2020-01-01T00:00:00Z", xsd::DATE_TIME),
+            typed("2020-06-15", xsd::DATE),
+            Term::Literal(Literal::new_language_tagged_literal("apple", "en").unwrap()),
+            typed("PT1H", xsd::DURATION),
+            Term::Literal(Literal::new_typed_literal(
+                "x",
+                NamedNode::new("http://ex/customdt").unwrap(),
+            )),
+        ]
+    }
+
+    /// Build a graph interning every corpus term (as the object of a triple) so each has a real
+    /// dictionary id; return the graph plus the `(term, id)` list.
+    fn graph_with(terms: &[Term]) -> (Graph, Vec<(Term, Id)>) {
+        let mut ttl = String::from("@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n");
+        for (i, t) in terms.iter().enumerate() {
+            // Serialise each object term inline; plain strings, langs, typed literals, IRIs,
+            // blanks all have a canonical Turtle form via oxrdf's Display.
+            let obj = match t {
+                Term::BlankNode(_) => format!("[ <http://ex/tag> {} ]", i), // fresh blank
+                other => other.to_string(),
+            };
+            ttl.push_str(&format!("<http://ex/s{}> <http://ex/v> {} .\n", i, obj));
+        }
+        let g = Graph::load_str(&ttl, "turtle").expect("corpus graph");
+        // Resolve each NON-blank term to its id via id_of; blanks get their own fresh id per
+        // row so we look them up positionally by re-querying is skipped — blanks are only used
+        // to exercise the class-rank arm, and any blank id works for that.
+        let mut ided = Vec::new();
+        for t in terms {
+            if let Term::BlankNode(_) = t {
+                continue; // handled separately below
+            }
+            let id = g.id_of(t).unwrap_or_else(|| panic!("term interned: {t}"));
+            ided.push((t.clone(), id));
+        }
+        (g, ided)
+    }
+
+    /// The eager cell the feature-OFF path builds for a term.
+    fn eager(t: &Term) -> SortCell {
+        sort_cell_val(Value::Term(t.clone()))
+    }
+
+    #[test]
+    fn strid_orders_identically_to_eager_val_on_every_pair() {
+        let all: Vec<Term> = strings().into_iter().chain(others()).collect();
+        let (g, ided) = graph_with(&all);
+        let l = LocalVocab::default();
+
+        // For each interned term decide its lazy cell: a plain string → StrId(id); anything
+        // else → the same eager Val cell the feature-off path uses (only the string arm is
+        // lazy). Then assert lazy-vs-lazy == eager-vs-eager for EVERY ordered pair.
+        let lazy_cell = |t: &Term, id: Id| -> SortCell {
+            if g.dict.plain_string_value(id).is_some() {
+                SortCell::StrId(id)
+            } else {
+                eager(t)
+            }
+        };
+
+        for (ta, ida) in &ided {
+            // Reflexivity of the lazy cell.
+            let la = lazy_cell(ta, *ida);
+            assert_eq!(
+                cmp_sort_cells(&g, &l, &la, &la),
+                Ordering::Equal,
+                "lazy reflexivity failed for {ta}"
+            );
+            for (tc, idc) in &ided {
+                let want = cmp_sort_cells(&g, &l, &eager(ta), &eager(tc));
+                let lc = lazy_cell(tc, *idc);
+                let got = cmp_sort_cells(&g, &l, &la, &lc);
+                assert_eq!(
+                    got, want,
+                    "lazy StrId order diverged from eager Val for ({ta}, {tc}): got {got:?} want {want:?}"
+                );
+                // Antisymmetry across the lazy path.
+                let got_rev = cmp_sort_cells(&g, &l, &lc, &la);
+                assert_eq!(got, got_rev.reverse(), "lazy antisymmetry ({ta}, {tc})");
+            }
+        }
+    }
+
+    #[test]
+    fn plain_string_value_matches_exactly_the_string_kind_set() {
+        // The lazy eligibility predicate must be `Some` for EXACTLY the plain xsd:string
+        // literals and `None` for everything else (lang-tagged, typed non-string, IRI, blank,
+        // numeric) — otherwise a non-string would take the string-ordered lazy arm.
+        let all: Vec<Term> = strings().into_iter().chain(others()).collect();
+        let (g, ided) = graph_with(&all);
+        for (t, id) in &ided {
+            let is_plain_string = matches!(t, Term::Literal(l)
+                if l.language().is_none() && l.datatype() == xsd::STRING);
+            assert_eq!(
+                g.dict.plain_string_value(*id).is_some(),
+                is_plain_string,
+                "plain_string_value eligibility mismatch for {t}"
+            );
+            if is_plain_string {
+                if let Term::Literal(l) = t {
+                    assert_eq!(g.dict.plain_string_value(*id), Some(l.value()), "value slice for {t}");
+                }
+            }
         }
     }
 }
