@@ -392,9 +392,15 @@ step() { echo "[STEP \$(date -u +%Y-%m-%dT%H:%M:%SZ)] \$*" | tee -a /root/GATHER
 export DEBIAN_FRONTEND=noninteractive
 step "apt update+install"
 apt-get update -qq
-# libboost-all-dev: corpus generators; jre: Fuseki-backed axes; raptor2-utils: the
-# parse axis rapper column (absent tool => absent column, never a fake number).
-apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 python3-venv python3-pip unzip docker.io openjdk-21-jre-headless libboost-all-dev bc raptor2-utils || true
+# libboost-all-dev: corpus generators; jre: Fuseki-backed axes; raptor2-utils +
+# serdi: the parse axis rapper/serd columns (absent tool => absent column, never a
+# fake number — but the canonical box provisions all three registered columns).
+apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 python3-venv python3-pip unzip docker.io openjdk-21-jre-headless libboost-all-dev bc raptor2-utils serdi || true
+# Jena riot: the parse axis third competitor column (gap-parse-2026-07 requires it
+# on the canonical box; apt has no package — pinned apache-jena dist, best-effort).
+step "jena riot install"
+curl -fsSL "https://archive.apache.org/dist/jena/binaries/apache-jena-${JENA_VERSION:-5.4.0}.tar.gz" | tar -xz -C /opt \
+  && ln -sf "/opt/apache-jena-${JENA_VERSION:-5.4.0}/bin/riot" /usr/local/bin/riot || step "WARN: riot install failed — parse riot column will be honestly absent"
 step "start docker"
 systemctl enable --now docker || systemctl start docker || true
 for _ in \$(seq 1 60); do docker info >/dev/null 2>&1 && { step "docker up"; break; }; sleep 2; done
