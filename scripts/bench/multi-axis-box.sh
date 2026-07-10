@@ -149,7 +149,7 @@ print_plan() {
     if [ -e "$root/$harness" ]; then present="present"; else present="ABSENT on this checkout -> honest skip"; fi
     bead="$(axis_bead "$axis")"
     if [ "$axis" = parse ]; then
-      echo "    $n_axes. $axis    bench/parse harness (gen ${PARSE_GEN_N} synthetic triples -> bench-nt/-ttl/-zip)"
+      echo "    $n_axes. $axis    bench/parse harness (gen ${PARSE_GEN_N} synthetic triples -> bench-nt/-ttl/-zip/-ext)"
       echo "         [$present; envelope wrapper pending $bead — raw rows to console until then]"
     else
       echo "    $n_axes. $axis    $harness  (TIMEOUT_S=$TIMEOUT_S CANONICAL=1 OUT_DIR=/root/axis-results/$axis)"
@@ -298,6 +298,10 @@ run_instance() {
         ./target/release/parse-baseline bench-nt  data/synthetic.nt
         ./target/release/parse-baseline bench-ttl data/synthetic.ttl
         ./target/release/parse-baseline bench-zip data/synthetic.nt
+        # External competitor columns (sq-hmd7l.6): serdi / rapper / riot
+        # subprocess rows over the SAME corpus files; absent tool => absent column.
+        ./target/release/parse-baseline bench-ext data/synthetic.nt
+        ./target/release/parse-baseline bench-ext data/synthetic.ttl
       ' "$PARSE_GEN_N" > "$out_dir/parse-rows.txt" 2>&1 || rc=$?
       t1=$(date +%s); wall=$((t1 - t0))
       con "status: $([ "$rc" -eq 0 ] && echo ok || echo failed) rc=${rc} wall_s=${wall}"
