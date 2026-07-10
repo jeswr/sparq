@@ -181,6 +181,31 @@ pub mod distinct_pushdown_testing {
     }
 }
 
+/// Test-only surface for the OPT-IN characteristic-set anchor-incidence prune (bead
+/// `sq-jnb1e`, the `cs-anchor-incidence` feature): toggle the prune and read whether it fired
+/// plus how many candidate predicates it eliminated, so the differential acceptance test can
+/// compare the incidence-pruned block scan against the exact scan within one binary. NOT part
+/// of the stable query API. [FABLE-5]
+#[cfg(feature = "cs-anchor-incidence")]
+#[doc(hidden)]
+pub mod anchor_incidence_testing {
+    /// Enables/disables the incidence prune on the current thread, returning the previous
+    /// value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::anchor_incidence::set_enabled(v)
+    }
+
+    /// Clears the per-query incidence statistics.
+    pub fn reset_stats() {
+        crate::exec::anchor_incidence::reset_stats()
+    }
+
+    /// `(incidence_built, predicates_pruned)` since the last [`reset_stats`].
+    pub fn stats() -> (bool, usize) {
+        crate::exec::anchor_incidence::stats()
+    }
+}
+
 /// Test/measurement hooks for the correlated (theta) anti-join — the
 /// `OPTIONAL … FILTER(!bound(?nb))` negation idiom with a correlated inner FILTER
 /// (bead sq-7d3dj.30.9, SP2Bench q06). A semantics-preserving perf optimisation that
