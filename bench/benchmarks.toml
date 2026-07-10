@@ -1572,20 +1572,20 @@ records_to  = "TBD — bench/competitor-results/<engine>-wasm-<UTC>.json (git-ig
 featured    = false  # registry stub; implementing bead sq-hmd7l.17
 status      = "planning"
 
-# [SONNET-4.6] sq-hmd7l.18 — Python bindings overhead comparison
+# [SONNET-4.6] sq-hmd7l.18 — Python bindings overhead comparison; [FABLE-5] implemented
 [[benchmark]]
 id          = "python-bindings-bench"
 name        = "Python binding overhead (sparq-py vs pyoxigraph vs rdflib)"
 category    = "serve"
-measures    = "Python-API round-trip time: load + query from Python for a pinned NT corpus and a set of queries; result-count oracle before timing; binding overhead = total - engine-only time"
-invoke      = "TBD — implementing bead sq-hmd7l.18"
-source      = "TBD — bench/python-bindings-bench/; scripts/bench-adapters/python_rdf_adapter.py"
-dataset     = "TBD — pinned NT corpus + query set; synthetic, deterministic"
+measures    = "Python-API round-trip time (load + warm min-of-K query, every cell materialised) on the SP2Bench tiny tier; row-count agreement gate across all engines + sparq-cli BEFORE any timing row; binding overhead = sparq-py whole-call - sparq-cli engine-internal (materialize mode, matched python-release codegen); floor (len/ASK/0-row/LIMIT-1 calls) + slope (per-row materialisation) isolate the boundary cost across bindings"
+invoke      = "bash bench/python/run.sh [--smoke]   # engines: pip install pyoxigraph rdflib; maturin develop --profile python-release in crates/sparq-py; absent engine => graceful skip"
+source      = "bench/python/; scripts/bench-adapters/python_rdf_adapter.py"
+dataset     = "SP2Bench deterministic generator, tiny tier (bench/sp2b/gen.sh 10000; SP2B_T overrides) + fixed inline synthetic micro-graphs (floor: 8 triples; slope: 64/8192)"
 quiet_box_sensitive = true
-pinning     = "TBD — corpus sha256 + competitor pinned versions at gather time"
-records_to  = "TBD — bench/competitor-results/<engine>-python-bindings-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.18
-status      = "planning"
+pinning     = "sp2b generator pinned by tarball sha256 + deterministic at -t; engine versions recorded in every results JSON at run time (first gather: pyoxigraph 0.5.9, rdflib 7.6.0)"
+records_to  = "bench/competitor-results/python-bindings-*-<UTC>.json (git-ignored)"
+featured    = false
+status      = "active"  # first-read record: research/gap-python-binding-2026-07.md
 
 # [SONNET-4.6] sq-hmd7l.21 — Graph Store Protocol same-box panel
 [[benchmark]]

@@ -891,10 +891,10 @@
       "name": "pyoxigraph (Python bindings for Oxigraph)",
       "kind": "python-lib",
       "role": "[SONNET-4.6 sq-hmd7l.1] pyoxigraph is the official Python binding for the Oxigraph RDF store. The python-bindings-bench suite compares sparq's Python API (sparq-py) vs pyoxigraph + rdflib on binding-overhead (parse/load/query time from Python). MIT -> numbers are publishable. pyoxigraph is the primary Python-RDF peer.",
-      "pinned_version": "pyoxigraph (PyPI; pin the exact version at gather time)",
+      "pinned_version": "pyoxigraph 0.5.9 (PyPI; pinned at the first gather run, sq-hmd7l.18)",
       "version_source": "`python3 -c 'import pyoxigraph; print(pyoxigraph.__version__)'` at run time, recorded in the gather results file",
       "install_recipe": "`pip install pyoxigraph` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/python_rdf_adapter.py --engine pyoxigraph --input <data.nt> --query <q.rq>; measure binding-overhead: load + query round-trip. Cross-check result count before trusting timing.",
+      "run_recipe": "bash bench/python/run.sh (or scripts/bench-adapters/python_rdf_adapter.py --engine pyoxigraph --mode workload|floor|slope --input <data.ttl> --queries <dir>); the run.sh --compare stage enforces the row-count agreement gate before any timing row.",
       "comparable_suites": [
         {
           "sparq_suite": "python-bindings-bench",
@@ -903,19 +903,17 @@
       ],
       "version_env_metadata": "gather records the pyoxigraph version, python --version, and the host env block",
       "quiet_box_sensitive": true,
-      "dashboard_engine_id": "pyoxigraph",
-      "unverified_pin": true,
-      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run."
+      "dashboard_engine_id": "pyoxigraph"
     },
     {
       "id": "rdflib",
       "name": "rdflib (Python RDF library)",
       "kind": "python-lib",
       "role": "[SONNET-4.6 sq-hmd7l.1] rdflib is the reference Python RDF library (pure Python + optional C extensions). The python-bindings-bench suite compares sparq's Python API vs rdflib for loading and querying RDF data from Python. BSD-3-Clause -> numbers are publishable. rdflib is the baseline 'pure-Python' column.",
-      "pinned_version": "rdflib (PyPI; pin the exact version at gather time)",
+      "pinned_version": "rdflib 7.6.0 (PyPI; pinned at the first gather run, sq-hmd7l.18)",
       "version_source": "`python3 -c 'import rdflib; print(rdflib.__version__)'` at run time, recorded in the gather results file",
       "install_recipe": "`pip install rdflib` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/python_rdf_adapter.py --engine rdflib --input <data.nt> --query <q.rq>; measure load + query round-trip. Cross-check result count before trusting timing.",
+      "run_recipe": "bash bench/python/run.sh (or scripts/bench-adapters/python_rdf_adapter.py --engine rdflib --mode workload|floor|slope --input <data.ttl> --queries <dir>); the run.sh --compare stage enforces the row-count agreement gate before any timing row.",
       "comparable_suites": [
         {
           "sparq_suite": "python-bindings-bench",
@@ -924,9 +922,7 @@
       ],
       "version_env_metadata": "gather records the rdflib version, python --version, and the host env block",
       "quiet_box_sensitive": true,
-      "dashboard_engine_id": "rdflib",
-      "unverified_pin": true,
-      "honesty_caveat": "PyPI version is unverified and TBD; to be pinned to a real PyPI version at the first gather run."
+      "dashboard_engine_id": "rdflib"
     },
     {
       "id": "oxigraph-wasm",

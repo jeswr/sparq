@@ -377,6 +377,7 @@ bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k poin
 cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh   # RSP-QL (cargo only): clock-free fixed (triple,ts) replay + DETERMINISTIC per-window row-count gate (3 EvalModes) + SRBench correctness oracle
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 bench/owl-sameas/run.sh               # OWL sameAs (python3 only): OWL-RL closure per size tier + closure-size (K·N·(N+M)) + query-row (K·N) gate
+bench/python/run.sh                   # Python bindings (pip pyoxigraph+rdflib + maturin sparq-py): SP2B tiny tier from Python + row-count agreement gate + binding-overhead floor/slope
 
 # --- selective bind-join + u64 value-id probes ---
 python3 bench/selective/gen.py 500000 > bench/selective/selective.nt
