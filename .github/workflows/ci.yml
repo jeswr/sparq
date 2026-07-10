@@ -2304,14 +2304,22 @@ jobs:
     # run 28624093902: the `Measure + enforce` step alone was 1691s, the per-crate loop
     # 1676s, DOMINATED by sparq-engine 668s ≈ 40%, then core 210s / vectors 167s / solid
     # 165s / server 114s). scripts/coverage.sh SHARD_GROUPS LPT-bin-packs the crates by that
-    # measured time into 4 balanced shards (engine ALONE = the wall-clock floor; the other
-    # three ~336s each) that measure CONCURRENTLY here — halving the wall-clock. Each shard
-    # runs the IDENTICAL coverage.sh + `--check-robust`, so the ratchet semantics are
-    # unchanged: a shard whose crate is below floor FAILS -> the ci-summary gate FAILS.
-    # A crate outside a shard's subset is reported MISSING by --check-robust (non-fatal for
-    # that shard — it is gated by the shard that DOES measure it). The `coverage-floors`
-    # shard-partition guard proves every per-commit crate is measured by exactly one shard.
-    name: coverage ratchet (shard ${{ matrix.shard }}/4)
+    # measured time into balanced shards that measure CONCURRENTLY here. Each shard runs the
+    # IDENTICAL coverage.sh + `--check-robust`, so the ratchet semantics are unchanged: a
+    # shard whose crate is below floor FAILS -> the ci-summary gate FAILS. A crate outside a
+    # shard's subset is reported MISSING by --check-robust (non-fatal for that shard — it is
+    # gated by the shard that DOES measure it). The `coverage-floors` shard-partition guard
+    # proves every per-commit crate is measured by exactly one place.
+    #
+    # [FABLE-5] sq-piapk: sparq-engine (the old shard-1 ~668s wall-clock FLOOR) is NO LONGER
+    # in this matrix — it moved to the dedicated cross-runner SPLIT pipeline below
+    # (coverage-engine-{archive,run,merge}). A compile-vs-test profile found the engine shard
+    # is ~97% TEST-EXECUTION-bound (instrumented compile ~16-26s; the pole is the test run),
+    # so the lever is splitting the TEST EXECUTION across runners (nextest --partition) and
+    # MERGING each partition's .profraw into one coverage-identical report — NOT a per-shard
+    # rebuild. This matrix therefore drops to the 3 remaining (non-engine) shards; engine is
+    # gated identically by the merge job's `coverage-gate.py --check`.
+    name: coverage ratchet (shard ${{ matrix.shard }}/3)
     # [OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): coverage is a function of
     # compiled code + tests, so it stays ALWAYS-RUN with ONE exception — skip only
     # when the affected closure is PROVABLY EMPTY (every changed path SAFE-listed /
@@ -2332,7 +2340,7 @@ jobs:
     strategy:
       fail-fast: false   # one failing shard must NOT cancel the others (want all verdicts)
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3]   # [FABLE-5] sq-piapk: was [1,2,3,4]; engine (old shard 1) split out
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
@@ -2428,6 +2436,176 @@ jobs:
           name: coverage-summary-shard-${{ matrix.shard }}
           path: target/coverage/coverage-summary.json
 
+  # ============================================================================
+  # [FABLE-5] sq-piapk: sparq-engine CROSS-RUNNER COVERAGE SPLIT
+  # (partitioned test-exec across runners + identity-preserving .profraw merge).
+  #
+  # WHY: after the 4-way per-commit coverage matrix (sq-p0hcd), the ONE remaining
+  # wall-clock floor was the sparq-engine shard measured ALONE (~668s ≈ 40% of the
+  # coverage job — the merge-queue's slow sibling). A compile-vs-test profile of
+  # that shard (this bead) found it ~97% TEST-EXECUTION-bound (instrumented compile
+  # ~16-26s; the pole is the serial instrumented test run). So the lever is to
+  # SPLIT the TEST EXECUTION across N runners — each running a nextest test-level
+  # PARTITION and emitting its own .profraw — then MERGE the .profraw into ONE
+  # `cargo llvm-cov report -p sparq-engine`. That merged report is over the FULL
+  # instrumented object set with the UNION of every partition's executed lines, so
+  # it is COVERAGE-IDENTICAL to the un-split shard (same covered, same denominator)
+  # — the floor is enforced exactly as before, just on a lower wall-clock.
+  #
+  # NO SHARED BUILD ARCHIVE: the instrumented engine binaries are BIT-FOR-BIT
+  # reproducible across runners (same pinned toolchain + same features + same source
+  # => identical coverage-counter hashes), so a .profraw from one runner's compile
+  # merges CLEANLY against the merge job's independently-compiled objects (measured:
+  # same-compile == cross-compile, md5-identical binaries, zero hash-mismatch
+  # warnings). The instrumented compile is cheap (~16-26s + warm dep cache), so each
+  # runner compiling its own objects is far simpler + more robust than the fragile
+  # cargo-llvm-cov `--archive-file` transport (whose 0.8.7 object layout does NOT
+  # match where `report` reads objects). Each run/merge job passes ONE pinned
+  # toolchain and NO per-runner RUSTFLAGS, keeping the binaries reproducible.
+  #
+  # Two jobs (both driven by scripts/coverage-engine-shard.sh):
+  #   coverage-engine-run   : matrix[part 1..N] — compile + run a nextest test-level
+  #                           PARTITION (--no-report), upload its .profraw.
+  #   coverage-engine-merge : compile the objects (build-objects), download every
+  #                           partition's .profraw, `report -p sparq-engine` over the
+  #                           union, then `coverage-gate.py --check` (SAME ratchet floor).
+  #
+  # The `coverage` aggregator (below) folds both into its needs + result loop, so the
+  # ci-summary `gate` still sees ONE "coverage ratchet + test-presence gate (per-crate)"
+  # verdict. Both job NAMEs are generic (no crate token the selection-alarm tokenizer
+  # would mis-implicate) and carry NO "advisory"/"informational" word, so they GATE.
+  # ============================================================================
+  coverage-engine-run:
+    # Compile the instrumented engine test binaries + run ONE nextest test-level partition,
+    # upload its .profraw. Same trigger envelope + path-filter guard as coverage-measure
+    # (skip a doc-only / provably-empty-affected PR -> the merge skips via needs, and the
+    # aggregator counts `skipped` as satisfied). N=3 partitions: nextest hash-partitions
+    # INDIVIDUAL tests, so the two >400s lib-target monster tests land on DIFFERENT runners
+    # (a per-binary split would not balance).
+    name: coverage engine run (partition ${{ matrix.part }}/3)
+    needs: [changes, coverage-floors, select]
+    if: >-
+      github.event_name != 'schedule' &&
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # one partition failing must not cancel the others (want all profraw)
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Free runner disk before instrumented build
+        run: ./scripts/ci-free-disk.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+      # Per-partition dep cache: each partition compiles the same instrumented engine, so a
+      # shared-key cache warms the deps; keying by part avoids save-race clobbering.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: coverage-engine-run-${{ matrix.part }}
+      - name: Install cargo-llvm-cov + nextest
+        # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
+        # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
+        # llvm-cov for instrumentation, nextest for the partitioning.
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov,nextest
+      - name: Fetch W3C fixtures (engine tests need them)
+        # Mirror coverage.sh's fixture fetch: some engine tests reference the pinned SPARQL
+        # fixtures; fetch idempotently so no engine test SKIPS for absence (which would drop
+        # its lines from the merged number). Best-effort — a fetch WARN is non-fatal.
+        run: |
+          ./scripts/fetch-conformance.sh      || echo "WARN: SPARQL fixture fetch failed"
+      - name: Compile + run partition ${{ matrix.part }}/3 (--no-report, emit .profraw)
+        run: ./scripts/coverage-engine-shard.sh run ${{ matrix.part }} 3
+      - name: Upload partition ${{ matrix.part }} .profraw
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-engine-profraw-${{ matrix.part }}
+          # [FABLE-5] sq-piapk: the native llvm-cov path emits .profraw under
+          # target/llvm-cov-target/ (per LLVM_PROFILE_FILE). `**` catches any nested subdir.
+          path: target/llvm-cov-target/**/*.profraw
+          retention-days: 1
+          if-no-files-found: error   # a partition that emitted NO profraw is a hard failure
+
+  coverage-engine-merge:
+    # Compile the instrumented engine objects (build-objects; bit-reproducible with the run
+    # partitions' compiles), download EVERY partition's .profraw, merge them into one
+    # `cargo llvm-cov report -p sparq-engine`, and enforce the SAME per-crate ratchet floor
+    # via coverage-gate.py --check. This merged report is coverage-IDENTICAL to the un-split
+    # single-shard number (same covered lines, same denominator), so the floor is unchanged.
+    name: coverage engine merge + ratchet (per-crate)
+    needs: coverage-engine-run
+    # Require the runs to SUCCEED so a merged FALSE-LOW never masks a partition failure: a
+    # failed partition reds coverage-engine-run (the aggregator treats that as a gate failure)
+    # and this merge skips. When the runs skipped (doc-only PR), this skips too (via needs)
+    # and the aggregator counts `skipped` as satisfied.
+    if: needs.coverage-engine-run.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Free runner disk before instrumented build
+        run: ./scripts/ci-free-disk.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+      # Reuse a run partition's dep cache to warm the merge job's object compile.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: coverage-engine-run-1
+      - name: Install cargo-llvm-cov + nextest
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov,nextest
+      - name: Build instrumented engine objects (for `report`, no test run)
+        # `cargo llvm-cov report` maps counters -> lines using the instrumented object files.
+        # build-objects compiles them WITHOUT running any test (--no-run: no profraw) — the
+        # SAME bit-reproducible binaries the run partitions compiled, so the downloaded
+        # partition .profraw merge cleanly against them. Native llvm-cov target layout, no
+        # archive extraction.
+        run: ./scripts/coverage-engine-shard.sh build-objects
+      - name: Download all partition .profraw
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-engine-profraw-*   # every partition's profraw artifact
+          path: engine-profraw
+          merge-multiple: true                 # flatten all partitions into one dir
+      - name: Restore .profraw into the llvm-cov target dir
+        # [FABLE-5] sq-piapk: coverage-engine-shard.sh report merges every *.profraw found
+        # recursively under target/, and `cargo llvm-cov report` reads counters from
+        # CARGO_LLVM_COV_TARGET_DIR/llvm-cov-target (where build-objects put the instrumented
+        # binaries + where a native run emits profraw). Place the downloaded partition profraw
+        # THERE so report merges them against those objects. Resolve the dir via show-env
+        # (CARGO_LLVM_COV_TARGET_DIR) so it tracks the tool's own layout rather than hard-coding.
+        run: |
+          set -euo pipefail
+          td="$(cargo llvm-cov show-env 2>/dev/null | sed -n 's/^CARGO_LLVM_COV_TARGET_DIR=\(.*\)$/\1/p')"
+          [ -n "$td" ] || td="$PWD/target"
+          pd="$td/llvm-cov-target"
+          mkdir -p "$pd"
+          n=$(find engine-profraw -name '*.profraw' 2>/dev/null | wc -l)
+          echo "downloaded $n .profraw file(s) across all partitions -> $pd"
+          [ "$n" -ge 1 ] || { echo "::error::no partition .profraw downloaded"; exit 1; }
+          find engine-profraw -name '*.profraw' -exec mv {} "$pd/" \;
+      - name: Merge .profraw -> coverage-identical engine report
+        run: ./scripts/coverage-engine-shard.sh report target/coverage/coverage-summary.json
+      - name: Enforce the sparq-engine ratchet floor (--check)
+        # --check (NOT --check-robust): the merged report IS the full-suite measurement over
+        # the union of all partitions, so there is nothing to "re-measure ONLY sub-floor
+        # crates" — and --check-robust's re-measure path would shell coverage.sh to rebuild
+        # + re-run the WHOLE engine (defeating the split). A partition that under-emitted
+        # profraw already fails coverage-engine-run (its `if-no-files-found: error` / nextest
+        # exit), so the merged number cannot be a silent transient undercount here.
+        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Upload merged engine coverage summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-summary-engine
+          path: target/coverage/coverage-summary.json
+
   coverage:
     # [OPUS-4.8] sq-p0hcd: single AGGREGATED pass/fail for the sharded coverage gate,
     # keeping the EXACT original required-check NAME so any tooling / branch-protection
@@ -2438,7 +2616,10 @@ jobs:
     # iff a needed gating job concluded non-green (failure/cancelled), and passes when they
     # succeeded or were skipped (doc-only PR).
     name: coverage ratchet + test-presence gate (per-crate)
-    needs: [coverage-floors, coverage-measure]
+    # [FABLE-5] sq-piapk: the sparq-engine cross-runner split (run + merge) folds into this
+    # single verdict alongside the non-engine shard matrix, so the ci-summary `gate` still
+    # sees ONE coverage check. A skipped engine job (doc-only PR) counts as satisfied.
+    needs: [coverage-floors, coverage-measure, coverage-engine-run, coverage-engine-merge]
     if: ${{ always() && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     steps:
@@ -2446,9 +2627,12 @@ jobs:
         run: |
           floors='${{ needs.coverage-floors.result }}'
           measure='${{ needs.coverage-measure.result }}'
+          eng_run='${{ needs.coverage-engine-run.result }}'
+          eng_merge='${{ needs.coverage-engine-merge.result }}'
           echo "coverage-floors=$floors  coverage-measure(matrix)=$measure"
+          echo "engine-split: run=$eng_run merge=$eng_merge"
           rc=0
-          for r in "$floors" "$measure"; do
+          for r in "$floors" "$measure" "$eng_run" "$eng_merge"; do
             case "$r" in
               success|skipped) ;;
               *) echo "::error::coverage gate FAILED — a needed job concluded '$r'"; rc=1 ;;
