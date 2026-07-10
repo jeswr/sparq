@@ -5674,13 +5674,29 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
     // scanned column. A candidate term absent from the dict can never bind here, so
     // dropping it from the id-set is safe (and keeps the set a superset of the matches).
     let cand_ids: FxHashSet<Id> = cands.iter().filter_map(|t| graph.id_of(t)).collect();
-    // Drop a row ONLY when the index is AUTHORITATIVE over its binding AND excludes it:
-    // keep when the binding is a candidate (an indexed match) OR the index has no opinion
-    // on it (NOT indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic
-    // CRS, or a different graph). The residual `geof:` FILTER then judges every kept row,
-    // so a geometry the index never saw is NEVER silently dropped. This makes the result
-    // identical to the post-hoc path no matter which subset the index covers. To avoid
-    // re-materialising a term per row, the not-indexed check is memoised per distinct id.
+    // The keep predicate (both branches below are IDENTICAL): keep a row when its
+    // binding is a candidate (an indexed match) OR the index has NO opinion on it (NOT
+    // indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic CRS, or a
+    // different graph). The residual `geof:` FILTER then judges every kept row, so a
+    // geometry the index never saw is NEVER silently dropped. This makes the result
+    // identical to the post-hoc path no matter which subset the index covers.
+    //
+    // FAST PATH: when the provider can give the ID-LEVEL indexed universe resolved
+    // against THIS graph's dict (freshness matched), `is_indexed(id)` is a pure
+    // `FxHashSet<Id>` lookup — ZERO per-row `Term` materialisation. `indexed.contains(&id)`
+    // equals `is_indexed(&graph.dict.term(id))` by the provider's contract, so the verdict
+    // is unchanged. [OPUS-4.8]
+    let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
+    if let Some(indexed) = idx.indexed_ids(dict_ptr) {
+        b.rows.retain(|row| {
+            let id = row[col];
+            // candidate (indexed match) OR not in the indexed universe -> keep.
+            cand_ids.contains(&id) || !indexed.contains(&id)
+        });
+        return true;
+    }
+    // SLOW FALLBACK (no fresh id-level universe): memoise the per-id not-indexed check to
+    // avoid re-materialising a term per row. Produces the SAME keep verdict as the fast path.
     let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
     b.rows.retain(|row| {
         let id = row[col];

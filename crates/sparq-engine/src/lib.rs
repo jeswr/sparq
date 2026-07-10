@@ -507,6 +507,32 @@ pub trait SpatialProvider: Send + Sync {
     /// decides. (For a `GeoIndex`: the geographic-CRS `geo:asWKT` literals it
     /// extracted.)
     fn is_indexed(&self, term: &Term) -> bool;
+
+    /// The ID-LEVEL indexed universe: the dictionary ids of the geometries this
+    /// index holds an opinion on — the exact id-set of the terms for which
+    /// [`is_indexed`](Self::is_indexed) returns `true` — returned ONLY when that
+    /// set was resolved against the SAME dict identified by `dict_ptr`
+    /// (`std::ptr::from_ref(&graph.dict) as usize`), else `None`.
+    ///
+    /// This lets the pushdown replace a per-row `Term` materialisation +
+    /// `is_indexed` hash with a pure `FxHashSet<Id>` lookup on the scanned
+    /// column. It is a PURE OPTIMISATION of the `is_indexed` decision: for a row
+    /// whose binding id is `i`, `set.contains(&i)` MUST equal
+    /// `is_indexed(&graph.dict.term(i))` — same keep/drop verdict, so the result
+    /// is byte-identical to the per-row path. The FRESHNESS contract is
+    /// load-bearing: an id-set only maps to the right terms against the dict it
+    /// came from, so the provider returns `Some` ONLY when certain the dict
+    /// matches and `None` on ANY doubt — whereupon the engine uses the per-row
+    /// fallback (always correct). Returned as an `Arc` so the engine holds it
+    /// cheaply. The default returns `None` (a provider with no id-level universe
+    /// is served entirely by the per-row path). [OPUS-4.8]
+    fn indexed_ids(
+        &self,
+        dict_ptr: usize,
+    ) -> Option<std::sync::Arc<rustc_hash::FxHashSet<sparq_core::dict::Id>>> {
+        let _ = dict_ptr;
+        None
+    }
 }
 
 /// Runs `f` with `idx` installed as the active spatial index — the planner
