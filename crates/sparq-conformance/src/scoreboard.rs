@@ -157,8 +157,8 @@ pub struct Suite {
 ///   `FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
 ///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
 ///   suite, compared by re-parse RDF-equivalence to the normative expected output).
-/// * JSON-LD expand 240 — `sparq-conformance` `src/floors/expand.rs`
-///   `FLOOR = 240` (sq-kk1mq oracle-correction re-baseline; opt-in
+/// * JSON-LD expand 259 — `sparq-conformance` `src/floors/expand.rs`
+///   `FLOOR = 259` (sq-oy1f.37 expand() correctness raise from 240; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
 ///   directly and compares the result to the expected document via `json_ld_equal`
 ///   — a document-level JSON comparator measuring JSON-LD data-model (semantic)
@@ -525,10 +525,12 @@ pub const SUITES: &[Suite] = &[
     // The old floor was 247 under the RDF-equivalence oracle (sq-oy1f); the rebase
     // reveals a net 7 fewer passes (20 old-pass→new-fail flips minus 13 recoveries:
     // 8 old-fail→new-pass via oracle precision + 5 old-skip→new-pass via options
-    // forwarding) and 26 new honest failures.  The new floor 240 is the MEASURED pass
-    // count with the corrected oracle at the pinned suite revision (sq-kk1mq).  The
-    // flatten lane keeps the old RDF-equivalence oracle (native flatten algorithm
-    // deferred; writer path is the correct oracle there).
+    // forwarding) and 26 new honest failures.  The floor was 240 (the MEASURED pass
+    // count with the corrected oracle at the pinned suite revision, sq-kk1mq), then
+    // RAISED to 259 by sq-oy1f.37 (three expand() correctness fixes: value-object
+    // @type collapse, empty-array-property retention, free-floating value/list drop —
+    // rise-only ratchet).  The flatten lane keeps the old RDF-equivalence oracle
+    // (native flatten algorithm deferred; writer path is the correct oracle there).
     // Floors kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 expand",
@@ -653,6 +655,41 @@ pub const SUITES: &[Suite] = &[
                conclusion oracle; an HONEST-denominator standards lane (the printed \
                skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED \
                pass count (0 at the current importer, rise-ready)",
+    },
+    // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm, a
+    // sparq EXTENSION ratchet tallied SEPARATELY from the W3C D-entailment row above
+    // (the W3C `sparql11/entailment` corpus is a SINGLE D-only test; the real value-space
+    // coverage is sparq's own hand-authored matrix). Mirrors the OWL 2 QL / EL / RIF-Core
+    // extension precedent — program honesty rule 4: the standards-conformance count is NOT
+    // padded with sparq's own cases. The floor const (`pub const D_VALUE_MATRIX_FLOOR`)
+    // lives in `tests/d_entail_suite.rs` (behind the opt-in `d-entail` feature, inside the
+    // `gated` module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting do not
+    // affect the match); `tests/scoreboard_floors.rs` pins this mirror to it so the two can
+    // never drift. The runner drives value-equal-distinct-lexical pairs (integer⊂decimal
+    // incl. the 2^53+1 non-aliasing guard, boolean true/1, the hex/base64 octet pair),
+    // facet-ill-formed negatives (rdfD1 must NOT type 200^^byte / a leading-space token),
+    // and disjoint-space negatives (decimal vs double, date vs dateTime) through the REAL
+    // `Profile::D` value-space comparator (now on the shared sparq-substrate seam,
+    // sq-pbz04.6.3) — plus broadened-map end-to-end cases through the same
+    // materialize→answer-restriction→engine-query path as the W3C lane.
+    Suite {
+        label: "D value-space matrix (integer/decimal/boolean/binary/temporal)",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "d_entail_suite",
+            feature: "d-entail",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 24,
+        floor_basis: "value-space assertions (sparq EXTENSION over the D datatype map, \
+                      NOT the W3C sparql11/entailment conformance count)",
+        note: "EXTENSION ratchet — sparq's own hand-authored D value-space matrix over the \
+               recognized datatype map (integer⊂decimal incl. 2^53+1 non-aliasing, boolean \
+               true/1, hex/base64 octet identity, facet-ill-formed negatives, decimal-vs-\
+               double + date-vs-dateTime disjoint-space negatives), driven through the REAL \
+               Profile::D value-space comparator + the materialize→answer-restriction→engine \
+               end-to-end path; tallied SEPARATELY, never faked as W3C conformance passes",
     },
     // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 `sparql11/service`
     // EVALUATION ratchet. The runner is crate-local here

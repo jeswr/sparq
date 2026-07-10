@@ -69,7 +69,7 @@ AHEAD-BUT-NOT-OOM / PARITY / BEHIND / NOT-MEASURED.
 |---|---|---|---|---|---|---|---|
 | D1 | Query latency — **WatDiv SF=1** (16 q, count) | 5.4–101.8 µs | virtuoso 652–1935 µs (HTTP); oxigraph 10.9–1177 ms (CLI) | **19–180×** vs virtuoso; **205–23453×** vs oxigraph | no standard query-latency benchmark published (WQS-relative marketing only → non-comparable) | **CLEARLY-AHEAD** | hold; canonical dominance evidence (survives HTTP correction — see §2) |
 | D2 | Query latency — **SP2Bench 250k vs the clean CLI baseline (oxigraph)** | see §3 | oxigraph 11.3 ms – 50.0 s (2 ERROR cells) | **8.3–4072×** | (as above) | **CLEARLY-AHEAD** (vs oxigraph) | hold; clean apples-to-apples column |
-| D3 | Query latency — **SP2Bench 250k vs virtuoso/qlever (HTTP)** | see §3 | virtuoso/qlever (HTTP) | wins 7/14; **BEHIND 7/14 (2.9–19×)** on q03b/c, q07, q08, q09, q11, q12b | (as above) | **BEHIND** on the complex-shape class | **NEW P1 sq-7d3dj.30** (profiling-first) |
+| D3 | Query latency — **SP2Bench 250k vs qlever (same-box) / virtuoso (HTTP ref)** | §3 + §3.1 addendum | qlever same-box; virtuoso §0 HTTP ref | **RE-MEASURED 2026-07-10** (sq-7d3dj.30.6, git 1190ca84, canonical c6i.4xlarge): wins **10/14** vs same-box QLever, correct+complete on all 14; q03b/c **flipped to AHEAD**; q08/q09/q11/q12b deficits **cut 4–14×**; **q07 the sole residual behind (3.8×, slightly worse)** | (as above) | **MIXED, strongly improved** (was BEHIND) — q07/q09 still behind | fixes landed sq-7d3dj.30.1–.14; residuals **sq-7d3dj.30.20** (q07 CSE), **sq-jnb1e** (q09) + new q08/q11 beads |
 | D4 | **Bulk-load throughput** (CLI, vs oxigraph) | 1.37 M t/s (sp2b) / 3.2 M t/s (watdiv) | oxigraph 176 k / 382 k t/s | **7.8× / 8.4×** | import 1.76 M t/s aggregate / ~27.5 k t/s per thread (64 thr, WatDiv 19.47 B; partial hw) | **AHEAD-BUT-NOT-OOM** (small-corpus, startup-dominated) | **NEW P1 sq-7d3dj.31** (scale-up + profile) |
 | D5 | **RDFox-class in-memory import rate** (big-core hw) | NOT-MEASURED | — | — | 1.76 M t/s / ~27.5 k t/s per thread; 1 M t/s `[reported]` / ~7.8 k t/s per core | **NOT-MEASURED** | **CITE sq-mbg0k** (G3) |
 | D6 | **Reasoning / materialisation throughput** | `rdfs_infer_s` 0.133 s (CI scale, correctness-first; no t/s at scale) | none in the matrix | — | 6.1 M t/s / ~47.7 k t/s per core (LUBM, SPARC T5-8); 60 M t/s headline | **NOT-MEASURED** at comparable scale | **CITE sq-1s03r** (G2) + **sq-w34fa** (G1 incremental) |
@@ -147,6 +147,31 @@ This is why D3 is **BEHIND** and carries a P1 profiling-first bead (**sq-7d3dj.3
 the seven queries on the canonical box, confirm the selective-FILTER-not-using-index
 hypothesis (q03b/c) and the OPTIONAL/long-path plan cost (rest) **before** any code change,
 then a targeted fix.
+
+### 3.1 D3 re-measure addendum (2026-07-10, sq-7d3dj.30.6) — the fixes landed
+
+<!-- [FABLE-5] The §3 table above is the 2026-07-07 PRE-fix baseline. The full fix decomposition
+     (sq-7d3dj.30.1–.14 + #1786 + #1795 + #1813) has since merged; the canonical re-measure below
+     supersedes the §3 D3 verdicts. -->
+
+The complex-shape fix wave (algebra-rewrite constant-substitution, SIP, top-k ORDER BY,
+DISTINCT-projection semijoin, DPccp default-on, theta anti-join, id-filter fast path) all
+landed. A canonical quiet-box re-measure — **c6i.4xlarge x86_64, min-of-5, SP2Bench 250k, git
+1190ca84, `bench/competitor-results/sparql-same-box-20260710T025117Z.json`**, full detail in
+`research/sp2bench-complex-shape-deficit.md` §7 — changes the D3 verdict from **BEHIND on the
+complex-shape class** to **MIXED, strongly improved**:
+
+- **q03b / q03c flipped BEHIND → AHEAD** (38× / 21× faster than same-box QLever; the two
+  selective-FILTER deficits are CLOSED by the algebra rewrite).
+- **q08 / q09 / q11 / q12b deficits cut 4–14×** — q09 (9.5×) and q11 (3.0×) still behind
+  QLever; q08 / q12b have **no valid QLever comparator** (QLever returns the wrong count 0, the
+  sq-ai2wa bnode≠IRI divergence) and sparq is the only correct+complete engine there.
+- **q07 is the sole query that did NOT improve** (30.9 ms, ~1.3× slower than §0, BEHIND QLever
+  3.8×) — the cross-level membership-CSE residual, tracked by **sq-7d3dj.30.20**.
+- sparq wins **10/14** vs same-box QLever and is **correct + complete on all 14**.
+
+Residual follow-ups: q07 CSE **sq-7d3dj.30.20**, q09 characteristic-set **sq-jnb1e**, plus new
+q11 top-k and q08/q12b same-box-correct-competitor beads (see §7.3 of the deficit record).
 
 ## 4. Load, memory, reasoning, SHACL detail
 

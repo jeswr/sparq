@@ -27,9 +27,11 @@
 #            adds axiomatic/reflexive triples sparq does not, and de-dups the ABox on load, so
 #            its closure size DIFFERS by construction. This is a PROFILE difference, not a bug.
 #   * VLog / Nemo are GENERAL Datalog engines. A like-for-like closure needs a Datalog encoding
-#            of the SAME rule set (.dlog / .rls) that REPRODUCES sparq's closure count — a
-#            SEPARATE, independently-VALIDATED artifact (see bench/competitors.json #eye for
-#            why an unvalidated encoding under-counts). Absent that, their columns emit an
+#            of the SAME rule set (.dlog / .rls) that REPRODUCES sparq's closure count. Those
+#            encodings now exist and are VALIDATED set-for-set against sparq (sq-hmd7l.30/.31):
+#            bench/reason-encodings/{vlog/*.dlog,nemo/*.rls}. When the vlog/nmo binary is present
+#            the adapters run them and the closure count AGREES with sparq (owl=150589,
+#            rdfs=126732 @ LUBM(1)); when the binary or encoding is absent the column emits an
 #            HONEST NOT-RUN-LOCALLY with the exact blocker, never a fabricated number.
 #
 # ORACLE: closure-size cross-check. sparq's `reason` self-reports its closure count on stderr
@@ -46,8 +48,9 @@
 #   * Jena: one JVM per (profile) under `timeout`; the Java driver loads the graph once
 #     (advisory load), then times InfModel materialization best-of-N (JVM start-up + parse
 #     stay OUTSIDE the timed section). A timeout/error degrades to an honest ERROR row.
-#   * VLog / Nemo: python adapters; if the binary is absent OR no validated rule encoding is
-#     wired, an honest NOT-RUN-LOCALLY row (never a fabricated number).
+#   * VLog / Nemo: python adapters run the VALIDATED bench/reason-encodings/{vlog,nemo}/
+#     program (default per profile); if the binary is absent an honest NOT-RUN-LOCALLY row
+#     (never a fabricated number). Their closure count AGREES with sparq set-for-set.
 #
 # USAGE
 #   scripts/bench/materialize-same-box.sh                 # both scales, all engines
@@ -284,14 +287,14 @@ if "jena" in engines:
 if "vlog" in engines:
     engines_meta["vlog"] = {
         "version": "",
-        "rule_set": "general Datalog — needs a SEPARATE validated OWL-RL/RDFS .dlog encoding reproducing sparq's closure (see bench/competitors.json #eye rationale)",
-        "mode": "scripts/bench-adapters/vlog_adapter.py: NOT-RUN-LOCALLY unless VLOG binary + a validated rules file are supplied",
+        "rule_set": "general Datalog running the VALIDATED bench/reason-encodings/vlog/{owl-rl,rdfs}.dlog — the SAME rule set as sparq's compared profile, reproducing its closure SET-FOR-SET (sq-hmd7l.30). If the vlog binary or the encoding is absent, the column is NOT-RUN-LOCALLY.",
+        "mode": "scripts/bench-adapters/vlog_adapter.py: writes an INMEMORY edb.conf binding the .nt to TE, runs `mat --storemat`, counts the materialized T relation",
     }
 if "nemo" in engines:
     engines_meta["nemo"] = {
         "version": "",
-        "rule_set": "general Datalog (Rust-native) — needs a SEPARATE validated OWL-RL/RDFS .rls encoding reproducing sparq's closure",
-        "mode": "scripts/bench-adapters/nemo_adapter.py: NOT-RUN-LOCALLY unless NEMO/nmo binary + a validated rules file are supplied",
+        "rule_set": "general Datalog (Rust-native) running the VALIDATED bench/reason-encodings/nemo/{owl-rl,rdfs}.rls — the SAME rule set as sparq's compared profile, reproducing its closure SET-FOR-SET (sq-hmd7l.31). If the nmo binary or the encoding is absent, the column is NOT-RUN-LOCALLY.",
+        "mode": "scripts/bench-adapters/nemo_adapter.py: substitutes the corpus path into the .rls, runs `nmo`, counts the exported `closed` relation",
     }
 
 note_canonical = (
@@ -304,9 +307,12 @@ note_canonical = (
     "CANONICAL=1 on a dedicated EC2 box (sq-hmd7l.26, univ>=100) for citable numbers."
 )
 
-# per-profile closure crosscheck. all_agree is scoped to engines that ran the SAME rule
-# set (only sparq here, by construction); a differing Jena/Datalog closure is recorded
-# with an explicit profile caveat, NEVER silently reconciled.
+# per-profile closure crosscheck. same_ruleset_agree folds together the engines that
+# ran the SAME compared rule set: sparq PLUS VLog/Nemo when they ran the VALIDATED
+# bench/reason-encodings/{vlog,nemo}/ program (which reproduces sparq's closure set-for-
+# set, sq-hmd7l.30/.31). Jena runs its OWN OWL-subset/RDFS reasoner (a different rule set)
+# and is recorded with an explicit profile caveat, NEVER silently reconciled.
+SAME_RULESET_ENGINES = ("sparq", "vlog", "nemo")
 cross = {}
 for p in profiles:
     row = {}
@@ -315,15 +321,18 @@ for p in profiles:
         r = data[e].get(p)
         c = r["closure"] if r else "n/a"
         row[e] = c
-        # only sparq runs the compared (OWL 2 RL / RDFS) rule set exactly; Jena/Datalog
-        # closures are profile-different and are NOT folded into all_agree.
-        if e == "sparq" and c not in ("n/a", "ERROR"):
+        # sparq + the validated-encoding Datalog engines run the compared rule set; a
+        # numeric closure from any of them is folded into the agreement check. A
+        # NOT-RUN-LOCALLY / ERROR value is skipped (never counted as a disagreement).
+        if e in SAME_RULESET_ENGINES and c not in ("n/a", "ERROR", "NOT-RUN-LOCALLY"):
             same_ruleset_counts.add(c)
-    row["same_ruleset_agree"] = len(same_ruleset_counts) == 1 and len(same_ruleset_counts) > 0
+    row["same_ruleset_agree"] = len(same_ruleset_counts) == 1
     row["profile_caveat"] = (
-        "Jena/VLog/Nemo columns (where present) run a DIFFERENT rule set than sparq's "
-        "compared profile; their closure size is not expected to equal sparq's and is "
-        "reported as a documented profile difference, not an agreement."
+        "sparq + VLog + Nemo (where present with the validated encoding) run the SAME "
+        "compared rule set and their closure sizes are expected to AGREE (folded into "
+        "same_ruleset_agree). A Jena column runs a DIFFERENT (OWL-subset/RDFS) rule set; "
+        "its closure size is a documented profile difference, not an agreement, and is "
+        "NEVER reconciled to sparq's."
     )
     cross[p] = row
 
@@ -353,10 +362,12 @@ envelope = {
     "count_crosscheck": cross,
     "count_crosscheck_note": (
         "per-profile closure size. same_ruleset_agree = the engines running the EXACT "
-        "compared rule set (sparq) agree on the closure count (the acceptance oracle "
-        "pins univ=1: owl=150589, rdfs=126732). Jena/VLog/Nemo run DIFFERENT rule sets "
-        "(profile difference) so their closure size is recorded HONESTLY as a caveat, "
-        "NEVER reconciled to sparq's. This is why COUNT is checked before any timing."
+        "compared rule set — sparq PLUS VLog/Nemo with the validated encodings "
+        "(bench/reason-encodings/, sq-hmd7l.30/.31) — agree on the closure count (the "
+        "acceptance oracle pins univ=1: owl=150589, rdfs=126732; the validated encodings "
+        "reproduce it SET-FOR-SET). A Jena column runs a DIFFERENT (OWL-subset/RDFS) rule "
+        "set, recorded HONESTLY as a profile caveat, NEVER reconciled to sparq's. This is "
+        "why COUNT is checked before any timing."
     ),
     "env": env,
 }

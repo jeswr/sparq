@@ -4212,6 +4212,7 @@ dependencies = [
  "sparq-introspect",
  "sparq-serve",
  "sparq-shacl",
+ "sparq-solid",
  "sparq-terse",
  "tokio",
  "tokio-tungstenite",

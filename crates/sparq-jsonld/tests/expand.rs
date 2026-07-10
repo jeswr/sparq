@@ -596,3 +596,77 @@ fn colliding_value_and_language_type() {
         JsonLdErrorCode::InvalidValueObject,
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// [FABLE-5] sq-oy1f.37 — expand-lane correctness regressions (W3C expand cases the native
+// document-level oracle exposed). Each is NON-VACUOUS: it fails on the pre-fix expander.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn value_object_type_collapses_to_scalar_via_context_term() {
+    // A value object's `@type` is a SINGLE value in the JSON-LD data model.
+    // The general keyword path arrayifies `@type`; expansion must collapse the
+    // single-element array back to a scalar (W3C expand/0002). Pre-fix the
+    // expander raised `invalid typed value` on the arrayified `@type`.
+    assert_expands(
+        r#"{"@context": {"t2": "http://example.com/t2", "term2": "http://example.com/term2"},
+            "term2": {"@value": "v2", "@type": "t2"}}"#,
+        r#"[{"http://example.com/term2": [{"@value": "v2", "@type": "http://example.com/t2"}]}]"#,
+    );
+}
+
+#[test]
+fn value_object_type_scalar_for_already_absolute_iri() {
+    // The same collapse when `@type` is an already-absolute IRI (W3C expand/0013).
+    assert_expands(
+        r#"[{"@id": "http://example.com/id1",
+             "http://example.com/term2": [{"@value": "v2", "@type": "http://example.com/t2"}]}]"#,
+        r#"[{"@id": "http://example.com/id1",
+             "http://example.com/term2": [{"@value": "v2", "@type": "http://example.com/t2"}]}]"#,
+    );
+}
+
+#[test]
+fn set_container_empty_array_property_is_retained() {
+    // A `@set`-container term whose value expands to an empty array must RETAIN
+    // the property as `[]` — the `addValue` `asArray=true` rule (W3C expand/0004,
+    // 0015). Pre-fix the property was dropped by the plain empty-array skip.
+    assert_expands(
+        r#"{"@context": {"myset": {"@id": "http://example.com/myset", "@container": "@set"}},
+            "@id": "http://example.org/id",
+            "myset": {"@set": []}}"#,
+        r#"[{"@id": "http://example.org/id", "http://example.com/myset": []}]"#,
+    );
+}
+
+#[test]
+fn plain_empty_array_property_is_retained() {
+    // A plain empty-array property value (no container mapping) is likewise
+    // retained as `[]` on the forward-property path (W3C expand/0004 set3).
+    assert_expands(
+        r#"{"@id": "http://example.org/id", "http://example.org/set3": []}"#,
+        r#"[{"@id": "http://example.org/id", "http://example.org/set3": []}]"#,
+    );
+}
+
+#[test]
+fn free_floating_value_object_is_dropped() {
+    // A top-level free-floating value object (active property null) is dropped —
+    // the whole document reduces to `[]` (W3C expand/0045).
+    assert_expands(r#"{"@value": "free-floating value"}"#, r#"[]"#);
+}
+
+#[test]
+fn free_floating_value_objects_under_graph_are_dropped() {
+    // Free-floating value objects (even language-tagged / typed) directly under
+    // `@graph` are dropped; a `@graph` of only such values reduces to `[]`
+    // (W3C expand/0046).
+    assert_expands(
+        r#"{"@graph": [
+            {"@value": "plain"},
+            {"@value": "tagged", "@language": "en"},
+            {"@value": "typed", "@type": "http://example.com/type"}
+        ]}"#,
+        r#"[]"#,
+    );
+}

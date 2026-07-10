@@ -1014,6 +1014,46 @@ feature but not the flag, `/terse/transpile` is `404`. Transpiling is query-shap
 by `--auth-token-read` like a GET. The CLI exposes the same transpiler as `sparq-cli terse` (see the
 `cli` skill).
 
+### Solid WAC/ACP authorization endpoints (`solid-authz` feature, default OFF; `sq-snopa.6`, issue #992 FR-4)
+
+A **thin, fail-closed HTTP shell** over the [`sparq-solid`](../../crates/sparq-solid) library
+authoriser — the deliberately-opt-in `sparq-server` → `sparq-solid` workspace dependency. All three
+endpoints are **POST** and take the pod dataset (N-Quads, incl. the `.acl`/`.acr` control graphs)
+plus an **already-resolved** session in a JSON body. The server does **NOT** authenticate — mapping a
+WebID + a request path is the caller's job (`sparq-solid` is a library authoriser with no HTTP
+surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shell. `view` (`"wac"` /
+`"acp"`) selects the model, else it is inferred (`.acr` present → ACP, else WAC). See also the
+`access-control` skill for the library `decide` / `wac_allow` / `query_as` surface underneath.
+
+- `POST /authz/decide` — body `{ "dataset", "session": { "agent"?, "client"?, "issuer"?, "now"? },
+  "resource", "mode": "read"|"write"|"append"|"control", "view"? }`. Returns
+  `{ "allow", "grantedModes", "governingAcl", "scope", "status", "aclLink" }`. An **allow** is `200`;
+  a **deny** maps the FR-6 status — a definitive one (`resolved` without the mode / `noAcl`) is `403`,
+  a retryable one (`unloaded` / `transient`) is `503`. `aclLink` is the RFC-8288 `Link: rel="acl"`
+  header VALUE (FR-5), already in the body so `sq-snopa.7` need only lift it into a response header.
+- `POST /authz/wac-allow` — body `{ "dataset", "session", "resource", "view"? }` → `{ "wacAllow":
+  "user=\"…\",public=\"…\"" }`, the RFC permission advertisement.
+- `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
+  **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
+  session sees ZERO rows (empty view), never the whole store.
+
+**FAIL-CLOSED (the soundness invariant):** every error path DENIES — an unparseable dataset is a
+`400` (never an empty-dataset allow), a materialisation failure a `503`, an unknown mode a `403`
+deny, never a grant. **Double opt-in**, OFF by default: compiled only with the `solid-authz` cargo
+feature **and** served only when `--solid-authz` / `SPARQ_SOLID_AUTHZ=1` is set (mirrors `shacl` /
+`terse`); with the feature but not the flag, `/authz/*` is `404`. Read-gated by `--auth-token-read`.
+This v1 is **stateless per request** (the dataset is supplied, not the server's own loaded store) — a
+stateful "authorise over the loaded pod" variant is a deliberate follow-up (it would thread a
+materialised `PodStore` through the concurrent-serving `AppState`).
+
+```sh
+cargo run -p sparq-server --features solid-authz -- data.ttl --solid-authz
+curl -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
+  "dataset": "<https://pod.ex/n1#it> <https://ex.dev/ns#t> \"hi\" <https://pod.ex/n1> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .",
+  "session": { "agent": "https://alice.ex/card#me" }, "resource": "https://pod.ex/n1", "mode": "read", "view": "wac" }'
+# → 200 {"allow":true,"grantedModes":["read"],"governingAcl":"https://pod.ex/.acl","scope":"http://www.w3.org/ns/auth/acl#default","status":"resolved","aclLink":"<https://pod.ex/.acl>; rel=\"acl\""}
+```
+
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
 
@@ -1045,6 +1085,7 @@ env overrides the default.
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
+| `--solid-authz` | `SPARQ_SOLID_AUTHZ` | off | (feature `solid-authz`) serve the Solid WAC/ACP authorization endpoints `POST /authz/decide`+`/wac-allow`+`/query` — a fail-closed HTTP shell over `sparq-solid`; POST the pod dataset + an already-resolved session, get the decision / `WAC-Allow` value / access-controlled query result; read-only — see "Solid WAC/ACP authorization endpoints" |
 | `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
 | `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |

@@ -159,7 +159,7 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   1. **Equal in a rule head is REJECTED** — `validate()` returns `RifError::EqualInConclusion`. This is the RIF-Core syntactic restriction (unlike RIF-BLD, Core does not permit equality in conclusions).
   2. **`t = t` (identical after substitution) is eliminated** — `Equal { left: Term::Iri("x"), right: Term::Iri("x") }` (or `?n=?n`) is trivially true and dropped. It contributes NO bindings for range-restriction — if a head variable is SOLELY bound by a `?x=?x` atom, `validate()` rejects the rule with `UnboundHeadVar` (unifying a variable with itself binds nothing).
   3. **`?x = t` (one side a variable) is SUBSTITUTED** — `t` replaces `?x` throughout head+body at validate/lower time, so `?x` becomes **bound-by-substitution** (`?x # C :- ?x = <a>` collapses to the fact `<a> # C`). **`?x = ?y` (two distinct variables) is UNIFIED** — one name is renamed to the other everywhere, so the join requires the SAME node: same-node reflexivity fires *without* any `owl:sameAs` assertion (fixes V2), and an asserted `owl:sameAs` between DISTINCT nodes never over-derives the equality (fixes V1). Substitution runs to a fixpoint, so chained `?x=?y, ?y=t` collapse both to `t`.
-  4. **Distinct GROUND constants are REJECTED fail-closed** — `validate()` returns `RifError::DistinctGroundEqual { left, right }` (including a distinct ground *created* by substitution, e.g. `?x=<a>, ?y=<b>, ?x=?y`). Value-space equality (e.g. `"1"^^xsd:integer = "1.0"^^xsd:decimal`) depends on the sq-v5evr value-space comparator (issue #1646, not yet merged); the front-end refuses rather than answering incorrectly. No body `Equal` atom ever reaches N3 lowering — a stray one fails closed, never emits `owl:sameAs`.
+  4. **Distinct GROUND constants are REJECTED fail-closed** — `validate()` returns `RifError::DistinctGroundEqual { left, right }` (including a distinct ground *created* by substitution, e.g. `?x=<a>, ?y=<b>, ?x=?y`). Value-space equality (e.g. `"1"^^xsd:integer = "1.0"^^xsd:decimal`) needs the substrate value-space comparator (`Num::cmp_relational`, sq-v5evr / #1646 — now **merged**), which the RIF Equal-atom path has **not yet adopted**; until that wiring lands the front-end refuses rather than answering incorrectly. No body `Equal` atom ever reaches N3 lowering — a stray one fails closed, never emits `owl:sameAs`.
 - **Builtins (`rif::Builtin`).** Numeric predicates (`NumericEqual`/`LessThan`/`GreaterThan`/`NotLessThan`/`NotGreaterThan`/`NumericNotEqual`) + functions (`NumericAdd`/`Subtract`/`Multiply`/`Divide`), string predicates (`StringContains`/`StartsWith`/`EndsWith`) + functions (`StringConcat`/`StringLength`/`StringUpperCase`/`StringLowerCase`/`StringEncodeForUri`), and list `ListContains`/`ListLength`/`ListConcatenate` (variadic — `is_variadic()` returns `true`; `arity()` is the minimum). `is_filter()` distinguishes a predicate (all args inputs) from a function (last arg = computed output). Each lowers to the equivalent `math:`/`string:`/`list:` N3 builtin. A **deferral ledger** (`rif::UNIMPLEMENTED`) records builtins that are NOT mapped because no sound N3 target exists today (e.g. `func:numeric-integer-divide` truncation semantics, `pred:matches` XSD-regex vs Rust-regex dialect gap, date/time builtins lacking a temporal tower); those entries are tracked, never silently dropped.
 - **Builtin SAFETY / range-restriction (enforced).** `Document::validate()` (also called by `to_n3_source`/`closure`) **rejects** an unsafe rule with a `RifError` rather than letting the chainer loop or over-derive: a head variable not bound by a positive body atom (`UnboundHeadVar`), a builtin *input* not range-restricted (`UnboundBuiltinInput`), a builtin in a head (`BuiltinInHead`), wrong arity (`BadBuiltinArity`), Equal in a head (`EqualInConclusion`), or distinct ground constants in a body Equal (`DistinctGroundEqual`).
 - **MONOTONE — NAF is EXCLUDED by design.** RIF-Core is monotone Horn; negation-as-failure / RIF-PRD actions / aggregation are **not in the dialect** and are not representable in the `Atom` model. Adding facts only ever *adds* conclusions. Larger-RIF surface (RIF-BLD function symbols, the SPARQL-RIF Core Entailment Regime) is documented out-of-scope in `rif::UNIMPLEMENTED` — tracked, never faked. The expressivity ratchet is `sparq-conformance`'s `rif_core_suite` (opt-in `rif-core` feature; `RIF_CORE_FLOOR`, a sparq-EXTENSION row in the central scoreboard).
@@ -442,14 +442,19 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 **Same-box materialization comparison (sparq vs Jena / VLog / Nemo).** To compare
 sparq's closure materialization against other reasoners on the LUBM `(ABox+TBox)`
 corpus, run `scripts/bench/materialize-same-box.sh` (`ONLY=sparq LUBM_UNIVS=1 …`
-for the fast self-check). The oracle is the **closure size** (pinned at `univ=1`:
-`owl=150589`, `rdfs=126732`). Critical honesty caveat: sparq `reason owl` is the
-**full W3C OWL 2 RL/RDF** rule table, whereas Jena has no full OWL 2 RL reasoner
-(its `OWL_MICRO`/`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic
-triples), and VLog/Nemo are general Datalog engines needing a separately-validated
-OWL-RL encoding — so the closure *sizes differ by construction* and the harness
-records this per column (`count_crosscheck.profile_caveat`) rather than reconciling
-them. Never read a raw closure-size delta as a correctness gap without the profile.
+for the fast self-check; supply `VLOG=`/`NEMO=` binary paths for those columns).
+The oracle is the **closure size** (pinned at `univ=1`: `owl=150589`,
+`rdfs=126732`). The VLog and Nemo columns run **validated Datalog encodings**
+(`bench/reason-encodings/{vlog/*.dlog,nemo/*.rls}`, `sq-hmd7l.30/.31`) that
+reproduce sparq's closure **set-for-set** — so all three engines' closure counts
+**AGREE** (folded into `count_crosscheck.same_ruleset_agree`). Critical honesty
+caveat: this holds because sparq `reason owl` is the **full W3C OWL 2 RL/RDF** rule
+table and the encodings transcribe exactly the rules the LUBM TBox exercises; a
+**Jena** column, by contrast, has no full OWL 2 RL reasoner (its `OWL_MICRO`/
+`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic triples) so its
+closure size *differs by construction* — recorded per column as a profile caveat,
+never reconciled. Never read a raw closure-size delta as a correctness gap without
+the profile.
 
 ## Gotchas / feature flags / prerequisites
 
@@ -497,4 +502,4 @@ full output-mode + builtins-coverage tables.
 - `mpc-protocols` — multi-party layer over (federated) SPARQL.
 - `hdt-format`, `fused-decompress-parse`, `rust-parallel-parsing` — sibling ingest/storage skills for getting triples into the graph you then reason over.
 - `research/owl2-el-ql-reasoning-spike.md` — the EL/QL feasibility spike: why EL first, the RL-incompleteness proof (the CR4 counterexample), and the phased plan (E1–E6) `sparq-reason-el` implements.
-- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` implements through phases Q1–Q3; only the conformance-floor graduation remains deferred).
+- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` implements through phases Q1–Q3, and the sparq-extension conformance floors — the DL-Lite_R certain-answer floor `QL_DLLITE_FLOOR` and the sound-subset entailment-arm floor `QL_ENTAILMENT_FLOOR` — have both graduated, sq-qo1a9 / sq-pbz04.3.4).

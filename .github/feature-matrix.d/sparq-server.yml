@@ -103,3 +103,29 @@
   crate: "sparq-server"
   features: "change-stream"
   test: true
+
+# [FABLE-5] sq-snopa.6 (issue #992 FR-4): the OPT-IN Solid WAC/ACP HTTP authorization surface
+# (`POST /authz/decide`+`/wac-allow`+`/query`), a fail-closed HTTP shell over the `sparq-solid`
+# library authoriser. The `crate::solid_authz` module (its handlers + the pure helpers + 12
+# in-module unit tests), the `ServerConfig::solid_authz` field + its Default/from_env arms, the
+# route mount, the optional `sparq-solid` dependency, and the `tests/solid_authz.rs` integration
+# suite are ALL `#[cfg(feature = "solid-authz")]`, so the DEFAULT build never compiled, clippy'd or
+# tested this code — and, crucially, the LOAD-BEARING FAIL-CLOSED integration tests would never run
+# in CI without this leg (the structural guard `scripts/check-feature-test-execution.py` flags
+# exactly that gap). This leg builds it, runs `clippy --all-targets -D warnings` with the feature ON
+# (the real gate), and runs the crate's tests — which now include the 12 `solid_authz::tests` unit
+# tests AND the 10-test gated `tests/solid_authz.rs` integration suite that drives the REAL axum
+# path: the opt-in 404, a real allow with FR-5 `governingAcl`/`aclLink` provenance, and the
+# fail-closed denies (anonymous 403, unparseable-dataset 400, unknown-mode 403, ungranted-mode 403,
+# grant-less query → zero rows, read-auth 401/200). `solid-authz` pulls `server` + optional
+# `sparq-solid` (no new EXTERNAL dependency — sparq-solid is a workspace crate that transitively
+# reuses the already-present sparq-engine + oxrdf), so the full async server compiles under it.
+# A dedicated single-feature leg (not folded into a broader compile) mirrors the `tpf` / `terse` /
+# `change-stream` pattern above and keeps the access-control soundness surface's tests executing on
+# their own discoverable check-run. Verified locally: `cargo test -p sparq-server --features
+# solid-authz` runs both suites; `clippy --all-targets -D warnings` is clean in the default,
+# solid-authz, and all-features states.
+- name: "sparq-server (solid-authz — POST /authz/* WAC/ACP HTTP surface)"
+  crate: "sparq-server"
+  features: "solid-authz"
+  test: true
