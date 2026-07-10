@@ -595,9 +595,10 @@ pub(crate) mod sip {
 // because `F` references OUTER variables (SP2Bench q06:
 // `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` evaluates the
 // full right side against the whole document set. This path instead:
-//   (a) partitions `F` into EQUALITY conjuncts `?outer = ?inner` (correlation) whose
-//       `?inner` is certain-in-`B` and `?outer` is a left variable, and a RESIDUAL
-//       theta remainder (everything else, e.g. `?yr2 < ?yr`);
+//   (a) partitions `F` into var-to-var CORRELATION conjuncts `?outer θ ?inner` whose
+//       `?inner` is certain-in-`B` and `?outer` is a left variable — where θ is value
+//       `=`, `sameTerm`, or a single-variable `?a IN (?b)` membership (sq-3cmr4) — and a
+//       RESIDUAL theta remainder (everything else, e.g. `?yr2 < ?yr`);
 //   (b) for each distinct left correlation tuple, SEEDS the `B` scan sideways with the
 //       outer IRI bound into `?inner`'s position (extending the #1741 SIP machinery to
 //       the anti-join), evaluating a tiny correlated `B'` instead of the cold corpus;
@@ -605,14 +606,21 @@ pub(crate) mod sip {
 //       `eval_expr` (3-valued: an error / false does NOT match, so the left row
 //       SURVIVES); the left row is dropped iff some `b` makes the whole condition true.
 //
+// For a very large anchor side the hash-path per-left-row probe is fanned out over
+// cores under the `parallel` feature (sq-f1emb): only the boolean elimination VERDICTS
+// are parallelised — the ordered output build + budget truncation stay serial — so the
+// result is byte-identical to the serial probe.
+//
 // Soundness / semantic traps (each has a witness test):
-//   * `?outer = ?inner` is SPARQL `=` (VALUE equality), not `sameTerm`. Seeding by term
-//     identity is exact ONLY when the pushed outer value is an IRI (IRI value-equality
-//     IS term identity). A left row whose correlation value is a LITERAL routes through
-//     the value-correct COLD anti-join (B evaluated once, full `F` re-checked per pair
-//     via `eval_expr`) — never the id-seeding fast path (the sq-lr2ii class: high-
-//     precision decimals, whitespace-padded numerics — a term-identity probe would miss
-//     a value-equal-but-not-identical literal and SPURIOUSLY KEEP a row that must drop).
+//   * The correlation relation θ is load-bearing: value `=`, `sameTerm` and id-equality
+//     are DIFFERENT relations on value-equal id-distinct literals (`"1"` vs `"01"`). A
+//     value-`=` correlation (including single-var `IN`) seeds / id-probes EXACTLY only
+//     when the outer value is an IRI or blank node (where `=` IS term identity); a
+//     LITERAL routes through the value-correct COLD anti-join with `=` re-checked (the
+//     sq-lr2ii class — a term-identity probe would miss a value-equal-but-not-identical
+//     literal and SPURIOUSLY KEEP a row that must drop). A `sameTerm` correlation is
+//     TERM IDENTITY for EVERY kind, so a literal key is itself id-probeable and any
+//     value-correct scan re-checks with `sameTerm`, never `=`.
 //   * Multiplicity: each surviving left row is emitted ONCE (with its original
 //     multiplicity), never multiplied by the number of `B` matches it lacks.
 //   * Output layout is the LeftJoin's: surviving left rows padded with `NO_ID` for every
@@ -7928,14 +7936,37 @@ fn left_outer_merge(
 // [FABLE-5] See the `theta_antijoin` module comment near the top of this file for the
 // shape, the SIP seeding, and the full soundness argument.
 
-/// One correlation conjunct `?outer = ?inner` extracted from the OPTIONAL condition,
-/// where `?inner` is certain-in-`B` and `?outer` is a left variable. The remaining
-/// conjuncts (residual theta) are re-checked verbatim per candidate right row.
+/// Which equality RELATION a correlation conjunct expresses. This is load-bearing for
+/// soundness: value `=`, `sameTerm`, and id-equality are DIFFERENT relations on RDF
+/// literals (a value-equal but id-distinct pair of literals exists), so the id-bucket
+/// probe eligibility AND the per-candidate re-check expression differ by kind. [FABLE-5]
+/// (sq-3cmr4)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CorrKind {
+    /// SPARQL value equality `?outer = ?inner` (also the desugaring of a single-variable
+    /// `?outer IN (?inner)`). Value-equality (sq-lr2ii): an id-bucket probe is exact ONLY
+    /// when the correlation value is a NamedNode/BlankNode (where `=` coincides with term
+    /// identity); a LITERAL key must take the value-correct scan with `=` re-checked.
+    Eq,
+    /// SPARQL `sameTerm(?outer, ?inner)` — TERM IDENTITY. Two terms are `sameTerm` iff
+    /// identical (same IRI / same blank id / same lexical+datatype+language literal),
+    /// which under dictionary interning is EXACTLY id-equality — for EVERY term kind,
+    /// literals included. So an id-bucket probe is exact even for a literal key, and the
+    /// per-candidate re-check (when a scan is taken) must be `sameTerm`, never `=`.
+    SameTerm,
+}
+
+/// One correlation conjunct `?outer θ ?inner` extracted from the OPTIONAL condition,
+/// where `?inner` is certain-in-`B` and `?outer` is a left variable and `θ` is the
+/// relation named by `kind`. The remaining conjuncts (residual theta) are re-checked
+/// verbatim per candidate right row.
 struct Correlation {
     /// Column of `?outer` in the LEFT bindings.
     left_col: usize,
     /// The certain-in-`B` variable `?inner` seeded sideways into the right scan.
     inner_var: Variable,
+    /// The equality relation `θ` this conjunct expresses (`=` or `sameTerm`). [FABLE-5]
+    kind: CorrKind,
 }
 
 /// Attempts the correlated theta anti-join for `Filter(!bound(?nb), LeftJoin(A, B, F))`.
@@ -7986,17 +8017,19 @@ fn try_theta_antijoin(
         return Ok(Some(Bindings::unsorted(out_vars, Vec::new())));
     }
 
-    // Partition the OPTIONAL condition into correlation equalities and a residual.
-    // A correlation conjunct is `?outer = ?inner` (either orientation) with `?inner`
-    // certain in `B` and `?outer` a LEFT variable. Everything else is residual theta,
-    // re-checked verbatim on the merged row. `sameTerm` is NOT treated as a
-    // correlation (it is term identity, but keeping it in the residual is always
-    // sound and it is not the q06 idiom). [FABLE-5]
+    // Partition the OPTIONAL condition into correlation conjuncts and a residual.
+    // A correlation conjunct is a var-to-var equality `?outer θ ?inner` (either
+    // orientation) with `?inner` certain in `B` and `?outer` a LEFT variable, where θ is
+    // value `=`, `sameTerm`, OR a single-variable `?a IN (?b)` membership (which
+    // desugars to `?a = ?b`). Everything else — a constant, a multi-element `IN`, a
+    // non-var operand, an inequality — is residual theta, re-checked VERBATIM on the
+    // merged row (always sound). A `?a IN (const, …)` list with no in/outer variable is
+    // NOT a correlation (nothing to seed sideways). [FABLE-5] (sq-3cmr4)
     let conjuncts = split_and(cond);
     let mut correlations: Vec<Correlation> = Vec::new();
     let mut residual: Vec<&Expression> = Vec::new();
     for c in &conjuncts {
-        if let Some((va, vb)) = as_var_equality(c) {
+        if let Some((va, vb, kind)) = as_correlation_pair(c) {
             // Orient: the certain-in-B side is `?inner`, the left side is `?outer`.
             let (outer, inner_var) = if b_certain.contains(&vb) && left_b.col(&va).is_some() {
                 (va.clone(), vb.clone())
@@ -8017,7 +8050,7 @@ fn try_theta_antijoin(
                 residual.push(c);
                 continue;
             };
-            correlations.push(Correlation { left_col, inner_var });
+            correlations.push(Correlation { left_col, inner_var, kind });
         } else {
             residual.push(c);
         }
@@ -8088,55 +8121,96 @@ fn try_theta_antijoin(
             .enumerate()
             .filter_map(|(lc, v)| b_all.col(v).map(|bc| (lc, bc)))
             .collect();
-        // The correlation `=` re-checks, for the value-correct scan of a literal-keyed
-        // left row (an IRI-keyed row's equality is already exact via the id bucket).
-        let eq_checks: Vec<Expression> = correlations
-            .iter()
-            .map(|c| {
-                Expression::Equal(
-                    Box::new(Expression::Variable(out_vars[c.left_col].clone())),
-                    Box::new(Expression::Variable(c.inner_var.clone())),
-                )
-            })
-            .collect();
-        let mut value_checks: Vec<Expression> = eq_checks.clone();
+        // The correlation re-checks, for the value-correct scan of a NON-id-probeable
+        // left row (an id-probeable row's correlation is already exact via the id bucket).
+        // Each conjunct uses ITS OWN relation: `=` for a value-equality correlation, but
+        // `sameTerm` for a sameTerm correlation (they DIFFER on value-equal id-distinct
+        // literals). [FABLE-5] (sq-3cmr4)
+        let corr_checks: Vec<Expression> =
+            correlations.iter().map(|c| corr_recheck_expr(c, &out_vars)).collect();
+        let mut value_checks: Vec<Expression> = corr_checks.clone();
         value_checks.extend(residual_owned.iter().cloned());
 
-        for lrow in &left_b.rows {
-            if budget::exhausted(result_rows.len()) {
-                break;
-            }
-            // Every correlation value id-hashable (a NamedNode OR BlankNode, never a
-            // literal)? Then an exact id-bucket probe is sound: for IRIs and blank nodes
-            // SPARQL `=` coincides with term identity. Per SPARQL 1.1 §17.4.1.7
-            // (RDFterm-equal), `=` on two DISTINCT non-literal terms returns FALSE (a type
-            // error arises only when BOTH arguments are literals) — and FALSE and error
-            // both mean NO MATCH under the anti-join, which an id-bucket non-match
-            // reproduces exactly. A LITERAL value is the sq-lr2ii value-equality hazard →
-            // value-correct scan. [FABLE-5]
-            let id_hashable = correlations.iter().all(|c| {
-                matches!(
-                    term_of(graph, local, lrow[c.left_col]),
-                    Some(Term::NamedNode(_) | Term::BlankNode(_))
-                )
-            });
-            let matched = if id_hashable {
+        // Per-left-row elimination verdict: `true` iff SOME right row eliminates `lrow`
+        // (so the row does NOT survive the anti-join). Every input it reads — `graph`,
+        // `local` (immutable), the buckets, the checks — is shared read-only, so this is
+        // safe to evaluate in parallel across left rows. `local` is `&LocalVocab` here
+        // (never mutated inside the probe): a probe interns nothing, so no per-row id
+        // divergence. [FABLE-5] (sq-3cmr4 / sq-f1emb)
+        let eliminated = |lrow: &Row| -> Result<bool, String> {
+            // Every correlation value id-bucket-probeable? Then an exact id-bucket probe
+            // is sound (see `corr_id_probeable` for the per-kind argument): for a value
+            // `=` correlation the value must be a NamedNode/BlankNode (where `=` coincides
+            // with term identity — per SPARQL 1.1 §17.4.1.7 `=` on two DISTINCT non-literal
+            // terms is FALSE, and FALSE/error both mean NO MATCH, which an id-bucket
+            // non-match reproduces); a LITERAL under `=` is the sq-lr2ii value-equality
+            // hazard → value-correct scan. For a `sameTerm` correlation EVERY kind is
+            // id-probeable (id-equality IS sameTerm for all term kinds, literals included).
+            // [FABLE-5] (sq-3cmr4)
+            let id_hashable = correlations
+                .iter()
+                .all(|c| corr_id_probeable(c.kind, term_of(graph, local, lrow[c.left_col]).as_ref()));
+            if id_hashable {
                 let key: Vec<Id> = correlations.iter().map(|c| lrow[c.left_col]).collect();
                 match buckets.get(&key) {
-                    None => false,
+                    None => Ok(false),
                     Some(cands) => antijoin_row_matches(
                         graph, local, lrow, &b_all, cands, &shared, &out_src, &tmp_vars,
                         &residual_owned,
-                    )?,
+                    ),
                 }
             } else {
-                // Literal-keyed left row: value-correct full scan with `=` re-checked.
+                // Literal-keyed left row: value-correct full scan with the correlation
+                // relation re-checked (`=` or `sameTerm` per kind).
                 antijoin_row_matches(
                     graph, local, lrow, &b_all, &all_b, &shared, &out_src, &tmp_vars,
                     &value_checks,
-                )?
-            };
-            if !matched {
+                )
+            }
+        };
+
+        // [FABLE-5] (sq-f1emb) For a VERY LARGE anchor side, the per-left-row probe is
+        // embarrassingly parallel (each verdict reads only shared read-only state).
+        // Mirror the parallel hash-join / BIND threshold (`PAR_THRESHOLD`): fan the
+        // VERDICT computation out over cores, collecting one `bool` per row IN ORDER, then
+        // build + budget-truncate the surviving output rows SERIALLY in the identical left
+        // order. Because only the verdicts are parallelised (never the ordered output
+        // build, never `local` interning), the result is byte-identical to the serial
+        // probe — the order-preserving `collect` + serial truncation reproduce exactly the
+        // serial loop's early-`break`-on-budget survivor prefix. The EXISTS residual re-
+        // enters the thread-local function / view / spatial state, so each worker installs
+        // the snapshot exactly like the FILTER / BIND parallel paths.
+        #[cfg(feature = "parallel")]
+        let verdicts: Vec<bool> = if left_b.rows.len() >= PAR_THRESHOLD {
+            use rayon::prelude::*;
+            let fns = functions::snapshot();
+            let vw = view::snapshot();
+            let spx = spatial::snapshot();
+            left_b
+                .rows
+                .par_iter()
+                .map(|lrow| {
+                    let _fns = functions::worker_install(&fns);
+                    let _vw = view::worker_install(&vw);
+                    let _spx = spatial::worker_install(&spx);
+                    eliminated(lrow)
+                })
+                .collect::<Result<Vec<bool>, String>>()?
+        } else {
+            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?
+        };
+        #[cfg(not(feature = "parallel"))]
+        let verdicts: Vec<bool> =
+            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?;
+
+        // Serial ordered build + budget truncation: identical to the serial probe loop's
+        // `if !matched { push } ; break on budget` — the survivor prefix and its order are
+        // reproduced exactly whether the verdicts were computed serially or in parallel.
+        for (lrow, &elim) in left_b.rows.iter().zip(&verdicts) {
+            if budget::exhausted(result_rows.len()) {
+                break;
+            }
+            if !elim {
                 let mut combined: Row = lrow.clone();
                 combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 result_rows.push(combined);
@@ -8202,14 +8276,13 @@ fn try_theta_antijoin(
             .filter_map(|(lc, v)| b_prime.col(v).map(|bc| (lc, bc)))
             .collect();
         // When NOT seeded, the correlation equalities were not enforced by substitution
-        // — prepend them to the theta so they are re-checked with full value `=`.
+        // — prepend them to the theta so they are re-checked with their FULL relation
+        // (`=` for a value-equality correlation, `sameTerm` for a sameTerm correlation:
+        // they differ on value-equal id-distinct literals). [FABLE-5] (sq-3cmr4)
         let mut checks: Vec<Expression> = Vec::new();
         if !seeded {
             for c in &correlations {
-                checks.push(Expression::Equal(
-                    Box::new(Expression::Variable(out_vars[c.left_col].clone())),
-                    Box::new(Expression::Variable(c.inner_var.clone())),
-                ));
+                checks.push(corr_recheck_expr(c, &out_vars));
             }
         }
         checks.extend(residual_owned.iter().cloned());
@@ -8422,16 +8495,69 @@ fn as_not_bound_var(e: &Expression) -> Option<Variable> {
     }
 }
 
-/// `Some((a, b))` iff `e` is `?a = ?b` (a variable-to-variable SPARQL `=` equality).
-/// `sameTerm` is intentionally NOT matched (it is term identity, not the correlation
-/// idiom — leaving it in the residual is always sound).
-fn as_var_equality(e: &Expression) -> Option<(Variable, Variable)> {
+/// `Some((a, b, kind))` iff `e` is a VAR-TO-VAR correlation conjunct the theta anti-join
+/// can seed sideways: `?a = ?b` (`CorrKind::Eq`), `sameTerm(?a, ?b)` (`CorrKind::SameTerm`),
+/// or a SINGLE-variable membership `?a IN (?b)` (which desugars to `?a = ?b`, so `Eq`).
+/// Returns `None` for a constant operand, an inequality, or a multi-element / constant
+/// `IN` list — those stay in the residual (always sound). Orientation (which is inner /
+/// outer) is decided by the caller from the certain-in-B / left-column sets. [FABLE-5]
+/// (sq-3cmr4)
+fn as_correlation_pair(e: &Expression) -> Option<(Variable, Variable, CorrKind)> {
     match e {
         Expression::Equal(a, b) => match (a.as_ref(), b.as_ref()) {
-            (Expression::Variable(va), Expression::Variable(vb)) => Some((va.clone(), vb.clone())),
+            (Expression::Variable(va), Expression::Variable(vb)) => {
+                Some((va.clone(), vb.clone(), CorrKind::Eq))
+            }
+            _ => None,
+        },
+        Expression::SameTerm(a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expression::Variable(va), Expression::Variable(vb)) => {
+                Some((va.clone(), vb.clone(), CorrKind::SameTerm))
+            }
+            _ => None,
+        },
+        // `?a IN (?b)` is exactly `?a = ?b` (SPARQL 1.1 §17.4.1.9): a single-variable
+        // membership. A list with a constant element, more than one element, or a
+        // non-variable target is NOT this seedable shape — decline (residual, sound).
+        Expression::In(target, list) => match (target.as_ref(), list.as_slice()) {
+            (Expression::Variable(va), [Expression::Variable(vb)]) => {
+                Some((va.clone(), vb.clone(), CorrKind::Eq))
+            }
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// The per-candidate re-check expression for a correlation, in `out_vars` order: `=`
+/// for a value-equality correlation, `sameTerm` for a sameTerm correlation. These are
+/// DIFFERENT relations on value-equal id-distinct literals, so the kind is load-bearing
+/// for soundness whenever a value-correct scan is taken (a non-id-probeable key, or the
+/// un-seeded SIP path). [FABLE-5] (sq-3cmr4)
+fn corr_recheck_expr(c: &Correlation, out_vars: &[Variable]) -> Expression {
+    let lhs = Box::new(Expression::Variable(out_vars[c.left_col].clone()));
+    let rhs = Box::new(Expression::Variable(c.inner_var.clone()));
+    match c.kind {
+        CorrKind::Eq => Expression::Equal(lhs, rhs),
+        CorrKind::SameTerm => Expression::SameTerm(lhs, rhs),
+    }
+}
+
+/// Is a left-row correlation value of the given `term` id-bucket-probeable under `kind`?
+///
+/// * `SameTerm` — YES for every term kind (a dictionary id equality IS `sameTerm`: two
+///   terms share an id iff identical). An `Unbound` (`None`) key is NOT probeable — an
+///   unbound operand makes `sameTerm` error, so route it through the scan where the
+///   3-valued residual decides (defensive: a correlation column is certain-in-A, so this
+///   is unreachable in practice).
+/// * `Eq` — YES only for a NamedNode/BlankNode (`=` coincides with term identity there);
+///   a literal is the sq-lr2ii value-equality hazard and an unbound is unprobeable.
+///
+/// [FABLE-5] (sq-3cmr4)
+fn corr_id_probeable(kind: CorrKind, term: Option<&Term>) -> bool {
+    match kind {
+        CorrKind::SameTerm => term.is_some(),
+        CorrKind::Eq => matches!(term, Some(Term::NamedNode(_) | Term::BlankNode(_))),
     }
 }
 
@@ -17500,19 +17626,69 @@ mod theta_antijoin_unit {
     }
 
     #[test]
-    fn as_var_equality_matches_var_to_var_only() {
+    fn as_correlation_pair_classifies_eq_sameterm_and_single_var_in() {
+        // `?a = ?b` → Eq correlation.
         assert_eq!(
-            as_var_equality(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))),
-            Some((var("a"), var("b")))
+            as_correlation_pair(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))),
+            Some((var("a"), var("b"), CorrKind::Eq))
+        );
+        // `sameTerm(?a, ?b)` → SameTerm correlation (sq-3cmr4 extension).
+        assert_eq!(
+            as_correlation_pair(&Expression::SameTerm(Box::new(ev("a")), Box::new(ev("b")))),
+            Some((var("a"), var("b"), CorrKind::SameTerm))
+        );
+        // `?a IN (?b)` desugars to `?a = ?b` → Eq correlation.
+        assert_eq!(
+            as_correlation_pair(&Expression::In(Box::new(ev("a")), vec![ev("b")])),
+            Some((var("a"), var("b"), CorrKind::Eq))
         );
         // A var = IRI equality is NOT a correlation (one side is a constant).
-        assert!(as_var_equality(&Expression::Equal(
+        assert!(as_correlation_pair(&Expression::Equal(
             Box::new(ev("a")),
             Box::new(Expression::NamedNode(nn("http://e/x")))
         ))
         .is_none());
-        // `sameTerm` is intentionally not a correlation (kept in the residual).
-        assert!(as_var_equality(&Expression::SameTerm(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+        // A CONSTANT-list `IN` is NOT a correlation (nothing to seed) — brief's rule.
+        assert!(as_correlation_pair(&Expression::In(
+            Box::new(ev("a")),
+            vec![Expression::NamedNode(nn("http://e/x"))]
+        ))
+        .is_none());
+        // A MULTI-element `IN` (even all-vars) is NOT the single-target seedable shape.
+        assert!(
+            as_correlation_pair(&Expression::In(Box::new(ev("a")), vec![ev("b"), ev("c")])).is_none()
+        );
+        // An inequality is not a correlation.
+        assert!(as_correlation_pair(&Expression::Less(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+    }
+
+    #[test]
+    fn corr_recheck_expr_uses_the_correlations_own_relation() {
+        // An Eq correlation re-checks with `=`; a SameTerm correlation with `sameTerm`
+        // (they DIFFER on value-equal id-distinct literals — the soundness point).
+        let out = vec![var("outer"), var("inner")];
+        let eq = Correlation { left_col: 0, inner_var: var("inner"), kind: CorrKind::Eq };
+        assert!(matches!(corr_recheck_expr(&eq, &out), Expression::Equal(..)));
+        let st = Correlation { left_col: 0, inner_var: var("inner"), kind: CorrKind::SameTerm };
+        assert!(matches!(corr_recheck_expr(&st, &out), Expression::SameTerm(..)));
+    }
+
+    #[test]
+    fn corr_id_probeable_is_kind_and_term_aware() {
+        use oxrdf::{BlankNode, Literal};
+        let iri = Term::NamedNode(nn("http://e/x"));
+        let blank = Term::BlankNode(BlankNode::new("b0").unwrap());
+        let lit = Term::Literal(Literal::new_simple_literal("hi"));
+        // sameTerm: EVERY bound kind is id-probeable (id-equality IS sameTerm).
+        assert!(corr_id_probeable(CorrKind::SameTerm, Some(&iri)));
+        assert!(corr_id_probeable(CorrKind::SameTerm, Some(&blank)));
+        assert!(corr_id_probeable(CorrKind::SameTerm, Some(&lit)));
+        assert!(!corr_id_probeable(CorrKind::SameTerm, None), "unbound is not probeable");
+        // Eq: only NamedNode/BlankNode; a LITERAL is the value-equality hazard.
+        assert!(corr_id_probeable(CorrKind::Eq, Some(&iri)));
+        assert!(corr_id_probeable(CorrKind::Eq, Some(&blank)));
+        assert!(!corr_id_probeable(CorrKind::Eq, Some(&lit)), "literal Eq must take value scan");
+        assert!(!corr_id_probeable(CorrKind::Eq, None));
     }
 
     #[test]
