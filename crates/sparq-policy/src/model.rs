@@ -310,6 +310,22 @@ pub enum Operator {
     /// `odrl:isA` — the request value IS the right operand (a type/identity
     /// membership check, treated as equality here).
     IsA,
+    /// `odrl:isAnyOf` — the request value equals **at least one** member of the
+    /// right-operand set (the [ODRL 2.2 set-relation
+    /// operator](https://www.w3.org/TR/odrl-vocab/#term-isAnyOf): the left operand
+    /// is *any of* the right-operand values). The right operand uses the same
+    /// `|`/space/comma-separated set encoding as [`Operator::IsPartOf`].
+    /// [FABLE-5] sq-uaz85.
+    IsAnyOf,
+    /// `odrl:isNoneOf` — the request value equals **none** of the members of the
+    /// right-operand set (the [ODRL 2.2
+    /// operator](https://www.w3.org/TR/odrl-vocab/#term-isNoneOf) — the negative
+    /// dual of [`Operator::IsAnyOf`]). Fail-closed like every negative operator: a
+    /// request with **no** evidence for the dimension is *unprovable*, never
+    /// silently satisfied, and a numeric/dateTime operand (no faithful lexical set
+    /// form to negate) is not satisfied either — see [`crate::evaluate`].
+    /// [FABLE-5] sq-uaz85.
+    IsNoneOf,
 }
 
 impl Operator {
@@ -326,6 +342,8 @@ impl Operator {
             "gteq" => Operator::Gteq,
             "isPartOf" => Operator::IsPartOf,
             "isA" => Operator::IsA,
+            "isAnyOf" => Operator::IsAnyOf,
+            "isNoneOf" => Operator::IsNoneOf,
             _ => return None,
         })
     }
