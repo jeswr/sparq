@@ -66,7 +66,7 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 
 1. A `Rule` **matches** when its action permits the request action (per the ODRL action hierarchy — `use` subsumes its sub-actions but not the `transfer` subtree), its `target`/`assignee` (if set) agree (by IRI equality **or collection membership** — see below), and **every** atomic `Constraint` **and** compound `LogicalConstraint` is satisfied (all ANDed).
 2. A `Permission` grants iff it matches **and** all its `Duty`s are discharged.
-3. A matching `Prohibition` **overrides** any permission (carve-out — ODRL Formal Semantics conflict default).
+3. A matching `Prohibition` **overrides** any permission (carve-out — deny-overrides, the one conflict strategy implemented; NOT a spec default: the ODRL 2.2 IM default for an unset `odrl:conflict` is `invalid`, and the ODRL Formal Semantics CG report's conflict machinery is explicitly pending — see the crate README's ODRL conformance note).
 4. **DENY by default:** no matching+discharged permission, or any matching prohibition ⇒ DENY. An empty/malformed policy denies everything; a constraint with no request value, an unknown operator, or a structurally incomplete constraint all fail closed.
 
 ## Constraint operators
