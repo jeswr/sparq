@@ -19,6 +19,8 @@ squared-Euclidean loop is scalar — so a 1M×128 build was aborted at >30min (h
 > is **compute-bound distance search in an already-parallel build with imperfect scaling**, NOT a
 > missing-parallelism bug. See §7 for the full sq-ose80 evaluation and the shipped fix.
 
+<!-- separator: two distinct callouts (MD028) -->
+
 > **NON-CANONICAL throughout.** Every timing below was collected on an **aarch64 EC2 work box
 > (no AVX2)**. Absolute figures are not canonical; the matched-recall *ranking* between kernels is
 > stable across ISAs. The x86_64 AVX2 kernel added here is type-checked + clippy-clean on the
