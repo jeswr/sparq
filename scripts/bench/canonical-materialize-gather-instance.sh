@@ -82,9 +82,11 @@ step "apt deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq || true
 # openjdk JDK (javac: the LUBM UBA generator build + the Jena driver compile),
-# raptor2-utils (rapper: RDF/XML -> N-Triples), cmake+zlib (VLog), docker (hdt-cpp).
+# raptor2-utils (rapper: RDF/XML -> N-Triples), cmake+zlib (VLog), docker (hdt-cpp),
+# libssl-dev (Nemo's cargo dep chain pulls openssl-sys, which needs libssl.pc +
+# pkg-config or the Nemo build fails immediately — sq-hmd7l.32 wave-3).
 apt-get install -y -qq build-essential g++ cmake pkg-config git curl jq python3 unzip \
-  docker.io openjdk-21-jdk-headless raptor2-utils zlib1g-dev bc || step "WARN: apt install returned non-zero"
+  docker.io openjdk-21-jdk-headless raptor2-utils zlib1g-dev libssl-dev bc || step "WARN: apt install returned non-zero"
 
 step "start docker (hdt-cpp column)"
 systemctl enable --now docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1 || true
@@ -135,11 +137,22 @@ fi
 if [ -n "$NEMO_BIN" ]; then step "Nemo built: $NEMO_BIN"; else step "WARN: Nemo build FAILED — column degrades to honest NOT-RUN-LOCALLY (re-run action)"; fi
 
 # ---- 4. the canonical materialization gather -----------------------------------------
+# Pass the competitor bins through EXPORTED env, not an inline `${VLOG_BIN:+VLOG=…}`
+# assignment prefix: a NAME=value produced by parameter expansion lands in COMMAND-WORD
+# position (bash only treats LITERAL NAME=value tokens as an assignment prefix), so the
+# old form tried to exec a file literally named "VLOG=/root/…/vlog" → "No such file or
+# directory" and the materialize run never happened whenever a competitor bin was present
+# (sq-hmd7l.32 wave-3). Export conditionally instead — absent bins stay unset so the
+# adapters emit their honest NOT-RUN-LOCALLY row.
 step "materialize-same-box.sh CANONICAL=1 (univs: $LUBM_UNIVS)"
+if [ -n "$VLOG_BIN" ]; then
+  export VLOG="$VLOG_BIN" VLOG_VERSION="karmaresearch/vlog@${VLOG_COMMIT:0:12} (source build)"
+fi
+if [ -n "$NEMO_BIN" ]; then
+  export NEMO="$NEMO_BIN" NEMO_VERSION="knowsys/nemo $NEMO_TAG (source build)"
+fi
 CANONICAL=1 LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S="$TIMEOUT_S" \
   JAVA_XMX="$JAVA_XMX" OUT_DIR="$OUT" \
-  ${VLOG_BIN:+VLOG="$VLOG_BIN"} ${VLOG_BIN:+VLOG_VERSION="karmaresearch/vlog@${VLOG_COMMIT:0:12} (source build)"} \
-  ${NEMO_BIN:+NEMO="$NEMO_BIN"} ${NEMO_BIN:+NEMO_VERSION="knowsys/nemo $NEMO_TAG (source build)"} \
   bash scripts/bench/materialize-same-box.sh \
   && step "materialize gather done (oracle held)" \
   || step "WARN: materialize-same-box.sh exited non-zero (a pinned univ=1 closure oracle diverged, or a scale failed) — envelopes on disk are still honest per-row records; inspect before citing"
