@@ -3901,6 +3901,7 @@ dependencies = [
  "md-5 0.11.0",
  "oxiri",
  "oxrdf 0.3.3",
+ "proptest",
  "rayon",
  "regex",
  "rustc-hash 2.1.3",
