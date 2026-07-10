@@ -147,6 +147,19 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/d_entail_suite.rs",
         "D_ENTAIL_FLOOR",
     ),
+    // [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG Core test-suite
+    // CONFORMANCE ratchet. `pub const RIF_WG_CORE_FLOOR` lives in this crate's
+    // `tests/rif_wg_core_suite.rs` (behind the opt-in `rif-wg-core` feature, inside the
+    // `gated` module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting do
+    // not affect the match); the guard pins the central scoreboard's `ratchet_floor` to
+    // it so the two can never silently drift. It is a STANDARDS-suite lane (family "W3C
+    // RIF") over the real W3C RIF WG Core test cases — DISTINCT from the
+    // sparq-EXTENSION `RIF_CORE_FLOOR` expressivity ratchet below.
+    (
+        "W3C RIF WG Core test suite",
+        "crates/sparq-conformance/tests/rif_wg_core_suite.rs",
+        "RIF_WG_CORE_FLOOR",
+    ),
     // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 sparql11/service
     // EVALUATION ratchet. `pub const SERVICE_EVAL_FLOOR` lives in this crate's
     // `tests/service_eval_suite.rs` (behind the opt-in `service` feature, inside the
@@ -442,6 +455,9 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("SolidLab ODRL Test Suite"));
     // [OPUS-4.8] sq-e5atd — the W3C SPARQL 1.1 D-entailment ratchet.
     assert!(md.contains("W3C SPARQL 1.1 D-entailment"));
+    // [FABLE-5] sq-pbz04.5.5 — the W3C RIF WG Core test-suite conformance ratchet (a
+    // STANDARDS lane, family "W3C RIF" — NOT the sparq-extension RIF-Core expressivity row).
+    assert!(md.contains("W3C RIF WG Core test suite"));
     // [OPUS-4.8] sq-ddpgx — the W3C SPARQL 1.1 sparql11/service evaluation ratchet.
     assert!(md.contains("W3C SPARQL 1.1 sparql11/service evaluation"));
     // [OPUS-4.8] sq-jaj38 — the W3C SPARQL 1.1 Protocol (HTTP layer) ratchet.
