@@ -88,7 +88,9 @@ CONSOLE_CAP_B="${CONSOLE_CAP_B:-6000}"
 PARSE_GEN_N="${PARSE_GEN_N:-320000}"         # registered bench/parse synthetic dataset size (~162MB NT)
 PREBUILD_ALLOW_S="${PREBUILD_ALLOW_S:-900}"  # budget line item for the one-off workspace release build
 EXTRA_INSTANCE_ENV="${EXTRA_INSTANCE_ENV:-}"
-RESULTS_LOCAL="${RESULTS_LOCAL:-$HOME/sparq-bench-results/multi-axis-$(date -u +%Y%m%dT%H%M%SZ)}"
+# ${HOME:-/root}: cloud-init user-data runs with HOME unset — a bare $HOME under
+# `set -u` killed --instance at this line on the first real launch (rc=1).
+RESULTS_LOCAL="${RESULTS_LOCAL:-${HOME:-/root}/sparq-bench-results/multi-axis-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 # HARD never-touch instance ids (prod + dev) — same list as scripts/orphan-check-bench.sh.
 readonly PROD_INSTANCE="i-090531b4ede8f2d3f"
@@ -149,7 +151,7 @@ print_plan() {
     if [ -e "$root/$harness" ]; then present="present"; else present="ABSENT on this checkout -> honest skip"; fi
     bead="$(axis_bead "$axis")"
     if [ "$axis" = parse ]; then
-      echo "    $n_axes. $axis    bench/parse harness (gen ${PARSE_GEN_N} synthetic triples -> bench-nt/-ttl/-zip)"
+      echo "    $n_axes. $axis    bench/parse harness (gen ${PARSE_GEN_N} synthetic triples -> bench-nt/-ttl/-zip/-ext)"
       echo "         [$present; envelope wrapper pending $bead — raw rows to console until then]"
     else
       echo "    $n_axes. $axis    $harness  (TIMEOUT_S=$TIMEOUT_S CANONICAL=1 OUT_DIR=/root/axis-results/$axis)"
@@ -298,6 +300,10 @@ run_instance() {
         ./target/release/parse-baseline bench-nt  data/synthetic.nt
         ./target/release/parse-baseline bench-ttl data/synthetic.ttl
         ./target/release/parse-baseline bench-zip data/synthetic.nt
+        # External competitor columns (sq-hmd7l.6): serdi / rapper / riot
+        # subprocess rows over the SAME corpus files; absent tool => absent column.
+        ./target/release/parse-baseline bench-ext data/synthetic.nt
+        ./target/release/parse-baseline bench-ext data/synthetic.ttl
       ' "$PARSE_GEN_N" > "$out_dir/parse-rows.txt" 2>&1 || rc=$?
       t1=$(date +%s); wall=$((t1 - t0))
       con "status: $([ "$rc" -eq 0 ] && echo ok || echo failed) rc=${rc} wall_s=${wall}"
@@ -389,12 +395,21 @@ set -x
 exec > >(tee /var/log/gather.log) 2>&1
 
 step() { echo "[STEP \$(date -u +%Y-%m-%dT%H:%M:%SZ)] \$*" | tee -a /root/GATHER_STEP >&2; }
+# cloud-init runs user-data WITHOUT HOME: rustup/cargo/git and every \$HOME expansion
+# (e.g. .cargo/env's PATH prepend, which produced "/.cargo/bin") misroute without this.
+export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 step "apt update+install"
 apt-get update -qq
-# libboost-all-dev: corpus generators; jre: Fuseki-backed axes; raptor2-utils: the
-# parse axis rapper column (absent tool => absent column, never a fake number).
-apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 python3-venv python3-pip unzip docker.io openjdk-21-jre-headless libboost-all-dev bc raptor2-utils || true
+# libboost-all-dev: corpus generators; jre: Fuseki-backed axes; raptor2-utils +
+# serdi: the parse axis rapper/serd columns (absent tool => absent column, never a
+# fake number — but the canonical box provisions all three registered columns).
+apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 python3-venv python3-pip unzip docker.io openjdk-21-jre-headless libboost-all-dev bc raptor2-utils serdi || true
+# Jena riot: the parse axis third competitor column (gap-parse-2026-07 requires it
+# on the canonical box; apt has no package — pinned apache-jena dist, best-effort).
+step "jena riot install"
+curl -fsSL "https://archive.apache.org/dist/jena/binaries/apache-jena-${JENA_VERSION:-5.4.0}.tar.gz" | tar -xz -C /opt \
+  && ln -sf "/opt/apache-jena-${JENA_VERSION:-5.4.0}/bin/riot" /usr/local/bin/riot || step "WARN: riot install failed — parse riot column will be honestly absent"
 step "start docker"
 systemctl enable --now docker || systemctl start docker || true
 for _ in \$(seq 1 60); do docker info >/dev/null 2>&1 && { step "docker up"; break; }; sleep 2; done

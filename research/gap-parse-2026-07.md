@@ -1,13 +1,15 @@
-<!-- [SONNET-4.6] sq-hmd7l.6 first-read gap record. All rows are NON-CANONICAL
-(measured on the shared work box, not a quiet EC2 instance). Canonical numbers
-ride sq-hmd7l.26. -->
+<!-- [SONNET-4.6] sq-hmd7l.6 first-read gap record. The 2026-07-07 rows are
+NON-CANONICAL (shared work box). CANONICAL wave-1 rows (sq-hmd7l.26) are in the
+canonical section below and supersede them. -->
 
 # RDF parse competitor gap — first-read record (2026-07-07)
 
-**Status:** NON-CANONICAL first-read. Canonical execution: sq-hmd7l.26 (quiet EC2).
+**Status:** CANONICAL wave-1 rows recorded (sq-hmd7l.26, quiet EC2 — see the
+canonical section below). Headline: NT CLEARLY-AHEAD only with chunk-parallelism;
+**Turtle single-thread is BEHIND serd (~2×)** — dominance gap row for `sq-hmd7l.27`.
 **Bead:** sq-hmd7l.6. **Epic:** sq-hmd7l.
-**Box:** shared work box (EC2 work instance, not a dedicated bench box — numbers are
-load-dependent and not suitable for publication).
+**Box (first-read sections):** shared work box (EC2 work instance, not a dedicated
+bench box — numbers are load-dependent and not suitable for publication).
 
 ## Harness
 
@@ -86,9 +88,62 @@ In-process reference (from `bench-nt` on the same box, same file):
 3. **Jena riot**: not available on this box. The canonical run (sq-hmd7l.26) must
    have riot installed and should use `riot --count` mode.
 
+## CANONICAL wave-1 rows (`sq-hmd7l.26`)
+
+Provenance: dedicated quiet box `i-06efda08048633f55` (c6i.4xlarge, eu-west-2, tag
+`sparq-bench`, self-terminated, orphan-check clean), commit `a1bf9b48`
+(= `origin/main` `343aee547` + wave-1 runner/harness-only fixes), UTC
+`2026-07-10T00:58:43Z`, `CANONICAL=1`. Corpus: deterministic synthetic
+320 000-entity graph, **2 560 000 triples**; NT 169 964 508 B (~170 MB — clears the
+≥100 MB canonical floor from note 1 above), TTL 60 022 305 B. All external columns
+min-of-3, count crosschecked against the authoritative oxttl count (**count-ok yes
+on every row**; riot required the grouping-separator fix, see below). Raw rows:
+`axis-results/parse/parse-rows.txt`. Cross-read: a first canonical read on box
+`i-01a735e27b1764317` (00:53Z, same commit base; riot rows suppressed there by the
+comma bug, which is why box-2 is transcribed) reproduces the subprocess competitor
+rows to within ~0.5 % and the 16-thread rows to within ~5 %, but the single-thread
+in-process rows ran up to ~28 % FASTER on box-1 (custom NT 1T 0.921 s / 2.78 Mt/s
+vs 1.278 s / 2.00 Mt/s here) — real between-box single-thread variance on the same
+instance type. The verdicts below hold under either reading (NT 1T lead vs serd is
+1.2–1.7×, still not OOM; Turtle 1T stays BEHIND serd ~1.8–2.0×).
+
+### N-Triples (170 MB, 2.56 M triples)
+
+| task | threads | s | MB/s | Mtriples/s |
+|---|---|---|---|---|
+| sparq custom NT parse+intern (in-process) | 1 | 1.278 | 133 | 2.00 |
+| sparq custom NT parse+intern (in-process) | 16 | 0.164 | 1033 | 15.56 |
+| oxttl NT parse-only (in-process reference, not sparq's parser) | 1 | 1.435 | 118 | 1.78 |
+| serdi/serd (subprocess, parse+serialize-to-sink) | 1 | 1.520 | 112 | 1.68 |
+| rapper/raptor2 (subprocess, count-only) | 1 | 2.551 | 67 | 1.00 |
+| Jena riot (subprocess, `--count`) | 1 | 4.896 | 35 | 0.52 |
+
+### Turtle (60 MB, 2.56 M triples)
+
+| task | threads | s | MB/s | Mtriples/s |
+|---|---|---|---|---|
+| sparq Turtle parse+intern (incumbent chunked, in-process) | 1 | 3.153 | 19 | 0.81 |
+| sparq Turtle parse+intern (incumbent chunked, in-process) | 16 | 0.490 | 122 | 5.22 |
+| serdi/serd (subprocess, parse+serialize-to-sink) | 1 | 1.547 | 39 | 1.65 |
+| rapper/raptor2 (subprocess, count-only) | 1 | 2.194 | 27 | 1.17 |
+| Jena riot (subprocess, `--count`) | 1 | 4.913 | 12 | 0.52 |
+
+### Verdicts (fixed vocabulary; regime caveats from the section above apply)
+
+| axis | verdict |
+|---|---|
+| NT, 1 thread | AHEAD-BUT-NOT-OOM vs serd (~1.2× Mt/s; and serd is doing extra serialize work); ~2× vs rapper; ~3.8× vs riot |
+| NT, 16 threads | CLEARLY-AHEAD (~9.3× vs serd — chunk-parallelism is the lever; the external tools are single-threaded by design) |
+| Turtle, 1 thread | **BEHIND serd (~2.0×) and rapper (~1.4×)** — sparq 0.81 Mt/s vs serd 1.65 / rapper 1.17, and serd additionally serializes. Honest dominance-gap row for `sq-hmd7l.27`: single-thread Turtle parse throughput (the incumbent chunked parser sits at oxttl speed, ~0.8 Mt/s) needs a profiling-first fix bead |
+| Turtle, 16 threads | AHEAD-BUT-NOT-OOM (~3.2× vs serd) — parallelism recovers the lead but not by an order of magnitude |
+
+Wave-1 execution notes: (a) riot 5.4.0 prints `Triples = 2,560,000` — the
+grouping-separator count-parse fix (this wave's PR) un-suppressed the riot rows;
+(b) subprocess spawn overhead is ~1–2 % at this corpus size (note 1 satisfied);
+(c) the serdi-faster-than-rapper regime question from the first read reproduces
+canonically on both formats.
+
 ## Pending
 
-- Canonical EC2 run with riot installed: sq-hmd7l.26.
 - suite-id registration (`parse-competitors`): sq-hmd7l.1 (dep, not yet landed).
-- Regime investigation: serdi faster than rapper despite serialize step — profile
-  on canonical box.
+- Turtle single-thread BEHIND row → root-cause fix bead via `sq-hmd7l.27`.
