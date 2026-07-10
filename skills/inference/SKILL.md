@@ -173,12 +173,12 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
-The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 23-XSD-datatype map via `Recognized::standard()` (or bring a custom map via `materialize_d(d, …, …)`):
+The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 30-XSD-datatype map via `Recognized::standard()` — the `DTYPE_TABLE` single source of truth in `dtype.rs` — plus the always-recognized `rdf:langString` (or bring a custom map via `materialize_d(d, …, …)`):
 
 **Supported datatypes** (complete signed/unsigned integer family, exact decimals/temporal):
 - String family: `xsd:string`, `xsd:normalizedString`, `xsd:token`; pattern-restricted derived types `xsd:language`, `xsd:Name`, `xsd:NCName`, `xsd:NMTOKEN`.
 - Boolean: `xsd:boolean`.
-- Integer family (all 12 XSD types): `xsd:integer`, `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte` (signed); `xsd:unsignedLong`/`xsd:unsignedInt`/`xsd:unsignedShort`/`xsd:unsignedByte` (unsigned); `xsd:nonNegativeInteger`/`xsd:positiveInteger`/`xsd:nonPositiveInteger`/`xsd:negativeInteger` (restricted).
+- Integer family (13 XSD types — `xsd:integer` + 12 derived): `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte` (signed); `xsd:unsignedLong`/`xsd:unsignedInt`/`xsd:unsignedShort`/`xsd:unsignedByte` (unsigned); `xsd:nonNegativeInteger`/`xsd:positiveInteger`/`xsd:nonPositiveInteger`/`xsd:negativeInteger` (restricted).
 - Numeric: `xsd:decimal` (exact, unbounded magnitude via canonical-decimal STRING comparison, never f64), `xsd:double`, `xsd:float` (IEEE 754, distinct value spaces).
 - Temporal: `xsd:dateTime`, `xsd:dateTimeStamp`, `xsd:date`.
 - URI: `xsd:anyURI`.

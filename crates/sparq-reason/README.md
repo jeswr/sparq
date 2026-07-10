@@ -37,11 +37,12 @@ let g = Graph::from_parts(dict, triples);
 - **OWL 2 RL** — property/class axioms over the same fixpoint engine; use `sparq-reason-el`
   for complete class classification.
 - **D-entailment** (opt-in `d-entail`) — `Profile::D`: rdfD1 datatype-typing rule under a
-  recognized 23-XSD-datatype map (string, boolean, 12 integer types, decimal, double, float,
-  date/dateTime/dateTimeStamp, language, anyURI, hexBinary/base64Binary) with **correct
-  typed value-space equality** (`"1"^^xsd:integer` = `"1.0"^^xsd:decimal`, never f64).
-  Fail-closed: unmapped datatypes/facet-invalid literals rejected; `xsd:time`, durations,
-  XML datatypes deferred.
+  recognized 30-XSD-datatype map (string/normalizedString/token + the
+  language/Name/NCName/NMTOKEN pattern-restricted types, boolean, 13 integer types, decimal,
+  double, float, date/dateTime/dateTimeStamp, anyURI, hexBinary/base64Binary; plus always-on
+  `rdf:langString`) with **correct typed value-space equality** (`"1"^^xsd:integer` =
+  `"1.0"^^xsd:decimal`, never f64). Fail-closed: unmapped datatypes/facet-invalid literals
+  rejected; `xsd:time`, durations, XML datatypes deferred.
 - **Notation3** — user-supplied `{ … } => { … }` rules with EYE-validated builtins.
 - **RIF-Core** (opt-in `rif-core`) — W3C RIF **Core** dialect (monotone Horn subset of
   RIF-BLD/PRD) as `rif::Document` over the N3 chainer. Atoms: frame/membership/subclass
