@@ -393,6 +393,15 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   graph-wide/conservative (correctness first): a graph carrying one high-precision decimal skips the
   numeric-pushdown optimisation for all its numeric FILTERs, never the wrong answer.
 - **`SELECT *`** never exposes blank-node "variables" (`_:x` in a pattern is an existential var).
+- **Non-deterministic builtins** (`sq-98w7z.1`) — `NOW()` is **query-constant** per SPARQL 1.1
+  §17.4.5.1: every evaluation within one execution (across rows, parallel workers, `EXISTS`
+  re-entry, sub-selects) returns the same `xsd:dateTime`, pinned at execution start and re-sampled
+  by the next execution (each UPDATE operation's WHERE is its own execution; second granularity).
+  `RAND()` stays fresh per call, drawn from a per-thread splitmix64 PRNG seeded once from OS
+  entropy — NOT cryptographic (SPARQL imposes no such requirement); don't derive secrets from it.
+  `REGEX()`/`REPLACE()` memoise the compiled `(pattern, flags)` per thread (capped at 64 entries),
+  so a constant-pattern FILTER compiles once instead of per row; an invalid pattern/flag is still a
+  per-row type error — the failure outcome is memoised, the semantics are unchanged.
 - **`update` vs `update_in_place` vs `update_in_place_atomic`** — `update` returns a fresh `Graph`
   (input borrowed, untouched, atomic by construction); `update_in_place(&mut g, …)` mutates via the
   delta overlay (call `Graph::compact` periodically) but is NON-atomic on error; `update_in_place_atomic`
