@@ -6,7 +6,10 @@
 use super::common::*;
 use serde_json::Value;
 // [SONNET-4.6] sq-kk1mq — native expand() for the document-level expand oracle.
-use sparq_jsonld::{expand as jsonld_expand, JsonLdOptions, NoopLoader, ProcessingMode};
+// [SONNET-4.6] sq-oy1f.45 — FsLoader maps the W3C suite URL prefix to local fixtures so
+// `@context`/`@import` relative-URL references (e.g. t0126, tc034, tso08) are resolved
+// from the local checkout rather than hitting the network.
+use sparq_jsonld::{expand as jsonld_expand, FsLoader, JsonLdOptions, ProcessingMode};
 use std::path::Path;
 
 /// [SONNET-4.6] sq-kk1mq — run the W3C JSON-LD `expand` category with the
@@ -48,6 +51,11 @@ pub fn run_expand_native(root: &Path) -> Score {
             return s;
         }
     };
+    // [SONNET-4.6] sq-oy1f.45 — FsLoader maps the suite's base URL prefix to the local
+    // fixture directory so `@context` / `@import` IRI references in test inputs are
+    // resolved against the checked-out files instead of hitting the network.  The mapping
+    // mirrors the `SUITE_BASE` constant (`https://w3c.github.io/json-ld-api/tests/`).
+    let loader = FsLoader::new().map_prefix(SUITE_BASE, root);
     for e in &entries {
         if e.requires.is_some() {
             s.skip();
@@ -118,8 +126,9 @@ pub fn run_expand_native(root: &Path) -> Score {
             }
         }
 
-        // 3. Call the native expand() algorithm.
-        let expanded = match jsonld_expand(&input_json, &opts, &NoopLoader) {
+        // 3. Call the native expand() algorithm. The FsLoader resolves any `@context` /
+        // `@import` relative-URL references to local fixture files (sq-oy1f.45).
+        let expanded = match jsonld_expand(&input_json, &opts, &loader) {
             Ok(j) => j,
             Err(why) => {
                 s.fail(&e.id, format!("expand() error: {}", why));

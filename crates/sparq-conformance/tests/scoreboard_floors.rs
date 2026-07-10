@@ -337,10 +337,11 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     ("W3C JSON-LD 1.1 fromRdf", 51),
     ("W3C JSON-LD 1.1 compact", 186),
     ("W3C JSON-LD 1.1 frame", 61),
-    // [FABLE-5] sq-oy1f.37 — raised 240 → 259 (expand() correctness: value-object
-    // @type collapse + empty-array-property retention + free-floating value/list
-    // drop). Bumped in the SAME commit as src/floors/expand.rs::FLOOR (rise-only).
-    ("W3C JSON-LD 1.1 expand", 259),
+    // [SONNET-4.6] sq-oy1f.45 — raised 259 → 276 (expand() correctness: FsLoader
+    // wiring + @id-null retention + IRI-colon scheme check + @nest scoped ctx
+    // propagation + @reverse @index + 1.0-mode round-trip guard). Bumped in the
+    // SAME commit as src/floors/expand.rs::FLOOR (rise-only).
+    ("W3C JSON-LD 1.1 expand", 276),
     // [FABLE-5] sq-oy1f.26 — oracle-change re-pin (RDF-writer 50 → native flatten() 53).
     // The native lane composes over expand() and inherits the sq-oy1f.37 expand raises,
     // so merging main flips its 7 inherited fails to passes and it now MEASURES 53 pass /

@@ -96,4 +96,32 @@
 /// network under `NoopLoader`) and 10 deeper divergences deferred to follow-up beads
 /// (`@id: null` retention t0122, relative-IRI-with-colon t0109, rdf-star reverse
 /// `@index` t0131, `invalid IRI mapping` / `invalid scoped context` shapes).
-pub const FLOOR: usize = 259;
+///
+/// ## [SONNET-4.6] sq-oy1f.45 — expand() correctness raise 259 → 276
+///
+/// Six additional spec-faithful fixes flip 17 previously-failing positive cases to pass
+/// (measured 276 pass / 0 fail / 109 skip):
+///
+/// * **FsLoader wiring** — the expand test harness now uses `FsLoader` (maps the W3C
+///   suite URL prefix to the local fixture directory) instead of `NoopLoader`, so
+///   `@context` / `@import` relative-URL references in test inputs are resolved from
+///   the checked-out files. Fixes t0126, t0127, t0128, tc031, tso08, tso09, tso11,
+///   tc034, tso05, tso06 (10 cases).
+/// * **`@id: null` retention** — `@id` with a string value that expands to nothing
+///   (keyword-form strings that don't map to an IRI) now emits `"@id": null` per
+///   §5.1.2 step 13.4.1, instead of omitting the property. Fixes t0122.
+/// * **Relative-IRI-with-colon** — `expand_iri` (step 6) now validates the prefix
+///   against RFC 3986 scheme rules (`is_valid_scheme`) before treating a colon-
+///   containing term as a compact or absolute IRI. Prefixes starting with `#`, `?`,
+///   etc. fall through to vocab/base resolution. Fixes t0109.
+/// * **`@nest` property-scoped context** — step 14 now applies any property-scoped
+///   `@context` declared on a `@nest`-aliased term (using `propagate = true` so the
+///   context persists into child node objects). Fixes tc037 and tc038.
+/// * **`@reverse` + `@index`** — `create_reverse_definition` now processes `@index`
+///   before storing the definition, matching the behaviour of `finish_definition`
+///   for forward terms with `@container: [@reverse, @index]`. Fixes t0131.
+/// * **Invalid IRI mapping in 1.0 mode** — the round-trip check in
+///   `create_term_definition` (§4.2.2 step 14.3.3) is now gated on JSON-LD 1.1
+///   mode and skipped when the expanded value is itself a keyword (e.g. `@type`),
+///   matching the spec's 1.1-only semantics. Fixes t0026 and t0071.
+pub const FLOOR: usize = 276;
