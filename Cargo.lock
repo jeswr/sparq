@@ -4214,6 +4214,8 @@ dependencies = [
  "sparq-shacl",
  "sparq-solid",
  "sparq-terse",
+ "sparq-trust",
+ "sparq-zk",
  "tokio",
  "tokio-tungstenite",
  "tower",

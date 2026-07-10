@@ -349,6 +349,16 @@ pub(crate) async fn decide_endpoint(
             return json_response(StatusCode::FORBIDDEN, deny);
         }
     };
+    // [SONNET-4.6] sq-pfae.17 — DOUBLE-OPT-IN stateless trust-graph extension.
+    // Activates ONLY when BOTH (a) the `solid-authz-trust` feature is compiled AND (b) the config
+    // flag is set AND (c) the request carries a "trust" JSON block. Any failure => 403 DENY
+    // (fail-closed: the trust path can only narrow, never broaden, the admission gate).
+    #[cfg(feature = "solid-authz-trust")]
+    if state.config().solid_authz_trust {
+        if let Some(trust_val) = v.get("trust") {
+            return trust_authz_decide(trust_val, &req, &resource, mode, &v);
+        }
+    }
     let store = match build_store(&req) {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -380,6 +390,705 @@ fn fail_closed_decision() -> WacDecision {
         scope: None,
         status: AclStatus::Resolved,
     }
+}
+
+// ── [SONNET-4.6] sq-pfae.17 — stateless trust-graph extension ──────────────
+//
+// The `trust_authz_decide` function and all its helpers are compiled ONLY behind
+// the `solid-authz-trust` feature (which implies `solid-authz` + `sparq-trust`
+// with the `cert-graph` feature). Feature OFF => zero compiled code, byte-identical
+// to `solid-authz`.
+//
+// FAIL-CLOSED INVARIANT: every parse/verify/dispatch failure returns a 403 DENY.
+// The trust path can only NARROW (never broaden) the WAC/ACP admission gate: the
+// cert-graph closure produces `direct_rules ++ derived_rules` (design §3.4), and
+// the unchanged `sparq_trust::admit` gate vetoes each rule independently.
+//
+// POSITIONAL format args used throughout (CodeQL rust/unused-variable guard).
+
+/// [SONNET-4.6] (sq-pfae.17) A minimal admission justification returned alongside the trust-path
+/// decision: which rule sourced the deciding admit (its IRI), how many facts were admitted,
+/// and whether the decision went through the cert-graph closure.
+#[cfg(feature = "solid-authz-trust")]
+#[cfg_attr(docsrs, doc(cfg(feature = "solid-authz-trust")))]
+#[derive(Debug)]
+struct TrustJustification {
+    /// IRI of the `trust:source` of the first admitted fact (the deciding rule).
+    admitted_source: String,
+    /// Count of distinct admitted facts.
+    admitted_count: usize,
+    /// Whether the cert-graph closure produced at least one derived rule (beyond the direct rules).
+    cert_graph_derived: bool,
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Serialise a `TrustJustification` into the JSON fragment added to
+/// the decide response body under the `"trust"` key. POSITIONAL format args (CodeQL guard).
+#[cfg(feature = "solid-authz-trust")]
+fn justification_to_json(j: &TrustJustification) -> serde_json::Value {
+    serde_json::json!({
+        "admittedSource": j.admitted_source,
+        "admittedCount": j.admitted_count,
+        "certGraphDerived": j.cert_graph_derived,
+    })
+}
+
+/// [SONNET-4.6] (sq-pfae.17) A parsed trust policy rule from the JSON wire format.
+///
+/// Wire schema (one element of `"trust"."rules"` array):
+/// ```json
+/// {
+///   "source": "https://issuer.example/",
+///   "issuerKeyHex": "<64-byte-hex compressed public key>",
+///   "scopeIri": "https://pod.ex/resource",
+///   "freshWithinSecs": 86400,
+///   "shapePredicateIri": "https://schema.org/age"
+/// }
+/// ```
+///
+/// `shapePredicateIri` is the `trust:forPredicate` IRI — desugared into the `ShapeRef`
+/// that `sparq_trust::policy::TrustRule` carries.
+#[cfg(feature = "solid-authz-trust")]
+struct WireTrustRule {
+    source: String,
+    issuer_key_hex: String,
+    scope_iri: String,
+    fresh_within_secs: i64,
+    shape_predicate_iri: String,
+}
+
+/// [SONNET-4.6] (sq-pfae.17) A parsed certification edge from the JSON wire format.
+///
+/// Wire schema (one element of `"trust"."certifications"` array):
+/// ```json
+/// {
+///   "certifierIri": "https://gov.example/framework",
+///   "certifierKeyHex": "<hex>",
+///   "certifiedIssuerIri": "https://issuer.example/dvs",
+///   "certifiedKeyHex": "<hex>",
+///   "validFromUnixSecs": 0,
+///   "validUntilUnixSecs": 9999999999,
+///   "signatureHex": "<hex>",
+///   "scopeKind": "anyService"
+/// }
+/// ```
+///
+/// `scopeKind` is `"anyService"` (no statement-type narrowing) or absent/other (fail-closed
+/// deny: unknown scope kinds are never silently widened).
+#[cfg(feature = "solid-authz-trust")]
+struct WireCertification {
+    certifier_iri: String,
+    certifier_key_hex: String,
+    certified_issuer_iri: String,
+    certified_key_hex: String,
+    valid_from_unix_secs: i64,
+    valid_until_unix_secs: i64,
+    signature_hex: String,
+    scope_kind_any_service: bool,
+}
+
+/// [SONNET-4.6] (sq-pfae.17) A parsed presented credential from the JSON wire format.
+///
+/// Wire schema (one element of `"trust"."credentials"` array):
+/// ```json
+/// {
+///   "graphNquads": "<N-Quads string>",
+///   "issuerSignatureHex": "<hex>",
+///   "saltHex": "<64-hex-byte>",
+///   "issuedAtUnixSecs": 1720000000,
+///   "revoked": false
+/// }
+/// ```
+#[cfg(feature = "solid-authz-trust")]
+struct WireCredential {
+    graph_nquads: String,
+    issuer_signature_hex: String,
+    salt_hex: String,
+    issued_at_unix_secs: i64,
+    revoked: bool,
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Parse a `WireTrustRule` from a JSON object. Fail-closed: any
+/// missing/mistyped field => `Err(reason)`.
+#[cfg(feature = "solid-authz-trust")]
+fn parse_wire_rule(obj: &serde_json::Map<String, serde_json::Value>) -> Result<WireTrustRule, &'static str> {
+    let source = obj.get("source").and_then(|v| v.as_str())
+        .ok_or("trust rule missing 'source'")?
+        .to_owned();
+    let issuer_key_hex = obj.get("issuerKeyHex").and_then(|v| v.as_str())
+        .ok_or("trust rule missing 'issuerKeyHex'")?
+        .to_owned();
+    let scope_iri = obj.get("scopeIri").and_then(|v| v.as_str())
+        .ok_or("trust rule missing 'scopeIri'")?
+        .to_owned();
+    let fresh_within_secs = obj.get("freshWithinSecs").and_then(|v| v.as_i64())
+        .ok_or("trust rule missing/invalid 'freshWithinSecs'")?;
+    let shape_predicate_iri = obj.get("shapePredicateIri").and_then(|v| v.as_str())
+        .ok_or("trust rule missing 'shapePredicateIri'")?
+        .to_owned();
+    Ok(WireTrustRule { source, issuer_key_hex, scope_iri, fresh_within_secs, shape_predicate_iri })
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Parse a `WireCertification` from a JSON object. Fail-closed.
+#[cfg(feature = "solid-authz-trust")]
+fn parse_wire_certification(obj: &serde_json::Map<String, serde_json::Value>) -> Result<WireCertification, &'static str> {
+    let certifier_iri = obj.get("certifierIri").and_then(|v| v.as_str())
+        .ok_or("certification missing 'certifierIri'")?
+        .to_owned();
+    let certifier_key_hex = obj.get("certifierKeyHex").and_then(|v| v.as_str())
+        .ok_or("certification missing 'certifierKeyHex'")?
+        .to_owned();
+    let certified_issuer_iri = obj.get("certifiedIssuerIri").and_then(|v| v.as_str())
+        .ok_or("certification missing 'certifiedIssuerIri'")?
+        .to_owned();
+    let certified_key_hex = obj.get("certifiedKeyHex").and_then(|v| v.as_str())
+        .ok_or("certification missing 'certifiedKeyHex'")?
+        .to_owned();
+    let valid_from_unix_secs = obj.get("validFromUnixSecs").and_then(|v| v.as_i64())
+        .ok_or("certification missing/invalid 'validFromUnixSecs'")?;
+    let valid_until_unix_secs = obj.get("validUntilUnixSecs").and_then(|v| v.as_i64())
+        .ok_or("certification missing/invalid 'validUntilUnixSecs'")?;
+    let signature_hex = obj.get("signatureHex").and_then(|v| v.as_str())
+        .ok_or("certification missing 'signatureHex'")?
+        .to_owned();
+    // Fail-closed on scope kind: only "anyService" is accepted; an absent or unrecognised scope
+    // kind denies (never silently widened to AnyService).
+    let scope_kind = obj.get("scopeKind").and_then(|v| v.as_str())
+        .ok_or("certification missing 'scopeKind'")?;
+    let scope_kind_any_service = match scope_kind {
+        "anyService" => true,
+        _ => return Err("certification 'scopeKind' must be 'anyService'"),
+    };
+    Ok(WireCertification {
+        certifier_iri, certifier_key_hex, certified_issuer_iri, certified_key_hex,
+        valid_from_unix_secs, valid_until_unix_secs, signature_hex, scope_kind_any_service,
+    })
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Parse a `WireCredential` from a JSON object. Fail-closed.
+#[cfg(feature = "solid-authz-trust")]
+fn parse_wire_credential(obj: &serde_json::Map<String, serde_json::Value>) -> Result<WireCredential, &'static str> {
+    let graph_nquads = obj.get("graphNquads").and_then(|v| v.as_str())
+        .ok_or("credential missing 'graphNquads'")?
+        .to_owned();
+    let issuer_signature_hex = obj.get("issuerSignatureHex").and_then(|v| v.as_str())
+        .ok_or("credential missing 'issuerSignatureHex'")?
+        .to_owned();
+    let salt_hex = obj.get("saltHex").and_then(|v| v.as_str())
+        .ok_or("credential missing 'saltHex'")?
+        .to_owned();
+    let issued_at_unix_secs = obj.get("issuedAtUnixSecs").and_then(|v| v.as_i64())
+        .ok_or("credential missing/invalid 'issuedAtUnixSecs'")?;
+    let revoked = obj.get("revoked").and_then(|v| v.as_bool())
+        .ok_or("credential missing/invalid 'revoked'")?;
+    Ok(WireCredential { graph_nquads, issuer_signature_hex, salt_hex, issued_at_unix_secs, revoked })
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Decode a 64-hex-char (32-byte) salt from a hex string. Fail-closed.
+#[cfg(feature = "solid-authz-trust")]
+fn decode_salt_hex(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Decode a single hex nibble. Fail-closed.
+#[cfg(feature = "solid-authz-trust")]
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Build a `sparq_trust::policy::ShapeRef` for a `trust:forPredicate`
+/// IRI. This is the same desugaring `sparq_trust::policy` does internally: a single-predicate
+/// SHACL node-shape targeting subjects of `predicate_iri` and requiring it present with
+/// `sh:minCount 1`. Fail-closed if the IRI is not valid.
+#[cfg(feature = "solid-authz-trust")]
+fn predicate_shape(predicate_iri: &str) -> Option<sparq_trust::policy::ShapeRef> {
+    use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
+    let pred = NamedNode::new(predicate_iri).ok()?;
+    let root = BlankNode::default();
+    let prop = BlankNode::default();
+    let sh_target_subjects_of = NamedNode::new("http://www.w3.org/ns/shacl#targetSubjectsOf")
+        .expect("static IRI is valid");
+    let sh_property = NamedNode::new("http://www.w3.org/ns/shacl#property")
+        .expect("static IRI is valid");
+    let sh_path = NamedNode::new("http://www.w3.org/ns/shacl#path")
+        .expect("static IRI is valid");
+    let sh_mincount = NamedNode::new("http://www.w3.org/ns/shacl#minCount")
+        .expect("static IRI is valid");
+    Some(sparq_trust::policy::ShapeRef {
+        root: Term::BlankNode(root.clone()),
+        triples: vec![
+            Triple::new(root.clone(), sh_target_subjects_of, pred.clone()),
+            Triple::new(root.clone(), sh_property, prop.clone()),
+            Triple::new(prop.clone(), sh_path, pred),
+            Triple::new(prop, sh_mincount, Literal::new_simple_literal("1")),
+        ],
+    })
+}
+
+/// [SONNET-4.6] (sq-pfae.17) The core trust-path decision handler. Called from `decide_endpoint`
+/// ONLY when BOTH (a) `solid-authz-trust` is compiled AND (b) the config flag is set AND (c) the
+/// request carries a `"trust"` block. Returns a `Response` — always a complete HTTP response
+/// (either an enriched allow/deny carrying a `"trust"` admission justification, or a plain 403
+/// deny for any parse/verify failure — FAIL-CLOSED).
+///
+/// # Wire format for the `"trust"` block
+///
+/// ```json
+/// {
+///   "trust": {
+///     "agentIri": "https://alice.ex/card#me",
+///     "nowUnixSecs": 1720000000,
+///     "rules": [ { "source": ..., "issuerKeyHex": ..., "scopeIri": ...,
+///                  "freshWithinSecs": ..., "shapePredicateIri": ... }, ... ],
+///     "certifications": [ { ... }, ... ],
+///     "credentials": [ { "graphNquads": ..., "issuerSignatureHex": ...,
+///                        "saltHex": ..., "issuedAtUnixSecs": ..., "revoked": ... }, ... ]
+///   }
+/// }
+/// ```
+///
+/// # Fail-closed invariant
+///
+/// ANY malformed / unverifiable / stale / revoked / over-depth / broadening trust input => 403 DENY.
+/// The WAC/ACP path is the SOLE gate on the dataset; the trust block can inject additional
+/// `trust:admitted` facts (via `sparq_trust::admit`) but it NEVER short-circuits or weakens the
+/// WAC/ACP materialisation.
+#[cfg(feature = "solid-authz-trust")]
+#[allow(clippy::result_large_err)]
+fn trust_authz_decide(
+    trust_val: &serde_json::Value,
+    req: &AuthzRequest,
+    resource: &str,
+    mode: sparq_solid::Mode,
+    full_body: &serde_json::Value,
+) -> Response {
+    use sparq_trust::{
+        admit, derive_effective_rules, policy::TrustRule, AdmittedFact,
+        PresentedCredential, Session as TrustSession,
+    };
+    use sparq_trust::graph::{Certification, CertScope};
+    use sparq_zk::sig::public_key_from_hex;
+    use oxrdf::NamedNode;
+
+    // ── 1. Parse the trust block object ──────────────────────────────────────
+    let trust_obj = match trust_val.as_object() {
+        Some(o) => o,
+        None => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("trust block must be a JSON object"),
+            );
+        }
+    };
+
+    // ── 2. Parse the trust session (agent IRI + now) ──────────────────────────
+    let agent_iri_str = match trust_obj.get("agentIri").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("trust block missing 'agentIri'"),
+            );
+        }
+    };
+    let agent_iri = match NamedNode::new(agent_iri_str) {
+        Ok(n) => n,
+        Err(_) => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("trust 'agentIri' is not a valid IRI"),
+            );
+        }
+    };
+    let now_unix_secs = match trust_obj.get("nowUnixSecs").and_then(|v| v.as_i64()) {
+        Some(n) => n,
+        None => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("trust block missing/invalid 'nowUnixSecs'"),
+            );
+        }
+    };
+    let trust_session = TrustSession { agent: agent_iri.clone(), now_unix_secs };
+
+    // ── 3. Parse direct trust rules ─────────────────────────────────────────
+    let rules_val = match trust_obj.get("rules").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("trust block missing 'rules' array"),
+            );
+        }
+    };
+    let mut direct_rules: Vec<TrustRule> = Vec::new();
+    for (idx, rule_v) in rules_val.iter().enumerate() {
+        let obj = match rule_v.as_object() {
+            Some(o) => o,
+            None => {
+                // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json(&format!("trust rule {} is not an object", idx)),
+                );
+            }
+        };
+        let wire_rule = match parse_wire_rule(obj) {
+            Ok(r) => r,
+            Err(reason) => {
+                return json_response(StatusCode::FORBIDDEN, trust_deny_json(reason));
+            }
+        };
+        let source = match NamedNode::new(&wire_rule.source) {
+            Ok(n) => n,
+            Err(_) => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("trust rule 'source' is not a valid IRI"),
+                );
+            }
+        };
+        let scope = match NamedNode::new(&wire_rule.scope_iri) {
+            Ok(n) => n,
+            Err(_) => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("trust rule 'scopeIri' is not a valid IRI"),
+                );
+            }
+        };
+        let issuer_key = match public_key_from_hex(&wire_rule.issuer_key_hex) {
+            Some(k) => k,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("trust rule 'issuerKeyHex' is not a valid public key"),
+                );
+            }
+        };
+        let shape = match predicate_shape(&wire_rule.shape_predicate_iri) {
+            Some(s) => s,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("trust rule 'shapePredicateIri' is not a valid IRI"),
+                );
+            }
+        };
+        direct_rules.push(TrustRule { source, issuer_key, shape, scope, fresh_within_secs: wire_rule.fresh_within_secs });
+    }
+
+    // ── 4. Parse certifications ──────────────────────────────────────────────
+    let certs_val = trust_obj
+        .get("certifications")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let mut certifications: Vec<Certification> = Vec::new();
+    for (idx, cert_v) in certs_val.iter().enumerate() {
+        let obj = match cert_v.as_object() {
+            Some(o) => o,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json(&format!("certification {} is not an object", idx)),
+                );
+            }
+        };
+        let wire = match parse_wire_certification(obj) {
+            Ok(c) => c,
+            Err(reason) => {
+                return json_response(StatusCode::FORBIDDEN, trust_deny_json(reason));
+            }
+        };
+        let certifier_iri = match NamedNode::new(&wire.certifier_iri) {
+            Ok(n) => n,
+            Err(_) => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("certification 'certifierIri' is not a valid IRI"),
+                );
+            }
+        };
+        let certified_issuer_iri = match NamedNode::new(&wire.certified_issuer_iri) {
+            Ok(n) => n,
+            Err(_) => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("certification 'certifiedIssuerIri' is not a valid IRI"),
+                );
+            }
+        };
+        let certifier_key = match public_key_from_hex(&wire.certifier_key_hex) {
+            Some(k) => k,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("certification 'certifierKeyHex' is not a valid public key"),
+                );
+            }
+        };
+        let certified_key = match public_key_from_hex(&wire.certified_key_hex) {
+            Some(k) => k,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("certification 'certifiedKeyHex' is not a valid public key"),
+                );
+            }
+        };
+        let scope = if wire.scope_kind_any_service {
+            CertScope::AnyService
+        } else {
+            // Fail-closed: only AnyService is currently supported; non-AnyService scopes
+            // deny until the shape-scope wire format is specified (sq-pfae.17 follow-up).
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("certification scopeKind not supported"),
+            );
+        };
+        certifications.push(Certification {
+            certifier: certifier_iri,
+            certifier_key,
+            certified_issuer: certified_issuer_iri,
+            certified_key,
+            scope,
+            valid_from_unix_secs: wire.valid_from_unix_secs,
+            valid_until_unix_secs: wire.valid_until_unix_secs,
+            signature_hex: wire.signature_hex,
+        });
+    }
+
+    // ── 5. Run the cert-graph closure ────────────────────────────────────────
+    // Depth-1 closure: derived rules are NOT re-used as anchors (sq-tu4e discipline).
+    let pre_count = direct_rules.len();
+    let effective_rules = derive_effective_rules(&direct_rules, &certifications, now_unix_secs, 1);
+    let cert_graph_derived = effective_rules.len() > pre_count;
+
+    // ── 6. Parse presented credentials ──────────────────────────────────────
+    let creds_val = match trust_obj.get("credentials").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("trust block missing 'credentials' array"),
+            );
+        }
+    };
+    let resource_node = match NamedNode::new(resource) {
+        Ok(n) => n,
+        Err(_) => {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("'resource' is not a valid IRI"),
+            );
+        }
+    };
+
+    let mut all_admitted: Vec<AdmittedFact> = Vec::new();
+    for (idx, cred_v) in creds_val.iter().enumerate() {
+        let obj = match cred_v.as_object() {
+            Some(o) => o,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json(&format!("credential {} is not an object", idx)),
+                );
+            }
+        };
+        let wire = match parse_wire_credential(obj) {
+            Ok(c) => c,
+            Err(reason) => {
+                return json_response(StatusCode::FORBIDDEN, trust_deny_json(reason));
+            }
+        };
+        // Decode the 32-byte salt from hex.
+        let salt = match decode_salt_hex(&wire.salt_hex) {
+            Some(s) => s,
+            None => {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    trust_deny_json("credential 'saltHex' must be 64 hex chars (32 bytes)"),
+                );
+            }
+        };
+        // Parse the credential graph from N-Quads. Each quad's triple is extracted regardless of
+        // its named graph (the default graph is the canonical credential graph; named-graph quads
+        // are treated as additional context — fail-closed means unknown predicates admit nothing).
+        let mut triples: Vec<oxrdf::Triple> = Vec::new();
+        for result in oxttl::NQuadsParser::new().for_slice(wire.graph_nquads.as_bytes()) {
+            match result {
+                Ok(quad) => {
+                    // Use the subject/predicate/object from the quad, regardless of graph name.
+                    let t = oxrdf::Triple::new(quad.subject, quad.predicate, quad.object);
+                    triples.push(t);
+                }
+                Err(_) => {
+                    return json_response(
+                        StatusCode::FORBIDDEN,
+                        trust_deny_json("credential 'graphNquads' is not valid N-Quads"),
+                    );
+                }
+            }
+        }
+        if triples.is_empty() {
+            // An empty credential graph admits nothing; skip it rather than sending to the gate.
+            continue;
+        }
+        let cred = PresentedCredential {
+            graph: triples,
+            issuer_signature_hex: wire.issuer_signature_hex,
+            salt,
+            issued_at_unix_secs: wire.issued_at_unix_secs,
+            revoked: wire.revoked,
+        };
+        // Run the admission gate (fail-closed: empty result is fine — that credential just admits
+        // nothing, only a complete trust-block failure => 403).
+        let admitted = admit(&cred, &effective_rules, &trust_session, &resource_node);
+        all_admitted.extend(admitted);
+    }
+
+    // ── 7. Build the WAC/ACP store and decide ───────────────────────────────
+    // The trust block extends, never replaces, the WAC/ACP admission stratum: admitted facts
+    // are injected INTO the pod dataset for materialisation, exactly as the design specifies.
+    // Build the store over the original dataset with admitted facts injected.
+    let store = match build_store_with_admitted(req, &all_admitted, resource, full_body) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let decision = store.decide(&req.session(), resource, mode);
+    let status = if decision.allow {
+        StatusCode::OK
+    } else {
+        deny_status_code(decision.status)
+    };
+
+    // ── 8. Emit the response with a minimal admission justification ──────────
+    let justification = if !all_admitted.is_empty() {
+        let first_source = all_admitted[0].issuer.as_str().to_owned();
+        Some(TrustJustification {
+            admitted_source: first_source,
+            admitted_count: all_admitted.len(),
+            cert_graph_derived,
+        })
+    } else {
+        None
+    };
+    let mut body_obj = match serde_json::from_str::<serde_json::Value>(&decision_to_json(&decision)) {
+        Ok(v) => v,
+        Err(_) => {
+            // decision_to_json is infallible for valid WacDecision; this branch is unreachable.
+            return json_response(StatusCode::FORBIDDEN, trust_deny_json("internal serialisation error"));
+        }
+    };
+    if let Some(j) = justification {
+        if let serde_json::Value::Object(ref mut map) = body_obj {
+            map.insert("trustJustification".to_owned(), justification_to_json(&j));
+        }
+    }
+    let acl_link = decision.acl_link_header();
+    json_response_with_link(status, body_obj.to_string(), acl_link.as_deref())
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Build a `PodStore` with admitted trust facts injected into the
+/// dataset. Admitted facts are emitted into TWO positions so they reach the WAC/ACP materialiser:
+///
+/// 1. **Named-graph position** (`resource + ".acl"` graph) — the WAC loader ONLY reads named
+///    graphs ending in `.acl`/`.acr`; injecting into that graph makes the facts visible to the
+///    N3 reasoner. The convention `resource + ".acl"` matches Solid's ACL-by-naming-convention:
+///    every resource `R` is governed by `R.acl` (or its nearest ancestor), and the loader emits
+///    `<R> solidx:ownAcl <R.acl>` from a present `<R.acl>` graph.
+///
+/// 2. **Default-graph position** (no graph IRI) — belt-and-braces; the engine SPARQL query path
+///    (`query_as` / `view_for`) sees the default graph alongside named graphs so trust-injected
+///    facts are also queryable as plain RDF terms. Default-graph quads do NOT reach the WAC N3
+///    reasoner (the loader skips them), so position 1 is the operative path for WAC decisions.
+///
+/// [SONNET-4.6] FIX (Fix 2, sq-zza2h): oxrdf's Display for `NamedOrBlankNode` (subject) and
+/// `NamedNode` (predicate) already emits the `<…>` / `_:…` wrapper, and `Term` (object) emits
+/// the correct N-Quads term. Do NOT re-wrap in `<{}>` — that would double-wrap a `NamedNode`
+/// subject as `<<…>>`, producing invalid N-Quads that the parser rejects, so admitted facts
+/// silently never reached the store before this fix. Emit `{} {} {} .` / `{} {} {} <graph> .`
+/// and let oxrdf Display produce the canonical N-Quads term syntax.
+///
+/// HONEST SCOPE: this is a PoC injection path (anchored-not-proven; sq-qhy4 pending external
+/// audit). A production wiring would use `trust:admitted`-named-graph tagging and epoch-based
+/// cache invalidation (design `research/solid-trust-graph-authz-design.md`).
+#[cfg(feature = "solid-authz-trust")]
+#[allow(clippy::result_large_err)]
+fn build_store_with_admitted(
+    req: &AuthzRequest,
+    admitted: &[sparq_trust::AdmittedFact],
+    resource: &str,
+    _full_body: &serde_json::Value,
+) -> Result<sparq_solid::PodStore, Response> {
+    use std::fmt::Write as _;
+    // The ACL graph IRI for this resource (Solid naming convention: resource + ".acl").
+    // Admitted facts emitted into this named graph are seen by the WAC N3 loader
+    // (assemble_input processes all graphs whose name ends in ".acl").
+    // [SONNET-4.6] POSITIONAL format args throughout (CodeQL rust/unused-variable guard).
+    let acl_graph = format!("{}.acl", resource);
+    let mut augmented = req.dataset.clone();
+    for fact in admitted {
+        // Named-graph position: reaches the WAC N3 reasoner via the .acl graph path.
+        let _ = writeln!(
+            &mut augmented,
+            "{} {} {} <{}> .",
+            fact.triple.subject,
+            fact.triple.predicate,
+            fact.triple.object,
+            acl_graph,
+        );
+        // Default-graph position: reachable via SPARQL query on the full dataset.
+        let _ = writeln!(
+            &mut augmented,
+            "{} {} {} .",
+            fact.triple.subject,
+            fact.triple.predicate,
+            fact.triple.object,
+        );
+    }
+    // Delegate to the unchanged build_store path (WAC/ACP inference + materialisation).
+    let augmented_req = AuthzRequest {
+        dataset: augmented,
+        agent: req.agent.clone(),
+        client: req.client.clone(),
+        issuer: req.issuer.clone(),
+        now: req.now.clone(),
+        view: req.view,
+    };
+    build_store(&augmented_req)
+}
+
+/// [SONNET-4.6] (sq-pfae.17) Serialise a 403 trust-deny JSON body. The reason string is NEVER
+/// echoed to the client verbatim from adversarial input (the caller always passes a static string
+/// literal or a format!() from controlled values). POSITIONAL format args (CodeQL guard).
+#[cfg(feature = "solid-authz-trust")]
+fn trust_deny_json(reason: &str) -> String {
+    serde_json::json!({
+        "allow": false,
+        "grantedModes": [],
+        "governingAcl": null,
+        "scope": null,
+        "status": "resolved",
+        "aclLink": null,
+        "trustDenied": true,
+        "trustDenyReason": reason,
+    })
+    .to_string()
 }
 
 /// `POST /authz/wac-allow` — the `WAC-Allow` header VALUE for a `(session, resource)` (FR-2/FR-4).
