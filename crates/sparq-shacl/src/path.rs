@@ -1,9 +1,10 @@
 //! SHACL property paths: the parsed form, evaluation by direct graph walks, and
 //! serialisation back to a Turtle path expression for validation reports.
 
-use crate::view::{dedup, GraphView, RDF_FIRST};
+use crate::view::{dedup, dedup_ids, GraphView, RDF_FIRST};
 use oxrdf::Term;
 use rustc_hash::FxHashSet;
+use sparq_core::dict::Id;
 
 const SH: &str = "http://www.w3.org/ns/shacl#";
 
@@ -99,6 +100,27 @@ impl Path {
         self.step(g, start, true)
     }
 
+    /// [FABLE-5] (sq-7d3dj.33.4) Compiles this path against `g`'s dictionary:
+    /// every predicate IRI is resolved to its id ONCE, so the per-focus-node walk
+    /// ([`PathIds::values_ids`]) never re-hashes a predicate string. A predicate
+    /// that is invalid or absent from the dictionary compiles to `None` — that
+    /// step matches nothing, exactly like the Term-level `triples` guard.
+    pub(crate) fn compile(&self, g: &GraphView) -> PathIds {
+        match self {
+            Path::Predicate(p) => PathIds::Predicate(g.pred_id(p)),
+            Path::Inverse(inner) => PathIds::Inverse(Box::new(inner.compile(g))),
+            Path::Sequence(parts) => {
+                PathIds::Sequence(parts.iter().map(|p| p.compile(g)).collect())
+            }
+            Path::Alternative(parts) => {
+                PathIds::Alternative(parts.iter().map(|p| p.compile(g)).collect())
+            }
+            Path::ZeroOrMore(inner) => PathIds::ZeroOrMore(Box::new(inner.compile(g))),
+            Path::OneOrMore(inner) => PathIds::OneOrMore(Box::new(inner.compile(g))),
+            Path::ZeroOrOne(inner) => PathIds::ZeroOrOne(Box::new(inner.compile(g))),
+        }
+    }
+
     /// One application of the path from `node`; `forward` flips under inversion.
     fn step(&self, g: &GraphView, node: &Term, forward: bool) -> Vec<Term> {
         match self {
@@ -189,6 +211,95 @@ impl Path {
             Path::ZeroOrOne(p) => format!("({})?", p.to_sparql_property_path()?),
         })
     }
+}
+
+/// [FABLE-5] (sq-7d3dj.33.4) The id-level compiled form of a [`Path`]: predicate
+/// IRIs pre-resolved to dictionary ids (`None` = invalid/absent → matches
+/// nothing). [`PathIds::values_ids`] mirrors [`Path::values`] step-for-step over
+/// the same permutation scans, so the id walk yields exactly the ids of the
+/// terms the Term-level walk yields, in the same discovery order — the
+/// result-equivalence the id fast path rests on (differential-tested in
+/// `lib.rs::idfast_equivalence`).
+#[derive(Debug, Clone)]
+pub(crate) enum PathIds {
+    Predicate(Option<Id>),
+    Inverse(Box<PathIds>),
+    Sequence(Vec<PathIds>),
+    Alternative(Vec<PathIds>),
+    ZeroOrMore(Box<PathIds>),
+    OneOrMore(Box<PathIds>),
+    ZeroOrOne(Box<PathIds>),
+}
+
+impl PathIds {
+    /// The value-node ids reachable from `start` along this path (a set, in
+    /// discovery order) — the id twin of [`Path::values`].
+    pub(crate) fn values_ids(&self, g: &GraphView, start: Id) -> Vec<Id> {
+        self.step_ids(g, start, true)
+    }
+
+    /// One application of the path from `node` — the id twin of [`Path::step`].
+    fn step_ids(&self, g: &GraphView, node: Id, forward: bool) -> Vec<Id> {
+        match self {
+            PathIds::Predicate(p) => match p {
+                None => Vec::new(),
+                Some(p) => {
+                    if forward {
+                        g.objects_ids(node, *p)
+                    } else {
+                        g.subjects_ids(*p, node)
+                    }
+                }
+            },
+            PathIds::Inverse(inner) => inner.step_ids(g, node, !forward),
+            PathIds::Sequence(parts) => {
+                let mut nodes = vec![node];
+                let order: Vec<&PathIds> = if forward {
+                    parts.iter().collect()
+                } else {
+                    parts.iter().rev().collect()
+                };
+                for p in order {
+                    nodes = dedup_ids(nodes.iter().flat_map(|&n| p.step_ids(g, n, forward)));
+                    if nodes.is_empty() {
+                        break;
+                    }
+                }
+                nodes
+            }
+            PathIds::Alternative(parts) => {
+                dedup_ids(parts.iter().flat_map(|p| p.step_ids(g, node, forward)))
+            }
+            PathIds::ZeroOrOne(inner) => {
+                dedup_ids(std::iter::once(node).chain(inner.step_ids(g, node, forward)))
+            }
+            PathIds::ZeroOrMore(inner) => closure_ids(g, node, inner, forward, true),
+            PathIds::OneOrMore(inner) => closure_ids(g, node, inner, forward, false),
+        }
+    }
+}
+
+/// Breadth-first reachability closure over ids — the id twin of [`closure`].
+fn closure_ids(g: &GraphView, start: Id, inner: &PathIds, forward: bool, reflexive: bool) -> Vec<Id> {
+    let mut seen: FxHashSet<Id> = FxHashSet::default();
+    let mut out: Vec<Id> = Vec::new();
+    let mut queue: Vec<Id> = vec![start];
+    if reflexive {
+        seen.insert(start);
+        out.push(start);
+    }
+    let mut i = 0;
+    while i < queue.len() {
+        let n = queue[i];
+        i += 1;
+        for next in inner.step_ids(g, n, forward) {
+            if seen.insert(next) {
+                out.push(next);
+                queue.push(next);
+            }
+        }
+    }
+    out
 }
 
 /// Breadth-first reachability closure of `inner` from `start`; `reflexive`
@@ -674,6 +785,52 @@ mod tests {
                 .unwrap(),
             format!("(<{EX}a>)?")
         );
+    }
+
+    /// [FABLE-5] (sq-7d3dj.33.4) The compiled id-level walk must yield EXACTLY the
+    /// terms of the Term-level walk, in the SAME discovery order (the report-
+    /// equivalence the eval fast path rests on), across every path form —
+    /// including an absent predicate (compiles to a matches-nothing step) and a
+    /// knows-cycle through the id closure.
+    #[test]
+    fn values_ids_mirror_values_order_exactly() {
+        let g = graph(
+            "ex:a ex:knows ex:b , ex:c . ex:b ex:knows ex:a . ex:c ex:knows ex:d .
+             ex:b ex:name \"B\" . ex:d ex:name \"D\" .
+             ex:x ex:parent ex:a . ex:y ex:parent ex:a .",
+        );
+        let view = GraphView::new(&g);
+        let paths = [
+            Path::Predicate(p("knows")),
+            Path::Predicate(p("absent")),
+            Path::Inverse(Box::new(Path::Predicate(p("parent")))),
+            Path::Sequence(vec![Path::Predicate(p("knows")), Path::Predicate(p("name"))]),
+            Path::Alternative(vec![Path::Predicate(p("knows")), Path::Predicate(p("parent"))]),
+            Path::ZeroOrMore(Box::new(Path::Predicate(p("knows")))),
+            Path::OneOrMore(Box::new(Path::Predicate(p("knows")))),
+            Path::ZeroOrOne(Box::new(Path::Predicate(p("knows")))),
+            Path::Inverse(Box::new(Path::Sequence(vec![
+                Path::Predicate(p("knows")),
+                Path::Predicate(p("name")),
+            ]))),
+        ];
+        for path in &paths {
+            let compiled = path.compile(&view);
+            for start in ["a", "b", "d", "x"] {
+                let start_term = n(start);
+                let by_terms = path.values(&view, &start_term);
+                let start_id = view.id_of(&start_term).expect("start interned");
+                let by_ids: Vec<Term> = compiled
+                    .values_ids(&view, start_id)
+                    .into_iter()
+                    .map(|id| view.term_of(id))
+                    .collect();
+                assert_eq!(
+                    by_ids, by_terms,
+                    "id walk diverged for {path:?} from ex:{start}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1283,3 +1283,149 @@ mod expression_tests {
         );
     }
 }
+
+// [FABLE-5] (sq-7d3dj.33.4) Report-equivalence tests for the id-level
+// core-constraint fast path: the SAME (data, shapes) pair validated with the
+// fast path ON (the default) and OFF (`eval::with_id_fastpath_disabled`) must
+// produce BYTE-IDENTICAL reports — result order included (stricter than the
+// order-independent `result_keys`) — and the fast path must actually FIRE
+// (non-vacuity via the id-walk counter, mirroring the sq-7d3dj.33.1 idiom).
+#[cfg(test)]
+mod idfast_tests {
+    use super::*;
+
+    fn g(ttl: &str) -> Graph {
+        let prelude = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+            @prefix ex: <http://example.org/> .\n\
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n";
+        Graph::load_str(&format!("{prelude}{ttl}"), "turtle").unwrap()
+    }
+
+    /// Validates twice — id fast path ON then OFF — asserting (a) the fast path
+    /// fired at least `min_walks` id-level value walks (anti-vacuity), (b) the
+    /// forced-off run fired NONE (the toggle works), and (c) the two reports are
+    /// byte-identical including order (`Debug` covers every field of every
+    /// result, recursively through `sh:detail`).
+    fn assert_identical_reports(data: &Graph, shapes: &Graph, min_walks: u64) {
+        let before = eval::idfast_walks();
+        let fast = validate(data, shapes);
+        let walks = eval::idfast_walks() - before;
+        assert!(
+            walks >= min_walks,
+            "id fast path fired {walks} id walks, expected >= {min_walks} (vacuous differential)"
+        );
+        let before = eval::idfast_walks();
+        let slow = eval::with_id_fastpath_disabled(|| validate(data, shapes));
+        assert_eq!(
+            eval::idfast_walks(),
+            before,
+            "with_id_fastpath_disabled failed: the forced run still took id walks"
+        );
+        assert_eq!(fast.conforms, slow.conforms, "conforms diverged");
+        assert_eq!(
+            format!("{:?}", fast.results),
+            format!("{:?}", slow.results),
+            "id-fast-path report differs from the Term-level report"
+        );
+    }
+
+    /// Datatype (well-/ill-formed lexicals, language-tagged, IRI, blank-node and
+    /// INLINE-integer values), pattern (+flags, IRI/blank subjects), lengths
+    /// (multi-byte chars), counts and nodeKind — the id arms of the benchmarked
+    /// `datatype_range` workload shape.
+    #[test]
+    fn idfast_value_constraints_report_equivalent() {
+        let data = g(r#"
+            ex:a a ex:T ; ex:age 42 ; ex:name "Alice" ; ex:mail "a@ex.org" .
+            ex:b a ex:T ; ex:age "4.2"^^xsd:integer ; ex:name "Bo"@en ; ex:mail "nope" .
+            ex:c a ex:T ; ex:age "007"^^xsd:integer ; ex:name ex:iriName ; ex:mail _:b1 .
+            ex:d a ex:T ; ex:age "-3"^^xsd:integer , 7 ; ex:name "Δδ" ; ex:mail "X@Y.Z" .
+            ex:e a ex:T ; ex:age <<( ex:s ex:p ex:o )>> ; ex:name _:b2 .
+        "#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+              sh:property [ sh:path ex:age ; sh:datatype xsd:integer ; sh:maxCount 1 ;
+                            sh:pattern "^4" ; sh:minLength 2 ] ;
+              sh:property [ sh:path ex:name ; sh:datatype xsd:string ; sh:minCount 1 ;
+                            sh:minLength 3 ; sh:maxLength 5 ; sh:nodeKind sh:Literal ;
+                            sh:pattern "^[A-Za-zΔδ]+$" ] ;
+              sh:property [ sh:path ex:mail ; sh:pattern "^[^@]+@.+$" ; sh:flags "i" ;
+                            sh:nodeKind ( sh:Literal sh:BlankNode ) ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 4);
+    }
+
+    /// Every path form (predicate / inverse / sequence / alternative /
+    /// zeroOrMore / oneOrMore / zeroOrOne / absent predicate) plus `sh:node`
+    /// through the id-keyed conformance memo — the benchmarked `node_paths`
+    /// workload shape, with a knows-cycle exercising the id closure.
+    #[test]
+    fn idfast_paths_and_node_report_equivalent() {
+        let data = g(r#"
+            ex:s1 a ex:Student ; ex:advisor ex:profHead ; ex:memberOf ex:dept ;
+                  ex:email "s1@u.edu" ; ex:knows ex:s2 ; ex:nick "n1" .
+            ex:s2 a ex:Student ; ex:advisor ex:profPlain ; ex:knows ex:s1 .
+            ex:s3 a ex:Student ; ex:memberOf ex:orphanDept ; ex:phone "555" .
+            ex:profHead ex:headOf ex:dept .
+            ex:dept ex:subOrgOf ex:univ .
+            ex:t1 ex:teaches ex:s1 . ex:t2 ex:teaches ex:s1 .
+        "#);
+        let shapes = g(r#"
+            ex:P a sh:NodeShape ; sh:targetClass ex:Student ;
+              sh:property [ sh:path ex:advisor ; sh:node ex:HeadShape ] ;
+              sh:property [ sh:path ( ex:memberOf ex:subOrgOf ) ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:inversePath ex:teaches ] ; sh:maxCount 1 ] ;
+              sh:property [ sh:path [ sh:alternativePath ( ex:email ex:phone ) ] ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:zeroOrMorePath ex:knows ] ; sh:maxCount 1 ] ;
+              sh:property [ sh:path [ sh:oneOrMorePath ex:knows ] ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:zeroOrOnePath ex:nick ] ; sh:minCount 2 ] ;
+              sh:property [ sh:path ex:absentPredicate ; sh:minCount 1 ] .
+            ex:HeadShape a sh:NodeShape ; sh:property [ sh:path ex:headOf ; sh:minCount 1 ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 8);
+    }
+
+    /// A cyclic `sh:node` reference: the recursion guard treats re-entry as
+    /// conforming and the context-free memo rule decides what may be cached —
+    /// `conforms_id`'s id-keyed memo layer must mirror the Term-keyed verdicts.
+    #[test]
+    fn idfast_cyclic_node_report_equivalent() {
+        let data = g(r#"
+            ex:n1 a ex:N ; ex:next ex:n2 ; ex:label "one" .
+            ex:n2 a ex:N ; ex:next ex:n1 .
+            ex:n3 a ex:N ; ex:next ex:n3 ; ex:label "three" .
+        "#);
+        let shapes = g(r#"
+            ex:A a sh:NodeShape ; sh:targetClass ex:N ;
+              sh:property [ sh:path ex:next ; sh:node ex:A ] ;
+              sh:property [ sh:path ex:label ; sh:minCount 1 ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 3);
+    }
+
+    /// A `sh:targetNode` focus ABSENT from the data graph: no id resolves, so the
+    /// whole validation of that focus takes the Term-level fallback — including
+    /// the zeroOrOne path whose value set contains the (dictionary-less) focus
+    /// term itself. `min_walks = 0`: no id walk is expected here.
+    #[test]
+    fn idfast_absent_focus_falls_back_to_term_route() {
+        let data = g("ex:present ex:p 1 .");
+        let shapes = g(r#"
+            ex:G a sh:NodeShape ; sh:targetNode ex:ghost ;
+              sh:property [ sh:path [ sh:zeroOrOnePath ex:p ] ; sh:datatype xsd:integer ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(
+            !r.conforms,
+            "the ghost focus itself flows through the zeroOrOne path and violates xsd:integer"
+        );
+        assert_identical_reports(&data, &shapes, 0);
+    }
+}
