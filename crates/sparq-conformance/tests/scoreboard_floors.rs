@@ -147,6 +147,18 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/d_entail_suite.rs",
         "D_ENTAIL_FLOOR",
     ),
+    // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm's
+    // EXTENSION ratchet. `pub const D_VALUE_MATRIX_FLOOR` lives in this crate's
+    // `tests/d_entail_suite.rs` (behind the opt-in `d-entail` feature, inside the `gated`
+    // module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting do not affect
+    // the match); the guard pins the central scoreboard's `ratchet_floor` to it so the two
+    // can never silently drift. It is a sparq EXTENSION-shaped ratchet (value-space
+    // assertions), tallied separately from the W3C D-entailment pass count above.
+    (
+        "D value-space matrix (integer/decimal/boolean/binary/temporal)",
+        "crates/sparq-conformance/tests/d_entail_suite.rs",
+        "D_VALUE_MATRIX_FLOOR",
+    ),
     // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 sparql11/service
     // EVALUATION ratchet. `pub const SERVICE_EVAL_FLOOR` lives in this crate's
     // `tests/service_eval_suite.rs` (behind the opt-in `service` feature, inside the
@@ -480,8 +492,11 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("OWL 2 DL profile identification (Direct arm)"));
     assert!(md.contains("OWL 2 Direct-Semantics consistency + entailment (scoped fragment)"));
     assert!(md.contains("NOT full OWL 2 DL"));
+    // [FABLE-5] sq-pbz04.6.4 — the sparq D value-space matrix, HONESTLY rendered as a
+    // sparq EXTENSION (tallied separately from the W3C D-entailment pass count).
+    assert!(md.contains("D value-space matrix (integer/decimal/boolean/binary/temporal)"));
     assert!(
-        md.contains("sparq-extension (8 rows, NOT conformance)"),
-        "eight extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (9 rows, NOT conformance)"),
+        "nine extension rows should be tallied separately and pluralised"
     );
 }

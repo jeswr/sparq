@@ -34,15 +34,38 @@
 //! (sign + minimal integer digits + minimal fraction digits, parsed exactly): this
 //! is the correct typed comparison, exact at any magnitude.
 //!
-//! ## sparq-core substrate
+//! ## sparq-substrate seam (the shared value-space comparator)
 //!
-//! Datatype recognition (`is_integer_datatype`) and temporal value parsing
-//! (`temporal::Temporal`) come from `sparq-core` — sparq-reason depends ONLY on
-//! sparq-core, never sparq-engine. NOTE: the shared zero-overhead eval substrate's
-//! typed `Num` compare (the substrate move-chain, research/ sq-6tykl) is not yet
-//! wired; once `sparq-substrate::compare` lands, `d_value_key` migrates onto it
-//! (one canonical typed-value comparator shared by the engine FILTER path and this
-//! materializer), and this module's local canonicalization is deleted.
+//! [FABLE-5] sq-pbz04.6.3 (epic sq-pbz04.6, seam 2 — design record
+//! `research/d-entailment-datatype-map.md` §4). Datatype recognition
+//! (`is_integer_datatype`) and temporal value parsing (`temporal::Temporal`) come
+//! from `sparq-core`; the integer/decimal canonical-key split + normalization now
+//! DELEGATE to `sparq_substrate::numeric::split_decimal` — the SAME pure-string,
+//! unbounded-magnitude splitter the SPARQL engine's exact decimal-string compare
+//! uses — so the reasoner and the engine can never diverge on which decimal lexicals
+//! are well-formed nor on the canonical form. sparq-reason still depends ONLY on
+//! sparq-core + (behind `d-entail`) sparq-substrate, never sparq-engine; the lean
+//! default build links none of it.
+//!
+//! ### What migrated, and what deliberately STAYED LOCAL (byte-identical ledger)
+//!
+//! The seam is BEHAVIOUR-NEUTRAL by construction — the `dtype` unit matrix and the
+//! `D_ENTAIL_FLOOR` ratchet are byte-identical before/after. Two pieces stay local
+//! by DESIGN, not omission (design record §4 keeps facet validation dtype-resident):
+//!
+//! - **`integer_subtype_ok` (bounded-range facets) stays local.** The substrate
+//!   `Num::of_literal` parses magnitude only; it does NOT reject `"200"^^xsd:byte`
+//!   (out of the `byte` value space). rdfD1 must not type an out-of-range literal, so
+//!   the `i128` parse + range-facet reject is applied HERE before the canonical key.
+//! - **`parse_xsd_double` (the double/float lexical parser) stays local — a
+//!   STOP-AND-REPORT.** The substrate `parse_xsd_f64` is STRICTER: it rejects the
+//!   Rust-`FromStr`-only spellings `Infinity` / `-Infinity` / `NAN` / `nan`, which
+//!   this local parser (a lowercase-only `"inf"` blocklist) currently ACCEPTS. Adopting
+//!   the substrate parser would be a Some→None behaviour change on those four spellings.
+//!   It is the XSD-CORRECT direction (the reasoner is presently more lenient than the
+//!   evaluator), but it is NOT behaviour-neutral, so this migration keeps the local
+//!   parser to honour the byte-identical invariant. The deliberate tightening is tracked
+//!   as a follow-up bead (see the crate note); do NOT silently swap the parser here.
 //!
 //! ## Single-table discipline
 //!
@@ -80,6 +103,14 @@ use crate::Vocab;
 use rustc_hash::FxHashSet;
 use sparq_core::dict::{self, Dict, Id, TermParts};
 use sparq_core::{is_integer_datatype, temporal};
+// [FABLE-5] sq-pbz04.6.3 (epic sq-pbz04.6, substrate seam 2): the SHARED value-space
+// comparator. The integer/decimal canonical-key parsing + normalization now delegate to
+// `sparq_substrate::numeric::split_decimal` (pure-string, unbounded magnitude — the SAME
+// splitter the engine's exact decimal-string compare uses), so the reasoner and the engine
+// cannot diverge on which decimal lexicals are well-formed nor on the canonical form. Only
+// this module is behind `d-entail`, which pulls the `numeric` slice; the default/lean build
+// links none of it.
+use sparq_substrate::numeric::split_decimal;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -313,9 +344,10 @@ pub fn has_value_mapping(dt: &str) -> bool {
 /// XSD 1.1 §3.3.17 defines anyURI as a distinct primitive; no cross-type key-equality
 /// with `xsd:string` is sanctioned.
 ///
-/// [OPUS-4.8] migrates to `sparq-substrate::compare` once the substrate move lands
-/// (sq-6tykl); the canonical-decimal logic here is the interim, sparq-core-only
-/// implementation (the typed Num compare is not yet wired into the substrate).
+/// [FABLE-5] sq-pbz04.6.3: the integer/decimal canonical key delegates to the shared
+/// `sparq_substrate::numeric::split_decimal` (see the private `canon_decimal` helper);
+/// `integer_subtype_ok` and `parse_xsd_double` stay local (facet validation + the
+/// double/float lexical acceptance set — see the module doc's byte-identical ledger for why).
 ///
 /// [SONNET-4.6] sq-pbz04.6.2: added anyURI, language/Name/NCName/NMTOKEN,
 /// hexBinary/base64Binary.
@@ -514,6 +546,13 @@ pub enum DValue {
 
 /// xsd float/double lexical syntax is a subset of Rust's `f64::parse`; reject the
 /// forms Rust accepts but XSD does not (hex, trailing `f`/`d`, the `inf` spelling).
+///
+/// [FABLE-5] sq-pbz04.6.3: KEPT LOCAL (a stop-and-report) rather than delegated to the
+/// stricter `sparq_substrate::numeric::parse_xsd_f64` — the substrate parser additionally
+/// rejects the Rust-`FromStr`-only spellings `Infinity` / `-Infinity` / `NAN` / `nan`
+/// (this blocklist's `contains("inf")` is lowercase-only, so `f64::FromStr` accepts them).
+/// Swapping in the substrate parser is XSD-correct but a Some→None behaviour change, so it
+/// is deferred to keep this migration byte-identical (tracked as a follow-up bead).
 fn parse_xsd_double(lex: &str) -> Option<f64> {
     match lex {
         "INF" | "+INF" => Some(f64::INFINITY),
@@ -565,25 +604,26 @@ fn integer_subtype_ok(dt: &str, v: i128) -> bool {
 /// Canonicalize a decimal lexical form to (sign)(minimal-int).(minimal-frac);
 /// `None` when ill-formed. `"-0.0"` canonicalizes to `"0"`; `"1.0"` to `"1"`; so
 /// the integer 1 and the decimal 1.0 share the key `"1"`.
+///
+/// [FABLE-5] sq-pbz04.6.3: the split + normalization delegates to the SHARED
+/// `sparq_substrate::numeric::split_decimal` (pure string, no `i128` bound — so an
+/// arbitrary-magnitude decimal like a 40-digit lexical still keys, exactly as the
+/// pre-migration hand-rolled version did; the substrate `Dec::parse` path would have
+/// overflowed and DROPPED such values, a behaviour change we deliberately avoid). The
+/// final canonical STRING assembly stays here because it is the D-value key form, not a
+/// comparator concern. `split_decimal` trims leading/trailing ASCII whitespace whereas the
+/// old hand-rolled splitter did NOT; to keep behaviour byte-identical (a padded decimal
+/// lexical was rejected before), reject any surrounding whitespace up front.
 fn canon_decimal(lex: &str) -> Option<String> {
-    let (sign, rest) = match lex.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, lex.strip_prefix('+').unwrap_or(lex)),
-    };
-    let (int_part, frac_part) = match rest.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (rest, ""),
-    };
-    if (int_part.is_empty() && frac_part.is_empty())
-        || !int_part.bytes().all(|b| b.is_ascii_digit())
-        || !frac_part.bytes().all(|b| b.is_ascii_digit())
-    {
+    // Preserve the pre-migration no-trim contract: `split_decimal` calls `s.trim()`, so
+    // `" 1"` would become `"1"` (Some) there; the old splitter's digit-check rejected the
+    // space (None). Reject surrounding whitespace so the accept/reject set is unchanged.
+    if lex.trim() != lex {
         return None;
     }
-    let int_trim = int_part.trim_start_matches('0');
-    let frac_trim = frac_part.trim_end_matches('0');
+    let (neg, int_trim, frac_trim) = split_decimal(lex)?;
     let int_c = if int_trim.is_empty() { "0" } else { int_trim };
-    let neg = sign && !(int_c == "0" && frac_trim.is_empty());
+    let neg = neg && !(int_c == "0" && frac_trim.is_empty());
     Some(format!(
         "{}{}{}{}",
         if neg { "-" } else { "" },
@@ -1389,5 +1429,153 @@ mod tests {
         // whitespace stripped
         assert_eq!(decode_base64_binary("YQ =="), Some(vec![0x61]));
         assert_eq!(decode_base64_binary("YQ="), None); // not multiple of 4
+    }
+
+    // ── [FABLE-5] sq-pbz04.6.3: dtype ≡ substrate differential over the XSD matrix ──
+    //
+    // The seam D3 fixes: the integer/decimal canonical key now delegates to
+    // `sparq_substrate::numeric::split_decimal`. These tests are the differential
+    // acceptance the bead requires — the value-space equality/relational verdicts of
+    // `d_value_key`/`d_value_eq` must AGREE with the substrate's own typed numeric
+    // comparator (`as_numeric` + `Num::cmp_relational`) over `=`, `<`, `>`, for
+    // value-equal-different-lexical pairs, plus the 2^53+1 non-aliasing guard.
+
+    use oxrdf::Literal as OxLit;
+    use sparq_substrate::numeric::{as_numeric, Num};
+    use std::cmp::Ordering;
+
+    /// Build an oxrdf literal for the substrate comparator side.
+    fn slit(value: &str, local: &str) -> OxLit {
+        OxLit::new_typed_literal(value, NamedNode::new_unchecked(format!("{}{}", XSD, local)))
+    }
+
+    /// The substrate's relational verdict for two numeric lexicals (the engine FILTER
+    /// path's semantics: `<`/`>`/`=`), or `None` if either is not numeric there.
+    fn substrate_cmp(a_lex: &str, a_dt: &str, b_lex: &str, b_dt: &str) -> Option<Ordering> {
+        let a = as_numeric(&slit(a_lex, a_dt.strip_prefix(XSD).unwrap()))?;
+        let b: Num = as_numeric(&slit(b_lex, b_dt.strip_prefix(XSD).unwrap()))?;
+        a.cmp_relational(b)
+    }
+
+    /// `=`: dtype value-equality (via the substrate-delegated canonical key) AGREES with
+    /// the substrate's own relational `Equal` verdict, over the integer⊂decimal space and
+    /// across value-equal-different-lexical pairs.
+    #[test]
+    fn dtype_substrate_equality_agrees_over_matrix() {
+        let integer = format!("{}integer", XSD);
+        let decimal = format!("{}decimal", XSD);
+        // (a_lex, a_dt, b_lex, b_dt): value-equal-different-lexical pairs across the
+        // coinciding integer/decimal space, plus non-equal controls.
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("1", &integer, "1.0", &decimal),
+            ("01", &integer, "+1", &integer),
+            ("1", &integer, "1.00", &decimal),
+            ("-0", &integer, "0", &decimal),
+            ("100", &decimal, "100.000", &decimal),
+            ("1", &integer, "2", &decimal),   // NOT equal
+            ("1.5", &decimal, "1", &integer), // NOT equal
+            ("-1.5", &decimal, "-1.50", &decimal),
+        ];
+        for &(al, adt, bl, bdt) in cases {
+            let dtype_eq = d_value_eq(al, adt, bl, bdt);
+            let substrate_eq = substrate_cmp(al, adt, bl, bdt) == Some(Ordering::Equal);
+            assert_eq!(
+                dtype_eq, substrate_eq,
+                "dtype ≡ substrate equality disagreement on ({:?}^^{:?}, {:?}^^{:?}): \
+                 dtype={} substrate={}",
+                al, adt, bl, bdt, dtype_eq, substrate_eq
+            );
+        }
+    }
+
+    /// `<` / `>`: the ORDER of two distinct-but-close numeric values agrees between the
+    /// dtype canonical key (string order over the shared canonical decimal) and the
+    /// substrate's `cmp_relational`. This exercises the relational verdict, not just `=`.
+    #[test]
+    fn dtype_substrate_relational_order_agrees() {
+        let integer = format!("{}integer", XSD);
+        let decimal = format!("{}decimal", XSD);
+        let ordered: &[(&str, &str, &str, &str)] = &[
+            ("1", &integer, "2", &integer),
+            ("1.4", &decimal, "1.5", &decimal),
+            ("9", &integer, "10", &decimal),
+            ("-2", &integer, "-1", &decimal),
+            ("0", &integer, "0.1", &decimal),
+        ];
+        for &(al, adt, bl, bdt) in ordered {
+            // Both well-formed → the substrate gives Less (a < b by construction).
+            assert_eq!(
+                substrate_cmp(al, adt, bl, bdt),
+                Some(Ordering::Less),
+                "fixture ({:?},{:?}) must be substrate-Less",
+                al,
+                bl
+            );
+            // dtype: distinct values → NOT key-equal; equal values → key-equal. Here they
+            // are distinct, so the dtype keys must differ (the < relation manifests as
+            // key-inequality in the value-space-equality contract dtype exposes).
+            assert!(
+                !d_value_eq(al, adt, bl, bdt),
+                "dtype keys of a strictly-ordered pair must differ ({:?} vs {:?})",
+                al,
+                bl
+            );
+        }
+    }
+
+    /// The 2^53+1 NON-ALIASING guard, cross-checked against the substrate: an f64 would
+    /// alias 2^53+1 with 2^53, but BOTH the dtype canonical-decimal key AND the substrate
+    /// exact comparator keep them distinct (the load-bearing unsound-f64 guard, now proven
+    /// on both sides of the seam).
+    #[test]
+    fn dtype_substrate_2p53_plus_1_non_aliasing() {
+        let integer = format!("{}integer", XSD);
+        let a = "9007199254740993"; // 2^53 + 1
+        let b = "9007199254740992"; // 2^53
+        // dtype: distinct keys.
+        assert!(
+            !d_value_eq(a, &integer, b, &integer),
+            "dtype must NOT alias 2^53+1 with 2^53"
+        );
+        // substrate: NOT relational-equal (exact i128/Dec tier, no f64 collapse).
+        assert_ne!(
+            substrate_cmp(a, &integer, b, &integer),
+            Some(Ordering::Equal),
+            "substrate must NOT alias 2^53+1 with 2^53"
+        );
+    }
+
+    /// Arbitrary-magnitude decimal REGRESSION guard: a 40+-digit `xsd:decimal` lexical
+    /// (well past the i128 bound of `Dec::parse`) STILL keys — because the delegation is to
+    /// the pure-string, unbounded `split_decimal`, NOT to `Dec::parse` (which would overflow
+    /// and drop it, a behaviour change we deliberately avoided). Non-vacuous: a naive
+    /// `Dec::parse`-based migration turns this `Some` into `None`.
+    #[test]
+    fn big_decimal_beyond_i128_still_keys() {
+        let decimal = format!("{}decimal", XSD);
+        let big = "123456789012345678901234567890123456789012.5"; // 43 significant digits
+        assert!(
+            d_value_key(big, &decimal).is_some(),
+            "an arbitrary-magnitude decimal must still get a D-value (unbounded split)"
+        );
+        // Its canonical key round-trips its own value (equal to itself, distinct from a
+        // neighbour that differs only in the last fraction digit).
+        assert!(d_value_eq(big, &decimal, big, &decimal));
+        let neighbour = "123456789012345678901234567890123456789012.6";
+        assert!(!d_value_eq(big, &decimal, neighbour, &decimal));
+    }
+
+    /// The no-trim contract of the canonical decimal key is preserved after delegating to
+    /// `split_decimal` (which trims): a whitespace-padded decimal lexical is still REJECTED,
+    /// byte-identically to the pre-migration hand-rolled splitter. Non-vacuous: dropping the
+    /// up-front whitespace reject makes " 1" key as Some.
+    #[test]
+    fn padded_decimal_lexical_rejected() {
+        let decimal = format!("{}decimal", XSD);
+        assert!(d_value_key(" 1", &decimal).is_none(), "leading space rejected");
+        assert!(d_value_key("1 ", &decimal).is_none(), "trailing space rejected");
+        assert!(d_value_key("1\t", &decimal).is_none(), "trailing tab rejected");
+        // A clean lexical still keys.
+        assert!(d_value_key("1", &decimal).is_some());
     }
 }
