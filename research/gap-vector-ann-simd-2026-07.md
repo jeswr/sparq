@@ -7,8 +7,17 @@
 **Bead:** `sq-lfo84` (P1, HNSW QPS/build gap vs hnswlib) + `sq-ose80` (build-time sibling).
 **Root cause (from `research/gap-vector-2026-07.md` §3.6/§7 + the sq-z2z18 sweep):** the
 `instant-distance` 0.6.1 HNSW backend ships **no SIMD distance kernel** — its inner
-squared-Euclidean loop is scalar — and its graph construction is largely serial, so a 1M×128
-build was aborted at >30min (hnswlib: 374s).
+squared-Euclidean loop is scalar — so a 1M×128 build was aborted at >30min (hnswlib: 374s).
+
+> **[OPUS-4.8] (sq-ose80) CORRECTION — the build is NOT serial.** An earlier draft of this record
+> (and §4 below, kept for provenance) attributed the build-time gap to "serial graph-construction".
+> The **sq-ose80 profiling refutes that**: `instant-distance` 0.6.1 **does** build in parallel —
+> `Hnsw::new` inserts each layer with rayon's `into_par_iter` (`src/lib.rs:317`), per-node `RwLock`s,
+> and a `SearchPool`. A `perf record` of a 200k build (`sq-ose80`, aarch64, NON-CANONICAL) put
+> **68.6% of samples in `Search::push`** — the greedy distance search inside the *parallel* insert —
+> at ~448% of 800% CPU (i.e. ~56% parallel efficiency, super-linear scaling as N grows). So the gap
+> is **compute-bound distance search in an already-parallel build with imperfect scaling**, NOT a
+> missing-parallelism bug. See §7 for the full sq-ose80 evaluation and the shipped fix.
 
 > **NON-CANONICAL throughout.** Every timing below was collected on an **aarch64 EC2 work box
 > (no AVX2)**. Absolute figures are not canonical; the matched-recall *ranking* between kernels is
@@ -90,13 +99,14 @@ matched-recall gap number is claimed here**. What is honestly established:
 - **BEHIND-but-improved.** The scalar→NEON kernel closes part of the *per-distance* gap
   (instant-distance's missing SIMD kernel was one of the two root causes). The QPS lift is ~1.2× on
   search and ~2.4× on build on this box.
-- **The build-time gap (sq-ose80) is only PARTIALLY addressed.** The NEON kernel roughly halves
-  build on a 100k clustered corpus, but on a **hard uniform 100k×128** corpus a single-map
-  `instant-distance` build still ran **>14 min** on this box before being cut off — the *serial
-  graph-construction* cost (not just the distance kernel) dominates at scale, exactly the sq-ose80
-  root cause. Halving the distance kernel does not make a >30min 1M build practical. **sq-ose80
-  stays OPEN**; its real fix is a parallel-build HNSW (which is what `hnsw_rs::parallel_insert` and
-  usearch already do) — a backend-swap decision to be taken on a canonical x86_64 box.
+- **The build-time gap (sq-ose80) is addressed by §7, not by a backend swap.** This §4 draft
+  guessed the residual build cost was *serial graph-construction* and that the fix was a
+  parallel-build backend (`hnsw_rs::parallel_insert`/usearch). **The sq-ose80 profiling (§7)
+  overturns both halves of that guess:** the build is already parallel, and `hnsw_rs`'s
+  parallel_insert is measurably **SLOWER** than instant-distance on this box (§7.2). The real,
+  measured build lever is `ef_construction`; the shipped fix is the `HnswConfig::fast_build` preset
+  (§7.3). The ">14 min hard-uniform 100k" figure above reflects `ef_construction=200` (the sweep
+  config), not the default 100 — see §7.1.
 
 ## 5. Recommendation for the maintainer
 
@@ -112,13 +122,124 @@ matched-recall gap number is claimed here**. What is honestly established:
 
 ---
 
+## 7. sq-ose80 — build-time gap: evaluate-then-implement
+
+**Goal:** close the 1M×128 HNSW build gap toward hnswlib's ~374s without breaking recall or the
+query path. All timings **NON-CANONICAL** (aarch64 8-core EC2 work box, no AVX2), cosine on
+L2-normalised SIFT1M; recall scored against the crate's own `nearest_exact` cosine oracle (the
+`tests/recall.rs` oracle). Harness: `crates/sparq-vectors/examples/` build/recall profilers (kept
+out of the committed tree — regenerable bench code).
+
+### 7.1 Profiling — where the 1M build time goes
+
+The premise in the sq-z2z18 finding ("`instant-distance` lacks rayon parallelism on insertion") is
+**wrong for 0.6.1**: `Hnsw::new` inserts each layer with `into_par_iter` over per-node `RwLock`s.
+Measured build scaling (`ef_search=100`, `ef_construction=200` — the sweep config, seed fixed; the
+`Default` is `ef_construction=100`, so these times are an upper bound on the default's):
+
+| N | store-load | HNSW build | throughput | CPU% (of 800%) |
+|---|---|---|---|---|
+| 50k | 0.02s | 8.2s | 6093 vec/s | — |
+| 100k | 0.05s | 20.1s | 4977 vec/s | — |
+| 200k | 0.10s | 94.0s | 2129 vec/s | **448%** |
+
+Store-load is negligible; the HNSW build dominates and scales **super-linearly** — throughput
+*collapses* 6093 → 2129 vec/s from 50k → 200k. A `perf record` of the 200k build put **68.6% of
+self-samples in `instant_distance::Search::push`** (the greedy distance search *inside* the rayon
+parallel insert), with the remaining ~31% in rayon idle/steal (`wait_until_cold`). So the build is
+**compute-bound on the distance search**, at ~56% parallel efficiency; the super-linear collapse is
+the HNSW-at-scale cache signature (random 512-byte vector gathers across a growing >0.5 GB working
+set). The distance kernel is already SIMD (sq-lfo84), so the remaining lever is **how much distance
+search each insert does** — i.e. `ef_construction`.
+
+### 7.2 Option evaluation (re-weighed for BUILD, per the bead)
+
+| Option | New dep | Build weight | 100k build (this box) | 200k build | Verdict |
+|---|---|---|---|---|---|
+| **(a) wrapper parallel-insert over instant-distance** | none | none | — | — | **moot** — the build is *already* rayon-parallel; a hand-rolled parallel insert would risk HNSW ordering/concurrency correctness for no gain |
+| **(b) `hnsw_rs` 0.3.4 (`parallel_insert`)** | **123-line dep tree** (`anndists`, `env_logger`, `regex`, `aho-corasick`, `jiff`, `bincode`, `serde`+`serde_derive`+`syn`, …) | HEAVY | **47.8s** @ 273% CPU | **111.1s** | **rejected on BOTH axes** — heavier tree AND *slower* build than instant-distance here (2.4× slower @100k, 1.2× slower @200k) |
+| **(c) keep instant-distance; tune `ef_construction`** | none | none | 20.1s (efc=100) | 91.5s (efc=100) | **CHOSEN** — the only lean, recall-preserving lever; see §7.3 |
+| instant-distance (baseline default, efc=100) | none | none | 20.1s | 91.5s | reference |
+
+Licences are all clean (`hnsw_rs` MIT/Apache-2.0; every transitive crate already on `deny.toml`'s
+allowlist) — licence was again **not** the discriminator. The discriminators were **build weight**
+and, decisively, **measured build speed**: `hnsw_rs`'s `parallel_insert` is *slower* than
+instant-distance's already-parallel build on this box, so option (b) buys a 123-crate dependency
+tree for a build-time *regression*. `usearch` (a C++ toolchain) is rejected a fortiori (it was
+already rejected in §1 on native-build weight; nothing here re-opens it). No hybrid (c-query /
+b-build) is needed because instant-distance wins the build outright.
+
+### 7.3 The `ef_construction` lever + shipped fix (option c)
+
+`ef_construction` is the greedy-search beam width during insertion — the exact quantity §7.1
+root-caused. Measured build / recall trade at 200k (cosine, 500 queries, k=10):
+
+| `ef_construction` | build (200k) | throughput | recall@10 | deficit |
+|---|---|---|---|---|
+| **40 (`fast_build`)** | **31.0s** | 6444 vec/s | 0.9944 | 28 / 5000 |
+| 100 (`Default`) | 91.5s | 2186 vec/s | 0.9990 | 5 / 5000 |
+| 200 (`high_recall`, = the sweep config that produced the ">30min at 1M" figure) | 137.3s | 1456 vec/s | 0.9992 | 4 / 5000 |
+
+`ef_construction=40` builds **~3× faster than the default and ~4.4× faster than the efc=200 config
+that produced the cited >30-min-at-1M abort**, at recall@10 = 0.9944 — comfortably above the 0.95
+floor. 100 → 200 doubles build cost for +0.0002 recall (deep diminishing returns).
+
+**1M×128 headline (NON-CANONICAL).** A full 1M build+recall run was **abandoned** on this shared
+work box under a **disk-pressure emergency** (the box hit 99% during the run — other agents'
+`target/` trees, not this measurement). The 200k curve is the sound, complete basis for the fix; the
+1M point is left as an honest extrapolation, not a measured number:
+
+- The measured 50k→200k throughput collapse (6093→2129 vec/s at efc=200) is super-linear, so a
+  1M efc=200 build extrapolates to roughly **25–35 min** — consistent with the original ">30 min,
+  aborted" observation (which used efc=200).
+- At **efc=40 (`fast_build`)** the 200k build ran at 6444 vec/s (≈3× the efc=100 rate). Applying the
+  same ~3× factor to a 1M build puts `fast_build` **materially below** the efc=200 abort — plausibly
+  in the several-minutes range, i.e. *approaching* hnswlib's ~374s territory — but this is an
+  **extrapolation from 200k, not a 1M measurement**, and is explicitly NOT claimed as a parity
+  result. A canonical 1M build/recall number belongs to the quiet-box re-run (`sq-hmd7l.26`); a
+  build-time-only 1M re-measure on this box is deferred to `sq-ose80.2` (below) once disk frees.
+
+**Shipped fix (`crates/sparq-vectors/src/ann.rs`):** two opt-in `HnswConfig` presets —
+`HnswConfig::fast_build()` (`ef_construction=40`) and `HnswConfig::high_recall()`
+(`ef_construction=200`) — sharing the default's `ef_search`+`seed`. Pure config: **no new
+dependency, no default change** (existing callers keep the exact same graph + recall), **build stays
+deterministic** for a fixed seed, and the `nearest`/`nearest_with_ef` query path + monotone-recall
+contract + the exact/DiskANN/PQ paths are untouched. The recall floor is asserted for `fast_build`
+by `tests/recall.rs::build_time_presets_preserve_the_recall_floor` (real build path, not a mock).
+
+### 7.4 Honest verdict
+
+- **No clean way to reach hnswlib's ~374s within lean-core discipline exists via a library swap** —
+  instant-distance is already parallel and beats the only pure-Rust parallel-build alternative
+  (`hnsw_rs`) on this box, and usearch's C++ toolchain violates the lean-native-build constraint.
+- **The shipped `fast_build` preset is a real, recall-preserving ~3× build-time win** (vs default;
+  ~4.4× vs the efc=200 sweep config), entirely dependency-free.
+- **The residual gap to hnswlib is algorithmic/ISA (AVX2) + implementation efficiency, not a fixable
+  parallelism bug.** A canonical x86_64 AVX2 re-measurement (`sq-hmd7l.26`) is the right place to
+  quantify what remains; a backend swap should only be reconsidered there, behind its own opt-in
+  feature, and only if it actually wins at matched recall — which `hnsw_rs` did not here.
+
+---
+
 ## 6. Discovered beads
 
 - **sq-9wrkc** (P2): extend the `simd::l2_sq_dist` kernel to the exact `cosine` / DiskANN Vamana /
   PQ `sq_dist` loops. Blocked on re-measuring `bench/vector/expected.tsv` on an x86_64 runner (the
   AVX2 float-sum order can shift the EXACT-gated diskann/pq deficits by ±1).
-- **sq-ose80** stays OPEN: the >30min 1M build is a *serial graph-construction* problem the distance
-  kernel only partially touches; the real fix is a parallel-build backend, decided on a canonical box.
+- **sq-ose80** — [OPUS-4.8] the >30min-at-1M figure was the `ef_construction=200` sweep config; the
+  build is *already parallel* (not serial), the gap is compute-bound distance search at ~56% parallel
+  efficiency, and the shipped `HnswConfig::fast_build` (efc=40) preset is a ~3× recall-preserving
+  build win (§7). `hnsw_rs` was re-evaluated for BUILD and rejected (heavier AND slower here). The
+  residual gap to hnswlib is ISA/algorithmic and belongs to the canonical x86_64 re-run (sq-hmd7l.26).
+- **sq-ose80.1** (P2, NEW): `VectorIndex::build_with` clones the whole normalised point set
+  (`points.clone()`, ~512 MB at 1M×128) to feed `instant-distance::Builder::build` while also
+  retaining it for the lazy `nearest_with_ef` secondary maps — a peak-memory doubling + one large
+  memcpy per build. Investigate building from `Arc<[NPoint]>` / a single shared buffer, or only
+  retaining the points when a secondary-ef build is actually requested.
+- **sq-ose80.2** (P3, NEW): re-measure the **1M×128 SIFT** build time (efc=40 vs 100 vs 200,
+  build-time-ONLY — no brute-force oracle) on this box once disk frees, to replace the §7.3
+  extrapolation with a measured 1M point. The oracle-bound recall harness is the slow part; a
+  build-only timer avoids it. The canonical recall+QPS 1M run stays `sq-hmd7l.26`.
 
 ---
 
