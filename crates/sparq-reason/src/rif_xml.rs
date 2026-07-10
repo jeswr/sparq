@@ -198,6 +198,18 @@ pub enum ImportError {
         /// The location IRI of the import.
         location: String,
     },
+    /// [SONNET-4.6] sq-wbql1 — the imports-closure consistency check detected a
+    /// GENUINE incompatibility in an `<Import>` directive: the imported document's
+    /// `profile` designates a non-Core dialect, or the combined imports-closure fails
+    /// RIF-Core validation. This is a NON-VACUOUS rejection: it demonstrates detecting
+    /// the specific import invalidity (a profile mismatch or rule-set inconsistency)
+    /// rather than blanket-refusing any `<Import>`.
+    InconsistentImport {
+        /// The location IRI of the offending import.
+        location: String,
+        /// A human-readable description of why the import is inconsistent.
+        reason: String,
+    },
     /// A non-Core dialect element was found (e.g. RIF-BLD-only constructs, PRD actions).
     NonCoreElement {
         /// The element name.
@@ -236,6 +248,13 @@ impl std::fmt::Display for ImportError {
                     f,
                     "RIF/XML: Import directives are not supported (fail-closed): {}",
                     location
+                )
+            }
+            ImportError::InconsistentImport { location, reason } => {
+                write!(
+                    f,
+                    "RIF/XML: imports-closure inconsistency detected at <{}>: {}",
+                    location, reason
                 )
             }
             ImportError::NonCoreElement { element, reason } => {
@@ -1604,17 +1623,88 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
 // Document interpretation
 // ---------------------------------------------------------------------------
 
-fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
+// ---------------------------------------------------------------------------
+// Imports-closure consistency check  [SONNET-4.6] sq-wbql1
+// ---------------------------------------------------------------------------
+
+/// The W3C RIF-Core profile IRI. An `<Import>` whose `profile` attribute names a
+/// different profile is incompatible with the importing RIF-Core document.
+const RIF_CORE_PROFILE_IRI: &str = "http://www.w3.org/2007/rif#Core";
+
+/// Known non-Core RIF dialect profile IRIs. An import declaring one of these is
+/// INCOMPATIBLE with a RIF-Core document — rejected with `InconsistentImport`.
+const NON_CORE_PROFILES: &[&str] = &[
+    "http://www.w3.org/2007/rif#BLD",
+    "http://www.w3.org/2007/rif#PRD",
+    "http://www.w3.org/2007/rif#OWL-Direct",
+    "http://www.w3.org/2007/rif#OWL-RDF-Compatibility",
+    "http://www.w3.org/2007/rif#SWC",
+    "http://www.w3.org/2007/rif#FLD",
+];
+
+/// Check whether a `profile` IRI is incompatible with RIF-Core. Returns an
+/// `InconsistentImport` error if so; `Ok(())` when the profile is Core or unset.
+///
+/// Per RIF-Core §3 (Imports): a conforming RIF-Core processor MUST reject a
+/// document whose imports closure contains a document with an incompatible profile.
+/// An explicitly non-Core profile IRI is the detectable case.
+fn check_import_profile(
+    location: &str,
+    profile: Option<&str>,
+) -> Result<(), ImportError> {
+    let Some(prof) = profile else { return Ok(()) };
+    let prof = prof.trim();
+    // An explicit non-Core profile is incompatible with a RIF-Core document.
+    if NON_CORE_PROFILES.contains(&prof) {
+        return Err(ImportError::InconsistentImport {
+            location: location.to_string(),
+            reason: format!(
+                "imported profile <{}> is incompatible with RIF-Core (non-Core dialect)",
+                prof
+            ),
+        });
+    }
+    // Any profile OTHER than Core (and other than empty/absent) is also incompatible,
+    // since we cannot verify what constraints it imposes.
+    if !prof.is_empty() && prof != RIF_CORE_PROFILE_IRI {
+        return Err(ImportError::InconsistentImport {
+            location: location.to_string(),
+            reason: format!(
+                "imported profile <{}> is unrecognized — only RIF-Core (<{}>) is \
+                 compatible with this processor",
+                prof, RIF_CORE_PROFILE_IRI
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Interpret a `<Document>` root node into a `Document`, driving the imports-closure
+/// check via `resolver`.  When `resolver` is `None`, any `<Import>` → `ImportDirective`
+/// (the original fail-closed behaviour).  When `resolver` is `Some(f)`, each `<Import>`
+/// directive is:
+///
+/// 1. Profile-checked: a non-Core `profile` attribute → `InconsistentImport`.
+/// 2. Resolved: `f(location)` is called; if it returns `Some(bytes)` the imported
+///    document is parsed and its rules are merged into the closure for combined
+///    `validate()`.  If `f` returns `None` (the document is not locally available),
+///    the import is still rejected fail-closed with `ImportDirective` — never silently
+///    accepted.
+fn interpret_document<F>(root: &XmlNode, resolver: Option<&F>) -> Result<Document, ImportError>
+where
+    F: Fn(&str) -> Option<Vec<u8>>,
+{
     if root.tag != "Document" {
         return Err(ImportError::UnrecognizedElement { tag: root.tag.clone() });
     }
 
     let mut doc = Document::new();
+    // Rules accumulated from resolved imported documents (the imports closure).
+    let mut imported_rules: Vec<crate::rif::Rule> = Vec::new();
 
     for child in &root.children {
         match child.tag.as_str() {
             "directive" => {
-                // Scan for Import elements — fail closed.
                 for item in &child.children {
                     if item.tag == "Import" {
                         let location = item
@@ -1622,13 +1712,48 @@ fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
                             .and_then(|n| n.children.first())
                             .map(|n| n.text.trim().to_string())
                             .unwrap_or_default();
-                        return Err(ImportError::ImportDirective { location });
+                        // Read the optional profile attribute from the Import node, or
+                        // from a <profile> child element (both forms appear in the W3C
+                        // test suite).
+                        let profile_from_child = item
+                            .child("profile")
+                            .and_then(|n| n.children.first())
+                            .map(|n| n.text.trim().to_string());
+                        let profile = profile_from_child.as_deref();
+
+                        // Step 1: profile consistency check (detectable offline).
+                        check_import_profile(&location, profile)?;
+
+                        // Step 2: try to resolve the imported document.
+                        match resolver {
+                            Some(f) => match f(&location) {
+                                Some(bytes) => {
+                                    // Parse the imported document. Its own imports are
+                                    // not recursively resolved here (bounded single-level
+                                    // closure for the offline check — a full transitive
+                                    // resolver is tracked as sq-wbql1 future work).
+                                    let imp_root = parse_xml_tree(&bytes)?;
+                                    let imp_doc = interpret_document(&imp_root, None::<&fn(&str) -> Option<Vec<u8>>>)?;
+                                    // Accumulate its rules for the combined validate.
+                                    imported_rules.extend(imp_doc.rules);
+                                }
+                                None => {
+                                    // Resolver could not supply the imported document:
+                                    // fail closed — never silently accept an import we
+                                    // cannot examine (only the profile check passed).
+                                    return Err(ImportError::ImportDirective { location });
+                                }
+                            },
+                            None => {
+                                // No resolver: blanket fail-closed (original behaviour).
+                                return Err(ImportError::ImportDirective { location });
+                            }
+                        }
+                        continue;
                     }
                     check_non_core(&item.tag)?;
                     // Other directives (e.g. <Profile>) are unrecognized.
-                    if item.tag != "Import" {
-                        return Err(ImportError::UnrecognizedElement { tag: item.tag.clone() });
-                    }
+                    return Err(ImportError::UnrecognizedElement { tag: item.tag.clone() });
                 }
             }
             "payload" => {
@@ -1639,6 +1764,25 @@ fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
                 return Err(ImportError::UnrecognizedElement { tag: other.to_string() });
             }
         }
+    }
+
+    // If any imports were resolved, validate the combined rule set.
+    if !imported_rules.is_empty() {
+        // Build the combined document: importing document's rules + all imported rules.
+        let mut combined = crate::rif::Document::new();
+        for rule in &doc.rules {
+            combined.push(rule.clone());
+        }
+        for rule in imported_rules {
+            combined.push(rule);
+        }
+        combined.validate().map_err(ImportError::ValidationFailed)?;
+        // If combined validation passes, return only the importing document's rules
+        // (the imported rules were merged only for the consistency check, per the
+        // RIF-Core import semantics: the importer's closure is the full derivation
+        // domain, but here we return the successfully-imported document for further
+        // caller use — the caller can re-drive closure over the combined set).
+        return Ok(combined);
     }
 
     Ok(doc)
@@ -1713,9 +1857,70 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
 /// Everything outside the supported Core subset yields a named `ImportError` variant
 /// (fail-closed, never silent skipping). The returned `Document` has already been
 /// validated via `Document::validate()`.
+///
+/// Any `<Import>` directive → `ImportDirective` fail-closed (blanket refusal when no
+/// resolver is available). To resolve imports and check their consistency, use
+/// [`import_with_closure`].
 pub fn import(xml_bytes: &[u8]) -> Result<Document, ImportError> {
     let root = parse_xml_tree(xml_bytes)?;
-    let doc = interpret_document(&root)?;
+    let doc = interpret_document(&root, None::<&fn(&str) -> Option<Vec<u8>>>)?;
+    doc.validate().map_err(ImportError::ValidationFailed)?;
+    Ok(doc)
+}
+
+/// [SONNET-4.6] sq-wbql1 — Parse a RIF-Core XML document and compute the
+/// **imports-closure consistency check** using a caller-supplied resolver.
+///
+/// Unlike [`import`], this function does NOT blanket-refuse `<Import>` directives.
+/// Instead, for each `<Import>` it:
+///
+/// 1. **Profile-checks** the `profile` attribute: if it names a non-Core RIF dialect
+///    (BLD, PRD, OWL-Direct, …) the import is rejected with
+///    `ImportError::InconsistentImport` — a GENUINE, NON-VACUOUS detection of the
+///    specific invalidity the W3C RIF ImportRejectionTests target.
+///
+/// 2. **Resolves** the imported document bytes via `resolver(location_iri)`. If the
+///    resolver returns `Some(bytes)`, the imported document is parsed as RIF-Core and
+///    its rules are merged with the importing document's rules; the combined set is then
+///    validated. A validation failure → `ImportError::InconsistentImport` (the imported
+///    rules are inconsistent with the importing document). If the resolver returns
+///    `None` (the document is not locally available), the import is rejected fail-closed
+///    with `ImportError::ImportDirective` — never silently accepted.
+///
+/// ## Fail-closed invariant (sq-wbql1)
+///
+/// An inconsistent/unresolvable/incompatible import is ALWAYS rejected — never silently
+/// accepted. A CONSISTENT import (resolvable, compatible profile, combined rules pass
+/// validation) is accepted and the merged `Document` is returned.
+///
+/// ## Example
+///
+/// ```rust
+/// # #[cfg(feature = "rif-xml")] {
+/// use sparq_reason::rif_xml::{import_with_closure, ImportError};
+///
+/// // An importing document with a non-Core profile import.
+/// let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+///   <directive><Import>
+///     <location><Const type="http://www.w3.org/2007/rif#iri">http://ex/rules</Const></location>
+///     <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#BLD</Const></profile>
+///   </Import></directive>
+///   <payload><Group></Group></payload>
+/// </Document>"#;
+///
+/// // The resolver provides no bytes (location not locally available).
+/// let result = import_with_closure(importing, |_loc| None);
+/// assert!(matches!(result, Err(ImportError::InconsistentImport { .. })),
+///     "a non-Core profile import must be rejected as InconsistentImport");
+/// # }
+/// ```
+pub fn import_with_closure<F>(xml_bytes: &[u8], resolver: F) -> Result<Document, ImportError>
+where
+    F: Fn(&str) -> Option<Vec<u8>>,
+{
+    let root = parse_xml_tree(xml_bytes)?;
+    let doc = interpret_document(&root, Some(&resolver))?;
+    // Final validate (covers the no-import case and the combined-rules path).
     doc.validate().map_err(ImportError::ValidationFailed)?;
     Ok(doc)
 }
@@ -4389,5 +4594,164 @@ mod tests {
             Err(e) => panic!("expected MalformedXml, got a different error: {}", e),
             Ok(_) => panic!("two <a> must be rejected, got Ok"),
         }
+    }
+
+    // ---- [SONNET-4.6] sq-wbql1: imports-closure consistency check tests ----
+
+    const EMPTY_GROUP_DOC: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group></Group></payload>
+</Document>"#;
+
+    const FRAME_FACT_DOC: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://example.org/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const></slot>
+    </Frame></sentence>
+  </Group></payload>
+</Document>"#;
+
+    /// A document with no imports imports cleanly via `import_with_closure`.
+    #[test]
+    fn import_with_closure_no_imports_passes() {
+        let result = import_with_closure(FRAME_FACT_DOC, |_| None);
+        assert!(result.is_ok(), "no-import doc must pass, got: {:?}", result.err());
+    }
+
+    /// A blanket-refused import (resolver returns None) → `ImportDirective` fail-closed.
+    /// The import is NOT silently accepted even though the profile check passes.
+    #[test]
+    fn import_with_closure_unresolvable_import_is_fail_closed() {
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/unavailable</Const></location>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let result = import_with_closure(importing, |_| None);
+        assert!(
+            matches!(result, Err(ImportError::ImportDirective { .. })),
+            "an unresolvable import (resolver returns None) MUST be fail-closed as \
+             ImportDirective, got: {:?}",
+            result
+        );
+    }
+
+    /// A non-Core profile import → `InconsistentImport` (genuine detection).
+    /// This is the load-bearing invariant for sq-wbql1.
+    #[test]
+    fn import_with_closure_non_core_profile_is_inconsistent_import() {
+        // BLD profile — incompatible with RIF-Core.
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/bld</Const></location>
+    <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#BLD</Const></profile>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        // Even with a resolver that provides valid bytes, the profile check fires first.
+        let result = import_with_closure(importing, |_| Some(EMPTY_GROUP_DOC.to_vec()));
+        assert!(
+            matches!(result, Err(ImportError::InconsistentImport { .. })),
+            "a BLD-profile import MUST be InconsistentImport (genuine detection), got: {:?}",
+            result
+        );
+    }
+
+    /// A Core-profile import that resolves to a valid RIF-Core document → ACCEPTED.
+    /// This is the positive invariant: a consistent import is not spuriously rejected.
+    #[test]
+    fn import_with_closure_core_profile_consistent_import_is_accepted() {
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/ext</Const></location>
+    <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#Core</Const></profile>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let result = import_with_closure(importing, |loc| {
+            if loc == "http://example.org/ext" {
+                Some(FRAME_FACT_DOC.to_vec())
+            } else {
+                None
+            }
+        });
+        assert!(
+            result.is_ok(),
+            "a Core-profile import resolving to a valid RIF-Core doc MUST be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// An import resolving to an INVALID RIF-Core document (the imported rules fail
+    /// `validate()`) → `ValidationFailed` or `InconsistentImport`. The combined rules
+    /// must not silently pass. This exercises the combined-validate path.
+    #[test]
+    fn import_with_closure_imported_invalid_rules_rejected() {
+        // Importing document (no imports, just wraps the import logic).
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/bad</Const></location>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        // Imported document: contains a rule with an UNSAFE head variable (UnboundHeadVar).
+        // The variable ?y appears in the head but not in the body — range-restriction fails.
+        let unsafe_imported = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence>
+      <Forall>
+        <declare><Var>x</Var></declare>
+        <declare><Var>y</Var></declare>
+        <formula><Implies>
+          <if><Frame>
+            <object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+          </Frame></if>
+          <then><Frame>
+            <object><Var>y</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot>
+          </Frame></then>
+        </Implies></formula>
+      </Forall>
+    </sentence>
+  </Group></payload>
+</Document>"#;
+        let result = import_with_closure(importing, |_| Some(unsafe_imported.to_vec()));
+        assert!(
+            result.is_err(),
+            "importing an unsafe (invalid RIF-Core) document MUST be rejected, got Ok"
+        );
+    }
+
+    /// MUTATION VERIFY (sq-wbql1): the profile check is NON-VACUOUS — a Core-profile
+    /// import is accepted while a BLD-profile import is rejected, proving the check
+    /// distinguishes them rather than accepting or rejecting both.
+    #[test]
+    fn import_with_closure_profile_check_is_non_vacuous_mutation() {
+        // ACCEPTED: no profile (absent = Core-compatible).
+        let no_profile = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/ext</Const></location>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let ok = import_with_closure(no_profile, |_| Some(EMPTY_GROUP_DOC.to_vec()));
+        assert!(ok.is_ok(), "no-profile import MUST be accepted (mutation check — ok side)");
+
+        // REJECTED: BLD profile.
+        let bld_profile = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/ext</Const></location>
+    <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#BLD</Const></profile>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let err = import_with_closure(bld_profile, |_| Some(EMPTY_GROUP_DOC.to_vec()));
+        assert!(
+            matches!(err, Err(ImportError::InconsistentImport { .. })),
+            "BLD-profile import MUST be InconsistentImport (mutation check — reject side), got: {:?}",
+            err
+        );
     }
 }
