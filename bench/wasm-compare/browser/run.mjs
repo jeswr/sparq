@@ -143,6 +143,7 @@ function startServer() {
       const body = await readFile(file);
       res.writeHead(200, {
         "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
+        "content-length": body.length, // explicit: chunked transfer would tax the fetch phase unevenly per engine
         "cache-control": "no-store", // fetch timings must hit the server, not a disk cache
       });
       res.end(body);
@@ -169,25 +170,35 @@ async function runNode(opts) {
 
 async function runBrowser(engine, opts, port, playwright) {
   const type = playwright[engine];
-  let browser;
-  try {
-    browser = await type.launch(
-      engine === "firefox"
-        ? { firefoxUserPrefs: { "privacy.reduceTimerPrecision": false } } // finer perf.now(); measure() batching covers engines that stay coarse
-        : {},
-    );
-  } catch (err) {
-    const reason =
-      `${engine} could not launch on this host: ${String(err?.message ?? err).split("\n")[0]} — ` +
-      `install it with \`npx playwright install ${engine}\` (+ \`sudo npx playwright install-deps ${engine}\` for OS libraries)`;
-    console.error(`[run] SKIP-WITH-NOTICE: ${reason}`);
-    return { skipped: true, reason };
-  }
-  try {
-    const version = `${engine} ${browser.version()} (playwright)`;
-    const rows = [];
-    const skipped = [];
-    for (const mode of ["streaming", "main"]) {
+  const rows = [];
+  const skipped = [];
+  let version;
+  // One FRESH browser process per mode: wasm compilation caches are
+  // per-process, so running `main` (decomposed WebAssembly.compile) in the
+  // same process as `streaming` would let whichever page runs second hit a
+  // warm compile cache and mis-attribute the compile phase.
+  for (const mode of ["streaming", "main"]) {
+    let browser;
+    try {
+      browser = await type.launch(
+        engine === "firefox"
+          ? { firefoxUserPrefs: { "privacy.reduceTimerPrecision": false } } // finer perf.now(); measure() batching covers engines that stay coarse
+          : {},
+      );
+    } catch (err) {
+      const firstLine =
+        String(err?.message ?? err)
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("browserType.launch"))[0] ?? String(err?.message ?? err).slice(0, 200);
+      const reason =
+        `${engine} could not launch on this host: ${firstLine} — ` +
+        `install it with \`npx playwright install ${engine}\` (+ \`sudo npx playwright install-deps ${engine}\` for OS libraries)`;
+      console.error(`[run] SKIP-WITH-NOTICE: ${reason}`);
+      return { skipped: true, reason };
+    }
+    try {
+      version = `${engine} ${browser.version()} (playwright)`;
       const page = await browser.newPage();
       page.on("console", (m) => {
         const text = m.text();
@@ -198,15 +209,14 @@ async function runBrowser(engine, opts, port, playwright) {
       await page.goto(`http://127.0.0.1:${port}/harness/page/index.html?mode=${mode}${q}`);
       await page.waitForFunction("window.__WASM_COMPARE_DONE__ === true", null, { timeout: opts.timeoutMs });
       const result = await page.evaluate("window.__WASM_COMPARE_RESULT__");
-      await page.close();
       if (!result.ok) return { ok: false, error: `${engine}/${mode}: ${result.error}`, version };
       rows.push(...result.rows);
       skipped.push(...(result.skipped ?? []));
+    } finally {
+      await browser.close();
     }
-    return { ok: true, rows, skipped, version };
-  } finally {
-    await browser.close();
   }
+  return { ok: true, rows, skipped, version };
 }
 
 // ---------- reporting ----------
@@ -303,6 +313,16 @@ const envelopes = [];
 let failed = false;
 
 const { server, port } = wantsBrowser ? await startServer() : { server: undefined, port: 0 };
+if (server) {
+  // Prewarm: one throwaway GET of the biggest asset so the FIRST engine's
+  // fetch phase does not also pay the server/OS cold file read.
+  await new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${port}/js/wasm/sparq_wasm_bg.wasm`, (res) => {
+      res.resume();
+      res.on("end", resolve);
+    }).on("error", reject);
+  });
+}
 try {
   for (const engine of opts.engines) {
     console.error(`\n[run] engine: ${engine}${opts.quick ? " (quick)" : ""}`);
