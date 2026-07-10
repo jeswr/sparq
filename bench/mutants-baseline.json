@@ -26,13 +26,13 @@
       "unviable": 32
     },
     "sparq-fedclient": {
-      "_note": "[OPUS-4.8] sq-qcnn.29: 0 mutations caught (553 survived) \u2014 same pattern as sparq-fedplan: baseline build passes, but all mutations survive because in-process test assertions are absent. sq-qcnn.22 (PR #1389) raised line coverage to 90% via direct unit tests but those tests do not yet assert on return values or behavioral invariants that cargo-mutants probes. Ceiling is honest; further direct assertion tests are the remedy.",
-      "caught": 0,
-      "caught_pct": 0.0,
-      "ceiling": 555,
-      "measured_surviving": 553,
-      "timeout": 0,
-      "unviable": 0
+      "_note": "[FABLE-5] sq-3dyje.6: the prior 0-caught/553-survived entry was a FEATURE-OFF ARTIFACT \u2014 the whole crate + every test is #[cfg(feature=\"fedclient\")]-gated, so a features-off cargo-mutants built+tested an EMPTY crate and every mutant trivially survived. Measured features-ON (--features fedclient,fedclient-adaptive, now set in the ci.yml mutants matrix like the sparq-canon/sparq-prov quirks): 465 caught / 10 survived / 5 timeout / 73 unviable (caught 0->465). The 10 survivors are ALL genuinely-EQUIVALENT mutants (documented in skills/federated-planning/SKILL.md): wire.rs |/^ bit-ops (header flag-sets, read_varint, write_varint \u2014 XOR==OR on every reachable input); EgressGuard::deny_private->Default::default() (derived Default over the empty allowlist); ScatterPool Drop->() (the tx field-drop closes the channel identically); exclusive_groups (i+1)..n->(i*1)..n (idempotent self-union); push_group SubQuery.project &&->|| (both branches yield an empty Vec). ceiling = 10 + 2 margin = 12.",
+      "caught": 465,
+      "caught_pct": 97.92,
+      "ceiling": 12,
+      "measured_surviving": 10,
+      "timeout": 5,
+      "unviable": 73
     },
     "sparq-fedplan": {
       "_note": "[OPUS-4.8] sq-qcnn.29: 0 mutations caught (534 survived) \u2014 the baseline build passes but no in-process assertion detects any behavioral change. sparq-fedplan tests are integration-style (exercised end-to-end via the federation engine path, not via `cargo test` in-crate unit assertions). The ceiling is the honest measured value; adding direct unit tests with value assertions is the sq-qcnn test-raise program for this crate.",
