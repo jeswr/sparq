@@ -692,11 +692,10 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
                 // incorrectly report the non-conclusion as entailed). Reject fail-closed.
                 // [SONNET-4.6] sq-n7y15
                 return Err(ImportError::UnrecognizedElement {
-                    tag: format!(
-                        "Const(rif:local) — local constants are document-scoped; \
-                         cross-document identity cannot be faithfully represented \
-                         (fail-closed, not silently mis-imported)"
-                    ),
+                    tag: "Const(rif:local) — local constants are document-scoped; \
+                          cross-document identity cannot be faithfully represented \
+                          (fail-closed, not silently mis-imported)"
+                        .to_string(),
                 });
             }
             if ty == RIF_IRI_TYPE {
