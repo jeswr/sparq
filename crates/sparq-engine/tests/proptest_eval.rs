@@ -94,6 +94,7 @@
 //!   red (every joined row duplicated vs the oracle multiset).
 //! * DISTINCT no-op (`distinct_bindings` emptied) → family 1 red on a
 //!   `SELECT DISTINCT` query whose oracle multiset deduped.
+//!
 //! Additionally `oracle_known_answer_*` pin the oracle itself against hand-computed
 //! rows (a degenerate oracle cannot silently agree with the engine), and
 //! `generator_diversity_floor` asserts the generated corpus actually contains
@@ -1508,13 +1509,13 @@ fn generator_diversity_floor() {
         Config::default(),
         TestRng::from_seed(RngAlgorithm::ChaCha, &[7u8; 32]),
     );
-    let strat = arb_case();
+    let strategy = arb_case();
     let n = 300;
     let (mut nonempty, mut dups, mut unbound_cells, mut multi_row) = (0, 0, 0, 0);
     let (mut bgp, mut opt, mut union, mut filt, mut bind, mut distinct, mut order, mut limit) =
         (0, 0, 0, 0, 0, 0, 0, 0);
     for _ in 0..n {
-        let (data, q) = strat.new_tree(&mut runner).expect("gen").current();
+        let (data, q) = strategy.new_tree(&mut runner).expect("gen").current();
         match q.body {
             Body::Bgp(_) => bgp += 1,
             Body::Opt(..) => opt += 1,
