@@ -567,6 +567,26 @@ fn sd_update_only_language_sets_update_flag_not_a_version() {
 }
 
 #[test]
+fn sd_service_subject_needs_both_type_and_service_object() {
+    // The sd:Service detection is `pred == rdf:type AND object == sd:Service`. A document
+    // where each condition holds on a DIFFERENT triple (a non-Service rdf:type, and an
+    // sd:Service object under a non-type predicate) has NO sd:Service subject, so the parser
+    // must return Ok(None) — the caller then falls back to an ASK probe. The `&&`→`||`
+    // mutation would wrongly register a service subject from EITHER half and return Some(..).
+    let nt = concat!(
+        // rdf:type, but to something that is NOT sd:Service.
+        "<http://host/thing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/sparql-service-description#Dataset> .\n",
+        // an sd:Service OBJECT, but under a non-rdf:type predicate.
+        "<http://host/other> <http://www.w3.org/ns/sparql-service-description#endpoint> <http://www.w3.org/ns/sparql-service-description#Service> .\n",
+    );
+    assert_eq!(
+        sparq_fedclient::discovery::parse_service_description(nt),
+        Ok(None),
+        "no triple satisfies BOTH rdf:type AND object=sd:Service ⇒ not a Service Description"
+    );
+}
+
+#[test]
 fn sd_sparql10_never_downgrades_an_advertised_11() {
     // Both orders: SPARQL11Query wins over SPARQL10Query regardless of triple order (the
     // `version != Sparql11` guard; `!=`→`==` or a deleted arm flips one of these).
