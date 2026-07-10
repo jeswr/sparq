@@ -168,6 +168,103 @@ fn one_pass_compressed_spill_build_matches_recompress() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+// ===== [FABLE-5] sq-7d3dj.32.2.7 — SPQCPRM2 format migration cross-version differentials =====
+
+/// [FABLE-5] sq-7d3dj.32.2.7 — the V2 emit config gate at the STORE level: `save_compressed`
+/// under `with_emit_format(V2)` must write `SPQCPRM2` perms that AUTO-DETECT on `open` and answer
+/// every query identically to the V1 save and the in-memory load. This is the migration's
+/// end-to-end soundness: a V2-saved store is query-equivalent to a V1-saved store.
+#[cfg(feature = "spqcprm2")]
+#[test]
+fn v2_saved_store_is_query_equivalent_to_v1() {
+    use sparq_core::compress::{with_emit_format, EmitFormat};
+    let nt = synthetic_nt(400); // > 128 rows per order ⇒ multi-block perms with reset_d1 rows
+    let base = std::env::temp_dir().join(format!("sparq_spqcprm2_v2eq_{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let v1_dir = base.join("v1");
+    let v2_dir = base.join("v2");
+
+    let g = Graph::load_str(&nt, "ntriples").unwrap();
+    g.save_compressed(&v1_dir).unwrap(); // default emit ⇒ SPQCPRM1
+    with_emit_format(EmitFormat::V2, || g.save_compressed(&v2_dir).unwrap());
+
+    // At least one V2 perm must carry the SPQCPRM2 magic (else the gate did not engage).
+    let saw_v2 = (0..6).any(|i| {
+        std::fs::read(v2_dir.join(format!("perm{i}.bin")))
+            .map(|b| b.starts_with(b"SPQCPRM2"))
+            .unwrap_or(false)
+    });
+    assert!(saw_v2, "V2 save produced no SPQCPRM2 perm — the emit gate did not engage");
+    // And the V1 dir must NOT carry any V2 magic (default stays SPQCPRM1).
+    for i in 0..6 {
+        if let Ok(b) = std::fs::read(v1_dir.join(format!("perm{i}.bin"))) {
+            assert!(!b.starts_with(b"SPQCPRM2"), "default save wrote a SPQCPRM2 perm{i} — V2 leaked into the default");
+        }
+    }
+
+    let mem = Graph::load_str(&nt, "ntriples").unwrap();
+    let v1 = Graph::open(&v1_dir).unwrap();
+    let v2 = Graph::open(&v2_dir).unwrap();
+    assert_eq!(v2.len(), mem.len(), "V2 triple count differs");
+    assert_eq!(dump(&v2), dump(&mem), "V2 term-level content differs from in-memory");
+    assert_eq!(dump(&v2), dump(&v1), "V2 term-level content differs from V1");
+    for q in QUERIES {
+        let want = query(&mem, q).unwrap().rows.len();
+        assert_eq!(query(&v1, q).unwrap().rows.len(), want, "V1 query differs for {q}");
+        assert_eq!(query(&v2, q).unwrap().rows.len(), want, "V2 query differs for {q}");
+    }
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.7 — V1→V2→V1 and V2→V1→V2 cross-version round-trips at the STORE
+/// level: opening a store in one format and RE-SAVING it in the other must preserve the exact
+/// logical content through every hop. This is the format-conversion soundness a real migration
+/// tool relies on (a V1 store can be rewritten V2 and back with no drift).
+#[cfg(feature = "spqcprm2")]
+#[test]
+fn cross_version_resave_round_trips_losslessly() {
+    use sparq_core::compress::{with_emit_format, EmitFormat};
+    let nt = synthetic_nt(350);
+    let base = std::env::temp_dir().join(format!("sparq_spqcprm2_xver_{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let d1 = base.join("v1");
+    let d2 = base.join("v2");
+    let d3 = base.join("v1-again");
+    let d4 = base.join("v2-again");
+
+    let mem = Graph::load_str(&nt, "ntriples").unwrap();
+    let reference = dump(&mem);
+
+    // V1 → open → V2.
+    mem.save_compressed(&d1).unwrap();
+    let g_v1 = Graph::open(&d1).unwrap();
+    assert_eq!(dump(&g_v1), reference, "V1 save/open lost content");
+    with_emit_format(EmitFormat::V2, || g_v1.save_compressed(&d2).unwrap());
+    let g_v2 = Graph::open(&d2).unwrap();
+    assert_eq!(dump(&g_v2), reference, "V1→V2 resave/open lost content");
+
+    // V2 → open → V1 (back to the shipped format).
+    g_v2.save_compressed(&d3).unwrap(); // default emit ⇒ V1
+    let g_v1b = Graph::open(&d3).unwrap();
+    assert_eq!(dump(&g_v1b), reference, "V2→V1 resave/open lost content");
+    for i in 0..6 {
+        if let Ok(b) = std::fs::read(d3.join(format!("perm{i}.bin"))) {
+            assert!(!b.starts_with(b"SPQCPRM2"), "V2→V1 resave wrote a SPQCPRM2 perm{i}");
+        }
+    }
+
+    // V1 → open → V2 once more (V2→V1→V2 leg): the full cycle is stable.
+    with_emit_format(EmitFormat::V2, || g_v1b.save_compressed(&d4).unwrap());
+    let g_v2b = Graph::open(&d4).unwrap();
+    assert_eq!(dump(&g_v2b), reference, "V1→V2 (second cycle) lost content");
+    // Query parity across the whole cycle.
+    for q in QUERIES {
+        let want = query(&mem, q).unwrap().rows.len();
+        assert_eq!(query(&g_v2b, q).unwrap().rows.len(), want, "cross-version cycle query differs for {q}");
+    }
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// The override is per-thread and OFF by default: a build run WITHOUT `with_build_compressed`
 /// (and without the env var) must still write RAW perms, so the default behaviour is intact.
 #[test]
