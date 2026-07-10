@@ -116,8 +116,19 @@ pub fn numeric_equal(a: &NumericValue, b: &NumericValue) -> bool {
         (_, Double(y)) => to_f64(a).is_some_and(|x| x == *y),
         (Integer(x), Integer(y)) => x == y,
         (Decimal(x), Decimal(y)) => x.cmp(y) == Ordering::Equal,
-        (Integer(x), Decimal(y)) => BigDecimal::from(x.clone()).cmp(y) == Ordering::Equal,
-        (Decimal(x), Integer(y)) => x.cmp(&BigDecimal::from(y.clone())) == Ordering::Equal,
+        // [OPUS-4.8] num-bigint 0.5: bigdecimal 0.4 no longer implements From<BigInt 0.5>
+        // (two separate semver-major instances). Convert via the decimal string form, which is
+        // lossless for integers and always parses successfully.
+        (Integer(x), Decimal(y)) => BigDecimal::from_str(&x.to_string())
+            .expect("BigInt::to_string yields a valid decimal literal")
+            .cmp(y)
+            == Ordering::Equal,
+        (Decimal(x), Integer(y)) => x
+            .cmp(
+                &BigDecimal::from_str(&y.to_string())
+                    .expect("BigInt::to_string yields a valid decimal literal"),
+            )
+            == Ordering::Equal,
     }
 }
 

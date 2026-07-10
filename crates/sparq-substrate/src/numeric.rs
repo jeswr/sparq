@@ -1502,6 +1502,178 @@ mod tests {
         assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
     }
 
+    // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants identified
+    // from nightly run 28776460517. Each asserts an EXACT value so a mutation of the
+    // comparison / arithmetic / sign logic goes red.
+
+    /// `Dec::parse` must preserve the negative sign of the input lexical.
+    /// Kills: `59:35 delete - in Dec::parse` (removes the `-mag` negation, making
+    /// negative parses return a positive mantissa).
+    #[test]
+    fn dec_parse_negative_mantissa_sign() {
+        assert_eq!(Dec::parse("-3"), Some(Dec { mant: -3, scale: 0 }));
+        assert_eq!(Dec::parse("-1.5"), Some(Dec { mant: -15, scale: 1 }));
+        assert_eq!(Dec::parse("-0.07"), Some(Dec { mant: -7, scale: 2 }));
+    }
+
+    /// `Dec::checked_div` with two negative operands must produce a positive result.
+    /// Kills: `129:46 replace < with == in Dec::checked_div` (changes `o.mant < 0`
+    /// to `o.mant == 0`; since the divisor is asserted non-zero, this makes the sign
+    /// depend only on the dividend, giving a wrong negative result for neg/neg).
+    #[test]
+    fn dec_checked_div_neg_divided_by_neg_is_positive() {
+        // −6 / −3 = 2.0 (positive, scale 1).
+        let r = Dec { mant: -6, scale: 0 }.checked_div(Dec { mant: -3, scale: 0 });
+        assert_eq!(r, Some(Dec { mant: 20, scale: 1 }));
+        // −4 / −2 = 2.0.
+        let r2 = Dec { mant: -4, scale: 0 }.checked_div(Dec { mant: -2, scale: 0 });
+        assert_eq!(r2, Some(Dec { mant: 20, scale: 1 }));
+    }
+
+    /// When the divisor has a non-zero scale the exponent `e = s + o.scale - self.scale`
+    /// uses `+` for `o.scale`; mutating that `+` to `-` gives the wrong exponent.
+    /// Kills: `134:30 replace + with - in Dec::checked_div`.
+    #[test]
+    fn dec_checked_div_nonzero_divisor_scale() {
+        // 10 / 0.5 = 20.0: o.scale=1, so e = s + 1 - 0 = s+1. At s=1: e=2, num=1000, den=5.
+        // Under mutation (−): e = s − 1 − 0 = s−1. At s=1: e=0, num=10, den=5 → 2.0. Wrong.
+        assert_eq!(
+            Dec { mant: 10, scale: 0 }.checked_div(Dec { mant: 5, scale: 1 }),
+            Some(Dec { mant: 200, scale: 1 })
+        );
+        // 3 / 0.3 = 10.0: o.scale=1. At s=1: e=2, num=300, den=3 → 100 → scale=1 → 10.0.
+        assert_eq!(
+            Dec { mant: 3, scale: 0 }.checked_div(Dec { mant: 3, scale: 1 }),
+            Some(Dec { mant: 100, scale: 1 })
+        );
+    }
+
+    /// Non-terminating division (1/3) rounds half-up: the quotient at max scale 18 is
+    /// 0.333...3 with the last digit 3 (rounds DOWN from 0.333...33…, rem=1, 1*2<3).
+    /// Non-terminating 2/3 rounds UP (rem=2, 2*2=4 ≥ 3), giving 0.666...7.
+    /// Kills: `151:27 replace + with - in Dec::checked_div` (rounds DOWN instead of UP)
+    ///        `151:50 replace * with / in Dec::checked_div` (rem/2 never ≥ den — no round).
+    #[test]
+    fn dec_checked_div_nonterminating_rounds_half_up() {
+        // 2/3: non-terminating at every scale. Round half-up at scale 18.
+        // rem = (2 * 10^18) % 3 = 2.  2*2=4 ≥ 3 → round UP.
+        let two_thirds = Dec { mant: 2, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        assert_eq!(two_thirds.scale, 18);
+        assert_eq!(two_thirds.mant, 666_666_666_666_666_667i128);
+        // 1/3: rem = (1 * 10^18) % 3 = 1.  1*2=2 < 3 → round DOWN (no increment).
+        let one_third = Dec { mant: 1, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        assert_eq!(one_third.scale, 18);
+        assert_eq!(one_third.mant, 333_333_333_333_333_333i128);
+    }
+
+    /// The non-terminating path preserves the negative sign of the result.
+    /// Kills: `153:35 delete - in Dec::checked_div` (removes the `-mant` negation in the
+    /// non-terminating branch, returning a positive mantissa for a negative quotient).
+    #[test]
+    fn dec_checked_div_nonterminating_negative_result() {
+        // −2/3 is non-terminating; result must have a negative mantissa.
+        let r = Dec { mant: -2, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        assert_eq!(r.scale, 18);
+        assert_eq!(r.mant, -666_666_666_666_666_667i128);
+    }
+
+    /// `Dec::round_to_int` Ceil of an exact decimal (no remainder) must NOT add 1.
+    /// The condition `r > 0` must be STRICT; `>= 0` would always round up since rem_euclid ≥ 0.
+    /// Kills: `174:57 replace > with >= in Dec::round_to_int`.
+    #[test]
+    fn dec_round_to_int_ceil_of_exact_decimal_is_identity() {
+        // 3.0 is already an integer — ceil must stay 3, not become 4.
+        assert_eq!(
+            Dec { mant: 30, scale: 1 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: 3, scale: 0 }
+        );
+        // 7.0 with a different scale.
+        assert_eq!(
+            Dec { mant: 700, scale: 2 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: 7, scale: 0 }
+        );
+        // Negative exact decimal: ceil(-3.0) = -3, not -2.
+        assert_eq!(
+            Dec { mant: -30, scale: 1 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: -3, scale: 0 }
+        );
+    }
+
+    /// `cmp_plain_decimal` must treat a negative non-zero value as Less than its
+    /// positive counterpart (same magnitude). Tests the sign detection path.
+    /// Kills:
+    ///   `254:32 replace && with || in cmp_plain_decimal` — `||` makes any number whose
+    ///     fraction part is empty (all integers) appear to be "zero", stripping the sign.
+    ///   `273:23 delete ! in cmp_plain_decimal` — removes the `!` from `na && !a_zero`,
+    ///     meaning neg_a is only true when the value IS zero (inverting the sign logic).
+    #[test]
+    fn cmp_plain_decimal_negative_vs_positive_same_magnitude() {
+        use Ordering::*;
+        assert_eq!(cmp_plain_decimal("-2", "2"), Some(Less));
+        assert_eq!(cmp_plain_decimal("2", "-2"), Some(Greater));
+        // Fraction form: -0.5 < 0.5.
+        assert_eq!(cmp_plain_decimal("-0.5", "0.5"), Some(Less));
+    }
+
+    /// Zero compared to a positive value must be Less, not Equal.
+    /// Kills: `256:15 replace && with || in cmp_plain_decimal` (the `a_zero || b_zero`
+    /// mutation returns Equal as soon as EITHER operand is zero, even when the other is not).
+    #[test]
+    fn cmp_plain_decimal_zero_vs_nonzero() {
+        use Ordering::*;
+        assert_eq!(cmp_plain_decimal("0", "5"), Some(Less));
+        assert_eq!(cmp_plain_decimal("5", "0"), Some(Greater));
+        assert_eq!(cmp_plain_decimal("-0", "3"), Some(Less));
+    }
+
+    /// When `Dec::checked_div` overflows the exact `i128` path it falls back to
+    /// `self.f64() / o.f64()` (division), not multiplication or remainder.
+    /// Kills: `486:53 replace / with * in Num::binop`
+    ///        `486:53 replace / with % in Num::binop`.
+    #[test]
+    fn num_binop_div_overflow_fallback_is_double_division() {
+        // i128::MAX / 0.1 overflows the exact Dec path (numerator would be ~1.7e40,
+        // exceeding u128::MAX), so falls back to Double.
+        // Expected: ~1.7e39. Mutation *: ~1.7e37. Mutation %: tiny value near 0.
+        let big = Num::Dec(Dec { mant: i128::MAX, scale: 0 });
+        let small = Num::Dec(Dec { mant: 1, scale: 1 }); // 0.1
+        let result = big.binop(small, ArithOp::Div).expect("never a type error here");
+        assert!(
+            matches!(result, Num::Double(d) if d > 1e38),
+            "overflow fallback must use f64 DIVISION (got {:?})",
+            result
+        );
+    }
+
+    /// `fmt_xsd_double` uses `< 1e15` (strict) for the integer-plain path; the
+    /// boundary value 1e15 itself must render as scientific notation, not as a plain integer.
+    /// Kills: `794:36 replace < with <= in fmt_xsd_double`.
+    #[test]
+    fn fmt_xsd_double_boundary_at_1e15_is_scientific() {
+        // 1e15.abs() < 1e15 is false → scientific "1.0E15".
+        // Under mutation (<= 1e15) it would be true → integer "1000000000000000".
+        assert_eq!(fmt_xsd_double(1e15), "1.0E15");
+        // 9.99e14 is strictly below 1e15 → still integer form.
+        assert_eq!(fmt_xsd_double(999_000_000_000_000.0_f64), "999000000000000");
+    }
+
+    /// `Num::lexical` for `Float` uses `f.abs() < 1e15` (strict); the nearest f32 to
+    /// 1e15 (`999_999_986_991_104.0_f32`) sits exactly AT the boundary — it must use
+    /// scientific notation, not integer form.
+    /// Kills: `610:55 replace < with <= in Num::lexical`.
+    #[test]
+    fn num_lexical_float_at_1e15_f32_boundary_is_scientific() {
+        // 1e15_f32 rounds to 999_999_986_991_104.0.  Its abs() is NOT strictly less
+        // than itself, so the original `< 1e15_f32` is false → scientific.
+        // Under mutation (`<=`), the condition is true → integer form (no 'E').
+        let at_boundary: f32 = 1e15_f32; // = 999_999_986_991_104.0
+        assert!(
+            Num::Float(at_boundary).lexical().contains('E'),
+            "float at 1e15_f32 boundary must render scientific; got {:?}",
+            Num::Float(at_boundary).lexical()
+        );
+    }
+
     /// [FABLE-5] (sq-9781x) TRUE cross-seam differential: the sparq-core numeric-value CACHE
     /// seam (`parse_xsd_f64(value.trim())` — the EXACT expression `numerics_of`/`numeric_of`
     /// call in sparq-core) vs the datatype-AWARE evaluator `as_numeric` (`Num::of_literal`,

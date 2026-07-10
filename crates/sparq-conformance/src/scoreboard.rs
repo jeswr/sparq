@@ -137,20 +137,28 @@ pub struct Suite {
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
 /// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
-/// * JSON-LD toRdf 413 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `TORDF_FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
-/// * JSON-LD fromRdf 51 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `FROMRDF_FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
-/// * JSON-LD compact 186 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `COMPACT_FLOOR = 186` (sq-3uos5; RAISED 163→186 by sq-oy1f.16 after #978's
+///
+/// [FABLE-5] sq-oy1f.40 — the SIX JSON-LD floors below now live LIB-SIDE in
+/// `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are IMPORTED directly into
+/// the `Suite` rows here (`ratchet_floor: crate::floors::<lane>::FLOOR`), so the
+/// registry and the runner's `assert!(pass >= FLOOR)` read ONE compile-time
+/// constant — they cannot drift (retiring their textual floor-sync rows in
+/// `tests/scoreboard_floors.rs`; `ci.yml` greps the same `src/floors/<lane>.rs`).
+///
+/// * JSON-LD toRdf 413 — `sparq-conformance` `src/floors/to_rdf.rs`
+///   `FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
+/// * JSON-LD fromRdf 51 — `sparq-conformance` `src/floors/from_rdf.rs`
+///   `FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
+/// * JSON-LD compact 186 — `sparq-conformance` `src/floors/compact.rs`
+///   `FLOOR = 186` (sq-3uos5; RAISED 163→186 by sq-oy1f.16 after #978's
 ///   faithfulness fixes; opt-in `jsonld-suite` feature; RDF → compacted JSON-LD via
 ///   the native Compaction Algorithm, lossless round-trip).
-/// * JSON-LD frame 61 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `FRAME_FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
+/// * JSON-LD frame 61 — `sparq-conformance` `src/floors/frame.rs`
+///   `FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
 ///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
 ///   suite, compared by re-parse RDF-equivalence to the normative expected output).
-/// * JSON-LD expand 240 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `EXPAND_FLOOR = 240` (sq-kk1mq oracle-correction re-baseline; opt-in
+/// * JSON-LD expand 240 — `sparq-conformance` `src/floors/expand.rs`
+///   `FLOOR = 240` (sq-kk1mq oracle-correction re-baseline; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
 ///   directly and compares the result to the expected document via `json_ld_equal`
 ///   — a document-level JSON comparator measuring JSON-LD data-model (semantic)
@@ -160,8 +168,8 @@ pub struct Suite {
 ///   reordered vs. the W3C reference (strict-ordered count 222).  OLD floor was
 ///   247 under the RDF-equivalence oracle (sq-oy1f); the rebase reveals a net 7
 ///   fewer passes (20 flips minus 13 recoveries) and 26 new honest fails).
-/// * JSON-LD flatten 50 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `FLATTEN_FLOOR = 50` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → flattened
+/// * JSON-LD flatten 50 — `sparq-conformance` `src/floors/flatten.rs`
+///   `FLOOR = 50` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → flattened
 ///   JSON-LD via the shipping `graph_to_jsonld(JsonLdForm::Flattened)` writer,
 ///   compared by re-parse RDF-equivalence to the normative expected document).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
@@ -425,7 +433,9 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 413,
+        // [FABLE-5] sq-oy1f.40 — sourced from the LIB-SIDE floor const so the
+        // registry and the runner's `assert!` read ONE number (no textual drift).
+        ratchet_floor: crate::floors::to_rdf::FLOOR,
         floor_basis: "pass",
         note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
                compact + frame are now gated; expand/flatten remain not-implemented buckets",
@@ -439,7 +449,8 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 51,
+        // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
+        ratchet_floor: crate::floors::from_rdf::FLOOR,
         floor_basis: "pass",
         note: "RDF → JSON-LD through the native serialize-rdf writer, compared by a \
                re-parse RDF-dataset round-trip (expanded + prefix-@context forms)",
@@ -466,7 +477,8 @@ pub const SUITES: &[Suite] = &[
         ci_job: "jsonld-conformance",
         // [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after the #978 compaction
         // faithfulness fixes landed (re-measured on current main: 186 pass).
-        ratchet_floor: 186,
+        // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
+        ratchet_floor: crate::floors::compact::FLOOR,
         floor_basis: "pass",
         note: "RDF → compacted JSON-LD through the native Compaction Algorithm \
                (serialize-rdf), compared by a re-parse RDF-dataset round-trip \
@@ -494,7 +506,8 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 61,
+        // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
+        ratchet_floor: crate::floors::frame::FLOOR,
         floor_basis: "pass",
         note: "RDF → framed JSON-LD through the native Framing Algorithm \
                (serialize-rdf) over the w3c/json-ld-framing suite, compared by a \
@@ -526,7 +539,8 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 240,
+        // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
+        ratchet_floor: crate::floors::expand::FLOOR,
         floor_basis: "pass",
         note: "native sparq_jsonld::expand() + json_ld_equal semantic-equivalence comparator \
                (sq-kk1mq; NOT structural identity — ~18/240 passes are reordered, \
@@ -542,7 +556,8 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 50,
+        // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
+        ratchet_floor: crate::floors::flatten::FLOOR,
         floor_basis: "pass",
         note: "RDF → flattened JSON-LD through the shipping graph_to_jsonld(Flattened) \
                writer (serialize-rdf), compared by a re-parse RDF-equivalence to the \

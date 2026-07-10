@@ -134,6 +134,10 @@ criteria = "safe-to-deploy"
 version = "0.4.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.bit-set]]
+version = "0.10.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.bitflags]]
 version = "2.13.0"
 criteria = "safe-to-deploy"
@@ -700,7 +704,11 @@ version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.naga]]
-version = "29.0.3"
+version = "30.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.naga-types]]
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ndk-sys]]
@@ -719,6 +727,10 @@ criteria = "safe-to-deploy"
 version = "0.4.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.num-bigint]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.num-complex]]
 version = "0.4.6"
 criteria = "safe-to-deploy"
@@ -729,6 +741,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.objc2]]
 version = "0.6.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-graphics]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-io-surface]]
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -1375,35 +1395,35 @@ version = "1.0.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-core]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-core-deps-apple]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-core-deps-emscripten]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-core-deps-windows-linux-android]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-hal]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-naga-bridge]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.wgpu-types]]
-version = "29.0.3"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.winapi-i686-pc-windows-gnu]]

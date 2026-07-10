@@ -5247,17 +5247,27 @@ fn render_select(
             }
             Err(e) => return engine_error_response(&e, config, true),
         },
-        _ => {
+        // CSV/TSV: row-oriented chunked streaming — mirrors the JSON T16 path; the peak
+        // never holds a second full-result copy. Byte-identical to the buffered form per
+        // the chunked invariant. XML stays buffered (prefix compaction). [SONNET-4.6]
+        Format::Csv | Format::Tsv => {
             let result = match sparq_engine::query_with_budget(graph, select, budget) {
                 Ok(r) => r,
                 Err(e) => return engine_error_response(&e, config, true),
             };
-            match fmt {
-                Format::Xml => results::select_to_xml(&result),
-                Format::Csv => results::select_to_csv(&result),
-                Format::Tsv => results::select_to_tsv(&result),
-                Format::Json => unreachable!(),
-            }
+            let chunks = match fmt {
+                Format::Csv => results::select_to_csv_chunks(&result),
+                Format::Tsv => results::select_to_tsv_chunks(&result),
+                _ => unreachable!(),
+            };
+            return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone())
+        }
+        Format::Xml => {
+            let result = match sparq_engine::query_with_budget(graph, select, budget) {
+                Ok(r) => r,
+                Err(e) => return engine_error_response(&e, config, true),
+            };
+            results::select_to_xml(&result)
         }
     };
     text_response(StatusCode::OK, ct, body, head_only)

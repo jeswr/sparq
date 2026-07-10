@@ -745,6 +745,26 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-
   the-DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical,
   and no new dependencies are added (no `unsafe`).
+- **Membership-cluster pre-materialisation** is the non-default `cluster-materialize` cargo feature
+  ([FABLE-5] bead `sq-7d3dj.30.14`; SP2Bench q07, research/sp2bench-complex-shape-deficit.md §5). It
+  targets the container-membership idiom `?bag ?member ?doc` — a pattern with an UNBOUND predicate (the
+  `rdf:_n` bag members are ordinary triples, so no single bound-predicate scan enumerates a whole bag).
+  When such a pattern sits in a BGP next to a small BOUND-predicate anchor it shares exactly one variable
+  with (q07's `?doc2 dcterms:references ?bag`), greedy GOO bind-joins the ~250k-row unbound-predicate
+  relation per driver binding through the widest permutation. With the feature on, `cluster::detect`
+  spots the shape and the executor evaluates the `{anchor, membership}` pair **standalone** (the anchor
+  bounds the shared variable to a small set → a few-thousand-row relation) and **natural-joins** it to the
+  rest. It is **ORDER-ONLY**: a BGP is a commutative/associative natural join, so partitioning into two
+  connected sub-BGPs and joining yields the SAME row bag as greedy — both sub-BGPs are evaluated
+  UNCORRELATED, so there is no sideways-information hazard (only one evaluation of the cluster; the
+  materialised relation is the full union-compatible superset), and natural join preserves multiplicity
+  exactly (no dedup). `detect` **DECLINES** (unchanged greedy plan) on any non-matching shape — not
+  exactly one membership pattern, an anchor variable that leaks into the rest, a pushed-down scan filter
+  on a cluster pattern, or the cost gate unmet. Proven by `tests/cluster_materialize_differential.rs`
+  (randomised shapes + nested-OPTIONAL + multiplicity + a non-vacuous mutation check, run in BOTH feature
+  states). The end-to-end q07 win is a measured hypothesis for the canonical perf host (bead
+  `sq-7d3dj.30.6`), not a baked-in number. When off, zero of this code compiles, the default native +
+  wasm builds are byte-identical, and no new dependencies are added (no `unsafe`).
 - **Pre-execution algebra rewrite pass** is the `algebra-rewrite` cargo feature — non-default in the
   sparq-engine LIBRARY, but lit BY DEFAULT in the shipped `sparq-cli` + `sparq-server` binaries and in
   the conformance/differential-fuzz harnesses ([FABLE-5] sq-7d3dj.30.13), so it is what real users and

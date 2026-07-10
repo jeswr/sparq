@@ -114,55 +114,18 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-solid/tests/differential_oracle.rs",
         "DIVERGENCE_FLOOR",
     ),
-    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets. The
-    // floor consts (`pub const TORDF_FLOOR` / `FROMRDF_FLOOR`) live in this same
-    // crate's `tests/jsonld_suite.rs` (behind the opt-in `jsonld-suite` feature);
-    // the guard reads them textually — exactly like the SHACL/geo/Solid floors —
-    // so the central scoreboard's `ratchet_floor` can never drift from what the
-    // runner asserts. (`const_floor_in` already tolerates the `pub ` prefix.)
-    (
-        "W3C JSON-LD 1.1 toRdf",
-        "crates/sparq-conformance/tests/jsonld_suite.rs",
-        "TORDF_FLOOR",
-    ),
-    (
-        "W3C JSON-LD 1.1 fromRdf",
-        "crates/sparq-conformance/tests/jsonld_suite.rs",
-        "FROMRDF_FLOOR",
-    ),
-    // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 `compact` ratchet (extends sq-oy1f.2).
-    // `pub const COMPACT_FLOOR` lives in the same `tests/jsonld_suite.rs`; the guard
-    // reads it textually so the central scoreboard's `ratchet_floor` can never drift
-    // from what the runner asserts.
-    (
-        "W3C JSON-LD 1.1 compact",
-        "crates/sparq-conformance/tests/jsonld_suite.rs",
-        "COMPACT_FLOOR",
-    ),
-    // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet over the SEPARATE
-    // w3c/json-ld-framing suite. `pub const FRAME_FLOOR` lives in the same
-    // `tests/jsonld_suite.rs`; the guard reads it textually so the central
-    // scoreboard's `ratchet_floor` can never drift from what the runner asserts.
-    (
-        "W3C JSON-LD 1.1 frame",
-        "crates/sparq-conformance/tests/jsonld_suite.rs",
-        "FRAME_FLOOR",
-    ),
-    // [OPUS-4.8] sq-oy1f — the W3C JSON-LD 1.1 `expand` + `flatten` ratchets driving
-    // the shipping `graph_to_jsonld(JsonLdForm::Expanded|Flattened)` writer.
-    // `pub const EXPAND_FLOOR` / `FLATTEN_FLOOR` live in the same
-    // `tests/jsonld_suite.rs`; the guard reads them textually so the central
-    // scoreboard's `ratchet_floor` can never drift from what the runner asserts.
-    (
-        "W3C JSON-LD 1.1 expand",
-        "crates/sparq-conformance/tests/jsonld_suite.rs",
-        "EXPAND_FLOOR",
-    ),
-    (
-        "W3C JSON-LD 1.1 flatten",
-        "crates/sparq-conformance/tests/jsonld_suite.rs",
-        "FLATTEN_FLOOR",
-    ),
+    // [FABLE-5] sq-oy1f.40 — the SIX W3C JSON-LD 1.1 ratchets (toRdf, fromRdf,
+    // compact, frame, expand, flatten) are NO LONGER listed here. Their floor consts
+    // moved LIB-SIDE to `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are
+    // IMPORTED directly into the `Suite` rows in `scoreboard::SUITES`
+    // (`ratchet_floor: crate::floors::<lane>::FLOOR`) AND into the runner
+    // (`tests/jsonld_suite/common.rs` re-exports them). Both therefore read the SAME
+    // compile-time constant — they CANNOT drift, so a textual floor-sync row is
+    // unnecessary (and would re-introduce the very hard-coded duplicate this bead
+    // removed). These six are the `LIB_SOURCED_FLOORS` set below; the
+    // `all_crate_test_suites_are_guarded` test exempts exactly them, so no OTHER
+    // crate-test suite can silently escape the textual guard. See
+    // `crates/sparq-conformance/src/floors/mod.rs`.
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
     // The floor const (`pub const ODRL_SUITE_FLOOR`) lives top-level in
     // `sparq-policy`'s `tests/odrl_test_suite.rs`; the guard reads it textually
@@ -318,6 +281,61 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// [FABLE-5] sq-oy1f.40 — the suite labels whose ratchet floor is sourced at
+/// COMPILE TIME from the LIB-SIDE `sparq_conformance::floors::<lane>::FLOOR` const
+/// (imported into BOTH `scoreboard::SUITES` and the `jsonld_suite` runner). These
+/// six do NOT need a textual floor-sync row in `CRATE_LOCAL_FLOORS`: the registry
+/// and the runner read the SAME `const`, so they cannot drift. The
+/// `all_crate_test_suites_are_guarded` test exempts exactly this set (and asserts
+/// nothing else escapes the textual guard).
+const LIB_SOURCED_FLOORS: &[&str] = &[
+    "W3C JSON-LD 1.1 toRdf",
+    "W3C JSON-LD 1.1 fromRdf",
+    "W3C JSON-LD 1.1 compact",
+    "W3C JSON-LD 1.1 frame",
+    "W3C JSON-LD 1.1 expand",
+    "W3C JSON-LD 1.1 flatten",
+];
+
+/// [FABLE-5] sq-oy1f.40 — the pinned floor VALUES the six lib-sourced JSON-LD
+/// registry rows must carry, as `(label, expected_floor)`. Because the registry
+/// imports the lib-side `const` directly, this compile-time check catches a silent
+/// LOWERING of any of the six floors (a ratchet may only RISE): if someone edits
+/// `src/floors/<lane>::FLOOR` down, the registry `ratchet_floor` drops with it and
+/// this assertion fires. RAISING a floor deliberately updates the value here in the
+/// same commit (mirroring how a textual-guard floor is bumped). This is the
+/// lib-sourced analogue of the `const_floor_in` textual re-read, giving the six
+/// JSON-LD lanes the same "floor cannot silently move" protection without a
+/// hard-coded duplicate of the number in two source files.
+const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
+    ("W3C JSON-LD 1.1 toRdf", 413),
+    ("W3C JSON-LD 1.1 fromRdf", 51),
+    ("W3C JSON-LD 1.1 compact", 186),
+    ("W3C JSON-LD 1.1 frame", 61),
+    ("W3C JSON-LD 1.1 expand", 240),
+    ("W3C JSON-LD 1.1 flatten", 50),
+];
+
+/// [FABLE-5] sq-oy1f.40 — the registry's six lib-sourced JSON-LD floors carry the
+/// pinned values (a ratchet may only RISE; a silent LOWERING of a
+/// `src/floors/<lane>::FLOOR` const drops the registry value and trips this).
+#[test]
+fn lib_sourced_jsonld_floors_are_pinned() {
+    for (label, expected) in LIB_SOURCED_EXPECTED {
+        let suite = SUITES
+            .iter()
+            .find(|s| s.label == *label)
+            .unwrap_or_else(|| panic!("scoreboard registry missing lib-sourced suite {label:?}"));
+        assert_eq!(
+            suite.ratchet_floor, *expected,
+            "lib-sourced floor for {label} is {} but the pinned ratchet is {} — a floor may \
+             only RISE; if this is a deliberate raise, bump LIB_SOURCED_EXPECTED in the same \
+             commit that edits src/floors/<lane>::FLOOR (and the ci.yml grep gate)",
+            suite.ratchet_floor, expected
+        );
+    }
+}
+
 #[test]
 fn central_floors_match_crate_local_sources() {
     for (label, src, const_name) in CRATE_LOCAL_FLOORS {
@@ -349,6 +367,15 @@ fn central_floors_match_crate_local_sources() {
 
 /// Every crate-test suite in the registry is covered by a sync check above (so a
 /// new crate-local ratchet added to `SUITES` cannot escape the guard).
+///
+/// [FABLE-5] sq-oy1f.40 — a crate-test suite is guarded either by a TEXTUAL
+/// floor-sync row in `CRATE_LOCAL_FLOORS` (the runner's `const` is read out of
+/// source and `assert_eq!`'d against the registry copy) OR by being LIB-SOURCED —
+/// its floor lives in `src/floors/<lane>::FLOOR` and is imported into BOTH the
+/// registry row and the runner, so the two read the same compile-time const and
+/// cannot drift (the `LIB_SOURCED_FLOORS` set, covered by
+/// `lib_sourced_jsonld_floors_are_pinned`). Every crate-test suite must be in
+/// exactly one of those two buckets — nothing escapes the guard.
 #[test]
 fn all_crate_test_suites_are_guarded() {
     for suite in SUITES {
@@ -358,9 +385,21 @@ fn all_crate_test_suites_are_guarded() {
             suite.runner,
             Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
         ) {
+            let textually_guarded =
+                CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label);
+            let lib_sourced = LIB_SOURCED_FLOORS.contains(&suite.label);
             assert!(
-                CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label),
-                "registry CrateTest suite {:?} has no floor-sync guard in CRATE_LOCAL_FLOORS",
+                textually_guarded || lib_sourced,
+                "registry CrateTest suite {:?} has neither a textual floor-sync guard in \
+                 CRATE_LOCAL_FLOORS nor a lib-sourced floor in LIB_SOURCED_FLOORS",
+                suite.label
+            );
+            // A suite must not be in BOTH buckets — a textual row for a lib-sourced
+            // floor re-introduces the hard-coded duplicate sq-oy1f.40 removed.
+            assert!(
+                !(textually_guarded && lib_sourced),
+                "registry CrateTest suite {:?} is BOTH textually guarded and lib-sourced — \
+                 remove the CRATE_LOCAL_FLOORS row (the lib-side const is the single source)",
                 suite.label
             );
         }

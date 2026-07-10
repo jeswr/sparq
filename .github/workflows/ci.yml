@@ -1686,8 +1686,9 @@ jobs:
     # Algorithm gated on RDF-equivalence to the normative expected output, each with
     # its own honest below-floor divergence + skip buckets); expand/flatten are
     # reported as not-implemented buckets and never fail the gate. Never lower the
-    # ratchet (raise TORDF_FLOOR / FROMRDF_FLOOR / COMPACT_FLOOR / FRAME_FLOOR as
-    # oxjsonld + the native writer/compactor/framer improve).
+    # ratchet (raise the `FLOOR` const in crates/sparq-conformance/src/floors/<lane>.rs
+    # as oxjsonld + the native writer/compactor/framer improve — [FABLE-5] sq-oy1f.40:
+    # the lib-side single source the runner + scoreboard + the grep gate below all read).
     name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51, compact >= 186, frame >= 61)
     # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (jsonld-suite) — skip only
     # when ENFORCED selection proves sparq-conformance unaffected (fail-closed).
@@ -1741,8 +1742,32 @@ jobs:
           done
       - name: Enforce ratchet (pass counts must not regress)
         run: |
-          TORDF_FLOOR=413
-          FROMRDF_FLOOR=51
+          # [FABLE-5] sq-oy1f.40 — the six floors are SOURCED from the LIB-SIDE
+          # single source `crates/sparq-conformance/src/floors/<lane>.rs`
+          # (`pub const FLOOR: usize = N;`) instead of hard-coded here. That kills
+          # the #1463 floor-DRIFT class structurally: the runner's `assert!`, the
+          # `scoreboard::SUITES` `ratchet_floor`, AND this belt-and-braces grep gate
+          # now all read the SAME number, so this gate can never disagree with the
+          # runner (a lowered lib const lowers ALL three at once, and the runner's
+          # own `assert!(pass >= FLOOR)` still reds the job). The helper greps the
+          # first `const FLOOR: usize = N;` out of a floor module.
+          floor_of() {
+            local lane="$1"
+            local f="crates/sparq-conformance/src/floors/${lane}.rs"
+            local n
+            n=$(grep -oE 'const FLOOR: usize = [0-9]+' "$f" | grep -oE '[0-9]+' | head -1)
+            if [ -z "$n" ]; then
+              echo "::error::could not read the JSON-LD ${lane} floor from ${f} (expected 'const FLOOR: usize = N;')" >&2
+              exit 1
+            fi
+            echo "$n"
+          }
+          TORDF_FLOOR=$(floor_of to_rdf)
+          FROMRDF_FLOOR=$(floor_of from_rdf)
+          COMPACT_FLOOR=$(floor_of compact)
+          FRAME_FLOOR=$(floor_of frame)
+          EXPAND_FLOOR=$(floor_of expand)
+          FLATTEN_FLOOR=$(floor_of flatten)
           # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "scoreboard
           # never produced" (an infra/compile flake left the .out with no TOTAL line)
           # from a GENUINE regression, so an empty scoreboard is never mis-reported as
@@ -1751,20 +1776,6 @@ jobs:
             echo "::error::JSON-LD conformance scoreboard is missing/empty — the test step produced no 'TOTAL toRdf|fromRdf|compact|frame|expand|flatten' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run JSON-LD ... suites' step output above."
             exit 1
           fi
-          # [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after #978's compaction
-          # faithfulness fixes (re-measured: 186 pass). Mirror the toRdf/fromRdf
-          # belt-and-braces grep gate.
-          COMPACT_FLOOR=186
-          # [OPUS-4.8] sq-oy1f.19 — the frame ratchet (RDF → framed JSON-LD over the
-          # w3c/json-ld-framing suite; normative-answer-equivalence). Same grep shape.
-          FRAME_FLOOR=61
-          # [OPUS-4.8] sq-kk1mq — the expand ratchet uses the document-level oracle
-          # (sparq_jsonld::expand() compared with json_ld_equal; NOT the RDF-writer path).
-          # Oracle-correction re-baseline: 247→240 (7 over-passes removed by switching
-          # from RDF-equivalence to JSON-level comparison; see sq-kk1mq). Same grep shape.
-          # MEASURED pass count at the pinned revision.
-          EXPAND_FLOOR=240
-          FLATTEN_FLOOR=50
           # runner prints: "TOTAL toRdf <pass> <fail> <skip> (floor F)"
           TORDF_PASS=$(grep -E '^TOTAL toRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
           FROMRDF_PASS=$(grep -E '^TOTAL fromRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)

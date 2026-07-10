@@ -16,9 +16,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/scripts/lib/fetch-retry.sh"
 
 # Pinned w3c/json-ld-framing commit (main, 2026-06). Bump deliberately: the
-# JSON-LD framing pass-count floor (FRAME_FLOOR) in
-# crates/sparq-conformance/tests/jsonld_suite.rs is calibrated against THIS suite
-# revision — pass counts are only comparable across runs when the suite is fixed.
+# JSON-LD framing pass-count floor in crates/sparq-conformance/src/floors/frame.rs
+# ([FABLE-5] sq-oy1f.40 — the lib-side single source, imported by the runner +
+# scoreboard + ci grep) is calibrated against THIS suite revision — pass counts are
+# only comparable across runs when the suite is fixed.
 PIN="3bf782ba9a40dd1b143435abe386d38df64f2b47"
 
 DEST="$ROOT/tests/w3c/json-ld-framing"
