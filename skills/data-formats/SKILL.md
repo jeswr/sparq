@@ -104,6 +104,23 @@ pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) ->
 // deterministic generator, so a malformed IRI can never be wrong-accepted into the store.
 // The `oxiri` dep is already in-tree (via oxttl), so the feature adds zero new compilation.
 
+// [OPUS-4.8] sq-jocpn — the OPT-IN `native-ttl` feature on `sparq-core` (OFF by default) swaps the
+// oxttl Turtle path for a hand-rolled byte-level tokenizer/parser (`sparq_core`'s `ttl` module) that
+// interns S/P/O directly into the Dict — the Turtle analogue of the byte-level N-Triples parser. It
+// handles the FULL Turtle grammar (prefixes/@base, collections `()`, blank-node property lists `[]`,
+// predicate-object lists `; ,`, `a`, numeric/boolean/triple-quoted literals, escapes) PLUS the RDF
+// 1.2 surface the workspace oxttl enables (reifiers `<< … >>`, triple terms `<<( … )>>`, `~` and
+// `{| … |}` annotations, all desugared to `rdf:reifies`). It is a BYTE-IDENTICAL drop-in: IRI base
+// resolution delegates to the same `oxiri` automaton oxttl uses, so resolved terms match exactly,
+// and it passes an IDENTICAL pass/fail set on the whole W3C rdf-turtle suite. Correctness is pinned
+// by (a) a native-vs-oxttl DIFFERENTIAL over many constructs + malformed-input parity (both must
+// Err), and (b) the conformance ratchet run with `--features sparq-core/native-ttl`
+// (`sparq-conformance`'s `native-ttl-suite`). Only anonymous blank-node labels differ (as between
+// two oxttl runs), so comparisons are blank-node-isomorphic. It is opt-in so it can be A/B'd against
+// oxttl before any thought of defaulting on; on a quiet box the native single-thread parse is
+// meaningfully faster (it removes oxttl's tokenizer/state-machine, ~53% of the incumbent parse per
+// the sq-wrn61 profile). Reproduce: `cargo test -p sparq-core --features native-ttl`.
+
 // Parse WITHOUT building indexes — the seam reasoning/transform hooks use.
 pub fn parse_to_triples(text: &str, format: &str) -> Result<(Dict, Vec<[Id; 3]>), String>
 pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph

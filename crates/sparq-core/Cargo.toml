@@ -95,6 +95,17 @@ shared = []
 # fast path (accepting EXACTLY what `oxiri` accepts — a mandatory differential-fuzz gate), so
 # the parallel loader reaches conformance parity with the serial oxttl path at fast-path cost.
 iri-fast = ["dep:oxiri"]
+# [OPUS-4.8] sq-jocpn: a native, hand-rolled byte-level Turtle tokenizer/parser (`ttl` module)
+# that interns S/P/O directly into the `Dict`, replacing the oxttl per-chunk worker on the
+# serial Turtle path. OFF by default so the incumbent oxttl path stays the shipped behaviour and
+# the native parser can be A/B'd first; it must be a byte-identical drop-in (same triples, same
+# term canonicalisation, same accept/reject on the W3C TurtleTests) before any thought of
+# defaulting it on. Pulls `oxiri` for RFC-3987 base resolution + IRI validation IDENTICAL to
+# oxttl's (oxttl resolves through the same `oxiri` automaton) — so IRI resolution is byte-exact by
+# construction rather than a hand-rolled re-derivation. `oxiri` is already in-tree transitively via
+# oxttl, so naming it here adds no new compiled crate. The default / wasm build never references
+# any of this — sparq-core stays lean. See the `ttl` module.
+native-ttl = ["dep:oxiri"]
 
 [dependencies]
 oxrdf.workspace = true
