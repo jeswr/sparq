@@ -226,6 +226,11 @@ pub use graph::{
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
 #[cfg(feature = "did")]
 pub use policy::{resolve_rule_keys, IssuerBinding};
+// [SONNET-4.6] sq-0hu2w: re-export the sig primitives so downstream crates that need to
+// parse/hold a `PublicKey` (e.g. callers constructing a `TrustRule.issuer_key` or calling
+// the admission gate) do NOT need a direct `sparq-zk` dependency — `sparq-trust` is the
+// single dependency chokepoint.
+pub use sparq_zk::sig::{public_key_from_hex, PublicKey};
 #[cfg(feature = "store")]
 pub use store::{
     AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,
