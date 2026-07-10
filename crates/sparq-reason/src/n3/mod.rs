@@ -1698,12 +1698,88 @@ fn num(t: &Term) -> Option<f64> {
 /// decimals compute exactly (scaled i128), doubles (an `e` exponent or
 /// INF/NaN) in f64. Strings coerce by lexical shape — `("2.7" "2")
 /// math:difference 0.7` must hold EXACTLY (f64 gives 0.700…0002).
+///
+/// # Seam-2 tower adoption (sq-pbz04.5.1, `research/rif-core-conformance-and-builtins.md` §2)
+///
+/// The exact add / subtract / multiply / negate / abs arithmetic and the
+/// scale-alignment used by the comparison / max-min paths are now DELEGATED to
+/// the SHARED `sparq_substrate::numeric::Dec` (the same exact fixed-point
+/// `mant * 10^-scale` decimal the SPARQL engine's FILTER / BIND path uses), so
+/// the N3 chainer and the engine can never diverge on exact-decimal arithmetic.
+/// This enum stays the thin **EYE-compat adapter** over that shared core: the
+/// three tiers are exactly EYE's (`Int` in `i128`, exact `Dec`, `f64`) and every
+/// EYE-specific edge is preserved byte-for-byte — lexical-shape string coercion
+/// ([`numval`]), the `numval_term` result rendering (whole-`f64` → `xsd:integer`,
+/// `Dec` normalised via `dec_norm`), `math:remainder`'s divisor-sign integer
+/// semantics, `math:integerQuotient`'s aligned-mantissa floor-division, the
+/// `math:quotient` scale-34 exactness rule (non-terminating → `f64`, integer /
+/// integer exact → `xsd:integer`), integer `math:exponentiation`, and the
+/// `Int`-collapse rendering of `floor` / `ceiling`.
+///
+/// The **i128 ↔ i64 wrinkle** the seam names: the chainer's `Int` tier is `i128`
+/// while substrate `Num::Int` is `i64`, so this adapter never carries a substrate
+/// `Num::Int` — it converts each exact tier to a substrate `Dec` for the delegated
+/// arithmetic (`Int(i)` → `Dec { mant: i, scale: 0 }`, exact for the full `i128`
+/// range including `> i64::MAX`; overflow of the `Dec` mantissa falls back to
+/// `f64` exactly as the pre-adoption `checked_*` path did). The substrate ops
+/// used ([`sparq_substrate::numeric::Dec::checked_add`] / `checked_sub` /
+/// `checked_mul` / `cmp`) are the SAME `i128` mantissa operations the private
+/// tower had, so the closure is byte-identical (verified by the direct
+/// old-vs-substrate differential in the tests below and the unchanged N3/EYE
+/// differential + expressivity floors). The EYE-specific ops that the substrate
+/// tower deliberately does NOT provide (quotient's scale-34 / type rule,
+/// remainder, integer-quotient, exponentiation, floor/ceiling/rounded rendering)
+/// keep their EYE algorithm here — reasoned non-adoption of those edges, so the
+/// refactor stays behaviour-neutral rather than smuggling a behaviour change
+/// through a shared method whose contract differs (e.g. `Dec::checked_div` rounds
+/// at scale 18 and always yields a decimal, which EYE's `math:quotient` does not).
 #[derive(Clone, Copy, Debug)]
 enum NumVal {
     Int(i128),
     /// mantissa, scale: value = mantissa / 10^scale.
     Dec(i128, u32),
     F64(f64),
+}
+
+/// EYE-compat bridge to the shared exact-decimal core. The exact tiers (`Int` /
+/// `Dec`) map to a substrate [`sparq_substrate::numeric::Dec`]; `F64` has no exact
+/// image (returns `None`, so the caller stays on the `f64` fallback path exactly
+/// as the private tower did). `Int(i128)` maps to `Dec { mant: i, scale: 0 }` for
+/// the FULL `i128` range — this is the i128↔i64 wrinkle: substrate `Num::Int` is
+/// `i64`, so an out-of-`i64`-range chainer integer is carried as a scale-0 `Dec`
+/// (exact). [OPUS-4.8] sq-pbz04.5.1
+#[inline]
+fn numval_to_subdec(v: NumVal) -> Option<sparq_substrate::numeric::Dec> {
+    match v {
+        NumVal::Int(i) => Some(sparq_substrate::numeric::Dec { mant: i, scale: 0 }),
+        NumVal::Dec(m, s) => Some(sparq_substrate::numeric::Dec { mant: m, scale: s }),
+        NumVal::F64(_) => None,
+    }
+}
+
+/// EYE `math:negation`, tier-preserving. The exact tiers negate the substrate
+/// `Dec` mantissa via `i128::checked_neg` (so `i128::MIN` overflows → `None`, the
+/// premise fails, exactly as the private tower did — the substrate `Num::neg`
+/// would instead fall back to `Double`, a NON-neutral edge, so negation keeps its
+/// EYE None-on-overflow semantics here). [OPUS-4.8] sq-pbz04.5.1
+#[inline]
+fn numval_negate(v: NumVal) -> Option<NumVal> {
+    match v {
+        NumVal::Int(i) => Some(NumVal::Int(i.checked_neg()?)),
+        NumVal::Dec(m, s) => Some(NumVal::Dec(m.checked_neg()?, s)),
+        NumVal::F64(x) => Some(NumVal::F64(-x)),
+    }
+}
+
+/// EYE `math:absoluteValue`, tier-preserving (`i128::checked_abs`, so `i128::MIN`
+/// overflows → `None`; symmetric to [`numval_negate`]). [OPUS-4.8] sq-pbz04.5.1
+#[inline]
+fn numval_abs(v: NumVal) -> Option<NumVal> {
+    match v {
+        NumVal::Int(i) => Some(NumVal::Int(i.checked_abs()?)),
+        NumVal::Dec(m, s) => Some(NumVal::Dec(m.checked_abs()?, s)),
+        NumVal::F64(x) => Some(NumVal::F64(x.abs())),
+    }
 }
 
 fn numval(t: &Term) -> Option<NumVal> {
@@ -1753,10 +1829,19 @@ impl NumVal {
         };
         Some((up(ma, sa)?, up(mb, sb)?, s))
     }
+    /// Value equality. The exact tiers delegate to the SHARED substrate
+    /// [`sparq_substrate::numeric::Dec::cmp`] (the same scale-alignment the private
+    /// tower's `aligned` did — `Dec::cmp` returns `None` on an alignment overflow,
+    /// which falls back to the `f64` image exactly as before); any `f64` operand or
+    /// an alignment overflow compares by `f64`. Byte-identical to the pre-adoption
+    /// `aligned`-then-`==` path. [OPUS-4.8] sq-pbz04.5.1
     fn eq(a: NumVal, b: NumVal) -> bool {
-        match NumVal::aligned(a, b) {
-            Some((x, y, _)) => x == y,
-            None => a.to_f64() == b.to_f64(),
+        match (numval_to_subdec(a), numval_to_subdec(b)) {
+            (Some(x), Some(y)) => match x.cmp(y) {
+                Some(ord) => ord == std::cmp::Ordering::Equal,
+                None => a.to_f64() == b.to_f64(), // scale-alignment overflow → f64 image
+            },
+            _ => a.to_f64() == b.to_f64(),
         }
     }
 }
@@ -1999,11 +2084,7 @@ fn eval_functional(
         if !s_applied.is_ground() {
             let o_applied = apply(obj, &b);
             if let Some(v) = numval(&o_applied) {
-                let negated = match v {
-                    NumVal::Int(i) => NumVal::Int(i.checked_neg()?),
-                    NumVal::Dec(m, sc) => NumVal::Dec(m.checked_neg()?, sc),
-                    NumVal::F64(x) => NumVal::F64(-x),
-                };
+                let negated = numval_negate(v)?;
                 let mut nb = b;
                 return unify_term(subj, &numval_term(negated), &mut nb).then_some(nb);
             }
@@ -2504,43 +2585,48 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
         let v = round(m, pow);
         Some(if s == 0 { NumVal::Int(v) } else { NumVal::Dec(v, 0) })
     };
+    // The exact add / subtract / multiply DELEGATE to the shared substrate
+    // `Dec` (byte-identical `(mant, scale)`: `+`/`-` keep the max scale, `*` sums
+    // the scales — the SAME i128 mantissa ops the private tower did). `renorm`
+    // keeps EYE's result-type rule (all-integer in → integer out; any decimal in
+    // → decimal out). [OPUS-4.8] sq-pbz04.5.1
+    use sparq_substrate::numeric::Dec as SubDec;
     let out = match f {
         Func::Sum => {
-            let mut acc = NumVal::Int(0);
+            let mut acc = SubDec { mant: 0, scale: 0 };
             for &v in &vals {
-                let (a, b, s) = NumVal::aligned(acc, v)?;
-                acc = NumVal::Dec(a.checked_add(b)?, s);
+                acc = acc.checked_add(numval_to_subdec(v)?)?;
             }
-            let NumVal::Dec(m, s) = acc else { return None };
-            renorm(m, s)
+            renorm(acc.mant, acc.scale)
         }
         Func::Product => {
-            let mut acc = NumVal::Int(1);
+            let mut acc = SubDec { mant: 1, scale: 0 };
             for &v in &vals {
-                let (ma, sa) = match acc {
-                    NumVal::Int(i) => (i, 0),
-                    NumVal::Dec(m, s) => (m, s),
-                    NumVal::F64(_) => return None,
-                };
-                let (mb, sb) = match v {
-                    NumVal::Int(i) => (i, 0),
-                    NumVal::Dec(m, s) => (m, s),
-                    NumVal::F64(_) => return None,
-                };
-                acc = NumVal::Dec(ma.checked_mul(mb)?, sa.checked_add(sb)?);
+                acc = acc.checked_mul(numval_to_subdec(v)?)?;
             }
-            let NumVal::Dec(m, s) = acc else { return None };
-            renorm(m, s)
+            renorm(acc.mant, acc.scale)
         }
         Func::Difference => {
-            let (a, b, s) = pair()?;
-            renorm(a.checked_sub(b)?, s)
+            if vals.len() != 2 {
+                return None;
+            }
+            let d = numval_to_subdec(vals[0])?.checked_sub(numval_to_subdec(vals[1])?)?;
+            renorm(d.mant, d.scale)
         }
         Func::Max | Func::Min => {
+            // Compare via the shared substrate `Dec::cmp` (the same scale-aligned
+            // i128 order as the private tower's `aligned`-then-`>`); an alignment
+            // overflow (`cmp` → `None`) falls through to the f64 path, matching the
+            // pre-adoption `aligned(..)?` behaviour. The WINNING ORIGINAL operand is
+            // returned unchanged (its own scale preserved). [OPUS-4.8] sq-pbz04.5.1
             let mut best = vals[0];
             for &v in &vals[1..] {
-                let (a, b, _) = NumVal::aligned(best, v)?;
-                let take = if matches!(f, Func::Max) { b > a } else { b < a };
+                let ord = numval_to_subdec(best)?.cmp(numval_to_subdec(v)?)?;
+                let take = if matches!(f, Func::Max) {
+                    ord == std::cmp::Ordering::Less
+                } else {
+                    ord == std::cmp::Ordering::Greater
+                };
                 if take {
                     best = v;
                 }
@@ -2589,15 +2675,18 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             }
             NumVal::Int(a.div_euclid(b))
         }
+        // Tier-preserving unary sign ops via the shared adapter helpers (i128
+        // `checked_neg`/`checked_abs` on the substrate `Dec` mantissa — `None` on
+        // `i128::MIN` overflow, exactly as before). `vals[0]` is never `F64` here
+        // (the leading guard returns early on any `F64`), so the helper's `F64` arm
+        // is unreachable in this path. [OPUS-4.8] sq-pbz04.5.1
         Func::Negation => match vals[0] {
-            NumVal::Int(i) => NumVal::Int(i.checked_neg()?),
-            NumVal::Dec(m, s) => NumVal::Dec(m.checked_neg()?, s),
             NumVal::F64(_) => return None,
+            v => numval_negate(v)?,
         },
         Func::AbsoluteValue => match vals[0] {
-            NumVal::Int(i) => NumVal::Int(i.checked_abs()?),
-            NumVal::Dec(m, s) => NumVal::Dec(m.checked_abs()?, s),
             NumVal::F64(_) => return None,
+            v => numval_abs(v)?,
         },
         // round-half-UP: floor(x + 1/2) — what the suite references encode
         // (-2.5 → -2, 0.5 → 1, 2.5 → 3). rounded keeps the decimal TYPE
@@ -3926,5 +4015,278 @@ mod tests {
         let frag_enc = d.intern_lit("hello/world%23test", xsd_str, None);
         assert!(s.contains(&[r, id(&d, "http://ex/frag"), frag_enc]),
             "string:encodeForFragID keeps / but encodes #");
+    }
+}
+
+/// [OPUS-4.8] sq-pbz04.5.1 — DIRECT differential over the seam-2 tower adoption: the
+/// current (substrate-`Dec`-backed) exact-arithmetic core vs a verbatim re-derivation of
+/// the OLD private-`NumVal` semantics, plus pinned EYE-edge outputs. The two must agree
+/// BYTE-FOR-BYTE (`Term` equality — lexical + datatype). Covers the arithmetic matrix the
+/// bead names: `> i64::MAX` integers (the i128↔i64 wrinkle), exact-decimal add/sub/mul
+/// (`0.1 + 0.2` = `0.3`), INF/NaN, and the `('2.7' '2') math:difference = 0.7` exactness
+/// case. Each assertion pins an EXACT value so a mutation of the arithmetic / rendering /
+/// branch logic goes red.
+#[cfg(test)]
+mod substrate_seam_differential {
+    use super::*;
+
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    const XSD_DEC: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+    const XSD_DBL: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+    fn lit(v: &str, dt: &str) -> Term {
+        Term::Lit(v.to_string(), dt.into(), None)
+    }
+    fn plain(v: &str) -> Term {
+        // A plain (un-typed) literal — the chainer coerces it by LEXICAL SHAPE via `numval`.
+        Term::Lit(v.to_string(), XSD_INT.into(), None)
+    }
+
+    // --- The OLD private-`NumVal` exact core, re-derived VERBATIM as the differential
+    // oracle (the pre-adoption code the seam replaced). It must produce the identical
+    // `(mant, scale)` the current substrate-`Dec`-backed core does for the delegated ops
+    // (Sum/Product/Difference/Max/Min/Negation/AbsoluteValue). ---
+
+    #[derive(Clone, Copy)]
+    enum OldNum {
+        Int(i128),
+        Dec(i128, u32),
+        // The old tower's `F64` tier: `eval_exact` returns `None` on ANY `F64` input (the
+        // exact core is integer/decimal-only), so the payload is never consulted — a unit
+        // marker is enough for the oracle and avoids a dead-field lint. [OPUS-4.8]
+        F64,
+    }
+    fn old_parse(t: &Term) -> Option<OldNum> {
+        match numval(t)? {
+            NumVal::Int(i) => Some(OldNum::Int(i)),
+            NumVal::Dec(m, s) => Some(OldNum::Dec(m, s)),
+            NumVal::F64(_) => Some(OldNum::F64),
+        }
+    }
+    fn old_aligned(a: OldNum, b: OldNum) -> Option<(i128, i128, u32)> {
+        let part = |v: OldNum| match v {
+            OldNum::Int(i) => Some((i, 0u32)),
+            OldNum::Dec(m, s) => Some((m, s)),
+            OldNum::F64 => None,
+        };
+        let ((ma, sa), (mb, sb)) = (part(a)?, part(b)?);
+        let s = sa.max(sb);
+        let up = |m: i128, from: u32| -> Option<i128> { m.checked_mul(10i128.checked_pow(s - from)?) };
+        Some((up(ma, sa)?, up(mb, sb)?, s))
+    }
+    /// The pre-adoption `eval_exact` for the DELEGATED arithmetic ops (verbatim i128 algorithm).
+    fn old_eval_exact(f: Func, args: &[Term]) -> Option<Term> {
+        let vals: Vec<OldNum> = args.iter().map(old_parse).collect::<Option<_>>()?;
+        if vals.iter().any(|v| matches!(v, OldNum::F64)) {
+            return None;
+        }
+        let any_dec = vals.iter().any(|v| matches!(v, OldNum::Dec(_, _)));
+        let renorm = |m: i128, s: u32| if any_dec { NumVal::Dec(m, s) } else { NumVal::Int(m) };
+        let out = match f {
+            Func::Sum => {
+                let mut acc = OldNum::Int(0);
+                for &v in &vals {
+                    let (a, b, s) = old_aligned(acc, v)?;
+                    acc = OldNum::Dec(a.checked_add(b)?, s);
+                }
+                let OldNum::Dec(m, s) = acc else { return None };
+                renorm(m, s)
+            }
+            Func::Product => {
+                let mut acc = OldNum::Int(1);
+                for &v in &vals {
+                    let (ma, sa) = match acc {
+                        OldNum::Int(i) => (i, 0),
+                        OldNum::Dec(m, s) => (m, s),
+                        OldNum::F64 => return None,
+                    };
+                    let (mb, sb) = match v {
+                        OldNum::Int(i) => (i, 0),
+                        OldNum::Dec(m, s) => (m, s),
+                        OldNum::F64 => return None,
+                    };
+                    acc = OldNum::Dec(ma.checked_mul(mb)?, sa.checked_add(sb)?);
+                }
+                let OldNum::Dec(m, s) = acc else { return None };
+                renorm(m, s)
+            }
+            Func::Difference => {
+                if vals.len() != 2 {
+                    return None;
+                }
+                let (a, b, s) = old_aligned(vals[0], vals[1])?;
+                renorm(a.checked_sub(b)?, s)
+            }
+            Func::Max | Func::Min => {
+                let mut best = vals[0];
+                for &v in &vals[1..] {
+                    let (a, b, _) = old_aligned(best, v)?;
+                    let take = if matches!(f, Func::Max) { b > a } else { b < a };
+                    if take {
+                        best = v;
+                    }
+                }
+                match best {
+                    OldNum::Int(i) => NumVal::Int(i),
+                    OldNum::Dec(m, s) => NumVal::Dec(m, s),
+                    OldNum::F64 => return None,
+                }
+            }
+            Func::Negation => match vals[0] {
+                OldNum::Int(i) => NumVal::Int(i.checked_neg()?),
+                OldNum::Dec(m, s) => NumVal::Dec(m.checked_neg()?, s),
+                OldNum::F64 => return None,
+            },
+            Func::AbsoluteValue => match vals[0] {
+                OldNum::Int(i) => NumVal::Int(i.checked_abs()?),
+                OldNum::Dec(m, s) => NumVal::Dec(m.checked_abs()?, s),
+                OldNum::F64 => return None,
+            },
+            _ => return None,
+        };
+        Some(numval_term(out))
+    }
+
+    /// The differential invariant: for the DELEGATED ops the substrate-backed `eval_exact`
+    /// equals the old-semantics oracle byte-for-byte.
+    fn assert_diff(f: Func, args: &[Term]) {
+        assert_eq!(
+            eval_exact(f, args),
+            old_eval_exact(f, args),
+            "substrate-backed eval_exact diverged from the old NumVal semantics for {:?} on {:?}",
+            f as u8,
+            args
+        );
+    }
+
+    #[test]
+    fn diff_sum_difference_product_over_matrix() {
+        // Integer, decimal, mixed, multi-arg — the value+scale-preserving delegated ops.
+        let cases: &[(Func, Vec<Term>)] = &[
+            (Func::Sum, vec![plain("2"), plain("3")]),
+            (Func::Sum, vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC)]),
+            (Func::Sum, vec![plain("1"), lit("0.20", XSD_DEC)]),
+            (Func::Sum, vec![plain("1"), plain("2"), plain("3"), lit("0.5", XSD_DEC)]),
+            (Func::Difference, vec![lit("2.7", XSD_DEC), plain("2")]),
+            (Func::Difference, vec![plain("10"), plain("3")]),
+            (Func::Product, vec![lit("2.7", XSD_DEC), lit("2.7", XSD_DEC)]),
+            (Func::Product, vec![plain("6"), plain("7")]),
+            (Func::Product, vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC), plain("2")]),
+            (Func::Max, vec![plain("3"), lit("2.9", XSD_DEC), plain("5")]),
+            (Func::Min, vec![lit("2.7", XSD_DEC), plain("2"), lit("2.71", XSD_DEC)]),
+            (Func::Negation, vec![lit("3.50", XSD_DEC)]),
+            (Func::AbsoluteValue, vec![lit("-3.50", XSD_DEC)]),
+        ];
+        for (f, args) in cases {
+            assert_diff(*f, args);
+        }
+    }
+
+    #[test]
+    fn diff_exact_decimal_add_sub_mul_pinned() {
+        // 0.1 + 0.2 is EXACTLY 0.3 (the f64 path gets 0.30000000000000004).
+        assert_eq!(
+            eval_exact(Func::Sum, &[lit("0.1", XSD_DEC), lit("0.2", XSD_DEC)]),
+            Some(lit("0.3", XSD_DEC))
+        );
+        // ('2.7' '2') math:difference = 0.7 EXACTLY (f64 gives 0.7000000000000002).
+        assert_eq!(
+            eval_exact(Func::Difference, &[lit("2.7", XSD_DEC), plain("2")]),
+            Some(lit("0.7", XSD_DEC))
+        );
+        // 2.7 * 2.7 = 7.29 exactly (scale 1 * scale 1 → scale 2).
+        assert_eq!(
+            eval_exact(Func::Product, &[lit("2.7", XSD_DEC), lit("2.7", XSD_DEC)]),
+            Some(lit("7.29", XSD_DEC))
+        );
+        // A trailing-zero scale is normalised by numval_term/dec_norm: 1 + 0.20 → "1.2".
+        assert_eq!(
+            eval_exact(Func::Sum, &[plain("1"), lit("0.20", XSD_DEC)]),
+            Some(lit("1.2", XSD_DEC))
+        );
+    }
+
+    #[test]
+    fn diff_over_i64_max_integers_i128_wrinkle() {
+        // The i128↔i64 wrinkle: chainer Int is i128, substrate Num::Int is i64, so an
+        // out-of-i64 integer is carried as substrate Dec { mant, scale: 0 } (EXACT). The
+        // sum stays an xsd:integer and is EXACT (no f64 collapse).
+        let a = (i64::MAX as i128) + 1; // 9223372036854775808, beyond i64
+        let b: i128 = 1000;
+        let sum = a + b;
+        assert_eq!(
+            eval_exact(Func::Sum, &[plain(&a.to_string()), plain(&b.to_string())]),
+            Some(lit(&sum.to_string(), XSD_INT)),
+            "sum of a > i64::MAX integer stays an exact xsd:integer via the substrate Dec carrier"
+        );
+        // Product of two large integers, still exact within i128.
+        let big = 3_037_000_500i128; // ~sqrt(i128::MAX)/... well within i128 when squared? no — pick safe
+        let sq = big.checked_mul(big).unwrap();
+        assert_eq!(
+            eval_exact(Func::Product, &[plain(&big.to_string()), plain(&big.to_string())]),
+            Some(lit(&sq.to_string(), XSD_INT))
+        );
+        // Difference crossing the i64 boundary.
+        let hi = (i64::MAX as i128) + 500;
+        assert_eq!(
+            eval_exact(Func::Difference, &[plain(&hi.to_string()), plain("500")]),
+            Some(lit(&(i64::MAX).to_string(), XSD_INT))
+        );
+        // All three delegated ops match the old oracle on the >i64 matrix.
+        assert_diff(Func::Sum, &[plain(&a.to_string()), plain(&b.to_string())]);
+        assert_diff(Func::Product, &[plain(&big.to_string()), plain(&big.to_string())]);
+        assert_diff(Func::Difference, &[plain(&hi.to_string()), plain("500")]);
+    }
+
+    #[test]
+    fn diff_inf_nan_stay_on_f64_fallback() {
+        // INF / NaN have no exact tier: eval_exact returns None (→ the f64 fallback path),
+        // identically in both the substrate-backed and old cores.
+        for special in ["INF", "-INF", "NaN"] {
+            let args = [lit(special, XSD_DBL), plain("2")];
+            assert_eq!(eval_exact(Func::Sum, &args), None, "{} has no exact tier", special);
+            assert_eq!(old_eval_exact(Func::Sum, &args), None);
+        }
+        // numval classifies the specials as F64 (the lexical-shape coercion edge).
+        assert!(matches!(numval(&lit("INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::INFINITY));
+        assert!(matches!(numval(&lit("-INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::NEG_INFINITY));
+        assert!(matches!(numval(&lit("NaN", XSD_DBL)), Some(NumVal::F64(f)) if f.is_nan()));
+    }
+
+    #[test]
+    fn diff_kept_eye_ops_unchanged() {
+        // The EYE-specific ops that KEEP their algorithm (quotient's scale-34 / type rule,
+        // remainder's divisor-sign, integer-quotient's floor) are pinned to their EYE output
+        // so the refactor cannot have perturbed them.
+        // integer / integer exact → xsd:integer (NOT a "N.0" decimal — the seam declines
+        // substrate Dec::checked_div here, which would always yield a decimal).
+        assert_eq!(eval_exact(Func::Quotient, &[plain("6"), plain("2")]), Some(lit("3", XSD_INT)));
+        // exact terminating quotient → decimal.
+        assert_eq!(eval_exact(Func::Quotient, &[plain("1"), plain("4")]), Some(lit("0.25", XSD_DEC)));
+        // non-terminating → None (f64 fallback), NOT a rounded decimal.
+        assert_eq!(eval_exact(Func::Quotient, &[plain("1"), plain("3")]), None);
+        // remainder: divisor-sign (Python %): -2 mod 4 = 2, 2 mod -4 = -2.
+        assert_eq!(eval_exact(Func::Remainder, &[plain("-2"), plain("4")]), Some(lit("2", XSD_INT)));
+        assert_eq!(eval_exact(Func::Remainder, &[plain("2"), plain("-4")]), Some(lit("-2", XSD_INT)));
+        // integerQuotient: floor division.
+        assert_eq!(eval_exact(Func::IntegerQuotient, &[plain("-7"), plain("2")]), Some(lit("-4", XSD_INT)));
+        // floor/ceiling collapse a decimal to an xsd:integer; rounded keeps the "N.0" decimal.
+        assert_eq!(eval_exact(Func::Floor, &[lit("2.7", XSD_DEC)]), Some(lit("2", XSD_INT)));
+        assert_eq!(eval_exact(Func::Ceiling, &[lit("2.1", XSD_DEC)]), Some(lit("3", XSD_INT)));
+        assert_eq!(eval_exact(Func::Rounded, &[lit("2.5", XSD_DEC)]), Some(lit("3.0", XSD_DEC)));
+    }
+
+    #[test]
+    fn diff_negation_abs_tier_preserving() {
+        // Negation / abs preserve the tier and scale (Dec stays Dec with its scale).
+        assert_eq!(eval_exact(Func::Negation, &[plain("5")]), Some(lit("-5", XSD_INT)));
+        assert_eq!(eval_exact(Func::Negation, &[lit("3.50", XSD_DEC)]), Some(lit("-3.5", XSD_DEC)));
+        assert_eq!(eval_exact(Func::AbsoluteValue, &[lit("-3.50", XSD_DEC)]), Some(lit("3.5", XSD_DEC)));
+        // A > i64 integer negates exactly (i128 checked_neg on the substrate Dec carrier).
+        let big = (i64::MAX as i128) + 7;
+        assert_eq!(
+            eval_exact(Func::Negation, &[plain(&big.to_string())]),
+            Some(lit(&(-big).to_string(), XSD_INT))
+        );
     }
 }
