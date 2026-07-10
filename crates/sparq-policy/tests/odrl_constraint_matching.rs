@@ -450,3 +450,236 @@ fn empty_or_is_fail_closed() {
         "a malformed compound operand must fail closed"
     );
 }
+
+// ===========================================================================
+// sq-c2aze — `odrl:recipient` constraints resolve party-collection membership
+// ([FABLE-5]): a recipient may be a party OR a member of an `odrl:PartyCollection`,
+// mirroring the assignee field's equality-or-membership lookup. Membership draws
+// ONLY on the request-supplied `with_party_membership(s)` evidence — with no edge,
+// recipient matching stays the flat base case (fail-closed, never widened).
+// ===========================================================================
+
+/// The bead's headline case: a `recipient isPartOf <PartyCollectionIRI>` constraint
+/// is satisfied by a *member* of that collection (previously the flat string split
+/// could only match the collection IRI itself).
+#[test]
+fn recipient_is_part_of_party_collection_grants_member() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rc> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand ex:team ] ] .
+ex:team a odrl:PartyCollection .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // alice IS a member of ex:team → the recipient constraint is satisfied → grant.
+    let member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert!(
+        evaluate(&p, &member).allow,
+        "a recipient who is a member of the party collection must be granted"
+    );
+    // bob supplies membership evidence — but in a DIFFERENT collection → DENY.
+    let nonmember = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/bob")
+        .with_party_membership("http://example.org/bob", "http://example.org/otherTeam");
+    assert!(
+        !evaluate(&p, &nonmember).allow,
+        "membership in a different collection must not match"
+    );
+    // NO membership evidence at all → the flat base case → DENY (never widened).
+    let no_evidence = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice");
+    assert!(
+        !evaluate(&p, &no_evidence).allow,
+        "without membership evidence the base case is unchanged (fail-closed)"
+    );
+}
+
+/// `recipient eq <collection>` also resolves membership — the exact
+/// equality-or-membership shape the assignee field gets via `party_matches`.
+#[test]
+fn recipient_eq_collection_matches_member() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/re> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand ex:team ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert!(evaluate(&p, &member).allow);
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/eve")
+        .with_party_membership("http://example.org/eve", "http://example.org/otherTeam");
+    assert!(!evaluate(&p, &outsider).allow);
+}
+
+/// `recipient neq <collection>` EXCLUDES a member of that collection (the negative
+/// dual — the carve-out extends to members, mirroring the taxonomic `neq`; being in
+/// the excluded group is being the excluded recipient).
+#[test]
+fn recipient_neq_collection_excludes_members() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rn> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand ex:blocked ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // A member of the excluded collection is ALSO excluded (no widening away).
+    let blocked_member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/mallory")
+        .with_party_membership("http://example.org/mallory", "http://example.org/blocked");
+    assert!(
+        !evaluate(&p, &blocked_member).allow,
+        "a member of the excluded collection must be denied"
+    );
+    // A party whose membership evidence names an UNRELATED collection is not excluded.
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/carol")
+        .with_party_membership("http://example.org/carol", "http://example.org/team");
+    assert!(evaluate(&p, &outsider).allow);
+}
+
+/// A PROHIBITION whose recipient constraint names a collection carves out its
+/// members (deny-overrides through the same membership resolution).
+#[test]
+fn recipient_prohibition_carves_out_collection_members() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rp> a odrl:Set ;
+    odrl:permission  [ odrl:action odrl:read ; odrl:target ex:x ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target ex:x ;
+        odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                          odrl:rightOperand ex:blocked ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let blocked_member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/mallory")
+        .with_party_membership("http://example.org/mallory", "http://example.org/blocked");
+    assert!(
+        !evaluate(&p, &blocked_member).allow,
+        "the prohibition must carve out a member of the blocked collection"
+    );
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/carol")
+        .with_party_membership("http://example.org/carol", "http://example.org/team");
+    assert!(evaluate(&p, &outsider).allow, "a non-member is not carved out");
+}
+
+/// An EXPLICIT `odrl:recipient` context value (the disclosure target need not be
+/// the requester) resolves through the same membership evidence.
+#[test]
+fn explicit_recipient_context_resolves_via_membership() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rx> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand ex:team ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // alice asks, disclosing to dave — dave (the explicit recipient) is the member.
+    let req = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with(
+            "http://www.w3.org/ns/odrl/2/recipient",
+            Value::Iri("http://example.org/dave".into()),
+        )
+        .with_party_membership("http://example.org/dave", "http://example.org/team");
+    assert!(evaluate(&p, &req).allow);
+    // alice's OWN membership does not stand in for the explicit recipient's.
+    let wrong = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with(
+            "http://www.w3.org/ns/odrl/2/recipient",
+            Value::Iri("http://example.org/dave".into()),
+        )
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert!(!evaluate(&p, &wrong).allow);
+}
+
+/// The two beads compose: `recipient isNoneOf "<g1>|<g2>"` (sq-uaz85) excludes a
+/// MEMBER of g1 through the membership resolution (sq-c2aze); an unrelated party
+/// with membership evidence in another group still grants.
+#[test]
+fn recipient_is_none_of_excludes_collection_members() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rno> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isNoneOf ;
+        odrl:rightOperand "http://example.org/g1|http://example.org/g2" ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let g1_member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/mallory")
+        .with_party_membership("http://example.org/mallory", "http://example.org/g1");
+    assert!(
+        !evaluate(&p, &g1_member).allow,
+        "a member of an excluded collection must be denied under isNoneOf"
+    );
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/carol")
+        .with_party_membership("http://example.org/carol", "http://example.org/team");
+    assert!(evaluate(&p, &outsider).allow);
+}
+
+/// The `recipient_status` audit surface reports the membership-resolved verdict —
+/// exactly what the evaluator acts on (member → Satisfied; non-member →
+/// DefinitelyUnsatisfied; no identity → Unprovable).
+#[test]
+fn recipient_status_reflects_membership_resolution() {
+    use sparq_policy::{recipient_status, RecipientMatch};
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rs> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand ex:team ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let rule = &p.permissions[0];
+    let member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert_eq!(recipient_status(rule, &member), RecipientMatch::Satisfied);
+    let nonmember = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/bob")
+        .with_party_membership("http://example.org/bob", "http://example.org/otherTeam");
+    assert_eq!(
+        recipient_status(rule, &nonmember),
+        RecipientMatch::DefinitelyUnsatisfied
+    );
+    let anonymous = Request::new(left("read")).on("http://example.org/x");
+    assert_eq!(recipient_status(rule, &anonymous), RecipientMatch::Unprovable);
+}

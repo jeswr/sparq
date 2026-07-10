@@ -1177,9 +1177,20 @@ fn is_subsumable_dimension(left: &str) -> bool {
 /// [`Request::with_purpose_subsumption`]); every other dimension is the plain
 /// [`compare`]. One source of truth for both [`constraint_status`] and
 /// [`constraint_satisfied`]. [OPUS-4.8] sq-z3ve / sq-wukl.
+///
+/// The `odrl:recipient` dimension is additionally **party-collection resolvable**
+/// ([FABLE-5] sq-c2aze): when the request supplies party-membership evidence
+/// ([`Request::with_party_membership`]), a recipient bound may name an
+/// `odrl:PartyCollection` the recipient is a *member* of — the same
+/// equality-or-membership lookup the `odrl:assignee` field gets via
+/// `Request::party_matches`. With no membership evidence, recipient matching is
+/// byte-for-byte the flat base case (access is never widened on absent evidence).
 fn compare_constraint(c: &Constraint, actual: &Value, request: &Request) -> bool {
     if is_subsumable_dimension(&c.left) && !request.purpose_subsumes.is_empty() {
         return compare_subsumed(actual, c.operator, &c.right, request);
+    }
+    if c.left == ODRL_RECIPIENT && !request.party_memberships.is_empty() {
+        return compare_recipient(actual, c.operator, &c.right, request);
     }
     compare(actual, c.operator, &c.right)
 }
@@ -1194,8 +1205,12 @@ fn compare_constraint(c: &Constraint, actual: &Value, request: &Request) -> bool
 /// - `neq`: NOT `actual ⊑ bound` — a sub-value of the excluded value is also excluded
 ///   (a sub-purpose IS that purpose; a sub-region IS in that region), so the carve-out
 ///   is not widened away.
-/// - `isPartOf`: `actual ⊑ some member` of the named set (the spatial `isPartOf EU`
-///   region-tree case, and the purpose-set-with-hierarchy case).
+/// - `isPartOf` / `isAnyOf`: `actual ⊑ some member` of the named set (the spatial
+///   `isPartOf EU` region-tree case, and the purpose-set-with-hierarchy case;
+///   `isAnyOf` is the same set-membership relation — [FABLE-5] sq-uaz85).
+/// - `isNoneOf`: `actual ⊑ NO member` of the named set — a sub-value of an excluded
+///   member is ALSO excluded (mirrors `neq`: the carve-out is not widened away), and
+///   the same representability guard as the flat [`is_none_of`] applies (fail-closed).
 /// - order operators (`lt`/`lteq`/`gt`/`gteq`): a taxonomic value is not orderable, so
 ///   these delegate to the plain [`compare`] (which already fail-closes on non-orderable).
 fn compare_subsumed(actual: &Value, op: Operator, bound: &Value, request: &Request) -> bool {
@@ -1203,12 +1218,71 @@ fn compare_subsumed(actual: &Value, op: Operator, bound: &Value, request: &Reque
     match op {
         Operator::Eq | Operator::IsA => request.purpose_subsumed_by(a, bound.as_str()),
         Operator::Neq => !request.purpose_subsumed_by(a, bound.as_str()),
-        Operator::IsPartOf => bound
+        Operator::IsPartOf | Operator::IsAnyOf => bound
             .as_str()
             .split(['|', ' ', ','])
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .any(|member| request.purpose_subsumed_by(a, member)),
+        Operator::IsNoneOf => {
+            set_negation_representable(actual, bound)
+                && !bound
+                    .as_str()
+                    .split(['|', ' ', ','])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .any(|member| request.purpose_subsumed_by(a, member))
+        }
+        Operator::Lt | Operator::Lteq | Operator::Gt | Operator::Gteq => compare(actual, op, bound),
+    }
+}
+
+/// Party-collection-aware comparison for the `odrl:recipient` dimension — invoked
+/// only when the request supplies [`Request::party_memberships`] evidence (see
+/// [`compare_constraint`]). [FABLE-5] sq-c2aze.
+///
+/// A recipient may be a party **or a member of an `odrl:PartyCollection`**: a
+/// recipient value `r` matches a bound member `m` when `r == m` OR the request's
+/// caller-supplied membership evidence asserts `r odrl:partOf m` — the SAME
+/// equality-or-membership lookup [`Request::party_matches`] applies to the
+/// `odrl:assignee` field. So a `recipient isPartOf <PartyCollectionIRI>` constraint
+/// is satisfied by a *member* of that collection, not only by the collection IRI.
+///
+/// - `eq`/`isA`: the recipient IS the named party/collection or a member of it.
+/// - `neq`: the negative dual — a member of the excluded collection is ALSO excluded
+///   (the carve-out is not widened away; mirrors the taxonomic `neq`).
+/// - `isPartOf`/`isAnyOf`: identity-or-membership against ANY member of the
+///   `|`/space/comma set.
+/// - `isNoneOf`: identity-or-membership against NO member (same representability
+///   fail-closed guard as the flat [`is_none_of`]).
+/// - order operators: not meaningful on a recipient — delegate to the plain
+///   [`compare`] (which fail-closes on non-orderable values).
+///
+/// **Soundness:** membership draws ONLY on the caller-supplied `party_memberships`
+/// set (read out of the state-of-the-world, never inferred). With an empty set this
+/// function is never reached and recipient matching is byte-for-byte the flat base
+/// case — access is never widened on absent evidence.
+fn compare_recipient(actual: &Value, op: Operator, bound: &Value, request: &Request) -> bool {
+    let r = actual.as_str();
+    let member_match = |m: &str| -> bool {
+        r == m
+            || request
+                .party_memberships
+                .contains(&(r.to_owned(), m.to_owned()))
+    };
+    let any_in_set = |bound: &Value| -> bool {
+        bound
+            .as_str()
+            .split(['|', ' ', ','])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .any(&member_match)
+    };
+    match op {
+        Operator::Eq | Operator::IsA => member_match(bound.as_str()),
+        Operator::Neq => !member_match(bound.as_str()),
+        Operator::IsPartOf | Operator::IsAnyOf => any_in_set(bound),
+        Operator::IsNoneOf => set_negation_representable(actual, bound) && !any_in_set(bound),
         Operator::Lt | Operator::Lteq | Operator::Gt | Operator::Gteq => compare(actual, op, bound),
     }
 }
@@ -1349,7 +1423,11 @@ fn compare(actual: &Value, op: Operator, bound: &Value) -> bool {
     match op {
         Operator::Eq | Operator::IsA => value_eq(actual, bound),
         Operator::Neq => !value_eq(actual, bound),
-        Operator::IsPartOf => is_part_of(actual, bound),
+        // `isAnyOf` (sq-uaz85) is the same set-membership relation `isPartOf` uses in
+        // this flat single-value base case: the actual value equals AT LEAST ONE
+        // member of the right-operand set (same `|`/space/comma encoding).
+        Operator::IsPartOf | Operator::IsAnyOf => is_part_of(actual, bound),
+        Operator::IsNoneOf => is_none_of(actual, bound),
         Operator::Lt | Operator::Lteq | Operator::Gt | Operator::Gteq => {
             let Some(ord) = order(actual, bound) else {
                 return false;
@@ -1430,6 +1508,29 @@ fn is_part_of(actual: &Value, bound: &Value) -> bool {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .any(|member| member == a)
+}
+
+/// `odrl:isNoneOf` (flat base case): the actual value equals **no** member of the
+/// right-operand set — the negative dual of [`is_part_of`]. [FABLE-5] sq-uaz85.
+///
+/// **Fail-closed representability guard:** negating a lexical set-membership test is
+/// only faithful when both operands live in the IRI/string space the
+/// `|`/space/comma encoding covers. A numeric operand has no lexical form here
+/// (`Value::as_str` is `""`) and a dateTime's set membership would be lexical, not
+/// instant-normalized — negating either gap would *satisfy* the constraint for a
+/// value that IS in the set, merely encoded differently (fail-OPEN). Such operands
+/// are therefore never satisfied (see [`set_negation_representable`]). An **empty**
+/// set with string/IRI operands is genuinely empty, so `isNoneOf` over it is
+/// (vacuously) satisfied — nothing is excluded, mirroring a `neq` no value equals.
+fn is_none_of(actual: &Value, bound: &Value) -> bool {
+    set_negation_representable(actual, bound) && !is_part_of(actual, bound)
+}
+
+/// Whether negating a lexical set-membership test over `(actual, bound)` is
+/// faithful: both operands must be IRI/string values (the space the
+/// `|`/space/comma set encoding covers). See [`is_none_of`]. [FABLE-5] sq-uaz85.
+fn set_negation_representable(actual: &Value, bound: &Value) -> bool {
+    matches!(actual, Value::Iri(_) | Value::Str(_)) && matches!(bound, Value::Iri(_) | Value::Str(_))
 }
 
 /// A total-ish order for orderable values: numeric by magnitude, dateTime by
