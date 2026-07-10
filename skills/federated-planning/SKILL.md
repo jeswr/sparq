@@ -443,9 +443,14 @@ error-variant `Display` strings, SRJ/Service-Description parse outputs, both SSR
 loopback TCP server (a configured timeout actually bounds a stalled request; a >3 MiB body
 round-trips under the real byte cap) — so a mutated return value is *caught*, not merely
 executed. A small residue of genuinely-**equivalent** mutants remains and is documented rather
-than papered over: the header/varint `|=`→`^=` flag-set mutations in `wire.rs` are equivalent
-(each distinct flag bit is set at most once from a zero start / LEB128 groups occupy
-non-overlapping shift windows, so XOR ≡ OR on every reachable input).
+than papered over: in `wire.rs` the `|`↔`^` bit-op mutations are all equivalent — the header /
+`read_varint` flag-set `|=`→`^=` (each distinct flag bit is set at most once from a zero start /
+LEB128 groups occupy non-overlapping shift windows) and the `write_varint` continuation-bit
+`byte | 0x80`→`byte ^ 0x80` (`byte` is masked to `& 0x7f`, so bit 7 is provably clear), so
+XOR ≡ OR on every reachable input; and `EgressGuard::deny_private`→`Default::default()` is
+equivalent because the struct derives `Default` and `deny_private` constructs exactly the empty
+allowlist the default does (its own doc says "Equivalent to `EgressGuard::default`"). These are
+noted, not asserted on — a test that "kills" an equivalent mutant would be vacuous.
 
 ## Deferred (NOT here)
 
