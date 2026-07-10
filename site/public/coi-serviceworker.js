@@ -153,6 +153,23 @@ if (typeof window === 'undefined') {
             (window.coiServiceWorkerPath || "/sparq/coi-serviceworker.js");
         n.serviceWorker.register(swPath).then(
             (registration) => {
+                // [FABLE-5] sq-bx1zv — Firefox can FULFIL register() with `registration === undefined`
+                // when service-worker registration is disallowed for the context (e.g. the Playwright
+                // `serviceWorkers: "block"` setting, some private-browsing / policy configs). Chromium
+                // rejects that case and takes the (err) branch below, but Firefox lands here with no
+                // registration object, so the original `registration.scope` read threw
+                // `TypeError: can't access property "scope", registration is undefined` — a real console
+                // error surfaced in the nightly cross-browser (firefox) lane. Treat a missing
+                // registration as a benign no-op: isolation headers simply are not applied (the same
+                // graceful-degradation posture as the (err) reject branch), and the page keeps working
+                // single-threaded. No `?.` — this vendored file must parse in the oldest SW-capable
+                // engines, so an explicit guard is used.
+                if (!registration) {
+                    !coi.quiet && console.log(
+                        "COOP/COEP Service Worker registration unavailable in this context; continuing without cross-origin isolation."
+                    );
+                    return;
+                }
                 !coi.quiet && console.log("COOP/COEP Service Worker registered", registration.scope);
 
                 registration.addEventListener("updatefound", () => {
