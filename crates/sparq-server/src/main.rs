@@ -77,6 +77,11 @@
 //!                             update (a slow update releases the single writer within S instead of
 //!                             holding it for the full --query-timeout). 0/unset = use --query-timeout
 //!                             [unset, env SPARQ_UPDATE_WHERE_TIMEOUT]
+//!   --no-adaptive-commit      [OPUS-4.8 sq-p7kk5] DISABLE adaptive group-commit (restore the always-
+//!                             windowed writer). Adaptive commit is ON by default: a serial interactive
+//!                             client commits in engine-time (µs) instead of paying the fixed group-commit
+//!                             window (ms); concurrent load still batches. FIFO/atomicity/durability
+//!                             unchanged. [on, env SPARQ_ADAPTIVE_COMMIT=0 to disable]
 //!   --max-body-bytes N        maximum request body in bytes              [1048576, env SPARQ_MAX_BODY_BYTES]
 //!   --max-concurrent N        maximum in-flight requests (429 beyond)    [32, env SPARQ_MAX_CONCURRENT]
 //!   --header-read-timeout S   [OPUS-4.8 sq-2gqr] slow-loris guard: max SECONDS a connection may take
@@ -221,6 +226,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let secs: u64 = parse_flag(&mut args, "--update-where-timeout")?;
                 config.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
+            // [OPUS-4.8] sq-p7kk5: restore the always-windowed writer (disable adaptive
+            // group-commit). Adaptive commit is ON by default — a serial interactive client
+            // then commits in engine-time instead of paying the fixed group-commit window.
+            "--no-adaptive-commit" => config.adaptive_commit = false,
             "--max-body-bytes" => {
                 config.max_body_bytes = parse_flag(&mut args, "--max-body-bytes")?
             }
@@ -519,7 +528,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
-                     [--query-timeout SECS] [--update-where-timeout SECS] [--header-read-timeout SECS] \
+                     [--query-timeout SECS] [--update-where-timeout SECS] [--no-adaptive-commit] [--header-read-timeout SECS] \
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
@@ -802,6 +811,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_decompress_ratio,
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
+    );
+    // [OPUS-4.8] sq-p7kk5: surface the write-path commit mode at startup.
+    eprintln!(
+        "write path: adaptive-group-commit={}",
+        if config.adaptive_commit { "on" } else { "off" }
     );
     // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps at startup (feature `brtpf`).
     #[cfg(feature = "brtpf")]

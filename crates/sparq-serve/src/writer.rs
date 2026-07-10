@@ -12,6 +12,22 @@
 //! [`GenerationRing::current`] lock-free; the only writer/reader interaction is
 //! the ring's arc-swap at publish.
 //!
+//! ## Adaptive group-commit ([`WriterConfig::adaptive_commit`])
+//!
+//! The fixed window is a batching heuristic, not a correctness requirement, and it
+//! is pure latency for a **serial / low-concurrency** client that blocks on its own
+//! ack (the interactive LDP-CRUD shape): nothing else can arrive to fill the window,
+//! so each update pays ~`window` even though the engine's `update_in_place` is ~15 µs
+//! (the sq-p7kk5 update-path gap — the 3 ms default window dominated a serial
+//! client's ~99% of commit latency). Opt-in [`adaptive_commit`](WriterConfig::adaptive_commit)
+//! drops the timed wait: after the first update the writer drains only the ALREADY-
+//! queued backlog (`try_recv`) and commits the instant it empties. Serial clients
+//! commit in engine-time; a genuinely concurrent stream still batches whatever piled
+//! up between iterations, so group-commit amortisation under load is preserved. FIFO
+//! order, per-update atomicity, and every ACID property below are unchanged — only
+//! epoch-tick granularity may be finer (a Wave-B cache-key concern, never
+//! correctness). sparq-server enables it for its write path.
+//!
 //! ## Sequencing and ACID (§6.5)
 //!
 //! Updates inside a batch are applied in **submission order** (strict FIFO — the
@@ -135,6 +151,33 @@ pub struct WriterConfig {
     /// Whether a window commits as one generation or as one generation per
     /// commuting run (module docs).
     pub granularity: CommitGranularity,
+    /// [OPUS-4.8] (sq-p7kk5) ADAPTIVE group-commit. When `false` (the default,
+    /// unchanged behaviour) the writer always waits the full [`window`](Self::window)
+    /// after the first update, absorbing any concurrent traffic that arrives within
+    /// it into one generation. That fixed wait is pure latency for a **serial /
+    /// low-concurrency** client (one in-flight update at a time — the interactive
+    /// LDP-CRUD shape): the client is blocked on its own ack, so nothing else can
+    /// arrive to fill the window, and it pays ~`window` per update no matter how fast
+    /// the engine is (the engine's `update_in_place` is ~15 µs; the 3 ms default
+    /// window is ~200× that — the measured update-path gap in sq-p7kk5).
+    ///
+    /// When `true` the writer instead DRAINS whatever is already queued
+    /// non-blocking (`try_recv`) after the first update and commits as soon as the
+    /// backlog is empty — **no timed wait**. A serial client commits in
+    /// engine-time (µs), not window-time (ms); a genuinely concurrent stream still
+    /// batches every update that had already piled up between the writer's
+    /// iterations, so group-commit amortisation under real load is preserved. It is
+    /// a strict LATENCY improvement with NO change to the mutation/durability
+    /// contract: application stays strict FIFO, per-update atomicity is unchanged,
+    /// every accepted update is still committed, and each committed generation is
+    /// still the serial order. Two clients whose requests genuinely overlap MAY land
+    /// in separate generations rather than one — that only affects epoch-tick
+    /// granularity (a Wave-B cache-key concern), never correctness or visibility.
+    ///
+    /// [`max_batch`](Self::max_batch) still bounds a drained backlog. Off by default
+    /// so the documented windowed contract is preserved for callers that rely on it;
+    /// sparq-server opts in for its interactive write path.
+    pub adaptive_commit: bool,
 }
 
 impl Default for WriterConfig {
@@ -143,6 +186,7 @@ impl Default for WriterConfig {
             window: DEFAULT_WINDOW,
             max_batch: DEFAULT_MAX_BATCH,
             granularity: CommitGranularity::Window,
+            adaptive_commit: false,
         }
     }
 }
@@ -512,11 +556,28 @@ fn run<A: ApplyUpdates>(
         // replaced — so a restore never races, or is reordered against, a concurrent update.
         let mut pending_restore: Option<PendingRestore<A>> = None;
         while batch.len() < max_batch {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match rx.recv_timeout(deadline - now) {
+            // [OPUS-4.8] (sq-p7kk5) In ADAPTIVE mode we never wait the window: after the
+            // first update we drain only what is ALREADY queued (`try_recv`) and commit the
+            // moment the backlog empties. A serial client (blocked on its own ack) has an
+            // empty queue here, so it commits in engine-time instead of paying ~window per
+            // update; a concurrent stream still batches everything that piled up between
+            // iterations. In windowed mode we block up to the remaining window as before.
+            let next = if config.adaptive_commit {
+                match rx.try_recv() {
+                    Ok(cmd) => Ok(cmd),
+                    // Nothing more queued: close the batch NOW (semantically the window's
+                    // Timeout — commit what we have).
+                    Err(mpsc::TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
+                    Err(mpsc::TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+                }
+            } else {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                rx.recv_timeout(deadline - now)
+            };
+            match next {
                 Ok(Cmd::Update(m)) => batch.push(m),
                 Ok(Cmd::Maintain(done)) => {
                     pending_maintain = Some(done);
