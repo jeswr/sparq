@@ -2772,6 +2772,64 @@ mod tests {
         );
     }
 
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): each arm of is_control_predicate's `||` chain is
+    // INDEPENDENTLY load-bearing. cargo-mutants showed `||`→`&&` survive because no test
+    // isolates an arm: a document whose only non-data triple is classified by JUST ONE arm.
+    // Mutating any single arm to `&&` makes that predicate fail the whole (now-conjunctive)
+    // test, so the triple leaks into the data set and inflates the pattern-matched count.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn each_control_predicate_arm_is_independently_load_bearing() {
+        // A permissive pattern (all vars) so ANY triple that reaches the data path matches and
+        // is counted — making a mis-classified control triple observable as an extra data row.
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        );
+        // Three fragments, each carrying EXACTLY one control triple classified by ONE arm, plus
+        // one genuine data triple. Only the data triple may survive the control/data split.
+        let cases = [
+            // hydra: arm (starts_with HYDRA_NS)
+            (
+                "<http://frag> <http://www.w3.org/ns/hydra/core#itemsPerPage> \"10\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                "hydra:",
+            ),
+            // void: arm (starts_with VOID_NS)
+            (
+                "<http://frag> <http://rdfs.org/ns/void#triples> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                "void:",
+            ),
+            // rdf:type arm (exact equality)
+            (
+                "<http://frag> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/hydra/core#Collection> .\n",
+                "rdf:type",
+            ),
+        ];
+        for (control_triple, arm) in cases {
+            let body = format!(
+                "{control_triple}<http://ex/a> <http://ex/p> <http://ex/b> .\n"
+            );
+            let page = parse_fragment_body(&body, &pattern).expect("well-formed fragment parses");
+            assert_eq!(
+                page.triples.len(),
+                1,
+                "the {} control triple must NOT be counted as data — only the one data triple",
+                arm
+            );
+            assert_eq!(
+                page.triples[0],
+                FragTriple::new(
+                    FragTerm::Iri("http://ex/a".to_string()),
+                    FragTerm::Iri("http://ex/p".to_string()),
+                    FragTerm::Iri("http://ex/b".to_string()),
+                ),
+                "the surviving triple is the genuine data triple, not the {} control node",
+                arm
+            );
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn fragment_body_legacy_next_page_predicate_paginates() {
