@@ -455,7 +455,12 @@ allowlist the default does (its own doc says "Equivalent to `EgressGuard::defaul
 no-op — so the group set is unchanged); and the `push_group` SubQuery-`project`-FIELD
 `&&`→`||` (line ~486) is equivalent because both branches yield an empty `Vec` in the only case
 they differ (`output_vars` empty ⇒ `project` empty). The `proj_clause` `&&` (line ~449) is NOT
-equivalent — it is killed by `push_group_projection_clause_by_output_var_membership`. These
+equivalent — it is killed by `push_group_projection_clause_by_output_var_membership`. Finally the
+`ScatterPool` `Drop::drop`→`()` is equivalent: after any drop body Rust drops the struct's fields,
+and the `tx: Option<SyncSender>` field-drop closes the channel exactly as the explicit
+`self.tx.take()` does, so detached workers still exit (the un-joined `JoinHandle`s make drop order
+unobservable). (`ScatterPool::join`→`()` is a DIFFERENT method and is NOT equivalent — its
+blocking drain is killed by `scatter_pool_join_blocks_until_all_jobs_complete`.) These
 equivalents are noted, not asserted on — a test that "kills" an equivalent mutant would be vacuous.
 
 ## Deferred (NOT here)
