@@ -65,6 +65,10 @@ match extract(&dict, &triples) {
   that cannot be mapped soundly without a declaration). Every arm has a diagnostic and a unit
   test; annotations, declarations, and ontology headers are recognised and ignored (they carry
   no ALCH-logical import).
+- **Forward RDF renderer** (`render`, bead sq-pbz04.4.7) — `render_to_triples(&Ontology, &mut Dict)`
+  maps the structural model back to OWL RDF triples (the inverse of `extract`), enabling
+  full-fragment round-trip testing (`RDF → extract → render → extract` ≡ same model) and
+  diagnostics via `render_to_turtle`. No extra deps; always compiled.
 
 **Profile checker (L2, bead sq-pbz04.4.2):** `profile::profiles(onto)` checks OWL 2 EL/QL/RL
 profile membership via a purely syntactic grammar walk (W3C OWL 2 Profiles §2/§3/§4), returning
