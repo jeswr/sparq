@@ -168,10 +168,12 @@ pub struct Suite {
 ///   reordered vs. the W3C reference (strict-ordered count 222).  OLD floor was
 ///   247 under the RDF-equivalence oracle (sq-oy1f); the rebase reveals a net 7
 ///   fewer passes (20 flips minus 13 recoveries) and 26 new honest fails).
-/// * JSON-LD flatten 50 — `sparq-conformance` `src/floors/flatten.rs`
-///   `FLOOR = 50` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → flattened
-///   JSON-LD via the shipping `graph_to_jsonld(JsonLdForm::Flattened)` writer,
-///   compared by re-parse RDF-equivalence to the normative expected document).
+/// * JSON-LD flatten 46 — `sparq-conformance` `src/floors/flatten.rs`
+///   `FLOOR = 46` (sq-oy1f.26; opt-in `jsonld-suite` feature; native
+///   `sparq_jsonld::flatten()` Flattening Algorithm §7.1, compared to the
+///   normative expected document via the `json_ld_equal` document-level
+///   comparator; re-pin 50→46 from the retired RDF-writer oracle — the drop is
+///   inherited native-expand gaps owned by sq-oy1f.37).
 /// * Solid WAC differential 0 — `sparq-solid` `tests/differential_oracle.rs`
 ///   `DIVERGENCE_FLOOR = 0` (sq-t58w.8; a divergence-count floor, hard 0 — the WAC
 ///   and ACP differential rows share this one const).
@@ -438,7 +440,8 @@ pub const SUITES: &[Suite] = &[
         ratchet_floor: crate::floors::to_rdf::FLOOR,
         floor_basis: "pass",
         note: "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); \
-               compact + frame are now gated; expand/flatten remain not-implemented buckets",
+               compact + frame + expand + flatten are all now gated lanes (html + \
+               remote-doc remain the not-implemented buckets)",
     },
     Suite {
         label: "W3C JSON-LD 1.1 fromRdf",
@@ -526,9 +529,11 @@ pub const SUITES: &[Suite] = &[
     // reveals a net 7 fewer passes (20 old-pass→new-fail flips minus 13 recoveries:
     // 8 old-fail→new-pass via oracle precision + 5 old-skip→new-pass via options
     // forwarding) and 26 new honest failures.  The new floor 240 is the MEASURED pass
-    // count with the corrected oracle at the pinned suite revision (sq-kk1mq).  The
-    // flatten lane keeps the old RDF-equivalence oracle (native flatten algorithm
-    // deferred; writer path is the correct oracle there).
+    // count with the corrected oracle at the pinned suite revision (sq-kk1mq).
+    // [FABLE-5] sq-oy1f.26 — the flatten lane ALSO moved to the native document oracle
+    // (sparq_jsonld::flatten() = expand ∘ node-map ∘ fold, compared via json_ld_equal);
+    // re-pin 50 (old RDF-writer oracle) → 46 (native). The drop is inherited expand-lane
+    // gaps (owned by sq-oy1f.37), not flatten bugs — see src/floors/flatten.rs.
     // Floors kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 expand",
@@ -559,9 +564,10 @@ pub const SUITES: &[Suite] = &[
         // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
         ratchet_floor: crate::floors::flatten::FLOOR,
         floor_basis: "pass",
-        note: "RDF → flattened JSON-LD through the shipping graph_to_jsonld(Flattened) \
-               writer (serialize-rdf), compared by a re-parse RDF-equivalence to the \
-               normative expected document",
+        note: "native sparq_jsonld::flatten() (Flattening Algorithm §7.1 = expand ∘ \
+               node-map ∘ named-graph fold) + json_ld_equal document-level comparator \
+               (sq-oy1f.26; re-pin 50→46 from the RDF-writer oracle — the 4 drop is \
+               inherited native-expand gaps owned by sq-oy1f.37, not flatten bugs)",
     },
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite, wired as a crate-local
     // decision-parity ratchet in sparq-policy (mirrors the Solid WAC/ACP pattern:

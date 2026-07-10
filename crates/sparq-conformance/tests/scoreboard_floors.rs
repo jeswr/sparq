@@ -312,8 +312,12 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     ("W3C JSON-LD 1.1 fromRdf", 51),
     ("W3C JSON-LD 1.1 compact", 186),
     ("W3C JSON-LD 1.1 frame", 61),
+    // [SONNET-4.6] sq-kk1mq — oracle-change re-pin (RDF-equivalence 247 → native 240).
     ("W3C JSON-LD 1.1 expand", 240),
-    ("W3C JSON-LD 1.1 flatten", 50),
+    // [FABLE-5] sq-oy1f.26 — oracle-change re-pin (RDF-writer 50 → native flatten() 46;
+    // the 4 drop is inherited native-expand gaps owned by sq-oy1f.37, not flatten bugs —
+    // see src/floors/flatten.rs). Rise-only after this re-pin.
+    ("W3C JSON-LD 1.1 flatten", 46),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the registry's six lib-sourced JSON-LD floors carry the
