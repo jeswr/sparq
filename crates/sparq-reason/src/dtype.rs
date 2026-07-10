@@ -57,15 +57,15 @@
 //!   `Num::of_literal` parses magnitude only; it does NOT reject `"200"^^xsd:byte`
 //!   (out of the `byte` value space). rdfD1 must not type an out-of-range literal, so
 //!   the `i128` parse + range-facet reject is applied HERE before the canonical key.
-//! - **`parse_xsd_double` (the double/float lexical parser) stays local — a
-//!   STOP-AND-REPORT.** The substrate `parse_xsd_f64` is STRICTER: it rejects the
-//!   Rust-`FromStr`-only spellings `Infinity` / `-Infinity` / `NAN` / `nan`, which
-//!   this local parser (a lowercase-only `"inf"` blocklist) currently ACCEPTS. Adopting
-//!   the substrate parser would be a Some→None behaviour change on those four spellings.
-//!   It is the XSD-CORRECT direction (the reasoner is presently more lenient than the
-//!   evaluator), but it is NOT behaviour-neutral, so this migration keeps the local
-//!   parser to honour the byte-identical invariant. The deliberate tightening is tracked
-//!   as a follow-up bead (see the crate note); do NOT silently swap the parser here.
+//! - **`parse_xsd_double` (local double/float parser) MIGRATED in sq-s3b10 [SONNET-4.6].**
+//!   The local blocklist (`contains("inf")`, case-sensitive) was replaced by the shared
+//!   `sparq_substrate::numeric::parse_xsd_f64` / `parse_xsd_f32`, so dtype.rs and the
+//!   SPARQL evaluator now use IDENTICAL XSD-conformant acceptance. `Infinity` /
+//!   `-Infinity` / `NAN` / `nan` are REJECTED by both (XSD forbids them; the valid
+//!   specials are `INF` / `-INF` / `NaN` only). This is a **documented Some→None
+//!   tightening** for those four spellings — the reasoner was more lenient than the
+//!   evaluator, the exact anti-pattern the module-doc warned against. D-entailment
+//!   conformance suite stays green (no W3C test uses those forbidden spellings).
 //!
 //! ## Single-table discipline
 //!
@@ -104,13 +104,17 @@ use rustc_hash::FxHashSet;
 use sparq_core::dict::{self, Dict, Id, TermParts};
 use sparq_core::{is_integer_datatype, temporal};
 // [FABLE-5] sq-pbz04.6.3 (epic sq-pbz04.6, substrate seam 2): the SHARED value-space
-// comparator. The integer/decimal canonical-key parsing + normalization now delegate to
+// comparator. The integer/decimal canonical-key parsing + normalization delegate to
 // `sparq_substrate::numeric::split_decimal` (pure-string, unbounded magnitude — the SAME
 // splitter the engine's exact decimal-string compare uses), so the reasoner and the engine
-// cannot diverge on which decimal lexicals are well-formed nor on the canonical form. Only
-// this module is behind `d-entail`, which pulls the `numeric` slice; the default/lean build
-// links none of it.
-use sparq_substrate::numeric::split_decimal;
+// cannot diverge on which decimal lexicals are well-formed nor on the canonical form.
+// [SONNET-4.6] sq-s3b10: the double/float lexical parser NOW ALSO delegates to the SHARED
+// `sparq_substrate::numeric::parse_xsd_f64` / `parse_xsd_f32`, so the reasoner and the
+// evaluator use the IDENTICAL XSD-conformant acceptance set — "Infinity"/"-Infinity"/"NAN"/
+// "nan" are REJECTED by both (XSD forbids them; only "INF"/"-INF"/"NaN" are valid specials).
+// Only this module is behind `d-entail`, which pulls the `numeric` slice; the default/lean
+// build links none of it.
+use sparq_substrate::numeric::{parse_xsd_f32, parse_xsd_f64, split_decimal};
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -345,9 +349,11 @@ pub fn has_value_mapping(dt: &str) -> bool {
 /// with `xsd:string` is sanctioned.
 ///
 /// [FABLE-5] sq-pbz04.6.3: the integer/decimal canonical key delegates to the shared
-/// `sparq_substrate::numeric::split_decimal` (see the private `canon_decimal` helper);
-/// `integer_subtype_ok` and `parse_xsd_double` stay local (facet validation + the
-/// double/float lexical acceptance set — see the module doc's byte-identical ledger for why).
+/// `sparq_substrate::numeric::split_decimal` (see the private `canon_decimal` helper).
+/// [SONNET-4.6] sq-s3b10: the double/float lexical parser NOW DELEGATES to the shared
+/// `sparq_substrate::numeric::parse_xsd_f64` / `parse_xsd_f32` — the local
+/// `parse_xsd_double` helper is removed; see the module doc's ledger for the tightening.
+/// `integer_subtype_ok` stays local (facet validation is dtype-resident by design).
 ///
 /// [SONNET-4.6] sq-pbz04.6.2: added anyURI, language/Name/NCName/NMTOKEN,
 /// hexBinary/base64Binary.
@@ -439,7 +445,11 @@ pub fn d_value_key(lex: &str, dt: &str) -> Option<DValue> {
         return Some(DValue::Decimal(canon_decimal(lex)?));
     }
     if dt == format!("{}double", XSD) {
-        let f = parse_xsd_double(lex)?;
+        // [SONNET-4.6] sq-s3b10: delegate to the SHARED substrate parser (XSD-conformant
+        // allowlist) so dtype.rs and the evaluator agree exactly on which double lexicals
+        // are well-formed. Tightening: "Infinity"/"-Infinity"/"NAN"/"nan" → None (correct
+        // per XSD; only "INF"/"-INF"/"NaN" are valid specials).
+        let f = parse_xsd_f64(lex)?;
         return Some(DValue::F64(if f.is_nan() {
             f64::NAN.to_bits()
         } else {
@@ -447,7 +457,9 @@ pub fn d_value_key(lex: &str, dt: &str) -> Option<DValue> {
         }));
     }
     if dt == format!("{}float", XSD) {
-        let f = parse_xsd_double(lex)? as f32;
+        // [SONNET-4.6] sq-s3b10: same tightening as double — delegate to the shared
+        // substrate parse_xsd_f32 (which in turn calls parse_xsd_f64 → sparq_core).
+        let f = parse_xsd_f32(lex)?;
         return Some(DValue::F32(if f.is_nan() {
             f32::NAN.to_bits()
         } else {
@@ -542,30 +554,6 @@ pub enum DValue {
     /// equal D-values across the two datatypes.
     /// [SONNET-4.6] sq-pbz04.6.2.
     Octets(Vec<u8>),
-}
-
-/// xsd float/double lexical syntax is a subset of Rust's `f64::parse`; reject the
-/// forms Rust accepts but XSD does not (hex, trailing `f`/`d`, the `inf` spelling).
-///
-/// [FABLE-5] sq-pbz04.6.3: KEPT LOCAL (a stop-and-report) rather than delegated to the
-/// stricter `sparq_substrate::numeric::parse_xsd_f64` — the substrate parser additionally
-/// rejects the Rust-`FromStr`-only spellings `Infinity` / `-Infinity` / `NAN` / `nan`
-/// (this blocklist's `contains("inf")` is lowercase-only, so `f64::FromStr` accepts them).
-/// Swapping in the substrate parser is XSD-correct but a Some→None behaviour change, so it
-/// is deferred to keep this migration byte-identical (tracked as a follow-up bead).
-fn parse_xsd_double(lex: &str) -> Option<f64> {
-    match lex {
-        "INF" | "+INF" => Some(f64::INFINITY),
-        "-INF" => Some(f64::NEG_INFINITY),
-        "NaN" => Some(f64::NAN),
-        _ => {
-            if lex.contains(['x', 'X']) || lex.ends_with(['f', 'F', 'd', 'D']) || lex.contains("inf")
-            {
-                return None;
-            }
-            lex.parse::<f64>().ok()
-        }
-    }
 }
 
 /// The integer-subtype range facet check: the value must be inside the bounded
@@ -1577,5 +1565,123 @@ mod tests {
         assert!(d_value_key("1\t", &decimal).is_none(), "trailing tab rejected");
         // A clean lexical still keys.
         assert!(d_value_key("1", &decimal).is_some());
+    }
+
+    // ── [SONNET-4.6] sq-s3b10: double/float dtype ≡ substrate parse_xsd_f64 parity ──
+    //
+    // Load-bearing invariant: d_value_key for xsd:double / xsd:float now delegates to
+    // sparq_substrate::numeric::parse_xsd_f64 / parse_xsd_f32, so the reasoner and the
+    // SPARQL evaluator accept IDENTICAL XSD lexical forms. This table pins the parity.
+    //
+    // XSD 1.1 §3.3.8 (double) / §3.3.7 (float) lexical space:
+    //   - Accepted specials: "INF", "-INF", "NaN"  (XSD-defined; +INF also accepted)
+    //   - REJECTED Rust-FromStr-only forms: "Infinity", "-Infinity", "NAN", "nan", "inf"
+    //   - Accepted numbers: "1.0E3", "0", "-0", "1", "+INF" etc.
+    //
+    // Non-vacuous: before sq-s3b10, dtype.rs used a lowercase-only `contains("inf")`
+    // blocklist that accepted "Infinity"/"-Infinity"/"NAN"/"nan" (the blocklist checked
+    // for "inf" but not for "Infinity" / mixed-case "NAN"); the evaluator correctly
+    // returned None. After the migration both return the SAME verdict on every row below.
+
+    use sparq_substrate::numeric::{parse_xsd_f64 as sub_parse_f64, parse_xsd_f32 as sub_parse_f32};
+
+    /// Parity table: dtype.rs d_value_key for xsd:double AGREES with the substrate
+    /// parse_xsd_f64 on EVERY XSD-valid and XSD-invalid lexical form. [SONNET-4.6] sq-s3b10.
+    #[test]
+    fn double_dtype_key_parity_with_substrate_parse_xsd_f64() {
+        let double = format!("{}double", XSD);
+        // (lexical, expected_some: bool)
+        // accepted = XSD-valid; rejected = XSD-invalid (Rust-FromStr-only or just garbage)
+        let cases: &[(&str, bool)] = &[
+            // XSD-valid specials
+            ("INF",    true),
+            ("+INF",   true),
+            ("-INF",   true),
+            ("NaN",    true),
+            // XSD-valid numbers
+            ("1.0E3",  true),
+            ("0",      true),
+            ("-0",     true),
+            ("1",      true),
+            ("+1",     true),
+            ("-1.5E2", true),
+            ("1.0",    true),
+            // Rust-FromStr-only spellings XSD REJECTS
+            ("Infinity",  false),
+            ("-Infinity", false),
+            ("NAN",       false),
+            ("nan",       false),
+            ("inf",       false),
+            ("+inf",      false),
+            ("-inf",      false),
+            // Other ill-formed forms
+            ("",    false),
+            ("abc", false),
+            ("1x",  false),
+        ];
+        for &(lex, expected) in cases {
+            let dtype_some = d_value_key(lex, &double).is_some();
+            let substrate_some = sub_parse_f64(lex).is_some();
+            // Both must agree with the expected verdict AND with each other.
+            assert_eq!(
+                dtype_some, expected,
+                "dtype double key mismatch for {:?}: expected some={}", lex, expected
+            );
+            assert_eq!(
+                substrate_some, expected,
+                "substrate parse_xsd_f64 mismatch for {:?}: expected some={}", lex, expected
+            );
+            // Cross-parity: they must agree even if both differ from the expected column
+            // (guards against the test fixture itself being wrong).
+            assert_eq!(
+                dtype_some, substrate_some,
+                "dtype vs substrate DISAGREE on double {:?}: dtype={} substrate={}",
+                lex, dtype_some, substrate_some
+            );
+        }
+    }
+
+    /// Same parity table for xsd:float — dtype.rs d_value_key delegates to parse_xsd_f32
+    /// (which itself calls parse_xsd_f64), so it must agree with the substrate on every form.
+    /// [SONNET-4.6] sq-s3b10.
+    #[test]
+    fn float_dtype_key_parity_with_substrate_parse_xsd_f32() {
+        let float = format!("{}float", XSD);
+        let cases: &[(&str, bool)] = &[
+            ("INF",    true),
+            ("+INF",   true),
+            ("-INF",   true),
+            ("NaN",    true),
+            ("1.0E3",  true),
+            ("0",      true),
+            ("-0",     true),
+            ("1",      true),
+            // Rust-FromStr-only spellings XSD REJECTS
+            ("Infinity",  false),
+            ("-Infinity", false),
+            ("NAN",       false),
+            ("nan",       false),
+            ("inf",       false),
+            // Other ill-formed
+            ("",    false),
+            ("abc", false),
+        ];
+        for &(lex, expected) in cases {
+            let dtype_some = d_value_key(lex, &float).is_some();
+            let substrate_some = sub_parse_f32(lex).is_some();
+            assert_eq!(
+                dtype_some, expected,
+                "dtype float key mismatch for {:?}: expected some={}", lex, expected
+            );
+            assert_eq!(
+                substrate_some, expected,
+                "substrate parse_xsd_f32 mismatch for {:?}: expected some={}", lex, expected
+            );
+            assert_eq!(
+                dtype_some, substrate_some,
+                "dtype vs substrate DISAGREE on float {:?}: dtype={} substrate={}",
+                lex, dtype_some, substrate_some
+            );
+        }
     }
 }
