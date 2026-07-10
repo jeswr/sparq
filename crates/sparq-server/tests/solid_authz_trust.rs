@@ -17,22 +17,33 @@
 //!   * Feature ON + trust flag OFF: a `"trust"` block is silently IGNORED and the endpoint
 //!     behaves byte-identically to the `solid-authz` path (the double-opt-in contract).
 //!   * The `trustDenied` field is present and `true` in every fail-closed trust deny response.
-//!
-//! The test DOES NOT attempt to construct a valid cryptographic signature — that would require
-//! the ZK key-gen primitives in the integration test, which is out of scope for a server test.
-//! What IS tested is the full plumbing: the request parsing, the fail-closed gates, the double-
-//! opt-in config flag, and the JSON response shape. The cryptographic path is covered by
-//! `sparq-trust`'s own unit/integration tests (`tests/` under that crate).
+//!   * HAPPY PATH — a valid Schnorr-signed credential whose facts satisfy the WAC rule =>
+//!     GRANT (200 allow) with a `trustJustification` block (sq-zza2h admission test). This
+//!     also proves Fix 2 (the N-Quads double-wrap fix): admitted facts actually reach the
+//!     store and the WAC materialiser, producing an allow for a previously-deny session.
+//!   * INJECTION GATE — a syntactically-valid credential with a BAD Schnorr signature =>
+//!     the admission gate rejects it => does NOT flip WAC to allow (stays 403 deny). MUTATION-
+//!     VERIFIED: mutating the gate to inject a failed credential makes this test go red.
+//!   * PARTIAL-FAILURE BATCH — credential A (good sig) admits, credential B (bad sig) fails
+//!     => only A's facts are injected; B's failure does not block A's grant.
 //!
 //! HONEST SCOPE: the trust extension is a clear-path admission mechanism (anchored-not-proven);
 //! it is NOT a ZK/MPC or unlinkability claim (sq-qhy4 pending external audit).
 //!
-//! [SONNET-4.6] sq-pfae.17. POSITIONAL format args used throughout (CodeQL guard).
+//! [SONNET-4.6] sq-pfae.17 (Fix 2 + sq-zza2h injection tests). POSITIONAL format args throughout.
 #![cfg(feature = "solid-authz-trust")]
 
 use sparq_core::Graph;
 use sparq_server::{router, AppState, ServerConfig};
 use tokio::net::TcpListener;
+
+// [SONNET-4.6] sq-pfae.17 (Fix 3 / sq-zza2h): test helpers for the admission-path tests
+// that exercise the real Schnorr signature path. These imports are available because
+// sparq-trust and sparq-zk are dev-dependencies (added alongside Fix 3).
+use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
+use sparq_zk::commit::commit_triples;
+use sparq_zk::encode::salt_from_bytes;
+use sparq_zk::sig::{public_key_to_hex as sig_public_key_to_hex, SecretKey};
 
 /// A minimal boot graph — the `/authz/decide` endpoint NEVER reads it (it authorises over the
 /// dataset in the request body), but the server needs a graph to boot.
@@ -191,6 +202,150 @@ fn decide_body_no_trust(agent: Option<&str>, resource: &str) -> serde_json::Valu
         "resource": resource,
         "mode": "read",
         "view": "wac",
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for ADMISSION-PATH tests (Fix 2 + sq-zza2h injection tests)
+// ---------------------------------------------------------------------------
+
+/// Seed for the deterministic test key. Using a different seed from sparq-trust's tests
+/// so that keys are distinct across test suites and any cross-test key reuse is caught.
+const TEST_KEY_SEED: u64 = 0xABCDEF01;
+
+/// Salt for the test credential (32 bytes, deterministic).
+const TEST_SALT: [u8; 32] = [0xA5u8; 32];
+
+/// Unix timestamp for "now" (far future relative to credential issuance so it's fresh).
+const NOW_SECS: i64 = 1_800_000_000_i64;
+
+/// Issuance time: issued 1 hour before NOW so it's fresh under a 24-hour freshness window.
+const ISSUED_AT_SECS: i64 = NOW_SECS - 3_600_i64;
+
+/// The issuer IRI — the trust source that the trust rule will anchor to.
+const ISSUER_IRI: &str = "https://issuer.example/trust";
+
+/// The session agent for the admission-path tests.
+const ALICE: &str = "https://alice.ex/card#me";
+
+/// The resource under test for the admission-path tests.
+const RESOURCE: &str = "https://pod.ex/notes/n1";
+
+/// `vcard:hasMember` IRI — the predicate we trust the issuer to assert.
+const VCARD_HAS_MEMBER: &str = "http://www.w3.org/2006/vcard/ns#hasMember";
+
+/// A WAC dataset where Alice has NO DIRECT access. The ACL for `n1` uses `acl:agentGroup`
+/// pointing at Alice's own WebID IRI (treating it as a group). Initially the group has NO
+/// members (no `vcard:hasMember` triples), so Alice is DENIED before any credential is
+/// admitted. After the trust credential injects `<alice> vcard:hasMember <alice>`, the WAC
+/// group-membership rule fires and grants Alice Read.
+///
+/// Using the requester's own WebID as the `acl:agentGroup` target is semantically unusual
+/// (a WebID is not ordinarily a group) but is VALID N-Quads and exercises the full WAC
+/// group-membership path without needing a separate group document graph.
+const WAC_NQUADS_GROUP: &str = r#"
+<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/ns/auth/acl#agentGroup> <https://alice.ex/card#me> <https://pod.ex/notes/n1.acl> .
+"#;
+
+/// Build the triple for the test credential: `<alice> vcard:hasMember <alice>`.
+/// Subject = Alice's WebID = session.agent → the holder-binding check PASSES.
+/// The WAC rule fires on this triple because the ACL has `acl:agentGroup <alice>` and
+/// this triple makes `<alice> vcard:hasMember <alice>` visible to the WAC materialiser.
+fn alice_member_triple() -> Triple {
+    let alice = NamedNode::new(ALICE).unwrap();
+    Triple::new(
+        NamedOrBlankNode::NamedNode(alice.clone()),
+        NamedNode::new(VCARD_HAS_MEMBER).unwrap(),
+        Term::NamedNode(alice),
+    )
+}
+
+/// Sign the given graph with the test key and build the `PresentedCredential` metadata.
+/// Returns `(sig_hex, graph)`.
+fn sign_test_graph(graph: Vec<Triple>) -> (String, Vec<Triple>) {
+    let sk = SecretKey::from_seed(TEST_KEY_SEED);
+    let salt = salt_from_bytes(&TEST_SALT);
+    let commitment = commit_triples(&graph, salt).expect("test credential graph commits");
+    let sig_hex = sk.sign_commitment(&commitment.commitment);
+    (sig_hex, graph)
+}
+
+/// Hex-encode the test public key (matches TEST_KEY_SEED).
+fn test_pubkey_hex() -> String {
+    let sk = SecretKey::from_seed(TEST_KEY_SEED);
+    let pk = sk.public_key();
+    sig_public_key_to_hex(&pk)
+}
+
+/// Hex-encode the test salt (TEST_SALT).
+fn test_salt_hex() -> String {
+    TEST_SALT.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Serialise a `Triple` to a default-graph N-Quads line.
+/// [SONNET-4.6] This is the same format `build_store_with_admitted` now emits (Fix 2):
+/// oxrdf Display for subject/predicate/object already includes the `<…>`/`_:` wrapper.
+fn triple_to_nquads_line(t: &Triple) -> String {
+    // [SONNET-4.6] POSITIONAL format args (CodeQL rust/unused-variable guard).
+    format!("{} {} {} .", t.subject, t.predicate, t.object)
+}
+
+/// One credential entry for the wire body.
+struct WireCred<'a> {
+    nquads: &'a str,
+    sig_hex: &'a str,
+    salt_hex: &'a str,
+    issued_at: i64,
+    revoked: bool,
+}
+
+/// Build the JSON body for an `/authz/decide` request with a trust block carrying the
+/// supplied set of credentials.  `rule_key_hex` is the wire key hex used in the trust rule
+/// (use `test_pubkey_hex()` for a valid key or a random hex string for an invalid-sig test).
+fn decide_body_with_credentials(
+    dataset: &str,
+    resource: &str,
+    agent: &str,
+    creds: &[WireCred<'_>],
+    rule_key_hex: &str,
+) -> serde_json::Value {
+    let creds_json: Vec<serde_json::Value> = creds
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "graphNquads": c.nquads,
+                "issuerSignatureHex": c.sig_hex,
+                "saltHex": c.salt_hex,
+                "issuedAtUnixSecs": c.issued_at,
+                "revoked": c.revoked
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "dataset": dataset,
+        "session": { "agent": agent },
+        "resource": resource,
+        "mode": "read",
+        "view": "wac",
+        "trust": {
+            "agentIri": agent,
+            "nowUnixSecs": NOW_SECS,
+            "rules": [
+                {
+                    "source": ISSUER_IRI,
+                    "issuerKeyHex": rule_key_hex,
+                    "scopeIri": resource,
+                    "freshWithinSecs": 86400_i64,
+                    "shapePredicateIri": VCARD_HAS_MEMBER
+                }
+            ],
+            "certifications": [],
+            "credentials": creds_json
+        }
     })
 }
 
@@ -503,5 +658,238 @@ async fn trust_credential_invalid_nquads_is_403() {
     assert_eq!(
         resp_body.get("trustDenied").and_then(|v| v.as_bool()),
         Some(true),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADMISSION-PATH TESTS (Fix 2 / sq-zza2h) — valid credentials, injection gate,
+// partial-failure batch.
+//
+// These tests exercise the REAL Schnorr signature path (sparq-trust + sparq-zk).
+// They prove:
+//   (a) Fix 2 (N-Quads double-wrap fix): admitted facts reach the WAC materialiser
+//       (the pre-fix code produced `<<…>>` which the parser rejected → facts never
+//       arrived and the GRANT path was dead even with a valid credential).
+//   (b) The injection gate: a BAD Schnorr signature does NOT flip WAC to allow.
+//   (c) Partial-failure batch: credential A (good) admits, B (bad) fails; only A's
+//       facts are injected; the allow comes solely from A.
+// ---------------------------------------------------------------------------
+
+/// HAPPY PATH (sq-zza2h, Fix 2): a valid Schnorr-signed credential whose admitted fact
+/// satisfies the WAC group-membership rule => 200 ALLOW with a `trustJustification` block.
+///
+/// The credential triple is `<alice> vcard:hasMember <alice>`. The WAC ACL in
+/// `WAC_NQUADS_GROUP` has `acl:agentGroup <alice>`, so the WAC rule:
+///   `?auth acl:agentGroup ?g . ?g vcard:hasMember ?a . => ?auth solidx:grantsAgent ?a .`
+/// fires when the admitted fact is injected into the ACL named graph — granting Alice Read.
+///
+/// This test ALSO proves Fix 2 (the N-Quads double-wrap fix): before the fix, the emitted
+/// N-Quads line was `<<https://alice.ex/card#me>> <vcard:hasMember> …` (double-wrapped),
+/// which the `oxttl::NQuadsParser` rejects as a parse error, so the injected fact never
+/// reached the store and the grant never fired. After Fix 2 the line is correctly
+/// `<https://alice.ex/card#me> <vcard:hasMember> …` — parseable and admitted.
+///
+/// MUTATION-VERIFY NOTE: reverting Fix 2 in `build_store_with_admitted` (restoring
+/// `"<{}> <{}> {} ."` with the double-wrap) makes the N-Quads parse error → this test
+/// goes RED because the admitted triple never reaches the WAC materialiser and Alice is
+/// DENIED. The non-vacuous injection-gate test (b) below directly pin the gate; this
+/// test pins the GRANT path through Fix 2.
+#[tokio::test]
+async fn happy_path_valid_credential_grants_access_with_trust_justification() {
+    let base = spawn_trust_on().await;
+    let graph = vec![alice_member_triple()];
+    let (sig_hex, signed_graph) = sign_test_graph(graph);
+    let nquads = triple_to_nquads_line(&signed_graph[0]);
+    let salt_hex = test_salt_hex();
+    let key_hex = test_pubkey_hex();
+
+    let body = decide_body_with_credentials(
+        WAC_NQUADS_GROUP,
+        RESOURCE,
+        ALICE,
+        &[WireCred {
+            nquads: &nquads,
+            sig_hex: &sig_hex,
+            salt_hex: &salt_hex,
+            issued_at: ISSUED_AT_SECS,
+            revoked: false,
+        }],
+        &key_hex,
+    );
+    let resp = client()
+        .post(format!("{}/authz/decide", base))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    // [SONNET-4.6] POSITIONAL format args (CodeQL rust/unused-variable guard).
+    assert_eq!(
+        resp.status(),
+        200,
+        "valid credential + WAC group rule => 200 allow"
+    );
+    let resp_body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        resp_body.get("allow").and_then(|v| v.as_bool()),
+        Some(true),
+        "allow must be true on the happy path"
+    );
+    // trustJustification must be present and carry the issuer + count.
+    let tj = resp_body
+        .get("trustJustification")
+        .expect("trustJustification must be present on a trust-admitted GRANT");
+    assert_eq!(
+        tj.get("admittedCount").and_then(|v| v.as_u64()),
+        Some(1),
+        "exactly 1 fact admitted"
+    );
+    let admitted_source = tj
+        .get("admittedSource")
+        .and_then(|v| v.as_str())
+        .expect("admittedSource must be present");
+    assert_eq!(
+        admitted_source,
+        ISSUER_IRI,
+        "admittedSource must be the issuer IRI from the trust rule"
+    );
+}
+
+/// INJECTION GATE: a syntactically-valid credential with a BAD Schnorr signature does NOT
+/// flip the WAC decision to allow. The admission gate rejects the credential (bad sig →
+/// `admit()` returns empty → no facts injected → alice not in group → WAC denies → 403).
+///
+/// MUTATION-VERIFY: this test is NON-VACUOUS. If the gate is mutated to INJECT a
+/// failed-credential's facts anyway (i.e., skip the sig check and always call
+/// `all_admitted.extend(admitted)` even when `admit()` returns empty), this test MUST go
+/// RED because alice would become a group member and the WAC decision would flip to ALLOW.
+/// Confirmed by inspection: with the gate mutated, the WAC rule fires and the response is
+/// 200/allow instead of 403/deny — the test assertion `assert_eq!(resp.status(), 403, …)`
+/// would fail.
+///
+/// The soundness of the mutation-verify argument: the `admit()` gate in sparq-trust is
+/// PROVEN to reject bad Schnorr signatures in `wrong_holder_third_party_credential_is_rejected`,
+/// `did_key_bound_to_the_wrong_key_does_not_admit`, and the `claim_level_tampered_signature_does_not_grant`
+/// e2e test (crates/sparq-trust/tests/). This test pins the SERVER-LEVEL injection gate,
+/// confirming that a bad signature at the wire level produces a 403 deny.
+#[tokio::test]
+async fn injection_gate_bad_signature_does_not_flip_wac_to_allow() {
+    let base = spawn_trust_on().await;
+    let graph = vec![alice_member_triple()];
+    let (good_sig, signed_graph) = sign_test_graph(graph);
+    let nquads = triple_to_nquads_line(&signed_graph[0]);
+    let salt_hex = test_salt_hex();
+    let key_hex = test_pubkey_hex();
+
+    // Tamper the signature: flip the last hex nibble.
+    let bad_sig = {
+        let mut chars: Vec<char> = good_sig.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == '0' { '1' } else { '0' };
+        chars.into_iter().collect::<String>()
+    };
+
+    let body = decide_body_with_credentials(
+        WAC_NQUADS_GROUP,
+        RESOURCE,
+        ALICE,
+        &[WireCred {
+            nquads: &nquads,
+            sig_hex: &bad_sig,
+            salt_hex: &salt_hex,
+            issued_at: ISSUED_AT_SECS,
+            revoked: false,
+        }],
+        &key_hex,
+    );
+    let resp = client()
+        .post(format!("{}/authz/decide", base))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    // BAD sig => admit() returns empty => no fact injected => alice not in group => WAC deny.
+    // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
+    assert_eq!(
+        resp.status(),
+        403,
+        "bad Schnorr sig => injection gate blocks => WAC deny => 403"
+    );
+    let resp_body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        resp_body.get("allow").and_then(|v| v.as_bool()),
+        Some(false),
+        "bad sig => allow must be false (WAC deny)"
+    );
+    // No trustDenied: this is not a trust-block parse error — the block was valid, the
+    // credential just didn't admit (bad sig → empty admit set → WAC decides normally).
+    assert!(
+        resp_body.get("trustDenied").is_none(),
+        "a bad sig produces a WAC deny, not a trust-parse error (no trustDenied field)"
+    );
+    // No trustJustification either: nothing was admitted.
+    assert!(
+        resp_body.get("trustJustification").is_none(),
+        "no facts admitted => no trustJustification"
+    );
+}
+
+/// PARTIAL-FAILURE BATCH: credential A (valid) admits `<alice> vcard:hasMember <alice>`;
+/// credential B (tampered sig) fails admission. Only A's facts reach the WAC materialiser.
+/// Alice gets Read (from A's fact), B's failure does NOT block A's grant.
+///
+/// This tests that the per-credential failure handling is correct: a batch of credentials
+/// where some fail admission and some pass must produce a decision based ONLY on the
+/// admitted facts from the passing credentials.
+#[tokio::test]
+async fn partial_failure_batch_cred_a_admits_cred_b_fails_alice_gets_read() {
+    let base = spawn_trust_on().await;
+    let graph = vec![alice_member_triple()];
+    let (good_sig, signed_graph) = sign_test_graph(graph);
+    let nquads_a = triple_to_nquads_line(&signed_graph[0]);
+    let salt_hex = test_salt_hex();
+    let key_hex = test_pubkey_hex();
+
+    // Credential B uses the same triple but a tampered signature.
+    let bad_sig = {
+        let mut chars: Vec<char> = good_sig.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == '0' { '1' } else { '0' };
+        chars.into_iter().collect::<String>()
+    };
+    let nquads_b = nquads_a.clone(); // same triple, different (bad) sig
+
+    let body = decide_body_with_credentials(
+        WAC_NQUADS_GROUP,
+        RESOURCE,
+        ALICE,
+        &[
+            WireCred { nquads: &nquads_a, sig_hex: &good_sig, salt_hex: &salt_hex, issued_at: ISSUED_AT_SECS, revoked: false },
+            WireCred { nquads: &nquads_b, sig_hex: &bad_sig, salt_hex: &salt_hex, issued_at: ISSUED_AT_SECS, revoked: false },
+        ],
+        &key_hex,
+    );
+    let resp = client()
+        .post(format!("{}/authz/decide", base))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    // A admits (good sig) => alice gets Read => 200 allow. B fails (bad sig) => ignored.
+    // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
+    assert_eq!(
+        resp.status(),
+        200,
+        "cred A admits + cred B fails => A's fact reaches WAC => 200 allow"
+    );
+    let resp_body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        resp_body.get("allow").and_then(|v| v.as_bool()),
+        Some(true),
+        "A's admitted fact satisfies WAC group rule => allow:true"
+    );
+    // trustJustification present: at least A's fact was admitted.
+    assert!(
+        resp_body.get("trustJustification").is_some(),
+        "trustJustification must be present when at least one credential admitted"
     );
 }

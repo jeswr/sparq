@@ -965,7 +965,7 @@ fn trust_authz_decide(
     // The trust block extends, never replaces, the WAC/ACP admission stratum: admitted facts
     // are injected INTO the pod dataset for materialisation, exactly as the design specifies.
     // Build the store over the original dataset with admitted facts injected.
-    let store = match build_store_with_admitted(req, &all_admitted, full_body) {
+    let store = match build_store_with_admitted(req, &all_admitted, resource, full_body) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -1004,27 +1004,58 @@ fn trust_authz_decide(
 }
 
 /// [SONNET-4.6] (sq-pfae.17) Build a `PodStore` with admitted trust facts injected into the
-/// dataset as `trust:admitted`-tagged triples in the default graph. The trust facts are added
-/// AS-IS to the N-Quads dataset before parsing, so the WAC/ACP materialiser can see them.
+/// dataset. Admitted facts are emitted into TWO positions so they reach the WAC/ACP materialiser:
 ///
-/// HONEST SCOPE: the injected triples are in the DEFAULT graph (no named graph tag). A production
-/// wiring would use `trust:admitted` named-graph tagging; the v1 wire uses default-graph injection
-/// for simplicity. This is strictly a PoC path (design `research/solid-trust-graph-authz-design.md`).
+/// 1. **Named-graph position** (`resource + ".acl"` graph) — the WAC loader ONLY reads named
+///    graphs ending in `.acl`/`.acr`; injecting into that graph makes the facts visible to the
+///    N3 reasoner. The convention `resource + ".acl"` matches Solid's ACL-by-naming-convention:
+///    every resource `R` is governed by `R.acl` (or its nearest ancestor), and the loader emits
+///    `<R> solidx:ownAcl <R.acl>` from a present `<R.acl>` graph.
+///
+/// 2. **Default-graph position** (no graph IRI) — belt-and-braces; the engine SPARQL query path
+///    (`query_as` / `view_for`) sees the default graph alongside named graphs so trust-injected
+///    facts are also queryable as plain RDF terms. Default-graph quads do NOT reach the WAC N3
+///    reasoner (the loader skips them), so position 1 is the operative path for WAC decisions.
+///
+/// [SONNET-4.6] FIX (Fix 2, sq-zza2h): oxrdf's Display for `NamedOrBlankNode` (subject) and
+/// `NamedNode` (predicate) already emits the `<…>` / `_:…` wrapper, and `Term` (object) emits
+/// the correct N-Quads term. Do NOT re-wrap in `<{}>` — that would double-wrap a `NamedNode`
+/// subject as `<<…>>`, producing invalid N-Quads that the parser rejects, so admitted facts
+/// silently never reached the store before this fix. Emit `{} {} {} .` / `{} {} {} <graph> .`
+/// and let oxrdf Display produce the canonical N-Quads term syntax.
+///
+/// HONEST SCOPE: this is a PoC injection path (anchored-not-proven; sq-qhy4 pending external
+/// audit). A production wiring would use `trust:admitted`-named-graph tagging and epoch-based
+/// cache invalidation (design `research/solid-trust-graph-authz-design.md`).
 #[cfg(feature = "solid-authz-trust")]
 #[allow(clippy::result_large_err)]
 fn build_store_with_admitted(
     req: &AuthzRequest,
     admitted: &[sparq_trust::AdmittedFact],
+    resource: &str,
     _full_body: &serde_json::Value,
 ) -> Result<sparq_solid::PodStore, Response> {
     use std::fmt::Write as _;
-    // Append the admitted facts as N-Quad default-graph triples at the end of the dataset.
+    // The ACL graph IRI for this resource (Solid naming convention: resource + ".acl").
+    // Admitted facts emitted into this named graph are seen by the WAC N3 loader
+    // (assemble_input processes all graphs whose name ends in ".acl").
+    // [SONNET-4.6] POSITIONAL format args throughout (CodeQL rust/unused-variable guard).
+    let acl_graph = format!("{}.acl", resource);
     let mut augmented = req.dataset.clone();
     for fact in admitted {
-        // [SONNET-4.6] POSITIONAL format args (CodeQL rust/unused-variable guard).
+        // Named-graph position: reaches the WAC N3 reasoner via the .acl graph path.
         let _ = writeln!(
             &mut augmented,
-            "<{}> <{}> {} .",
+            "{} {} {} <{}> .",
+            fact.triple.subject,
+            fact.triple.predicate,
+            fact.triple.object,
+            acl_graph,
+        );
+        // Default-graph position: reachable via SPARQL query on the full dataset.
+        let _ = writeln!(
+            &mut augmented,
+            "{} {} {} .",
             fact.triple.subject,
             fact.triple.predicate,
             fact.triple.object,

@@ -434,6 +434,16 @@ flate2 = { version = "1", optional = true }
 mimalloc = "0.1"
 
 [dev-dependencies]
+# [SONNET-4.6] (sq-pfae.17) Trust/ZK test helpers for the admission-path integration tests
+# (tests/solid_authz_trust.rs): construct valid Schnorr-signed credentials, verify the
+# happy-path GRANT and injection-gate DENY. These are dev-only — the production path is
+# behind the `solid-authz-trust` feature, which already enables sparq-trust/sparq-zk as
+# optional deps; the dev-dep is unconditional so the test binary can import the helpers
+# regardless of which feature set the dev ran (tests are #[cfg(feature="solid-authz-trust")]).
+sparq-trust = { path = "../sparq-trust", version = "0.1.0", features = ["cert-graph"] }
+sparq-zk = { path = "../sparq-zk", version = "0.1.0" }
+oxrdf = { workspace = true }
+oxttl = { workspace = true }
 # [OPUS-4.8] Reference SPARQL-results parser (oxigraph's) for the serializer oracle
 # (tests/serializer_oracle.rs): re-parses OUR XML/TSV output and asserts the round-trip
 # result set equals the source QueryResult. Pinned to 0.3 so its `oxrdf` (0.3.3) is the
