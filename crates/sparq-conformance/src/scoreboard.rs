@@ -637,16 +637,14 @@ pub const SUITES: &[Suite] = &[
     // RIF/XML import → validate → closure → conclusion oracle — as a STANDARDS-suite lane
     // (family "W3C RIF") with an HONEST denominator: the printed per-category skip
     // taxonomy IS the denominator's honesty. The FLOOR is the ACTUAL MEASURED pass count
-    // at the pinned archive — a MEASURED 0 at the current importer: every real RIF Core
-    // file exceeds the importer's single-slot-frame subset (multi-slot frames, positional
-    // predicate atoms) and the reject-kind tests reject only VACUOUSLY (blanket
-    // import-refusal / unsupported-construct — never a genuine detection), so all 46
-    // Core+Approved tests land in named skip buckets. The load-bearing NET vacuity rule
-    // (an un-importable premise is a SKIP, never a vacuous "not entailed") is enforced +
-    // tested. RISE-READY: the floor ratchets above 0 the moment the importer's Core
-    // coverage grows. The SPARQL RIF entailment regime (sparql11/entailment rif01..rif06)
+    // at the pinned archive — MEASURED 3 after sq-n7y15 positional-Atom import (the 3
+    // NegativeSyntaxTests whose positional Atoms now import, allowing genuine
+    // range-restriction detection; multi-slot frames + arity 3+ still skip:condition-shape).
+    // The load-bearing NET vacuity rule (un-importable premise = SKIP, never a vacuous
+    // "not entailed") is enforced + tested. RISE-READY: the floor ratchets up as importer
+    // Core coverage grows. The SPARQL RIF entailment regime (sparql11/entailment rif01..rif06)
     // stays tracked-not-asserted out-of-scope. Floor kept in lock-step by
-    // `tests/scoreboard_floors.rs`.
+    // `tests/scoreboard_floors.rs`. [SONNET-4.6] sq-n7y15
     Suite {
         label: "W3C RIF WG Core test suite",
         family: "W3C RIF",
@@ -656,13 +654,15 @@ pub const SUITES: &[Suite] = &[
             feature: "rif-wg-core",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 0,
+        // [SONNET-4.6] sq-n7y15: raised from 0 to 3 by positional-Atom import. Mirror of
+        // `RIF_WG_CORE_FLOOR` in tests/rif_wg_core_suite.rs (kept in lock-step).
+        ratchet_floor: 3,
         floor_basis: "pass",
         note: "the W3C RIF WG test cases (Core dialect, pinned Core_v1.22 archive) driven \
                end-to-end through the real RIF/XML import -> validate -> closure -> \
                conclusion oracle; an HONEST-denominator standards lane (the printed \
                skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED \
-               pass count (0 at the current importer, rise-ready)",
+               pass count (3 at the sq-n7y15 positional-Atom importer, rise-ready)",
     },
     // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm, a
     // sparq EXTENSION ratchet tallied SEPARATELY from the W3C D-entailment row above

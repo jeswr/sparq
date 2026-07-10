@@ -170,6 +170,10 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   `Import` directives, non-Core elements, unknown `External` IRIs, named-argument uniterms,
   and malformed XML each produce a named `ImportError` variant. Parsing only — no new inference
   beyond the existing `rif-core` forward chainer. Unblocks sq-pbz04.5.5 (W3C RIF WG test-suite arm).
+  **Positional predicate atoms** (`<Atom><op>P</op><args>…</args></Atom>`, sq-n7y15): the dominant
+  form in real W3C RIF Core test files. Arity-1 maps to `Atom::Member` (membership `a # C`),
+  arity-2 maps to `Atom::Frame` (frame atom `a[P → b]`). Arity-0 and arity-3+ are rejected
+  fail-closed (`ImportError::UnrecognizedElement`) — no sound mapping exists in the Core model.
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
