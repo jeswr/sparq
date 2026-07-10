@@ -618,6 +618,44 @@ pub const SUITES: &[Suite] = &[
                through sparq-reason's opt-in Profile::D (rdfD1 typing + typed \
                value-space equality)",
     },
+    // [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG test-suite CONFORMANCE
+    // arm, Core subset. The runner is crate-local here (`tests/rif_wg_core_suite.rs`)
+    // but behind the OPT-IN `rif-wg-core` feature (forwards to sparq-reason/rif-xml — the
+    // RIF/XML importer + rif-core model — plus sparq-substrate/numeric for the
+    // value-aware conclusion compare) so the default + `--workspace` builds neither link
+    // the importer nor go red — the lean-core posture. DISTINCT from the sparq-EXTENSION
+    // `rif_core_suite.rs` expressivity ratchet (below): THIS drives the ACTUAL W3C RIF WG
+    // test cases (the pinned Core_v1.22 archive) end-to-end through the real path —
+    // RIF/XML import → validate → closure → conclusion oracle — as a STANDARDS-suite lane
+    // (family "W3C RIF") with an HONEST denominator: the printed per-category skip
+    // taxonomy IS the denominator's honesty. The FLOOR is the ACTUAL MEASURED pass count
+    // at the pinned archive — a MEASURED 0 at the current importer: every real RIF Core
+    // file exceeds the importer's single-slot-frame subset (multi-slot frames, positional
+    // predicate atoms) and the reject-kind tests reject only VACUOUSLY (blanket
+    // import-refusal / unsupported-construct — never a genuine detection), so all 46
+    // Core+Approved tests land in named skip buckets. The load-bearing NET vacuity rule
+    // (an un-importable premise is a SKIP, never a vacuous "not entailed") is enforced +
+    // tested. RISE-READY: the floor ratchets above 0 the moment the importer's Core
+    // coverage grows. The SPARQL RIF entailment regime (sparql11/entailment rif01..rif06)
+    // stays tracked-not-asserted out-of-scope. Floor kept in lock-step by
+    // `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C RIF WG Core test suite",
+        family: "W3C RIF",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "rif_wg_core_suite",
+            feature: "rif-wg-core",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 0,
+        floor_basis: "pass",
+        note: "the W3C RIF WG test cases (Core dialect, pinned Core_v1.22 archive) driven \
+               end-to-end through the real RIF/XML import -> validate -> closure -> \
+               conclusion oracle; an HONEST-denominator standards lane (the printed \
+               skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED \
+               pass count (0 at the current importer, rise-ready)",
+    },
     // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm, a
     // sparq EXTENSION ratchet tallied SEPARATELY from the W3C D-entailment row above
     // (the W3C `sparql11/entailment` corpus is a SINGLE D-only test; the real value-space

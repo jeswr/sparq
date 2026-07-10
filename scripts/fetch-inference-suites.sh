@@ -15,6 +15,10 @@
 #      original wiki (owl.semanticweb.org) is offline; the canonical bulk export
 #      is preserved by the Internet Archive. The snapshot TIMESTAMP in the URL is
 #      the pin; the sha256 check makes any drift loud.
+#   4. W3C RIF WG test cases   — the RIF Working Group test cases, Core dialect
+#      (Core_v1.22.zip from www.w3.org/2005/rules/test/repository/zips/). Fetched,
+#      NOT vendored (no redistribution license — see step 4 below); the versioned
+#      zip + sha256 is the pin; the rif-wg-core lane SKIPS when absent.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -92,4 +96,66 @@ else
     fi
     mv "$OWL_DEST.tmp" "$OWL_DEST"
     echo "OWL 2 test cases pinned (snapshot $OWL_SNAPSHOT, sha256 ok)."
+fi
+
+# --- 4. W3C RIF Working Group test cases (Core subset) ------------------------
+# [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG test cases, Core dialect,
+# for the `rif-wg-core` conformance arm (crates/sparq-conformance/tests/rif_wg_core_suite.rs).
+#
+# FIXTURES ARE FETCHED, NOT VENDORED (license gate — verified 2026-07). The RIF test
+# cases live at https://www.w3.org/2005/rules/test/repository/ (still live in 2026),
+# but they carry NO explicit redistribution/test-suite/BSD license marker: the W3C
+# default (https://www.w3.org/copyright/intellectual-rights/) is the W3C DOCUMENT
+# LICENSE, which forbids derivative works — and W3C explicitly treats "the creation of
+# a subset of a test suite" as a prohibited derivative
+# (https://www.w3.org/copyright/test-suite-license-2023/). There is no affirmative
+# grant to copy the Core subset into this repo, so we use the same fetch-at-test-time +
+# skip-if-absent pattern the D-entailment / EL lanes use: the data lands in the
+# gitignored tests/w3c/, and the runner SKIPS when it is absent (a fresh offline
+# checkout stays green). NO fabricated fixtures.
+#
+# Pin = the versioned Core_v1.22.zip archive (an immutable convenience bundle the W3C
+# publishes alongside the per-test tree) + its sha256. The zip's directory layout —
+# `Core_v1.22/Approved/<TestType>/<id>/<id>-{premise,conclusion,input,nonconclusion}.rif`
+# — encodes the test type and Approved status by path, so the runner needs no manifest
+# parse. Any payload drift is made loud by the sha256 gate below.
+RIF_URL="https://www.w3.org/2005/rules/test/repository/zips/Core_v1.22.zip"
+RIF_SHA256="421e80f2e2671e4ee95bf0f9c424d0fd83955f5cecf67fb9104422eeb9f3887a"
+RIF_DEST="$ROOT/tests/w3c/rif-core"
+RIF_STAMP="$RIF_DEST/.Core_v1.22.sha256"
+
+if [ -f "$RIF_STAMP" ] && [ "$(cat "$RIF_STAMP")" = "$RIF_SHA256" ]; then
+    echo "RIF WG Core test cases already present (sha256 ok) — nothing to do."
+else
+    mkdir -p "$RIF_DEST"
+    echo "Downloading the W3C RIF WG Core test cases (Core_v1.22.zip)…"
+    # www.w3.org occasionally 503s / resets large-archive transfers from CI runner IP
+    # ranges (observed intermittently on this endpoint); --retry-all-errors covers the
+    # reset/503 that plain --retry misses. The sha256 gate makes drift loud, so
+    # retrying is safe.
+    if ! curl -sSfL \
+            --retry 5 --retry-delay 5 --retry-all-errors --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o "$RIF_DEST/Core_v1.22.zip.tmp" "$RIF_URL"; then
+        rm -f "$RIF_DEST/Core_v1.22.zip.tmp"
+        echo "ERROR: could not download the RIF WG Core test cases after retries." >&2
+        echo "  URL: $RIF_URL" >&2
+        echo "  This is a W3C-hosted archive; transient 503/connection resets are" >&2
+        echo "  common. Re-run the job; the rif-wg-core lane SKIPS when the data is" >&2
+        echo "  absent so a fresh offline checkout stays green." >&2
+        exit 1
+    fi
+    HAVE_SHA="$(sha256_of "$RIF_DEST/Core_v1.22.zip.tmp")"
+    if [ "$HAVE_SHA" != "$RIF_SHA256" ]; then
+        rm -f "$RIF_DEST/Core_v1.22.zip.tmp"
+        echo "ERROR: RIF Core zip checksum mismatch (got $HAVE_SHA, want $RIF_SHA256)." >&2
+        exit 1
+    fi
+    # Extract the Approved/ tree next to the stamp; the runner reads it directly.
+    ( cd "$RIF_DEST" \
+        && rm -rf Core_v1.22 \
+        && unzip -q -o Core_v1.22.zip.tmp \
+        && rm -f Core_v1.22.zip.tmp )
+    echo "$RIF_SHA256" > "$RIF_STAMP"
+    echo "RIF WG Core test cases pinned (Core_v1.22, sha256 ok)."
 fi

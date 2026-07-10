@@ -2060,6 +2060,31 @@ jobs:
           PASS=$(grep -E '^TOTAL d-entail ' d-entail-conformance.out | awk '{print $3}' | head -1)
           echo "D-entailment pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::D-entailment regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
+      - name: Run RIF WG Core conformance lane (rif-wg-core feature ON) + enforce floor
+        # [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the OPT-IN W3C RIF WG test-suite
+        # CONFORMANCE arm, Core subset. SEPARATE from the binary ratchet above and from the
+        # sparq-EXTENSION rif-core expressivity lane below: this drives the REAL W3C RIF WG
+        # test cases (the pinned Core_v1.22 archive fetched by the fetch step above) end-to-end
+        # through the real RIF/XML import -> validate -> closure -> conclusion oracle, and
+        # prints a `TOTAL rif-wg-core <pass> <fail> <skip>` line; the floor (RIF_WG_CORE_FLOOR,
+        # mirrored in scoreboard::SUITES) is asserted in-runner AND re-grepped here. An
+        # HONEST-denominator standards lane — the printed skip taxonomy is the honesty — and
+        # NET-vacuity-guarded (an un-importable premise is a SKIP, never a vacuous pass).
+        # `--nocapture` so the TOTAL line reaches stdout.
+        run: |
+          set -uo pipefail
+          cargo test -p sparq-conformance --features rif-wg-core --test rif_wg_core_suite -- --nocapture \
+            | tee rif-wg-core-conformance.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::RIF WG Core lane test failed (exit $rc)"; exit "$rc"; }
+          if ! grep -qE '^TOTAL rif-wg-core ' rif-wg-core-conformance.out; then
+            echo "::error::RIF WG Core lane produced no 'TOTAL rif-wg-core' line — infra/build issue (or the fetched Core_v1.22 archive is absent), not a conformance change. Re-run the job."
+            exit 1
+          fi
+          FLOOR=0
+          PASS=$(grep -E '^TOTAL rif-wg-core ' rif-wg-core-conformance.out | awk '{print $3}' | head -1)
+          echo "RIF WG Core pass: ${PASS:-unknown} (floor: $FLOOR)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::RIF WG Core regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
       - name: Run RIF-Core expressivity lane (rif-core feature ON) + enforce floor
         # [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the OPT-IN RIF-Core (monotone Horn)
         # expressivity ratchet. SEPARATE from the binary ratchet above so the default
