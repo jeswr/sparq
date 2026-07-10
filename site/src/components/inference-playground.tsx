@@ -188,7 +188,17 @@ export function InferencePlayground() {
           <Brain className="size-4 text-primary" />
           Live reasoner
         </CardTitle>
-        <EngineIndicator engine={engine} />
+        {/* [FABLE-5] sq-2av3s — the live-reasoner status badge reflects the W-reason wasm
+            bundle load outcome (cold → warming → ready | error). In the lean-wasm VISUAL lane
+            the reason bundle genuinely cannot load, so this region renders the
+            "Reasoner failed — retries on reason" state and the load-error toast baked into the
+            baseline, making the surface-inference screenshot drift. Mask this load-driven region
+            at capture ("mask, don't chase", cf. the benchmarks provenance strip in #1801) so the
+            baseline guards the static playground layout, not the runtime load outcome. The
+            vrMasks() helper in e2e/visual/*.spec.ts masks every [data-vr-mask] node. */}
+        <span data-vr-mask className="inline-flex">
+          <EngineIndicator engine={engine} />
+        </span>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex flex-wrap gap-1.5">
