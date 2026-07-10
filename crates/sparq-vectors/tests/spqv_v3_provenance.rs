@@ -124,7 +124,7 @@ fn rejects_wrong_dimension() {
     // A query vector of the wrong width against the exact searcher yields no meaningful match; the
     // build path rejects a wrong-width `put` outright.
     let mut wrong = VectorStore::create(tmp("dimw"), 8).unwrap().with_provenance(store_prov());
-    let put_err = wrong.put(1, &vec![1.0; 16]).expect_err("a wrong-width vector must be rejected");
+    let put_err = wrong.put(1, &[1.0; 16]).expect_err("a wrong-width vector must be rejected");
     assert!(put_err.contains("dim"), "wrong-width put must name dim: {}", put_err);
     std::fs::remove_file(&path8).ok();
 }
@@ -150,7 +150,7 @@ fn v2_store_has_no_provenance_and_rejects_by_default() {
     // A store built WITHOUT a provenance is the v2 format (default) and carries no provenance.
     let path = tmp("v2");
     let mut store = VectorStore::create(&path, 8).unwrap();
-    store.put(1, &vec![1.0; 8]).unwrap();
+    store.put(1, &[1.0; 8]).unwrap();
     store.finalize().unwrap();
     let store = VectorStore::open(&path).unwrap();
     assert!(store.provenance().is_none(), "a v2 store carries no embedding provenance");
@@ -171,7 +171,7 @@ fn legacy_allow_opts_into_a_provenance_less_store() {
     // A caller that KNOWS the legacy store is compatible can bypass the check with LegacyMode::Allow.
     let path = tmp("v2allow");
     let mut store = VectorStore::create(&path, 8).unwrap();
-    store.put(1, &vec![1.0; 8]).unwrap();
+    store.put(1, &[1.0; 8]).unwrap();
     store.finalize().unwrap();
     let store = VectorStore::open(&path).unwrap();
     assert!(
@@ -207,7 +207,7 @@ fn reserved_extension_area_round_trips_and_does_not_gate() {
     let mut prov = store_prov();
     prov.reserved = vec![0x01, 0x02, 0x03, 0xFF];
     let mut store = VectorStore::create(&path, 8).unwrap().with_provenance(prov.clone());
-    store.put(1, &vec![1.0; 8]).unwrap();
+    store.put(1, &[1.0; 8]).unwrap();
     store.finalize().unwrap();
     let store = VectorStore::open(&path).unwrap();
     // The reserved bytes survive the round trip.

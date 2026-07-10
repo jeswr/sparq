@@ -87,3 +87,21 @@
   crate: "sparq-vectors"
   features: "neuro-symbolic"
   test: true
+
+# [FABLE-5] sq-lhcot.1: the .spqv v3 embedding-provenance WRITE path + the mandatory
+# compatibility REJECTION. The whole write-side v3 record (provenance block + reserved KERN
+# extension area) is `spqv-provenance`-gated behind `default = []`, and the end-to-end negative
+# suite `tests/spqv_v3_provenance.rs` is `#![cfg(feature = "spqv-provenance")]`, so the default
+# build (and ci.yml's `--workspace --all-targets` archive, which passes NO `--features`) compiled
+# the write path + tests EMPTY and ran ZERO of them — the gap this leg (and the C1 structural
+# guard) closes. The v3 READ path is always-compiled, but the fail-closed rejection tests
+# (incompatible model id / metric / normalization / dimension axes, the v2/v1 legacy fail-closed
+# default, and the reserved-area KERN boundary) only run with the feature ON. `spqv-provenance`
+# implies NO other feature and adds NO new dependency (a hand-rolled fixed-width LE codec, no
+# serde, no engine). This leg builds the module, runs `cargo test` (the negative suite runs only
+# with the feature ON), and `clippy --all-targets -D warnings` with it ON (the real gate).
+# Appended at the END to minimise the recurring feature-matrix merge conflict.
+- name: "sparq-vectors (spqv-provenance — v3 embedding-provenance write + fail-closed rejection)"
+  crate: "sparq-vectors"
+  features: "spqv-provenance"
+  test: true
