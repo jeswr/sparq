@@ -177,7 +177,11 @@ while :; do
   # every tick so progress is visible even with SSH down, and the final envelopes (dumped
   # between ===ENVELOPE-BEGIN/END=== markers) are recoverable from it.
   aws ec2 get-console-output --region "$REGION" --instance-id "$INSTANCE_ID" --output text > "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
-  CON_STEP=$(grep -aoE '\[STEP [0-9TZ:-]+\] .*' "$RESULTS_LOCAL/console.txt" 2>/dev/null | tail -1)
+  # `|| true`: on early ticks the console is still empty so grep finds no STEP line and
+  # exits non-zero; under this launcher's `set -euo pipefail` a naked `CON_STEP=$(grep …)`
+  # would then trip set -e on iteration 1 and the EXIT trap would terminate the box ~65s in
+  # with zero telemetry (sq-hmd7l.32 wave-3 early-cleanup). Same guard on the ssh step read.
+  CON_STEP=$(grep -aoE '\[STEP [0-9TZ:-]+\] .*' "$RESULTS_LOCAL/console.txt" 2>/dev/null | tail -1 || true)
   CUR_STEP=$(ssh $SSHO "ubuntu@$IP" "sudo tail -n1 /root/GATHER_STEP 2>/dev/null" 2>/dev/null || true)
   log "[$i / ${ELAPSED}s] state=$STATE; step(ssh): ${CUR_STEP:-<none>}; step(console): ${CON_STEP:-<none>}"
   if grep -qa 'STEP.*gather complete' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
