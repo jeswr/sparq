@@ -1,0 +1,820 @@
+//! # `graph.rs` — the depth-bounded certification-edge trust-graph closure (fail-closed)
+//!
+//! The pod-side evaluation the merged `trustx:Certification` vocabulary
+//! ([`crate::framework_vocab`]) lacked: [`derive_effective_rules`] runs a **depth-bounded**
+//! (v1: depth-1), **attenuation-only**, **fail-closed** closure over signed
+//! certification edges to derive additional [`TrustRule`]s **AHEAD of** — and consumed
+//! by — the UNCHANGED admission gate ([`mod@crate::admit`]). It is a pure PRE-PROCESSING
+//! step: it produces the `Vec<TrustRule>` admission then consumes verbatim; it does not
+//! change the gate.
+//!
+//! ```text
+//!   direct_rules (Control-gated anchors)  +  signed trustx:Certification edges
+//!                                │
+//!                                ▼
+//!   ┌──────────────────────────────────────────────────────────────────┐
+//!   │  derive_effective_rules  (this module, NEW, OPT-IN `cert-graph`)   │
+//!   │  depth-1 · attenuation-only · fail-closed certification closure    │
+//!   │  every derived rule ⊆ (anchor ∩ cert scope ∩ validity window)      │
+//!   └──────────────────────────────────────────────────────────────────┘
+//!                                │  effective_rules == direct_rules ++ derived
+//!                                ▼
+//!   ADMISSION gate  (crate::admit, UNCHANGED — consumes a flat Vec<TrustRule>)
+//! ```
+//!
+//! ## The certification model (design `research/trust-expression-spec.md` §3.4 / D4)
+//!
+//! A [`Certification`] is a signed edge: an authority (the **certifier**) attests that
+//! another issuer (the **certified issuer**) is certified — under a framework, over a
+//! **scope**, within a **validity window** — to issue statements of that scope. A
+//! Trusted-List / DIATF-register entry IS one such edge. The closure lets a pod that
+//! anchors trust in a *certifier* transitively (depth-1) admit facts from issuers that
+//! certifier vouches for — but ONLY narrowed to what the certifier itself may confer.
+//!
+//! ## The HARD invariant — fail-closed, attenuation-ONLY (a broadening bug is escalation)
+//!
+//! This is authorisation-derivation logic: a rule that grants an issuer authority its
+//! certifier does not hold is a **privilege escalation**, not a bug to paper over. The
+//! closure therefore guarantees:
+//!
+//! - **Attenuation only.** Every derived rule's scope is the *intersection*
+//!   `anchor_scope ∩ cert_scope ∩ validity_window` and its statement-type shape is the
+//!   *intersection* of the anchor's shape with the cert's — a certification can only
+//!   **NARROW**, never **WIDEN**, the certifier's own authority. Where narrowing cannot
+//!   be *proven* (undecidable SHACL-shape containment), the edge contributes **NOTHING**
+//!   (design §3.4: "undecidable containment ⇒ NOT contained ⇒ contributes nothing").
+//! - **A CHECKED signature, never a self-asserted one.** The edge is admitted only if a
+//!   signature over its domain-separated [`certification_message`] verifies under the
+//!   **certifier's** key — the key bound by the certifier's own anchor [`TrustRule`]
+//!   (`is_reserved`-style discipline: a graph *claiming* `trustx:certifies` proves
+//!   nothing). A forged/absent signature ⇒ NOTHING.
+//! - **Fail-closed on time.** An expired / not-yet-valid / (positive-)status-missing edge
+//!   ⇒ NOTHING; the derived rule's freshness is `min(anchor.fresh_within, window)`.
+//! - **No cycle-driven amplification.** A self-certifying edge (`certifier ==
+//!   certified_issuer`), or one whose certified issuer already anchors the certifier, is
+//!   dropped: it can add no authority the graph did not already hold, and admitting it
+//!   would let a cycle launder a broadening.
+//! - **Depth-bounded.** v1 is depth-1: derived rules are NOT themselves used as anchors
+//!   for a further round (no in-reasoner recursion; the `sq-tu4e` discipline is untouched).
+//!   A `depth_bound` of `0` short-circuits to `direct_rules`.
+//! - **Strict additivity.** ZERO certifications (or none that survive the gate) ⇒ output
+//!   is `direct_rules` **byte-identical** (same rules, same order, cloned verbatim).
+//! - **Opt-in.** The whole module is behind the default-OFF `cert-graph` feature; with it
+//!   OFF nothing here is compiled and the default `sparq-trust` build is byte-identical.
+//!
+//! ## Honest scope — NO cryptographic-soundness or privacy claim (read first)
+//!
+//! Like the rest of this crate, `derive_effective_rules` is a research PoC and makes **no
+//! settled cryptographic-soundness, anonymity, or unlinkability claim**. It is a
+//! **fail-closed attenuation** layer: a CHECKED certifier signature over a canonical
+//! message, plus scope/time narrowing — a *trust-anchored delegation* claim, not
+//! cryptography. Framework trust is ANCHORED, not proven (design §7.2). The ZK estate it
+//! shares a signature primitive with is internally re-audited but has **no external
+//! accredited-cryptographer sign-off** (open gate `sq-qhy4`), and `sparq-mpc` is
+//! honest-majority **semi-honest only**. The certifier's *own* key is still
+//! operator-/DID-asserted (the live forgery vector D′, `sq-pfae.3`) — this layer defeats
+//! a *broadening* or *forged-edge* escalation given honest anchor keys; it does not close
+//! the upstream key-trust gap.
+//!
+//! [OPUS-4.8] sq-pfae.15 (epic sq-pfae, issue #940; design record
+//! `research/trust-expression-spec.md` §3.4). Written while Fable unavailable — flag for
+//! re-review when Fable returns. 🤖 SPARQ agent — certification-edge trust-graph closure.
+
+use crate::policy::{ShapeRef, TrustRule};
+use oxrdf::{NamedNode, Term};
+use sparq_zk::encode::{encode_term, encode_triple, salt_from_bytes};
+use sparq_zk::field::Fr;
+use sparq_zk::poseidon2;
+use sparq_zk::sig::{
+    commitment_message, holder_key_digest, public_key_to_hex, signature_from_hex, verify, PublicKey,
+};
+
+/// The certification-scope a certification edge confers — a *statement-type* constraint
+/// plus the *resource* scope it applies over. The derived rule's authority is the
+/// intersection of the certifier's anchor with this scope, so a `CertScope` can only
+/// **narrow** the certifier's authority (§3.4 scope-conformance).
+///
+/// The statement-type is modelled the same way [`TrustRule::shape`] is (a `trust:forShape`
+/// SHACL node-shape, `trust:forPredicate` desugared into it), so the closure reuses the
+/// crate's ONE statement-type idiom rather than inventing a second. `AnyServiceScope` is
+/// the honest DIATF service-level granularity ("everything this certified service issues")
+/// — the *coarsest* scope, and the ONLY one that never narrows a shape.
+#[derive(Debug, Clone)]
+pub enum CertScope {
+    /// `trustx:AnyServiceScope` — the coarsest, service-level scope. It imposes NO
+    /// statement-type narrowing of its own; the derived rule inherits the certifier
+    /// anchor's shape unchanged. (It never *broadens* — the anchor shape is the ceiling.)
+    AnyService,
+    /// A statement-type-scoped certification: the issuer is certified only for statements
+    /// matching this SHACL node-shape (a `trust:forPredicate` predicate is desugared into
+    /// a single-predicate shape upstream, exactly as [`crate::policy`] does).
+    Shape(ShapeRef),
+}
+
+/// A signed certification EDGE: an authority (`certifier`) attests that `certified_issuer`
+/// is certified — under a framework — over `scope`, within `[valid_from, valid_until]`.
+///
+/// It is admitted into the closure ONLY if its [`certification_message`] signature
+/// verifies under `certifier_key` (a CHECKED signature — never a self-asserted
+/// `trustx:certifies` triple), the window covers `now`, and the derived authority
+/// narrows (never broadens) the certifier's own anchor rule. Any failure ⇒ the edge
+/// contributes NOTHING (fail-closed).
+#[derive(Debug, Clone)]
+pub struct Certification {
+    /// `trustx:` — the certifying authority's identity (the framework operator / a
+    /// higher issuer). To confer authority it MUST match the `source` of an anchor
+    /// [`TrustRule`] in `direct_rules` (the certifier only confers what it itself holds).
+    pub certifier: NamedNode,
+    /// The certifier's verification key. The edge signature must verify under it, and it
+    /// must equal the `issuer_key` of the matching anchor rule (so a graph cannot name a
+    /// certifier whose key the pod does not already anchor).
+    pub certifier_key: PublicKey,
+    /// `trustx:certifies` — the certified issuer's identity (the DID/key being vouched
+    /// for). The derived rule authorises THIS issuer, within the intersected scope.
+    pub certified_issuer: NamedNode,
+    /// The certified issuer's verification key — the derived [`TrustRule::issuer_key`],
+    /// bound into the signed [`certification_message`] so the certifier's signature
+    /// ATTESTS exactly which key it is vouching for (a substituted key breaks the
+    /// signature — the delegation `sq-l5og` key-binding discipline applied to certs).
+    pub certified_key: PublicKey,
+    /// `trustx:scope` — what the issuer is certified to issue (the statement-type / scope
+    /// narrowing). The derived rule's shape is `anchor.shape ∩ scope`.
+    pub scope: CertScope,
+    /// `trustx:validFrom` — inclusive start of the certification window (Unix seconds).
+    pub valid_from_unix_secs: i64,
+    /// `trustx:validUntil` — inclusive end of the certification window (Unix seconds). An
+    /// edge with `valid_until < valid_from` is ill-formed and contributes nothing.
+    pub valid_until_unix_secs: i64,
+    /// The certifier's Schnorr signature over [`certification_message`], hex
+    /// (`compressed(R) ‖ s`), exactly as `sparq_zk::sig` produces. An absent/forged
+    /// signature fails closed.
+    pub signature_hex: String,
+}
+
+/// Why a single certification edge contributed NOTHING to the derived rule set. Returned
+/// by [`explain_edge`] (the per-edge fail-closed reason) so the adversarial matrix can
+/// assert *which* gate denied a forged / broadening / expired edge, not merely that the
+/// output was empty. NOT part of the fast path — [`derive_effective_rules`] simply drops
+/// a rejected edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdgeRejection {
+    /// The certifier names no anchor [`TrustRule`] in `direct_rules`, OR the anchor it
+    /// names binds a different key than `certifier_key` — the pod does not anchor this
+    /// certifier, so it can confer nothing.
+    NoAnchor,
+    /// The edge signature is absent or did not verify under `certifier_key` over the
+    /// domain-separated [`certification_message`] (a self-asserted / forged edge).
+    SignatureInvalid,
+    /// The window is ill-formed (`valid_until < valid_from`) or does not cover `now`
+    /// (expired / not-yet-valid) — fail-closed on time.
+    OutOfWindow,
+    /// `certifier == certified_issuer` (self-certification), or the certified issuer
+    /// already anchors the certifier — a cycle that could launder a broadening or add
+    /// no new authority. Dropped.
+    Cyclic,
+    /// The certification scope is NOT provably contained in the certifier's anchor scope
+    /// (a broadening attempt, or an undecidable containment). Attenuation-only ⇒ dropped.
+    Broadening,
+    /// The `depth_bound` was `0`, or this edge would only be reachable at a depth beyond
+    /// the bound (v1 depth-1: derived rules are never re-used as anchors).
+    OverDepth,
+}
+
+/// Derive the **effective** trust-rule set from the Control-gated anchor rules plus a set
+/// of signed certification edges — a depth-bounded, attenuation-only, fail-closed closure
+/// that runs AHEAD of the UNCHANGED admission gate ([`mod@crate::admit`]).
+///
+/// - `direct_rules` — the anchor rules parsed from the Control-gated policy
+///   ([`crate::policy::parse_policy`]). They are the trust ROOT; only a certifier that
+///   already appears here (as a rule `source` with the matching key) can confer authority.
+/// - `certifications` — the signed [`Certification`] edges (from a framework's published
+///   Trusted-List / register). Each is CHECKED, never trusted on assertion.
+/// - `now_unix_secs` — the evaluation instant, checked against each edge's window.
+/// - `depth_bound` — the closure depth. v1 uses `1`: derived rules are NOT re-used as
+///   anchors for a further round. `0` short-circuits to `direct_rules` verbatim.
+///
+/// The result is `direct_rules` (cloned **verbatim, in order** — strict additivity) with
+/// the surviving derived rules appended. **Zero surviving certifications ⇒ output is
+/// `direct_rules` byte-identical**; the admission gate then consumes the result exactly as
+/// it consumes a hand-authored policy — no gate change.
+///
+/// Every derived rule satisfies the HARD invariant `derived ⊆ (anchor ∩ cert scope ∩
+/// validity window)` (module docs): a certification can only NARROW the certifier's
+/// authority. Any unverifiable / expired / out-of-window / cyclic / over-depth /
+/// broadening edge contributes NOTHING. See [`explain_edge`] for the per-edge reason a
+/// forged / broadening / expired edge is denied.
+pub fn derive_effective_rules(
+    direct_rules: &[TrustRule],
+    certifications: &[Certification],
+    now_unix_secs: i64,
+    depth_bound: u32,
+) -> Vec<TrustRule> {
+    // Strict additivity: the anchors are always the prefix, cloned verbatim in order.
+    let mut effective: Vec<TrustRule> = direct_rules.to_vec();
+
+    // Depth 0 (or no edges): the closure is a no-op — output is direct_rules byte-identical.
+    if depth_bound == 0 || certifications.is_empty() {
+        return effective;
+    }
+
+    // v1: DEPTH-1 only. Derived rules are NEVER re-used as anchors — a certifier must be a
+    // DIRECT (`direct_rules`) anchor. This makes the closure a single pass over the edges
+    // and forecloses cycle-driven amplification structurally (a derived rule cannot certify
+    // anything). A future depth-N generalisation would iterate with a visited set + a
+    // per-round re-derivation of the ⊆ ceiling; it is deliberately NOT v1 (`sq-tu4e`).
+    for cert in certifications {
+        if let Some(rule) = derive_one(direct_rules, cert, now_unix_secs) {
+            effective.push(rule);
+        }
+    }
+    effective
+}
+
+/// Explain, per edge, why it did (`Ok`) or did NOT (`Err`) contribute — the fail-closed
+/// reason the adversarial matrix asserts against. It mirrors [`derive_effective_rules`]'s
+/// gate exactly (same checks, same order), returning the derived [`TrustRule`] on success
+/// or the [`EdgeRejection`] on the FIRST failing gate. Depth is the closure's `depth_bound`
+/// (v1 depth-1): a `depth_bound` of `0` denies every edge as [`EdgeRejection::OverDepth`].
+pub fn explain_edge(
+    direct_rules: &[TrustRule],
+    cert: &Certification,
+    now_unix_secs: i64,
+    depth_bound: u32,
+) -> Result<TrustRule, EdgeRejection> {
+    if depth_bound == 0 {
+        return Err(EdgeRejection::OverDepth);
+    }
+    derive_one_explained(direct_rules, cert, now_unix_secs)
+}
+
+/// The depth-1 per-edge derivation used by the fast path: `Some(rule)` iff every gate
+/// passes, else `None` (the reason is discarded — see [`explain_edge`] for it).
+fn derive_one(
+    direct_rules: &[TrustRule],
+    cert: &Certification,
+    now_unix_secs: i64,
+) -> Option<TrustRule> {
+    derive_one_explained(direct_rules, cert, now_unix_secs).ok()
+}
+
+/// The single shared gate, returning the derived rule OR the first [`EdgeRejection`]. Both
+/// [`derive_effective_rules`] (via [`derive_one`]) and [`explain_edge`] route through here,
+/// so the fast path and the explained path can NEVER diverge on what they admit.
+fn derive_one_explained(
+    direct_rules: &[TrustRule],
+    cert: &Certification,
+    now_unix_secs: i64,
+) -> Result<TrustRule, EdgeRejection> {
+    // GATE 1 — CYCLE. A self-certifying edge, or one whose certified issuer already anchors
+    // the certifier, is dropped BEFORE any other work: it can confer no authority the graph
+    // did not already hold, and admitting it is the shape a cycle would use to launder a
+    // broadening. (Checked first so a forged self-cert can't even reach the sig check.)
+    if cert.certifier.as_str() == cert.certified_issuer.as_str() {
+        return Err(EdgeRejection::Cyclic);
+    }
+    if direct_rules.iter().any(|r| {
+        r.source.as_str() == cert.certified_issuer.as_str()
+            && public_key_to_hex(&r.issuer_key) == public_key_to_hex(&cert.certified_key)
+    }) {
+        // The "certified" issuer is already a DIRECT anchor with this key — the edge would
+        // form a cycle (issuer certifies its own certifier / itself) and adds nothing.
+        return Err(EdgeRejection::Cyclic);
+    }
+
+    // GATE 2 — ANCHOR. The certifier MUST be a direct anchor whose key matches. This is the
+    // depth bound made concrete: only a `direct_rules` source (never a derived rule) can
+    // certify. It also binds the certifier's key to the one the pod anchors, so a graph
+    // cannot name a certifier whose key it does not already hold.
+    // All direct anchors the certifier holds (a certifier may be anchored for several
+    // statement-types over the same key — e.g. `age` AND `name`). We keep the WHOLE set so
+    // GATE 5 can pick the one the certification provably narrows, never just the first.
+    let candidate_anchors: Vec<&TrustRule> = direct_rules
+        .iter()
+        .filter(|r| {
+            r.source.as_str() == cert.certifier.as_str()
+                && public_key_to_hex(&r.issuer_key) == public_key_to_hex(&cert.certifier_key)
+        })
+        .collect();
+    if candidate_anchors.is_empty() {
+        return Err(EdgeRejection::NoAnchor);
+    }
+
+    // GATE 3 — CHECKED SIGNATURE. The edge is admitted only if a signature over the
+    // domain-separated `certification_message` verifies under the CERTIFIER's key. A graph
+    // merely *claiming* `trustx:certifies` proves nothing; a forged/absent sig fails closed.
+    let msg = commitment_message(&certification_message(cert));
+    let sig = signature_from_hex(&cert.signature_hex).ok_or(EdgeRejection::SignatureInvalid)?;
+    if !verify(&cert.certifier_key, &msg, &sig) {
+        return Err(EdgeRejection::SignatureInvalid);
+    }
+
+    // GATE 4 — TIME. The window must be well-formed AND cover `now` (inclusive). An expired
+    // / not-yet-valid / inverted-window edge fails closed. (Positive, existence-of-a-covering
+    // -window semantics — never evidence-of-absence; the OWA/monotonicity §3.3 D3 rule.)
+    if cert.valid_until_unix_secs < cert.valid_from_unix_secs
+        || now_unix_secs < cert.valid_from_unix_secs
+        || now_unix_secs > cert.valid_until_unix_secs
+    {
+        return Err(EdgeRejection::OutOfWindow);
+    }
+
+    // GATE 5 — ATTENUATION (shape). The derived statement-type is anchor.shape ∩ cert.scope,
+    // and it MUST be provably ⊆ the anchor's shape (a cert can only narrow). Try EACH candidate
+    // anchor and take the FIRST one the certification provably narrows — so a certifier anchored
+    // for several types is correctly narrowed by a cert scoped to one of them (never widened:
+    // the chosen anchor is always genuine pod authority). If NO candidate anchor is narrowed by
+    // this cert scope, it is a broadening ⇒ contributes nothing. Where narrowing cannot be
+    // PROVEN (undecidable SHACL-shape containment), each attempt yields None ⇒ Broadening.
+    let (anchor, derived_shape) = candidate_anchors
+        .iter()
+        .find_map(|a| narrowed_shape(&a.shape, &cert.scope).map(|s| (*a, s)))
+        .ok_or(EdgeRejection::Broadening)?;
+
+    // GATE 6 — ATTENUATION (freshness). The derived rule is no fresher than the anchor AND
+    // its window is no wider than the certification window: `min(anchor.fresh_within, window)`.
+    // A cert can only shrink the admitted staleness, never widen it.
+    let window_secs = cert
+        .valid_until_unix_secs
+        .saturating_sub(now_unix_secs)
+        .max(0);
+    let derived_fresh = anchor.fresh_within_secs.min(window_secs);
+
+    // The derived rule: it authorises the CERTIFIED issuer + key, but its scope (resource),
+    // shape (statement-type), and freshness are all the certifier anchor's — NARROWED by the
+    // certification. `scope` is the anchor's resource scope UNCHANGED: a certification narrows
+    // WHO and WHAT-TYPE, never widens WHERE (the resource scope is the certifier's ceiling).
+    Ok(TrustRule {
+        source: cert.certified_issuer.clone(),
+        issuer_key: cert.certified_key,
+        shape: derived_shape,
+        scope: anchor.scope.clone(),
+        fresh_within_secs: derived_fresh,
+    })
+}
+
+/// The narrowed statement-type shape `anchor.shape ∩ cert.scope`, or `None` if narrowing
+/// cannot be PROVEN (⇒ the edge contributes nothing — attenuation-only).
+///
+/// Decidable cases (the only ones that ever produce `Some`):
+/// - `CertScope::AnyService` — imposes no statement-type narrowing of its own, so the
+///   derived shape is the anchor's shape UNCHANGED (the anchor is the ceiling; this never
+///   broadens).
+/// - `CertScope::Shape(s)` where `s` **contains** the anchor shape via a **root-anchored
+///   structural match** ([`shape_contains`]): every constraint reachable from the anchor
+///   shape's root is matched by a constraint reachable from the cert shape's root, with
+///   intermediate blank nodes matched by structural position (NOT by label). A shape with
+///   MORE constraints admits FEWER nodes, so `cert ⊇ anchor` (as constraint sets) is a
+///   *narrowing*; the derived shape is the CERT shape (the strictly-tighter one).
+///
+/// Every other case — a cert shape that DROPS an anchor constraint (broadening), or one
+/// whose containment cannot be structurally decided within the bounded matcher — returns
+/// `None`. This is the design's "undecidable containment ⇒ NOT contained ⇒ contributes
+/// nothing" rule (§3.4), the SAFE side for authorisation: a false `None` merely fails to
+/// admit; a false `Some` would escalate. The matcher is deliberately CONSERVATIVE — it
+/// proves narrowing only for shapes it can structurally match, never guesses.
+fn narrowed_shape(anchor: &ShapeRef, cert_scope: &CertScope) -> Option<ShapeRef> {
+    match cert_scope {
+        // AnyService adds no statement-type constraint: the derived shape IS the anchor's
+        // (the anchor remains the ceiling). No broadening is possible.
+        CertScope::AnyService => Some(anchor.clone()),
+        CertScope::Shape(cert_shape) => {
+            // The cert shape must CONTAIN the anchor shape (every anchor constraint is
+            // present in the cert, matched from the roots outward). If so, the cert admits a
+            // SUBSET of what the anchor admits ⇒ a narrowing; the derived shape is the cert's
+            // (strictly-tighter) shape. If NOT provable ⇒ None (fail-closed).
+            if shape_contains(cert_shape, anchor) {
+                Some(cert_shape.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Whether the `sup` (cert) shape CONTAINS the `sub` (anchor) shape as a constraint set,
+/// via a bounded, root-anchored, **injective** structural match: identifying `sub.root`
+/// with `sup.root`, every triple reachable from `sub.root` must have a DISTINCT matching
+/// triple reachable from `sup.root`, with blank-node objects matched RECURSIVELY (structural
+/// position, not label) under an injective blank-node assignment, and IRI/literal objects
+/// matched exactly.
+///
+/// This is the decidable-containment core of [`narrowed_shape`]. **Injectivity is the
+/// soundness guarantee against a false positive:** each anchor constraint edge is matched to
+/// a *distinct* cert constraint edge, and each anchor blank node to a *distinct* cert blank
+/// node — so a cert with FEWER constraints can never be reported as containing an anchor with
+/// more (which would be a broadening reported as narrowing = escalation). It is SOUND for the
+/// SHACL node-shapes the crate mints (the `forPredicate`/`forShape` idiom: a root with a few
+/// direct constraints + one level of `sh:property` blank nodes) and conservative beyond them
+/// — it returns `true` only when it PROVES an injective embedding, so any un-provable case is
+/// the fail-closed (safe) `false`.
+fn shape_contains(sup: &ShapeRef, sub: &ShapeRef) -> bool {
+    let mut mapping: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    node_contains(&sup.root, sup, &sub.root, sub, &mut mapping)
+}
+
+/// Recursive node match with an injective blank-node `mapping` (anchor-node-id →
+/// cert-node-id): does the constraint sub-tree rooted at `sub_node` embed into the one
+/// rooted at `sup_node`? Every outgoing `(predicate, object)` edge of `sub_node` must be
+/// matched to a DISTINCT edge of `sup_node` (injective edge assignment), and any blank-node
+/// object must map injectively (consistently across the whole match) into a cert blank node.
+fn node_contains(
+    sup_node: &Term,
+    sup: &ShapeRef,
+    sub_node: &Term,
+    sub: &ShapeRef,
+    mapping: &mut std::collections::HashMap<String, String>,
+) -> bool {
+    // Enforce a consistent, injective blank-node assignment sub → sup. If sub_node is already
+    // mapped, it must map to THIS sup_node; and no OTHER sub node may already map to sup_node.
+    let sub_id = term_id(sub_node);
+    let sup_id = term_id(sup_node);
+    match mapping.get(&sub_id) {
+        Some(existing) if *existing == sup_id => return true, // already matched, consistent
+        Some(_) => return false,                              // sub_node maps elsewhere — inconsistent
+        None => {}
+    }
+    if mapping.values().any(|v| *v == sup_id) {
+        return false; // sup_node already used by a DIFFERENT sub node — not injective
+    }
+    mapping.insert(sub_id.clone(), sup_id.clone());
+
+    let sup_edges = edges_of(sup, sup_node);
+    let sub_edge_list = edges_of(sub, sub_node);
+    // Injective edge match: assign each sub edge to a DISTINCT sup edge (by index).
+    let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let ok = sub_edge_list.iter().all(|(sub_pred, sub_obj)| {
+        let hit = sup_edges.iter().enumerate().find(|(i, (sup_pred, sup_obj))| {
+            !used.contains(i)
+                && sup_pred == sub_pred
+                && obj_matches(sup_obj, sup, sub_obj, sub, mapping)
+        });
+        if let Some((i, _)) = hit {
+            used.insert(i);
+            true
+        } else {
+            false
+        }
+    });
+    if !ok {
+        // Roll back this node's mapping so a failed branch does not poison a sibling.
+        mapping.remove(&sub_id);
+    }
+    ok
+}
+
+/// Whether a cert-shape object `sup_obj` matches an anchor-shape object `sub_obj`: a
+/// blank-node `sub_obj` matches by RECURSING (its sub-tree must embed into `sup_obj`'s,
+/// injectively); an IRI/literal matches by exact equality.
+fn obj_matches(
+    sup_obj: &Term,
+    sup: &ShapeRef,
+    sub_obj: &Term,
+    sub: &ShapeRef,
+    mapping: &mut std::collections::HashMap<String, String>,
+) -> bool {
+    match (sup_obj, sub_obj) {
+        // A blank-node constraint node in the anchor must be structurally matched by a
+        // blank-node constraint node in the cert (recurse into their sub-trees, injectively).
+        (Term::BlankNode(_), Term::BlankNode(_)) => {
+            node_contains(sup_obj, sup, sub_obj, sub, mapping)
+        }
+        // A blank node on one side and a ground term on the other never match.
+        (_, Term::BlankNode(_)) | (Term::BlankNode(_), _) => false,
+        // Ground objects (IRIs / literals) match by exact term equality.
+        (a, b) => a == b,
+    }
+}
+
+/// The outgoing `(predicate, object)` edges whose subject is `node`.
+fn edges_of<'a>(shape: &'a ShapeRef, node: &Term) -> Vec<(&'a str, &'a Term)> {
+    let node_id = term_id(node);
+    shape
+        .triples
+        .iter()
+        .filter(|t| term_id(&Term::from(t.subject.clone())) == node_id)
+        .map(|t| (t.predicate.as_str(), &t.object))
+        .collect()
+}
+
+/// A stable id for an RDF term used only for the module-local structural match (NOT a
+/// canonicalisation). Blank nodes are keyed by their local id; the match identifies the two
+/// shape roots explicitly (via the recursion entry) so a root-label mismatch never defeats
+/// containment.
+fn term_id(t: &Term) -> String {
+    match t {
+        Term::NamedNode(n) => format!("I{}", n.as_str()),
+        Term::BlankNode(b) => format!("B{}", b.as_str()),
+        Term::Literal(l) => format!("L{}", l),
+        // RDF-1.2 triple terms: rendered via Debug — only used for the structural match,
+        // where any inequality is the safe (fail-closed) side.
+        other => format!("T{:?}", other),
+    }
+}
+
+/// The message a certifier signs (and [`derive_effective_rules`] verifies): a
+/// domain-separated `Poseidon2` hash binding the WHOLE edge — the certifier, the CERTIFIED
+/// issuer AND ITS KEY, the scope, and the validity window.
+///
+/// ## Why every field MUST be in the signed preimage (the attenuation soundness)
+///
+/// Binding all of these is load-bearing, not cosmetic — it is the certification analogue
+/// of `delegation::hop_message`'s `sq-l5og` key-binding fix:
+///
+/// - Binding `certified_key` means an attacker cannot lift a genuine certification and
+///   substitute its OWN key as the certified issuer's — that would break the certifier's
+///   signature (rejected at the sig gate). Without it, a captured edge would let a forger
+///   ride the certifier's authority under an attacker-chosen key.
+/// - Binding the scope + window means a forger cannot lift a narrow certification and
+///   re-present it with a BROADER scope or a longer window — the tampered message no longer
+///   verifies. The scope narrowing is thus attested by the certifier, not asserted by the
+///   holder.
+///
+/// The certifier signs this via `SecretKey::sign_commitment` (which wraps it in the
+/// domain-separated `commitment_message` before signing), and the closure verifies against
+/// the same wrapped form — so the value returned here is the *pre-wrap* message. The domain
+/// tag `"TRUSTCRT"` keeps a certification signature from ever being confused with a
+/// delegation-hop, credential-commitment, or holder-PoP signature (distinct domain tags).
+pub fn certification_message(cert: &Certification) -> Fr {
+    // Domain tag "TRUSTCRT" — a certification-edge signature is never confused with a
+    // delegation hop ("TRUSTDLG"), a commitment, or a PoP (cross-protocol confusion defence).
+    const SIG_DOMAIN_CERTIFICATION: u64 = 0x5452_5553_5443_5254; // "TRUSTCRT"
+    let mut inputs: Vec<Fr> = vec![
+        Fr::from(SIG_DOMAIN_CERTIFICATION),
+        iri_to_field(&cert.certifier),
+        key_to_field(&cert.certifier_key),
+        iri_to_field(&cert.certified_issuer),
+        key_to_field(&cert.certified_key),
+        Fr::from(cert.valid_from_unix_secs.unsigned_abs()),
+        Fr::from(u64::from(cert.valid_from_unix_secs < 0)),
+        Fr::from(cert.valid_until_unix_secs.unsigned_abs()),
+        Fr::from(u64::from(cert.valid_until_unix_secs < 0)),
+    ];
+    // The scope is folded into the signed preimage so a forger cannot re-present a narrow
+    // certification with a broader scope: a scope kind tag + the shape's constraint set.
+    match &cert.scope {
+        CertScope::AnyService => {
+            inputs.push(Fr::from(SCOPE_KIND_ANY_SERVICE));
+        }
+        CertScope::Shape(shape) => {
+            inputs.push(Fr::from(SCOPE_KIND_SHAPE));
+            inputs.push(Fr::from(shape.triples.len() as u64));
+            // Sign over each shape-defining triple via the estate's domain-separated
+            // `encode_triple`, so any tampering with the scope breaks the signature. Signed
+            // in listed order — the honest signer re-serialises the same shape identically.
+            let salt = salt_from_bytes(&[0u8; 32]);
+            for t in &shape.triples {
+                // A triple that fails to encode (only an RDF-1.2 triple-term subject/object
+                // can) folds a fixed sentinel instead of silently dropping — the shape still
+                // signs deterministically and the structural narrowing gate stays the arbiter.
+                let f = encode_triple(t, &salt).unwrap_or_else(|| Fr::from(UNENCODABLE_TRIPLE_SENTINEL));
+                inputs.push(f);
+            }
+        }
+    }
+    poseidon2::hash(&inputs)
+}
+
+/// Scope-kind domain tag for `AnyService`, folded into [`certification_message`] so the
+/// scope kind itself is signed (a forger cannot flip a shape-scope to `AnyService`).
+const SCOPE_KIND_ANY_SERVICE: u64 = 0x414e_5953_5643_0000; // "ANYSVC"
+/// Scope-kind domain tag for a shape-scope.
+const SCOPE_KIND_SHAPE: u64 = 0x5348_4150_4500_0000; // "SHAPE"
+/// Sentinel folded for a shape triple that cannot be `encode_triple`-encoded (only an
+/// RDF-1.2 triple-term subject/object), so the message stays deterministic; the structural
+/// narrowing gate ([`narrowed_shape`]) remains the arbiter of what such a shape admits.
+const UNENCODABLE_TRIPLE_SENTINEL: u64 = 0x5452_5553_5443_5458; // "TRUSTCTX"
+
+/// Fold a key into the signed preimage as its domain-separated coordinate digest (reuses
+/// `sparq_zk::sig::holder_key_digest`, `Poseidon2([ZKSIG_HK, x, y])` — no new hashing
+/// primitive). The curve identity has no affine coordinates and is never a usable signing
+/// key (`verify` rejects it independently); it is bound as a FIXED sentinel so an
+/// identity-key edge is still deterministically signed/verified and the Schnorr layer's own
+/// identity rejection keeps the path fail-closed. Mirrors `delegation::key_to_field`.
+fn key_to_field(pk: &PublicKey) -> Fr {
+    const IDENTITY_KEY_SENTINEL: u64 = 0x5452_5553_544b_4944; // "TRUSTKID"
+    holder_key_digest(pk).unwrap_or_else(|_| Fr::from(IDENTITY_KEY_SENTINEL))
+}
+
+/// Embed an IRI as a field element via the estate's domain-separated `encode_term` (IRIs
+/// are salt-independent there). No new hashing primitive; mirrors `delegation::iri_to_field`.
+fn iri_to_field(n: &NamedNode) -> Fr {
+    let salt = salt_from_bytes(&[0u8; 32]);
+    encode_term(&Term::NamedNode(n.clone()), &salt)
+        .expect("a NamedNode always encodes (only RDF-1.2 triple terms return None)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::{BlankNode, Literal, NamedNode, Triple};
+    use sparq_zk::sig::{public_key_to_hex, SecretKey};
+
+    fn iri(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+
+    /// A deterministic key pair for a source, by seed.
+    fn keypair(seed: u64) -> (SecretKey, PublicKey) {
+        let sk = SecretKey::from_seed(seed);
+        let pk = sk.public_key();
+        (sk, pk)
+    }
+
+    /// A predicate-scoped shape (`trust:forPredicate P` desugared): a single-predicate
+    /// SHACL node-shape targeting subjects of `p` and requiring `p` present.
+    fn predicate_shape(p: &str) -> ShapeRef {
+        let root = BlankNode::default();
+        let prop = BlankNode::default();
+        let sh_target_subjects_of = iri("http://www.w3.org/ns/shacl#targetSubjectsOf");
+        let sh_property = iri("http://www.w3.org/ns/shacl#property");
+        let sh_path = iri("http://www.w3.org/ns/shacl#path");
+        let sh_mincount = iri("http://www.w3.org/ns/shacl#minCount");
+        let pred = iri(p);
+        ShapeRef {
+            root: Term::BlankNode(root.clone()),
+            triples: vec![
+                Triple::new(root.clone(), sh_target_subjects_of, pred.clone()),
+                Triple::new(root.clone(), sh_property, prop.clone()),
+                Triple::new(prop.clone(), sh_path, pred),
+                Triple::new(
+                    prop,
+                    sh_mincount,
+                    Literal::new_simple_literal("1"),
+                ),
+            ],
+        }
+    }
+
+    /// An anchor rule for `source`/`key` over `scope`, for statement-type `shape`.
+    fn anchor(source: &str, key: PublicKey, shape: ShapeRef, scope: &str, fresh: i64) -> TrustRule {
+        TrustRule {
+            source: iri(source),
+            issuer_key: key,
+            shape,
+            scope: iri(scope),
+            fresh_within_secs: fresh,
+        }
+    }
+
+    /// Build a signed certification edge, signed by `certifier_sk` over the message.
+    fn signed_cert(
+        certifier: &str,
+        certifier_sk: &SecretKey,
+        certified: &str,
+        certified_key: PublicKey,
+        scope: CertScope,
+        valid_from: i64,
+        valid_until: i64,
+    ) -> Certification {
+        let mut cert = Certification {
+            certifier: iri(certifier),
+            certifier_key: certifier_sk.public_key(),
+            certified_issuer: iri(certified),
+            certified_key,
+            scope,
+            valid_from_unix_secs: valid_from,
+            valid_until_unix_secs: valid_until,
+            signature_hex: String::new(),
+        };
+        // Sign the domain-separated message via sign_commitment (the same wrap the gate
+        // verifies against).
+        cert.signature_hex = certifier_sk.sign_commitment(&certification_message(&cert));
+        cert
+    }
+
+    // ── Positive end-to-end case ────────────────────────────────────────────
+
+    #[test]
+    fn positive_certification_narrows_and_admits() {
+        let (gov_sk, gov_pk) = keypair(1);
+        let (_iss_sk, iss_pk) = keypair(2);
+        let anchor_rule = anchor(
+            "https://gov.example/framework",
+            gov_pk,
+            predicate_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let cert = signed_cert(
+            "https://gov.example/framework",
+            &gov_sk,
+            "https://issuer.example/dvs",
+            iss_pk,
+            CertScope::AnyService,
+            0,
+            i64::MAX / 2,
+        );
+        let effective =
+            derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert), 1_000, 1);
+        assert_eq!(effective.len(), 2, "anchor + one derived rule");
+        // The anchor is first, verbatim.
+        assert_eq!(effective[0].source.as_str(), anchor_rule.source.as_str());
+        // The derived rule authorises the CERTIFIED issuer with ITS key, over the anchor's
+        // scope + shape (AnyService inherits the anchor shape), no fresher than the anchor.
+        let derived = &effective[1];
+        assert_eq!(derived.source.as_str(), "https://issuer.example/dvs");
+        assert_eq!(
+            public_key_to_hex(&derived.issuer_key),
+            public_key_to_hex(&iss_pk)
+        );
+        assert_eq!(derived.scope.as_str(), "https://pod.ex/resourceX");
+        assert!(
+            derived.fresh_within_secs <= anchor_rule.fresh_within_secs,
+            "attenuation: derived freshness never exceeds the anchor's"
+        );
+    }
+
+    #[test]
+    fn positive_edge_explains_as_admitted() {
+        let (gov_sk, gov_pk) = keypair(1);
+        let (_iss_sk, iss_pk) = keypair(2);
+        let anchor_rule = anchor(
+            "https://gov.example/framework",
+            gov_pk,
+            predicate_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let cert = signed_cert(
+            "https://gov.example/framework",
+            &gov_sk,
+            "https://issuer.example/dvs",
+            iss_pk,
+            CertScope::AnyService,
+            0,
+            i64::MAX / 2,
+        );
+        let derived = explain_edge(&[anchor_rule], &cert, 1_000, 1)
+            .expect("a well-formed edge is admitted");
+        assert_eq!(derived.source.as_str(), "https://issuer.example/dvs");
+    }
+
+    // ── Strict additivity ───────────────────────────────────────────────────
+
+    #[test]
+    fn certification_message_is_deterministic_and_scope_sensitive() {
+        // A DIRECT test of the public `certification_message`: it is deterministic for a
+        // fixed edge, and CHANGES when the scope changes (so scope tampering breaks the sig).
+        let (_g, gov_pk) = keypair(1);
+        let (_i, iss_pk) = keypair(2);
+        let base = Certification {
+            certifier: iri(GOV_URL),
+            certifier_key: gov_pk,
+            certified_issuer: iri("https://iss.ex"),
+            certified_key: iss_pk,
+            scope: CertScope::AnyService,
+            valid_from_unix_secs: 0,
+            valid_until_unix_secs: 100,
+            signature_hex: String::new(),
+        };
+        assert_eq!(
+            certification_message(&base),
+            certification_message(&base),
+            "deterministic for a fixed edge"
+        );
+        let mut widened = base.clone();
+        widened.scope = CertScope::Shape(predicate_shape("https://schema.org/age"));
+        assert_ne!(
+            certification_message(&base),
+            certification_message(&widened),
+            "the scope is folded into the message — a scope change alters it"
+        );
+    }
+
+    const GOV_URL: &str = "https://gov.example/framework";
+
+    #[test]
+    fn zero_certifications_is_direct_rules_verbatim() {
+        let (_sk, pk) = keypair(1);
+        let rules = vec![
+            anchor("https://a.ex", pk, predicate_shape("https://schema.org/age"), "https://pod.ex/", 100),
+            anchor("https://b.ex", pk, predicate_shape("https://schema.org/name"), "https://pod.ex/x", 200),
+        ];
+        let out = derive_effective_rules(&rules, &[], 1_000, 1);
+        assert_eq!(out.len(), rules.len());
+        for (a, b) in rules.iter().zip(out.iter()) {
+            assert_eq!(a.source.as_str(), b.source.as_str());
+            assert_eq!(a.scope.as_str(), b.scope.as_str());
+            assert_eq!(a.fresh_within_secs, b.fresh_within_secs);
+            assert_eq!(public_key_to_hex(&a.issuer_key), public_key_to_hex(&b.issuer_key));
+        }
+    }
+
+    #[test]
+    fn depth_zero_short_circuits_to_direct_rules() {
+        let (gov_sk, gov_pk) = keypair(1);
+        let (_iss_sk, iss_pk) = keypair(2);
+        let anchor_rule = anchor("https://gov.ex", gov_pk, predicate_shape("https://schema.org/age"), "https://pod.ex/", 100);
+        let cert = signed_cert("https://gov.ex", &gov_sk, "https://iss.ex", iss_pk, CertScope::AnyService, 0, i64::MAX / 2);
+        let out = derive_effective_rules(&[anchor_rule], std::slice::from_ref(&cert), 1_000, 0);
+        assert_eq!(out.len(), 1, "depth 0 ⇒ no derivation");
+        // And explain_edge reports OverDepth at depth 0. (`TrustRule` has no `PartialEq`,
+        // so match on the Err variant rather than assert_eq! on the whole Result.)
+        let (_g, gov_pk2) = keypair(1);
+        let anchor2 = anchor("https://gov.ex", gov_pk2, predicate_shape("https://schema.org/age"), "https://pod.ex/", 100);
+        assert!(matches!(
+            explain_edge(&[anchor2], &cert, 1_000, 0),
+            Err(EdgeRejection::OverDepth)
+        ));
+    }
+}
