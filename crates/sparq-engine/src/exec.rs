@@ -1761,11 +1761,13 @@ impl LocalVocab {
         }
         let id = LOCAL_BASE + self.terms.len() as Id;
         self.nums.push(match &t {
-            // [OPUS-4.8] sq-rkzhr: parse through `parse_xsd_f64` — the SAME acceptance set
-            // as `as_num` / `as_numeric` — so the local-vocab numeric cache agrees with the
-            // lenient/exact compare seams on the XSD spelling rules (INF/+INF/-INF/NaN yes;
-            // Rust-only inf/infinity/nan no). A rejected spelling folds to the NaN sentinel.
-            Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()).unwrap_or(f64::NAN),
+            // [FABLE-5] sq-74oy4 / sq-6b1lj: cache the DATATYPE-AWARE f64 (`numeric_cache_f64`)
+            // — the SAME acceptance the graph `numeric_value` cache and the lenient `as_num`
+            // seam use — so a computed (BIND/aggregate) numeric term joins/compares identically
+            // to a graph term. It TRIMS (XSD `collapse` facet) and rejects a per-datatype-
+            // ill-formed lexical (`"1.5"^^xsd:integer`); either folds to the NaN cache-miss
+            // sentinel, deferring `=`/`<`/`>` to the exact evaluator (which type-errors it).
+            Term::Literal(l) => numeric_cache_f64(l).unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
         // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
@@ -5183,7 +5185,13 @@ fn extract_sargable(graph: &Graph, e: &Expression) -> Option<(Variable, ScanCmp)
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
-                let v: f64 = parse_xsd_f64(l.value())?;
+                // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant (`numeric_cache_f64`).
+                // A datatype-ill-formed threshold (`"1.5"^^xsd:integer`) yields `None`, so
+                // `extract_sargable` DECLINES the numeric fast path and the FILTER takes the
+                // exact general comparison — which type-errors the ill-formed constant,
+                // matching the reference semantics (a sargable f64 threshold would instead
+                // compare against it, over-including).
+                let v: f64 = numeric_cache_f64(l)?;
                 // A threshold f64 can't represent precisely (> 15 significant digits —
                 // large integers or high-precision decimals) makes the sargable f64 scan
                 // unsafe; decline so the filter takes the exact general comparison path.
@@ -10878,7 +10886,10 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
                 graph.numeric_value(id)
             }
         }
-        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-6b1lj: the CONSTANT operand is datatype-aware/trimmed too
+        // (`numeric_cache_f64`), so a datatype-ill-formed literal constant (`"1.5"^^xsd:integer`)
+        // is a type error on this fast comparison path exactly as the graph-term side is.
+        Literal(l) => numeric_cache_f64(l),
         Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
         Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
         Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
@@ -10987,7 +10998,8 @@ fn eval_compiled_numeric(graph: &Graph, local: &LocalVocab, row: &[Id], e: &Comp
             let id = row[c];
             if id == NO_ID { None } else if is_local(id) { local.numeric(id) } else { graph.numeric_value(id) }
         }
-        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant, matching `eval_numeric`.
+        Literal(l) => numeric_cache_f64(l),
         Add(a, d) => Some(eval_compiled_numeric(graph, local, row, a)? + eval_compiled_numeric(graph, local, row, d)?),
         Subtract(a, d) => {
             Some(eval_compiled_numeric(graph, local, row, a)? - eval_compiled_numeric(graph, local, row, d)?)
@@ -11465,16 +11477,19 @@ fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        // [OPUS-4.8] sq-rkzhr: route the lexical→f64 arm through `parse_xsd_f64` (the SAME
-        // parser the exact/typed `as_numeric` path uses) instead of Rust's `str::parse::<f64>`.
-        // Two reasons, both about keeping this LENIENT `as_f64` seam in lock-step with the
-        // exact `as_numeric` one that the sq-rikm7 `exact_cmp` recheck drives: (a) it accepts
-        // the XSD specials `INF`/`+INF`/`-INF`/`NaN`; (b) it REJECTS the non-XSD spellings
-        // Rust's parser also swallows (`inf`/`infinity`/`nan`), which `as_numeric` already
-        // rejects. Before this the two paths disagreed on those spellings, so a numeric compare
-        // could succeed via `as_f64` yet find no exact recheck value — the f64-collapse
-        // asymmetry sq-rikm7 set out to remove.
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-74oy4 / sq-6b1lj: route the lexical→f64 arm through the DATATYPE-AWARE
+        // `numeric_cache_f64` — the SAME acceptance the graph `numeric_value` cache and
+        // `LocalVocab::intern` use. This keeps the lenient relational `<`/`>` seam in lock-step
+        // with the equality reference `Num::of_literal` on BOTH residuals sq-9781x left open:
+        // (a) whitespace — the value is TRIMMED (XSD `collapse` facet), so a padded
+        // `" 1"^^xsd:integer` is value-1 on `<`/`>` exactly as it is on `=` (was: type-error
+        // on `<`/`>`, cache-miss, but value-1 on `=` via the trimming cache); (b) per-datatype
+        // well-formedness — a lexical ill-formed FOR its datatype (`"1.5"^^xsd:integer`,
+        // `"1E2"^^xsd:decimal`, an i128-overflow decimal) is `None` here, a type error on
+        // `<`/`>` matching `of_literal` (was: compared as f64). The XSD f64 SPELLINGS
+        // (INF/+INF/-INF/NaN yes; Rust-only inf/infinity/nan no) are still enforced by the
+        // underlying `parse_xsd_f64` image.
+        Value::Term(Term::Literal(l)) => numeric_cache_f64(l),
         _ => None,
     }
 }
@@ -11485,6 +11500,30 @@ fn is_numeric_dt(l: &Literal) -> bool {
         || dt == xsd::DECIMAL.as_str()
         || dt == xsd::DOUBLE.as_str()
         || dt == xsd::FLOAT.as_str()
+}
+
+/// The DATATYPE-AWARE cached/lenient f64 of a numeric literal, matching the graph's
+/// `Graph::numeric_value` cache acceptance (sparq-core `cached_numeric_f64`): `Some` iff the
+/// lexical is well-formed FOR ITS DATATYPE (`Num::of_literal` accepts it), imaged by the
+/// shared `parse_xsd_f64` on the TRIMMED lexical so the value is bit-identical to what the
+/// graph cache and `LocalVocab::intern` store for the same term. `None` (a datatype-ill-formed
+/// lexical like `"1.5"^^xsd:integer`, or a non-numeric) is a SPARQL type error.
+///
+/// [FABLE-5] (sq-74oy4 / sq-6b1lj) This is the single acceptance the lenient relational seam
+/// (`as_num`/`as_f64`), the local-vocab numeric cache (`LocalVocab::intern`), and the graph
+/// cache now all share — closing the pre-fix asymmetry where `as_num`/`intern` parsed
+/// datatype-agnostically (and un-trimmed) while `Num::of_literal` (the equality reference)
+/// did not, so a padded or per-datatype-ill-formed lexical compared numerically on `<`/`>`
+/// yet type-errored on `=`. Acceptance is gated on `Num::of_literal` (the strictest, so the
+/// datatype rules can never drift); the f64 image is `parse_xsd_f64` (every lexical
+/// `of_literal` accepts, `parse_xsd_f64` also accepts, for the same value).
+#[inline]
+fn numeric_cache_f64(l: &Literal) -> Option<f64> {
+    if is_numeric_dt(l) && Num::of_literal(l).is_some() {
+        parse_xsd_f64(l.value().trim())
+    } else {
+        None
+    }
 }
 
 // [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the engine implements the substrate's
@@ -11507,15 +11546,15 @@ impl CompareTerm for Value {
     }
     #[inline]
     fn literal_kind(&self) -> LiteralKind {
-        // [FABLE-5] sq-wjl8i: the kind-first rank of the total order. Numeric tracks the
-        // LENIENT `as_num` membership (the same set the numeric arm compares), so a
-        // lexical the exact classifier rejects but `parse_xsd_f64` accepts (e.g.
-        // "1.5"^^xsd:integer) still sorts numerically, exactly as it did pre-fix — with
-        // one exception: a computed boolean (whose lenient f64 view is 0.0/1.0)
-        // classifies as Boolean, keeping it in one kind with boolean LITERALS (both
-        // order `false < true` via `strict_cmp`). ILL-FORMED numeric/temporal lexicals
-        // classify as Other (lexical order): a kind mixing value-ordered and
-        // lexical-fallback pairs is intransitive — the very bug this rank removes.
+        // [FABLE-5] sq-wjl8i / sq-74oy4: the kind-first rank of the total order. Numeric
+        // tracks the `as_num` membership (the same set the numeric arm compares), which is
+        // now DATATYPE-AWARE (sq-74oy4): a lexical ill-formed FOR its datatype (e.g.
+        // "1.5"^^xsd:integer) is NOT numeric here and classifies as Other (lexical order) —
+        // matching `of_literal` and keeping the Numeric kind purely value-ordered (a kind
+        // mixing value-ordered and type-error pairs is intransitive — the very bug this rank
+        // removes; pre-sq-74oy4 the lenient `as_num` wrongly kept such a lexical Numeric).
+        // A computed boolean (whose f64 view is 0.0/1.0) classifies as Boolean, keeping it in
+        // one kind with boolean LITERALS (both order `false < true` via `strict_cmp`).
         match lit_kind(self) {
             LitKind::Bool(_) => LiteralKind::Boolean,
             LitKind::Num(_) if as_num(self).is_some() => LiteralKind::Numeric,
@@ -16008,6 +16047,29 @@ mod f64_collapse_order_agreement {
                 as_numeric(&dbl(s)).is_some(),
                 "as_num / as_numeric disagree on the validity of {:?}",
                 s
+            );
+        }
+
+        // [FABLE-5] sq-74oy4 / sq-6b1lj: the alignment now extends to PER-DATATYPE
+        // well-formedness AND whitespace. `as_num` is datatype-aware and trimming, so it
+        // agrees with `as_numeric` (`Num::of_literal`) on integer/decimal lexicals too — a
+        // padded lexical is its trimmed value; a lexical ill-formed FOR its datatype is None.
+        let ints = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::INTEGER)));
+        let decs = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DECIMAL)));
+        assert_eq!(as_num(&ints(" 1 ")), Some(1.0), "padded integer trims to 1");
+        assert_eq!(as_num(&decs(" 1.5 ")), Some(1.5), "padded decimal trims to 1.5");
+        assert_eq!(as_num(&ints("1.5")), None, "fraction on integer is a type error");
+        assert_eq!(as_num(&ints("1E2")), None, "exponent on integer is a type error");
+        assert_eq!(as_num(&decs("1E2")), None, "exponent on decimal is a type error");
+        // Every one agrees with the exact `as_numeric` seam.
+        for (v, _lbl) in [
+            (ints(" 1 "), "padded int"), (decs(" 1.5 "), "padded dec"),
+            (ints("1.5"), "int fraction"), (ints("1E2"), "int exp"), (decs("1E2"), "dec exp"),
+        ] {
+            assert_eq!(
+                as_num(&v).is_some(),
+                as_numeric(&v).is_some(),
+                "as_num / as_numeric disagree on datatype-aware validity"
             );
         }
     }
