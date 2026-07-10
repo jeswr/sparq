@@ -20,7 +20,10 @@ pub mod scs;
 mod sparql;
 pub mod view;
 
-pub use model::{Component, PreBindingFailure, Shape, ShapesModel, Target};
+// [FABLE-5] (sq-11a) `IllFormedConstruct` records a shapes-graph construct that
+// violates the SHACL syntax rules; `validate_strict` reports the shapes graph as
+// a failure (the test-suite `sht:Failure` outcome) when any were found.
+pub use model::{Component, IllFormedConstruct, PreBindingFailure, Shape, ShapesModel, Target};
 pub use path::Path;
 // [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
 // SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
@@ -46,7 +49,9 @@ use sparq_core::Graph;
 
 /// Validates `data` against the SHACL shapes in `shapes`, returning the
 /// validation report. Constructs the shapes graph never declares (or declares
-/// ill-formed — e.g. an unparsable path) are skipped rather than failing.
+/// ill-formed — e.g. an unparsable path) are skipped rather than failing; use
+/// [`validate_strict`] to report ill-formed constructs as a failure instead
+/// (the W3C test-suite `sht:Failure` outcome). [FABLE-5] (sq-11a)
 pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
     let model = ShapesModel::parse(shapes);
     validate_with_model(data, &model)
@@ -68,17 +73,22 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
 }
 
 /// [OPUS-4.8] (sq-0mjfd) A SHACL processing **failure** (W3C SHACL §3.4): the
-/// shapes graph declares a constraint a conformant processor cannot soundly
-/// evaluate, so the spec says it MUST signal a *failure* rather than produce a
-/// validation report. The only producer today is a SHACL-SPARQL pre-binding
-/// violation (a `sh:sparql` constraint or constraint-component validator using
-/// `MINUS` / `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound
-/// variable / a `BIND` that re-binds one). Carries the offending nodes + the
-/// violated rule for diagnostics.
+/// shapes graph declares something a conformant processor cannot soundly
+/// evaluate, so the spec says it signals a *failure* rather than produce a
+/// validation report. Two producers: a SHACL-SPARQL pre-binding violation (a
+/// `sh:sparql` constraint or constraint-component validator using `MINUS` /
+/// `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound variable / a
+/// `BIND` that re-binds one), and [FABLE-5] (sq-11a) an **ill-formed
+/// shapes-graph construct** (a violated SHACL syntax rule — an unparsable
+/// `sh:path`, a non-integer `sh:minCount`, a malformed SHACL list, …). Carries
+/// the offending nodes + the violated rules for diagnostics.
 #[derive(Debug, Clone)]
 pub struct ShaclFailure {
-    /// The pre-binding failures that triggered the overall failure (at least one).
+    /// The pre-binding failures found (may be empty when `ill_formed` is not).
     pub pre_binding: Vec<model::PreBindingFailure>,
+    /// [FABLE-5] (sq-11a) The ill-formed shapes-graph constructs found (may be
+    /// empty when `pre_binding` is not). At least one of the two vecs is non-empty.
+    pub ill_formed: Vec<model::IllFormedConstruct>,
 }
 
 impl std::fmt::Display for ShaclFailure {
@@ -86,11 +96,14 @@ impl std::fmt::Display for ShaclFailure {
         // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
         write!(
             f,
-            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s)",
-            self.pre_binding.len()
+            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s), {} ill-formed shapes-graph construct(s)",
+            self.pre_binding.len(),
+            self.ill_formed.len()
         )?;
         if let Some(first) = self.pre_binding.first() {
             write!(f, " — e.g. {}: {}", first.node, first.message)?;
+        } else if let Some(first) = self.ill_formed.first() {
+            write!(f, " — e.g. {} at {}: {}", first.predicate, first.node, first.message)?;
         }
         Ok(())
     }
@@ -99,10 +112,11 @@ impl std::fmt::Display for ShaclFailure {
 impl std::error::Error for ShaclFailure {}
 
 /// [OPUS-4.8] (sq-0mjfd) STRICT validation (W3C SHACL §3.4 failure outcome): like
-/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares a
-/// constraint a conformant processor MUST reject — currently a SHACL-SPARQL
-/// pre-binding violation. The lenient [`validate`] instead skips such a
-/// constraint (its lenient ill-formed-shape policy), so use this when the
+/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares
+/// something a conformant processor rejects — a SHACL-SPARQL pre-binding
+/// violation, or [FABLE-5] (sq-11a) an ill-formed shapes-graph construct
+/// ([`ShapesModel::ill_formed`]). The lenient [`validate`] instead skips such a
+/// construct (its lenient ill-formed-shape policy), so use this when the
 /// distinction matters (e.g. the W3C `mf:result sht:Failure` entries).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure> {
     let model = ShapesModel::parse(shapes);
@@ -111,15 +125,19 @@ pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport,
 
 /// [OPUS-4.8] (sq-0mjfd) [`validate_strict`] against an already-parsed model: an
 /// `Err` if the model recorded any pre-binding failure
-/// ([`ShapesModel::pre_binding_failures`]), else the lenient validation report.
+/// ([`ShapesModel::pre_binding_failures`]) or [FABLE-5] (sq-11a) any ill-formed
+/// shapes-graph construct ([`ShapesModel::ill_formed`]), else the lenient
+/// validation report.
 pub fn validate_strict_with_model(
     data: &Graph,
     model: &ShapesModel,
 ) -> Result<ValidationReport, ShaclFailure> {
-    let failures = model.pre_binding_failures();
-    if !failures.is_empty() {
+    let pre_binding = model.pre_binding_failures();
+    let ill_formed = model.ill_formed();
+    if !pre_binding.is_empty() || !ill_formed.is_empty() {
         return Err(ShaclFailure {
-            pre_binding: failures.to_vec(),
+            pre_binding: pre_binding.to_vec(),
+            ill_formed: ill_formed.to_vec(),
         });
     }
     Ok(validate_with_model(data, model))

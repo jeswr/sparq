@@ -80,10 +80,20 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport;
 // Validate against an ALREADY-parsed shapes model (amortise parsing across many graphs).
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport;
 
-// STRICT validation (sq-0mjfd): returns Err(ShaclFailure) for a constraint a conformant
-// processor MUST REJECT — currently an unsound SHACL-SPARQL pre-binding (MINUS / VALUES /
-// SERVICE / a sub-SELECT dropping $this / a BIND re-binding it; the W3C `sht:Failure`
-// entries). `validate` instead SKIPS such a constraint (its never-fails contract).
+// STRICT validation (sq-0mjfd): returns Err(ShaclFailure) for what a conformant
+// processor REJECTS (the W3C `sht:Failure` outcome) — an unsound SHACL-SPARQL
+// pre-binding (MINUS / VALUES / SERVICE / a sub-SELECT dropping $this / a BIND
+// re-binding it), and (sq-11a) an ILL-FORMED shapes-graph construct: an unparsable
+// sh:path (or >1 sh:path values), a non-integer count/length (a NEGATIVE integer is
+// well-formed and stays a silent skip), a literal sh:datatype/sh:class/sh:nodeKind/
+// sh:pattern or a non-IRI list member, a malformed SHACL list (sh:in/and/or/xone/
+// languageIn/ignoredProperties), a literal shape ref (sh:node/not/property/…), a
+// non-boolean sh:closed/uniqueLang/…, a non-literal range comparand, an ill-formed
+// comparand path (sh:equals/lessThan/…), a non-IRI sh:target{Class,SubjectsOf,
+// ObjectsOf}, an sh:sparql node with no sh:select literal. Construct-local checks,
+// NOT a full SHACL-of-SHACL pass; ShaclFailure.ill_formed / ShapesModel::ill_formed()
+// carry (node, predicate, message). `validate` instead SKIPS all of the above
+// unchanged (its never-fails contract).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure>;
 pub fn validate_strict_with_model(data: &Graph, model: &ShapesModel)
     -> Result<ValidationReport, ShaclFailure>;
@@ -511,11 +521,16 @@ SHACL-spec-correct conforms/violations).
   (sq-sx15d): a Debug/Trace-only report conforms; a Warning/Info result does NOT. For a
   stricter "only Violation fails" gate use `conforms_violations_only()`; for a custom
   `sh:conformanceDisallows` set use `conforms_with_disallowed(&[..])`.
-- **Ill-formed shapes are skipped, not errored.** A shape never declared, an
-  unparsable path, or an `sh:select` that fails to parse (e.g. undeclared prefix)
-  contributes no results; the rest of validation still runs. `validate` never returns
-  a `Result`/panics on bad shapes — so a silently-empty report can mean "no targets"
-  rather than "conforms".
+- **Ill-formed shapes are skipped by `validate`, reported as a failure by
+  `validate_strict` (sq-11a).** A shape never declared, an unparsable path, or an
+  `sh:select` that fails to parse (e.g. undeclared prefix) contributes no results;
+  the rest of validation still runs. `validate` never returns a `Result`/panics on
+  bad shapes — so a silently-empty report can mean "no targets" rather than
+  "conforms". When the distinction matters (CI shape linting, the suite's
+  `sht:Failure` entries), `validate_strict` rejects ill-formed constructs with
+  `ShaclFailure.ill_formed` (see the strict-validation list above) — but a PRESENT
+  `sh:select` whose query text our parser cannot parse stays a lenient skip (that
+  outcome depends on the engine's SPARQL parser, not on the shapes graph).
 - **An uncompilable `sh:pattern` is SKIPPED, not fail-closed (sq-lz99x).** The Rust
   `regex` crate has no lookahead/lookbehind — neither does the XML Schema regex flavour
   the SHACL spec ties `sh:pattern` to — so e.g. `^(?!(TODO|TBD)).*` does not compile.
