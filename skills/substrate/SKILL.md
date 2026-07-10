@@ -102,6 +102,15 @@ the `JoinTable`, eliminating the previous double-hash in the partitioned probe p
 calls `out.reserve(matches.len())` before the emit loop (batch-emission contract the sq-pntvh M4
 morsel pipeline inherits: reserve then materialise, not per-match).
 
+**Single-column key fast path ([OPUS-4.8] sq-4r8uy):** `JoinKeys::left_key`/`right_key` special-case
+the dominant `key_cols.len() == 1` case — the whole per-row key projection collapses to a direct
+one-element `Key` push instead of iterating the heap `key_cols` `Vec` and running the general
+`SmallVec::from_iter` collect. It is **result-identical** to the general projection (same length,
+same id, same order), a pure performance specialization on the existing path — no feature flag, no
+public-API change. Multi-column keys fall through to the general `iter().collect()` unchanged. This
+closes most of the `hash_probe` descriptor-projection overhead the #1810 delta measured; the
+`overhead` harness re-measures it (canonical re-measure is the acceptance gate).
+
 ```toml
 [dependencies]
 sparq-substrate = { version = "0.1.0", features = ["join"] }  # implies "rows"
