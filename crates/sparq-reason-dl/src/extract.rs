@@ -810,8 +810,20 @@ fn decode_class_inner(
     }
     let result = if is_inter {
         let head = idx.intersection_of[&id];
-        decode_class_list(dict, v, idx, head, visiting, depth)
-            .map(ClassExpression::ObjectIntersectionOf)
+        // [FABLE-5] sq-pbz04.4.16 — singleton `owl:intersectionOf` normalization (M7).
+        // The OWL-1-era RDF encoding `_:B owl:intersectionOf ( :A )` — a one-member operand
+        // list — denotes the class `⊓{A}`, whose Direct-Semantics interpretation is EXACTLY
+        // that of its sole member `A` (OWL 2 Structural Specification §8.1: the extension of a
+        // 1-ary ObjectIntersectionOf is the intersection of the single conjunct's extension,
+        // i.e. the conjunct itself). The official test-suite tagging normalizes this singleton
+        // to its member before profile-checking, so `_:B owl:intersectionOf ( :A )` is tagged
+        // in EL/QL/RL. L2's structural-spec arity rule (≥ 2 members) would otherwise reject it
+        // as `NotIn`. Normalizing HERE — at L1 extraction, model-preservingly — makes the
+        // downstream profile checker AND the tableau see the equivalent atomic member, so the
+        // 27 pinned M7 profile divergences resolve without weakening the arity rule for genuine
+        // ≥ 2-member intersections. `decode_class_list` guarantees a non-empty list (an empty
+        // one is `MalformedList`), so a 1-element result is the only singleton case.
+        decode_class_list(dict, v, idx, head, visiting, depth).map(normalize_intersection)
     } else if is_union {
         let head = idx.union_of[&id];
         decode_class_list(dict, v, idx, head, visiting, depth).map(ClassExpression::ObjectUnionOf)
@@ -861,6 +873,28 @@ fn decode_restriction(
             "restriction {} missing its someValuesFrom/allValuesFrom filler",
             term_iri(dict, id)
         ))),
+    }
+}
+
+/// Normalize a decoded `owl:intersectionOf` operand list into a class expression, collapsing
+/// the OWL-1-era SINGLETON encoding `⊓{A}` to its sole member `A` (M7, sq-pbz04.4.16).
+///
+/// A one-member `ObjectIntersectionOf` has, under OWL 2 Direct Semantics, exactly the
+/// interpretation of its single conjunct (OWL 2 Structural Specification §8.1), so returning
+/// the member directly is MODEL-PRESERVING. The official OWL WG profile tagging performs this
+/// same normalization before deciding EL/QL/RL membership; without it, L2's structural-spec
+/// arity rule (≥ 2 members) would spuriously reject these positively-tagged cases as `NotIn`.
+///
+/// `members` is always non-empty ([`decode_class_list`] refuses an empty operand list with
+/// `MalformedList`), so the only singleton case is `len == 1`. A ≥ 2-member list is wrapped
+/// unchanged in `ObjectIntersectionOf`, preserving the arity rule for genuine intersections.
+fn normalize_intersection(members: Vec<ClassExpression>) -> ClassExpression {
+    let mut members = members;
+    if members.len() == 1 {
+        // `swap_remove(0)` moves the sole member out without a clone; the vec is discarded.
+        members.swap_remove(0)
+    } else {
+        ClassExpression::ObjectIntersectionOf(members)
     }
 }
 
@@ -1493,5 +1527,74 @@ mod tests {
         assert!(!is_triple_term(&dict, s));
         assert!(term_iri(&dict, s).contains("ex/s"));
         assert!(term_iri(&dict, lit).contains("lit"));
+    }
+
+    /// Direct unit test of `normalize_intersection` (sq-pbz04.4.16 / M7): a one-member
+    /// operand list collapses to its sole member; a ≥ 2-member list is preserved as an
+    /// `ObjectIntersectionOf`, keeping the profile-grammar arity rule intact.
+    #[test]
+    fn normalize_intersection_collapses_singleton_only() {
+        // Singleton → the member itself (using dict-free synthetic ids for the members).
+        let a = ClassExpression::Class(7);
+        assert_eq!(normalize_intersection(vec![a.clone()]), a);
+        // Two members → preserved as an intersection (arity rule unaffected).
+        let b = ClassExpression::Class(9);
+        let two = normalize_intersection(vec![a.clone(), b.clone()]);
+        assert_eq!(two, ClassExpression::ObjectIntersectionOf(vec![a, b]));
+    }
+
+    /// End-to-end M7: the OWL-1-era singleton encoding `_:B owl:intersectionOf ( :A )` used
+    /// as a subClassOf super-CE extracts to the atomic member `Class(A)` — NOT a 1-ary
+    /// `ObjectIntersectionOf` the profile-grammar arity rule would reject (sq-pbz04.4.16).
+    /// A genuine 2-member intersection still extracts as an `ObjectIntersectionOf`.
+    #[test]
+    fn extract_singleton_intersection_normalizes_to_member() {
+        // `:S rdfs:subClassOf [ owl:intersectionOf ( :A ) ]`.
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             <http://ex/S> rdfs:subClassOf [ owl:intersectionOf ( <http://ex/A> ) ] .",
+            "turtle",
+        )
+        .expect("parse");
+        let onto = extract(&dict, &triples).expect("accept");
+        let sup = onto
+            .axioms
+            .iter()
+            .find_map(|ax| match ax {
+                Axiom::SubClassOf { sup, .. } => Some(sup),
+                _ => None,
+            })
+            .expect("a SubClassOf axiom");
+        // The singleton intersection collapsed to the atomic member (never a 1-ary
+        // ObjectIntersectionOf).
+        assert!(
+            matches!(sup, ClassExpression::Class(_)),
+            "singleton intersection should normalize to its member, got {:?}",
+            sup
+        );
+
+        // A genuine 2-member intersection is preserved.
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             <http://ex/S> rdfs:subClassOf [ owl:intersectionOf ( <http://ex/A> <http://ex/B> ) ] .",
+            "turtle",
+        )
+        .expect("parse");
+        let onto = extract(&dict, &triples).expect("accept");
+        let sup = onto
+            .axioms
+            .iter()
+            .find_map(|ax| match ax {
+                Axiom::SubClassOf { sup, .. } => Some(sup),
+                _ => None,
+            })
+            .expect("a SubClassOf axiom");
+        assert!(
+            matches!(sup, ClassExpression::ObjectIntersectionOf(m) if m.len() == 2),
+            "2-member intersection should be preserved, got {:?}",
+            sup
+        );
     }
 }

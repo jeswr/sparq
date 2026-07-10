@@ -1065,15 +1065,22 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 68,
+        ratchet_floor: 95,
         floor_basis: "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the \
                       L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT \
-                      a W3C ProfileIdentificationTest conformance claim)",
+                      a W3C ProfileIdentificationTest conformance claim); re-pinned by \
+                      sq-pbz04.4.16 (M7 singleton-intersection normalization: +27, 68 -> 95)",
         note: "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose \
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
-               REAL fail-closed L1 extraction + grammar walk; explicit-negative and species \
-               assertions are not checked (documented), abstentions are never passes, and \
-               the 27 singleton-intersection divergences are pinned by name",
+               REAL fail-closed L1 extraction + grammar walk; abstentions are never passes. \
+               The 27 singleton-intersection (M7) divergences are FIXED by sq-pbz04.4.16 (L1 \
+               normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
+               positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
+               a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
+               profile negations refuted where L2 can (139), with an honest measured In-gap \
+               (180 of 319 checkable) where axiom-grammar membership over the ALCH shadow \
+               cannot refute full-profile membership (deferred restrictions); species \
+               assertions remain unchecked (documented)",
     },
     Suite {
         label: "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
@@ -1084,21 +1091,24 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 190,
+        ratchet_floor: 182,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
                       re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, 192 -> 189); \
                       re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode existential-reading fix: \
-                      +1, 189 -> 190 — both M2 rows graduate to passes, one free-existential- \
-                      root conclusion bnode shifts to an honest abstention)",
+                      +1, 189 -> 190); re-pinned by sq-pbz04.4.16 (M7 singleton-intersection \
+                      normalization: -8, 190 -> 182 — 8 consistency cases re-route from the \
+                      ALCH tableau to the RL branch and honestly abstain via the documented \
+                      disjointWith divergence guard, never a wrong verdict; fail set unchanged)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
                passes, and all 5 remaining wrong-verdict divergences are pinned by name \
                with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
-               M2 FIXED sq-pbz04.4.13 — those rows now pass/abstain; remaining: M3/M5/M6)",
+               M2 FIXED sq-pbz04.4.13; M7 FIXED sq-pbz04.4.16 — those rows now pass/abstain; \
+               remaining: M3/M5/M6)",
     },
 ];
 
