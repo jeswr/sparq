@@ -58,11 +58,6 @@
       "reason": "No feature-matrix leg for sparq-solid trust-graph yet. The trust-graph feature is off by default. Tracked gap: add a sparq-solid (trust-graph) leg."
     },
     {
-      "crate": "sparq-trust",
-      "features": ["framework-vocab"],
-      "reason": "No feature-matrix leg for sparq-trust framework-vocab yet. The trust_framework_ttl.rs integration suite is gated on it. Tracked gap: add a sparq-trust (framework-vocab) leg."
-    },
-    {
       "crate": "sparq-vectors",
       "features": ["approx-ann"],
       "reason": "No feature-matrix leg for sparq-vectors approx-ann yet. The feature pulls the heavy instant-distance HNSW crate; building it in the feature-matrix lane requires verifying it stays within the CI wall-clock budget. Tracked gap: add a sparq-vectors (approx-ann) leg. Affected tests: hybrid.rs, hybrid_olympics.rs, olympics.rs, recall.rs, throughput.rs."

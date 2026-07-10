@@ -635,6 +635,12 @@ pub(crate) mod theta_antijoin {
         static FIRED: Cell<bool> = const { Cell::new(false) };
         static CORRELATED_ROWS: Cell<usize> = const { Cell::new(0) };
         static BINDINGS_EVALUATED: Cell<usize> = const { Cell::new(0) };
+        /// [OPUS-4.8] (sq-7d3dj.30.20) Count of anti-join shapes the STATIC early-decline
+        /// gate (opt-in `antijoin-static-decline`) rejected BEFORE the mandatory left side
+        /// was evaluated — i.e. the redundant left evaluations this feature saved. Test-only
+        /// signal for the non-vacuity check; only ever incremented under the feature.
+        #[cfg(feature = "antijoin-static-decline")]
+        static EARLY_DECLINED: Cell<usize> = const { Cell::new(0) };
     }
 
     /// Whether the correlated theta anti-join is enabled on this thread (default on).
@@ -649,11 +655,25 @@ pub(crate) mod theta_antijoin {
         ENABLED.with(|e| e.replace(v))
     }
 
+    /// Records one STATIC early-decline (the feature saved one redundant left evaluation).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub(crate) fn record_early_decline() {
+        EARLY_DECLINED.with(|e| e.set(e.get().saturating_add(1)));
+    }
+
+    /// Number of static early-declines since the last [`reset_stats`] (feature-gated).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub(crate) fn early_declined() -> usize {
+        EARLY_DECLINED.with(|e| e.get())
+    }
+
     /// Clears the per-query firing statistics (call before a measured/traced run).
     pub(crate) fn reset_stats() {
         FIRED.with(|f| f.set(false));
         CORRELATED_ROWS.with(|c| c.set(0));
         BINDINGS_EVALUATED.with(|b| b.set(0));
+        #[cfg(feature = "antijoin-static-decline")]
+        EARLY_DECLINED.with(|e| e.set(0));
     }
 
     /// Records one fired anti-join: `rows` right-side solutions produced across
@@ -5674,13 +5694,29 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
     // scanned column. A candidate term absent from the dict can never bind here, so
     // dropping it from the id-set is safe (and keeps the set a superset of the matches).
     let cand_ids: FxHashSet<Id> = cands.iter().filter_map(|t| graph.id_of(t)).collect();
-    // Drop a row ONLY when the index is AUTHORITATIVE over its binding AND excludes it:
-    // keep when the binding is a candidate (an indexed match) OR the index has no opinion
-    // on it (NOT indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic
-    // CRS, or a different graph). The residual `geof:` FILTER then judges every kept row,
-    // so a geometry the index never saw is NEVER silently dropped. This makes the result
-    // identical to the post-hoc path no matter which subset the index covers. To avoid
-    // re-materialising a term per row, the not-indexed check is memoised per distinct id.
+    // The keep predicate (both branches below are IDENTICAL): keep a row when its
+    // binding is a candidate (an indexed match) OR the index has NO opinion on it (NOT
+    // indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic CRS, or a
+    // different graph). The residual `geof:` FILTER then judges every kept row, so a
+    // geometry the index never saw is NEVER silently dropped. This makes the result
+    // identical to the post-hoc path no matter which subset the index covers.
+    //
+    // FAST PATH: when the provider can give the ID-LEVEL indexed universe resolved
+    // against THIS graph's dict (freshness matched), `is_indexed(id)` is a pure
+    // `FxHashSet<Id>` lookup — ZERO per-row `Term` materialisation. `indexed.contains(&id)`
+    // equals `is_indexed(&graph.dict.term(id))` by the provider's contract, so the verdict
+    // is unchanged. [OPUS-4.8]
+    let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
+    if let Some(indexed) = idx.indexed_ids(dict_ptr) {
+        b.rows.retain(|row| {
+            let id = row[col];
+            // candidate (indexed match) OR not in the indexed universe -> keep.
+            cand_ids.contains(&id) || !indexed.contains(&id)
+        });
+        return true;
+    }
+    // SLOW FALLBACK (no fresh id-level universe): memoise the per-id not-indexed check to
+    // avoid re-materialising a term per row. Produces the SAME keep verdict as the fast path.
     let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
     b.rows.retain(|row| {
         let id = row[col];
@@ -8224,6 +8260,25 @@ fn try_theta_antijoin(
         return Ok(None);
     }
 
+    // [OPUS-4.8] (sq-7d3dj.30.20) Static early-decline: this path exists ONLY to SEED the
+    // right scan sideways from a var-to-var correlation in the OPTIONAL condition. If no
+    // conjunct of `cond` can be such a seedable correlation — decided PURELY STATICALLY from
+    // the left/right variable SETS, no graph access — the path would evaluate the mandatory
+    // left side and then decline (`correlations.is_empty()` below), forcing the cold
+    // `Filter{LeftJoin}` fallback to RE-EVALUATE that same left side. SP2Bench q07 is exactly
+    // this case (its OPTIONAL condition is a bare `!bound(?doc4)`), and its left side is the
+    // dominant ~30ms outer BGP — so the redundant second evaluation is the query's residual.
+    // Declining HERE, before the left side is touched, removes the wasted evaluation. This is a
+    // pure evaluation-ORDERING change: it declines exactly the same shapes the
+    // `correlations.is_empty()` check below would (that check is total over `cond` and does not
+    // depend on any left ROW), and a decline always yields the identical cold-plan result, so it
+    // is BAG-RESULT-EQUIVALENT to the feature-off build. OPT-IN; when off, byte-identical.
+    #[cfg(feature = "antijoin-static-decline")]
+    if !cond_has_seedable_correlation(cond, left, &b_certain) {
+        theta_antijoin::record_early_decline();
+        return Ok(None);
+    }
+
     // Evaluate the mandatory left side once.
     let left_b = eval_graph_pattern(graph, local, left)?;
 
@@ -8719,6 +8774,46 @@ fn as_not_bound_var(e: &Expression) -> Option<Variable> {
         },
         _ => None,
     }
+}
+
+/// [OPUS-4.8] (sq-7d3dj.30.20) STATIC over-approximation of "does the OPTIONAL condition
+/// `cond` contain at least one conjunct the theta anti-join could seed sideways?", decided
+/// from the left-side variable SET and the certain-in-`B` set — WITHOUT evaluating either
+/// side (no graph access). Used by [`try_theta_antijoin`]'s early-decline gate (opt-in
+/// `antijoin-static-decline`) so it never pays to evaluate the mandatory left side only to
+/// discard it on the `correlations.is_empty()` decline.
+///
+/// A conjunct is a SEEDABLE correlation exactly when the runtime partition (in
+/// `try_theta_antijoin`) would place it in `correlations` rather than `residual`: it is a
+/// var-to-var pair (`?a = ?b` / `sameTerm(?a, ?b)` / `?a IN (?b)`) with ONE side certain in
+/// `B` and the OTHER a LEFT variable, and the certain-in-`B` side (the `?inner`) NOT also a
+/// left variable. This mirrors that logic with `left_vars` standing in for the runtime
+/// `left_b.col(v).is_some()` test — SOUND because for the conjunctive/BGP left sides this path
+/// runs over, `left_b.vars` equals `left`'s in-scope variables. The over-approximation
+/// direction is SAFE regardless: if this returns `true` when no correlation actually seeds, the
+/// gate simply does NOT decline early and the unchanged runtime partition declines instead
+/// (same result, one extra left evaluation — i.e. exactly the pre-feature behaviour). It only
+/// ever declines early when the runtime would ALSO have found `correlations.is_empty()`.
+#[cfg(feature = "antijoin-static-decline")]
+fn cond_has_seedable_correlation(
+    cond: &Expression,
+    left: &GraphPattern,
+    b_certain: &FxHashSet<Variable>,
+) -> bool {
+    let left_vars: FxHashSet<Variable> = in_scope_vars(left).into_iter().collect();
+    split_and(cond).into_iter().any(|c| {
+        let Some((va, vb, _)) = as_correlation_pair(c) else { return false };
+        // Same orientation choice as the runtime partition: pick the certain-in-B side as
+        // `inner` and the left side as `outer`; a seedable correlation additionally requires
+        // the chosen `inner` NOT to be a left variable.
+        if b_certain.contains(&vb) && left_vars.contains(&va) {
+            !left_vars.contains(&vb)
+        } else if b_certain.contains(&va) && left_vars.contains(&vb) {
+            !left_vars.contains(&va)
+        } else {
+            false
+        }
+    })
 }
 
 /// `Some((a, b, kind))` iff `e` is a VAR-TO-VAR correlation conjunct the theta anti-join

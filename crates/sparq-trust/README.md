@@ -76,19 +76,19 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
 - **DID issuer-key binding** (`did`, **opt-in `did` feature**, `sq-pfae.3`) — a rule may name its issuer by
   `trust:issuerDid` instead of `trust:issuerKey` hex (`DidKeyResolver` decodes `did:key` offline; `DidWebResolver`
   reads `did:web` via a **pluggable** fetcher). **Narrows** the forgery vector D′ (no absolute anchor).
-- **Security properties** (`secprop` / `admissibility`, **opt-in `secprop-vocab` / `secprop-admissibility`**, `sq-5oru9` /
-  `sq-ufsi9`) — the sparq **`sec-prop:` extension** ([`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl); proof-system
-  dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3 ODRL → admissible-proof-set reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over ANNOTATIONS, not crypto (`sq-qhy4`).
+- **Security properties** (`secprop` / `admissibility`, **opt-in `secprop-vocab` / `secprop-admissibility`**, `sq-5oru9` / `sq-ufsi9`) — the sparq **`sec-prop:` extension**
+  ([`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl); proof-system dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3 ODRL → admissible-proof-set reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over ANNOTATIONS, not crypto (`sq-qhy4`).
 - **`trustx:` certification-scope vocabulary** (`framework_vocab`, **opt-in `framework-vocab`**, `sq-6syab.2` / [#1592](https://github.com/jeswr/sparq/issues/1592)) —
   the trust-expression layer for **framework-certified-issuer** trust + issuer **certification scope**: a verifier→holder trust-requirements graph, two
   modes (enumerated `trustsIssuer` OR `trustsFramework`), positive time-windowed status attestation. Turtle ([`trust-framework.ttl`](ontologies/trust/trust-framework.ttl))
   **extends** `trust:` and **`rdfs:seeAlso`s** the vendored `sec-req:` eIDAS/UK-DVS individuals (no fork/duplication); pinned to Rust constants. **Anchored, not proven** (`sq-qhy4`).
-- **Property-admissibility pre-check** (`admit_with_precheck`, **opt-in `secprop-precheck`**, `sq-dt5hv` Ph 5 / `sq-nrwqs` / `sq-ddbm8`) —
-  an OPTIONAL pre-admission check: the caller passes ONLY the requester's ODRL preference + the method IRI; the gate resolves the
-  method's posture from the **bundled** `secprop-methods.ttl` (tamper-resistant; unknown method / malformed operand fail closed) and **fails closed** *before* the sig/holder checks. NO preference ⇒ **byte-identical** to `admit`.
-- **Live status / revocation** (`status_list`, **opt-in `status-list`**, `sq-pfae.7`) — gate derivations on a **live W3C Bitstring Status List**
-  instead of `revoked: bool`: fetch (pluggable `StatusListResolver`) + decode (multibase over a pluggable `GzipDecoder`; built-in `Flate2GzipDecoder`
-  behind `status-list-flate2`); `admit_with_status` admits ONLY a `LiveStatus::Live` credential — **fail-closed on set/unknown/stale** — with a minimal `prov:`/`trust:` justification.
+- **Certification-edge trust-graph closure** (`graph`, **opt-in `cert-graph`**, `sq-pfae.15`) — `derive_effective_rules`: a depth-bounded (v1 depth-1), **attenuation-ONLY,
+  fail-closed** closure deriving extra `TrustRule`s from signed `trustx:Certification` edges AHEAD of the UNCHANGED admission gate. Every derived rule `⊆ (anchor ∩ cert scope ∩
+  window)` — a cert can only NARROW, never widen; any unverifiable/expired/revoked/cyclic/over-depth/**broadening** edge contributes NOTHING (broadening = escalation); zero certs ⇒ output == direct rules byte-identical.
+- **Property-admissibility pre-check** (`admit_with_precheck`, **opt-in `secprop-precheck`**, `sq-dt5hv` Ph 5 / `sq-nrwqs` / `sq-ddbm8`) — an OPTIONAL pre-admission check: the caller
+  passes ONLY the requester's ODRL preference + the method IRI; the gate resolves the method's posture from the **bundled** `secprop-methods.ttl` (tamper-resistant; unknown method / malformed operand fail closed) and **fails closed** *before* the sig/holder checks. NO preference ⇒ **byte-identical** to `admit`.
+- **Live status / revocation** (`status_list`, **opt-in `status-list`**, `sq-pfae.7`) — gate derivations on a **live W3C Bitstring Status List** instead of `revoked: bool`: fetch
+  (pluggable `StatusListResolver`) + decode (multibase over a pluggable `GzipDecoder`; built-in `Flate2GzipDecoder` behind `status-list-flate2`); `admit_with_status` admits ONLY a `LiveStatus::Live` credential — **fail-closed on set/unknown/stale** — with a minimal `prov:`/`trust:` justification.
 - **Verified status-list issuer signature** (`VerifyingLiveStatusCheck`, **`status-list`**, `sq-pfae.13`) — verify the status-list VC's OWN issuer
   signature (the SAME `sparq-zk` Schnorr-over-RDFC-1.0 path the admit gate uses) against a trusted status-authority key (or a `did:key`/`did:web` issuer
   via `with_did_issuer`, `did` feature) **before** trusting its bits. **Fail-closed**: an unsigned / bad-sig / wrong-key / unresolvable-issuer list VC is `Unknown` (deny).

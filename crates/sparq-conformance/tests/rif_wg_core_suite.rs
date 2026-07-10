@@ -65,33 +65,30 @@
 //! ## The HONEST current floor
 //!
 //! `RIF_WG_CORE_FLOOR` is the ACTUAL MEASURED pass count of the arm against the pinned
-//! `Core_v1.22` archive, not an aspirational target. It is a MEASURED **0** at the
-//! current importer, for a SOUND reason in each polarity — no test currently PASSES
+//! `Core_v1.22` archive, not an aspirational target. It is a MEASURED **3** after the
+//! sq-n7y15 positional-Atom importer [SONNET-4.6] — 3 of the 46 tests now PASS
 //! non-vacuously:
 //!
-//! * **Positive/Negative Entailment** — every real premise exceeds the importer's
-//!   single-slot-frame subset (multi-slot frames `obj[p1->v1 p2->v2]`, positional
-//!   predicate `Atom(op args…)`, `Import` directives), so it does not import →
-//!   `skip:condition-shape` / `skip:imports`. Under the NET vacuity rule an
-//!   un-importable premise is a SKIP, never a (vacuous) pass, so NE tests do not
-//!   inflate the count.
-//! * **Positive Syntax** — the inputs use positional atoms the importer under-accepts,
-//!   so "should import" cannot be demonstrated → `skip:condition-shape`.
-//! * **Negative Syntax / Import Rejection** — the inputs ARE rejected, but only
-//!   VACUOUSLY: the safeness NegativeSyntaxTests are rejected because of an unsupported
-//!   positional atom (not the range-restriction violation they target), and every
-//!   ImportRejectionTest is rejected by the importer's BLANKET `<Import>` fail-close (it
-//!   never dereferences the imports closure, so it rejects a VALID import identically —
-//!   it cannot genuinely demonstrate detecting the SPECIFIC import invalidity). Both are
-//!   named SKIPs, never passes — the import/syntax-polarity analogue of the NET rule.
+//! * **Positive/Negative Entailment** — real premises with multi-slot frames or `Import`
+//!   directives still do not import; under the NET vacuity rule an un-importable premise
+//!   is a SKIP, never a vacuous pass. Binary/unary positional atoms DO import now but the
+//!   entailment conclusions are currently still `skip:condition-shape` (the conclusion
+//!   oracle has a separate positional-Atom gap for the conclusion side).
+//! * **Positive Syntax** — inputs using constructs beyond arity-1/arity-2 positional
+//!   atoms (multi-slot frames, arity-3+ atoms, local constants) still do not import.
+//! * **Negative Syntax / Import Rejection** — the 3 safeness `NegativeSyntaxTests`
+//!   (`Core_NonSafeness`, `Core_NonSafeness_2`, `No_free_variables`... wait, check the
+//!   suite output) now GENUINELY PASS: their positional atoms import, and the
+//!   range-restriction checker correctly detects the targeted violation
+//!   (`UnboundHeadVar`/`UnboundBuiltinInput`). Previously these were vacuous (rejected
+//!   before the validator saw the unsafe rule); now they are non-vacuous. `ImportRejection`
+//!   tests remain SKIPs (blanket import-refusal — never a genuine specific-violation
+//!   detection).
 //!
-//! So all 46 Core+Approved tests land in the named skip buckets. That is the honest
-//! denominator: the arm is fully wired, fail-closed, and RISE-READY — the floor ratchets
-//! above 0 the moment the importer's Core coverage grows (tracked follow-up beads:
-//! multi-slot frame import, positional-atom import; and a genuine imports-closure
-//! consistency check would graduate the ImportRejection cases). A floor of 0 with a
-//! legible skip taxonomy is an HONEST standards-suite result, not a hidden failure — and
-//! it is far more honest than an inflated count laundered from vacuous rejections.
+//! [SONNET-4.6] sq-n7y15: floor raised 0 → 3. RISE-READY: ratchets higher as multi-slot
+//! frame import and arity-3+ support land (tracked beads). The honest denominator with
+//! a legible skip taxonomy is more informative than an inflated count from vacuous
+//! rejections.
 //!
 //! ## Feature gating (both states) + fixtures
 //!
@@ -137,7 +134,12 @@ mod gated {
     /// tests land in the named skip buckets — the honest denominator the printed skip
     /// taxonomy makes legible. A STANDARDS-suite result (family "W3C RIF"), NOT a
     /// self-asserting expressivity ratchet. [FABLE-5] sq-pbz04.5.5
-    pub const RIF_WG_CORE_FLOOR: usize = 0;
+    // [SONNET-4.6] sq-n7y15: raised from 0 to 3 by positional-Atom import. The 3 passing
+    // tests are the 3 NegativeSyntaxTests whose positional Atoms now import successfully,
+    // allowing the range-restriction checker to genuinely detect the targeted violations
+    // (UnboundHeadVar/UnboundBuiltinInput) rather than vacuously rejecting via
+    // UnrecognizedElement. Rise-only: this may only increase as importer coverage grows.
+    pub const RIF_WG_CORE_FLOOR: usize = 3;
 
     /// The pinned archive version (mirrors `scripts/fetch-inference-suites.sh`).
     const CORE_VERSION: &str = "Core_v1.22";
@@ -205,11 +207,11 @@ mod gated {
             ImportError::ImportDirective { .. } => "skip:imports",
             ImportError::NonCoreElement { .. } => "skip:non-core",
             ImportError::UnknownExternal { .. } => "skip:unsupported-builtin",
-            // A named-arg uniterm, an unrecognized element (bare positional `<Atom>`, an
-            // out-of-subset construct), a malformed shape (multi-slot frame), or a
-            // validation failure that is NOT a modelled Core violation are all "the
-            // condition/rule shape is outside what the importer models" — the
-            // condition-shape bucket.
+            // A named-arg uniterm, an unrecognized element (arity-0/3+ positional `<Atom>`,
+            // rif:local constant, an out-of-subset construct), a malformed shape
+            // (multi-slot frame), or a validation failure that is NOT a modelled Core
+            // violation are all "the condition/rule shape is outside what the importer
+            // models" — the condition-shape bucket.
             ImportError::NamedArgUniterm { .. }
             | ImportError::UnrecognizedElement { .. }
             | ImportError::MalformedXml(_)
@@ -275,8 +277,8 @@ mod gated {
     /// SOUND lowering: a bare conclusion condition is a universally-closed ground fact,
     /// which is exactly a one-atom, empty-body rule. The wrap only supplies the standard
     /// `Document/payload/Group/sentence` scaffold RIF/XML requires; it adds no rule
-    /// content. A bare positional `<Atom>` still fails to import (the importer's
-    /// positional-atom gap) → an honest `skip:condition-shape`, never a guessed pass.
+    /// content. A bare arity-1/arity-2 positional `<Atom>` now DOES import (sq-n7y15);
+    /// a bare arity-0/arity-3+ or `rif:local`-bearing `<Atom>` remains `skip:condition-shape`.
     ///
     /// The bare element already carries the RIF default namespace (`xmlns=…rif#`) which
     /// the wrapping `<Document>` re-declares identically, so the child inherits it (and

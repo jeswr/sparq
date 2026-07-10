@@ -103,6 +103,27 @@ store.fingerprint() -> Option<Fingerprint>;  store.check_graph(&Graph) -> Result
 //   (Graph::open -- mmaps the FROZEN id order) to resolve query terms; NEVER re-parse the source RDF (Graph::load_str etc.).
 //   (Graph::save/open need sparq-core's `mmap` feature.) Round-trip vs re-parse trap pinned in tests/staleness_contract.rs.
 
+// --- embedding provenance (.spqv v3) (src/spqv_provenance.rs) --- [FABLE-5] sq-lhcot.1 (review gap 1; spec sq-rvgr2.4)
+// The v3 header records the EMBEDDING PIPELINE identity so an INCOMPATIBLE query embedder is REJECTED (not silently-wrong
+// neighbours). v3 READ path always compiled; the v3 WRITE path is behind the opt-in `spqv-provenance` feature (LEAN, no new dep).
+EmbeddingProvenance { model_id, model_version, content_version, metric: EmbeddingMetric, normalization: Normalization,
+                      verbalization, reserved: Vec<u8> }   // string axes are OPAQUE caller tokens (no encoder privileged)
+EmbeddingProvenance::new(model_id, EmbeddingMetric, Normalization)   // other axes empty; set fields directly (NOT Default — metric/norm load-bearing)
+EmbeddingMetric::{Cosine, Dot, Euclidean};  Normalization::{None, L2}   // typed axes; from_tag() fail-closed on an unknown tag
+prov.compatible_with(&query_prov) -> Result<(), String>   // compatible IFF every DEFINED axis equal; reserved area EXCLUDED (KERN boundary)
+// KERN BOUNDARY: `reserved` is a versioned OPAQUE TLV — extension fields RESERVED pending the cross-implementation profile (#1746).
+//   NO encoder-version-hash / codebook-hash / D semantics defined; it round-trips byte-for-byte and does NOT gate compatibility.
+// v3 WRITE (feature = "spqv-provenance" ONLY): binding a provenance selects the v3 path; else the writer emits v2 (unchanged).
+VectorStore::create(p, dim)?.with_provenance(EmbeddingProvenance)   // finalize writes v3 with the provenance in the header
+StreamingWriter::create_with_provenance(p, dim, &Graph, EmbeddingProvenance)   // streaming v3 (also binds the graph fingerprint)
+// v3 READ + the mandatory check (ALWAYS compiled — a v3 file opens on a feature-OFF build; the demanding check is always available):
+store.provenance() -> Option<&EmbeddingProvenance>   // Some for a v3 file; None for a legacy v1/v2 file (predate embedding provenance)
+store.check_provenance(&query_prov, LegacyMode) -> Result<(), String>   // REJECTS an incompatible query embedder (names each mismatched axis)
+LegacyMode::{Reject, Allow}   // Reject (DEFAULT, fail-closed): a legacy no-provenance store is REJECTED; Allow: bypass for a LEGACY store ONLY
+//   A v3 store is ALWAYS checked against its recorded provenance regardless of LegacyMode. Dimension is enforced structurally (wrong-width put/search errs).
+//   RDF vocab: prov_vocab::{SPQVP_NS, MODEL, MODEL_VERSION, CONTENT_VERSION, METRIC, NORMALIZATION, DIMENSION, VERBALIZATION} (http://sparq.dev/spqv-prov#)
+//   `compact` (delta feature) carries the provenance forward (a v3 store stays v3); SPQV_VERSION_V3 = 3. NEGATIVE tests: tests/spqv_v3_provenance.rs.
+
 // --- incremental add/remove/update (src/delta.rs) --- feature = "delta" ONLY; LEAN, no new dep [OPUS-4.8] sq-pi44
 // In-RAM DELTA SIDECAR over the immutable base: append map + tombstone set. No file rebuild; a single graph change no
 // longer forces a full re-embed. get/iter/len (hence search) transparently union base+delta and honour tombstones.
@@ -133,6 +154,10 @@ cosine(a: &[f32], b: &[f32]) -> f32
 // pulling instant-distance; default build has NO third-party ANN dep). recall < 1.0 — NOT exact.
 VectorIndex::build(&store) / ::build_with(&store, HnswConfig{ef_search, ef_construction, seed})
 impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
+                   fn nearest_with_ef(&self, query: &[f32], k, ef_search: usize) -> Vec<(Id, f32)>;  // [SONNET-4.6] sq-jo6ty: per-query ef_search sweep (Pareto API)
+                   // nearest_with_ef: when ef==build_ef_search uses the primary map (zero overhead); other ef values
+                   // trigger a lazy one-time build of a secondary map (same ef_construction/seed/points, only ef_search
+                   // differs) cached by ef level — amortised for sweeps. Monotone-recall: higher ef >= lower ef recall.
                    fn nearest_term(&self, &Term, &Graph, &VectorStore, k) -> Vec<(Term, f32)>;
                    fn nearest_term_checked(..) -> Result<Vec<(Term, f32)>, String> }
 
@@ -1140,6 +1165,60 @@ step). *Verify-shrinks-to-sound* is **provable + tested** (the load-bearing test
 vector-proposed-but-shape-invalid candidate is rejected). Whether the neural periphery raises end-task
 **recall** is **empirical, dataset-dependent, EC2-gated** (GraphRAG/KG-RAG does not uniformly beat
 vector RAG) — measured by the on/off ablation harness (recipe 14; sq-0wo9e.7), **never asserted here**.
+
+### 20. Embedding provenance + mandatory compatibility rejection (`.spqv` v3, opt-in, feature = `spqv-provenance`)
+
+An embedding is a coordinate in **one** model's space. A query vector from a *different* model,
+content revision, metric, normalization, dimension, or verbalization regime lands in a *different*
+space — its cosine against the stored vectors is arithmetically defined but **semantically wrong**,
+with no error. The v2 `.spqv` container recorded only the dimension + a graph fingerprint (a shifted
+dictionary, not a shifted embedding space). The **v3** format records the embedding pipeline's
+identity in the header and REJECTS an incompatible query. This closes review gap 1 / the spec's
+reproducibility obligation (`sq-rvgr2.4`).
+
+```toml
+sparq-vectors = { path = "../sparq-vectors", features = ["spqv-provenance"] }
+```
+
+```rust,ignore
+use sparq_vectors::{EmbeddingMetric, EmbeddingProvenance, LegacyMode, Normalization, VectorStore};
+
+// Record the pipeline that produced the vectors, then WRITE v3 (binding a provenance selects v3;
+// without it the writer emits v2 exactly as before — the default on-disk format is unchanged):
+let mut prov = EmbeddingProvenance::new("text-embedding-3-small", EmbeddingMetric::Cosine, Normalization::L2);
+prov.content_version = "verb-v2".into();          // the graph→text (verbaliser) revision
+prov.verbalization = "entity-verbalized".into();
+let mut store = VectorStore::create("graph.spqv", 384)?.with_provenance(prov.clone());
+// … put/embed vectors …
+store.finalize()?;                                // written v3, provenance in the header
+
+// At QUERY time, declare the embedder that produced the query vector and CHECK before searching:
+let store = VectorStore::open("graph.spqv")?;     // v3 opens on ANY build (the read path is always compiled)
+store.check_provenance(&prov, LegacyMode::Reject)?;   // Ok iff every DEFINED axis matches; else a descriptive Err
+// A WRONG model id / metric / normalization / verbalization is REJECTED (fail-closed) — a distinct
+// error per axis; dimension is enforced structurally (a wrong-width query vector errs on search/put).
+# Ok::<(), String>(())
+```
+
+**Legacy stores (fail-closed default).** A v2/v1 store carries no provenance (`store.provenance()`
+is `None`), so `check_provenance(.., LegacyMode::Reject)` REJECTS it — the embedding pipeline is
+unverifiable. A caller that **knows** the store is compatible passes `LegacyMode::Allow` to bypass
+the check **for a legacy store only** (a v3 store is always checked against its recorded provenance).
+`compact` (the `delta` feature) carries the provenance forward, so a v3 store stays v3.
+
+**KERN boundary (do not extend ahead of the profile freeze).** `EmbeddingProvenance::reserved` is a
+versioned **opaque** byte area — *extension fields reserved pending the cross-implementation profile
+(#1746)*. **No** fields are defined over it (no encoder-version-hash, no codebook-hash, no `D`
+semantics); it round-trips byte-for-byte and does **not** participate in `compatible_with`, so a v3
+store written by a future implementation that populated it stays queryable here. The format defines
+and privileges **no** encoder — the string axes are caller-supplied opaque tokens.
+
+**Honest conformance note (closes review gap 1; spec estate `sq-rvgr2.4`).** Revision 2 of the vector
+spec normatively requires **embedding provenance + rejection of incompatible queries**. The v2
+container was knowingly **non-conforming** on that reproducibility obligation (it persisted only the
+dimension + graph fingerprint). The v3 format + the mandatory `check_provenance` **close that gap** for
+the DEFINED axes. The extensible-provenance profile itself (the `#1746` reserved-area semantics) is
+NOT frozen, so the reserved area stays opaque here — it is the remaining, deliberately-deferred, part.
 
 ## Gotchas / feature flags / prerequisites
 

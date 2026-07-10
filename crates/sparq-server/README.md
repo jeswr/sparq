@@ -89,9 +89,9 @@ By default: **no auth, loopback-only.** Hardening is opt-in but honest where it 
 > *external* deployment concern.
 
 Readers pin the current immutable generation; writers commit batches as new generations
-([`sparq-serve`](../sparq-serve/README.md)). **This single writer IS the write ceiling, by design**
-— a feature for the interactive single-resource-write workload, not a gap. An in-engine
-distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012; no engine code).
+([`sparq-serve`](../sparq-serve/README.md)). **Adaptive group-commit** (on by default; `--no-adaptive-commit`
+to disable): a serial interactive client commits in engine-time (µs) instead of paying a fixed group-commit
+window, while concurrent load still batches — same FIFO/atomicity/durability, lower latency. **This single writer IS the write ceiling, by design** — an in-engine distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012).
 
 ## Durable persistence (`--persist DIR`)
 

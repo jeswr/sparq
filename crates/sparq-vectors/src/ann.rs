@@ -19,10 +19,23 @@
 //! brute-force searchers ([`nearest_exact`], [`nearest_term_exact`]) and NO heavy ANN
 //! dependency. Approximate search is APPROXIMATE: its recall is `< 1.0` (measured against
 //! [`nearest_exact`], the ground truth) — only the exact path is answer-exact.
+//!
+//! [SONNET-4.6] (sq-jo6ty) **Per-query `ef_search` (`nearest_with_ef`)**: `instant-distance`
+//! encodes `ef_search` into `HnswMap` at build time and does not expose a per-search
+//! override. `VectorIndex` therefore caches the L2-normalised `NPoint` vectors and builds
+//! a secondary map on first use of each new `ef_search` value (same graph topology;
+//! `ef_construction` and `seed` are unchanged). The secondary map is stored in a
+//! `Mutex<HashMap<usize, HnswMap<…>>>` so sweeps amortise the rebuild cost: 100 queries
+//! at `ef=16`, then 100 at `ef=32`, pay one extra build per ef level, not one per query.
+//! `nearest_with_ef(q, k, ef)` where `ef == build_ef_search` is free (uses the primary map).
 
 use crate::store::VectorStore;
 #[cfg(feature = "approx-ann")]
 use instant_distance::{Builder, HnswMap, Point, Search};
+#[cfg(feature = "approx-ann")]
+use std::collections::HashMap;
+#[cfg(feature = "approx-ann")]
+use std::sync::Mutex;
 use oxrdf::Term;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
@@ -175,9 +188,29 @@ fn normalized(v: &[f32]) -> Option<Vec<f32>> {
 /// [OPUS-4.8] (sq-ip3a) **APPROXIMATE** — recall `< 1.0`, gated behind the opt-in
 /// `approx-ann` feature (the only thing that pulls `instant-distance`). For answer-exact
 /// search use [`nearest_exact`]; this trades recall for speed at scale.
+///
+/// [SONNET-4.6] (sq-jo6ty) Exposes `nearest_with_ef` for per-query `ef_search` sweeps
+/// (e.g. to build a recall–QPS Pareto curve at multiple ef levels without rebuilding the
+/// whole store). The primary map (built at `HnswConfig::ef_search`) is used for
+/// `nearest` and for `nearest_with_ef` when `ef == build_ef_search`. A secondary per-ef
+/// map is built lazily and cached in `ef_cache` on first use of each new ef value.
 #[cfg(feature = "approx-ann")]
 pub struct VectorIndex {
+    /// Primary HNSW map — built with the `HnswConfig::ef_search` value.
     map: HnswMap<NPoint, Id>,
+    /// The `ef_search` the primary map was built with (needed for the cache short-circuit).
+    ef_search_default: usize,
+    /// The `ef_construction` / `seed` used to build the primary map (reused for secondary maps
+    /// so that all ef levels share the same graph topology and seed).
+    ef_construction: usize,
+    seed: u64,
+    /// L2-normalised points and their dict ids — retained so that secondary maps for different
+    /// `ef_search` values can be built from the same normalised vectors (no store re-scan).
+    points: Vec<NPoint>,
+    values: Vec<Id>,
+    /// Lazily-built secondary maps keyed by `ef_search`. Populated on the first
+    /// `nearest_with_ef` call at a new ef level; thereafter the cached map is reused.
+    ef_cache: Mutex<HashMap<usize, HnswMap<NPoint, Id>>>,
     dim: usize,
 }
 
@@ -189,6 +222,7 @@ impl VectorIndex {
         VectorIndex::build_with(store, HnswConfig::default())
     }
 
+    /// Builds the index with the given [`HnswConfig`].
     pub fn build_with(store: &VectorStore, cfg: HnswConfig) -> VectorIndex {
         let mut points = Vec::with_capacity(store.len());
         let mut values = Vec::with_capacity(store.len());
@@ -201,12 +235,21 @@ impl VectorIndex {
             .ef_search(cfg.ef_search)
             .ef_construction(cfg.ef_construction)
             .seed(cfg.seed)
-            .build(points, values);
-        VectorIndex { map, dim: store.dim() }
+            .build(points.clone(), values.clone());
+        VectorIndex {
+            map,
+            ef_search_default: cfg.ef_search,
+            ef_construction: cfg.ef_construction,
+            seed: cfg.seed,
+            points,
+            values,
+            ef_cache: Mutex::new(HashMap::new()),
+            dim: store.dim(),
+        }
     }
 
     /// Approximate top-`k` ids by cosine similarity to `query`, best first.
-    /// `k` is clamped by the index's `ef_search`. An all-zero `query` returns no
+    /// Uses the build-time `ef_search`. An all-zero `query` returns no
     /// results (same contract as [`nearest_exact`]).
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
         assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
@@ -214,6 +257,65 @@ impl VectorIndex {
         let q = NPoint(q);
         let mut search = Search::default();
         self.map
+            .search(&q, &mut search)
+            .take(k)
+            .map(|item| (*item.value, 1.0 - item.distance * item.distance / 2.0))
+            .collect()
+    }
+
+    /// Approximate top-`k` ids with a **per-query** `ef_search` beam width.
+    ///
+    /// [SONNET-4.6] (sq-jo6ty) This is the recall–QPS sweep entry point: the caller can
+    /// vary `ef_search` across queries to trace the recall–throughput Pareto frontier
+    /// without rebuilding the index. The `ef_search` value controls the candidate beam at
+    /// query time — a larger beam visits more neighbours and improves recall at the cost of
+    /// throughput; a smaller beam is faster but may miss true top-`k` candidates.
+    ///
+    /// **Monotone-recall property**: for any fixed query and `k`, recall@k vs the exact
+    /// oracle is non-decreasing as `ef_search` increases (sweeping upward can never lower
+    /// recall). This follows from the HNSW algorithm: a wider beam subsumes the candidate
+    /// set explored by any narrower beam over the same graph.
+    ///
+    /// When `ef_search == build_ef_search` (the value passed to [`HnswConfig`] at build
+    /// time), the primary map is used directly — zero extra overhead. For any other value,
+    /// a secondary map is built once and cached; subsequent calls at the same ef level
+    /// reuse the cached map. All secondary maps share the same `ef_construction`, `seed`,
+    /// and normalised point set as the primary map, so the graph topology is identical.
+    ///
+    /// **APPROXIMATE** — recall `< 1.0` at any finite `ef_search`; use [`nearest_exact`]
+    /// for answer-exact results.
+    pub fn nearest_with_ef(&self, query: &[f32], k: usize, ef_search: usize) -> Vec<(Id, f32)> {
+        assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
+        let Some(q) = normalized(query) else { return Vec::new() };
+        let q = NPoint(q);
+        let mut search = Search::default();
+        // [SONNET-4.6] (sq-jo6ty) Short-circuit: the build-time ef → primary map (zero overhead).
+        if ef_search == self.ef_search_default {
+            return self
+                .map
+                .search(&q, &mut search)
+                .take(k)
+                .map(|item| (*item.value, 1.0 - item.distance * item.distance / 2.0))
+                .collect();
+        }
+        // [SONNET-4.6] (sq-jo6ty) Non-default ef: check the cache, build and insert if absent,
+        // then search with the lock held. The search is read-only on the map and only mutates
+        // `search` (a local variable), so there is no correctness issue with holding the lock
+        // here — throughput of the secondary path is a benchmarking sweep concern, not a
+        // production hot path.
+        let mut cache = self.ef_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let ef_construction = self.ef_construction;
+        let seed = self.seed;
+        let points = &self.points;
+        let values = &self.values;
+        cache.entry(ef_search).or_insert_with(|| {
+            Builder::default()
+                .ef_search(ef_search)
+                .ef_construction(ef_construction)
+                .seed(seed)
+                .build(points.clone(), values.clone())
+        });
+        cache[&ef_search]
             .search(&q, &mut search)
             .take(k)
             .map(|item| (*item.value, 1.0 - item.distance * item.distance / 2.0))

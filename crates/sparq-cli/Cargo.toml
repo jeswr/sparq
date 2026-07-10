@@ -115,7 +115,13 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # witnesses run in the `sparq-engine (algebra-rewrite)` feature-matrix leg, and
 # `tests/cli_contract.rs::algebra_rewrite_*` is the compile-time + behavioral tripwire
 # that this dep line keeps the pass lit.
-sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner", "algebra-rewrite"] }
+# [OPUS-4.8] sq-7d3dj.30.20: also enable the opt-in `antijoin-static-decline` — a purely
+# static, bag-result-equivalent evaluation-ordering fix that stops the correlated-anti-join
+# recogniser re-evaluating a bare-`!bound` OPTIONAL's (SP2Bench q07's) dominant left side.
+# Same rationale as `algebra-rewrite`: the shipped CLI and canonical bench measure the fixed
+# plan, the LIBRARY default stays OFF, zero new deps / no `unsafe`. Its equivalence witnesses
+# run in the `sparq-engine (antijoin-static-decline)` feature-matrix leg.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner", "algebra-rewrite", "antijoin-static-decline"] }
 # [OPUS-4.8] (sq-l4ki) `query` reuses sparq-server's W3C SELECT result serialisers
 # (XML/CSV/TSV) for its `--format` flag instead of re-implementing them. We take ONLY
 # the pure serialiser library (`results`) — `default-features = false` drops the `server`

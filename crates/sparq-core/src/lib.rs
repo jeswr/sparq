@@ -4778,7 +4778,16 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
 /// heap churn between oxttl's output and the dict.
 #[cfg(feature = "parallel")]
 fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
-    let mut triples = Vec::new();
+    // [SONNET-4.6] (sq-wrn61) Pre-size the output triple Vec to a capacity HINT derived
+    // from the input size, so the append loop does not repeatedly `grow_amortized`
+    // (each growth is a realloc + memcpy of the whole Vec). Profiling the single-thread
+    // incumbent path with `perf` (60 MB / 2.56 M-triple corpus, work box, NON-CANONICAL)
+    // attributes ~53% to oxttl (tokenizer + prefixed-name expansion), ~30% to the dict
+    // intern (`find_iri` hashbrown lookup + key memcmp), and the rest to allocation churn,
+    // of which the un-pre-sized triple Vec's realloc/memcpy is a measurable slice. This is
+    // a PURE capacity hint: it never bounds the parsed count — the Vec still grows if the
+    // estimate is low — so the parse result is byte-for-byte identical.
+    let mut triples = Vec::with_capacity(estimate_turtle_triples(bytes.len()));
     for t in TurtleParser::new().for_slice(bytes) {
         let t = t.map_err(|e| e.to_string())?;
         let s = intern_subject_ref(dict, &t.subject);
@@ -4787,6 +4796,27 @@ fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, Str
         triples.push([s, p, o]);
     }
     Ok(triples)
+}
+
+/// [SONNET-4.6] (sq-wrn61) Estimate the triple count of a Turtle document from its byte
+/// length, for pre-sizing the output `Vec<[Id; 3]>` (and, at the top of the load, the
+/// `Dict`). This is a HINT ONLY — a low estimate just means the Vec grows a little, a high
+/// estimate over-reserves harmlessly; it NEVER changes the parsed result.
+///
+/// The divisor is a deliberately CONSERVATIVE bytes-per-triple: predicate-grouped,
+/// prefixed Turtle (the realistic human-authored shape) is compact (~20-25 bytes/triple on
+/// the bench corpus), but real-world Turtle with long absolute IRIs is far more verbose. A
+/// conservative (large) divisor UNDER-estimates on compact input — still removing most of
+/// the early doublings — while never grossly over-allocating on verbose input. The `+ 1`
+/// keeps the hint non-zero for a pathologically small chunk.
+#[cfg(feature = "parallel")]
+#[inline]
+fn estimate_turtle_triples(byte_len: usize) -> usize {
+    // Conservative: assume ~40 bytes per triple. On the compact bench corpus (~23 B/triple)
+    // this reserves ~57% of the final count up front — enough to skip the costly early
+    // grow_amortized doublings — without over-reserving on verbose real-world Turtle.
+    const AVG_TTL_BYTES_PER_TRIPLE: usize = 40;
+    byte_len / AVG_TTL_BYTES_PER_TRIPLE + 1
 }
 
 /// Skip whitespace and `#`-comments from `i`, returning the next significant byte offset.
@@ -5110,7 +5140,13 @@ fn parse_turtle_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     if threads == 1 {
         // No parallelism available: chunking is pure overhead (measured ~16% at 1T on the
         // wikidata slice — 1.300 s chunked vs 1.12 s serial) — parse directly.
-        let mut dict = Dict::new();
+        // [SONNET-4.6] (sq-wrn61) Pre-size the dict table so the intern loop skips the early
+        // `reserve_rehash` growths (perf attributed a small but real slice to hashbrown
+        // resize on this single-thread path). Distinct terms are a fraction of triples;
+        // half the triple estimate is a safe under-reservation (a low guess just rehashes a
+        // little, never wrong). Chunked callers merge into a ShardedDict, so this only
+        // applies to the serial branch.
+        let mut dict = Dict::with_capacity(estimate_turtle_triples(bytes.len()) / 2);
         return parse_turtle_chunk(bytes, &mut dict).map(|t| (dict, t));
     }
     let target = (threads * 4).min(bytes.len() / 8192 + 1).max(1);
@@ -6469,6 +6505,82 @@ mod tests {
             ":a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(300)
         );
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
+    }
+
+    // [SONNET-4.6] (sq-wrn61) The Turtle triple-Vec / Dict pre-sizing (`estimate_turtle_triples`)
+    // is a PURE capacity hint. These pin its two load-bearing invariants: (a) it never returns
+    // zero (a zero capacity would defeat the hint but not corrupt output) and never SHRINKS with
+    // input size — monotonic; (b) a hint that UNDER-estimates the real count does NOT truncate the
+    // parse — the Vec still grows and every triple is emitted, byte-for-byte identical to a hint-
+    // free oxttl parse.
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn estimate_turtle_triples_never_zero_and_monotonic() {
+        // Never zero, even for an empty or 1-byte document (a zero-capacity Vec is legal but the
+        // `+ 1` guarantees the hint is always usable / non-degenerate).
+        assert!(estimate_turtle_triples(0) >= 1);
+        assert!(estimate_turtle_triples(1) >= 1);
+        // Monotonic non-decreasing in byte length: a bigger document never hints a smaller Vec.
+        let mut prev = 0usize;
+        for &n in &[0usize, 1, 39, 40, 41, 4_000, 60_000_000] {
+            let e = estimate_turtle_triples(n);
+            assert!(e >= prev, "estimate must be monotonic: {} then {}", prev, e);
+            prev = e;
+        }
+        // The divisor is conservative (>= 1 byte/triple), so the hint never EXCEEDS the byte
+        // count — it can only ever UNDER-reserve, never grossly over-allocate.
+        assert!(estimate_turtle_triples(1_000_000) <= 1_000_001);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn presized_turtle_parse_is_hint_only_matches_oxttl_direct() {
+        // A document whose bytes-per-triple is FAR below the estimate's conservative divisor:
+        // very short IRIs / no prefixes means many triples per byte, so `estimate_turtle_triples`
+        // UNDER-estimates the true count by a wide margin. If the estimate ever bounded the parse
+        // (it must not), triples past the hinted capacity would be dropped.
+        let mut ttl = String::from("@prefix : <http://e/> .\n");
+        for i in 0..2000 {
+            // Three compact triples per subject; predicate-grouped.
+            ttl.push_str(&format!(":s{i} :a :b ; :c :d ; :e {i} .\n"));
+        }
+        let bytes = ttl.as_bytes();
+        // Sanity: the hint really does under-estimate here (exercises the grow path).
+        assert!(
+            estimate_turtle_triples(bytes.len()) < 6000,
+            "test must exercise the under-estimate case"
+        );
+
+        // Pre-sized incumbent path.
+        let mut dict = Dict::new();
+        let presized = parse_turtle_chunk(bytes, &mut dict).unwrap();
+
+        // Independent reference: oxttl directly, no capacity hint, interned the same way.
+        let mut ref_dict = Dict::new();
+        let mut reference: Vec<[Id; 3]> = Vec::new();
+        for t in TurtleParser::new().for_slice(bytes) {
+            let t = t.unwrap();
+            let s = intern_subject_ref(&mut ref_dict, &t.subject);
+            let p = ref_dict.intern_iri(t.predicate.as_str());
+            let o = intern_object_ref(&mut ref_dict, &t.object);
+            reference.push([s, p, o]);
+        }
+
+        // Byte-for-byte identical result: same count and same decoded S/P/O for every triple.
+        assert_eq!(presized.len(), reference.len(), "pre-sizing must not change the triple count");
+        assert_eq!(presized.len(), 6000, "all 3*2000 triples must be emitted");
+        let decode = |d: &Dict, t: &[[Id; 3]]| -> Vec<String> {
+            let mut v: Vec<String> =
+                t.iter().map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o))).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            decode(&dict, &presized),
+            decode(&ref_dict, &reference),
+            "pre-sized parse must be identical to the hint-free oxttl parse"
+        );
     }
 
     /// [OPUS-4.8] sq-t267: RDF 1.2 triple terms must parse IDENTICALLY through the
