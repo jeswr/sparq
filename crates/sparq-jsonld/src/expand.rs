@@ -392,6 +392,28 @@ fn expand_object(
 
     // step 14: process deferred @nest keys into the same result.
     for nest_key in nests.clone() {
+        // [SONNET-4.6] sq-oy1f.45 — §5.1.2 step 14: apply any property-scoped context
+        // declared on the @nest-aliased term (tc037/tc038).  The context is applied with
+        // override_protected = true and propagate = true so that term definitions from the
+        // nest's scoped context remain visible when descending into child node objects
+        // (e.g. the `agent → @nest` alias in tc038 must be visible inside `aut`'s value).
+        let nest_ctx_and_base: Option<(Json, Option<String>)> = active_context
+            .term_definition(&nest_key)
+            .and_then(|td| td.context().cloned().map(|c| (c, td.base_url.clone())));
+        let nest_processed;
+        let nest_active: &ActiveContext = if let Some((sctx, sbase)) = &nest_ctx_and_base {
+            nest_processed = active_context.process_scoped(
+                sctx,
+                sbase.as_deref(),
+                true,  // override_protected: may redefine protected terms
+                true,  // propagate: keep context in child nodes (not a type-scoped ctx)
+                ctx.loader,
+                ctx.options,
+            )?;
+            &nest_processed
+        } else {
+            active_context
+        };
         for nv in as_array(element.get(&nest_key).cloned().unwrap_or_else(json_null)) {
             if !matches!(nv, Json::Obj(_)) || has_key_expanding_to(active_context, &nv, "@value") {
                 return Err(JsonLdError::new(E::InvalidNestValue));
@@ -399,7 +421,7 @@ fn expand_object(
             let mut inner_nests = Vec::new();
             expand_object(
                 ctx,
-                active_context,
+                nest_active,
                 type_scoped_context,
                 active_property,
                 &nv,
@@ -431,8 +453,14 @@ fn expand_keyword(
     match expanded_property {
         "@id" => match value {
             Json::Str(s) => {
-                if let Some(iri) = active_context.expand_iri(s, true, false) {
-                    set_obj(result, "@id", Json::Str(iri));
+                // [SONNET-4.6] sq-oy1f.45 — §5.1.2 step 13.4.1: "set result[@id] to the
+                // result of IRI expanding value" — the spec always stores the result,
+                // including null (a keyword-form string that is not a recognised keyword
+                // expands to null per §5.2 step 2).  W3C expand/0122 expects
+                // `{"@id": null}` for `@ignoreMe`, not an empty node object `{}`.
+                match active_context.expand_iri(s, true, false) {
+                    Some(iri) => set_obj(result, "@id", Json::Str(iri)),
+                    None => set_obj(result, "@id", json_null()),
                 }
             }
             Json::Arr(items) if frame_expansion => {
