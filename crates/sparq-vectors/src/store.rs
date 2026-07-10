@@ -37,7 +37,7 @@
 //! returns arithmetically-defined but semantically-WRONG neighbours). See [`crate::spqv_provenance`].
 //!
 //! **Opt-in write discipline (mirrors how v2 was introduced).** v3 is WRITTEN only when the opt-in
-//! `spqv-provenance` feature is on AND a provenance was bound ([`VectorStore::with_provenance`]); with
+//! `spqv-provenance` feature is on AND a provenance was bound (`VectorStore::with_provenance`); with
 //! the feature off (or no provenance) the writer emits v2 exactly as before — the default on-disk
 //! format is unchanged. The v3 READ path is ALWAYS compiled: a v3 store opens on a feature-off build
 //! (its provenance is exposed via [`VectorStore::provenance`]; only the demanding query check is
@@ -195,7 +195,7 @@ pub struct VectorStore {
     /// can mis-resolve.
     fingerprint: Option<Fingerprint>,
     /// [FABLE-5] (sq-lhcot.1) The embedding provenance bound to this store: `Some` for a v3 file (or
-    /// a build-phase store after [`with_provenance`](Self::with_provenance)), `None` for a v1/v2 file
+    /// a build-phase store after `with_provenance` (feature-gated)), `None` for a v1/v2 file
     /// (which predate embedding provenance) and a freshly `create`d store until a provenance is bound.
     /// [`check_provenance`](Self::check_provenance) uses it to reject an incompatible query embedder.
     provenance: Option<EmbeddingProvenance>,
@@ -626,7 +626,7 @@ impl VectorStore {
 
     /// [FABLE-5] (sq-lhcot.1) The embedding provenance this store was built with, or `None` for a
     /// legacy v1/v2 file (which predate embedding provenance) or a store finalized without
-    /// [`with_provenance`](Self::with_provenance). See [`check_provenance`](Self::check_provenance).
+    /// `with_provenance` (feature-gated). See [`check_provenance`](Self::check_provenance).
     /// Always available (the v3 read path is always compiled, even without the `spqv-provenance`
     /// feature).
     pub fn provenance(&self) -> Option<&EmbeddingProvenance> {
