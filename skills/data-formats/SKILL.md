@@ -393,10 +393,13 @@ Algorithm** (sq-oy1f.25) ships too: `sparq_jsonld::expand(&input, &opts, &loader
 canonical expanded array — Value Expansion, scoped (property/type) contexts,
 `@index`/`@id`/`@type`/`@language`/`@graph` container maps, `@nest`, `@reverse`, `@included`,
 `@json` literals, keyword aliases, and the drop-null + array-normalisation rules — raising the
-exact spec error code on invalid input and threading `frameExpansion`. Compaction / flattening /
-framing on this substrate, the surface wiring, and the conformance-lane switch to the normative
-document-level expand oracle land in later beads; the RDF-first writers above remain the shipped
-emit path until then.
+exact spec error code on invalid input and threading `frameExpansion`. **Node Map Generation +
+Flattening** (sq-oy1f.26) ship next: `sparq_jsonld::generate_node_map()` (§7.2, deterministic
+`_:bN` blank-node issuer) and `sparq_jsonld::flatten(&input, &opts, &loader)` (§7.1 = expand ∘
+node-map ∘ named-graph fold, sorted by `@id`, empty nodes dropped), with the `flatten`
+conformance lane moved to the native document oracle. Compaction / framing on this substrate,
+the surface wiring, and the remaining conformance-lane switches land in later beads; the
+RDF-first writers above remain the shipped emit path until then.
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
@@ -603,11 +606,14 @@ cargo build -p sparq-cli --features serialize-rdf
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:
   **toRdf** through the `jsonld` parser (oxjsonld), **fromRdf** through the `serialize-rdf`
   writer, **compact** through the native Compaction Algorithm (`graph_to_jsonld_compact`),
-  **expand** + **flatten** through the shipping writer (`graph_to_jsonld(Expanded|Flattened)`),
+  **expand** + **flatten** through the **native `sparq-jsonld` document pipeline**
+  (`sparq_jsonld::expand()` sq-kk1mq / `sparq_jsonld::flatten()` sq-oy1f.26),
   and **frame** through the native Framing Algorithm (`graph_to_jsonld_framed`). toRdf/fromRdf/compact
   are compared by a re-parse RDF-dataset round-trip against the INPUT (`reparse(out) ≡ in`, the
-  oxjsonld self-reparse oracle); **expand/flatten/frame** are compared by re-parse RDF-equivalence
-  against the suite's NORMATIVE expected output (`reparse(write(D)) ≡ reparse(expected)`) — these
+  oxjsonld self-reparse oracle); **expand** + **flatten** are compared **document-to-document**
+  against the suite's NORMATIVE expected output via the `json_ld_equal` comparator (key order
+  insignificant; array order significant only inside `@list`), and **frame** by re-parse
+  RDF-equivalence (`reparse(write(D)) ≡ reparse(expected)`) — these
   are JSON-LD normal forms / a SELECT+RESHAPE (they drop/merge/prune/fill), so the oracle anchors on
   the expected document, not the input. The floors only RISE; they reflect ACTUAL current pass
   counts, not full conformance — the
@@ -629,12 +635,16 @@ cargo build -p sparq-cli --features serialize-rdf
   frame-validation errors, so it cannot honestly "pass" by rejecting). The compact/frame oracle
   is oxjsonld self-reparse, so the `@reverse` double-inversion / non-string-language interop gap
   documented above (the compaction interop caveat) is NOT caught by it and is tracked separately.
-  The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket: each
-  `jld:ExpandTest`/`jld:FlattenTest` input is parsed to RDF and projected through the shipping
-  writer, then compared by RDF-equivalence to the normative expected document; below-floor cases
-  are honest writer divergences (`@direction`/i18n-datatype, list/coercion shapes) and the SKIP
-  buckets are the documented ones (negatives sparq's TOTAL writer does not raise, JSON-LD-1.0-only,
-  empty-RDF inputs). Only **html** (script extraction) + **remote-doc** (a `LoadDocumentCallback`)
+  The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket and
+  BOTH now run the **native `sparq-jsonld` document oracle**: the input is passed to
+  `sparq_jsonld::expand()` / `sparq_jsonld::flatten()` and the result is deep-compared to the
+  normative expected document via `json_ld_equal`. The `flatten` floor was RE-PINNED 50→46
+  (sq-oy1f.26) when it moved off the RDF-writer oracle — the drop is inherited native-`expand()`
+  gaps (empty-property retention, a few `invalid typed value` cases; owned by sq-oy1f.37), NOT
+  flatten-algorithm bugs, and it is rise-only after the re-pin. Below-floor cases are honest
+  divergences; the SKIP buckets are the documented ones (negatives, JSON-LD-1.0-only, the single
+  post-flatten-compaction case deferred to sq-oy1f.27). Only **html** (script extraction) +
+  **remote-doc** (a `LoadDocumentCallback`)
   remain NOT-IMPLEMENTED buckets the runner reports separately and never fails on (they grow the
   ratchet as those land). The lane is the opt-in
   `jsonld-suite` feature on `sparq-conformance` (forwards to `sparq-core/jsonld` +

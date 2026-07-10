@@ -341,7 +341,12 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     // @type collapse + empty-array-property retention + free-floating value/list
     // drop). Bumped in the SAME commit as src/floors/expand.rs::FLOOR (rise-only).
     ("W3C JSON-LD 1.1 expand", 259),
-    ("W3C JSON-LD 1.1 flatten", 50),
+    // [FABLE-5] sq-oy1f.26 — oracle-change re-pin (RDF-writer 50 → native flatten() 53).
+    // The native lane composes over expand() and inherits the sq-oy1f.37 expand raises,
+    // so merging main flips its 7 inherited fails to passes and it now MEASURES 53 pass /
+    // 0 fail on the merged tree — a net RISE above the old writer oracle's 50 (union of
+    // the native oracle AND main's expand fixes — see src/floors/flatten.rs). Rise-only.
+    ("W3C JSON-LD 1.1 flatten", 53),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the registry's six lib-sourced JSON-LD floors carry the
