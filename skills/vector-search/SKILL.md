@@ -154,6 +154,10 @@ cosine(a: &[f32], b: &[f32]) -> f32
 // pulling instant-distance; default build has NO third-party ANN dep). recall < 1.0 — NOT exact.
 VectorIndex::build(&store) / ::build_with(&store, HnswConfig{ef_search, ef_construction, seed})
 impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
+                   fn nearest_with_ef(&self, query: &[f32], k, ef_search: usize) -> Vec<(Id, f32)>;  // [SONNET-4.6] sq-jo6ty: per-query ef_search sweep (Pareto API)
+                   // nearest_with_ef: when ef==build_ef_search uses the primary map (zero overhead); other ef values
+                   // trigger a lazy one-time build of a secondary map (same ef_construction/seed/points, only ef_search
+                   // differs) cached by ef level — amortised for sweeps. Monotone-recall: higher ef >= lower ef recall.
                    fn nearest_term(&self, &Term, &Graph, &VectorStore, k) -> Vec<(Term, f32)>;
                    fn nearest_term_checked(..) -> Result<Vec<(Term, f32)>, String> }
 
