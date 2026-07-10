@@ -88,7 +88,9 @@ CONSOLE_CAP_B="${CONSOLE_CAP_B:-6000}"
 PARSE_GEN_N="${PARSE_GEN_N:-320000}"         # registered bench/parse synthetic dataset size (~162MB NT)
 PREBUILD_ALLOW_S="${PREBUILD_ALLOW_S:-900}"  # budget line item for the one-off workspace release build
 EXTRA_INSTANCE_ENV="${EXTRA_INSTANCE_ENV:-}"
-RESULTS_LOCAL="${RESULTS_LOCAL:-$HOME/sparq-bench-results/multi-axis-$(date -u +%Y%m%dT%H%M%SZ)}"
+# ${HOME:-/root}: cloud-init user-data runs with HOME unset — a bare $HOME under
+# `set -u` killed --instance at this line on the first real launch (rc=1).
+RESULTS_LOCAL="${RESULTS_LOCAL:-${HOME:-/root}/sparq-bench-results/multi-axis-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 # HARD never-touch instance ids (prod + dev) — same list as scripts/orphan-check-bench.sh.
 readonly PROD_INSTANCE="i-090531b4ede8f2d3f"
@@ -393,6 +395,9 @@ set -x
 exec > >(tee /var/log/gather.log) 2>&1
 
 step() { echo "[STEP \$(date -u +%Y-%m-%dT%H:%M:%SZ)] \$*" | tee -a /root/GATHER_STEP >&2; }
+# cloud-init runs user-data WITHOUT HOME: rustup/cargo/git and every \$HOME expansion
+# (e.g. .cargo/env's PATH prepend, which produced "/.cargo/bin") misroute without this.
+export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 step "apt update+install"
 apt-get update -qq
