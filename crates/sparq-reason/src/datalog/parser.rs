@@ -4,9 +4,9 @@
 //! decision). Constants are interned into the caller's [`Dict`] as they are parsed;
 //! every out-of-fragment construct is a loud error naming the construct.
 
-use super::{AggAtom, AggFunc, Atom, CmpOp, DTerm, Filter, Program, Rule};
+use super::{AggAtom, Atom, CmpOp, DTerm, Filter, Program, Rule};
 use rustc_hash::{FxHashMap, FxHashSet};
-use sparq_core::dict::{Dict, Id};
+use sparq_core::dict::Dict;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -269,8 +269,8 @@ impl Parser<'_> {
         }
         self.skip_ws();
         let func = self.name()?;
-        let func = match func.to_ascii_uppercase().as_str() {
-            "COUNT" => AggFunc::Count,
+        match func.to_ascii_uppercase().as_str() {
+            "COUNT" => {}
             "SUM" | "MIN" | "MAX" | "AVG" => {
                 return Err(self.err(&format!(
                     "AGGREGATE function `{func}` is not implemented in Phase 1 (COUNT only — \
@@ -287,7 +287,7 @@ impl Parser<'_> {
             return Err(self.err("expected a `?variable` as the AGGREGATE function argument"));
         }
         let cname = self.name()?;
-        let Some(&counted) = local.slots.get(&cname) else {
+        let Some(&_counted) = local.slots.get(&cname) else {
             return Err(self.err(&format!(
                 "AGGREGATE `COUNT(?{cname})`: the variable does not occur in the aggregate body"
             )));
@@ -322,8 +322,6 @@ impl Parser<'_> {
             AggAtom {
                 body,
                 on,
-                func,
-                counted,
                 out,
                 n_slots,
             },

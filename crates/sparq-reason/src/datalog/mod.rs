@@ -101,24 +101,17 @@ pub(crate) struct Atom {
     pub(crate) pred: Id,
 }
 
-/// The aggregate functions of the surface syntax. Phase 1 implements `COUNT`;
-/// the others parse to a loud error naming the follow-up phase.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum AggFunc {
-    Count,
-}
-
 /// One `AGGREGATE(body ON ?g… BIND COUNT(?v) AS ?c)` atom. The body has its own
 /// variable scope (`n_slots` local slots); `on` maps each grouping variable's
-/// aggregate-local slot to its outer rule slot.
+/// aggregate-local slot to its outer rule slot. Phase 1 carries no function/value
+/// fields: `COUNT(?v)` counts DISTINCT body matches per group (the counted
+/// variable is validated to occur in the body but does not change that count);
+/// the `SUM`/`MIN`/`MAX`/`AVG` phase reintroduces a function + value slot.
 #[derive(Clone, Debug)]
 pub(crate) struct AggAtom {
     pub(crate) body: Vec<Atom>,
     /// `(aggregate-local slot, outer rule slot)` per `ON` variable, in `ON` order.
     pub(crate) on: Vec<(u32, u32)>,
-    pub(crate) func: AggFunc,
-    /// Aggregate-local slot of the counted variable (must occur in `body`).
-    pub(crate) counted: u32,
     /// Outer rule slot the aggregate value binds to (fresh in the outer scope).
     pub(crate) out: u32,
     /// Aggregate-local slot count.
