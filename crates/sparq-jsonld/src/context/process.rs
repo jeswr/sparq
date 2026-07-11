@@ -494,9 +494,14 @@ pub(crate) fn create_term_definition(
             // The check is also skipped when the IRI mapping is a keyword (e.g. `@type`):
             // keywords are not IRIs, so the round-trip "expand term = IRI mapping" predicate
             // cannot hold and the check would always fire spuriously.
+            // [FABLE-5] (sq-oy1f.27) The round-trip check applies to a term containing
+            // a colon "anywhere but as the first or last character" (§4.2.2 step
+            // 14.3.3) — a term ENDING in a colon (the `"prefix:"` declaration form,
+            // W3C compact/p003-p004) is a regular term, not a compact-IRI form.
             if env.mode != ProcessingMode::JsonLd10
                 && !is_keyword(&expanded)
-                && (term.find(':').is_some_and(|i| i > 0) || term.contains('/'))
+                && (term.find(':').is_some_and(|i| i > 0 && i < term.len() - 1)
+                    || term.contains('/'))
             {
                 defined.insert(term.to_string(), true);
                 let rt = expand_iri_in_context(active, term, false, true, local, defined, env)?;
@@ -504,7 +509,12 @@ pub(crate) fn create_term_definition(
                     return Err(JsonLdError::new(E::InvalidIriMapping));
                 }
             }
-            // Simple-term prefix flag.
+            // Simple-term prefix flag (§4.2.2 step 23): only a SIMPLE (string-valued)
+            // term whose IRI ends in a gen-delim is a prefix — deliberately in BOTH
+            // processing modes, matching jsonld.js and pyld (W3C compact/p001 pins the
+            // 1.0-mode half: an expanded term definition is not a prefix in 1.0 either;
+            // the one suite case that presumes 1.0-era prefixing, compact/0038, is an
+            // honest FAIL for REC-conformant processors — see the compact floor doc).
             if simple_term
                 && term.find(':').is_none()
                 && !term.contains('/')

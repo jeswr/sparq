@@ -1,56 +1,55 @@
-//! [FABLE-5] sq-oy1f.40 — the W3C JSON-LD 1.1 `compact` lane runner (split out of
-//! the former monolithic `tests/jsonld_suite.rs`; behaviour byte-identical).
+//! [FABLE-5] sq-oy1f.27 — the W3C JSON-LD 1.1 `compact` lane runner, on the NATIVE
+//! DOCUMENT-LEVEL oracle: `sparq_jsonld::compact::compact()` (the spec Compaction
+//! Algorithm over the expanded document) deep-compared against the suite's NORMATIVE
+//! expected document with `json_ld_equal` — the same oracle shape as the `expand` and
+//! `flatten` lanes (sq-kk1mq / sq-oy1f.26). This REPLACES the old oxjsonld self-reparse
+//! round-trip oracle (`reparse(compact(D, ctx)) ≡ D`), which measured RDF losslessness
+//! of the engine's RDF-first writer, not the Compaction Algorithm — and could pass a
+//! document whose JSON shape a strict third-party processor reads differently (the exact
+//! honesty gap the oracle correction closes; see the floor doc for the side-by-side
+//! re-pin).
 
 use super::common::*;
-use sparq_core::Graph;
+use serde_json::Value;
+use sparq_jsonld::{FsLoader, JsonLdOptions, ProcessingMode};
 use std::path::Path;
 
-/// [OPUS-4.8] sq-3uos5 — run the W3C JSON-LD `compact` category against sparq's
-/// hand-rolled Compaction Algorithm (`sparq_engine::serialize::
-/// graph_to_jsonld_compact`, the `serialize-rdf` feature).
+/// [FABLE-5] sq-oy1f.27 — run the W3C JSON-LD `compact` category with the NATIVE
+/// DOCUMENT-LEVEL oracle.
 ///
-/// ## Pipeline (the REAL compaction path)
+/// ## Pipeline (the native compact path)
 ///
-/// 1. Parse the case `input` (`.jsonld`) → RDF via the real oxjsonld ingest path
-///    (`parse_jsonld_dataset`); this dataset is the losslessness ORACLE.
-/// 2. Re-emit that dataset as N-Quads and load it into a sparq [`Graph`]
-///    (preserving named graphs) — the writer takes a `Graph`, not a JSON-LD doc,
-///    because sparq compacts RDF, not arbitrary documents.
-/// 3. Read the case `@context` (`read_context_member`) and run
-///    `graph_to_jsonld_compact(&graph, &ctx)`.
-/// 4. **Invariant (answer-safety):** re-parse the compacted document through
-///    oxjsonld back to a canonical [`Dataset`] and require it equals the input
-///    dataset — `reparse(compact(D, ctx)) ≡ D`. Compaction must be LOSSLESS
-///    w.r.t. the RDF. This is the SAME round-trip oracle `from_rdf::run_fromrdf`
-///    uses (oxjsonld self-reparse equivalence), NOT a JSON-structural diff against
-///    the suite's `expect.jsonld` (whose layout sparq's writer does not reproduce
-///    byte-for-byte).
+/// 1. Read the case `input` (`.jsonld`) and parse it as a `sparq_jsonld::Json`.
+/// 2. Read the case `context` (the sibling `*-context.jsonld`) and parse it likewise.
+/// 3. Build `JsonLdOptions` from the manifest entry: `base` (the document IRI or the
+///    `option.base` override), `processingMode`/`specVersion`, `compactArrays`,
+///    `compactToRelative`.
+/// 4. Call `sparq_jsonld::compact::compact(input, context, opts, loader)` — this expands
+///    the input through the native Expansion Algorithm, then runs the spec Compaction
+///    Algorithm. The `FsLoader` maps the suite URL prefix to the local fixture tree so
+///    remote `@context`/`@import` references resolve offline (deny-by-default otherwise).
+/// 5. Deep-compare against the suite's EXPECTED document via `json_ld_equal` (object key
+///    order insignificant; array order significant only inside explicit `@list` values;
+///    numbers compared as in the expand lane).
 ///
 /// ## Honest oracle caveat
 ///
-/// The oracle is *oxjsonld self-reparse equivalence*, exactly like toRdf/fromRdf.
-/// A case where sparq's `@reverse` compaction double-inverts, or where a
-/// non-string `@language`/`@none` value is mis-shaped, can still PASS here when
-/// our OWN re-parse round-trips it (oxjsonld reads back what oxjsonld would emit)
-/// even though a strict third-party processor (pyld) would read it inverted.
-/// Strict third-party (pyld) faithfulness for those shapes is tracked separately
-/// (a child of sq-oy1f) and is NOT claimed by this ratchet — see the crate README.
+/// `json_ld_equal` treats arrays outside an explicit `"@list"` key as SETS. In a
+/// *compacted* document a `@container: @list` term's array carries list order without
+/// the `@list` marker, so the comparator cannot see it — a wrongly-ordered compacted
+/// list would still pass. The strict order-sensitive pass count is measured and recorded
+/// alongside the floor (see `floors::compact`); list-order fidelity is covered by the
+/// crate-local `tests/compact.rs` unit tests, which assert exact shapes.
 ///
 /// ## Honest SKIP buckets (recorded, not passed, not failed)
 ///
 /// * `requires` optional-feature cases — out of the gated surface.
-/// * Non-object / remote / array `@context` — not drivable through the inline
-///   single-object writer (no network).
-/// * NegativeEvaluationTests — sparq's compaction is TOTAL (it never raises the
-///   spec's compaction/context errors: list-of-lists, invalid term definition,
-///   `@protected` redefinition, processing-mode conflict, …). A 1.1 writer that
-///   does not model those errors cannot honestly "pass" by rejecting, so these
-///   are SKIPPED rather than counted.
-/// * Positive cases whose input → RDF is EMPTY (free-floating-node drops, pure
-///   `@context`/`@graph` framing with no triples): there is no RDF to compact, so
-///   the round-trip is vacuous and tells us nothing about the algorithm — SKIP.
+/// * NegativeEvaluationTests — compaction raises `invalid @nest value`, but error-code
+///   completeness across context processing/expansion/compaction is unverified; the
+///   negative lanes are bead sq-oy1f.31. SKIP (honest), never a counted pass.
+/// * Remote `input` URL — no network.
+/// * No `expect` / no `context` member — nothing to compare / compact against.
 pub fn run_compact(root: &Path) -> Score {
-    use sparq_engine::serialize::graph_to_jsonld_compact;
     let mut s = Score::default();
     let entries = match read_manifest(root, "compact") {
         Ok(e) => e,
@@ -59,102 +58,124 @@ pub fn run_compact(root: &Path) -> Score {
             return s;
         }
     };
+    // Map the suite's base URL prefix to the local fixture directory (same as the
+    // expand lane) so remote-context references in inputs resolve offline.
+    let loader = FsLoader::new().map_prefix(SUITE_BASE, root);
     for e in &entries {
         if e.requires.is_some() {
             s.skip();
             continue;
         }
-        // NegativeEvaluationTest: sparq's compaction does not raise the spec's
-        // compaction/context errors, so a faithful 1.1 writer cannot "pass" by
-        // rejecting — SKIP (honest), never count as a pass.
         if e.is_negative {
             s.skip();
             continue;
         }
-        // JSON-LD-1.0-only positives (processing-mode shape differences a 1.1
-        // writer is not obliged to reproduce): SKIP.
-        if e.spec_version.as_deref() == Some("json-ld-1.0")
-            || e.processing_mode.as_deref() == Some("json-ld-1.0")
-        {
+        let Some(expect_rel) = &e.expect else {
             s.skip();
             continue;
-        }
+        };
         let Some(ctx_rel) = &e.context else {
             s.skip();
             continue;
         };
-
-        // 1. Parse the input JSON-LD → RDF (the oracle dataset). Skip remote
-        //    inputs (no network).
         if e.input.starts_with("http://") || e.input.starts_with("https://") {
             s.skip();
             continue;
         }
+
+        // 1-2. Read and parse the input document and the caller context.
         let input_path = root.join(&e.input);
         let in_text = match std::fs::read_to_string(&input_path) {
             Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("read input: {why}"));
+                s.fail(&e.id, format!("read input: {}", why));
                 continue;
             }
         };
-        let base = doc_base(e);
-        let want = match parse_jsonld_dataset(&in_text, &base) {
-            Ok(ds) => ds,
-            // An input the real oxjsonld path rejects is out of scope for the
-            // compaction round-trip (the toRdf lane already gates ingest); SKIP.
-            Err(_) => {
-                s.skip();
+        let input_json = match sparq_jsonld::Json::parse(&in_text) {
+            Ok(j) => j,
+            Err(why) => {
+                s.fail(&e.id, format!("parse input JSON: {}", why));
                 continue;
             }
         };
-        // No triples → nothing to compact; the round-trip is vacuous. SKIP.
-        if want.is_empty() {
-            s.skip();
-            continue;
+        let ctx_path = root.join(ctx_rel);
+        let ctx_text = match std::fs::read_to_string(&ctx_path) {
+            Ok(t) => t,
+            Err(why) => {
+                s.fail(&e.id, format!("read context: {}", why));
+                continue;
+            }
+        };
+        let ctx_json = match sparq_jsonld::Json::parse(&ctx_text) {
+            Ok(j) => j,
+            Err(why) => {
+                s.fail(&e.id, format!("parse context JSON: {}", why));
+                continue;
+            }
+        };
+
+        // 3. Options from the manifest entry.
+        let processing_mode = match (e.processing_mode.as_deref(), e.spec_version.as_deref()) {
+            (Some("json-ld-1.0"), _) | (_, Some("json-ld-1.0")) => ProcessingMode::JsonLd10,
+            _ => ProcessingMode::JsonLd11,
+        };
+        // JsonLdOptions is #[non_exhaustive] — build via default() + field mutation.
+        let mut opts = JsonLdOptions::default();
+        opts.base = Some(doc_base(e));
+        opts.processing_mode = processing_mode;
+        if let Some(ca) = e.compact_arrays {
+            opts.compact_arrays = ca;
+        }
+        if let Some(cr) = e.compact_to_relative {
+            opts.compact_to_relative = cr;
         }
 
-        // 2. Read the case @context (skip non-inline / remote / multi forms).
-        let ctx_path = root.join(ctx_rel);
-        let ctx = match read_context_member(&ctx_path) {
-            Ok(c) => c,
-            Err(_) => {
-                s.skip();
-                continue;
-            }
-        };
+        // 4. The native document-level Compaction Algorithm.
+        let compacted =
+            match sparq_jsonld::compact::compact(&input_json, &ctx_json, &opts, &loader) {
+                Ok(j) => j,
+                Err(why) => {
+                    s.fail(&e.id, format!("compact() error: {}", why));
+                    continue;
+                }
+            };
 
-        // 3. Load the input RDF into a sparq Graph (named graphs preserved) and
-        //    run the REAL compaction writer.
-        let nq = dataset_to_nquads(&want);
-        let graph = match Graph::load_dataset(&nq, "nquads") {
-            Ok(g) => g,
+        // 5. Compare against the suite's NORMATIVE expected document.
+        let got: Value = match sparq_json_to_serde(&compacted) {
+            Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                s.fail(&e.id, format!("convert compact output: {}", why));
                 continue;
             }
         };
-        let compacted = graph_to_jsonld_compact(&graph, &ctx);
-
-        // 4. The losslessness invariant: re-parse the compacted document and
-        //    require RDF-dataset equivalence with the input.
-        let got = match jsonld_to_canonical_dataset(&compacted, &base) {
-            Ok(ds) => ds,
+        let expect_path = root.join(expect_rel);
+        let exp_text = match std::fs::read_to_string(&expect_path) {
+            Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("re-parse compacted output: {why}"));
+                s.fail(&e.id, format!("read expect: {}", why));
                 continue;
             }
         };
-        if got == want {
+        let want: Value = match serde_json::from_str(&exp_text) {
+            Ok(v) => v,
+            Err(why) => {
+                s.fail(&e.id, format!("parse expect JSON: {}", why));
+                continue;
+            }
+        };
+        if json_ld_equal(&got, &want) {
             s.pass();
         } else {
+            // Truncated got/want dumps keep a regression diagnosable from the
+            // failure log without re-running locally.
+            let mut g = got.to_string();
+            let mut w = want.to_string();
+            g.truncate(240);
+            w.truncate(240);
             s.fail(
                 &e.id,
-                format!(
-                    "compaction not lossless ({} vs {} quads)",
-                    got.len(),
-                    want.len()
-                ),
+                format!("compacted JSON differs\n    got:  {}\n    want: {}", g, w),
             );
         }
     }
