@@ -1628,20 +1628,20 @@ records_to  = "bench/competitor-results/gsp-<UTC>.json via GSP_JSON_OUT (git-ign
 featured    = false  # external-competitor differential harness, not a dashboard-promoted capability suite
 status      = "ok"  # smoke (sparq loopback) is self-contained; competitor columns are gather-time external cost
 
-# [SONNET-4.6] sq-hmd7l.12 — federation harness (FedShop vs Comunica + Jena SERVICE)
+# [FABLE-5] sq-hmd7l.12 — federation harness (FedShop-shaped vs Comunica + Jena SERVICE)
 [[benchmark]]
 id          = "federation-fedshop"
-name        = "Federation comparison — FedShop vs Comunica + Jena SERVICE over local member endpoints"
+name        = "Federation comparison — FedShop-shaped vs Comunica + Jena SERVICE over local member endpoints"
 category    = "query"
-measures    = "per-query result count + federation latency (ms) for FedShop-shaped queries over local member SPARQL endpoints; source-selection precision (members contacted vs correct members); result-count oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.12"
-source      = "TBD — bench/federation-fedshop/; scripts/bench-adapters/comunica_adapter.mjs + http_sparql_adapter.py"
-dataset     = "TBD — FedShop-shaped corpus split across local member endpoints; member data generated in-repo"
+measures    = "per-query canonical RESULT-SET agreement oracle (asserted BEFORE any timing) + federation wall time (best-of-N) for FedShop-shaped queries over 2 local sparq-server member endpoints; per-member HTTP REQUEST COUNTS via a counting reverse proxy (uniform across engines); source-selection precision/recall vs measured per-member block-relevance ground truth; explicit-SERVICE regime (sparq/comunica/jena) + virtual source-selection regime (comunica)"
+invoke      = "bash bench/federation/run.sh [--smoke]  # --smoke = acceptance: one query, sparq-vs-Comunica result-set agreement"
+source      = "bench/federation/{run.sh,compare.py,comunica_runner.mjs}"
+dataset     = "FedShop-shaped vendor+ratingsite shop federation, generated in-repo by compare.py (deterministic seed; per-member sha256 recorded in the results JSON); LargeRDFBench's public endpoints are dead — local replicas only"
 quiet_box_sensitive = true
-pinning     = "TBD — corpus sha256 + Comunica + Jena pinned versions at gather time"
-records_to  = "TBD — bench/competitor-results/<engine>-federation-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.12
-status      = "planning"
+pinning     = "per-member corpus sha256 + the RESOLVED @comunica/query-sparql npm version recorded in the results JSON at every gather (FED_COMUNICA_SPEC pins the install; Jena optional via FED_JENA_ARQ)"
+records_to  = "bench/competitor-results/federation-fedshop-<UTC>.json (git-ignored)"
+featured    = false  # comparative harness; smoke (sparq + gather-time Comunica) is the committed self-test
+status      = "ok"
 
 # [SONNET-4.6] sq-hmd7l.13 — LDBC Graphalytics comparison
 [[benchmark]]
