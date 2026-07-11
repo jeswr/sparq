@@ -118,8 +118,13 @@ fn snapshot_mutation_invisible_to_base() {
 #[test]
 fn snapshot_shares_base_indexes_no_duplication() {
     // A base large enough that an O(triples) deep clone would be obvious.
+    // [FABLE-5] (sq-0s15k) Scaled under Miri (native size unchanged): the assertions below
+    // are STRUCTURAL (Arc strong counts + heap-bytes equality), so they stay just as
+    // non-vacuous over a smaller base — the full-size intern loop alone ran 100+ min under
+    // the Miri interpreter in the nightly UB lane.
+    let n: u32 = if cfg!(miri) { 3_000 } else { 50_000 };
     let mut dict = sparq_core::dict::Dict::new();
-    let ids: Vec<[Id; 3]> = (0..50_000u32)
+    let ids: Vec<[Id; 3]> = (0..n)
         .map(|i| {
             [
                 dict.intern_iri(&format!("http://ex/s{}", i % 5000)),

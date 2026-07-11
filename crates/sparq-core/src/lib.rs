@@ -6126,6 +6126,20 @@ mod build_timing {
 mod tests {
     use super::*;
 
+    /// [FABLE-5] (sq-0s15k) Scale a heavy end-to-end input size down under Miri, keeping the
+    /// native size UNCHANGED. Miri interprets every instruction (~100×+ slower than native), so
+    /// the heavy loader tests here ran 50–100+ min EACH in the nightly `miri.yml` UB lane and
+    /// timed out at its per-test cap — pure cost debt, not a coverage gain: Miri checks
+    /// aliasing/provenance per ACCESS, so a scaled input exercises exactly the same unsafe
+    /// paths (parallel dict scatter writes, sharded merges, POD↔bytes reinterprets) as the
+    /// native-sized one. Every structural invariant a test relies on (multi-chunk fan-out,
+    /// the 8 KiB auto-chunk thresholds, multiple shards, block counts) still HOLDS — and
+    /// stays asserted — at the Miri size; where a byte-size assert must shrink with the
+    /// input it is scaled with this same helper so it never silently weakens the native run.
+    const fn miri_scaled(native: usize, under_miri: usize) -> usize {
+        if cfg!(miri) { under_miri } else { native }
+    }
+
     // ---- sq-1ivw7: predicate-range object term-kind (predicate_has_literal_object) ----
     //
     // Direct unit tests for the two new public fns the engine's predicate-range non-literal
@@ -6589,7 +6603,10 @@ mod tests {
         let mut ttl = String::from(
             "@prefix : <http://ex/> .\n@prefix ex: <http://example.org/foo.bar#> .\n# header . comment\n",
         );
-        for i in 0..500 {
+        // 80 iterations keep the doc > 8 KiB under Miri, so `parse_turtle_parallel`'s
+        // auto-target (`len/8192 + 1`) still fans out to >1 chunk (sq-0s15k).
+        let n = miri_scaled(500, 80);
+        for i in 0..n {
             ttl.push_str(&format!(
                 ":s{i} :dec {i}.5 ; :s \"a.b.c\" , \"x\\\"y.z\" ; :iri ex:rel{i} .\n\
                  :s{i} ex:m \"\"\"l1 . still\nl2.\"\"\" ; :p <http://x.y/a.b.{i}> . # trailing . c\n",
@@ -6601,14 +6618,14 @@ mod tests {
         let mut sd = Dict::new();
         let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
         assert_eq!(decoded(&pd, &pt), decoded(&sd, &st), "parallel split must equal serial");
-        assert!(pt.len() >= 1500);
+        assert!(pt.len() >= 3 * n);
 
         // Blank-node docs fan out too (the dict merge unifies labels by term equality — see
         // turtle_chunks). The differential coverage lives in
         // parallel_turtle_bnodes_match_serial; here just pin that the splitter no longer bails.
         let bn = format!(
             "@prefix : <http://ex/> .\n{}",
-            ":a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(300)
+            ":a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(miri_scaled(300, 40))
         );
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
@@ -6682,14 +6699,15 @@ mod tests {
         // UNDER-estimates the true count by a wide margin. If the estimate ever bounded the parse
         // (it must not), triples past the hinted capacity would be dropped.
         let mut ttl = String::from("@prefix : <http://e/> .\n");
-        for i in 0..2000 {
+        let n = miri_scaled(2000, 150);
+        for i in 0..n {
             // Three compact triples per subject; predicate-grouped.
             ttl.push_str(&format!(":s{i} :a :b ; :c :d ; :e {i} .\n"));
         }
         let bytes = ttl.as_bytes();
         // Sanity: the hint really does under-estimate here (exercises the grow path).
         assert!(
-            estimate_turtle_triples(bytes.len()) < 6000,
+            estimate_turtle_triples(bytes.len()) < 3 * n,
             "test must exercise the under-estimate case"
         );
 
@@ -6710,7 +6728,7 @@ mod tests {
 
         // Byte-for-byte identical result: same count and same decoded S/P/O for every triple.
         assert_eq!(presized.len(), reference.len(), "pre-sizing must not change the triple count");
-        assert_eq!(presized.len(), 6000, "all 3*2000 triples must be emitted");
+        assert_eq!(presized.len(), 3 * n, "all 3 triples per subject must be emitted");
         let decode = |d: &Dict, t: &[[Id; 3]]| -> Vec<String> {
             let mut v: Vec<String> =
                 t.iter().map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o))).collect();
@@ -6757,54 +6775,59 @@ mod tests {
         // (a) Plain triple-term objects, one statement each, many statements so the splitter
         //     puts chunk boundaries BETWEEN triple-term statements. The `>` inside `>>` and the
         //     `<` of `<<(` must not desync the terminator scan.
+        // (sq-0s15k) The differential forces fan-out with an EXPLICIT chunk target (32), so
+        // under Miri the docs only need enough statements for multi-chunk boundaries — the
+        // byte-size sanity bound scales with the input (the native bound is unchanged).
+        let n_plain = miri_scaled(500, 60);
         let mut plain = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..500 {
+        for i in 0..n_plain {
             plain.push_str(&format!(":s{i} :annotates <<( :a{i} :age {i} )>> .\n"));
         }
-        assert!(plain.len() > 8192);
+        assert!(plain.len() > miri_scaled(8192, 1024));
         let (p, s) = differential(&plain, 32, true);
         assert_eq!(p, s);
-        assert_eq!(p, 500, "every quoted-triple statement must parse");
+        assert_eq!(p, n_plain, "every quoted-triple statement must parse");
 
         // (b) A DECIMAL inside the triple term (`3.5`) — the `.` is inside the `<…>`-skipped span,
         //     so it must NOT be read as a statement terminator. Plus a `.`-bearing IRI inside.
         let mut decimals = String::from("@prefix : <http://ex/> .\n@prefix ex: <http://e.x/foo.bar#> .\n");
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 50) {
             decimals.push_str(&format!(
                 ":m{i} :stmt <<( ex:r{i} :weight {i}.5 )>> ; :note <<( :a :seeAlso <http://x.y/p.{i}> )>> .\n"
             ));
         }
-        assert!(decimals.len() > 8192);
+        assert!(decimals.len() > miri_scaled(8192, 1024));
         differential(&decimals, 32, true);
 
         // (c) The `{| … |}` annotation form: each statement expands to the asserted base triple,
         //     a fresh `rdf:reifies <<( … )>>`, and the annotation triple — all of which must
         //     survive chunking identically (anonymous reifier ids canonicalised by position).
         let mut annot = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 50) {
             annot.push_str(&format!(":a{i} :age {i} {{| :certainty {i}.5 ; :by :src{i} |}} .\n"));
         }
-        assert!(annot.len() > 8192);
+        assert!(annot.len() > miri_scaled(8192, 1024));
         differential(&annot, 32, true);
 
         // (d) A SINGLE large triple-term statement (long IRIs, internal newlines/decimals)
         //     padded with ground statements either side, so a chunk boundary falls right AFTER
         //     the big statement's terminator — exercising the boundary-adjacent case without
         //     splitting the term itself. chunked == serial is the witness it stayed intact.
+        let n_pad = miri_scaled(400, 60);
         let mut boundary = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..400 {
+        for i in 0..n_pad {
             boundary.push_str(&format!(":prefix{i} :predicate :object{i} .\n"));
         }
         boundary.push_str(
             ":big :annotates\n  <<( <http://very.long/iri.with.dots/subject>\n      :measuredAt\n      3.14159 )>> .\n",
         );
-        for i in 0..400 {
+        for i in 0..n_pad {
             boundary.push_str(&format!(":postfix{i} :predicate :object{i} .\n"));
         }
-        assert!(boundary.len() > 8192, "len={}", boundary.len());
+        assert!(boundary.len() > miri_scaled(8192, 1024), "len={}", boundary.len());
         let (p, s) = differential(&boundary, 32, true);
         assert_eq!(p, s);
-        assert_eq!(p, 801, "400 pre + 1 quoted + 400 post");
+        assert_eq!(p, 2 * n_pad + 1, "pre + 1 quoted + post");
     }
 
     /// [OPUS-4.8] (sq-87bq) END-TO-END semantics of the RDF 1.2 Turtle reification surface
@@ -6934,7 +6957,7 @@ mod tests {
         //    boundary) plus labels shared between adjacent statements: the merge must
         //    unify each label to ONE node, exactly like the serial document-scoped parse.
         let mut ttl = String::from("@prefix : <http://ex/> .\n_:shared :starts :here .\n");
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 50) {
             ttl.push_str(&format!(":s{i} :p :o{i} .\n_:b{} :links _:b{} .\n", i / 3, i / 3 + 1));
         }
         ttl.push_str("_:shared :ends :here .\n");
@@ -6943,7 +6966,7 @@ mod tests {
         // 2. Anonymous nests + collections: fresh ids must stay distinct across chunks, and
         //    each nest's internal structure must survive chunking intact.
         let mut anon = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..300 {
+        for i in 0..miri_scaled(300, 40) {
             anon.push_str(&format!(
                 ":r{i} :has [ :p{i} [ :q \"v{i}.w\" ] ; :list ( 1 2.5 \"three\" ) ] .\n"
             ));
@@ -6953,7 +6976,7 @@ mod tests {
         // 3. Pathological ALL-bnode doc: every subject/object a labeled bnode, chained
         //    across consecutive statements so every chunk boundary cuts a shared label.
         let mut chain = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..500 {
+        for i in 0..miri_scaled(500, 60) {
             chain.push_str(&format!("_:n{i} :next _:n{} .\n", i + 1));
         }
         differential(&chain, 16);
@@ -6962,9 +6985,11 @@ mod tests {
         //    through a large ground-statement body (formerly: any one of them forfeited the
         //    whole parallel parse).
         let mut sparse = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..600 {
-            if i % 97 == 0 {
-                sparse.push_str(&format!(":s{i} :somevalue _:sv{} .\n", i / 97));
+        // Sprinkle interval scales with the doc so several labeled bnodes survive under Miri.
+        let sprinkle = miri_scaled(97, 29);
+        for i in 0..miri_scaled(600, 90) {
+            if i % sprinkle == 0 {
+                sparse.push_str(&format!(":s{i} :somevalue _:sv{} .\n", i / sprinkle));
             } else {
                 sparse.push_str(&format!(":s{i} :p :o{i} .\n"));
             }
@@ -6973,7 +6998,7 @@ mod tests {
 
         // 5. Bnode-free control through the same harness (the pre-existing fan-out case).
         let mut ground = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 50) {
             ground.push_str(&format!(":s{i} :p \"lit {i}\" ; :q {i}.5 .\n"));
         }
         differential(&ground, 16);
@@ -7000,7 +7025,10 @@ mod tests {
             "@prefix : <http://ex/> .\n@prefix ex: <http://example.org/v#> .\n@base <http://base/> .\n",
         );
         ttl.push_str("_:shared :starts :here .\n");
-        for i in 0..500 {
+        // (sq-0s15k) 40 iterations (~9 KiB, 5 statements each) keep the doc over the 8 KiB
+        // sanity bound AND multi-chunk at the explicit target below.
+        let n = miri_scaled(500, 40);
+        for i in 0..n {
             ttl.push_str(&format!(
                 ":s{i} :p :o{i} ; :rel ex:r{i} ; :iri <doc/{i}> .\n"
             ));
@@ -7046,7 +7074,7 @@ mod tests {
             canon_bnodes(&sd, &st),
             "sharded chunked merge must equal serial up to anonymous bnode ids"
         );
-        assert!(pt.len() >= 2000, "expected the full triple set, got {}", pt.len());
+        assert!(pt.len() >= 4 * n, "expected the full triple set, got {}", pt.len());
     }
 
     /// [OPUS-4.8] Regression for review 1398: a PN_LOCAL_ESC `\#` in a prefixed-name local
@@ -7062,13 +7090,14 @@ mod tests {
     fn parallel_turtle_escaped_hash_in_local() {
         // (a) Escaped `#` in a local does not eat the terminator: the splitter still scans the
         //     statements cleanly and the chunked parse equals the serial parse.
+        let n = miri_scaled(400, 60);
         let mut clean = String::from("@prefix ex: <http://ex/> .\n");
-        for i in 0..400 {
+        for i in 0..n {
             // `ex:foo\#bar{i}` — a valid PN_LOCAL with an escaped `#`. The `\#` must NOT start
             // a comment; the `.` after it is the real top-level terminator.
             clean.push_str(&format!("ex:s{i} ex:p ex:foo\\#bar{i} .\n"));
         }
-        assert!(clean.len() > 8192);
+        assert!(clean.len() > miri_scaled(8192, 1024));
         // The escaped-`#` doc must still split (no spurious comment-eating of terminators)…
         assert!(turtle_chunks(clean.as_bytes(), 32).is_some(), "escaped # must not break the split");
         // …and parse identically to the serial parser.
@@ -7076,7 +7105,7 @@ mod tests {
         let mut sd = Dict::new();
         let st = parse_turtle_chunk(clean.as_bytes(), &mut sd).unwrap();
         assert_eq!(canon_bnodes(&pd, &pt), canon_bnodes(&sd, &st), "escaped-# chunked parse must equal serial");
-        assert_eq!(pt.len(), 400);
+        assert_eq!(pt.len(), n);
 
         // (b) [OPUS-4.8] (T3) An interspersed `@base` AFTER an escaped `#` (with enough
         //     statements to force multiple chunks) must be attributed to its FOLLOWING
@@ -7085,16 +7114,17 @@ mod tests {
         //     did, the relative IRIs would resolve against the stale `@base <http://first/>`.
         //     The check is the load-bearing one: chunked == serial. The base is also redefined a
         //     second time so the snapshot must carry BOTH `@base`s in order.
+        let b = miri_scaled(150, 25);
         let mut interspersed = String::from("@prefix ex: <http://ex/> .\n@base <http://first/> .\n");
-        for i in 0..150 {
+        for i in 0..b {
             interspersed.push_str(&format!("ex:s{i} ex:p <rel{i}> ; ex:e ex:foo\\#bar{i} .\n"));
         }
         interspersed.push_str("@base <http://second/> .\n");
-        for i in 150..300 {
+        for i in b..2 * b {
             interspersed.push_str(&format!("<sub{i}> ex:p <rel{i}> .\n"));
         }
         interspersed.push_str("@base <http://third/> .\n");
-        for i in 300..450 {
+        for i in 2 * b..3 * b {
             interspersed.push_str(&format!("<sub{i}> ex:p <rel{i}> .\n"));
         }
         let chunks = turtle_chunks(interspersed.as_bytes(), 32)
@@ -7137,24 +7167,28 @@ mod tests {
         // 1. Prefix REDEFINITION mid-body: the SAME prefix `p:` is rebound several times, so each
         //    block of statements must see the binding in scope at its position. A stale snapshot
         //    would expand `p:x` to the wrong IRI — caught because chunked must equal serial.
+        // (sq-0s15k) Keep every ROUND (the directive-redefinition structure is the point);
+        // scale only the per-round statement count. The byte-size sanity bound scales with
+        // the input; the load-bearing fan-out is asserted inside `differential`.
         let mut redef = String::from("@prefix p: <http://v0/> .\n");
         for round in 0..6 {
             redef.push_str(&format!("@prefix p: <http://v{round}/> .\n"));
-            for i in 0..80 {
+            for i in 0..miri_scaled(80, 12) {
                 redef.push_str(&format!("p:s{round}_{i} p:p p:o{i} .\n"));
             }
         }
-        assert!(redef.len() > 8192);
+        assert!(redef.len() > miri_scaled(8192, 1024));
         differential(&redef, 32, true);
 
         // 2. Relative `@base` redefinition mid-body with relative-IRI subjects/objects that
         //    resolve against the running base; new prefixes appear partway through too.
+        let m = miri_scaled(100, 20);
         let mut mixed = String::from("@base <http://b0/> .\n@prefix a: <http://a/> .\n");
-        for i in 0..100 {
+        for i in 0..m {
             mixed.push_str(&format!("<s{i}> a:p <o{i}> .\n"));
         }
         mixed.push_str("@base <http://b1/> .\n@prefix b: <http://bb/> .\n");
-        for i in 100..200 {
+        for i in m..2 * m {
             mixed.push_str(&format!("<s{i}> a:p b:o{i} .\n"));
         }
         differential(&mixed, 16, true);
@@ -7163,7 +7197,7 @@ mod tests {
         //    as the very last top-level unit before EOF (no following statement) — the trailing
         //    directive simply contributes to no later chunk.
         let mut adjacent = String::from("@prefix x: <http://x/> .\n");
-        for i in 0..60 {
+        for i in 0..miri_scaled(60, 15) {
             adjacent.push_str(&format!("x:s{i} x:p x:o{i} .\n"));
         }
         adjacent.push_str("@prefix y: <http://y/> .\nx:last y:p x:o .\n@prefix z: <http://z/> .\n");
@@ -7177,21 +7211,22 @@ mod tests {
         let mut sparql = String::from("PREFIX s: <http://s0/>\nBASE <http://base0/>\n");
         for round in 0..8 {
             sparql.push_str(&format!("PREFIX s: <http://s{round}/>\nBASE <http://base{round}/>\n"));
-            for i in 0..120 {
+            for i in 0..miri_scaled(120, 12) {
                 sparql.push_str(&format!("s:longkey{round}_{i} s:longpred <relative-iri-{i}> .\n"));
             }
         }
-        assert!(sparql.len() > 8192);
+        assert!(sparql.len() > miri_scaled(8192, 1024));
         differential(&sparql, 32, true);
 
         // 5. MIXED `@`-form and SPARQL-style directives in the SAME document, interleaved with
         //    statements — both forms must be tracked in the same ordered snapshot.
+        let f = miri_scaled(80, 15);
         let mut mixedforms = String::from("@prefix a: <http://a/> .\nPREFIX b: <http://b/>\n");
-        for i in 0..80 {
+        for i in 0..f {
             mixedforms.push_str(&format!("a:s{i} b:p a:o{i} .\n"));
         }
         mixedforms.push_str("@base <http://base/> .\nPREFIX c: <http://c/>\n");
-        for i in 80..160 {
+        for i in f..2 * f {
             mixedforms.push_str(&format!("<s{i}> b:p c:o{i} .\n"));
         }
         differential(&mixedforms, 16, true);
@@ -7266,8 +7301,11 @@ mod tests {
         // 1. Multiple named graphs interleaved with the default graph, ground terms only — the
         //    core per-graph routing across chunk boundaries. The same predicate/object recur in
         //    different graphs (each graph has its OWN dict, exactly as the serial path builds).
+        // (sq-0s15k) All cases force fan-out with an EXPLICIT chunk target (asserted >1 range
+        // inside `differential`), so under Miri each doc only needs enough lines for genuine
+        // cross-chunk boundaries.
         let mut multi = String::new();
-        for i in 0..600 {
+        for i in 0..miri_scaled(600, 60) {
             let g = i % 4; // 0 -> default, 1..3 -> named graphs g1..g3
             if g == 0 {
                 multi.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
@@ -7284,7 +7322,7 @@ mod tests {
         //    chained between adjacent quads, so the per-graph dict merge must unify each label to
         //    one node — the cross-chunk bnode-scope risk.
         let mut bn = String::from("_:shared <http://ex/starts> <http://ex/here> .\n");
-        for i in 0..500 {
+        for i in 0..miri_scaled(500, 45) {
             bn.push_str(&format!(
                 "_:n{} <http://ex/next> _:n{} .\n<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> <http://ex/g1> .\n",
                 i / 3,
@@ -7299,7 +7337,7 @@ mod tests {
         //    dict), while a SAME-labelled `_:g` used as a subject in the default graph is a normal
         //    bnode there — the two must not be conflated.
         let mut bgraph = String::new();
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 40) {
             if i % 2 == 0 {
                 bgraph.push_str(&format!("_:x{i} <http://ex/p> \"v{i}\" _:g .\n"));
             } else {
@@ -7314,7 +7352,7 @@ mod tests {
         //    casing-normalisation parity: the byte parser must lowercase the tag to the SAME slot
         //    oxttl produces, or this differential check fails on the language column.
         let mut lits = String::new();
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 30) {
             let g = if i % 3 == 0 { String::new() } else { format!(" <http://g.x/{}.n>", i % 3) };
             lits.push_str(&format!(
                 "<http://ex/s{i}> <http://ex/p> \"val.{i} \\\"q\\\" x\"@en-us{g} .\n\
@@ -7328,7 +7366,7 @@ mod tests {
         // 5. RDF 1.2 triple-term objects in a named graph (forces the serial `merge_remap` branch
         //    of the per-graph merge, since the sharded merge cannot represent triple terms).
         let mut tt = String::new();
-        for i in 0..300 {
+        for i in 0..miri_scaled(300, 30) {
             tt.push_str(&format!(
                 "<http://ex/r{i}> <http://ex/reifies> <<( <http://ex/a{i}> <http://ex/age> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> <http://ex/meta> .\n\
                  <http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
@@ -7339,7 +7377,7 @@ mod tests {
         // 6. Empty + whitespace + comment-only lines interleaved (the parser must skip them
         //    identically to oxttl, and a chunk boundary may land on a blank line).
         let mut sparse = String::new();
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 40) {
             sparse.push_str("# a comment . with a dot\n\n");
             let g = if i % 2 == 0 { " <http://ex/g7>" } else { "" };
             sparse.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}>{g} .\n"));
@@ -7353,7 +7391,7 @@ mod tests {
         //    and reused as a graph name), so the per-graph merge must unify the dotted labels too;
         //    a dotted graph name `_:g.{k}` must not be conflated with a same-spelled S/O bnode.
         let mut dotted = String::from("_:sh.ared <http://ex/starts> _:o.0 .\n");
-        for i in 0..500 {
+        for i in 0..miri_scaled(500, 45) {
             dotted.push_str(&format!(
                 "_:n.{} <http://ex/next> _:n.{} _:g.{} .\n\
                  <http://ex/s{i}> <http://ex/p> _:n.{} .\n",
@@ -7392,8 +7430,11 @@ mod tests {
         // 1. Many `GRAPH g { … }` blocks interleaved with top-level default-graph triples and an
         //    anonymous `{ … }` default block — the core per-graph routing across chunk boundaries.
         //    A leading `@prefix` is in scope for every chunk (the directive-snapshot replay).
+        // (sq-0s15k) Every case forces fan-out with an EXPLICIT chunk target (asserted >1
+        // chunk inside `differential`), so under Miri each doc only needs enough statements
+        // for genuine cross-chunk boundaries.
         let mut multi = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 40) {
             match i % 4 {
                 0 => multi.push_str(&format!(":s{i} :p :o{i} .\n")), // default (top level)
                 1 => multi.push_str(&format!("GRAPH :g1 {{ :s{i} :p :o{i} . :s{i} :q :r{i} . }}\n")),
@@ -7408,7 +7449,7 @@ mod tests {
         //    same blank-node label `_:b{k}` recurs at the block's start and end and is chained
         //    between adjacent statements, so the per-graph dict merge must unify it across chunks.
         let mut big = String::from("@prefix : <http://ex/> .\n:top :p :level .\nGRAPH :big {\n_:shared :starts :here .\n");
-        for i in 0..500 {
+        for i in 0..miri_scaled(500, 50) {
             big.push_str(&format!(":s{i} :p :o{i} .\n_:n{} :next _:n{} .\n", i / 3, i / 3 + 1));
         }
         big.push_str("_:shared :ends :here .\n}\n");
@@ -7418,7 +7459,7 @@ mod tests {
         //    same-spelled `_:g` used as a normal subject/object in the default graph — the routing
         //    key must NOT be conflated with the in-graph bnode (mirrors the N-Quads case 3).
         let mut bgraph = String::from("@prefix : <http://ex/> .\n_:g :is :a-default-subject .\n_:g {\n");
-        for i in 0..400 {
+        for i in 0..miri_scaled(400, 40) {
             bgraph.push_str(&format!(":s{i} :p _:x{i} .\n"));
         }
         bgraph.push_str("}\n:after :p :default .\n");
@@ -7428,14 +7469,14 @@ mod tests {
         //    survive: g_a, then g_b, then g_a again must keep [g_a, g_b]), plus prefixed names,
         //    typed/lang literals (incl. an interior `.`), and SPARQL-style `PREFIX` directives.
         let mut reopen = String::from("PREFIX : <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n");
-        for i in 0..300 {
+        for i in 0..miri_scaled(300, 25) {
             reopen.push_str(&format!(
                 "GRAPH :g_a {{ :s{i} :p \"v.{i}\"@en . }}\n\
                  :top{i} :p \"{i}\"^^xsd:integer .\n\
                  GRAPH :g_b {{ :s{i} :p :o{i} . }}\n"
             ));
         }
-        for i in 0..50 {
+        for i in 0..miri_scaled(50, 8) {
             reopen.push_str(&format!("GRAPH :g_a {{ :late{i} :p :o{i} . }}\n"));
         }
         differential(&reopen, 24);
@@ -7443,12 +7484,13 @@ mod tests {
         // 5. Mid-document `@prefix` REDEFINITION: statements before vs after the redefinition must
         //    each parse under the correct snapshot (the chunker splits a group at any directive
         //    change and replays the in-scope directives verbatim).
+        let r = miri_scaled(150, 20);
         let mut redef = String::from("@prefix p: <http://a/> .\n");
-        for i in 0..150 {
+        for i in 0..r {
             redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
         }
         redef.push_str("@prefix p: <http://b/> .\n");
-        for i in 0..150 {
+        for i in 0..r {
             redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
         }
         differential(&redef, 24);
@@ -7456,7 +7498,7 @@ mod tests {
         // 6. Comments + blank lines interleaved (a chunk boundary may land on one); a comment text
         //    contains a `.` and braces to confirm they are skipped, not treated as structure.
         let mut sparse = String::from("@prefix : <http://ex/> .\n");
-        for i in 0..300 {
+        for i in 0..miri_scaled(300, 30) {
             sparse.push_str("# a comment . with a dot and { fake brace }\n\n");
             if i % 2 == 0 {
                 sparse.push_str(&format!("GRAPH :g {{ :s{i} :p :o{i} . }}\n"));
@@ -7602,7 +7644,10 @@ mod tests {
     #[test]
     fn load_dataset_trig_public_entry_matches_serial() {
         let mut trig = String::from("@prefix : <http://ex/> .\n_:shared :a :b .\n");
-        for i in 0..3000 {
+        // (sq-0s15k) The PUBLIC entry auto-chunks at `len/8192 + 1` targets, so the Miri size
+        // must keep the document ABOVE 8 KiB for the dispatch to genuinely fan out — pinned by
+        // the assert below (which the native size satisfies by an order of magnitude).
+        for i in 0..miri_scaled(3000, 250) {
             if i % 3 == 0 {
                 trig.push_str(&format!(":s{i} :p _:n{i} .\n"));
             } else {
@@ -7610,6 +7655,7 @@ mod tests {
             }
         }
         trig.push_str("GRAPH :g1 { _:shared :c :d . }\n");
+        assert!(trig.len() > 8192, "doc must be big enough for the public entry's auto fan-out");
         let pub_g = Graph::load_dataset(&trig, "trig").unwrap();
         let ser = Graph::load_dataset_serial(&trig, "trig").unwrap();
         assert_eq!(pub_g.len(), ser.len());
@@ -7688,11 +7734,14 @@ mod tests {
     #[test]
     fn load_dataset_nquads_public_entry_matches_serial() {
         let mut nq = String::from("_:shared <http://ex/a> <http://ex/b> .\n");
-        for i in 0..2000 {
+        // (sq-0s15k) Keep the doc above the public entry's 8 KiB auto-chunk threshold under
+        // Miri too, so the dispatch genuinely fans out (asserted below).
+        for i in 0..miri_scaled(2000, 200) {
             let g = if i % 3 == 0 { "" } else { " <http://ex/g1>" };
             nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> _:n{i}{g} .\n"));
         }
         nq.push_str("_:shared <http://ex/c> <http://ex/d> <http://ex/g1> .\n");
+        assert!(nq.len() > 8192, "doc must be big enough for the public entry's auto fan-out");
         let pub_g = Graph::load_dataset(&nq, "nquads").unwrap();
         let ser = Graph::load_dataset_serial(&nq, "nquads").unwrap();
         assert_eq!(pub_g.len(), ser.len());
@@ -9166,14 +9215,19 @@ mod tests {
     #[test]
     fn load_reader_parallel_handles_triple_terms() {
         let mut nt = String::new();
-        for i in 0..1500u32 {
+        // (sq-0s15k) 120 lines ≈ 11 KiB keeps the block's internal `len/4096 + 1` chunking
+        // multi-shard under Miri; the reification interval scales so several triple-term
+        // lines still land in distinct shards.
+        let n = miri_scaled(1500, 120) as u32;
+        let reify_every = miri_scaled(300, 30) as u32;
+        for i in 0..n {
             nt.push_str(&format!(
                 "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
                 i % 97,
                 i % 7,
                 i % 300
             ));
-            if i % 300 == 0 {
+            if i % reify_every == 0 {
                 nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://alpha.example/s> <http://beta.example/p> <<( <http://gamma.example/a> <http://delta.example/b> \"x\" )>> )>> .\n");
             }
         }
@@ -9203,7 +9257,9 @@ mod tests {
         // across chunks (exercising the partial-dict merge) and the objects are inline
         // integers (exercising the inline-id passthrough in the remap).
         let mut nt = String::new();
-        for i in 0..2000u32 {
+        // (sq-0s15k) 120 lines ≈ 11 KiB stay above the parallel path's 4 KiB/chunk split
+        // under Miri, so the input still spans multiple shards.
+        for i in 0..miri_scaled(2000, 120) as u32 {
             nt.push_str(&format!(
                 "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
                 i % 137,
@@ -9263,14 +9319,19 @@ mod tests {
         // in distinct namespaces (different leaf shards), a shared triple term (cross-shard
         // dedup), a blank-node component, and a nested triple term.
         let mut nt = String::new();
-        for i in 0..4000u32 {
+        // (sq-0s15k) 160 lines ≈ 15 KiB keep `parse_block`'s `len/4096 + 1` split multi-partial
+        // under Miri; the dedup-pair interval scales so the shared triple term still recurs
+        // across partials.
+        let n = miri_scaled(4000, 160) as u32;
+        let dedup_every = miri_scaled(700, 40) as u32;
+        for i in 0..n {
             nt.push_str(&format!(
                 "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
                 i % 211,
                 i % 13,
                 i % 700
             ));
-            if i % 700 == 0 {
+            if i % dedup_every == 0 {
                 // Same triple term referenced by two statements -> must dedup to one id.
                 nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
                 nt.push_str("<http://ex/r1b> <http://ex/sameAs> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
@@ -9344,11 +9405,12 @@ mod tests {
         // Multi-block corpus: repeated predicate/type IRIs (heavy dict reuse), distinct
         // subjects/objects, typed + language literals, blank nodes, and a nested triple term.
         let mut nt = String::new();
-        for i in 0..2000u32 {
+        let n = miri_scaled(2000, 60) as u32;
+        for i in 0..n {
             nt.push_str(&format!("<http://ex/n{}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> .\n", i));
             nt.push_str(&format!("<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n", i, i));
             nt.push_str(&format!("<http://ex/n{}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i, i % 91));
-            nt.push_str(&format!("_:b{} <http://ex/reifies> <<( <http://ex/n{}> <http://ex/knows> <http://ex/n{}> )>> .\n", i, i, (i + 1) % 2000));
+            nt.push_str(&format!("_:b{} <http://ex/reifies> <<( <http://ex/n{}> <http://ex/knows> <http://ex/n{}> )>> .\n", i, i, (i + 1) % n));
         }
         let bytes = nt.as_bytes();
 
@@ -9415,7 +9477,9 @@ mod tests {
             }
         }
         let mut nt = String::new();
-        for i in 0..3000u32 {
+        // (sq-0s15k) 80 lines (~7 KiB) still span multiple 4 KiB blocks in the multi-block
+        // section below and force hundreds of short reads at max=7.
+        for i in 0..miri_scaled(3000, 80) as u32 {
             nt.push_str(&format!(
                 "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
                 i % 211,
@@ -9442,8 +9506,9 @@ mod tests {
             assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at block={block} max={max}");
             assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at block={block} max={max}");
         }
-        // A single line LONGER than the block size (carry outgrows the block).
-        let long = format!("<http://ex/s> <http://ex/p> \"{}\" .\n<http://ex/s2> <http://ex/p> \"x\" .", "y".repeat(20_000));
+        // A single line LONGER than the block size (carry outgrows the block) — the literal
+        // stays over the 4096-byte block in both native and Miri sizes.
+        let long = format!("<http://ex/s> <http://ex/p> \"{}\" .\n<http://ex/s2> <http://ex/p> \"x\" .", "y".repeat(miri_scaled(20_000, 6_000)));
         let lseq = Graph::load_reader(long.as_bytes(), "ntriples").unwrap();
         let lpar = Graph::load_ntriples_pipelined(ShortReader { data: long.as_bytes(), pos: 0, max: 333 }, 4096).unwrap();
         assert_eq!(lpar.len(), lseq.len());
@@ -9675,7 +9740,11 @@ mod tests {
             // re-insert, delete-of-pending-insert, delete-absent, re-insert-of-deleted).
             [term_iri(r() % 30, "s"), term_iri(r() % 5, "p"), term_iri(r() % 40, "o")]
         };
-        for batch in 0..200 {
+        // (sq-0s15k) Fewer batches under Miri, with the compaction period scaled so the
+        // overlay still folds mid-sequence several times (the cross-compaction coverage).
+        let batches = miri_scaled(200, 30);
+        let compact_every = miri_scaled(50, 10);
+        for batch in 0..batches {
             let n_ins = (rng() % 6) as usize;
             let n_del = (rng() % 6) as usize;
             let inserts: Vec<[Term; 3]> = (0..n_ins).map(|_| mk(&mut rng)).collect();
@@ -9690,7 +9759,7 @@ mod tests {
             }
             g.apply_delta(&inserts, &deletes).unwrap();
 
-            if batch % 50 == 49 {
+            if batch % compact_every == compact_every - 1 {
                 g.compact().unwrap(); // fold the overlay periodically
                 assert!(!g.store.has_overlay());
             }

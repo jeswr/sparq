@@ -1140,6 +1140,14 @@ fn upper_bound(rows: &[[Id; 3]], key: &[Id; 3]) -> usize {
 mod tests {
     use super::*;
 
+    /// [FABLE-5] (sq-0s15k) Scale a heavy input size down under Miri (native size UNCHANGED) —
+    /// the ~50–100 min/test Miri interpreter cost of the big randomized inputs here was pure
+    /// debt in the nightly `miri.yml` UB lane; Miri checks aliasing/provenance per access, so
+    /// scaled inputs exercise the same unsafe build paths. See the twin helper in `lib.rs`.
+    const fn miri_scaled(native: usize, under_miri: usize) -> usize {
+        if cfg!(miri) { under_miri } else { native }
+    }
+
     /// MANDATORY differential-fuzz equivalence gate (sq-7d3dj.17): the O(n) LSD
     /// `radix_sort_rows` used to build every permutation index MUST produce output
     /// BYTE-IDENTICAL to the comparison `sort_unstable()` it replaces, for every input.
@@ -1188,9 +1196,12 @@ mod tests {
             st ^= st << 5;
             st
         };
+        // (sq-0s15k) Keep all 4 id-range regimes; scale reps × row count under Miri.
+        let reps = miri_scaled(40, 5);
+        let max_rows = miri_scaled(3000, 400) as u32;
         for regime in 0..4 {
-            for _ in 0..40 {
-                let n = (rng() % 3000) as usize;
+            for _ in 0..reps {
+                let n = (rng() % max_rows) as usize;
                 let mut rows: Vec<[Id; 3]> = Vec::with_capacity(n);
                 for _ in 0..n {
                     // Three raw draws, then shape per regime: tiny (byte 0 only), two low
@@ -1229,8 +1240,12 @@ mod tests {
             st ^= st << 5;
             st
         };
-        for _ in 0..8 {
-            let n = 500 + (rng() % 4000) as usize;
+        // (sq-0s15k) Fewer, smaller random builds under Miri — each build still crosses all
+        // BUILT permutations with a several-hundred-row deduped reference.
+        let builds = miri_scaled(8, 2);
+        let (base, spread) = (miri_scaled(500, 150), miri_scaled(4000, 300) as u32);
+        for _ in 0..builds {
+            let n = base + (rng() % spread) as usize;
             let mut triples: Vec<[Id; 3]> = Vec::with_capacity(n);
             for _ in 0..n {
                 triples.push([1 + rng() % 300, 1 + rng() % 20, 1 + rng() % 1500]);
@@ -1496,7 +1511,8 @@ mod tests {
         let base: [[Id; 3]; 5] = [[3, 1, 9], [1, 2, 2], [1, 2, 8], [7, 4, 4], [3, 1, 5]];
         let mut triples: Vec<[Id; 3]> = Vec::new();
         // Repeat the whole set 4000× (20 000 rows, only 5 distinct) plus one lone triple.
-        for _ in 0..4000 {
+        // (sq-0s15k: 300× under Miri — still a heavily-duplicated multi-thousand-row input.)
+        for _ in 0..miri_scaled(4000, 300) {
             triples.extend_from_slice(&base);
         }
         triples.push([9, 9, 9]);
@@ -1525,7 +1541,8 @@ mod tests {
             st ^= st << 5;
             st
         };
-        for _ in 0..40_000 {
+        // (sq-0s15k) 1500 rows under Miri still span many 128-row blocks per permutation.
+        for _ in 0..miri_scaled(40_000, 1500) {
             triples.push([1 + rng() % 800, 1 + rng() % 12, 1 + rng() % 5000]);
         }
         let raw = TripleStore::from_triples(triples.clone());
@@ -1764,7 +1781,7 @@ mod tests {
             st
         };
         let mut triples: Vec<[Id; 3]> = Vec::new();
-        for _ in 0..20_000 {
+        for _ in 0..miri_scaled(20_000, 900) {
             triples.push([1 + rng() % 400, 1 + rng() % 9, 1 + rng() % 2000]);
         }
         let mut store = TripleStore::from_triples(triples.clone());
@@ -1774,7 +1791,7 @@ mod tests {
         triples.sort_unstable();
         triples.dedup();
         let deletes: Vec<[Id; 3]> = triples.iter().step_by(7).copied().chain([[9999, 9999, 9999]]).collect();
-        let mut inserts: Vec<[Id; 3]> = (0..500).map(|_| [401 + rng() % 50, 10 + rng() % 3, 2001 + rng() % 100]).collect();
+        let mut inserts: Vec<[Id; 3]> = (0..miri_scaled(500, 80)).map(|_| [401 + rng() % 50, 10 + rng() % 3, 2001 + rng() % 100]).collect();
         inserts.push(triples[3]); // already in the base
         store.apply_delta(&inserts, &deletes);
         assert!(store.has_overlay());
@@ -1885,8 +1902,11 @@ mod tests {
         use std::borrow::Cow;
 
         // Base: subjects 1..=100, predicate 1, objects 1..=10 (1000 triples, several perms).
+        // (sq-0s15k: 60 subjects under Miri — the probe list below stays inside/around the
+        // touched subject 50, and the absent-subject probe stays absent in both sizes.)
+        let smax = miri_scaled(100, 60) as u32;
         let mut triples: Vec<[Id; 3]> = Vec::new();
-        for s in 1..=100u32 {
+        for s in 1..=smax {
             for o in 1..=10u32 {
                 triples.push([s, 1, o]);
             }
@@ -1909,7 +1929,7 @@ mod tests {
         // (i) UNTOUCHED range (subject 7): fast path — rows are BORROWED and identical to
         // the no-overlay base store (which also borrows). This is the "store WITH an
         // overlay, scanned range clean" case the fast path exists for.
-        for s in [1u32, 7, 49, 51, 100] {
+        for s in [1u32, 7, 49, 51, smax] {
             let pat: Pattern = [Some(s), None, None];
             let scan = store.scan(&pat);
             assert!(matches!(scan.rows, Cow::Borrowed(_)), "untouched subject {} must be zero-copy borrowed", s);

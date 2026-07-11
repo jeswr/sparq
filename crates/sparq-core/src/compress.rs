@@ -1142,6 +1142,12 @@ impl Drop for CompressedPermWriter {
 mod byte_attribution {
     use super::{encode_block, Id, BLOCK};
 
+    /// [FABLE-5] (sq-0s15k) Scale a heavy input size down under Miri (native UNCHANGED) —
+    /// see the twin helper in `lib.rs`'s test module for the rationale.
+    const fn miri_scaled(native: usize, under_miri: usize) -> usize {
+        if cfg!(miri) { under_miri } else { native }
+    }
+
     /// Byte length of the unsigned LEB128 varint that `put_varint` would emit for `x`
     /// (mirrors its `while x >= 0x80 { x >>= 7 }` loop exactly): `⌈bits/7⌉`, min 1.
     #[inline]
@@ -1335,8 +1341,10 @@ mod byte_attribution {
     /// fiction. Runs across block boundaries and both reset shapes.
     #[test]
     fn attribution_total_equals_real_encoded_length() {
+        // (sq-0s15k) Keep all 3 id-density regimes and all 6 permutations; scale only the
+        // row count under Miri (600 rows still cross several 128-row block boundaries).
         for &n_terms in &[100_000u64, 1_000_000, 5_000_000] {
-            let triples = synth_watdiv(20_000, n_terms, 0xA5A5);
+            let triples = synth_watdiv(miri_scaled(20_000, 600), n_terms, 0xA5A5);
             for (_, order) in PERM_ORDERS {
                 let rows = perm_rows(&triples, order);
                 // Real encoded block-stream length.
@@ -1686,6 +1694,12 @@ mod byte_attribution {
 mod tests {
     use super::*;
 
+    /// [FABLE-5] (sq-0s15k) Scale a heavy input size down under Miri (native UNCHANGED) —
+    /// see the twin helper in `lib.rs`'s test module for the rationale.
+    const fn miri_scaled(native: usize, under_miri: usize) -> usize {
+        if cfg!(miri) { under_miri } else { native }
+    }
+
     /// A deterministic pseudo-random sorted permutation with realistic structure:
     /// clustered subjects (long equal-col0 runs), a few predicates, sparse objects.
     fn sample(n: usize) -> Vec<[Id; 3]> {
@@ -1754,7 +1768,9 @@ mod tests {
     /// block ranges, the empty / inverted range, and the exact boundary keys.
     #[test]
     fn count_range_equals_materialised_range_len() {
-        let rows = sample(5000);
+        // (sq-0s15k) 700 rows under Miri keep several interior blocks (> 3 × BLOCK asserted
+        // below) while the exhaustive per-row single-row-count loop stays affordable.
+        let rows = sample(miri_scaled(5000, 700));
         let c = CompressedPerm::encode(&rows);
         assert!(rows.len() > 3 * BLOCK, "need several blocks to exercise the interior arithmetic");
 

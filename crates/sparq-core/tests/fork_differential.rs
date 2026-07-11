@@ -16,6 +16,14 @@ fn iri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new_unchecked(s.to_string()))
 }
 
+/// [FABLE-5] (sq-0s15k) Scale a heavy input size down under Miri (native size UNCHANGED) —
+/// the full-size fork chain ran 100+ min under the Miri interpreter in the nightly UB lane;
+/// Miri checks aliasing/provenance per access, so a shorter chain over a smaller base
+/// exercises the same unsafe paths. See the twin helper in `sparq-core`'s lib tests.
+const fn miri_scaled(native: usize, under_miri: usize) -> usize {
+    if cfg!(miri) { under_miri } else { native }
+}
+
 /// Term-level dump of a graph's default-graph triples, sorted — the flat reference.
 fn dump(g: &Graph) -> Vec<[String; 3]> {
     let mut v: Vec<[String; 3]> = g
@@ -49,7 +57,9 @@ fn assert_reads_match(forked: &Graph, reference: &[[Term; 3]], ctx: &str) {
     // Probe a battery of patterns built from terms that exist in either graph plus
     // guaranteed misses, across every bound/unbound shape and every sort column.
     let mut probe_terms: Vec<Term> = Vec::new();
-    for t in reference.iter().take(8) {
+    // (sq-0s15k) The probe battery is cubic in the term count — 3 triples' terms under Miri
+    // still probe every bound/unbound shape and every sort column.
+    for t in reference.iter().take(miri_scaled(8, 3)) {
         probe_terms.push(t[0].clone());
         probe_terms.push(t[1].clone());
         probe_terms.push(t[2].clone());
@@ -153,7 +163,7 @@ fn fork_chain_matches_flat_rebuild() {
     let mut rng = Rng(0x5EED_CAFE);
     let term = |kind: &str, i: usize| iri(&format!("http://ex/{kind}{i}"));
     let mut reference: Vec<[Term; 3]> = Vec::new();
-    for _ in 0..400 {
+    for _ in 0..miri_scaled(400, 60) {
         reference.push([
             term("s", rng.below(60)),
             term("p", rng.below(7)),
@@ -175,7 +185,9 @@ fn fork_chain_matches_flat_rebuild() {
     // Chain of generations: gen[k+1] = fork(gen[k]) + a random batch. Holds every
     // generation alive (the ring shape) and re-checks old ones for isolation.
     let mut generations: Vec<(Graph, Vec<[Term; 3]>)> = vec![(base, reference)];
-    for gen in 0..8 {
+    // (sq-0s15k) 3 generations under Miri still cover fork → batch → fork AND the every-3rd
+    // mid-chain compaction (gen 2); native keeps the full 8-generation chain.
+    for gen in 0..miri_scaled(8, 3) {
         let (cur, cur_ref) = generations.last().unwrap();
         let mut g = cur.fork();
         let mut reference = cur_ref.clone();
@@ -256,8 +268,11 @@ fn fork_chain_matches_flat_rebuild() {
 /// resets it to zero.
 #[test]
 fn fork_pending_delta_accounting() {
+    // (sq-0s15k) Base size scaled under Miri (the accounting asserts below are relative to
+    // it); must stay ≥ 20 so the insert batch's p0/oN terms all pre-exist.
+    let n = miri_scaled(1000, 150);
     let mut dict = sparq_core::dict::Dict::new();
-    let ids: Vec<[Id; 3]> = (0..1000)
+    let ids: Vec<[Id; 3]> = (0..n)
         .map(|i| {
             [
                 dict.intern_iri(&format!("http://ex/s{}", i % 100)),
@@ -284,13 +299,13 @@ fn fork_pending_delta_accounting() {
     let mut g3 = g2.fork();
     g3.compact().unwrap();
     assert_eq!(g3.pending_delta_len(), 0);
-    assert_eq!(g3.len(), 1020);
+    assert_eq!(g3.len(), n + 20);
     // And the compacted generation forks + updates onward correctly.
     let mut g4 = g3.fork();
     g4.apply_delta(&[[iri("http://ex/after"), iri("http://ex/p0"), iri("http://ex/after")]], &[])
         .unwrap();
-    assert_eq!(g4.len(), 1021);
-    assert_eq!(g3.len(), 1020, "compacted base isolated from its fork");
+    assert_eq!(g4.len(), n + 21);
+    assert_eq!(g3.len(), n + 20, "compacted base isolated from its fork");
 }
 
 /// Named graphs fork structurally too: updates to a fork's named graph must not

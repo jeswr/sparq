@@ -33,6 +33,16 @@ fn iri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new_unchecked(s.to_string()))
 }
 
+/// [FABLE-5] (sq-0s15k) Scale a heavy input size down under Miri (native size UNCHANGED) —
+/// the full-size synthetic corpora ran 100+ min EACH under the Miri interpreter in the
+/// nightly UB lane; Miri checks aliasing/provenance per access, so the scaled corpora
+/// exercise the same parallel-ingest unsafe paths. Structural invariants (the Turtle doc
+/// staying above the 8 KiB auto-chunk fan-out threshold, the N-Triples doc spanning
+/// multiple 4 KiB shards) still hold at the Miri sizes — see the asserts at the use sites.
+const fn miri_scaled(native: usize, under_miri: usize) -> usize {
+    if cfg!(miri) { under_miri } else { native }
+}
+
 /// Sorted term-level dump of a graph's default-graph triples — the equality oracle.
 fn dump(g: &Graph) -> Vec<[String; 3]> {
     let mut v: Vec<[String; 3]> = g
@@ -100,7 +110,9 @@ fn assert_loaded_matches_reference(loaded: &Graph, reference: &[[Term; 3]], ctx:
     // (3) Per-pattern scan SETS match the reference for every bound/unbound shape. Build the
     // probe-term set from the first few reference triples plus a guaranteed miss.
     let mut probe: Vec<Term> = Vec::new();
-    for [s, p, o] in reference.iter().take(6) {
+    // (sq-0s15k) The probe battery is cubic in the term count — 3 triples' terms under Miri
+    // still probe every bound/unbound shape.
+    for [s, p, o] in reference.iter().take(miri_scaled(6, 3)) {
         probe.push(s.clone());
         probe.push(p.clone());
         probe.push(o.clone());
@@ -198,7 +210,9 @@ fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
     let mut nt = String::new();
     let mut reference: Vec<[Term; 3]> = Vec::new();
     let xsd_int = "http://www.w3.org/2001/XMLSchema#integer";
-    for i in 0..3000u32 {
+    // (sq-0s15k) 100 iterations (two ~55-B lines each ≈ 11 KiB) keep the doc spanning
+    // multiple 4 KiB parallel shards under Miri.
+    for i in 0..miri_scaled(3000, 100) as u32 {
         // Clustered subjects/predicates so terms recur across many shard boundaries.
         let s = format!("http://ex/s{}", i % 211);
         let p = format!("http://ex/p{}", i % 13);
@@ -234,7 +248,9 @@ fn synthetic_turtle() -> (String, Vec<[Term; 3]>) {
     let lit = |v: &str| Term::Literal(oxrdf::Literal::new_simple_literal(v.to_string()));
     let mut ttl = String::from("@prefix ex: <http://ex/> .\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n");
     let mut reference: Vec<[Term; 3]> = Vec::new();
-    for i in 0..1500u32 {
+    // (sq-0s15k) 130 statements (~66 B each) keep the doc ABOVE the 8 KiB threshold
+    // `parse_turtle_parallel`'s auto-target needs to fan out — asserted below.
+    for i in 0..miri_scaled(1500, 130) as u32 {
         let s = format!("http://ex/s{}", i % 97);
         // predicate-object list with two predicates; one object is a dotted/semicoloned literal.
         ttl.push_str(&format!(
@@ -253,6 +269,7 @@ fn synthetic_turtle() -> (String, Vec<[Term; 3]>) {
     }
     ttl.push_str("ex:end rdfs:comment \"trailing dot inside. literal\" .\n");
     reference.push([iri("http://ex/end"), iri("http://www.w3.org/2000/01/rdf-schema#comment"), lit("trailing dot inside. literal")]);
+    assert!(ttl.len() > 8192, "Turtle doc must exceed the parallel auto-chunk threshold");
     (ttl, reference)
 }
 
