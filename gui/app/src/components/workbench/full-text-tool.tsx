@@ -13,26 +13,40 @@
 // sync it surfaces an honest "search unavailable" state rather than crashing or silently failing.
 //
 // This is a keyboard-first operational panel: Enter submits the search (not only the button).
+//
+// [FABLE-5] sq-ixc3.16 — index MANAGEMENT over workspace literals: the "Index stats" strip
+// reports the REAL BM25 index footprint (indexed documents / tokens / heap bytes) the W-text
+// bundle computes over the CURRENT live store. The bundle is stateless one-shot (it indexes
+// per call), so "management" here is honest visibility — recompute on demand after imports /
+// updates — never a fabricated cache figure.
 
 import * as React from "react";
-import { Search, Loader2 } from "lucide-react";
+import { Search, Loader2, Gauge } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
 import { loadTextSearch } from "@/lib/text-wasm";
 import { TIER_META, toolById } from "@/data/tools";
-import type { ToolOverride } from "@/data/tools";
 
-/**
- * Optional honesty-metadata override merged over the base `ToolDef` (data/tools.ts) by the
- * tool-panel registry's `resolveTool` and by the stub itself. `undefined` = base metadata
- * unchanged. Omit fields you do not override.
- */
-export const FULL_TEXT_TOOL_OVERRIDE: ToolOverride | undefined = {
-  built: true,
-  group: "working" as const,
-};
+// [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
+// rail/tab honesty read path) so THIS panel module can stay behind a lazy dynamic import().
+// Re-exported here so the panel file remains the tool's single import surface.
+export { FULL_TEXT_TOOL_OVERRIDE } from "@/components/workbench/full-text-tool.meta";
+
+/** [FABLE-5] sq-ixc3.16 — the REAL index footprint `TextSearch.indexStats` reports. */
+interface IndexStats {
+  docs: number;
+  tokens: number;
+  heapBytes: number;
+  hasPositions: boolean;
+}
+
+type StatsState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "stats"; stats: IndexStats; ms: number; storeQuads: number }
+  | { kind: "error"; message: string };
 
 interface HitRow {
   subject: string;
@@ -95,6 +109,7 @@ export function FullTextTool() {
   const { status, storeSize, serializeStore } = useEngine();
   const [term, setTerm] = React.useState("");
   const [state, setState] = React.useState<SearchState>({ kind: "idle" });
+  const [statsState, setStatsState] = React.useState<StatsState>({ kind: "idle" });
   const [bundleError, setBundleError] = React.useState<string | null>(null);
 
   const ready = status.kind === "ready";
@@ -172,6 +187,39 @@ export function FullTextTool() {
     }
   }, [term, serializeStore, storeSize]);
 
+  // [FABLE-5] sq-ixc3.16 — compute the BM25 index footprint over the CURRENT live store
+  // (workspace literals). On-demand: the W-text bundle is stateless one-shot, so every figure
+  // is a real measurement of indexing the store as it is NOW — rerun after an import/update.
+  const onStats = React.useCallback(async () => {
+    setStatsState({ kind: "running" });
+    let textSearch;
+    try {
+      textSearch = await loadTextSearch();
+    } catch (err) {
+      setBundleError(err instanceof Error ? err.message : String(err));
+      setStatsState({ kind: "idle" });
+      return;
+    }
+    const data = serializeStore();
+    if (data === null) {
+      setStatsState({
+        kind: "error",
+        message: "The live store is not ready, so it cannot be serialised for indexing.",
+      });
+      return;
+    }
+    const t0 = performance.now();
+    try {
+      const stats = JSON.parse(textSearch.indexStats(data, "trig")) as IndexStats;
+      setStatsState({ kind: "stats", stats, ms: performance.now() - t0, storeQuads: storeSize });
+    } catch (err) {
+      setStatsState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, [serializeStore, storeSize]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -214,6 +262,54 @@ export function FullTextTool() {
           {state.kind === "running" ? <Loader2 className="animate-spin" /> : <Search />}
           Search
         </Button>
+      </div>
+
+      {/* [FABLE-5] sq-ixc3.16 — index management strip: the real BM25 index footprint over
+          the current workspace literals, recomputed on demand (the bundle indexes per call). */}
+      <div className="flex flex-wrap items-center gap-2 border-b bg-card/50 px-3 py-1 text-[11px] text-muted-foreground">
+        <Button
+          data-text-stats-btn
+          size="sm"
+          variant="outline"
+          onClick={() => void onStats()}
+          disabled={!ready || bundleError !== null || statsState.kind === "running"}
+        >
+          {statsState.kind === "running" ? <Loader2 className="animate-spin" /> : <Gauge />}
+          Index stats
+        </Button>
+        {statsState.kind === "stats" ? (
+          <span data-text-stats className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+            <span>
+              <span data-text-stats-docs className="tabular text-foreground">
+                {statsState.stats.docs.toLocaleString()}
+              </span>{" "}
+              indexed docs
+            </span>
+            <span>
+              <span data-text-stats-tokens className="tabular text-foreground">
+                {statsState.stats.tokens.toLocaleString()}
+              </span>{" "}
+              tokens
+            </span>
+            <span>
+              <span className="tabular text-foreground">
+                {(statsState.stats.heapBytes / 1024).toFixed(1)}
+              </span>{" "}
+              KiB heap
+            </span>
+            <span>{statsState.stats.hasPositions ? "with positions" : "no positions"}</span>
+            <span className="tabular">
+              indexed {statsState.storeQuads.toLocaleString()} quads in{" "}
+              {statsState.ms.toFixed(1)} ms
+            </span>
+          </span>
+        ) : statsState.kind === "error" ? (
+          <span data-text-stats-error className="text-destructive">
+            {statsState.message}
+          </span>
+        ) : (
+          <span>Real index footprint over the live store — recompute after imports.</span>
+        )}
       </div>
 
       {/* Bundle unavailable: honest error with rebuild instruction. Rendered once the

@@ -15,6 +15,11 @@
 //   query_service    → [FABLE-5] sq-ixc3.14: fail-closed allowlist mirror of the Rust command —
 //                      rejects with the "SERVICE egress refused" marker unless the caller's
 //                      allow[] contains fed.example.org; else resolves a joined SELECT doc
+//   odrl_preview     → [FABLE-5] sq-ixc3.15: fail-closed mirror of the Rust command — a policy
+//                      that does not look like Turtle ODRL resolves the DENY-EVERYTHING shape
+//                      (policy_ok:false + verbatim-style reason + zero-row panes); a well-formed
+//                      one resolves the sample preview (alice's pane hides the secret graph the
+//                      prohibition flipped, bob's + the ungated pane keep it)
 //   (any other cmd)  → throws Error (catches unexpected IPC surface drift)
 
 /** The script string injected via page.addInitScript before the page's own scripts run. */
@@ -48,6 +53,38 @@ export const tauriMockScript: string = `
     ] }
   });
 
+  // [FABLE-5] sq-ixc3.15 — the ODRL policy tool's native round-trip (odrl_preview). The mock
+  // mirrors the Rust contract (gui/src-tauri/src/odrl.rs): the SAME SPARQL-JSON docs the real
+  // PodStore gating produces, with alice's pane HIDING the secret graph her prohibition flips
+  // and bob's pane keeping it; a malformed policy resolves the fail-closed deny-everything
+  // shape (nothing materialized, zero-row panes, the parse reason surfaced verbatim).
+  var G_PUBLIC = "http://example.org/public";
+  var G_SECRET = "http://example.org/secret";
+  function odrlRows(rows) {
+    return JSON.stringify({
+      head: { vars: ["g", "s", "title"] },
+      results: { bindings: rows.map(function (r) {
+        return {
+          g: { type: "uri", value: r[0] },
+          s: { type: "uri", value: r[1] },
+          title: { type: "literal", value: r[2] }
+        };
+      }) }
+    });
+  }
+  var ODRL_PUBLIC_ROW = [G_PUBLIC, "http://example.org/doc1", "Public report"];
+  var ODRL_SECRET_ROW = [G_SECRET, "http://example.org/doc2", "Secret memo"];
+  function odrlPane(requester, allow, rows, matched, notes) {
+    return {
+      requester: requester,
+      allow: allow,
+      matched_rules: matched,
+      unmet_constraints: [],
+      bridge_notes: notes,
+      results_json: odrlRows(rows)
+    };
+  }
+
   window.__TAURI__ = {
     core: {
       invoke: function (cmd, args) {
@@ -69,6 +106,46 @@ export const tauriMockScript: string = `
             );
           }
           return Promise.resolve(SERVICE_FIXTURE);
+        }
+        if (cmd === "odrl_preview") {
+          var policyText = (args && args.policy) || "";
+          var reqs = (args && args.requesters) || [];
+          var reqA = reqs[0] || "http://example.org/alice";
+          var reqB = reqs[1] || "http://example.org/bob";
+          if (policyText.indexOf("@prefix") === -1) {
+            // Malformed policy: NOTHING materialized — deny-everything, reason verbatim.
+            return Promise.resolve({
+              policy_ok: false,
+              policy_error: "Turtle parse error: unexpected token at line 1",
+              permissions: 0,
+              prohibitions: 0,
+              refused: false,
+              ungated_json: odrlRows([ODRL_PUBLIC_ROW, ODRL_SECRET_ROW]),
+              panes: [
+                odrlPane(reqA, false, [], [],
+                  ["policy malformed — nothing materialized (deny-everything)"]),
+                odrlPane(reqB, false, [], [],
+                  ["policy malformed — nothing materialized (deny-everything)"])
+              ]
+            });
+          }
+          // The sample policy: alice's prohibition hides the secret graph; bob keeps it.
+          return Promise.resolve({
+            policy_ok: true,
+            policy_error: null,
+            permissions: 2,
+            prohibitions: 1,
+            refused: false,
+            ungated_json: odrlRows([ODRL_PUBLIC_ROW, ODRL_SECRET_ROW]),
+            panes: [
+              odrlPane(reqA, false, [ODRL_PUBLIC_ROW],
+                ["http://example.org/policy1#prohibition1"],
+                ["deny: " + reqA + " read " + G_SECRET]),
+              odrlPane(reqB, true, [ODRL_PUBLIC_ROW, ODRL_SECRET_ROW],
+                ["http://example.org/policy1#permission2"],
+                ["grant: " + reqB + " read " + G_SECRET])
+            ]
+          });
         }
         return Promise.reject(new Error("[tauri-mock] Unexpected IPC invoke: " + cmd));
       }

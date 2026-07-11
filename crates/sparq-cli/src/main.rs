@@ -5,6 +5,12 @@
 use std::io::Read;
 use std::time::Instant;
 
+// [FABLE-5] (sq-lsp7k.8) Materializing tabular→RDF import (CSV direct mapping + the R2RML
+// materializing subset over CSV logical tables). The whole module exists only under the
+// opt-in `tabular` feature; the default CLI build carries none of it.
+#[cfg(feature = "tabular")]
+mod tabular;
+
 // T1.0 scaling lever: replace the system allocator (whose per-thread arena locks contend under
 // rayon's many-worker per-row allocation) with mimalloc (sharded, lock-light). Compile-time;
 // `--no-default-features --features mmap` builds with the system allocator for A/B.
@@ -42,6 +48,20 @@ fn main() {
         // terse code, so the subcommand is only present when built with `--features terse`.
         #[cfg(feature = "terse")]
         Some("terse") => cmd_terse(&args),
+        // [FABLE-5] (sq-8ju74) `to-hdt` EXPORTS a loaded RDF document as a standard-layout
+        // HDT v1.0 archive via sparq-hdt's direct in-memory encoder. Gated behind the opt-in
+        // `hdt-write` cargo feature (which implies `hdt`, the loader): the default CLI build
+        // carries no HDT code, so the subcommand is only present when built with
+        // `--features hdt-write`.
+        #[cfg(feature = "hdt-write")]
+        Some("to-hdt") => cmd_to_hdt(&args),
+        // [FABLE-5] (sq-lsp7k.8) `tabular` materializes RDF from CSV — direct mapping by
+        // default, R2RML (CSV logical tables) with `--mapping` — then loads the graph (and
+        // optionally queries it) or streams N-Triples to `--out`. Gated behind the opt-in
+        // `tabular` feature: the default CLI build carries no CSV/R2RML code and the
+        // subcommand is absent.
+        #[cfg(feature = "tabular")]
+        Some("tabular") => tabular::cmd_tabular(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli memstat <data-file> <format> [compressed]  # deterministic memory-composition breakdown (B/triple) + RSS\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)\n\n  env SPARQ_STORE_PROFILE=raw|compressed selects the in-RAM store profile on the shared load path (query/bench/reason/scaling); unset=raw; unknown value is a hard error");
             std::process::exit(2);
@@ -1196,6 +1216,53 @@ fn cmd_dump(args: &[String]) {
         }
     };
     print!("{serialized}");
+}
+
+/// [FABLE-5] (sq-8ju74) `to-hdt <data-file[.gz|.bz2|.zst]> <format> <out.hdt[.gz|.zst|.bz2]>` —
+/// load an RDF document through the shared load path (any ingestible format, `.hdt` itself
+/// included) and EXPORT it as a standard-layout HDT v1.0 archive (FourSectionDictionary +
+/// BitmapTriples, SPO) via `sparq_hdt::save` — the direct in-memory encoder, no temporary
+/// N-Triples round-trip. The output container (`.hdt.gz` / `.hdt.zst` / `.hdt.bz2`, or a bare
+/// `.hdt`) is chosen by the OUTPUT path's extension (the write side cannot sniff content that
+/// does not exist yet). HDT carries a SINGLE default graph: when the loaded input has named
+/// graphs (TriG / N-Quads / JSON-LD `@graph`) they are DROPPED from the archive, and a loud
+/// warning with the dropped graph/triple counts goes to stderr — never silently. An RDF 1.2
+/// quoted-triple term cannot be represented in standard HDT; `save` fails with a term error
+/// (exit 1) rather than emitting a lossy archive. Behind the opt-in `hdt-write` cargo feature.
+#[cfg(feature = "hdt-write")]
+fn cmd_to_hdt(args: &[String]) {
+    let (path, format, out) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(f), Some(o)) => (p.as_str(), f.as_str(), o.as_str()),
+        _ => {
+            eprintln!(
+                "usage: sparq-cli to-hdt <data-file[.gz|.bz2|.zst]> <format> <out.hdt[.gz|.zst|.bz2]>\n  \
+                 exports the loaded document as a standard HDT v1.0 archive (default graph only; \
+                 output compression chosen by the output extension)"
+            );
+            std::process::exit(2);
+        }
+    };
+    let g = load_quiet(path, format);
+    // Honesty over silence: HDT has no place for named graphs, so a dataset input (TriG /
+    // N-Quads / JSON-LD `@graph`) loses them in the archive. Count what is dropped and say so.
+    let (mut named_graphs, mut named_triples) = (0usize, 0usize);
+    g.for_named_graphs_with_prefix("", |_, sub| {
+        named_graphs += 1;
+        named_triples += sub.len();
+    });
+    if named_graphs > 0 {
+        eprintln!(
+            "warning: HDT carries a single default graph — dropping {named_graphs} named graph(s) \
+             ({named_triples} triple(s)); only the {} default-graph triple(s) are written",
+            g.len()
+        );
+    }
+    let t = Instant::now();
+    sparq_hdt::save(&g, out).unwrap_or_else(|e| {
+        eprintln!("error writing {out}: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("wrote {} triples to {out} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
 }
 
 /// [OPUS-4.8] (sq-vczh2, epic sq-2m6zm) `terse <terse-query>` — transpile a *terse* query into

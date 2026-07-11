@@ -1538,20 +1538,20 @@ records_to  = "TBD — bench/competitor-results/<engine>-parse-<UTC>.json (git-i
 featured    = false  # registry stub — no perf claim; implementing bead sq-hmd7l.6 promotes
 status      = "planning"
 
-# [SONNET-4.6] sq-hmd7l.14 — new serialization-throughput harness
+# [FABLE-5] sq-hmd7l.14 — serialization-throughput harness
 [[benchmark]]
 id          = "serialize-bench"
-name        = "Serialization throughput (sparq writers vs oxrdfio / Jena riot / serd)"
+name        = "Serialization throughput (sparq writers vs oxrdfio / Jena riot / serd / rapper)"
 category    = "parse"
-measures    = "MB/s serialize throughput for NT->Turtle, NT->NQuads, NT->RDF/XML round-trips vs serd, rapper, Jena riot, and oxrdfio; triple-count round-trip oracle"
-invoke      = "TBD — implementing bead sq-hmd7l.14"
-source      = "TBD — bench/parse/ (new serialize harness); scripts/bench-adapters/parse_cli_adapter.py"
-dataset     = "TBD — same pinned NT corpus as parse-competitors; sha256-pinned"
-quiet_box_sensitive = true
-pinning     = "TBD — corpus sha256 + competitor pinned version at gather time"
-records_to  = "TBD — bench/competitor-results/<engine>-serialize-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.14
-status      = "planning"
+measures    = "two labelled regimes, never cross-compared: (A) sparq in-process serialize-only writer matrix (nt/turtle/turtle-pretty/turtle-stream/trig/trig-stream; min-of-iters, MB/s over output bytes); (C) cross-engine one-process pipeline NT->{Turtle,NT} (min-of-iters process wall; mbps_in over the shared input corpus is the cross-comparable number). Every emitted document is ROUND-TRIP GATED (re-parse == source store: count + exact canonical N-Quads lines) before its timing row is trusted; a red competitor is a recorded outcome (e.g. rapper's Turtle xsd:double->decimal rewrite), only a sparq gate failure reds the panel; a per-run corrupted-document self-check proves the gate non-vacuous"
+invoke      = "bash bench/serialize/run.sh --smoke (sparq-only acceptance) | bash bench/serialize/run.sh (full panel; peers via PATH or SERIALIZE_SERDI/SERIALIZE_RAPPER/SERIALIZE_RIOT; SERIALIZE_OXRDFIO_BIN=auto builds the shim)"
+source      = "bench/serialize/{run.sh,README.md}; crates/sparq-engine-serialize/examples/serialize_bench.rs (public-API runner: gen/bench/pipe/check); scripts/bench-adapters/serialize_oxrdfio_adapter.sh; first read research/gap-serialize-2026-07.md"
+dataset     = "deterministic generated blank-node-free NT corpus (serialize_bench gen, LCG-seeded; SERIALIZE_SUBJECTS, 8 triples/subject; never committed) — exact-match round-trip gating needs bnode-freedom, so the parse-competitors corpus is NOT reused"
+quiet_box_sensitive = true  # timing arms are wall-clock; the round-trip gates are deterministic
+pinning     = "generator seed fixed in-source + SERIALIZE_SUBJECTS recorded in the envelope; competitor versions recorded per run (serdi/rapper/riot --version; oxrdfio shim pin, default = the workspace's own oxrdf/oxttl family); JSON-LD is the jsonld-bench axis; RDF/XML out of scope (no sparq writer / no in-repo re-parse oracle)"
+records_to  = "stdout (PHASE A/B/C lines) + optional SERIALIZE_JSON_OUT envelope, suggest bench/competitor-results/serialize-<UTC>.json (git-ignored)"
+featured    = false  # comparative gather panel; writer correctness itself is CI-gated by the sparq-engine-serialize crate suite
+status      = "active"  # [FABLE-5] sq-hmd7l.14
 
 # [SONNET-4.6] sq-hmd7l.15 — JSON-LD comparison
 [[benchmark]]
@@ -1628,20 +1628,20 @@ records_to  = "bench/competitor-results/gsp-<UTC>.json via GSP_JSON_OUT (git-ign
 featured    = false  # external-competitor differential harness, not a dashboard-promoted capability suite
 status      = "ok"  # smoke (sparq loopback) is self-contained; competitor columns are gather-time external cost
 
-# [SONNET-4.6] sq-hmd7l.12 — federation harness (FedShop vs Comunica + Jena SERVICE)
+# [FABLE-5] sq-hmd7l.12 — federation harness (FedShop-shaped vs Comunica + Jena SERVICE)
 [[benchmark]]
 id          = "federation-fedshop"
-name        = "Federation comparison — FedShop vs Comunica + Jena SERVICE over local member endpoints"
+name        = "Federation comparison — FedShop-shaped vs Comunica + Jena SERVICE over local member endpoints"
 category    = "query"
-measures    = "per-query result count + federation latency (ms) for FedShop-shaped queries over local member SPARQL endpoints; source-selection precision (members contacted vs correct members); result-count oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.12"
-source      = "TBD — bench/federation-fedshop/; scripts/bench-adapters/comunica_adapter.mjs + http_sparql_adapter.py"
-dataset     = "TBD — FedShop-shaped corpus split across local member endpoints; member data generated in-repo"
+measures    = "per-query canonical RESULT-SET agreement oracle (asserted BEFORE any timing) + federation wall time (best-of-N) for FedShop-shaped queries over 2 local sparq-server member endpoints; per-member HTTP REQUEST COUNTS via a counting reverse proxy (uniform across engines); source-selection precision/recall vs measured per-member block-relevance ground truth; explicit-SERVICE regime (sparq/comunica/jena) + virtual source-selection regime (comunica)"
+invoke      = "bash bench/federation/run.sh [--smoke]  # --smoke = acceptance: one query, sparq-vs-Comunica result-set agreement"
+source      = "bench/federation/{run.sh,compare.py,comunica_runner.mjs}"
+dataset     = "FedShop-shaped vendor+ratingsite shop federation, generated in-repo by compare.py (deterministic seed; per-member sha256 recorded in the results JSON); LargeRDFBench's public endpoints are dead — local replicas only"
 quiet_box_sensitive = true
-pinning     = "TBD — corpus sha256 + Comunica + Jena pinned versions at gather time"
-records_to  = "TBD — bench/competitor-results/<engine>-federation-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.12
-status      = "planning"
+pinning     = "per-member corpus sha256 + the RESOLVED @comunica/query-sparql npm version recorded in the results JSON at every gather (FED_COMUNICA_SPEC pins the install; Jena optional via FED_JENA_ARQ)"
+records_to  = "bench/competitor-results/federation-fedshop-<UTC>.json (git-ignored)"
+featured    = false  # comparative harness; smoke (sparq + gather-time Comunica) is the committed self-test
+status      = "ok"
 
 # [SONNET-4.6] sq-hmd7l.13 — LDBC Graphalytics comparison
 [[benchmark]]
@@ -1664,14 +1664,14 @@ id          = "reason-el-real"
 name        = "OWL 2 EL classification on real ontologies (GO / OpenGALEN) vs ELK"
 category    = "inference"
 measures    = "EL classification wall time + subsumption count on the Gene Ontology (GO) and OpenGALEN ontologies vs ELK; subsumption-count oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.8"
-source      = "TBD — bench/reason-el-real/; scripts/bench-adapters/ (ELK adapter)"
-dataset     = "TBD — Gene Ontology OWL release (sha256-pinned) + OpenGALEN OWL (sha256-pinned); downloaded at gather time"
+invoke      = "ONLY=sparq bash scripts/bench/reason-el-same-box.sh --smoke   # hermetic acceptance (pinned vendored fixture). Full gather: bash scripts/bench/reason-el-same-box.sh"
+source      = "scripts/bench/reason-el-same-box.sh (harness); crates/sparq-reason-el/examples/reason_el_real_bench.rs (sparq leg + smoke); crates/sparq-reason-el/examples/data/el_smoke.ttl (vendored fixture); ELK invoked via its standalone CLI jar (gather-only /tmp)"
+dataset     = "Gene Ontology (go-basic.owl, CC-BY-4.0) + OpenGALEN 8 (OWL); sha256 recorded per envelope at gather time; converted OWL->NT via Jena riot. gather-only /tmp, NOT committed"
 quiet_box_sensitive = true
-pinning     = "TBD — GO + OpenGALEN release SHA or URL + sha256; ELK jar pinned version"
-records_to  = "TBD — bench/competitor-results/elk-reason-el-<UTC>.json (git-ignored); research/gap-reason-el-2026-07.md"
-featured    = false  # registry stub; implementing bead sq-hmd7l.8
-status      = "planning"
+pinning     = "ontology_sha256 recorded per gather envelope; ELK_VERSION (default 0.6.0) + JENA_VERSION (default 5.4.0) pinned in the harness; the committed smoke fixture pins a subsumption COUNT (not a timing)"
+records_to  = "bench/competitor-results/ (git-ignored envelopes: reason-el-<ontology>-<UTC>.json); research/gap-reason-el-2026-07.md"
+featured    = false  # opt-in reasoner crate; non-canonical until a quiet-box gather
+status      = "harness-ready"
 
 # [SONNET-4.6] sq-hmd7l.9 — QL rewriting vs Ontop on NPD + Requiem suites
 [[benchmark]]
@@ -1748,3 +1748,45 @@ pinning     = "TBD — W3C RIF test-suite commit sha256"
 records_to  = "TBD — bench/rif-conformance/results.tsv (pass/fail counts); NOT a perf number"
 featured    = false  # registry stub; implementing bead sq-hmd7l.24. NOT-COMPARABLE perf verdict
 status      = "planning"
+
+# [FABLE-5] sq-lsp7k.1.1 — sparq-forms derivation micro-bench: the cost of one
+# shape→FormDescription derivation (shape selection + field enumeration + DASH
+# widget scoring + nested sh:node recursion) over a synthetic in-process
+# shapes+data graph. The committed STDOUT/JSON facts are the DETERMINISTIC
+# structural counts (switcher entries, fields, nested sub-forms); the per-form
+# µs are advisory + box-sensitive + NON-CANONICAL (never baked into docs/gates).
+[[benchmark]]
+id          = "forms-derive-overhead"
+name        = "sparq-forms shape-to-FormDescription derivation overhead"
+category    = "query"
+measures    = "per-derivation µs for a grouped/enum/nested person form (advisory, box-sensitive); deterministic structural counts"
+invoke      = "cargo run -p sparq-forms --example derive_form_bench --release"
+source      = "crates/sparq-forms/examples/derive_form_bench.rs"
+dataset     = "SYNTHETIC, generated in-process (200 focus nodes) — no external dataset"
+quiet_box_sensitive = true
+pinning     = "none (in-process synthetic graphs)"
+records_to  = "stdout (--json <path> for the deterministic structural counts)"
+status      = "ok"
+# [FABLE-5] trend-only DISPOSITION (featured = false): internal overhead
+# micro-bench, no head-to-head capability claim — the documented G3/drift-scan
+# escape hatch.
+featured    = false
+
+# [FABLE-5] sq-lsp7k.8 (epic sq-lsp7k): the opt-in `tabular` materializing CSV->RDF import
+# (direct mapping + R2RML subset). Two engine-internal timers: the full one-shot import
+# (map + parallel NT ingest -> Graph) and the mapping stage alone (--out /dev/null).
+[[benchmark]]
+id          = "tabular-import-smoke"
+name        = "CSV->RDF materializing import (tabular direct mapping) perf smoke"
+category    = "ingest"
+measures    = "one-shot import wall time (CLI-internal 'loaded N triples in Xs' line, M/s) + mapping-stage-only time ('wrote N triples'); min-of-N"
+invoke      = "bash bench/tabular/perf-smoke.sh [rows=1000000] [iters=3]"
+source      = "bench/tabular/perf-smoke.sh; crates/sparq-cli/src/tabular.rs"
+dataset     = "SYNTHETIC 4-column CSV generated in-script by awk — deterministic (content is a pure function of the row index, no RNG); 5 triples/row"
+quiet_box_sensitive = true
+pinning     = "pin the row count + iters; deterministic input, so triple counts are exact (rows*5)"
+records_to  = "stdout"
+status      = "ok"
+# Internal throughput smoke for the import path, no head-to-head capability claim yet
+# (competitor CSV-import comparisons belong to the sq-hmd7l comparative program).
+featured    = false

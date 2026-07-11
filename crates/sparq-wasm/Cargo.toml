@@ -41,6 +41,20 @@ sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = tr
 # `wasm_bundle_bytes` baseline is byte-identical; the site/published build turns it on.
 sparq-canon = { path = "../sparq-canon", default-features = false, optional = true }
 
+# [FABLE-5] sq-586sh (#890 ask A): the stateless ODRL usage-control evaluator
+# (`sparq-policy`) compiled to wasm32, OPT-IN behind the `policy` feature (OFF by
+# default). PROBE scope: proves wasm32 compat + gives the bundle-delta measurement a
+# reachable parse→evaluate→conflict path behind two EXPERIMENTAL free functions
+# (`policyEvaluate` / `policyConflicts`); the full JS API awaits a maintainer
+# public-contract decision, and the published `@jeswr/sparq` bundle (js `build:wasm`)
+# does NOT enable it — the lean default bundle links zero policy code and stays
+# byte-identical. `default-features = false` keeps the stateful `count-enforcement`
+# store (Mutex/lockfile usage counters — meaningless in a single-threaded browser tab
+# with no POSIX filesystem) compiled OUT; `sparq-policy` itself deps only
+# sparq-core/sparq-engine (both already default-features = false here) + oxrdf, so no
+# new external dependency enters the wasm graph.
+sparq-policy = { path = "../sparq-policy", default-features = false, optional = true }
+
 # oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so
 # select getrandom's browser backend (crypto.getRandomValues). The matching
 # `--cfg getrandom_backend="wasm_js"` is set in .cargo/config.toml.
@@ -106,6 +120,9 @@ serialize-rdf = ["sparq-engine/serialize-rdf", "dep:js-sys"]
 # its oxrdf-0.2 bridge needs on wasm. OFF by default so the lean bundle is byte-identical;
 # the published `@jeswr/sparq` bundle (js `build:wasm`) turns it on.
 canon = ["dep:sparq-canon", "dep:getrandom02"]
+# [FABLE-5] sq-586sh: the ODRL usage-control wasm32 probe (see the sparq-policy
+# dependency note above). OFF by default; NOT enabled by the published bundle build.
+policy = ["dep:sparq-policy"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]

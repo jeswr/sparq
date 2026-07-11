@@ -197,6 +197,40 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   invalidity; with a file-system resolver wired to the fetched `Core_v1.22` archive, tests using
   non-Core `profile` attributes graduate from `skip:imports` to `Outcome::Pass`.
 
+## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
+
+RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
+rule dialect with `NOT` (negation as failure) + `AGGREGATE COUNT` atoms and a minimal
+exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
+through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
+non-incremental per-stratum evaluator on the shared substrate join kernels.
+
+```rust
+use sparq_reason::datalog::{eval, parse_program, stratify};
+
+pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String>;
+pub fn stratify(dict: &Dict, p: &Program) -> Result<Stratification, String>; // checker alone
+pub fn eval(dict: &mut Dict, facts: &[[Id;3]], p: &Program) -> Result<Vec<[Id;3]>, String>;
+impl Program { pub fn n_rules(&self) -> usize; }
+impl Stratification { pub fn n_strata(&self) -> usize; }
+```
+
+```rust
+let mut dict = Dict::new();
+let rules = parse_program(&mut dict, r#"@prefix ex: <http://ex/> .
+[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .
+[?x, a, ex:Hub]  :- [?x, ex:deg, ?c], FILTER(?c >= 3) .
+[?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."#)?;
+let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
+```
+
+Fragment honesty (all loud parse errors, never silent): constant predicates only;
+COUNT only (SUM/MIN/MAX/AVG beaded); `FILTER` is exact `xsd:integer`/`decimal`
+comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
+non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
+counts DISTINCT body matches per group; counts mint `xsd:integer` literals. Naive
+rounds per stratum (fixture-scale; semi-naive + incremental maintenance are beaded).
+
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
 The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 30-XSD-datatype map via `Recognized::standard()` — the `DTYPE_TABLE` single source of truth in `dtype.rs` — plus the always-recognized `rdf:langString` (or bring a custom map via `materialize_d(d, …, …)`):
@@ -321,7 +355,9 @@ returning `ConsistencyOutcome` / `EntailmentOutcome`: a tri-state verdict PLUS t
 that produced it (traceability). `entailment()` checks `O ⊨ α` per conclusion axiom by an
 argued refutation encoding onto the tableau (`SubClassOf`, `ClassAssertion`,
 `ObjectPropertyAssertion` via a fresh-class encoding, `EquivalentClasses`, `DisjointClasses`,
-domain/range; property-axiom conclusions abstain). Every guard fails CLOSED — uncertainty is a
+domain/range, and — since sq-pbz04.4.9 — `SubObjectPropertyOf(R,S)` via the
+fresh-individual-pair lift `{R(a,b), B(b), (∀S.¬B)(a)}`, sound and complete because the
+tableau's ∀-rule fires modulo the role hierarchy). Every guard fails CLOSED — uncertainty is a
 typed `UnknownReason`, never a guessed verdict. **Conclusion anonymous individuals
 (sq-pbz04.4.13):** a blank-node individual in the CONCLUSION is read EXISTENTIALLY (per the
 official Direct-Semantics tests) — L1's skolem-constant reading is entailment-preserving on the
@@ -368,7 +404,7 @@ the whole graph, never a partial extraction):
 | Cardinality (min/max/exact/qualified) | Refused | `OutOfFragment` |
 | Nominals (`owl:oneOf`, `owl:hasValue`, `owl:hasSelf`); inverse properties (`owl:inverseOf`); property characteristics (Transitive/Functional/IFP/Sym/Asym/Refl/Irr) | Refused | `OutOfFragment` |
 | `owl:sameAs` / `owl:differentFrom`; property chains; keys; `owl:disjointUnionOf` | Refused | `OutOfFragment` |
-| Datatypes / data properties / data-range restrictions | Refused | `DataConstruct` |
+| Datatypes / data properties / data-range restrictions; a bare datatype-map IRI (`xsd:*`, `rdfs:Literal`, `owl:real`/`rational`) in ANY class position incl. an `rdfs:range`/`rdfs:domain` object (sq-pbz04.4.9) | Refused | `DataConstruct` |
 | Malformed RDF list (unterminated, cyclic, branching, empty, orphan cell, `rdf:nil` as list cell) | Refused | `MalformedList` |
 | Malformed class expression (missing filler/property, conflicting shapes, cyclic, bare blank) | Refused | `MalformedClassExpression` |
 | Undeclared predicate (role-vs-annotation ambiguous); RDF 1.2 triple term | Refused | `Unclassifiable` |
@@ -389,9 +425,10 @@ the whole graph, never a partial extraction):
 |---|---|---|
 | `SubClassOf`, `ClassAssertion`, `EquivalentClasses`, `DisjointClasses`, `ObjectPropertyDomain` / `ObjectPropertyRange` | Yes (sound + complete via refutation encoding) | — |
 | `ObjectPropertyAssertion` (fresh-class encoding — sound and complete, `check.rs` §4) | Yes | — |
+| `SubObjectPropertyOf` (fresh-individual-pair encoding `{R(a,b), B(b), (∀S.¬B)(a)}` — sound and complete; sq-pbz04.4.9) | Yes | — |
 | Tree-shaped conclusion blank node (rolls up to an existential class assertion; sq-pbz04.4.13) | Yes | — |
 | Non-tree conclusion blank node (shared / cyclic / named-successor / free-existential root) | Never | `ConclusionAnonymousIndividual` |
-| `SubObjectPropertyOf` conclusion | Never | `UnencodedConclusion` |
+| A future axiom kind without an argued encoding (none expressible today) | Never | `UnencodedConclusion` |
 | Deterministic count budget exhausted mid-search | Never | `ResourceBudget` |
 
 Deferred constructs — inverse roles, cardinality/functionality, nominals, transitivity,

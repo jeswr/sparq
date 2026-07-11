@@ -1,0 +1,5 @@
+# [FABLE-5] (sq-lsp7k.8) Adapted from W3C R2RML test case R2RMLTC0000 ("no triples map"):
+# a mapping document with no triples map generates an EMPTY output graph even though a
+# logical table (here: the CSV) has rows. SQL logical table -> CSV logical table.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .

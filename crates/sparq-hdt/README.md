@@ -26,7 +26,9 @@ sparq_hdt::save(&graph, "out.hdt")?;
 
 In sparq-cli (behind the opt-in `hdt` cargo feature —
 `cargo build -p sparq-cli --features hdt`), the `hdt` format argument or a
-`.hdt`/`.hdt.gz` file extension routes loading through this crate.
+`.hdt`/`.hdt.gz` file extension routes loading through this crate; the opt-in
+`hdt-write` CLI feature adds `sparq-cli to-hdt <file> <in-fmt> <out.hdt>`, the
+export direction over `save` (sq-8ju74).
 
 ## ✨ Features
 

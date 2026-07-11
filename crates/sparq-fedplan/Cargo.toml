@@ -64,3 +64,12 @@ oxttl = { workspace = true }
 name = "fedplan"
 harness = false
 required-features = ["fedplan"]
+
+# [FABLE-5] sq-vw3ax.13: the site federation-capability capture harness runs the real
+# select_sources + plan_bgp over a declared fixture and prints verbatim output for
+# site/src/lib/federation.ts (the anti-fabrication discipline of sq-dwdm / sq-3was).
+# Registering the requirement keeps `cargo build --all-targets` (default features)
+# green — the example's whole file is `#![cfg(feature = "fedplan")]`-gated.
+[[example]]
+name = "capture_surface_federation"
+required-features = ["fedplan"]

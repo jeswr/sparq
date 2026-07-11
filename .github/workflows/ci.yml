@@ -643,6 +643,15 @@ jobs:
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
       - name: clippy (wasm32 target, jsonld feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld -- -D warnings
+      # [FABLE-5] sq-586sh: also build + clippy WITH the opt-in `policy` feature (the
+      # sparq-policy ODRL-evaluator wasm32 probe, #890 ask A) so the wasm32 compat this
+      # probe established is gate-protected. NOT in the published bundle (build:wasm) —
+      # the full JS API awaits a maintainer public-contract decision. The DEFAULT
+      # bundle stays policy-free (perf floor byte-identical).
+      - name: Build sparq-wasm for the browser target (policy feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features policy
+      - name: clippy (wasm32 target, policy feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features policy -- -D warnings
       # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
       # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
       # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
@@ -1700,15 +1709,17 @@ jobs:
     # <pass> …` lines as the same belt-and-braces `>= floor` gate. The runner's own
     # `assert!(pass >= FLOOR)` is the primary gate. Honest baseline: NOT 100%
     # conformant (remote-context / option / negative divergences are documented gaps;
-    # compact is RDF→compacted-JSON-LD via the native Compaction Algorithm gated on a
-    # lossless round-trip; frame is RDF→framed-JSON-LD via the native Framing
-    # Algorithm gated on RDF-equivalence to the normative expected output, each with
-    # its own honest below-floor divergence + skip buckets); expand/flatten are
-    # reported as not-implemented buckets and never fail the gate. Never lower the
-    # ratchet (raise the `FLOOR` const in crates/sparq-conformance/src/floors/<lane>.rs
-    # as oxjsonld + the native writer/compactor/framer improve — [FABLE-5] sq-oy1f.40:
-    # the lib-side single source the runner + scoreboard + the grep gate below all read).
-    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 186, frame >= 61)
+    # compact is the NATIVE document-level Compaction Algorithm (sparq-jsonld) gated
+    # on document equivalence with the W3C EXPECTED output ([FABLE-5] sq-oy1f.27 —
+    # the oracle correction from the old writer self-reparse round-trip); frame is
+    # RDF→framed-JSON-LD via the native Framing Algorithm gated on RDF-equivalence
+    # to the normative expected output, each with its own honest below-floor
+    # divergence + skip buckets. Never lower the ratchet (raise the `FLOOR` const in
+    # crates/sparq-conformance/src/floors/<lane>.rs as the native pipeline improves —
+    # [FABLE-5] sq-oy1f.40: the lib-side single source the runner + scoreboard + the
+    # grep gate below all read; the floors in this job's display name are informative,
+    # the greps below read the real consts).
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 228, frame >= 61)
     # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (jsonld-suite) — skip only
     # when ENFORCED selection proves sparq-conformance unaffected (fail-closed).
     needs: [changes, select]

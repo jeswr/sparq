@@ -26,6 +26,10 @@ function healthyInputs() {
     pages: {
       "/page": [...first, "static/chunks/app/page.js"],
       "/capabilities/page": [...first, "static/chunks/app/capabilities/page.js"],
+      "/surface/data-formats/page": [
+        ...first,
+        "static/chunks/app/surface/data-formats/page.js",
+      ],
     },
   };
   const routes = { basePath: "/sparq" };
@@ -33,6 +37,8 @@ function healthyInputs() {
   const htmlByLabel = {
     "/": '<script src="/sparq/_next/static/chunks/webpack.js"></script>',
     "/capabilities": '<script src="/sparq/_next/static/chunks/app/capabilities/page.js"></script>',
+    "/surface/data-formats":
+      '<script src="/sparq/_next/static/chunks/app/surface/data-formats/page.js"></script>',
   };
   return { loadable, app, routes, images, htmlByLabel };
 }
@@ -89,6 +95,8 @@ test("CONFIG: adapts to the root-relative (basePath '') build mode", () => {
   inputs.htmlByLabel = {
     "/": '<script src="/_next/static/chunks/webpack.js"></script>',
     "/capabilities": '<script src="/_next/static/chunks/app/capabilities/page.js"></script>',
+    "/surface/data-formats":
+      '<script src="/_next/static/chunks/app/surface/data-formats/page.js"></script>',
   };
   const { errors, summary } = analyzeBundle(inputs);
   assert.deepEqual(errors, []);
@@ -110,9 +118,41 @@ test("CONFIG: an image-optimiser reference in exported HTML is flagged", () => {
   assert.ok(errors.some((e) => /image optimiser/.test(e)));
 });
 
-test("GUARDED_ROUTES covers exactly the Home REPL and /capabilities", () => {
+test("GUARDED_ROUTES covers exactly the Home REPL, /capabilities, and the lazy-codec consumer", () => {
   assert.deepEqual(
     GUARDED_ROUTES.map((r) => r.label).sort(),
-    ["/", "/capabilities"],
+    ["/", "/capabilities", "/surface/data-formats"],
   );
+});
+
+// [FABLE-5] sq-4ssz1 (#1046) — the lazy-codec rule: the zstd decoder must stay a dynamic
+// split point, and its chunk must never reach the codec consumer's first-load payload.
+test("fzstd is pinned as a heavy module (PRESENCE) and flagged if it leaks into first-load", () => {
+  assert.ok(HEAVY_MODULE_SUFFIXES.includes("-> fzstd"));
+
+  // A build where the fzstd split point vanished (static-import regression) fails PRESENCE.
+  const noSplit = healthyInputs();
+  delete noSplit.loadable["src -> fzstd"];
+  const { errors: presenceErrors } = analyzeBundle(noSplit);
+  assert.ok(presenceErrors.some((e) => /^PRESENCE: "fzstd"/.test(e)));
+
+  // A build where the codec chunk leaked into /surface/data-formats' first-load fails ISOLATION.
+  const leaked = healthyInputs();
+  const codecChunk = leaked.loadable["src -> fzstd"].files[0];
+  leaked.app.pages["/surface/data-formats/page"].push(codecChunk);
+  const { errors: isolationErrors } = analyzeBundle(leaked);
+  assert.ok(
+    isolationErrors.some(
+      (e) => e.startsWith("ISOLATION: /surface/data-formats") && e.includes(codecChunk),
+    ),
+  );
+
+  // The route's guard is SCOPED to the codec (`heavyModules`): a commons chunk it
+  // legitimately shares with another heavy module's file list (the editors also sit in
+  // the hero-runner's chunks) must NOT be flagged for this route.
+  const shared = healthyInputs();
+  const heroChunk = shared.loadable["src -> @/components/home/hero-runner"].files[0];
+  shared.app.pages["/surface/data-formats/page"].push(heroChunk);
+  const { errors: sharedErrors } = analyzeBundle(shared);
+  assert.deepEqual(sharedErrors, []);
 });

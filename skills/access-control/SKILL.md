@@ -260,6 +260,12 @@ Materialize the authorization view from the access-control documents, then enfor
   over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
   `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
   that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split). The
+  **ODRL lane on `/authz/*`** (sq-lrtc3.1 + sq-3mu76) has LANDED as `sparq-server`'s opt-in
+  `odrl-authz` feature — dataset-carried ODRL policies are fed through `materialize_odrl_policy`
+  (deny-overrides, fail-closed) before the access-controlled query runs, so an ODRL policy gates a
+  SPARQL query end-to-end over HTTP; since sq-3mu76 the advisory `/authz/decide` +
+  `/authz/wac-allow` run the same lane (read-scoped advertisement), so they never report an allow
+  the query lane would refuse to honour. The
   **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
   and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
   was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
@@ -830,6 +836,37 @@ wrong-key / unresolvable-issuer list VC, or a verified graph with no `encodedLis
 status-authority `did:key`/`did:web` issuer DID via `VerifyingLiveStatusCheck::with_did_issuer(.., did_resolver,
 authority_did, ..)` (the `did` feature, same binding the admission gate uses). Research-grade, externally
 **UNAUDITED** (`sq-qhy4`): a verified issuer signature, NOT a privacy/unlinkability guarantee.
+
+## Pattern-scoped masking spike — [FABLE-5] sq-lrtc3.3 (opt-in `pattern-scope`)
+
+Sub-named-graph (triple-pattern / row-level) result masking: an ODRL-style target as a
+set of **allow/deny triple patterns** over a source graph, so a session can be granted
+*"the contacts graph except phone numbers"*. Design record (options analysis, ODRL
+vocabulary, production caching path, follow-up beads):
+`research/odrl-pattern-scoped-targets-2026-07.md`. Measured envelope:
+`bench/pattern-scope/` (work-box JSONs, non-canonical).
+
+**Mechanism — masked-subgraph materialization, NOT per-scan filtering.** A scoped graph
+is decoded, filtered, and rebuilt as a physical replica; the engine evaluates a dataset
+in which masked triples are **physically absent**, so equivalence with an oracle store
+(the source with those triples deleted) under SELECT / `OPTIONAL` / `EXISTS` / `MINUS` /
+aggregates / `COUNT` / `ASK` / `GRAPH ?g` holds **by construction** (differential
+battery: `crates/sparq-solid/tests/pattern_scope.rs`). Zero engine/core changes; the
+graph-granular enforcement walk is reused unchanged.
+
+- `ScopePattern::new(s, p, o)` / `::any()` — per-triple predicate, `None` = wildcard,
+  **term-identity** matching (no join variables, no value equality).
+- `GraphScope::allow_only(patterns)` (permission shape) / `::deny_within(patterns)`
+  (prohibition carving a hole); a triple is visible iff it matches ≥1 allow AND 0 deny
+  (**deny overrides allow**; empty allow grants nothing — fail-closed).
+- `masked_graph(&Graph, &GraphScope) -> Graph`; `masked_dataset(&Graph, &decisions)`
+  (explicit-decision assembly: absent from the map = absent from the dataset; a fully
+  masked graph is **omitted** — indistinguishable from absent).
+- `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
+  (a scope can only shrink the session's graph-level accessible set, never widen), then
+  `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
+  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
+  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
 
 ## Related skills
 

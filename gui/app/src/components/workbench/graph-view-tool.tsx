@@ -21,22 +21,14 @@ import { Badge } from "@/components/ui/badge";
 import { useEngine, type QueryOutcome } from "@/lib/engine-context";
 import { GraphView } from "@/components/workbench/graph-view";
 import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
-import type { ToolOverride } from "@/data/tools";
+
+// [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
+// rail/tab honesty read path) so THIS panel module can stay behind a lazy dynamic import().
+// Re-exported here so the panel file remains the tool's single import surface.
+export { GRAPH_VIEW_TOOL_OVERRIDE } from "@/components/workbench/graph-view-tool.meta";
 
 /** The default CONSTRUCT query the tool opens with — broad enough to show the sample graph. */
 const DEFAULT_CONSTRUCT = `CONSTRUCT WHERE { ?s ?p ?o } LIMIT 100`;
-
-/**
- * Optional honesty-metadata override merged over the base `ToolDef` (data/tools.ts) by the
- * tool-panel registry's `resolveTool` and by the stub itself. Now that the working panel has
- * landed, flip tier/built/group to reflect reality — never by editing the shared data/tools.ts.
- */
-export const GRAPH_VIEW_TOOL_OVERRIDE: ToolOverride = {
-  tier: "live",
-  built: true,
-  group: "working",
-  blurb: "Node-link visualisation of CONSTRUCT/DESCRIBE results over the live store.",
-};
 
 export function GraphViewTool() {
   const { run, status } = useEngine();

@@ -164,8 +164,10 @@ pub fn detect_conflicts(policy: &Policy) -> Vec<Conflict> {
 /// no `odrl:conflict` at all (the bridge's operative default is deny-overrides — the one
 /// strategy it implements). An unset default is treated as `prohibit`, **not** the ODRL
 /// spec default of `invalid`: fully honouring `invalid` for every conflicting-yet-
-/// undeclared policy would refuse the bridge's core deny-overrides use case, a larger
-/// breaking change tracked as a follow-up. See the crate README for the honest boundary.
+/// undeclared policy would refuse the bridge's core deny-overrides use case. This
+/// divergence is deliberate and documented (issue #1375, decided: keep deny-overrides —
+/// fail-closed, never authorises what a prohibition forbids). See the crate README's
+/// ODRL conformance note for the honest boundary.
 ///
 /// # Examples
 ///

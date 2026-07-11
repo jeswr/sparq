@@ -841,14 +841,12 @@ export function sameBoxComparison(suite: string): SameBoxComparison | undefined 
 }
 
 // Number-formatter matching dashboard.js fmtNum (no fabrication, just display).
-export function fmtNum(v: number | null | undefined): string {
-  if (v == null) return "—";
-  if (v === 0) return "0";
-  const abs = Math.abs(v);
-  if (abs >= 1000) return v.toLocaleString("en-US", { maximumFractionDigits: 0 });
-  if (abs >= 1) return (Math.round(v * 100) / 100).toLocaleString("en-US");
-  return (Math.round(v * 10000) / 10000).toString();
-}
+// [FABLE-5] sq-qgkwy.1 — moved to src/lib/fmt-num.ts and RE-EXPORTED here for server-side
+// callers only. "use client" components must import it from "@/lib/fmt-num" directly:
+// importing any VALUE from THIS module drags the full ~1.3 MB generated snapshot into the
+// browser bundle (it double-shipped /benchmarks/[type]'s data as a ~762 KB raw page chunk
+// on top of the prerendered HTML). Guarded by test/benchmarks-data-server-only.test.mjs.
+export { fmtNum } from "@/lib/fmt-num";
 
 // ---- TREND series (sq-hsyg; mirror of dashboard.js trendPoints) -----------------------
 // Per-metric history points {date, value} across the committed window, oldest → newest.

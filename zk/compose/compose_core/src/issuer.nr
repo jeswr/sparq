@@ -156,14 +156,56 @@ pub fn scalar_mul(scalar: Field, base: Point) -> Point {
 }
 
 /// Assert a point lies on Baby-JubJub: `x^2 + y^2 == 1 + d*x^2*y^2` (a = 1). The
-/// caller passes PRIVATE `R` and `pk` through here so an off-curve witness (a
-/// small-subgroup / twist point a forger might use to satisfy the equation
-/// off-curve) is rejected -- mirroring `sig::verify`'s `is_on_curve` guard.
+/// caller passes PRIVATE `R` and `pk` through here so an OFF-curve witness (a twist
+/// point, or an arbitrary `(x, y)` a forger might pick to satisfy the verification
+/// equation off the curve) is rejected -- mirroring `sig::verify`'s `is_on_curve`
+/// guard.
+///
+/// [OPUS-4.8] sq-l15mi (audit H-1): this on-curve guard does NOT exclude LOW-ORDER
+/// / TORSION points. Baby-JubJub has cofactor 8, so its full group contains torsion
+/// points of order 2/4/8 that ARE on the curve -- `x^2 + y^2 == 1 + d*x^2*y^2` holds
+/// for them, so this assert ACCEPTS them. Prime-order-subgroup membership is a
+/// SEPARATE constraint (`assert_in_prime_order_subgroup`). The earlier version of
+/// this comment wrongly claimed the on-curve assert rejected "small-subgroup" points.
 // `pub` so the holder-PoK member reuses this on-curve guard verbatim (design S3.4).
 pub fn assert_on_curve(p: Point) {
     let xx = p.x * p.x;
     let yy = p.y * p.y;
     assert(xx + yy == 1 + BJJ_D * xx * yy, "point is not on Baby-JubJub");
+}
+
+/// Assert `p` lies in the PRIME-ORDER (order-`L`) subgroup of Baby-JubJub:
+/// `[L]*p == O`, where `O` is the neutral `(0, 1)`. This is the in-circuit twin of
+/// the host `Affine::is_in_correct_subgroup_assuming_on_curve` (`[MODULUS]*P == 0`)
+/// -- the SAME cofactor/order check, no invented crypto. The caller MUST have
+/// already run `assert_on_curve(p)` (the `[L]*p` computation is only meaningful for
+/// an on-curve `p`).
+///
+/// # Why it is soundness-critical (sq-l15mi, audit H-1)
+/// Baby-JubJub has cofactor 8, so the full curve group has order `8*L` and contains
+/// torsion points of order 2/4/8 that `assert_on_curve` accepts. A torsion /
+/// low-order issuer public key breaks Schnorr soundness on the hidden-issuer path:
+/// for an order-2 `pk`, `e*pk` depends only on the parity of the challenge `e`, so a
+/// prover holding NO secret key can forge a satisfying `(R, s)` (pick `s`, set
+/// `R = s*G - e*pk`) with constant probability, then bind that torsion key into the
+/// public `key_set_root`. Requiring `[L]*pk == O` keeps torsion keys out.
+///
+/// # Correctness of `[L]*p == O`
+/// `L` is prime, so `ord(p) | L` iff `ord(p) in {1, L}`: `[L]*p == O` holds exactly
+/// for the neutral and the order-`L` (prime-order-subgroup) points, and for NO
+/// torsion point of order 2/4/8 (each of those needs a factor from the cofactor 8,
+/// not `L`, to vanish). The neutral itself passes here but is rejected separately by
+/// `schnorr_verify`'s identity guard, so the two together admit only genuine
+/// order-`L` keys. `L < 2^SCALAR_BITS`, so `scalar_mul(BJJ_L, p)` decomposes `L`
+/// exactly.
+// [OPUS-4.8] sq-l15mi: the missing prime-order subgroup / torsion-key guard on the
+// hidden-issuer path. `pub` so the in-crate Noir tests can isolate it.
+pub fn assert_in_prime_order_subgroup(p: Point) {
+    let lp = scalar_mul(BJJ_L, p);
+    assert(
+        (lp.x == 0) & (lp.y == 1),
+        "public key not in prime-order subgroup (torsion / low-order key rejected)",
+    );
 }
 
 /// Recompute the Schnorr challenge `e = Poseidon2([DOMAIN, R.x, R.y, pk.x, pk.y,
@@ -241,24 +283,35 @@ pub fn assert_lt_l(value: Field) {
 /// PRIVATE: `pk`, `r` (= signature R), `s`, `e`, `e_k`. PUBLIC (caller-bound):
 /// `m`. Asserts:
 ///   1. `pk` and `R` are on the curve (off-curve forgery guard).
-///   2. `pk` is not the neutral `(0, 1)` (identity-key universal forgery guard --
+///   2. `pk` and `R` are in the prime-order subgroup, `[L]*P == O` (torsion /
+///      low-order-key forgery guard, sq-l15mi -- on-curve alone does NOT exclude the
+///      cofactor-8 torsion points; `sig::verify` mirrors this with
+///      `is_in_correct_subgroup_assuming_on_curve`).
+///   3. `pk` is not the neutral `(0, 1)` (identity-key universal forgery guard --
 ///      `sig::verify` rejects `pk.is_zero()`; the twisted-Edwards neutral is
 ///      `(0,1)`).
-///   3. `s < L` (canonical scalar).
-///   4. `e == Poseidon2(...) mod L` (challenge binding, see `challenge_scalar`).
-///   5. `s*G == R + e*pk` (the verification equation).
+///   4. `s < L` (canonical scalar).
+///   5. `e == Poseidon2(...) mod L` (challenge binding, see `challenge_scalar`).
+///   6. `s*G == R + e*pk` (the verification equation).
 pub fn schnorr_verify(pk: Point, r: Point, s: Field, e: Field, e_k: Field, m: Field) {
     // (1) on-curve guards for the private points.
     assert_on_curve(pk);
     assert_on_curve(r);
-    // (2) reject the identity public key (neutral (0,1)): e*pk = neutral for it,
+    // (2) [OPUS-4.8] sq-l15mi: prime-order subgroup membership. assert_on_curve does
+    // NOT exclude the cofactor-8 torsion points; a torsion `pk` enables a no-secret
+    // forgery on this hidden-issuer path (see assert_in_prime_order_subgroup). Guard
+    // `pk` (the forgery vector) AND `R` (a free witness too -- defense in depth: an
+    // honest R = k*G is already in the subgroup, so this never rejects a valid sig).
+    assert_in_prime_order_subgroup(pk);
+    assert_in_prime_order_subgroup(r);
+    // (3) reject the identity public key (neutral (0,1)): e*pk = neutral for it,
     // so s*G == R is satisfiable for any (R = s*G), a universal forgery.
     assert(!((pk.x == 0) & (pk.y == 1)), "identity issuer key rejected");
-    // (3) s canonical.
+    // (4) s canonical.
     assert_lt_l(s);
-    // (4) bind e to the Poseidon2 challenge over (R, pk, m).
+    // (5) bind e to the Poseidon2 challenge over (R, pk, m).
     let e_bound = challenge_scalar(r, pk, m, e, e_k);
-    // (5) s*G == R + e*pk.
+    // (6) s*G == R + e*pk.
     let g = Point { x: BJJ_GX, y: BJJ_GY };
     let lhs = scalar_mul(s, g);
     let e_pk = scalar_mul(e_bound, pk);
@@ -327,10 +380,14 @@ pub fn hidden_issuer_attestation<let D: u32>(
     key_set_membership::<D>(pk, key_set_root, index, siblings);
 }
 
-// Cost note (noir-optimisation): the dominant cost is the two ~251-bit
-// double-and-add scalar muls in schnorr_verify (s*G and e*pk). Each bit does one
-// double + one conditional add = two complete twisted-Edwards adds, each ~3 Field
-// inversions + a handful of mults. ~251 * 2 * 2 ~= ~1000 point adds. This is the
-// heavy gadget the sig.rs docs warned about; the Merkle membership (one h2 per
-// level) is tiny next to it. Measured `bb gates` for revoke_issuer_d10 is in the
-// crate STATUS / the verifier docs.
+// Cost note (noir-optimisation): the dominant cost is the ~251-bit double-and-add
+// scalar muls in schnorr_verify. The verification equation needs two (`s*G` and
+// `e*pk`); the sq-l15mi prime-order-subgroup guards add two more (`[L]*pk` and
+// `[L]*r`), so schnorr_verify now does FOUR scalar muls. Each bit does one double +
+// one conditional add = two complete twisted-Edwards adds, each ~3 Field inversions
+// + a handful of mults. ~251 * 4 * 2 ~= ~2000 point adds. The extra pair is the
+// unavoidable price of torsion-key soundness (`is_in_correct_subgroup` on the host
+// is one `[L]*P` per point too); the Merkle membership (one h2 per level) is tiny
+// next to it. Measured `bb gates` for revoke_issuer_d10 is in the crate STATUS /
+// the verifier docs. A follow-up MAY fold `[L]*pk` into `e*pk` via a shared ladder,
+// but only after `bb gates` confirms the saving (noir-optimisation discipline).
