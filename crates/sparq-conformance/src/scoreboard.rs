@@ -1116,11 +1116,15 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 95,
+        ratchet_floor: 94,
         floor_basis: "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the \
                       L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT \
                       a W3C ProfileIdentificationTest conformance claim); re-pinned by \
-                      sq-pbz04.4.16 (M7 singleton-intersection normalization: +27, 68 -> 95)",
+                      sq-pbz04.4.16 (M7 singleton-intersection normalization: +27, 68 -> 95); \
+                      re-pinned by sq-pbz04.4.9 (L1 datatype-map-IRI refusal: -1, 95 -> 94 — the \
+                      WebOnt-I5.3-015 EL profile row whose premise carries xsd:integer/xsd:string \
+                      ranges now refuses extraction and honestly abstains, was a pass under the \
+                      old opaque-datatype reading)",
         note: "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose \
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
                REAL fail-closed L1 extraction + grammar walk; abstentions are never passes. \
@@ -1128,10 +1132,11 @@ pub const SUITES: &[Suite] = &[
                normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
                positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
                a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
-               profile negations refuted where L2 can (139), with an honest measured In-gap \
-               (180 of 319 checkable) where axiom-grammar membership over the ALCH shadow \
-               cannot refute full-profile membership (deferred restrictions); species \
-               assertions remain unchecked (documented)",
+               profile negations refuted where L2 can (137 after sq-pbz04.4.9's L1 \
+               datatype-map-IRI refusal moved 2 datatype rows out of the checkable set), with \
+               an honest measured In-gap (180 of 317 checkable) where axiom-grammar membership \
+               over the ALCH shadow cannot refute full-profile membership (deferred \
+               restrictions); species assertions remain unchecked (documented)",
     },
     Suite {
         label: "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
@@ -1151,7 +1156,10 @@ pub const SUITES: &[Suite] = &[
                       +1, 189 -> 190); re-pinned by sq-pbz04.4.16 (M7 singleton-intersection \
                       normalization: -8, 190 -> 182 — 8 consistency cases re-route from the \
                       ALCH tableau to the RL branch and honestly abstain via the documented \
-                      disjointWith divergence guard, never a wrong verdict; fail set unchanged)",
+                      disjointWith divergence guard, never a wrong verdict; fail set unchanged); \
+                      unchanged at 182 by sq-pbz04.4.9 (SubObjectPropertyOf conclusion encoding \
+                      + L1 datatype-map-IRI refusal net to zero on the pass total, composition \
+                      97+69 -> 96+70; fail set still 5, M3/M5/M6)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \

@@ -96,8 +96,8 @@ classification; verdicts only for a pure ⊤-free EL+⊥ TBox with zero skipped 
 (always `Unknown` — DL-Lite_R consistency is the QL workstream's, not duplicated), or the
 **ALCH tableau** (complete for the fragment). `check::DirectChecker::entailment` decides
 premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
-(GCI / class-assertion / the fresh-class role-assertion trick + the record's desugarings);
-unencoded kinds abstain. A **blank-node individual in the conclusion is read EXISTENTIALLY**
+(GCI / class-assertion / the fresh-class trick, its sq-pbz04.4.9 role-subsumption lift for
+`SubObjectPropertyOf`, + the record's desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY**
 (sq-pbz04.4.13): a tree-shaped anonymous assertion set rolls up into an `∃`-class assertion
 decided soundly, and a non-rollable shape (shared / cyclic / nominal / free-root) abstains
 `ConclusionAnonymousIndividual` — never a skolem-constant `NotEntailed`. Every verdict carries its producing `Branch`; every guard fails
