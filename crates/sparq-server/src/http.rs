@@ -192,6 +192,28 @@ impl std::fmt::Debug for ServiceAllowOverride {
     }
 }
 
+/// [GPT-5.6] Loaded, immutable SHACL shapes used by transaction guard mode.
+#[cfg(feature = "shacl")]
+#[derive(Clone)]
+pub struct ShaclShapes(Arc<Graph>);
+
+#[cfg(feature = "shacl")]
+impl ShaclShapes {
+    /// Wraps a parsed shapes graph for [`ServerConfig::shacl_shapes`].
+    pub fn new(graph: Graph) -> Self {
+        Self(Arc::new(graph))
+    }
+
+    fn graph(&self) -> &Graph { &self.0 }
+}
+
+#[cfg(feature = "shacl")]
+impl std::fmt::Debug for ShaclShapes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShaclShapes").field("triples", &self.0.len()).finish()
+    }
+}
+
 /// Tunable guards that make the endpoint safe to expose publicly (T15).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -641,6 +663,13 @@ pub struct ServerConfig {
     /// is a READ over the store, so the endpoint is gated by the read auth like any GET.
     #[cfg(feature = "shacl")]
     pub shacl: bool,
+    /// [GPT-5.6] (sq-lsp7k.2.4) Reject writes whose post-state does not conform to
+    /// [`shacl_shapes`](Self::shacl_shapes). Validation runs before persistence or publish.
+    #[cfg(feature = "shacl")]
+    pub shacl_guard: bool,
+    /// [GPT-5.6] Loaded shapes graph used by SHACL guard mode. Required when the guard is on.
+    #[cfg(feature = "shacl")]
+    pub shacl_shapes: Option<ShaclShapes>,
     /// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** (`text/n3`) dialect for the
     /// Graph-Store-Protocol `PATCH` method. When `true`, a `PATCH` whose body is `text/n3` (a
     /// `solid:InsertDeletePatch`) is parsed into its `solid:deletes` / `solid:inserts` /
@@ -857,6 +886,10 @@ impl Default for ServerConfig {
             // SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             shacl: false,
+            #[cfg(feature = "shacl")]
+            shacl_guard: false,
+            #[cfg(feature = "shacl")]
+            shacl_shapes: None,
             // [OPUS-4.8] sq-hj4n: safe default — the OPT-IN N3-Patch PATCH dialect is OFF even when
             // the feature is compiled in (the operator opts in deliberately via --n3-patch /
             // SPARQ_N3_PATCH=1). The always-on application/sparql-update PATCH dialect is unaffected.
@@ -1149,6 +1182,10 @@ impl ServerConfig {
         #[cfg(feature = "shacl")]
         if let Ok(v) = std::env::var("SPARQ_SHACL") {
             cfg.shacl = env_truthy(&v);
+        }
+        #[cfg(feature = "shacl")]
+        if let Ok(v) = std::env::var("SPARQ_SHACL_GUARD") {
+            cfg.shacl_guard = env_truthy(&v);
         }
         // [OPUS-4.8] sq-hj4n: SPARQ_N3_PATCH truthy ("1"/"true"/"yes"/"on") enables the OPT-IN
         // Solid N3-Patch PATCH dialect (text/n3). Off by default. Only present with the
@@ -1837,6 +1874,8 @@ fn open_or_create_durable(dir: &std::path::Path, seed: Graph) -> Result<Graph, S
 /// default 400 (client error). Never leaves the process — stripped before the message
 /// reaches the client.
 const DURABLE_UNAVAILABLE_PREFIX: &str = "\u{1}durable-unavailable\u{1}";
+#[cfg(feature = "shacl")]
+const SHACL_GUARD_REJECTED_PREFIX: &str = "\u{1}shacl-guard-rejected\u{1}";
 
 struct ServerApplier {
     inner: GraphApplier,
@@ -2000,6 +2039,16 @@ impl ApplyUpdates for ServerApplier {
             with_engine_scope(&self.config, || {
                 sparq_engine::update_in_place_with_budget(working, update, &budget)
             })?;
+        }
+        // [GPT-5.6] sq-lsp7k.2.4: validate the private candidate before seal/publish.
+        #[cfg(feature = "shacl")]
+        if self.config.shacl_guard {
+            let shapes = self.config.shacl_shapes.as_ref()
+                .expect("shacl_guard configuration validated at startup");
+            let report = sparq_shacl::validate(working, shapes.graph());
+            if !report.conforms {
+                return Err(format!("{SHACL_GUARD_REJECTED_PREFIX}{}", shacl_report_to_json(&report)));
+            }
         }
         Ok(())
     }
@@ -2262,6 +2311,10 @@ impl AppState {
     /// `ServerApplier::seal`). With `persist_dir == None` this is exactly the historical
     /// in-memory path (the ring is seeded from `graph`; no durable mirror; never errors).
     pub fn try_with_config(graph: Graph, config: ServerConfig) -> Result<Self, String> {
+        #[cfg(feature = "shacl")]
+        if config.shacl_guard && config.shacl_shapes.is_none() {
+            return Err("SHACL guard requires a loaded shapes graph (set ServerConfig::shacl_shapes or --shacl-shapes)".to_string());
+        }
         Self::try_with_config_inner(
             graph,
             config,
@@ -5762,6 +5815,10 @@ pub(crate) fn engine_error_response(e: &str, config: &ServerConfig, apply_max_re
 /// hit (the memory cap / deadline tripped inside a `DELETE/INSERT … WHERE`) is a 413 / 503,
 /// exactly like a query; any other rejection (parse / semantic error) is the client's 400.
 fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
+    #[cfg(feature = "shacl")]
+    if let Some(report_json) = e.strip_prefix(SHACL_GUARD_REJECTED_PREFIX) {
+        return text_response(StatusCode::UNPROCESSABLE_ENTITY, "application/json; charset=utf-8", report_json.to_string(), false);
+    }
     // [OPUS-4.8] (sq-vpx4) A durable-write refusal is a retryable 503, NOT a 400. The write
     // was valid but could not be made durable (transient ENOSPC/I/O on the `--persist` mirror);
     // nothing was published or acked, the server is still serving reads, and the client should
@@ -6145,6 +6202,11 @@ async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode)
             with_generation_header(success.into_response(), number)
         }
         UpdateOutcome::Rejected(e) => {
+            // [GPT-5.6] sq-lsp7k.2.4: preserve the shared 422 + report mapping for GSP writes.
+            #[cfg(feature = "shacl")]
+            if e.starts_with(SHACL_GUARD_REJECTED_PREFIX) {
+                return update_rejection_response(&e, &state.config);
+            }
             // [OPUS-4.8] sq-ebii: a budget hit (timeout / memory cap) inside a GSP write's
             // WHERE maps to 503/413; a genuine parse/semantic failure stays a 400.
             if e.contains("query budget exceeded") {
