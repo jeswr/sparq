@@ -27,7 +27,7 @@
 //      (routes-manifest.basePath, images-manifest), so the check adapts to BOTH build modes
 //      (the default `/sparq` sub-path and the `NEXT_PUBLIC_BASE_PATH=''` root-relative export).
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,15 +53,32 @@ export const HEAVY_MODULE_SUFFIXES = [
   // The in-tab ZK prover (~MB each), dynamic-imported inside lib/zk-prover.ts.
   "-> @aztec/bb.js",
   "-> @noir-lang/noir_js",
+  // [FABLE-5] sq-4ssz1 (#1046) — the zstd decoder, dynamic-imported inside
+  // lib/dataset-archive.ts#loadCodec. Small, but the maintainer's standing rule is that
+  // rarely-used codecs are fetched ONLY when a user actually decodes a file of that
+  // type, so it must STAY a lazy split point (never fold into a route-entry bundle).
+  "-> fzstd",
 ];
 
 /**
- * The two surfaces this bead guards. `manifestKey` is the app-build-manifest.json `pages` key;
+ * The guarded surfaces. `manifestKey` is the app-build-manifest.json `pages` key;
  * `html` is the exported document under out/ (trailingSlash:true → <route>/index.html).
+ * `/` + `/capabilities` are the original sq-vw3ax.9 "route + prove in under one screen"
+ * surfaces, guarded against EVERY heavy module; `/surface/data-formats` joins them
+ * ([FABLE-5] sq-4ssz1) guarded against the lazy zstd codec ONLY (`heavyModules`) — the
+ * page legitimately shares editor commons chunks with the hero-runner's dynamic file
+ * list, so the blunt all-modules check would false-positive there. What must never
+ * reach its first-load payload is the codec decoder itself.
  */
 export const GUARDED_ROUTES = [
   { manifestKey: "/page", label: "/", html: "index.html" },
   { manifestKey: "/capabilities/page", label: "/capabilities", html: "capabilities/index.html" },
+  {
+    manifestKey: "/surface/data-formats/page",
+    label: "/surface/data-formats",
+    html: "surface/data-formats/index.html",
+    heavyModules: ["-> fzstd"],
+  },
 ];
 
 /**
@@ -85,8 +102,10 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
     files: Array.isArray(v) ? v : Array.isArray(v?.files) ? v.files : [],
   }));
 
-  // 1. PRESENCE — each heavy module must still be a dynamic split point; collect its chunk files.
+  // 1. PRESENCE — each heavy module must still be a dynamic split point; collect its chunk
+  //    files, both as one union set and per module (a route can scope its guard — see below).
   const heavyFiles = new Set();
+  const heavyFilesByModule = new Map();
   const heavyReport = [];
   for (const suffix of HEAVY_MODULE_SUFFIXES) {
     const name = suffix.replace(/^-> /, "");
@@ -105,12 +124,16 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
       heavyFiles.add(f);
       files.add(f);
     }
+    heavyFilesByModule.set(suffix, files);
     heavyReport.push(`${name} → ${files.size} chunk(s)`);
   }
 
   // 2. ISOLATION — no heavy chunk file may appear in a guarded route's first-load set.
+  //    A route with `heavyModules` is checked against just those modules' chunks (used when
+  //    the route legitimately shares commons chunks with an unrelated heavy module's file
+  //    list, but must never ship a specific module — e.g. the lazy zstd codec).
   const routeReport = [];
-  for (const { manifestKey, label } of GUARDED_ROUTES) {
+  for (const { manifestKey, label, heavyModules } of GUARDED_ROUTES) {
     const first = app?.pages?.[manifestKey];
     if (!Array.isArray(first)) {
       errors.push(
@@ -119,7 +142,14 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
       );
       continue;
     }
-    const leaked = first.filter((f) => heavyFiles.has(f));
+    let guardSet = heavyFiles;
+    if (Array.isArray(heavyModules)) {
+      guardSet = new Set();
+      for (const suffix of heavyModules) {
+        for (const f of heavyFilesByModule.get(suffix) ?? []) guardSet.add(f);
+      }
+    }
+    const leaked = first.filter((f) => guardSet.has(f));
     if (leaked.length > 0) {
       errors.push(
         `ISOLATION: ${label} first-load bundle ships heavy code-split chunk(s) that must be ` +
@@ -164,9 +194,50 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
   return { errors, summary: { basePath, unoptimized, heavyReport, routeReport } };
 }
 
+/**
+ * [FABLE-5] sq-qgkwy.1 — 4. DATA ISOLATION: the ~1.3 MB benchmark snapshot
+ * (src/data/benchmarks.generated.json) is SERVER-ONLY. It renders into the prerendered
+ * HTML/RSC payload; no emitted client JS chunk may embed it. A "use client" module (or
+ * anything transitively imported by one — the subtle case: metric-table.tsx has no
+ * directive yet is client-bundled via suite-group) importing a VALUE from
+ * src/data/benchmarks.ts folds the whole snapshot into a chunk — that double-shipped
+ * /benchmarks/[type]'s data as a ~762 KB raw first-load page chunk on top of the already
+ * prerendered HTML. Client code imports display helpers from src/lib/fmt-num.ts instead.
+ *
+ * Detection is by FINGERPRINT, not size threshold: `latest.commit` from the snapshot is a
+ * full commit sha — long, unique, and by construction present in any chunk that embeds the
+ * JSON. Pure (fs-free) for unit-testing; main() supplies the chunk texts.
+ *
+ * @param {string} fingerprint          distinctive string from the server-only snapshot
+ * @param {Array<{file: string, text: string}>} chunks  emitted client JS chunks
+ * @returns {string[]} offending chunk file names
+ */
+export function findSnapshotLeaks(fingerprint, chunks) {
+  if (!fingerprint || fingerprint.length < 8) {
+    throw new Error(
+      `DATA-ISOLATION: unusable snapshot fingerprint ${JSON.stringify(fingerprint)} — ` +
+        `did benchmarks.generated.json lose latest.commit?`,
+    );
+  }
+  return chunks.filter((c) => c.text.includes(fingerprint)).map((c) => c.file);
+}
+
 /** Read + JSON-parse a build manifest, or return null if it does not exist. */
 function readJson(path) {
   return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+}
+
+/** Every emitted client JS chunk under .next/static/chunks, recursively. */
+function readClientChunks(dir, prefix = "") {
+  const chunks = [];
+  if (!existsSync(dir)) return chunks;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) chunks.push(...readClientChunks(join(dir, entry.name), rel));
+    else if (entry.name.endsWith(".js"))
+      chunks.push({ file: rel, text: readFileSync(join(dir, entry.name), "utf8") });
+  }
+  return chunks;
 }
 
 function main() {
@@ -194,12 +265,33 @@ function main() {
 
   const { errors, summary } = analyzeBundle({ loadable, app, routes, images, htmlByLabel });
 
+  // 4. DATA ISOLATION — the server-only benchmark snapshot must not appear in ANY client chunk.
+  const snapshot = readJson(join(siteRoot, "src", "data", "benchmarks.generated.json"));
+  const fingerprint = snapshot?.latest?.commit;
+  let leakReport = "skipped (no snapshot)";
+  if (snapshot) {
+    const leaked = findSnapshotLeaks(
+      fingerprint,
+      readClientChunks(join(nextDir, "static", "chunks")),
+    );
+    for (const file of leaked) {
+      errors.push(
+        `DATA-ISOLATION: client chunk ${file} embeds the server-only benchmark snapshot ` +
+          `(fingerprint: latest.commit ${fingerprint}). A client-bundled module imports a ` +
+          `VALUE from src/data/benchmarks.ts — import display helpers from ` +
+          `"@/lib/fmt-num" instead (see that file's header).`,
+      );
+    }
+    leakReport = leaked.length === 0 ? "no client chunk embeds it" : `${leaked.length} LEAK(S)`;
+  }
+
   console.log("[check-bundle] wasm-free main-bundle guard (sq-vw3ax.9)");
   console.log(`  basePath (resolved): "${summary.basePath}"   images.unoptimized: ${summary.unoptimized}`);
   console.log("  heavy modules kept code-split (lazy on expand):");
   for (const line of summary.heavyReport) console.log(`    - ${line}`);
   console.log("  guarded route first-load payloads:");
   for (const line of summary.routeReport) console.log(`    - ${line}`);
+  console.log(`  server-only benchmark snapshot: ${leakReport}`);
 
   if (errors.length > 0) {
     console.error(`\n[check-bundle] FAIL — ${errors.length} problem(s):`);
@@ -208,8 +300,9 @@ function main() {
   }
 
   console.log(
-    "\n[check-bundle] PASS — no engine wasm / ZK prover / demo chunk in the / or /capabilities " +
-      "first-load bundle; basePath + images.unoptimized preserved.",
+    "\n[check-bundle] PASS — no engine wasm / ZK prover / demo / lazy-codec chunk in any " +
+      "guarded route's first-load bundle; server-only benchmark snapshot in no client chunk; " +
+      "basePath + images.unoptimized preserved.",
   );
 }
 

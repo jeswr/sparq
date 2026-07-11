@@ -13,23 +13,11 @@
       "promotion_criteria": "G3 heuristic proven on real PR traffic with zero false-positives; promote by removing (advisory) token and --advisory flag",
       "registered": "2026-07-06"
     },
-    "markdownlint-advisory (whole repo)": {
+    "docs-quality quick-advisory (advisory)": {
       "workflow": "docs-quality.yml",
       "owner_bead": "sq-5fd1",
-      "promotion_criteria": "whole-repo markdownlint backlog (bench/, .claude/) is fully clean",
-      "registered": "2026-07-06"
-    },
-    "vale (prose, advisory)": {
-      "workflow": "docs-quality.yml",
-      "owner_bead": "sq-5fd1",
-      "promotion_criteria": "prose-style backlog on README/skills/docs/crates is clean and the vale ruleset has settled",
-      "registered": "2026-07-06"
-    },
-    "external-links (lychee online, advisory)": {
-      "workflow": "docs-quality.yml",
-      "owner_bead": "sq-5fd1",
-      "promotion_criteria": "not promotable; network-flaky by nature — stays advisory indefinitely (dead external links must never block a merge)",
-      "registered": "2026-07-06"
+      "promotion_criteria": "per-step (sq-6vshe.20 consolidation of the former markdownlint-advisory / vale / external-links jobs): a step promotes by MOVING into the quick-gates job — markdownlint-advisory once the whole-repo backlog (bench/, .claude/) is fully clean; vale once the prose-style backlog on README/skills/docs/crates is clean and the vale ruleset has settled; external-links never promotes (network-flaky by nature — dead external links must never block a merge)",
+      "registered": "2026-07-11"
     },
     "mutation ratchet (cargo-mutants, advisory)": {
       "workflow": "ci.yml",

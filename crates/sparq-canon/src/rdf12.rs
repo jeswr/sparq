@@ -285,6 +285,30 @@ pub fn canonicalize_triples_rdf12_ground_terms_with<D: Digest>(
     canonicalize_triples_rdf12_with::<D>(triples)
 }
 
+/// **NON-STANDARD (constrained).** Like [`canonicalize_graph_content_rdf12`],
+/// but requires every triple term stored in the graph to be **ground** (no
+/// blank node at any nesting depth) and fails closed with
+/// [`CanonError::NestedBlankNode`] otherwise. The [`sparq_core::Graph`]-level
+/// parity sibling of [`canonicalize_triples_rdf12_ground_terms`] ([FABLE-5]
+/// sq-l3pk7); equivalent to composing [`crate::graph_triples`] with that
+/// function. See [`canonicalize_rdf12_ground_terms`] for the guard semantics.
+pub fn canonicalize_graph_content_rdf12_ground_terms(
+    g: &sparq_core::Graph,
+) -> Result<crate::CanonicalGraph, CanonError> {
+    canonicalize_graph_content_rdf12_ground_terms_with::<Sha256>(g)
+}
+
+/// **NON-STANDARD (constrained).** Like
+/// [`canonicalize_graph_content_rdf12_ground_terms`] but parameterized over
+/// the RDFC-1.0 hash function `D` ([`crate::Digest`]); see
+/// [`canonicalize_rdf12_with`] for the hash-profile semantics.
+pub fn canonicalize_graph_content_rdf12_ground_terms_with<D: Digest>(
+    g: &sparq_core::Graph,
+) -> Result<crate::CanonicalGraph, CanonError> {
+    let triples = crate::graph_triples(g)?;
+    canonicalize_triples_rdf12_ground_terms_with::<D>(&triples)
+}
+
 /// The ground-triple-term guard: `Err(NestedBlankNode)` iff any blank node
 /// occurs **inside** a triple-term object of any quad, at any nesting depth.
 /// Top-level subject/object/graph blank nodes do not count — those are
