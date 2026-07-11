@@ -237,7 +237,9 @@ fn auto_object_term(name: &str, obj: &Map<String, Value>) -> Result<Term, String
 /// The parsed body of a template: a query or an update, prepared once at registration.
 #[derive(Debug, Clone)]
 enum Body {
-    Query(PreparedQuery),
+    // Boxed: a PreparedQuery is much larger than a PreparedUpdate (clippy
+    // large_enum_variant); templates are stored long-term, so keep the enum slim.
+    Query(Box<PreparedQuery>),
     Update(PreparedUpdate),
 }
 
@@ -245,8 +247,8 @@ enum Body {
 /// value-substituted algebra to whatever execution path it already uses.
 #[derive(Debug, Clone)]
 pub enum Bound {
-    /// A bound SELECT / ASK / CONSTRUCT / DESCRIBE.
-    Query(PreparedQuery),
+    /// A bound SELECT / ASK / CONSTRUCT / DESCRIBE (boxed — see [`PreparedQuery`]'s size).
+    Query(Box<PreparedQuery>),
     /// A bound SPARQL 1.1 UPDATE. The invocation surface MUST keep its update gate in
     /// front of executing this (the template layer stores and binds; it never widens
     /// write access).
@@ -318,7 +320,7 @@ impl Template {
             return Err("template name must be non-empty".to_string());
         }
         let body = match PreparedQuery::parse(text) {
-            Ok(q) => Body::Query(q),
+            Ok(q) => Body::Query(Box::new(q)),
             Err(query_err) => match PreparedUpdate::parse(text) {
                 Ok(u) => Body::Update(u),
                 Err(update_err) => {
@@ -439,7 +441,7 @@ impl Template {
         for (pname, ptype) in &self.params {
             let term = ptype.term_for(pname, &args[pname])?;
             bound = match bound {
-                Body::Query(q) => Body::Query(q.bind(pname, term)?),
+                Body::Query(q) => Body::Query(Box::new(q.bind(pname, term)?)),
                 Body::Update(u) => Body::Update(u.bind(pname, term)?),
             };
         }

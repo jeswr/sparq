@@ -129,7 +129,8 @@ impl McpServer {
         &self.graph
     }
 
-    /// The server's configuration (crate-internal: tool advertisement reads it).
+    /// The server's configuration (crate-internal: template-tool advertisement reads it).
+    #[cfg(feature = "templates")]
     pub(crate) fn config(&self) -> &ServerConfig {
         &self.config
     }
