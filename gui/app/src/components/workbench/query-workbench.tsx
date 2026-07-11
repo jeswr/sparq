@@ -64,6 +64,8 @@ import { InferenceControl } from "@/components/workbench/inference-control";
 import { FederationControl, RunLocationBadge } from "@/components/workbench/federation-control";
 import { useWorkspace } from "@/lib/workspace-context";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
+// [FABLE-5] sq-ixc3.14 — the honesty-override type for QUERY_TOOL_OVERRIDE (sq-5lyme seam).
+import type { ToolOverride } from "@/data/tools";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
 import { useRegisterPaletteCommands } from "@/components/workbench/command-palette";
@@ -456,6 +458,16 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
 // ---------------------------------------------------------------------------
 // The workbench.
 // ---------------------------------------------------------------------------
+
+// [FABLE-5] sq-ixc3.14 — honesty override (the sq-5lyme seam: copy flips live in the panel
+// file that earns them, never by editing data/tools.ts). The Query tool now also executes
+// federated SERVICE queries — on the DESKTOP's native engine, gated by the per-workspace
+// egress allowlist; the browser build labels that half native-only instead of pretending.
+export const QUERY_TOOL_OVERRIDE: ToolOverride = {
+  blurb:
+    "Run SPARQL 1.1/1.2 over the live store — SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE, plus " +
+    "federated SERVICE on the desktop's native engine (allowlist-gated, fail-closed).",
+};
 
 export function QueryWorkbench() {
   // [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN is the canonical run(query, { mode }) path (no standalone
