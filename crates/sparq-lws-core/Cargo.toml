@@ -107,10 +107,12 @@ solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", re
 sparq-core = { path = "../sparq-core", features = ["mmap"], optional = true }
 sparq-engine = { path = "../sparq-engine", optional = true }
 # RDF parse/serialise: oxttl (Turtle/N-Triples) + oxjsonld (JSON-LD ↔ RDF), via oxrdf model (spike §4).
-# oxttl 0.2 + oxjsonld 0.2 both pin `oxrdf =0.3.3`, so this is a coherent Oxigraph set.
-oxrdf = "0.3"
-oxttl = "0.2"
-oxjsonld = "0.2"
+# The WORKSPACE dep set (which enables `rdf-12`): the sparq workspace unifies `rdf-12` into oxrdf/
+# oxttl in any `--workspace` build anyway, so this crate takes it unconditionally and handles the
+# quoted-triple variants explicitly (rejected fail-closed in the N3 Patch surface — `ldp::patch`).
+oxrdf.workspace = true
+oxttl.workspace = true
+oxjsonld.workspace = true
 # Blob storage seam: object_store gives one trait over S3/GCS/Azure/Local (spike §4).
 object_store = "0.13"
 # Async trait support for the Store / SparqClient / BlobStore seams.

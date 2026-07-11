@@ -189,8 +189,8 @@ fn apply_update(state: &MockState, sparql: &str) {
             // Replace any stale child record (the DELETE-before-INSERT semantics), then add the edge
             // (idempotent) + record THIS operation's marker nonce. The INSERT literals are, in order:
             // contentType, blobKey, etag, createMarker-nonce.
-            let lits = extract_literals(sparql);
-            let g = |i: usize| lits.get(i).cloned().unwrap_or_default();
+            let literals_found = extract_literals(sparql);
+            let g = |i: usize| literals_found.get(i).cloned().unwrap_or_default();
             store.meta.insert(child.clone(), (g(0), g(1), g(2)));
             let nonce = g(3);
             // Markers are APPEND-ONLY (no DELETE of markers), so a same-child create never removes an
@@ -575,8 +575,8 @@ fn first_iri_after(s: &str, from: usize) -> Option<String> {
 /// Best-effort: the three string literals of an index record, in INSERT order (ct, bk, etag).
 /// Returns their UNESCAPED lexical values.
 fn parse_record_literals(s: &str) -> (String, String, String) {
-    let lits = extract_literals(s);
-    let g = |i: usize| lits.get(i).cloned().unwrap_or_default();
+    let literals_found = extract_literals(s);
+    let g = |i: usize| literals_found.get(i).cloned().unwrap_or_default();
     (g(0), g(1), g(2))
 }
 
@@ -967,10 +967,9 @@ async fn delete_modify_writes_the_marker_but_a_two_statement_form_does_not() {
             "\"etag-1\"".into(),
         ),
     );
-    let real = sparq_lws_core::store::sparql::update_delete_container_if_empty(
-        CONTAINER, None, "op-real",
-    )
-    .unwrap();
+    let real =
+        sparq_lws_core::store::sparql::update_delete_container_if_empty(CONTAINER, None, "op-real")
+            .unwrap();
     // Shape sanity: the real builder MUST emit a single modify (no top-level `;`), else this test is
     // not exercising the fix.
     assert!(

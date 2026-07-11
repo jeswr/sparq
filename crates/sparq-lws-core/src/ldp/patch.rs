@@ -406,13 +406,10 @@ fn instantiate(pat: &PatTriple, binding: &Binding) -> Result<Triple, ServerError
                 "a patch triple subject cannot be a literal".into(),
             ))
         }
-        // `oxrdf`'s `Term::Triple` (RDF 1.2 quoted triples) variant exists only when the `rdf-12`
-        // feature is enabled — which the embedded-sparq backend's `sparq-core`/`sparq-engine` deps
-        // turn on for the whole build via feature unification. Quoted triples are NOT part of N3
-        // Patch, so a subject that is a quoted triple is rejected as an unprocessable patch (422).
-        // The arm is `#[cfg]`-gated so it does not reference a non-existent variant in the DEFAULT
-        // (no-embedded-sparq) build, where `rdf-12` is off and the variant is absent.
-        #[cfg(feature = "embedded-sparq")]
+        // `oxrdf`'s `Term::Triple` (RDF 1.2 quoted triples). In the sparq workspace this crate
+        // depends on oxrdf WITH `rdf-12` (the workspace-wide dep set), so the variant is always
+        // present regardless of feature unification. Quoted triples are NOT part of N3 Patch, so a
+        // subject that is a quoted triple is rejected as an unprocessable patch (422), fail-closed.
         Term::Triple(_) => {
             return Err(ServerError::UnprocessablePatch(
                 "a patch triple subject cannot be a quoted triple".into(),
@@ -504,10 +501,8 @@ enum Position {
 
 /// Convert an N3 term to a pattern term, enforcing position + formula-kind constraints.
 ///
-/// NB: oxttl's `N3Term::Triple` (RDF 1.2 quoted triples) exists only with its `rdf-12` feature,
-/// which is OFF for this crate's oxttl dependency — so the enum has no such variant here and this
-/// match is exhaustive without it. If `rdf-12` is ever enabled, the compiler will flag the missing
-/// arm and a reject branch must be added (quoted triples are not part of N3 Patch).
+/// NB: oxttl's `N3Term::Triple` (RDF 1.2 quoted triples) is present (this crate takes the sparq
+/// workspace's `rdf-12` oxttl dep) and rejected below — quoted triples are not part of N3 Patch.
 fn pat_term(t: &N3Term, kind: FormulaKind, pos: Position) -> Result<PatTerm, ServerError> {
     match t {
         N3Term::NamedNode(n) => Ok(PatTerm::Term(Term::NamedNode(n.clone()))),
@@ -543,12 +538,10 @@ fn pat_term(t: &N3Term, kind: FormulaKind, pos: Position) -> Result<PatTerm, Ser
             // always an IRI, so a predicate variable simply binds to an IRI during the join.
             Ok(PatTerm::Var(v.clone()))
         }
-        // `oxttl`'s `N3Term::Triple` (RDF 1.2 quoted triples) variant exists only when the `rdf-12`
-        // feature is enabled — which the embedded-sparq backend's deps turn on for the whole build
-        // via feature unification (see the `rdf-12` note above). Quoted triples are NOT part of N3
-        // Patch, so any position is rejected. The arm is `#[cfg]`-gated so it does not reference a
-        // non-existent variant in the DEFAULT (no-embedded-sparq) build where the variant is absent.
-        #[cfg(feature = "embedded-sparq")]
+        // `oxttl`'s `N3Term::Triple` (RDF 1.2 quoted triples). In the sparq workspace this crate
+        // depends on oxttl WITH `rdf-12` (the workspace-wide dep set), so the variant is always
+        // present regardless of feature unification. Quoted triples are NOT part of N3 Patch, so
+        // any position is rejected, fail-closed.
         N3Term::Triple(_) => Err(ServerError::UnprocessablePatch(
             "quoted triples are not allowed in an N3 Patch".into(),
         )),
@@ -1416,5 +1409,57 @@ mod tests {
         // Inserting an existing triple is a no-op (set union), not a duplicate.
         let result = apply_patch(&existing, &patch).unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    // --- RDF 1.2 quoted triples (rdf-12) are rejected fail-closed [FABLE-5] sq-gg0qq.2 ----------
+    // In the sparq workspace this crate takes oxrdf/oxttl WITH `rdf-12`, so `Term::Triple` /
+    // `N3Term::Triple` are real inhabitants. N3 Patch has no quoted triples: both entry points
+    // must refuse them with UnprocessablePatch (422), never accept or panic.
+
+    /// `pat_term` refuses a quoted triple in every position and both formula kinds.
+    #[test]
+    fn pat_term_rejects_quoted_triple_in_every_position() {
+        let qt = N3Term::Triple(Box::new(triple(
+            "https://s.example/s",
+            "https://p.example/p",
+            "o",
+        )));
+        for kind in [FormulaKind::Where, FormulaKind::Template] {
+            for pos in [Position::Subject, Position::Predicate, Position::Object] {
+                match pat_term(&qt, kind, pos) {
+                    Err(ServerError::UnprocessablePatch(msg)) => {
+                        assert!(msg.contains("quoted triples"), "unexpected message: {msg}");
+                    }
+                    other => panic!("expected UnprocessablePatch, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// `instantiate` refuses a template subject variable that resolved to a quoted triple.
+    #[test]
+    fn instantiate_rejects_quoted_triple_subject_binding() {
+        let pat = PatTriple {
+            subject: PatTerm::Var(Variable::new("s").unwrap()),
+            predicate: PatTerm::Term(Term::NamedNode(
+                oxrdf::NamedNode::new("https://p.example/p").unwrap(),
+            )),
+            object: PatTerm::Term(Term::Literal(oxrdf::Literal::new_simple_literal("o"))),
+        };
+        let mut binding = Binding::new();
+        binding.insert(
+            "s".to_string(),
+            Term::Triple(Box::new(triple(
+                "https://s.example/s",
+                "https://p.example/p",
+                "o",
+            ))),
+        );
+        match instantiate(&pat, &binding) {
+            Err(ServerError::UnprocessablePatch(msg)) => {
+                assert!(msg.contains("quoted triple"), "unexpected message: {msg}");
+            }
+            other => panic!("expected UnprocessablePatch, got {other:?}"),
+        }
     }
 }
