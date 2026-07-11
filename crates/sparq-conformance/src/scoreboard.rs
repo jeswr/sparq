@@ -151,10 +151,10 @@ pub struct Suite {
 ///   `FLOOR = 52` (sq-oy1f.2; RAISED 51→52 by sq-oy1f.28 flipping the lane to the
 ///   native document-level `sparq_jsonld::from_rdf` oracle; opt-in `jsonld-suite`
 ///   feature).
-/// * JSON-LD compact 186 — `sparq-conformance` `src/floors/compact.rs`
-///   `FLOOR = 186` (sq-3uos5; RAISED 163→186 by sq-oy1f.16 after #978's
-///   faithfulness fixes; opt-in `jsonld-suite` feature; RDF → compacted JSON-LD via
-///   the native Compaction Algorithm, lossless round-trip).
+/// * JSON-LD compact 228 — `sparq-conformance` `src/floors/compact.rs`
+///   `FLOOR = 228` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
+///   sq-oy1f.27's oracle correction to the native document-level Compaction
+///   Algorithm vs the W3C EXPECTED document; opt-in `jsonld-suite` feature).
 /// * JSON-LD frame 61 — `sparq-conformance` `src/floors/frame.rs`
 ///   `FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
 ///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
@@ -462,16 +462,16 @@ pub const SUITES: &[Suite] = &[
                §8.1), compared document-level against the normative expected docs \
                plus a scoped re-parse round-trip; negatives assert exact error codes",
     },
-    // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 `compact` ratchet (extends sq-oy1f.2,
-    // epic sq-oy1f). Each `jld:CompactTest` input is parsed to RDF (the real oxjsonld
-    // path), compacted against the case `@context` through the native hand-rolled
-    // Compaction Algorithm (`graph_to_jsonld_compact`, serialize-rdf), then the
-    // compacted document is re-parsed and required to reconstruct the SAME RDF dataset
-    // (`reparse(compact(D, ctx)) ≡ D` — the lossless-compaction invariant, the same
-    // oxjsonld self-reparse oracle toRdf/fromRdf use). The floor is the MEASURED pass
-    // count at the pinned revision; the remaining cases are honest compaction
-    // divergences (below the floor, to RISE) or documented SKIP buckets (negatives
-    // sparq does not raise, JSON-LD-1.0-only, non-inline/remote @context, empty RDF).
+    // [FABLE-5] sq-oy1f.27 — the W3C JSON-LD 1.1 `compact` ratchet (epic sq-oy1f), on
+    // the NATIVE DOCUMENT-LEVEL oracle: each `jld:CompactTest` input is expanded and
+    // compacted through the spec Compaction Algorithm (`sparq_jsonld::compact`), then
+    // deep-compared against the suite's NORMATIVE EXPECTED document (`json_ld_equal`
+    // — the same oracle shape as the expand/flatten lanes). Replaces the old oxjsonld
+    // self-reparse round-trip over the engine's RDF-first writer (sq-3uos5), which
+    // measured RDF losslessness rather than the Compaction Algorithm; see the
+    // side-by-side re-pin on `floors::compact`. The floor is the MEASURED pass count
+    // at the pinned revision; the one below-floor fail (t0038, 1.0-era prefixing) and
+    // the 17 negative SKIPs are documented there.
     // Floor kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 compact",
@@ -482,14 +482,15 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        // [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after the #978 compaction
-        // faithfulness fixes landed (re-measured on current main: 186 pass).
+        // [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 (#978 writer faithfulness fixes).
+        // [FABLE-5] sq-oy1f.27 — RE-PINNED 186 → 228 with the oracle correction to
+        // the native document-level Compaction Algorithm (see floors::compact).
         // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
         ratchet_floor: crate::floors::compact::FLOOR,
         floor_basis: "pass",
-        note: "RDF → compacted JSON-LD through the native Compaction Algorithm \
-               (serialize-rdf), compared by a re-parse RDF-dataset round-trip \
-               (lossless-compaction invariant)",
+        note: "native document-level Compaction Algorithm (sparq-jsonld), compared \
+               against the W3C EXPECTED compacted document (json_ld_equal — the \
+               normative document oracle)",
     },
     // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet (epic sq-oy1f),
     // over the SEPARATE w3c/json-ld-framing suite (fetch-jsonld-framing-tests.sh).

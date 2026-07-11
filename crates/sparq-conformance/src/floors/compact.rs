@@ -1,26 +1,44 @@
 //! [FABLE-5] sq-oy1f.40 — the W3C JSON-LD 1.1 `compact` lane ratchet floor
 //! (relocated from `tests/jsonld_suite.rs` to this lib-side single source).
 
-/// [OPUS-4.8] sq-3uos5 — compact (RDF → compacted JSON-LD via the native
-/// hand-rolled Compaction Algorithm, round-trip) pass floor. RATCHET: may
-/// only RISE. This is the MEASURED pass count at the pinned revision — the
-/// number of `jld:CompactTest` cases for which compacting the input's RDF
-/// against the case `@context` and re-parsing the compacted document
-/// reconstructs the SAME RDF dataset (`reparse(compact(D, ctx)) ≡ D`). It is
-/// NOT the suite total: many cases exercise input-document compaction
-/// features sparq's fromRdf-then-compact writer does not target (scoped/typed
-/// contexts, `@nest`, `@index`/`@id` maps the writer never emits, `@protected`
-/// redefinition errors, processing-mode error-raising), and those are SKIPPED
-/// (not failed) — see `run_compact` for the honest skip buckets.
+/// [FABLE-5] sq-oy1f.27 — `compact` pass floor, RE-PINNED for the ORACLE
+/// CORRECTION to the native document-level Compaction Algorithm
+/// (`sparq_jsonld::compact::compact()`), compared against the suite's
+/// NORMATIVE EXPECTED document via `json_ld_equal` — the same oracle shape as
+/// the `expand` (sq-kk1mq) and `flatten` (sq-oy1f.26) lanes. RATCHET: may only
+/// RISE from here.
 ///
-/// [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after the compaction faithfulness
-/// fixes (#978, sq-oy1f.12/.13/.14: `@reverse` double-invert, non-string
-/// `@language`/`@none`, `@type:@id`-coerced-key-vs-plain-string IRI confusion,
-/// container round-trips) landed on main. Re-MEASURED on current main at the
-/// pinned revision: compact 186 pass / 35 fail / 25 skip (was 163/58/25). The
-/// +23 FAIL→PASS are the cases those writer fixes made lossless. The 35
-/// remaining failures are real writer gaps below the floor (scoped/typed
-/// contexts, `@nest`, `@index`/`@id` map shapes the writer does not emit),
-/// tracked for a future RISE; the 25 SKIP are unchanged (negatives sparq does
-/// not raise, JSON-LD-1.0-only, non-inline/remote/multi `@context`, empty-RDF).
-pub const FLOOR: usize = 186;
+/// ## Side-by-side re-pin (old oracle vs new oracle, same pinned suite rev)
+///
+/// * OLD (sq-3uos5/sq-oy1f.16, floor **186**): the engine's RDF-first writer
+///   (`graph_to_jsonld_compact`) + an **oxjsonld self-reparse round-trip**
+///   (`reparse(compact(D, ctx)) ≡ D`) — measured 186 pass / 35 fail / 25 skip.
+///   That oracle measured RDF losslessness of the writer, NOT the Compaction
+///   Algorithm: it never compared against the suite's expected document, could
+///   pass shapes a strict third-party processor reads differently (the
+///   sq-oy1f.10 data-loss class), and had to SKIP every case whose features the
+///   writer never emits (scoped/typed contexts, `@nest`, `@index`/`@id` maps,
+///   non-inline contexts, empty-RDF inputs).
+/// * NEW (sq-oy1f.27, floor **228**): the spec Compaction Algorithm over the
+///   natively expanded document, deep-compared to the W3C EXPECTED document —
+///   measured **228 pass / 1 fail / 17 skip** of 246. The 42-case rise over the
+///   old floor is real algorithm coverage (scoped/typed contexts, `@nest`,
+///   container maps, `@graph` containers, options forwarding), not an oracle
+///   relaxation: the new oracle is strictly harder (document equivalence vs
+///   self-reparse). Passes also hold under STRICT order-sensitive JSON equality
+///   (strict-ordered count = 228 — no pass relies on the comparator's
+///   outside-`@list` array order-insensitivity).
+///
+/// ## The 1 honest FAIL and the 17 honest SKIPs
+///
+/// * `#t0038` (`specVersion: json-ld-1.0`) expects 1.0-era compact-IRI creation
+///   through an EXPANDED (map-valued) term definition (`body:/format`). A
+///   REC-conformant 1.1 processor never sets the prefix flag on an expanded
+///   term — in either processing mode (`compact/p001` pins exactly that for
+///   1.0 mode) — so this expectation is unreachable; jsonld.js and pyld make
+///   the same trade. Documented FAIL below the floor, not skipped.
+/// * 17 SKIPs = the NegativeEvaluationTests: compaction raises `invalid @nest
+///   value`, but error-code completeness across context processing, expansion,
+///   and compaction is unverified; the negative ratchet lanes are bead
+///   sq-oy1f.31. SKIP (honest), never a counted pass.
+pub const FLOOR: usize = 228;

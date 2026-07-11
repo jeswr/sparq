@@ -57,10 +57,12 @@
 #     perf backend with no first-party Rust code of its own, so compiling it here buys
 #     no rot-protection for sparq's own source. Left out to keep the lane fast + free
 #     of a C build dep.
-#   • `hdt` (sparq-cli) / sparq-hdt `write`: the wrapped `hdt` crate declares MSRV
-#     1.87 and pulls a heavy decode stack; sparq-hdt is already --exclude'd from the
-#     workspace MSRV/test jobs for that reason. Gating it needs its own toolchain lane
-#     (future bead) — not folded in here so this lane stays on the stable floor.
+#   • [FABLE-5] sq-8ju74: the `hdt`/`hdt-write` (sparq-cli) + `write` (sparq-hdt) legs
+#     USED to be excluded here because the wrapped `hdt` crate declares MSRV 1.87 and
+#     the workspace floor was 1.85 ("needs its own toolchain lane"). That reason is
+#     STALE — the floor is 1.88, at/above sparq-hdt's 1.87 — so the legs now exist in
+#     .github/feature-matrix.d/{sparq-cli,sparq-hdt}.yml and the former silent gaps
+#     (tests/hdt_cli.rs, tests/hdt_write_cli.rs, tests/write_roundtrip.rs) gate normally.
 #   • `live` (sparq-nlq) / `embeddings` (sparq-vectors): enable a REAL network client
 #     (reqwest against the Anthropic / OpenAI-compatible endpoints). They are off in CI
 #     by contract (the eval harness runs on recorded fixtures) and must not open a
@@ -264,6 +266,40 @@ jobs:
           echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
           echo "Assembled $LEGS opt-in leg(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
+      - name: Loud failure attribution — the opt-in matrix was NOT generated
+        # [FABLE-5] sq-2wo5t: when THIS job fails (golden leg-name drift after adding
+        # a new opt-in leg, the C1 structural guard, the tier ratchet, or a malformed
+        # fragment), the matrix output is never produced, so the `opt-in-features` job
+        # spawns ZERO legs and EVERY required `opt-in <crate> (…)` check on the PR goes
+        # expected-but-MISSING. That absence historically misread as "one specific leg
+        # failing across multiple unrelated PRs" — a false main-regression signature
+        # (the 2026-07-11 'spqv-provenance' drain-blocker alarm; none of the PRs
+        # touched the crate). This step fires ONLY when an earlier step in this job
+        # failed and emits an unmissable ::error annotation + job-summary block that
+        # attributes the missing legs to THIS job, so triage starts at the real failing
+        # step instead of chasing a phantom cross-PR leg regression. It cannot rescue
+        # the job (the earlier failure already decides the job's conclusion, which the
+        # required ci-summary gate REDs on) — the fail-closed guards are unchanged.
+        # The wiring + this script's output are pinned by
+        # scripts/tests/test_feature_matrix_assemble.py (TestAssembleFailureAnnotation).
+        if: failure()
+        run: |
+          set -euo pipefail
+          echo "::error title=opt-in feature matrix NOT generated::The 'assemble feature matrix' job failed, so NO 'opt-in *' matrix legs were spawned for this commit. Every required 'opt-in <crate> (...)' check is therefore MISSING, not failing — a missing leg is not a failing leg, and this is NOT a regression in any single opt-in leg. Fix the failing step in THIS job first. Common causes: golden leg-name drift (a new opt-in leg without a matching line in scripts/tests/feature-matrix-legnames.golden.txt), the C1 feature-gated-test-execution guard (scripts/check-feature-test-execution.py), the tier ratchet (scripts/feature-matrix-tiers.py), or a malformed .github/feature-matrix.d fragment."
+          {
+            echo "## opt-in feature matrix NOT generated"
+            echo
+            echo "This \`assemble feature matrix\` job **failed**, so the matrix JSON was never produced and **no \`opt-in *\` check-runs were spawned** for this commit."
+            echo
+            echo "**Every required \`opt-in <crate> (…)\` check on this PR is MISSING, not failing.** A missing leg is not a failing leg — do not triage individual opt-in legs, and do not suspect a cross-PR / main regression in one of them."
+            echo
+            echo "Fix the failing step above first. Common causes:"
+            echo
+            echo "- **Golden leg-name drift** — a new opt-in leg was added without updating \`scripts/tests/feature-matrix-legnames.golden.txt\` (the assembler self-test)."
+            echo "- **Structural guard C1** — a feature-gated test with no CI executor and no allowlist entry (\`scripts/check-feature-test-execution.py --check\`)."
+            echo "- **Tier ratchet** — \`scripts/feature-matrix-tiers.py --enforce\`."
+            echo "- **Malformed fragment** — a broken or duplicate-name leg in \`.github/feature-matrix.d/<crate>.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   opt-in-features:
     needs: [changes, setup]

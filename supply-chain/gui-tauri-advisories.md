@@ -85,11 +85,14 @@ frameworks scope.
 
 ## Tracking
 
-- Dependabot alert **#5** (`repos/jeswr/sparq/dependabot/alerts/5`, state `open`). Its true
-  resolution is the upstream **Tauri Linux GTK4 / `webkitgtk-6.0` migration** (which brings
-  `gtk-rs 0.20` → `glib 0.20`); until then the alert may be dismissed on GitHub as
-  *tolerable-risk / no fix available in the supported version line* (a maintainer decision, not
-  an in-repo edit) or left open as a visible reminder.
+- Dependabot alert **#5** (`repos/sparq-org/sparq/dependabot/alerts/5`): **DISMISSED
+  2026-07-11 as `tolerable_risk`** [FABLE-5] with a dismissal comment pointing back to this
+  record and the tracking beads (standing proceed-and-document rule; reversible — a dismissed
+  alert can be reopened at any time). Its true resolution remains the upstream **Tauri Linux
+  GTK4 / `webkitgtk-6.0` migration** (which brings `gtk-rs 0.20` → `glib 0.20`). Leaving it
+  open as a "visible reminder" was re-raising duplicate work items for an
+  already-dispositioned finding (bead sq-ybgjf duplicated sq-x3r9b), so the reminder now
+  lives in the open migration bead **sq-tuqht**, not the alert state.
 - Upstream signal: the RustSec GTK3-EOL cluster (RUSTSEC-2024-0411…0420) is the authoritative
   "GTK3 is end-of-life" marker; Tauri's Linux backend consuming `webkit2gtk` (GTK3) is the
   binding constraint.
