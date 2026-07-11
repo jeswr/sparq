@@ -1059,18 +1059,26 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
 - `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
   **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
   session sees ZERO rows (empty view), never the whole store.
-  - **ODRL lane** (`odrl-authz` cargo feature, default OFF; sq-lrtc3.1): when the request dataset
-    carries ODRL policy rules (`odrl:permission`/`odrl:prohibition`), the handler parses them from
-    the UNION of the dataset's graphs and runs the `sparq-solid` bridge
+  - **ODRL lane** (`odrl-authz` cargo feature, default OFF; sq-lrtc3.1 + sq-3mu76): when the
+    request dataset carries ODRL policy rules (`odrl:permission`/`odrl:prohibition`), the handler
+    parses them from the UNION of the dataset's graphs and runs the `sparq-solid` bridge
     (`PodStore::materialize_odrl_policy`, BOTH sides, deny-overrides) for
     (party = session agent, action = `odrl:read`, target = each rule's target graph) BEFORE the
     query — an ODRL prohibition beats a static WAC grant through the unchanged
-    `∪ allow ∖ ∪ deny` enforcement. Fail-closed 4xx refusals (never a silent allow): malformed
+    `∪ allow ∖ ∪ deny` enforcement. The lane runs on **all three endpoints** (sq-3mu76): the
+    advisory `/authz/decide` and `/authz/wac-allow` never report an allow `/authz/query` would
+    refuse to honour, and their advertisements are **read-scoped** while the lane evidences only
+    `odrl:read` — `grantedModes` is masked to the requested mode, `wacAllow` carries at most
+    `user="read"` with `public=""` (anonymous is refused wherever the lane fires). Fail-closed 4xx
+    refusals (never a silent allow): malformed
     policy, unimplementable `odrl:conflict` strategy, a rule without a concrete target graph IRI
-    (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), or an
-    anonymous session. Constraints the stateless lane cannot evidence (`odrl:purpose`,
-    `odrl:count` — stateful budgets are sq-snopa.8) never grant. Feature OFF ⇒ byte-identical
-    `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
+    (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), an
+    anonymous session, or a `trust` block combined with an ODRL-carrying dataset on `/decide`
+    (the trust dispatch would bypass the lane). Constraints the stateless lane cannot evidence
+    (`odrl:purpose`, `odrl:count` — stateful budgets are sq-snopa.8) never grant. `/decide` stays
+    governing-ACL-scoped: with no discoverable `.acl`/`.acr` it returns its `noAcl` deny even
+    where a bridged grant lets `/authz/query` see rows (a deny-side-only divergence). Feature OFF
+    ⇒ byte-identical `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
 
 **FAIL-CLOSED (the soundness invariant):** every error path DENIES — an unparseable dataset is a
 `400` (never an empty-dataset allow), a materialisation failure a `503`, an unknown mode a `403`
