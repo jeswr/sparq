@@ -225,6 +225,19 @@ jobs:
       # (the purl/supplier assertion jobs already regenerated it unconditionally on every
       # PR — one generation now feeds both assertions AND the artifact upload, which keeps
       # its former rust_changed cadence).
+      #
+      # ORDERING CONSTRAINT (learned on this PR's own first run): the three SBOM-check
+      # self-test suites each run their OWN live `cargo cyclonedx` and DELETE every
+      # crates/**/*.cdx.json in their cleanup (finally-block `unlink`), so they MUST run
+      # BEFORE the canonical generation below — exactly the order the former standalone
+      # jobs used internally (self-tests first, then generate+assert). Running them after
+      # generation wipes the SBOMs the assertions gate on.
+      - name: purl-canonicality check self-test
+        run: python3 scripts/tests/test_sbom_purl_canonical.py
+      - name: bom-ref-canonicality check self-test (GS-6)
+        run: python3 scripts/tests/test_sbom_bomref_canonical.py
+      - name: supplier-name check self-test
+        run: python3 scripts/tests/test_sbom_supplier.py
       - name: Warm registry cache (retry transient crates.io fetch)
         # [OPUS-4.8] sq-hxn7: `cargo cyclonedx` runs `cargo metadata`, which fetches the
         # crates.io registry. That fetch is TRANSIENTLY flaky on hosted runners (observed
@@ -311,17 +324,15 @@ jobs:
       # (scripts/check-sbom-purl-canonical.py) — so a regression in the normalizer-vs-tool
       # contract FAILS the PR instead of shipping. Also runs the hermetic self-tests so a
       # regression in the checks themselves is caught:
+      # The hermetic self-tests for both halves ran ABOVE (before the canonical
+      # generation — see the ordering-constraint note):
       #   * test_sbom_purl_canonical.py — the purl half (GS-7).
       #   * test_sbom_bomref_canonical.py — the bom-ref half (GS-6, sq-9gli): pins that the SBOM
       #     ROOT COMPONENT's `bom-ref` (and every workspace/path ref + dependency edge) is
       #     rewritten from the `path+file:///abs/build/dir/...#ver` form to the canonical
       #     `pkg:cargo/<name>@<version>` identity, so no build-machine path leaks into the
       #     PUBLISHED SBOM. With the toolchain installed above, its live-workspace assertion
-      #     runs here (not skipped) over the same normalizer the publication path uses.
-      - name: purl-canonicality check self-test
-        run: python3 scripts/tests/test_sbom_purl_canonical.py
-      - name: bom-ref-canonicality check self-test (GS-6)
-        run: python3 scripts/tests/test_sbom_bomref_canonical.py
+      #     runs (not skipped) over the same normalizer the publication path uses.
       - name: SBOM purl-canonicality assertion over the normalized SBOM — GATING
         run: |
           set -euo pipefail
@@ -348,10 +359,8 @@ jobs:
       # carries a supplier.name (scripts/check-sbom-supplier.py) — so a future
       # cargo-cyclonedx bump that changes the component shape and silently stops the
       # derivation FAILS the PR instead of shipping an SBOM that regressed to the
-      # empty-supplier state. Also runs the hermetic self-test so a regression in the check
-      # itself is caught.
-      - name: supplier-name check self-test
-        run: python3 scripts/tests/test_sbom_supplier.py
+      # empty-supplier state. Its hermetic self-test (test_sbom_supplier.py) ran ABOVE,
+      # before the canonical generation (ordering-constraint note).
       - name: SBOM per-component supplier-name assertion over the normalized SBOM — GATING
         run: |
           set -euo pipefail
