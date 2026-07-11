@@ -584,7 +584,7 @@
       "pinned_version": "cwm (pin the exact version/git commit at gather time; `cwm --version` or `python2 cwm.py --version`)",
       "version_source": "`cwm --version` or the git commit of the checked-out source, recorded in the gather results file",
       "install_recipe": "download from https://www.w3.org/2000/10/swap/cwm.py (or the cwm git mirror). Requires Python 2 or the community Python 3 fork. gather-only — NOT a committed dependency.",
-      "run_recipe": "cwm bench/inference/socrates.n3 --think for the socrates closure; cwm gen_deeptaxonomy.n3 --think for the DeepTaxonomy closure. Cross-check closure triple count before timing.",
+      "run_recipe": "CWM=<path>/cwm bench/inference/eye-comparison.sh (the cwm column; graceful 'absent' skip without the tool). The harness runs `cwm <file> --think --data` (closure serialized with rules stripped) and closure-gates the count BEFORE timing; socrates+dt1k only by default (CWM_HEAVY=1 / CWM_DT100K=1 for the larger cells) — cwm is the honest SLOW column.",
       "comparable_suites": [
         {
           "sparq_suite": "inference-eye-comparison",
@@ -599,24 +599,22 @@
     },
     {
       "id": "jen3",
-      "name": "jen3 (N3 reasoner, JavaScript)",
-      "kind": "js-lib",
-      "role": "[SONNET-4.6 sq-hmd7l.1] jen3 is a JavaScript N3 reasoner (npm). The JS-ecosystem N3 counterpart to EYE and cwm, run via Node.js. MIT -> numbers are publishable. Part of the N3-reasoners comparison row in sq-hmd7l.11.",
-      "pinned_version": "jen3 (pin the exact npm version at gather time)",
-      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
-      "install_recipe": "`npm install jen3` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/n3_reasoner_adapter.mjs with ENGINE=jen3; reasons over the same N3 corpora as EYE. Cross-check closure triple count before timing.",
+      "name": "jen3 (N3 reasoner, Java — Apache Jena fork with Notation3 support)",
+      "kind": "binary",
+      "role": "[FABLE-5 sq-hmd7l.11, correcting the sq-hmd7l.1 stub] jen3 (github.com/william-vw/jen3) is a JAVA fork of Apache Jena adding Notation3 parsing + forward-chaining N3 inference — NOT an npm/JavaScript library (the original stub mis-registered it; corrected against the real GitHub release + a verified local run). Executed via `java -jar jen3.jar`. Apache-2.0 (Jena lineage) -> numbers are publishable. The fourth column of the N3-reasoners comparison (sq-hmd7l.11).",
+      "pinned_version": "jen3 v0.0.1 (github.com/william-vw/jen3 release asset jen3.jar, sha256 e886af61cbbd84c2cdd8231e4313759949e418fea75ed185a5723d3f6f7f27c6)",
+      "version_source": "the GitHub release tag + the sha256 of the downloaded jen3.jar, recorded in the gather results file",
+      "install_recipe": "download jen3.jar from https://github.com/william-vw/jen3/releases (v0.0.1); needs a JRE (verified on OpenJDK 21). gather-only — NOT a committed dependency.",
+      "run_recipe": "JEN3_JAR=<path>/jen3.jar bench/inference/eye-comparison.sh (the jen3 column; graceful 'absent' skip without the jar). CLI verified: `java -jar jen3.jar -n3 <file> -conclusion` serializes the full closure, `-inferences` only the derived (rule-free) triples — the harness closure-gates on the latter BEFORE timing.",
       "comparable_suites": [
         {
           "sparq_suite": "inference-eye-comparison",
-          "note": "N3 forward closure on the same corpora as EYE and cwm — jen3 is the fourth column; cross-check closure triple count vs sparq-cli reason n3 before trusting timing"
+          "note": "N3 forward closure on the same corpora as EYE and cwm — jen3 is the fourth column; the harness asserts the closure triple count against the deterministic expected size before trusting any timing"
         }
       ],
-      "version_env_metadata": "gather records the resolved jen3 npm version, node --version, and the host env block",
+      "version_env_metadata": "gather records the jen3 release tag + jar sha256, java -version, and the host env block",
       "quiet_box_sensitive": true,
-      "dashboard_engine_id": "jen3",
-      "unverified_pin": true,
-      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+      "dashboard_engine_id": "jen3"
     },
     {
       "id": "vlog",
