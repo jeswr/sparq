@@ -2152,6 +2152,36 @@ pub struct AppState {
     /// `(from, to)` pair is exactly that commit (gapless, monotonic — the `ChangeLog` contract).
     #[cfg(feature = "change-stream")]
     change_log: Option<Arc<std::sync::Mutex<sparq_serve::ChangeLog>>>,
+    /// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore permit. `true` while a restore is in flight.
+    /// Two concurrent restores were previously silently serialized by the single writer thread
+    /// (each individually crash-safe, last-writer-wins) — harmless but surprising: an operator
+    /// scripting parallel restores got no signal that one restore clobbered the other. This flag
+    /// lets [`try_begin_restore`](Self::try_begin_restore) reject the SECOND concurrent restore
+    /// explicitly (the route maps it to 409 Conflict) instead. Shared across handler clones
+    /// (`AppState` is `Clone`; the `Arc` is the per-server identity). `backup`-feature ONLY —
+    /// compiled out of the default build entirely, like the rest of the restore machinery.
+    #[cfg(feature = "backup")]
+    restore_in_flight: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// [FABLE-5] (sq-fy8ci) RAII permit for the SINGLE-FLIGHT restore guard: while one of these is
+/// alive, [`AppState::try_begin_restore`] returns `None` (the route maps that to 409 Conflict).
+/// Dropping it — normally, or during an unwind if the restore panics — releases the permit, so
+/// the guard can never wedge the server into permanently refusing restores. Obtain one via
+/// [`AppState::try_begin_restore`]; there is no other constructor.
+#[cfg(feature = "backup")]
+#[derive(Debug)]
+pub struct RestoreGuard {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "backup")]
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        // Release: pairs with the Acquire in `try_begin_restore` so the next permit holder
+        // observes everything this restore wrote before releasing.
+        self.flag.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl AppState {
@@ -2297,6 +2327,10 @@ impl AppState {
             access_audit_sink,
             #[cfg(feature = "change-stream")]
             change_log,
+            // [FABLE-5] sq-fy8ci: no restore in flight at boot (restore-on-start runs on the
+            // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
+            #[cfg(feature = "backup")]
+            restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -2538,6 +2572,28 @@ impl AppState {
     ///
     /// `persist == true` on an IN-MEMORY server is an `Err` (there is no durable dir to write
     /// through). Blocking (import parses + indexes the whole dataset): call it on the blocking pool.
+    /// [FABLE-5] (sq-fy8ci) Acquires the SINGLE-FLIGHT restore permit: `Some(guard)` if no other
+    /// restore is currently in flight on this server state, `None` if one is (the caller should
+    /// reject with a conflict — `/admin/restore` maps it to 409 — rather than let the writer
+    /// thread silently serialize a last-writer-wins pile-up). Hold the returned [`RestoreGuard`]
+    /// for the WHOLE restore ([`restore_from`](Self::restore_from) /
+    /// [`restore_from_with_deltas`](Self::restore_from_with_deltas)); dropping it (normally or
+    /// during an unwind) releases the permit. The permit is ADVISORY for embedding callers —
+    /// the restore paths stay individually crash-safe and atomic without it (the single writer
+    /// thread serializes them); it exists to make concurrency EXPLICIT instead of silent.
+    #[cfg(feature = "backup")]
+    pub fn try_begin_restore(&self) -> Option<RestoreGuard> {
+        use std::sync::atomic::Ordering;
+        self.restore_in_flight
+            // AcqRel on success: Acquire pairs with the releasing drop of the previous holder;
+            // Release publishes the claim. Acquire on failure is enough for the reject path.
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| RestoreGuard {
+                flag: self.restore_in_flight.clone(),
+            })
+    }
+
     #[cfg(feature = "backup")]
     pub fn restore_from<R: std::io::Read>(&self, input: R, persist: bool) -> Result<u64, String> {
         match (self.config.persist_dir.is_some(), persist) {
@@ -4827,6 +4883,9 @@ async fn admin_backup(State(state): State<AppState>, headers: HeaderMap) -> Resp
 ///   `recover_compaction`). WITHOUT `?persist=true` a durable server REFUSES the restore (409): an
 ///   in-memory-only swap would be silently lost on the next restart, which is a footgun.
 /// - `?persist=true` on an in-memory server → 409 (no durable dir to write through).
+/// - **Single-flight** ([FABLE-5] sq-fy8ci): a second restore posted while one is still in flight
+///   is rejected 409 (`a restore is already in progress`) instead of being silently serialized
+///   into a last-writer-wins pile-up by the writer thread. Retry after the first completes.
 ///
 /// **Fail-closed.** A corrupt/mismatched/non-artifact body is rejected (400) and the live store is
 /// left UNTOUCHED — the artifact is imported + validated fully before anything is swapped, and the
@@ -4864,8 +4923,24 @@ async fn admin_restore(
              is no durable directory to write the restore through to)",
         );
     }
+    // [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT: claim the restore permit AFTER the deterministic
+    // posture 409s above (so those errors never depend on timing) and BEFORE any work. A second
+    // concurrent restore gets an explicit 409 instead of being silently serialized behind the
+    // first by the writer thread (last-writer-wins). The permit rides into the blocking closure
+    // so it is released exactly when the restore finishes — including on a panic (unwind drops
+    // it), so a failed restore can never wedge the route shut.
+    let Some(restore_permit) = state.try_begin_restore() else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "a restore is already in progress on this server; retry after it completes \
+             (concurrent restores are rejected rather than silently applied last-writer-wins)",
+        );
+    };
     let st = state.clone();
-    let task = tokio::task::spawn_blocking(move || st.restore_from(&body[..], persist));
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = restore_permit;
+        st.restore_from(&body[..], persist)
+    });
     match task.await {
         Ok(Ok(source_generation)) => text_response(
             StatusCode::OK,
