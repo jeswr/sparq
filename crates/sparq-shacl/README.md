@@ -102,18 +102,18 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
 
 ## Scope and non-goals
 
-`validate_strict` returns `Err(ShaclFailure)` for an unsound SHACL-SPARQL pre-binding
-(`MINUS`/`VALUES`/`SERVICE` / a sub-`SELECT` dropping `$this` / a `BIND` re-binding it,
-sq-0mjfd) and for **ill-formed shapes-graph constructs** — the W3C-suite `sht:Failure`
-outcome (an unparsable `sh:path`, a non-integer `sh:minCount`, a malformed SHACL list…;
-construct-local syntax checks, not a full SHACL-of-SHACL pass, sq-11a). `validate` skips
-both leniently. Out of scope: `$shapesGraph` — see `bd list -l area:sparq-shacl`.
-Validation results are **not deduplicated** across
-traversal routes (a nested shape reached through two parents reports twice, matching
-the suite), re-entrant recursion on the same focus/shape pair counts as conforming, and
-an **uncompilable `sh:pattern`** (e.g. a `(?!…)` lookahead) is **skipped** into
-`report.diagnostics`, never fail-closed onto every value (the Rust-vs-XPath regex
-dialect boundary — not an ill-formedness failure).
+`validate_strict` returns `Err(ShaclFailure)` for an unsound SHACL-SPARQL pre-binding (`MINUS`/
+`VALUES`/`SERVICE` / a sub-`SELECT` dropping `$this` / a `BIND` re-binding it, sq-0mjfd) and for
+**ill-formed shapes-graph constructs** — the W3C-suite `sht:Failure` outcome: an unparsable
+`sh:path` or pathless property shape, a non-integer `sh:minCount`, a malformed SHACL list, a
+non-node-kind `sh:nodeKind`, `sh:qualifiedValueShape` without either count, or a PRESENT
+`sh:select`/`sh:sparqlExpr` that does not parse — **fail-closed relative to this engine's SPARQL
+parser** (a valid query beyond its coverage is also rejected strictly). Construct-local checks,
+not a full SHACL-of-SHACL pass (sq-11a, sq-ehq4g); `validate` skips all leniently. Out of scope:
+`$shapesGraph` — see `bd list -l area:sparq-shacl`. Results are **not deduplicated** across
+traversal routes (a nested shape via two parents reports twice, matching the suite), re-entrant
+recursion counts as conforming, and an **uncompilable `sh:pattern`** is **skipped** into
+`report.diagnostics` (the Rust-vs-XPath regex boundary, sq-lz99x — never fail-closed).
 
 ## License
 

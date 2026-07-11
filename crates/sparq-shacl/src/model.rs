@@ -929,6 +929,18 @@ impl ShapesModel {
                 "a property shape must have exactly one sh:path value".to_string(),
             );
         }
+        // [FABLE-5] (sq-ehq4g) A node explicitly typed `sh:PropertyShape` with NO
+        // `sh:path` is ill-formed (the syntax rules give a property shape exactly
+        // one). Recorded, then parsed as the same degenerate no-path shape as
+        // before. The untyped `sh:property [ … ]` spelling is checked at its use
+        // site (the `sh:property` loop), which this type guard keeps single-shot.
+        if path_objects.is_empty() && g.has_type(node, &sh("PropertyShape")) {
+            self.record_ill_formed(
+                node,
+                "path",
+                "a property shape must have exactly one sh:path value".to_string(),
+            );
+        }
         let path = path_objects
             .into_iter()
             .next()
@@ -1077,6 +1089,21 @@ impl ShapesModel {
             // [FABLE-5] (sq-11a) Recorded when ill-formed; built as before.
             self.check_iri_or_iri_list(g, node, "nodeKind", &o);
             let kinds = iri_set(g, &o);
+            // [FABLE-5] (sq-ehq4g) Each kind must be one of the SIX sh:* node
+            // kinds (SHACL §4.6.1); recorded when not, then built as before (an
+            // unknown kind matches no value node at eval, unchanged).
+            for kind in &kinds {
+                if !is_node_kind_iri(kind) {
+                    self.record_ill_formed(
+                        node,
+                        "nodeKind",
+                        format!(
+                            "the value of sh:nodeKind must be one of the six sh:* node kinds, got <{}>",
+                            kind
+                        ),
+                    );
+                }
+            }
             if !kinds.is_empty() {
                 c.push(Component::NodeKind(kinds));
             }
@@ -1420,6 +1447,22 @@ impl ShapesModel {
         }
         for o in g.objects(node, &sh("property")) {
             self.check_shape_ref(node, "property", &o);
+            // [FABLE-5] (sq-ehq4g) The value of sh:property must be a PROPERTY
+            // shape, i.e. carry an sh:path (syntax rules; a pathless child would
+            // silently validate nothing). A literal value is already recorded
+            // above; an explicitly-typed `sh:PropertyShape` records once in its
+            // own parse instead. The degenerate child is still interned as before.
+            if !matches!(o, Term::Literal(_))
+                && !g.has_type(&o, &sh("PropertyShape"))
+                && g.objects(&o, &sh("path")).is_empty()
+            {
+                self.record_ill_formed(
+                    &o,
+                    "path",
+                    "a property shape (the value of sh:property) must have exactly one sh:path value"
+                        .to_string(),
+                );
+            }
             let id = self.shape_id(g, &o);
             shape.components.push(Component::Property(id));
             shape.property_children.push(id);
@@ -1456,7 +1499,25 @@ impl ShapesModel {
                 }
             }
         }
-        for o in g.objects(node, &sh("qualifiedValueShape")) {
+        // [FABLE-5] (sq-ehq4g) `sh:qualifiedValueShape` with NEITHER
+        // `sh:qualifiedMinCount` nor `sh:qualifiedMaxCount` is ill-formed: both
+        // qualified-cardinality constraint components (SHACL §4.7.5–6) then miss a
+        // mandatory parameter, and a shape with values for SOME but not all
+        // mandatory parameters of a component is ill-formed (SHACL §2.3.2).
+        // Recorded once per shape node; the inert component is built as before.
+        let qualified_shapes = g.objects(node, &sh("qualifiedValueShape"));
+        if !qualified_shapes.is_empty()
+            && g.object(node, &sh("qualifiedMinCount")).is_none()
+            && g.object(node, &sh("qualifiedMaxCount")).is_none()
+        {
+            self.record_ill_formed(
+                node,
+                "qualifiedValueShape",
+                "a shape with sh:qualifiedValueShape must also have sh:qualifiedMinCount or sh:qualifiedMaxCount"
+                    .to_string(),
+            );
+        }
+        for o in qualified_shapes {
             self.check_shape_ref(node, "qualifiedValueShape", &o);
             let id = self.shape_id(g, &o);
             let num = |p: &str| -> Option<u64> {
@@ -1510,8 +1571,8 @@ impl ShapesModel {
                 // [FABLE-5] (sq-11a) No `sh:select` string literal on the
                 // constraint node (SHACL-SPARQL §5.2.1 requires exactly one):
                 // recorded, then skipped exactly as before. (A PRESENT but
-                // unparsable/non-SELECT query stays a lenient skip — that outcome
-                // depends on this engine's SPARQL parser, not on the shapes graph.)
+                // unparsable/non-SELECT query is recorded inside
+                // `parse_sparql_constraint` instead — sq-ehq4g.)
                 self.record_ill_formed(
                     &sp,
                     "select",
@@ -1578,8 +1639,10 @@ impl ShapesModel {
     /// `sh:prefixes`) into [`Self::select_exprs`], returning its index. `None` when
     /// `node` carries neither (so the caller falls back to the literal/term reading
     /// — e.g. a plain `sh:targetNode` IRI), or when the derived query is ill-formed
-    /// (dropped leniently, like an ill-formed `sh:sparql`). `sh:select` takes
-    /// precedence over `sh:sparqlExpr` when both are present.
+    /// (dropped leniently, like an ill-formed `sh:sparql` — [FABLE-5] (sq-ehq4g)
+    /// but ALSO recorded for the strict channel, fail-closed relative to this
+    /// engine's SPARQL parser). `sh:select` takes precedence over `sh:sparqlExpr`
+    /// when both are present.
     fn intern_select_expr(&mut self, g: &GraphView, node: &Term) -> Option<usize> {
         // Only blank-node / IRI node-expression resources carry these predicates; a
         // literal `sh:targetNode` is a target node, never an expression.
@@ -1589,11 +1652,29 @@ impl ShapesModel {
         let prefixes = collect_prefixes_from(g, &g.objects(node, &sh("prefixes")));
         let prepared = match g.object(node, &sh("select")) {
             Some(Term::Literal(l)) => {
-                crate::sparql::PreparedSelectExpr::build_select(&prefixes, l.value())
+                let built = crate::sparql::PreparedSelectExpr::build_select(&prefixes, l.value());
+                if built.is_none() {
+                    self.record_ill_formed(
+                        node,
+                        "select",
+                        "the sh:select of a SPARQL-based node expression must parse as a SPARQL SELECT query"
+                            .to_string(),
+                    );
+                }
+                built
             }
             _ => match g.object(node, &sh("sparqlExpr")) {
                 Some(Term::Literal(l)) => {
-                    crate::sparql::PreparedSelectExpr::build_expr(&prefixes, l.value())
+                    let built = crate::sparql::PreparedSelectExpr::build_expr(&prefixes, l.value());
+                    if built.is_none() {
+                        self.record_ill_formed(
+                            node,
+                            "sparqlExpr",
+                            "the sh:sparqlExpr of a SPARQL-based node expression must parse as a SPARQL expression"
+                                .to_string(),
+                        );
+                    }
+                    built
                 }
                 _ => return None, // not a SPARQL node expression — caller's fallback
             },
@@ -1652,7 +1733,23 @@ impl ShapesModel {
         // (surfaced by `validate_strict`) and the constraint is then dropped
         // (`prepared = None`), so the lenient `validate` simply skips it.
         constraint.prepared = match crate::sparql::PreparedSparql::build(&constraint) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => {
+                // [FABLE-5] (sq-ehq4g) A PRESENT `sh:select` whose (post-`$PATH`-
+                // substitution) text does not parse as a SPARQL SELECT query is
+                // ill-formed (SHACL-SPARQL §5.2.1): recorded for the strict
+                // channel, then skipped exactly as before (`prepared: None`).
+                // FAIL-CLOSED boundary: "does not parse" is relative to THIS
+                // engine's vendored SPARQL parser (see the crate README).
+                if prepared.is_none() {
+                    self.record_ill_formed(
+                        node,
+                        "select",
+                        "the sh:select query of an sh:sparql constraint must parse as a SPARQL SELECT query"
+                            .to_string(),
+                    );
+                }
+                prepared
+            }
             Err(violation) => {
                 self.pre_binding_failures.push(PreBindingFailure {
                     node: node.clone(),
@@ -1800,6 +1897,24 @@ fn is_integer_lexical(s: &str) -> bool {
 /// [FABLE-5] (sq-11a) True iff `s` is a valid `xsd:boolean` lexical form.
 fn is_boolean_lexical(s: &str) -> bool {
     matches!(s, "true" | "false" | "0" | "1")
+}
+
+/// [FABLE-5] (sq-ehq4g) True iff `iri` is one of the SIX `sh:nodeKind` values
+/// (SHACL §4.6.1): `sh:BlankNode` / `sh:IRI` / `sh:Literal` and the three
+/// pairwise unions. Anything else — including another `sh:`-namespace IRI — is
+/// an ill-formed `sh:nodeKind` value.
+fn is_node_kind_iri(iri: &str) -> bool {
+    iri.strip_prefix(SH).is_some_and(|local| {
+        matches!(
+            local,
+            "BlankNode"
+                | "IRI"
+                | "Literal"
+                | "BlankNodeOrIRI"
+                | "BlankNodeOrLiteral"
+                | "IRIOrLiteral"
+        )
+    })
 }
 
 fn iri_set(g: &GraphView, o: &Term) -> Vec<String> {
