@@ -438,13 +438,27 @@ since:
   with the SAME materialised `natural_join`. Re-planning changes the plan, never the answer:
   `tests/adaptive_result_equals_static.rs` asserts the adaptive result equals both the static
   interpreter and ground-truth local engine eval across a genuine large-divergence switch.
+  - **Multi-source (union-arm) adaptive loop** (`sq-xw8zz`):
+    `adaptive::execute_adaptive_multi_source` lifts the adaptive path's `MultiSource` guard
+    exactly as `sq-7yf0` did for the static/streaming interpreters — a leaf's retained arms
+    are fetched per source (bag-union re-keyed onto the pattern header; a failed arm fails the
+    leaf CLOSED, never a silent arm-drop), each successful arm's wall-clock fetch latency is
+    recorded under its SOURCE index via `RuntimeStats::record_source_latency` (a failed arm
+    records nothing — a transport error's duration would make a fast-failing source look
+    attractively fast), and the observed leaf cardinality is the UNION count. That makes the
+    latency-aware cost bias above — slowest-arm default AND the opt-in `CardinalityWeighted`
+    (sq-s5kd) — consumable from a LIVE run, not just planner-level tests, and is the live seam
+    the deferred source-failover work needs. The final `RuntimeStats` is exposed on
+    `AdaptiveOutcome::stats` (carry observations across queries / assert what the re-planner
+    saw). `tests/adaptive_multi_source_result_equals_local.rs` holds the loop to the same
+    merged-graph engine oracle as `sq-7yf0`, with two distinct live per-arm latencies.
 
 With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7 all
 landed; epic **sq-dnko** closed). Multi-source UNION-per-leaf fan-out has since landed under
-epic sq-3183 (`sq-7yf0`, above). Still ahead as future beads under epic sq-3183: the
-pushed-down streaming bind-join, and the ANAPSID "adaptive operator" refinement (estimate a
-leaf's cardinality from a prefix of its rows while still streaming it). See
-`crates/sparq-fedclient/README.md`.
+epic sq-3183 (`sq-7yf0`, above; the ADAPTIVE loop's union-arm counterpart is `sq-xw8zz`,
+above). Still ahead as future beads under epic sq-3183: the pushed-down streaming bind-join,
+and the ANAPSID "adaptive operator" refinement (estimate a leaf's cardinality from a prefix
+of its rows while still streaming it). See `crates/sparq-fedclient/README.md`.
 
 **Test-quality note — the mutation ratchet is measured features-ON (`sq-3dyje.6`).** The whole
 `sparq-fedclient` surface (and every test file) is `#[cfg(feature = "fedclient")]`-gated, so
