@@ -130,8 +130,13 @@
   features: "solid-authz"
   test: true
 
-# [FABLE-5] sq-lrtc3.1 (epic sq-lrtc3): `odrl-authz` (default OFF) — the OPT-IN ODRL lane on
-# `POST /authz/query` (ODRL as THE access-control language for SPARQL queries, fail-closed).
+# [FABLE-5] sq-lrtc3.1 + sq-3mu76 (epic sq-lrtc3): `odrl-authz` (default OFF) — the OPT-IN ODRL
+# lane on `POST /authz/query` AND (sq-3mu76) the advisory `POST /authz/decide` /
+# `POST /authz/wac-allow` endpoints (ODRL as THE access-control language for SPARQL queries,
+# fail-closed; the advisory surfaces never report an allow the query lane refuses to honour —
+# read-scoped advertisement until the sq-lrtc3.2 action contract lands). NOTE the leg NAME
+# below deliberately keeps its original `/authz/query` wording: check-run names are the gate
+# aggregator's discovery contract and must stay byte-identical (this file's header).
 # The `solid_authz` ODRL branch, the `ServerConfig` wiring, the optional `sparq-policy`
 # dependency, and the `tests/odrl_authz.rs` integration suite are ALL `#[cfg(feature =
 # "odrl-authz")]`, so the DEFAULT build never compiled, clippy'd or tested this code — the
