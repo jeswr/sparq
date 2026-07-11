@@ -25,6 +25,23 @@ heavy MCP-SDK dependency.
 | `stats` | graph count + introspection totals | small JSON object |
 | `ask` *(feature `nlq`, OFF by default)* | `sparq_nlq` NL→SPARQL loop | executed SPARQL + real result rows (+ citations) |
 | `update` *(gated, OFF by default)* | `sparq_engine::update_in_place_atomic` | new triple count |
+| `template_list` / `template_invoke` *(feature `templates`, OFF by default)* | `sparq_engine::templates` (#901 injection-safe binding) | definitions / typed fail-closed invocation |
+| `text_search` *(feature `text`, OFF by default)* | `sparq_text::TextIndex` (BM25, lazily built + reconciled) | ranked literal hits JSON |
+
+### Named templates + full-text search (features `templates` / `text`, OFF by default) — [FABLE-5] sq-lsp7k.10
+
+Register validated `sparq_engine::templates::Template`s on `ServerConfig::templates`; the
+server then advertises `template_list` (definitions: name/kind/text/typed parameters) and
+`template_invoke` (bind typed JSON arguments through the #901 **algebra rewrite** — never
+string concatenation — and execute; **fail-closed** on an unknown template or an
+unknown/missing/mistyped parameter). An **UPDATE template stays behind the same
+`allow_update` gate** as the raw `update` tool: listed on a read-only server, refused at
+invocation. `text_search` (feature `text`) BM25-ranks the graph's string literals via a
+lazily-built `sparq-text` index, reconciled incrementally (`O(new dict terms)`) before every
+search so it stays current across updates; modes `and`/`any`, `tok*` prefix matching for
+autocomplete-style discovery. The HTTP server exposes the same template layer at
+`/templates` (see the `http-server` skill §5g). Facet-count and richer IRI-autocomplete
+tools are deliberately deferred to their own beads (the facet/autocomplete engine features).
 
 ### Pod mode (feature `solid`, OFF by default) — [FABLE-5] sq-u16eq
 

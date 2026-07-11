@@ -133,6 +133,20 @@ pub mod n3_patch;
 #[cfg(feature = "solid-authz")]
 pub mod solid_authz;
 
+/// [FABLE-5] (sq-lsp7k.10) OPT-IN named-parameterized-template REST surface (`/templates`):
+/// server-stored, IRI-identified SPARQL query/UPDATE templates with typed JSON parameter
+/// binding (GraphDB "SPARQL templates" / Stardog "stored queries" parity). Compiled ONLY
+/// behind the `templates` feature (which enables `sparq-engine/templates` on top of the
+/// #901 injection-safe `params` binding), and served only when
+/// [`ServerConfig::templates`](http::ServerConfig) is also set (`--templates` /
+/// `SPARQ_TEMPLATES=1`) — the same double-opt-in as `tpf` / `shacl` / `terse`. Template
+/// writes and UPDATE-template invocations are write-gated through the SAME sequenced-writer
+/// path as `/sparql` updates (the gated-update posture is preserved). With the feature off
+/// the module + the routes + the config fields are `#[cfg]`-stripped, byte-identical to
+/// before. See the module docs.
+#[cfg(feature = "templates")]
+pub mod templates;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;

@@ -18,11 +18,11 @@
 import * as React from "react";
 
 import { Badge } from "@/components/ui/badge";
-import {
-  fmtNum,
-  type CompetitiveSummary,
-  type SameBoxComparison,
-  type SameBoxRow,
+import { fmtNum } from "@/lib/fmt-num";
+import type {
+  CompetitiveSummary,
+  SameBoxComparison,
+  SameBoxRow,
 } from "@/data/benchmarks";
 
 type Regime = "keep-alive" | "fresh-connect";

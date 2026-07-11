@@ -24,7 +24,7 @@ import { Scale, Loader2, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { toolById, TIER_META, type ToolOverride } from "@/data/tools";
+import { toolById, TIER_META } from "@/data/tools";
 import { useEngine } from "@/lib/engine-context";
 import { isTauriRuntime, nativeOdrlPreview } from "@/lib/tauri-ipc";
 import {
@@ -42,16 +42,10 @@ import {
 } from "@/lib/odrl";
 import { isAskResult, type SparqlResults } from "@sparq/client";
 
-// ---------------------------------------------------------------------------
-// Honesty-metadata override — flips this tool to a working panel (sq-ixc3.15).
-// The tier stays `live-native`: live on the desktop's native engine, honestly
-// unavailable in the hosted web build. Never edit data/tools.ts.
-// ---------------------------------------------------------------------------
-
-export const ODRL_TOOL_OVERRIDE: ToolOverride = {
-  built: true,
-  group: "working",
-};
+// [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
+// rail/tab honesty read path) so THIS panel module can stay behind a lazy dynamic import().
+// Re-exported here so the panel file remains the tool's single import surface.
+export { ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool.meta";
 
 // ---------------------------------------------------------------------------
 // State shapes.

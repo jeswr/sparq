@@ -1035,6 +1035,44 @@ feature but not the flag, `/terse/transpile` is `404`. Transpiling is query-shap
 by `--auth-token-read` like a GET. The CLI exposes the same transpiler as `sparq-cli terse` (see the
 `cli` skill).
 
+**5g. Named parameterized SPARQL templates (OPT-IN, `sq-lsp7k.10`; feature `templates`).
+[FABLE-5]** Server-stored, IRI-identified query/UPDATE templates with **typed, fail-closed
+parameter binding** — the GraphDB "SPARQL templates" (smart updates) / Stardog "stored
+queries" parity surface, and what an app backend or LLM agent should call instead of
+composing free-form UPDATE strings.
+
+- `GET /templates` — list every stored definition (read-gated). `GET /templates/{name}` —
+  one definition; the `{name}` segment is a wildcard capture, so IRI names work verbatim.
+- `PUT /templates/{name}` — store/replace (**write-gated**); the JSON body is
+  `{ "text" | "sparql", "parameters": { name → auto|iri|string|boolean|integer|decimal|double|<datatype-IRI> },
+  "description"? }`. **Fail-closed registration**: unparseable text, a declared parameter
+  that is not a free bindable placeholder (e.g. a literal type in a predicate slot), or a
+  result/aggregate/BIND output variable is a `400` — a stored template is always invocable.
+  `DELETE /templates/{name}` — remove (**write-gated**).
+- `POST /templates/{name}` — **invoke** with a JSON argument object. Binding is the #901
+  `params` **algebra rewrite** (`sparq_engine::templates`): values become typed terms inside
+  the parsed AST, never string concatenation, so a hostile value cannot inject syntax.
+  **Fail-closed invocation**: an unknown/missing/mistyped argument is a `400`. SELECT/ASK →
+  SPARQL-JSON; CONSTRUCT/DESCRIBE → N-Triples; an **UPDATE template is write-gated and runs
+  through the SAME sequenced-writer path (`run_update`) as a `/sparql` update** — budgets,
+  atomicity, durability and the gated-update posture are identical.
+- `--templates-file PATH` (env `SPARQ_TEMPLATES_FILE`) makes the store durable: loaded
+  fail-closed at startup (a corrupt file is a startup ERROR, never a silently-empty store),
+  rewritten atomically (write-temp + rename) on every successful `PUT`/`DELETE`.
+
+```sh
+cargo run -p sparq-server --features templates -- data.ttl --templates
+curl -X PUT -H 'Content-Type: application/json' http://127.0.0.1:3030/templates/friends \
+  -d '{"text":"SELECT ?f WHERE { ?who <http://ex/knows> ?f }","parameters":{"who":"iri"}}'
+curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:3030/templates/friends \
+  -d '{"who":"http://ex/alice"}'          # → SPARQL-JSON, typed + injection-safe
+```
+
+**Double opt-in**, OFF by default: compiled only with the `templates` cargo feature **and**
+served only when `--templates` / `SPARQ_TEMPLATES=1` is also set (mirrors `shacl`/`tpf`/
+`terse`); without the flag every `/templates` path is `404`. The MCP surface exposes the same
+template layer as `template_invoke` (see the `agent-tools` skill).
+
 ### Solid WAC/ACP authorization endpoints (`solid-authz` feature, default OFF; `sq-snopa.6`, issue #992 FR-4)
 
 A **thin, fail-closed HTTP shell** over the [`sparq-solid`](../../crates/sparq-solid) library
@@ -1059,18 +1097,26 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
 - `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
   **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
   session sees ZERO rows (empty view), never the whole store.
-  - **ODRL lane** (`odrl-authz` cargo feature, default OFF; sq-lrtc3.1): when the request dataset
-    carries ODRL policy rules (`odrl:permission`/`odrl:prohibition`), the handler parses them from
-    the UNION of the dataset's graphs and runs the `sparq-solid` bridge
+  - **ODRL lane** (`odrl-authz` cargo feature, default OFF; sq-lrtc3.1 + sq-3mu76): when the
+    request dataset carries ODRL policy rules (`odrl:permission`/`odrl:prohibition`), the handler
+    parses them from the UNION of the dataset's graphs and runs the `sparq-solid` bridge
     (`PodStore::materialize_odrl_policy`, BOTH sides, deny-overrides) for
     (party = session agent, action = `odrl:read`, target = each rule's target graph) BEFORE the
     query — an ODRL prohibition beats a static WAC grant through the unchanged
-    `∪ allow ∖ ∪ deny` enforcement. Fail-closed 4xx refusals (never a silent allow): malformed
+    `∪ allow ∖ ∪ deny` enforcement. The lane runs on **all three endpoints** (sq-3mu76): the
+    advisory `/authz/decide` and `/authz/wac-allow` never report an allow `/authz/query` would
+    refuse to honour, and their advertisements are **read-scoped** while the lane evidences only
+    `odrl:read` — `grantedModes` is masked to the requested mode, `wacAllow` carries at most
+    `user="read"` with `public=""` (anonymous is refused wherever the lane fires). Fail-closed 4xx
+    refusals (never a silent allow): malformed
     policy, unimplementable `odrl:conflict` strategy, a rule without a concrete target graph IRI
-    (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), or an
-    anonymous session. Constraints the stateless lane cannot evidence (`odrl:purpose`,
-    `odrl:count` — stateful budgets are sq-snopa.8) never grant. Feature OFF ⇒ byte-identical
-    `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
+    (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), an
+    anonymous session, or a `trust` block combined with an ODRL-carrying dataset on `/decide`
+    (the trust dispatch would bypass the lane). Constraints the stateless lane cannot evidence
+    (`odrl:purpose`, `odrl:count` — stateful budgets are sq-snopa.8) never grant. `/decide` stays
+    governing-ACL-scoped: with no discoverable `.acl`/`.acr` it returns its `noAcl` deny even
+    where a bridged grant lets `/authz/query` see rows (a deny-side-only divergence). Feature OFF
+    ⇒ byte-identical `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
 
 **FAIL-CLOSED (the soundness invariant):** every error path DENIES — an unparseable dataset is a
 `400` (never an empty-dataset allow), a materialisation failure a `503`, an unknown mode a `403`

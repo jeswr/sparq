@@ -19,7 +19,6 @@ import { Server, Loader2, RefreshCw, Unplug, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { ToolOverride } from "@/data/tools";
 import {
   connectionSafetyWarnings,
   hasBlockingWarning,
@@ -33,18 +32,10 @@ import {
   type ServerHealth,
 } from "@sparq/client";
 
-// ---------------------------------------------------------------------------
-// Honesty-metadata override — flips this tool from "walkthrough / not built" to
-// "live / working" once this panel lands (sq-iemfq). Never edit data/tools.ts.
-// ---------------------------------------------------------------------------
-
-export const SERVER_TOOL_OVERRIDE: ToolOverride = {
-  tier: "live",
-  built: true,
-  group: "working",
-  blurb:
-    "Connect to a running SPARQL 1.1 Protocol endpoint — query + bindings table, health status.",
-};
+// [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
+// rail/tab honesty read path) so THIS panel module can stay behind a lazy dynamic import().
+// Re-exported here so the panel file remains the tool's single import surface.
+export { SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool.meta";
 
 // ---------------------------------------------------------------------------
 // State shapes.
