@@ -1,0 +1,39 @@
+# EDG-style "employee record" shapes: property groups, fractional sh:order,
+# names/descriptions, cardinalities, boolean/date/lang widgets, dash:singleLine.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dash: <http://datashapes.org/dash#> .
+@prefix ex: <http://example.org/> .
+
+ex:IdentityGroup a sh:PropertyGroup ; rdfs:label "Identity" ; sh:order 0 .
+ex:WorkGroup a sh:PropertyGroup ; rdfs:label "Employment" ; sh:order 1 .
+
+ex:EmployeeShape a sh:NodeShape ;
+  sh:targetClass ex:Employee ;
+  sh:name "Employee" ;
+  sh:property [
+    sh:path ex:fullName ; sh:name "Full name" ; sh:description "Legal name." ;
+    sh:order 1 ; sh:group ex:IdentityGroup ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:bio ; sh:name "Biography" ; sh:order 1.5 ; sh:group ex:IdentityGroup ;
+    sh:datatype xsd:string ; dash:singleLine false ;
+  ] ;
+  sh:property [
+    sh:path ex:motto ; sh:name "Motto" ; sh:order 2 ; sh:group ex:IdentityGroup ;
+    sh:datatype rdf:langString ; sh:uniqueLang true ;
+  ] ;
+  sh:property [
+    sh:path ex:active ; sh:name "Active" ; sh:order 1 ; sh:group ex:WorkGroup ;
+    sh:datatype xsd:boolean ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:hireDate ; sh:name "Hire date" ; sh:order 2 ; sh:group ex:WorkGroup ;
+    sh:datatype xsd:date ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:internalCode ; sh:deactivated true ;
+  ] .

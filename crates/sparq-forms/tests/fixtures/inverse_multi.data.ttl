@@ -1,0 +1,10 @@
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex: <http://example.org/> .
+
+ex:apollo a ex:Project ;
+  ex:title "Apollo" ;
+  ex:budget "1000000"^^xsd:integer ;
+  ex:homepage <http://example.org/apollo/logo.svg> .
+
+ex:neil a ex:Person ; ex:worksOn ex:apollo .
+ex:buzz a ex:Person ; ex:worksOn ex:apollo .
