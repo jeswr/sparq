@@ -36,7 +36,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { downloadText } from "@/lib/download";
 import {
@@ -61,6 +60,8 @@ import { GraphView } from "@/components/workbench/graph-view";
 // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference (RDFS / OWL 2 RL) selector, in the
 // action row so the active entailment regime is visible + controllable while querying.
 import { InferenceControl } from "@/components/workbench/inference-control";
+// [FABLE-5] sq-ixc3.14 — the federation allowlist editor + the honest run-location badge.
+import { FederationControl, RunLocationBadge } from "@/components/workbench/federation-control";
 import { useWorkspace } from "@/lib/workspace-context";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
@@ -626,12 +627,16 @@ export function QueryWorkbench() {
         {/* Action row. */}
         <div className="flex items-center gap-2 border-b bg-card px-3 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">SPARQL</span>
-          <Badge variant="outline" className="h-5 gap-1 text-[10px]" title="Where this query runs">
-            LOCAL · in-tab WASM
-          </Badge>
+          {/* [FABLE-5] sq-ixc3.14 — the HONEST run-location badge: in-tab WASM for a plain
+              query; the desktop's native engine (allowlist-gated) when SERVICE is detected;
+              native-only labelling on the web build instead of pretending to federate. */}
+          <RunLocationBadge query={query} />
           {/* [OPUS-4.8] sq-tp1m — the per-workspace inference regime (queries run with the chosen
               RDFS / OWL 2 RL entailment applied by the engine). */}
           <InferenceControl className="ml-2" />
+          {/* [FABLE-5] sq-ixc3.14 — the per-workspace federation egress allowlist (fail-closed:
+              SERVICE may dial ONLY these endpoints, enforced by the native engine). */}
+          <FederationControl className="ml-1" />
           <div className="ml-auto flex items-center gap-1.5">
             <Button
               size="sm"

@@ -53,6 +53,9 @@ import {
 // workspace's persisted choice (restores it on load), mounted once regardless of the active tab.
 // [sq-glo5r] — N3RulesBridge keeps the engine's N3 rules cache in lockstep with the workspace.
 import { InferenceModeBridge, N3RulesBridge } from "@/components/workbench/inference-control";
+// [FABLE-5] sq-ixc3.14 — keeps the engine's federation egress allowlist in lockstep with the
+// active workspace's persisted setting (fail-closed until pushed), mounted once like the bridges above.
+import { FederationBridge } from "@/components/workbench/federation-control";
 // [OPUS-4.8] sq-xvj9 — the Cmd-K counterpart to the rail's "Export data…": serialise + download the
 // whole store as pretty Turtle / TriG / JSON-LD from the keyboard-first spine.
 import { downloadText } from "@/lib/download";
@@ -119,6 +122,8 @@ export function Workbench() {
         <InferenceModeBridge />
         {/* [sq-glo5r] — sync the per-workspace N3 rules into the engine's closure cache. */}
         <N3RulesBridge />
+        {/* [FABLE-5] sq-ixc3.14 — sync the per-workspace federation egress allowlist. */}
+        <FederationBridge />
         {/* (sq-eydh9) [SONNET-4.6] — global RDF file drop overlay, mounted once here. */}
         <GlobalDropOverlay />
         {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — a native-feeling dark workspace. The ambient teal
