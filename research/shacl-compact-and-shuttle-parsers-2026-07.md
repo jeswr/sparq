@@ -203,8 +203,8 @@ per sq-rvgr2 rules (every normative statement traces to implemented behaviour or
 labelled proposal; Security Considerations + implementation-status sections mandatory;
 Fable soundness review pre-publication). Normative core = the Shuttle grammar + emission
 mapping. **Destination:** jeswr/solid-specs pending → land in-repo now, contribute when
-created; also contribute spec tests upstream to jeswr/shaclc-1.2 per standing rule
-#1546. Note: house Typst is ReSpec-*look*; genuine ReSpec/Bikeshed conversion for
+created; also contribute spec tests upstream to jeswr/shaclc-1.2 per standing
+rule #1546. Note: house Typst is ReSpec-*look*; genuine ReSpec/Bikeshed conversion for
 upstream is unbudgeted and flagged (Q4).
 
 **Improvement thesis — measurable, not assumed** (sq-tonhr.12): the claim "Shuttle's
