@@ -287,7 +287,9 @@ Materialize the authorization view from the access-control documents, then enfor
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
   one-shot allow — so the granted agent is verified **per session**, not frozen to the
-  materializing party. `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`/`neq`) maps
+  materializing party. `odrl:recipient`/`odrl:assignee`
+  (`eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` — the set operators one head /
+  exception per member, [FABLE-5] sq-5fkpp) maps
   faithfully (recipient-of-data = session agent); an `odrl:dateTime` **inclusive** bound
   (`lteq` → `auth:notAfter`, `gteq` → `auth:notBefore`) maps to a **live-clock window**
   re-checked against `Session::now` per request ([OPUS-4.8] sq-0q7n — a lapsed window denies

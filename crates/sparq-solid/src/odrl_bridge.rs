@@ -656,12 +656,14 @@ enum AgentMapping {
     /// with the `except` principals carved out via an ACP `noneOf` exception matcher
     /// (the "everyone-except-X" / `recipient neq X` shape). [OPUS-4.8] sq-5037.
     Faithful {
-        /// Positive recipient principals (`eq`/`isA`/`isPartOf`). Empty ⇒ no positive
-        /// restriction → grant to `auth:Public` (everyone), narrowed only by `except`.
+        /// Positive recipient principals (`eq`/`isA`/`isPartOf`/`isAnyOf`). Empty ⇒ no
+        /// positive restriction → grant to `auth:Public` (everyone), narrowed only by
+        /// `except`.
         agents: Vec<String>,
-        /// Principals carved OUT (`recipient neq X`) — each becomes an ACP `noneOf`
-        /// exception matcher on the grant: a session matching the grant head is denied
-        /// the grant if it is one of these. Empty ⇒ no exception.
+        /// Principals carved OUT (`recipient neq X` / `recipient isNoneOf <set>`) —
+        /// each becomes an ACP `noneOf` exception matcher on the grant: a session
+        /// matching the grant head is denied the grant if it is one of these. Empty ⇒
+        /// no exception.
         except: Vec<String>,
         /// The live-clock validity window from a faithfully-mappable `odrl:dateTime`
         /// constraint (`gteq` → `not_before`, `lteq` → `not_after`). [OPUS-4.8] sq-0q7n.
@@ -679,17 +681,20 @@ enum AgentMapping {
 /// be persisted as re-checked ACP agent conditions.
 ///
 /// **Faithful (→ agent matcher):** an `odrl:recipient`/`odrl:assignee` constraint
-/// under `eq`/`isA` (the recipient IS this principal) or `isPartOf` (the recipient is
-/// a member of a static principal set). The recipient-of-data is exactly the session
-/// agent the ACP `auth:agent` head re-checks, so the persisted condition has the SAME
-/// semantics — it just re-evaluates per session instead of being frozen.
+/// under `eq`/`isA` (the recipient IS this principal) or `isPartOf`/`isAnyOf` (the
+/// recipient is a member of a static principal set — the evaluator matches both
+/// operators as the same flat lexical set, sq-uaz85). The recipient-of-data is exactly
+/// the session agent the ACP `auth:agent` head re-checks, so the persisted condition
+/// has the SAME semantics — it just re-evaluates per session instead of being frozen.
 ///
 /// **Faithful (→ noneOf exception):** an `odrl:recipient`/`odrl:assignee` constraint
 /// under `neq` (the recipient is everyone EXCEPT the named party — the
-/// "everyone-except-X" shape). This maps to an ACP `noneOf`: the grant head is the
-/// positive recipient set (or `auth:Public` if there is no positive constraint) with
-/// an `auth:exceptMatcher` carving out the named party, re-checked per session by the
-/// same machinery WAC/ACP `noneOf` already uses. [OPUS-4.8] sq-5037.
+/// "everyone-except-X" shape) or `isNoneOf` (everyone except the members of a static
+/// set — the list-valued dual, one exception matcher per member; [FABLE-5] sq-5fkpp).
+/// This maps to an ACP `noneOf`: the grant head is the positive recipient set (or
+/// `auth:Public` if there is no positive constraint) with an `auth:exceptMatcher`
+/// carving out each named party, re-checked per session by the same machinery WAC/ACP
+/// `noneOf` already uses. [OPUS-4.8] sq-5037.
 ///
 /// **Faithful (→ live-clock window):** an `odrl:dateTime` constraint under `lteq`
 /// ("until T", inclusive → `auth:notAfter`) or `gteq` ("from T", inclusive →
@@ -704,8 +709,11 @@ enum AgentMapping {
 /// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
 /// a client app is not a purpose-of-use, so mapping it to a client matcher would
 /// over-grant), a STRICT `odrl:dateTime` bound (`lt`/`gt` — see above), `odrl:count`
-/// (ACP is stateless — no usage counter), and any unrecognised left-operand. Any one
-/// such constraint forces the whole rule one-shot.
+/// (ACP is stateless — no usage counter), any unrecognised left-operand, and a
+/// malformed set right-operand — an EMPTY member set under `isPartOf`/`isAnyOf`/
+/// `isNoneOf`, or a numeric/dateTime operand under `isNoneOf` (the evaluator never
+/// satisfies those — `set_negation_representable` — so persisting an exception for
+/// them would widen access). Any one such constraint forces the whole rule one-shot.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
     let mut agents: Vec<String> = Vec::new();
     let mut except: Vec<String> = Vec::new();
@@ -745,15 +753,12 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
                 _ => return AgentMapping::Unmappable,
             },
             // recipient ∈ {a|b|c} (static set) → one agent matcher per member.
-            Operator::IsPartOf => {
-                let members: Vec<String> = c
-                    .right
-                    .as_str()
-                    .split(['|', ' ', ','])
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
+            // `odrl:isAnyOf` is evaluated by sparq-policy exactly as the flat
+            // `isPartOf` lexical set (sq-uaz85), so it maps identically. An EMPTY
+            // set (incl. a numeric operand, whose lexical form here is empty) is
+            // unsatisfiable under both operators → fail-closed. [FABLE-5] sq-5fkpp.
+            Operator::IsPartOf | Operator::IsAnyOf => {
+                let members = set_members(c.right.as_str());
                 if members.is_empty() {
                     return AgentMapping::Unmappable;
                 }
@@ -766,11 +771,45 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
                 Value::Iri(s) | Value::Str(s) => except.push(s.clone()),
                 _ => return AgentMapping::Unmappable,
             },
+            // recipient ∉ {a|b|c} (`odrl:isNoneOf` — the list-valued dual of `neq`)
+            // → one ACP noneOf exception matcher per member, carving each out of the
+            // grant. The evaluator only ever satisfies `isNoneOf` for IRI/string
+            // operands (`set_negation_representable`), so a numeric/dateTime operand
+            // is malformed here → fail-closed (persisting an exception for a value
+            // the evaluator flat-denies would WIDEN access). The degenerate EMPTY
+            // set also stays one-shot: it excludes nothing, and promoting a (likely
+            // malformed) empty operand to a bare re-checked grant is not worth the
+            // widened persistence — the one-shot path still enforces it, frozen.
+            // [FABLE-5] sq-5fkpp.
+            Operator::IsNoneOf => match &c.right {
+                Value::Iri(s) | Value::Str(s) => {
+                    let members = set_members(s);
+                    if members.is_empty() {
+                        return AgentMapping::Unmappable;
+                    }
+                    except.extend(members);
+                }
+                _ => return AgentMapping::Unmappable,
+            },
             // order operators (lt/gt/…) on a recipient are not meaningful → one-shot.
             _ => return AgentMapping::Unmappable,
         }
     }
     AgentMapping::Faithful { agents, except, window }
+}
+
+/// Split the compact `|`/space/comma right-operand set encoding into its members —
+/// the SAME lexical set `sparq_policy::evaluate` matches for the flat
+/// `isPartOf`/`isAnyOf`/`isNoneOf` base case (its `is_part_of`), so a bridged
+/// matcher-per-member grant re-checks exactly the set the evaluator would.
+/// Empty/whitespace-only members are dropped. [FABLE-5] sq-5fkpp.
+fn set_members(right: &str) -> Vec<String> {
+    right
+        .split(['|', ' ', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Tighten an inclusive window bound with a new `xsd:dateTime` candidate `t`, compared
@@ -820,8 +859,9 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// # When a conditional grant is emitted (faithful)
 ///
 /// All of the matched permission's constraints are `odrl:recipient`/`odrl:assignee`
-/// constraints under `eq`/`isA`/`isPartOf` (see the crate-internal
-/// `map_constraints_to_agents`). The emitted grant is:
+/// constraints under `eq`/`isA`/`isPartOf`/`isAnyOf` (positive heads) or
+/// `neq`/`isNoneOf` (noneOf exceptions), plus an inclusive `odrl:dateTime` window
+/// (see the crate-internal `map_constraints_to_agents`). The emitted grant is:
 ///
 /// ```text
 /// <grant> a auth:ConditionalGrant ; auth:effect auth:Allow ;
@@ -842,9 +882,10 @@ fn recipient_principal_allowed(p: &str) -> bool {
 ///   materializes **nothing** — exactly as the one-shot path.
 /// - An unmapped action, or a missing target, materializes nothing.
 /// - **Mixed constraints fail safe:** if ANY constraint is unmappable (`purpose`,
-///   `dateTime`, `count`, a `neq`/order recipient), the WHOLE rule falls back to the
-///   one-shot path so the unmappable bound is still enforced (frozen) — a persisted
-///   condition is emitted ONLY when every constraint maps faithfully.
+///   a strict `dateTime` bound, `count`, an order/malformed-operand recipient), the
+///   WHOLE rule falls back to the one-shot path so the unmappable bound is still
+///   enforced (frozen) — a persisted condition is emitted ONLY when every constraint
+///   maps faithfully.
 /// - A recipient IRI inside the reserved pair encoding is dropped from the grant head
 ///   (it could otherwise impersonate a minted pair principal).
 ///
@@ -971,9 +1012,9 @@ pub fn materialize_permission_conditional(
 /// # When a conditional deny is emitted (faithful)
 ///
 /// All of the matched prohibition's constraints are `odrl:recipient`/`odrl:assignee`
-/// constraints under `eq`/`isA`/`isPartOf`/`neq` (see the crate-internal
-/// `map_constraints_to_agents`), the action [`action_to_mode`]-maps, and the request
-/// names a target. The recipient
+/// constraints under `eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` (see the
+/// crate-internal `map_constraints_to_agents`), the action [`action_to_mode`]-maps,
+/// and the request names a target. The recipient
 /// constraint is NOT required to hold against the request party — the persisted
 /// condition re-checks it per session, exactly as the allow path.
 ///
