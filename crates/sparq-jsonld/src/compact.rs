@@ -3,7 +3,7 @@
 //! [FABLE-5] (sq-oy1f.27) The W3C **Compaction Algorithm** and **Value Compaction**
 //! (spec "Compaction Algorithms", <https://www.w3.org/TR/json-ld11-api/#compaction-algorithms>),
 //! running over the *expanded document* with a real
-//! [`ActiveContext`](crate::context::ActiveContext) — rather than as a bespoke inverse of
+//! [`ActiveContext`] — rather than as a bespoke inverse of
 //! the RDF writer — which is what structurally removes the self-reparse-invisible
 //! data-loss class of bug (design record §3.2). The compaction-side context machinery it
 //! composes landed earlier: Inverse Context Creation, IRI Compaction, and Term Selection

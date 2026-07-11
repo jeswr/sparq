@@ -567,12 +567,9 @@ pub fn compact_iri(
             preferred_values.push("@reverse".to_string());
         }
         let id_entry = value.and_then(|v| v.get("@id")).and_then(Json::as_str);
-        if (type_language_value == "@id" || type_language_value == "@reverse")
-            && id_entry.is_some()
-        {
+        if let ("@id" | "@reverse", Some(id_iri)) = (type_language_value.as_str(), id_entry) {
             // Prefer @vocab-coercing terms when the nested @id round-trips through a
             // term; otherwise prefer @id-coercing terms.
-            let id_iri = id_entry.expect("guarded");
             let compacted_id = compact_iri(ctx, inverse, id_iri, None, true, false);
             let round_trips = ctx
                 .term_definitions
