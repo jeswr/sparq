@@ -53,15 +53,32 @@ export const HEAVY_MODULE_SUFFIXES = [
   // The in-tab ZK prover (~MB each), dynamic-imported inside lib/zk-prover.ts.
   "-> @aztec/bb.js",
   "-> @noir-lang/noir_js",
+  // [FABLE-5] sq-4ssz1 (#1046) — the zstd decoder, dynamic-imported inside
+  // lib/dataset-archive.ts#loadCodec. Small, but the maintainer's standing rule is that
+  // rarely-used codecs are fetched ONLY when a user actually decodes a file of that
+  // type, so it must STAY a lazy split point (never fold into a route-entry bundle).
+  "-> fzstd",
 ];
 
 /**
- * The two surfaces this bead guards. `manifestKey` is the app-build-manifest.json `pages` key;
+ * The guarded surfaces. `manifestKey` is the app-build-manifest.json `pages` key;
  * `html` is the exported document under out/ (trailingSlash:true → <route>/index.html).
+ * `/` + `/capabilities` are the original sq-vw3ax.9 "route + prove in under one screen"
+ * surfaces, guarded against EVERY heavy module; `/surface/data-formats` joins them
+ * ([FABLE-5] sq-4ssz1) guarded against the lazy zstd codec ONLY (`heavyModules`) — the
+ * page legitimately shares editor commons chunks with the hero-runner's dynamic file
+ * list, so the blunt all-modules check would false-positive there. What must never
+ * reach its first-load payload is the codec decoder itself.
  */
 export const GUARDED_ROUTES = [
   { manifestKey: "/page", label: "/", html: "index.html" },
   { manifestKey: "/capabilities/page", label: "/capabilities", html: "capabilities/index.html" },
+  {
+    manifestKey: "/surface/data-formats/page",
+    label: "/surface/data-formats",
+    html: "surface/data-formats/index.html",
+    heavyModules: ["-> fzstd"],
+  },
 ];
 
 /**
@@ -85,8 +102,10 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
     files: Array.isArray(v) ? v : Array.isArray(v?.files) ? v.files : [],
   }));
 
-  // 1. PRESENCE — each heavy module must still be a dynamic split point; collect its chunk files.
+  // 1. PRESENCE — each heavy module must still be a dynamic split point; collect its chunk
+  //    files, both as one union set and per module (a route can scope its guard — see below).
   const heavyFiles = new Set();
+  const heavyFilesByModule = new Map();
   const heavyReport = [];
   for (const suffix of HEAVY_MODULE_SUFFIXES) {
     const name = suffix.replace(/^-> /, "");
@@ -105,12 +124,16 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
       heavyFiles.add(f);
       files.add(f);
     }
+    heavyFilesByModule.set(suffix, files);
     heavyReport.push(`${name} → ${files.size} chunk(s)`);
   }
 
   // 2. ISOLATION — no heavy chunk file may appear in a guarded route's first-load set.
+  //    A route with `heavyModules` is checked against just those modules' chunks (used when
+  //    the route legitimately shares commons chunks with an unrelated heavy module's file
+  //    list, but must never ship a specific module — e.g. the lazy zstd codec).
   const routeReport = [];
-  for (const { manifestKey, label } of GUARDED_ROUTES) {
+  for (const { manifestKey, label, heavyModules } of GUARDED_ROUTES) {
     const first = app?.pages?.[manifestKey];
     if (!Array.isArray(first)) {
       errors.push(
@@ -119,7 +142,14 @@ export function analyzeBundle({ loadable, app, routes, images, htmlByLabel }) {
       );
       continue;
     }
-    const leaked = first.filter((f) => heavyFiles.has(f));
+    let guardSet = heavyFiles;
+    if (Array.isArray(heavyModules)) {
+      guardSet = new Set();
+      for (const suffix of heavyModules) {
+        for (const f of heavyFilesByModule.get(suffix) ?? []) guardSet.add(f);
+      }
+    }
+    const leaked = first.filter((f) => guardSet.has(f));
     if (leaked.length > 0) {
       errors.push(
         `ISOLATION: ${label} first-load bundle ships heavy code-split chunk(s) that must be ` +
@@ -208,8 +238,8 @@ function main() {
   }
 
   console.log(
-    "\n[check-bundle] PASS — no engine wasm / ZK prover / demo chunk in the / or /capabilities " +
-      "first-load bundle; basePath + images.unoptimized preserved.",
+    "\n[check-bundle] PASS — no engine wasm / ZK prover / demo / lazy-codec chunk in any " +
+      "guarded route's first-load bundle; basePath + images.unoptimized preserved.",
   );
 }
 
