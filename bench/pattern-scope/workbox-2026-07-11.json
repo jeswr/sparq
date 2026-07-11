@@ -1,0 +1,12 @@
+{
+  "bead": "sq-lrtc3.3",
+  "design": "masked-subgraph materialization (research/odrl-pattern-scoped-targets-2026-07.md)",
+  "host": "work box — NON-canonical",
+  "driver": "cargo run -p sparq-solid --features pattern-scope --release --example pattern_scope_bench",
+  "note": "breakeven_queries = -1 means the replica query showed no measurable saving at this size",
+  "sizes": [
+    {"extra": 0, "quads": 3060, "scoped_build_ms": 25.545, "view_query_ms": 1.680, "replica_query_ms": 0.837, "view_scan_ms": 2.693, "replica_scan_ms": 2.165, "view_title_rows": 599, "replica_title_rows": 0, "breakeven_queries": 49},
+    {"extra": 20, "quads": 20340, "scoped_build_ms": 59.907, "view_query_ms": 2.060, "replica_query_ms": 1.180, "view_scan_ms": 8.533, "replica_scan_ms": 7.347, "view_title_rows": 599, "replica_title_rows": 0, "breakeven_queries": 51},
+    {"extra": 50, "quads": 46260, "scoped_build_ms": 79.782, "view_query_ms": 1.923, "replica_query_ms": 0.893, "view_scan_ms": 17.477, "replica_scan_ms": 15.503, "view_title_rows": 599, "replica_title_rows": 0, "breakeven_queries": 41}
+  ]
+}
