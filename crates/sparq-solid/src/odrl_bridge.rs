@@ -872,9 +872,11 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// re-checked by [`crate::AuthIndex::accessible`]: a session whose agent is the
 /// recipient is granted; any other agent (or anonymous) is denied — **without**
 /// re-running the ODRL evaluator. A recipient *set* emits one grant per member (the
-/// auth view unions the allows). When the rule has NO recipient constraint, the grant
-/// head is `auth:Public` (any session) — only valid because the action/target/duties
-/// were already satisfied at materialization.
+/// auth view unions the allows). A bare `odrl:assignee` PROPERTY (no constraint)
+/// scopes the head to exactly that party ([FABLE-5] sq-9n1q4 — it previously widened
+/// to `auth:Public`); when the rule has NO recipient constraint AND no assignee, the
+/// grant head is `auth:Public` (any session) — only valid because the
+/// action/target/duties were already satisfied at materialization.
 ///
 /// # Fail-closed
 ///
@@ -941,7 +943,15 @@ pub fn materialize_permission_conditional(
         }
         match map_constraints_to_agents(rule) {
             AgentMapping::Faithful { agents: recipients, except, window } => {
-                let agents = condition_agents(rule, &recipients);
+                // [FABLE-5] sq-9n1q4: fold the bare `odrl:assignee` PROPERTY into the
+                // head set (a bare-assignee rule previously widened to auth:Public).
+                let Some(agents) = condition_agents(rule, &recipients) else {
+                    fallback_reasons.push(format!(
+                        "permission {} odrl:assignee has no faithful ACP condition head; one-shot path",
+                        rule.id
+                    ));
+                    continue;
+                };
                 if agents.is_empty() {
                     // every recipient was reserved-encoded → fail-closed, nothing.
                     fallback_reasons.push(format!(
@@ -1026,6 +1036,12 @@ pub fn materialize_permission_conditional(
 ///   the unmappable bound is still enforced (the one-shot deny is materialized iff the
 ///   prohibition currently matches — frozen). A persisted deny condition is emitted ONLY
 ///   when every constraint maps faithfully.
+/// - **A bare `odrl:assignee` PROPERTY falls back to one-shot** ([FABLE-5] sq-9n1q4):
+///   the evaluator gives `assignee` party-collection membership semantics
+///   (request-supplied edges) that a persisted concrete deny head cannot re-check —
+///   member sessions would escape the deny (fail-open). Previously the assignee was
+///   silently dropped and the deny head widened to `auth:Public` (over-denying
+///   everyone, including sessions the prohibition never named).
 /// - An unmapped action or a missing target materializes nothing.
 /// - A reserved-encoded recipient/exclusion cannot become an enforceable matcher; the
 ///   rule falls back to one-shot rather than emit a deny condition that cannot bite
@@ -1066,38 +1082,8 @@ pub fn materialize_prohibition_conditional(
         if !rule_action_target_match(rule, request, mode, target) {
             continue;
         }
-        match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful { agents: recipients, except, window } => {
-                // [OPUS-4.8] sq-0q7n: a time-windowed DENY is fail-OPEN — outside the
-                // window the deny would lapse and the carved-out party would regain
-                // access. A live-clock window is safe only on an ALLOW (a lapsed allow
-                // removes access — fail-closed). So a dateTime-windowed prohibition must
-                // stay one-shot (the frozen deny is materialized iff it matches now).
-                if window.is_some() {
-                    fallback_reasons.push(format!(
-                        "prohibition {} carries a dateTime window (fail-open as a live deny); one-shot path",
-                        rule.id
-                    ));
-                    continue;
-                }
-                let agents = condition_agents(rule, &recipients);
-                if agents.is_empty() {
-                    fallback_reasons.push(format!(
-                        "prohibition {} recipients are all reserved-encoded; no deny",
-                        rule.id
-                    ));
-                    continue;
-                }
-                let excepts = condition_excepts(&except);
-                if excepts.len() != except.len() {
-                    // A reserved-encoded exclusion would silently re-admit the carved-out
-                    // party to the DENY (i.e. they'd escape it) — fail-closed to one-shot.
-                    fallback_reasons.push(format!(
-                        "prohibition {} has a reserved-encoded neq recipient; one-shot path",
-                        rule.id
-                    ));
-                    continue;
-                }
+        match prohibition_condition_heads(rule) {
+            Ok((agents, excepts)) => {
                 let (first, emitted) = append_conditional_grants(
                     graph, &agents, &excepts, &TimeWindow::default(), mode, target, GrantEffect::Deny,
                 );
@@ -1109,14 +1095,7 @@ pub fn materialize_prohibition_conditional(
                     ..BridgeOutcome::default()
                 };
             }
-            AgentMapping::Unmappable => {
-                // A constraint with no faithful condition analogue (purpose / dateTime /
-                // count) → the one-shot deny path must check it (frozen) instead.
-                fallback_reasons.push(format!(
-                    "prohibition {} has a constraint with no faithful ACP condition; one-shot path",
-                    rule.id
-                ));
-            }
+            Err(reason) => fallback_reasons.push(format!("prohibition {} {reason}", rule.id)),
         }
     }
 
@@ -1130,18 +1109,118 @@ pub fn materialize_prohibition_conditional(
     out
 }
 
-/// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
-/// reserved-encoded recipient. An empty recipient list means the rule had NO agent
-/// restriction → a single `auth:Public` head (any session matches).
-fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
-    if recipients.is_empty() {
-        return vec![PUBLIC.to_owned()];
+/// Per-rule faithfulness test + head computation for a conditional DENY — the ONE
+/// place that decides whether a prohibition can be persisted as a re-checked deny
+/// condition, shared by [`materialize_prohibition_conditional`]'s emit loop and
+/// [`prohibition_maps_faithfully`] (the refresh router) so the two can never drift.
+/// `Err(reason)` means the rule must stay one-shot (the reason is appended to the
+/// outcome's fallback reasons, prefixed with the rule id). [FABLE-5] sq-9n1q4.
+fn prohibition_condition_heads(rule: &Rule) -> Result<(Vec<String>, Vec<String>), String> {
+    // [FABLE-5] sq-9n1q4: a bare `odrl:assignee` PROPERTY on a DENY must stay one-shot.
+    // Before this guard it was silently dropped and the deny head widened to
+    // auth:Public (over-denying everyone). Folding it into a concrete deny head (the
+    // allow-side fix) is NOT sound here: the evaluator gives `assignee` PartyCollection
+    // membership semantics via request-supplied edges, which a persisted concrete head
+    // cannot re-check — member sessions would ESCAPE the deny (fail-OPEN). The one-shot
+    // path enforces it exactly (frozen), mirroring the dateTime-window rule below.
+    if rule.assignee.is_some() {
+        return Err(
+            "names a bare odrl:assignee (a persisted deny head cannot re-check \
+             party-collection membership — fail-open); one-shot path"
+                .to_owned(),
+        );
     }
-    recipients
+    let AgentMapping::Faithful { agents: recipients, except, window } =
+        map_constraints_to_agents(rule)
+    else {
+        // A constraint with no faithful condition analogue (purpose / dateTime /
+        // count) → the one-shot deny path must check it (frozen) instead.
+        return Err("has a constraint with no faithful ACP condition; one-shot path".to_owned());
+    };
+    // [OPUS-4.8] sq-0q7n: a time-windowed DENY is fail-OPEN — outside the window the
+    // deny would lapse and the carved-out party would regain access. A live-clock
+    // window is safe only on an ALLOW (a lapsed allow removes access — fail-closed).
+    // So a dateTime-windowed prohibition must stay one-shot (the frozen deny is
+    // materialized iff it matches now).
+    if window.is_some() {
+        return Err(
+            "carries a dateTime window (fail-open as a live deny); one-shot path".to_owned()
+        );
+    }
+    let Some(agents) = condition_agents(rule, &recipients) else {
+        // Unreachable while the assignee guard above precedes it; kept so a future
+        // relaxation of that guard cannot silently emit an unfaithful deny head.
+        return Err("odrl:assignee has no faithful ACP condition head; one-shot path".to_owned());
+    };
+    if agents.is_empty() {
+        return Err("recipients are all reserved-encoded; no deny".to_owned());
+    }
+    let excepts = condition_excepts(&except);
+    if excepts.len() != except.len() {
+        // A reserved-encoded exclusion would silently re-admit the carved-out
+        // party to the DENY (i.e. they'd escape it) — fail-closed to one-shot.
+        return Err("has a reserved-encoded neq recipient; one-shot path".to_owned());
+    }
+    Ok((agents, excepts))
+}
+
+/// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
+/// reserved-encoded recipient — folding in the rule's bare `odrl:assignee` PROPERTY
+/// (`Rule::assignee`, which is NOT a `rule.constraints` entry and so is invisible to
+/// `map_constraints_to_agents`). [FABLE-5] sq-9n1q4: before this fold, a permission
+/// `assignee alice` with zero constraints emitted an `auth:Public` head — granting
+/// EVERYONE (including anonymous sessions) a rule scoped to one party (widening).
+///
+/// Semantics: the evaluator requires the requesting party to match `assignee`
+/// ([`sparq_policy`]'s `party_matches`: exact IRI, or membership of an
+/// `odrl:PartyCollection` via *request-supplied* edges) AND every recipient constraint
+/// to hold. Both dimensions re-check the SAME session agent here, so the faithful head
+/// set is their INTERSECTION:
+///
+/// - assignee `None` → the recipient heads alone (empty ⇒ no agent restriction →
+///   a single `auth:Public` head — any session matches). Unchanged behaviour.
+/// - assignee `Some(a)`, no positive recipients → `[a]` (the fix). The assignee IRI is
+///   deliberately NOT sentinel-normalised (`normalise_recipient_principal`): the
+///   evaluator matches `assignee` by exact IRI — folding `odrl:All` to `auth:Public`
+///   here would WIDEN vs the evaluator. A PartyCollection-valued assignee therefore
+///   over-restricts (members' sessions do not equal the collection IRI) — fail-CLOSED;
+///   collection membership needs the one-shot path's request-supplied evidence.
+/// - assignee `Some(a)` AND positive recipients → `[a]` iff the intersection is
+///   trivially `{a}` (`a` is itself a recipient head, or a recipient head is
+///   `auth:Public`/`auth:Authenticated` — an `a`-session always satisfies those);
+///   otherwise `None` — the caller falls back to one-shot (fail-closed; the frozen
+///   path enforces both dimensions exactly).
+/// - a reserved-encoded assignee, or an assignee spoofing the `auth:` class principals
+///   (`auth:Public`/`auth:Authenticated` — a head match no real WebID equality backs)
+///   → `None` (dropping it, or emitting the class head, would widen — one-shot).
+fn condition_agents(rule: &Rule, recipients: &[String]) -> Option<Vec<String>> {
+    let rec_heads: Vec<String> = recipients
         .iter()
         .filter(|r| recipient_principal_allowed(r))
         .map(|r| normalise_recipient_principal(r))
-        .collect()
+        .collect();
+    let Some(a) = rule.assignee.as_deref() else {
+        // No assignee property: the recipient constraints alone scope the head set.
+        return Some(if recipients.is_empty() { vec![PUBLIC.to_owned()] } else { rec_heads });
+    };
+    if a == PUBLIC || a == AUTHENTICATED || !recipient_principal_allowed(a) {
+        // A class-principal or reserved-encoded assignee never equals a real session
+        // WebID under the evaluator's exact-IRI match — persisting (or dropping) it
+        // would widen. Fail-closed: no faithful head set, stay one-shot.
+        return None;
+    }
+    if recipients.is_empty() {
+        // The sq-9n1q4 fix: a bare assignee scopes the grant to EXACTLY that party
+        // (re-checked per session) — never auth:Public.
+        return Some(vec![a.to_owned()]);
+    }
+    // assignee ∧ recipient constraints re-check the same session agent → intersection.
+    // Trivial only when a recipient head already admits every a-session.
+    if rec_heads.iter().any(|h| h == a || h == PUBLIC || h == AUTHENTICATED) {
+        return Some(vec![a.to_owned()]);
+    }
+    // Empty / non-trivial intersection → one-shot (fail-closed, still enforced frozen).
+    None
 }
 
 /// The principal-space carve-out heads for a `recipient neq X` exception set, dropping
@@ -1673,12 +1752,19 @@ fn refresh_prohibition_conditional(
 /// Whether SOME prohibition in `policy` whose action/target structurally name `request`
 /// maps faithfully to agent conditions (so the conditional-deny path would emit a
 /// re-checked condition rather than fall back to one-shot). [OPUS-4.8] sq-4r70.
+///
+/// [FABLE-5] sq-9n1q4: decided by the SAME per-rule predicate the emit loop uses
+/// ([`prohibition_condition_heads`]), so a rule the loop sends one-shot (bare
+/// `odrl:assignee`, dateTime window, reserved-encoded recipient/exclusion) is also
+/// refreshed via the deny-retention path ([`refresh_prohibition`]) — previously a
+/// windowed prohibition classified "faithful" here but fell back one-shot in the loop,
+/// losing the keep-deny-on-ambiguity rule across refresh.
 fn prohibition_maps_faithfully(policy: &Policy, request: &Request) -> bool {
     let Some(mode) = action_to_mode(&request.action) else { return false };
     let Some(target) = request.target.as_deref() else { return false };
     policy.prohibitions.iter().any(|rule| {
         rule_action_target_match(rule, request, mode, target)
-            && matches!(map_constraints_to_agents(rule), AgentMapping::Faithful { .. })
+            && prohibition_condition_heads(rule).is_ok()
     })
 }
 

@@ -296,7 +296,11 @@ Materialize the authorization view from the access-control documents, then enfor
   immediately, no `refresh_odrl_grant` needed); `odrl:purpose`/`count`/a *strict* `dateTime`
   bound have no faithful analogue and STAY one-shot; a rule mixing mappable + unmappable
   constraints falls back **entirely** to one-shot (fail-safe — never drops a bound). A
-  dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). Mapping
+  dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). A bare
+  `odrl:assignee` **property** (no constraint) folds into the allow head set — the grant is
+  scoped to exactly that party, never widened to `auth:Public` ([FABLE-5] sq-9n1q4); on the
+  prohibition dual a bare assignee stays one-shot (a concrete deny head cannot re-check
+  party-collection membership — fail-open for members). Mapping
   table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
 - `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when

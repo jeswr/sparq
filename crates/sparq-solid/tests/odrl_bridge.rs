@@ -2548,3 +2548,301 @@ fn isanyof_prohibition_persists_conditional_deny_per_member() {
     assert!(reads(&mut store, ALICE), "alice (not in set) keeps the public allow");
     assert!(reads(&mut store, DAVE), "dave (not in set) keeps the public allow");
 }
+
+// ===========================================================================
+// [FABLE-5] sq-9n1q4 — the bare `odrl:assignee` PROPERTY through the CONDITIONAL
+// entry points. Root cause: `map_constraints_to_agents` only reads
+// `rule.constraints`, so a permission `assignee alice` with ZERO constraints looked
+// "unrestricted" and the conditional path emitted an `auth:Public` head — granting
+// EVERYONE (including anonymous) a rule scoped to one party (WIDENING). Fix: the
+// assignee is folded into the condition head set (allow side) / forces one-shot
+// (deny side — a concrete deny head cannot re-check party-collection membership, so
+// persisting it would fail OPEN for collection members).
+// ===========================================================================
+
+/// alice MAY read n1 — a bare assignee, ZERO constraints (the sq-9n1q4 probe policy).
+fn bare_assignee_read_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/bare> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 36. THE sq-9n1q4 acceptance test: a bare-assignee permission via the CONDITIONAL
+//     entry point grants ONLY the assignee — bob AND anonymous are denied through the
+//     real enforcement path. NON-VACUOUS vs the pre-fix behaviour: the old code
+//     emitted an auth:Public head here, so `reads(bob)` and the anonymous probe were
+//     both TRUE (the widening this bead fixes).
+#[test]
+fn bare_assignee_conditional_grants_only_assignee() {
+    // Bridge shape (free-function form): ONE head naming alice, NO public head.
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &bare_assignee_read_policy(), &req);
+    assert!(out.granted, "bare-assignee permission grants (as a condition): {out:?}");
+    assert_eq!(cond_grants_for(&g, Some(ALICE)), 1, "the head is exactly the assignee");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "WIDENING GUARD: a bare assignee must never widen to an auth:Public head"
+    );
+
+    // Through the real enforcement path: alice reads; bob and ANONYMOUS are denied.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&bare_assignee_read_policy(), &req).granted);
+    assert!(reads(&mut store, ALICE), "the assignee is granted");
+    assert!(!reads(&mut store, BOB), "bob (not the assignee) is denied");
+    assert!(!reads(&mut store, CAROL), "carol (not the assignee) is denied");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "anonymous is denied — a one-party rule never grants an anonymous session"
+    );
+
+    // Parity: the persisted condition verdicts exactly as the evaluator would.
+    assert_bridge_evaluator_parity(&bare_assignee_read_policy());
+}
+
+// 37. The condition is RE-CHECKED, not frozen: a request by a NON-assignee party still
+//     persists the alice-scoped condition (the whole point of the conditional entry
+//     point — the agent restriction is deferred to the per-session re-check).
+#[test]
+fn bare_assignee_condition_is_rechecked_not_frozen() {
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(CAROL); // NOT the assignee
+    assert!(store.materialize_odrl_permission_conditional(&bare_assignee_read_policy(), &req).granted);
+    assert!(reads(&mut store, ALICE), "the assignee reads regardless of who materialized");
+    assert!(!reads(&mut store, CAROL), "the materializing non-assignee party is NOT granted");
+}
+
+// 38. MIXED assignee + recipient constraint = INTERSECTION (both re-check the same
+//     session agent). assignee alice + `recipient eq alice` → one alice head;
+//     assignee alice + `recipient eq bob` → empty intersection → one-shot fallback
+//     (which denies: alice fails the recipient bound, bob fails the assignee) — and
+//     crucially NEVER a persisted head for bob alone (the old code's answer, which
+//     granted bob a rule whose assignee names alice).
+#[test]
+fn assignee_recipient_intersection_or_one_shot() {
+    let mixed = |recipient: &str| -> sparq_policy::Policy {
+        parse_policy_str(
+            &format!(
+                r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/mixed> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <{recipient}> ] ] .
+"#
+            ),
+            "turtle",
+        )
+        .expect("policy parses")
+    };
+
+    // (a) Trivial intersection {alice} ∩ {alice} → one alice-scoped condition.
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&mixed(ALICE), &req).granted);
+    assert_eq!(cond_grants_for(&store.graph, Some(ALICE)), 1, "one alice head");
+    assert!(reads(&mut store, ALICE), "alice satisfies both dimensions");
+    assert!(!reads(&mut store, BOB), "bob satisfies neither");
+
+    // (b) Empty intersection {alice} ∩ {bob} → NO persisted condition; the one-shot
+    //     fallback evaluates (and denies — no session can be both parties).
+    let mut g = pod();
+    let out = materialize_permission_conditional(&mut g, &mixed(BOB), &req);
+    assert!(!out.granted, "no session satisfies assignee alice AND recipient bob: {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "no condition from an empty intersection");
+    let mut store2 = PodStore::new(pod());
+    assert!(!store2.materialize_odrl_permission_conditional(&mixed(BOB), &req).granted);
+    assert!(!reads(&mut store2, BOB), "WIDENING GUARD: bob never gets an alice-assigned rule");
+    assert!(!reads(&mut store2, ALICE), "alice fails the recipient bound");
+}
+
+// 39. assignee + a `neq` exception compose: assignee alice + `recipient neq bob` →
+//     an alice head carrying the bob exceptMatcher (alice reads; bob is doubly out).
+#[test]
+fn assignee_with_neq_recipient_keeps_exception() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/aneq> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <https://bob.ex/card#me> ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert_eq!(cond_grants_for(&store.graph, Some(ALICE)), 1, "alice head (not Public)");
+    assert_eq!(
+        cond_grants_for(&store.graph, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "the neq shape must not widen a bare-assignee rule to a public head"
+    );
+    assert!(reads(&mut store, ALICE), "alice reads (assignee, not excepted)");
+    assert!(!reads(&mut store, BOB), "bob denied (excepted AND not the assignee)");
+    assert!(!reads(&mut store, CAROL), "carol denied (not the assignee)");
+}
+
+// 40. An assignee spoofing the auth CLASS principals — or one inside the reserved
+//     pair encoding (anti-impersonation) — is fail-closed: the evaluator matches
+//     `assignee` by exact IRI, so persisting `auth:Public` as the CLASS head (every
+//     session) or a reserved-encoded head (a minted pair principal) would widen. Both
+//     stay one-shot (which denies: no requester IS that IRI).
+#[test]
+fn assignee_spoofing_auth_class_principal_stays_one_shot() {
+    for spoof in [
+        "https://sparq.dev/ns/auth#Public",
+        "https://sparq.dev/ns/auth#Authenticated",
+        "urn:sparq:pair?agent=x&client=y",
+    ] {
+        let pol = parse_policy_str(
+            &format!(
+                r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/spoof> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <{spoof}> ] .
+"#
+            ),
+            "turtle",
+        )
+        .unwrap();
+        let mut g = pod();
+        let req = Request::new(odrl("read")).on(N1).by(ALICE);
+        let out = materialize_permission_conditional(&mut g, &pol, &req);
+        assert!(!out.granted, "no requester IS <{spoof}> → nothing grants: {out:?}");
+        assert_eq!(cond_grants_for(&g, None), 0, "no persisted head for <{spoof}>");
+        let mut store = PodStore::new(pod());
+        assert!(!store.materialize_odrl_permission_conditional(&pol, &req).granted);
+        assert!(!reads(&mut store, BOB), "WIDENING GUARD: <{spoof}> grants no one");
+        assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anon denied");
+    }
+}
+
+// 41. The PROHIBITION dual: a bare-assignee prohibition must NOT become a PUBLIC deny
+//     (the pre-fix behaviour over-denied everyone). It stays ONE-SHOT: the frozen deny
+//     names the matching request party; a non-matching party materializes nothing —
+//     and in both cases NO auth:Public deny condition exists, so other agents keep
+//     their allows.
+#[test]
+fn bare_assignee_prohibition_stays_one_shot_no_public_deny() {
+    let prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/bpro> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://carol.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // A public allow underneath so the deny's true scope is observable.
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+
+    // (a) The assignee herself asks → the ONE-SHOT frozen deny (carol-scoped), never a
+    //     re-checked public deny condition.
+    let mut store = PodStore::new(pod());
+    let mat = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &mat).granted);
+    let carol_req = Request::new(odrl("read")).on(N1).by(CAROL);
+    let out = store.materialize_odrl_prohibition_conditional(&prohib, &carol_req);
+    assert!(out.prohibited, "the matching assignee is denied (frozen one-shot): {out:?}");
+    assert_eq!(cond_denies_for(&store.graph, None), 0, "no re-checked deny CONDITION at all");
+    assert_eq!(
+        out.deny_triple.as_ref().map(|t| t.1.contains("denyRead")),
+        Some(true),
+        "the frozen deny shape (auth:denyRead), not a ConditionalGrant: {out:?}"
+    );
+    assert!(!reads(&mut store, CAROL), "carol (the assignee) is denied");
+    assert!(reads(&mut store, BOB), "OVER-DENY GUARD: bob keeps the public allow");
+    assert!(reads(&mut store, ALICE), "alice keeps the public allow");
+
+    // (b) A NON-assignee party asks → the prohibition does not name them → NOTHING is
+    //     materialized (pre-fix: a public deny condition denied everyone here too).
+    let mut store2 = PodStore::new(pod());
+    assert!(store2.materialize_odrl_permission_conditional(&permit, &mat).granted);
+    let out2 = store2.materialize_odrl_prohibition_conditional(&prohib, &mat);
+    assert!(!out2.prohibited, "a non-assignee request materializes no deny: {out2:?}");
+    assert_eq!(cond_denies_for(&store2.graph, None), 0, "no deny condition");
+    assert!(reads(&mut store2, BOB), "bob unaffected");
+    assert!(reads(&mut store2, CAROL), "carol unaffected (her deny was never materialized)");
+}
+
+// 42. REFRESH-ROUTING consistency (the shared prohibition_condition_heads predicate):
+//     a prohibition the emit loop sends ONE-SHOT (here: a dateTime-windowed one) must
+//     refresh through the deny-RETENTION rule — an AMBIGUOUS re-eval (no dateTime
+//     evidence) KEEPS the frozen deny. Pre-fix, the refresh router classified this rule
+//     "faithful" (map_constraints_to_agents ignores the window), re-ran the conditional
+//     materializer, and the one-shot fallback RETRACTED the deny on missing evidence —
+//     fail-OPEN across refresh.
+#[test]
+fn windowed_prohibition_conditional_refresh_keeps_deny_on_ambiguity() {
+    let prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/winpc> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                      odrl:rightOperand "2026-12-31T00:00:00Z"^^xsd:dateTime ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // A public allow underneath so the deny's presence is observable via carol.
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    let mut store = PodStore::new(pod());
+    let mat = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &mat).granted);
+
+    // Inside the window, carol asking → the windowed deny falls back ONE-SHOT (frozen).
+    let in_window = Request::new(odrl("read"))
+        .on(N1)
+        .by(CAROL)
+        .with(odrl("dateTime"), Value::DateTime("2026-06-16T00:00:00Z".to_owned()));
+    let out = store.materialize_odrl_prohibition_conditional(&prohib, &in_window);
+    assert!(out.prohibited, "in-window one-shot deny materializes: {out:?}");
+    assert!(!reads(&mut store, CAROL), "carol denied while the frozen deny stands");
+
+    // Refresh the tracked ProhibitionConditional entry with NO dateTime evidence →
+    // AMBIGUOUS → the deny must be KEPT (fail-closed), never retracted.
+    let no_evidence = Request::new(odrl("read")).on(N1).by(CAROL);
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&prohib, &no_evidence, BridgeKind::ProhibitionConditional);
+    assert!(matched, "the tracked deny slot matched");
+    assert_eq!(retracted, 0, "FAIL-CLOSED: an ambiguous re-eval keeps the deny");
+    assert!(!reads(&mut store, CAROL), "carol stays denied on missing evidence");
+    assert!(reads(&mut store, BOB), "bob keeps the public allow throughout");
+}
