@@ -584,7 +584,10 @@ fn recipient_prohibition_carves_out_collection_members() {
         .on("http://example.org/x")
         .by("http://example.org/carol")
         .with_party_membership("http://example.org/carol", "http://example.org/team");
-    assert!(evaluate(&p, &outsider).allow, "a non-member is not carved out");
+    assert!(
+        evaluate(&p, &outsider).allow,
+        "a non-member is not carved out"
+    );
 }
 
 /// An EXPLICIT `odrl:recipient` context value (the disclosure target need not be
@@ -681,7 +684,10 @@ fn recipient_status_reflects_membership_resolution() {
         RecipientMatch::DefinitelyUnsatisfied
     );
     let anonymous = Request::new(left("read")).on("http://example.org/x");
-    assert_eq!(recipient_status(rule, &anonymous), RecipientMatch::Unprovable);
+    assert_eq!(
+        recipient_status(rule, &anonymous),
+        RecipientMatch::Unprovable
+    );
 }
 
 // ===========================================================================
@@ -806,7 +812,10 @@ _:c2 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
     let base = Request::new(left("read")).on("urn:asset/x");
     for purpose in ["urn:purpose/research", "urn:purpose/teaching"] {
         let req = base.clone().for_purpose(Value::Iri(purpose.into()));
-        assert!(evaluate(&p, &req).allow, "merged member {purpose} must grant");
+        assert!(
+            evaluate(&p, &req).allow,
+            "merged member {purpose} must grant"
+        );
     }
     let other = base.for_purpose(Value::Iri("urn:purpose/marketing".into()));
     assert!(!evaluate(&p, &other).allow);
@@ -848,32 +857,30 @@ fn list_member_nested_compound_recurses() {
     assert!(!evaluate(&p, &neither).allow);
 }
 
-/// An EMPTY list operand (`odrl:or ()` — `rdf:nil` directly) stays fail-closed:
-/// nil has no cons cell, is not expanded, and remains the unsatisfiable guard.
+/// An EMPTY list operand (`odrl:or ()` — `rdf:nil` directly) REFUSES the whole
+/// parse: per-operand degradation would silently DISABLE a prohibition's compound
+/// carve-out (deny-overrides bypassed), so the degenerate shape is rejected
+/// outright (fail-closed on both rule kinds).
 #[test]
-fn empty_list_operand_is_fail_closed() {
+fn empty_list_operand_refuses_the_parse() {
     let ttl = r#"
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
 <urn:pol/emptylist> a odrl:Set ; odrl:permission [
     odrl:action odrl:read ; odrl:target <urn:asset/x> ;
     odrl:constraint [ a odrl:LogicalConstraint ; odrl:or () ] ] .
 "#;
-    let p = parse_policy_str(ttl, "turtle").unwrap();
-    let req = Request::new(left("read"))
-        .on("urn:asset/x")
-        .for_purpose(Value::Iri("urn:purpose/x".into()));
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
     assert!(
-        !evaluate(&p, &req).allow,
-        "an empty list combinator can never be satisfied"
+        err.contains("EMPTY collection operand"),
+        "an empty combinator collection must refuse the parse, got: {err}"
     );
 }
 
-/// A NESTED-list member (a list inside the list) is NOT recursively flattened —
-/// one level only, mirroring the rightOperand fold — so it stays an unmatchable
-/// operand (the unsatisfiable guard) and the enclosing `and` fails closed even
-/// when the inner constraint would hold.
+/// A NESTED-list member (a list inside the list) REFUSES the whole parse — one
+/// expansion level only, mirroring the rightOperand fold; silently flattening or
+/// degrading could mis-honour the authored structure on either rule kind.
 #[test]
-fn nested_list_member_is_fail_closed() {
+fn nested_list_member_refuses_the_parse() {
     let ttl = r#"
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
 <urn:pol/nestednil> a odrl:Set ; odrl:permission [
@@ -882,13 +889,83 @@ fn nested_list_member_is_fail_closed() {
         ( [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
             odrl:rightOperand <urn:purpose/x> ] ) ) ] ] .
 "#;
-    let p = parse_policy_str(ttl, "turtle").unwrap();
-    let req = Request::new(left("read"))
-        .on("urn:asset/x")
-        .for_purpose(Value::Iri("urn:purpose/x".into()));
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
     assert!(
-        !evaluate(&p, &req).allow,
-        "a doubly-nested list member must stay fail-closed, not silently flatten"
+        err.contains("NESTED-list member"),
+        "a nested-list member must refuse the parse, got: {err}"
+    );
+}
+
+/// A MALFORMED collection (broken tail — a cons cell with `rdf:first` but no
+/// `rdf:rest`) REFUSES the parse: honouring the valid PREFIX of an `odrl:and`
+/// operand list would make the compound EASIER to satisfy than authored
+/// (widening). Written with explicit cons-cell triples (Turtle `( … )` sugar
+/// always emits well-formed lists).
+#[test]
+fn broken_tail_list_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/broken> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:first _:c1 .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/x> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a broken-tail list must refuse the parse, got: {err}"
+    );
+}
+
+/// A CYCLIC collection (`rdf:rest` looping back to the head) REFUSES the parse —
+/// a cycle never reaches `rdf:nil`, so the collection has no well-defined member
+/// set. Crucially this holds on a PROHIBITION too: a degraded compound would
+/// silently disable the carve-out and let the sibling permission grant (widening).
+#[test]
+fn cyclic_list_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/cyclic> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+        odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:first _:c1 ; rdf:rest _:l1 .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/x> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a cyclic list (esp. gating a prohibition) must refuse the parse, got: {err}"
+    );
+}
+
+/// A FORKED cons cell (two distinct `rdf:rest` values) REFUSES the parse:
+/// honouring one deterministic fork of an ambiguous collection could silently
+/// drop authored members.
+#[test]
+fn forked_list_cell_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/forked> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:first _:c1 ; rdf:rest _:l2 , rdf:nil .
+_:l2 rdf:first _:c2 ; rdf:rest rdf:nil .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/x> .
+_:c2 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/y> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a forked list cell must refuse the parse, got: {err}"
     );
 }
 
