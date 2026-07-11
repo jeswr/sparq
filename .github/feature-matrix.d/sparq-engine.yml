@@ -28,6 +28,15 @@
   features: "zk"
   test: true
 
+# [FABLE-5] sq-7d3dj.32.2.7: runs the SPQCPRM2 format-migration cross-version storage
+# differentials (v2_saved_store_is_query_equivalent_to_v1 / cross_version_resave_round_trips_
+# losslessly) through the real save_compressed → open → query path in V2 emit mode. `spqcprm2`
+# forwards to sparq-core/spqcprm2 (which implies mmap), so the store/open paths compile.
+- name: "sparq-engine (spqcprm2)"
+  crate: "sparq-engine"
+  features: "spqcprm2"
+  test: true
+
 # [OPUS-4.8] (sq-6vshe.4) Seam A2: the `service` MODULE + its in-src unit tests moved to the
 # internal sparq-engine-service sub-crate (see .github/feature-matrix.d/sparq-engine-service.yml).
 # This engine leg STAYS (unlike the serialize legs, which fully moved) because it still runs the
@@ -288,4 +297,25 @@
 - name: "sparq-engine (id-filter-fastpath)"
   crate: "sparq-engine"
   features: "id-filter-fastpath"
+  test: true
+
+# [OPUS-4.8] sq-7d3dj.30.20: the `antijoin-static-decline` opt-in fix gates ALL of its code
+# (the static early-decline gate + `cond_has_seedable_correlation` in exec.rs and the
+# `EARLY_DECLINED`/`record_early_decline`/`early_declined` test-stat surface) behind
+# `#[cfg(feature = "antijoin-static-decline")]`, so the default build (and ci.yml's
+# `--workspace --all-targets` archive, which passes NO `--features`) compiled them EMPTY.
+# The whole-file result-equivalence + non-vacuity suite
+# `tests/antijoin_static_decline_differential.rs` runs its equivalence + mutation tests in
+# BOTH states (to prove on==off), but its non-vacuity test
+# (`early_decline_fires_on_q07_not_on_q06`, asserting the gate FIRES on the bare-`!bound` q07
+# shape and NOT on the correlated q06 shape) is `#[cfg(feature = "antijoin-static-decline")]`
+# and runs ZERO times without this leg — the silent gap this lane closes. No new dep
+# (`antijoin-static-decline = []`, only the already-direct oxrdf/spargebra + rustc-hash; no
+# `unsafe`) and no `not(feature=…)` divergence (the off path is byte-identical), so a single
+# isolated leg covers it; verified `cargo test -p sparq-engine --features antijoin-static-decline`
+# runs the suite green and `cargo clippy -p sparq-engine --all-targets --features
+# antijoin-static-decline -- -D warnings` is clean.
+- name: "sparq-engine (antijoin-static-decline)"
+  crate: "sparq-engine"
+  features: "antijoin-static-decline"
   test: true

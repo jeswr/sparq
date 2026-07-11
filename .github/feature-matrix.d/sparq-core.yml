@@ -40,10 +40,12 @@
   features: "block-bloom"
   test: true
 
-# [FABLE-5] sq-7d3dj.32.2.6: SPIKE — SPQCPRM2 frame-of-reference col2-reset block encoding.
-# OFF by default (the store still writes/reads SPQCPRM1 bit-exactly); this leg runs the V2
-# round-trip + SPQCPRM1-vs-SPQCPRM2 differential + zigzag tests (compress::tests::*v2* etc).
-# `mmap` is co-enabled so the reserved FILE_MAGIC_V2 marker test also runs.
+# [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7: SPQCPRM2 frame-of-reference col2-reset format.
+# The V2 EMITTER is OFF by default (the store still WRITES SPQCPRM1 bit-exactly); this leg runs
+# the V2 emit-gate + write/open round-trip + streaming-writer byte-identity + cross-version +
+# corrupt-magic mutation-witness + SPQCPRM1-vs-SPQCPRM2 differential + zigzag tests, PLUS the
+# V2 corruption oracle (`mmap_loader_survives_corruption_compressed_v2`). `mmap` is co-enabled
+# (spqcprm2 implies it) so the on-disk write/open path and FILE_MAGIC_V2 tests run.
 - name: "sparq-core (spqcprm2, mmap)"
   crate: "sparq-core"
   features: "spqcprm2,mmap"

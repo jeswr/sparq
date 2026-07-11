@@ -557,3 +557,213 @@ fn block_scan_anchor_driven_side_equivalence() {
     want.sort();
     assert_eq!(got, want, "block-scan anchor-driven side predicate set wrong (ex:bulk leaked?)");
 }
+
+// ── characteristic-set anchor-incidence prune (sq-jnb1e, opt-in) ─────────────────
+//
+// The `cs-anchor-incidence` feature precomputes, per anchor join position, the SET of
+// predicates that relate SOME anchor member, so a candidate predicate absent from that set is
+// pruned by an O(1) membership test instead of the clip+gallop block scan. The load-bearing
+// invariant is DISTINCT result-SET equivalence between the incidence-pruned path and the exact
+// block scan; these tests differentially verify that within one feature-ON binary via the
+// runtime toggle, plus the answer-safety corners (overlay invalidation, probe-bound decline).
+#[cfg(feature = "cs-anchor-incidence")]
+mod incidence {
+    use super::*;
+    use sparq_engine::anchor_incidence_testing;
+
+    /// Runs `q` with the incidence prune forced OFF (exact block scan) then forced ON,
+    /// returning both result tables. The DISTINCT pushdown itself stays ON for both.
+    fn incidence_on_off(g: &Graph, q: &str) -> (Table, Table) {
+        let prev = anchor_incidence_testing::set_enabled(false);
+        let off = table(g, q);
+        anchor_incidence_testing::set_enabled(true);
+        let on = table(g, q);
+        anchor_incidence_testing::set_enabled(prev);
+        (off, on)
+    }
+
+    /// The load-bearing invariant: on the q09 shape the incidence-pruned path and the exact
+    /// block scan return the IDENTICAL DISTINCT predicate set, and the prune actually FIRED
+    /// (the set was built and eliminated the value-typed no-hit predicates). The anchor must
+    /// exceed the small-anchor threshold (256) so the BLOCK-SCAN path runs — the incidence
+    /// prune accelerates the block scan; a small anchor takes the exact pattern-trick path and
+    /// never consults the set (which is why `n = 300` here, not the tens used elsewhere).
+    #[test]
+    fn q09_incidence_equivalence_and_fired() {
+        let g = q09_dataset(300, 900);
+        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+        let (off, on) = incidence_on_off(&g, &q);
+        assert_eq!(off, on, "incidence-pruned q09 differs from the exact block scan");
+        let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
+        assert_eq!(got, expected_q09_predicates(), "incidence path predicate set wrong");
+
+        // The prune FIRED: the incidence set was built and pruned at least one candidate
+        // (the fixture's ex:Doc rdf:type block relates a class, not a person, at the object
+        // position, so the object-join branch prunes rdf:type's doc block via incidence).
+        anchor_incidence_testing::set_enabled(true);
+        anchor_incidence_testing::reset_stats();
+        let _ = table(&g, &q);
+        let (built, pruned) = anchor_incidence_testing::stats();
+        assert!(built, "the incidence set should have been built for the q09 shape");
+        assert!(pruned > 0, "the incidence prune should have eliminated a candidate predicate");
+    }
+
+    /// A LARGE value-typed no-hit block (the exact q09 residual): documents carry a
+    /// high-cardinality predicate whose objects/subjects are NEVER persons. The incidence set
+    /// must prune it (so the block is never scanned) AND the answer must exclude it — identical
+    /// to the exact path.
+    #[test]
+    fn large_no_hit_block_pruned_and_excluded() {
+        let mut ttl = String::new();
+        for p in 0..500 {
+            ttl.push_str(&format!("ex:p{p} rdf:type foaf:Person .\n"));
+            ttl.push_str(&format!("ex:p{p} foaf:knows ex:p{} .\n", (p + 1) % 500));
+        }
+        // A large value-typed predicate whose 8000 distinct objects are literals/docs — never a
+        // person. This is the block whose no-hit scan the incidence set eliminates.
+        for d in 0..8000 {
+            ttl.push_str(&format!("ex:doc{d} dc:title \"T{d}\" .\n"));
+            ttl.push_str(&format!("ex:doc{d} rdfs:seeAlso ex:ext{d} .\n"));
+        }
+        let ttl = format!(
+            "PREFIX dc: <http://purl.org/dc/elements/1.1/>\n\
+             PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n{ttl}"
+        );
+        let g = load(&ttl);
+        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+        let (off, on) = incidence_on_off(&g, &q);
+        assert_eq!(off, on, "incidence path differs on a large no-hit-block fixture");
+        let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
+        // Only knows (person subject AND object) and rdf:type (person subject) qualify;
+        // dc:title / rdfs:seeAlso relate documents/literals, never a person.
+        let mut want = vec![
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string(),
+            "<http://xmlns.com/foaf/0.1/knows>".to_string(),
+        ];
+        want.sort();
+        let mut got_sorted = got.clone();
+        got_sorted.sort();
+        assert_eq!(got_sorted, want, "no-hit value-typed predicate leaked into the answer");
+
+        // The prune fired and eliminated the two large no-hit predicates (dc:title,
+        // rdfs:seeAlso) on BOTH branches → at least 2 predicates pruned.
+        anchor_incidence_testing::set_enabled(true);
+        anchor_incidence_testing::reset_stats();
+        let _ = table(&g, &q);
+        let (built, pruned) = anchor_incidence_testing::stats();
+        assert!(built, "incidence set not built");
+        assert!(pruned >= 2, "expected the two no-hit value-typed predicates pruned, got {}", pruned);
+    }
+
+    /// Randomised differential across many graphs straddling the small/large anchor threshold
+    /// and mixing person-related / document-related predicates: the incidence-pruned path must
+    /// match the exact block scan on every one.
+    #[test]
+    fn randomized_incidence_differential() {
+        // A deterministic LCG so the corpus is reproducible per-commit (no rand dep here).
+        let mut state: u64 = 0x9e3779b97f4a7c15;
+        let mut next = |m: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % m
+        };
+        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+        for _ in 0..40 {
+            let n = 1 + next(400) as usize; // persons: straddles the 256 anchor threshold
+            let docs = next(500) as usize;
+            let mut ttl = String::new();
+            for p in 0..n {
+                ttl.push_str(&format!("ex:p{p} rdf:type foaf:Person .\n"));
+                // Sometimes a person-subject / person-object predicate.
+                if next(2) == 0 {
+                    ttl.push_str(&format!("ex:p{p} foaf:knows ex:p{} .\n", next(n as u64)));
+                }
+                if next(3) == 0 {
+                    ttl.push_str(&format!("ex:p{p} foaf:age {} .\n", 20 + next(50)));
+                }
+            }
+            for d in 0..docs {
+                ttl.push_str(&format!("ex:d{d} ex:bulk ex:v{d} .\n")); // never a person
+                if next(4) == 0 {
+                    // Some docs name a person as OBJECT (person-object predicate).
+                    ttl.push_str(&format!("ex:d{d} ex:maker ex:p{} .\n", next(n as u64)));
+                }
+            }
+            let g = load(&ttl);
+            let (off, on) = incidence_on_off(&g, &q);
+            assert_eq!(off, on, "incidence differential mismatch at n={} docs={}", n, docs);
+        }
+    }
+
+    /// Answer-safety under a PENDING UPDATE overlay: after an INSERT that adds a NEW
+    /// predicate relating a person (one the base incidence set never saw), the incidence path
+    /// must DECLINE (base-index set could be stale) and fall back to the exact scan, so the new
+    /// predicate is correctly INCLUDED — identical to the exact path. The anchor is > 256 so the
+    /// BLOCK-SCAN path (where incidence lives) runs; the NON-VACUITY of the decline is asserted
+    /// by first confirming the SAME fixture builds a set on the base graph (no overlay).
+    #[test]
+    fn overlay_invalidates_incidence() {
+        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
+        // Base graph (no overlay), > 256 persons → block-scan path. Confirm the incidence set
+        // IS built here, so the later decline is genuinely caused by the overlay, not the shape.
+        let base = q09_dataset(300, 900);
+        anchor_incidence_testing::set_enabled(true);
+        anchor_incidence_testing::reset_stats();
+        let _ = table(&base, &q);
+        let (base_built, _) = anchor_incidence_testing::stats();
+        assert!(base_built, "control: the incidence set must build on the base graph (no overlay)");
+
+        // Apply a SPARQL INSERT: a NEW predicate (ex:befriends) relating one person to another —
+        // a predicate the base-index incidence set never saw, so a stale base prune would
+        // WRONGLY drop it.
+        let mut g = q09_dataset(300, 900);
+        sparq_engine::update_in_place(
+            &mut g,
+            "PREFIX ex: <http://example.org/>\n\
+             INSERT DATA { ex:p0 ex:befriends ex:p1 . }",
+        )
+        .expect("insert");
+        assert!(g.store.has_overlay(), "the INSERT must produce a delta overlay");
+
+        let (off, on) = incidence_on_off(&g, &q);
+        assert_eq!(off, on, "incidence path differs from exact under an update overlay");
+        let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
+        assert!(
+            got.contains(&"<http://example.org/befriends>".to_string()),
+            "the newly-inserted person-relating predicate must appear in the answer"
+        );
+
+        // The incidence prune must have DECLINED (no set built) because of the overlay.
+        anchor_incidence_testing::set_enabled(true);
+        anchor_incidence_testing::reset_stats();
+        let _ = table(&g, &q);
+        let (built, _) = anchor_incidence_testing::stats();
+        assert!(!built, "incidence must decline (not build a set) on a graph with an overlay");
+    }
+
+    /// A probe with an EXTRA bound position (`?person ex:knows ?x` joined to the anchor via
+    /// ?person, but here the projected predicate slot is bound to a constant in one branch)
+    /// must DECLINE the incidence prune — the base incidence set is over the whole predicate,
+    /// not conditioned on the extra constraint — and the exact scan answers correctly.
+    #[test]
+    fn probe_with_extra_bound_position_declines() {
+        // Query whose probe pattern binds the OBJECT to a constant: the projected `?predicate`
+        // relates a person only via SOME triple, but the pushdown's block scan is over the
+        // constrained pattern. The incidence set (unconstrained) must NOT prune it. We assert
+        // equivalence; the pushdown may decline the whole shape, which is also correct.
+        let mut ttl = String::new();
+        for p in 0..300 {
+            ttl.push_str(&format!("ex:p{p} rdf:type foaf:Person .\n"));
+            ttl.push_str(&format!("ex:p{p} foaf:knows ex:target .\n"));
+            ttl.push_str(&format!("ex:p{p} foaf:mbox ex:other .\n"));
+        }
+        let g = load(&ttl);
+        // Probe binds the object to ex:target: DISTINCT ?predicate where a person is subject of
+        // a triple whose OBJECT is ex:target. (foaf:knows qualifies; foaf:mbox does not.)
+        let q = "SELECT DISTINCT ?predicate WHERE {\n\
+                   ?person rdf:type foaf:Person .\n\
+                   ?person ?predicate ex:target\n\
+                 }";
+        let (off, on) = incidence_on_off(&g, q);
+        assert_eq!(off, on, "extra-bound-position probe differs on vs off (unsound prune?)");
+    }
+}

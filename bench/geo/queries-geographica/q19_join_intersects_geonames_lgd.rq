@@ -1,0 +1,20 @@
+# [FABLE-5] sq-hmd7l.29 — Geographica real-world micro SPATIAL-JOIN query
+# "QUERY 19 - Intersects_GeoNames_LGD" (micro_joins.lst, geographica2.di.uoa.gr), pinned for
+# scripts/bench/geo-same-box.sh (the GEO_GEOGRAPHICA=1 family; corpus recipe
+# bench/geo/geographica.sh). TRANSLATIONS vs upstream (see bench/geo/README.md):
+#   * GRAPH <http://geographica.di.uoa.gr/dataset/...> wrapper dropped — both
+#     engines load the merged slice into the default graph; the per-dataset
+#     predicate IRIs keep LGD/GeoNames distinguishable.
+#   * COUNT-wrapped (counts-not-coordinates): only the result-set SIZE is
+#     cross-checked between engines before any timing is trusted.
+#   * the one LGD/GeoNames-only join in the suite: a ~21 990 x 12 097 cross
+#   *   product under a geof: FILTER — NEITHER engine has an indexed spatial-join
+#   *   path for it, so at the default per-workload cap this typically records
+#   *   honest ERROR(timeout) rows on BOTH sides (that IS the comparative result).
+# Oracle: COUNT must equal expected-geographica.tsv before timing is trusted.
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+SELECT (COUNT(*) AS ?n) WHERE {
+  ?s1 <http://www.geonames.org/ontology#asWKT> ?o1 .
+  ?s2 <http://linkedgeodata.org/ontology/asWKT> ?o2 .
+  FILTER(geof:sfIntersects(?o1, ?o2))
+}

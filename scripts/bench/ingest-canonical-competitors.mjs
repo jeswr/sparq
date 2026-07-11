@@ -93,7 +93,7 @@ const ENGINE_META = {
   },
   "hdt-cpp": {
     label: "hdt-cpp (rdfhdt)",
-    mode: "in-process decode (Docker rdfhdt/hdt-cpp, hdt2rdf: decode .hdt → N-Triples)",
+    mode: "in-container decode (Docker rdfhdt/hdt-cpp, hdt2rdf: decode .hdt → N-Triples; container spawn excluded, hdt2rdf process start included)",
   },
   jena: {
     label: "Apache Jena (rule reasoner)",
@@ -101,11 +101,11 @@ const ENGINE_META = {
   },
   vlog: {
     label: "VLog (Datalog)",
-    mode: "in-process (VLog Datalog; needs a validated OWL-RL/RDFS encoding — else NOT-RUN)",
+    mode: "VLog Datalog on the VALIDATED bench/reason-encodings program (closure set-identical to sparq's); timed = VLog's self-reported materialization (EDB load + store excluded)",
   },
   nemo: {
     label: "Nemo (Datalog)",
-    mode: "in-process (Nemo Datalog; needs a validated OWL-RL/RDFS encoding — else NOT-RUN)",
+    mode: "Nemo Datalog on the VALIDATED bench/reason-encodings program (closure set-identical to sparq's); timed = Nemo's self-reported `Reasoning:` breakdown (import + export excluded)",
   },
 };
 // Column order (sparq first, then the SPARQL matrix's fixed order; any engine not listed
@@ -124,12 +124,16 @@ function engineIdsOf(envelope) {
   return [...ordered, ...extra];
 }
 
-// Per-row count agreement can be recorded as `all_agree` (sp2b/watdiv/materialize) OR a plain
-// boolean `agree` (geo) OR left absent (fts, which cross-checks engine-vs-engine differently).
-// Read whichever is present; a missing flag stays null (renders "—", never a fabricated ✓).
+// Per-row count agreement can be recorded as `all_agree` (sp2b/watdiv) OR a plain boolean
+// `agree` (geo) OR `same_ruleset_agree` (materialize: sparq + the validated-encoding
+// Datalog engines run the SAME rule set and must agree; Jena's profile-different closure
+// is a documented caveat, deliberately outside the flag) OR left absent (fts, which
+// cross-checks engine-vs-engine differently). Read whichever is present; a missing flag
+// stays null (renders "—", never a fabricated ✓).
 function rowCountMatch(cc) {
   if (typeof cc.all_agree === "boolean") return cc.all_agree;
   if (typeof cc.agree === "boolean") return cc.agree;
+  if (typeof cc.same_ruleset_agree === "boolean") return cc.same_ruleset_agree;
   return null;
 }
 
@@ -367,9 +371,16 @@ function normalizeHdt(primary, gathers) {
   const sparqDecodeS = decodeCell && typeof decodeCell.value !== "undefined" ? Number(decodeCell.value) : null;
   const cc = primary.count_agreement || {};
   const ids = engineIdsOf(primary).length ? engineIdsOf(primary) : ["sparq", "hdt-cpp"];
-  // decode seconds → µs for a uniform unit with the other axes; hdt-cpp wall-clock is on the
-  // envelope only as a raw N-Triples sample (no committed numeric us yet) → null (renders n/a).
-  const values = { sparq: sparqDecodeS != null ? Math.round(sparqDecodeS * 1e6) : null };
+  // decode seconds → µs for a uniform unit with the other axes. hdt-cpp: [FABLE-5]
+  // sq-hmd7l.33 — the harness now records a NUMERIC best-of-N in-container decode_us
+  // (container spawn excluded) under hdt_cpp_metrics; absent (an older envelope, or the
+  // in-container timing fell back) → null (renders n/a, never a fabricated number).
+  const cppCell = (primary.hdt_cpp_metrics || {}).decode_us;
+  const cppUs = cppCell && typeof cppCell.value !== "undefined" ? Number(cppCell.value) : null;
+  const values = {
+    sparq: sparqDecodeS != null && Number.isFinite(sparqDecodeS) ? Math.round(sparqDecodeS * 1e6) : null,
+    "hdt-cpp": cppUs != null && Number.isFinite(cppUs) ? Math.round(cppUs) : null,
+  };
   const row = {
     query: "decode",
     unit: "µs",

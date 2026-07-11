@@ -1,0 +1,254 @@
+# Merge-queue critical path: measured profile + five speedup levers (2026-07)
+
+> 🤖 SPARQ agent [FABLE-5] — maintainer-commissioned design record under epic **sq-6vshe**
+> (CI structural speedup program). DESIGN ONLY: no workflow edits in this PR. All numbers
+> are a dated snapshot of GitHub-hosted-runner CI runs (2026-07-10, run ids cited) —
+> steering data for this program, not canonical performance claims.
+
+## 1. What the maintainer experiences vs what the queue does
+
+Observed symptom: "~40 min+ per merge group". The measured decomposition is:
+
+```text
+PR time-in-queue ≈ ceil(position / capacity) × entry-wall  +  post-gate async ruleset evals
+                    capacity   = max_entries_to_build = 3      (ruleset 17688455)
+                    entry-wall = ci-summary gate duration      (median 15.1 m, p90 23.4 m)
+                    async evals: code_quality + code_scanning rules, API-invisible,
+                                 observed ~11 min+ on PRs (reference-sparq-merge-mechanics)
+```
+
+A PR at position 4–6 in a drain therefore waits ≈ 2 × (15–23 m) + evals ≈ **40–60 min even
+when every check is green and nothing fails**. The queue is not churning: of the last 250
+`merge_group` workflow runs, **238 succeeded, 0 failed, 0 cancelled** (12 in-flight at query
+time). Restart churn (the ALLGREEN requeue cascade) is a real historical failure mode
+(2026-07-08 wasm-drift episode; 2026-07-02 congestion collapse) but is NOT the current
+steady-state cost. The steady-state cost is **entry-wall × capacity-3 serialization**.
+
+## 2. Measured profile (2026-07-10)
+
+### 2.1 Per-workflow entry wall on `merge_group` (n≈17–20 successful runs each, last 250)
+
+| workflow (check family)  | median | p90    | max    | on the gate? |
+|--------------------------|--------|--------|--------|--------------|
+| ci-summary (gate waiter) | 15.1 m | 23.4 m | 28.9 m | IS the gate — duration ≈ entry critical path |
+| **CI** (ci.yml)          | **14.4 m** | **19.0 m** | 28.5 m | yes — **the pole** |
+| feature-matrix           | 5.8 m  | 10.4 m | 11.2 m | yes — #2 pole on engine-touching entries |
+| codeql                   | 3.8 m  | 4.0 m  | 4.2 m  | yes — **not a pole** (buildless; confirms sq-6vshe.6) |
+| Benchmarks               | 3.7 m  | 5.1 m  | 5.3 m  | yes — sibling lane moving it off (lever 5) |
+| container-scan           | 3.6 m  | 4.4 m  | 4.8 m  | yes |
+| fuzz (corpus-replay)     | 0.8 m  | 5.0 m  | 6.5 m  | yes |
+| supply-chain             | 0.7 m  | 1.0 m  | 1.4 m  | yes |
+| docs-quality             | 0.6 m  | 1.8 m  | 2.4 m  | yes |
+| flow-on-gates            | 0.3 m  | 0.6 m  | 0.8 m  | yes |
+| zk-toolchain             | 0.2 m  | 0.4 m  | 0.6 m  | yes |
+| formal-verification      | 0.2 m  | 0.5 m  | **22.7 m** | yes — rare pole when change-coupled Kani suites select |
+
+### 2.2 Inside the CI workflow (job level; runs 29105265898 / 29105286547 / 29105790070)
+
+The engine-touching worst case (run 29105265898, 18.9 m end-to-end) is a **serial chain**:
+
+```text
+select (~15 s + ~20 s queue)
+  → build + archive test binaries   369–447 s
+      steps: free-disk 72 s | compile+nextest-archive 162 s | artifact upload 90 s
+             | doctests 18 s | checkout/toolchain/cache-restore ~25 s
+  → slowest test shard (needs the archive): bulk 3/3 655 s   ← ends last
+      (bulk 1/3 489 s, heavy-diskann 420 s, bulk 2/3 340 s, heavy-hnsw 228 s — imbalanced)
+```
+
+Running in parallel with that chain (they self-compile, start ~1 m in):
+
+- coverage ratchet shards: 448–785 s each, last ends ~14.7 m in — **the pole whenever
+  selection skips the test shards** (run 29105286547: all test shards selection-skipped,
+  coverage shard 1/4 at 621 s WAS the critical path; entry wall 11.9 m).
+- wasm build 265–289 s; inference conformance 182–205 s; docker smoke 168–201 s;
+  clippy 154–158 s; the other conformance ratchets 44–76 s each.
+
+feature-matrix on an engine-touching entry: ~15–20 selected opt-in engine legs at
+320–397 s each, with **per-job runner-queue delays of 43–225 s** during a 3-entry burst
+(run 29105286406, workflow wall 11.2 m). The queue delays are pool/provisioning
+contention, not compute.
+
+### 2.3 What is already fixed (do not re-litigate)
+
+- **Selection IS live on `merge_group`** (sq-fmx4u.3/.4/.5, ci_select.py accepts
+  `merge_group` as a diff-carrying event; evidence: run 29105286547 skipped every test
+  shard, run 29105790070 ran a single coverage shard). Lever 4's "extend selection to the
+  merge group" premise is largely DONE; what remains is §3.4 below.
+- **CodeQL is buildless and fast** (3.8 m median). The 20–40 min figure predates the
+  buildless migration (sq-6vshe.6, issue #1815). Lever 3's "CodeQL is the likely pole"
+  premise is **falsified by measurement**.
+- **rust-cache is wired per-job** across ci.yml + feature-matrix.yml (deps-only by
+  design), and the test suite is build-once via `cargo nextest archive` (sq-vyxy).
+  Merge-queue refs restore main-scoped caches (queue branches base on main).
+- **Coverage is changed-cone** (sq-6vshe.8) and cross-runner-sharded (sq-piapk, #1871).
+- **Per-PR fuzz is deterministic corpus-replay** (sq-6vshe.6, #1814).
+
+### 2.4 The push-to-main shadow load (lever 1's target)
+
+Every queue merge fast-forwards main and fires **~17 push-triggered workflows** on the
+new tip — and `ci_select.py` treats `push` as mode=**full** (no PR diff), so this wave is
+the FULL matrix: build+archive, all test shards, all coverage shards, all conformance,
+the full feature-matrix leg set, randomized full-form fuzz, codeql, bench, container-scan,
+… ≈ **200–400 runner-minutes per merged PR** (estimate from the §2.2 sums plus the
+full feature-matrix). During a batch drain the *next* merge's push cancels the previous
+wave mid-flight (observed: push CI for 2817c19c cancelled at 928 s, 6df875f6 at 311 s via
+the per-ref concurrency group) — so most of that spend buys nothing, while its burst
+competes with the ACTIVE merge-group entries (the measured 43–225 s per-job queue
+delays, and the 2026-07-02 congestion-collapse tail risk where starved gate waiters
+emitted false REDs). The org is enterprise-tier, so this is burst-provisioning latency
+and waste rather than a hard concurrency cap — the delays are real wall-clock on the
+critical path either way.
+
+Key soundness fact for lever 1: with a merge queue, the SHA pushed to main **is** the
+merge-group commit that just carried a full green check-suite. Post-merge push CI on that
+SHA is validation-redundant by construction; what push runs uniquely provide today is
+(a) side effects (bench canonical series, release-plz, pages deploy, scorecard),
+(b) rust-cache priming on the main scope, (c) main's default-branch CodeQL alert state.
+
+## 3. The five levers
+
+### 3.1 Lever 1 — skip queue-validated re-validation on push to main → **bead sq-6vshe.14**
+
+**Design.** A cheap `push`-event pre-job (`queue-validated`) queries the check-runs on
+`github.sha`; if a successful `ci-summary / gate` produced by a `merge_group` event exists
+on that exact SHA, pure-validation legs skip. **Fail-open**: no gate found (direct push,
+revert, force-fix) → full run, exactly as today.
+
+KEEP-list (never skipped): release-plz, pages, scorecard, the bench canonical-series
+job (main-push writes the dashboard), randomized full-form fuzz (its placement IS
+push+nightly per sq-6vshe.6), **codeql on push** (main's default-branch alert state is
+fed by `refs/heads/main` analyses — the merge-group analysis lands on the queue ref;
+keep until the association is verified, it costs ~4 m on one runner), and ONE
+**cache-primer** leg (build-archive or a deps-build) so the main-scope rust-cache stays
+warm — note today's cache freshness already depends on whichever push wave survives
+cancellation, so a small always-completing primer is a strict improvement.
+
+**Safety: SAFE** (fail-open guard + explicit keep-list + the nightly full-matrix
+backstop and sq-va7at selection alarm are untouched).
+**Est. saved:** ~200–400 runner-min per merged PR of pool load; −0.5–2 m median entry
+wall via the measured queue delays; removes the congestion-collapse tail risk; and is
+the **precondition** for raising queue parallelism (lever 3).
+
+### 3.2 Lever 2 — caching within and across runs → **bead sq-6vshe.15** (extends sq-6vshe.5)
+
+What exists is already the big win (per-job rust-cache for deps + build-once nextest
+archive): the merge-group compile step is 162 s, not the naive multi-minute per-shard
+rebuild. The honest remaining deltas, in measured order:
+
+1. **Artifact diet** (on the critical path): the nextest archive upload is 90 s and every
+   test shard re-downloads it. Tune zstd level / prune non-test artifacts / measure
+   upload+download vs compile trade.
+2. **`save-if` discipline**: rust-cache saves on `gh-readonly-queue/*` refs are dead on
+   arrival (the ref is deleted post-merge; nothing can restore them) — restrict saves to
+   `refs/heads/main`. Frees post-step seconds per job and cache-backend quota.
+3. **sccache (GHA backend) A/B on build-archive** — measure-first, expectations LOW:
+   deps are already warm via rust-cache; the changed crates of a PR always miss; only
+   unchanged workspace crates hit, and feature-matrix legs key differently per cfg.
+   Adopt only on a ≥60 s median win, else record the negative result.
+
+**Safety: SAFE** (cache poisoning discipline per sq-6vshe.5 applies; measure-first).
+**Est. saved:** −0.5–2 m entry wall, mostly from (1).
+
+### 3.3 Lever 3 — prioritize/parallelize the thing about to merge → **bead sq-6vshe.16**
+
+- **CodeQL: KEEP on the blocking path.** Measured 3.8 m median (buildless). Moving a
+  security gate off the queue for ~0 saving is all risk, no win — the maintainer's
+  suspicion was correct for the pre-buildless era, and is honestly falsified now. The
+  alerts-at-zero posture + the ruleset's code_scanning rule stay intact. **REJECTED.**
+- **Queue settings (maintainer ruleset edit, one-line each):**
+  `max_entries_to_build` 3→5 lifts deep-queue drain capacity ×1.67; with the measured
+  0/250 entry-failure rate the extra speculative builds are almost never wasted. Do this
+  ONLY after lever 1 lands (5 concurrent entries × ~30 jobs each needs the pool headroom
+  the push waves currently burn). Verify `min_entries_to_merge_wait_minutes: 5` is inert
+  given `min_entries_to_merge: 1` — if it is delaying single-entry merges by up to 5 m,
+  set it to 0 (a flat win on every quiet-period merge).
+- **Test-shard rebalance** (the actual CI pole): bulk 3/3 at 655 s vs bulk 2/3 at 340 s
+  is a ~2× imbalance on the serial chain's last hop. This is owned by the OPEN bead
+  **sq-6vshe.7** (nextest partition rebalance) — annotated with this profile rather than
+  re-beaded. Rebalance + one extra bulk shard ≈ −3–5 m off the engine-entry p90.
+
+**Safety:** settings = SAFE-QUICK-WIN (conditional on lever 1); CodeQL move = REJECTED.
+**Est. saved:** position-6 wait 2×E → 2×E with capacity 3→5 becomes ceil(6/5)=2 → same;
+the gain appears from position >6 and during bursts (drain rate ×1.67). Plus up to 5 m
+flat if the min-entries wait proves non-inert.
+
+### 3.4 Lever 4 — skip tests for unaffected crates in the merge group
+
+Change-based selection ALREADY runs on `merge_group` with the sound fail-closed rule set
+(fmx4u: skipped ⇒ provably outside the reverse-dep closure; anything ambiguous ⇒ full;
+gate REDs if a skip's `select` verdict is missing/unsuccessful). Two real remainders:
+
+**(a) Coverage off the merge-group blocking path → bead sq-6vshe.17 — NEEDS-CAREFUL-DESIGN.**
+Coverage shards (448–785 s) are the entry pole whenever selection skips the test shards.
+Coverage is a RATCHET, not a correctness test: a floor regression that slips through a
+batch is detectable and recoverable post-merge, unlike a functional bug — which is what
+makes demotion designable at all. Proposed enforcement topology: PR coverage unchanged
+(the primary gate); `merge_group` drops the coverage-measure legs; the **push-to-main
+run keeps ONLY its coverage legs** (exempt from the lever-1 skip — post-merge, off the
+queue's critical path); a main coverage red auto-files a P1 (mirror sq-va7at / the
+sq-6vshe.6 demotion auto-bead protocol) and blocks further ratchet advances until green.
+The residual risk is the batch-stacking case: two PRs individually ≥ floor merging to
+< floor — rare, caught ~15 m later on main, recoverable, floor never silently lowered.
+This needs an explicit maintainer-visible design (proceed-and-document), not a quick flip.
+**Est. saved:** −2–6 m median entry wall (run 29105286547 would have been ~7 m, not 11.9 m).
+
+**(b) Selection-soundness memo + the fmx4u §7 P8 decision → bead sq-6vshe.18 — SAFE.**
+The union-diff-vs-target-tip argument that makes merge-group selection sound under
+ALLGREEN + a sole required `gate` is currently a bead note, and the maintainer's
+stricter-rule option (`event==merge_group ⇒ mode=full` — a one-line selector change that
+would REVERSE much of this lever) is still an open decision. Codify the argument in
+research/change-based-test-selection.md, present the decision, recommend KEEP-selected
+(nightly full backstop + sq-va7at alarm already fence it).
+
+Not worth extending selection to: conformance ratchets (44–76 s each, parallel,
+never the pole), container-scan (3.6 m, parallel), codeql language-scoping (security
+gate, 3.8 m, the code_scanning ruleset expects analyses — small win, real risk).
+
+### 3.5 Lever 5 — benchmarks → nightly EC2 (sibling lane; cross-reference only)
+
+The `Benchmarks` merge-group leg ("run + track benchmarks", 233 s + select) gates today.
+The sibling lane moving benchmark timing off shared runners to the nightly EC2 lanes
+removes a 3.7 m median leg (rarely the pole) — but its REAL value is retiring the last
+flaky-timing surface from the gate: with ALLGREEN grouping, one flaky gating leg forces
+a whole-entry requeue (the worst churn multiplier), so the expected saving is in the
+tail, not the median. No bead here — owned by the sibling; do not double-implement.
+
+## 4. Ranking — (queue-time saved × safety)
+
+| rank | lever | bead | verdict | est. saved | class |
+|------|-------|------|---------|-----------|-------|
+| 1 | push-to-main skip (validated SHAs) | sq-6vshe.14 | SAFE (fail-open) | 200–400 runner-min/merge; −0.5–2 m wall; collapse-tail removal; unlocks #3 | **SAFE-QUICK-WIN** |
+| 2 | bench → nightly EC2 | (sibling lane) | SAFE as designed there | −3.7 m leg + flake-requeue tail | in-flight |
+| 3 | queue settings (build 3→5; min-wait audit) | sq-6vshe.16 | SAFE after #1 | drain ×1.67 deep-queue; ≤5 m flat if wait non-inert | **SAFE-QUICK-WIN** (maintainer ruleset edit) |
+| 4 | coverage off merge_group | sq-6vshe.17 | recoverable-ratchet argument, needs protocol | −2–6 m median entry wall | **NEEDS-CAREFUL-DESIGN** |
+| 5 | test-shard rebalance | sq-6vshe.7 (existing, annotated) | SAFE | −3–5 m engine-entry p90 | existing bead |
+| 6 | cache/artifact diet + sccache A/B | sq-6vshe.15 | SAFE, measure-first | −0.5–2 m | SAFE |
+| 7 | selection memo + P8 decision | sq-6vshe.18 | SAFE (docs/audit) | 0 direct; closes an open soundness decision | SAFE-QUICK-WIN |
+| 8 | gate waiter off the runner slot | sq-6vshe.19 | SAFE but fiddly | frees 3–6 runner slots during drains | discovered, P3 |
+| — | CodeQL off the blocking path | — | **REJECTED** — measured non-pole (3.8 m), security gate | ~0 | falsified premise |
+
+**End-state estimate** (levers 1+3+4a+5 + the existing .7): median entry wall
+15.1 m → ~9–12 m; engine-entry p90 23.4 m → ~17–19 m (then bounded by the
+build→test chain, whose next lever is the .7 rebalance and the closed-for-now .3/.4
+engine-split reopening conditions); a position-6 PR ≈ 40–60 m → ~15–25 m.
+
+## 5. Discovered work (beaded unless noted)
+
+- sq-6vshe.19 — the ci-summary gate is a WAITER occupying a runner slot ~15–23 m per
+  entry (×3–5 concurrent entries, + the push waiter). Its own doctrine (sq-90cv4) names
+  moving it off the build-runner slot as the deferred deep fix.
+- sq-6vshe.7 (existing) — annotated with the measured bulk-shard imbalance (655 s vs
+  340 s) and the formal-verification change-coupled-Kani 22.7 m outlier (a per-leg
+  wall-time item squarely in that bead's inventory scope).
+- The `min_entries_to_merge_wait_minutes` semantics audit (folded into sq-6vshe.16).
+
+## 6. Method / reproducibility
+
+`gh run list --event merge_group --limit 250` (duration stats over successful runs);
+`gh api repos/sparq-org/sparq/actions/runs/<id>/jobs` for job/step decomposition (runs
+29105265898, 29105286547, 29105790070, 29105286406); ruleset 17688455 via
+`gh api repos/sparq-org/sparq/rulesets/17688455`; selection semantics from
+scripts/ci_select.py + .github/workflows/ci-summary.yml; conclusions histogram over the
+same 250-run window. Snapshot 2026-07-10 — re-profile before acting on a ranking if the
+lane set has materially changed.

@@ -16,6 +16,11 @@ pub mod extsort;
 #[cfg(feature = "iri-fast")]
 pub mod iri;
 mod nt;
+// [OPUS-4.8] sq-jocpn: the opt-in native byte-level Turtle parser. OFF by default (it names
+// `oxiri` as a dep for byte-identical base resolution) so the lean default / wasm build never
+// links it and the incumbent oxttl Turtle path stays shipped until this drop-in is A/B-validated.
+#[cfg(feature = "native-ttl")]
+mod ttl;
 // [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
 // default so the lean default / wasm build never links it (it is `std::sync` only — no new
 // dep — but the surface stays out of the default API).
@@ -618,22 +623,19 @@ fn write_temporals(path: &std::path::Path, flags: &[u8], instants: &[f64]) -> st
 }
 
 /// [FABLE-5] (sq-9781x) Parse a numeric-literal lexical to its f64 image using the XSD
-/// lexical space — the SINGLE shared routine that the numeric-value CACHE
-/// (`numerics_of`/`numeric_of`) and the evaluator's **datatype-AGNOSTIC f64 seam**
-/// (`as_num` / `as_f64` / substrate `parse_xsd_f64`) agree on, so a cache HIT is
-/// equivalent to acceptance on THAT seam for the same numeric value.
+/// `doubleRep` lexical space — the SINGLE shared routine for the XSD f64 SPELLING rules.
 ///
-/// SCOPE (important): this alignment is with the datatype-agnostic f64 seam, NOT with the
-/// full datatype-AWARE `sparq_substrate::numeric::as_numeric` / `Num::of_literal`
-/// acceptance set. `of_literal` is per-datatype: integers must be scale-0, decimals carry
-/// no exponent, and an integer beyond i128 is not representable. `parse_xsd_f64` ignores
-/// the datatype, so it ACCEPTS some lexicals that are ill-formed FOR THEIR DATATYPE and
-/// that `of_literal` rejects with a type error. Counterexamples that cache-HIT here yet
-/// `of_literal`-reject: `"1.5"^^xsd:integer` (fraction on an integer), `"1E2"^^xsd:decimal`
-/// (exponent on a decimal), a >38-digit `xsd:decimal` (i128 overflow → `of_literal` None).
-/// This residual per-datatype over-leniency is PRE-EXISTING (the old raw parse accepted the
-/// same lexicals) and tracked in the residual bead sibling of sq-74oy4; see the eqjoin
-/// `JKey::Num` comment and the substrate differential test `cache_f64_seam_vs_as_numeric`.
+/// This function is DATATYPE-AGNOSTIC: it decides only whether a lexical is a well-formed
+/// XSD double lexical (specials + scientific form), NOT whether it is well-formed for a
+/// specific integer/decimal datatype. The numeric-value CACHE
+/// (`numerics_of`/`numeric_of`/`cached_numeric_f64`) layers the datatype-AWARE gate
+/// `numeric_datatype_wellformed` ON TOP of this, so a cache HIT is now equivalent to
+/// `sparq_substrate::numeric::Num::of_literal` acceptance (sq-6b1lj — integers scale-0,
+/// decimals no-exponent, i128-fit), NOT merely to this f64-seam acceptance. The lenient
+/// engine `as_num`/`as_f64` and reasoner `as_f64` seams are also datatype-aware as of
+/// sq-74oy4, so `"1.5"^^xsd:integer` now uniformly type-errors on `=`/`<`/`>` (cache-miss →
+/// exact evaluator) instead of the pre-fix fast-path-only over-inclusion; the substrate
+/// differential test `cache_f64_seam_vs_as_numeric_differential` pins that agreement.
 ///
 /// It is the lowest-tier home of the parser `sparq_substrate::numeric::parse_xsd_f64`
 /// re-exports (the substrate depends on `sparq-core`, not the reverse, so the shared body
@@ -644,10 +646,11 @@ fn write_temporals(path: &std::path::Path, flags: &[u8], instants: &[f64]) -> st
 ///   REJECTED, even though `str::parse::<f64>` would accept them. This is load-bearing: the
 ///   old raw `str::parse::<f64>` cache stored `inf` for `"inf"^^xsd:double`, which the
 ///   evaluator type-errors — a cache MORE lenient than the evaluator.
-/// - No trimming here (byte-identical to the substrate re-export, which the lenient engine
-///   `as_num`/`as_f64` seam and the reasoner `as_f64` route through UN-trimmed). Callers
-///   that must match the evaluator's TRIMMING equality path (`Num::of_literal`) trim the
-///   lexical themselves before calling — `numerics_of` does exactly that.
+/// - No trimming here (byte-identical to the substrate re-export). Callers that must match
+///   the evaluator's TRIMMING acceptance path (`Num::of_literal`, XSD `collapse` facet) trim
+///   the lexical themselves before calling — `cached_numeric_f64` does exactly that, and
+///   the lenient `as_num`/`as_f64` seams trim too as of sq-74oy4 (so a whitespace-padded
+///   `" 1"^^xsd:integer` is value-1 uniformly on `=`, `<`, `>`, not a `<`/`>` type error).
 ///
 /// `None` for an ill-formed lexical.
 #[inline]
@@ -663,14 +666,112 @@ pub fn parse_xsd_f64(v: &str) -> Option<f64> {
     }
 }
 
-/// The f64 value of a term if it is a numeric XSD literal, else NaN. Routes the lexical
-/// through the shared [`parse_xsd_f64`] (XSD f64 acceptance set) on the TRIMMED value so it
-/// agrees with the evaluator's datatype-AGNOSTIC f64 seam. It does NOT reproduce the
-/// datatype-AWARE `Num::of_literal` acceptance set (see [`parse_xsd_f64`] SCOPE note: e.g.
-/// `"1.5"^^xsd:integer` parses here yet `of_literal` type-errors). [FABLE-5] (sq-9781x)
+/// `true` iff `v` (already TRIMMED) is a well-formed lexical FOR its numeric `datatype`
+/// under XSD's per-datatype lexical space — the datatype-AWARE gate that mirrors
+/// `sparq_substrate::numeric::Num::of_literal`'s ACCEPTANCE set (not its typed value).
+///
+/// [FABLE-5] (sq-74oy4 / sq-6b1lj) This is the second half of the numeric-cache alignment:
+/// sq-9781x aligned the cache's f64 SPELLINGS + trimming with the evaluator's f64 seam, but
+/// left the cache datatype-AGNOSTIC — it stored an f64 for a lexical ill-formed FOR ITS
+/// DATATYPE (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, a >38-digit decimal) that
+/// `Num::of_literal` type-errors, so the sargable `=`/`<` fast path and `JKey::Num`
+/// value-join over-included such a row. This gate reproduces `of_literal`'s per-datatype
+/// acceptance so a cache HIT is now equivalent to `of_literal` acceptance for the SAME f64.
+///
+/// `sparq-core` is the leanest tier and cannot depend on `sparq-substrate` (which owns
+/// `Num`/`Dec`), so the acceptance rules are re-derived here from the SAME grammar
+/// (`split_decimal`-style digit scan + i128 fit); an anti-drift differential test pins this
+/// against `Num::of_literal` over a lexical×datatype matrix in `sparq-substrate`.
+///
+/// - **integer family** (`is_integer_datatype`): a SCALE-0 decimal lexical (NO exponent)
+///   that fits `i128` — matching `Num::of_literal`, which routes an over-`i64` integer
+///   through `Dec::parse` and accepts scale 0. So `"5"`, `"+3"`, `"007"`, `"5."`, `"5.0"`,
+///   `"5.00"` (all value-5 integers) are well-formed; `"1.5"` (scale 1), `".5"`,
+///   `"1E2"^^xsd:integer`, and a >i128 integer are ill-formed.
+/// - **`xsd:decimal`**: `[+-]?digits(.digits)?` (NO exponent) with the mantissa within
+///   `i128`. `"1E2"^^xsd:decimal` / a >i128-mantissa decimal are ill-formed.
+/// - **`xsd:float` / `xsd:double`**: the full XSD `doubleRep` lexical space — exactly
+///   [`parse_xsd_f64`] (`Some`), which already matches `of_literal`.
+/// - any non-numeric datatype: `false`.
+fn numeric_datatype_wellformed(v: &str, datatype: &str) -> bool {
+    // Parse `[+-]?digits(.digits)?` (no exponent) into its i128-fit mantissa + written scale
+    // — the shared decimal-lexical scan `Num::of_literal`'s integer/decimal paths ride on
+    // (`Dec::parse` / `Dec::parse_lexical` in sparq-substrate). `None` = ill-formed (bad char,
+    // empty, or mantissa beyond i128). The scale is the NUMBER OF TRAILING FRACTION DIGITS
+    // as WRITTEN — for the scale-0 integer test, trailing zeros do NOT count (`Dec::parse`
+    // normalises them: `"5.0"` is scale-0). So compute the NORMALISED scale (strip trailing
+    // fraction zeros) exactly as `of_literal` sees it.
+    fn scan_decimal(v: &str) -> Option<u32> {
+        let body = v.strip_prefix(['+', '-']).unwrap_or(v);
+        let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+        if (int.is_empty() && frac.is_empty())
+            || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())
+        {
+            return None;
+        }
+        // i128-fit of the concatenated mantissa (leading `+`/`-` already stripped).
+        let mut mag: i128 = 0;
+        for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
+            mag = mag.checked_mul(10).and_then(|m| m.checked_add((ch - b'0') as i128))?;
+        }
+        // Normalised scale: trailing fraction zeros are insignificant (`Dec::parse` drops
+        // them), so `"5.00"` is scale-0, matching `of_literal`'s scale-0 integer acceptance.
+        Some(frac.trim_end_matches('0').len() as u32)
+    }
+    if is_integer_datatype(datatype) {
+        // scale-0, i128-fit — `Num::of_literal` accepts `"5"`, `"+3"`, `"007"`, `"5."`,
+        // `"5.0"` (all value-5 integers) but NOT `"5.5"` (scale 1) or a >i128 mantissa.
+        return matches!(scan_decimal(v), Some(0));
+    }
+    if datatype == xsd::DECIMAL.as_str() {
+        // any scale (no exponent), i128-fit mantissa — mirrors `Dec::parse_lexical`.
+        return scan_decimal(v).is_some();
+    }
+    // float / double: the datatype-agnostic XSD doubleRep space is already `of_literal`'s.
+    (datatype == xsd::FLOAT.as_str() || datatype == xsd::DOUBLE.as_str()) && parse_xsd_f64(v).is_some()
+}
+
+/// The DATATYPE-AWARE cached f64 of a numeric literal `(value, datatype)`, or `NaN` (the
+/// cache's not-a-value sentinel) when the lexical is ill-formed FOR its datatype. Trims the
+/// lexical (XSD `collapse` whitespace facet — the same trim `Num::of_literal` /
+/// `Dec::parse_lexical` apply) then gates the f64 on [`numeric_datatype_wellformed`], so a
+/// cache HIT is equivalent to `of_literal` acceptance for the same f64. [FABLE-5]
+/// (sq-74oy4 / sq-6b1lj)
+#[inline]
+pub(crate) fn cached_numeric_f64(value: &str, datatype: &str) -> f64 {
+    let v = value.trim();
+    if numeric_datatype_wellformed(v, datatype) {
+        parse_xsd_f64(v).unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
+}
+
+/// The numeric-value CACHE's acceptance of a literal `(value, datatype)`: `Some(f64)` iff the
+/// lexical is well-formed FOR its datatype (equivalently `Num::of_literal` accepts it), else
+/// `None`. This is exactly what `Graph::numeric_value` returns for the term (modulo the
+/// genuine-`NaN`-double sentinel, which reads back as `None` in both). Public so the
+/// substrate's cross-seam differential test can assert the cache seam against the
+/// datatype-AWARE `Num::of_literal` WITHOUT re-implementing the cache's acceptance (which
+/// would make the test circular). [FABLE-5] (sq-74oy4 / sq-6b1lj)
+#[inline]
+pub fn numeric_cache_value(value: &str, datatype: &str) -> Option<f64> {
+    let v = cached_numeric_f64(value, datatype);
+    if v.is_nan() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// The f64 value of a term if it is a well-formed numeric XSD literal FOR its datatype, else
+/// NaN. Routes through [`cached_numeric_f64`], the DATATYPE-AWARE acceptance that mirrors
+/// `Num::of_literal` (see [`numeric_datatype_wellformed`]): a lexical ill-formed for its
+/// datatype (`"1.5"^^xsd:integer`) folds to the NaN cache-miss sentinel exactly as the
+/// evaluator type-errors it. [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj)
 fn numeric_of(term: &Term) -> f64 {
     match term {
-        Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value().trim()).unwrap_or(f64::NAN),
+        Term::Literal(l) if is_numeric_dt(l) => cached_numeric_f64(l.value(), l.datatype().as_str()),
         _ => f64::NAN,
     }
 }
@@ -851,7 +952,14 @@ impl Graph {
                 {
                     return parse_turtle_parallel(bytes);
                 }
-                #[cfg(not(feature = "parallel"))]
+                // [OPUS-4.8] (sq-jocpn) The non-parallel build (e.g. wasm) also routes through the
+                // native parser under `native-ttl` — a whole-document parse with no base.
+                #[cfg(all(not(feature = "parallel"), feature = "native-ttl"))]
+                {
+                    let ids = ttl::parse(bytes, None, &mut dict)?;
+                    triples.extend_from_slice(&ids);
+                }
+                #[cfg(all(not(feature = "parallel"), not(feature = "native-ttl")))]
                 {
                     for t in TurtleParser::new().for_slice(bytes) {
                         let t = t.map_err(|e| e.to_string())?;
@@ -940,12 +1048,26 @@ impl Graph {
             // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set, mirroring
             // `parse_to_triples`; an unknown `format` errors instead of parsing as Turtle.
             _ if is_turtle_format(format) => {
-                let parser = TurtleParser::new()
-                    .with_base_iri(base)
-                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
-                for t in parser.for_slice(bytes) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                // [OPUS-4.8] (sq-jocpn) Under `native-ttl`, the WITH-BASE serial Turtle path — the
+                // one the W3C TurtleTests conformance ratchet drives (`turtle_suite.rs` calls
+                // `parse_to_triples_with_base`) — runs through the native parser too, so the ratchet
+                // pins the native parser's accept/reject + resolved-term set against oxttl's on the
+                // whole W3C suite. Base resolution is delegated to the same `oxiri` automaton oxttl
+                // uses, so resolved IRIs are byte-identical.
+                #[cfg(feature = "native-ttl")]
+                {
+                    let ids = ttl::parse(bytes, Some(base), &mut dict)?;
+                    triples.extend_from_slice(&ids);
+                }
+                #[cfg(not(feature = "native-ttl"))]
+                {
+                    let parser = TurtleParser::new()
+                        .with_base_iri(base)
+                        .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                    for t in parser.for_slice(bytes) {
+                        let t = t.map_err(|e| e.to_string())?;
+                        push_triple!(&t.subject, &t.predicate, &t.object);
+                    }
                 }
             }
             _ => return Err(unknown_format_err(format)),
@@ -4095,18 +4217,17 @@ fn numerics_of(dict: &Dict) -> Vec<f64> {
     let n = dict.len();
     let numeric_of_parts = |i: usize| -> f64 {
         match dict.term_parts(i as Id + 1) {
-            // [FABLE-5] (sq-9781x) Route through the shared XSD-lexical-space parser on the
-            // TRIMMED value — NOT a raw `str::parse::<f64>` — so a cache HIT is equivalent to
-            // acceptance on the evaluator's datatype-AGNOSTIC f64 seam (`parse_xsd_f64`, which
-            // trims here to match `Num::of_literal`'s trim), for exactly the same f64. This
-            // both admits the whitespace-padded lexical (` 1`^^xsd:integer) the raw parse
-            // missed AND rejects the Rust-only `inf`/`infinity`/`nan` spellings the raw parse
-            // wrongly cached. It does NOT reproduce the datatype-AWARE `of_literal` set: a
-            // per-datatype-ill-formed lexical (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`,
-            // an i128-overflow decimal) still caches its f64 here while `of_literal`
-            // type-errors — a PRE-EXISTING residual tracked in the sq-74oy4-sibling bead.
+            // [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj) Route through the DATATYPE-AWARE
+            // acceptance (`cached_numeric_f64` → `numeric_datatype_wellformed`) on the TRIMMED
+            // value, so a cache HIT is equivalent to `Num::of_literal` acceptance for exactly
+            // the same f64. This admits the whitespace-padded lexical (` 1`^^xsd:integer) AND
+            // rejects both the Rust-only `inf`/`infinity`/`nan` spellings (already so since
+            // sq-9781x) AND the per-datatype-ill-formed lexicals `of_literal` type-errors
+            // (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, an i128-overflow decimal — sq-6b1lj):
+            // they now fold to the NaN cache-miss sentinel, so the sargable `=`/`<` fast path
+            // and `JKey::Num` value-join defer to the exact evaluator and agree with it.
             dict::TermParts::Lit { value, datatype, lang: None } if is_numeric_datatype_str(datatype) => {
-                parse_xsd_f64(value.trim()).unwrap_or(f64::NAN)
+                cached_numeric_f64(value, datatype)
             }
             _ => f64::NAN,
         }
@@ -4683,15 +4804,60 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
 /// heap churn between oxttl's output and the dict.
 #[cfg(feature = "parallel")]
 fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
-    let mut triples = Vec::new();
-    for t in TurtleParser::new().for_slice(bytes) {
-        let t = t.map_err(|e| e.to_string())?;
-        let s = intern_subject_ref(dict, &t.subject);
-        let p = dict.intern_iri(t.predicate.as_str());
-        let o = intern_object_ref(dict, &t.object);
-        triples.push([s, p, o]);
+    // [OPUS-4.8] (sq-jocpn) When the opt-in `native-ttl` feature is on, parse this chunk with the
+    // native byte-level Turtle parser instead of oxttl. It is a byte-identical drop-in (same
+    // resolved terms — IRI resolution is delegated to the same `oxiri` automaton oxttl uses — same
+    // triple set, same accept/reject), pinned by the `native_ttl_matches_oxttl` differential and
+    // the W3C TurtleTests ratchet. Anonymous blank-node LABELS differ (as they already do between
+    // two oxttl runs), which the blank-node-isomorphic differential/merge accommodates. No base:
+    // the parallel loader only routes here for base-less documents (the with-base entry point is
+    // its own serial path below), and each chunk carries its own directive snapshot.
+    #[cfg(feature = "native-ttl")]
+    {
+        ttl::parse(bytes, None, dict)
     }
-    Ok(triples)
+    // [SONNET-4.6] (sq-wrn61) Pre-size the output triple Vec to a capacity HINT derived
+    // from the input size, so the append loop does not repeatedly `grow_amortized`
+    // (each growth is a realloc + memcpy of the whole Vec). Profiling the single-thread
+    // incumbent path with `perf` (60 MB / 2.56 M-triple corpus, work box, NON-CANONICAL)
+    // attributes ~53% to oxttl (tokenizer + prefixed-name expansion), ~30% to the dict
+    // intern (`find_iri` hashbrown lookup + key memcmp), and the rest to allocation churn,
+    // of which the un-pre-sized triple Vec's realloc/memcpy is a measurable slice. This is
+    // a PURE capacity hint: it never bounds the parsed count — the Vec still grows if the
+    // estimate is low — so the parse result is byte-for-byte identical.
+    #[cfg(not(feature = "native-ttl"))]
+    {
+        let mut triples = Vec::with_capacity(estimate_turtle_triples(bytes.len()));
+        for t in TurtleParser::new().for_slice(bytes) {
+            let t = t.map_err(|e| e.to_string())?;
+            let s = intern_subject_ref(dict, &t.subject);
+            let p = dict.intern_iri(t.predicate.as_str());
+            let o = intern_object_ref(dict, &t.object);
+            triples.push([s, p, o]);
+        }
+        Ok(triples)
+    }
+}
+
+/// [SONNET-4.6] (sq-wrn61) Estimate the triple count of a Turtle document from its byte
+/// length, for pre-sizing the output `Vec<[Id; 3]>` (and, at the top of the load, the
+/// `Dict`). This is a HINT ONLY — a low estimate just means the Vec grows a little, a high
+/// estimate over-reserves harmlessly; it NEVER changes the parsed result.
+///
+/// The divisor is a deliberately CONSERVATIVE bytes-per-triple: predicate-grouped,
+/// prefixed Turtle (the realistic human-authored shape) is compact (~20-25 bytes/triple on
+/// the bench corpus), but real-world Turtle with long absolute IRIs is far more verbose. A
+/// conservative (large) divisor UNDER-estimates on compact input — still removing most of
+/// the early doublings — while never grossly over-allocating on verbose input. The `+ 1`
+/// keeps the hint non-zero for a pathologically small chunk.
+#[cfg(feature = "parallel")]
+#[inline]
+fn estimate_turtle_triples(byte_len: usize) -> usize {
+    // Conservative: assume ~40 bytes per triple. On the compact bench corpus (~23 B/triple)
+    // this reserves ~57% of the final count up front — enough to skip the costly early
+    // grow_amortized doublings — without over-reserving on verbose real-world Turtle.
+    const AVG_TTL_BYTES_PER_TRIPLE: usize = 40;
+    byte_len / AVG_TTL_BYTES_PER_TRIPLE + 1
 }
 
 /// Skip whitespace and `#`-comments from `i`, returning the next significant byte offset.
@@ -4801,8 +4967,24 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
         // (string / IRI / comment skipping, the `.`-terminator and `\`-escape tests) are
         // UNCHANGED, so behaviour — including the review-1398 PN_LOCAL_ESC `\#` fix — is
         // identical; this only fast-forwards over the runs the old `_ => i += 1` arm crawled.
+        //
+        // [OPUS-4.8] (sq-98w7z.1 hang fix) The scan-byte set has SIX members but `memchr` tops
+        // out at three needles, so this needs two passes. The earlier form ran BOTH `memchr3`
+        // calls over the SAME full tail `bytes[i..]` and took `x.min(y)` — which is O(tail) work
+        // per state-change even when one class of byte is entirely absent. On a document with no
+        // string literals or PN_LOCAL escapes (e.g. an all-IRI N-Triples-shaped body), the
+        // quote/backslash `memchr3` found NOTHING and re-walked the whole remaining buffer once
+        // per `<`/`.`, making `next_terminator` O(statement · tail) ⇒ the whole parse O(n²) and a
+        // 55k-triple load hang for minutes. Fix: find the FIRST `. < #` (the class that ends a
+        // scan region), then look for a quote/backslash ONLY in the window BEFORE it. Each byte
+        // is now examined by the bounded second pass at most once, restoring O(n).
         let a = memchr::memchr3(b'.', b'<', b'#', &bytes[i..]);
-        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..]);
+        // Second pass is bounded: if `a` found a byte at offset `x`, a quote/backslash can only
+        // matter if it occurs strictly before `x` (otherwise `a`'s byte wins the `min`); if `a`
+        // found nothing, the region to the end is the whole tail (unchanged behaviour, but now it
+        // is the ONLY full-tail scan and it terminates the statement search via `None`).
+        let bound = a.map_or(bytes.len() - i, |x| x);
+        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..i + bound]);
         i += match (a, b) {
             (None, None) => return None, // no interesting byte before EOF → incomplete statement
             (Some(x), None) => x,
@@ -5015,7 +5197,13 @@ fn parse_turtle_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     if threads == 1 {
         // No parallelism available: chunking is pure overhead (measured ~16% at 1T on the
         // wikidata slice — 1.300 s chunked vs 1.12 s serial) — parse directly.
-        let mut dict = Dict::new();
+        // [SONNET-4.6] (sq-wrn61) Pre-size the dict table so the intern loop skips the early
+        // `reserve_rehash` growths (perf attributed a small but real slice to hashbrown
+        // resize on this single-thread path). Distinct terms are a fraction of triples;
+        // half the triple estimate is a safe under-reservation (a low guess just rehashes a
+        // little, never wrong). Chunked callers merge into a ShardedDict, so this only
+        // applies to the serial branch.
+        let mut dict = Dict::with_capacity(estimate_turtle_triples(bytes.len()) / 2);
         return parse_turtle_chunk(bytes, &mut dict).map(|t| (dict, t));
     }
     let target = (threads * 4).min(bytes.len() / 8192 + 1).max(1);
@@ -6376,6 +6564,117 @@ mod tests {
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
 
+    /// [OPUS-4.8] (sq-98w7z.1) Regression: the parallel Turtle terminator scan must be LINEAR in
+    /// document size, not quadratic. `next_terminator` used to run a full-tail `memchr3` for
+    /// `" ' \` on EVERY state-change byte; on a body with NO string literals or PN_LOCAL escapes
+    /// (an all-IRI N-Triples-shaped document — exactly what a wide synthetic graph produces) that
+    /// scan found nothing and re-walked the whole remaining buffer once per statement, making the
+    /// splitter O(n²): a 55k-triple load hung for ~19 minutes. The fix bounds the second pass to
+    /// the window before the next `. < #`.
+    ///
+    /// NON-VACUOUS: this is a hard wall-clock ceiling, not a ratio. On the pre-fix code a 20k-row
+    /// quote-free parse takes ~600 s (measured: 10k rows = 150 s, scaling ~4× per doubling); the
+    /// fixed code does it in well under a second. A 20 s ceiling would be blown by >30× on the
+    /// broken code yet leaves ~100× slack for the fixed code on the slowest CI runner, so it
+    /// cannot flake on a slow-but-linear machine and cannot pass on a quadratic one. Work-box
+    /// timings are non-canonical — only the coarse linear/quadratic distinction is asserted.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_terminator_scan_is_linear_not_quadratic() {
+        // A quote/backslash-free body forces the bounded second-pass arm (`b == None`) — the exact
+        // shape that triggered the quadratic full-tail re-scan. 20k statements ⇒ ~1 MB, comfortably
+        // over the fan-out threshold, and large enough that O(n²) is minutes while O(n) is < 1 s.
+        let rows = 20_000usize;
+        let ttl: String =
+            (0..rows).map(|i| format!("<http://ex/s{}> <http://ex/p> <http://ex/o> .\n", i)).collect();
+        assert!(turtle_chunks(ttl.as_bytes(), 32).is_some(), "quote-free body should fan out");
+        let t = std::time::Instant::now();
+        let (_d, triples) = parse_turtle_parallel(ttl.as_bytes()).unwrap();
+        let elapsed = t.elapsed();
+        assert_eq!(triples.len(), rows, "every quote-free statement must parse");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "quote-free parse took {:?} — the terminator scan has regressed to quadratic",
+            elapsed
+        );
+    }
+
+    // [SONNET-4.6] (sq-wrn61) The Turtle triple-Vec / Dict pre-sizing (`estimate_turtle_triples`)
+    // is a PURE capacity hint. These pin its two load-bearing invariants: (a) it never returns
+    // zero (a zero capacity would defeat the hint but not corrupt output) and never SHRINKS with
+    // input size — monotonic; (b) a hint that UNDER-estimates the real count does NOT truncate the
+    // parse — the Vec still grows and every triple is emitted, byte-for-byte identical to a hint-
+    // free oxttl parse.
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn estimate_turtle_triples_never_zero_and_monotonic() {
+        // Never zero, even for an empty or 1-byte document (a zero-capacity Vec is legal but the
+        // `+ 1` guarantees the hint is always usable / non-degenerate).
+        assert!(estimate_turtle_triples(0) >= 1);
+        assert!(estimate_turtle_triples(1) >= 1);
+        // Monotonic non-decreasing in byte length: a bigger document never hints a smaller Vec.
+        let mut prev = 0usize;
+        for &n in &[0usize, 1, 39, 40, 41, 4_000, 60_000_000] {
+            let e = estimate_turtle_triples(n);
+            assert!(e >= prev, "estimate must be monotonic: {} then {}", prev, e);
+            prev = e;
+        }
+        // The divisor is conservative (>= 1 byte/triple), so the hint never EXCEEDS the byte
+        // count — it can only ever UNDER-reserve, never grossly over-allocate.
+        assert!(estimate_turtle_triples(1_000_000) <= 1_000_001);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn presized_turtle_parse_is_hint_only_matches_oxttl_direct() {
+        // A document whose bytes-per-triple is FAR below the estimate's conservative divisor:
+        // very short IRIs / no prefixes means many triples per byte, so `estimate_turtle_triples`
+        // UNDER-estimates the true count by a wide margin. If the estimate ever bounded the parse
+        // (it must not), triples past the hinted capacity would be dropped.
+        let mut ttl = String::from("@prefix : <http://e/> .\n");
+        for i in 0..2000 {
+            // Three compact triples per subject; predicate-grouped.
+            ttl.push_str(&format!(":s{i} :a :b ; :c :d ; :e {i} .\n"));
+        }
+        let bytes = ttl.as_bytes();
+        // Sanity: the hint really does under-estimate here (exercises the grow path).
+        assert!(
+            estimate_turtle_triples(bytes.len()) < 6000,
+            "test must exercise the under-estimate case"
+        );
+
+        // Pre-sized incumbent path.
+        let mut dict = Dict::new();
+        let presized = parse_turtle_chunk(bytes, &mut dict).unwrap();
+
+        // Independent reference: oxttl directly, no capacity hint, interned the same way.
+        let mut ref_dict = Dict::new();
+        let mut reference: Vec<[Id; 3]> = Vec::new();
+        for t in TurtleParser::new().for_slice(bytes) {
+            let t = t.unwrap();
+            let s = intern_subject_ref(&mut ref_dict, &t.subject);
+            let p = ref_dict.intern_iri(t.predicate.as_str());
+            let o = intern_object_ref(&mut ref_dict, &t.object);
+            reference.push([s, p, o]);
+        }
+
+        // Byte-for-byte identical result: same count and same decoded S/P/O for every triple.
+        assert_eq!(presized.len(), reference.len(), "pre-sizing must not change the triple count");
+        assert_eq!(presized.len(), 6000, "all 3*2000 triples must be emitted");
+        let decode = |d: &Dict, t: &[[Id; 3]]| -> Vec<String> {
+            let mut v: Vec<String> =
+                t.iter().map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o))).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            decode(&dict, &presized),
+            decode(&ref_dict, &reference),
+            "pre-sized parse must be identical to the hint-free oxttl parse"
+        );
+    }
+
     /// [OPUS-4.8] sq-t267: RDF 1.2 triple terms must parse IDENTICALLY through the
     /// chunk-parallel Turtle path and the serial path — including a triple term that lands at a
     /// CHUNK BOUNDARY. The terminator pre-scan ([`next_terminator`]) treats the `<` of `<<( … )>>`
@@ -7588,6 +7887,12 @@ mod tests {
             "",
             ".",                                            // bare dot at EOF is a terminator
             ".5 .\n",                                       // leading decimal then real terminator
+            // [OPUS-4.8] (sq-98w7z.1) Quote/backslash-FREE bodies: the bounded second `memchr3`
+            // pass (introduced with the O(n²) fix) takes the `b == None` arm here, so the split
+            // offset must still match the scalar oracle exactly. An all-IRI N-Triples-shaped run
+            // is precisely the shape that used to trigger the quadratic full-tail re-scan.
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s2> <http://ex/p> <http://ex/o2> .\n",
+            ":a :b :c . :d :e :f . :g :h :i .\n",           // several quote-free statements in a row
         ];
         for (k, c) in cases.iter().enumerate() {
             let b = c.as_bytes();
@@ -10303,19 +10608,56 @@ mod tests {
         }
     }
 
-    /// [FABLE-5] (sq-9781x) SHARED-PARSER PLUMBING check (NOT a differential vs the real
-    /// datatype-aware evaluator). It pins that the numeric-value cache actually routes every
-    /// numeric datatype through the shared `parse_xsd_f64` on the TRIMMED lexical: a cache HIT
-    /// (`numeric_value(id).is_some()`) is EQUIVALENT to `parse_xsd_f64(value.trim())` being
-    /// `Some` non-NaN, and the cached f64 is EXACTLY that value. Because the "evaluator model"
-    /// here is the SAME function the cache calls, this cannot detect divergence from the real
-    /// datatype-AWARE `Num::of_literal` — that cross-seam check is
-    /// `sparq_substrate::compare` `cache_f64_seam_vs_as_numeric`, which asserts the KNOWN
-    /// per-datatype divergence (`"1.5"^^xsd:integer` etc., bead sq-6b1lj). A stored-NaN value
-    /// folds to a cache MISS (the cache uses NaN as its "not cached" sentinel, so a genuine
-    /// `NaN`^^xsd:double falls through to the evaluator). Covers whitespace padding, leading
-    /// `+`, the XSD specials, the Rust-only spellings, exponent forms, empty/`abc`,
-    /// high-precision decimals and `2^53 ± 1`.
+    /// [FABLE-5] (sq-74oy4 / sq-6b1lj) DIRECT unit test of the public DATATYPE-AWARE cache
+    /// acceptance `numeric_cache_value` (and thereby `cached_numeric_f64` /
+    /// `numeric_datatype_wellformed`): trims, per-datatype well-formedness, and the exact
+    /// scale-0 integer rule (`"5."`/`"5.0"` accepted as integers, `"5.5"` not). This is the
+    /// in-crate coverage anchor for the new fns; the CROSS-crate agreement with
+    /// `Num::of_literal` is pinned in `sparq-substrate`'s `cache_f64_seam_vs_as_numeric_differential`.
+    #[test]
+    fn numeric_cache_value_datatype_aware_acceptance() {
+        let xi = xsd::INTEGER.as_str();
+        let xd = xsd::DECIMAL.as_str();
+        let xdbl = xsd::DOUBLE.as_str();
+        let xf = xsd::FLOAT.as_str();
+        // integers: scale-0 (after trailing-zero normalisation), i128-fit, trimmed.
+        assert_eq!(numeric_cache_value("5", xi), Some(5.0));
+        assert_eq!(numeric_cache_value(" 5 ", xi), Some(5.0)); // XSD collapse: trimmed
+        assert_eq!(numeric_cache_value("+7", xi), Some(7.0));
+        assert_eq!(numeric_cache_value("5.", xi), Some(5.0)); // trailing dot, no fraction
+        assert_eq!(numeric_cache_value("5.0", xi), Some(5.0)); // trailing-zero fraction
+        assert_eq!(numeric_cache_value("5.5", xi), None); // fraction on an integer
+        assert_eq!(numeric_cache_value(".5", xi), None); // no integer part, scale 1
+        assert_eq!(numeric_cache_value("1E2", xi), None); // exponent on an integer
+        assert_eq!(numeric_cache_value("9999999999999999999999999999999999999999", xi), None); // >i128
+        // decimals: any scale, no exponent, i128-fit.
+        assert_eq!(numeric_cache_value("1.5", xd), Some(1.5));
+        assert_eq!(numeric_cache_value(".5", xd), Some(0.5));
+        assert_eq!(numeric_cache_value("007.50", xd), Some(7.5));
+        assert_eq!(numeric_cache_value("1E2", xd), None); // exponent on a decimal
+        assert_eq!(numeric_cache_value("9999999999999999999999999999999999999999.5", xd), None);
+        // float/double: XSD doubleRep spellings; genuine NaN reads back as a cache MISS.
+        assert_eq!(numeric_cache_value("1.5E2", xdbl), Some(150.0));
+        assert_eq!(numeric_cache_value("INF", xdbl), Some(f64::INFINITY));
+        assert_eq!(numeric_cache_value("3.0", xf), Some(3.0));
+        assert_eq!(numeric_cache_value("inf", xdbl), None); // Rust-only spelling
+        assert_eq!(numeric_cache_value("NaN", xdbl), None); // genuine NaN -> sentinel miss
+        // non-numeric datatype: always None.
+        assert_eq!(numeric_cache_value("5", xsd::STRING.as_str()), None);
+    }
+
+    /// [FABLE-5] (sq-9781x / sq-6b1lj) PLUMBING check that the numeric-value cache's decision
+    /// matches the cache's OWN documented acceptance function `numeric_cache_value` (the
+    /// DATATYPE-AWARE gate over the shared `parse_xsd_f64`): a cache HIT
+    /// (`numeric_value(id).is_some()`) is EQUIVALENT to `numeric_cache_value(value, datatype)`
+    /// being `Some`, and the cached f64 is EXACTLY that value. Because the model here is the
+    /// SAME function the cache calls, this pins the wiring (build path ⟺ the acceptance fn),
+    /// not the cross-crate agreement with `Num::of_literal` — that TRUE differential is
+    /// `sparq_substrate::numeric` `cache_f64_seam_vs_as_numeric_differential`. A stored-NaN
+    /// value folds to a cache MISS (the cache uses NaN as its "not cached" sentinel, so a
+    /// genuine `NaN`^^xsd:double falls through to the evaluator). Covers whitespace padding,
+    /// leading `+`, the XSD specials, the Rust-only spellings, exponent forms, empty/`abc`,
+    /// high-precision decimals, `2^53 ± 1`, and the sq-6b1lj per-datatype-ill-formed lexicals.
     #[test]
     fn numeric_cache_hit_matches_shared_parse_xsd_f64_plumbing() {
         // (lexical, datatype-suffix). Each becomes one distinct dictionary literal.
@@ -10341,6 +10683,10 @@ mod tests {
             ("9007199254740991", "xsd:integer"),     // 2^53 - 1
             ("3.0", "xsd:float"),       // ordinary float
             ("007.50", "xsd:decimal"),  // leading zeros
+            // sq-6b1lj: datatype-ill-formed lexicals -> cache MISS (of_literal type-errors).
+            ("1.5", "xsd:integer"),     // fraction on an integer -> REJECTED
+            ("1E2", "xsd:decimal"),     // exponent on a decimal -> REJECTED
+            ("1E2", "xsd:integer"),     // exponent on an integer -> REJECTED
         ];
         let mut ttl = String::from(
             "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n",
@@ -10368,9 +10714,9 @@ mod tests {
             if !is_numeric_datatype_str(datatype) {
                 continue;
             }
-            // Evaluator model: accept iff parse_xsd_f64(trimmed) is Some AND non-NaN (a NaN
-            // value is stored but folds to a cache miss via the sentinel).
-            let model = parse_xsd_f64(value.trim()).filter(|v| !v.is_nan());
+            // Model: the cache's OWN datatype-aware acceptance (`numeric_cache_value`), which
+            // trims, gates on per-datatype well-formedness, and folds a NaN value to a miss.
+            let model = numeric_cache_value(value, datatype);
             let cached = g.numeric_value(id);
             match (model, cached) {
                 (Some(m), Some(c)) => assert_eq!(

@@ -93,16 +93,28 @@ impl ActiveContext {
                 if prefix == "_" || suffix.starts_with("//") {
                     return Some(value.to_string());
                 }
-                // If the prefix is a term flagged `@prefix`, concatenate.
-                if let Some(pdef) = self.term_definitions.get(prefix) {
-                    if pdef.prefix {
-                        if let Some(piri) = &pdef.iri {
-                            return Some(format!("{}{}", piri, suffix));
+                // [SONNET-4.6] sq-oy1f.45 — a colon in a fragment (e.g. `#Test:2`) does
+                // NOT mark a compact-IRI prefix; the prefix must be a valid RFC 3986 URI
+                // scheme (ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )).  A non-scheme
+                // prefix (starting with `#`, containing non-scheme chars, etc.) means the
+                // value is a relative reference — fall through to base resolution (step 8).
+                // W3C expand/0109: `#Test:2` must resolve against the base, not be returned
+                // as-is as if it were an absolute IRI.
+                if !is_valid_scheme(prefix) {
+                    // Not a compact IRI (prefix is not a valid scheme); fall through to
+                    // vocab / base resolution.
+                } else {
+                    // If the prefix is a term flagged `@prefix`, concatenate.
+                    if let Some(pdef) = self.term_definitions.get(prefix) {
+                        if pdef.prefix {
+                            if let Some(piri) = &pdef.iri {
+                                return Some(format!("{}{}", piri, suffix));
+                            }
                         }
                     }
+                    // Otherwise the value already contains a valid scheme: treat as absolute IRI.
+                    return Some(value.to_string());
                 }
-                // Otherwise the value already contains a colon: treat it as an absolute IRI.
-                return Some(value.to_string());
             }
         }
         // step 7: a vocabulary reference with a `@vocab` mapping.

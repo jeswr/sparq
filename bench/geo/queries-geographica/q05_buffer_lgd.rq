@@ -1,0 +1,23 @@
+# [FABLE-5] sq-hmd7l.29 — Geographica real-world micro NON-TOPOLOGICAL query
+# "QUERY 5 - Buffer_LGD" (micro_nontopological.lst, geographica2.di.uoa.gr), pinned for
+# scripts/bench/geo-same-box.sh (the GEO_GEOGRAPHICA=1 family; corpus recipe
+# bench/geo/geographica.sh). TRANSLATIONS vs upstream (see bench/geo/README.md):
+#   * GRAPH <http://geographica.di.uoa.gr/dataset/...> wrapper dropped — both
+#     engines load the merged slice into the default graph; the per-dataset
+#     predicate IRIs keep LGD/GeoNames distinguishable.
+#   * COUNT-wrapped (counts-not-coordinates): only the result-set SIZE is
+#     cross-checked between engines before any timing is trusted.
+#   * upstream 2-arg Strabon-dialect buffer(?o1, r) -> the standard 3-arg
+#     geof:buffer(?o1, r, uom:degree): the same planar degree-space semantic,
+#     executable identically on both engines (no degree->metre conversion).
+#   * COUNT(?ret) counts only rows where the function EVALUATED (an error
+#     leaves ?ret unbound), so the count is a per-engine function-evaluation
+#     oracle and the HTTP response stays tiny (no giant WKT serialisation
+#     across the recorded in-process-vs-HTTP mode asymmetry).
+# Oracle: COUNT must equal expected-geographica.tsv before timing is trusted.
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?ret) AS ?n) WHERE {
+  ?s1 <http://linkedgeodata.org/ontology/asWKT> ?o1 .
+  BIND(geof:buffer(?o1, 0.04, uom:degree) AS ?ret)
+}

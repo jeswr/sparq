@@ -910,3 +910,20 @@ fn query_iri_equality_filter_rows_correct_through_rewrite() {
     assert!(stdout.contains("2 row(s)"), "exactly two rows: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// [OPUS-4.8] (sq-7d3dj.30.20) COMPILE-TIME tripwire that the CLI's `sparq-engine` dependency
+/// keeps the SP2Bench-q07 `antijoin-static-decline` fix enabled (Cargo.toml dep features, like
+/// `algebra-rewrite`/`dp-planner`). `theta_antijoin_testing::early_declined` only exists under
+/// that feature, so if a future edit drops it from the dep line this test FAILS TO COMPILE in
+/// the per-crate lanes (`cargo test -p sparq-cli`) — the same authoritative-per-crate caveat as
+/// `algebra_rewrite_pass_is_lit_and_fires_on_iri_equality` above. It also asserts the counter
+/// starts at zero (a live, callable feature surface), never a stale value.
+#[test]
+fn antijoin_static_decline_is_lit() {
+    sparq_engine::theta_antijoin_testing::reset_stats();
+    assert_eq!(
+        sparq_engine::theta_antijoin_testing::early_declined(),
+        0,
+        "the antijoin-static-decline early-decline counter is live and reset-to-zero"
+    );
+}

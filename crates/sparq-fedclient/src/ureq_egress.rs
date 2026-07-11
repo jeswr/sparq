@@ -107,3 +107,136 @@ pub(crate) fn filter_resolved(
     }
     Ok(permitted)
 }
+
+// [FABLE-5] sq-3dyje.6 (mutation-kill): DIRECT unit tests for this `pub(crate)` module.
+// The module previously had NO inline tests — it was exercised only end-to-end through the
+// three transports' loopback tests, which never pin these helpers' individual outputs, so
+// cargo-mutants return-value/operator mutations here survived. Every assertion below pins a
+// specific value: the URI→(host_port, host, port) triple including scheme-default ports and
+// IPv6 bracket handling, the refusal error's exact `ErrorKind` + reason, and the resolved-
+// address filtering decisions (allowlist bypass / forbidden drop / empty ⇒ hard error).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    fn uri(s: &str) -> ureq::http::Uri {
+        s.parse().expect("test URI parses")
+    }
+
+    #[test]
+    fn uri_host_port_explicit_port_and_lowercasing() {
+        assert_eq!(
+            uri_host_port(&uri("http://Example.ORG:8080/sparql")),
+            Some(("Example.ORG:8080".to_string(), "example.org".to_string(), 8080)),
+            "host_port keeps the authority spelling for resolution; the allowlist key is lowercased"
+        );
+    }
+
+    #[test]
+    fn uri_host_port_scheme_default_ports() {
+        assert_eq!(
+            uri_host_port(&uri("https://example.org/q")),
+            Some(("example.org:443".to_string(), "example.org".to_string(), 443)),
+            "https defaults to 443"
+        );
+        assert_eq!(
+            uri_host_port(&uri("http://example.org/q")),
+            Some(("example.org:80".to_string(), "example.org".to_string(), 80)),
+            "http (and anything non-https) defaults to 80"
+        );
+    }
+
+    #[test]
+    fn uri_host_port_strips_ipv6_brackets() {
+        assert_eq!(
+            uri_host_port(&uri("http://[::1]:8053/q")),
+            Some(("::1:8053".to_string(), "::1".to_string(), 8053)),
+            "the bare (bracket-stripped) host is both the resolve target's host part and the allowlist key"
+        );
+    }
+
+    #[test]
+    fn uri_host_port_no_authority_is_none() {
+        // A relative-form URI carries no authority to vet.
+        assert_eq!(uri_host_port(&uri("/no-authority")), None);
+    }
+
+    #[test]
+    fn egress_refused_is_permission_denied_with_reason() {
+        let err = egress_refused("blocked: policy".to_string());
+        match err {
+            ureq::Error::Io(io) => {
+                assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+                assert_eq!(io.to_string(), "blocked: policy");
+            }
+            other => panic!("expected Error::Io(PermissionDenied), got {:?}", other),
+        }
+    }
+
+    /// 127.0.0.1:<port> resolves locally with no DNS, deterministically.
+    const LOOP: &str = "127.0.0.1:8080";
+
+    fn always(_: IpAddr) -> bool {
+        true
+    }
+    fn never(_: IpAddr) -> bool {
+        false
+    }
+
+    #[test]
+    fn filter_resolved_allowed_bypasses_the_classifier() {
+        // allowed=true must return the address EVEN THOUGH the classifier forbids it —
+        // the allowlist bypass (`allowed || !forbidden`; the `&&` mutation fails here).
+        let got = filter_resolved(LOOP, true, always, || unreachable!("no refusal"))
+            .expect("allowlisted host resolves");
+        let want: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+        assert!(!got.is_empty(), "the resolved set must not be empty");
+        assert_eq!(got[0], want, "the loopback address survives the filter");
+    }
+
+    #[test]
+    fn filter_resolved_forbidden_addresses_are_a_hard_error() {
+        // Not allowlisted + every address forbidden ⇒ a HARD PermissionDenied carrying the
+        // refusal text — never an empty Ok (ureq would fall through to an unguarded dial).
+        let err = filter_resolved(LOOP, false, always, || "refused: test-policy".to_string())
+            .expect_err("all-forbidden must refuse");
+        match err {
+            ureq::Error::Io(io) => {
+                assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+                assert_eq!(io.to_string(), "refused: test-policy");
+            }
+            other => panic!("expected Error::Io(PermissionDenied), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn filter_resolved_permitted_addresses_pass_unallowlisted() {
+        // Not allowlisted but the classifier permits ⇒ the address flows through (the
+        // `!forbidden` — deleting the `!` fails here).
+        let got = filter_resolved(LOOP, false, never, || unreachable!("no refusal"))
+            .expect("permitted address resolves");
+        assert_eq!(
+            got[0],
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
+        );
+    }
+
+    #[test]
+    fn allowlist_permits_matches_host_and_port_scoped_entries() {
+        let mut allow: HashSet<String> = HashSet::new();
+        allow.insert("open.example".to_string());
+        allow.insert("scoped.example:8443".to_string());
+        // Host-level entry: every port.
+        assert!(allowlist_permits(&allow, "open.example", 80));
+        assert!(allowlist_permits(&allow, "open.example", 65535));
+        // Port-scoped entry: exactly its port.
+        assert!(allowlist_permits(&allow, "scoped.example", 8443));
+        assert!(!allowlist_permits(&allow, "scoped.example", 8444));
+        // Absent host: refused.
+        assert!(!allowlist_permits(&allow, "absent.example", 8443));
+        // Empty allowlist: nothing permitted.
+        assert!(!allowlist_permits(&HashSet::new(), "open.example", 80));
+    }
+}

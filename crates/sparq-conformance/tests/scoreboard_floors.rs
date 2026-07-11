@@ -147,6 +147,19 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/d_entail_suite.rs",
         "D_ENTAIL_FLOOR",
     ),
+    // [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG Core test-suite
+    // CONFORMANCE ratchet. `pub const RIF_WG_CORE_FLOOR` lives in this crate's
+    // `tests/rif_wg_core_suite.rs` (behind the opt-in `rif-wg-core` feature, inside the
+    // `gated` module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting do
+    // not affect the match); the guard pins the central scoreboard's `ratchet_floor` to
+    // it so the two can never silently drift. It is a STANDARDS-suite lane (family "W3C
+    // RIF") over the real W3C RIF WG Core test cases — DISTINCT from the
+    // sparq-EXTENSION `RIF_CORE_FLOOR` expressivity ratchet below.
+    (
+        "W3C RIF WG Core test suite",
+        "crates/sparq-conformance/tests/rif_wg_core_suite.rs",
+        "RIF_WG_CORE_FLOOR",
+    ),
     // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm's
     // EXTENSION ratchet. `pub const D_VALUE_MATRIX_FLOOR` lives in this crate's
     // `tests/d_entail_suite.rs` (behind the opt-in `d-entail` feature, inside the `gated`
@@ -321,14 +334,25 @@ const LIB_SOURCED_FLOORS: &[&str] = &[
 /// hard-coded duplicate of the number in two source files.
 const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     ("W3C JSON-LD 1.1 toRdf", 413),
-    ("W3C JSON-LD 1.1 fromRdf", 51),
+    // [FABLE-5] sq-oy1f.28 — raised 51 → 52: the lane flipped from the engine-writer
+    // round-trip oracle to the native document-level `sparq_jsonld::from_rdf` (§8.1)
+    // oracle (normative expected-doc comparison + scoped round-trip + REAL negative
+    // error-code assertions). Bumped in the SAME commit as src/floors/from_rdf.rs::FLOOR
+    // and the ci.yml job name (rise-only; side-by-side in src/floors/from_rdf.rs).
+    ("W3C JSON-LD 1.1 fromRdf", 52),
     ("W3C JSON-LD 1.1 compact", 186),
     ("W3C JSON-LD 1.1 frame", 61),
-    // [FABLE-5] sq-oy1f.37 — raised 240 → 259 (expand() correctness: value-object
-    // @type collapse + empty-array-property retention + free-floating value/list
-    // drop). Bumped in the SAME commit as src/floors/expand.rs::FLOOR (rise-only).
-    ("W3C JSON-LD 1.1 expand", 259),
-    ("W3C JSON-LD 1.1 flatten", 50),
+    // [SONNET-4.6] sq-oy1f.45 — raised 259 → 276 (expand() correctness: FsLoader
+    // wiring + @id-null retention + IRI-colon scheme check + @nest scoped ctx
+    // propagation + @reverse @index + 1.0-mode round-trip guard). Bumped in the
+    // SAME commit as src/floors/expand.rs::FLOOR (rise-only).
+    ("W3C JSON-LD 1.1 expand", 276),
+    // [FABLE-5] sq-oy1f.26 — oracle-change re-pin (RDF-writer 50 → native flatten() 53).
+    // The native lane composes over expand() and inherits the sq-oy1f.37 expand raises,
+    // so merging main flips its 7 inherited fails to passes and it now MEASURES 53 pass /
+    // 0 fail on the merged tree — a net RISE above the old writer oracle's 50 (union of
+    // the native oracle AND main's expand fixes — see src/floors/flatten.rs). Rise-only.
+    ("W3C JSON-LD 1.1 flatten", 53),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the registry's six lib-sourced JSON-LD floors carry the
@@ -457,6 +481,9 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("SolidLab ODRL Test Suite"));
     // [OPUS-4.8] sq-e5atd — the W3C SPARQL 1.1 D-entailment ratchet.
     assert!(md.contains("W3C SPARQL 1.1 D-entailment"));
+    // [FABLE-5] sq-pbz04.5.5 — the W3C RIF WG Core test-suite conformance ratchet (a
+    // STANDARDS lane, family "W3C RIF" — NOT the sparq-extension RIF-Core expressivity row).
+    assert!(md.contains("W3C RIF WG Core test suite"));
     // [OPUS-4.8] sq-ddpgx — the W3C SPARQL 1.1 sparql11/service evaluation ratchet.
     assert!(md.contains("W3C SPARQL 1.1 sparql11/service evaluation"));
     // [OPUS-4.8] sq-jaj38 — the W3C SPARQL 1.1 Protocol (HTTP layer) ratchet.

@@ -63,12 +63,30 @@ the follow-up beads), never a fabricated number.
   an honest `ERROR` row (Jena's `OWL_MINI`/`OWL` reasoners are slow enough on
   LUBM(1) to time out — recorded, not hidden).
 - **VLog / Nemo** via `scripts/bench-adapters/{vlog,nemo}_adapter.py` —
-  `NOT-RUN-LOCALLY` unless the binary AND a validated rules file are supplied.
+  `NOT-RUN-LOCALLY` unless the binary AND a validated rules file are supplied
+  (the validated encodings live at `bench/reason-encodings/`, sq-hmd7l.30/.31).
+  **Timing basis (sq-hmd7l.32):** the compared figure is each engine's OWN
+  loaded-graph materialization report (VLog `Runtime materialization` at
+  `-l info`; Nemo `--report short` `Reasoning:` breakdown) — the same basis as
+  sparq's self-reported materialize and Jena's InfModel-materialize. Timing the
+  whole subprocess would fold the multi-GB `.nt` load + closure export into the
+  competitor's figure at `univ≥100` — an overstatement biased FOR sparq. The
+  envelope TSVs carry a per-row `timed=` basis column; a wall fallback is
+  declared there, never silent.
 
-Emits one `bench/canonical-competitor-results/`-shaped envelope per scale;
-`canonical:false` unless `CANONICAL=1`. Gather-only Jena tarball in `/tmp` (engines
-stay out of git). Acceptance: `ONLY=sparq LUBM_UNIVS=1 …` exits 0, asserts the
-pinned closure counts, emits a well-formed envelope.
+Emits one `bench/canonical-competitor-results/`-shaped envelope per scale, with a
+per-scale suite id (`materialize-competitors-lubm<univ>`) so different scales never
+fold into one ingest group; `canonical:false` unless `CANONICAL=1`. Gather-only Jena
+tarball in `/tmp` (engines stay out of git). Acceptance: `ONLY=sparq LUBM_UNIVS=1 …`
+exits 0, asserts the pinned closure counts, emits a well-formed envelope.
+
+The canonical `univ≥100` wave runs via the COMMITTED orphan-proof launcher
+`scripts/bench/canonical-materialize-bench.sh` → instance-side
+`scripts/bench/canonical-materialize-gather-instance.sh` (dedicated quiet
+c6i.4xlarge; pinned VLog/Nemo source builds — a build failure degrades to the
+adapters' honest `NOT-RUN-LOCALLY`, a re-run action, never a sparq win); reviewed
+envelopes are vendored into `bench/canonical-competitor-results/<date>/` and
+ingested by `scripts/bench/ingest-canonical-competitors.mjs`.
 
 ## Performance-dominance disposition
 

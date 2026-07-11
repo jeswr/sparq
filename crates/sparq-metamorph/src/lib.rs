@@ -24,6 +24,10 @@
 //! * [`generate`] — seeded, wall-clock-free, reproducible query/data generation.
 //! * [`engine`] — the engine-under-test trait, the in-process sparq driver, and the
 //!   deliberately-injected wrong-result mutant the self-tests must flag.
+//! * [`harness`] — the seeded CI driver window (bead `sq-3dyje.9`): generated cases →
+//!   TLP + NoREC verdicts, every verdict counted, fail-closed, deterministic repro on
+//!   failure. Entry point of the `metamorph-driver` binary and the nightly
+//!   `metamorph.yml` lane.
 //! * [`ledger`] — the found-bug record format (upstream issue link + confirmation
 //!   status REQUIRED per entry).
 //! * `driver` (cargo feature `protocol-drivers`, off by default) — HTTP drivers for
@@ -51,6 +55,7 @@
 pub mod differential;
 pub mod engine;
 pub mod generate;
+pub mod harness;
 pub mod ledger;
 pub mod norec;
 pub mod tlp;
@@ -62,6 +67,7 @@ pub mod driver;
 pub use differential::check_differential;
 pub use engine::{FilterDropsRow, InProcessSparq, SparqlEngine};
 pub use generate::{generate_case, GeneratedCase, SplitMix64};
+pub use harness::{check_seed, run_window, SeedOutcome, WindowReport};
 pub use ledger::{from_jsonl, to_jsonl, validate_entry, BugClass, ConfirmationStatus, FoundBug};
 pub use norec::{check_norec, norec_queries, NorecQueries};
 pub use tlp::{check_tlp, tlp_queries, TlpQueries};

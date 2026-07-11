@@ -104,6 +104,23 @@ pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) ->
 // deterministic generator, so a malformed IRI can never be wrong-accepted into the store.
 // The `oxiri` dep is already in-tree (via oxttl), so the feature adds zero new compilation.
 
+// [OPUS-4.8] sq-jocpn — the OPT-IN `native-ttl` feature on `sparq-core` (OFF by default) swaps the
+// oxttl Turtle path for a hand-rolled byte-level tokenizer/parser (`sparq_core`'s `ttl` module) that
+// interns S/P/O directly into the Dict — the Turtle analogue of the byte-level N-Triples parser. It
+// handles the FULL Turtle grammar (prefixes/@base, collections `()`, blank-node property lists `[]`,
+// predicate-object lists `; ,`, `a`, numeric/boolean/triple-quoted literals, escapes) PLUS the RDF
+// 1.2 surface the workspace oxttl enables (reifiers `<< … >>`, triple terms `<<( … )>>`, `~` and
+// `{| … |}` annotations, all desugared to `rdf:reifies`). It is a BYTE-IDENTICAL drop-in: IRI base
+// resolution delegates to the same `oxiri` automaton oxttl uses, so resolved terms match exactly,
+// and it passes an IDENTICAL pass/fail set on the whole W3C rdf-turtle suite. Correctness is pinned
+// by (a) a native-vs-oxttl DIFFERENTIAL over many constructs + malformed-input parity (both must
+// Err), and (b) the conformance ratchet run with `--features sparq-core/native-ttl`
+// (`sparq-conformance`'s `native-ttl-suite`). Only anonymous blank-node labels differ (as between
+// two oxttl runs), so comparisons are blank-node-isomorphic. It is opt-in so it can be A/B'd against
+// oxttl before any thought of defaulting on; on a quiet box the native single-thread parse is
+// meaningfully faster (it removes oxttl's tokenizer/state-machine, ~53% of the incumbent parse per
+// the sq-wrn61 profile). Reproduce: `cargo test -p sparq-core --features native-ttl`.
+
 // Parse WITHOUT building indexes — the seam reasoning/transform hooks use.
 pub fn parse_to_triples(text: &str, format: &str) -> Result<(Dict, Vec<[Id; 3]>), String>
 pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph
@@ -393,10 +410,13 @@ Algorithm** (sq-oy1f.25) ships too: `sparq_jsonld::expand(&input, &opts, &loader
 canonical expanded array — Value Expansion, scoped (property/type) contexts,
 `@index`/`@id`/`@type`/`@language`/`@graph` container maps, `@nest`, `@reverse`, `@included`,
 `@json` literals, keyword aliases, and the drop-null + array-normalisation rules — raising the
-exact spec error code on invalid input and threading `frameExpansion`. Compaction / flattening /
-framing on this substrate, the surface wiring, and the conformance-lane switch to the normative
-document-level expand oracle land in later beads; the RDF-first writers above remain the shipped
-emit path until then.
+exact spec error code on invalid input and threading `frameExpansion`. **Node Map Generation +
+Flattening** (sq-oy1f.26) ship next: `sparq_jsonld::generate_node_map()` (§7.2, deterministic
+`_:bN` blank-node issuer) and `sparq_jsonld::flatten(&input, &opts, &loader)` (§7.1 = expand ∘
+node-map ∘ named-graph fold, sorted by `@id`, empty nodes dropped), with the `flatten`
+conformance lane moved to the native document oracle. Compaction / framing on this substrate,
+the surface wiring, and the remaining conformance-lane switches land in later beads; the
+RDF-first writers above remain the shipped emit path until then.
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
@@ -575,31 +595,42 @@ cargo build -p sparq-cli --features serialize-rdf
   `SPQCPRM1` format, so a perm built with the feature on persists byte-identically to one built
   with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
   win materialises is to be confirmed on the canonical perf host (no number is asserted here).
-- **`spqcprm2` (opt-in EXPERIMENT, OFF by default).** A block-encoding SPIKE, not a shipped
-  format. The default save/open path still writes and auto-detects ONLY the `SPQCPRM1` on-disk
-  format (`compress::FILE_MAGIC`); `CompressedPerm::encode` / `from_mmap` always produce a `V1`
-  perm. The feature adds an alternate col2-reset encoding under a frame-of-reference scheme: where
-  `SPQCPRM1` writes a middle-column-reset col2 id ABSOLUTE, `SPQCPRM2` writes it as a zigzag signed
-  delta from the block's first-row col2 (the frame origin the decoder recovers at block start), so
-  clustered objects encode as short varints. It surfaces three public items on `sparq_core::compress`
-  **only when the feature is on**: `enum Format { V1, V2 }` (which block reader a `CompressedPerm`
-  decodes through — a perm tracks its own `format`), `fn encode_v2` (builds a `V2` perm; the only
-  producer of one), and `const FILE_MAGIC_V2: [u8; 8]` = `b"SPQCPRM2"` — a RESERVED version marker
-  (feature-gated with `mmap`) that the default path NEVER writes; it reserves the marker so a future
-  migration can write/auto-detect V2 without colliding with the shipped `SPQCPRM1` magic. A V2 block
-  with no middle-column reset is byte-identical to its V1 block. Whether the frame-of-reference
-  encoding shrinks the stream enough to adopt is an open question to be settled on the canonical perf
-  host (no number is asserted here); until then it stays an opt-in spike behind the feature flag.
+- **SPQCPRM2 frame-of-reference col2 encoding (versioned on-disk format; V2 emission opt-in).**
+  A second block-stream version, `SPQCPRM2`, alongside the shipped `SPQCPRM1`. Where `SPQCPRM1`
+  writes a middle-column-reset col2 id ABSOLUTE, `SPQCPRM2` writes it as a zigzag signed delta from
+  the block's first-row col2 (the frame origin the decoder recovers at block start), so clustered
+  objects encode as short varints. A V2 block with no middle-column reset is byte-identical to its
+  V1 block.
+  - **The V2 READER ships with `mmap`.** `open`/`from_mmap` auto-detect the 8-byte file magic —
+    `compress::FILE_MAGIC` (`SPQCPRM1`) or `compress::FILE_MAGIC_V2` (`SPQCPRM2`) — and pick the
+    matching block reader; a `CompressedPerm` carries its `format` (`enum Format { V1, V2 }`). **An
+    existing `SPQCPRM1` file on disk keeps decoding byte-identically forever** (the backward-compat
+    soundness invariant). ANY OTHER 8-byte magic is a loud, clean `Err` — never a silent misdecode
+    (mutation-witnessed in `mmap_corruption_oracle`).
+  - **A build EMITS `SPQCPRM1` by DEFAULT.** V2 is NOT defaulted on (a separate decision pending a
+    clearly-positive real-data B/triple measurement — the col2-clustered synthetic win did NOT hold
+    on WatDiv). The `spqcprm2` cargo feature (which implies `mmap`) exposes the emit config gate:
+    `compress::with_emit_format(EmitFormat::V2, || …)` on a thread, or `SPARQ_EMIT_FORMAT=v2` for a
+    process, routes the store's `save_compressed` and the streaming `CompressedPermWriter` through
+    the V2 encoder. `CompressedPerm::encode_v2` builds a `V2` perm directly; `encode_emit` honours
+    the gate in one place. With the feature OFF, `emit_format()` is a `const V1`, so the default
+    build cannot emit V2 and every shipped index stays `SPQCPRM1` bit-for-bit.
+  - **Public API (`sparq_core::compress`).** With `mmap`: `enum Format`, `const FILE_MAGIC_V2`,
+    `fn CompressedPerm::encode_emit`. With `spqcprm2`: `enum EmitFormat`, `fn with_emit_format`,
+    `fn CompressedPerm::encode_v2`, `fn CompressedPermWriter::create_with`.
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
   JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19 + sq-oy1f) drives the official
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:
   **toRdf** through the `jsonld` parser (oxjsonld), **fromRdf** through the `serialize-rdf`
   writer, **compact** through the native Compaction Algorithm (`graph_to_jsonld_compact`),
-  **expand** + **flatten** through the shipping writer (`graph_to_jsonld(Expanded|Flattened)`),
+  **expand** + **flatten** through the **native `sparq-jsonld` document pipeline**
+  (`sparq_jsonld::expand()` sq-kk1mq / `sparq_jsonld::flatten()` sq-oy1f.26),
   and **frame** through the native Framing Algorithm (`graph_to_jsonld_framed`). toRdf/fromRdf/compact
   are compared by a re-parse RDF-dataset round-trip against the INPUT (`reparse(out) ≡ in`, the
-  oxjsonld self-reparse oracle); **expand/flatten/frame** are compared by re-parse RDF-equivalence
-  against the suite's NORMATIVE expected output (`reparse(write(D)) ≡ reparse(expected)`) — these
+  oxjsonld self-reparse oracle); **expand** + **flatten** are compared **document-to-document**
+  against the suite's NORMATIVE expected output via the `json_ld_equal` comparator (key order
+  insignificant; array order significant only inside `@list`), and **frame** by re-parse
+  RDF-equivalence (`reparse(write(D)) ≡ reparse(expected)`) — these
   are JSON-LD normal forms / a SELECT+RESHAPE (they drop/merge/prune/fill), so the oracle anchors on
   the expected document, not the input. The floors only RISE; they reflect ACTUAL current pass
   counts, not full conformance — the
@@ -621,12 +652,16 @@ cargo build -p sparq-cli --features serialize-rdf
   frame-validation errors, so it cannot honestly "pass" by rejecting). The compact/frame oracle
   is oxjsonld self-reparse, so the `@reverse` double-inversion / non-string-language interop gap
   documented above (the compaction interop caveat) is NOT caught by it and is tracked separately.
-  The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket: each
-  `jld:ExpandTest`/`jld:FlattenTest` input is parsed to RDF and projected through the shipping
-  writer, then compared by RDF-equivalence to the normative expected document; below-floor cases
-  are honest writer divergences (`@direction`/i18n-datatype, list/coercion shapes) and the SKIP
-  buckets are the documented ones (negatives sparq's TOTAL writer does not raise, JSON-LD-1.0-only,
-  empty-RDF inputs). Only **html** (script extraction) + **remote-doc** (a `LoadDocumentCallback`)
+  The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket and
+  BOTH now run the **native `sparq-jsonld` document oracle**: the input is passed to
+  `sparq_jsonld::expand()` / `sparq_jsonld::flatten()` and the result is deep-compared to the
+  normative expected document via `json_ld_equal`. The `flatten` floor was RE-PINNED 50→46
+  (sq-oy1f.26) when it moved off the RDF-writer oracle — the drop is inherited native-`expand()`
+  gaps (empty-property retention, a few `invalid typed value` cases; owned by sq-oy1f.37), NOT
+  flatten-algorithm bugs, and it is rise-only after the re-pin. Below-floor cases are honest
+  divergences; the SKIP buckets are the documented ones (negatives, JSON-LD-1.0-only, the single
+  post-flatten-compaction case deferred to sq-oy1f.27). Only **html** (script extraction) +
+  **remote-doc** (a `LoadDocumentCallback`)
   remain NOT-IMPLEMENTED buckets the runner reports separately and never fails on (they grow the
   ratchet as those land). The lane is the opt-in
   `jsonld-suite` feature on `sparq-conformance` (forwards to `sparq-core/jsonld` +

@@ -33,6 +33,19 @@
 //! contract to the ci-bench hook (which harvests the `_us` columns as advisory
 //! `geo_<name>_us` trend metrics). Correctness lives in `expected.tsv`, NOT in
 //! the binary — exactly like LUBM / SHACL. [OPUS-4.8] (sq-tf8n)
+//!
+//! ## Mode 3 — `query <corpus.nt> <query.rq> [iters]` (needs the `engine` feature)
+//!
+//! The generic SPARQL runner for the Geographica real-world family
+//! (`bench/geo/queries-geographica/`, driven by `scripts/bench/geo-same-box.sh`
+//! under `GEO_GEOGRAPHICA=1`): load the corpus, run the pinned query file
+//! through `sparq_engine::query_with_functions` with the full `geof:` registry,
+//! and emit the same `name\tcount\tus` line (name = the query-file stem;
+//! `count` = the COUNT scalar of a COUNT-wrapped query, else the row count —
+//! the identical comparable-size convention as
+//! `scripts/bench-adapters/http_sparql_adapter.py`, so the result-set-size
+//! cross-check against an HTTP competitor is like-for-like). [FABLE-5]
+//! (sq-hmd7l.29)
 
 use std::time::Instant;
 
@@ -86,8 +99,85 @@ fn main() {
             print!("{}", generate_corpus(n));
         }
         Some("bench") => bench_mode(&args[1..]),
+        Some("query") => query_mode(&args[1..]),
         _ => report_mode(args.first().and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N)),
     }
+}
+
+/// Mode 3: run one pinned SPARQL query file over a corpus with the `geof:`
+/// registry installed; emit `stem\tcount\tus`. [FABLE-5] (sq-hmd7l.29)
+#[cfg(feature = "engine")]
+fn query_mode(args: &[String]) {
+    let usage = "usage: bench_geo query <corpus.nt> <query.rq> [iters]";
+    let (corpus_path, query_path) = match (args.first(), args.get(1)) {
+        (Some(c), Some(q)) => (c, q),
+        _ => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
+    let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+    if iters == 0 {
+        eprintln!("error: iters must be >= 1 (got 0); need at least one sample for finite timings");
+        std::process::exit(2);
+    }
+    let nt = std::fs::read_to_string(corpus_path)
+        .unwrap_or_else(|e| panic!("read corpus {corpus_path}: {e}"));
+    let sparql = std::fs::read_to_string(query_path)
+        .unwrap_or_else(|e| panic!("read query {query_path}: {e}"));
+    let graph = Graph::load_str(&nt, "ntriples").unwrap_or_else(|e| panic!("parse corpus: {e}"));
+    let reg = sparq_geo::geof_registry();
+
+    // Best-of-iters over the FULL query (parse + plan + eval); the count must be
+    // identical across iters (a drifting count would poison the size oracle).
+    let mut count: Option<usize> = None;
+    let mut us = f64::INFINITY;
+    for _ in 0..iters {
+        let t = Instant::now();
+        let r = sparq_engine::query_with_functions(&graph, &sparql, &reg)
+            .unwrap_or_else(|e| panic!("query {query_path}: {e}"));
+        us = us.min(t.elapsed().as_secs_f64() * 1e6);
+        let c = comparable_count(&r);
+        if let Some(prev) = count {
+            assert_eq!(prev, c, "nondeterministic count across iters for {}", query_path);
+        }
+        count = Some(c);
+    }
+
+    let stem = std::path::Path::new(query_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("query");
+    emit(stem, count.expect("iters >= 1"), us);
+}
+
+/// The comparable result-set size of a query result: a single-row single-var
+/// result whose only binding is an integer literal is a COUNT-wrapped query and
+/// yields the SCALAR; anything else yields the row count. Mirrors
+/// `parse_sparql_json` in `scripts/bench-adapters/http_sparql_adapter.py` so
+/// sparq's number and an HTTP competitor's number measure the same thing.
+/// [FABLE-5] (sq-hmd7l.29)
+#[cfg(feature = "engine")]
+fn comparable_count(r: &sparq_engine::QueryResult) -> usize {
+    if r.vars.len() == 1 && r.rows.len() == 1 {
+        if let Some(Some(oxrdf::Term::Literal(l))) = r.rows[0].first() {
+            if let Ok(v) = l.value().parse::<usize>() {
+                return v;
+            }
+        }
+    }
+    r.rows.len()
+}
+
+/// Without the `engine` feature there is no SPARQL path; fail loudly rather
+/// than silently degrading (the corpus/bench modes stay available).
+#[cfg(not(feature = "engine"))]
+fn query_mode(_args: &[String]) {
+    eprintln!(
+        "error: `bench_geo query` needs the sparq-geo `engine` feature \
+         (on by default; rebuild without --no-default-features)"
+    );
+    std::process::exit(2);
 }
 
 /// Mode 2: the deterministic `name\tcount\tus` runner (the G1 contract).

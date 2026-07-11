@@ -635,6 +635,12 @@ pub(crate) mod theta_antijoin {
         static FIRED: Cell<bool> = const { Cell::new(false) };
         static CORRELATED_ROWS: Cell<usize> = const { Cell::new(0) };
         static BINDINGS_EVALUATED: Cell<usize> = const { Cell::new(0) };
+        /// [OPUS-4.8] (sq-7d3dj.30.20) Count of anti-join shapes the STATIC early-decline
+        /// gate (opt-in `antijoin-static-decline`) rejected BEFORE the mandatory left side
+        /// was evaluated — i.e. the redundant left evaluations this feature saved. Test-only
+        /// signal for the non-vacuity check; only ever incremented under the feature.
+        #[cfg(feature = "antijoin-static-decline")]
+        static EARLY_DECLINED: Cell<usize> = const { Cell::new(0) };
     }
 
     /// Whether the correlated theta anti-join is enabled on this thread (default on).
@@ -649,11 +655,25 @@ pub(crate) mod theta_antijoin {
         ENABLED.with(|e| e.replace(v))
     }
 
+    /// Records one STATIC early-decline (the feature saved one redundant left evaluation).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub(crate) fn record_early_decline() {
+        EARLY_DECLINED.with(|e| e.set(e.get().saturating_add(1)));
+    }
+
+    /// Number of static early-declines since the last [`reset_stats`] (feature-gated).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub(crate) fn early_declined() -> usize {
+        EARLY_DECLINED.with(|e| e.get())
+    }
+
     /// Clears the per-query firing statistics (call before a measured/traced run).
     pub(crate) fn reset_stats() {
         FIRED.with(|f| f.set(false));
         CORRELATED_ROWS.with(|c| c.set(0));
         BINDINGS_EVALUATED.with(|b| b.set(0));
+        #[cfg(feature = "antijoin-static-decline")]
+        EARLY_DECLINED.with(|e| e.set(0));
     }
 
     /// Records one fired anti-join: `rows` right-side solutions produced across
@@ -732,6 +752,56 @@ pub(crate) mod distinct_pushdown {
             ROWS_EMITTED.with(|c| c.get()),
             ROWS_SCANNED.with(|c| c.get()),
         )
+    }
+}
+
+/// [FABLE-5] (sq-jnb1e) Runtime toggle + telemetry for the OPT-IN characteristic-set
+/// anchor-incidence prune (the `cs-anchor-incidence` feature). Lets the differential
+/// acceptance test compare the incidence-pruned block scan against the exact scan WITHIN one
+/// feature-ON binary, and read whether the prune fired plus how many candidate predicates it
+/// eliminated. Enabled by default when the feature is compiled in.
+#[cfg(feature = "cs-anchor-incidence")]
+pub(crate) mod anchor_incidence {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(true) };
+        static BUILT: Cell<bool> = const { Cell::new(false) };
+        static PRUNED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether the incidence prune is active on this thread (default on with the feature).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Enables/disables the prune on this thread, returning the previous value. The
+    /// differential test flips it to compare pruned vs exact within one binary.
+    pub(crate) fn set_enabled(v: bool) -> bool {
+        ENABLED.with(|e| e.replace(v))
+    }
+
+    /// Clears the per-query incidence statistics.
+    pub(crate) fn reset_stats() {
+        BUILT.with(|b| b.set(false));
+        PRUNED.with(|c| c.set(0));
+    }
+
+    /// Records that an incidence set was BUILT (a set was available for at least one branch).
+    pub(crate) fn note_built() {
+        BUILT.with(|b| b.set(true));
+    }
+
+    /// Records `n` candidate predicates pruned by the incidence set (block scan skipped).
+    pub(crate) fn note_pruned(n: usize) {
+        PRUNED.with(|c| c.set(c.get().saturating_add(n)));
+    }
+
+    /// `(incidence_built, predicates_pruned)` since the last [`reset_stats`]. The acceptance
+    /// test asserts the set was built AND pruned the value-typed no-hit predicates.
+    pub(crate) fn stats() -> (bool, usize) {
+        (BUILT.with(|b| b.get()), PRUNED.with(|c| c.get()))
     }
 }
 
@@ -1475,6 +1545,105 @@ pub(crate) mod multiplicity {
     }
 }
 
+// ---- Query-execution NOW() instant (sq-98w7z.1) ---------------------------------
+//
+// [FABLE-5] SPARQL 1.1 §17.4.5.1: every `NOW()` within ONE query execution must
+// return the SAME `xsd:dateTime`. The instant is pinned by `scope()` at the top of
+// `eval_modified` — the single choke point all SELECT / ASK / JSON / count /
+// UPDATE-WHERE evaluation funnels through — with OUTERMOST-WINS semantics: the
+// guard samples the clock only when no instant is already active, so the recursive
+// `eval_modified` calls (solution modifiers, sub-SELECTs) and the `eval_exists`
+// re-entry all observe the OUTER execution's instant, and only the outermost
+// guard's drop clears the slot. The clear-on-drop is what makes the thread-local
+// safe: the NEXT execution on this thread re-samples instead of inheriting a stale
+// instant (a plain set-once thread-local would return the first query's time
+// forever). The rayon-parallel FILTER / BIND / aggregate branches evaluate
+// expressions on worker threads whose slot is empty; they snapshot the instant (a
+// `Copy`) and re-install it around each item exactly like the `functions` / `view`
+// / `spatial` registries above, restoring the previous value on drop (rayon runs
+// some items on the installing thread itself).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod query_now {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NOW: Cell<Option<i64>> = const { Cell::new(None) };
+    }
+
+    /// [`epoch_secs`] calls that found NO active instant and fell back to a fresh
+    /// clock sample (the pre-sq-98w7z.1 per-call behaviour). Under a correctly
+    /// scoped execution — including its rayon worker items — this never fires; the
+    /// parallel NOW-constancy test asserts a zero delta, which is what makes it a
+    /// probe for any expression-evaluation path missing the `worker_install`.
+    #[cfg(test)]
+    pub(crate) static UNSCOPED_FALLBACKS: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    /// Guard from [`scope`]: clears the slot on drop iff THIS guard installed it.
+    pub(crate) struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if self.0 {
+                NOW.with(|c| c.set(None));
+            }
+        }
+    }
+
+    /// Pins this execution's instant if none is active (outermost-wins).
+    pub(crate) fn scope() -> Guard {
+        NOW.with(|c| {
+            if c.get().is_some() {
+                Guard(false)
+            } else {
+                c.set(Some(sample()));
+                Guard(true)
+            }
+        })
+    }
+
+    /// The active execution's instant (unix seconds). An un-scoped call — no
+    /// execution in progress on this thread — falls back to a fresh sample.
+    pub(crate) fn epoch_secs() -> i64 {
+        NOW.with(Cell::get).unwrap_or_else(|| {
+            #[cfg(test)]
+            UNSCOPED_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            sample()
+        })
+    }
+
+    fn sample() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+
+    /// Snapshot for the rayon-parallel branches (`Copy`, free).
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<i64> {
+        NOW.with(Cell::get)
+    }
+
+    /// Scoped re-install of a snapshot inside a rayon worker item; restores the
+    /// PREVIOUS value on drop (rayon runs some items on the installing thread).
+    pub(crate) struct WorkerGuard(Option<Option<i64>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                NOW.with(|c| c.set(prev));
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: Option<i64>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(s) => WorkerGuard(Some(NOW.with(|c| c.replace(Some(s))))),
+        }
+    }
+}
+
 // ---- Spatial index (sq-mg9) ----------------------------------------------------
 //
 // The thread-local [`SpatialProvider`] installed by `with_spatial_index`. The
@@ -1769,11 +1938,13 @@ impl LocalVocab {
         }
         let id = LOCAL_BASE + self.terms.len() as Id;
         self.nums.push(match &t {
-            // [OPUS-4.8] sq-rkzhr: parse through `parse_xsd_f64` — the SAME acceptance set
-            // as `as_num` / `as_numeric` — so the local-vocab numeric cache agrees with the
-            // lenient/exact compare seams on the XSD spelling rules (INF/+INF/-INF/NaN yes;
-            // Rust-only inf/infinity/nan no). A rejected spelling folds to the NaN sentinel.
-            Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()).unwrap_or(f64::NAN),
+            // [FABLE-5] sq-74oy4 / sq-6b1lj: cache the DATATYPE-AWARE f64 (`numeric_cache_f64`)
+            // — the SAME acceptance the graph `numeric_value` cache and the lenient `as_num`
+            // seam use — so a computed (BIND/aggregate) numeric term joins/compares identically
+            // to a graph term. It TRIMS (XSD `collapse` facet) and rejects a per-datatype-
+            // ill-formed lexical (`"1.5"^^xsd:integer`); either folds to the NaN cache-miss
+            // sentinel, deferring `=`/`<`/`>` to the exact evaluator (which type-errors it).
+            Term::Literal(l) => numeric_cache_f64(l).unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
         // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
@@ -2491,6 +2662,11 @@ fn count_leftjoin(
 // ---- Algebra dispatch ---------------------------------------------------------
 
 fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+    // Pin NOW() for this execution (SPARQL 1.1 §17.4.5.1). Outermost call samples
+    // the clock once; the recursive / EXISTS re-entries see it active and keep the
+    // outer instant (a Cell read). [FABLE-5] sq-98w7z.1
+    #[cfg(not(target_arch = "wasm32"))]
+    let _query_now = query_now::scope();
     match p {
         GraphPattern::Project { inner, variables } => {
             let b = eval_modified(graph, local, inner)?;
@@ -2670,9 +2846,21 @@ fn try_distinct_pushdown(
     // instead of per-branch removes the second full anchor scan+sort. Keyed by the anchor's
     // prepared id-pattern + join position, which fully determines the set.
     let mut anchor_cache: AnchorCache = FxHashMap::default();
+    // [FABLE-5] (sq-jnb1e) Opt-in predicate-incidence cache: shared across branches so the two
+    // q09 semijoins (subject- and object-join) each build their incidence set at most once.
+    #[cfg(feature = "cs-anchor-incidence")]
+    let mut incidence_cache: IncidenceCache = FxHashMap::default();
 
     for branch in &branches {
-        match branch_distinct_values(graph, branch, pvar, &seen, &mut anchor_cache)? {
+        match branch_distinct_values(
+            graph,
+            branch,
+            pvar,
+            &seen,
+            &mut anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            &mut incidence_cache,
+        )? {
             Some((new_ids, scanned)) => {
                 total_scanned = total_scanned.saturating_add(scanned);
                 for id in new_ids {
@@ -2913,6 +3101,7 @@ fn branch_distinct_values(
     pvar: &Variable,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     if !is_conjunctive(branch) {
         return Ok(None);
@@ -2945,7 +3134,15 @@ fn branch_distinct_values(
     }
     match patterns.len() {
         1 => single_pattern_distinct(graph, &patterns[0], pvar, seen),
-        2 => two_pattern_distinct(graph, &patterns, pvar, seen, anchor_cache),
+        2 => two_pattern_distinct(
+            graph,
+            &patterns,
+            pvar,
+            seen,
+            anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
+        ),
         _ => Ok(None),
     }
 }
@@ -2984,6 +3181,7 @@ fn two_pattern_distinct(
     pvar: &Variable,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (idp0, pv0, uns0) = prepare_pattern(graph, &patterns[0])?;
     let (idp1, pv1, uns1) = prepare_pattern(graph, &patterns[1])?;
@@ -2998,6 +3196,8 @@ fn two_pattern_distinct(
             *ppos,
             seen,
             anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
         ),
         ([], [ppos]) => probe_anchor_distinct(
             graph,
@@ -3006,6 +3206,8 @@ fn two_pattern_distinct(
             *ppos,
             seen,
             anchor_cache,
+            #[cfg(feature = "cs-anchor-incidence")]
+            incidence_cache,
         ),
         _ => Ok(None),
     }
@@ -3047,6 +3249,110 @@ fn cached_anchor_ids(
     let set = std::rc::Rc::new(AnchorSet { hash, sorted });
     cache.insert(key, set.clone());
     Some(set)
+}
+
+/// [FABLE-5] (sq-jnb1e) Per-pushdown cache of anchor PREDICATE-INCIDENCE sets, keyed by the
+/// anchor membership set (identified by the anchor's prepared id-pattern + join position) and
+/// the probe's canonical JOIN position (0=subject, 2=object; a predicate never joins). The
+/// value is `Some(set)` where `set` is exactly the predicates that relate SOME anchor member
+/// at that position, or `None` when the set could not be computed (budget / overlay / no built
+/// permutation) — cached so the two q09 branches never recompute the same incidence.
+#[cfg(feature = "cs-anchor-incidence")]
+type IncidenceCache = FxHashMap<(IdPattern, usize, usize), Option<std::rc::Rc<FxHashSet<Id>>>>;
+
+/// [FABLE-5] (sq-jnb1e) The set of predicates that relate ANY anchor member at the probe's
+/// canonical join position `probe_jpos` (0=subject or 2=object) — a characteristic-set-style
+/// incidence summary. Computed by ONE range-restricted scan over the anchor's id window: the
+/// permutation sorted by `probe_jpos` groups triples by that column, so restricting to
+/// `[a_min, a_max]` (every anchor member lies in that window) and, for each row whose join
+/// value is an actual anchor member, recording its predicate, yields exactly
+/// `{ predicate(t) : t is a triple with t[probe_jpos] ∈ anchor }`.
+///
+/// SOUNDNESS. This set is EXACT on the base index: a predicate P is in it iff some triple uses
+/// P with an anchor member at `probe_jpos`, i.e. iff the (anchor ⋈ probe-on-P) branch is
+/// non-empty. So `P ∉ set` ⇒ that branch contributes no solution ⇒ P can be pruned WITHOUT
+/// scanning P's block, and `P ∈ set` still takes the exact per-block scan. Pruning only
+/// provably-empty checks makes the DISTINCT answer identical to the block-scan path.
+///
+/// Returns `None` (caller keeps the exact block scan for every P) when:
+/// * the graph carries a pending-update overlay — the derived set is built against the base
+///   index only, and incremental maintenance is out of scope, so we DECLINE conservatively
+///   rather than risk a stale prune;
+/// * `probe_jpos` is the predicate slot (1) — a predicate never joins to the anchor here;
+/// * no permutation sorted by `probe_jpos` is built (e.g. the compact wasm index);
+/// * the scan exceeds the query budget.
+#[cfg(feature = "cs-anchor-incidence")]
+fn anchor_probe_incidence(
+    graph: &Graph,
+    anchor: &AnchorSet,
+    probe_jpos: usize,
+) -> Option<FxHashSet<Id>> {
+    // Conservative invalidation: a delta-overlay means the base-index incidence may be stale
+    // (an inserted triple could add a predicate; a deleted one could remove the last member
+    // relation). We do not maintain the set incrementally, so decline and let the exact scan
+    // (which reads the overlay-merged rows) answer every candidate.
+    if graph.store.has_overlay() {
+        return None;
+    }
+    if probe_jpos == 1 || anchor.sorted.is_empty() {
+        return None;
+    }
+    let (a_min, a_max) = (anchor.sorted[0], anchor.sorted[anchor.sorted.len() - 1]);
+    // A permutation whose FIRST column is `probe_jpos` so the anchor id window is one
+    // contiguous range and the predicate sits at a fixed column. Bind nothing; sort by the
+    // join column. `scan_sorted` picks such a perm when built; if the chosen perm is not
+    // actually led by `probe_jpos`, we cannot range-restrict soundly — decline.
+    let all_unbound: IdPattern = [None, None, None];
+    let scan = graph.store.scan_sorted(&all_unbound, probe_jpos);
+    let order = scan.perm.order();
+    if order[0] != probe_jpos {
+        return None;
+    }
+    // Predicate lives at whichever column of this perm is canonical position 1.
+    let pk = order.iter().position(|&c| c == 1)?;
+    let jk = 0usize; // join column is the leading column (== probe_jpos)
+    let rows = scan.rows.as_ref();
+    // Restrict to the anchor id window `[a_min, a_max]` with two binary searches: rows outside
+    // it can never carry an anchor member at the join column, so they cannot contribute a
+    // predicate to the incidence set.
+    let lo = rows.partition_point(|r| r[jk] < a_min);
+    let hi = rows.partition_point(|r| r[jk] <= a_max);
+    let window = &rows[lo..hi];
+    let mut inc: FxHashSet<Id> = FxHashSet::default();
+    for (n, r) in window.iter().enumerate() {
+        if n & 4095 == 0 && budget::exhausted(inc.len()) {
+            return None;
+        }
+        // Only rows whose join value is an ACTUAL anchor member contribute (the window can
+        // include non-member ids that merely fall inside `[a_min, a_max]`).
+        if anchor.hash.contains(&r[jk]) {
+            inc.insert(r[pk]);
+        }
+    }
+    Some(inc)
+}
+
+/// [FABLE-5] (sq-jnb1e) The predicate-incidence set for `(anchor, probe_jpos)`, memoised in
+/// `cache`. Keyed by the anchor identity (`anchor_ip` + `anchor_jpos`) and the probe join
+/// position, so q09's two branches share one computation per position. The cached value is an
+/// `Option` (a computed-and-failed decline is cached too, so a second branch on the same
+/// position does not retry a scan that already declined).
+#[cfg(feature = "cs-anchor-incidence")]
+fn cached_incidence(
+    graph: &Graph,
+    anchor_ip: &IdPattern,
+    anchor_jpos: usize,
+    anchor: &AnchorSet,
+    probe_jpos: usize,
+    cache: &mut IncidenceCache,
+) -> Option<std::rc::Rc<FxHashSet<Id>>> {
+    let key = (*anchor_ip, anchor_jpos, probe_jpos);
+    if let Some(v) = cache.get(&key) {
+        return v.clone();
+    }
+    let computed = anchor_probe_incidence(graph, anchor, probe_jpos).map(std::rc::Rc::new);
+    cache.insert(key, computed.clone());
+    computed
 }
 
 /// [FABLE-5] (sq-7d3dj.30.10) The "pattern-trick" strategy for the loose semi-join: iterate
@@ -3152,6 +3458,7 @@ fn probe_anchor_distinct(
     ppos: usize,
     seen: &FxHashSet<Id>,
     anchor_cache: &mut AnchorCache,
+    #[cfg(feature = "cs-anchor-incidence")] incidence_cache: &mut IncidenceCache,
 ) -> Result<Option<(Vec<Id>, usize)>, String> {
     let (probe_ip, probe_pv, probe_uns) = probe;
     let (anchor_ip, anchor_pv, anchor_uns) = anchor;
@@ -3215,6 +3522,30 @@ fn probe_anchor_distinct(
     debug_assert_eq!(scan.perm.order()[kp], ppos);
     debug_assert_eq!(scan.perm.order()[jk], jpos);
     let rows = scan.rows.as_ref();
+    // [FABLE-5] (sq-jnb1e) OPT-IN characteristic-set anchor-incidence prune. When the probe
+    // pattern constrains ONLY the projected predicate and the join variable (every other
+    // position free — the q09 shape `?subject ?predicate ?person` / `?person ?predicate
+    // ?object`), a candidate predicate `pv_id` qualifies iff it relates SOME anchor member at
+    // the join position — exactly the precomputed incidence set. A `pv_id` NOT in that set is
+    // pruned by an O(1) membership test instead of the clip+gallop block scan. The prune is
+    // sound ONLY when the probe has no OTHER bound position (else a predicate could relate an
+    // anchor member on a DIFFERENT triple than the one satisfying the bound constraint); we
+    // decline the incidence set otherwise and every candidate takes the exact scan.
+    #[cfg(feature = "cs-anchor-incidence")]
+    let incidence: Option<std::rc::Rc<FxHashSet<Id>>> = {
+        // "Bound only P and J" ⇔ the probe id-pattern binds no position (both P and J are
+        // variables, so a bound slot would be the third position).
+        let probe_only_pj = probe_ip.iter().all(|s| s.is_none());
+        if anchor_incidence::enabled() && probe_only_pj {
+            let inc = cached_incidence(graph, anchor_ip, anchor_jpos, &a, jpos, incidence_cache);
+            if inc.is_some() {
+                anchor_incidence::note_built();
+            }
+            inc
+        } else {
+            None
+        }
+    };
     let mut out: Vec<Id> = Vec::new();
     let mut scanned = 0usize;
     let mut i = 0usize;
@@ -3231,6 +3562,19 @@ fn probe_anchor_distinct(
         // Already emitted by an earlier branch — no re-check needed.
         if seen.contains(&pv_id) {
             continue;
+        }
+        // [FABLE-5] (sq-jnb1e) Incidence prune: when the precomputed set is available and does
+        // NOT contain this predicate, the (anchor ⋈ probe-on-`pv_id`) branch is provably empty
+        // — skip the whole block WITHOUT the clip+gallop scan (one metadata consultation counts
+        // as one unit of examination). A `pv_id` IN the set falls through to the exact block
+        // scan below, so the emitted answer is bit-for-bit identical to the feature-off path.
+        #[cfg(feature = "cs-anchor-incidence")]
+        if let Some(inc) = incidence.as_ref() {
+            if !inc.contains(&pv_id) {
+                scanned += 1;
+                anchor_incidence::note_pruned(1);
+                continue;
+            }
         }
         // The block is join-variable-sorted, so its join range is [first, last]. When that
         // range is DISJOINT from the anchor set's id range, no anchor member can occur in
@@ -5191,7 +5535,13 @@ fn extract_sargable(graph: &Graph, e: &Expression) -> Option<(Variable, ScanCmp)
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
-                let v: f64 = parse_xsd_f64(l.value())?;
+                // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant (`numeric_cache_f64`).
+                // A datatype-ill-formed threshold (`"1.5"^^xsd:integer`) yields `None`, so
+                // `extract_sargable` DECLINES the numeric fast path and the FILTER takes the
+                // exact general comparison — which type-errors the ill-formed constant,
+                // matching the reference semantics (a sargable f64 threshold would instead
+                // compare against it, over-including).
+                let v: f64 = numeric_cache_f64(l)?;
                 // A threshold f64 can't represent precisely (> 15 significant digits —
                 // large integers or high-precision decimals) makes the sargable f64 scan
                 // unsafe; decline so the filter takes the exact general comparison path.
@@ -5448,13 +5798,29 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
     // scanned column. A candidate term absent from the dict can never bind here, so
     // dropping it from the id-set is safe (and keeps the set a superset of the matches).
     let cand_ids: FxHashSet<Id> = cands.iter().filter_map(|t| graph.id_of(t)).collect();
-    // Drop a row ONLY when the index is AUTHORITATIVE over its binding AND excludes it:
-    // keep when the binding is a candidate (an indexed match) OR the index has no opinion
-    // on it (NOT indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic
-    // CRS, or a different graph). The residual `geof:` FILTER then judges every kept row,
-    // so a geometry the index never saw is NEVER silently dropped. This makes the result
-    // identical to the post-hoc path no matter which subset the index covers. To avoid
-    // re-materialising a term per row, the not-indexed check is memoised per distinct id.
+    // The keep predicate (both branches below are IDENTICAL): keep a row when its
+    // binding is a candidate (an indexed match) OR the index has NO opinion on it (NOT
+    // indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic CRS, or a
+    // different graph). The residual `geof:` FILTER then judges every kept row, so a
+    // geometry the index never saw is NEVER silently dropped. This makes the result
+    // identical to the post-hoc path no matter which subset the index covers.
+    //
+    // FAST PATH: when the provider can give the ID-LEVEL indexed universe resolved
+    // against THIS graph's dict (freshness matched), `is_indexed(id)` is a pure
+    // `FxHashSet<Id>` lookup — ZERO per-row `Term` materialisation. `indexed.contains(&id)`
+    // equals `is_indexed(&graph.dict.term(id))` by the provider's contract, so the verdict
+    // is unchanged. [OPUS-4.8]
+    let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
+    if let Some(indexed) = idx.indexed_ids(dict_ptr) {
+        b.rows.retain(|row| {
+            let id = row[col];
+            // candidate (indexed match) OR not in the indexed universe -> keep.
+            cand_ids.contains(&id) || !indexed.contains(&id)
+        });
+        return true;
+    }
+    // SLOW FALLBACK (no fresh id-level universe): memoise the per-id not-indexed check to
+    // avoid re-materialising a term per row. Produces the SAME keep verdict as the fast path.
     let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
     b.rows.retain(|row| {
         let id = row[col];
@@ -7998,6 +8364,25 @@ fn try_theta_antijoin(
         return Ok(None);
     }
 
+    // [OPUS-4.8] (sq-7d3dj.30.20) Static early-decline: this path exists ONLY to SEED the
+    // right scan sideways from a var-to-var correlation in the OPTIONAL condition. If no
+    // conjunct of `cond` can be such a seedable correlation — decided PURELY STATICALLY from
+    // the left/right variable SETS, no graph access — the path would evaluate the mandatory
+    // left side and then decline (`correlations.is_empty()` below), forcing the cold
+    // `Filter{LeftJoin}` fallback to RE-EVALUATE that same left side. SP2Bench q07 is exactly
+    // this case (its OPTIONAL condition is a bare `!bound(?doc4)`), and its left side is the
+    // dominant ~30ms outer BGP — so the redundant second evaluation is the query's residual.
+    // Declining HERE, before the left side is touched, removes the wasted evaluation. This is a
+    // pure evaluation-ORDERING change: it declines exactly the same shapes the
+    // `correlations.is_empty()` check below would (that check is total over `cond` and does not
+    // depend on any left ROW), and a decline always yields the identical cold-plan result, so it
+    // is BAG-RESULT-EQUIVALENT to the feature-off build. OPT-IN; when off, byte-identical.
+    #[cfg(feature = "antijoin-static-decline")]
+    if !cond_has_seedable_correlation(cond, left, &b_certain) {
+        theta_antijoin::record_early_decline();
+        return Ok(None);
+    }
+
     // Evaluate the mandatory left side once.
     let left_b = eval_graph_pattern(graph, local, left)?;
 
@@ -8186,6 +8571,8 @@ fn try_theta_antijoin(
             let fns = functions::snapshot();
             let vw = view::snapshot();
             let spx = spatial::snapshot();
+            #[cfg(not(target_arch = "wasm32"))]
+            let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
             left_b
                 .rows
                 .par_iter()
@@ -8193,6 +8580,8 @@ fn try_theta_antijoin(
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _qn = query_now::worker_install(qn);
                     eliminated(lrow)
                 })
                 .collect::<Result<Vec<bool>, String>>()?
@@ -8495,6 +8884,46 @@ fn as_not_bound_var(e: &Expression) -> Option<Variable> {
     }
 }
 
+/// [OPUS-4.8] (sq-7d3dj.30.20) STATIC over-approximation of "does the OPTIONAL condition
+/// `cond` contain at least one conjunct the theta anti-join could seed sideways?", decided
+/// from the left-side variable SET and the certain-in-`B` set — WITHOUT evaluating either
+/// side (no graph access). Used by [`try_theta_antijoin`]'s early-decline gate (opt-in
+/// `antijoin-static-decline`) so it never pays to evaluate the mandatory left side only to
+/// discard it on the `correlations.is_empty()` decline.
+///
+/// A conjunct is a SEEDABLE correlation exactly when the runtime partition (in
+/// `try_theta_antijoin`) would place it in `correlations` rather than `residual`: it is a
+/// var-to-var pair (`?a = ?b` / `sameTerm(?a, ?b)` / `?a IN (?b)`) with ONE side certain in
+/// `B` and the OTHER a LEFT variable, and the certain-in-`B` side (the `?inner`) NOT also a
+/// left variable. This mirrors that logic with `left_vars` standing in for the runtime
+/// `left_b.col(v).is_some()` test — SOUND because for the conjunctive/BGP left sides this path
+/// runs over, `left_b.vars` equals `left`'s in-scope variables. The over-approximation
+/// direction is SAFE regardless: if this returns `true` when no correlation actually seeds, the
+/// gate simply does NOT decline early and the unchanged runtime partition declines instead
+/// (same result, one extra left evaluation — i.e. exactly the pre-feature behaviour). It only
+/// ever declines early when the runtime would ALSO have found `correlations.is_empty()`.
+#[cfg(feature = "antijoin-static-decline")]
+fn cond_has_seedable_correlation(
+    cond: &Expression,
+    left: &GraphPattern,
+    b_certain: &FxHashSet<Variable>,
+) -> bool {
+    let left_vars: FxHashSet<Variable> = in_scope_vars(left).into_iter().collect();
+    split_and(cond).into_iter().any(|c| {
+        let Some((va, vb, _)) = as_correlation_pair(c) else { return false };
+        // Same orientation choice as the runtime partition: pick the certain-in-B side as
+        // `inner` and the left side as `outer`; a seedable correlation additionally requires
+        // the chosen `inner` NOT to be a left variable.
+        if b_certain.contains(&vb) && left_vars.contains(&va) {
+            !left_vars.contains(&vb)
+        } else if b_certain.contains(&va) && left_vars.contains(&vb) {
+            !left_vars.contains(&va)
+        } else {
+            false
+        }
+    })
+}
+
 /// `Some((a, b, kind))` iff `e` is a VAR-TO-VAR correlation conjunct the theta anti-join
 /// can seed sideways: `?a = ?b` (`CorrKind::Eq`), `sameTerm(?a, ?b)` (`CorrKind::SameTerm`),
 /// or a SINGLE-variable membership `?a IN (?b)` (which desugars to `?a = ?b`, so `Eq`).
@@ -8695,6 +9124,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
             .par_iter()
             .enumerate()
@@ -8702,6 +9133,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(not(target_arch = "wasm32"))]
+                let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
                 let v = eval_compiled(graph, lv, bref, row, &compiled)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
@@ -8881,6 +9314,8 @@ fn group_aggregate(
         // (`self::` because the `aggregates` *parameter* below shadows the module name.)
         #[cfg(feature = "window-functions")]
         let aggs = self::aggregates::snapshot();
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
         // resolve each batch in parallel, then serially intern only that batch's genuinely
         // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
@@ -8895,6 +9330,8 @@ fn group_aggregate(
                     let _spx = spatial::worker_install(&spx);
                     #[cfg(feature = "window-functions")]
                     let _aggs = self::aggregates::worker_install(&aggs);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _qn = query_now::worker_install(qn);
                     aggregates
                         .iter()
                         .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
@@ -9352,6 +9789,21 @@ enum SortCell {
     /// `cmp_sort_cells` can then directly compare two `&str` slices — no allocation.
     /// [SONNET-4.6] sq-7d3dj.30.2
     Iri(Box<str>),
+    /// [FABLE-5] sq-7d3dj.30.21 — a PLAIN `xsd:string` LITERAL GRAPH term carried as its
+    /// DICTIONARY ID only, deferring the value materialisation the eager [`SortCell::Val`] arm
+    /// does at construction time (a `reconstruct_ref` `Literal` alloc + a `value_str`
+    /// collation-key alloc per input row). Under the `topk-lazy-strkey` feature the top-k
+    /// ORDER BY key build emits this instead of `Val{..}` for a plain-string column, so an
+    /// ORDER-BY on such a column over N input rows does ZERO key allocation up front (the
+    /// SP2Bench q11 residual: only k of the 17663 keyed rows survive). `cmp_sort_cells`
+    /// compares two `StrId` cells by their ZERO-COPY `Dict::term_parts` `value` bytes, which is
+    /// BYTE-IDENTICAL to comparing the two eager `value_str` keys (a plain string orders by its
+    /// `value()` lexical bytes — the sq-7d3dj.30.12 differential test proves it). Cross-kind /
+    /// cross-class comparisons use the fixed `String`-kind / `Literal`-class ranks (a plain
+    /// string literal is always Literal-class, String-kind), so those arms need no
+    /// materialisation either.
+    #[cfg(feature = "topk-lazy-strkey")]
+    StrId(Id),
     /// Any other key value (a plain / typed / language-tagged literal, a blank node, a
     /// quoted triple term, a computed value, or an unbound / error). Extends the `Iri`
     /// fast-path idea to EVERY `SortCell` kind (bead sq-7d3dj.30.12): the SPARQL
@@ -9490,6 +9942,48 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
             Value::Term(Term::NamedNode(n)) => n.as_str().cmp(a.as_ref()),
             _ => Ordering::Greater,
         },
+        // [FABLE-5] sq-7d3dj.30.21 — LAZY plain-string-literal cells. `StrId(id)` denotes a
+        // plain `xsd:string` literal: TermClass::Literal (rank 3), LiteralKind::String (rank
+        // 4), value = the literal's `value` slice (via `Dict::term_parts`). Every arm below
+        // reproduces the order the eager `Val{class:3, kind:4, key:Some(value)}` cell would
+        // give BYTE-IDENTICALLY, with no per-row `value_str` allocation. The homogeneous
+        // `(StrId, StrId)` arm is the hot q11 comparator; the cross-type arms cover a mixed key
+        // column (an ORDER BY expression that yields plain strings on some rows and other terms
+        // on others).
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(a), SortCell::StrId(b)) => {
+            // Same class (Literal) + same kind (String) → lexical value-byte order, exactly
+            // the eager `(Some(la), Some(lb)) => la.cmp(lb)` `Val` arm.
+            str_id_value(graph, *a).cmp(str_id_value(graph, *b))
+        }
+        // String literal (Literal-class rank 3) vs an IRI (rank 2): the literal sorts AFTER the
+        // IRI — regardless of value.
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(_), SortCell::Iri(_)) => Ordering::Greater,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Iri(_), SortCell::StrId(_)) => Ordering::Less,
+        // String literal (kind String rank 4) vs a numeric (kind Numeric rank 0) or temporal
+        // (kind DateTime rank 2 / Date rank 3) — all Literal-class, and String's kind rank is
+        // strictly greater than every one of those, so the string sorts AFTER, by kind rank.
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(_), SortCell::Num { .. }) => Ordering::Greater,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Num { .. }, SortCell::StrId(_)) => Ordering::Less,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(_), SortCell::Temp { .. }) => Ordering::Greater,
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Temp { .. }, SortCell::StrId(_)) => Ordering::Less,
+        // String literal vs a generic Val — mirror the eager `Val` dispatch by the OTHER cell's
+        // precomputed class/kind ranks against the fixed (Literal=3, String=4) ranks of a plain
+        // string, then compare value bytes for the same-class-same-kind (String) case.
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::StrId(a), SortCell::Val { class: cb, kind: kb, key: kb_key, v: cv }) => {
+            cmp_strid_val(graph, *a, *cb, *kb, kb_key.as_deref(), cv)
+        }
+        #[cfg(feature = "topk-lazy-strkey")]
+        (SortCell::Val { class: ca, kind: ka, key: ka_key, v: av }, SortCell::StrId(b)) => {
+            cmp_strid_val(graph, *b, *ca, *ka, ka_key.as_deref(), av).reverse()
+        }
         // Two generic key values: compare the PRECOMPUTED class rank, then (within the
         // literal class) the PRECOMPUTED kind rank — both integer compares, no per-comparison
         // `lit_kind` / `is_numeric_dt` re-derivation. Only when the ranks tie (same class,
@@ -9608,6 +10102,52 @@ fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
     Value::Term(term_of(graph, local, id).expect("sort key id resolves"))
 }
 
+/// [FABLE-5] sq-7d3dj.30.21 — the ZERO-COPY value `&str` of a plain-string-literal dictionary
+/// id, borrowed straight from the record store (no allocation). Only called on ids `cell_of`
+/// already proved are plain `xsd:string` literals (`Dict::plain_string_value` returned `Some`),
+/// so the non-plain-string arm is unreachable; it returns the empty slice as a safe
+/// placeholder rather than panic (mirroring `cmp_sort_cells_lex`).
+#[cfg(feature = "topk-lazy-strkey")]
+#[inline]
+fn str_id_value(graph: &Graph, id: Id) -> &str {
+    graph.dict.plain_string_value(id).unwrap_or("")
+}
+
+/// [FABLE-5] sq-7d3dj.30.21 — order a lazy plain-string-literal cell (`StrId(a)`: fixed
+/// `TermClass::Literal` rank 3, `LiteralKind::String` rank 4, value = the literal's `value`
+/// slice) against an EAGER `Val` cell carrying its own precomputed `(class, kind, key, v)`.
+/// This is byte-identical to the `(Val, Val)` arm of [`cmp_sort_cells`] with the string's fixed
+/// ranks: compare class ranks first; within the Literal class compare kind ranks; only when
+/// BOTH are Literal-class String-kind (the string's kind) do we compare value bytes — the
+/// eager String-kind `Val` always carries `key = Some(value_str)` (see `sort_cell_val`), which
+/// for a plain string IS the `value()` bytes, so a direct slice compare against
+/// `str_id_value(a)` reproduces the eager `(Some, Some) => la.cmp(lb)` order exactly.
+#[cfg(feature = "topk-lazy-strkey")]
+#[inline]
+fn cmp_strid_val(graph: &Graph, a: Id, vclass: u8, vkind: u8, vkey: Option<&str>, v: &Value) -> Ordering {
+    let str_class = TermClass::Literal as u8;
+    let str_kind = LiteralKind::String as u8;
+    match str_class.cmp(&vclass) {
+        Ordering::Equal => {
+            // Both Literal-class. Rank by kind first (String vs the Val's kind).
+            if str_kind != vkind {
+                return str_kind.cmp(&vkind);
+            }
+            // Both Literal-class String-kind: value-byte order. A String-kind `Val` always
+            // carries a precomputed lexical key; fall back to `value_str` only if (unexpectedly)
+            // absent, so the comparison never silently mis-orders.
+            match vkey {
+                Some(lb) => str_id_value(graph, a).cmp(lb),
+                None => match value_str(v) {
+                    Some(lb) => str_id_value(graph, a).cmp(lb.as_str()),
+                    None => Ordering::Equal,
+                },
+            }
+        }
+        ord => ord,
+    }
+}
+
 /// Sort or bounded-select the bindings according to `exprs`.
 ///
 /// When `row_budget` is `Some(k)` AND `k < b.rows.len()`, uses bounded selection
@@ -9657,6 +10197,19 @@ fn order_bindings(
                 if let Some(t) = graph.temporal_value(id) {
                     return Ok(SortCell::Temp { t, id });
                 }
+                // [FABLE-5] sq-7d3dj.30.21 — LAZY STRING-LITERAL key: a plain `xsd:string`
+                // store-literal becomes a zero-allocation `SortCell::StrId(id)` (compared via
+                // the literal's ZERO-COPY `Dict::term_parts` `value` bytes) instead of eagerly
+                // reconstructing a `Literal` (`term_of`) AND allocating a `value_str` collation
+                // key (`sort_cell_val`) for every input row. `plain_string_value` is a single
+                // record probe that returns `Some` for EXACTLY the `LiteralKind::String` set
+                // (datatype `xsd:string`, no lang tag), so the SPARQL value-order is preserved.
+                // The eager `Val{..}` key remains the feature-OFF path (byte-identical order).
+                // This targets the SP2Bench q11 residual: N=17663 keyed, k=60 survive.
+                #[cfg(feature = "topk-lazy-strkey")]
+                if graph.dict.plain_string_value(id).is_some() {
+                    return Ok(SortCell::StrId(id));
+                }
                 // Neither numeric nor temporal: materialise the term once. For IRI terms,
                 // store the IRI string in SortCell::Iri so comparisons are direct &str
                 // comparisons with no per-comparison allocation. [SONNET-4.6] sq-7d3dj.30.2
@@ -9701,21 +10254,36 @@ fn order_bindings(
         // Invariant for the bounded-selection path below: 0 < k < n, so
         // `k - 1 < n = keyed.len()` and `select_nth_unstable_by(k - 1)` is in range.
         if k < n {
-            // Build (key, input_idx, row) — parallel for large sets.
+            // Build (key, input_idx) — parallel for large sets. INDEX-CARRY: the keyed
+            // vector holds only the sort key + the original `b.rows` index, NOT a cloned
+            // `Row`. `key_of` borrows each row read-only (via `cell_of`, which touches
+            // `graph`/`local` but never `b.rows`), so `b.rows` is still owned + intact
+            // after this build; only the k surviving rows are cloned when we gather the
+            // output below. This eliminates the n up-front `Row::clone`s of the previous
+            // `(key, input_idx, Row)` tuple — only k clones happen (n=17663 → k=60 on the
+            // SP2Bench q11 residual). Byte-identical output: the tuple index reproduces the
+            // same stable-sort tie order, and the gathered row is `b.rows[i]` unchanged.
+            // [SONNET-4.6] sq-7d3dj.30.23
             // Use Vec<_> to avoid the clippy::type_complexity lint on the explicit type.
             #[cfg(feature = "parallel")]
             let mut keyed: Vec<_> = if n >= PAR_THRESHOLD {
                 use rayon::prelude::*;
+                #[cfg(not(target_arch = "wasm32"))]
+                let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
                 b.rows
                     .par_iter()
                     .enumerate()
-                    .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                    .map(|(i, row)| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let _qn = query_now::worker_install(qn);
+                        Ok((key_of(row)?, i))
+                    })
                     .collect::<Result<Vec<_>, String>>()?
             } else {
                 b.rows
                     .iter()
                     .enumerate()
-                    .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                    .map(|(i, row)| Ok((key_of(row)?, i)))
                     .collect::<Result<Vec<_>, String>>()?
             };
             #[cfg(not(feature = "parallel"))]
@@ -9723,25 +10291,23 @@ fn order_bindings(
                 .rows
                 .iter()
                 .enumerate()
-                .map(|(i, row)| Ok((key_of(row)?, i, row.clone())))
+                .map(|(i, row)| Ok((key_of(row)?, i)))
                 .collect::<Result<_, String>>()?;
 
             // Strict total-order comparator: sort key first (descending as flagged),
             // then input_idx as tiebreaker (smaller index = appears earlier in the
             // stable sort, so it sorts LESS here — reproduces the stable sort exactly).
-            let cmp_total =
-                |a: &(Vec<(bool, SortCell)>, usize, Row),
-                 c: &(Vec<(bool, SortCell)>, usize, Row)| {
-                    for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
-                        let ord = cmp_sort_cells(graph, local, av, cv);
-                        let ord = if *desc { ord.reverse() } else { ord };
-                        if ord != Ordering::Equal {
-                            return ord;
-                        }
+            let cmp_total = |a: &(Vec<(bool, SortCell)>, usize), c: &(Vec<(bool, SortCell)>, usize)| {
+                for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
+                    let ord = cmp_sort_cells(graph, local, av, cv);
+                    let ord = if *desc { ord.reverse() } else { ord };
+                    if ord != Ordering::Equal {
+                        return ord;
                     }
-                    // Tiebreak: smaller input_idx wins (matches stable sort input order).
-                    a.1.cmp(&c.1)
-                };
+                }
+                // Tiebreak: smaller input_idx wins (matches stable sort input order).
+                a.1.cmp(&c.1)
+            };
 
             // Partition: after select_nth_unstable_by(k-1), keyed[..k] holds the k
             // smallest elements by cmp_total (not yet sorted within that prefix).
@@ -9752,7 +10318,10 @@ fn order_bindings(
             // Sort the selected prefix into the correct final order.
             keyed[..k].sort_by(|a, c| cmp_total(a, c));
 
-            b.rows = keyed.into_iter().take(k).map(|(_, _, r)| r).collect();
+            // Gather the k surviving rows by index — the ONLY `Row::clone`s in this path.
+            // `keyed[..k]` is now in final sorted order, so the gathered rows land in that
+            // exact order. [SONNET-4.6] sq-7d3dj.30.23
+            b.rows = keyed[..k].iter().map(|(_, i)| b.rows[*i].clone()).collect();
             b.sorted_by = None;
             return Ok(());
         }
@@ -9764,7 +10333,16 @@ fn order_bindings(
     #[cfg(feature = "parallel")]
     let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> = if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        b.rows.par_iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
+        b.rows
+            .par_iter()
+            .map(|row| {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _qn = query_now::worker_install(qn);
+                Ok((key_of(row)?, row.clone()))
+            })
+            .collect::<Result<_, String>>()?
     } else {
         b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
     };
@@ -10005,6 +10583,151 @@ mod sort_collation_key_differential {
                 got,
                 want
             );
+        }
+    }
+}
+
+/// [FABLE-5] sq-7d3dj.30.21 — DIFFERENTIAL test for the LAZY plain-string-literal sort cell
+/// (`topk-lazy-strkey`). It pins the load-bearing invariant of the feature: a `SortCell::StrId`
+/// (an interned plain `xsd:string` literal carried as a dict id, compared via the ZERO-COPY
+/// `plain_string_value` bytes) orders BYTE-IDENTICALLY to the eager `SortCell::Val` cell the
+/// feature-OFF path builds for the SAME literal — for EVERY pair, both string-vs-string (the
+/// hot q11 case, incl. the `"10" < "2"` / empty-string ties) and string-vs-every-other-kind
+/// (the mixed-column cross-type arms). A wrong class/kind rank, a mis-read value slice, or a
+/// mis-ordered fall-through goes red here. If it agreed with itself but not with the eager
+/// path, the top-k output under the feature would silently differ.
+#[cfg(all(test, feature = "topk-lazy-strkey"))]
+mod lazy_strkey_differential {
+    use super::*;
+    use oxrdf::{vocab::xsd, BlankNode, Literal, NamedNode};
+
+    fn typed(lex: &str, dt: oxrdf::NamedNodeRef<'_>) -> Term {
+        Term::Literal(Literal::new_typed_literal(lex, dt))
+    }
+
+    /// The plain-`xsd:string` literals the lazy path handles — including the adversarial
+    /// lexical-order cases (`"10" < "2"`), the empty string, and duplicates (ties).
+    fn strings() -> Vec<Term> {
+        ["apple", "banana", "zebra", "", "10", "2", "apple", "Apple", "aardvark", "http://x/y"]
+            .iter()
+            .map(|s| Term::Literal(Literal::new_simple_literal(*s)))
+            .collect()
+    }
+
+    /// Non-string terms spanning every OTHER class + literal kind, to exercise the cross-type
+    /// arms (`StrId` vs `Iri` / `Num` / `Temp` / `Val`).
+    fn others() -> Vec<Term> {
+        vec![
+            Term::BlankNode(BlankNode::new("b0").unwrap()),
+            Term::NamedNode(NamedNode::new("http://ex/a").unwrap()),
+            Term::NamedNode(NamedNode::new("http://x/y").unwrap()), // same lexical as a string
+            typed("42", xsd::INTEGER),
+            typed("3.14", xsd::DOUBLE),
+            typed("true", xsd::BOOLEAN),
+            typed("2020-01-01T00:00:00Z", xsd::DATE_TIME),
+            typed("2020-06-15", xsd::DATE),
+            Term::Literal(Literal::new_language_tagged_literal("apple", "en").unwrap()),
+            typed("PT1H", xsd::DURATION),
+            Term::Literal(Literal::new_typed_literal(
+                "x",
+                NamedNode::new("http://ex/customdt").unwrap(),
+            )),
+        ]
+    }
+
+    /// Build a graph interning every corpus term (as the object of a triple) so each has a real
+    /// dictionary id; return the graph plus the `(term, id)` list.
+    fn graph_with(terms: &[Term]) -> (Graph, Vec<(Term, Id)>) {
+        let mut ttl = String::from("@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n");
+        for (i, t) in terms.iter().enumerate() {
+            // Serialise each object term inline; plain strings, langs, typed literals, IRIs,
+            // blanks all have a canonical Turtle form via oxrdf's Display.
+            let obj = match t {
+                Term::BlankNode(_) => format!("[ <http://ex/tag> {} ]", i), // fresh blank
+                other => other.to_string(),
+            };
+            ttl.push_str(&format!("<http://ex/s{}> <http://ex/v> {} .\n", i, obj));
+        }
+        let g = Graph::load_str(&ttl, "turtle").expect("corpus graph");
+        // Resolve each NON-blank term to its id via id_of; blanks get their own fresh id per
+        // row so we look them up positionally by re-querying is skipped — blanks are only used
+        // to exercise the class-rank arm, and any blank id works for that.
+        let mut ided = Vec::new();
+        for t in terms {
+            if let Term::BlankNode(_) = t {
+                continue; // handled separately below
+            }
+            let id = g.id_of(t).unwrap_or_else(|| panic!("term interned: {t}"));
+            ided.push((t.clone(), id));
+        }
+        (g, ided)
+    }
+
+    /// The eager cell the feature-OFF path builds for a term.
+    fn eager(t: &Term) -> SortCell {
+        sort_cell_val(Value::Term(t.clone()))
+    }
+
+    #[test]
+    fn strid_orders_identically_to_eager_val_on_every_pair() {
+        let all: Vec<Term> = strings().into_iter().chain(others()).collect();
+        let (g, ided) = graph_with(&all);
+        let l = LocalVocab::default();
+
+        // For each interned term decide its lazy cell: a plain string → StrId(id); anything
+        // else → the same eager Val cell the feature-off path uses (only the string arm is
+        // lazy). Then assert lazy-vs-lazy == eager-vs-eager for EVERY ordered pair.
+        let lazy_cell = |t: &Term, id: Id| -> SortCell {
+            if g.dict.plain_string_value(id).is_some() {
+                SortCell::StrId(id)
+            } else {
+                eager(t)
+            }
+        };
+
+        for (ta, ida) in &ided {
+            // Reflexivity of the lazy cell.
+            let la = lazy_cell(ta, *ida);
+            assert_eq!(
+                cmp_sort_cells(&g, &l, &la, &la),
+                Ordering::Equal,
+                "lazy reflexivity failed for {ta}"
+            );
+            for (tc, idc) in &ided {
+                let want = cmp_sort_cells(&g, &l, &eager(ta), &eager(tc));
+                let lc = lazy_cell(tc, *idc);
+                let got = cmp_sort_cells(&g, &l, &la, &lc);
+                assert_eq!(
+                    got, want,
+                    "lazy StrId order diverged from eager Val for ({ta}, {tc}): got {got:?} want {want:?}"
+                );
+                // Antisymmetry across the lazy path.
+                let got_rev = cmp_sort_cells(&g, &l, &lc, &la);
+                assert_eq!(got, got_rev.reverse(), "lazy antisymmetry ({ta}, {tc})");
+            }
+        }
+    }
+
+    #[test]
+    fn plain_string_value_matches_exactly_the_string_kind_set() {
+        // The lazy eligibility predicate must be `Some` for EXACTLY the plain xsd:string
+        // literals and `None` for everything else (lang-tagged, typed non-string, IRI, blank,
+        // numeric) — otherwise a non-string would take the string-ordered lazy arm.
+        let all: Vec<Term> = strings().into_iter().chain(others()).collect();
+        let (g, ided) = graph_with(&all);
+        for (t, id) in &ided {
+            let is_plain_string = matches!(t, Term::Literal(l)
+                if l.language().is_none() && l.datatype() == xsd::STRING);
+            assert_eq!(
+                g.dict.plain_string_value(*id).is_some(),
+                is_plain_string,
+                "plain_string_value eligibility mismatch for {t}"
+            );
+            if is_plain_string {
+                if let Term::Literal(l) = t {
+                    assert_eq!(g.dict.plain_string_value(*id), Some(l.value()), "value slice for {t}");
+                }
+            }
         }
     }
 }
@@ -10513,6 +11236,8 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        #[cfg(not(target_arch = "wasm32"))]
+        let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
             .par_iter()
             .enumerate()
@@ -10520,6 +11245,8 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(not(target_arch = "wasm32"))]
+                let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
                 Ok(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?))
             })
@@ -11041,7 +11768,10 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
                 graph.numeric_value(id)
             }
         }
-        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-6b1lj: the CONSTANT operand is datatype-aware/trimmed too
+        // (`numeric_cache_f64`), so a datatype-ill-formed literal constant (`"1.5"^^xsd:integer`)
+        // is a type error on this fast comparison path exactly as the graph-term side is.
+        Literal(l) => numeric_cache_f64(l),
         Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
         Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
         Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
@@ -11150,7 +11880,8 @@ fn eval_compiled_numeric(graph: &Graph, local: &LocalVocab, row: &[Id], e: &Comp
             let id = row[c];
             if id == NO_ID { None } else if is_local(id) { local.numeric(id) } else { graph.numeric_value(id) }
         }
-        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant, matching `eval_numeric`.
+        Literal(l) => numeric_cache_f64(l),
         Add(a, d) => Some(eval_compiled_numeric(graph, local, row, a)? + eval_compiled_numeric(graph, local, row, d)?),
         Subtract(a, d) => {
             Some(eval_compiled_numeric(graph, local, row, a)? - eval_compiled_numeric(graph, local, row, d)?)
@@ -11628,16 +12359,19 @@ fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        // [OPUS-4.8] sq-rkzhr: route the lexical→f64 arm through `parse_xsd_f64` (the SAME
-        // parser the exact/typed `as_numeric` path uses) instead of Rust's `str::parse::<f64>`.
-        // Two reasons, both about keeping this LENIENT `as_f64` seam in lock-step with the
-        // exact `as_numeric` one that the sq-rikm7 `exact_cmp` recheck drives: (a) it accepts
-        // the XSD specials `INF`/`+INF`/`-INF`/`NaN`; (b) it REJECTS the non-XSD spellings
-        // Rust's parser also swallows (`inf`/`infinity`/`nan`), which `as_numeric` already
-        // rejects. Before this the two paths disagreed on those spellings, so a numeric compare
-        // could succeed via `as_f64` yet find no exact recheck value — the f64-collapse
-        // asymmetry sq-rikm7 set out to remove.
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
+        // [FABLE-5] sq-74oy4 / sq-6b1lj: route the lexical→f64 arm through the DATATYPE-AWARE
+        // `numeric_cache_f64` — the SAME acceptance the graph `numeric_value` cache and
+        // `LocalVocab::intern` use. This keeps the lenient relational `<`/`>` seam in lock-step
+        // with the equality reference `Num::of_literal` on BOTH residuals sq-9781x left open:
+        // (a) whitespace — the value is TRIMMED (XSD `collapse` facet), so a padded
+        // `" 1"^^xsd:integer` is value-1 on `<`/`>` exactly as it is on `=` (was: type-error
+        // on `<`/`>`, cache-miss, but value-1 on `=` via the trimming cache); (b) per-datatype
+        // well-formedness — a lexical ill-formed FOR its datatype (`"1.5"^^xsd:integer`,
+        // `"1E2"^^xsd:decimal`, an i128-overflow decimal) is `None` here, a type error on
+        // `<`/`>` matching `of_literal` (was: compared as f64). The XSD f64 SPELLINGS
+        // (INF/+INF/-INF/NaN yes; Rust-only inf/infinity/nan no) are still enforced by the
+        // underlying `parse_xsd_f64` image.
+        Value::Term(Term::Literal(l)) => numeric_cache_f64(l),
         _ => None,
     }
 }
@@ -11648,6 +12382,30 @@ fn is_numeric_dt(l: &Literal) -> bool {
         || dt == xsd::DECIMAL.as_str()
         || dt == xsd::DOUBLE.as_str()
         || dt == xsd::FLOAT.as_str()
+}
+
+/// The DATATYPE-AWARE cached/lenient f64 of a numeric literal, matching the graph's
+/// `Graph::numeric_value` cache acceptance (sparq-core `cached_numeric_f64`): `Some` iff the
+/// lexical is well-formed FOR ITS DATATYPE (`Num::of_literal` accepts it), imaged by the
+/// shared `parse_xsd_f64` on the TRIMMED lexical so the value is bit-identical to what the
+/// graph cache and `LocalVocab::intern` store for the same term. `None` (a datatype-ill-formed
+/// lexical like `"1.5"^^xsd:integer`, or a non-numeric) is a SPARQL type error.
+///
+/// [FABLE-5] (sq-74oy4 / sq-6b1lj) This is the single acceptance the lenient relational seam
+/// (`as_num`/`as_f64`), the local-vocab numeric cache (`LocalVocab::intern`), and the graph
+/// cache now all share — closing the pre-fix asymmetry where `as_num`/`intern` parsed
+/// datatype-agnostically (and un-trimmed) while `Num::of_literal` (the equality reference)
+/// did not, so a padded or per-datatype-ill-formed lexical compared numerically on `<`/`>`
+/// yet type-errored on `=`. Acceptance is gated on `Num::of_literal` (the strictest, so the
+/// datatype rules can never drift); the f64 image is `parse_xsd_f64` (every lexical
+/// `of_literal` accepts, `parse_xsd_f64` also accepts, for the same value).
+#[inline]
+fn numeric_cache_f64(l: &Literal) -> Option<f64> {
+    if is_numeric_dt(l) && Num::of_literal(l).is_some() {
+        parse_xsd_f64(l.value().trim())
+    } else {
+        None
+    }
 }
 
 // [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the engine implements the substrate's
@@ -11670,15 +12428,15 @@ impl CompareTerm for Value {
     }
     #[inline]
     fn literal_kind(&self) -> LiteralKind {
-        // [FABLE-5] sq-wjl8i: the kind-first rank of the total order. Numeric tracks the
-        // LENIENT `as_num` membership (the same set the numeric arm compares), so a
-        // lexical the exact classifier rejects but `parse_xsd_f64` accepts (e.g.
-        // "1.5"^^xsd:integer) still sorts numerically, exactly as it did pre-fix — with
-        // one exception: a computed boolean (whose lenient f64 view is 0.0/1.0)
-        // classifies as Boolean, keeping it in one kind with boolean LITERALS (both
-        // order `false < true` via `strict_cmp`). ILL-FORMED numeric/temporal lexicals
-        // classify as Other (lexical order): a kind mixing value-ordered and
-        // lexical-fallback pairs is intransitive — the very bug this rank removes.
+        // [FABLE-5] sq-wjl8i / sq-74oy4: the kind-first rank of the total order. Numeric
+        // tracks the `as_num` membership (the same set the numeric arm compares), which is
+        // now DATATYPE-AWARE (sq-74oy4): a lexical ill-formed FOR its datatype (e.g.
+        // "1.5"^^xsd:integer) is NOT numeric here and classifies as Other (lexical order) —
+        // matching `of_literal` and keeping the Numeric kind purely value-ordered (a kind
+        // mixing value-ordered and type-error pairs is intransitive — the very bug this rank
+        // removes; pre-sq-74oy4 the lenient `as_num` wrongly kept such a lexical Numeric).
+        // A computed boolean (whose f64 view is 0.0/1.0) classifies as Boolean, keeping it in
+        // one kind with boolean LITERALS (both order `false < true` via `strict_cmp`).
         match lit_kind(self) {
             LitKind::Bool(_) => LiteralKind::Boolean,
             LitKind::Num(_) if as_num(self).is_some() => LiteralKind::Numeric,
@@ -11974,17 +12732,30 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 }
             }
         }
-        // NOW(): the current UTC instant as xsd:dateTime. RAND(): xsd:double in [0, 1)
-        // (sourced from the same OS RNG as UUID, avoiding a new wasm-hostile dep) —
-        // both native-only for the same reason as UUID()/STRUUID().
+        // ---- Builtin memoisation policy (sq-98w7z.1) [FABLE-5] ----------------------
+        // ALLOW (memoised, keyed on the argument VALUES — pure, so a hit is
+        //   result-identical to a fresh evaluation): the REGEX()/REPLACE() compiled
+        //   `(pattern, flags)` via `regex_cache`, the one per-row builtin cost worth a
+        //   memo (compile is µs-scale vs ns-scale match). Compile FAILURES are memoised
+        //   too — an invalid pattern stays a per-row type error.
+        // PINNED (not memoised — spec-MANDATED constancy): NOW() formats the
+        //   execution-scoped `query_now` instant (SPARQL 1.1 §17.4.5.1); the next
+        //   execution re-samples.
+        // DENY (non-deterministic — MUST re-evaluate on every call; memoising any of
+        //   these would silently collapse per-row freshness): RAND(), UUID(), STRUUID(),
+        //   no-arg BNODE() (fresh label per call), and every REGISTERED custom function
+        //   (`FunctionRegistry` makes no purity promise). The freshness-per-row test is
+        //   `nondeterministic_builtins_fresh_per_call_never_memoised`.
+        // Everything else (UCASE, STR, numeric ops, …) evaluates directly: value-keyed
+        // memoisation of ns-scale pure builtins costs more in key hashing than it saves.
+        //
+        // NOW(): the execution's pinned instant as xsd:dateTime. RAND(): xsd:double in
+        // [0, 1) from a per-thread splitmix64 seeded once from the OS RNG (see
+        // `rand_unit`) — both native-only for the same reason as UUID()/STRUUID().
         #[cfg(not(target_arch = "wasm32"))]
         F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(now_lexical(), xsd::DATE_TIME))),
         #[cfg(not(target_arch = "wasm32"))]
-        F::Rand => {
-            let bytes = *uuid::Uuid::new_v4().as_bytes();
-            let x = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
-            Value::Num(Num::Double((x >> 11) as f64 / (1u64 << 53) as f64))
-        }
+        F::Rand => Value::Num(Num::Double(rand_unit::next())),
         #[cfg(not(target_arch = "wasm32"))]
         F::Uuid => Value::Term(Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
             "urn:uuid:{}",
@@ -12008,7 +12779,7 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 _ => return Ok(Value::Error),
             };
             let flags = if nargs >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
-            match build_regex(&pat, &flags) {
+            match regex_cache::get(&pat, &flags) {
                 Some(re) => Value::Bool(re.is_match(&text)),
                 None => Value::Error,
             }
@@ -12020,7 +12791,7 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 _ => return Ok(Value::Error),
             };
             let flags = if nargs >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
-            match build_regex(&pat, &flags) {
+            match regex_cache::get(&pat, &flags) {
                 Some(re) => lit_with_lang(re.replace_all(&text, rep.as_str()).into_owned(), lang.as_deref()),
                 None => Value::Error,
             }
@@ -12668,12 +13439,14 @@ thread_local! {
     static ROW_SCOPE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-/// The current UTC instant as an `xsd:dateTime` lexical (civil-from-days conversion,
-/// no time-crate dependency).
+/// The query execution's `NOW()` instant as an `xsd:dateTime` lexical (civil-from-days
+/// conversion, no time-crate dependency). The instant comes from the `query_now`
+/// scope pinned in `eval_modified`, so every `NOW()` in one execution — across rows,
+/// rayon workers and `EXISTS` re-entry — formats the SAME value (SPARQL 1.1
+/// §17.4.5.1); an un-scoped call falls back to a fresh sample. [FABLE-5] sq-98w7z.1
 #[cfg(not(target_arch = "wasm32"))]
 fn now_lexical() -> String {
-    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs() as i64;
+    let secs = query_now::epoch_secs();
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -12689,6 +13462,41 @@ fn now_lexical() -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { y + 1 } else { y };
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+/// Thread-local PRNG behind `RAND()` (sq-98w7z.1). [FABLE-5]
+///
+/// The old arm drew `uuid::Uuid::new_v4()` — an OS-RNG syscall — PER ROW. SPARQL
+/// `RAND()` (§17.4.5.2) has no cryptographic requirement, only "a fresh value per
+/// call", so each thread seeds ONCE from the OS RNG (uuid v4, the crate's existing
+/// entropy source — no new dependency) and then advances a splitmix64 state: every
+/// call still yields a fresh, non-deterministic value (the seed is fresh entropy
+/// per thread per process), rayon workers get independent streams, and `EXISTS`
+/// re-entry merely draws the next value — there is no layout- or query-dependent
+/// state to leak. Deliberately NOT deterministic or query-constant.
+#[cfg(not(target_arch = "wasm32"))]
+mod rand_unit {
+    use std::cell::Cell;
+
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(u64::from_le_bytes(
+            uuid::Uuid::new_v4().as_bytes()[..8].try_into().expect("8 bytes"),
+        ));
+    }
+
+    /// The next value in `[0, 1)` — splitmix64 output through the same 53-bit
+    /// mantissa construction the old per-row OS draw used.
+    pub(super) fn next() -> f64 {
+        STATE.with(|s| {
+            let seed = s.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+            s.set(seed);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 53) as f64
+        })
+    }
 }
 
 /// 64-bit FxHash of a string (label material for BNODE(str)).
@@ -12820,10 +13628,79 @@ fn tz_to_duration(tz: &str) -> Option<String> {
     Some(out)
 }
 
+/// Per-thread `REGEX()`/`REPLACE()` compile memo (sq-98w7z.1). [FABLE-5]
+///
+/// `build_regex` used to run INSIDE the per-row scalar eval, so a constant-pattern
+/// FILTER recompiled the regex on every row (compile is µs-scale vs ns-scale match).
+/// The memo compiles each distinct `(pattern, flags)` ONCE per thread and hands out
+/// the same instance via `Rc` — sharing the INSTANCE (not clones of it) is what
+/// preserves the warmed lazy-DFA cache, the same bug class the SHACL fix (PR #1891)
+/// found. A compile FAILURE is memoised as `None`, so an invalid pattern or flag
+/// stays a per-row type error (`Value::Error`) exactly as before — the cache stores
+/// the error-or-regex OUTCOME, never swallows it.
+///
+/// Re-entry safety: the key `(pattern, flags)` fully determines the compiled regex
+/// independent of any `Bindings` layout or query context, so an `EXISTS`-nested
+/// FILTER re-entering this thread can only HIT the memo correctly — unlike a
+/// column-index thread-local, there is nothing execution-scoped to drain or reset,
+/// and for the same reason entries carrying over across queries cannot change any
+/// result. The `RefCell` borrow never spans user code (`build_regex` is pure), so
+/// re-entry cannot observe a live borrow.
+#[cfg(feature = "regex")]
+mod regex_cache {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Hard cap on memo entries; on overflow the memo is CLEARED, so a pathological
+    /// dynamic-pattern workload degrades to the old compile-per-row behaviour,
+    /// never to unbounded memory. Lookup is a linear scan — with ≤ CAP entries and
+    /// the typical one-or-two distinct patterns per query, that is an
+    /// allocation-free string compare, cheaper than hashing an owned key.
+    const CAP: usize = 64;
+
+    thread_local! {
+        #[allow(clippy::type_complexity)]
+        static MEMO: RefCell<Vec<((String, String), Option<Rc<regex::Regex>>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    // Compiles actually performed on this thread (memo misses) — the compile-once
+    // counter tests assert on deltas of this.
+    #[cfg(test)]
+    thread_local! {
+        static COMPILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn compile_count() -> u64 {
+        COMPILES.with(std::cell::Cell::get)
+    }
+
+    /// The compiled regex for `(pattern, flags)`, or `None` for an invalid
+    /// pattern/flag — both memoised.
+    pub(super) fn get(pattern: &str, flags: &str) -> Option<Rc<regex::Regex>> {
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some((_, re)) = m.iter().find(|((p, f), _)| p == pattern && f == flags) {
+                return re.clone();
+            }
+            #[cfg(test)]
+            COMPILES.with(|c| c.set(c.get() + 1));
+            let re = super::build_regex(pattern, flags).map(Rc::new);
+            if m.len() >= CAP {
+                m.clear();
+            }
+            m.push(((pattern.to_string(), flags.to_string()), re.clone()));
+            re
+        })
+    }
+}
+
 /// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`
 /// multi-line, `x` extended/ignore-whitespace, `q` literal-pattern mode per XPath F&O —
 /// every pattern character is matched literally, combinable with `i`).
 /// Returns `None` on an invalid pattern or an unknown flag (→ type error).
+/// Compile-per-call — go through [`regex_cache::get`] on any per-row path.
 #[cfg(feature = "regex")]
 fn build_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
     if !flags.chars().all(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'q')) {
@@ -13408,6 +14285,329 @@ mod function_tests {
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"BOB\", \"i\")) }"), 1);
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[0-9]+\")) }"), 1); // Carol123
         assert_eq!(n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]\", \"X\") AS ?g) }"), 3);
+    }
+}
+
+/// [FABLE-5] sq-98w7z.1 — per-row builtin memoisation: (A) the REGEX/REPLACE
+/// compile memo, (B) the RAND() thread-local PRNG, (C) NOW() query-constancy
+/// (SPARQL 1.1 §17.4.5.1). Every test here exercises the REAL evaluation path
+/// (`crate::query*` or the actual thread-local modules), never a mock.
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod builtin_memo_tests {
+    use super::*;
+
+    // [OPUS-4.8] (sq-98w7z.1) Used only by the `regex`-gated REGEX/REPLACE tests, so gate the
+    // helper too — otherwise it is dead code under `--no-default-features` (feature-OFF clippy).
+    #[cfg(feature = "regex")]
+    fn names_graph() -> Graph {
+        Graph::load_str(
+            "@prefix : <http://ex/> .\n\
+             :a :name \"Alice\" . :b :name \"bob\" . :c :name \"Carol123\" .\n",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn wide_graph(rows: usize) -> Graph {
+        let ttl: String =
+            (0..rows).map(|i| format!("<http://ex/s{i}> <http://ex/p> <http://ex/o> .\n")).collect();
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    // ---- (A) REGEX / REPLACE compile memo ---------------------------------------
+
+    /// Result-equivalence differential: over a mixed (pattern, flags) set — valid,
+    /// invalid pattern, unknown flag, each of i/s/m/x/q — the memoised regex must
+    /// behave IDENTICALLY to a fresh `build_regex` compile, on both the first
+    /// (miss) and second (hit) lookup, including the `None` outcome that maps to
+    /// `Value::Error` per row.
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_cache_fresh_equivalence_differential() {
+        let cases: &[(&str, &str)] = &[
+            ("^[A-Z]", ""),
+            ("bob", "i"),
+            ("a.c", "s"),
+            ("^b", "m"),
+            ("a b", "x"),
+            ("a.c", "q"),  // literal mode: the dot matches only a literal dot
+            ("A.C", "qi"), // q combined with i keeps case-insensitivity
+            ("[", ""),     // invalid pattern -> None
+            ("a", "z"),    // unknown flag -> None
+            ("(unclosed", "i"),
+        ];
+        let texts = ["Alice", "bob", "BOB", "a.c", "aXc", "abc\nbcd", "a b"];
+        for (pat, flags) in cases {
+            let fresh = build_regex(pat, flags);
+            for round in 0..2 {
+                let cached = regex_cache::get(pat, flags);
+                assert_eq!(
+                    cached.is_some(),
+                    fresh.is_some(),
+                    "compile outcome diverged for ({pat:?}, {flags:?}) round {round}"
+                );
+                if let (Some(c), Some(f)) = (&cached, &fresh) {
+                    for t in &texts {
+                        assert_eq!(c.is_match(t), f.is_match(t), "is_match diverged: ({pat:?}, {flags:?}) on {t:?}");
+                        assert_eq!(
+                            c.replace_all(t, "_").into_owned(),
+                            f.replace_all(t, "_").into_owned(),
+                            "replace_all diverged: ({pat:?}, {flags:?}) on {t:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compile-once counter (NON-VACUOUS: reverting the memo lookup in
+    /// `regex_cache::get` makes the first delta 100, one per row): a
+    /// constant-pattern FILTER over 100 rows compiles once; a SECOND execution
+    /// reusing the pattern compiles zero times (the key is query-independent);
+    /// REPLACE adds one compile for its distinct pattern; an INVALID pattern
+    /// memoises its failure once while still erroring per row (FILTER drops every
+    /// row, BIND leaves every row with the variable unbound — the pre-memo
+    /// semantics).
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_compiles_once_not_per_row() {
+        let ttl: String =
+            (0..100).map(|i| format!("<http://ex/s{i}> <http://ex/name> \"name{i}A\" .\n")).collect();
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        let filter_q = "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"e9[0-9]A$\")) }";
+
+        let c0 = regex_cache::compile_count();
+        assert_eq!(crate::query(&g, filter_q).unwrap().len(), 10); // name90A..name99A
+        let c1 = regex_cache::compile_count();
+        assert_eq!(c1 - c0, 1, "a constant-pattern FILTER over 100 rows must compile ONCE, not per row");
+
+        assert_eq!(crate::query(&g, filter_q).unwrap().len(), 10);
+        assert_eq!(regex_cache::compile_count(), c1, "a second execution reuses the memoised compile");
+
+        assert_eq!(
+            crate::query(&g, "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]+\", \"#\") AS ?r) }")
+                .unwrap()
+                .len(),
+            100
+        );
+        assert_eq!(regex_cache::compile_count(), c1 + 1, "REPLACE compiles its distinct pattern once");
+
+        // Invalid pattern: the FAILURE is memoised (one compile attempt), and the
+        // per-row semantics stay exactly the pre-memo ones.
+        assert_eq!(
+            crate::query(&g, "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[\")) }").unwrap().len(),
+            0,
+            "invalid pattern: type error per row -> FILTER drops every row"
+        );
+        assert_eq!(regex_cache::compile_count(), c1 + 2);
+        let r = crate::query(&g, "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[\", \"X\") AS ?r) }")
+            .unwrap();
+        assert_eq!(r.len(), 100, "invalid pattern under BIND keeps rows");
+        assert!(r.rows.iter().all(|row| row[0].is_none()), "…with ?r unbound on every row");
+        assert_eq!(regex_cache::compile_count(), c1 + 2, "the memoised failure is reused, not recompiled");
+    }
+
+    /// Overflowing the memo cap stays bounded and correct (the memo clears and
+    /// keeps compiling — degraded, never wrong).
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_cache_cap_overflow_stays_correct() {
+        for i in 0..131 {
+            let pat = format!("^p{i}$");
+            let re = regex_cache::get(&pat, "").expect("valid pattern");
+            assert!(re.is_match(&format!("p{i}")));
+            assert!(!re.is_match("nope"));
+        }
+    }
+
+    /// EXISTS-nested REGEX re-enters the memo on the SAME thread in the middle of
+    /// the outer FILTER's row loop. The `(pattern, flags)` key is independent of
+    /// any `Bindings` layout (unlike a column-index thread-local), so the
+    /// re-entry can only hit the memo correctly: both patterns coexist and each
+    /// compiles exactly once despite the interleaving.
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_cache_exists_reentry() {
+        let g = names_graph();
+        let c0 = regex_cache::compile_count();
+        let q = "SELECT ?n WHERE { ?s <http://ex/name> ?n \
+                 FILTER(REGEX(?n, \"^[A-Za-z]+[0-9]+$\") && EXISTS { ?s <http://ex/name> ?n2 FILTER(REGEX(?n2, \"^[A-Z]\")) }) }";
+        assert_eq!(crate::query(&g, q).unwrap().len(), 1); // Carol123
+        assert_eq!(
+            regex_cache::compile_count() - c0,
+            2,
+            "outer + EXISTS-nested pattern compile once each across the re-entry"
+        );
+    }
+
+    // ---- (B) RAND() thread-local PRNG -------------------------------------------
+
+    /// RAND() stays non-deterministic per SPARQL: every call yields a fresh
+    /// `xsd:double` in [0, 1), and two separate executions do not repeat.
+    #[test]
+    fn rand_fresh_per_call_in_unit_range() {
+        let g = wide_graph(100);
+        let q = "SELECT ?r WHERE { ?s <http://ex/p> ?o BIND(RAND() AS ?r) }";
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(r.len(), 100);
+        let mut seen = std::collections::HashSet::new();
+        for row in &r.rows {
+            let Some(Term::Literal(l)) = &row[0] else { panic!("RAND() must bind a literal") };
+            assert_eq!(l.datatype(), xsd::DOUBLE);
+            let v: f64 = l.value().parse().expect("xsd:double lexical");
+            assert!((0.0..1.0).contains(&v), "RAND() out of [0,1): {v}");
+            seen.insert(l.value().to_string());
+        }
+        // splitmix64 collides over 100 draws with probability ~2^-46; a constant
+        // or repeating stream (the failure mode this guards) collapses `seen`.
+        assert!(seen.len() >= 99, "RAND() must draw fresh per call; got {} distinct of 100", seen.len());
+        // Distinct executions draw from fresh state too (collision odds ~2^-53).
+        let one = |q: &str| crate::query(&g, q).unwrap().rows[0][0].clone();
+        assert_ne!(
+            one("SELECT ?r WHERE { ?s <http://ex/p> ?o BIND(RAND() AS ?r) } LIMIT 1"),
+            one("SELECT ?r WHERE { ?s <http://ex/p> ?o BIND(RAND() AS ?r) } LIMIT 1"),
+            "RAND() must not repeat across executions"
+        );
+    }
+
+    /// DENY-list guard (the memoisation-policy block in `eval_function_inner`):
+    /// every non-deterministic builtin — UUID(), STRUUID(), no-arg BNODE() —
+    /// must yield a FRESH value on every call. A value-keyed memo wired around
+    /// any of them (they take zero arguments, so a memo collapses ALL calls to
+    /// one value) fails this immediately: all 50 rows would bind one term.
+    #[test]
+    fn nondeterministic_builtins_fresh_per_call_never_memoised() {
+        let g = wide_graph(50);
+        for (expr, what) in
+            [("UUID()", "UUID"), ("STRUUID()", "STRUUID"), ("BNODE()", "no-arg BNODE")]
+        {
+            let q = format!("SELECT ?v WHERE {{ ?s <http://ex/p> ?o BIND({expr} AS ?v) }}");
+            let r = crate::query(&g, &q).unwrap();
+            assert_eq!(r.len(), 50);
+            let distinct: std::collections::HashSet<String> =
+                r.rows.iter().map(|row| row[0].clone().unwrap().to_string()).collect();
+            assert_eq!(distinct.len(), 50, "{what} must be fresh per call, never memoised");
+        }
+    }
+
+    // ---- (C) NOW() query-constancy (SPARQL 1.1 §17.4.5.1) -----------------------
+
+    /// Deterministic guard mechanics (no clock dependence): outermost-wins
+    /// nesting, worker-guard restore, clear on the OUTERMOST drop only.
+    #[test]
+    fn query_now_scope_mechanics() {
+        assert_eq!(query_now::snapshot(), None);
+        let g1 = query_now::scope();
+        let v = query_now::snapshot().expect("outermost scope samples the clock");
+        {
+            let g2 = query_now::scope(); // nested (sub-select / EXISTS re-entry)
+            assert_eq!(query_now::snapshot(), Some(v), "nested scope keeps the outer instant");
+            drop(g2);
+            assert_eq!(query_now::snapshot(), Some(v), "nested drop must NOT clear the outer instant");
+        }
+        {
+            let w = query_now::worker_install(Some(v + 999));
+            assert_eq!(query_now::snapshot(), Some(v + 999));
+            drop(w);
+            assert_eq!(query_now::snapshot(), Some(v), "worker guard restores the previous instant");
+        }
+        drop(g1);
+        assert_eq!(query_now::snapshot(), None, "outermost drop clears: the next execution re-samples");
+    }
+
+    /// A sleeping extension function forces a REAL ≥1 s clock advance INSIDE one
+    /// execution between two NOW() evaluations — they must still be equal (before
+    /// this fix each evaluation re-read the clock, so the seconds differed and
+    /// this test fails). A separate execution afterwards necessarily lands in a
+    /// LATER second, proving the pinned instant does not leak across executions.
+    #[test]
+    fn now_constant_within_execution_fresh_across_executions() {
+        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
+        let mut reg = crate::FunctionRegistry::new();
+        reg.register("http://test/sleep", |_args: &[Term]| {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            Ok(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)))
+        });
+        let q = "SELECT ?a ?b WHERE { ?s ?p ?o BIND(NOW() AS ?a) \
+                 BIND(<http://test/sleep>() AS ?x) BIND(NOW() AS ?b) }";
+        let r = crate::query_with_functions(&g, q, &reg).unwrap();
+        assert_eq!(r.len(), 1);
+        let (a, b) = (r.rows[0][0].clone().unwrap(), r.rows[0][1].clone().unwrap());
+        assert_eq!(a, b, "NOW() must be constant across a >=1s in-execution clock advance");
+        // This execution starts >=1.2s after the first one PINNED its instant, so
+        // its whole-second lexical is strictly later — a stale thread-local NOW
+        // reused across queries would return `a` here.
+        let r2 = crate::query(&g, "SELECT ?n WHERE { ?s ?p ?o BIND(NOW() AS ?n) }").unwrap();
+        assert_ne!(r2.rows[0][0].clone().unwrap(), a, "a NEW execution must sample a NEW instant");
+    }
+
+    /// EXISTS re-entry across a REAL clock tick. The EXISTS body sleeps >=1.2s and
+    /// evaluates `NOW()` inside its own FILTER expression path, so the nested
+    /// evaluation re-enters expression handling ON THE SAME THREAD while the outer
+    /// execution's instant is still pinned. `?a` (`NOW()` from BEFORE the EXISTS)
+    /// must therefore equal `?b` (`NOW()` from AFTER the EXISTS returns, >=1.2s of
+    /// real time later): a single pinned instant survives the whole
+    /// EXISTS-inclusive execution. Pre-fix, `?a` and `?b` re-read the clock and
+    /// land in different whole seconds.
+    ///
+    /// The EXISTS is CORRELATED on `?s` (a shared BOUND variable), so it runs the
+    /// per-row `eval_graph_pattern` re-entry rather than the uncorrelated ASK fast
+    /// path — the branch that actually re-enters expression evaluation for the
+    /// inner `NOW()`. An outer-only variable is deliberately NOT referenced inside
+    /// the EXISTS (spargebra does not substitute it into the inner scope).
+    #[test]
+    fn now_exists_reentry_same_instant() {
+        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
+        let mut reg = crate::FunctionRegistry::new();
+        reg.register("http://test/sleep", |_args: &[Term]| {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            Ok(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)))
+        });
+        let q = "SELECT ?a ?b WHERE { ?s ?p ?o BIND(NOW() AS ?a) \
+                 FILTER EXISTS { ?s ?p ?o2 BIND(<http://test/sleep>() AS ?x) FILTER(STR(NOW()) = STR(NOW())) } \
+                 BIND(NOW() AS ?b) }";
+        let r = crate::query_with_functions(&g, q, &reg).unwrap();
+        assert_eq!(r.len(), 1);
+        let (a, b) = (r.rows[0][0].clone().unwrap(), r.rows[0][1].clone().unwrap());
+        assert_eq!(a, b, "NOW() before and after a >=1.2s EXISTS re-entry must be the SAME pinned instant");
+    }
+
+    /// Parallel-threshold row count: a single NOW() instant across ALL rows AND a
+    /// zero un-scoped-fallback delta. The fallback counter is what makes this
+    /// non-vacuous at whole-second clock granularity: without the rayon
+    /// `worker_install` wiring the workers' evaluations fall back to fresh clock
+    /// samples and the counter goes hot even when every sample lands in the same
+    /// second.
+    // [OPUS-4.8] (sq-98w7z.1) Gated on `parallel`: the test's whole point is the rayon
+    // `worker_install` NOW-snapshot wiring, and it references `PAR_THRESHOLD` — both of which only
+    // exist under the `parallel` feature. Without it there is no worker path to guard and the
+    // constant reference would not compile (feature-OFF clippy caught this).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn now_parallel_rows_single_instant_no_fallback() {
+        use std::sync::atomic::Ordering;
+        // Just past PAR_THRESHOLD: the FILTER/BIND parallel branches activate on a
+        // `>= PAR_THRESHOLD` row count (independent of per-row cost), so a thin
+        // over-threshold graph exercises the exact rayon worker paths this test
+        // guards while staying cheap on a contended box. `+ 200` keeps a healthy
+        // margin so the branch fires deterministically.
+        let rows = PAR_THRESHOLD + 200;
+        let g = wide_graph(rows);
+        let f0 = query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed);
+        let q = "SELECT ?n WHERE { ?s <http://ex/p> ?o BIND(NOW() AS ?n) FILTER(STR(?n) = STR(NOW())) }";
+        let r = crate::query(&g, q).unwrap();
+        assert_eq!(r.len(), rows, "every row's FILTER NOW() must equal its BIND NOW()");
+        let mut distinct = std::collections::HashSet::new();
+        for row in &r.rows {
+            distinct.insert(row[0].clone().unwrap().to_string());
+        }
+        assert_eq!(distinct.len(), 1, "NOW() must be one instant across all rows");
+        assert_eq!(
+            query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed) - f0,
+            0,
+            "no evaluation path may fall back to an un-pinned clock sample"
+        );
     }
 }
 
@@ -16173,6 +17373,29 @@ mod f64_collapse_order_agreement {
                 s
             );
         }
+
+        // [FABLE-5] sq-74oy4 / sq-6b1lj: the alignment now extends to PER-DATATYPE
+        // well-formedness AND whitespace. `as_num` is datatype-aware and trimming, so it
+        // agrees with `as_numeric` (`Num::of_literal`) on integer/decimal lexicals too — a
+        // padded lexical is its trimmed value; a lexical ill-formed FOR its datatype is None.
+        let ints = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::INTEGER)));
+        let decs = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DECIMAL)));
+        assert_eq!(as_num(&ints(" 1 ")), Some(1.0), "padded integer trims to 1");
+        assert_eq!(as_num(&decs(" 1.5 ")), Some(1.5), "padded decimal trims to 1.5");
+        assert_eq!(as_num(&ints("1.5")), None, "fraction on integer is a type error");
+        assert_eq!(as_num(&ints("1E2")), None, "exponent on integer is a type error");
+        assert_eq!(as_num(&decs("1E2")), None, "exponent on decimal is a type error");
+        // Every one agrees with the exact `as_numeric` seam.
+        for (v, _lbl) in [
+            (ints(" 1 "), "padded int"), (decs(" 1.5 "), "padded dec"),
+            (ints("1.5"), "int fraction"), (ints("1E2"), "int exp"), (decs("1E2"), "dec exp"),
+        ] {
+            assert_eq!(
+                as_num(&v).is_some(),
+                as_numeric(&v).is_some(),
+                "as_num / as_numeric disagree on datatype-aware validity"
+            );
+        }
     }
 
     #[test]
@@ -17504,6 +18727,109 @@ mod compiled_expr_tests {
         assert_ne!(
             pre_sort_rows, b.rows,
             "pre-sort input happened to be sorted — test is vacuous"
+        );
+    }
+
+    /// [SONNET-4.6] sq-7d3dj.30.23 — INDEX-CARRY top-k byte-identity: the bounded
+    /// top-k path (`order_bindings(…, Some(k))`) now carries only the row INDEX in the
+    /// `keyed` vector (not a cloned `Row`) and gathers the k surviving rows from `b.rows`
+    /// by index. This test pins that the gathered result is BYTE-IDENTICAL to the full
+    /// stable sort (`order_bindings(…, None)`) truncated to `[..k]`, for a set with
+    /// deliberate ORDER BY tie groups (duplicate keys) and `k < n`. It also pins the
+    /// exact surviving key sequence so a wrong gather (wrong index, wrong prefix, dropped
+    /// tie-break) turns the test RED.
+    ///
+    /// MUTATION-VERIFICATION (non-vacuous): the `expected_keys` assertion pins the exact
+    /// ascending survivor sequence `[1,1,2,3,4]`. If the gather used the wrong index
+    /// (e.g. `b.rows[*i]` → `b.rows[0]`) or the prefix bound `[..k]` were off, or if the
+    /// stable-tie order were reversed, the surviving sequence changes and this assertion
+    /// fails. Reversing the pinned first element (say to `2`) also makes it fail — verified
+    /// by flipping the expected head and observing RED.
+    #[test]
+    fn index_carry_topk_is_byte_identical_to_full_sort_truncated() {
+        let g = one_row_graph();
+        let local = LocalVocab::default();
+        let n_var = oxrdf::Variable::new_unchecked("n");
+        let n_expr = Expression::Variable(n_var.clone());
+
+        // Inline-int keys with DELIBERATE tie groups: two 1s, two 4s, plus 3,2,3,4.
+        // 8 rows in scrambled input order → the full sort is non-trivial and ties exercise
+        // the index tie-breaker. The distinct SECOND column value tags each row so a wrong
+        // gather (right key, wrong row) is observable, not masked by identical rows.
+        let key = |v: i64| sparq_core::dict::inline_id_of_int(v).unwrap();
+        let tag = |v: i64| sparq_core::dict::inline_id_of_int(1000 + v).unwrap();
+        let tag_var = oxrdf::Variable::new_unchecked("tag");
+        let input_rows = vec![
+            Row::from_slice(&[key(3), tag(0)]),
+            Row::from_slice(&[key(1), tag(1)]),
+            Row::from_slice(&[key(4), tag(2)]),
+            Row::from_slice(&[key(1), tag(3)]),
+            Row::from_slice(&[key(2), tag(4)]),
+            Row::from_slice(&[key(4), tag(5)]),
+            Row::from_slice(&[key(3), tag(6)]),
+            Row::from_slice(&[key(4), tag(7)]),
+        ];
+        let n = input_rows.len();
+        let vars = vec![n_var.clone(), tag_var.clone()];
+        let order = [OrderExpression::Asc(n_expr.clone())];
+
+        // For each k in 1..n (all k < n exercise the bounded index-carry path), the
+        // top-k output must equal the full sort truncated to [..k], byte-for-byte.
+        let mut full = Bindings::unsorted(vars.clone(), input_rows.clone());
+        order_bindings(&g, &local, &mut full, &order, None).unwrap();
+        // Sanity: the full sort actually reorders (input was scrambled) — not vacuous.
+        assert_ne!(full.rows, input_rows, "full sort was a no-op — test is vacuous");
+
+        for k in 1..n {
+            let mut topk = Bindings::unsorted(vars.clone(), input_rows.clone());
+            order_bindings(&g, &local, &mut topk, &order, Some(k)).unwrap();
+            assert_eq!(
+                topk.rows,
+                full.rows[..k].to_vec(),
+                "index-carry top-k (k={}) diverged from full-sort truncated to [..k]",
+                k
+            );
+        }
+
+        // Pin the EXACT surviving ROWS for k=5 so a gather-index bug goes RED. The
+        // expected 5 smallest keys (ascending, ties kept) are [1,1,2,3,4]; the two tied
+        // `1` rows keep INPUT order (stable tie-break) — row idx 1 (tag 1) before row idx 3
+        // (tag 3) — and among the three `3`/`4` boundary the first `3` (tag 0 then tag 6)
+        // and first `4` (tag 2) are the picks. The distinct tag column pins the exact rows,
+        // not just the keys, so a right-key/wrong-row gather is caught.
+        let mut topk5 = Bindings::unsorted(vars.clone(), input_rows.clone());
+        order_bindings(&g, &local, &mut topk5, &order, Some(5)).unwrap();
+        let expected5 = vec![
+            Row::from_slice(&[key(1), tag(1)]), // first tied 1 (input idx 1)
+            Row::from_slice(&[key(1), tag(3)]), // second tied 1 (input idx 3)
+            Row::from_slice(&[key(2), tag(4)]),
+            Row::from_slice(&[key(3), tag(0)]), // first tied 3 (input idx 0)
+            Row::from_slice(&[key(3), tag(6)]), // second tied 3 (input idx 6)
+        ];
+        assert_eq!(
+            topk5.rows, expected5,
+            "top-5 must gather exactly these rows (keys [1,1,2,3,3], stable tie order)"
+        );
+
+        // DESC boundary: k=1 must gather the single MAX-key row. The three `4`s tie; the
+        // FIRST in input order (idx 2, tag 2) wins the stable tie-break. Byte-identical to
+        // the full DESC sort's head.
+        let tag_col = 1usize;
+        let desc = [OrderExpression::Desc(n_expr.clone())];
+        let mut full_desc = Bindings::unsorted(vars.clone(), input_rows.clone());
+        order_bindings(&g, &local, &mut full_desc, &desc, None).unwrap();
+        let mut top1_desc = Bindings::unsorted(vars, input_rows);
+        order_bindings(&g, &local, &mut top1_desc, &desc, Some(1)).unwrap();
+        assert_eq!(top1_desc.rows.len(), 1, "k=1 must yield exactly one row");
+        assert_eq!(
+            top1_desc.rows,
+            full_desc.rows[..1].to_vec(),
+            "DESC k=1 must gather the same head row as the full DESC sort"
+        );
+        assert_eq!(
+            top1_desc.rows[0][tag_col],
+            tag(2),
+            "DESC k=1 head must be the FIRST max-key (4) row in input order (tag 2)"
         );
     }
 

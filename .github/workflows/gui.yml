@@ -261,6 +261,13 @@ jobs:
         working-directory: gui/app
         run: npm run typecheck
 
+      # (sq-w3dmj) [FABLE-5] — the gui/app node:test unit suite (pure helpers: editor keys +
+      # the global-first Tauri fs plugin resolution). Build-free (on-the-fly TS loader); was
+      # previously never exercised in CI.
+      - name: GUI frontend unit tests
+        working-directory: gui/app
+        run: npm run test:unit
+
       # The hosted "Try the GUI live" web target (sub-path basePath).
       - name: GUI frontend static export (web target)
         working-directory: gui/app
@@ -446,6 +453,17 @@ jobs:
       # sparq-engine link and need no display server.
       - name: Test (engine command layer)
         run: cargo test
+
+      # [FABLE-5] sq-ixc3.14 — the OPT-IN federation feature state: clippy + the native-lane
+      # federated-SERVICE tests (federation.rs), which join the live workspace snapshot with a
+      # LIVE loopback SPARQL endpoint through the real engine SERVICE client and prove the
+      # strict egress allowlist refuses an un-allowlisted endpoint pre-HTTP (fail-closed).
+      # Loopback-only — no external network. Keeps BOTH feature states green.
+      - name: Clippy (federation, -D warnings)
+        run: cargo clippy --all-targets --features federation -- -D warnings
+
+      - name: Test (federated SERVICE, native lane)
+        run: cargo test --features federation
 
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #

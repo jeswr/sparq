@@ -63,7 +63,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 45 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 50 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -112,8 +112,13 @@ Recurring invariant shorthands used below:
 | `src/extsort.rs:100` | slice reinterpret (read) | page-align; whole `[u32;3]` triples | `n = len/12` per run. |
 | `src/extsort.rs:232` | `Mmap::map` | own-for-lifetime | `map_perm` read-only map of a perm file we own for the call. |
 | `src/compress.rs:646` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] stream_writer_byte_identical_to_encode_write_to`, sq-vkz7): read-only map of a perm file the test just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates the file during the test, so the subsequent `CompressedPerm::from_mmap` read stays in-bounds over a stable region. [OPUS-4.8] |
+| `src/compress.rs:1800` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] v2_reader_ships_with_mmap_roundtrips`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:1987` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] write_to_v2_roundtrips_through_from_mmap`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:2017` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] v1_file_decodes_byte_identically_forever`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:2104` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the loud-error `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
+| `src/compress.rs:2120` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a second temp perm file the same test created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
 
-### `sparq-vectors` — 9 sites (aligned vector blobs + mmap'd `.spqv` / DiskANN)
+### `sparq-vectors` — 13 sites (aligned vector blobs + mmap'd `.spqv` / DiskANN + the SIMD ANN kernel)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -126,6 +131,10 @@ Recurring invariant shorthands used below:
 | `src/diskann.rs:395` | slice reinterpret (read) | f32 no invalid patterns; align ok | f32→LE bytes; LE target asserted; borrows `b.vectors`. |
 | `src/diskann.rs:509` | `Mmap::map` | own-for-lifetime | read-only map of a DiskANN file; `open` validates after. **B5**. |
 | `src/diskann.rs:596` | slice reinterpret (read) | page-align; `start` a multiple of 4 ⇒ f32-aligned; range validated in `open` | `debug_assert_eq!` checks alignment; f32 accepts any bit pattern; borrows the map. **B5**. |
+| `src/simd.rs:40` (`approx-ann`) | `#[target_feature(enable="neon")]` call | the `neon` ISA extension is present at runtime | entered ONLY inside `if is_aarch64_feature_detected!("neon")` on the line above; `l2_sq_neon` reads exactly `a.len()==b.len()` lanes. [OPUS-4.8] sq-lfo84 |
+| `src/simd.rs:50` (`approx-ann`) | `#[target_feature(enable="avx2,fma")]` call | both `avx2` and `fma` are present at runtime | entered ONLY inside `if is_x86_feature_detected!("avx2") && …("fma")` on the line above; `l2_sq_avx2` reads exactly `a.len()` lanes via unaligned loads. [OPUS-4.8] sq-lfo84 |
+| `src/simd.rs:86` (`approx-ann`) | `unsafe fn l2_sq_neon` (NEON L2² kernel) | caller confirmed `neon`; `a.len()==b.len()` | 16-wide FMA body + 4-wide drain + scalar tail (`get_unchecked` only for `i<len`), so every `vld1q_f32` load is in-bounds. Verified vs an f64 reference for dim 0..=257 (`simd::tests`). [OPUS-4.8] sq-lfo84 |
+| `src/simd.rs:129` (`approx-ann`) | `unsafe fn l2_sq_avx2` (AVX2+FMA L2² kernel) | caller confirmed `avx2`+`fma`; `a.len()==b.len()` | 16-wide FMA body + 8-wide drain + scalar tail (`get_unchecked` only for `i<len`); `_mm256_loadu_ps` is unaligned so no alignment precondition. Numeric output verified by `simd::tests` on the x86_64 CI runner (this aarch64 box cannot execute AVX2). [OPUS-4.8] sq-lfo84 |
 
 ### `sparq-cli` — 2 sites (the `dump-perm` debug command)
 

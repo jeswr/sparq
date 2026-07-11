@@ -11,7 +11,8 @@
 # list (scripts/honesty-phrases.json) — one source of truth, zero drift.
 #
 # This harness builds a self-contained throwaway "site" mirror (papers.ts + a paper .typ +
-# paper-evidence.json + the real gate scripts + the shared list) and drives the REAL
+# paper-evidence.json + the real gate scripts + the shared list + the evidence-BINDING verifier
+# and a shrink-only allowlist that tolerates the synthetic fixture record) and drives the REAL
 # build-papers.mjs against it, asserting:
 #   - CLEAN sources                       => the boundary scan PASSES (and the build proceeds;
 #                                            typst may be absent — we only assert the scan, so
@@ -34,8 +35,17 @@ BUILDER="${ROOT}/site/scripts/build-papers.mjs"
 PERF_GATE="${ROOT}/scripts/check-no-perf-numbers.py"
 PRIV_GATE="${ROOT}/scripts/check-privacy-claims.sh"
 SHARED="${ROOT}/scripts/honesty-phrases.json"
+# [OPUS-4.8] sq-gum8.13: build-papers.mjs now runs the fail-closed evidence-BINDING verifier
+# (scripts/verify-paper-evidence.py) at the build boundary, resolving each canonical record's
+# `binding` against its committed source. The throwaway repo must therefore mirror that too —
+# copy the verifier and seed a shrink-only allowlist that TOLERATES this test's synthetic
+# fixture record (whose `source` is a fake path that cannot resolve in the throwaway repo),
+# exactly as the real repo's allowlist tolerates a real un-migrated record. This keeps BOTH
+# fail-closed gates real: the verifier still runs (it is not disabled), and the honesty-boundary
+# assertions (the actual thing under test) are untouched.
+VERIFIER="${ROOT}/scripts/verify-paper-evidence.py"
 
-for f in "$BUILDER" "$PERF_GATE" "$PRIV_GATE" "$SHARED"; do
+for f in "$BUILDER" "$PERF_GATE" "$PRIV_GATE" "$SHARED" "$VERIFIER"; do
   [ -f "$f" ] || { echo "FATAL: required file not found: $f"; exit 2; }
 done
 command -v node >/dev/null 2>&1 || { echo "FATAL: node not found"; exit 2; }
@@ -60,6 +70,8 @@ cp "$BUILDER"    "${REPO}/site/scripts/build-papers.mjs"
 cp "$PERF_GATE"  "${REPO}/scripts/check-no-perf-numbers.py"
 cp "$PRIV_GATE"  "${REPO}/scripts/check-privacy-claims.sh"
 cp "$SHARED"     "${REPO}/scripts/honesty-phrases.json"
+# [OPUS-4.8] sq-gum8.13: the builder now invokes this verifier at the build boundary.
+cp "$VERIFIER"   "${REPO}/scripts/verify-paper-evidence.py"
 
 # Minimal papers.ts the builder's regex registry parser understands (slug + source).
 cat > "${REPO}/site/src/data/papers.ts" <<'TS'
@@ -85,6 +97,18 @@ TYP
 { "records": { "x.foo": {
   "value": 0.9, "environment": "canonical", "source": "crates/x/tests/y.rs::z",
   "note": "Asserted recall floor on a 20000-vector synthetic set; machine-independent." } } }
+JSON
+  # [OPUS-4.8] sq-gum8.13: the fixture record above is canonical + UNBOUND (no `binding`), and
+  # its `source` is a fake path that does not resolve in this throwaway repo. The build-boundary
+  # evidence-BINDING verifier is fail-closed on exactly that. This record is incidental
+  # scaffolding — the thing under test is the .typ PERF / evidence-note PRIVACY phrase gate, not
+  # the binding. So we tolerate it via the verifier's OWN intended mechanism: seed the shrink-only
+  # allowlist with the key (seed_count matches), exactly as the real repo's allowlist tolerates a
+  # real not-yet-migrated record. This does NOT weaken the verifier (it still runs, resolves, and
+  # would still fail-closed on a drifted/renamed/grown-allowlist record — that behaviour is proven
+  # non-vacuously by `verify-paper-evidence.py --self-test`, a separate CI check).
+  cat > "${REPO}/scripts/paper-evidence-binding-allowlist.json" <<'JSON'
+{ "seed_count": 1, "keys": ["x.foo"] }
 JSON
 }
 

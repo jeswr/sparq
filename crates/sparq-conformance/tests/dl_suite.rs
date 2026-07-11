@@ -74,13 +74,31 @@
 //!   WebOnt-Ontology-003's OWL-1-era non-entailment hinges on the stripped header.
 //! - **M6 — the premise/input literal does not parse with oxrdfxml** (a nested
 //!   `rdf:RDF` property element the strict parser rejects).
-//! - **M7 — L2 profile-grammar arity vs the official singleton-list normalization.**
-//!   L2 requires `ObjectIntersectionOf` arity ≥ 2 (the structural-spec arity); the
-//!   official tagging accepts the RDF singleton-intersection encoding (normalizing it
-//!   to its sole member), so positively-tagged cases carrying `owl:intersectionOf (x)`
-//!   come back `NotIn`. (WebOnt-I5.26-001 left this pin under sq-pbz04.4.12: its input's
-//!   anonymous singleton intersection appears in no axiom, so the M4 fix now ABSTAINS on it
-//!   rather than reaching the arity rule.)
+//! - **M7 — FIXED (sq-pbz04.4.16).** L2 requires `ObjectIntersectionOf` arity ≥ 2 (the
+//!   structural-spec arity); the official tagging accepts the OWL-1-era RDF
+//!   singleton-intersection encoding `_:B owl:intersectionOf ( :A )` by NORMALIZING it to
+//!   its sole member `:A`. The L1 extractor now performs that same model-preserving
+//!   normalization (`⊓{A} ≡ A` under Direct Semantics — a 1-ary intersection has exactly
+//!   its single conjunct's interpretation), so the 27 positively-tagged singleton cases
+//!   (`WebOnt-I5.26-002`/`-005`, `WebOnt-disjointWith-003`…`-009`, each EL/QL/RL) now
+//!   extract to the atomic member and PASS — the whole `PROFILE_DIVERGENCES` pin cleared.
+//!   The arity rule is UNCHANGED for genuine ≥ 2-member intersections. (WebOnt-I5.26-001
+//!   was already removed under sq-pbz04.4.12: its anonymous singleton intersection appears
+//!   in no axiom, so the M4 fix ABSTAINS on it rather than reaching this rule.) [FABLE-5]
+//!
+//! ## Explicit-negative profile lane (sq-pbz04.4.16)
+//!
+//! A SECOND profile direction is now wired: the export's manifest-level
+//! `owl:NegativePropertyAssertion(case, test:profile, {EL|QL|RL})` triples assert a case is
+//! NOT in a profile. Each checkable such row is driven with `expect_in = false` into the
+//! SEPARATE [`gated::DL_PROFILE_NEGATIVE_REFUTED`] lane. This is HONESTLY a partial check:
+//! L2's `In` is axiom-grammar membership over the extracted ALCH shadow and cannot always
+//! refute FULL-profile membership (the profile specs' non-grammar restrictions — anonymous
+//! individuals, datatype maps, global/species constraints — are unimplemented at L2, design
+//! record §4/§5, deferred). So an `In` verdict on an explicit negation is an honest MEASURED
+//! GAP, not a soundness bug: it is pinned as a gap floor with RISE-ONLY semantics (the gap
+//! may only shrink), NEVER asserted to zero, and kept OUT of the positive lane's fail set so
+//! the positive M7-cleared floor never moves when the negative lane grows.
 //!
 //! ## Feature gating (both states)
 //!
@@ -114,7 +132,36 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the L1/L2
     /// fragment, NOT a W3C ProfileIdentificationTest conformance claim.
     /// [FABLE-5] sq-pbz04.4.5
-    pub const DL_PROFILE_FLOOR: usize = 68;
+    /// Re-pinned by sq-pbz04.4.16 (M7 singleton-intersection normalization): +27 (68 → 95).
+    /// The 27 pinned M7 rows (`WebOnt-I5.26-002`/`-005`, `WebOnt-disjointWith-003`…`-009`,
+    /// each EL/QL/RL) whose singleton `owl:intersectionOf ( :A )` L1 now normalizes to its
+    /// member all PASS; `PROFILE_DIVERGENCES` is now empty. [FABLE-5]
+    pub const DL_PROFILE_FLOOR: usize = 95;
+
+    /// EXPLICIT-NEGATIVE profile lane REFUTED (pass) count — checkable
+    /// `owl:NegativePropertyAssertion(case, test:profile, {EL|QL|RL})` rows the L2 checker
+    /// DEFINITIVELY refuted (`NotIn`), driven `expect_in = false`. RISE-only: a genuine new
+    /// full-profile restriction only ADDS refutations. [FABLE-5] sq-pbz04.4.16
+    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 139;
+
+    /// EXPLICIT-NEGATIVE profile lane In-GAP — checkable explicit-negation rows where L2
+    /// answered `In` (could not refute full-profile membership from axiom-grammar membership
+    /// over the ALCH shadow). An HONEST measured limitation, NOT a soundness bug; FALL-only
+    /// (the gap may only shrink as L2 grows the deferred full-profile restrictions,
+    /// sq-1ivw7-style follow-ups). The In-vs-negative gap is `IN_GAP` of
+    /// `REFUTED + IN_GAP` = 180 of 319 (improved from the pre-lane measurement 211/322 — the
+    /// M7 normalization moved the 27 singleton cases into the checkable set on BOTH sides).
+    /// [FABLE-5] sq-pbz04.4.16
+    pub const DL_PROFILE_NEGATIVE_IN_GAP: usize = 180;
+
+    /// EXPLICIT-NEGATIVE profile lane ABSTAINED — explicit-negation rows where L1 extraction
+    /// refused (out-of-fragment input), so L2 abstained (`Unknown`) rather than answering
+    /// either direction. Pinned so the tri-state accounting closes. [FABLE-5] sq-pbz04.4.16
+    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 615;
+
+    /// EXPLICIT-NEGATIVE profile lane OUT-OF-SCOPE — explicit-negation rows excluded at
+    /// selection (owl:imports / functional-syntax-only input). [FABLE-5] sq-pbz04.4.16
+    pub const DL_PROFILE_NEGATIVE_OUT_OF_SCOPE: usize = 74;
 
     /// DIRECT consistency/entailment lane pass count through the L4 `DirectChecker` —
     /// the MEASURED value at the pinned export snapshot, EXACT-pinned (module docs).
@@ -122,8 +169,8 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the scoped
     /// fragment — NOT full OWL 2 DL.
     ///
-    /// COMPOSITION: 105 consistency + 14 inconsistency + 69 positive-entailment +
-    /// 2 negative-entailment = 190. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12/.13
+    /// COMPOSITION: 97 consistency + 14 inconsistency + 69 positive-entailment +
+    /// 2 negative-entailment = 182. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12/.13
     /// Re-pinned by sq-pbz04.4.11 (M1 named-composite fix): +8 net.
     /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): −3 (192 → 189) — three graphs with
     /// an unconsumed anonymous composite (`WebOnt-I5.26-001`/`-006` consistency; `WebOnt-I5.5-005`
@@ -137,7 +184,20 @@ mod gated {
     /// annotation, so it is unanchored / non-rollable — its old skolem pass was coincidental
     /// and unsound for a non-trivial class). Net positive-entailment +1 (70 − 1 = 69), all
     /// four consistency/inconsistency lanes unchanged. [OPUS-4.8] sq-pbz04.4.13
-    pub const DL_DIRECT_FLOOR: usize = 190;
+    /// Re-pinned by sq-pbz04.4.16 (M7 singleton-intersection normalization): −8 (190 → 182),
+    /// ALL in the CONSISTENCY lane (105 → 97) and ALL honest fail-closed abstentions (verified:
+    /// the fail set is UNCHANGED at 5, M3/M5/M6 — never a wrong verdict). MECHANISM: `WebOnt-
+    /// disjointWith-003`…`-009` (7) and `WebOnt-I5.26-005` (1) previously carried a singleton
+    /// `owl:intersectionOf ( :A )` whose arity-1 shape put them OUT of every profile, routing
+    /// consistency to the ALCH tableau (a definitive `Consistent`). The M7 normalization
+    /// collapses those singletons to their member, so the graphs are now correctly IN-RL and
+    /// dispatch routes them to the RL branch — which fail-closed ABSTAINS via the documented
+    /// `RlDivergenceGuard("owl:disjointWith")` (RL rule-set incompleteness on disjointness, the
+    /// DisjointClasses-001/-003 divergences), because "no clash" does not certify consistency
+    /// there. Honest routing to a guarded branch, not a lost capability — the tableau would
+    /// still decide these if reached; graduating them back is a deliberate future re-pin once
+    /// the RL divergence guard is narrowed or a tableau fallback is added. [FABLE-5]
+    pub const DL_DIRECT_FLOOR: usize = 182;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
     /// EXACT-pinned so the tri-state accounting is closed: profile lane, then the four
@@ -164,7 +224,12 @@ mod gated {
     /// free-existential-root conclusion bnode of `WebOnt-AnnotationProperty-002` shifts from a
     /// (coincidental) Pass to a fail-closed `ConclusionAnonymousIndividual` abstention; the two
     /// graduated M2 cases move Fail → Pass (they never counted as abstentions). [OPUS-4.8]
-    pub const DL_DIRECT_ABSTAINED: usize = 464;
+    /// Re-pinned by sq-pbz04.4.16 (M7 singleton-intersection normalization): +8 (464 → 472).
+    /// The 8 consistency cases (`WebOnt-disjointWith-003`…`-009`, `WebOnt-I5.26-005`) that the
+    /// M7 fix re-routes from the ALCH tableau (Pass) to the RL branch move to a fail-closed
+    /// `RlDivergenceGuard("owl:disjointWith")` abstention — see [`DL_DIRECT_FLOOR`] for the full
+    /// mechanism (honest routing to a guarded branch, never a wrong verdict). [FABLE-5]
+    pub const DL_DIRECT_ABSTAINED: usize = 472;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M3/M5/M6): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
@@ -216,49 +281,147 @@ mod gated {
         ),
     ];
 
-    /// PINNED profile-lane divergence rows (positive tags where L2 answers `NotIn`) —
-    /// same exact-set discipline as [`DOCUMENTED_DIVERGENCES`]. All 30 are ONE audited
-    /// mechanism (M7 in the module docs): the OWL-1-era singleton
-    /// `owl:intersectionOf ( :A )` encoding — `_:B owl:intersectionOf` with a
-    /// one-member list — which the export tags in-EL/QL/RL but L2's structural-spec
-    /// arity rule (≥ 2 members) rejects. [FABLE-5] sq-pbz04.4.5
-    const PROFILE_DIVERGENCES: &[(&str, &str)] = &[
-        // WebOnt-I5.26-001 (EL/QL/RL) REMOVED by sq-pbz04.4.12: its input carries an anonymous
-        // `owl:intersectionOf` that appears in no axiom, so the M4 orphan fix now makes
-        // extraction refuse it → the profile set is `Unknown` → the row ABSTAINS rather than
-        // producing the wrong `NotIn` (the M7 singleton divergence no longer applies). [OPUS-4.8]
-        ("owl2-dl/profile-EL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-I5.26-005", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-I5.26-005", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-I5.26-005", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-003", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-003", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-003", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-004", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-004", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-004", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-005", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-005", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-005", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-006", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-006", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-006", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-007", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-007", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-007", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-008", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-008", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-008", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-EL: WebOnt-disjointWith-009", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-disjointWith-009", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-disjointWith-009", "M7 — singleton owl:intersectionOf operand list"),
-    ];
+    /// PINNED positive-profile divergence rows (positive tags where L2 answers `NotIn`) —
+    /// same exact-set discipline as [`DOCUMENTED_DIVERGENCES`]. NOW EMPTY: the single
+    /// audited mechanism (M7 — the OWL-1-era singleton `owl:intersectionOf ( :A )` encoding
+    /// L2's ≥ 2-member arity rule rejected) was FIXED by sq-pbz04.4.16 (L1 now normalizes a
+    /// 1-ary intersection to its sole member, model-preservingly), so all 27 rows
+    /// (`WebOnt-I5.26-002`/`-005`, `WebOnt-disjointWith-003`…`-009`, each EL/QL/RL) now PASS
+    /// and `DL_PROFILE_FLOOR` rose 68 → 95. `WebOnt-I5.26-001` had already been removed by
+    /// sq-pbz04.4.12 (its anonymous singleton appears in no axiom → the M4 orphan fix
+    /// ABSTAINS, never reaching the arity rule). The exact-set assertion keeps the lane
+    /// RED if any future regression re-introduces a positive-tag `NotIn`. [FABLE-5]
+    const PROFILE_DIVERGENCES: &[(&str, &str)] = &[];
+
+    /// RENDER ROUND-TRIP arm (sq-pbz04.4.17) — the number of DIRECT-arm corpus documents
+    /// (premise / input / conclusion / non-conclusion literals) where L1 extraction
+    /// succeeded AND the forward renderer's output re-extracted to an EQUAL structural
+    /// model. EXACT-pinned like the other lanes so the arm can never silently go vacuous
+    /// (a selection bug that skips every document would show as 0 ≠ the pin, not as a
+    /// green no-op). NOT a scoreboard row: this is an internal renderer-fidelity
+    /// invariant over the scoped ALCH fragment, not a conformance-shaped measurement.
+    ///
+    /// MEASURED at the pinned export snapshot AFTER the sq-pbz04.4.17 renderer fix: the
+    /// arm's first run caught 15 REAL mis-renders (14 named-composite-equivalence
+    /// reference divergences, e.g. `WebOnt-description-logic-201`…`-209`, plus the
+    /// self-referential `WebOnt-someValuesFrom-003` rendering to a cyclic expression the
+    /// extractor refuses) — fixed by always emitting the explicit
+    /// `A owl:equivalentClass _:b` shape (see `render.rs`), which moved those 15 from
+    /// violations to passes (278 → 293). [FABLE-5] sq-pbz04.4.17
+    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 293;
+    /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents the L1 extractor refused
+    /// (out-of-ALCH-fragment; the renderer contract is scoped to successful extractions).
+    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 378;
+    /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents whose RDF/XML literal oxrdfxml
+    /// rejects (the M6 mechanism, `FS2RDF-literals-ar`); they reach no lane's extraction.
+    pub const DL_RENDER_ROUNDTRIP_PARSE_FAILED: usize = 1;
+    /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — total documents examined (closed accounting:
+    /// `DOCUMENTS = FLOOR + REFUSED + PARSE_FAILED + violations(0)`).
+    pub const DL_RENDER_ROUNDTRIP_DOCUMENTS: usize = 672;
 
     /// Locate the OWL WG export the same way the inference binary + el-suite lane do.
     fn owl_export() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/w3c/owl2/all.rdf")
+    }
+
+    /// The RENDER ROUND-TRIP corpus arm (sq-pbz04.4.17): extends the renderer's 13
+    /// hand-written round-trip tests (`sparq-reason-dl::render::tests`) to EVERY ontology
+    /// document of the DIRECT-arm corpus. The load-bearing assertion is that
+    /// `report.violations` is EMPTY: whenever L1 extraction succeeds, `render_to_triples`'
+    /// output MUST re-extract to an equal structural model — a violation is a REAL
+    /// renderer/extractor fidelity bug and is NOT pinnable as an acceptable divergence
+    /// (unlike the M3/M5/M6 semantic-expectation divergences of the reasoning lanes).
+    /// The counts are EXACT-pinned so the arm cannot silently go vacuous.
+    #[test]
+    fn dl_render_roundtrip_corpus() {
+        let export = owl_export();
+        if !export.exists() {
+            eprintln!(
+                "SKIP: OWL WG export not present at {} — run scripts/fetch-inference-suites.sh",
+                export.display()
+            );
+            return;
+        }
+        let text = std::fs::read_to_string(&export)
+            .unwrap_or_else(|e| panic!("read {}: {e}", export.display()));
+        let report = dl_suite::run_render_roundtrip_arm(&text).expect("all.rdf parses");
+        // [FABLE-5] Grep-able ratchet line — pass count in field $8, positional args
+        // (CodeQL rust/unused-variable guard).
+        println!("{}", report.render());
+        println!(
+            "OWL 2 DL render round-trip ratchet pass {} of {} (floor {})",
+            report.round_tripped,
+            report.documents,
+            DL_RENDER_ROUNDTRIP_FLOOR
+        );
+        // The invariant: NO violations, ever — not a pinnable divergence set.
+        assert!(
+            report.violations.is_empty(),
+            "render round-trip violations (REAL renderer/extractor fidelity bugs): {:#?}",
+            report.violations
+        );
+        // Exact pins (the module-doc discipline: `==`, so an unexplained rise and a
+        // regression both go red; re-pin deliberately when the fragment or corpus moves).
+        assert_eq!(
+            report.round_tripped, DL_RENDER_ROUNDTRIP_FLOOR,
+            "render round-trip pass count moved (got {}, pinned {}) — re-pin \
+             DL_RENDER_ROUNDTRIP_FLOOR deliberately with evidence",
+            report.round_tripped, DL_RENDER_ROUNDTRIP_FLOOR
+        );
+        assert_eq!(
+            report.extraction_refused, DL_RENDER_ROUNDTRIP_REFUSED,
+            "render round-trip refused count moved — the accounting is pinned"
+        );
+        assert_eq!(
+            report.parse_failed, DL_RENDER_ROUNDTRIP_PARSE_FAILED,
+            "render round-trip parse-failed count moved — the accounting is pinned"
+        );
+        assert_eq!(
+            report.documents, DL_RENDER_ROUNDTRIP_DOCUMENTS,
+            "render round-trip document count moved — the accounting is pinned"
+        );
+        assert!(report.accounting_closed(), "every document in exactly one bucket");
+    }
+
+    /// Render round-trip derivation canary — NOT a W3C case, NOT counted in any pin.
+    /// Proves the arm drives the REAL extract → render → re-extract pipeline end-to-end
+    /// on a mini manifest with KNOWN counts: two in-fragment documents round-trip, one
+    /// out-of-fragment document (owl:sameAs) is refused, and nothing is a violation. A
+    /// neutered arm (one that skips every document, or one that counts refusals as
+    /// round-trips) turns these exact counts RED — and the canary runs WITHOUT the
+    /// corpus file, so the arm logic is exercised even on an offline checkout.
+    #[test]
+    fn dl_render_roundtrip_derivation_canary() {
+        let mini = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xmlns:test="http://www.w3.org/2007/OWL/testOntology#">
+  <test:TestCase rdf:about="http://ex/canary-roundtrip">
+    <rdf:type rdf:resource="http://www.w3.org/2007/OWL/testOntology#PositiveEntailmentTest"/>
+    <test:identifier rdf:datatype="http://www.w3.org/2001/XMLSchema#string">canary-roundtrip</test:identifier>
+    <test:status rdf:resource="http://www.w3.org/2007/OWL/testOntology#Approved"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#DIRECT"/>
+    <test:rdfXmlPremiseOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;owl:Class rdf:about="A"&gt;&lt;rdfs:subClassOf&gt;&lt;owl:Restriction&gt;&lt;owl:onProperty&gt;&lt;owl:ObjectProperty rdf:about="r"/&gt;&lt;/owl:onProperty&gt;&lt;owl:someValuesFrom rdf:resource="B"/&gt;&lt;/owl:Restriction&gt;&lt;/rdfs:subClassOf&gt;&lt;/owl:Class&gt;&lt;/rdf:RDF&gt;</test:rdfXmlPremiseOntology>
+    <test:rdfXmlConclusionOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;owl:Class rdf:about="A"&gt;&lt;rdfs:subClassOf&gt;&lt;owl:Class rdf:about="C"/&gt;&lt;/rdfs:subClassOf&gt;&lt;/owl:Class&gt;&lt;/rdf:RDF&gt;</test:rdfXmlConclusionOntology>
+  </test:TestCase>
+  <test:TestCase rdf:about="http://ex/canary-out-of-fragment">
+    <rdf:type rdf:resource="http://www.w3.org/2007/OWL/testOntology#ConsistencyTest"/>
+    <test:identifier rdf:datatype="http://www.w3.org/2001/XMLSchema#string">canary-out-of-fragment</test:identifier>
+    <test:status rdf:resource="http://www.w3.org/2007/OWL/testOntology#Approved"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#DIRECT"/>
+    <test:rdfXmlPremiseOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;rdf:Description rdf:about="a"&gt;&lt;owl:sameAs rdf:resource="b"/&gt;&lt;/rdf:Description&gt;&lt;/rdf:RDF&gt;</test:rdfXmlPremiseOntology>
+  </test:TestCase>
+</rdf:RDF>"#;
+        let report = dl_suite::run_render_roundtrip_arm(mini).expect("canary export parses");
+        // 3 documents: the ∃r.B premise + the A⊑C conclusion round-trip through the REAL
+        // renderer; the owl:sameAs premise is refused by L1 (out-of-fragment) — and a
+        // refusal is NEVER counted as a round-trip.
+        assert_eq!(report.documents, 3);
+        assert_eq!(report.round_tripped, 2);
+        assert_eq!(report.extraction_refused, 1);
+        assert_eq!(report.parse_failed, 0);
+        assert!(report.violations.is_empty(), "{:?}", report.violations);
+        assert!(report.accounting_closed());
     }
 
     #[test]
@@ -367,6 +530,53 @@ mod gated {
                 + report.profile.fails.len()
                 + report.profile.out_of_fragment_total()
                 + report.profile.out_of_scope_total()
+        );
+
+        // ---- Explicit-negative profile lane (sq-pbz04.4.16) ----------------------------
+        // These are EXACT-pinned MEASUREMENTS of the explicit-negation direction (module
+        // docs). REFUTED (pass) is rise-only; the In-GAP is the honest L2 limitation and is
+        // fall-only (it shrinks as L2 grows the deferred full-profile restrictions — never
+        // rises without an unaudited regression). Both go RED on ANY move so a change is a
+        // deliberate re-pin, exactly like the positive floors.
+        println!(
+            "OWL 2 DL profile explicit-negative lane: refuted {} of {} checkable (In-gap {}), abstained {}",
+            report.profile_negative.pass,
+            report.profile_negative.pass + report.profile_negative.fails.len(),
+            report.profile_negative.fails.len(),
+            report.profile_negative.out_of_fragment_total()
+        );
+        assert_eq!(
+            report.profile_negative.pass, DL_PROFILE_NEGATIVE_REFUTED,
+            "negative-lane REFUTED count moved (got {}, pinned {}) — re-pin \
+             DL_PROFILE_NEGATIVE_REFUTED deliberately with evidence (rise-only)",
+            report.profile_negative.pass, DL_PROFILE_NEGATIVE_REFUTED
+        );
+        assert_eq!(
+            report.profile_negative.fails.len(),
+            DL_PROFILE_NEGATIVE_IN_GAP,
+            "negative-lane In-GAP moved (got {}, pinned {}) — the gap is fall-only; a RISE is \
+             an unaudited regression, a FALL is a deliberate re-pin when L2 grows a sound \
+             full-profile restriction",
+            report.profile_negative.fails.len(),
+            DL_PROFILE_NEGATIVE_IN_GAP
+        );
+        assert_eq!(
+            report.profile_negative.out_of_fragment_total(),
+            DL_PROFILE_NEGATIVE_ABSTAINED,
+            "negative-lane abstention total moved — the tri-state accounting is pinned"
+        );
+        assert_eq!(
+            report.profile_negative.out_of_scope_total(),
+            DL_PROFILE_NEGATIVE_OUT_OF_SCOPE,
+            "negative-lane out-of-scope total moved — the tri-state accounting is pinned"
+        );
+        // Closed accounting for the negative lane too.
+        assert_eq!(
+            report.profile_negative.total(),
+            report.profile_negative.pass
+                + report.profile_negative.fails.len()
+                + report.profile_negative.out_of_fragment_total()
+                + report.profile_negative.out_of_scope_total()
         );
     }
 

@@ -486,8 +486,18 @@ pub(crate) fn create_term_definition(
                 return Err(JsonLdError::new(E::InvalidIriMapping));
             }
             def.iri = Some(expanded.clone());
-            // Round-trip check for compact / relative-IRI terms.
-            if term.find(':').is_some_and(|i| i > 0) || term.contains('/') {
+            // Round-trip check for compact / relative-IRI terms (JSON-LD 1.1 §4.2.2 step
+            // 14.3.3).  This check is ABSENT from the JSON-LD 1.0 algorithm — it was added
+            // in 1.1 to disallow inconsistent compact-IRI redefinitions.  In JSON-LD 1.0
+            // mode the check is skipped (W3C expand/0026 maps rdf:type→@type and
+            // expand/0071 remaps v:term→v:somethingElse — both VALID in 1.0).
+            // The check is also skipped when the IRI mapping is a keyword (e.g. `@type`):
+            // keywords are not IRIs, so the round-trip "expand term = IRI mapping" predicate
+            // cannot hold and the check would always fire spuriously.
+            if env.mode != ProcessingMode::JsonLd10
+                && !is_keyword(&expanded)
+                && (term.find(':').is_some_and(|i| i > 0) || term.contains('/'))
+            {
                 defined.insert(term.to_string(), true);
                 let rt = expand_iri_in_context(active, term, false, true, local, defined, env)?;
                 if rt.as_deref() != Some(expanded.as_str()) {
@@ -598,6 +608,25 @@ fn create_reverse_definition(
             j if is_null(j) => vec![],
             _ => return Err(JsonLdError::new(E::InvalidReverseProperty)),
         };
+    }
+    // [SONNET-4.6] sq-oy1f.45 — §4.2.2 step 18: `@index` applies to `@container @index`
+    // terms including reverse properties (W3C expand/0131: a `@reverse` + `@container @index`
+    // + `@index "predicate"` combination).  The non-reverse path processes `@index` inside
+    // `finish_definition`, but `create_reverse_definition` returns early before reaching
+    // `finish_definition`.  Apply it here so the property-valued-index key is stored.
+    if let Some(idx) = value.get("@index") {
+        if env.mode == ProcessingMode::JsonLd10 || !def.container.iter().any(|m| m == "@index") {
+            return Err(JsonLdError::new(E::InvalidTermDefinition));
+        }
+        let Json::Str(is) = idx else {
+            return Err(JsonLdError::new(E::InvalidTermDefinition));
+        };
+        let is = is.clone();
+        match expand_iri_in_context(active, &is, false, true, local, defined, env)? {
+            Some(e) if is_absolute_iri(&e) => {}
+            _ => return Err(JsonLdError::new(E::InvalidTermDefinition)),
+        }
+        def.index = Some(is);
     }
     def.reverse = true;
     active.term_definitions.insert(term.to_string(), def);

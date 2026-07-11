@@ -288,6 +288,120 @@ async fn query_is_access_controlled_per_session() {
 }
 
 // ---------------------------------------------------------------------------
+// sq-snopa.7 — Link: rel="acl" response header (FR-5).
+// The decide and wac-allow endpoints must emit the RFC 8288 Link header value from
+// WacDecision::acl_link_header() when a governing ACL was discovered, and MUST NOT emit it
+// when none was found (fail-closed — nothing to advertise).
+// ---------------------------------------------------------------------------
+
+/// decide emits `Link: <acl-iri>; rel="acl"` when a governing ACL is known.
+/// MUTATION SPOT-CHECK: change the expected value below to `<https://pod.ex/.OTHER>; rel="acl"`
+/// and this test goes red — confirming it exercises the real header, not a vacuous assertion.
+#[tokio::test]
+async fn decide_emits_link_header_when_governing_acl_known() {
+    // [SONNET-4.6] sq-snopa.7: assert the RFC-8288 Link header is present and correct.
+    let base = spawn(true).await;
+    let resp = client()
+        .post(format!("{base}/authz/decide"))
+        .json(&decide_body(
+            Some("https://alice.ex/card#me"),
+            "https://pod.ex/notes/n1",
+            "read",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let link = resp
+        .headers()
+        .get("link")
+        .expect("decide must emit a Link header when a governing ACL is known")
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        link,
+        r#"<https://pod.ex/.acl>; rel="acl""#,
+        "Link header must be the RFC-8288 link-value for the governing ACL"
+    );
+}
+
+/// decide does NOT emit a Link header when no governing ACL exists (resource outside the pod).
+/// Fail-closed: if there is no ACL document to advertise, nothing is emitted.
+#[tokio::test]
+async fn decide_omits_link_header_when_no_governing_acl() {
+    // [SONNET-4.6] sq-snopa.7: resource with no governing ACL → no Link header.
+    let base = spawn(true).await;
+    let resp = client()
+        .post(format!("{base}/authz/decide"))
+        .json(&decide_body(
+            Some("https://alice.ex/card#me"),
+            "https://other.ex/resource", // not in the WAC dataset — no governing ACL
+            "read",
+        ))
+        .send()
+        .await
+        .unwrap();
+    // The status is a deny (no grant) — but we are testing the HEADER, not the body.
+    assert!(
+        resp.headers().get("link").is_none(),
+        "decide must NOT emit a Link header when no governing ACL was discovered"
+    );
+}
+
+/// wac-allow emits `Link: <acl-iri>; rel="acl"` when a governing ACL is known.
+#[tokio::test]
+async fn wac_allow_emits_link_header_when_governing_acl_known() {
+    // [SONNET-4.6] sq-snopa.7: wac-allow must also carry the Link header.
+    let base = spawn(true).await;
+    let resp = client()
+        .post(format!("{base}/authz/wac-allow"))
+        .json(&serde_json::json!({
+            "dataset": WAC_NQUADS,
+            "session": { "agent": "https://alice.ex/card#me" },
+            "resource": "https://pod.ex/notes/n1",
+            "view": "wac",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let link = resp
+        .headers()
+        .get("link")
+        .expect("wac-allow must emit a Link header when a governing ACL is known")
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        link,
+        r#"<https://pod.ex/.acl>; rel="acl""#,
+        "Link header must be the RFC-8288 link-value for the governing ACL"
+    );
+}
+
+/// wac-allow does NOT emit a Link header when no governing ACL exists.
+#[tokio::test]
+async fn wac_allow_omits_link_header_when_no_governing_acl() {
+    // [SONNET-4.6] sq-snopa.7: resource outside the dataset → no governing ACL → no Link header.
+    let base = spawn(true).await;
+    let resp = client()
+        .post(format!("{base}/authz/wac-allow"))
+        .json(&serde_json::json!({
+            "dataset": WAC_NQUADS,
+            "session": { "agent": "https://alice.ex/card#me" },
+            "resource": "https://other.ex/resource", // not in the WAC dataset
+            "view": "wac",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers().get("link").is_none(),
+        "wac-allow must NOT emit a Link header when no governing ACL was discovered"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // read-auth gating.
 // ---------------------------------------------------------------------------
 

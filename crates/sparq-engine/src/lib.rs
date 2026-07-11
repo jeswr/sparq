@@ -181,6 +181,31 @@ pub mod distinct_pushdown_testing {
     }
 }
 
+/// Test-only surface for the OPT-IN characteristic-set anchor-incidence prune (bead
+/// `sq-jnb1e`, the `cs-anchor-incidence` feature): toggle the prune and read whether it fired
+/// plus how many candidate predicates it eliminated, so the differential acceptance test can
+/// compare the incidence-pruned block scan against the exact scan within one binary. NOT part
+/// of the stable query API. [FABLE-5]
+#[cfg(feature = "cs-anchor-incidence")]
+#[doc(hidden)]
+pub mod anchor_incidence_testing {
+    /// Enables/disables the incidence prune on the current thread, returning the previous
+    /// value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::anchor_incidence::set_enabled(v)
+    }
+
+    /// Clears the per-query incidence statistics.
+    pub fn reset_stats() {
+        crate::exec::anchor_incidence::reset_stats()
+    }
+
+    /// `(incidence_built, predicates_pruned)` since the last [`reset_stats`].
+    pub fn stats() -> (bool, usize) {
+        crate::exec::anchor_incidence::stats()
+    }
+}
+
 /// Test/measurement hooks for the correlated (theta) anti-join — the
 /// `OPTIONAL … FILTER(!bound(?nb))` negation idiom with a correlated inner FILTER
 /// (bead sq-7d3dj.30.9, SP2Bench q06). A semantics-preserving perf optimisation that
@@ -204,6 +229,16 @@ pub mod theta_antijoin_testing {
     /// last [`reset_stats`].
     pub fn stats() -> (bool, usize, usize) {
         crate::exec::theta_antijoin::stats()
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.30.20) Number of anti-join shapes the STATIC early-decline gate
+    /// (opt-in `antijoin-static-decline`) rejected BEFORE evaluating the mandatory left side
+    /// since the last [`reset_stats`] — i.e. the redundant left evaluations the feature saved.
+    /// Compiled only with the feature on; the differential test asserts it is `> 0` on the
+    /// SP2Bench-q07 shape (the gate fired) and `0` on a correlated (q06) shape (it did not).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub fn early_declined() -> usize {
+        crate::exec::theta_antijoin::early_declined()
     }
 }
 
@@ -482,6 +517,32 @@ pub trait SpatialProvider: Send + Sync {
     /// decides. (For a `GeoIndex`: the geographic-CRS `geo:asWKT` literals it
     /// extracted.)
     fn is_indexed(&self, term: &Term) -> bool;
+
+    /// The ID-LEVEL indexed universe: the dictionary ids of the geometries this
+    /// index holds an opinion on — the exact id-set of the terms for which
+    /// [`is_indexed`](Self::is_indexed) returns `true` — returned ONLY when that
+    /// set was resolved against the SAME dict identified by `dict_ptr`
+    /// (`std::ptr::from_ref(&graph.dict) as usize`), else `None`.
+    ///
+    /// This lets the pushdown replace a per-row `Term` materialisation +
+    /// `is_indexed` hash with a pure `FxHashSet<Id>` lookup on the scanned
+    /// column. It is a PURE OPTIMISATION of the `is_indexed` decision: for a row
+    /// whose binding id is `i`, `set.contains(&i)` MUST equal
+    /// `is_indexed(&graph.dict.term(i))` — same keep/drop verdict, so the result
+    /// is byte-identical to the per-row path. The FRESHNESS contract is
+    /// load-bearing: an id-set only maps to the right terms against the dict it
+    /// came from, so the provider returns `Some` ONLY when certain the dict
+    /// matches and `None` on ANY doubt — whereupon the engine uses the per-row
+    /// fallback (always correct). Returned as an `Arc` so the engine holds it
+    /// cheaply. The default returns `None` (a provider with no id-level universe
+    /// is served entirely by the per-row path). [OPUS-4.8]
+    fn indexed_ids(
+        &self,
+        dict_ptr: usize,
+    ) -> Option<std::sync::Arc<rustc_hash::FxHashSet<sparq_core::dict::Id>>> {
+        let _ = dict_ptr;
+        None
+    }
 }
 
 /// Runs `f` with `idx` installed as the active spatial index — the planner

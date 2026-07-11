@@ -90,6 +90,8 @@ wasm = [
   "sparq-shacl-wasm",
   "sparq-introspect",
   "sparq-solid",
+  # [FABLE-5] sq-98c: rlib-only wasm smoke — memmap2 target-gated out on wasm32.
+  "sparq-vectors",
 ]
 # [SONNET-4.6] sq-mel85: bench.yml `bench` job — the perf regression gate.
 # TRUE INVARIANT: every hard-gated metric measured on the PR/merge_group tier must have
@@ -133,10 +135,11 @@ crates = ["sparq-kb"]
 
 # W3C/RDF conformance corpus — FETCHED (gitignored) by scripts/fetch-conformance.sh
 # et al. into tests/w3c/. Read by sparq-conformance's suites via
-# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail).
+# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail),
+# and by sparq-jsonld's crate-local W3C flatten harness (tests/flatten.rs).
 [[map]]
 pattern = "tests/w3c/**"
-crates = ["sparq-conformance"]
+crates = ["sparq-conformance", "sparq-jsonld"]
 
 # W3C ODRL test suite — FETCHED by scripts/fetch-odrl-suite.sh into
 # tests/odrl-test-suite/. Read by sparq-policy's odrl_test_suite.rs.

@@ -34,6 +34,11 @@ mmap = ["sparq-core/mmap"]
 # runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
 dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
+# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` so `save ... compressed` (and
+# `recompress`) honour `SPARQ_EMIT_FORMAT=v2` to write the SPQCPRM2 frame-of-reference on-disk
+# format. OFF by default (the default CLI emits SPQCPRM1 bit-for-bit); enabling it is how the
+# real-data B/triple comparison writes both formats from the same corpus.
+spqcprm2 = ["sparq-core/spqcprm2"]
 # [OPUS-4.8] (sq-oy1f.4, epic sq-oy1f) `jsonld` — JSON-LD ingest + re-serialisation, DEFAULT ON
 # (maintainer-directed exception to opt-in-by-default; see `default` above). Forwards
 # `sparq-core/jsonld` (the `oxjsonld` parser `dump <file> jsonld …` / `load <file> jsonld` use to
@@ -80,6 +85,19 @@ terse = ["dep:sparq-terse"]
 # none of the fast-path machinery and is behaviour-identical). Enable to bench the fast path, e.g.
 # `cargo build --release -p sparq-cli --features id-filter-fastpath`.
 id-filter-fastpath = ["sparq-engine/id-filter-fastpath"]
+# [FABLE-5] (sq-jnb1e) Forward sparq-engine's opt-in `cs-anchor-incidence` — the
+# characteristic-set anchor-incidence prune for the DISTINCT predicate-projection semijoin
+# (SP2Bench q09). OFF by default (the default CLI build carries none of the incidence
+# machinery and is behaviour-identical). Enable to bench the prune, e.g.
+# `cargo build --release -p sparq-cli --features cs-anchor-incidence`.
+cs-anchor-incidence = ["sparq-engine/cs-anchor-incidence"]
+# [FABLE-5] (sq-7d3dj.30.21) Forward sparq-engine's opt-in `topk-lazy-strkey` — the lazy
+# string-literal collation key for the top-k ORDER BY selection path (an ORDER-BY on a plain
+# `xsd:string` column + LIMIT builds a zero-allocation id-carrying sort key instead of
+# reconstructing + re-allocating the literal value per input row). OFF by default (the default
+# CLI build carries none of it and is behaviour-identical). Enable to bench the fast path, e.g.
+# `cargo build --release -p sparq-cli --features topk-lazy-strkey`.
+topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
@@ -97,7 +115,13 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # witnesses run in the `sparq-engine (algebra-rewrite)` feature-matrix leg, and
 # `tests/cli_contract.rs::algebra_rewrite_*` is the compile-time + behavioral tripwire
 # that this dep line keeps the pass lit.
-sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner", "algebra-rewrite"] }
+# [OPUS-4.8] sq-7d3dj.30.20: also enable the opt-in `antijoin-static-decline` — a purely
+# static, bag-result-equivalent evaluation-ordering fix that stops the correlated-anti-join
+# recogniser re-evaluating a bare-`!bound` OPTIONAL's (SP2Bench q07's) dominant left side.
+# Same rationale as `algebra-rewrite`: the shipped CLI and canonical bench measure the fixed
+# plan, the LIBRARY default stays OFF, zero new deps / no `unsafe`. Its equivalence witnesses
+# run in the `sparq-engine (antijoin-static-decline)` feature-matrix leg.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", features = ["dp-planner", "algebra-rewrite", "antijoin-static-decline"] }
 # [OPUS-4.8] (sq-l4ki) `query` reuses sparq-server's W3C SELECT result serialisers
 # (XML/CSV/TSV) for its `--format` flag instead of re-implementing them. We take ONLY
 # the pure serialiser library (`results`) — `default-features = false` drops the `server`

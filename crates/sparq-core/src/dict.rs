@@ -1612,6 +1612,29 @@ impl Dict {
         }
     }
 
+    /// [FABLE-5] sq-7d3dj.30.21 — if `id` is a PLAIN `xsd:string` literal (datatype exactly
+    /// `xsd:string`, NO language tag), returns its value as a ZERO-COPY `&str` borrowed from
+    /// the record store; otherwise `None`. A single-probe eligibility test AND value accessor
+    /// for the engine's lazy top-k ORDER-BY string key — it matches EXACTLY the engine's
+    /// `LiteralKind::String` set (no lang tag + `datatype == xsd:string`), so routing such an
+    /// id to a zero-allocation id-carrying sort cell preserves the SPARQL `value()`-order
+    /// exactly (a plain string sorts by its value bytes). Inline-integer ids are numeric
+    /// literals, so they return `None` (no allocation, no reconstruction, unlike `term(id)`).
+    #[inline]
+    pub fn plain_string_value(&self, id: Id) -> Option<&str> {
+        if is_inline(id) {
+            return None;
+        }
+        match self.record(id) {
+            StoredRef::Lit { value, datatype, lang: None }
+                if self.datatypes[datatype as usize].as_ref() == xsd::STRING =>
+            {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the term for an id. Inline-integer ids are decoded directly; others are
     /// reconstructed from the compact record store (panics on an invalid index — ids
     /// come from the store).
@@ -2829,6 +2852,48 @@ mod tests {
             assert_eq!(d.lookup(&int(&v.to_string())), id, "lookup agrees with intern");
         }
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
+    }
+
+    /// [FABLE-5] sq-7d3dj.30.21 — `plain_string_value` returns the ZERO-COPY value slice for
+    /// EXACTLY a plain `xsd:string` literal (no lang tag, datatype `xsd:string`) and `None` for
+    /// every other term kind — the eligibility gate the engine's lazy top-k string key relies
+    /// on to stay byte-identical to the `LiteralKind::String` set.
+    #[test]
+    fn plain_string_value_only_plain_strings() {
+        let mut d = Dict::new();
+        // Plain xsd:string (explicit datatype) and a "simple" literal (implicit xsd:string):
+        // both are plain strings and must return their value slice.
+        let s_typed = d.intern(&Term::Literal(Literal::new_typed_literal("hello", xsd::STRING)));
+        let s_simple = d.intern(&Term::Literal(Literal::new_simple_literal("world")));
+        let s_empty = d.intern(&Term::Literal(Literal::new_simple_literal("")));
+        assert_eq!(d.plain_string_value(s_typed), Some("hello"));
+        assert_eq!(d.plain_string_value(s_simple), Some("world"));
+        assert_eq!(d.plain_string_value(s_empty), Some(""));
+        // Same lexical, canonical id: a simple and an explicit-xsd:string literal of the same
+        // value intern to ONE id (both plain strings).
+        assert_eq!(
+            d.intern(&Term::Literal(Literal::new_simple_literal("hello"))),
+            s_typed,
+            "simple and explicit xsd:string of the same value share one id"
+        );
+
+        // Every non-plain-string kind must be `None`.
+        let lang = d.intern(&Term::Literal(Literal::new_language_tagged_literal("hello", "en").unwrap()));
+        let int_lit = d.intern(&Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER)));
+        let other_dt = d.intern(&Term::Literal(Literal::new_typed_literal(
+            "x",
+            NamedNode::new("http://ex/dt").unwrap(),
+        )));
+        let iri = d.intern(&Term::NamedNode(NamedNode::new("http://ex/a").unwrap()));
+        let blank = d.intern(&Term::BlankNode(oxrdf::BlankNode::new("b0").unwrap()));
+        let inline_int = d.intern(&Term::Literal(Literal::new_typed_literal("7", xsd::INTEGER)));
+        assert_eq!(d.plain_string_value(lang), None, "lang-tagged is not a plain string");
+        assert_eq!(d.plain_string_value(int_lit), None, "large integer literal");
+        assert_eq!(d.plain_string_value(other_dt), None, "other datatype");
+        assert_eq!(d.plain_string_value(iri), None, "IRI");
+        assert_eq!(d.plain_string_value(blank), None, "blank node");
+        assert!(is_inline(inline_int), "small int inlines");
+        assert_eq!(d.plain_string_value(inline_int), None, "inline integer id is never a string");
     }
 
     /// [OPUS-4.8] sq-cvug — a triple-term component id that is IN RANGE but resolves to the

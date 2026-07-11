@@ -32,12 +32,22 @@ import { basePath } from "@/lib/base-path";
 import { SAMPLE_TURTLE, SAMPLE_FORMAT } from "@/data/sample-graph";
 import { type ExportFormat } from "@/lib/rdf-format";
 import {
+  hasNativeFederation,
   hasNativeLoader,
   nativeDiskUsage,
   nativeLoadPath,
   nativeLoadText,
+  nativeServiceQuery,
   type LoadedDocument,
 } from "@/lib/tauri-ipc";
+// [FABLE-5] sq-ixc3.14 — federated SERVICE routing: the pure detector + native-result parse +
+// fail-closed refusal classifier (see lib/federation.ts for the design note).
+import {
+  describeServiceRefusal,
+  parseServiceResults,
+  queryUsesService,
+  WEB_FEDERATION_MESSAGE,
+} from "@/lib/federation";
 // [OPUS-4.8] sq-tp1m (#757) — the tier-b W-reason wasm bundle loader: the REAL forward-chaining
 // RDFS / OWL 2 RL reasoner (crates/sparq-reason via sparq-reason-wasm), lazy-loaded so the lean
 // query engine pays nothing until a workspace turns inference on.
@@ -330,6 +340,20 @@ export interface EngineContextValue {
    */
   setN3Rules: (docs: WorkspaceRulesDoc[]) => void;
   /**
+   * [FABLE-5] sq-ixc3.14 — push the active workspace's FEDERATION egress allowlist to the
+   * engine, so a SERVICE-bearing run hands the native `query_service` command exactly the
+   * endpoints the user allowlisted for THIS workspace. Kept in lockstep with the persisted
+   * workspace setting by `FederationBridge` (mirrors the inference-mode bridge). FAIL-CLOSED:
+   * until pushed (or when empty), every SERVICE endpoint is refused by the native engine.
+   */
+  setServiceAllowlist: (hosts: string[]) => void;
+  /**
+   * [FABLE-5] sq-ixc3.14 — whether the native federated-query IPC is available (inside the
+   * Tauri desktop shell). On the web build this is false and a SERVICE-bearing run degrades
+   * honestly (native-only) instead of hanging on CORS.
+   */
+  nativeFederationAvailable: boolean;
+  /**
    * [OPUS-4.8] sq-ixc3.13 — the whole-dataset N-QUADS snapshot of the live store (default graph +
    * every named graph), the save/open cache a workspace persists as its `dataSnapshot` (sq-atb0).
    * N-Quads (not the TriG `serializeStore` emits) because that is the workspace snapshot format,
@@ -582,6 +606,13 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
 
   const storeRef = React.useRef<WasmStore | null>(null);
   const ctorRef = React.useRef<WasmStoreCtor | null>(null);
+
+  // [FABLE-5] sq-ixc3.14 — the active workspace's FEDERATION egress allowlist, pushed by
+  // `setServiceAllowlist` (the FederationBridge / workspace lifecycle). A ref (not state):
+  // run() reads it imperatively at dispatch time and nothing re-renders on it. Starts EMPTY,
+  // so until a workspace pushes its setting the native engine refuses every SERVICE endpoint
+  // (fail-closed by construction).
+  const serviceAllowRef = React.useRef<string[]>([]);
 
   // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference regime + its materialised closure.
   const [inferenceMode, setInferenceModeState] = React.useState<WorkspaceInferenceMode>("off");
@@ -905,6 +936,14 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setInferenceModeState(mode);
   }, []);
 
+  // [FABLE-5] sq-ixc3.14 — push the active workspace's federation egress allowlist. A plain
+  // ref write: the next SERVICE-bearing run() hands exactly this list to the native engine's
+  // strict fail-closed policy. Called by FederationBridge + the workspace lifecycle (switch /
+  // restore), mirroring setInferenceMode's lockstep discipline.
+  const setServiceAllowlist = React.useCallback((hosts: string[]) => {
+    serviceAllowRef.current = hosts;
+  }, []);
+
   // [sq-glo5r] — push updated N3 rules to the engine; bumps rulesEpoch so the
   // applyInferenceMode effect fires and rebuilds the N3 closure when rules change.
   const setN3Rules = React.useCallback((docs: WorkspaceRulesDoc[]) => {
@@ -1068,7 +1107,30 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       const t0 = performance.now();
       let outcome: QueryOutcome;
       try {
-        if (mode === "explain" || mode === "analyze") {
+        if (mode === "run" && (form === "select" || form === "ask") && queryUsesService(query)) {
+          // [FABLE-5] sq-ixc3.14 — FEDERATED path. The in-tab WASM engine cannot evaluate a
+          // SERVICE clause (no blocking cross-origin HTTP in a browser), so a SERVICE-bearing
+          // SELECT/ASK routes to the desktop shell's NATIVE engine over IPC: a whole-dataset
+          // N-Quads snapshot of the (possibly reasoned) target store + the query + the
+          // per-workspace egress allowlist, evaluated under the engine's STRICT fail-closed
+          // policy (an endpoint off the list is refused pre-HTTP — a typed error, never a
+          // hang). On the web build this degrades HONESTLY with the native-only message
+          // instead of running. The native call is not cooperatively cancellable; a Stop
+          // during flight surfaces as "cancelled" once the (transport-bounded) call returns.
+          if (!hasNativeFederation()) {
+            outcome = { kind: "error", message: WEB_FEDERATION_MESSAGE };
+          } else {
+            const dataset = storeToNQuads(target);
+            const json = await nativeServiceQuery(dataset, query, serviceAllowRef.current);
+            if (signal?.aborted) {
+              outcome = { kind: "cancelled" };
+            } else if (json === null) {
+              outcome = { kind: "error", message: WEB_FEDERATION_MESSAGE };
+            } else {
+              outcome = parseServiceResults(json, rowCap);
+            }
+          }
+        } else if (mode === "explain" || mode === "analyze") {
           // EXPLAIN renders the planner's chosen plan; EXPLAIN ANALYZE also EXECUTES it and
           // traces the per-operator work (the wasm `explain` / `explainAnalyze` bindings, which
           // mirror `sparq_engine::explain[_analyze]` and the server's `explain=plan|analyze`).
@@ -1135,13 +1197,15 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           }
         }
       } catch (err) {
+        // [FABLE-5] sq-ixc3.14 — a native SERVICE egress REFUSAL (the engine's stable marker)
+        // is surfaced as the actionable fail-closed message (pointing at the per-workspace
+        // allowlist); every other error passes through unchanged. A Tauri command rejection is
+        // a plain string, so String(err) covers both shapes.
+        const raw = err instanceof Error ? err.message : String(err);
         outcome =
           err instanceof AbortError || signal?.aborted
             ? { kind: "cancelled" }
-            : {
-                kind: "error",
-                message: err instanceof Error ? err.message : String(err),
-              };
+            : { kind: "error", message: describeServiceRefusal(raw) ?? raw };
       }
       const latencyMs = performance.now() - t0;
       setLastLatencyMs(latencyMs);
@@ -1209,6 +1273,14 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setNativeLoaderAvailable(hasNativeLoader());
   }, []);
 
+  // [FABLE-5] sq-ixc3.14 — whether the native federated-query IPC is reachable (inside the
+  // Tauri shell). Same once-on-mount discipline as nativeLoaderAvailable, so the Query tool
+  // can label the SERVICE run location honestly without re-detecting per render.
+  const [nativeFederationAvailable, setNativeFederationAvailable] = React.useState(false);
+  React.useEffect(() => {
+    setNativeFederationAvailable(hasNativeFederation());
+  }, []);
+
   const value = React.useMemo<EngineContextValue>(
     () => ({
       status,
@@ -1231,6 +1303,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceStatus,
       setInferenceMode,
       setN3Rules,
+      setServiceAllowlist,
+      nativeFederationAvailable,
     }),
     [
       status,
@@ -1253,6 +1327,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceStatus,
       setInferenceMode,
       setN3Rules,
+      setServiceAllowlist,
+      nativeFederationAvailable,
     ],
   );
 

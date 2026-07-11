@@ -713,9 +713,16 @@ export {
   type WorkspaceStoreOptions,
   type KeyValueStorage,
   type TauriFsApi,
+  // (sq-9i1h9) serialized per-workspace saves + (sq-w3dmj) save-failure surfacing.
+  type SerializedWorkspaceSaver,
+  createSerializedWorkspaceSaver,
+  describeWorkspaceSaveError,
+  isQuotaExceededError,
   WORKSPACE_SCHEMA,
   WORKSPACE_INFERENCE_MODES,
   parseInferenceMode,
+  // [FABLE-5] sq-ixc3.14 — per-workspace federation egress allowlist (fail-closed parse).
+  parseServiceAllowlist,
   WebWorkspaceStore,
   MemoryWorkspaceStore,
   TauriWorkspaceStore,

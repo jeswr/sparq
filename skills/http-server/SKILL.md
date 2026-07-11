@@ -143,14 +143,19 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   generation snapshot (`PinnedGen = Arc<sparq_serve::Generation<Graph>>`; call
   `.snapshot() -> &Graph`, `.number() -> u64`, `.published_at()`, `.epochs()`).
 - `AppState::apply_update(&self, sparql: &str) -> Result<u64, String>` — submit a SPARQL
-  Update through the sequenced group-commit writer; **blocks** until the containing
-  generation is published; returns that generation number (read-your-writes token). Call
-  off the async workers (`spawn_blocking`).
+  Update through the sequenced writer; **blocks** until the containing generation is
+  published; returns that generation number (read-your-writes token). Call off the async
+  workers (`spawn_blocking`). With **adaptive group-commit** (default; `adaptive_commit`),
+  a serial interactive client commits in engine-time (µs) — the writer drains only the
+  already-queued backlog and commits, instead of paying a fixed group-commit window;
+  concurrent load still batches. FIFO order, per-update atomicity and durability are
+  unchanged (`sq-p7kk5`).
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
   (**`time-travel` feature only**; the HTTP `?generation=N` pin does NOT need this — it
   resolves against the ring's concurrency-retention window directly, so it works in the
   default build via `sq-ci2d6`).
 - `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
+  adaptive_commit: bool,
   max_body_bytes: usize,
   max_concurrent: usize, header_read_timeout: Option<Duration>, body_read_timeout: Option<Duration>, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_query_bytes: Option<usize>,
@@ -160,7 +165,12 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`update_where_timeout` = separate, typically-SHORTER writer-side WHERE deadline for SPARQL
   UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
-  use `query_timeout`, `sq-nulp`; `max_query_rows` = coarse memory cap; `max_query_bytes` =
+  use `query_timeout`, `sq-nulp`;
+  `adaptive_commit` = **adaptive group-commit** (default `true`): a serial interactive client
+  commits in engine-time (µs) rather than paying a fixed group-commit window; concurrent load
+  still batches. Pure latency change — FIFO/atomicity/durability unchanged. `false` = always
+  windowed. `--no-adaptive-commit` / `SPARQ_ADAPTIVE_COMMIT=0` — `sq-p7kk5`;
+  `max_query_rows` = coarse memory cap; `max_query_bytes` =
   byte-accounted memory cap that also prices row WIDTH + computed-literal size — `sq-s5is`;
   `max_decompress_ratio` = zip-bomb guard — `sq-ebii`;
   `header_read_timeout` = **slow-loris guard**: max time a connection may take to send its
@@ -1029,10 +1039,12 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
   "resource", "mode": "read"|"write"|"append"|"control", "view"? }`. Returns
   `{ "allow", "grantedModes", "governingAcl", "scope", "status", "aclLink" }`. An **allow** is `200`;
   a **deny** maps the FR-6 status — a definitive one (`resolved` without the mode / `noAcl`) is `403`,
-  a retryable one (`unloaded` / `transient`) is `503`. `aclLink` is the RFC-8288 `Link: rel="acl"`
-  header VALUE (FR-5), already in the body so `sq-snopa.7` need only lift it into a response header.
+  a retryable one (`unloaded` / `transient`) is `503`. When a governing ACL was discovered the
+  response also carries `Link: <acl-iri>; rel="acl"` (RFC 8288, FR-5, sq-snopa.7) — the `aclLink`
+  body field holds the same value. Fail-closed: no Link header when no governing ACL exists.
 - `POST /authz/wac-allow` — body `{ "dataset", "session", "resource", "view"? }` → `{ "wacAllow":
-  "user=\"…\",public=\"…\"" }`, the RFC permission advertisement.
+  "user=\"…\",public=\"…\"" }`, the RFC permission advertisement. Also emits `Link: <acl-iri>;
+  rel="acl"` when a governing ACL was discovered (FR-5, sq-snopa.7); omitted when none.
 - `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
   **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
   session sees ZERO rows (empty view), never the whole store.
@@ -1048,10 +1060,12 @@ materialised `PodStore` through the concurrent-serving `AppState`).
 
 ```sh
 cargo run -p sparq-server --features solid-authz -- data.ttl --solid-authz
-curl -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
+curl -si -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
   "dataset": "<https://pod.ex/n1#it> <https://ex.dev/ns#t> \"hi\" <https://pod.ex/n1> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .",
   "session": { "agent": "https://alice.ex/card#me" }, "resource": "https://pod.ex/n1", "mode": "read", "view": "wac" }'
-# → 200 {"allow":true,"grantedModes":["read"],"governingAcl":"https://pod.ex/.acl","scope":"http://www.w3.org/ns/auth/acl#default","status":"resolved","aclLink":"<https://pod.ex/.acl>; rel=\"acl\""}
+# HTTP/1.1 200 OK
+# link: <https://pod.ex/.acl>; rel="acl"
+# → {"allow":true,"grantedModes":["read"],"governingAcl":"https://pod.ex/.acl","scope":"http://www.w3.org/ns/auth/acl#default","status":"resolved","aclLink":"<https://pod.ex/.acl>; rel=\"acl\""}
 ```
 
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
@@ -1061,6 +1075,7 @@ env overrides the default.
 | --- | --- | --- | --- |
 | `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0`=off) | per-request timeout → `503` |
 | `--update-where-timeout SECS` | `SPARQ_UPDATE_WHERE_TIMEOUT` | unset (`0`/unset = use `--query-timeout`) | **separate, typically-SHORTER writer-side WHERE deadline for SPARQL UPDATE** — bounds writer-queue **head-of-line blocking** from a slow update (the single sequenced writer is released within this window instead of holding it for the full read timeout); the update WHERE budget is `min(query_timeout, update_where_timeout)` → slow update `503` (`sq-nulp`) |
+| `--no-adaptive-commit` | `SPARQ_ADAPTIVE_COMMIT` (`0` disables) | adaptive **on** | **adaptive group-commit**: a serial interactive client commits in engine-time (µs) instead of paying a fixed group-commit window; concurrent load still batches. Pure latency change — FIFO/atomicity/durability unchanged. `--no-adaptive-commit` restores the always-windowed writer (`sq-p7kk5`) |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
 | `--header-read-timeout SECS` | `SPARQ_HEADER_READ_TIMEOUT` | `15` (`0`=off) | **slow-loris guard**: max time a connection may take to send its complete request-header block — enforced at hyper's HTTP/1 connection layer by `sparq_server::serve` (NOT `axum::serve`, which never installs a timer so its header deadline is inert), so it fires BEFORE a handler and frees the concurrency slot a dribbling client would otherwise hold forever; connection closed when exceeded (`sq-2gqr`) |
@@ -1086,6 +1101,7 @@ env overrides the default.
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
 | `--solid-authz` | `SPARQ_SOLID_AUTHZ` | off | (feature `solid-authz`) serve the Solid WAC/ACP authorization endpoints `POST /authz/decide`+`/wac-allow`+`/query` — a fail-closed HTTP shell over `sparq-solid`; POST the pod dataset + an already-resolved session, get the decision / `WAC-Allow` value / access-controlled query result; read-only — see "Solid WAC/ACP authorization endpoints" |
+| `--solid-authz-trust` | `SPARQ_SOLID_AUTHZ_TRUST` | off | (feature `solid-authz-trust`, implies `solid-authz`) opt-in stateless trust-graph extension to `POST /authz/decide` — a request may carry an additional `"trust"` JSON block containing credentials, a trust policy, and signed certification edges; the server runs the cert-graph closure (`derive_effective_rules`) and the `sparq_trust::admit` gate over them, injects any admitted facts into the pod dataset, then runs the unchanged WAC/ACP decision; double-opt-in: the feature must be compiled AND this flag set AND the request must carry a `"trust"` block — see "Stateless trust-graph decision extension (sq-pfae.17)"; honest scope: anchored-not-proven clear-path only (no ZK/unlinkability claim; sq-qhy4 external audit PENDING) |
 | `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
 | `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |

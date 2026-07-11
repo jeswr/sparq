@@ -2443,4 +2443,115 @@ mod tests {
             })
         );
     }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): DIRECT unit tests for the private ChannelPeek
+    // readiness probe. Its ready()/is_done() answers only steer the streaming feeder's
+    // side-preference, so no end-to-end result-equality test can observe them (the join
+    // result is order-independent) — cargo-mutants proved that by surviving BOTH
+    // `ready -> true` and `ready -> false`. Pin the probe's contract directly instead.
+    #[test]
+    fn channel_peek_ready_look_ahead_and_done_semantics() {
+        use crate::stream::{Solution, SolutionStream};
+        let (sink, stream) = SolutionStream::bounded(4);
+        let mut peek = ChannelPeek::over(stream);
+        assert!(!peek.ready(), "an empty open channel is NOT ready");
+        assert!(!peek.is_done(), "an open channel is not done");
+        let sol = Solution::new(vec!["s".to_string()], vec![None]);
+        assert!(sink.emit(sol.clone()));
+        assert!(peek.ready(), "an emitted item makes the side ready");
+        assert!(
+            peek.ready(),
+            "readiness is idempotent (the look-ahead buffers exactly one item)"
+        );
+        let got = peek
+            .next()
+            .expect("the buffered look-ahead is the next item")
+            .expect("a solution, not an error");
+        assert_eq!(got, sol, "next() consumes the look-ahead first");
+        assert!(!peek.ready(), "consumed: not ready again until a new emit");
+        drop(sink);
+        assert!(
+            !peek.ready(),
+            "a closed, drained channel is not ready (and marks done)"
+        );
+        assert!(peek.is_done(), "closed + no look-ahead ⇒ done");
+        assert!(peek.next().is_none(), "done ⇒ next() is None");
+    }
+
+    #[test]
+    fn channel_peek_next_blocks_through_to_a_late_item_and_close() {
+        use crate::stream::{Solution, SolutionStream};
+        // next() must return an item emitted AFTER the (empty) readiness probe — the
+        // blocking recv path — and then None once the sink drops.
+        let (sink, stream) = SolutionStream::bounded(1);
+        let mut peek = ChannelPeek::over(stream);
+        assert!(!peek.ready(), "nothing emitted yet");
+        let producer = std::thread::spawn(move || {
+            let ok = sink.emit(Solution::new(
+                vec!["s".to_string()],
+                vec![Some(oxrdf::Term::NamedNode(
+                    oxrdf::NamedNode::new("http://ex/late").unwrap(),
+                ))],
+            ));
+            assert!(ok, "consumer is alive");
+            // sink drops here → the channel closes.
+        });
+        let got = peek.next().expect("the late item arrives").expect("ok");
+        assert_eq!(
+            got.get("s").map(|t| t.to_string()),
+            Some("<http://ex/late>".to_string())
+        );
+        producer.join().unwrap();
+        assert!(peek.next().is_none(), "after close: drained");
+        assert!(peek.is_done());
+    }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): ScatterPool::join must BLOCK until every submitted
+    // job's side effect is visible — that blocking-drain is its whole contract (Drop only
+    // closes the queue and lets workers finish detached). cargo-mutants showed `join` replaced
+    // by `()` survived: no test observed that after join() returns, all work is DONE. Submit
+    // jobs that each sleep then bump a shared counter; a no-op join returns before the sleeping
+    // jobs finish, so the counter would be < N right after it returns.
+    #[test]
+    fn scatter_pool_join_blocks_until_all_jobs_complete() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::time::Duration;
+        const N: usize = 8;
+        let done = StdArc::new(AtomicUsize::new(0));
+        let pool = ScatterPool::new(4, N);
+        for _ in 0..N {
+            let done = StdArc::clone(&done);
+            pool.submit(move || {
+                // Sleep so a no-op join cannot have waited for this to finish.
+                std::thread::sleep(Duration::from_millis(40));
+                done.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        // Not yet joined: at least one job is still sleeping, so the count is below N.
+        pool.join();
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            N,
+            "join() must block until EVERY submitted job has completed its side effect"
+        );
+    }
+
+    #[test]
+    fn scatter_pool_runs_every_submitted_job_exactly_once() {
+        // Each of N distinct jobs records its own index; after join the recorded set is
+        // EXACTLY {0..N} — no job dropped, none run twice (submit → send → worker runs once).
+        use std::sync::Arc as StdArc;
+        const N: usize = 16;
+        let seen: StdArc<Mutex<Vec<usize>>> = StdArc::new(Mutex::new(Vec::new()));
+        let pool = ScatterPool::new(3, 4);
+        for i in 0..N {
+            let seen = StdArc::clone(&seen);
+            pool.submit(move || seen.lock().unwrap().push(i));
+        }
+        pool.join();
+        let mut got = StdArc::try_unwrap(seen).unwrap().into_inner().unwrap();
+        got.sort_unstable();
+        assert_eq!(got, (0..N).collect::<Vec<_>>(), "every job runs exactly once");
+    }
 }

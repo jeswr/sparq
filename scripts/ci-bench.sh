@@ -28,12 +28,32 @@ cd "$(dirname "$0")/.."
 # [OPUS-4.8] (sq-dzfu) --parse-only: cheap TIMING re-measure for the perf-gate best-of-N flake fix.
 # When present as the first arg, ONLY the parse_ns_per_byte metric is (re-)measured (see measure_parse
 # below) and written out — no big corpus, no wasm build, no well-known suites.
+#
+# [FABLE-5] (sq-6vshe.6 heavy-lane placement, MAINTAINER-DIRECTED extension) --deterministic-only:
+#   scripts/ci-bench.sh --deterministic-only [scale=200000] [out.json=bench-results.json]
+# emits ONLY the DETERMINISTIC (runner-noise-immune) hard-gated byte-count / memory-layout metrics —
+# store_bytes_per_triple, comp_store_bytes_per_triple, store_bytes_per_triple_small, dict_bytes_per_term,
+# wasm_bundle_bytes — and NOTHING else. It deliberately SKIPS every wall-clock timing measurement (the
+# min-of-3 load loop, the min-of-5 parse loop, the query-latency loops, RDFS-inference timing, wasm-opt
+# trend) AND every well-known / crate-example suite (sp2b/dbpsb/watdiv/bsbm/lubm/deeptax/sameas/shacl/
+# geo/fts/vector/rsp/hdt/solid/nlq/zk). This is the FAST, DETERMINISTIC form of the per-PR / merge_group
+# bench gate (bench.yml): the deterministic byte-count RATCHET (scripts/perf-gate.py) still hard-gates
+# every PR against bench/perf-baseline.json — a pure function of the code, seconds not minutes, immune to
+# shared-runner noise — while the noisy latency suites are RELOCATED to the nightly EC2 lane (bench-ec2.yml)
+# so they no longer drag the merge queue or flap the gate. The stanzas below are the EXACT same load/wasm
+# commands the full run uses (single source of truth), just without the timing/suite blocks.
 PARSE_ONLY=0
+DET_ONLY=0
 if [ "${1:-}" = "--parse-only" ]; then
   PARSE_ONLY=1
   shift
   OUT="${1:-bench-results.json}"
   SCALE=0
+elif [ "${1:-}" = "--deterministic-only" ]; then
+  DET_ONLY=1
+  shift
+  SCALE="${1:-200000}"
+  OUT="${2:-bench-results.json}"
 else
   SCALE="${1:-200000}"
   OUT="${2:-bench-results.json}"
@@ -233,6 +253,43 @@ if [ "$PARSE_ONLY" = "1" ]; then
   exit 0
 fi
 
+# [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) --deterministic-only: emit ONLY the DETERMINISTIC
+# byte-count / memory-layout metrics the perf-gate HARD-gates, then exit. This is the FAST per-PR /
+# merge_group form (bench.yml): NO timing loops, NO well-known / crate-example suites. Every command
+# here is byte-for-byte the same one the full run below uses (one load summary for store/dict bytes,
+# one compressed-profile load, one fixed-scale small load, one wasm build) — so the ratchet compares
+# the identical values, just measured without the noisy latency work. `add` is idempotent-per-name;
+# the full run measures these too when it runs on the nightly EC2 lane.
+if [ "$DET_ONLY" = "1" ]; then
+  "$GEN" dump "$SCALE" "$TMP/data.nt" >/dev/null 2>&1
+  # store/dict bytes-per-{triple,term} — DETERMINISTIC memory-layout from the load summary line.
+  "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e" || true
+  dbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dbtriple:-}" ] && add store_bytes_per_triple bytes "$dbtriple"
+  dbterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dbterm:-}" ] && add dict_bytes_per_term bytes "$dbterm"
+  # compressed-profile B/triple (SPARQ_STORE_PROFILE=compressed => into_compressed()) — DETERMINISTIC.
+  SPARQ_STORE_PROFILE=compressed "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e_comp" || true
+  dcbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e_comp" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dcbtriple:-}" ] && add comp_store_bytes_per_triple bytes "$dcbtriple"
+  # store bytes-per-triple at the SECOND (fixed 50k) scale — catches per-triple-overhead regressions.
+  DET_FIX="${PARSE_FIX:-50000}"
+  "$GEN" dump "$DET_FIX" "$TMP/fix.nt" >/dev/null 2>&1
+  "$CLI" bench "$TMP/fix.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/fe" || true
+  dbtriple2=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/fe" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dbtriple2:-}" ] && add store_bytes_per_triple_small bytes "$dbtriple2"
+  # wasm bundle size (bytes, DETERMINISTIC) — same release-wasm profile the shipped bundle uses.
+  if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+    if cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
+      DET_WASM=$(ls target/wasm32-unknown-unknown/release-wasm/*.wasm 2>/dev/null | head -1)
+      [ -n "${DET_WASM:-}" ] && add wasm_bundle_bytes bytes "$(wc -c < "$DET_WASM" | tr -d ' ')"
+    fi
+  fi
+  emit_json > "$OUT"
+  echo "wrote $OUT (--deterministic-only):"; cat "$OUT"
+  exit 0
+fi
+
 "$GEN" dump "$SCALE" "$TMP/data.nt" >/dev/null 2>&1
 
 # load (seconds, smaller better) — the "loaded … in Xs" line goes to stderr; min over 3 runs.
@@ -251,6 +308,17 @@ btriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' 
 [ -n "${btriple:-}" ] && add store_bytes_per_triple bytes "$btriple"
 bterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
 [ -n "${bterm:-}" ] && add dict_bytes_per_term bytes "$bterm"
+
+# [SONNET-4.6] (sq-7d3dj.32.2.5) comp_store_bytes_per_triple — DETERMINISTIC compressed-profile
+# B/triple ratchet. Mirrors the raw store_bytes_per_triple stanza exactly, differing only in that
+# SPARQ_STORE_PROFILE=compressed instructs load_quiet to call into_compressed() after the raw
+# index-build, so the stderr load summary line reports the compressed store's heap_bytes()/len().
+# The {:.0} format in load() is an INTEGER (rounded) — runner-noise-immune, mode:auto gated.
+# Mode=auto, threshold=2%: floor seeded at 56 (SPQCPRM2 V2 post-#1824, 200k scale, 3 consecutive
+# runs, all identical). The floor auto-ratchets DOWN on a genuine improvement, never auto-raises.
+SPARQ_STORE_PROFILE=compressed "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e_comp" || true
+cbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e_comp" | head -1 | grep -oE '[0-9]+' | head -1)
+[ -n "${cbtriple:-}" ] && add comp_store_bytes_per_triple bytes "$cbtriple"
 
 # [OPUS-4.8] Two more DETERMINISTIC (runner-noise-immune) regression GATES on a FIXED corpus.
 # The bytes-per-triple figures vary with scale (fixed per-graph overhead amortises differently),

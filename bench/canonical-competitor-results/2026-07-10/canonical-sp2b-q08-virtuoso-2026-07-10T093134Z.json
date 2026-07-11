@@ -1,0 +1,42 @@
+{
+  "gather": "sparql-same-box-comparison-q08-q12b-virtuoso",
+  "bead": "sq-7d3dj.30.22",
+  "canonical": true,
+  "canonical_note": "CANONICAL: dedicated quiet EC2 c6i.4xlarge (16 vCPU / 32 GiB, x86_64) in eu-west-2. min-of-5 on loaded stores; count cross-checked vs bench/sp2b/expected-rows.tsv. Virtuoso OSS (Docker) is the only prior CORRECT comparator on q08/q12b (QLever disqualified: wrong count 0 on both). sparq built from main@e26380fd.",
+  "git_commit": "e26380fd",
+  "git_commit_full": "e26380fd874a187b226892bf7508653cc83055fb",
+  "git_branch": "main",
+  "suite": "sp2b",
+  "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
+  "iters": 5,
+  "tsv_format": "<query>\t<rows|ERROR>\t<best_us|engine>",
+  "disqualified_note": "QLever returns count 0 on q08 (expected 358) and q12b (expected 1); bnode!=IRI strict-type-error divergence (sq-ai2wa). QLever timing on these two rows is NOT a valid comparator.",
+  "engines": {
+    "sparq": {
+      "version": "e26380fd",
+      "features": "id-filter-fastpath (PRs #1785+#1795)",
+      "mode": "sparq-cli bench (count mode)"
+    },
+    "virtuoso": {
+      "version": "openlink/virtuoso-opensource-7",
+      "mode": "http-sparql via scripts/virtuoso-same-box.sh (isql ld_dir bulk-load) + http_sparql_adapter.py"
+    }
+  },
+  "statuses": {
+    "sparq": "ok",
+    "virtuoso": "ok"
+  },
+  "env": {
+    "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+    "nproc": 16,
+    "os": "Linux",
+    "kernel": "6.17.0-1019-aws",
+    "quiet_box": true,
+    "gathered_at_utc": "2026-07-10T09:31:34Z",
+    "region": "eu-west-2"
+  },
+  "sparq_tsv": "q01\t1\t11.2\nq02\t6067\t11143.7\nq03a\t15823\t2355.0\nq03b\t114\t44.2\nq03c\t0\t57.4\nq04\t541911\t199943.3\nq05b\t6933\t9877.2\nq07\t48\t22745.9\nq08\t358\t36147.5\nq09\t4\t12671.2\nq10\t452\t4.5\nq11\t10\t4534.8\nq12b\t1\t36322.2\nq12c\t0\t5.0\n",
+  "virtuoso_tsv": "q01\t1\t724\nq02\t6067\t353726\nq03a\t15823\t94614\nq03b\t114\t1322\nq03c\t0\t608\nq04\t541911\t8199521\nq05b\t6933\t108348\nq07\t48\t511405\nq08\t358\t12969\nq09\t4\t13503\nq10\t452\t5569\nq11\t10\t13232\nq12b\t1\t8975\nq12c\t0\t576\n",
+  "step_log": "[STEP 2026-07-10T09:28:12Z] apt update+install (including docker.io for Virtuoso)\n[STEP 2026-07-10T09:28:12Z] BEGIN apt (timeout 900s): bash -c apt-get update -qq && apt-get install -y -qq build-essential g++ pkg-config git curl jq python3 python3-venv python3-pip unzip docker.io\n[STEP 2026-07-10T09:28:44Z] OK    apt\n[STEP 2026-07-10T09:28:44Z] start docker daemon (required for Virtuoso OSS)\n[STEP 2026-07-10T09:28:44Z] docker daemon up\n[STEP 2026-07-10T09:28:44Z] rustup install\n[STEP 2026-07-10T09:28:45Z] BEGIN rustup (timeout 600s): bash -c curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal\n[STEP 2026-07-10T09:28:53Z] OK    rustup\n[STEP 2026-07-10T09:28:53Z] git clone + checkout main\n[STEP 2026-07-10T09:28:58Z] checked out e26380fd\n[STEP 2026-07-10T09:28:58Z] cargo build sparq-cli (release)\n[STEP 2026-07-10T09:28:58Z] BEGIN build-sparq-cli (timeout 2400s): cargo build --release -q -p sparq-cli\n[STEP 2026-07-10T09:30:06Z] OK    build-sparq-cli\n[STEP 2026-07-10T09:30:06Z] sp2b gen (250000 triples)\n[STEP 2026-07-10T09:30:06Z] BEGIN sp2b-gen (timeout 600s): bash -c bash bench/sp2b/gen.sh 250000 > /tmp/corpus_path.txt 2>/tmp/gen.err\n[STEP 2026-07-10T09:30:25Z] OK    sp2b-gen\n[STEP 2026-07-10T09:30:25Z] corpus=/tmp/sp2b/sp2b-250000.ttl\n[STEP 2026-07-10T09:30:25Z] sparq-cli bench (count, iters=5)\n[STEP 2026-07-10T09:30:25Z] BEGIN sparq-run (timeout 1200s): bash -c ./target/release/sparq-cli bench \"/tmp/sp2b/sp2b-250000.ttl\" turtle bench/sp2b/queries 5 count > /tmp/sparq.tsv 2>/tmp/sparq.err\n[STEP 2026-07-10T09:30:27Z] OK    sparq-run\n[STEP 2026-07-10T09:30:27Z] Virtuoso same-box run (scripts/virtuoso-same-box.sh, iters=5)\n[STEP 2026-07-10T09:30:27Z] BEGIN virtuoso (timeout 3600s): bash scripts/virtuoso-same-box.sh /tmp/sp2b/sp2b-250000.ttl ttl bench/sp2b/queries 5 /tmp/virtuoso.tsv\n[STEP 2026-07-10T09:31:34Z] OK    virtuoso\n[STEP 2026-07-10T09:31:34Z] Virtuoso OK\n[STEP 2026-07-10T09:31:34Z] count cross-check\n[STEP 2026-07-10T09:31:34Z] q08/q12b timing comparison\n"
+}

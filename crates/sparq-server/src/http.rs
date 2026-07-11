@@ -222,6 +222,27 @@ pub struct ServerConfig {
     /// writer is out of scope — see `sparq_serve`'s scheduler docs). Set via
     /// `--update-where-timeout` / `SPARQ_UPDATE_WHERE_TIMEOUT` (seconds; `0` disables).
     pub update_where_timeout: Option<Duration>,
+    /// [OPUS-4.8] (sq-p7kk5) **Adaptive group-commit for the write path.** The sequenced
+    /// writer normally waits a fixed group-commit window (`sparq_serve`'s 3 ms default) after
+    /// the first update in a batch, absorbing any concurrent updates that arrive within it into
+    /// one published generation. For a **serial / low-concurrency interactive** client (one
+    /// in-flight `application/sparql-update` at a time — the LDP-CRUD shape) that window is pure
+    /// latency: the client is blocked on its own ack, so nothing can arrive to fill it, and each
+    /// update pays ~one window even though the engine's in-place apply is ~15 µs (the sq-p7kk5
+    /// update-path gap: the fixed window dominated ~99 % of a serial client's commit latency).
+    ///
+    /// When `true` (the DEFAULT — the server's write path is interactive) the writer instead
+    /// drains only the already-queued backlog after the first update and commits the moment it
+    /// empties, so a serial client commits in engine-time (µs) rather than window-time (ms). A
+    /// genuinely concurrent stream still batches every update that had piled up between the
+    /// writer's iterations, so group-commit amortisation under real load is preserved. This is a
+    /// pure LATENCY change with NO effect on the mutation/durability contract: application stays
+    /// strict FIFO, per-update atomicity is unchanged, every accepted update is still committed,
+    /// visibility and the `--persist` durability path are identical, and each committed
+    /// generation is still the serial order — only epoch-tick granularity may be finer under
+    /// overlap (a cache-key concern, never correctness). `false` restores the always-windowed
+    /// behaviour. Set via `--no-adaptive-commit` / `SPARQ_ADAPTIVE_COMMIT=0`.
+    pub adaptive_commit: bool,
     /// Maximum accepted request body, enforced before the handler reads it (413).
     pub max_body_bytes: usize,
     /// Maximum in-flight requests; excess requests are shed with 429.
@@ -683,6 +704,21 @@ pub struct ServerConfig {
     /// cost. Set by the binary's `--solid-authz` flag / `SPARQ_SOLID_AUTHZ=1` env.
     #[cfg(feature = "solid-authz")]
     pub solid_authz: bool,
+    /// [SONNET-4.6] (sq-pfae.17) OPT-IN stateless trust-graph extension to `POST /authz/decide`.
+    ///
+    /// When both this flag AND the `solid-authz-trust` cargo feature are active, the endpoint
+    /// accepts an optional `"trust"` JSON block carrying credential graphs + a trust policy +
+    /// signed certification edges. It runs the cert-graph closure
+    /// (`sparq_trust::derive_effective_rules`) then the UNCHANGED WAC/ACP admission gate, and
+    /// returns a minimal admission justification alongside the decision. FAIL-CLOSED: ANY
+    /// malformed/unverifiable/stale/revoked/over-depth/broadening trust input => 403 DENY.
+    /// Feature OFF => byte-identical to the `solid-authz` path. Double-opt-in: activates ONLY
+    /// when BOTH (a) this feature is compiled AND (b) the request carries a `"trust"` block.
+    ///
+    /// This field exists only with the `solid-authz-trust` cargo feature. Set by
+    /// `SPARQ_SOLID_AUTHZ_TRUST=1`.
+    #[cfg(feature = "solid-authz-trust")]
+    pub solid_authz_trust: bool,
 }
 
 impl Default for ServerConfig {
@@ -693,6 +729,13 @@ impl Default for ServerConfig {
             // update's WHERE budget is the plain query_timeout, exactly as before. An operator
             // who wants to bound writer-queue head-of-line blocking opts a shorter one in.
             update_where_timeout: None,
+            // [OPUS-4.8] sq-p7kk5: adaptive group-commit ON by default — the server's write
+            // path is interactive (a serial client blocked on its own ack), where the fixed
+            // group-commit window is pure latency. A serial client now commits in engine-time
+            // instead of window-time; concurrent load still batches. Pure latency change, no
+            // effect on the FIFO/atomicity/durability contract. Off via --no-adaptive-commit /
+            // SPARQ_ADAPTIVE_COMMIT=0. See ServerConfig::adaptive_commit.
+            adaptive_commit: true,
             max_body_bytes: 1024 * 1024, // 1 MiB
             max_concurrent: 32,
             // [OPUS-4.8] sq-2gqr: a 15s header-read deadline closes the slow-loris hole ON by
@@ -810,6 +853,11 @@ impl Default for ServerConfig {
             // --solid-authz / SPARQ_SOLID_AUTHZ=1). Fail-closed: `/authz/*` is 404 until set.
             #[cfg(feature = "solid-authz")]
             solid_authz: false,
+            // [SONNET-4.6] sq-pfae.17: safe default — the OPT-IN stateless trust-graph extension
+            // is OFF even when the feature is compiled in. The operator opts in deliberately via
+            // SPARQ_SOLID_AUTHZ_TRUST=1. Fail-closed: trust block is ignored until set.
+            #[cfg(feature = "solid-authz-trust")]
+            solid_authz_trust: false,
         }
     }
 }
@@ -886,6 +934,11 @@ impl ServerConfig {
         // (the update WHERE budget is then the plain query_timeout, exactly as before).
         if let Some(secs) = env_parse::<u64>("SPARQ_UPDATE_WHERE_TIMEOUT") {
             cfg.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        // [OPUS-4.8] sq-p7kk5: adaptive group-commit (ON by default). SPARQ_ADAPTIVE_COMMIT=0
+        // restores the always-windowed writer; anything else (or unset) keeps it on.
+        if let Some(n) = env_parse::<u8>("SPARQ_ADAPTIVE_COMMIT") {
+            cfg.adaptive_commit = n != 0;
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_BODY_BYTES") {
             cfg.max_body_bytes = n;
@@ -1091,6 +1144,13 @@ impl ServerConfig {
         #[cfg(feature = "solid-authz")]
         if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ") {
             cfg.solid_authz = env_truthy(&v);
+        }
+        // [SONNET-4.6] sq-pfae.17: SPARQ_SOLID_AUTHZ_TRUST truthy ("1"/"true"/"yes"/"on") enables
+        // the OPT-IN stateless trust-graph extension to POST /authz/decide. Off by default. Only
+        // present with the `solid-authz-trust` feature.
+        #[cfg(feature = "solid-authz-trust")]
+        if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ_TRUST") {
+            cfg.solid_authz_trust = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -2190,7 +2250,7 @@ impl AppState {
         let writer = Arc::new(Writer::spawn(
             ring.clone(),
             applier,
-            WriterConfig::default(),
+            writer_config(&config),
         ));
         // [OPUS-4.8] sq-gos8: open the structured access-audit sink if one is configured. A
         // failure to open (e.g. an unwritable audit-file path) is surfaced as a clean startup
@@ -2572,7 +2632,11 @@ impl AppState {
         let ring_config = build_ring_config(&self.config);
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let applier = ServerApplier::new(self.config.clone());
-        let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
+        let writer = Arc::new(Writer::spawn(
+            ring.clone(),
+            applier,
+            writer_config(&self.config),
+        ));
         // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
         // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
         self.core.store(Arc::new(ServingCore { ring, writer }));
@@ -5159,6 +5223,20 @@ fn update_budget(config: &ServerConfig) -> QueryBudget {
         max_rows: config.max_query_rows,
         // [OPUS-4.8] (sq-s5is) the byte cap reaches the UPDATE's WHERE evaluation too.
         max_bytes: config.max_query_bytes,
+    }
+}
+
+/// [OPUS-4.8] (sq-p7kk5) The sequenced writer's config, derived from the server config: the
+/// stock `sparq_serve` group-commit window/batch defaults, but with adaptive group-commit
+/// wired from [`ServerConfig::adaptive_commit`] (ON by default — the write path is interactive,
+/// where the fixed window is pure latency for a serial client blocked on its own ack). Adaptive
+/// mode changes only WHEN the batch closes (drain the queued backlog, commit immediately when it
+/// empties); FIFO application order, per-update atomicity, visibility and durability are all
+/// unchanged.
+fn writer_config(config: &ServerConfig) -> WriterConfig {
+    WriterConfig {
+        adaptive_commit: config.adaptive_commit,
+        ..WriterConfig::default()
     }
 }
 
@@ -8821,6 +8899,51 @@ mod from_env_tests {
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
         assert!(result.is_none(), "unparseable env var value must yield None from env_parse");
+    }
+
+    // [OPUS-4.8] (sq-p7kk5) Adaptive group-commit: default ON, env toggle, and the
+    // WriterConfig mapping — the write-path latency fix.
+    #[test]
+    fn adaptive_commit_is_on_by_default() {
+        assert!(
+            ServerConfig::default().adaptive_commit,
+            "the interactive write path defaults to adaptive group-commit"
+        );
+    }
+
+    #[test]
+    fn sparq_adaptive_commit_env_zero_disables_it() {
+        std::env::set_var("SPARQ_ADAPTIVE_COMMIT", "0");
+        let off = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_ADAPTIVE_COMMIT");
+        assert!(
+            !off.expect("from_env ok").adaptive_commit,
+            "SPARQ_ADAPTIVE_COMMIT=0 must disable adaptive group-commit"
+        );
+
+        std::env::set_var("SPARQ_ADAPTIVE_COMMIT", "1");
+        let on = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_ADAPTIVE_COMMIT");
+        assert!(
+            on.expect("from_env ok").adaptive_commit,
+            "SPARQ_ADAPTIVE_COMMIT=1 must keep adaptive group-commit on"
+        );
+    }
+
+    #[test]
+    fn writer_config_carries_adaptive_commit_from_server_config() {
+        // The writer the server spawns inherits the server config's adaptive-commit flag,
+        // so the fix actually reaches the sequenced writer (both polarities).
+        let on = ServerConfig {
+            adaptive_commit: true,
+            ..ServerConfig::default()
+        };
+        assert!(super::writer_config(&on).adaptive_commit);
+        let off = ServerConfig {
+            adaptive_commit: false,
+            ..ServerConfig::default()
+        };
+        assert!(!super::writer_config(&off).adaptive_commit);
     }
 
     // [OPUS-4.8] sq-qcnn.37: individual tests for each remaining SPARQ_* env-var body branch
