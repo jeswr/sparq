@@ -75,8 +75,9 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
   by the W3C `sparql/*` sub-suites.
 - **SHACL Advanced Features (opt-in `shacl-af`)** — a rule **inference** step
   (`sh:rule` / `sh:values`, not part of `validate`): `sh:TripleRule`, `sh:SPARQLRule`,
-  value rules, the SHACL 1.2 node-expression algebra + function registry (`shnex:`/`sh:`),
-  and `sh:expression` / `sh:nodeByExpression`. Off ⇒ none of it compiles.
+  value rules, node expressions, and `sh:expression` / `sh:nodeByExpression`;
+  `validate_with_domain` selects asserted facts or `data ∪ inferred`, and its model variant
+  reuses parsed shapes. Off ⇒ none of this surface compiles.
 - **Differential fuzzing** — a deterministic SplitMix64 fuzzer (`tests/diff_fuzz.rs`)
   cross-checks reports against pluggable reference engines (pySHACL, Jena SHACL, the
   Zazuko / `rdf-validate-shacl` Node engines); `#[ignore]`d, a nightly CI lane.
