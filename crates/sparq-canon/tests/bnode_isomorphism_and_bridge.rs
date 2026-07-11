@@ -177,14 +177,20 @@ fn canon_error_display_is_distinct_and_nonempty_per_variant() {
     let tt = CanonError::TripleTerm.to_string();
     let br = CanonError::Bridge("parse boom".into()).to_string();
     let cz = CanonError::Canonicalization("hndq limit".into()).to_string();
+    let nb = CanonError::NestedBlankNode.to_string();
+    let td = CanonError::TripleTermDepthExceeded.to_string();
 
     for (label, msg) in [
         ("TripleTerm", &tt),
         ("Bridge", &br),
         ("Canonicalization", &cz),
+        ("NestedBlankNode", &nb),
+        ("TripleTermDepthExceeded", &td),
     ] {
         assert!(!msg.is_empty(), "{label} Display must be non-empty");
     }
+    assert_ne!(nb, td, "the two ungated profile-guard variants must differ");
+    assert_ne!(tt, td);
     // The wrapped detail must be carried through, and the three messages must differ.
     assert!(
         br.contains("parse boom"),
