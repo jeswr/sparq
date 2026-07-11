@@ -265,8 +265,9 @@ fn materialize_leaf_multi(
 /// The retained source indices for `pattern`, ascending (the deterministic order
 /// [`select_sources`](sparq_fedplan::select_sources) records). A pattern absent from the
 /// selection — or one whose candidate set is empty — contributes no sources, hence an empty
-/// leaf relation. [OPUS-4.8] sq-7yf0.
-fn leaf_source_indices(selection: &[PatternSources], pattern: usize) -> Vec<usize> {
+/// leaf relation. `pub(crate)`: the adaptive executor's union-arm leaf fetch
+/// ([FABLE-5] sq-xw8zz) shares this so both fan-outs resolve arms identically. [OPUS-4.8] sq-7yf0.
+pub(crate) fn leaf_source_indices(selection: &[PatternSources], pattern: usize) -> Vec<usize> {
     selection
         .iter()
         .find(|ps| ps.pattern == pattern)
@@ -348,8 +349,9 @@ fn materialize_leaf(
 ///
 /// This is the wiring the bead asks for: a `JoinTree` leaf that resolves to a TPF/brTPF source is
 /// now answered, not rejected with `Unsupported`. The single-source-per-leaf contract is enforced
-/// by the caller. [OPUS-4.8] sq-yzca.
-fn fetch_leaf_relation(
+/// by the caller. `pub(crate)`: the adaptive executor's union-arm leaf fetch ([FABLE-5] sq-xw8zz)
+/// times this exact fetch per arm, so both interpreters answer a leaf identically. [OPUS-4.8] sq-yzca.
+pub(crate) fn fetch_leaf_relation(
     source: &dyn FederatedSource,
     tp: &TriplePattern,
 ) -> Result<Relation, InterpError> {
@@ -1383,8 +1385,9 @@ fn stream_leaf_multi(
 
 /// Project one parsed SRJ row from its `src_vars` order onto `keep`'s order (an absent
 /// variable becomes unbound). The streaming analogue of [`Relation::project`] for a single
-/// row. [OPUS-4.8] sq-vtba.
-fn rel_row_project(
+/// row. `pub(crate)`: also re-keys union arms in the adaptive executor ([FABLE-5] sq-xw8zz).
+/// [OPUS-4.8] sq-vtba.
+pub(crate) fn rel_row_project(
     src_vars: &[String],
     row: &[Option<Term>],
     keep: &[String],

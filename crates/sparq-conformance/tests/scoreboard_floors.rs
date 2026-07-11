@@ -340,7 +340,12 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     // error-code assertions). Bumped in the SAME commit as src/floors/from_rdf.rs::FLOOR
     // and the ci.yml job name (rise-only; side-by-side in src/floors/from_rdf.rs).
     ("W3C JSON-LD 1.1 fromRdf", 52),
-    ("W3C JSON-LD 1.1 compact", 186),
+    // [FABLE-5] sq-oy1f.27 — oracle-correction re-pin 186 → 228: the compact lane
+    // moved from the RDF-writer self-reparse round-trip to the NATIVE document-level
+    // Compaction Algorithm compared against the W3C EXPECTED document (see
+    // src/floors/compact.rs for the side-by-side). Bumped in the SAME commit as the
+    // lib const (rise-only).
+    ("W3C JSON-LD 1.1 compact", 228),
     ("W3C JSON-LD 1.1 frame", 61),
     // [SONNET-4.6] sq-oy1f.45 — raised 259 → 276 (expand() correctness: FsLoader
     // wiring + @id-null retention + IRI-colon scheme check + @nest scoped ctx

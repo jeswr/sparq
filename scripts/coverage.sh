@@ -107,6 +107,9 @@ PER_COMMIT_CRATES=(
   # misleadingly-low artifact (measured 55-79% native; same class as sparq-cli's
   # subprocess artifact) — they are floor-0 + presence-gated in the JSONs instead.
   sparq-fedclient sparq-fedplan sparq-prov
+  # [FABLE-5] sq-lsp7k.1.1: sparq-forms — opt-in headless SHACL-to-form derivation.
+  # No cargo features (whole surface default-compiled), so no measure() case arm.
+  sparq-forms
   # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
   # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
   # stateful `odrl:count` counter stores (the `count`/`count_file`/`count_backend` modules
@@ -221,7 +224,7 @@ SHARD_GROUPS=(
   # shard 2 (was 3; ~336s measured; + sparq-reason-el [EL rbox+hasse] + sparq-reason-ql [QL experimental], sq-qcnn.23)
   "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-reason-el sparq-reason-ql sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
   # shard 3 (was 4; ~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
-  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize sparq-engine-service"
+  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize sparq-engine-service sparq-forms"
 )
 SHARD_TOTAL=${#SHARD_GROUPS[@]}
 

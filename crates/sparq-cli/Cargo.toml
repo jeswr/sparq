@@ -59,6 +59,12 @@ serialize-rdf = ["sparq-engine/serialize-rdf"]
 # for the common load-and-query paths. Enable with
 # `cargo build -p sparq-cli --features hdt`.
 hdt = ["dep:sparq-hdt"]
+# [FABLE-5] (sq-8ju74) `hdt-write` — the `to-hdt` EXPORT subcommand (Graph -> standard-layout
+# HDT v1.0 via sparq-hdt's direct in-memory encoder; `.hdt.gz`/`.hdt.zst`/`.hdt.bz2` chosen by
+# the OUTPUT extension). Implies `hdt` (the loader — `to-hdt` reads its input through the same
+# shared load path, so any ingestible format, HDT itself included, can be exported) and turns
+# on sparq-hdt's `write` feature. OFF by default for the same two reasons as `hdt` above.
+hdt-write = ["hdt", "sparq-hdt?/write"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library via flate2) — a measured 1.5–3× inflate on every gzip
 # ingest path (`.nt.gz` etc.) at ~zero code change. The weak `sparq-hdt?/zlib-ng` dep
@@ -98,6 +104,15 @@ cs-anchor-incidence = ["sparq-engine/cs-anchor-incidence"]
 # CLI build carries none of it and is behaviour-identical). Enable to bench the fast path, e.g.
 # `cargo build --release -p sparq-cli --features topk-lazy-strkey`.
 topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
+# [FABLE-5] (sq-lsp7k.8, epic sq-lsp7k) `tabular` — the `tabular` subcommand: MATERIALIZING
+# tabular→RDF import (CSV direct mapping + the R2RML materializing subset over CSV logical
+# tables). OFF by default — the default CLI build carries no CSV/R2RML code and the subcommand
+# is absent. ZERO new dependencies: the streaming RFC-4180 CSV reader is first-party, R2RML
+# mappings parse through sparq-core's Turtle parser, and generated triples stream as N-Triples
+# chunks into the existing parallel ingest (`Graph::load_reader_parallel`) — so `.csv.gz` /
+# `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. Enable with
+# `cargo build -p sparq-cli --features tabular`.
+tabular = []
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the

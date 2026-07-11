@@ -136,7 +136,9 @@ pub mod rdf12;
 
 #[cfg(feature = "rdf12-triple-terms")]
 pub use rdf12::{
-    canonicalize_graph_content_rdf12, canonicalize_graph_content_rdf12_with, canonicalize_rdf12,
+    canonicalize_graph_content_rdf12, canonicalize_graph_content_rdf12_ground_terms,
+    canonicalize_graph_content_rdf12_ground_terms_with, canonicalize_graph_content_rdf12_with,
+    canonicalize_rdf12,
     canonicalize_rdf12_ground_terms, canonicalize_rdf12_ground_terms_with, canonicalize_rdf12_with,
     canonicalize_triples_rdf12, canonicalize_triples_rdf12_ground_terms,
     canonicalize_triples_rdf12_ground_terms_with, canonicalize_triples_rdf12_with,

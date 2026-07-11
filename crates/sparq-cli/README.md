@@ -45,6 +45,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   runs the **full W3C JSON-LD 1.1 Compaction** against a caller `@context` passed with
   `--context <ctx.jsonld>` (richer than the prefix-only `jsonld-compacted`). The writer matrix is
   the `serialize-rdf` feature, pulled into the **default build by the default-on `jsonld` feature**.
+- **`to-hdt <file> <in-fmt> <out.hdt[.gz|.zst|.bz2]>`** *(opt-in `hdt-write` feature, which
+  implies `hdt`; [FABLE-5] sq-8ju74)* — export a loaded document (any ingestible format, HDT
+  itself included) as a standard-layout **HDT v1.0 archive** via `sparq-hdt`'s direct in-memory
+  encoder; the output container is chosen by the output extension. HDT holds a single default
+  graph: named graphs are dropped **loudly** (a stderr warning with the dropped counts).
 - **JSON-LD I/O is default-on** ([OPUS-4.8] sq-oy1f.4, user-prioritised epic sq-oy1f) — the
   default CLI **reads** a JSON-LD document (`<in-fmt>` ∈ `jsonld` / `json-ld` / `application/ld+json`;
   `@graph` named graphs are preserved as a dataset) AND **writes** one (the `jsonld*` out-formats
@@ -54,6 +59,13 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   JSON-LD **parse + serialise + full 1.1 Compaction/Framing**; full conneg-conformance ratcheting
   is on the [sq-oy1f](https://github.com/jeswr/sparq/issues/757) roadmap.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
+- **`tabular <csv[.gz|.zst|.bz2]> …`** *(opt-in `tabular` feature; [FABLE-5] sq-lsp7k.8)* —
+  **materializing tabular→RDF import**: stream CSV rows through a direct mapping (subject IRI
+  template `{col}`/`{_row}` via `--template`, per-column predicates, `xsd` datatype inference,
+  per-row `rdf:type`) or an **R2RML mapping** (`--mapping <r2rml.ttl>`, CSV logical tables bound
+  by `rr:tableName` = file stem) into a loaded graph (`--query` runs SPARQL in the same shot) or
+  an N-Triples stream (`--out out.nt[.gz|.zst]`). Streaming end-to-end (no whole-file buffering);
+  unsupported R2RML (`rr:sqlQuery`, `rr:parentTriplesMap`, `rr:graphMap`, …) fails loudly.
 - **`terse <query | ->`** *(opt-in `terse` feature; [OPUS-4.8] sq-vczh2)* — transpile a terse query
   (the `K:<name>` keyword layer over canonical SPARQL) into the **canonical SPARQL** it expands to,
   printing the verifiable JSON `{ canonical_sparql, keywords, resolutions, warnings, legendVersion }`

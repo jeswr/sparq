@@ -1450,6 +1450,112 @@ fn nested_blank_node_error_display() {
 }
 
 // ---------------------------------------------------------------------------
+// 8) Graph-level constrained wrappers ([FABLE-5] sq-l3pk7):
+//    `canonicalize_graph_content_rdf12_ground_terms` (+ `_with`) — the
+//    `sparq_core::Graph` parity siblings of the sq-iaxd wrapper family.
+//    Contract: (a) equivalent to composing `graph_triples` with
+//    `canonicalize_triples_rdf12_ground_terms` and byte-identical to the full
+//    graph_content profile on ground input; (b) fail closed with
+//    `NestedBlankNode` on any bnode inside a stored triple term (which the
+//    FULL graph_content profile accepts — kills a "delegate without guard"
+//    mutant); (c) the `_with` hash generic is honoured.
+// ---------------------------------------------------------------------------
+
+/// Direct test for `canonicalize_graph_content_rdf12_ground_terms`: a stored
+/// ground triple term plus a top-level bnode is accepted, byte-identical to
+/// the full profile, and identical to the documented composition it replaces.
+#[test]
+fn graph_content_ground_terms_matches_full_profile_and_composition() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "<http://ex/a> <http://ex/says> <<( <http://ex/s> <http://ex/p> <http://ex/o> )>> .\n\
+         _:top <http://ex/knows> <http://ex/a> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    let c = sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g).unwrap();
+    // Non-vacuity: the triple term survives and the top-level bnode relabels.
+    assert_eq!(c.lines.len(), 2, "two stored triples -> two canonical lines");
+    assert!(
+        c.lines.iter().any(|l| l.contains("<<(")),
+        "triple-term token preserved: {:?}",
+        c.lines
+    );
+    assert!(
+        c.lines.iter().any(|l| l.contains("_:c14n0")),
+        "top-level bnode must relabel to c14n0: {:?}",
+        c.lines
+    );
+    // (a) Byte-identical to the FULL graph_content profile on ground input
+    // (thin guard + delegate) …
+    let full = sparq_canon::canonicalize_graph_content_rdf12(&g).unwrap();
+    assert_eq!(c.lines, full.lines);
+    assert_eq!(c.triples, full.triples);
+    // … and to the composition the wrapper is a parity sibling of.
+    let triples = sparq_canon::graph_triples(&g).unwrap();
+    let composed = sparq_canon::canonicalize_triples_rdf12_ground_terms(&triples).unwrap();
+    assert_eq!(c.lines, composed.lines);
+    assert_eq!(c.triples, composed.triples);
+}
+
+/// (b) Error contract for the Graph-level wrapper: a blank node INSIDE a
+/// stored triple term fails closed with `NestedBlankNode`, while the FULL
+/// graph_content profile still accepts the same graph. Kills a mutant that
+/// drops the guard and delegates straight to `canonicalize_graph_content_rdf12`.
+#[test]
+fn graph_content_ground_terms_rejects_nested_bnode() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "<http://ex/a> <http://ex/says> <<( <http://ex/s> <http://ex/p> _:inner )>> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    assert!(matches!(
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    assert!(matches!(
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms_with::<Sha384>(&g),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    // Contrast (non-vacuity): the full descent accepts what the constrained
+    // Graph-level variant rejects.
+    assert!(
+        sparq_canon::canonicalize_graph_content_rdf12(&g).is_ok(),
+        "the full graph_content descent must still accept nested bnodes"
+    );
+}
+
+/// Direct test for `canonicalize_graph_content_rdf12_ground_terms_with::<D>`:
+/// the hash generic delegates faithfully — SHA-384 output equals the full
+/// profile's SHA-384 output on a ground graph, and the default entry point is
+/// exactly the `Sha256` instantiation.
+#[test]
+fn graph_content_ground_terms_with_sha384_matches_full_profile() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "_:x <http://ex/says> <<( <http://ex/s> <http://ex/p> \"v\" )>> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    let c384 =
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms_with::<Sha384>(&g).unwrap();
+    let full384 = sparq_canon::canonicalize_graph_content_rdf12_with::<Sha384>(&g).unwrap();
+    assert_eq!(c384.lines, full384.lines);
+    assert!(
+        c384.lines[0].contains("_:c14n0"),
+        "top-level bnode must relabel under SHA-384: {:?}",
+        c384.lines
+    );
+    // Default = Sha256 instantiation, exactly.
+    let c = sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g).unwrap();
+    let c256 =
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms_with::<Sha256>(&g).unwrap();
+    assert_eq!(c.lines, c256.lines);
+    assert_eq!(c.triples, c256.triples);
+}
+
+// ---------------------------------------------------------------------------
 // [FABLE-5] sq-x3oj2: crate-wide triple-term nesting-depth bound.
 // Every profile entry point must fail closed with `TripleTermDepthExceeded`
 // on a chain one past `MAX_TRIPLE_TERM_DEPTH`, and still accept a chain
