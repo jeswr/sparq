@@ -1224,8 +1224,11 @@ fn parse_flags(args: &[String]) -> Flags {
     f
 }
 
+/// A CSV row stream over the CLI's transparently-decompressing reader.
+type FileRows = CsvRows<Box<dyn Read + Send>>;
+
 /// Open one CSV, read its header, and return (header, the still-streaming row reader).
-fn open_csv(path: &str, sep: u8) -> Result<(Vec<String>, CsvRows<Box<dyn Read + Send>>), String> {
+fn open_csv(path: &str, sep: u8) -> Result<(Vec<String>, FileRows), String> {
     let reader = crate::open_reader(path).map_err(|e| format!("opening {path}: {e}"))?;
     let mut rows = CsvRows::new(reader, sep);
     match rows.next() {
@@ -1605,7 +1608,7 @@ mod tests {
                 .find(|(n, _)| n == table)
                 .ok_or_else(|| format!("test: no CSV for table {table}"))?;
             let mut all = CsvRows::new(Cursor::new(csv.as_bytes().to_vec()), b',');
-            let header = all.next().ok_or("empty csv")?.map_err(|e| e)?;
+            let header = all.next().ok_or("empty csv")??;
             let map = compile_tm(&m, tm_key, &header, None)?;
             for chunk in (MappedRows { rows: all, map, row_num: 0, failed: false }) {
                 lines.extend(chunk?.lines().map(str::to_owned));
