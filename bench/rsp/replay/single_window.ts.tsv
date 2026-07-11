@@ -1,0 +1,29 @@
+# [FABLE-5] (sq-hmd7l.20) Pinned timestamped replay — the EXPORTED copy of the fixed
+# single-window (triple, ts) script in crates/sparq-rsp/examples/rsp_oracle.rs
+# (fn single_window_script). This is the "identical timestamped replay" the bounded
+# count-matched-replay protocol (research/comparative-benchmarking-everything.md sec 5.2)
+# feeds to external RSP engines (RSP4J/YASPER). Events are sorted by ts (ascending).
+#
+# FIDELITY GUARD: bench/rsp/test_rsp4j_compare.py re-derives the per-window row counts
+# from THIS file with an independent reference evaluator and asserts them against
+# bench/rsp/expected.tsv — which run.sh in turn pins to the in-code script. A drift in
+# either copy breaks that chain loudly. (The guard is count-structural: subjects,
+# predicates, timestamps and window maths are covered; a literal-value-only edit that
+# changes no per-window count is not observable at the count level.)
+#
+# Columns: <ts>\t<stream-iri>\t<subject>\t<predicate>\t<object>
+# Terms use N-Triples syntax. The single-window scenarios have one logical stream,
+# exported under <http://ex/stream>.
+0	<http://ex/stream>	<http://ex/s1>	<http://ex/in>	<http://ex/kitchen>
+1	<http://ex/stream>	<http://ex/s1>	<http://ex/value>	"20"^^<http://www.w3.org/2001/XMLSchema#integer>
+4	<http://ex/stream>	<http://ex/s1>	<http://ex/value>	"22"^^<http://www.w3.org/2001/XMLSchema#integer>
+5	<http://ex/stream>	<http://ex/s2>	<http://ex/in>	<http://ex/hall>
+6	<http://ex/stream>	<http://ex/s2>	<http://ex/value>	"30"^^<http://www.w3.org/2001/XMLSchema#integer>
+8	<http://ex/stream>	<http://ex/s2>	<http://ex/value>	"30"^^<http://www.w3.org/2001/XMLSchema#integer>
+21	<http://ex/stream>	<http://ex/s1>	<http://ex/in>	<http://ex/kitchen>
+22	<http://ex/stream>	<http://ex/s1>	<http://ex/value>	"100"^^<http://www.w3.org/2001/XMLSchema#integer>
+28	<http://ex/stream>	<http://ex/s1>	<http://ex/value>	"26"^^<http://www.w3.org/2001/XMLSchema#integer>
+31	<http://ex/stream>	<http://ex/s3>	<http://ex/in>	<http://ex/hall>
+33	<http://ex/stream>	<http://ex/s3>	<http://ex/value>	"5"^^<http://www.w3.org/2001/XMLSchema#integer>
+39	<http://ex/stream>	<http://ex/s3>	<http://ex/value>	"7"^^<http://www.w3.org/2001/XMLSchema#integer>
+41	<http://ex/stream>	<http://ex/s1>	<http://ex/value>	"9"^^<http://www.w3.org/2001/XMLSchema#integer>
