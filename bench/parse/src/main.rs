@@ -37,6 +37,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use sparq_core::Graph;
 use std::hint::black_box;
+// [FABLE-5] (sq-tonhr.2) Pluggable CANDIDATE parser rows (rdf-shuttle generated
+// parsers slot in here as competitor rows; empty in the default build).
+mod candidate;
+
 use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -377,6 +381,24 @@ fn bench_nt(path: &str) {
         });
         row(name, "custom NT -> Graph (load_str, incumbent)", n, secs, bytes.len(), triples);
     }
+
+    candidate_rows(name, "ntriples", &text, bytes.len(), triples);
+}
+
+/// [FABLE-5] (sq-tonhr.2) Emit one competitor row per registered candidate parser
+/// (`candidate::candidates_for`) — same table + `--json` shape as every other row.
+/// The candidate's statement count is VERIFIED against the reference count before
+/// timing (a mis-parsing candidate panics loudly; it never posts a bogus number).
+fn candidate_rows(name: &str, format: &str, text: &str, bytes: usize, triples: usize) {
+    for c in candidate::candidates_for(format) {
+        let counted = (c.parse)(text).unwrap_or_else(|e| panic!("candidate {} failed to parse the corpus: {e}", c.name));
+        assert_eq!(counted, triples, "candidate {} statement count {counted} != reference {triples}", c.name);
+        let secs = median(|| {
+            let n = (c.parse)(text).unwrap();
+            black_box(n);
+        });
+        row(name, &format!("candidate {} parse ({format})", c.name), 1, secs, bytes, triples);
+    }
 }
 
 fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
@@ -567,6 +589,8 @@ fn bench_ttl(path: &str) {
         });
         row(name, "Turtle -> Graph (load_str)", n, secs, bytes.len(), triples);
     }
+
+    candidate_rows(name, "turtle", &text, bytes.len(), triples);
 }
 
 // ---------------------------------------------------------------------------
