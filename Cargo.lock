@@ -4276,6 +4276,7 @@ dependencies = [
  "sparq-engine",
  "sparq-geo",
  "sparq-introspect",
+ "sparq-policy",
  "sparq-serve",
  "sparq-shacl",
  "sparq-solid",

@@ -24,6 +24,7 @@ import {
 import { FullTextTool, FULL_TEXT_TOOL_OVERRIDE } from "@/components/workbench/full-text-tool";
 import { StreamingTool, STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool";
 import { ServerTool, SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool";
+import { OdrlTool, ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -50,6 +51,10 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   "full-text": { Component: FullTextTool, override: FULL_TEXT_TOOL_OVERRIDE },
   streaming: { Component: StreamingTool, override: STREAMING_TOOL_OVERRIDE },
   server: { Component: ServerTool, override: SERVER_TOOL_OVERRIDE },
+  // [FABLE-5] sq-ixc3.15 — the ODRL policy tool: a working panel over the desktop's NATIVE
+  // engine (evaluate + fail-closed gated preview); the hosted web build degrades honestly
+  // inside the panel (the `live-native` tier's framing).
+  odrl: { Component: OdrlTool, override: ODRL_TOOL_OVERRIDE },
 };
 
 /**
