@@ -837,6 +837,37 @@ status-authority `did:key`/`did:web` issuer DID via `VerifyingLiveStatusCheck::w
 authority_did, ..)` (the `did` feature, same binding the admission gate uses). Research-grade, externally
 **UNAUDITED** (`sq-qhy4`): a verified issuer signature, NOT a privacy/unlinkability guarantee.
 
+## Pattern-scoped masking spike — [FABLE-5] sq-lrtc3.3 (opt-in `pattern-scope`)
+
+Sub-named-graph (triple-pattern / row-level) result masking: an ODRL-style target as a
+set of **allow/deny triple patterns** over a source graph, so a session can be granted
+*"the contacts graph except phone numbers"*. Design record (options analysis, ODRL
+vocabulary, production caching path, follow-up beads):
+`research/odrl-pattern-scoped-targets-2026-07.md`. Measured envelope:
+`bench/pattern-scope/` (work-box JSONs, non-canonical).
+
+**Mechanism — masked-subgraph materialization, NOT per-scan filtering.** A scoped graph
+is decoded, filtered, and rebuilt as a physical replica; the engine evaluates a dataset
+in which masked triples are **physically absent**, so equivalence with an oracle store
+(the source with those triples deleted) under SELECT / `OPTIONAL` / `EXISTS` / `MINUS` /
+aggregates / `COUNT` / `ASK` / `GRAPH ?g` holds **by construction** (differential
+battery: `crates/sparq-solid/tests/pattern_scope.rs`). Zero engine/core changes; the
+graph-granular enforcement walk is reused unchanged.
+
+- `ScopePattern::new(s, p, o)` / `::any()` — per-triple predicate, `None` = wildcard,
+  **term-identity** matching (no join variables, no value equality).
+- `GraphScope::allow_only(patterns)` (permission shape) / `::deny_within(patterns)`
+  (prohibition carving a hole); a triple is visible iff it matches ≥1 allow AND 0 deny
+  (**deny overrides allow**; empty allow grants nothing — fail-closed).
+- `masked_graph(&Graph, &GraphScope) -> Graph`; `masked_dataset(&Graph, &decisions)`
+  (explicit-decision assembly: absent from the map = absent from the dataset; a fully
+  masked graph is **omitted** — indistinguishable from absent).
+- `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
+  (a scope can only shrink the session's graph-level accessible set, never widen), then
+  `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
+  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
+  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
+
 ## Related skills
 
 - [`http-server`](../http-server/SKILL.md) — the sparq SPARQL HTTP server has **no**
