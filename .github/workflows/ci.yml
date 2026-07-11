@@ -607,7 +607,8 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-text-wasm"') ||
        contains(needs.select.outputs.affected, '"sparq-shacl-wasm"') ||
        contains(needs.select.outputs.affected, '"sparq-introspect"') ||
-       contains(needs.select.outputs.affected, '"sparq-solid"'))
+       contains(needs.select.outputs.affected, '"sparq-solid"') ||
+       contains(needs.select.outputs.affected, '"sparq-vectors"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -795,6 +796,24 @@ jobs:
         run: cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: Headless wasm tests (sparq-solid materialize, wasm-pack test --node)
         run: wasm-pack test --node crates/sparq-solid
+      # [FABLE-5] sq-98c: sparq-vectors wasm-safety — memmap2 is target-gated out of wasm32
+      # builds (`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`), so the crate must
+      # keep compiling to wasm32 with the default features and its wasm graph must stay
+      # memmap2-free (the bead's acceptance criterion, asserted below with `cargo tree`).
+      # `open_from_bytes` (`.spqv` AND `.spqg`) is the filesystem-less read path there. clippy
+      # is LIB-ONLY (no --all-targets): the dev-deps pull sparq-core's `mmap` feature, whose
+      # wasm32 lint surface is out of this lane's scope — the crate's own wasm-cfg'd code is
+      # fully covered by the lib check.
+      - name: Build sparq-vectors for the wasm32 target
+        run: cargo build -p sparq-vectors --target wasm32-unknown-unknown
+      - name: Assert memmap2 is absent from the sparq-vectors wasm32 graph
+        run: |
+          if cargo tree -p sparq-vectors --target wasm32-unknown-unknown -e normal | grep -q memmap2; then
+            echo "::error::memmap2 leaked into the sparq-vectors wasm32 dependency graph"
+            exit 1
+          fi
+      - name: clippy (wasm32 target, sparq-vectors, deny warnings)
+        run: cargo clippy -p sparq-vectors --target wasm32-unknown-unknown -- -D warnings
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
@@ -1689,7 +1708,7 @@ jobs:
     # ratchet (raise the `FLOOR` const in crates/sparq-conformance/src/floors/<lane>.rs
     # as oxjsonld + the native writer/compactor/framer improve — [FABLE-5] sq-oy1f.40:
     # the lib-side single source the runner + scoreboard + the grep gate below all read).
-    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51, compact >= 186, frame >= 61)
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 186, frame >= 61)
     # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (jsonld-suite) — skip only
     # when ENFORCED selection proves sparq-conformance unaffected (fail-closed).
     needs: [changes, select]
@@ -2902,6 +2921,27 @@ jobs:
           # honest and matches scripts/coverage.sh's PER-CRATE QUIRKS.
           - crate: sparq-prov
             features: reason
+          # [SONNET-4.6] sq-3dyje.7: sparq-fedplan QUIRK — the ENTIRE crate surface is
+          # `#[cfg(feature = "fedplan")]`-gated (empty crate by default), and every
+          # `#[cfg(test)]` block and test file is gated the same way. Without the
+          # features, cargo-mutants generates 534 mutants from the source but builds +
+          # tests an EMPTY crate, so ALL of them trivially "survived" — the committed
+          # 0-caught/534-survived baseline was this feature-OFF ARTIFACT, NOT a
+          # missing-assertion gap. Same class as the sparq-canon/sparq-prov/sparq-fedclient
+          # quirks above; matches scripts/coverage.sh's PER-CRATE QUIRKS feature set.
+          - crate: sparq-fedplan
+            features: fedplan,adaptive-replan
+          # [FABLE-5] sq-3dyje.6: sparq-fedclient QUIRK — the ENTIRE crate surface is
+          # `#[cfg(feature = "fedclient")]`-gated (empty crate by default, mirroring
+          # sparq-fedplan), and every test file is gated the same way. Without the
+          # features, cargo-mutants generated 553 mutants from the source but built +
+          # tested an EMPTY crate, so ALL of them trivially "survived" — the committed
+          # 0-caught/553-survived baseline was this artifact, NOT a missing-assertion
+          # gap (the crate's inline + integration suites pin exact values and kill the
+          # bulk of the set once compiled). Same class as the sparq-canon/sparq-prov
+          # quirks above; matches scripts/coverage.sh's PER-CRATE QUIRKS feature set.
+          - crate: sparq-fedclient
+            features: fedclient,fedclient-adaptive
           # [SONNET-4.6] sq-qcnn.28: HEAVY-CRATE TIMEOUT OVERRIDES.
           # Run 28776460517 (2026-07-06): sparq-engine, sparq-solid, sparq-zk-compose,
           # sparq-vectors all cancelled at the old 120min ceiling. Raise to 360min.

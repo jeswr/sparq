@@ -107,6 +107,14 @@ engine instead (no compressed-file / HDT path — the drawer says so). A success
 `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
 workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
 
+For **federation** (`sq-ixc3.14`), a SERVICE-bearing SELECT/ASK in the Query tool routes to the
+native `query_service` command (behind the crate's opt-in `federation` feature, which forwards to
+`sparq-engine/service`): the live store's N-Quads snapshot is evaluated natively, joining remote
+SPARQL endpoints under the engine's **strict fail-closed egress allowlist** — a SERVICE clause may
+dial ONLY the per-workspace `Federation` control's entries (host / host:port / `*.suffix`, the
+same grammar as sparq-server's `--service-allow`); everything else, including public hosts, is
+refused pre-HTTP. The browser build labels SERVICE **native-only** (CORS) instead of pretending.
+
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 

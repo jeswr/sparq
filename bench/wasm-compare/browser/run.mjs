@@ -33,6 +33,7 @@ import { spawnSync } from "node:child_process";
 import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { startServer } from "./server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..", "..");
@@ -114,47 +115,8 @@ async function ensureArtifacts(build) {
 }
 
 // ---------- static server (serves the repo's js/ tree + this harness dir) ----------
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".wasm": "application/wasm", // required for instantiateStreaming
-  ".json": "application/json",
-  ".map": "application/json",
-};
+// Implementation extracted to server.mjs (shared with compare.mjs, sq-hmd7l.17).
 const ROOTS = { "/js/": path.join(REPO, "js"), "/harness/": HERE };
-
-function startServer() {
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, "http://localhost");
-      const prefix = Object.keys(ROOTS).find((p) => url.pathname.startsWith(p));
-      if (!prefix) {
-        res.writeHead(404).end("not found");
-        return;
-      }
-      const root = ROOTS[prefix];
-      const rel = url.pathname.slice(prefix.length);
-      const file = path.resolve(root, rel);
-      if (!file.startsWith(root + path.sep) && file !== root) {
-        res.writeHead(403).end("forbidden");
-        return;
-      }
-      const body = await readFile(file);
-      res.writeHead(200, {
-        "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
-        "content-length": body.length, // explicit: chunked transfer would tax the fetch phase unevenly per engine
-        "cache-control": "no-store", // fetch timings must hit the server, not a disk cache
-      });
-      res.end(body);
-    } catch {
-      res.writeHead(404).end("not found");
-    }
-  });
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port }));
-  });
-}
 
 // ---------- engine runners ----------
 async function runNode(opts) {
@@ -312,7 +274,7 @@ const utc = new Date().toISOString().replace(/[:.]/g, "-");
 const envelopes = [];
 let failed = false;
 
-const { server, port } = wantsBrowser ? await startServer() : { server: undefined, port: 0 };
+const { server, port } = wantsBrowser ? await startServer(ROOTS) : { server: undefined, port: 0 };
 if (server) {
   // Prewarm: one throwaway GET of the biggest asset so the FIRST engine's
   // fetch phase does not also pay the server/OS cold file read.

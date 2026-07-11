@@ -90,6 +90,8 @@ wasm = [
   "sparq-shacl-wasm",
   "sparq-introspect",
   "sparq-solid",
+  # [FABLE-5] sq-98c: rlib-only wasm smoke — memmap2 target-gated out on wasm32.
+  "sparq-vectors",
 ]
 # [SONNET-4.6] sq-mel85: bench.yml `bench` job — the perf regression gate.
 # TRUE INVARIANT: every hard-gated metric measured on the PR/merge_group tier must have

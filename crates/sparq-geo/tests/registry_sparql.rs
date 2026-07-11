@@ -416,3 +416,27 @@ fn unregistered_geof_iri_stays_a_hard_error() {
     .unwrap_err();
     assert!(err.contains("unsupported SPARQL function"), "got: {err}");
 }
+
+#[test]
+fn constant_polygon_filter_cold_and_warm_runs_agree() {
+    // sq-lkrgi [FABLE-5]: the Geographica large-constant selection shape — one
+    // constant POLYGON literal in the FILTER, evaluated against every row. The
+    // registry now serves the constant from a per-thread parsed-geometry cache
+    // after the first row; a cold run and a warm re-run (same thread, cache
+    // already populated) must return identical rows, and both must match the
+    // hand-derived answer.
+    let g = cities();
+    let q = format!(
+        "{PREFIXES} SELECT ?city WHERE {{ \
+           ?city ex:loc ?there . \
+           FILTER(geof:sfWithin(?there, \
+             \"POLYGON((-1 42.5, 7 42.5, 7 51, -1 51, -1 42.5))\"^^<http://www.opengis.net/ont/geosparql#wktLiteral>)) \
+         }} ORDER BY ?city"
+    );
+    let reg = geof_registry();
+    let cold = query_with_functions(&g, &q, &reg).unwrap();
+    let warm = query_with_functions(&g, &q, &reg).unwrap();
+    let expected = vec!["<http://ex/lyon>".to_string(), "<http://ex/paris>".to_string()];
+    assert_eq!(names(&cold, 0), expected);
+    assert_eq!(names(&warm, 0), expected, "warm (cached) run must equal the cold run");
+}

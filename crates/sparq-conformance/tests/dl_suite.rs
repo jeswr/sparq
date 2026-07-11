@@ -293,9 +293,135 @@ mod gated {
     /// RED if any future regression re-introduces a positive-tag `NotIn`. [FABLE-5]
     const PROFILE_DIVERGENCES: &[(&str, &str)] = &[];
 
+    /// RENDER ROUND-TRIP arm (sq-pbz04.4.17) — the number of DIRECT-arm corpus documents
+    /// (premise / input / conclusion / non-conclusion literals) where L1 extraction
+    /// succeeded AND the forward renderer's output re-extracted to an EQUAL structural
+    /// model. EXACT-pinned like the other lanes so the arm can never silently go vacuous
+    /// (a selection bug that skips every document would show as 0 ≠ the pin, not as a
+    /// green no-op). NOT a scoreboard row: this is an internal renderer-fidelity
+    /// invariant over the scoped ALCH fragment, not a conformance-shaped measurement.
+    ///
+    /// MEASURED at the pinned export snapshot AFTER the sq-pbz04.4.17 renderer fix: the
+    /// arm's first run caught 15 REAL mis-renders (14 named-composite-equivalence
+    /// reference divergences, e.g. `WebOnt-description-logic-201`…`-209`, plus the
+    /// self-referential `WebOnt-someValuesFrom-003` rendering to a cyclic expression the
+    /// extractor refuses) — fixed by always emitting the explicit
+    /// `A owl:equivalentClass _:b` shape (see `render.rs`), which moved those 15 from
+    /// violations to passes (278 → 293). [FABLE-5] sq-pbz04.4.17
+    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 293;
+    /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents the L1 extractor refused
+    /// (out-of-ALCH-fragment; the renderer contract is scoped to successful extractions).
+    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 378;
+    /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents whose RDF/XML literal oxrdfxml
+    /// rejects (the M6 mechanism, `FS2RDF-literals-ar`); they reach no lane's extraction.
+    pub const DL_RENDER_ROUNDTRIP_PARSE_FAILED: usize = 1;
+    /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — total documents examined (closed accounting:
+    /// `DOCUMENTS = FLOOR + REFUSED + PARSE_FAILED + violations(0)`).
+    pub const DL_RENDER_ROUNDTRIP_DOCUMENTS: usize = 672;
+
     /// Locate the OWL WG export the same way the inference binary + el-suite lane do.
     fn owl_export() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/w3c/owl2/all.rdf")
+    }
+
+    /// The RENDER ROUND-TRIP corpus arm (sq-pbz04.4.17): extends the renderer's 13
+    /// hand-written round-trip tests (`sparq-reason-dl::render::tests`) to EVERY ontology
+    /// document of the DIRECT-arm corpus. The load-bearing assertion is that
+    /// `report.violations` is EMPTY: whenever L1 extraction succeeds, `render_to_triples`'
+    /// output MUST re-extract to an equal structural model — a violation is a REAL
+    /// renderer/extractor fidelity bug and is NOT pinnable as an acceptable divergence
+    /// (unlike the M3/M5/M6 semantic-expectation divergences of the reasoning lanes).
+    /// The counts are EXACT-pinned so the arm cannot silently go vacuous.
+    #[test]
+    fn dl_render_roundtrip_corpus() {
+        let export = owl_export();
+        if !export.exists() {
+            eprintln!(
+                "SKIP: OWL WG export not present at {} — run scripts/fetch-inference-suites.sh",
+                export.display()
+            );
+            return;
+        }
+        let text = std::fs::read_to_string(&export)
+            .unwrap_or_else(|e| panic!("read {}: {e}", export.display()));
+        let report = dl_suite::run_render_roundtrip_arm(&text).expect("all.rdf parses");
+        // [FABLE-5] Grep-able ratchet line — pass count in field $8, positional args
+        // (CodeQL rust/unused-variable guard).
+        println!("{}", report.render());
+        println!(
+            "OWL 2 DL render round-trip ratchet pass {} of {} (floor {})",
+            report.round_tripped,
+            report.documents,
+            DL_RENDER_ROUNDTRIP_FLOOR
+        );
+        // The invariant: NO violations, ever — not a pinnable divergence set.
+        assert!(
+            report.violations.is_empty(),
+            "render round-trip violations (REAL renderer/extractor fidelity bugs): {:#?}",
+            report.violations
+        );
+        // Exact pins (the module-doc discipline: `==`, so an unexplained rise and a
+        // regression both go red; re-pin deliberately when the fragment or corpus moves).
+        assert_eq!(
+            report.round_tripped, DL_RENDER_ROUNDTRIP_FLOOR,
+            "render round-trip pass count moved (got {}, pinned {}) — re-pin \
+             DL_RENDER_ROUNDTRIP_FLOOR deliberately with evidence",
+            report.round_tripped, DL_RENDER_ROUNDTRIP_FLOOR
+        );
+        assert_eq!(
+            report.extraction_refused, DL_RENDER_ROUNDTRIP_REFUSED,
+            "render round-trip refused count moved — the accounting is pinned"
+        );
+        assert_eq!(
+            report.parse_failed, DL_RENDER_ROUNDTRIP_PARSE_FAILED,
+            "render round-trip parse-failed count moved — the accounting is pinned"
+        );
+        assert_eq!(
+            report.documents, DL_RENDER_ROUNDTRIP_DOCUMENTS,
+            "render round-trip document count moved — the accounting is pinned"
+        );
+        assert!(report.accounting_closed(), "every document in exactly one bucket");
+    }
+
+    /// Render round-trip derivation canary — NOT a W3C case, NOT counted in any pin.
+    /// Proves the arm drives the REAL extract → render → re-extract pipeline end-to-end
+    /// on a mini manifest with KNOWN counts: two in-fragment documents round-trip, one
+    /// out-of-fragment document (owl:sameAs) is refused, and nothing is a violation. A
+    /// neutered arm (one that skips every document, or one that counts refusals as
+    /// round-trips) turns these exact counts RED — and the canary runs WITHOUT the
+    /// corpus file, so the arm logic is exercised even on an offline checkout.
+    #[test]
+    fn dl_render_roundtrip_derivation_canary() {
+        let mini = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xmlns:test="http://www.w3.org/2007/OWL/testOntology#">
+  <test:TestCase rdf:about="http://ex/canary-roundtrip">
+    <rdf:type rdf:resource="http://www.w3.org/2007/OWL/testOntology#PositiveEntailmentTest"/>
+    <test:identifier rdf:datatype="http://www.w3.org/2001/XMLSchema#string">canary-roundtrip</test:identifier>
+    <test:status rdf:resource="http://www.w3.org/2007/OWL/testOntology#Approved"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#DIRECT"/>
+    <test:rdfXmlPremiseOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;owl:Class rdf:about="A"&gt;&lt;rdfs:subClassOf&gt;&lt;owl:Restriction&gt;&lt;owl:onProperty&gt;&lt;owl:ObjectProperty rdf:about="r"/&gt;&lt;/owl:onProperty&gt;&lt;owl:someValuesFrom rdf:resource="B"/&gt;&lt;/owl:Restriction&gt;&lt;/rdfs:subClassOf&gt;&lt;/owl:Class&gt;&lt;/rdf:RDF&gt;</test:rdfXmlPremiseOntology>
+    <test:rdfXmlConclusionOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;owl:Class rdf:about="A"&gt;&lt;rdfs:subClassOf&gt;&lt;owl:Class rdf:about="C"/&gt;&lt;/rdfs:subClassOf&gt;&lt;/owl:Class&gt;&lt;/rdf:RDF&gt;</test:rdfXmlConclusionOntology>
+  </test:TestCase>
+  <test:TestCase rdf:about="http://ex/canary-out-of-fragment">
+    <rdf:type rdf:resource="http://www.w3.org/2007/OWL/testOntology#ConsistencyTest"/>
+    <test:identifier rdf:datatype="http://www.w3.org/2001/XMLSchema#string">canary-out-of-fragment</test:identifier>
+    <test:status rdf:resource="http://www.w3.org/2007/OWL/testOntology#Approved"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#DIRECT"/>
+    <test:rdfXmlPremiseOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;rdf:Description rdf:about="a"&gt;&lt;owl:sameAs rdf:resource="b"/&gt;&lt;/rdf:Description&gt;&lt;/rdf:RDF&gt;</test:rdfXmlPremiseOntology>
+  </test:TestCase>
+</rdf:RDF>"#;
+        let report = dl_suite::run_render_roundtrip_arm(mini).expect("canary export parses");
+        // 3 documents: the ∃r.B premise + the A⊑C conclusion round-trip through the REAL
+        // renderer; the owl:sameAs premise is refused by L1 (out-of-fragment) — and a
+        // refusal is NEVER counted as a round-trip.
+        assert_eq!(report.documents, 3);
+        assert_eq!(report.round_tripped, 2);
+        assert_eq!(report.extraction_refused, 1);
+        assert_eq!(report.parse_failed, 0);
+        assert!(report.violations.is_empty(), "{:?}", report.violations);
+        assert!(report.accounting_closed());
     }
 
     #[test]

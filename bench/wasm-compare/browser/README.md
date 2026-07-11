@@ -91,3 +91,28 @@ latency. Timings on 1ms-clamped engines are recovered by batching
 nature. There is deliberately **no CI lane**: this is a measurement harness,
 run on demand (the timing benches were moved off the PR path in #1895 for the
 same reason).
+
+## Cross-LIBRARY comparison layer (sq-hmd7l.17)
+
+`compare.mjs` reuses this harness's workload module + static server to
+compare sparq against the pinned competitor stacks from
+`bench/competitors.json` — `oxigraph` (npm WASM, node + web builds) and
+`n3js-quadstore` (N3.js + quadstore + quadstore-comunica; Node runtime only)
+— on a reduced workload (text→store load + the five query shapes), one
+library per fresh process/browser:
+
+```sh
+# gather-only competitor installs (never committed; exact pins in compare-workload.mjs):
+npm install --no-save oxigraph@0.5.9 n3@2.1.1 quadstore@15.4.1 quadstore-comunica@6.3.1 memory-level@3.1.0
+
+node compare.mjs                       # node runtime, all libraries
+node compare.mjs --runtime chromium    # in-browser (headless Chrome)
+node compare.mjs --runtime all --quick # smoke tier
+```
+
+Same envelope/exit discipline as `run.mjs`, plus the bead invariant: **no
+latency row without row-count agreement** — per-library oracle checks before
+every timing row and a cross-library/runtime agreement re-check at report
+time. Missing packages and browser-infeasible columns skip WITH NOTICE. The
+deterministic bundle-bytes stage lives one directory up
+(`bench/wasm-compare/run.sh --bundle-only`, see `../README.md`).

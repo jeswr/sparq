@@ -1,0 +1,48 @@
+# [FABLE-5] sq-hmd7l.44 — ODRL-gated vs unguarded query-eval OVERHEAD envelope.
+#
+# DELIBERATELY a STANDALONE cargo project (own `[workspace]` table, the same isolation
+# pattern as bench/ac/, bench/ac/live/, bench/parse, bench/dict). It is NOT a workspace
+# member: the root workspace never links the opt-in `odrl-bridge`/`count-enforcement`
+# features, so the lean-core invariant holds; this dev-only driver is the ONE component
+# that turns them on to measure what enforcement COSTS.
+#
+# SCOPE (bead sq-hmd7l.44, epic sq-hmd7l): three lanes, all fail-closed on any
+# correctness disagreement while timing —
+#   A  policy-materialization cost sweep (kind × count: bare permission,
+#      permission+prohibition, conditional recipient re-check, counted odrl:count);
+#   B  steady-state per-query overhead: `query_as` over an ODRL-materialized
+#      <urn:sparq:auth> vs the SAME query unguarded (`sparq_engine::query`) on a
+#      dataset where the permitted subset is physically the whole store — identical
+#      result sets asserted per query (honest apples-to-apples);
+#   C  churn: `refresh_odrl_grants` (no-op) + `refresh_odrl_grant` (revocation) cost
+#      vs bridge-ledger size, asserting the retraction actually removes access.
+#
+# HONESTY: work-box wall-clock is advisory + NON-CANONICAL (bench/CATALOG.md QUIET-BOX
+# convention); canonical envelopes are EC2-gated. No number is committed to markdown.
+[package]
+name = "ac-bench-overhead"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root — keeps this driver out of the root workspace.
+[workspace]
+
+[dependencies]
+# Use-case resource universes (U1–U4 intent tables) — the acbench datasets lane B is
+# specced against. Generators only; the by-construction oracle stays in bench/ac/.
+sparq-acbench = { path = "../../../crates/sparq-acbench" }
+# The SYSTEM UNDER TEST, with the opt-in enforcement features ON (the whole point of
+# this driver): `count-enforcement` implies `odrl-bridge`.
+sparq-solid = { path = "../../../crates/sparq-solid", features = ["count-enforcement"] }
+# ODRL policy parsing (parse_policy_str), Request builder, the in-memory usage-counter
+# store for the counted lane.
+sparq-policy = { path = "../../../crates/sparq-policy", features = ["count-enforcement"] }
+# Graph::load_dataset for the pod datasets.
+sparq-core = { path = "../../../crates/sparq-core", default-features = false }
+# The UNGUARDED baseline path: `sparq_engine::query` over a plain Graph.
+sparq-engine = { path = "../../../crates/sparq-engine", default-features = false }
+
+[[bin]]
+name = "ac-bench-overhead"
+path = "src/main.rs"

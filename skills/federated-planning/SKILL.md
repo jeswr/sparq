@@ -432,6 +432,39 @@ pushed-down streaming bind-join, and the ANAPSID "adaptive operator" refinement 
 leaf's cardinality from a prefix of its rows while still streaming it). See
 `crates/sparq-fedclient/README.md`.
 
+**Test-quality note — the mutation ratchet is measured features-ON (`sq-3dyje.6`).** The whole
+`sparq-fedclient` surface (and every test file) is `#[cfg(feature = "fedclient")]`-gated, so
+`cargo-mutants` MUST run it with `--features fedclient,fedclient-adaptive` — a features-off run
+builds an EMPTY crate and reports every mutant as a spurious survivor (the same per-crate quirk
+`.github/workflows/ci.yml` applies to `sparq-canon`'s `rdf12-triple-terms` and `sparq-prov`'s
+`reason`). The feature-on suite pins EXACT observable values — rendered pushdown sub-queries,
+error-variant `Display` strings, SRJ/Service-Description parse outputs, both SSRF
+`is_forbidden_ip` boundary tables, and native-transport observables driven over a raw in-process
+loopback TCP server (a configured timeout actually bounds a stalled request; a >3 MiB body
+round-trips under the real byte cap) — so a mutated return value is *caught*, not merely
+executed. A small residue of genuinely-**equivalent** mutants remains and is documented rather
+than papered over: in `wire.rs` the `|`↔`^` bit-op mutations are all equivalent — the header /
+`read_varint` flag-set `|=`→`^=` (each distinct flag bit is set at most once from a zero start /
+LEB128 groups occupy non-overlapping shift windows) and the `write_varint` continuation-bit
+`byte | 0x80`→`byte ^ 0x80` (`byte` is masked to `& 0x7f`, so bit 7 is provably clear), so
+XOR ≡ OR on every reachable input; `EgressGuard::deny_private`→`Default::default()` is
+equivalent because the struct derives `Default` and `deny_private` constructs exactly the empty
+allowlist the default does (its own doc says "Equivalent to `EgressGuard::default`"); the
+`exclusive_groups` union-find inner-loop bound `(i + 1)..n`→`(i * 1)..n` is equivalent (the extra
+`j == i` iteration does an idempotent self-union — same source, self-shares-var, `union(i,i)` is a
+no-op — so the group set is unchanged); and the `push_group` SubQuery-`project`-FIELD
+`&&`→`||` (line ~486) is equivalent because both branches yield an empty `Vec` in the only case
+they differ (`output_vars` empty ⇒ `project` empty). The `proj_clause` `&&` (line ~449) is NOT
+equivalent — it is killed by `push_group_projection_clause_by_output_var_membership`. Finally the
+`ScatterPool` `Drop::drop`→`()` is equivalent: after any drop body Rust drops the struct's fields,
+and the `tx: Option<SyncSender>` field-drop closes the channel exactly as the explicit
+`self.tx.take()` does, so detached workers still exit (the un-joined `JoinHandle`s make drop order
+unobservable). (`ScatterPool::join`→`()` is a DIFFERENT method and is NOT equivalent — its
+blocking drain is killed by `scatter_pool_join_blocks_until_all_jobs_complete`.) These
+equivalents are noted, not asserted on — a test that "kills" an equivalent mutant would be vacuous.
+
+**Test-quality note — the mutation ratchet for `sparq-fedplan` is measured features-ON (`sq-3dyje.7`).** The entire `sparq-fedplan` surface (and every `#[cfg(test)]` block) is `#[cfg(feature = "fedplan")]`-gated, so `cargo-mutants` MUST run with `--features fedplan,adaptive-replan` — a features-off run builds an empty crate and every mutant trivially survives (the committed 534-surviving / 0-caught baseline was this feature-OFF artefact, mirroring the `sparq-fedclient` / `sparq-canon` / `sparq-prov` quirk). With features ON the ratchet drops to 52 surviving / 415 caught (89 %). Six externally-authored tests in `crates/sparq-fedplan/tests/mutation_kill_assertions.rs` pin additional observable decisions: `plan_bgp` refuses an empty BGP with a non-empty selection slice (`pattern.rs:114`); `diverges()` requires STRICTLY greater than `k × estimate` in both directions — `o == k*e` and `e == k*o.max(1)` do NOT trigger (two `>=` mutants killed via `AdaptiveExecutor::maybe_replan` on a 3-arm star BGP after one `advance()`, ensuring `remaining.len() >= 2` so the short-circuit guard is not hit); `evict_stale(0.0)` evicts sources with age > 0 without short-circuiting (`< 0.0` guard fires only for negative max_age, killed by `<= 0.0` mutant); and `iri_eq` correctly excludes non-`scs:CharacteristicSet` rdf:type triples from the char-set classification (`descriptor.rs:431`, killed by `→ true` mutant). A genuinely-equivalent residue of 46 survivors is documented below — these are NOT papered over with assertions. Key categories: (1) **spill/budget bookkeeping** — `StreamJoin::spill_key -=`→`+=`/`/=` and `spilled()`-path mutations are equivalent because the spill key is only used as a de-duplication marker and any consistent alteration per spill run behaves identically under the existing test load; (2) **Tuple key encoding** — `> 7`→`>= 7`/`== 7`/`< 7` mutations are equivalent because the test data either stays in or out of the short encoding regime under all variants; (3) **run_streaming early-exit comparisons** — `< capacity`→`>= capacity`/`> capacity`/`== capacity` mutations survive because the bounded-result test queries always exhaust results before hitting the capacity edge; (4) **cost-formula** — `plan.rs:263`/`:262`/`:259`/`:258` delete-arm / operator mutations survive because the test plans use symmetric estimates that produce the same greedy choice under both forms; (5) **plan_suffix_greedy** — several `<`→`==`/`>`/`<=` and delete-arm mutations in `adaptive.rs:902–908` are equivalent under the star-BGP test fixture's symmetric or dominated cost ratios; (6) **descriptor** — `char_set` builder `< → ==`/`<=` boundary mutations survive because the test fixtures use counts that avoid the exact boundary; (7) **is_subset** `+=`→`*=` is equivalent when accumulator values are 0 or 1 (the test uses binary indicator sums); (8) **suffix_cost_greedy** `*`→`+` in the cost product is equivalent when all cost components are 1.0 (unit estimates). The `record_source_latency_after` `contains_key → true` mutant is equivalent because `fold_latency`'s `Entry::Vacant` arm seeds unconditionally (no alpha applied), so the guard's value on the first call for a fresh source is unobservable. These equivalents are noted, not asserted on. [SONNET-4.6]
+
 ## Deferred (NOT here)
 
 **Mid-*operator* adaptivity** (tearing down a join while it is producing output and resuming

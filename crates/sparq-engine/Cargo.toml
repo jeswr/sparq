@@ -440,6 +440,12 @@ spargebra.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
+# [FABLE-5] sq-3dyje.3: property-based eval tests (tests/proptest_eval.rs — engine ≡
+# naive reference / join-order invariance / ORDER BY laws). DEV/TEST ONLY, exactly like
+# the sparq-core + sparq-substrate proptest dev-deps: it never appears in [dependencies]
+# or any feature, so the shipped crate and the wasm bundle are unchanged. Same version
+# req as those crates (resolves to the already-attested proptest in supply-chain/).
+proptest = "1"
 # [OPUS-4.8] (sq-e3pj, sq-6vshe.4) DEV-only serde_json: the `explain_json` structured-EXPLAIN
 # tests parse the hand-emitted JSON DOM back to assert every field round-trips (and `chunk`'s
 # `impl PartialEq<serde_json::Value>` test helper), so the opt-in `explain-json` feature itself

@@ -45,10 +45,10 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 
 ## ✨ Features
 
-- **`VectorStore`** — memory-mapped `.spqv`; `get` is one binary search + a contiguous
-  `&[f32]`; corrupt files rejected up front. `StreamingWriter` builds stores bigger than
-  RAM in O(1) memory, byte-identical to the in-RAM builder. `open_from_bytes` for
-  filesystem-less use.
+- **`VectorStore`** — memory-mapped `.spqv` (native); `get` is one binary search + a contiguous
+  `&[f32]`; corrupt files rejected up front. `StreamingWriter` builds stores bigger than RAM in
+  O(1) memory, byte-identical to the in-RAM builder. **Compiles on wasm32** (sq-98c): memmap2 is
+  target-gated out; `open_from_bytes` (`.spqv` and `.spqg` alike) is the filesystem-less read path.
 - **Exact vs approximate search** — `nearest_exact` (answer-exact ground truth) and the
   persistent on-disk `DiskAnnIndex` in the default build; the in-RAM HNSW `VectorIndex`
   behind the **opt-in `approx-ann`** feature, the **only** third-party-ANN dependency

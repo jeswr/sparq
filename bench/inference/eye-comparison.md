@@ -1,5 +1,19 @@
 # sparq-reason vs EYE — N3 inference benchmark (2026-06, updated fixpoint-opt)
 
+> **Update (sq-hmd7l.11, 2026-07)** [FABLE-5]: the runner grew two optional
+> competitor columns — **cwm** (W3C SWAP, Python; `cwm <f> --think --data`) and
+> **jen3** (`java -jar jen3.jar -n3 <f> -conclusion`; a Java/Apache-Jena fork
+> with N3 support, GitHub release v0.0.1 — *not* an npm library). Absent tool ⇒
+> the column prints `absent` and the run stays green; EYE remains the pinned,
+> required reference. Before any competitor cell is timed, its closure count is
+> now cross-checked in-run against the deterministic expected sizes below
+> (sparq's own count is asserted too, mirroring `bench/deep-taxonomy`); jen3 is
+> gated via its rule-free `-inferences` output (ground + derived = closure),
+> cwm via its rule-stripped `--data` closure. cwm defaults to the small cells
+> only (`CWM_HEAVY=1` opts into the rest) — it is the honest *slow* column.
+> No numbers in this file were re-measured; the tables below remain the 2026-06
+> EYE-only record. Method + caveats: `research/gap-n3-2026-07.md`.
+
 **Machine:** Apple M1 (fanless), macOS 25.4.0, same machine for both engines.
 **Engines:** sparq `target/release/sparq-cli reason <f> n3 n3 /dev/null`
 (parse → forward closure → serialize full closure to /dev/null) vs

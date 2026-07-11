@@ -1784,6 +1784,20 @@ mod tests {
             Some(("host.example".to_string(), 9000))
         );
         assert_eq!(endpoint_host_port("http:///nohost"), None);
+        // [FABLE-5] sq-3dyje.6: a BARE (unbracketed) multi-colon IPv6 authority must NOT be
+        // split on its last colon into host + port — the `!h.contains(':')` guard keeps the
+        // whole thing as the host with the scheme default port. Mutating that guard to `true`
+        // would wrongly split `fe80::1` into host `fe80:` + port 1. (No earlier test exercised
+        // a bare multi-colon authority, so the guard survived.)
+        assert_eq!(
+            endpoint_host_port("http://fe80::1/sparql"),
+            Some(("fe80::1".to_string(), 80)),
+            "a bare multi-colon IPv6 authority keeps the whole host + default port, never split"
+        );
+        assert_eq!(
+            endpoint_host_port("https://2001:db8::dead:beef/q"),
+            Some(("2001:db8::dead:beef".to_string(), 443))
+        );
     }
 
     // ── DENY: default guard refuses a loopback / private endpoint ─────────────────
@@ -2730,6 +2744,153 @@ mod tests {
                 .check_endpoint("http://sparql.internal/sparql")
                 .unwrap(),
             "sparql.internal"
+        );
+    }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): the fragment-body control/data split must set
+    // `next` from EXACTLY the hydra:next / legacy hydra:nextPage predicates — cargo-mutants
+    // showed `pred == …nextPage` mutated to `!=` survived, i.e. no test pinned that another
+    // control link (hydra:first / hydra:last also pass is_control_predicate and carry
+    // NamedNode objects) must NOT become the pagination cursor. Walking a wrong "next" link
+    // would re-fetch page 1 forever or truncate the fragment — a real answer-safety bug class.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_body_control_links_other_than_next_do_not_paginate() {
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Bound(FragTerm::Iri("http://ex/p".to_string())),
+            PatternTerm::Var("o".to_string()),
+        );
+        // hydra:first + hydra:last are control links with IRI objects, but NOT next-page
+        // cursors; hydra:totalItems carries the count; one matching data triple.
+        let body = concat!(
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#first> <http://frag/page1> .\n",
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#last> <http://frag/page9> .\n",
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#totalItems> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/a> <http://ex/p> <http://ex/b> .\n",
+        );
+        let page = parse_fragment_body(body, &pattern).expect("well-formed fragment parses");
+        assert_eq!(
+            page.next, None,
+            "hydra:first/last are NOT pagination cursors — only hydra:next/nextPage are"
+        );
+        assert_eq!(page.total_items, 42, "hydra:totalItems drives the count");
+        assert_eq!(page.triples.len(), 1, "exactly the one matching data triple");
+        assert_eq!(
+            page.triples[0],
+            FragTriple::new(
+                FragTerm::Iri("http://ex/a".to_string()),
+                FragTerm::Iri("http://ex/p".to_string()),
+                FragTerm::Iri("http://ex/b".to_string()),
+            )
+        );
+    }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): each arm of is_control_predicate's `||` chain is
+    // INDEPENDENTLY load-bearing. cargo-mutants showed `||`→`&&` survive because no test
+    // isolates an arm: a document whose only non-data triple is classified by JUST ONE arm.
+    // Mutating any single arm to `&&` makes that predicate fail the whole (now-conjunctive)
+    // test, so the triple leaks into the data set and inflates the pattern-matched count.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn each_control_predicate_arm_is_independently_load_bearing() {
+        // A permissive pattern (all vars) so ANY triple that reaches the data path matches and
+        // is counted — making a mis-classified control triple observable as an extra data row.
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        );
+        // Three fragments, each carrying EXACTLY one control triple classified by ONE arm, plus
+        // one genuine data triple. Only the data triple may survive the control/data split.
+        let cases = [
+            // hydra: arm (starts_with HYDRA_NS)
+            (
+                "<http://frag> <http://www.w3.org/ns/hydra/core#itemsPerPage> \"10\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                "hydra:",
+            ),
+            // void: arm (starts_with VOID_NS)
+            (
+                "<http://frag> <http://rdfs.org/ns/void#triples> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                "void:",
+            ),
+            // rdf:type arm (exact equality)
+            (
+                "<http://frag> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/hydra/core#Collection> .\n",
+                "rdf:type",
+            ),
+        ];
+        for (control_triple, arm) in cases {
+            let body = format!(
+                "{control_triple}<http://ex/a> <http://ex/p> <http://ex/b> .\n"
+            );
+            let page = parse_fragment_body(&body, &pattern).expect("well-formed fragment parses");
+            assert_eq!(
+                page.triples.len(),
+                1,
+                "the {} control triple must NOT be counted as data — only the one data triple",
+                arm
+            );
+            assert_eq!(
+                page.triples[0],
+                FragTriple::new(
+                    FragTerm::Iri("http://ex/a".to_string()),
+                    FragTerm::Iri("http://ex/p".to_string()),
+                    FragTerm::Iri("http://ex/b".to_string()),
+                ),
+                "the surviving triple is the genuine data triple, not the {} control node",
+                arm
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_body_legacy_next_page_predicate_paginates() {
+        // The legacy hydra:nextPage spelling must set the cursor exactly like hydra:next.
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        );
+        let body =
+            "<http://frag/page1> <http://www.w3.org/ns/hydra/core#nextPage> <http://frag/page2> .\n";
+        let page = parse_fragment_body(body, &pattern).expect("well-formed fragment parses");
+        assert_eq!(page.next.as_deref(), Some("http://frag/page2"));
+        assert_eq!(page.total_items, 0, "no count metadata in this fragment");
+        assert!(page.triples.is_empty(), "control-only fragment has no data");
+    }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): the count comes from EITHER hydra:totalItems OR
+    // void:triples. The earlier fragment tests read the count from hydra:totalItems only, so
+    // the `pred == void:triples` half of the count predicate could be mutated to `!=` unnoticed
+    // (a void:triples-only fragment would then report count 0). Pin BOTH count predicates, and
+    // the recall-safe MAX when a fragment carries both.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fragment_body_count_reads_void_triples_and_takes_max() {
+        let pattern = FragPattern::new(
+            PatternTerm::Var("s".to_string()),
+            PatternTerm::Var("p".to_string()),
+            PatternTerm::Var("o".to_string()),
+        );
+        // void:triples alone drives the count.
+        let void_only =
+            "<http://frag> <http://rdfs.org/ns/void#triples> \"77\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
+        assert_eq!(
+            parse_fragment_body(void_only, &pattern).unwrap().total_items,
+            77,
+            "void:triples must drive the count (kills the void== →!= survivor)"
+        );
+        // Both present: the recall-safe MAX wins regardless of order.
+        let both = concat!(
+            "<http://frag> <http://rdfs.org/ns/void#triples> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://frag> <http://www.w3.org/ns/hydra/core#totalItems> \"90\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        );
+        assert_eq!(
+            parse_fragment_body(both, &pattern).unwrap().total_items,
+            90,
+            "the max of the two counts is taken"
         );
     }
 }
