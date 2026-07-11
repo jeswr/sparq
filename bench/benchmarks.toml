@@ -1693,6 +1693,21 @@ records_to  = "bench/competitor-results/<engine>-materialize-<UTC>.json (git-ign
 featured    = false  # sparq/vlog/nemo columns run; canonical univ>=100 numbers are sq-hmd7l.32's job
 status      = "implemented"
 
+# [SONNET-4.6] sq-hmd7l.23 — KGE link-prediction quality comparison vs PyKEEN published numbers
+[[benchmark]]
+id          = "kge-quality-comparison"
+name        = "KGE link-prediction quality comparison — sparq vs PyKEEN published reference numbers (FB15k-237 / WN18RR)"
+category    = "query"
+measures    = "filtered link-prediction MRR / Hits@1 / Hits@3 / Hits@10 at MATCHED model (DistMult / ComplEx) vs PyKEEN published reference numbers from two pinned sources: (A) RotatE paper Table 5 (Sun et al., ICLR 2019) and (B) PyKEEN re-evaluation (Ali et al., IEEE TPAMI 2021). Phase 1 (this bead): published-numbers column only, emitted from bench/kge/published-numbers.tsv (no PyKEEN install required). Phase 2 (sq-hmd7l.37): same-box PyKEEN run + real-dataset sparq-kge run at matched budget."
+invoke      = "bash bench/kge/run.sh --published-only   # Phase 1: exit 0, emits citation table — no PyKEEN install needed\n# Phase 2 (sq-hmd7l.37, not yet implemented):\n# pip install pykeen torch && SPARQ_KGE_DATASET=/path/to/wn18rr.nt bash bench/kge/run.sh --measure"
+source      = "bench/kge/{run.sh,published-numbers.tsv,README.md}; crates/sparq-vectors/examples/kge_ablation.rs (the runnable sparq KGE example, --features kge); research/gap-kge-2026-07.md"
+dataset     = "Phase 1: NO dataset required (published numbers only, from bench/kge/published-numbers.tsv). Phase 2: FB15k-237 (14541 entities, 237 relations, ~310k triples) + WN18RR (40943 entities, 11 relations, ~93k triples); sha256-pinned at gather time. sparq synthetic arm: in-process synthetic slices from kge_ablation.rs (NOT comparable to real-dataset rows)."
+quiet_box_sensitive = false  # Phase 1 is deterministic (published citation lookup only); Phase 2 MRR/Hits@k are INDICATIVE on a non-canonical box
+pinning     = "Phase 1: bench/kge/published-numbers.tsv (pinned citation table). Phase 2 (TBD, sq-hmd7l.37): PyKEEN version pinned at gather time; ComplEx dim=200, lr=0.1, epochs=1000, batch=1024, filtered eval — to be matched against Source B hyperparams."
+records_to  = "Phase 1: stdout only (no file). Phase 2: bench/competitor-results/kge-pykeen-<UTC>.json (git-ignored; do NOT commit metrics to markdown). research/gap-kge-2026-07.md carries the gap record."
+featured    = false  # quality comparison at matched model/budget, not a throughput dashboard card; HONESTY: sparq-kge is in-store KGE over dict-encoded ids, not a standalone KGE training library
+status      = "implemented"  # Phase 1 (published-only) implemented; Phase 2 is sq-hmd7l.37
+
 # [SONNET-4.6] sq-hmd7l.24 — RIF NOT-COMPARABLE verdict + conformance runner
 [[benchmark]]
 id          = "rif-conformance"
