@@ -13,8 +13,8 @@
     feature = "fedclient",
     doc = r#"sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
 sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**,
-Phase 0 bead **sq-s1uy**). See `research/federation-client-design.md` for the full
-design (§4 architecture, §6 phased build plan, §7 honest risks).
+Phase 0 bead **sq-s1uy**). See `research/federation-client-design.md` — the crate's
+architecture-of-record (§4 architecture, §7 honest risks).
 
 Given one SPARQL query and a set of heterogeneous remote sources — full SPARQL
 endpoints, bindings-restricted (brTPF) servers, plain TPF servers, and the *local*
@@ -110,7 +110,7 @@ Both must FAIL if a future edit introduces such an edge.
     not(feature = "fedclient"),
     doc = r#"sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
 sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**). See
-`research/federation-client-design.md` for the full design.
+`research/federation-client-design.md` — the crate's architecture-of-record.
 
 **This is the default build with the `fedclient` feature OFF, so the crate is empty** — the
 whole client (the `source` / `discovery` / `planner` / `pushdown` / `operators` / `stream` /
