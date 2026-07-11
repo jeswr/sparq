@@ -20,7 +20,10 @@ pub mod scs;
 mod sparql;
 pub mod view;
 
-pub use model::{Component, PreBindingFailure, Shape, ShapesModel, Target};
+// [FABLE-5] (sq-11a) `IllFormedConstruct` records a shapes-graph construct that
+// violates the SHACL syntax rules; `validate_strict` reports the shapes graph as
+// a failure (the test-suite `sht:Failure` outcome) when any were found.
+pub use model::{Component, IllFormedConstruct, PreBindingFailure, Shape, ShapesModel, Target};
 pub use path::Path;
 // [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
 // SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
@@ -46,7 +49,9 @@ use sparq_core::Graph;
 
 /// Validates `data` against the SHACL shapes in `shapes`, returning the
 /// validation report. Constructs the shapes graph never declares (or declares
-/// ill-formed — e.g. an unparsable path) are skipped rather than failing.
+/// ill-formed — e.g. an unparsable path) are skipped rather than failing; use
+/// [`validate_strict`] to report ill-formed constructs as a failure instead
+/// (the W3C test-suite `sht:Failure` outcome). [FABLE-5] (sq-11a)
 pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
     let model = ShapesModel::parse(shapes);
     validate_with_model(data, &model)
@@ -68,17 +73,22 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
 }
 
 /// [OPUS-4.8] (sq-0mjfd) A SHACL processing **failure** (W3C SHACL §3.4): the
-/// shapes graph declares a constraint a conformant processor cannot soundly
-/// evaluate, so the spec says it MUST signal a *failure* rather than produce a
-/// validation report. The only producer today is a SHACL-SPARQL pre-binding
-/// violation (a `sh:sparql` constraint or constraint-component validator using
-/// `MINUS` / `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound
-/// variable / a `BIND` that re-binds one). Carries the offending nodes + the
-/// violated rule for diagnostics.
+/// shapes graph declares something a conformant processor cannot soundly
+/// evaluate, so the spec says it signals a *failure* rather than produce a
+/// validation report. Two producers: a SHACL-SPARQL pre-binding violation (a
+/// `sh:sparql` constraint or constraint-component validator using `MINUS` /
+/// `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound variable / a
+/// `BIND` that re-binds one), and [FABLE-5] (sq-11a) an **ill-formed
+/// shapes-graph construct** (a violated SHACL syntax rule — an unparsable
+/// `sh:path`, a non-integer `sh:minCount`, a malformed SHACL list, …). Carries
+/// the offending nodes + the violated rules for diagnostics.
 #[derive(Debug, Clone)]
 pub struct ShaclFailure {
-    /// The pre-binding failures that triggered the overall failure (at least one).
+    /// The pre-binding failures found (may be empty when `ill_formed` is not).
     pub pre_binding: Vec<model::PreBindingFailure>,
+    /// [FABLE-5] (sq-11a) The ill-formed shapes-graph constructs found (may be
+    /// empty when `pre_binding` is not). At least one of the two vecs is non-empty.
+    pub ill_formed: Vec<model::IllFormedConstruct>,
 }
 
 impl std::fmt::Display for ShaclFailure {
@@ -86,11 +96,14 @@ impl std::fmt::Display for ShaclFailure {
         // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
         write!(
             f,
-            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s)",
-            self.pre_binding.len()
+            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s), {} ill-formed shapes-graph construct(s)",
+            self.pre_binding.len(),
+            self.ill_formed.len()
         )?;
         if let Some(first) = self.pre_binding.first() {
             write!(f, " — e.g. {}: {}", first.node, first.message)?;
+        } else if let Some(first) = self.ill_formed.first() {
+            write!(f, " — e.g. {} at {}: {}", first.predicate, first.node, first.message)?;
         }
         Ok(())
     }
@@ -99,10 +112,11 @@ impl std::fmt::Display for ShaclFailure {
 impl std::error::Error for ShaclFailure {}
 
 /// [OPUS-4.8] (sq-0mjfd) STRICT validation (W3C SHACL §3.4 failure outcome): like
-/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares a
-/// constraint a conformant processor MUST reject — currently a SHACL-SPARQL
-/// pre-binding violation. The lenient [`validate`] instead skips such a
-/// constraint (its lenient ill-formed-shape policy), so use this when the
+/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares
+/// something a conformant processor rejects — a SHACL-SPARQL pre-binding
+/// violation, or [FABLE-5] (sq-11a) an ill-formed shapes-graph construct
+/// ([`ShapesModel::ill_formed`]). The lenient [`validate`] instead skips such a
+/// construct (its lenient ill-formed-shape policy), so use this when the
 /// distinction matters (e.g. the W3C `mf:result sht:Failure` entries).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure> {
     let model = ShapesModel::parse(shapes);
@@ -111,15 +125,19 @@ pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport,
 
 /// [OPUS-4.8] (sq-0mjfd) [`validate_strict`] against an already-parsed model: an
 /// `Err` if the model recorded any pre-binding failure
-/// ([`ShapesModel::pre_binding_failures`]), else the lenient validation report.
+/// ([`ShapesModel::pre_binding_failures`]) or [FABLE-5] (sq-11a) any ill-formed
+/// shapes-graph construct ([`ShapesModel::ill_formed`]), else the lenient
+/// validation report.
 pub fn validate_strict_with_model(
     data: &Graph,
     model: &ShapesModel,
 ) -> Result<ValidationReport, ShaclFailure> {
-    let failures = model.pre_binding_failures();
-    if !failures.is_empty() {
+    let pre_binding = model.pre_binding_failures();
+    let ill_formed = model.ill_formed();
+    if !pre_binding.is_empty() || !ill_formed.is_empty() {
         return Err(ShaclFailure {
-            pre_binding: failures.to_vec(),
+            pre_binding: pre_binding.to_vec(),
+            ill_formed: ill_formed.to_vec(),
         });
     }
     Ok(validate_with_model(data, model))
@@ -162,6 +180,30 @@ pub fn graph_from_triples<I: IntoIterator<Item = Triple>>(triples: I) -> Graph {
 /// `sh:shape` data-graph link) that a pure shapes-graph scan cannot express.
 pub fn count_focus_nodes(data: &Graph, model: &ShapesModel) -> usize {
     eval::count_focus_nodes(data, model)
+}
+
+/// [OPUS-4.8] (sq-7d3dj.33.1) The calling thread's monotonically-increasing count of
+/// `sh:sparql` constraint query executions the validator has run (one per engine
+/// query). Thread-local so a `validate` on one thread is not perturbed by a
+/// concurrent `validate` on another; snapshot and read the delta on the SAME thread.
+///
+/// Its purpose is a perf / anti-vacuity check: with focus-node batching the delta
+/// across one [`validate`] call is ~O(number of `sh:sparql` shapes) — one query per
+/// ~10 000-focus chunk — instead of O(number of focus nodes). A test / benchmark can
+/// snapshot it before and after [`validate`] and assert the batched path fired (a
+/// small delta for a large focus set), guarding against a silent regression back to
+/// the per-focus loop. The absolute value is not meaningful — only the delta.
+///
+/// ```
+/// # use sparq_shacl::{sparql_constraint_executions, validate, graph_from_triples};
+/// let before = sparql_constraint_executions();
+/// // ... run validate() over a shapes graph with sh:sparql constraints ...
+/// let executions = sparql_constraint_executions() - before;
+/// # let _ = executions;
+/// ```
+#[must_use]
+pub fn sparql_constraint_executions() -> u64 {
+    sparql::exec_count()
 }
 
 /// Loads a Turtle document into a [`Graph`], resolving relative IRIs against
@@ -922,6 +964,192 @@ mod tests {
         let r = validate(&data, &shapes);
         assert!(r.conforms, "{}", r.to_text());
     }
+
+    // --- [OPUS-4.8] (sq-7d3dj.33.1) sh:sparql focus-node batching --------------
+
+    /// A stable, order-independent key for one result, covering every field the
+    /// W3C suite compares (focus / value / path / component / source shape+constraint
+    /// / severity / message). Two reports are report-equivalent iff their sorted key
+    /// multisets are equal.
+    fn result_keys(r: &ValidationReport) -> Vec<String> {
+        let mut ks: Vec<String> = r
+            .results
+            .iter()
+            .map(|x| {
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}",
+                    x.focus_node,
+                    x.value.as_ref().map(|v| v.to_string()).unwrap_or_default(),
+                    x.path.as_ref().map(Path::to_turtle).unwrap_or_default(),
+                    x.source_component,
+                    x.source_shape,
+                    x.source_constraint
+                        .as_ref()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default(),
+                    x.severity,
+                    x.default_message,
+                )
+            })
+            .collect();
+        ks.sort();
+        ks
+    }
+
+    /// Data + shapes with a `sh:sparql` constraint over MANY focus nodes, a mix of
+    /// violating and conforming, plus a non-`sh:sparql` (core) constraint on the same
+    /// shape so batching must interleave correctly with the per-focus components.
+    fn batch_case() -> (Graph, Graph) {
+        let mut data = String::from("@prefix ex: <http://example.org/> .\n");
+        for i in 0..60 {
+            // Even i => age negative (violates the sh:sparql); every 7th also lacks a
+            // name (violates the core minCount) — exercising mixed components/foci.
+            let age = if i % 2 == 0 { -(i as i64) - 1 } else { i as i64 };
+            data.push_str(&format!("ex:n{} a ex:Person ; ex:age {} .\n", i, age));
+            if i % 7 != 0 {
+                data.push_str(&format!("ex:n{} ex:name \"n{}\" .\n", i, i));
+            }
+        }
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:PersonShape a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] ;
+              sh:sparql [
+                a sh:SPARQLConstraint ;
+                sh:prefixes ex:p ;
+                sh:message "age must not be negative" ;
+                sh:select """SELECT $this ?value WHERE { $this <http://example.org/age> ?value . FILTER(?value < 0) }""" ;
+              ] .
+            ex:p sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+        "#;
+        (
+            Graph::load_str(&data, "turtle").unwrap(),
+            Graph::load_str(shapes, "turtle").unwrap(),
+        )
+    }
+
+    /// HARD invariant: the batched `sh:sparql` path produces a byte-for-byte
+    /// report-equivalent result set (and `conforms`) to the per-focus path, over a
+    /// many-focus mixed-component workload.
+    #[test]
+    fn batched_equals_per_focus_report() {
+        let (data, shapes) = batch_case();
+        let batched = validate(&data, &shapes);
+        let per_focus = eval::with_sparql_batching_disabled(|| validate(&data, &shapes));
+        assert_eq!(
+            batched.conforms, per_focus.conforms,
+            "conforms diverged between batched and per-focus"
+        );
+        assert_eq!(
+            batched.results.len(),
+            per_focus.results.len(),
+            "result count diverged"
+        );
+        assert_eq!(
+            result_keys(&batched),
+            result_keys(&per_focus),
+            "batched vs per-focus reports differ"
+        );
+        // The sh:sparql constraint alone flags the 30 even-index nodes.
+        let sparql_hits = batched
+            .results
+            .iter()
+            .filter(|r| r.source_component.ends_with("SPARQLConstraintComponent"))
+            .count();
+        assert_eq!(sparql_hits, 30, "expected 30 negative-age violations");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.33.1) Local, NON-canonical measurement of the batched vs
+    /// per-focus `sh:sparql` wall time on a synthetic workload shaped like the LUBM
+    /// `sparql_constraint`/`sparql_heavy` benchmarks (a `SELECT $this ?value` with a
+    /// two-triple BGP + type check, one solution per violating focus). Prints the
+    /// speed-up ratio; run with `cargo test -p sparq-shacl --lib -- --ignored
+    /// --nocapture perf_batched`. `#[ignore]` because it is a timing harness, not a
+    /// pass/fail gate (the box is shared → numbers are directional only). It still
+    /// asserts the reports match and the execution-count contrast holds.
+    #[test]
+    #[ignore = "local timing harness; non-canonical, run with --ignored --nocapture"]
+    fn perf_batched_vs_per_focus() {
+        use std::time::Instant;
+        const N: usize = 2000;
+        let mut data = String::from("@prefix ex: <http://example.org/> .\n");
+        for i in 0..N {
+            data.push_str(&format!("ex:s{} a ex:Student ; ex:takesCourse ex:c{} .\n", i, i));
+            // Half the courses are graduate courses → half the students violate.
+            if i % 2 == 0 {
+                data.push_str(&format!("ex:c{} a ex:GraduateCourse .\n", i));
+            }
+        }
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Student ;
+              sh:sparql [ a sh:SPARQLConstraint ; sh:prefixes ex:p ; sh:message "grad course" ;
+                sh:select """SELECT $this ?value WHERE { $this <http://example.org/takesCourse> ?value . ?value a <http://example.org/GraduateCourse> }""" ] .
+            ex:p sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+        "#;
+        let data = Graph::load_str(&data, "turtle").unwrap();
+        let shapes = Graph::load_str(shapes, "turtle").unwrap();
+
+        // Warm up (parse/plan caches) then time each path best-of-3.
+        let mut batched_ns = u128::MAX;
+        let mut per_focus_ns = u128::MAX;
+        let mut batched_report = None;
+        let mut per_focus_report = None;
+        for _ in 0..3 {
+            let t = Instant::now();
+            let r = validate(&data, &shapes);
+            batched_ns = batched_ns.min(t.elapsed().as_nanos());
+            batched_report = Some(r);
+
+            let t = Instant::now();
+            let r = eval::with_sparql_batching_disabled(|| validate(&data, &shapes));
+            per_focus_ns = per_focus_ns.min(t.elapsed().as_nanos());
+            per_focus_report = Some(r);
+        }
+        let batched = batched_report.unwrap();
+        let per_focus = per_focus_report.unwrap();
+        assert_eq!(result_keys(&batched), result_keys(&per_focus));
+        let ratio = per_focus_ns as f64 / batched_ns as f64;
+        println!(
+            "[sq-7d3dj.33.1] N={N} foci  batched={:.3}ms  per_focus={:.3}ms  speed-up={:.1}x  (violations={})",
+            batched_ns as f64 / 1e6,
+            per_focus_ns as f64 / 1e6,
+            ratio,
+            batched.results.len(),
+        );
+    }
+
+    /// Anti-vacuity: the batched path FIRES — one query execution for 60 focus nodes,
+    /// not 60. Uses the public per-thread execution counter.
+    #[test]
+    fn batched_path_fires_once_for_many_foci() {
+        let (data, shapes) = batch_case();
+        let before = sparql_constraint_executions();
+        let _ = validate(&data, &shapes);
+        let batched_execs = sparql_constraint_executions() - before;
+        assert_eq!(
+            batched_execs, 1,
+            "expected ONE batched sh:sparql execution for 60 foci, got {}",
+            batched_execs
+        );
+        // And the per-focus path really does run one query per focus (the contrast
+        // that makes the '1' meaningful, not an artefact of e.g. zero executions).
+        let before_pf = sparql_constraint_executions();
+        eval::with_sparql_batching_disabled(|| {
+            let _ = validate(&data, &shapes);
+        });
+        let per_focus_execs = sparql_constraint_executions() - before_pf;
+        assert_eq!(
+            per_focus_execs, 60,
+            "per-focus path should run one query per focus node"
+        );
+    }
 }
 
 // [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) The two SHACL-AF node-expression
@@ -1071,5 +1299,151 @@ mod expression_tests {
             "expected a NodeByExpression violation for ex:obs: {}",
             r.to_text()
         );
+    }
+}
+
+// [FABLE-5] (sq-7d3dj.33.4) Report-equivalence tests for the id-level
+// core-constraint fast path: the SAME (data, shapes) pair validated with the
+// fast path ON (the default) and OFF (`eval::with_id_fastpath_disabled`) must
+// produce BYTE-IDENTICAL reports — result order included (stricter than the
+// order-independent `result_keys`) — and the fast path must actually FIRE
+// (non-vacuity via the id-walk counter, mirroring the sq-7d3dj.33.1 idiom).
+#[cfg(test)]
+mod idfast_tests {
+    use super::*;
+
+    fn g(ttl: &str) -> Graph {
+        let prelude = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+            @prefix ex: <http://example.org/> .\n\
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n";
+        Graph::load_str(&format!("{prelude}{ttl}"), "turtle").unwrap()
+    }
+
+    /// Validates twice — id fast path ON then OFF — asserting (a) the fast path
+    /// fired at least `min_walks` id-level value walks (anti-vacuity), (b) the
+    /// forced-off run fired NONE (the toggle works), and (c) the two reports are
+    /// byte-identical including order (`Debug` covers every field of every
+    /// result, recursively through `sh:detail`).
+    fn assert_identical_reports(data: &Graph, shapes: &Graph, min_walks: u64) {
+        let before = eval::idfast_walks();
+        let fast = validate(data, shapes);
+        let walks = eval::idfast_walks() - before;
+        assert!(
+            walks >= min_walks,
+            "id fast path fired {walks} id walks, expected >= {min_walks} (vacuous differential)"
+        );
+        let before = eval::idfast_walks();
+        let slow = eval::with_id_fastpath_disabled(|| validate(data, shapes));
+        assert_eq!(
+            eval::idfast_walks(),
+            before,
+            "with_id_fastpath_disabled failed: the forced run still took id walks"
+        );
+        assert_eq!(fast.conforms, slow.conforms, "conforms diverged");
+        assert_eq!(
+            format!("{:?}", fast.results),
+            format!("{:?}", slow.results),
+            "id-fast-path report differs from the Term-level report"
+        );
+    }
+
+    /// Datatype (well-/ill-formed lexicals, language-tagged, IRI, blank-node and
+    /// INLINE-integer values), pattern (+flags, IRI/blank subjects), lengths
+    /// (multi-byte chars), counts and nodeKind — the id arms of the benchmarked
+    /// `datatype_range` workload shape.
+    #[test]
+    fn idfast_value_constraints_report_equivalent() {
+        let data = g(r#"
+            ex:a a ex:T ; ex:age 42 ; ex:name "Alice" ; ex:mail "a@ex.org" .
+            ex:b a ex:T ; ex:age "4.2"^^xsd:integer ; ex:name "Bo"@en ; ex:mail "nope" .
+            ex:c a ex:T ; ex:age "007"^^xsd:integer ; ex:name ex:iriName ; ex:mail _:b1 .
+            ex:d a ex:T ; ex:age "-3"^^xsd:integer , 7 ; ex:name "Δδ" ; ex:mail "X@Y.Z" .
+            ex:e a ex:T ; ex:age <<( ex:s ex:p ex:o )>> ; ex:name _:b2 .
+        "#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+              sh:property [ sh:path ex:age ; sh:datatype xsd:integer ; sh:maxCount 1 ;
+                            sh:pattern "^4" ; sh:minLength 2 ] ;
+              sh:property [ sh:path ex:name ; sh:datatype xsd:string ; sh:minCount 1 ;
+                            sh:minLength 3 ; sh:maxLength 5 ; sh:nodeKind sh:Literal ;
+                            sh:pattern "^[A-Za-zΔδ]+$" ] ;
+              sh:property [ sh:path ex:mail ; sh:pattern "^[^@]+@.+$" ; sh:flags "i" ;
+                            sh:nodeKind ( sh:Literal sh:BlankNode ) ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 4);
+    }
+
+    /// Every path form (predicate / inverse / sequence / alternative /
+    /// zeroOrMore / oneOrMore / zeroOrOne / absent predicate) plus `sh:node`
+    /// through the id-keyed conformance memo — the benchmarked `node_paths`
+    /// workload shape, with a knows-cycle exercising the id closure.
+    #[test]
+    fn idfast_paths_and_node_report_equivalent() {
+        let data = g(r#"
+            ex:s1 a ex:Student ; ex:advisor ex:profHead ; ex:memberOf ex:dept ;
+                  ex:email "s1@u.edu" ; ex:knows ex:s2 ; ex:nick "n1" .
+            ex:s2 a ex:Student ; ex:advisor ex:profPlain ; ex:knows ex:s1 .
+            ex:s3 a ex:Student ; ex:memberOf ex:orphanDept ; ex:phone "555" .
+            ex:profHead ex:headOf ex:dept .
+            ex:dept ex:subOrgOf ex:univ .
+            ex:t1 ex:teaches ex:s1 . ex:t2 ex:teaches ex:s1 .
+        "#);
+        let shapes = g(r#"
+            ex:P a sh:NodeShape ; sh:targetClass ex:Student ;
+              sh:property [ sh:path ex:advisor ; sh:node ex:HeadShape ] ;
+              sh:property [ sh:path ( ex:memberOf ex:subOrgOf ) ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:inversePath ex:teaches ] ; sh:maxCount 1 ] ;
+              sh:property [ sh:path [ sh:alternativePath ( ex:email ex:phone ) ] ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:zeroOrMorePath ex:knows ] ; sh:maxCount 1 ] ;
+              sh:property [ sh:path [ sh:oneOrMorePath ex:knows ] ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:zeroOrOnePath ex:nick ] ; sh:minCount 2 ] ;
+              sh:property [ sh:path ex:absentPredicate ; sh:minCount 1 ] .
+            ex:HeadShape a sh:NodeShape ; sh:property [ sh:path ex:headOf ; sh:minCount 1 ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 8);
+    }
+
+    /// A cyclic `sh:node` reference: the recursion guard treats re-entry as
+    /// conforming and the context-free memo rule decides what may be cached —
+    /// `conforms_id`'s id-keyed memo layer must mirror the Term-keyed verdicts.
+    #[test]
+    fn idfast_cyclic_node_report_equivalent() {
+        let data = g(r#"
+            ex:n1 a ex:N ; ex:next ex:n2 ; ex:label "one" .
+            ex:n2 a ex:N ; ex:next ex:n1 .
+            ex:n3 a ex:N ; ex:next ex:n3 ; ex:label "three" .
+        "#);
+        let shapes = g(r#"
+            ex:A a sh:NodeShape ; sh:targetClass ex:N ;
+              sh:property [ sh:path ex:next ; sh:node ex:A ] ;
+              sh:property [ sh:path ex:label ; sh:minCount 1 ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 3);
+    }
+
+    /// A `sh:targetNode` focus ABSENT from the data graph: no id resolves, so the
+    /// whole validation of that focus takes the Term-level fallback — including
+    /// the zeroOrOne path whose value set contains the (dictionary-less) focus
+    /// term itself. `min_walks = 0`: no id walk is expected here.
+    #[test]
+    fn idfast_absent_focus_falls_back_to_term_route() {
+        let data = g("ex:present ex:p 1 .");
+        let shapes = g(r#"
+            ex:G a sh:NodeShape ; sh:targetNode ex:ghost ;
+              sh:property [ sh:path [ sh:zeroOrOnePath ex:p ] ; sh:datatype xsd:integer ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(
+            !r.conforms,
+            "the ghost focus itself flows through the zeroOrOne path and violates xsd:integer"
+        );
+        assert_identical_reports(&data, &shapes, 0);
     }
 }

@@ -42,7 +42,23 @@ required-features = ["server"]
 # binary has no bundle-size floor. Still TOGGLEABLE: `--no-default-features --features server`
 # (or just `server`) drops JSON-LD and `application/ld+json` becomes unrecognised (406/415) as
 # before. The `--no-default-features` (pure serialiser library) build is unaffected.
-default = ["server", "jsonld"]
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` is in the default set too: the shipped server
+# binary executes the same rewritten plans the CLI and the canonical benchmarks measure
+# (#1735 — result-equivalent, zero new deps; see the feature's own comment below). Like
+# `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
+# `--no-default-features --features server,jsonld` drops it for an explicit rewrite-dark build.
+default = ["server", "jsonld", "algebra-rewrite"]
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` (default ON, see above): forwards sparq-engine's
+# opt-in pre-execution algebra rewrite pass (#1735 / sq-7d3dj.30.1) — the result-equivalent
+# FILTER `?v = <iri>` constant substitution + `FILTER(!bound) → Minus` anti-join applied by
+# `PreparedQuery::parse` before evaluation. IRI-constants only (the sq-lr2ii literal-equality
+# avoidance contract); a non-matching shape is left verbatim. Pulls ZERO new dependencies
+# (`algebra-rewrite = []` in sparq-engine) and no `unsafe`; the pass's soundness revert-witnesses
+# run in the `sparq-engine (algebra-rewrite)` feature-matrix leg, and
+# `tests/algebra_rewrite_default.rs` is this crate's tripwire that the default set keeps it lit.
+# The pure serialiser library build (`--no-default-features`) is unaffected either way — this
+# only changes which sparq-engine the QUERY path compiles against.
+algebra-rewrite = ["sparq-engine/algebra-rewrite"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation
@@ -260,6 +276,64 @@ terse = ["server", "dep:sparq-terse"]
 # cryptographic authenticity of the records are out of scope (same boundary as the backup family).
 # Needs `server`.
 change-stream = ["server", "sparq-serve/change-stream"]
+# [FABLE-5] (sq-snopa.6, issue #992 FR-4) `solid-authz` (default OFF) mounts the OPT-IN Solid
+# WAC/ACP HTTP authorization surface — `POST /authz/decide`, `POST /authz/wac-allow`,
+# `POST /authz/query` — a THIN HTTP shell over the `sparq-solid` library authoriser
+# (`PodStore::decide` / `wac_allow` / `query_json_as`). This is the NEW, deliberately-opt-in
+# `sparq-server` -> `sparq-solid` workspace dependency the FR-4 architecture note flagged: the
+# default server build carries ZERO Solid/access-control code (the dep is `optional`, so it is
+# only compiled with this feature). Per the design record (`research/sparq-solid-scope.md` §4),
+# `sparq-solid` is a LIBRARY-level authoriser with NO HTTP surface — this feature is exactly that
+# missing HTTP shell: authentication (Solid-OIDC/DPoP -> a `(WebID, client)` session) stays the
+# caller's job; the endpoints take an already-resolved session + the pod dataset per request and
+# map the library verdict onto HTTP. FAIL-CLOSED is the soundness invariant — every error path
+# (unparseable dataset, materialize failure, unknown mode/view) DENIES (`allow:false`), never
+# opens. STILL OFF AT RUNTIME by default even when compiled in — the operator must additionally
+# set `--solid-authz` / `SPARQ_SOLID_AUTHZ=1` (`ServerConfig::solid_authz`), mirroring `tpf` /
+# `shacl` / `terse`; without the flag the routes are `404`. Without the feature the module + the
+# routes + the config field are `#[cfg]`-stripped, so a build without it is byte-identical to
+# before; sparq-core / sparq-engine / the wasm bundle are untouched either way (sparq-wasm
+# depends on sparq-core/-engine directly, never on sparq-server). Needs `server`. NOTE: the
+# `Link: rel="acl"` response-header wiring is a SEPARATE follow-up (sq-snopa.7) — this feature
+# already surfaces `governing_acl` / `aclLink` in the decision BODY, so that wiring only needs to
+# lift it into a header.
+solid-authz = ["server", "dep:sparq-solid"]
+# [SONNET-4.6] (sq-pfae.17) `solid-authz-trust` (default OFF): extends the OPT-IN
+# `POST /authz/decide` endpoint (from `solid-authz`) to accept a stateless trust block —
+# presented credential graphs + a trust policy + signed certification edges IN THE REQUEST
+# (stateless: no server-side trust store needed; the request carries the full trust graph).
+# The handler derives effective rules via the cert-graph closure (`sparq_trust::derive_effective_rules`,
+# `sq-pfae.15/16`) then runs the UNCHANGED WAC/ACP admission and decision gates; the response
+# carries a minimal admission justification (which rule/edge admitted the deciding fact).
+# FAIL-CLOSED is the soundness invariant: ANY malformed/unverifiable/stale/revoked/over-depth/
+# broadening trust input => 403 DENY with justification; feature OFF => byte-identical to `solid-authz`.
+# The trust extension is DOUBLE-OPT-IN: it activates only when BOTH this feature is compiled AND
+# the request carries a "trust" JSON block (no trust block => falls through to the existing path).
+# HONEST SCOPE: this is a clear-path admission mechanism (anchored-not-proven); it is NOT a ZK/MPC
+# or unlinkability claim. The ZK estate it touches is internally re-audited but has NO external
+# accredited-cryptographer sign-off (sq-qhy4 pending); sparq-mpc is semi-honest only.
+# Needs `solid-authz` + enables sparq-trust with the `cert-graph` feature for the closure.
+# [SONNET-4.6] POSITIONAL format args used throughout (CodeQL rust/unused-variable guard).
+solid-authz-trust = ["solid-authz", "dep:sparq-trust", "dep:sparq-zk"]
+# [FABLE-5] (sq-lrtc3.1, epic sq-lrtc3) `odrl-authz` (default OFF): the ODRL lane on the
+# OPT-IN `POST /authz/query` endpoint (from `solid-authz`). When the request dataset carries
+# ODRL policy rules (`odrl:permission` / `odrl:prohibition` predicates), the handler parses
+# them (`sparq_policy::parse_policy` over the UNION of the dataset's graphs) and runs the
+# sparq-solid ODRL->AUTH_GRAPH bridge (`PodStore::materialize_odrl_policy` — both the Permit
+# allow side AND the matched-Prohibition deny side, deny-overrides) for the request's
+# (party = session agent, action = odrl:read, target = each rule's target graph) BEFORE the
+# access-controlled query runs — so an ODRL policy demonstrably gates a SPARQL query
+# end-to-end over HTTP at NAMED-GRAPH granularity. FAIL-CLOSED is the soundness invariant:
+# a malformed policy, an unimplementable `odrl:conflict` strategy, a rule without a concrete
+# target (pattern targets are sq-lrtc3.3), a non-read mode, or an anonymous session is a
+# 4xx refusal — NEVER a silent allow; a constraint the stateless lane cannot evidence
+# (purpose / count / an undischarged duty) simply never grants. STATELESS-lane scope only
+# (the dataset arrives in the request body; the stateful loaded-store variant is sq-snopa.8),
+# which is exactly why the ONE-SHOT bridge entry point is used: the per-request store dies
+# with the response, so frozen-at-materialization semantics and per-session re-checked
+# conditions coincide. OFF by default — a build WITHOUT this feature carries ZERO ODRL code
+# (sparq-policy is never compiled) and `solid-authz` behaviour is byte-identical.
+odrl-authz = ["solid-authz", "sparq-solid/odrl-bridge", "dep:sparq-policy"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -299,6 +373,30 @@ sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 # sparq-core/-engine/-nlq/-vectors. OFF by default — a build without the `terse` feature carries
 # zero terse code.
 sparq-terse = { path = "../sparq-terse", version = "0.1.0", optional = true }
+# [FABLE-5] (sq-snopa.6, issue #992 FR-4) Behind the opt-in `solid-authz` feature only: the Solid
+# WAC/ACP library authoriser (`sparq_solid::PodStore::decide` / `wac_allow` / `query_json_as` ->
+# `WacDecision`) for the `POST /authz/*` endpoints. It transitively pulls sparq-engine (already a
+# dependency here) + sparq-reason; its OWN `oxrdf` is the same workspace 0.3 the server resolves,
+# so terms flow through. OFF by default — a build WITHOUT the `solid-authz` feature carries ZERO
+# Solid/access-control code (the standard server build never sees sparq-solid or sparq-reason).
+sparq-solid = { path = "../sparq-solid", version = "0.1.0", optional = true }
+# [SONNET-4.6] (sq-pfae.17) Behind the opt-in `solid-authz-trust` feature only: the trust-graph
+# authorisation admission gate (`sparq_trust::derive_effective_rules` + `sparq_trust::admit`),
+# with the `cert-graph` feature for the certification-edge closure. OFF by default — a build
+# WITHOUT the `solid-authz-trust` feature carries ZERO trust-graph code.
+sparq-trust = { path = "../sparq-trust", version = "0.1.0", optional = true, features = ["cert-graph"] }
+# [SONNET-4.6] (sq-pfae.17) Behind `solid-authz-trust` only: the ZK signature primitive used to
+# parse verifying keys from hex (`sparq_zk::sig::public_key_from_hex`). The `sparq-trust`
+# crate already pulls `sparq-zk` transitively, but `sparq-server` needs it directly so the
+# handler code can import `public_key_from_hex` without an extra re-export layer.
+sparq-zk = { path = "../sparq-zk", version = "0.1.0", optional = true }
+# [FABLE-5] (sq-lrtc3.1) Behind the opt-in `odrl-authz` feature only: the typed ODRL 2.2
+# model/parser/evaluator (`sparq_policy::parse_policy` / `Request` / `conflict_admissibility`)
+# the `/authz/query` ODRL lane feeds into the sparq-solid bridge. `sparq-solid/odrl-bridge`
+# already pulls it transitively, but the handler names `sparq_policy` types directly (the
+# bridge entry points take `&sparq_policy::Policy`), so the server needs the direct edge.
+# OFF by default — the standard build never compiles sparq-policy.
+sparq-policy = { path = "../sparq-policy", version = "0.1.0", optional = true }
 oxrdf.workspace = true
 # [OPUS-4.8] sq-rt6v: prefix-compacting Turtle + RDF/XML graph serialisation, and RDF/XML
 # request-body parsing, for the GSP read/write + CONSTRUCT/DESCRIBE surface. Both crates are
@@ -362,6 +460,16 @@ flate2 = { version = "1", optional = true }
 mimalloc = "0.1"
 
 [dev-dependencies]
+# [SONNET-4.6] (sq-pfae.17) Trust/ZK test helpers for the admission-path integration tests
+# (tests/solid_authz_trust.rs): construct valid Schnorr-signed credentials, verify the
+# happy-path GRANT and injection-gate DENY. These are dev-only — the production path is
+# behind the `solid-authz-trust` feature, which already enables sparq-trust/sparq-zk as
+# optional deps; the dev-dep is unconditional so the test binary can import the helpers
+# regardless of which feature set the dev ran (tests are #[cfg(feature="solid-authz-trust")]).
+sparq-trust = { path = "../sparq-trust", version = "0.1.0", features = ["cert-graph"] }
+sparq-zk = { path = "../sparq-zk", version = "0.1.0" }
+oxrdf = { workspace = true }
+oxttl = { workspace = true }
 # [OPUS-4.8] Reference SPARQL-results parser (oxigraph's) for the serializer oracle
 # (tests/serializer_oracle.rs): re-parses OUR XML/TSV output and asserts the round-trip
 # result set equals the source QueryResult. Pinned to 0.3 so its `oxrdf` (0.3.3) is the

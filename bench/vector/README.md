@@ -144,3 +144,19 @@ maths — are **fixture-unit-tested without numpy/hnswlib** in `scripts/bench-ad
 gather deps. Results land git-ignored in `bench/competitor-results/`. FAISS / ScaNN / DiskANN-ref are
 additional kernel peers on the same recall–QPS axis (run each library's sweep, score against the same
 exact-kNN ground truth, compare frontiers at matched recall) — tracked as further gather backends.
+
+The **comprehensive multi-engine Pareto gather** (hnswlib + FAISS IVFFlat + FAISS IVFSQ8 on both
+corpora) runs through `scripts/bench-adapters/gather_ann_pareto.py`:
+
+```sh
+# SIFT1M comprehensive gather (L2; hnswlib + FAISS):
+python3 scripts/bench-adapters/gather_ann_pareto.py sift /tmp/ann/results_sift.json
+# GloVe-100-angular comprehensive gather (cosine; hnswlib + FAISS-IP):
+python3 scripts/bench-adapters/gather_ann_pareto.py glove /tmp/ann/results_glove.json
+# Adapter self-test (no heavy deps; exercises pure functions only):
+python3 scripts/bench-adapters/vector_lib_adapter.py --smoke  # must exit 0
+```
+
+First-read results are in `research/gap-vector-2026-07.md` (NON-CANONICAL work-box run;
+canonical re-run is sq-hmd7l.26). ScaNN and DiskANN-ref were NOT-RUN on this gather;
+see the gap record §5 for reasons and follow-up beads.

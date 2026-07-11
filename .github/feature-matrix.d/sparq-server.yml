@@ -103,3 +103,67 @@
   crate: "sparq-server"
   features: "change-stream"
   test: true
+
+# [FABLE-5] sq-snopa.6 (issue #992 FR-4): the OPT-IN Solid WAC/ACP HTTP authorization surface
+# (`POST /authz/decide`+`/wac-allow`+`/query`), a fail-closed HTTP shell over the `sparq-solid`
+# library authoriser. The `crate::solid_authz` module (its handlers + the pure helpers + 12
+# in-module unit tests), the `ServerConfig::solid_authz` field + its Default/from_env arms, the
+# route mount, the optional `sparq-solid` dependency, and the `tests/solid_authz.rs` integration
+# suite are ALL `#[cfg(feature = "solid-authz")]`, so the DEFAULT build never compiled, clippy'd or
+# tested this code — and, crucially, the LOAD-BEARING FAIL-CLOSED integration tests would never run
+# in CI without this leg (the structural guard `scripts/check-feature-test-execution.py` flags
+# exactly that gap). This leg builds it, runs `clippy --all-targets -D warnings` with the feature ON
+# (the real gate), and runs the crate's tests — which now include the 12 `solid_authz::tests` unit
+# tests AND the 10-test gated `tests/solid_authz.rs` integration suite that drives the REAL axum
+# path: the opt-in 404, a real allow with FR-5 `governingAcl`/`aclLink` provenance, and the
+# fail-closed denies (anonymous 403, unparseable-dataset 400, unknown-mode 403, ungranted-mode 403,
+# grant-less query → zero rows, read-auth 401/200). `solid-authz` pulls `server` + optional
+# `sparq-solid` (no new EXTERNAL dependency — sparq-solid is a workspace crate that transitively
+# reuses the already-present sparq-engine + oxrdf), so the full async server compiles under it.
+# A dedicated single-feature leg (not folded into a broader compile) mirrors the `tpf` / `terse` /
+# `change-stream` pattern above and keeps the access-control soundness surface's tests executing on
+# their own discoverable check-run. Verified locally: `cargo test -p sparq-server --features
+# solid-authz` runs both suites; `clippy --all-targets -D warnings` is clean in the default,
+# solid-authz, and all-features states.
+- name: "sparq-server (solid-authz — POST /authz/* WAC/ACP HTTP surface)"
+  crate: "sparq-server"
+  features: "solid-authz"
+  test: true
+
+# [FABLE-5] sq-lrtc3.1 (epic sq-lrtc3): `odrl-authz` (default OFF) — the OPT-IN ODRL lane on
+# `POST /authz/query` (ODRL as THE access-control language for SPARQL queries, fail-closed).
+# The `solid_authz` ODRL branch, the `ServerConfig` wiring, the optional `sparq-policy`
+# dependency, and the `tests/odrl_authz.rs` integration suite are ALL `#[cfg(feature =
+# "odrl-authz")]`, so the DEFAULT build never compiled, clippy'd or tested this code — the
+# structural guard C1 (scripts/check-feature-test-execution.py) flags exactly that gap; this
+# leg is its executor. It builds the feature, runs `clippy --all-targets -D warnings` with it
+# ON (the real gate), and runs the crate's tests — which now include the gated
+# `tests/odrl_authz.rs` suite: the differential decision matrix (HTTP-lane decision ==
+# `sparq_policy::evaluate` oracle for permit / prohibit / deny-overrides / constraint /
+# conditional(recipient) / fail-closed), the two-requesters-disjoint-rows pillar, the
+# fail-closed HTTP refusals (anonymous, non-read mode, targetless rule, unimplementable
+# conflict strategy) and the dormant-lane no-ODRL invariant. `odrl-authz` implies
+# `solid-authz` + pulls `sparq-solid/odrl-bridge` + optional `sparq-policy` (workspace crates
+# only — no new external dependency). A dedicated single-feature leg mirrors the
+# `solid-authz` / `tpf` / `terse` pattern above, keeping the access-control soundness
+# surface's tests executing on their own discoverable check-run.
+- name: "sparq-server (odrl-authz — ODRL lane on POST /authz/query)"
+  crate: "sparq-server"
+  features: "odrl-authz"
+  test: true
+
+# [SONNET-4.6] sq-pfae.17: `solid-authz-trust` (default OFF) — the DOUBLE-OPT-IN stateless
+# trust-graph extension to `POST /authz/decide`. The `solid_authz_trust` config field, the
+# `trust_authz_decide` handler, and the 11-test gated `tests/solid_authz_trust.rs` integration
+# suite are ALL `#[cfg(feature = "solid-authz-trust")]`, so the DEFAULT build never compiled,
+# clippy'd or tested this code. This leg builds it, runs `clippy --all-targets -D warnings`
+# with the feature ON, and runs the crate's tests — including the 11 gated tests that cover
+# the fail-closed invariant, the double-opt-in config flag, the trust-block parse gates, and
+# the WAC fallthrough paths. `solid-authz-trust` implies `solid-authz` + pulls `sparq-trust`
+# (with `cert-graph`) + `sparq-zk` (for key-parsing), all workspace crates.
+# HONEST SCOPE: tests exercise the HTTP plumbing and fail-closed gates; the cryptographic path
+# is covered by sparq-trust's own unit tests (the ZK estate is externally UNAUDITED, sq-qhy4).
+- name: "sparq-server (solid-authz-trust — stateless trust-graph /authz/decide extension)"
+  crate: "sparq-server"
+  features: "solid-authz-trust"
+  test: true

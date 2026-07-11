@@ -1,0 +1,6 @@
+PREFIX ex: <http://ex/>
+SELECT DISTINCT ?s ?a WHERE {
+  ?s ex:age ?a ; ex:name ?n .
+  OPTIONAL { ?s ex:p ?o . FILTER(?a > 50 && LANG(?n) = "en") }
+  { ?s a ex:T } UNION { ?s ex:val ?v } MINUS { ?s ex:q ?z }
+} ORDER BY DESC(?a) LIMIT 10 OFFSET 2

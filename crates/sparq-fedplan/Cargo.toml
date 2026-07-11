@@ -54,7 +54,7 @@ rustc-hash = { workspace = true }
 # oorandom) are already covered by upstream imports (bytecode-alliance / google /
 # mozilla) in supply-chain/imports.lock from when sparq-substrate added criterion.
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # Round-trip a descriptor parsed from the served N-Triples form.
 oxttl = { workspace = true }
 
@@ -63,4 +63,13 @@ oxttl = { workspace = true }
 [[bench]]
 name = "fedplan"
 harness = false
+required-features = ["fedplan"]
+
+# [FABLE-5] sq-vw3ax.13: the site federation-capability capture harness runs the real
+# select_sources + plan_bgp over a declared fixture and prints verbatim output for
+# site/src/lib/federation.ts (the anti-fabrication discipline of sq-dwdm / sq-3was).
+# Registering the requirement keeps `cargo build --all-targets` (default features)
+# green — the example's whole file is `#![cfg(feature = "fedplan")]`-gated.
+[[example]]
+name = "capture_surface_federation"
 required-features = ["fedplan"]

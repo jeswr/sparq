@@ -39,6 +39,13 @@ assert_eq!(count, 1);
   path in front of `oxiri` — accepting *exactly* what `oxiri` accepts (a mandatory
   differential-fuzz equivalence gate), so the parallel loader reaches conformance parity with
   the serial oxttl path at fast-path cost. Zero new dependency (`oxiri` is already in-tree).
+- **Opt-in native Turtle parser** — the `native-ttl` feature (OFF by default) replaces the oxttl
+  Turtle path with a hand-rolled byte-level tokenizer/parser (full grammar: prefixes/base,
+  collections, blank-node property lists, predicate-object lists, numeric/boolean/triple-quoted
+  literals, RDF 1.2 reifiers/triple-terms/annotations). It is a byte-identical drop-in — IRI
+  resolution delegates to the same `oxiri` automaton oxttl uses, so resolved terms match, and the
+  full W3C rdf-turtle suite passes an *identical* pass/fail set (a differential + conformance
+  ratchet pin this). Only anonymous blank-node labels differ, as they do between two oxttl runs.
 - **Triple-pattern scans** — look up any triple pattern over the loaded graph.
 - **Incremental updates** — start from `Graph::new()` / `Graph::default()` (an empty graph) and
   `insert_triple(s, p, o)` / `remove_triple(s, p, o)` a single triple from `oxrdf` terms, or apply

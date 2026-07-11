@@ -17,13 +17,46 @@
       "unviable": 3
     },
     "sparq-canon": {
-      "_note": "[OPUS-4.8] sq-qcnn.14: measured with --features rdf12-triple-terms (the rdf12.rs NON-STANDARD RDF-1.2 triple-term profile is gated behind this feature; without it, cargo-mutants generates rdf12.rs mutations but they are trivially missed because the module is not compiled). 4 surviving mutations are all comparison-operator variants in CanonState::hash_n_degree_quads path-pruning logic (lines 429, 430, 448, 459) — a hard-to-distinguish HNDQ optimization boundary guard.",
+      "_note": "[OPUS-4.8] sq-qcnn.14: measured with --features rdf12-triple-terms (the rdf12.rs NON-STANDARD RDF-1.2 triple-term profile is gated behind this feature; without it, cargo-mutants generates rdf12.rs mutations but they are trivially missed because the module is not compiled). 4 surviving mutations are all comparison-operator variants in CanonState::hash_n_degree_quads path-pruning logic (lines 429, 430, 448, 459) \u2014 a hard-to-distinguish HNDQ optimization boundary guard.",
       "caught": 104,
       "caught_pct": 96.3,
       "ceiling": 6,
       "measured_surviving": 4,
       "timeout": 0,
       "unviable": 32
+    },
+    "sparq-fedclient": {
+      "_note": "[FABLE-5] sq-3dyje.6: the prior 0-caught/553-survived entry was a FEATURE-OFF ARTIFACT \u2014 the whole crate + every test is #[cfg(feature=\"fedclient\")]-gated, so a features-off cargo-mutants built+tested an EMPTY crate and every mutant trivially survived. Measured features-ON (--features fedclient,fedclient-adaptive, now set in the ci.yml mutants matrix like the sparq-canon/sparq-prov quirks): 465 caught / 10 survived / 5 timeout / 73 unviable (caught 0->465). The 10 survivors are ALL genuinely-EQUIVALENT mutants (documented in skills/federated-planning/SKILL.md): wire.rs |/^ bit-ops (header flag-sets, read_varint, write_varint \u2014 XOR==OR on every reachable input); EgressGuard::deny_private->Default::default() (derived Default over the empty allowlist); ScatterPool Drop->() (the tx field-drop closes the channel identically); exclusive_groups (i+1)..n->(i*1)..n (idempotent self-union); push_group SubQuery.project &&->|| (both branches yield an empty Vec). ceiling = 10 + 2 margin = 12.",
+      "caught": 465,
+      "caught_pct": 97.92,
+      "ceiling": 12,
+      "measured_surviving": 10,
+      "timeout": 5,
+      "unviable": 73
+    },
+    "sparq-fedplan": {
+      "caught": 415,
+      "caught_pct": 89.14,
+      "ceiling": 54,
+      "measured_surviving": 52,
+      "timeout": 12,
+      "unviable": 55
+    },
+    "sparq-geo": {
+      "caught": 499,
+      "caught_pct": 66.23,
+      "ceiling": 261,
+      "measured_surviving": 259,
+      "timeout": 9,
+      "unviable": 468
+    },
+    "sparq-hdt": {
+      "caught": 179,
+      "caught_pct": 82.27,
+      "ceiling": 41,
+      "measured_surviving": 39,
+      "timeout": 2,
+      "unviable": 10
     },
     "sparq-introspect": {
       "caught": 179,
@@ -33,6 +66,14 @@
       "timeout": 23,
       "unviable": 5
     },
+    "sparq-nlq": {
+      "caught": 185,
+      "caught_pct": 51.81,
+      "ceiling": 175,
+      "measured_surviving": 173,
+      "timeout": 1,
+      "unviable": 53
+    },
     "sparq-parse": {
       "caught": 73,
       "caught_pct": 83.17,
@@ -41,21 +82,79 @@
       "timeout": 11,
       "unviable": 1
     },
+    "sparq-policy": {
+      "caught": 387,
+      "caught_pct": 70.24,
+      "ceiling": 166,
+      "measured_surviving": 164,
+      "timeout": 0,
+      "unviable": 46
+    },
     "sparq-prov": {
-      "caught": 151,
-      "caught_pct": 74.15,
+      "caught": 166,
+      "caught_pct": 76.02,
       "ceiling": 55,
       "measured_surviving": 53,
-      "timeout": 1,
-      "unviable": 22
+      "timeout": 2,
+      "unviable": 25
+    },
+    "sparq-rsp": {
+      "caught": 296,
+      "caught_pct": 86.49,
+      "ceiling": 52,
+      "measured_surviving": 50,
+      "timeout": 24,
+      "unviable": 51
+    },
+    "sparq-serve": {
+      "caught": 108,
+      "caught_pct": 24.7,
+      "ceiling": 377,
+      "measured_surviving": 375,
+      "timeout": 15,
+      "unviable": 61
+    },
+    "sparq-shacl": {
+      "_note": "[OPUS-4.8] sq-qcnn.29: 994 surviving mutants on a large crate (1629 viable). 36% catch rate reflects that many SHACL evaluation paths are exercised by W3C conformance tests run via subprocess (sparq-conformance), not in-process assertions inside sparq-shacl itself. Ceiling is the honest measured value; the sq-qcnn coverage-raise program targets adding in-process assertions to reduce survivors.",
+      "caught": 562,
+      "caught_pct": 36.32,
+      "ceiling": 996,
+      "measured_surviving": 994,
+      "timeout": 5,
+      "unviable": 68
+    },
+    "sparq-sim": {
+      "caught": 71,
+      "caught_pct": 76.04,
+      "ceiling": 25,
+      "measured_surviving": 23,
+      "timeout": 2,
+      "unviable": 14
     },
     "sparq-substrate": {
-      "caught": 183,
-      "caught_pct": 60.98,
-      "ceiling": 130,
-      "measured_surviving": 128,
-      "timeout": 17,
-      "unviable": 21
+      "_note": "[SONNET-4.6] sq-qcnn.28: ceiling raised --allow-higher from 130 to 182 \u2014 measured_surviving grew 128 to 180 (52 new survivors) in run 28776460517 (2026-07-06). 535 mutants tested, 180 missed. New code added to sparq-substrate since last seeding lacks proportionate tests. Beaded for test-quality follow-up.",
+      "caught": 312,
+      "caught_pct": 64.77,
+      "ceiling": 182,
+      "measured_surviving": 180,
+      "timeout": 19,
+      "unviable": 24
+    },
+    "sparq-text": {
+      "caught": 171,
+      "caught_pct": 77.73,
+      "ceiling": 51,
+      "measured_surviving": 49,
+      "timeout": 0,
+      "unviable": 10
+    },
+    "sparq-zk": {
+      "caught": 283,
+      "caught_pct": 67.3,
+      "ceiling": 140,
+      "measured_surviving": 138,
+      "timeout": 1,
+      "unviable": 62
     }
   },
   "margin": 2

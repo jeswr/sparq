@@ -1,0 +1,14 @@
+{
+  "_comment": "RUST-DRIFT fixture: the rust-anchor const DEMO_SHACL_FLOOR EXISTS in floors.rs, but the recorded value (77) does NOT appear within the anchor window (the source says 98). The literal-adjacency check must catch the drifted number even though the anchor still resolves. MUST fail.",
+  "schemaVersion": 2,
+  "records": {
+    "demo.shacl_floor": {
+      "value": 77,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "crates/demo/tests/floors.rs::DEMO_SHACL_FLOOR",
+      "binding": { "kind": "rust-anchor", "file": "crates/demo/tests/floors.rs", "anchor": "DEMO_SHACL_FLOOR" },
+      "note": "Anchor exists but the recorded value drifted from the source literal (98)."
+    }
+  }
+}

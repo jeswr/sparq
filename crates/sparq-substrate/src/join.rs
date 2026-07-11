@@ -30,7 +30,9 @@
 //! concern (`research/shared-eval-substrate.md` §6).
 
 use crate::rows::{Id, Key, Posting, Row, NO_ID};
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 
 /// A cooperative-cancellation poll the join kernels call once per key-group /
@@ -105,18 +107,61 @@ pub struct JoinKeys {
 
 impl JoinKeys {
     /// The left-side key column indices, in `key_cols` order.
+    ///
+    /// **Single-column fast path ([OPUS-4.8] sq-4r8uy).** The overwhelmingly
+    /// common join is on ONE variable (`key_cols.len() == 1`). For it, building the
+    /// [`Key`] by iterating the heap `key_cols` `Vec` and running the general
+    /// `SmallVec::from_iter` collect machinery costs measurably more than a direct
+    /// one-element push — the descriptor's per-row projection was the whole measured
+    /// `hash_probe` overhead over a hand-specialised single-column probe (the #1810
+    /// canonical delta). This branch special-cases it to `single_key`, which
+    /// pushes exactly the one projected id, and falls through to the general
+    /// `iter().collect()` for multi-column keys (byte-identical to the old path).
+    /// The result is IDENTICAL to the general path in every case — same length,
+    /// same ids, same order — so the join semantics are unchanged; only the
+    /// single-column key derivation is cheaper.
     #[inline]
     pub fn left_key(&self, row: &[Id]) -> Key {
+        if let [(lc, _)] = self.key_cols.as_slice() {
+            return single_key(row[*lc]);
+        }
         self.key_cols.iter().map(|&(lc, _)| row[lc]).collect()
     }
 
     /// The right-side key column indices, in `key_cols` order — projected to the
     /// SAME key tuple shape as [`left_key`](JoinKeys::left_key) so build and probe
     /// keys are equal exactly when the join columns are equal.
+    ///
+    /// Carries the same single-column fast path as [`left_key`](JoinKeys::left_key)
+    /// ([OPUS-4.8] sq-4r8uy) — for `key_cols.len() == 1` it pushes exactly the one
+    /// projected right-side id via `single_key` rather than running the general
+    /// `iter().collect()`. The single-column result is IDENTICAL to the general
+    /// path, so a build key and a probe key still compare equal exactly when the
+    /// join columns agree — the hash-join correctness invariant is preserved.
     #[inline]
     pub fn right_key(&self, row: &[Id]) -> Key {
+        if let [(_, rc)] = self.key_cols.as_slice() {
+            return single_key(row[*rc]);
+        }
         self.key_cols.iter().map(|&(_, rc)| row[rc]).collect()
     }
+}
+
+/// Build a one-element [`Key`] holding exactly `id` — the single-column key fast
+/// path ([OPUS-4.8] sq-4r8uy).
+///
+/// This is byte-identical to `[id].into_iter().collect::<Key>()` (a length-1
+/// [`Key`], the id in slot 0, inline — the `[Id; 2]` inline width holds one id with
+/// no heap spill) but skips the general `SmallVec::from_iter` collect path: it
+/// constructs an empty `Key` and pushes the single id, exactly what a
+/// pre-extraction engine hard-coded for a single-variable equi-join. Kept a free
+/// function (not inlined literally at each call site) so the two projection methods
+/// share one definition and the differential test can pin the derivation.
+#[inline]
+fn single_key(id: Id) -> Key {
+    let mut k = Key::new();
+    k.push(id);
+    k
 }
 
 /// The partition/lookup hash for a join key — build and probe must agree on it.
@@ -131,6 +176,20 @@ pub fn key_hash(key: &Key) -> u64 {
 /// Number of radix partitions for the parallel hash-join build. 64 spreads well at
 /// high thread counts while keeping the per-partition tag-scan cheap.
 pub const JOIN_PARTS: usize = 64;
+
+/// The hash table type for hash-join build-side storage: a [`hashbrown::HashMap`] keyed on
+/// [`Key`] (the equi-join projection), mapping to the sorted posting list of matching
+/// build-row indices, backed by [`FxBuildHasher`].
+///
+/// Using `hashbrown::HashMap` (rather than `std::collections::HashMap`) lets [`probe_emit`]
+/// and [`probe_gather_indices`] call `raw_entry().from_hash` to skip the second internal
+/// re-hash on the partitioned probe path — a single [`key_hash`] call derives the radix
+/// partition **and** performs the table lookup. The `FxBuildHasher` keeps the stored hash
+/// identical to the explicit [`key_hash`] computation so the precomputed hash hits the
+/// correct bucket every time.
+///
+/// [SONNET-4.6] sq-7d3dj.19
+pub type JoinTable = HashMap<Key, Posting, FxBuildHasher>;
 
 /// Sorted **merge join** of two relations already sorted on a single shared key
 /// column (`lk` on the left, `rk` on the right), with optional `extra_shared`
@@ -195,10 +254,12 @@ pub fn merge_join<B: Budget>(
 }
 
 /// Builds the serial hash table for a hash join: maps each build-side key to the
-/// ascending list of build-row indices sharing it.
+/// ascending list of build-row indices sharing it. Returns a [`JoinTable`]
+/// (`hashbrown::HashMap<Key, Posting, FxBuildHasher>`) so that the probe path can
+/// call `raw_entry().from_hash` with the precomputed [`key_hash`] value.
 #[inline]
-pub fn build_table(build: &[Row], keys: &JoinKeys) -> FxHashMap<Key, Posting> {
-    let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+pub fn build_table(build: &[Row], keys: &JoinKeys) -> JoinTable {
+    let mut t = JoinTable::default();
     for (ri, row) in build.iter().enumerate() {
         t.entry(keys.left_key(row)).or_default().push(ri);
     }
@@ -210,12 +271,13 @@ pub fn build_table(build: &[Row], keys: &JoinKeys) -> FxHashMap<Key, Posting> {
 /// Within a partition rows are scanned in ascending index, so each posting list
 /// stays in ascending build-row order — exactly the serial build — and the probe
 /// output is byte-identical. Requires the `parallel` feature (the inner rayon
-/// import is the caller's; this returns the per-partition maps).
+/// import is the caller's; this returns the per-partition maps). Returns
+/// `Vec<`[`JoinTable`]`>` so the probe path can use `raw_entry().from_hash`.
 #[inline]
-pub fn build_partitioned(build: &[Row], keys: &JoinKeys, parts: &[u8]) -> Vec<FxHashMap<Key, Posting>> {
+pub fn build_partitioned(build: &[Row], keys: &JoinKeys, parts: &[u8]) -> Vec<JoinTable> {
     (0..JOIN_PARTS)
         .map(|p| {
-            let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+            let mut t = JoinTable::default();
             for (ri, row) in build.iter().enumerate() {
                 if parts[ri] as usize == p {
                     t.entry(keys.left_key(row)).or_default().push(ri);
@@ -229,43 +291,90 @@ pub fn build_partitioned(build: &[Row], keys: &JoinKeys, parts: &[u8]) -> Vec<Fx
 /// Emits, for one probe row, every combined output row (its build-side matches
 /// from `tables`, each extended with the probe-only columns). Shared by the serial
 /// and parallel probe paths so they are byte-identical. `tables` is either one
-/// serial table or `JOIN_PARTS` radix partitions; `probe_only` are the probe
+/// serial [`JoinTable`] or `JOIN_PARTS` radix partitions; `probe_only` are the probe
 /// columns appended after the build row.
+///
+/// **Single-hash optimisation ([SONNET-4.6] sq-7d3dj.19):** the join key is hashed
+/// ONCE via [`key_hash`]; the hash bits select the radix partition and
+/// `raw_entry().from_hash` performs the table lookup without a second internal
+/// re-hash. `out.reserve(matches.len())` allocates for all matches in one call —
+/// the **batch-emission contract** the sq-pntvh M4 morsel pipeline inherits:
+/// reserve then materialise once per key group, not per match.
 #[inline]
 pub fn probe_emit(
     prow: &Row,
     keys: &JoinKeys,
     build: &[Row],
-    tables: &[FxHashMap<Key, Posting>],
+    tables: &[JoinTable],
     probe_only: &[usize],
     out: &mut Vec<Row>,
 ) {
     let key: Key = keys.right_key(prow);
+    // [SONNET-4.6] sq-7d3dj.19: hash ONCE — partition selection and raw_entry lookup
+    // share this value; no second internal re-hash on the partitioned probe path.
+    let h = key_hash(&key);
     let table = if tables.len() == 1 {
         &tables[0]
     } else {
-        &tables[(key_hash(&key) % JOIN_PARTS as u64) as usize]
+        &tables[(h % JOIN_PARTS as u64) as usize]
     };
-    if let Some(matches) = table.get(&key) {
-        for &bi in matches {
-            let mut combined = build[bi].clone();
-            for &pi in probe_only {
-                combined.push(prow[pi]);
-            }
-            out.push(combined);
+    let Some((_, matches)) = table.raw_entry().from_hash(h, |k| *k == key) else {
+        return;
+    };
+    // Reserve exact match count — one allocation for the entire key group.
+    // Batch-emission contract (sq-pntvh M4): materialise after reserve, not per match.
+    // [SONNET-4.6] sq-7d3dj.19
+    out.reserve(matches.len());
+    for &bi in matches {
+        let mut combined = build[bi].clone();
+        for &pi in probe_only {
+            combined.push(prow[pi]);
         }
+        out.push(combined);
+    }
+}
+
+/// Collects, for one probe row, the build-side match indices into `build_indices`
+/// without materialising any output rows. This is the **M4 batch-emission contract**
+/// (sq-pntvh.7): a morsel pipeline calls this to gather `(build_idx, probe_row)`
+/// index runs, then materialises the combined output once per chunk — no per-match
+/// `Row` clone. The scalar [`probe_emit`] is the row-materialising wrapper over
+/// this primitive.
+///
+/// The join key is hashed ONCE via [`key_hash`]; the hash selects the radix
+/// partition and drives `raw_entry().from_hash` — the partitioned probe path pays
+/// exactly one hash operation, identical to the serial path.
+///
+/// [SONNET-4.6] sq-7d3dj.19
+#[inline]
+pub fn probe_gather_indices(
+    prow: &Row,
+    keys: &JoinKeys,
+    tables: &[JoinTable],
+    build_indices: &mut Vec<usize>,
+) {
+    let key: Key = keys.right_key(prow);
+    let h = key_hash(&key);
+    let table = if tables.len() == 1 {
+        &tables[0]
+    } else {
+        &tables[(h % JOIN_PARTS as u64) as usize]
+    };
+    if let Some((_, matches)) = table.raw_entry().from_hash(h, |k| *k == key) {
+        build_indices.extend(matches.iter().copied());
     }
 }
 
 /// Serial **hash join** probe: for every probe row, emit its build-side matches.
 /// `budget` is polled once per probe row (the engine's pre-move per-row check).
 /// The build table(s) and the layout are the caller's; this is the probe hot loop.
+/// Delegates per-row emission to [`probe_emit`] (single-hash + batch-reserve).
 #[inline]
 pub fn hash_probe_serial<B: Budget>(
     probe: &[Row],
     keys: &JoinKeys,
     build: &[Row],
-    tables: &[FxHashMap<Key, Posting>],
+    tables: &[JoinTable],
     probe_only: &[usize],
     budget: &B,
     out: &mut Vec<Row>,
@@ -413,7 +522,15 @@ impl<'a> TrieIter<'a> {
 
 /// Leapfrog intersection of the participating iterators at one level.
 struct Leapfrog {
-    order: Vec<usize>, // participant indices, kept in cyclic key order
+    /// Participant iterator indices kept in cyclic ascending-key order.
+    ///
+    /// `SmallVec<[usize; 8]>` inline for k ≤ 8 (all practical WCO arities) so the
+    /// struct lives entirely on the stack — no per-recursion-level heap allocation.
+    /// For k=3 (the dominant triangle/clique case), `search_k3` loads all three
+    /// entries as stack-local copies at entry so the hot loop never reads this field.
+    ///
+    /// [SONNET-4.6] sq-7d3dj.20
+    order: SmallVec<[usize; 8]>,
     p: usize,
     ended: bool,
     key: Id,
@@ -421,7 +538,12 @@ struct Leapfrog {
 
 impl Leapfrog {
     fn init(iters: &mut [TrieIter], parts: &[usize]) -> Self {
-        let mut lf = Leapfrog { order: parts.to_vec(), p: 0, ended: false, key: 0 };
+        let mut lf = Leapfrog {
+            order: SmallVec::from_slice(parts),
+            p: 0,
+            ended: false,
+            key: 0,
+        };
         if parts.iter().any(|&i| iters[i].at_end()) {
             lf.ended = true;
             return lf;
@@ -430,31 +552,108 @@ impl Leapfrog {
         lf.search(iters);
         lf
     }
+
+    /// Advance the leapfrog state to the next common value across all participants.
+    ///
+    /// Three micro-optimisations ([SONNET-4.6] sq-7d3dj.20):
+    ///
+    /// (a) **Branchless wrap**: `p` only advances by 1 per iteration, so
+    ///     `(p + 1) % k` becomes `p += 1; if p == k { p = 0 }` — compiles to a
+    ///     `cmov` rather than an integer divide.
+    ///
+    /// (b) **Hoisted indirection**: `order[p]` and `order[prev]` are resolved once
+    ///     per iteration into `cur_idx` / `prev_idx` locals, eliminating repeated
+    ///     SmallVec + slice pointer chases inside the hot loop.
+    ///
+    /// (c) **Monomorphized k=3 dispatch**: routes to `search_k3` when
+    ///     `order.len() == 3` (the triangle / 3-clique case dominating WCO workloads),
+    ///     which additionally copies all three entries as stack-local variables so the
+    ///     hot loop never touches the `order` field at all.
+    #[inline]
     fn search(&mut self, iters: &mut [TrieIter]) {
         let k = self.order.len();
+        // (c) Route to monomorphized k=3 path for the dominant WCO arity.
+        if k == 3 {
+            return self.search_k3(iters);
+        }
         loop {
-            let max = iters[self.order[(self.p + k - 1) % k]].key();
-            let min = iters[self.order[self.p]].key();
+            // (a) Branchless predecessor: p only decrements by 1 cyclically.
+            let prev = if self.p == 0 { k - 1 } else { self.p - 1 };
+            // (b) Hoist: resolve order[..] into locals once per iteration.
+            let prev_idx = self.order[prev];
+            let cur_idx = self.order[self.p];
+            let max = iters[prev_idx].key();
+            let min = iters[cur_idx].key();
             if min == max {
                 self.key = min;
                 return;
             }
-            iters[self.order[self.p]].seek(max);
-            if iters[self.order[self.p]].at_end() {
+            iters[cur_idx].seek(max);
+            if iters[cur_idx].at_end() {
                 self.ended = true;
                 return;
             }
-            self.p = (self.p + 1) % k;
+            // (a) Branchless wrap: advance p one step mod k.
+            self.p += 1;
+            if self.p == k {
+                self.p = 0;
+            }
         }
     }
+
+    /// Monomorphized k=3 fast path for triangle / 3-clique queries.
+    ///
+    /// Loads `order[0..3]` into a stack-local array `o` at entry so the hot loop
+    /// reads register-resident copies rather than the `SmallVec` field.  Cyclic
+    /// advance is a compare-and-reset against the fixed modulus 3, eliminating both
+    /// `%` ops present in the generic path.
+    ///
+    /// Only called from [`search`](Leapfrog::search) when `order.len() == 3`.
+    /// [SONNET-4.6] sq-7d3dj.20
+    #[inline]
+    fn search_k3(&mut self, iters: &mut [TrieIter]) {
+        debug_assert_eq!(self.order.len(), 3);
+        // Load all three order entries as stack-locals — hot loop never touches
+        // self.order again. [SONNET-4.6] sq-7d3dj.20
+        let o = [self.order[0], self.order[1], self.order[2]];
+        loop {
+            // Predecessor in {0, 1, 2}: 0 → 2, else p − 1.
+            let prev = if self.p == 0 { 2usize } else { self.p - 1 };
+            let ci = o[self.p]; // current iterator index
+            let max = iters[o[prev]].key();
+            let min = iters[ci].key();
+            if min == max {
+                self.key = min;
+                return;
+            }
+            iters[ci].seek(max);
+            if iters[ci].at_end() {
+                self.ended = true;
+                return;
+            }
+            // Branchless cyclic advance for the fixed modulus 3: no % op.
+            self.p += 1;
+            if self.p == 3 {
+                self.p = 0;
+            }
+        }
+    }
+
+    #[inline]
     fn next(&mut self, iters: &mut [TrieIter]) {
         let k = self.order.len();
-        iters[self.order[self.p]].next();
-        if iters[self.order[self.p]].at_end() {
+        // (b) Hoist: resolve order[p] once. [SONNET-4.6] sq-7d3dj.20
+        let cur_idx = self.order[self.p];
+        iters[cur_idx].next();
+        if iters[cur_idx].at_end() {
             self.ended = true;
             return;
         }
-        self.p = (self.p + 1) % k;
+        // (a) Branchless wrap: advance p one step mod k. [SONNET-4.6] sq-7d3dj.20
+        self.p += 1;
+        if self.p == k {
+            self.p = 0;
+        }
         self.search(iters);
     }
 }
@@ -1335,5 +1534,467 @@ mod tests {
         assert!(any_unbound(&rows, &[0, 1])); // any unbound in the set trips it
         let full = vec![row(&[1, 2, 3])];
         assert!(!any_unbound(&full, &[0, 1, 2])); // all bound
+    }
+
+    // [SONNET-4.6] sq-7d3dj.20 — DIRECT tests for the monomorphized k=3 path.
+
+    #[test]
+    fn lftj_k3_three_way_intersection() {
+        // 3-way set intersection: R(x) ∧ S(x) ∧ T(x).
+        // All three tries participate at level 0 (k=3), exercising the monomorphized
+        // search_k3 path directly. Results must match the manual intersection.
+        // [SONNET-4.6] sq-7d3dj.20
+        let r = Trie { tuples: vec![vec![1], vec![2], vec![3], vec![5], vec![7]] };
+        let s = Trie { tuples: vec![vec![2], vec![3], vec![5], vec![6], vec![8]] };
+        let t = Trie { tuples: vec![vec![1], vec![3], vec![5], vec![7], vec![9]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        // Intersection: {3, 5} — values present in all three tries.
+        assert_eq!(out.len(), 2, "k=3 intersection must find exactly 2 common values");
+        assert!(out.contains(&row(&[3])));
+        assert!(out.contains(&row(&[5])));
+    }
+
+    #[test]
+    fn lftj_k3_intersection_empty_when_no_common_value() {
+        // k=3 path: empty intersection. [SONNET-4.6] sq-7d3dj.20
+        let r = Trie { tuples: vec![vec![1], vec![2]] };
+        let s = Trie { tuples: vec![vec![3], vec![4]] };
+        let t = Trie { tuples: vec![vec![5], vec![6]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        assert!(out.is_empty(), "k=3 path must produce empty output when no common value exists");
+    }
+
+    #[test]
+    fn lftj_k3_intersection_result_equivalent_to_k2_pair_intersection() {
+        // Invariant: 3-way intersection equals the pairwise intersection computed
+        // sequentially. Verifies the k=3 path is semantically equivalent to the
+        // generic path. [SONNET-4.6] sq-7d3dj.20
+        let vals_r: Vec<u32> = (0..20).filter(|x| x % 2 == 0).collect(); // even
+        let vals_s: Vec<u32> = (0..20).filter(|x| x % 3 == 0).collect(); // multiples of 3
+        let vals_t: Vec<u32> = (0..20).filter(|x| x % 4 == 0).collect(); // multiples of 4
+
+        // Expected: values divisible by lcm(2,3,4)=12 in 0..20 → {0, 12}
+        let expected: Vec<Row> = vals_r
+            .iter()
+            .filter(|&&v| vals_s.contains(&v) && vals_t.contains(&v))
+            .map(|&v| row(&[v]))
+            .collect();
+
+        let r = Trie { tuples: vals_r.iter().map(|&v| vec![v]).collect() };
+        let s = Trie { tuples: vals_s.iter().map(|&v| vec![v]).collect() };
+        let t = Trie { tuples: vals_t.iter().map(|&v| vec![v]).collect() };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+        let parts_at_level = vec![vec![0usize, 1, 2]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        let mut out_sorted = out.clone();
+        out_sorted.sort();
+        let mut exp_sorted = expected.clone();
+        exp_sorted.sort();
+        assert_eq!(out_sorted, exp_sorted, "k=3 result must match sequential pairwise intersection");
+    }
+
+    // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants from
+    // nightly run 28776460517. Each asserts an EXACT value or outcome so a mutation
+    // of the key/hash/trie logic goes red.
+
+    /// `key_hash` must produce distinct values for distinct keys so the hash join
+    /// partitions build and probe rows correctly into separate buckets.
+    /// Kills: `126:5 replace key_hash -> u64 with 0` (constant hash collapses all
+    /// partitions to one, making this assertion fail since equal hashes for distinct keys
+    /// are not guaranteed by the function's contract but a constant-0 trivially equals 0).
+    #[test]
+    fn key_hash_distinct_keys_produce_distinct_hashes() {
+        use smallvec::smallvec;
+        let k1: Key = smallvec![1u32];
+        let k2: Key = smallvec![2u32];
+        let k3: Key = smallvec![100u32, 200u32];
+        let k4: Key = smallvec![100u32, 201u32];
+        // With a constant-0 hash, ALL of these would be equal — so assert they differ.
+        assert_ne!(key_hash(&k1), key_hash(&k2), "key [1] and [2] must hash differently");
+        assert_ne!(key_hash(&k3), key_hash(&k4), "key [100,200] and [100,201] must hash differently");
+    }
+
+    /// When a trie has multiple child rows for the same parent key, `TrieIter::open`
+    /// must expose ALL of them at the child level. The parent-column index in `open`
+    /// is `frames.len() - 1`; mutating to `/ 1` (= `frames.len()`, one-off) reads the
+    /// wrong column for the grouping key, shrinking the visible child range.
+    /// Kills: `401:46 replace - with / in TrieIter<'a>::open`.
+    #[test]
+    fn lftj_multiple_children_per_parent_key_all_emitted() {
+        // Trie with a=1 having three children b=1,2,3. The leapfrog intersection of
+        // two identical tries must emit all three (a=1,b=1), (a=1,b=2), (a=1,b=3).
+        // Under the mutation, open() uses column 1 (the b value) as the parent grouping
+        // key, which confines each iterator to only the first child row → 1 row output.
+        let r = Trie { tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]] };
+        let s = Trie { tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
+        let parts_at_level = vec![vec![0usize, 1], vec![0usize, 1]];
+        let mut current = vec![NO_ID; 2];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &NoBudget, &mut out);
+        assert_eq!(out.len(), 3, "must emit all 3 children; open() must use column 0 not 1");
+        assert!(out.contains(&row(&[1, 1])));
+        assert!(out.contains(&row(&[1, 2])));
+        assert!(out.contains(&row(&[1, 3])));
+    }
+
+    /// The generic Leapfrog::search path (k >= 4) must advance `p` FORWARD (`+= 1`),
+    /// not backward. With k=4 participants starting at distinct values the leapfrog
+    /// must seek iterators in order; `p -= 1` from p=0 underflows (debug panic) or
+    /// cycles backward through the wrong iterator.
+    /// Kills: `489:20 replace += with -= in Leapfrog::search`.
+    ///
+    /// Also exercises the k=2 case where the two iterators start at different values
+    /// (so the `p += 1` branch is reached inside search, unlike the existing tests
+    /// where both iterators always start at the same key and `search` returns early).
+    #[test]
+    fn lftj_k2_different_start_keys_reaches_search_advance() {
+        // R starts at 3, S starts at 5; intersection is {7}.
+        // `search` must seek R from 3 to 7 (via 5, then wrap) and S from 5 to 7,
+        // going through the `p += 1` branch at least once.
+        let r = Trie { tuples: vec![vec![3], vec![7]] };
+        let s = Trie { tuples: vec![vec![5], vec![7]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
+        let parts_at_level = vec![vec![0usize, 1]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        assert_eq!(out, vec![row(&[7])]);
+    }
+
+    /// k=4 leapfrog with all four participants starting at distinct values forces
+    /// multiple iterations through the `p += 1` branch of `search` (the generic path,
+    /// since k != 3 bypasses `search_k3`).
+    #[test]
+    fn lftj_k4_intersection_via_generic_search_path() {
+        // Four single-column tries; only value 10 is common to all.
+        let a = Trie { tuples: vec![vec![1], vec![5], vec![10]] };
+        let b = Trie { tuples: vec![vec![3], vec![7], vec![10]] };
+        let c = Trie { tuples: vec![vec![4], vec![8], vec![10]] };
+        let d = Trie { tuples: vec![vec![2], vec![6], vec![10]] };
+        let mut iters = vec![
+            TrieIter::new(&a),
+            TrieIter::new(&b),
+            TrieIter::new(&c),
+            TrieIter::new(&d),
+        ];
+        let parts_at_level = vec![vec![0usize, 1, 2, 3]];
+        let mut current = vec![NO_ID; 1];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        assert_eq!(out, vec![row(&[10])], "k=4 intersection must find the single common value");
+    }
+
+    // [SONNET-4.6] sq-7d3dj.19 — DIRECT tests for `probe_gather_indices` (M4 batch-emission
+    // contract) and the single-hash optimisation in `probe_emit`.
+
+    #[test]
+    fn probe_gather_indices_serial_table_finds_matching_build_indices() {
+        // Serial table (len == 1): probe_gather_indices must return the correct build-row indices.
+        // [SONNET-4.6] sq-7d3dj.19
+        let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[1, 11])];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let tables = vec![build_table(&build, &keys)];
+
+        // key=1 matches build rows 0 and 2 (ascending index order from build_table).
+        let probe_row = row(&[1, 99]);
+        let mut indices = Vec::new();
+        probe_gather_indices(&probe_row, &keys, &tables, &mut indices);
+        assert_eq!(indices, vec![0usize, 2], "key=1 must yield build indices [0, 2] in insertion order");
+
+        // key=2 matches build row 1 only.
+        let mut indices2 = Vec::new();
+        probe_gather_indices(&row(&[2, 0]), &keys, &tables, &mut indices2);
+        assert_eq!(indices2, vec![1usize]);
+
+        // key=99 has no match.
+        let mut indices3 = Vec::new();
+        probe_gather_indices(&row(&[99, 0]), &keys, &tables, &mut indices3);
+        assert!(indices3.is_empty(), "unmatched key must yield no indices");
+    }
+
+    #[test]
+    fn probe_gather_indices_partitioned_table_finds_matching_build_indices() {
+        // Partitioned table (len == JOIN_PARTS): exercises the radix branch and raw_entry lookup.
+        // [SONNET-4.6] sq-7d3dj.19
+        let build = vec![row(&[10, 100]), row(&[20, 200]), row(&[10, 101])];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let parts: Vec<u8> = build
+            .iter()
+            .map(|r| (key_hash(&keys.left_key(r)) % JOIN_PARTS as u64) as u8)
+            .collect();
+        let tables = build_partitioned(&build, &keys, &parts);
+        assert_eq!(tables.len(), JOIN_PARTS);
+
+        let mut indices = Vec::new();
+        probe_gather_indices(&row(&[10, 0]), &keys, &tables, &mut indices);
+        assert_eq!(indices, vec![0usize, 2], "key=10 must yield build indices [0, 2] from partitioned table");
+    }
+
+    #[test]
+    fn probe_gather_indices_result_equivalent_to_probe_emit_indices() {
+        // Load-bearing invariant: probe_gather_indices must collect exactly the build indices
+        // that probe_emit materialises. Verifies the M4 batch-emission contract: the morsel
+        // pipeline can gather indices via probe_gather_indices and materialise the same rows.
+        // [SONNET-4.6] sq-7d3dj.19
+        let build = vec![
+            row(&[3, 30]),
+            row(&[1, 10]),
+            row(&[2, 20]),
+            row(&[1, 11]),
+            row(&[3, 31]),
+        ];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![1] };
+        let tables = vec![build_table(&build, &keys)];
+
+        for probe_val in [1u32, 2, 3, 99] {
+            let prow = row(&[probe_val, 77]);
+
+            // Collect build indices via probe_gather_indices.
+            let mut indices = Vec::new();
+            probe_gather_indices(&prow, &keys, &tables, &mut indices);
+
+            // Materialise the combined rows manually from the gathered indices.
+            let mut manual_out: Vec<Row> = Vec::with_capacity(indices.len());
+            for &bi in &indices {
+                let mut combined = build[bi].clone();
+                combined.push(prow[1]); // probe_only = [1]
+                manual_out.push(combined);
+            }
+
+            // Collect rows via probe_emit.
+            let mut emit_out = Vec::new();
+            probe_emit(&prow, &keys, &build, &tables, &[1], &mut emit_out);
+
+            assert_eq!(
+                manual_out, emit_out,
+                "probe_gather_indices + manual materialise must equal probe_emit for key={}",
+                probe_val
+            );
+        }
+    }
+
+    #[test]
+    fn probe_emit_reserve_is_exact_for_high_fanout() {
+        // Confirms the batch-reservation: for a key with N build matches, out.capacity()
+        // increases by exactly N after probe_emit (no over-allocation on a hot start).
+        // This is the deterministic alloc-count proof for the optimization. [SONNET-4.6] sq-7d3dj.19
+        let mut build = Vec::new();
+        for i in 0..20u32 {
+            build.push(row(&[7, i])); // 20 build rows all share key=7
+        }
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let tables = vec![build_table(&build, &keys)];
+
+        let mut out: Vec<Row> = Vec::new();
+        let cap_before = out.capacity();
+        probe_emit(&row(&[7, 99]), &keys, &build, &tables, &[], &mut out);
+        let cap_after = out.capacity();
+        assert_eq!(out.len(), 20, "all 20 build rows must be emitted");
+        // capacity must cover all 20 rows (reserve(20) was called); no under-allocation.
+        assert!(cap_after >= 20, "reserve(20) must have been called: cap_after={}", cap_after);
+        // and the grow should have been exactly from 0 → ≥20 (no wasted double-grow on cold start)
+        assert_eq!(cap_before, 0, "output was empty before probe_emit");
+    }
+
+    // [OPUS-4.8] sq-4r8uy — the SINGLE-COLUMN JoinKeys key fast path. `left_key`/`right_key`
+    // special-case `key_cols.len() == 1` (the dominant join arity) to a direct one-element
+    // `Key::push` (`single_key`) instead of the general `iter().collect()`. The HARD invariant
+    // is byte-identity with the general path — same length, same ids, same order — so a
+    // single-column join produces the identical key on every row and the join semantics do not
+    // change. These tests pin that identity so a mutation of the fast-path key derivation goes
+    // red, and a differential test runs a whole single-column join old-path-vs-fast-path.
+
+    /// The single-column fast path must produce a `Key` BYTE-IDENTICAL to the general
+    /// `iter().map().collect()` path — same length (1), the same projected id in slot 0,
+    /// and inline (no heap spill). This is the load-bearing derivation the fast path
+    /// replaces; the differential join test below relies on it. MUTATION GUARD: if
+    /// `single_key` pushed the wrong id (e.g. `id.wrapping_add(1)`, or read the wrong
+    /// column), or produced a length ≠ 1, this goes red.
+    #[test]
+    fn single_column_key_is_byte_identical_to_the_general_collect() {
+        // A general reference collect over the SAME descriptor, forced through the
+        // multi-column code (bypassing the fast path) by projecting explicitly.
+        let reference = |cols: &[(usize, usize)], row: &[Id], left: bool| -> Key {
+            cols.iter()
+                .map(|&(lc, rc)| if left { row[lc] } else { row[rc] })
+                .collect()
+        };
+        // Distinct left/right key columns so a swapped-side bug is caught, and a
+        // deliberately-unbound (NO_ID) key value so the null-key case is covered.
+        for &lc in &[0usize, 1, 2] {
+            for &rc in &[0usize, 1, 2] {
+                let keys = JoinKeys { key_cols: vec![(lc, rc)], right_only: vec![] };
+                let r = row(&[10, NO_ID, 30]);
+
+                let fast_l = keys.left_key(&r);
+                let fast_r = keys.right_key(&r);
+                let ref_l = reference(&keys.key_cols, &r, true);
+                let ref_r = reference(&keys.key_cols, &r, false);
+
+                assert_eq!(fast_l.len(), 1, "single-column left key must have length 1");
+                assert_eq!(fast_r.len(), 1, "single-column right key must have length 1");
+                assert_eq!(fast_l, ref_l, "left_key fast path must equal the general collect (lc={}, rc={})", lc, rc);
+                assert_eq!(fast_r, ref_r, "right_key fast path must equal the general collect (lc={}, rc={})", lc, rc);
+                assert_eq!(fast_l.as_slice(), &[r[lc]], "left key must be exactly [row[lc]]");
+                assert_eq!(fast_r.as_slice(), &[r[rc]], "right key must be exactly [row[rc]]");
+                assert!(!fast_l.spilled(), "a 1-element Key must stay inline (no heap spill)");
+            }
+        }
+    }
+
+    /// Multi-column keys are UNCHANGED — they must not take the single-column fast path.
+    /// A 2-column and a 3-column key still project all columns in `key_cols` order.
+    #[test]
+    fn multi_column_key_is_unaffected_by_the_fast_path() {
+        let keys2 = JoinKeys { key_cols: vec![(0, 1), (2, 3)], right_only: vec![] };
+        let lrow = [10u32, 20, 30, 40];
+        let rrow = [5u32, 10, 7, 30];
+        assert_eq!(keys2.left_key(&lrow).as_slice(), &[10u32, 30u32]);
+        assert_eq!(keys2.right_key(&rrow).as_slice(), &[10u32, 30u32]);
+
+        // 3-column key spills past the [Id; 2] inline width — the general path handles it.
+        let keys3 = JoinKeys { key_cols: vec![(0, 0), (1, 1), (2, 2)], right_only: vec![] };
+        let r = [1u32, 2, 3];
+        let k = keys3.left_key(&r);
+        assert_eq!(k.as_slice(), &[1u32, 2, 3]);
+        assert!(k.spilled(), "a 3-column Key spills, exercising the general (non-fast) path");
+    }
+
+    /// **Differential test (the HARD invariant).** For a whole single-column hash join,
+    /// the fast-path `left_key`/`right_key` must produce a result BYTE-IDENTICAL to a
+    /// reference that forces the general multi-column collect projection — across empty
+    /// inputs, a no-match probe, many-duplicate keys, and null/unbound (NO_ID) keys.
+    /// The two runs differ ONLY in how the single-column key is derived, so any deviation
+    /// is the fast path breaking join semantics. MUTATION GUARD: reverting `single_key`
+    /// to push a wrong id makes the two result sets diverge and this goes red.
+    #[test]
+    fn single_column_join_is_result_identical_fast_path_vs_general_path() {
+        // A reference JoinKeys whose key projection is FORCED down the general collect by
+        // building the key explicitly here (never calling the fast-path methods). Same
+        // build_table / probe_emit as the real path otherwise, so the ONLY difference is
+        // the single-column key derivation.
+        fn reference_join(
+            build: &[Row],
+            probe: &[Row],
+            key_col: (usize, usize),
+            probe_only: &[usize],
+        ) -> Vec<Row> {
+            // Build a table keyed on the GENERAL collect (a 1-element collect, but via the
+            // multi-column iterator, exactly the old pre-fast-path behaviour), so the ONLY
+            // difference from `fast_join` is the single-column key derivation.
+            let general_left = |r: &[Id]| -> Key { [key_col].iter().map(|&(lc, _)| r[lc]).collect() };
+            let general_right = |r: &[Id]| -> Key { [key_col].iter().map(|&(_, rc)| r[rc]).collect() };
+            let mut table: std::collections::HashMap<Vec<Id>, Vec<usize>> = std::collections::HashMap::new();
+            for (bi, br) in build.iter().enumerate() {
+                table.entry(general_left(br).to_vec()).or_default().push(bi);
+            }
+            let mut out = Vec::new();
+            for pr in probe {
+                let key = general_right(pr).to_vec();
+                if let Some(matches) = table.get(&key) {
+                    let mut sorted = matches.clone();
+                    sorted.sort_unstable();
+                    for &bi in &sorted {
+                        let mut combined = build[bi].clone();
+                        for &pi in probe_only {
+                            combined.push(pr[pi]);
+                        }
+                        out.push(combined);
+                    }
+                }
+            }
+            out
+        }
+
+        // The real fast-path join via the substrate kernels (build_table posts in ascending
+        // build-index order; the reference sorts its posting to match that order).
+        fn fast_join(build: &[Row], probe: &[Row], key_col: (usize, usize), probe_only: &[usize]) -> Vec<Row> {
+            let keys = JoinKeys { key_cols: vec![key_col], right_only: vec![] };
+            let tables = vec![build_table(build, &keys)];
+            let mut out = Vec::new();
+            hash_probe_serial(probe, &keys, build, &tables, probe_only, &NoBudget, &mut out);
+            out
+        }
+
+        // Fixture set: (name, build, probe, key_col, probe_only).
+        type JoinCase = (&'static str, Vec<Row>, Vec<Row>, (usize, usize), Vec<usize>);
+        let empty: Vec<Row> = vec![];
+        let cases: Vec<JoinCase> = vec![
+            ("empty-both", empty.clone(), empty.clone(), (0, 0), vec![1]),
+            ("empty-build", empty.clone(), vec![row(&[1, 10])], (0, 0), vec![1]),
+            ("empty-probe", vec![row(&[1, 10])], empty.clone(), (0, 0), vec![1]),
+            (
+                "no-match",
+                vec![row(&[1, 10]), row(&[2, 20])],
+                vec![row(&[9, 90]), row(&[8, 80])],
+                (0, 0),
+                vec![1],
+            ),
+            (
+                "many-duplicate-keys",
+                vec![row(&[7, 1]), row(&[7, 2]), row(&[7, 3]), row(&[7, 4]), row(&[3, 9])],
+                vec![row(&[7, 100]), row(&[3, 200]), row(&[7, 101])],
+                (0, 0),
+                vec![1],
+            ),
+            (
+                "null-unbound-keys",
+                vec![row(&[NO_ID, 10]), row(&[1, 11]), row(&[NO_ID, 12])],
+                vec![row(&[NO_ID, 99]), row(&[1, 88])],
+                (0, 0),
+                vec![1],
+            ),
+            (
+                "distinct-left-right-key-cols",
+                vec![row(&[5, 1]), row(&[6, 2]), row(&[5, 3])],
+                vec![row(&[0, 5]), row(&[0, 6]), row(&[0, 7])],
+                (0, 1),
+                vec![0],
+            ),
+        ];
+
+        for (name, build, probe, key_col, probe_only) in &cases {
+            let fast = fast_join(build, probe, *key_col, probe_only);
+            let reference = reference_join(build, probe, *key_col, probe_only);
+            assert_eq!(
+                fast, reference,
+                "single-column fast path must be result-identical to the general path for `{}`",
+                name
+            );
+        }
+    }
+
+    /// The fast path and the general path must yield the same DeltaTable probe results too
+    /// (the delta join also routes its key projection through `JoinKeys::{left,right}_key`).
+    #[test]
+    fn single_column_delta_table_matches_static_build_under_the_fast_path() {
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let build = vec![row(&[1, 10]), row(&[1, 11]), row(&[2, 20])];
+        let probe = vec![row(&[1, 0]), row(&[2, 0]), row(&[9, 0])];
+
+        // Static path (build_table + probe_emit) uses the fast single-column key.
+        let tables = vec![build_table(&build, &keys)];
+        let mut static_out = Vec::new();
+        for pr in &probe {
+            probe_emit(pr, &keys, &build, &tables, &[], &mut static_out);
+        }
+
+        // Delta path routes its key projection through the same fast `left_key`/`right_key`.
+        let dt = delta::DeltaTable::build(&build, &keys);
+        let mut delta_out: Vec<Row> = Vec::new();
+        dt.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| delta_out.push(b.clone()));
+
+        assert_eq!(static_out, delta_out, "delta and static single-column joins must agree under the fast path");
     }
 }

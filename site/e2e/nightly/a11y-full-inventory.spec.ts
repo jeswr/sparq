@@ -40,7 +40,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AxeBuilder } from "@axe-core/playwright";
-import { test, expect, gotoAppReady } from "../support";
+import { test, expect, gotoAppReady, expectRunnerState } from "../support";
 import { WCAG_TAGS, formatViolations, countByImpact } from "../support/a11y";
 import { PAPERS } from "../../src/data/papers";
 import { SPECS } from "../../src/data/specs";
@@ -195,10 +195,12 @@ test("[a11y-inventory] / (home, WASM results state) — ZERO serious/critical WC
   test.skip(!WASM_PRESENT, "wasm bundle absent — home:results needs the in-tab engine (build with npm run sync-wasm)");
   await gotoAppReady(page, "");
   await page.getByRole("button", { name: /Run/ }).first().click();
-  // Wait for the WASM-computed results state before scanning.
-  await expect(
-    page.locator("[data-runner-surface='home'][data-runner-state='results']"),
-  ).toBeVisible({ timeout: 60_000 });
+  // [FABLE-5] sq-mcsbp — wait for the WASM-computed results state via the MAINTAINED
+  // runner-state anchor (e2e/support/runner-state.ts → home:results = [data-hero-results-table]),
+  // the same web-first waiter the passing per-PR a11y spec uses. The previous raw locator
+  // [data-runner-surface='home'][data-runner-state='results'] never existed in the component,
+  // so this test timed out ("element(s) not found") even though the engine reached results.
+  await expectRunnerState(page, "home", "results");
   await assertNoSeriousCritical(page, "/ (home, WASM results)");
 });
 

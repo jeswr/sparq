@@ -28,6 +28,7 @@ const SURFACE_REDIRECTS: { from: string; theme: string }[] = [
   { from: "surface/genai/", theme: "search-genai" },
   { from: "surface/http-server/", theme: "serve-embed" },
   { from: "surface/streaming-rsp/", theme: "serve-embed" },
+  { from: "surface/federation/", theme: "serve-embed" },
   { from: "surface/cli/", theme: "serve-embed" },
   { from: "surface/python/", theme: "serve-embed" },
 ];

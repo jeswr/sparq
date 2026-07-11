@@ -80,10 +80,28 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport;
 // Validate against an ALREADY-parsed shapes model (amortise parsing across many graphs).
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport;
 
-// STRICT validation (sq-0mjfd): returns Err(ShaclFailure) for a constraint a conformant
-// processor MUST REJECT — currently an unsound SHACL-SPARQL pre-binding (MINUS / VALUES /
-// SERVICE / a sub-SELECT dropping $this / a BIND re-binding it; the W3C `sht:Failure`
-// entries). `validate` instead SKIPS such a constraint (its never-fails contract).
+// STRICT validation (sq-0mjfd): returns Err(ShaclFailure) for what a conformant
+// processor REJECTS (the W3C `sht:Failure` outcome) — an unsound SHACL-SPARQL
+// pre-binding (MINUS / VALUES / SERVICE / a sub-SELECT dropping $this / a BIND
+// re-binding it), and (sq-11a) an ILL-FORMED shapes-graph construct: an unparsable
+// sh:path (or >1 sh:path values), a non-integer count/length (a NEGATIVE integer is
+// well-formed and stays a silent skip), a literal sh:datatype/sh:class/sh:nodeKind/
+// sh:pattern or a non-IRI list member, a malformed SHACL list (sh:in/and/or/xone/
+// languageIn/ignoredProperties), a literal shape ref (sh:node/not/property/…), a
+// non-boolean sh:closed/uniqueLang/…, a non-literal range comparand, an ill-formed
+// comparand path (sh:equals/lessThan/…), a non-IRI sh:target{Class,SubjectsOf,
+// ObjectsOf}, an sh:sparql node with no sh:select literal. (sq-ehq4g) adds: a
+// PROPERTY shape with NO sh:path (an sh:property value, or a node typed
+// sh:PropertyShape), sh:qualifiedValueShape with NEITHER sh:qualifiedMinCount nor
+// sh:qualifiedMaxCount (both qualified components then miss a mandatory parameter),
+// an sh:nodeKind value outside the SIX sh:* kinds, and a PRESENT sh:select /
+// sh:sparqlExpr (on sh:sparql constraints AND on the SPARQL-based node expressions
+// of sh:targetNode/sh:values) whose text does not parse as the required query form
+// — FAIL-CLOSED relative to this engine's vendored SPARQL parser: a valid query
+// beyond the parser's coverage is also rejected strictly. Construct-local checks,
+// NOT a full SHACL-of-SHACL pass; ShaclFailure.ill_formed / ShapesModel::ill_formed()
+// carry (node, predicate, message). `validate` instead SKIPS all of the above
+// unchanged (its never-fails contract).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure>;
 pub fn validate_strict_with_model(data: &Graph, model: &ShapesModel)
     -> Result<ValidationReport, ShaclFailure>;
@@ -93,6 +111,11 @@ pub fn load_turtle_with_base(text: &str, base: &str) -> Result<Graph, String>;
 
 // Build a Graph from already-parsed oxrdf::Triples.
 pub fn graph_from_triples<I: IntoIterator<Item = oxrdf::Triple>>(triples: I) -> Graph;
+
+// Per-thread monotonic count of sh:sparql query executions (sq-7d3dj.33.1). Snapshot
+// the delta across a `validate` call to assert focus-node batching fired (a small
+// delta for a large focus set) — see "Focus-node batching" under SHACL-SPARQL below.
+pub fn sparql_constraint_executions() -> u64;
 ```
 
 `ValidationReport::conforms` honours a shapes-graph `sh:conformanceDisallows`
@@ -237,6 +260,33 @@ let shapes = Graph::load_str(r#"
 let report = sparq_shacl::validate(&data, &shapes);   // source_component ends with "SPARQLConstraintComponent"
 ```
 
+*Focus-node batching (perf, sq-7d3dj.33.1).* Semantically each `sh:sparql` constraint
+is "run per focus node", but the engine evaluates it for **all** of a shape's focus
+nodes in ONE query: a single multi-row `VALUES ?this { … }` is injected (chunked at
+10 000 foci), executed once, and the solution rows are grouped by `?this` to build the
+per-focus results. This replaces the old O(N_focus × full-query) per-focus loop (which
+re-materialised the whole BGP for every focus node — quadratic) with O(1) queries per
+shape; the report is byte-for-byte identical. A constraint whose TOP-level form is
+NOT per-focus-equivalent — a `LIMIT`/`OFFSET`, a `GROUP BY`/aggregate not keyed on
+`$this` (an implicit single group or `GROUP BY ?other`), or `REDUCED` — falls back to
+the per-focus path automatically (a nested aggregate sub-select is always batched: the
+pre-binding rules force it to group by `$this`). `sparq_shacl::sparql_constraint_executions()`
+exposes a per-thread `sh:sparql` query-execution counter (snapshot the delta across a
+`validate` call) so a perf guard can assert the batched path fired.
+
+*Id-level core-constraint fast path (perf, sq-7d3dj.33.4).* Core constraints are
+evaluated at the **dictionary-id level**: each shape's `sh:path` is compiled once per
+`validate` (predicate IRIs → ids), the per-focus path walk and dedup run over `u32`
+ids, and the hot value checks (`sh:datatype` / `sh:pattern` / `sh:nodeKind` /
+`sh:minCount`·`maxCount` / `sh:minLength`·`maxLength` / `sh:node`, which also gets an
+id-keyed conformance memo) read the dictionary's zero-copy literal records — a term is
+materialised only for a VIOLATING value, at the report boundary. Compiled `sh:pattern`
+regexes are `Rc`-shared across focus nodes (a per-focus `Regex` clone would rebuild the
+lazy-DFA cache on every match). All of it is internal — no API or feature flag — and the
+report is byte-identical to the Term-level route: a focus node absent from the data
+dictionary (e.g. a `sh:targetNode` naming a ghost IRI) falls back to the Term-level walk,
+and the in-crate `idfast_*` differential tests diff full reports fast-vs-forced-slow.
+
 **SHACL-1.2 core constraints (always on, no feature flag).** The disjunctive
 *set* spellings of `sh:datatype` / `sh:nodeKind` — `sh:datatype ( xsd:string
 rdf:langString )`, `sh:nodeKind ( sh:BlankNode sh:IRI )` — conform a value node
@@ -279,6 +329,13 @@ the override resolves per occurrence from that reifier (`misc/{deactivated-003,m
 severity-003}`). Supported on single-statement Core constraints (`sh:datatype`, `sh:nodeKind`,
 `sh:class`, `sh:hasValue`, `sh:rootClass`, `sh:node`, `sh:property`, `sh:not`, `sh:someValue`,
 `sh:memberShape`); list-/path-valued operands are not single statements and carry no override.
+On a RECURSING composite (`sh:node` / `sh:not` / `sh:someValue` / `sh:memberShape`) the
+message/severity override governs the composite component's OWN result and survives the
+nested shape evaluation (sq-1jemy); it does NOT govern the nested shape's results — those
+carry the nested shape's own metas (the 1.2 severity precedence keys on the reifier of the
+constraint statement that caused each result). On `sh:property` — which reports the nested
+property shape's results directly, with no composite result — only `{| sh:deactivated |}`
+is observable.
 
 **SHACL-1.2 targets & SPARQL node expressions (always on, no feature flag, sq-rnkdh).**
 Beyond `sh:targetNode`/`Class`/`SubjectsOf`/`ObjectsOf` + implicit class targets:
@@ -479,11 +536,18 @@ SHACL-spec-correct conforms/violations).
   (sq-sx15d): a Debug/Trace-only report conforms; a Warning/Info result does NOT. For a
   stricter "only Violation fails" gate use `conforms_violations_only()`; for a custom
   `sh:conformanceDisallows` set use `conforms_with_disallowed(&[..])`.
-- **Ill-formed shapes are skipped, not errored.** A shape never declared, an
-  unparsable path, or an `sh:select` that fails to parse (e.g. undeclared prefix)
-  contributes no results; the rest of validation still runs. `validate` never returns
-  a `Result`/panics on bad shapes — so a silently-empty report can mean "no targets"
-  rather than "conforms".
+- **Ill-formed shapes are skipped by `validate`, reported as a failure by
+  `validate_strict` (sq-11a, sq-ehq4g).** A shape never declared, an unparsable path,
+  or an `sh:select` that fails to parse (e.g. undeclared prefix) contributes no
+  results; the rest of validation still runs. `validate` never returns a
+  `Result`/panics on bad shapes — so a silently-empty report can mean "no targets"
+  rather than "conforms". When the distinction matters (CI shape linting, the suite's
+  `sht:Failure` entries), `validate_strict` rejects ill-formed constructs with
+  `ShaclFailure.ill_formed` (see the strict-validation list above). A PRESENT
+  `sh:select`/`sh:sparqlExpr` whose text does not parse is rejected strictly too
+  (sq-ehq4g) — FAIL-CLOSED relative to this engine's vendored SPARQL parser, so a
+  valid query using syntax the parser lacks is also rejected; prefer fixing the query
+  (or filing the parser gap) over weakening the strict gate.
 - **An uncompilable `sh:pattern` is SKIPPED, not fail-closed (sq-lz99x).** The Rust
   `regex` crate has no lookahead/lookbehind — neither does the XML Schema regex flavour
   the SHACL spec ties `sh:pattern` to — so e.g. `^(?!(TODO|TBD)).*` does not compile.

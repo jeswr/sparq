@@ -105,10 +105,35 @@
 //! constants are tuned by hand, not derived — it nudges the re-plan toward faster sources,
 //! it does **not** claim to find the latency-optimal plan.
 //!
+//! ## Per-source (not slowest-arm) aggregation (sq-s5kd) — opt-in
+//!
+//! The slowest-arm rule above models a **parallel** union's wall-clock: the union is not
+//! done until its slowest arm is. But it charges the *whole* pattern at the slow arm's
+//! factor even when that arm contributes a negligible share of the rows — a pattern with a
+//! huge fast arm and a tiny slow arm is deferred as if all its work were slow.
+//! [`ReplanPolicy::latency_aggregation`] adds an opt-in alternative,
+//! [`LatencyAggregation::CardinalityWeighted`]: each retained source's latency runs through
+//! the same `factor` formula individually (an unobserved source contributes `1.0`, inert as
+//! ever), and the pattern's factor is the **cardinality-weighted mean** over its retained
+//! sources — the per-source factors weighted by each source's (corrected) estimated
+//! cardinality share, i.e. an *expected-work* model rather than a *bottleneck* model.
+//! Every per-source factor is already clamped, and a convex combination of clamped values
+//! stays inside `[latency_floor, latency_cap]`, so no re-clamp is needed. When every
+//! retained cardinality is `0` (nothing to weight by) it falls back to the plain mean over
+//! the retained sources. The default stays [`LatencyAggregation::SlowestArm`], so existing
+//! behaviour is bit-identical unless a caller opts in; with **no** latency observations
+//! both modes are exactly `1.0` (the off-by-construction invariant holds unchanged).
+//! Which model wins is workload-dependent (parallel-fetch unions really are bottlenecked;
+//! sequential/bind-join work really is proportional) — this ships the MECHANISM, honestly
+//! un-tuned, for the federation bench harness to compare.
+//!
 //! Latency feeds the trigger too: a not-yet-executed pattern whose slowest source is
 //! observed to be more than `divergence_factor×` the baseline is enough to *consider* a
 //! re-plan (the hysteresis margin still gates whether one is *adopted*), so a query that is
-//! latency-bound — not cardinality-bound — can still react.
+//! latency-bound — not cardinality-bound — can still react. The trigger stays **slowest-arm
+//! under both aggregation modes** (sq-s5kd): its job is to *detect* that some arm has gone
+//! pathologically slow; whether deferring that pattern actually wins is then judged by the
+//! (possibly cardinality-weighted) cost comparable under the hysteresis margin.
 //!
 //! **The latency weighting changes execution STRATEGY/ORDERING only — never results.** It
 //! enters exclusively through the *cost* term (and the suffix selection score), never the
@@ -156,6 +181,31 @@ use crate::plan::{JoinTree, PlanOptions};
 use crate::selection::PatternSources;
 use std::collections::HashMap;
 
+/// [FABLE-5] sq-s5kd. How a multi-source pattern's per-source latency observations are
+/// aggregated into the single cost factor its joins are scaled by.
+///
+/// * [`Self::SlowestArm`] (default, sq-b51o behaviour) — the pattern is charged at its
+///   slowest retained source's factor: a **bottleneck / wall-clock** model (a parallel
+///   union is not done until its slowest arm is).
+/// * [`Self::CardinalityWeighted`] — the per-source factors are averaged weighted by each
+///   retained source's estimated cardinality share: an **expected-work** model (a tiny slow
+///   arm no longer dominates a huge fast arm's pattern). Falls back to the plain mean when
+///   every retained cardinality is `0`.
+///
+/// Both are HEURISTICS; both leave a pattern with **no** latency observation at factor
+/// `1.0` (inert until evidence arrives), and both bias cost/ordering ONLY — never the
+/// result multiset. See the module docs ("Per-source (not slowest-arm) aggregation").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LatencyAggregation {
+    /// Charge the pattern at its slowest retained source's latency factor (bottleneck
+    /// model — the sq-b51o behaviour, and the default).
+    #[default]
+    SlowestArm,
+    /// Charge the pattern at the cardinality-weighted mean of its retained sources'
+    /// latency factors (expected-work model — opt-in, sq-s5kd).
+    CardinalityWeighted,
+}
+
 /// Policy controlling when a mid-execution re-plan fires and whether its result is adopted.
 ///
 /// The two knobs together give the divergence-then-hysteresis behaviour: a re-plan is
@@ -198,6 +248,12 @@ pub struct ReplanPolicy {
     /// latency spike from dominating the join order (anti-thrash for the latency term, mirroring
     /// the cardinality `divergence_factor` discipline). Default `4.0`.
     pub latency_cap: f64,
+    /// [FABLE-5] sq-s5kd. How a multi-source pattern's per-source latencies fold into its
+    /// single cost factor: [`LatencyAggregation::SlowestArm`] (default — bottleneck model,
+    /// the sq-b51o behaviour, bit-identical for existing callers) or the opt-in
+    /// [`LatencyAggregation::CardinalityWeighted`] (expected-work model). Single-source
+    /// patterns are unaffected (both modes reduce to that source's factor).
+    pub latency_aggregation: LatencyAggregation,
 }
 
 impl Default for ReplanPolicy {
@@ -210,6 +266,7 @@ impl Default for ReplanPolicy {
             latency_baseline: 100.0,
             latency_floor: 0.5,
             latency_cap: 4.0,
+            latency_aggregation: LatencyAggregation::SlowestArm,
         }
     }
 }
@@ -588,19 +645,74 @@ fn pattern_slowest_latency(
         .fold(None::<f64>, |acc, l| Some(acc.map_or(l, |a| a.max(l))))
 }
 
-/// [OPUS-4.8] sq-b51o. The latency cost-multiplier for joining `pattern`: its slowest source's
-/// observed latency run through [`ReplanPolicy::latency_factor`]. Returns `1.0` (inert) when no
-/// source of the pattern has a latency observation — the latency model contributes nothing
-/// until evidence arrives, so a measurement-free re-plan is byte-identical to cardinality-only.
+/// [OPUS-4.8] sq-b51o. The latency cost-multiplier for joining `pattern`, aggregated over
+/// its retained sources per [`ReplanPolicy::latency_aggregation`] ([FABLE-5] sq-s5kd):
+///
+/// * [`LatencyAggregation::SlowestArm`] — the slowest source's observed latency run through
+///   [`ReplanPolicy::latency_factor`] (bottleneck model, the default).
+/// * [`LatencyAggregation::CardinalityWeighted`] — each retained source's factor
+///   individually, averaged weighted by its estimated cardinality (expected-work model).
+///
+/// Returns `1.0` (inert) in **both** modes when no source of the pattern has a latency
+/// observation — the latency model contributes nothing until evidence arrives, so a
+/// measurement-free re-plan is byte-identical to cardinality-only.
 fn pattern_latency_factor(
     pattern: usize,
     selection: &[PatternSources],
     stats: &RuntimeStats,
     policy: &ReplanPolicy,
 ) -> f64 {
-    match pattern_slowest_latency(pattern, selection, stats) {
-        Some(l) => policy.latency_factor(l),
-        None => 1.0,
+    match policy.latency_aggregation {
+        LatencyAggregation::SlowestArm => {
+            match pattern_slowest_latency(pattern, selection, stats) {
+                Some(l) => policy.latency_factor(l),
+                None => 1.0,
+            }
+        }
+        LatencyAggregation::CardinalityWeighted => {
+            pattern_weighted_latency_factor(pattern, selection, stats, policy)
+        }
+    }
+}
+
+/// [FABLE-5] sq-s5kd. The cardinality-weighted mean of the per-source latency factors over
+/// `pattern`'s retained sources: `Σ card_c · factor_c / Σ card_c`, where `factor_c` is the
+/// source's EWMA latency through [`ReplanPolicy::latency_factor`] (or `1.0` when the source
+/// has no observation — inert, exactly as in slowest-arm mode). Each `factor_c` is already
+/// clamped to `[latency_floor, latency_cap]` and the result is a convex combination of them,
+/// so it needs no re-clamp. Falls back to the **plain mean** over the retained sources when
+/// every retained cardinality is `0` (nothing to weight by), and to `1.0` for a pattern with
+/// no retained sources at all. With no latency observation on any source every `factor_c` is
+/// exactly `1.0`, so the mean is exactly `1.0` — the off-by-construction invariant holds.
+fn pattern_weighted_latency_factor(
+    pattern: usize,
+    selection: &[PatternSources],
+    stats: &RuntimeStats,
+    policy: &ReplanPolicy,
+) -> f64 {
+    let Some(ps) = selection.iter().find(|ps| ps.pattern == pattern) else {
+        return 1.0;
+    };
+    if ps.candidates.is_empty() {
+        return 1.0;
+    }
+    let mut weighted = 0.0f64;
+    let mut plain = 0.0f64;
+    let mut total_weight = 0.0f64;
+    for c in &ps.candidates {
+        let factor = match stats.observed_latency_of(c.source) {
+            Some(l) => policy.latency_factor(l),
+            None => 1.0,
+        };
+        let w = c.estimated_cardinality.max(0.0);
+        weighted += w * factor;
+        plain += factor;
+        total_weight += w;
+    }
+    if total_weight > 0.0 {
+        weighted / total_weight
+    } else {
+        plain / ps.candidates.len() as f64
     }
 }
 
@@ -1690,6 +1802,250 @@ mod tests {
             ..ReplanPolicy::default()
         };
         assert_eq!(off.latency_factor(9999.0), 1.0, "weight 0 ⇒ always neutral");
+    }
+
+    // ============================================================================
+    // [FABLE-5] sq-s5kd — per-source (cardinality-weighted) latency aggregation.
+    // ============================================================================
+
+    // One pattern (index 0) retained on two sources with the given per-source cards.
+    fn two_arm_selection(card0: f64, card1: f64) -> Vec<PatternSources> {
+        vec![PatternSources {
+            pattern: 0,
+            candidates: vec![
+                SourceCandidate {
+                    source: 0,
+                    estimated_cardinality: card0,
+                },
+                SourceCandidate {
+                    source: 1,
+                    estimated_cardinality: card1,
+                },
+            ],
+        }]
+    }
+
+    fn weighted_policy() -> ReplanPolicy {
+        ReplanPolicy {
+            latency_aggregation: LatencyAggregation::CardinalityWeighted,
+            ..ReplanPolicy::default()
+        }
+    }
+
+    // ---- BACK-COMPAT default: the aggregation mode defaults to SlowestArm everywhere, so
+    //      existing callers are bit-identical (the sq-s5kd knob is strictly opt-in).
+    #[test]
+    fn default_aggregation_is_slowest_arm() {
+        assert_eq!(
+            LatencyAggregation::default(),
+            LatencyAggregation::SlowestArm
+        );
+        assert_eq!(
+            ReplanPolicy::default().latency_aggregation,
+            LatencyAggregation::SlowestArm
+        );
+    }
+
+    // ---- The load-bearing difference: a HUGE fast arm + a TINY slow arm. Slowest-arm
+    //      charges the whole pattern at the slow arm's (capped) factor 4.0; the weighted
+    //      mode charges the expected work: (1000·1.0 + 10·4.0) / 1010.
+    #[test]
+    fn weighted_aggregation_tracks_dominant_arm() {
+        let sel = two_arm_selection(1000.0, 10.0);
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(0, 100.0); // at baseline ⇒ factor 1.0.
+        stats.record_source_latency(1, 1000.0); // 10× baseline ⇒ factor capped at 4.0.
+        let slowest = pattern_latency_factor(0, &sel, &stats, &ReplanPolicy::default());
+        assert_eq!(slowest, 4.0, "slowest-arm charges the slow arm's cap");
+        let weighted = pattern_latency_factor(0, &sel, &stats, &weighted_policy());
+        assert_eq!(
+            weighted,
+            (1000.0 * 1.0 + 10.0 * 4.0) / 1010.0,
+            "weighted mode charges each arm by its cardinality share"
+        );
+        assert!(
+            weighted < slowest,
+            "a tiny slow arm must no longer dominate a huge fast arm"
+        );
+    }
+
+    // ---- An UNOBSERVED arm contributes a neutral 1.0 in weighted mode (inert until
+    //      evidence arrives, exactly as in slowest-arm mode) — while slowest-arm still
+    //      charges the whole pattern at the one observed (slow) arm.
+    #[test]
+    fn weighted_unobserved_arm_is_neutral() {
+        let sel = two_arm_selection(1000.0, 10.0);
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(1, 1000.0); // only the tiny arm observed (factor 4.0).
+        assert_eq!(
+            pattern_latency_factor(0, &sel, &stats, &ReplanPolicy::default()),
+            4.0
+        );
+        assert_eq!(
+            pattern_latency_factor(0, &sel, &stats, &weighted_policy()),
+            (1000.0 * 1.0 + 10.0 * 4.0) / 1010.0,
+            "the unobserved big arm weighs in at factor 1.0"
+        );
+    }
+
+    // ---- OFF-BY-CONSTRUCTION invariant holds in BOTH modes: with no latency observation
+    //      on any source the factor is EXACTLY 1.0 (measurement-free re-plans stay
+    //      byte-identical to cardinality-only planning).
+    #[test]
+    fn weighted_inert_without_observations() {
+        let sel = two_arm_selection(1000.0, 10.0);
+        let stats = RuntimeStats::new();
+        assert_eq!(
+            pattern_latency_factor(0, &sel, &stats, &ReplanPolicy::default()),
+            1.0
+        );
+        assert_eq!(
+            pattern_latency_factor(0, &sel, &stats, &weighted_policy()),
+            1.0,
+            "no observations ⇒ exactly neutral in weighted mode too"
+        );
+    }
+
+    // ---- Zero total cardinality (nothing to weight by) falls back to the PLAIN mean over
+    //      the retained arms — never a 0/0 NaN.
+    #[test]
+    fn weighted_zero_cardinality_falls_back_to_plain_mean() {
+        let sel = two_arm_selection(0.0, 0.0);
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(0, 100.0); // factor 1.0.
+        stats.record_source_latency(1, 1000.0); // factor 4.0.
+        let f = pattern_latency_factor(0, &sel, &stats, &weighted_policy());
+        assert_eq!(f, (1.0 + 4.0) / 2.0, "plain mean over the retained arms");
+    }
+
+    // ---- Degenerate shapes are neutral: a pattern with NO retained sources, or one absent
+    //      from the selection entirely, contributes factor 1.0 in weighted mode.
+    #[test]
+    fn weighted_degenerate_shapes_are_neutral() {
+        let empty = vec![PatternSources {
+            pattern: 0,
+            candidates: vec![],
+        }];
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(0, 1000.0);
+        assert_eq!(
+            pattern_latency_factor(0, &empty, &stats, &weighted_policy()),
+            1.0,
+            "no retained sources ⇒ neutral"
+        );
+        assert_eq!(
+            pattern_latency_factor(7, &empty, &stats, &weighted_policy()),
+            1.0,
+            "pattern absent from the selection ⇒ neutral"
+        );
+    }
+
+    // ---- SINGLE-source pattern: both modes reduce to that source's factor (the common
+    //      single-arm case is aggregation-mode-independent).
+    #[test]
+    fn weighted_single_source_equals_slowest_arm() {
+        let sel = vec![PatternSources {
+            pattern: 0,
+            candidates: vec![SourceCandidate {
+                source: 0,
+                estimated_cardinality: 50.0,
+            }],
+        }];
+        let mut stats = RuntimeStats::new();
+        stats.record_source_latency(0, 200.0); // 2× baseline ⇒ factor 1.5.
+        let slowest = pattern_latency_factor(0, &sel, &stats, &ReplanPolicy::default());
+        let weighted = pattern_latency_factor(0, &sel, &stats, &weighted_policy());
+        assert_eq!(slowest, 1.5);
+        assert_eq!(weighted, 1.5, "single-arm patterns are mode-independent");
+    }
+
+    // ---- END-TO-END decision difference: a pattern whose union is a huge fast arm + a
+    //      tiny slow arm. Under SlowestArm the whole pattern is charged 4× ⇒ the executor
+    //      DEFERS it (Switched); under CardinalityWeighted its expected-work factor is a
+    //      mild 1.15 ⇒ the re-plan is considered (the trigger stays slowest-arm by design)
+    //      but the current order survives. Knocking out the weighted dispatch turns the
+    //      second half of this test red (it would switch like slowest-arm) — the mutation
+    //      witness for the sq-s5kd seam.
+    //
+    //      The hysteresis margin is pinned at 0.17 (not the 0.1 default) because this
+    //      fixture has an INTRINSIC, latency-free order asymmetry — the third join's star
+    //      estimate depends on which pattern joins last, making [c, b] ~12.5% cheaper than
+    //      [b, c] even with no latency observed — which the default margin would not
+    //      absorb. At 0.17 the intrinsic gap alone cannot clear the margin, the weighted
+    //      1.15× on :b still cannot (37.25 > 43·0.83), but the slowest-arm 4× can
+    //      (80 < 100·0.83) — so the OUTCOME difference below isolates exactly the
+    //      aggregation-mode seam.
+    #[test]
+    fn weighted_aggregation_flips_the_replan_decision() {
+        // Star on ?s: pattern 0 = :a (seed, card 10, source A), pattern 1 = :b served by
+        // TWO sources (B1 card 95 fast/unobserved + B2 card 5 slow), pattern 2 = :c
+        // (card 200, source C).
+        let bgp = star_bgp();
+        let sa = SourceDescriptor::builder(SourceId::new("A"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/a", 10, 10, 10))
+            .build();
+        let sb1 = SourceDescriptor::builder(SourceId::new("B1"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/b", 95, 95, 95))
+            .build();
+        let sb2 = SourceDescriptor::builder(SourceId::new("B2"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/b", 5, 5, 5))
+            .build();
+        let sc = SourceDescriptor::builder(SourceId::new("C"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/c", 200, 200, 200))
+            .build();
+        let srcs = [sa, sb1, sb2, sc];
+        let sel = select_sources(&bgp, &srcs);
+        let b_arms = sel.iter().find(|ps| ps.pattern == 1).unwrap();
+        assert_eq!(
+            b_arms.candidates.len(),
+            2,
+            "fixture: :b must be retained on both B1 and B2"
+        );
+        let plan = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+
+        let run = |aggregation: LatencyAggregation| {
+            let policy = ReplanPolicy {
+                latency_aggregation: aggregation,
+                // See the header comment: absorbs the fixture's intrinsic order asymmetry
+                // so only the latency aggregation mode decides the outcome.
+                improvement_margin: 0.17,
+                ..ReplanPolicy::default()
+            };
+            let mut exec =
+                AdaptiveExecutor::new(&bgp, &srcs, &sel, &plan, PlanOptions::default(), policy);
+            assert_eq!(exec.advance().unwrap(), 0, ":a is the seed");
+            assert_eq!(exec.remaining_order(), &[1, 2], "static suffix is [:b, :c]");
+            let mut stats = RuntimeStats::new();
+            // Cardinalities spot-on ⇒ the cardinality trigger stays silent; only B2 (the
+            // TINY arm of :b) is observed slow (10× baseline ⇒ latency trigger fires in
+            // both modes — the trigger is slowest-arm by design).
+            stats.record_leaf_cardinality(1, 100.0);
+            stats.record_leaf_cardinality(2, 200.0);
+            stats.record_source_latency(2, 1000.0); // source index 2 = B2.
+            let outcome = exec.maybe_replan(&stats);
+            (outcome, exec.remaining_order().to_vec())
+        };
+
+        let (slowest_outcome, slowest_order) = run(LatencyAggregation::SlowestArm);
+        assert_eq!(
+            slowest_outcome,
+            ReplanOutcome::Switched,
+            "slowest-arm charges ALL of :b at 4× ⇒ :b is deferred"
+        );
+        assert_eq!(slowest_order, vec![2, 1]);
+
+        let (weighted_outcome, weighted_order) = run(LatencyAggregation::CardinalityWeighted);
+        assert_eq!(
+            weighted_outcome,
+            ReplanOutcome::KeptWithinHysteresis,
+            "weighted mode charges :b at its expected-work 1.15× ⇒ the order survives \
+             (the slowest-arm trigger fired, so this is Kept, not NoDivergence)"
+        );
+        assert_eq!(weighted_order, vec![1, 2]);
     }
 
     // ============================================================================

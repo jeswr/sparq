@@ -85,6 +85,11 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
 - **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
   graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
+- **Constant-geometry parse + prepared-relate caching** — geometry arguments resolve
+  through a small bounded per-thread cache keyed by the exact lexical form: a constant
+  `FILTER` polygon is parsed once per thread, not once per row (sq-lkrgi), and the
+  DE-9IM relations lazily add a `geo::PreparedGeometry` per REUSED operand (sq-hq8t5).
+  Results are byte-identical (differential-tested); parse failures are never cached.
 
 **Distance accuracy.** Metric units measure great-circle distance on the GRS80 mean
 sphere; point↔point and point↔extended geometry are exact haversine (spherical
@@ -106,7 +111,8 @@ upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 - **Spec** — GeoSPARQL 1.0/1.1; the implemented requirement subset is pinned by
   [`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs).
 - **Benchmark** — `cargo run --release -p sparq-geo --example bench_geo` (no figures
-  baked in here, per the repo's no-hard-coded-performance-numbers rule).
+  baked in here, per the repo's no-hard-coded-performance-numbers rule); its `query`
+  subcommand replays pinned `.rq` files (the Geographica family — `bench/geo/README.md`).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

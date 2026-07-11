@@ -1,0 +1,236 @@
+{
+  "gather": "sparql-same-box-comparison",
+  "wave": "canonical-http-ttfb-panel (sq-7d3dj.34)",
+  "canonical": true,
+  "canonical_note": "CANONICAL: dedicated QUIET c6i.4xlarge (16 vCPU / 32 GiB, x86_64) in eu-west-2, single-tenant, one engine active at a time on the SAME generated corpus + SAME query files. min-of-3 on a loaded store; per-query timeout recorded as honest 'timeout'/ERROR, never fabricated. Counts cross-checked engine-vs-engine AND vs bench/<suite>/expected-rows.tsv where present.",
+  "git_commit": "246b1bfe",
+  "suite": "watdiv-http",
+  "scale": "WatDiv SF=1 (real Waterloo watdiv, deterministic seed=1)",
+  "iters": 3,
+  "tsv_format": "<query>\\t<rows|ERROR>\\t<ka_best_us>\\t<ka_ttfb_us>\\t<fresh_best_us>\\t<fresh_ttfb_us>",
+  "engines": {
+    "sparq": {
+      "version": "246b1bfe",
+      "mode": "HTTP server (sparq-server, SPARQL 1.1 protocol at /sparql) via http_sparql_adapter.py --profile"
+    },
+    "oxigraph": {
+      "version": "0.5.9",
+      "mode": "HTTP server (prebuilt sha256-pinned oxigraph serve-read-only, /query) via http_sparql_adapter.py --profile"
+    },
+    "fuseki": {
+      "version": "apache-jena-fuseki 6.1.0 (official Apache tarball)",
+      "mode": "HTTP server (OFFLINE tdb2.tdbloader bulk load -> fuseki-server --tdb2, the intended bulk path; fixes the 2026-07-07 docker-image load hang) via http_sparql_adapter.py --profile"
+    },
+    "virtuoso": {
+      "version": "openlink/virtuoso-opensource-7",
+      "image_digest": "openlink/virtuoso-opensource-7@sha256:2a9914b95f8a52927a73947c87ec2727f78f87d38e41c38c379efb121f9cbed1",
+      "mode": "HTTP server (isql ld_dir bulk load, /sparql) via http_sparql_adapter.py --profile"
+    },
+    "qlever": {
+      "version": "adfreiburg/qlever",
+      "image_digest": "adfreiburg/qlever@sha256:bc1958b921a731b088ffcf8b4f4524d1937dc35227abe6730c8e28f3797d5fd1",
+      "mode": "HTTP server (qlever-index -> qlever-server) via http_sparql_adapter.py --profile"
+    }
+  },
+  "load": {
+    "sparq_load_s": "0.514",
+    "oxigraph_load_s": "0.429",
+    "fuseki_wall_s": "7.4",
+    "virtuoso_wall_s": "13.1",
+    "qlever_wall_s": "5.9",
+    "note": "sparq = sparq-server spawn->first-HTTP-answer seconds (load+bind); oxigraph = pure offline bulk-load seconds; fuseki/virtuoso/qlever = whole-recipe wall (load+serve+query+teardown)"
+  },
+  "statuses": {
+    "sparq": "ok",
+    "oxigraph": "ok",
+    "fuseki": "ok",
+    "virtuoso": "ok",
+    "qlever": "ok"
+  },
+  "count_crosscheck": {
+    "C3": {
+      "sparq": "8763",
+      "oxigraph": "8763",
+      "fuseki": "8763",
+      "virtuoso": "8763",
+      "qlever": "8763",
+      "all_agree": true,
+      "expected": "8763",
+      "matches_expected": true
+    },
+    "F2": {
+      "sparq": "1",
+      "oxigraph": "1",
+      "fuseki": "1",
+      "virtuoso": "1",
+      "qlever": "1",
+      "all_agree": true,
+      "expected": "1",
+      "matches_expected": true
+    },
+    "F3": {
+      "sparq": "3",
+      "oxigraph": "3",
+      "fuseki": "3",
+      "virtuoso": "3",
+      "qlever": "3",
+      "all_agree": true,
+      "expected": "3",
+      "matches_expected": true
+    },
+    "F5": {
+      "sparq": "34",
+      "oxigraph": "34",
+      "fuseki": "34",
+      "virtuoso": "34",
+      "qlever": "34",
+      "all_agree": true,
+      "expected": "34",
+      "matches_expected": true
+    },
+    "L1": {
+      "sparq": "4",
+      "oxigraph": "4",
+      "fuseki": "4",
+      "virtuoso": "4",
+      "qlever": "4",
+      "all_agree": true,
+      "expected": "4",
+      "matches_expected": true
+    },
+    "L2": {
+      "sparq": "3",
+      "oxigraph": "3",
+      "fuseki": "3",
+      "virtuoso": "3",
+      "qlever": "3",
+      "all_agree": true,
+      "expected": "3",
+      "matches_expected": true
+    },
+    "L3": {
+      "sparq": "41",
+      "oxigraph": "41",
+      "fuseki": "41",
+      "virtuoso": "41",
+      "qlever": "41",
+      "all_agree": true,
+      "expected": "41",
+      "matches_expected": true
+    },
+    "L4": {
+      "sparq": "2",
+      "oxigraph": "2",
+      "fuseki": "2",
+      "virtuoso": "2",
+      "qlever": "2",
+      "all_agree": true,
+      "expected": "2",
+      "matches_expected": true
+    },
+    "L5": {
+      "sparq": "1",
+      "oxigraph": "1",
+      "fuseki": "1",
+      "virtuoso": "1",
+      "qlever": "1",
+      "all_agree": true,
+      "expected": "1",
+      "matches_expected": true
+    },
+    "S1": {
+      "sparq": "6",
+      "oxigraph": "6",
+      "fuseki": "6",
+      "virtuoso": "6",
+      "qlever": "6",
+      "all_agree": true,
+      "expected": "6",
+      "matches_expected": true
+    },
+    "S2": {
+      "sparq": "4",
+      "oxigraph": "4",
+      "fuseki": "4",
+      "virtuoso": "4",
+      "qlever": "4",
+      "all_agree": true,
+      "expected": "4",
+      "matches_expected": true
+    },
+    "S3": {
+      "sparq": "6",
+      "oxigraph": "6",
+      "fuseki": "6",
+      "virtuoso": "6",
+      "qlever": "6",
+      "all_agree": true,
+      "expected": "6",
+      "matches_expected": true
+    },
+    "S4": {
+      "sparq": "4",
+      "oxigraph": "4",
+      "fuseki": "4",
+      "virtuoso": "4",
+      "qlever": "4",
+      "all_agree": true,
+      "expected": "4",
+      "matches_expected": true
+    },
+    "S5": {
+      "sparq": "8",
+      "oxigraph": "8",
+      "fuseki": "8",
+      "virtuoso": "8",
+      "qlever": "8",
+      "all_agree": true,
+      "expected": "8",
+      "matches_expected": true
+    },
+    "S6": {
+      "sparq": "1",
+      "oxigraph": "1",
+      "fuseki": "1",
+      "virtuoso": "1",
+      "qlever": "1",
+      "all_agree": true,
+      "expected": "1",
+      "matches_expected": true
+    },
+    "S7": {
+      "sparq": "2",
+      "oxigraph": "2",
+      "fuseki": "2",
+      "virtuoso": "2",
+      "qlever": "2",
+      "all_agree": true,
+      "expected": "2",
+      "matches_expected": true
+    }
+  },
+  "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+  "env": {
+    "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+    "nproc": 16,
+    "os": "Linux",
+    "kernel": "6.17.0-1019-aws",
+    "quiet_box": true,
+    "gathered_at_utc": "2026-07-07T09:04:38Z",
+    "git_commit": "246b1bfe"
+  },
+  "sparq_tsv": "C3\t8763\t1940\t1822\t2003\t1850\nF2\t1\t244\t238\t275\t270\nF3\t3\t232\t227\t265\t260\nF5\t34\t390\t380\t416\t406\nL1\t4\t237\t231\t270\t264\nL2\t3\t224\t219\t258\t254\nL3\t41\t275\t269\t311\t304\nL4\t2\t212\t207\t263\t256\nL5\t1\t267\t261\t285\t278\nS1\t6\t457\t451\t423\t417\nS2\t4\t269\t264\t294\t289\nS3\t6\t233\t228\t298\t291\nS4\t4\t232\t227\t264\t257\nS5\t8\t256\t250\t275\t269\nS6\t1\t227\t221\t268\t261\nS7\t2\t240\t233\t264\t258\n",
+  "oxigraph_tsv": "C3\t8763\t1162130\t58886\t1156880\t58848\nF2\t1\t638\t628\t839\t829\nF3\t3\t901\t888\t1085\t1072\nF5\t34\t6285\t6242\t6793\t6747\nL1\t4\t1204\t1191\t1459\t1445\nL2\t3\t641\t630\t806\t794\nL3\t41\t755\t734\t946\t927\nL4\t2\t402\t392\t629\t618\nL5\t1\t302\t292\t512\t502\nS1\t6\t7826\t7808\t8274\t8255\nS2\t4\t1556\t1544\t1826\t1814\nS3\t6\t790\t775\t961\t944\nS4\t4\t940\t928\t1075\t1065\nS5\t8\t1055\t1040\t1245\t1231\nS6\t1\t369\t358\t593\t582\nS7\t2\t310\t300\t531\t520\n",
+  "fuseki_tsv": "C3\t8763\t212669\t211912\t207545\t206718\nF2\t1\t6328\t5792\t7071\t6652\nF3\t3\t6713\t6246\t6839\t6222\nF5\t34\t8703\t8096\t8505\t7981\nL1\t4\t5513\t4995\t6351\t5873\nL2\t3\t5788\t5349\t6273\t5799\nL3\t41\t5747\t5312\t6324\t5900\nL4\t2\t5251\t4771\t5580\t5173\nL5\t1\t5458\t4998\t5620\t5154\nS1\t6\t7103\t6711\t7157\t6832\nS2\t4\t6043\t5608\t5634\t5221\nS3\t6\t5081\t4772\t5633\t5254\nS4\t4\t4962\t4559\t5494\t5052\nS5\t8\t5602\t5226\t5762\t5394\nS6\t1\t5239\t4676\t5097\t4863\nS7\t2\t4927\t4511\t5133\t4844\n",
+  "virtuoso_tsv": "C3\t8763\t38641\t38297\t38710\t38507\nF2\t1\t771\t764\t726\t721\nF3\t3\t800\t792\t761\t755\nF5\t34\t1931\t1916\t1934\t1920\nL1\t4\t736\t731\t717\t711\nL2\t3\t600\t593\t727\t720\nL3\t41\t973\t967\t1038\t1031\nL4\t2\t628\t622\t677\t671\nL5\t1\t608\t603\t623\t617\nS1\t6\t1070\t1063\t998\t992\nS2\t4\t629\t624\t671\t666\nS3\t6\t831\t825\t749\t743\nS4\t4\t696\t690\t684\t678\nS5\t8\t801\t794\t797\t791\nS6\t1\t627\t622\t605\t600\nS7\t2\t635\t630\t731\t725\n",
+  "qlever_tsv": "C3\t8763\t30084\t29925\t29862\t29655\nF2\t1\t47857\t34380\t34476\t34452\nF3\t3\t19940\t10801\t10789\t10762\nF5\t34\t11120\t11098\t11439\t11401\nL1\t4\t4231\t4203\t4313\t4291\nL2\t3\t7798\t2871\t2721\t2699\nL3\t41\t2607\t2590\t2885\t2862\nL4\t2\t5718\t2678\t2760\t2738\nL5\t1\t8287\t4162\t4444\t4417\nS1\t6\t167115\t167098\t164344\t164323\nS2\t4\t8864\t4758\t4608\t4585\nS3\t6\t5892\t5879\t6151\t6128\nS4\t4\t11265\t4720\t4665\t4641\nS5\t8\t5931\t5916\t6206\t6180\nS6\t1\t7173\t4286\t4317\t4296\nS7\t2\t8255\t4384\t4539\t4512\n",
+  "connection": {
+    "modes_measured": [
+      "keep-alive",
+      "fresh-connect"
+    ],
+    "primary": "keep-alive",
+    "note": "EVERY query was measured in BOTH connection regimes (the fairness question research/perf-dominance-gap-2026-07.md D9 left open): cols 3-4 = keep-alive (ONE persistent HTTP/1.1 connection reused across iterations; min-of-N discards the connect-bearing first iteration), cols 5-6 = fresh-connect (a NEW TCP connection per iteration, connect cost included). TTFB = time from request start to status-line+headers received; full = entire body read. All values are per-mode minima over the iterations."
+  }
+}

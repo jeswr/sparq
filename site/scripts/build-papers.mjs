@@ -174,6 +174,49 @@ function runBuildBoundaryHonestyScan(papers) {
   );
 }
 
+// ---- the fail-closed EVIDENCE-BINDING verifier (bead sq-gum8.13, paper factory F1) --------
+// [OPUS-4.8] runHonestyGate() above validates the record ENVELOPE (environment/source/value
+// present) but never checks that a record's `value` still MATCHES its committed source — a
+// ratchet/floor rise, or a rename, silently republishes a STALE number. This step runs
+// scripts/verify-paper-evidence.py at the build boundary: every environment=canonical record
+// must carry a machine-verified `binding` (json-pointer / rust-anchor / doc-anchor) whose
+// source resolves AND whose value matches, OR sit on the shrink-only allowlist
+// (scripts/paper-evidence-binding-allowlist.json). FAIL-CLOSED: a drifted value, a
+// missing/renamed source, or a grown allowlist ABORTS the build (no artifact written).
+//
+// HONEST SCOPE (do not oversell): the verifier is MECHANICAL — value<->source EQUALITY /
+// EXISTENCE only. A semantic overclaim (a true number framed misleadingly) is NOT caught here;
+// that stays the Stage-5 claims<->evidence human review (skills/academic-paper/SKILL.md,
+// sq-dxi3). It does not touch the ZK/MPC posture (external audit pending, sq-qhy4).
+function runEvidenceBindingVerifier() {
+  const verifier = join(REPO_ROOT, "scripts", "verify-paper-evidence.py");
+  if (!existsSync(verifier)) {
+    console.error(
+      `\n[paper-factory] EVIDENCE-BINDING VERIFY: required verifier missing: ${verifier}\n`,
+    );
+    process.exit(1);
+  }
+  try {
+    // Runs against the committed evidence file + allowlist, resolving sources under the repo
+    // root (the verifier's defaults). The gate self-reports any drift/missing-anchor to stderr.
+    execFileSync("python3", [verifier], { cwd: REPO_ROOT, stdio: ["ignore", "inherit", "inherit"] });
+  } catch (e) {
+    const code = typeof e.status === "number" ? e.status : 1;
+    console.error(
+      `\n[paper-factory] EVIDENCE-BINDING VERIFY FAILED (exit ${code}).\n` +
+        "  A canonical paper-evidence value no longer matches its committed source, a bound\n" +
+        "  source was renamed/removed, or the shrink-only allowlist grew. Fix the number at its\n" +
+        "  source-of-truth (do not hand-edit the paper value), re-point the binding, or shrink\n" +
+        "  the allowlist. The factory will not republish a stale number. (Mechanical value<->\n" +
+        "  source match only; semantic framing stays the Stage-5 human review.)\n",
+    );
+    process.exit(1);
+  }
+  console.log(
+    "[paper-factory] evidence-binding verify passed: every canonical record is machine-bound or allowlisted.",
+  );
+}
+
 // ---- compile one paper to PDF + HTML ------------------------------------------------------
 function compilePaper(typst, paper, evidenceJson) {
   const typPath = join(PAPERS_DIR, paper.source);
@@ -208,6 +251,12 @@ function compilePaper(typst, paper, evidenceJson) {
 // ---- main ---------------------------------------------------------------------------------
 function main() {
   runHonestyGate();
+
+  // [OPUS-4.8] sq-gum8.13 (paper factory F1): fail-closed evidence-BINDING verify — every
+  // canonical record's value must still MATCH its committed source (or sit on the shrink-only
+  // allowlist). Runs right after the envelope gate + before any compile/placeholder is written,
+  // so a stale/renamed number aborts the build. Independent of typst (a pure source check).
+  runEvidenceBindingVerifier();
 
   const typst = resolveTypst();
   const papers = readRegistry();

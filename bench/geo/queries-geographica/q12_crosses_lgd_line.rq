@@ -1,0 +1,17 @@
+# [FABLE-5] sq-hmd7l.29 — Geographica real-world micro SPATIAL-SELECTION query
+# "QUERY 12 - Crosses_LGD_GivenLine" (micro_selections.lst, geographica2.di.uoa.gr), pinned for
+# scripts/bench/geo-same-box.sh (the GEO_GEOGRAPHICA=1 family; corpus recipe
+# bench/geo/geographica.sh). TRANSLATIONS vs upstream (see bench/geo/README.md):
+#   * GRAPH <http://geographica.di.uoa.gr/dataset/...> wrapper dropped — both
+#     engines load the merged slice into the default graph; the per-dataset
+#     predicate IRIs keep LGD/GeoNames distinguishable.
+#   * COUNT-wrapped (counts-not-coordinates): only the result-set SIZE is
+#     cross-checked between engines before any timing is trusted.
+#   * geometry constant copied VERBATIM from upstream (bare CRS84, lon/lat).
+# Oracle: COUNT must equal expected-geographica.tsv before timing is trusted.
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+SELECT (COUNT(?s1) AS ?n) WHERE {
+  ?s1 <http://linkedgeodata.org/ontology/asWKT> ?o1 .
+  FILTER(geof:sfCrosses(?o1, "LINESTRING(23.756212100000003 38.0600648,23.7559401 38.0600919,23.755625700000003 38.0601324,23.755343200000002 38.0601782,23.754906700000003 38.0602664,23.754571400000003 38.0603469,23.7541094 38.060477500000005,23.7536129 38.060636900000006,23.753038 38.0608188,23.7520698 38.0611387,23.750889200000003 38.0615193,23.7500523 38.0617929,23.7491625 38.0620816,23.748359100000002 38.062344100000004,23.745930100000002 38.063137700000006,23.7449088 38.0634691,23.744017000000003 38.0637616,23.743048700000003 38.0640769,23.742100100000002 38.0643845,23.7416388 38.064534,23.7410822 38.064700900000005,23.7403897 38.0649099,23.7400959 38.064996400000005,23.739364300000002 38.065215300000006,23.7384357 38.065485900000006,23.7377892 38.065662,23.7370857 38.065838500000005,23.736120000000003 38.0660742,23.7354646 38.066235,23.7350782 38.066328500000004,23.7341431 38.066546900000006,23.7333663 38.0667191)"^^geo:wktLiteral))
+}

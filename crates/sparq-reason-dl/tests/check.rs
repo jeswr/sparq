@@ -411,22 +411,89 @@ fn entailment_disjointness_domain_range_desugarings() {
     assert_eq!(v, EntailmentVerdict::Entailed);
 }
 
+// -------------------------------------------------------------------------------------------
+// SubObjectPropertyOf conclusions — the fresh-individual-pair encoding ([FABLE-5] sq-pbz04.4.9)
+// -------------------------------------------------------------------------------------------
+
 #[test]
-fn entailment_unencoded_conclusion_kind_abstains() {
-    // Property-axiom conclusions are deferred by the design record: no encoding, no guess.
-    let (v, b) = entail(
-        ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .",
-        ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .",
-    );
-    assert!(
-        matches!(
-            v,
-            EntailmentVerdict::Unknown(UnknownReason::UnencodedConclusion(_))
-        ),
-        "expected UnencodedConclusion, got {:?}",
-        v
-    );
+fn entailment_subproperty_direct_and_converse() {
+    // BEAD ACCEPTANCE CASE (sq-pbz04.4.9): a SubObjectPropertyOf CONCLUSION now gets a
+    // definitive verdict via {R(a,b), B(b), (∀S.¬B)(a)} with fresh a/b/B — previously an
+    // UnencodedConclusion abstention. r ⊑ s entails r ⊑ s...
+    let premise = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
+    let conclusion = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
+    let (v, b) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::Entailed);
     assert_eq!(b, Branch::AlchTableau);
+    // ...and the CONVERSE s ⊑ r is definitively NOT entailed (completeness half: the model
+    // interpreting B = {b} with an s-edge outside r certifies satisfiability). A mutation
+    // that quantifies ∀ over the SUB role instead of the SUPER role makes this refutation
+    // unsatisfiable and flips it to a WRONG Entailed — this assertion is the witness.
+    let (v, b) = entail(
+        premise,
+        ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :s rdfs:subPropertyOf :r .",
+    );
+    assert_eq!(v, EntailmentVerdict::NotEntailed);
+    assert_eq!(b, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_subproperty_transitivity() {
+    // Role-hierarchy transitivity flows through the tableau's reflexive-transitive
+    // `is_subrole` closure: r ⊑ s ⊑ t entails r ⊑ t.
+    let premise = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :t a owl:ObjectProperty . \
+                   :r rdfs:subPropertyOf :s . :s rdfs:subPropertyOf :t .";
+    let (v, b) = entail(
+        premise,
+        ":r a owl:ObjectProperty . :t a owl:ObjectProperty . :r rdfs:subPropertyOf :t .",
+    );
+    assert_eq!(v, EntailmentVerdict::Entailed);
+    assert_eq!(b, Branch::AlchTableau);
+    // t ⊑ r is not entailed by the chain.
+    let (v, _) = entail(
+        premise,
+        ":r a owl:ObjectProperty . :t a owl:ObjectProperty . :t rdfs:subPropertyOf :r .",
+    );
+    assert_eq!(v, EntailmentVerdict::NotEntailed);
+}
+
+#[test]
+fn entailment_subproperty_reflexivity_from_empty_premise() {
+    // R ⊑ R holds in EVERY interpretation, so even an (axiom-)empty premise entails it —
+    // the refutation {r(a,b), B(b), (∀r.¬B)(a)} clashes on the r-edge itself (the
+    // reflexive base of `is_subrole`). A mutation that drops B(b) or the role assertion
+    // from the encoding leaves the refutation satisfiable and flips this to NotEntailed.
+    let (v, b) = entail(
+        ":x a :A .",
+        ":r a owl:ObjectProperty . :r rdfs:subPropertyOf :r .",
+    );
+    assert_eq!(v, EntailmentVerdict::Entailed);
+    assert_eq!(b, Branch::AlchTableau);
+    // Two UNRELATED roles from the same premise: definitively not entailed (freshness: the
+    // fresh B/a/b must not capture anything in the premise).
+    let (v, _) = entail(
+        ":x a :A .",
+        ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .",
+    );
+    assert_eq!(v, EntailmentVerdict::NotEntailed);
+}
+
+#[test]
+fn entailment_subproperty_mixed_conclusion_aggregates() {
+    // A conclusion mixing the NEW RBox encoding with an ABox one: r ⊑ s AND s(x,y) both
+    // follow from {r ⊑ s, r(x,y)} — the per-axiom conjunction aggregates to Entailed.
+    let premise = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . \
+                   :r rdfs:subPropertyOf :s . :x :r :y .";
+    let conclusion = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . \
+                      :r rdfs:subPropertyOf :s . :x :s :y .";
+    let (v, b) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::Entailed);
+    assert_eq!(b, Branch::AlchTableau);
+    // Flip ONE conjunct (t ⊑ r not entailed): the whole conclusion set fails definitively.
+    let conclusion = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . \
+                      :t a owl:ObjectProperty . :t rdfs:subPropertyOf :r . :x :s :y .";
+    let (v, _) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::NotEntailed);
 }
 
 #[test]

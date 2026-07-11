@@ -12,6 +12,9 @@ mod yannakakis_differential;
 mod vectorized_byte_identity;
 #[path = "differentials/vectorized_exec_differential.rs"]
 mod vectorized_exec_differential;
+// [SONNET-4.6] (sq-y5ew5) Hybrid tri-mask FILTER kernel acceptance tests (T1-T5).
+#[path = "differentials/chunk_select_tri_mask.rs"]
+mod chunk_select_tri_mask;
 #[path = "differentials/window_inline_over.rs"]
 mod window_inline_over;
 #[path = "differentials/zk_trace_differential.rs"]

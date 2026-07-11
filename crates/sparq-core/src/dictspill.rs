@@ -1013,8 +1013,13 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
                     (dict::StoredRef::Iri { prefix: prefixes.intern(prefix), suffix }, f64::NAN, None)
                 }
                 TermParts::Lit { value, datatype, lang } => {
+                    // [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj) SAME DATATYPE-AWARE acceptance
+                    // (`cached_numeric_f64`) as the in-RAM `numerics_of` — the spilled cache must
+                    // be byte-identical to the in-RAM one, and both equal `Num::of_literal`'s
+                    // acceptance set (so a per-datatype-ill-formed lexical folds to the NaN
+                    // cache-miss sentinel identically in either build path).
                     let numeric = if lang.is_none() && crate::is_numeric_datatype_str(datatype) {
-                        value.parse::<f64>().unwrap_or(f64::NAN)
+                        crate::cached_numeric_f64(value, datatype)
                     } else {
                         f64::NAN
                     };

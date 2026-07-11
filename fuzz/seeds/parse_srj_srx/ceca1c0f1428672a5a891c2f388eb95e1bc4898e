@@ -1,0 +1,7 @@
+<?xion="1.0"?>
+<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+  <head><cariable name="s"/></head>
+  <results>
+    <r¥sult><binding name="s"><uri>http://example.org/s</uri></bint><bi</result>
+  </resusts>
+</sparql>

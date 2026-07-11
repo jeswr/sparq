@@ -143,14 +143,19 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   generation snapshot (`PinnedGen = Arc<sparq_serve::Generation<Graph>>`; call
   `.snapshot() -> &Graph`, `.number() -> u64`, `.published_at()`, `.epochs()`).
 - `AppState::apply_update(&self, sparql: &str) -> Result<u64, String>` — submit a SPARQL
-  Update through the sequenced group-commit writer; **blocks** until the containing
-  generation is published; returns that generation number (read-your-writes token). Call
-  off the async workers (`spawn_blocking`).
+  Update through the sequenced writer; **blocks** until the containing generation is
+  published; returns that generation number (read-your-writes token). Call off the async
+  workers (`spawn_blocking`). With **adaptive group-commit** (default; `adaptive_commit`),
+  a serial interactive client commits in engine-time (µs) — the writer drains only the
+  already-queued backlog and commits, instead of paying a fixed group-commit window;
+  concurrent load still batches. FIFO order, per-update atomicity and durability are
+  unchanged (`sq-p7kk5`).
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
   (**`time-travel` feature only**; the HTTP `?generation=N` pin does NOT need this — it
   resolves against the ring's concurrency-retention window directly, so it works in the
   default build via `sq-ci2d6`).
 - `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
+  adaptive_commit: bool,
   max_body_bytes: usize,
   max_concurrent: usize, header_read_timeout: Option<Duration>, body_read_timeout: Option<Duration>, max_results: Option<usize>, max_query_rows: Option<usize>,
   max_query_bytes: Option<usize>,
@@ -160,7 +165,12 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`update_where_timeout` = separate, typically-SHORTER writer-side WHERE deadline for SPARQL
   UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
-  use `query_timeout`, `sq-nulp`; `max_query_rows` = coarse memory cap; `max_query_bytes` =
+  use `query_timeout`, `sq-nulp`;
+  `adaptive_commit` = **adaptive group-commit** (default `true`): a serial interactive client
+  commits in engine-time (µs) rather than paying a fixed group-commit window; concurrent load
+  still batches. Pure latency change — FIFO/atomicity/durability unchanged. `false` = always
+  windowed. `--no-adaptive-commit` / `SPARQ_ADAPTIVE_COMMIT=0` — `sq-p7kk5`;
+  `max_query_rows` = coarse memory cap; `max_query_bytes` =
   byte-accounted memory cap that also prices row WIDTH + computed-literal size — `sq-s5is`;
   `max_decompress_ratio` = zip-bomb guard — `sq-ebii`;
   `header_read_timeout` = **slow-loris guard**: max time a connection may take to send its
@@ -272,6 +282,11 @@ and the Graph-Store-Protocol read path keeps its lenient default):
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
 | CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
 
+<!-- [SONNET-4.6] sq-7d3dj.12: CSV/TSV SELECT responses are now streamed as row-oriented
+chunks (mirrors the JSON T16 path): Content-Length is known up-front (chunks are fully
+evaluated first), the body streams chunk-by-chunk via hyper, and peak memory never holds a
+second full-result copy. XML stays buffered (prefix compaction). -->
+
 <!-- [OPUS-4.8] sq-u79ee (survey §C1 / FINDINGS F21) -->
 Per the W3C SPARQL Results TSV format, the **TSV** serialiser abbreviates an
 `xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literal whose lexical form is
@@ -283,6 +298,37 @@ round-trips its original spelling (`"1.0E6"^^xsd:double` → `1.0E6`, not canoni
 **computed** numerics arrive already in the engine's canonical form, so they serialise
 canonically. **CSV** writes each value's bare lexical string (datatype/lang dropped — lossy by
 spec); **JSON/XML** carry the full term (value + datatype) unchanged.
+
+<!-- [OPUS-4.8] sq-7d3dj.34.2 -->
+**SELECT-JSON streams (TTFB).** The `application/sparql-results+json` SELECT path streams its
+body: the engine serialises on a blocking worker feeding a bounded channel, so the results
+header + early solutions are written to the socket **before the whole result is serialised**
+(first byte before full materialisation, rather than after it). The streamed body is
+**byte-identical** to the single materialised JSON string (same solution order, same escaping) —
+`query_json_stream_with_budget` shares one emit core with the buffered serialiser. Two response
+shapes: a **single-chunk** (small, ≤ one 64 KiB chunk) result is returned buffered with a
+`Content-Length`; a **multi-chunk** result streams under **chunked transfer-encoding** with **no
+`Content-Length`** (the total is unknown until the last row). *Note the streaming scope:* a
+DISTINCT / join / ORDER-BY SELECT must fully evaluate before any solution exists, so its first
+byte still lands after the join materialises (the header is flushed the instant that finishes,
+before serialisation) — the earliest-first-byte win is largest on scan-shaped and
+below-parallel-threshold results; XML/CSV/TSV stay buffered. **Error mid-stream (honest
+contract):** the status is chosen from the *first* chunk, so a failure detected before any byte
+(parse error, or a row/byte cap / deadline the engine confirms before the header) still returns
+the correct `400` / `413` / `503`. But once the header has been flushed for a genuinely
+multi-chunk result, the HTTP status is committed: a later cap/deadline trip is surfaced by
+**truncating the chunked body** (the stream ends without its terminating zero-length chunk, so
+the client sees a broken/incomplete response) — a streamed `200` cannot retroactively become a
+`413`/`503`.
+
+<!-- [OPUS-4.8] sq-7d3dj.34.1 -->
+**Single parse per request (HTTP floor).** The read path parses each request query with
+`spargebra` exactly ONCE — the server parses to classify the form + apply any protocol dataset
+override, then hands the resulting algebra straight to the engine's `*_prepared` entry points
+(`query_json_stream_prepared_with_budget` for JSON SELECT, `ask_prepared_with_budget` for ASK),
+so the engine does not re-parse the query string. This shaves one full parse off the per-request
+floor for ARBITRARY novel queries (no query cache — parsing is still paid, just not twice);
+negligible on a trivial `ASK{}` (sub-µs), and larger on realistic multi-pattern queries.
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
@@ -380,6 +426,17 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > (never a 406 — the endpoint always has a representation), and a write body in it is a plain `415`
 > — byte-identical to a JSON-LD-disabled build. What is default-on now: JSON-LD parse + serialise
 > (flattened) + content-negotiation; full conneg-conformance ratcheting is on the sq-oy1f roadmap.
+
+<!-- [FABLE-5] sq-7d3dj.30.13: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **Default-on algebra rewrite (`algebra-rewrite` feature — [FABLE-5] sq-7d3dj.30.13).** The
+> server's default set also lights sparq-engine's pre-execution algebra rewrite pass (#1735): a
+> result-equivalent `FILTER(?v = <iri>)` IRI-constant folding + `FILTER(!bound)` anti-join applied
+> at parse time, so the shipped server executes the same plans the CLI and the canonical benchmarks
+> measure. IRI constants only (a literal equality is never rewritten — the `sq-lr2ii` avoidance
+> contract); zero new dependencies. Drop it with `--no-default-features --features server,jsonld`
+> for an explicitly rewrite-dark build; the sparq-engine LIBRARY default remains OFF for lean
+> library consumers.
 
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
@@ -601,6 +658,11 @@ restored store. **Fail-closed:** a corrupt / truncated / version-mismatched / no
 rejected (`400`) and the live store is left **untouched** (the new core is built fully before the
 swap). Both routes are **POST-only** and gated by the **write** token (the admin gate). Responses:
 backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact.
+**Single-flight (`sq-fy8ci`):** a restore posted while another is still in flight is rejected
+**`409`** (`a restore is already in progress`) instead of being silently serialized behind it by
+the writer thread (last-writer-wins) — retry after the first completes. Embedders driving
+`AppState::restore_from` directly can claim the same permit via `AppState::try_begin_restore()`
+(an RAII `RestoreGuard`; dropping it — even on a panic — releases the permit).
 
 **Restore into a live durable store (`sq-ft7u`).** On a `--persist` server, a plain
 `/admin/restore` (no opt-in) is **`409`** — an in-memory-only swap on a durable server would be
@@ -967,6 +1029,62 @@ feature but not the flag, `/terse/transpile` is `404`. Transpiling is query-shap
 by `--auth-token-read` like a GET. The CLI exposes the same transpiler as `sparq-cli terse` (see the
 `cli` skill).
 
+### Solid WAC/ACP authorization endpoints (`solid-authz` feature, default OFF; `sq-snopa.6`, issue #992 FR-4)
+
+A **thin, fail-closed HTTP shell** over the [`sparq-solid`](../../crates/sparq-solid) library
+authoriser — the deliberately-opt-in `sparq-server` → `sparq-solid` workspace dependency. All three
+endpoints are **POST** and take the pod dataset (N-Quads, incl. the `.acl`/`.acr` control graphs)
+plus an **already-resolved** session in a JSON body. The server does **NOT** authenticate — mapping a
+WebID + a request path is the caller's job (`sparq-solid` is a library authoriser with no HTTP
+surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shell. `view` (`"wac"` /
+`"acp"`) selects the model, else it is inferred (`.acr` present → ACP, else WAC). See also the
+`access-control` skill for the library `decide` / `wac_allow` / `query_as` surface underneath.
+
+- `POST /authz/decide` — body `{ "dataset", "session": { "agent"?, "client"?, "issuer"?, "now"? },
+  "resource", "mode": "read"|"write"|"append"|"control", "view"? }`. Returns
+  `{ "allow", "grantedModes", "governingAcl", "scope", "status", "aclLink" }`. An **allow** is `200`;
+  a **deny** maps the FR-6 status — a definitive one (`resolved` without the mode / `noAcl`) is `403`,
+  a retryable one (`unloaded` / `transient`) is `503`. When a governing ACL was discovered the
+  response also carries `Link: <acl-iri>; rel="acl"` (RFC 8288, FR-5, sq-snopa.7) — the `aclLink`
+  body field holds the same value. Fail-closed: no Link header when no governing ACL exists.
+- `POST /authz/wac-allow` — body `{ "dataset", "session", "resource", "view"? }` → `{ "wacAllow":
+  "user=\"…\",public=\"…\"" }`, the RFC permission advertisement. Also emits `Link: <acl-iri>;
+  rel="acl"` when a governing ACL was discovered (FR-5, sq-snopa.7); omitted when none.
+- `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
+  **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
+  session sees ZERO rows (empty view), never the whole store.
+  - **ODRL lane** (`odrl-authz` cargo feature, default OFF; sq-lrtc3.1): when the request dataset
+    carries ODRL policy rules (`odrl:permission`/`odrl:prohibition`), the handler parses them from
+    the UNION of the dataset's graphs and runs the `sparq-solid` bridge
+    (`PodStore::materialize_odrl_policy`, BOTH sides, deny-overrides) for
+    (party = session agent, action = `odrl:read`, target = each rule's target graph) BEFORE the
+    query — an ODRL prohibition beats a static WAC grant through the unchanged
+    `∪ allow ∖ ∪ deny` enforcement. Fail-closed 4xx refusals (never a silent allow): malformed
+    policy, unimplementable `odrl:conflict` strategy, a rule without a concrete target graph IRI
+    (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), or an
+    anonymous session. Constraints the stateless lane cannot evidence (`odrl:purpose`,
+    `odrl:count` — stateful budgets are sq-snopa.8) never grant. Feature OFF ⇒ byte-identical
+    `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
+
+**FAIL-CLOSED (the soundness invariant):** every error path DENIES — an unparseable dataset is a
+`400` (never an empty-dataset allow), a materialisation failure a `503`, an unknown mode a `403`
+deny, never a grant. **Double opt-in**, OFF by default: compiled only with the `solid-authz` cargo
+feature **and** served only when `--solid-authz` / `SPARQ_SOLID_AUTHZ=1` is set (mirrors `shacl` /
+`terse`); with the feature but not the flag, `/authz/*` is `404`. Read-gated by `--auth-token-read`.
+This v1 is **stateless per request** (the dataset is supplied, not the server's own loaded store) — a
+stateful "authorise over the loaded pod" variant is a deliberate follow-up (it would thread a
+materialised `PodStore` through the concurrent-serving `AppState`).
+
+```sh
+cargo run -p sparq-server --features solid-authz -- data.ttl --solid-authz
+curl -si -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
+  "dataset": "<https://pod.ex/n1#it> <https://ex.dev/ns#t> \"hi\" <https://pod.ex/n1> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .\n<https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .",
+  "session": { "agent": "https://alice.ex/card#me" }, "resource": "https://pod.ex/n1", "mode": "read", "view": "wac" }'
+# HTTP/1.1 200 OK
+# link: <https://pod.ex/.acl>; rel="acl"
+# → {"allow":true,"grantedModes":["read"],"governingAcl":"https://pod.ex/.acl","scope":"http://www.w3.org/ns/auth/acl#default","status":"resolved","aclLink":"<https://pod.ex/.acl>; rel=\"acl\""}
+```
+
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
 
@@ -974,6 +1092,7 @@ env overrides the default.
 | --- | --- | --- | --- |
 | `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0`=off) | per-request timeout → `503` |
 | `--update-where-timeout SECS` | `SPARQ_UPDATE_WHERE_TIMEOUT` | unset (`0`/unset = use `--query-timeout`) | **separate, typically-SHORTER writer-side WHERE deadline for SPARQL UPDATE** — bounds writer-queue **head-of-line blocking** from a slow update (the single sequenced writer is released within this window instead of holding it for the full read timeout); the update WHERE budget is `min(query_timeout, update_where_timeout)` → slow update `503` (`sq-nulp`) |
+| `--no-adaptive-commit` | `SPARQ_ADAPTIVE_COMMIT` (`0` disables) | adaptive **on** | **adaptive group-commit**: a serial interactive client commits in engine-time (µs) instead of paying a fixed group-commit window; concurrent load still batches. Pure latency change — FIFO/atomicity/durability unchanged. `--no-adaptive-commit` restores the always-windowed writer (`sq-p7kk5`) |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
 | `--header-read-timeout SECS` | `SPARQ_HEADER_READ_TIMEOUT` | `15` (`0`=off) | **slow-loris guard**: max time a connection may take to send its complete request-header block — enforced at hyper's HTTP/1 connection layer by `sparq_server::serve` (NOT `axum::serve`, which never installs a timer so its header deadline is inert), so it fires BEFORE a handler and frees the concurrency slot a dribbling client would otherwise hold forever; connection closed when exceeded (`sq-2gqr`) |
@@ -998,6 +1117,8 @@ env overrides the default.
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
+| `--solid-authz` | `SPARQ_SOLID_AUTHZ` | off | (feature `solid-authz`) serve the Solid WAC/ACP authorization endpoints `POST /authz/decide`+`/wac-allow`+`/query` — a fail-closed HTTP shell over `sparq-solid`; POST the pod dataset + an already-resolved session, get the decision / `WAC-Allow` value / access-controlled query result; read-only — see "Solid WAC/ACP authorization endpoints" |
+| `--solid-authz-trust` | `SPARQ_SOLID_AUTHZ_TRUST` | off | (feature `solid-authz-trust`, implies `solid-authz`) opt-in stateless trust-graph extension to `POST /authz/decide` — a request may carry an additional `"trust"` JSON block containing credentials, a trust policy, and signed certification edges; the server runs the cert-graph closure (`derive_effective_rules`) and the `sparq_trust::admit` gate over them, injects any admitted facts into the pod dataset, then runs the unchanged WAC/ACP decision; double-opt-in: the feature must be compiled AND this flag set AND the request must carry a `"trust"` block — see "Stateless trust-graph decision extension (sq-pfae.17)"; honest scope: anchored-not-proven clear-path only (no ZK/unlinkability claim; sq-qhy4 external audit PENDING) |
 | `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
 | `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |
 | `--audit-log` | `SPARQ_AUDIT_LOG` | off | (feature `audit-log`) per-query **access audit log** — see "Access audit log" |

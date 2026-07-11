@@ -332,6 +332,23 @@ jobs:
       # No compile / no files / no subprocess (mirrors perf-gate.py --self-test in bench.yml).
       - name: Self-test coverage-gate.py (ratchet + monotonicity aggregation logic)
         run: python3 scripts/coverage-gate.py --self-test
+      # [FABLE-5] sq-6vshe.6: the demotion auto-bead filer's PURE logic (id derivation +
+      # per-lane dedupe + append-only JSONL + log-tail truncation + issue-body assembly).
+      # It fires from fuzz.yml's randomized-run failure path (and any future demoted lane),
+      # so a regression in the filer must be caught HERE — on every PR — not only when a
+      # lane finally fails. Hermetic: no gh, no repo writes (mirrors coverage-gate.py
+      # --self-test; same stdlib-only, no-deps pattern as the differential filer's inline
+      # self-test in differential.yml).
+      - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
+        run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
+      # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
+      # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion
+      # failure (always fatal — the finding the lane exists for). A regression here could turn
+      # the UB lane silently green, so its hermetic self-test (timeout-vs-real-failure split +
+      # exit codes) runs on every PR — same stdlib-only, no-deps pattern as the lints above.
+      - name: Self-test Miri verdict classifier (timeout-vs-UB split + exit codes)
+        run: python3 scripts/miri_classify_verdict.py --self-test
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
@@ -419,6 +436,20 @@ jobs:
         run: shellcheck scripts/tests/test_build_papers_honesty_boundary.sh
       - name: Self-test the build-papers.mjs build-boundary honesty assertion (sq-mraf)
         run: bash scripts/tests/test_build_papers_honesty_boundary.sh
+      # [OPUS-4.8] sq-gum8.13 (epic sq-gum8, paper factory F1): the fail-closed EVIDENCE-BINDING
+      # verifier (scripts/verify-paper-evidence.py) upgrades every paper-evidence number's
+      # source-trace from ASSERTED to MACHINE-VERIFIED — a canonical record's value must still
+      # MATCH its committed source (json-pointer / rust-anchor / doc-anchor) or sit on the
+      # shrink-only allowlist, else the paper build aborts (a ratchet rise or a rename can no
+      # longer silently republish a stale headline). The verifier is also wired into the paper
+      # build boundary (site/scripts/build-papers.mjs). Its --self-test is NON-VACUOUS: a
+      # value-DRIFT fixture and a MISSING/renamed-anchor fixture each exit non-zero while the real
+      # evidence file passes; it also proves the shrink-only ratchet (allowlist-grew / stale-entry)
+      # and the unbound-canonical fail-closed case. Stdlib-only, no network — mirrors the other
+      # scripts/check-*.py --self-test lints above. HARD job (no "advisory" token) so a regression
+      # in the verifier's own logic reds the ci-summary gate before every paper build depends on it.
+      - name: Self-test the paper-evidence binding verifier (drift + missing-anchor FAIL; real evidence PASS — sq-gum8.13)
+        run: python3 scripts/verify-paper-evidence.py --self-test
       # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
       # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
       # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
@@ -575,6 +606,22 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] sq-qcnn.32: the advisory-job registry + gate-intent placement
+      # check. Two directions, both diff-visible instead of review-catch-dependent:
+      #   C2 — every job whose NAME matches \b(advisory|informational)\b must have
+      #        a registry entry in .github/advisory-registry.json with
+      #        {owner_bead, promotion_criteria, registered}.
+      #   C3 — no run-step invoking a gate-classified script (scripts/*gate*.py) may
+      #        live inside an advisory-named job without a `gate_script_waiver` in
+      #        the registry (lesson: #1679 gate-intent G3 self-test sat in an advisory
+      #        job = provably non-gating until caught).
+      # Self-test pins the gate's own classification logic; the enforce step applies
+      # it over the live workflows. Stdlib-only, no deps — placed here with the other
+      # structural workflow-lint steps.
+      - name: Self-test the advisory-registry checker (C2/C3 logic — sq-qcnn.32)
+        run: python3 scripts/check-advisory-registry.py --self-test
+      - name: "Enforce advisory-job registry + gate-intent placement (C2/C3) — GATING"
+        run: python3 scripts/check-advisory-registry.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

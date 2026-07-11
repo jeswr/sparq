@@ -1,0 +1,5 @@
+{
+  "_comment": "Empty allowlist — the record is bound, so it must be verified (anchor exists but literal drifted).",
+  "seed_count": 0,
+  "keys": []
+}

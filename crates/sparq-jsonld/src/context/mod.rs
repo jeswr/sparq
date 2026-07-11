@@ -16,6 +16,7 @@
 //! Spec: <https://www.w3.org/TR/json-ld11-api/#context-processing-algorithms>.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::json::Json;
 
@@ -194,7 +195,16 @@ pub struct ActiveContext {
     // Term → definition. A present key is a defined term (its definition may carry a null
     // IRI mapping, i.e. the term expands to null / is dropped); an absent key means the
     // term is undefined.
-    pub(crate) term_definitions: BTreeMap<String, TermDefinition>,
+    //
+    // [FABLE-5] (sq-hmd7l.42) Behind an `Arc` so `ActiveContext::clone` is O(1): the
+    // Expansion Algorithm clones the active context per node object (§5.1.2 steps 7–11)
+    // and Context Processing clones it per fold (§4.1.2 step 1), which on a context-heavy
+    // document (~100 term definitions) made the deep `BTreeMap` clone >50% of expand time
+    // (measured with `perf`, work box, NON-canonical). Mutation goes through
+    // [`ActiveContext::term_definitions_mut`] (copy-on-write via `Arc::make_mut`), so a
+    // shared map is deep-copied at most once per actual context-processing operation —
+    // the same amortisation jsonld.js gets from its resolved-context cache.
+    pub(crate) term_definitions: Arc<BTreeMap<String, TermDefinition>>,
     // `@base` — the current base IRI for resolving relative references.
     pub(crate) base_iri: Option<String>,
     // The document's original base URL, restored when a context is nullified.
@@ -206,7 +216,10 @@ pub struct ActiveContext {
     // `@direction` — the default base direction.
     pub(crate) default_base_direction: Option<Direction>,
     // The previous context, retained for `@propagate: false` reversion during expansion.
-    pub(crate) previous_context: Option<Box<ActiveContext>>,
+    // `Arc` (not `Box`) so cloning an active context never deep-copies the chain
+    // ([FABLE-5] sq-hmd7l.42); the previous context is only ever replaced, never mutated
+    // in place.
+    pub(crate) previous_context: Option<Arc<ActiveContext>>,
 }
 
 impl ActiveContext {
@@ -214,7 +227,7 @@ impl ActiveContext {
     /// (JSON-LD 1.1 API §4.1.2 step 1) and which has no term definitions.
     pub fn new(base: Option<&str>) -> ActiveContext {
         ActiveContext {
-            term_definitions: BTreeMap::new(),
+            term_definitions: Arc::new(BTreeMap::new()),
             base_iri: base.map(str::to_string),
             original_base_url: base.map(str::to_string),
             vocabulary_mapping: None,
@@ -264,6 +277,15 @@ impl ActiveContext {
     /// nullification guard, §4.1.2 step 5.1.1).
     pub(crate) fn has_protected_terms(&self) -> bool {
         self.term_definitions.values().any(TermDefinition::is_protected)
+    }
+
+    /// Mutable access to the term-definition map, copy-on-write ([FABLE-5] sq-hmd7l.42).
+    ///
+    /// The map sits behind an `Arc` so [`Clone`] is O(1); this deep-copies the map iff it
+    /// is currently shared with another active context (`Arc::make_mut`), so a burst of
+    /// Create Term Definition inserts into one context pays at most one copy.
+    pub(crate) fn term_definitions_mut(&mut self) -> &mut BTreeMap<String, TermDefinition> {
+        Arc::make_mut(&mut self.term_definitions)
     }
 }
 
@@ -406,10 +428,47 @@ mod tests {
         assert!(!has_keyword_form("foo"));
     }
 
+    /// [FABLE-5] (sq-hmd7l.42) The COW contract behind the O(1) clone: a clone SHARES the
+    /// term-definition map (no deep copy — this is the perf fix), and a subsequent
+    /// mutation of either side copies-on-write instead of aliasing through to the other.
+    #[test]
+    fn clone_shares_term_definitions_and_mutation_does_not_alias() {
+        let mut original = ActiveContext::new(None);
+        original.term_definitions_mut().insert(
+            "a".to_string(),
+            TermDefinition {
+                iri: Some("http://example.org/a".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let mut cloned = original.clone();
+        // The clone shares the map (O(1) clone), it does not deep-copy it.
+        assert!(Arc::ptr_eq(&original.term_definitions, &cloned.term_definitions));
+
+        // Mutating the clone copies-on-write: the original keeps its view.
+        cloned.term_definitions_mut().insert(
+            "b".to_string(),
+            TermDefinition {
+                iri: Some("http://example.org/b".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(!Arc::ptr_eq(&original.term_definitions, &cloned.term_definitions));
+        assert!(cloned.has_term("b"));
+        assert!(!original.has_term("b"), "mutating a clone must not alias into the original");
+        assert!(original.has_term("a") && cloned.has_term("a"));
+
+        // Removal through the mutable accessor is COW-isolated too.
+        cloned.term_definitions_mut().remove("a");
+        assert!(!cloned.has_term("a"));
+        assert!(original.has_term("a"));
+    }
+
     #[test]
     fn has_protected_terms_detects_a_protected_definition() {
         let mut ac = ActiveContext::new(None);
-        ac.term_definitions.insert(
+        ac.term_definitions_mut().insert(
             "a".to_string(),
             TermDefinition {
                 protected: true,
@@ -419,10 +478,10 @@ mod tests {
         assert!(ac.has_protected_terms());
         let mut plain = ActiveContext::new(None);
         plain
-            .term_definitions
+            .term_definitions_mut()
             .insert("b".to_string(), TermDefinition::default());
         // A defined term with a null IRI mapping is retained but is not protected.
-        plain.term_definitions.insert(
+        plain.term_definitions_mut().insert(
             "c".to_string(),
             TermDefinition {
                 iri: None,

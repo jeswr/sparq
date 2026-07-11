@@ -82,25 +82,27 @@ unstable gate is never left blocking the train while it is fixed.
   visual subset must earn its own §3 window *after* the functional lanes are stable, never
   bundled with them.
 
-## 6. Current anomaly — `gui-mock-ipc` gates today (maintainer decision pending)
+## 6. `gui-mock-ipc` early promotion — RATIFIED 2026-07-06 (#1656)
 
 The `gui-mock-ipc` job carries **no `advisory` token and no `continue-on-error`**, so it
-**already gates** `ci-summary`. It was promoted at creation (`sq-ymr2e.5`, PR #1431) on the
-rationale that it is a fully deterministic headless-Chromium lane (`retries=0`, mocked IPC).
+**gates** `ci-summary`. It was promoted at creation (`sq-ymr2e.5`, PR #1431) on the rationale
+that it is a fully deterministic headless-Chromium lane (`retries=0`, mocked IPC). That
+promotion **pre-dated this governance** and did not sit on recorded §3 probation evidence,
+which the architect's plan of record (design §6.3 "everything lands advisory"; the
+`sq-ymr2e.12` note classifying `gui-mock-ipc` as *in the promotion set*) says it should.
 
-That **pre-dates this governance** and does not sit on recorded §3 probation evidence, which
-the architect's plan of record (design §6.3 "everything lands advisory"; the `sq-ymr2e.12`
-note classifying `gui-mock-ipc` as *in the promotion set*) says it should. This policy does
-**not** unilaterally demote a green, deterministic gate — that would reduce real enforcement
-on an actively-developed surface. Instead the discrepancy is **flagged for the maintainer**
-(tracking issue **#1656**) to decide:
+**Decision (issue #1656, ratified 2026-07-06):** the early promotion is **ratified** — the
+lane stays gating. Demoting a green, deterministic (`retries=0`, mocked IPC) gate on an
+actively-developed surface would reduce real enforcement, so the early promotion is blessed
+rather than reset under §3. The alternative (**reset** to advisory + `continue-on-error` and
+re-earn gating under §3) was considered and declined for that reason. Its §8 ledger row is
+backfilled to *gating — ratified 2026-07-06 (#1656)*. The decision is also recorded in the
+repo decision ledger, [`docs/decisions/README.md`](../docs/decisions/README.md).
 
-- **Ratify** — bless the early promotion, keep it gating, and backfill its ledger row from
-  the run history to date; or
-- **Reset** — apply the §4 flip in reverse (add ` (advisory)` + `continue-on-error: true` on
-  the `Run Playwright mocked-IPC tests` step) so it re-earns gating uniformly under §3.
-
-Until then it is recorded truthfully in §8 as *gating (early promotion, unratified)*.
+**Rollback (one line, if the lane later flakes):** apply the §4 flip in reverse — add
+` (advisory)` to the job `name:` **and** `continue-on-error: true` on the `Run Playwright
+mocked-IPC tests` step in `gui.yml`; the lane then re-earns gating uniformly under §3. No
+branch-protection edit is involved either way (§1).
 
 ## 7. Flake-quarantine policy (codified beside the suites)
 
@@ -130,7 +132,7 @@ lane is promotable only when its row clears **both** §3 floors with zero §7 qu
 |---|---|---|---|---|---|---|
 | site functional E2E + a11y (`site-e2e-foundation`) | not yet opened | 0 — accumulating | 0 | 0 | **No** | — |
 | home hero-runner (`site-e2e-hero`) | not yet opened | 0 — accumulating | 0 | 0 | **No** | — |
-| GUI mocked-IPC (`gui-mock-ipc`) | n/a (gating early, §6) | not tracked pre-governance | — | 0 known | **Gating — unratified** | pending maintainer (§6, issue #1656) |
+| GUI mocked-IPC (`gui-mock-ipc`) | n/a (gating from creation, §6) | not tracked pre-governance | — | 0 known | **Gating — ratified 2026-07-06** | #1656 (ratified, §6); rollback = §4 reverse flip |
 | visual key-layouts (`site-visual`) | not yet opened | 0 — accumulating | 0 | 0 | **No** (promotes last, §5) | — |
 
 > The window is "opened" the first green run after the lane's spec set is considered stable;

@@ -107,34 +107,25 @@ class Residual:
 
 
 # --- acknowledged residuals (audit-proven; each has a fix bead) --------------
-# sq-m4bxc tracks relocating these shared inputs to repo-level dirs (mappable)
-# or adding the missing dep edge, so the residual set can shrink to empty.
+# [FABLE-5] sq-m4bxc closed the two sibling-crate include residuals (sparq-zk ->
+# secprop-ext.ttl, sparq-reason -> sparq-solid/rules) with the ci_select
+# additional-readers mechanism (a `readers` entry in ci/path-ownership.toml
+# unions the extra reader into the affected set — monotone, fail-safe). They are
+# now COVERED "additional-readers map" below, not acknowledged. Residual 3 stays:
+# scoreboard_floors.rs reads sibling TEST SOURCES at a runtime-computed workspace
+# path; a `readers` entry cannot cover a statically-unresolvable ('.') read, and
+# the sound fix is a shared floors crate — its own design pass (see the fix bead).
 KNOWN_RESIDUALS: tuple[Residual, ...] = (
-    Residual(
-        "sparq-zk",
-        "crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl",
-        "sparq-zk's #[cfg(test)] module include_str!s sparq-trust's shared "
-        "secprop-ext vocab to assert cross-crate agreement; a sparq-zk -> "
-        "sparq-trust dep is a forbidden cycle (sparq-trust depends on sparq-zk), "
-        "so the reverse closure cannot cover it. Backstop: nightly FULL run "
-        "(design §6.1). Fix: sq-m4bxc (relocate the shared vocab).",
-    ),
-    Residual(
-        "sparq-reason",
-        "crates/sparq-solid/rules",
-        "sparq-reason's incremental-N3 tests read sparq-solid's WAC/ACP rule "
-        "files; sparq-reason has no dep on sparq-solid. Backstop: nightly FULL "
-        "run. Fix: sq-m4bxc (add a dev-dep edge or relocate the rules).",
-    ),
     Residual(
         "sparq-conformance",
         ".",
         "scoreboard_floors.rs reads sibling-crate test sources at a "
         "runtime-computed workspace path to keep floor constants in sync "
         "(sparq-shacl/sparq-geo are dep-covered; sparq-solid is not). The path "
-        "is statically unresolvable (a runtime arg). Backstop: nightly FULL "
-        "run. Fix: sq-m4bxc (assert floors via a shared crate, not by reading "
-        "foreign test sources).",
+        "is statically unresolvable (a runtime arg), so the additional-readers "
+        "mechanism cannot attribute it. Backstop: nightly FULL run (design §6.1). "
+        "Fix: sq-z1xv8 (shared floors crate consumed by the conformance runner "
+        "tests instead of reading foreign test sources — own design pass).",
     ),
 )
 
@@ -361,9 +352,16 @@ def audit_refs(
             )
             continue
 
-        # owner is a different crate D: covered iff reader in reverse-closure(D).
+        # owner is a different crate D: covered iff reader in reverse-closure(D),
+        # OR the ownership map declares this reader an additional-reader for the
+        # path (sq-m4bxc — the selector unions it into the affected set even
+        # though D owns the path; the dep edge that reverse-closure would need is
+        # a forbidden cycle).
         if ref.crate in closures.get(owner, {owner}):
             res.covered.append((ref.crate, ref.resolved, f"dep-closure of {owner}"))
+            continue
+        if ref.crate in cs.additional_readers(ref.resolved, map_entries):
+            res.covered.append((ref.crate, ref.resolved, "additional-readers map"))
             continue
         ack = _ack_for(ref, acks)
         if ack is not None:

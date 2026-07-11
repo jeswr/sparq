@@ -45,7 +45,15 @@ export default function BenchmarksOverviewPage() {
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        {/* [FABLE-5] sq-mcsbp — this provenance strip (commit sha, report date, refresh mode)
+            is data-driven from the benchmark-data branch, so it churns every time the committed
+            benchmarks snapshot updates and was the recurring cause of the benchmarks-index visual
+            baseline drift. Mask it at capture ("mask, don't chase") so the baseline survives data
+            churn — the surrounding static card layout is what the snapshot actually guards. */}
+        <div
+          data-vr-mask
+          className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+        >
           <Badge variant="muted" className="gap-1">
             <GitCommitHorizontal aria-hidden />
             commit {commit}

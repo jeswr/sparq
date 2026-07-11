@@ -2266,3 +2266,285 @@ fn unset_conflict_is_not_refused() {
     assert!(!out.refused, "an undeclared conflict strategy defaults to deny-overrides: {out:?}");
     assert!(out.prohibited, "the deny still materializes: {out:?}");
 }
+
+// ===========================================================================
+// [FABLE-5] sq-5fkpp — faithful `odrl:isAnyOf` / `odrl:isNoneOf` mapping.
+// `recipient isAnyOf <set>` → one re-checked agent head per member (exactly the
+// `isPartOf` shape — the evaluator matches both operators as the same flat lexical
+// set, sq-uaz85); `recipient isNoneOf <set>` → one ACP noneOf exceptMatcher per
+// member (the list-valued `neq` dual, sq-5037). Previously both routed through the
+// catch-all to Unmappable, freezing the whole rule one-shot.
+// ===========================================================================
+
+/// bob OR carol may read n1 — `recipient isAnyOf "bob|carol"`.
+fn recipient_isanyof_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/anyof> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://carol.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// everyone EXCEPT bob and dave may read n1 — `recipient isNoneOf "bob|dave"`.
+fn recipient_isnoneof_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/noneof> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isNoneOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://dave.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// A recipient-`isNoneOf`-style permission with an arbitrary operator + right operand
+/// spliced in (for the malformed-operand fail-closed cases).
+fn recipient_set_policy(operator: &str, right_operand: &str) -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/setop> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:{operator} ;
+                      odrl:rightOperand {right_operand} ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").expect("policy parses")
+}
+
+/// Bridge ↔ evaluator PARITY over identified recipients: after bridging (materialized
+/// by ALICE — the constraint need not hold against the materializing party), each
+/// candidate agent's per-session access equals `sparq_policy::evaluate`'s verdict for
+/// a request naming that party. Anonymous sessions are deliberately OUT of the panel:
+/// the evaluator is fail-closed on missing identity, while the bridged noneOf shape
+/// keeps the everyone-except public head — the accepted sq-5037 semantics (asserted
+/// separately below).
+fn assert_bridge_evaluator_parity(pol: &sparq_policy::Policy) {
+    let mut store = PodStore::new(pod());
+    let mat = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(pol, &mat).granted);
+    for agent in [ALICE, BOB, CAROL, DAVE] {
+        let bridged = reads(&mut store, agent);
+        let evaluated =
+            sparq_policy::evaluate(pol, &Request::new(odrl("read")).on(N1).by(agent)).allow;
+        assert_eq!(bridged, evaluated, "bridge/evaluator parity for {agent}");
+    }
+}
+
+// 30. `isAnyOf` BRIDGE SHAPE: one re-checked agent head per set member (NOT a public
+//     head), exactly as `isPartOf`.
+#[test]
+fn recipient_isanyof_persists_one_condition_per_member() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_isanyof_policy(), &req);
+    assert!(out.granted, "isAnyOf maps faithfully to agent conditions: {out:?}");
+    assert_eq!(cond_grants_for(&g, Some(BOB)), 1, "bob head present");
+    assert_eq!(cond_grants_for(&g, Some(CAROL)), 1, "carol head present");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "a positive set is per-member heads, never a public head"
+    );
+    assert!(except_matchers(&g).is_empty(), "no exception on a positive set");
+
+    // RE-CHECKED end-to-end: members read, everyone else (incl. the materializer) not.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&recipient_isanyof_policy(), &req).granted);
+    assert!(reads(&mut store, BOB), "bob in set");
+    assert!(reads(&mut store, CAROL), "carol in set");
+    assert!(!reads(&mut store, ALICE), "alice (the materializer) not in set");
+    assert!(!reads(&mut store, DAVE), "dave not in set");
+    assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
+}
+
+// 31. `isNoneOf` BRIDGE SHAPE: a single public head carrying one exceptMatcher PER
+//     member of the exclusion set (the list-valued `neq` / ACP noneOf dual).
+#[test]
+fn recipient_isnoneof_emits_one_exception_per_member() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_isnoneof_policy(), &req);
+    assert!(out.granted, "isNoneOf maps faithfully to a noneOf condition: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        1,
+        "everyone-except is a single public head"
+    );
+    let ms = except_matchers(&g);
+    assert_eq!(ms.len(), 2, "one exceptMatcher per excluded member: {ms:?}");
+    assert!(ms.iter().any(|m| m.1.contains("bob.ex")), "bob carved out: {ms:?}");
+    assert!(ms.iter().any(|m| m.1.contains("dave.ex")), "dave carved out: {ms:?}");
+
+    // RE-CHECKED end-to-end: everyone reads EXCEPT the set members. The public head
+    // matches anonymous too — the accepted sq-5037 everyone-except semantics.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&recipient_isnoneof_policy(), &req).granted);
+    assert!(reads(&mut store, ALICE), "alice (not excluded) granted");
+    assert!(reads(&mut store, CAROL), "carol (not excluded) granted");
+    assert!(!reads(&mut store, BOB), "bob carved out");
+    assert!(!reads(&mut store, DAVE), "dave carved out");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).iter().any(|gr| gr.as_str() == N1),
+        "anonymous (public) is granted; only the set members are excepted"
+    );
+}
+
+// 32. PARITY with the evaluator on both operators, over an identified-agent panel:
+//     the persisted, re-checked condition must verdict exactly as `evaluate` would.
+//     Non-vacuous vs the pre-fix routing: Unmappable would freeze a one-shot verdict
+//     scoped to the MATERIALIZING party (deny-all for isAnyOf since alice ∉ set;
+//     alice-only for isNoneOf), flipping the members'/non-members' verdicts.
+#[test]
+fn isanyof_bridge_matches_evaluator_verdicts() {
+    assert_bridge_evaluator_parity(&recipient_isanyof_policy());
+}
+
+#[test]
+fn isnoneof_bridge_matches_evaluator_verdicts() {
+    assert_bridge_evaluator_parity(&recipient_isnoneof_policy());
+}
+
+// 33. MALFORMED right operands stay fail-closed (Unmappable → one-shot), mirroring the
+//     evaluator's own guards — never a persisted condition that widens access.
+#[test]
+fn isnoneof_nonstring_operand_stays_one_shot_fail_closed() {
+    // A numeric or dateTime operand is never satisfied by the evaluator's isNoneOf
+    // (set_negation_representable), so a persisted everyone-except grant would WIDEN
+    // access. One-shot fallback: evaluate denies the materializer → NOTHING emitted.
+    // The dateTime case is the distinguishing one: its lexical form is non-empty, so
+    // an (incorrect) lexical set-split would fabricate an exception member and fail
+    // open to a public grant — the arm must reject on the VALUE TYPE, not set size.
+    for operand in
+        ["42", r#""2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>"#]
+    {
+        let pol = recipient_set_policy("isNoneOf", operand);
+        let mut g = pod();
+        let req = Request::new(odrl("read")).on(N1).by(ALICE);
+        let out = materialize_permission_conditional(&mut g, &pol, &req);
+        assert!(!out.granted, "isNoneOf over {operand} grants nothing: {out:?}");
+        assert_eq!(cond_grants_for(&g, None), 0, "no condition from operand {operand}");
+        assert!(except_matchers(&g).is_empty(), "no exception matcher for {operand}");
+
+        let mut store = PodStore::new(pod());
+        assert!(!store.materialize_odrl_permission_conditional(&pol, &req).granted);
+        for agent in [ALICE, BOB, CAROL] {
+            assert!(!reads(&mut store, agent), "{agent} denied (fail-closed) for {operand}");
+        }
+    }
+}
+
+#[test]
+fn isanyof_empty_set_is_unsatisfiable_nothing_materialized() {
+    // isAnyOf over the empty set has no member to equal — unsatisfiable for everyone
+    // in the evaluator; the bridge must not turn it into any persisted head.
+    let pol = recipient_set_policy("isAnyOf", r#""""#);
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(!out.granted, "empty isAnyOf set grants nothing: {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "no condition from an empty set");
+}
+
+#[test]
+fn isnoneof_empty_set_stays_one_shot_no_public_widening() {
+    // The DEGENERATE empty exclusion set stays one-shot (conservative): the evaluator
+    // vacuously satisfies it for a stated recipient, so the frozen path still grants
+    // the materializing party — but the bridge must NOT promote a (likely malformed)
+    // empty operand into a bare unconditional re-checked public grant.
+    let pol = recipient_set_policy("isNoneOf", r#""""#);
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "vacuous isNoneOf holds for the materializer (frozen): {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "no re-checked condition from an empty set");
+
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "frozen grant scoped to the materializer");
+    assert!(!reads(&mut store, CAROL), "no public widening from an empty exclusion set");
+}
+
+// 34. A RESERVED-ENCODED member anywhere in the exclusion set sinks the WHOLE rule to
+//     one-shot — dropping just that member would re-admit it (fail-open); mirrors the
+//     single-value neq guard (test 21) for the list-valued path.
+#[test]
+fn isnoneof_reserved_member_sinks_whole_rule_to_one_shot() {
+    let pol = recipient_set_policy(
+        "isNoneOf",
+        r#""https://bob.ex/card#me|urn:sparq:pair?agent=x&client=y""#,
+    );
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    // One-shot: the evaluator proves isNoneOf for alice (not a member) → a frozen
+    // alice-scoped grant; crucially NO public noneOf head is emitted.
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "one-shot grants the (non-excluded) materializer: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "a reserved-encoded exclusion member must not widen to a public grant"
+    );
+    assert!(except_matchers(&g).is_empty(), "no unenforceable matcher emitted");
+
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(!reads(&mut store, CAROL), "no public widening: carol denied");
+    assert!(!reads(&mut store, BOB), "bob (excluded member) denied");
+}
+
+// 35. The PROHIBITION dual: `recipient isAnyOf <set>` on a prohibition persists one
+//     re-checked conditional DENY per member, composing with deny-overrides.
+#[test]
+fn isanyof_prohibition_persists_conditional_deny_per_member() {
+    // A public allow (bare permission via the conditional path → Public head)…
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/pub> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // …plus a prohibition denying the set {bob, carol}.
+    let prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/panyof> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://carol.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    let out = store.materialize_odrl_prohibition_conditional(&prohib, &req);
+    assert!(out.prohibited, "isAnyOf prohibition maps to per-member deny conditions: {out:?}");
+
+    // Deny-overrides through the real path: the set members lose the public allow.
+    assert!(!reads(&mut store, BOB), "bob (in set) denied — deny beats allow");
+    assert!(!reads(&mut store, CAROL), "carol (in set) denied — deny beats allow");
+    assert!(reads(&mut store, ALICE), "alice (not in set) keeps the public allow");
+    assert!(reads(&mut store, DAVE), "dave (not in set) keeps the public allow");
+}
