@@ -179,6 +179,34 @@ export async function nativeServiceQuery(
 }
 
 /**
+ * [FABLE-5] sq-ixc3.15 — run the ODRL policy tool's whole native round-trip (`odrl_preview`,
+ * gui/src-tauri/src/odrl.rs): parse/validate the Turtle `policy`, evaluate the (action,
+ * target, requester) request per requester, materialize the policy through the odrl-bridge,
+ * and evaluate `query` once UNGATED over the raw `dataset` (TriG/N-Quads per `format`) plus
+ * once PER REQUESTER through PodStore's fail-closed per-session named-graph gating. Returns
+ * the preview object (see lib/odrl.ts for the mirrored shape), or `null` outside the desktop
+ * shell (the web target degrades honestly — the ODRL stack is not in the wasm bundle).
+ * Whether the desktop build compiled the `odrl` feature is only knowable at invoke time: a
+ * lean build's stub throws a loud rebuild-hint error, surfaced through the panel's error
+ * state. Throws the native error string on a dataset/query failure — but NEVER for a
+ * malformed policy or a missing grant, which are in-band fail-closed outcomes (deny-
+ * everything with a visible reason / zero rows).
+ */
+export async function nativeOdrlPreview(args: {
+  dataset: string;
+  format: string;
+  policy: string;
+  action: string;
+  target: string;
+  requesters: string[];
+  query: string;
+}): Promise<import("./odrl").OdrlPreviewResult | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<import("./odrl").OdrlPreviewResult>("odrl_preview", args);
+}
+
+/**
  * [OPUS-4.8] sq-cno90 (#820 follow-up) — probe the REAL on-disk byte size of the
  * `$APPLOCALDATA/workspaces` tree through the native `disk_usage` command, or `null` outside the
  * desktop shell (the web target has no native FS — the status bar falls back to the snapshot-bytes
