@@ -3,3 +3,5 @@
 # tracked (reproducible --locked builds), like the sibling standalone bench projects.
 data/
 target/
+# [FABLE-5] sq-hmd7l.44: runtime overhead envelopes (git-ignored, regenerable).
+overhead-results/

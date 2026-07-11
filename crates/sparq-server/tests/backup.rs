@@ -787,3 +787,96 @@ async fn restore_persist_on_in_memory_server_is_409() {
         "?persist=true on an in-memory server must be 409 (no durable dir to write through)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore guard.
+//
+// Two concurrent restores used to be silently serialized by the single writer thread
+// (individually crash-safe, last-writer-wins, no signal to the operator). The guard makes the
+// collision EXPLICIT: while one restore is in flight, a second `POST /admin/restore` is 409.
+// The in-flight restore is simulated DETERMINISTICALLY by holding the public permit
+// (`AppState::try_begin_restore`) — the exact object the route claims — rather than racing two
+// real restores (which would be flaky-by-construction).
+// ---------------------------------------------------------------------------
+
+/// Like [`spawn_with`], but also returns the (Clone) `AppState` behind the router so a test can
+/// drive state-level APIs (e.g. hold the restore permit) against the SAME server identity.
+async fn spawn_with_state(graph: Graph, config: ServerConfig) -> (String, AppState) {
+    let state = AppState::with_config(graph, config);
+    let app = router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), state)
+}
+
+/// DIRECT unit test for the public permit API: `try_begin_restore` grants exactly ONE live
+/// permit per server state — a second call (even through a state CLONE, as every handler holds
+/// one) is refused while the first permit is alive, and dropping the permit releases it.
+#[tokio::test]
+async fn try_begin_restore_permit_is_single_flight() {
+    let state = AppState::new(Graph::load_str("", "turtle").unwrap());
+    let first = state.try_begin_restore();
+    assert!(first.is_some(), "an idle server must grant the restore permit");
+    assert!(
+        state.clone().try_begin_restore().is_none(),
+        "a second permit must be refused while the first is alive — including through a clone \
+         (handlers hold clones; the permit is per-server identity)"
+    );
+    drop(first);
+    assert!(
+        state.try_begin_restore().is_some(),
+        "dropping the permit must release the single-flight guard (RAII, no wedge)"
+    );
+}
+
+/// ROUTE CONTRACT: while a restore is in flight, a second `POST /admin/restore` is 409 and the
+/// live store is left UNTOUCHED; once the in-flight restore completes (the permit drops), the
+/// SAME artifact restores 200 — the guard is a permit, not a poison.
+#[tokio::test]
+async fn concurrent_restore_is_rejected_409_then_succeeds_after_release() {
+    let cl = reqwest::Client::new();
+    let artifact = make_artifact(&cl).await; // 3 triples (default + named)
+    let (base, state) =
+        spawn_with_state(Graph::load_str("", "turtle").unwrap(), ServerConfig::default()).await;
+    assert_eq!(count_all(&cl, &base).await, 0, "destination starts empty");
+
+    // Deterministically simulate an in-flight restore: hold the route's own permit.
+    let permit = state.try_begin_restore().expect("idle server grants the permit");
+    let resp = cl
+        .post(format!("{base}/admin/restore"))
+        .body(artifact.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::CONFLICT,
+        "a restore posted while one is in flight must be rejected 409, not silently serialized"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("already in progress"),
+        "the 409 must say WHY (restore already in progress); got: {body}"
+    );
+    assert_eq!(
+        count_all(&cl, &base).await,
+        0,
+        "the refused restore must leave the live store untouched"
+    );
+
+    // Release the permit (the in-flight restore "completed"): the same artifact now lands.
+    drop(permit);
+    assert_eq!(
+        post_restore(&cl, &base, artifact, false).await,
+        reqwest::StatusCode::OK,
+        "once the permit is released the restore must succeed"
+    );
+    assert_eq!(
+        count_all(&cl, &base).await,
+        3,
+        "the post-release restore must actually install the artifact"
+    );
+}

@@ -432,6 +432,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "sparq-core",
+ "sparq-substrate",
 ]
 
 [[package]]
@@ -450,6 +451,7 @@ dependencies = [
 name = "sparq-substrate"
 version = "0.1.0"
 dependencies = [
+ "hashbrown",
  "oxrdf",
  "rustc-hash",
  "smallvec",
