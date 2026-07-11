@@ -37,6 +37,36 @@
   ],
   "vulnerabilities": [
     {
+      "id": "RUSTSEC-2025-0134",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2025-0134"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "RustSec"
+          },
+          "severity": "none"
+        }
+      ],
+      "description": "rustls-pemfile is unmaintained (archived): its PEM-parsing functionality moved into rustls-pki-types' PemObject API. This is an informational 'unmaintained' advisory - there is no vulnerability, no CVE, and no known exploit; the crate is a small, stable PEM decoder.",
+      "detail": "Re-added for the solid-server-rs import pre-flight (bead sq-gg0qq.1, epic sq-gg0qq): the imported server's mTLS serve path parses the PEM certificate chain + private key via rustls-pemfile 2 into the DER types that rustls' with_client_cert_verifier(..).with_single_cert(..) builder needs, exactly as upstream jeswr/solid-server-rs ships it. The crate was previously in the tree via ureq 2 and this same advisory was tolerated until sq-g2xs removed it (ureq 3 dropped the dep); this statement restores the same justification for the incoming crates.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "response": [
+          "will_not_fix"
+        ],
+        "detail": "Honest scope: 'unmaintained' is an advisory ABOUT maintenance status, not an exploitable flaw - there is no vulnerable code path to reach. The parser handles operator-supplied local PEM files (TLS cert/key material), not untrusted network input. Planned remediation: migrate the imported mTLS path to rustls-pki-types' PemObject (the maintained successor API, already in the tree) in follow-up bead sq-5ah3p, then remove this statement AND the matching deny.toml [advisories].ignore entry together. Mirrors the deny.toml ignore entry (same reason)."
+      },
+      "affects": [
+        {
+          "ref": "pkg:cargo/sparq"
+        }
+      ]
+    },
+    {
       "id": "RUSTSEC-2026-0194",
       "source": {
         "name": "RustSec",
