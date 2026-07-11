@@ -817,8 +817,10 @@ mod tests {
         let r = WidgetRegistry::dash();
         // sh:in on a literal: EnumSelect(10) beats TextField(10)? both 10 —
         // ties break lexicographically: EnumSelectEditor < TextFieldEditor.
-        let mut e = Constraints::default();
-        e.in_values = vec![crate::description::TermRef::from_term(&lit("a"))];
+        let e = Constraints {
+            in_values: vec![crate::description::TermRef::from_term(&lit("a"))],
+            ..Constraints::default()
+        };
         let ctx = WidgetContext {
             value: Some(&lit("a")),
             constraints: &e,
