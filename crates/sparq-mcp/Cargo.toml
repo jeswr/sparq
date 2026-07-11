@@ -46,6 +46,15 @@ stdio = []
 # all-features rustdoc/clippy lane compiles the citation path. [OPUS-4.8]
 nlq = ["dep:sparq-nlq", "sparq-nlq/live", "sparq-nlq/nlq-endpoint", "citations"]
 citations = ["sparq-nlq?/citations"]
+# [FABLE-5] sq-u16eq: the opt-in pod-backed server (`SolidMcpServer`) — LDP
+# container/resource CRUD tools (resource_get/container_list, plus gated
+# resource_put/resource_delete/container_create) with WAC/ACP-authorized session-scoped
+# semantics per the MCP-Solid proposal draft (site/specs/mcp-solid.typ §6.4/§7.3/§9.3).
+# OFF by default — it pulls in `sparq-solid` (the access-control library whose PodStore
+# backs the pod dataset + authorization view); the default sparq-mcp build stays the
+# thin single-graph wrapper. `oxrdf` comes along only for named-graph Term/NamedNode
+# handling (it is already sparq-solid's public-API vocabulary — no new external dep).
+solid = ["dep:sparq-solid", "dep:oxrdf"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
@@ -57,6 +66,11 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
 # core/engine stay lean. A reviewed cargo-vet exemption covers the new edge (sparq-mcp ->
 # sparq-nlq under the feature).
 sparq-nlq = { path = "../sparq-nlq", version = "0.1.0", optional = true }
+# [FABLE-5] sq-u16eq: the pod store + WAC/ACP authorization view backing the opt-in
+# `solid` feature's LDP resource tools. OPTIONAL — pulled in ONLY by that feature, so the
+# default build never compiles it (in-workspace path dep; no supply-chain delta).
+sparq-solid = { path = "../sparq-solid", version = "0.1.0", optional = true }
+oxrdf = { workspace = true, optional = true }
 # The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
 # sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.
 serde = { version = "1", features = ["derive"] }

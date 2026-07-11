@@ -16,6 +16,10 @@
 //! - `nlq` (feature `nlq`) — the server-side natural-language `ask` tool (NL→SPARQL→execute
 //!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is set).
 //! - `transport` (feature `stdio`) — the line-delimited stdio serve loop.
+//! - `solid` (feature `solid`) — the pod-backed server (`SolidMcpServer`): LDP
+//!   container/resource CRUD tools (`resource_get`/`container_list`, plus the gated
+//!   `resource_put`/`resource_delete`/`container_create`) with WAC/ACP-authorized,
+//!   session-scoped semantics over a `sparq_solid::PodStore`. [FABLE-5] sq-u16eq
 
 pub mod jsonrpc;
 pub mod server;
@@ -31,8 +35,19 @@ pub mod nlq;
 #[cfg_attr(docsrs, doc(cfg(feature = "stdio")))]
 pub mod transport;
 
+// [FABLE-5] sq-u16eq: the pod-backed server with LDP resource tools, behind the opt-in
+// `solid` feature.
+#[cfg(feature = "solid")]
+#[cfg_attr(docsrs, doc(cfg(feature = "solid")))]
+pub mod solid;
+
 pub use server::{McpServer, ServerConfig, PROTOCOL_VERSION};
 pub use tools::ToolSpec;
+
+/// The pod-backed MCP server + its configuration (feature `solid`). See `solid`.
+#[cfg(feature = "solid")]
+#[cfg_attr(docsrs, doc(cfg(feature = "solid")))]
+pub use solid::{SolidMcpServer, SolidServerConfig};
 
 /// Serve the MCP protocol over this process's stdin/stdout (the standard MCP stdio
 /// transport). Available with the `stdio` feature. See `transport::serve_stdio`.
