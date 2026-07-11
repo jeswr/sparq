@@ -1,0 +1,229 @@
+# [FABLE-5] Standing nightly metamorphic (TLP/NoREC) lane (bead sq-3dyje.9,
+# design record research/testing-strategy-assessment-2026-07.md §7.3).
+#
+# WHAT: drives crates/sparq-metamorph's SINGLE-ENGINE metamorphic oracles — TLP
+# (ternary logic partitioning re-derived for SPARQL's three-valued EBV semantics)
+# and NoREC (the non-optimizable-rewrite cardinality oracle) — over the crate's
+# seeded deterministic query/data generator, via the `metamorph-driver` binary.
+# TLP/NoREC catch the logic bugs cross-engine differentials structurally cannot:
+# bugs SHARED with the oracle engine, and surfaces where no oracle engine exists.
+# They need no cross-engine adjudication registry — a violation is sparq's own
+# evaluation paths disagreeing with each other.
+#
+# TWO SHARDS (mirroring differential.yml's window scheme):
+#   * smoke   — a FIXED regression window (seeds 0..2000), replayed every night:
+#     deterministic, so a red smoke shard means a fresh engine/driver REGRESSION
+#     on seeds known green. This is also the bead's acceptance window (the driver
+#     over it exits 0 on main).
+#   * nightly — an ADVANCING window (days-since-epoch × WINDOW_STRIDE), so each
+#     night explores a fresh, never-replayed seed range (the generator is a
+#     deterministic SplitMix64 — the seed IS the corpus).
+#
+# VERDICT DISCIPLINE (fail-closed, never silently skipped): every seed yields a
+# TLP and a NoREC verdict; Pass is counted, VIOLATION (wrong-result signal) and
+# ENGINE-FAILURE (a generated valid query failed to evaluate) both print a
+# deterministic repro line and fail the window; an empty window fails. The
+# non-vacuity anchor (the injected FilterDropsRow mutant must be flagged) is
+# enforced by `cargo test -p sparq-metamorph` in the per-PR CI, and the driver's
+# red path can be demonstrated any time with `--inject-filter-drops-row`.
+#
+# BUDGET: ~0.45 ms/seed measured locally (release, in-process engine); 500k
+# nightly seeds ≈ 4–15 min depending on runner throughput, well inside the
+# timeout. WINDOW_STRIDE must stay >= the nightly count so consecutive nights
+# can never replay a seed.
+#
+# ON FAILURE, each shard: (1) uploads the driver log — which contains the full
+# deterministic repro (VIOLATION/ENGINE-FAILURE seed lines + the FIRST FAILING
+# CASE block with replay command, queries, and graph) — as an artifact, and
+# (2) auto-files the finding via scripts/ci-file-metamorph-failure.py: a GitHub
+# issue with the repro inline (deduped per shard) + a P1 bug bead appended to
+# .beads/issues.jsonl with a BEST-EFFORT push (fail-soft on the GH013
+# protected-main ruleset rejection, exactly the differential.yml pattern; the
+# GitHub issue is the reliable channel the orchestrator's issue sweep beads from).
+#
+# TRIGGER — NIGHTLY/HEAVY tier ONLY (schedule + workflow_dispatch), like
+# differential.yml: this workflow never produces a check-run on a PR head
+# commit, so the `ci-summary / gate` aggregator never sees it and the per-PR
+# gate is unaffected. The per-PR guarantee for this crate is its self-test suite
+# (which includes the driver's non-vacuity tests) in the normal CI lanes.
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the
+# trailing `# vX.Y.Z` comment is what Dependabot follows to bump the pin. Pins
+# match those already used by differential.yml / fuzz.yml / ci.yml.
+name: metamorph
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_start:
+        description: "seed window start for the nightly shard (default: days-since-epoch × stride — the advancing window)"
+        required: false
+        default: ""
+      count:
+        description: "seeds for the nightly shard (smoke keeps its fixed window)"
+        required: false
+        default: ""
+  # Daily heavy tier. 04:07 UTC — offset from ci.yml's coverage cron (03:17),
+  # differential.yml (03:53), fuzz.yml (04:23) and differential-update.yml
+  # (04:37) per the existing nightly stagger convention.
+  schedule:
+    - cron: "7 4 * * *"
+
+permissions:
+  contents: read
+
+# One nightly sweep at a time; never cancel a shard mid bug-filing.
+concurrency:
+  group: metamorph-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The advancing-window stride (seeds/night for the nightly shard). MUST stay
+  # >= the nightly `count` below, or consecutive nights would replay seeds
+  # instead of exploring fresh ones.
+  WINDOW_STRIDE: "600000"
+
+jobs:
+  metamorph:
+    name: nightly metamorphic TLP/NoREC (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # best-effort .beads bug-bead commit-back (fail-soft on GH013)
+      issues: write # auto-file the finding as a GitHub issue with the repro inline
+    strategy:
+      # Run both shards even if one finds a bug — a red smoke (regression) and a
+      # red nightly (fresh find) are distinct signals worth having together.
+      fail-fast: false
+      matrix:
+        include:
+          # Fixed regression window: the bead's acceptance window, green on main.
+          - { name: smoke, count: 2000, advancing: false }
+          # Advancing exploration window (see WINDOW_STRIDE).
+          - { name: nightly, count: 500000, advancing: true }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable via toolchain input
+        with:
+          toolchain: stable
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Both shards build the identical driver binary — share ONE cache key
+          # across the matrix instead of two near-duplicate caches.
+          shared-key: metamorph-nightly
+      # Build once, distinctly, so a compile error is reported separately from an
+      # oracle failure.
+      - name: Build the metamorph driver
+        run: cargo build -p sparq-metamorph --release --bins
+      - name: Compute the seed window
+        id: window
+        env:
+          INPUT_SEED_START: ${{ github.event.inputs.seed_start }}
+          INPUT_COUNT: ${{ github.event.inputs.count }}
+          MATRIX_COUNT: ${{ matrix.count }}
+          MATRIX_ADVANCING: ${{ matrix.advancing }}
+        run: |
+          set -euo pipefail
+          if [ "$MATRIX_ADVANCING" = "true" ]; then
+            # Advancing window: start = days-since-epoch × stride, so exploration
+            # NEVER replays a previous night's range. A workflow_dispatch may pin
+            # an explicit start (e.g. to re-run a failing night's window).
+            if [ -n "$INPUT_SEED_START" ]; then
+              start="$INPUT_SEED_START"
+            else
+              days=$(( $(date -u +%s) / 86400 ))
+              start=$(( days * WINDOW_STRIDE ))
+            fi
+            count="$MATRIX_COUNT"
+            if [ -n "$INPUT_COUNT" ]; then
+              count="$INPUT_COUNT"
+            fi
+            if [ "$count" -gt "$WINDOW_STRIDE" ]; then
+              echo "::error::nightly count $count exceeds WINDOW_STRIDE $WINDOW_STRIDE — nights would replay seeds"
+              exit 1
+            fi
+          else
+            # The smoke shard's window is FIXED — it is the deterministic
+            # regression anchor and ignores dispatch overrides.
+            start=0
+            count="$MATRIX_COUNT"
+          fi
+          echo "start=$start" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Window for this shard: seeds $start..$(( start + count ))"
+      - name: Run the TLP/NoREC driver (fails on any violation or engine failure)
+        env:
+          START: ${{ steps.window.outputs.start }}
+          COUNT: ${{ steps.window.outputs.count }}
+        run: |
+          set -euo pipefail
+          # Tee the log: on a failure it contains the full deterministic repro
+          # (VIOLATION/ENGINE-FAILURE seed lines + the FIRST FAILING CASE block
+          # with replay + queries + graph), which the failure steps below upload
+          # and file. pipefail keeps the exit code.
+          ./target/release/metamorph-driver "$START" "$COUNT" 2>&1 \
+            | tee "$RUNNER_TEMP/metamorph-log.txt"
+      # ── failure path: preserve the repro + auto-file the finding ────────────────
+      - name: Auto-file the finding (GitHub issue + P1 bug bead, deduped)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Explicit repo for `gh issue …` (independent of the checkout's remote).
+          GH_REPO: ${{ github.repository }}
+          SHARD: ${{ matrix.name }}
+          START: ${{ steps.window.outputs.start }}
+          COUNT: ${{ steps.window.outputs.count }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-file-metamorph-failure.py --self-test
+          python3 scripts/ci-file-metamorph-failure.py \
+            --log "$RUNNER_TEMP/metamorph-log.txt" \
+            --shard "$SHARD" \
+            --seed-start "${START:-unknown}" \
+            --count "${COUNT:-unknown}" \
+            --out-dir "$RUNNER_TEMP/metamorph-repro" \
+            --jsonl .beads/issues.jsonl \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Commit the new bug bead back to main (best-effort; fail-soft on ruleset-blocked push)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHARD: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .beads/issues.jsonl; then
+            echo "no bead appended (deduped or filing skipped) — nothing to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .beads/issues.jsonl
+          git commit -m "chore(beads): auto-file metamorph P1 bug bead (${SHARD}) [skip ci]" \
+                     -m "Nightly metamorphic lane finding (sq-3dyje.9). [FABLE-5]"
+          # Best-effort push, exactly the differential.yml fail-soft pattern: the
+          # protected-main ruleset (GH013) rejects direct pushes until a bypass
+          # exists (sq-roe3); the GitHub issue filed above is the reliable channel.
+          set +e
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          push_rc=$?
+          set -e
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=metamorph bead push declined::Could not push the auto-filed bug bead to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection). The GitHub issue filed in the previous step is the durable record; the orchestrator beads it on the next issue sweep."
+            exit 0
+          fi
+          echo "pushed the auto-filed bug bead to main."
+      - name: Upload the repro artifact (log + parsed seed/queries/graph)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: metamorph-repro-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/metamorph-log.txt
+            ${{ runner.temp }}/metamorph-repro/
+          if-no-files-found: warn

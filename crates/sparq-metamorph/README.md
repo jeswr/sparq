@@ -47,6 +47,11 @@ feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap i
   a developer-confirmation status; unfiled observations are not entries.
 - **Non-vacuity self-tests**: a deliberately-injected wrong-result mutant
   (`FilterDropsRow`) is flagged by all three oracles against the *real* sparq engine.
+- **Nightly CI driver** (`harness` + the `metamorph-driver` binary): seeded window ->
+  TLP + NoREC verdicts per seed, every verdict counted (fail-closed), deterministic
+  repro on failure. Driven by `.github/workflows/metamorph.yml` (advancing nightly
+  window + fixed smoke window, auto-filed findings). Red path on demand:
+  `metamorph-driver <start> <count> --inject-filter-drops-row`.
 
 ## 📚 Learn more
 
