@@ -153,7 +153,7 @@ existing EDG/shaperone/shacl-form shape libraries render unchanged.
 
 **Architecture: headless core + two renderers + an agent surface.**
 
-```
+```text
 crates/sparq-forms  (opt-in crate, no GUI deps, wasm-able)
   (data graph, shapes graph, focus node, mode: view|edit, role) ->
   FormDescription (serde JSON):
