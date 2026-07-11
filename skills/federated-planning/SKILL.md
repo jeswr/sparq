@@ -192,6 +192,20 @@ to join (the **suffix**).
   faster sources / deferring a slow one, **not** a claim to compute the latency-optimal plan.
   Latency enters only the *cost* term (and the suffix-selection score), **never** the output
   cardinality, so results are unchanged. `latency_weight = 0` disables it.
+- **Per-source vs slowest-arm aggregation (sq-s5kd) — opt-in, default unchanged.** How a
+  multi-source pattern's per-source latencies fold into its single cost factor is now a policy
+  knob, `ReplanPolicy::latency_aggregation`: `LatencyAggregation::SlowestArm` (default — the
+  sq-b51o bottleneck model above, bit-identical for existing callers) or
+  `LatencyAggregation::CardinalityWeighted` — each retained source's latency runs through the
+  same `factor` formula individually and the pattern is charged the **cardinality-weighted
+  mean** of the per-source factors (an *expected-work* model: a tiny slow arm no longer
+  dominates a huge fast arm's pattern; plain mean when every retained cardinality is 0). An
+  unobserved source still contributes `1.0`, so with no observations both modes are exactly
+  neutral, and single-source patterns are mode-independent. The re-plan *trigger* stays
+  slowest-arm under both modes (its job is to detect a pathologically slow arm; the weighted
+  cost + hysteresis then decide adoption). Which model wins is workload-dependent
+  (parallel-fetch unions really are bottlenecked; sequential/bind-join work is proportional) —
+  the MECHANISM ships un-tuned for the federation bench harness to compare.
 - **Latency EWMA smoothing (sq-b51o follow-up) — a HEURISTIC α, not optimal.** The cost factor
   and the trigger read a per-source **exponentially-weighted moving average**, not the single
   last sample: `record_source_latency` folds each sample in as `ewma = α·observed + (1−α)·prev`
