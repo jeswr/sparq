@@ -229,6 +229,105 @@ pub const ASK: ToolSpec = ToolSpec {
     },
 };
 
+/// The `template_list` tool (feature `templates`): the registered named-template
+/// definitions, so an agent can ground a `template_invoke` call. [FABLE-5] sq-lsp7k.10
+#[cfg(feature = "templates")]
+pub const TEMPLATE_LIST: ToolSpec = ToolSpec {
+    name: "template_list",
+    description: "List the named parameterized SPARQL templates this server exposes: for \
+                  each, its name, kind (query or update), SPARQL text, declared typed \
+                  parameters (name -> type: auto|iri|string|boolean|integer|decimal|double \
+                  or a datatype IRI) and description. Call this before template_invoke to \
+                  learn the exact parameter names and types. Read-only.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The `template_invoke` tool (feature `templates`): typed, fail-closed invocation of a
+/// registered template — the safe alternative to free-form UPDATE for agents. [FABLE-5]
+/// sq-lsp7k.10
+#[cfg(feature = "templates")]
+pub const TEMPLATE_INVOKE: ToolSpec = ToolSpec {
+    name: "template_invoke",
+    description: "Invoke a named parameterized SPARQL template with typed arguments. The \
+                  arguments are bound as typed RDF terms into the template's parsed algebra \
+                  (never string concatenation), so values cannot inject SPARQL syntax. \
+                  FAIL-CLOSED: an unknown template name, an unknown or missing parameter, \
+                  or an argument whose JSON shape does not match the declared type is an \
+                  error, never a silent no-op. A SELECT/ASK template returns SPARQL 1.1 \
+                  JSON results; CONSTRUCT/DESCRIBE returns N-Triples; an UPDATE template \
+                  mutates the graph and is only invocable when the server was started with \
+                  update enabled (the same gate as the raw update tool).",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The template name, exactly as listed by template_list."
+                },
+                "parameters": {
+                    "type": "object",
+                    "description": "The template's declared parameters. Every declared \
+                                    parameter is required; JSON shapes must match the \
+                                    declared types (string for iri/string/datatype-IRI \
+                                    lexical forms, number for integer/decimal/double, \
+                                    boolean for boolean; an `auto` parameter also accepts \
+                                    {\"iri\": ...}, {\"value\": ..., \"datatype\": ...} or \
+                                    {\"value\": ..., \"lang\": ...})."
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The `text_search` tool (feature `text`): BM25 full-text search over the graph's
+/// string literals via the sparq-text index. [FABLE-5] sq-lsp7k.10
+#[cfg(feature = "text")]
+pub const TEXT_SEARCH: ToolSpec = ToolSpec {
+    name: "text_search",
+    description: "Full-text search over the RDF graph's string literals (BM25-ranked, \
+                  best first). Returns the matching literals (N-Triples form) with their \
+                  relevance scores; to reach the subjects/predicates carrying a matched \
+                  literal, follow up with a query tool call that filters on the literal \
+                  value. mode \"and\" (default) requires every token; \"any\" ranks the \
+                  union. A trailing * on a token is a prefix match (autocomplete-style \
+                  IRI/label discovery). Read-only; the index is maintained server-side \
+                  and stays current across updates.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search tokens, e.g. \"quick fox\" or \"auto*\"."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["and", "any"],
+                    "description": "Token combination: \"and\" (all tokens, default) or \
+                                    \"any\" (union)."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Maximum hits returned (default 20)."
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    },
+};
+
 /// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
 /// is appended by [`advertised`] only when a model backend is configured.
 pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS];
@@ -246,5 +345,19 @@ pub fn advertised(server: &McpServer) -> Vec<&'static ToolSpec> {
     if crate::nlq::backend_configured() {
         tools.push(&ASK);
     }
+    // [FABLE-5] sq-lsp7k.10: the template tools are advertised only when the embedder
+    // registered at least one template (a template-less server does not advertise an
+    // unusable tool — the `ask` degrade-cleanly pattern). An UPDATE template is listed
+    // even on a read-only server (the agent can see it exists) but its invocation is
+    // gated on `allow_update` at call time.
+    #[cfg(feature = "templates")]
+    if !server.config().templates.is_empty() {
+        tools.push(&TEMPLATE_LIST);
+        tools.push(&TEMPLATE_INVOKE);
+    }
+    // [FABLE-5] sq-lsp7k.10: full-text search is self-contained (the index builds lazily
+    // from the loaded graph), so the feature alone advertises it.
+    #[cfg(feature = "text")]
+    tools.push(&TEXT_SEARCH);
     tools
 }

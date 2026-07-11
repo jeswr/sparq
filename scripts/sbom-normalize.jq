@@ -41,6 +41,17 @@ def canon_ref:
     | ($rest | sub("^(?<v>[^ ]*)"; "")) as $suffix       # trailing suffix after the version token
     | ($rest | sub("^(?<v>[^ ]*).*$"; "\(.v)")) as $version
     | "pkg:cargo/\($name)@\($version)\($suffix)"
+  elif type == "string" and startswith("git+") and test("#") then
+    # [FABLE-5] sq-gg0qq.2 (GS-6): a GIT dependency (today only jeswr/solid-oidc-verifier).
+    # cargo-cyclonedx 0.5.9 emits
+    #   git+https://<host>/<owner>/<repo>?rev=<sha>#<version>
+    # (the fragment is the bare version; the crate name is the repo basename — true for
+    # every git dep this workspace allows, deny.toml pins the allow-list). Canonicalise to
+    # the same host-independent form as every other component; the pin (rev) stays
+    # discoverable in Cargo.lock + supply-chain/config.toml, not in the published ref.
+    (sub("#.*$"; "") | sub("\\?.*$"; "") | sub("^.*/"; "")) as $name
+    | (sub("^[^#]*#"; "")) as $version
+    | "pkg:cargo/\($name)@\($version)"
   else
     .
   end;
@@ -59,6 +70,14 @@ def canon_purl:
   if type == "string" and test("[?&]download_url=file://") then
     # Drop the download_url qualifier together with any trailing host-derived #subpath.
     sub("[?&]download_url=file://.*$"; "")
+  elif type == "string" and test("[?&]vcs_url=") then
+    # [FABLE-5] sq-gg0qq.2 (GS-7): a GIT dependency's purl —
+    #   pkg:cargo/<name>@<version>?vcs_url=git%2Bhttps://<host>/<owner>/<repo>%40<sha>
+    # The canonical cargo purl carries NO query/fragment (scripts/check-sbom-purl-canonical.py
+    # asserts ^pkg:cargo/[^?#]+@[^?#]+$); the exact rev pin remains in Cargo.lock +
+    # supply-chain/config.toml. vcs_url is the only qualifier cargo-cyclonedx 0.5.9 emits
+    # for a git dep, so the tail-strip is exact.
+    sub("[?&]vcs_url=.*$"; "")
   else
     .
   end;
@@ -90,6 +109,10 @@ def canon_purl:
 #          (NOT this project — attributing it to sparq would be FABRICATION); treated like a
 #          registry crate (supplier "crates.io" + the crate's crates.io URL; publisher from
 #          author). This is why we cannot collapse "path+file => first-party".
+#   * git+https://github.com/jeswr/<repo>?rev=<sha>#<version>
+#       -> a GIT dependency pinned to the maintainer's own repository (today only
+#          solid-oidc-verifier, sq-gg0qq.2). Supplier = the repository owner (the same
+#          identity as the VEX top-level supplier), url = the repository. [FABLE-5]
 #   * anything else (none today)
 #       -> supplier NOT determinable -> OMITTED (no supplier emitted). Honest per NTIA.
 #
@@ -118,6 +141,13 @@ def derive_supplier($author):
     elif ($ref | test("^path\\+file://.*/crates/sparq")) then
       # first-party workspace crate -> the project (matches the VEX top-level supplier)
       {name: "Jesse Wright", url: ["https://github.com/jeswr/sparq"]}
+    elif ($ref | test("^git\\+https://github\\.com/jeswr/")) then
+      # [FABLE-5] sq-gg0qq.2 (GS-1): a GIT dependency pinned to the MAINTAINER'S OWN
+      # repository (today only solid-oidc-verifier; deny.toml's sources allow-list keeps
+      # this set closed). Supplier-of-record = the repository owner — the same identity as
+      # the VEX top-level supplier, honestly determinable from the pinned source URL.
+      # A git dep from any OTHER host/owner still falls through to null (omitted honestly).
+      {name: "Jesse Wright", url: [($ref | sub("^git\\+"; "") | sub("\\?.*$"; ""))]}
     else
       null    # not determinable -> omitted honestly
     end;

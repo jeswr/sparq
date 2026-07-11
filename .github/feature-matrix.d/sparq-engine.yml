@@ -319,3 +319,17 @@
   crate: "sparq-engine"
   features: "antijoin-static-decline"
   test: true
+
+# [FABLE-5] sq-lsp7k.10: named parameterized SPARQL templates — the shared definition +
+# typed-JSON-binding layer (`templates` module: `Template::new/from_json/to_json/bind_json`,
+# `ParamType`, `Bound::{is_update,is_graph_form,render}`) behind the server's `/templates`
+# REST surface and the MCP `template_invoke` tool. `templates = ["params", "dep:serde_json"]`
+# — everything is `#[cfg(feature = "templates")]`, so the default build compiles it EMPTY and
+# runs ZERO of the 12 `templates::tests::*` unit tests (incl. the fail-closed
+# unknown/missing/mistyped-parameter contracts and the #901 injection-through-the-template
+# scenario); this leg closes that gap. serde_json is already the crate's dev-dependency
+# (workspace-ubiquitous), so the leg pulls no new crate.
+- name: "sparq-engine (templates — named parameterized templates over params)"
+  crate: "sparq-engine"
+  features: "templates"
+  test: true

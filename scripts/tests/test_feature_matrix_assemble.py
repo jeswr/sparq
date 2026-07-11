@@ -13,7 +13,8 @@
 #
 # Hermetic: imports the assembler module + reads the committed fragments + golden file
 # on disk (committed files, not git/network state), so the run is deterministic. NO
-# subprocess, NO network.
+# network; the only subprocess is a local `bash` run of the workflow's failure-
+# attribution script (TestAssembleFailureAnnotation, sq-2wo5t) — still offline.
 #
 # Run:  python3 scripts/tests/test_feature_matrix_assemble.py
 # (stdlib + the same PyYAML the assembler needs; no pytest required — also
@@ -447,6 +448,100 @@ class TestTierBehaviorPreservation(unittest.TestCase):
         obj = _run_main_json(self.mod, ["--event", "pull_request"])
         for leg in obj["include"]:
             self.assertEqual(set(leg.keys()), {"name", "crate", "features", "test"})
+
+
+# [FABLE-5] sq-2wo5t: LOUD assemble-failure attribution.
+#
+# When the `setup` ("assemble feature matrix") job fails, the matrix output is never
+# produced, `opt-in-features` spawns ZERO legs, and EVERY required `opt-in *` check on
+# the PR goes expected-but-MISSING — which historically misread as "one specific leg
+# failing across multiple unrelated PRs" (the 2026-07-11 false 'spqv-provenance'
+# main-regression alarm). The workflow therefore carries a final `if: failure()` step
+# that emits a ::error annotation + job-summary block attributing the missing legs to
+# the assemble job itself. These tests pin that step's WIRING (present, failure-only,
+# LAST — so every earlier guard's failure triggers it) and EXECUTE its script (bash is
+# the only subprocess; still offline/deterministic) to prove the annotation actually
+# fires with the load-bearing text, non-vacuously.
+class TestAssembleFailureAnnotation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import yaml  # noqa: PLC0415  (lazy: only when the test runs)
+
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        cls.setup_steps = workflow["jobs"]["setup"]["steps"]
+        cls.failure_steps = [
+            s for s in cls.setup_steps if str(s.get("if", "")).strip() == "failure()"
+        ]
+
+    def test_setup_job_has_exactly_one_failure_attribution_step(self):
+        self.assertEqual(
+            len(self.failure_steps),
+            1,
+            "the setup job must carry exactly ONE `if: failure()` loud-attribution "
+            "step (sq-2wo5t) — an assemble failure otherwise reads as a phantom "
+            "cross-PR `opt-in *` leg regression",
+        )
+
+    def test_failure_attribution_step_is_last(self):
+        # LAST is load-bearing: `if: failure()` fires only on an EARLIER step's
+        # failure, so any guard step added AFTER it would fail silently again.
+        self.assertIs(
+            self.setup_steps[-1],
+            self.failure_steps[0],
+            "the failure-attribution step must be the LAST step of the setup job so "
+            "every failure-capable guard step precedes (and thus triggers) it",
+        )
+
+    def test_failure_attribution_step_has_no_id_or_outputs_dependency(self):
+        # It must be self-contained: no `${{ steps.* }}` reads (an earlier failed
+        # step's outputs are empty) and plain `run:` (no action to fetch).
+        step = self.failure_steps[0]
+        self.assertIn("run", step, "attribution must be a plain run: step")
+        self.assertNotIn("uses", step)
+        self.assertNotIn("${{ steps.", step["run"])
+
+    def test_failure_annotation_names_the_real_situation(self):
+        run = self.failure_steps[0]["run"]
+        self.assertIn("::error", run, "must emit a GitHub Actions ::error annotation")
+        for needle in (
+            "MISSING, not failing",
+            "opt-in",
+            "feature-matrix-legnames.golden.txt",
+            "check-feature-test-execution.py",
+        ):
+            self.assertIn(
+                needle, run,
+                f"the loud annotation must mention {needle!r} so triage starts at "
+                "the assemble job, not a phantom per-leg regression",
+            )
+
+    def test_failure_annotation_script_fires(self):
+        """NON-VACUOUS: execute the step's script and assert the annotation + the
+        job-summary block are actually produced (catches an unbound var under
+        `set -u`, a broken heredoc/quoting, or dropped load-bearing text)."""
+        import subprocess  # noqa: PLC0415  (lazy: only this test shells out)
+
+        run = self.failure_steps[0]["run"]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "step_summary.md"
+            summary.touch()
+            proc = subprocess.run(
+                ["bash", "-c", run],
+                capture_output=True,
+                text=True,
+                env={"PATH": "/usr/bin:/bin", "GITHUB_STEP_SUMMARY": str(summary)},
+                timeout=30,
+            )
+            self.assertEqual(
+                proc.returncode, 0,
+                f"the attribution script must not itself fail:\n{proc.stderr}",
+            )
+            self.assertIn("::error", proc.stdout)
+            self.assertIn("MISSING, not failing", proc.stdout)
+            summary_text = summary.read_text(encoding="utf-8")
+            self.assertIn("opt-in feature matrix NOT generated", summary_text)
+            self.assertIn("MISSING, not failing", summary_text)
+            self.assertIn("feature-matrix-legnames.golden.txt", summary_text)
 
 
 if __name__ == "__main__":

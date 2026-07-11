@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# [FABLE-5] (sq-hmd7l.20) RSP4J/YASPER gather — the REAL-engine leg of the bounded
+# count-matched-replay protocol (research/comparative-benchmarking-everything.md
+# sec 5.2). GATHER-TIME ONLY: needs java (11+), a maven binary, and network for the
+# first build; RSP4J is NOT a committed dependency and this script never runs in CI.
+#
+# Pipeline:
+#   1. clone + build RSP4J at the PINNED commit (jars land in ~/.m2, Apache-2.0),
+#   2. compile bench/rsp/rsp4j/Rsp4jReplayRunner.java against them,
+#   3. drive YASPER with the pinned timestamped replay (event-time, no wall clock),
+#   4. run the count-match gate (rsp4j_compare.py) — the envelope gets timing rows
+#      ONLY if every non-excluded window count-matches the oracle; every row carries
+#      the machine-attached time-model caveat.
+#
+# Usage: bench/rsp/gather-rsp4j.sh [out-envelope.json]
+#   env: MVN=/path/to/mvn  RSP4J_SRC=/path/to/checkout  CANONICAL=1 (quiet box only)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+OUT="${1:-$ROOT/bench/canonical-competitor-results/$(date -u +%Y-%m-%d)/rsp4j-yasper-count-match-$(date -u +%Y%m%dT%H%M%SZ).json}"
+
+# Pinned upstream: the repo moved to the streamreasoning org (the registry's original
+# riccardotommasini URL 404s — see bead note); jar version 1.0.1 on master.
+RSP4J_REPO="https://github.com/streamreasoning/rsp4j"
+RSP4J_COMMIT="c46e0f674fb740b85543e73d8013196b18763abd"
+RSP4J_VERSION="1.0.1"
+RSP4J_SRC="${RSP4J_SRC:-/tmp/rsp4j-src}"
+MVN="${MVN:-mvn}"
+
+command -v java >/dev/null || { echo "[rsp4j-gather] ERROR: java not found (gather needs a JVM)" >&2; exit 1; }
+command -v "$MVN" >/dev/null || { echo "[rsp4j-gather] ERROR: maven not found (set MVN=; e.g. the apache-maven-3.9.x binary tarball)" >&2; exit 1; }
+
+# ---- 1. build RSP4J at the pinned commit -------------------------------------------
+if [ ! -d "$RSP4J_SRC/.git" ]; then
+  git clone "$RSP4J_REPO" "$RSP4J_SRC"
+fi
+git -C "$RSP4J_SRC" fetch -q origin "$RSP4J_COMMIT" 2>/dev/null || true
+git -C "$RSP4J_SRC" checkout -q "$RSP4J_COMMIT"
+JARS="$HOME/.m2/repository/org/streamreasoning/rsp4j"
+if [ ! -f "$JARS/operatorapi/$RSP4J_VERSION/operatorapi-$RSP4J_VERSION.jar" ]; then
+  (cd "$RSP4J_SRC" && "$MVN" -q -pl api,yasper,operatorapi -am -DskipTests install)
+fi
+
+# ---- 2. compile the runner -----------------------------------------------------------
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+(cd "$RSP4J_SRC" && "$MVN" -q -pl operatorapi dependency:build-classpath -Dmdep.outputFile="$WORK/cp.txt")
+CP="$(cat "$WORK/cp.txt")"
+for m in api yasper operatorapi io; do
+  CP="$CP:$JARS/$m/$RSP4J_VERSION/$m-$RSP4J_VERSION.jar"
+done
+javac -cp "$CP" -d "$WORK" "$HERE/rsp4j/Rsp4jReplayRunner.java"
+
+# ---- 3. drive YASPER with the pinned replay ------------------------------------------
+java -cp "$WORK:$CP" Rsp4jReplayRunner \
+  --replay "$HERE/replay/srbench.ts.tsv" \
+  --scenario srbench_join \
+  --version "$RSP4J_VERSION (pinned $RSP4J_COMMIT, locally built)" \
+  > "$WORK/rsp4j.tsv"
+
+# ---- 4. the count-match gate (timing admitted only on agreement) ---------------------
+mkdir -p "$(dirname "$OUT")"
+CANON_ARGS=()
+if [ "${CANONICAL:-0}" = "1" ]; then CANON_ARGS+=(--canonical); fi
+python3 "$HERE/rsp4j_compare.py" count-match \
+  --scenario srbench_join \
+  --competitor "$WORK/rsp4j.tsv" \
+  --replay "$HERE/replay/srbench.ts.tsv" \
+  --out "$OUT" "${CANON_ARGS[@]}"
+echo "[rsp4j-gather] envelope: $OUT" >&2

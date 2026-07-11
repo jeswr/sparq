@@ -33,6 +33,35 @@
 //! [`WacDecision`](sparq_solid::WacDecision) is `allow == false` for every non-`Resolved` status,
 //! and a grant-less / un-materialised session sees nothing. The tests exercise this directly (an
 //! unparseable dataset -> deny with a `400`; an un-materialisable view still denies).
+//!
+//! # The ODRL lane (`odrl-authz` feature, sq-lrtc3.1 + sq-3mu76) [FABLE-5]
+//!
+//! Behind the OPT-IN `odrl-authz` cargo feature, ALL THREE endpoints (`/authz/query`,
+//! `/authz/decide`, `/authz/wac-allow` — the latter two are sq-3mu76) grow an ODRL lane: when the
+//! request dataset carries ODRL policy rules (`odrl:permission` / `odrl:prohibition` predicates),
+//! the handler parses them from the UNION of the dataset's graphs (`sparq_policy::parse_policy`)
+//! and runs the sparq-solid ODRL bridge (`PodStore::materialize_odrl_policy` — the Permit allow
+//! side AND the matched-Prohibition deny side, deny-overrides) for the request's
+//! (party = session agent, action = `odrl:read`, target = each rule's target graph) BEFORE
+//! `query_json_as` / `decide` / `wac_allow` runs. The bridged grants/denies compose with the
+//! WAC/ACP view through the UNCHANGED `∪ allow ∖ ∪ deny` enforcement — an ODRL prohibition beats
+//! a static WAC grant, on the enforcement surface AND the advisory ones (pre-sq-3mu76, a dataset
+//! carrying a prohibition could get a `/authz/decide` allow that `/authz/query` would refuse to
+//! honour). Fail-closed refusals (never a silent allow): a malformed policy, an unimplementable
+//! `odrl:conflict` strategy, a rule without a concrete target graph IRI (pattern targets are
+//! sq-lrtc3.3), a non-read mode (the query-action contract is sq-lrtc3.2), or an anonymous
+//! session each yield a 4xx. Stateless-lane scope only (sq-snopa.8 owns the stateful variant).
+//!
+//! ## Read-scoped advertisement (sq-3mu76) [FABLE-5]
+//!
+//! The lane evidences ONLY the `odrl:read` action until the sq-lrtc3.2 action contract lands, so
+//! when it fires the ADVISORY mode advertisements are scoped down to what it evidenced:
+//! `/authz/decide` masks `grantedModes` to the requested (read) mode, and `/authz/wac-allow`
+//! reports at most `user="read"` with `public=""` (an anonymous session is REFUSED wherever the
+//! lane fires, so public access is never advertised under an ODRL policy). Under-advertising is
+//! the fail-closed direction — the `allow` bit / the advertised `read` are exactly what
+//! `/authz/query` enforces; a WAC write grant is merely not repeated where the ODRL lane cannot
+//! yet evaluate a write-action rule against it.
 
 use axum::{
     body::Bytes,
@@ -314,6 +343,14 @@ fn infer_view(dataset: &str) -> AuthView {
 ///
 /// Fail-closed: an unknown mode, an unparseable dataset, or a materialisation failure all DENY
 /// (never grant). The endpoint reads the store; it is gated like any read.
+///
+/// [FABLE-5] sq-3mu76: behind the `odrl-authz` feature, a dataset carrying ODRL policy rules
+/// runs the [`apply_odrl_lane`] materialisation first, so a prohibition denies HERE exactly as
+/// `/authz/query` refuses to honour it — with the query lane's refusal matrix (non-read mode =>
+/// 400 until sq-lrtc3.2, anonymous session => 403) and the read-scoped `grantedModes`
+/// advertisement (module doc). NOTE the decision stays governing-ACL-scoped: with NO
+/// discoverable `.acl`/`.acr` anywhere, `decide` still returns its fail-closed `noAcl` deny
+/// even where a bridged ODRL grant lets `/authz/query` see rows — a deny-side-only divergence.
 pub(crate) async fn decide_endpoint(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -349,6 +386,20 @@ pub(crate) async fn decide_endpoint(
             return json_response(StatusCode::FORBIDDEN, deny);
         }
     };
+    // [FABLE-5] sq-3mu76 — the trust dispatch below decides over its OWN store and would
+    // BYPASS the ODRL lane, silently dropping a prohibition (fail-OPEN through a side door).
+    // Composing the two lanes is future work; until then the combination is refused up front.
+    #[cfg(all(feature = "solid-authz-trust", feature = "odrl-authz"))]
+    if state.config().solid_authz_trust
+        && v.get("trust").is_some()
+        && dataset_carries_odrl(&req.dataset)
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "the dataset carries ODRL policies; combining the trust extension with the \
+             ODRL lane is not supported (fail-closed)",
+        );
+    }
     // [SONNET-4.6] sq-pfae.17 — DOUBLE-OPT-IN stateless trust-graph extension.
     // Activates ONLY when BOTH (a) the `solid-authz-trust` feature is compiled AND (b) the config
     // flag is set AND (c) the request carries a "trust" JSON block. Any failure => 403 DENY
@@ -363,9 +414,34 @@ pub(crate) async fn decide_endpoint(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    // [FABLE-5] sq-3mu76 — the OPT-IN ODRL lane, on the ADVISORY decision endpoint too: a
+    // dataset-carried prohibition must deny here exactly as `/authz/query` refuses to honour
+    // it. Same refusal matrix as the query lane (non-read mode => 400 until sq-lrtc3.2,
+    // anonymous => 403). Feature OFF => this block does not exist, byte-identical behaviour.
+    #[cfg(feature = "odrl-authz")]
+    let (store, odrl_lane_fired) = {
+        let mut store = store;
+        let fired = dataset_carries_odrl(&req.dataset);
+        if fired {
+            if let Err(resp) = apply_odrl_lane(&mut store, &req, mode) {
+                return resp;
+            }
+        }
+        (store, fired)
+    };
     // Deciding is CPU-light here (the materialise already ran), but keep the store owned in the
     // closure so the borrowed session must be rebuilt inside — do it inline (no spawn needed).
     let decision = store.decide(&req.session(), &resource, mode);
+    // [FABLE-5] sq-3mu76 — read-scoped advertisement (module doc): when the lane fired, mask
+    // the advisory `grantedModes` to the requested (read) mode — the lane evidenced no other.
+    #[cfg(feature = "odrl-authz")]
+    let decision = {
+        let mut decision = decision;
+        if odrl_lane_fired {
+            mask_decision_to_mode(&mut decision, mode);
+        }
+        decision
+    };
     let status = if decision.allow {
         StatusCode::OK
     } else {
@@ -1098,6 +1174,13 @@ fn trust_deny_json(reason: &str) -> String {
 ///
 /// Fail-closed: an unparseable dataset / materialisation failure is an error (never a wider
 /// advertisement); a grant-less session yields `user="",public=""`.
+///
+/// [FABLE-5] sq-3mu76: behind the `odrl-authz` feature, a dataset carrying ODRL policy rules
+/// runs the [`apply_odrl_lane`] materialisation (as `Mode::Read` — the endpoint has no mode
+/// field and the lane evidences only the read action) before advertising, and the value is
+/// scoped by [`read_scoped_wac_allow`]: a read prohibition is never advertised past, `user`
+/// carries at most `read`, `public` is always empty (module doc). Same refusal matrix
+/// (anonymous session => 403 etc.).
 pub(crate) async fn wac_allow_endpoint(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1134,6 +1217,23 @@ pub(crate) async fn wac_allow_endpoint(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    // [FABLE-5] sq-3mu76 — the OPT-IN ODRL lane on the advertisement endpoint: a
+    // dataset-carried read prohibition must not be advertised past (`user="read"` from a static
+    // WAC grant that `/authz/query` would refuse to honour). The endpoint has no mode field —
+    // the lane runs for `Mode::Read`, the ONLY action it evidences (sq-lrtc3.2 owns the rest),
+    // and the advertisement is scoped down to that evidence below. Same refusal matrix
+    // (anonymous => 403 etc.). Feature OFF => this block does not exist.
+    #[cfg(feature = "odrl-authz")]
+    let (store, odrl_lane_fired) = {
+        let mut store = store;
+        let fired = dataset_carries_odrl(&req.dataset);
+        if fired {
+            if let Err(resp) = apply_odrl_lane(&mut store, &req, Mode::Read) {
+                return resp;
+            }
+        }
+        (store, fired)
+    };
     // [SONNET-4.6] sq-snopa.7 FR-5: resolve the governing ACL for the Link header BEFORE
     // `wac_allow` consumes the store. `resolve_acl` is a pure index lookup (no mode needed) and
     // returns `None` when no ACL was discovered — fail-closed: no header emitted in that case.
@@ -1142,8 +1242,217 @@ pub(crate) async fn wac_allow_endpoint(
         .resolve_acl(&resource_iri)
         .map(|eff| format!("<{}>; rel=\"acl\"", eff.acl.as_str()));
     let value = store.wac_allow(&req.session(), &resource);
+    // [FABLE-5] sq-3mu76 — read-scoped advertisement (module doc): the lane materialised
+    // read-action outcomes only, so advertise at most `user="read"` and never a public mode
+    // (an anonymous session is refused wherever the lane fires). Fail-closed: this can only
+    // NARROW the advertisement, never widen it.
+    #[cfg(feature = "odrl-authz")]
+    let value = if odrl_lane_fired {
+        read_scoped_wac_allow(&value)
+    } else {
+        value
+    };
     let body = serde_json::json!({ "wacAllow": value }).to_string();
     json_response_with_link(StatusCode::OK, body, acl_link.as_deref())
+}
+
+// ── [FABLE-5] sq-lrtc3.1 + sq-3mu76 — the OPT-IN ODRL lane on `/authz/*` ───
+//
+// Everything below is compiled ONLY behind the `odrl-authz` feature (which implies
+// `solid-authz` + `sparq-solid/odrl-bridge` + `sparq-policy`). Feature OFF => zero
+// compiled code, byte-identical to `solid-authz`.
+//
+// FAIL-CLOSED INVARIANT: every refusal path returns a 4xx and materialises nothing —
+// NEVER a silent allow. In particular a prohibition must never be silently DROPPED
+// (dropping a deny widens access), so any input the lane cannot faithfully enforce
+// (a targetless rule, a non-read mode, an anonymous session, an unimplementable
+// `odrl:conflict` strategy, an unparseable policy) refuses the whole request.
+//
+// The lane deliberately uses the ONE-SHOT bridge entry point
+// (`PodStore::materialize_odrl_policy`) rather than the persisted-conditional
+// variants: the stateless per-request store dies with the response, so
+// frozen-at-materialization and re-checked-per-session semantics coincide here —
+// and the one-shot path evaluates `odrl:assignee` against the request party
+// (the conditional path drops a bare-assignee restriction to an `auth:Public`
+// head — a widening hazard tracked as its own sparq-solid bug bead, unsuitable
+// for an enforcement surface).
+
+/// Does the request dataset carry ODRL policy rules? A cheap substring scan for the
+/// `odrl:permission` / `odrl:prohibition` predicate IRIs in N-Quads term brackets —
+/// the same suffix-scan convenience shape as [`infer_view_is_acp`]. A false positive
+/// (the IRI inside a literal) parses to a rule-less policy, which materialises
+/// nothing — the lane then behaves exactly as if it had not fired (fail-closed
+/// direction). Pure + directly unit-tested. [FABLE-5] sq-lrtc3.1.
+#[cfg(feature = "odrl-authz")]
+pub(crate) fn dataset_carries_odrl(dataset: &str) -> bool {
+    dataset.contains("http://www.w3.org/ns/odrl/2/permission>")
+        || dataset.contains("http://www.w3.org/ns/odrl/2/prohibition>")
+}
+
+/// The ODRL action IRI the query lane exercises for a WAC/ACP [`Mode`]: a SPARQL
+/// query is an `odrl:read` exercise, so ONLY [`Mode::Read`] maps; every other mode is
+/// `None` and the lane refuses (fail-closed — the full query-action contract,
+/// including the deliberate non-mapping of `odrl:use`, is sq-lrtc3.2). Pure +
+/// directly unit-tested. [FABLE-5] sq-lrtc3.1.
+#[cfg(feature = "odrl-authz")]
+pub(crate) fn odrl_action_for_mode(mode: Mode) -> Option<&'static str> {
+    match mode {
+        Mode::Read => Some("http://www.w3.org/ns/odrl/2/read"),
+        Mode::Write | Mode::Append | Mode::Control => None,
+    }
+}
+
+/// Mask an advisory decision's `granted_modes` to the SINGLE mode the ODRL lane evidenced
+/// (the requested read mode) — the read-scoped-advertisement rule (module doc, sq-3mu76).
+/// The `allow` bit is untouched: it concerns exactly the requested mode, which is never
+/// masked out. Fail-closed direction only (a mode is removed from the advertisement, never
+/// added). Pure + directly unit-tested. [FABLE-5] sq-3mu76.
+#[cfg(feature = "odrl-authz")]
+pub(crate) fn mask_decision_to_mode(decision: &mut WacDecision, mode: Mode) {
+    decision.granted_modes.retain(|m| *m == mode);
+}
+
+/// Scope a [`sparq_solid::PodStore::wac_allow`] advertisement value down to what the ODRL
+/// lane evidenced (the read-scoped-advertisement rule, module doc, sq-3mu76): `user` keeps at
+/// most `read`, `public` is always empty (an anonymous session is REFUSED wherever the lane
+/// fires, so no public mode is ever evidenced under an ODRL policy). The input is the
+/// crate-controlled fixed format `user="<modes>",public="<modes>"` where `<modes>` is a
+/// space-separated subset of the four mode names — `read` can only occur as the read-mode
+/// token, so the substring test is exact. Fail-closed: the output advertises a subset of the
+/// input's `user` field and nothing public. Pure + directly unit-tested. [FABLE-5] sq-3mu76.
+#[cfg(feature = "odrl-authz")]
+pub(crate) fn read_scoped_wac_allow(value: &str) -> String {
+    let user_holds_read = value
+        .split_once(",public=")
+        .map(|(user, _)| user.contains("read"))
+        .unwrap_or(false);
+    let user = if user_holds_read { "read" } else { "" };
+    format!(r#"user="{}",public="""#, user)
+}
+
+/// Union-project the request dataset's quads to TRIPLES so ODRL policies are parsed
+/// wherever they live (the default graph OR a named graph). `sparq_policy::parse_policy`
+/// queries bare triple patterns — the DEFAULT graph only — so a policy expressed inside
+/// a named graph would otherwise be INVISIBLE, silently dropping its prohibitions
+/// (fail-OPEN); the union projection makes it visible. Blank-node labels are
+/// document-scoped in N-Quads, so the projection preserves node identity across graph
+/// boundaries. Directly unit-tested. [FABLE-5] sq-lrtc3.1.
+#[cfg(feature = "odrl-authz")]
+fn union_policy_graph(dataset: &str) -> Result<sparq_core::Graph, String> {
+    use std::fmt::Write as _;
+    let mut nt = String::new();
+    for quad in oxttl::NQuadsParser::new().for_slice(dataset.as_bytes()) {
+        let quad = quad.map_err(|e| e.to_string())?;
+        // oxrdf Display emits canonical N-Triples term syntax (no re-wrapping — the
+        // sq-zza2h double-wrap lesson); the graph name is deliberately dropped.
+        let _ = writeln!(&mut nt, "{} {} {} .", quad.subject, quad.predicate, quad.object);
+    }
+    sparq_core::Graph::load_str(&nt, "ntriples")
+}
+
+/// Run the ODRL lane over an already WAC/ACP-materialised `store`: parse the dataset's
+/// ODRL policy and materialise its bridged grants/denies (both sides, deny-overrides)
+/// into the auth view for the request's `(party, action, target)` per rule target.
+/// Returns the fail-closed 4xx [`Response`] on any input the lane cannot faithfully
+/// enforce (see the section comment above); `Ok(())` means every materialisation
+/// outcome is now in the auth view and `query_json_as` / `decide` / `wac_allow` (all
+/// three consume the same `∪ allow ∖ ∪ deny` index) can honour it. [FABLE-5]
+/// sq-lrtc3.1 + sq-3mu76.
+///
+/// What the stateless lane can and cannot evidence (honest scope): the request context
+/// carries the party (session agent), the delivery recipient (the same agent — the
+/// query results go to the requester), and `odrl:dateTime` (the session `now`, when
+/// supplied). A constraint dimension with no evidence (`odrl:purpose`, `odrl:count` —
+/// stateful budgets are sq-snopa.8 territory) or an undischarged duty never grants
+/// (the evaluator is fail-closed on missing evidence); it is never silently widened.
+// `Response` is large; same `result_large_err` allow as the crate's other handler helpers.
+#[cfg(feature = "odrl-authz")]
+#[allow(clippy::result_large_err)]
+fn apply_odrl_lane(store: &mut PodStore, req: &AuthzRequest, mode: Mode) -> Result<(), Response> {
+    // 1. The query-action contract: only `read` maps (sq-lrtc3.2). Refuse any other
+    //    mode rather than guess an ODRL action for it (fail-closed).
+    let Some(action) = odrl_action_for_mode(mode) else {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "the dataset carries ODRL policies; the ODRL lane covers the read/query \
+             action only (fail-closed)",
+        ));
+    };
+    // 2. A concrete party: bridged grants AND denies are principal-scoped triples, so
+    //    an anonymous session would leave an applicable prohibition unenforceable
+    //    against any static public grant (fail-OPEN). Refuse instead.
+    let Some(agent) = req.agent.as_deref() else {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "the dataset carries ODRL policies; the ODRL lane requires an \
+             authenticated agent (fail-closed)",
+        ));
+    };
+    // 3. Parse the policy from the UNION of the dataset's graphs. The parse detail is
+    //    withheld from the client (info-leak posture), as everywhere on this surface.
+    let policy_graph = union_policy_graph(&req.dataset)
+        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "'dataset' is not valid N-Quads"))?;
+    let policy = sparq_policy::parse_policy(&policy_graph).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "the dataset's ODRL policy did not parse (fail-closed)",
+        )
+    })?;
+    // 4. Refuse an unimplementable `odrl:conflict` strategy UP FRONT: under e.g.
+    //    `odrl:perm` NONE of the policy's rules can be trusted into deny-overrides
+    //    enforcement, and a rule-less short-circuit below must not skip the check.
+    if sparq_policy::conflict_admissibility(&policy).is_err() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "the ODRL policy declares a conflict strategy this engine cannot honour \
+             (fail-closed)",
+        ));
+    }
+    // 5. Graph-granularity targets only: a rule with NO concrete target graph IRI
+    //    applies to *any* target, which this lane cannot faithfully enumerate — and
+    //    under-materialising a targetless PROHIBITION would widen access. Refuse
+    //    (pattern/sub-graph targets are the sq-lrtc3.3 design track).
+    let mut targets = std::collections::BTreeSet::new();
+    for rule in policy.permissions.iter().chain(policy.prohibitions.iter()) {
+        match rule.target.as_deref() {
+            Some(t) => {
+                targets.insert(t.to_owned());
+            }
+            None => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "an ODRL rule without a concrete target graph IRI is not supported \
+                     on this lane (fail-closed; pattern targets are a tracked design \
+                     follow-up)",
+                ));
+            }
+        }
+    }
+    // 6. Materialise BOTH sides of the policy per target. Each call is independently
+    //    fail-closed (a non-matching / unevidenced rule materialises nothing) and
+    //    idempotent; the deny side wins at enforcement (∪ allow ∖ ∪ deny).
+    for target in &targets {
+        let mut request = sparq_policy::Request::new(action)
+            .on(target.clone())
+            .by(agent)
+            // The requesting agent IS the delivery recipient of the query results.
+            .with(
+                sparq_policy::ODRL_RECIPIENT,
+                sparq_policy::Value::Iri(agent.to_owned()),
+            );
+        if let Some(now) = req.now.as_deref() {
+            request = request.at(now);
+        }
+        let outcome = store.materialize_odrl_policy(&policy, &request);
+        if outcome.refused {
+            // Defence-in-depth: step 4 already refused inadmissible strategies.
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "the ODRL policy was refused by the bridge (fail-closed)",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `POST /authz/query` — an ACCESS-CONTROLLED SPARQL query as `session` (FR-4). Body:
@@ -1196,6 +1505,20 @@ pub(crate) async fn query_endpoint(
     let store = match build_store(&req) {
         Ok(s) => s,
         Err(resp) => return resp,
+    };
+    // [FABLE-5] sq-lrtc3.1 — the OPT-IN ODRL lane: when the dataset carries ODRL policy
+    // rules, materialise their bridged grants/denies into the auth view BEFORE the
+    // access-controlled query runs. Feature OFF => this block does not exist and the
+    // endpoint is byte-identical to plain `solid-authz`.
+    #[cfg(feature = "odrl-authz")]
+    let store = {
+        let mut store = store;
+        if dataset_carries_odrl(&req.dataset) {
+            if let Err(resp) = apply_odrl_lane(&mut store, &req, mode) {
+                return resp;
+            }
+        }
+        store
     };
     match store.query_json_as(&req.session(), mode, &query) {
         Ok(json) => json_response(StatusCode::OK, json),
@@ -1314,6 +1637,46 @@ mod tests {
         assert_eq!(json["aclLink"], serde_json::Value::Null);
     }
 
+    /// [FABLE-5] sq-3mu76 — the read-scoped-advertisement mask keeps ONLY the requested mode
+    /// and never touches the `allow` bit.
+    #[cfg(feature = "odrl-authz")]
+    #[test]
+    fn mask_decision_to_mode_keeps_only_the_requested_mode() {
+        let mut d = WacDecision {
+            allow: true,
+            granted_modes: vec![Mode::Read, Mode::Write, Mode::Control],
+            governing_acl: None,
+            scope: None,
+            status: AclStatus::Resolved,
+        };
+        mask_decision_to_mode(&mut d, Mode::Read);
+        assert_eq!(d.granted_modes, vec![Mode::Read]);
+        assert!(d.allow, "the allow bit is untouched by the advertisement mask");
+        // A mode the session does not hold is not conjured up (fail-closed direction only).
+        let mut none = fail_closed_decision();
+        mask_decision_to_mode(&mut none, Mode::Read);
+        assert!(none.granted_modes.is_empty());
+    }
+
+    /// [FABLE-5] sq-3mu76 — the wac-allow value is scoped to at most `user="read"`,
+    /// `public` always empty, and a `read` in the PUBLIC field never leaks into `user`.
+    #[cfg(feature = "odrl-authz")]
+    #[test]
+    fn read_scoped_wac_allow_scopes_user_and_blanks_public() {
+        assert_eq!(
+            read_scoped_wac_allow(r#"user="read write append control",public="read""#),
+            r#"user="read",public="""#
+        );
+        // No read held by the user: nothing advertised — the public `read` must NOT leak.
+        assert_eq!(
+            read_scoped_wac_allow(r#"user="write",public="read""#),
+            r#"user="",public="""#
+        );
+        assert_eq!(read_scoped_wac_allow(r#"user="",public="""#), r#"user="",public="""#);
+        // A value not in the crate-controlled format advertises NOTHING (fail-closed).
+        assert_eq!(read_scoped_wac_allow("garbage"), r#"user="",public="""#);
+    }
+
     #[test]
     fn parse_request_rejects_absent_dataset_fail_closed() {
         // No dataset -> a 400, NOT an empty-dataset allow.
@@ -1387,5 +1750,193 @@ mod tests {
         let dw = store.decide(&req.session(), "https://pod.ex/notes/n1", Mode::Write);
         assert!(!dw.allow);
         assert_eq!(deny_status_code(dw.status), StatusCode::FORBIDDEN);
+    }
+}
+
+// ── [FABLE-5] sq-lrtc3.1 — unit tests for the ODRL lane helpers ─────────────
+// One DIRECT test per new fn (coverage ratchet), plus the lane's fail-closed
+// refusal matrix and a positive/negative enforcement round-trip through the REAL
+// store. Gated on the `odrl-authz` feature (zero code otherwise).
+#[cfg(all(test, feature = "odrl-authz"))]
+mod odrl_tests {
+    use super::*;
+
+    const ALICE: &str = "https://alice.ex/card#me";
+    const BOB: &str = "https://bob.ex/card#me";
+    const N1: &str = "https://pod.ex/notes/n1";
+
+    /// One content graph, no static ACL — the only possible grants are bridged ones.
+    const CONTENT: &str = "<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> \"hello\" <https://pod.ex/notes/n1> .\n";
+
+    /// An ODRL permit for `agent` to read n1, as default-graph N-Quads.
+    fn permit_nq(agent: &str) -> String {
+        format!(
+            "<urn:pol/p> <http://www.w3.org/ns/odrl/2/permission> _:perm .\n\
+             _:perm <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> .\n\
+             _:perm <http://www.w3.org/ns/odrl/2/target> <{N1}> .\n\
+             _:perm <http://www.w3.org/ns/odrl/2/assignee> <{agent}> .\n"
+        )
+    }
+
+    /// An ODRL prohibition carving `agent` out of reading n1, as default-graph N-Quads.
+    fn prohibit_nq(agent: &str) -> String {
+        format!(
+            "<urn:pol/p> <http://www.w3.org/ns/odrl/2/prohibition> _:proh .\n\
+             _:proh <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> .\n\
+             _:proh <http://www.w3.org/ns/odrl/2/target> <{N1}> .\n\
+             _:proh <http://www.w3.org/ns/odrl/2/assignee> <{agent}> .\n"
+        )
+    }
+
+    fn authz_req(dataset: String, agent: Option<&str>) -> AuthzRequest {
+        AuthzRequest {
+            dataset,
+            agent: agent.map(str::to_owned),
+            client: None,
+            issuer: None,
+            now: None,
+            view: Some(AuthView::Wac),
+        }
+    }
+
+    /// Build the store exactly as the endpoint does, then run the lane.
+    // Same `result_large_err` allow as the handler helpers under test.
+    #[allow(clippy::result_large_err)]
+    fn lane(req: &AuthzRequest, mode: Mode) -> Result<PodStore, Response> {
+        let mut store = build_store(req).expect("fixture materialises");
+        apply_odrl_lane(&mut store, req, mode)?;
+        Ok(store)
+    }
+
+    fn reads_n1(store: &PodStore, agent: &str) -> bool {
+        let s = Session { agent: Some(agent), client: None, issuer: None, now: None };
+        store.accessible(&s, Mode::Read).iter().any(|g| g.as_str() == N1)
+    }
+
+    #[test]
+    fn dataset_carries_odrl_detects_rule_predicates() {
+        assert!(dataset_carries_odrl(&permit_nq(ALICE)));
+        assert!(dataset_carries_odrl(&prohibit_nq(ALICE)));
+        // A WAC-only dataset does not fire the lane.
+        assert!(!dataset_carries_odrl(CONTENT));
+        assert!(!dataset_carries_odrl(""));
+    }
+
+    #[test]
+    fn odrl_action_for_mode_is_read_only_fail_closed() {
+        assert_eq!(
+            odrl_action_for_mode(Mode::Read),
+            Some("http://www.w3.org/ns/odrl/2/read")
+        );
+        // Every non-read mode is unmapped => the lane refuses (fail-closed).
+        assert_eq!(odrl_action_for_mode(Mode::Write), None);
+        assert_eq!(odrl_action_for_mode(Mode::Append), None);
+        assert_eq!(odrl_action_for_mode(Mode::Control), None);
+    }
+
+    #[test]
+    fn union_policy_graph_sees_named_graph_policies() {
+        // The SAME permit, but tucked inside a named graph — parse_policy over the raw
+        // dataset would MISS it (bare patterns match the default graph only); the
+        // union projection must surface it.
+        let named = permit_nq(ALICE)
+            .lines()
+            .map(|l| format!("{} <https://pod.ex/policies>{}\n", &l[..l.len() - 2], " ."))
+            .collect::<String>();
+        let g = union_policy_graph(&named).expect("projection parses");
+        let policy = sparq_policy::parse_policy(&g).expect("policy parses");
+        assert_eq!(policy.permissions.len(), 1, "named-graph rule must be visible");
+        assert_eq!(policy.permissions[0].target.as_deref(), Some(N1));
+    }
+
+    #[test]
+    fn lane_permit_grants_assignee_only() {
+        let req = authz_req(format!("{CONTENT}{}", permit_nq(ALICE)), Some(ALICE));
+        let store = lane(&req, Mode::Read).expect("lane applies");
+        // alice (the assignee) reads through the REAL enforcement path…
+        assert!(reads_n1(&store, ALICE));
+        // …and the grant is scoped: bob + anonymous see nothing (fail-closed).
+        assert!(!reads_n1(&store, BOB));
+        assert!(store.accessible(&Session::default(), Mode::Read).is_empty());
+
+        // The SAME dataset requested BY bob materialises nothing for bob.
+        let req_bob = authz_req(format!("{CONTENT}{}", permit_nq(ALICE)), Some(BOB));
+        let store_bob = lane(&req_bob, Mode::Read).expect("lane applies");
+        assert!(!reads_n1(&store_bob, BOB));
+    }
+
+    #[test]
+    fn lane_prohibition_overrides_static_wac_grant() {
+        // alice holds a STATIC WAC grant on n1; the ODRL prohibition must beat it
+        // (deny-overrides through the unchanged ∪ allow ∖ ∪ deny enforcement).
+        let wac = r#"<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+"#;
+        // WITHOUT the ODRL prohibition the WAC grant admits alice (guards vacuity).
+        let req_wac = authz_req(wac.to_owned(), Some(ALICE));
+        let store_wac = build_store(&req_wac).expect("fixture materialises");
+        assert!(reads_n1(&store_wac, ALICE), "static WAC grant must admit alice");
+        // WITH it, the bridged deny wins.
+        let req = authz_req(format!("{wac}{}", prohibit_nq(ALICE)), Some(ALICE));
+        let store = lane(&req, Mode::Read).expect("lane applies");
+        assert!(!reads_n1(&store, ALICE), "ODRL prohibition must beat the WAC grant");
+    }
+
+    #[test]
+    fn lane_refuses_anonymous_fail_closed() {
+        let req = authz_req(format!("{CONTENT}{}", prohibit_nq(ALICE)), None);
+        let err = lane(&req, Mode::Read).err().expect("anonymous must refuse");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn lane_refuses_non_read_mode_fail_closed() {
+        let req = authz_req(format!("{CONTENT}{}", permit_nq(ALICE)), Some(ALICE));
+        for mode in [Mode::Write, Mode::Append, Mode::Control] {
+            let err = lane(&req, mode).err().expect("non-read mode must refuse");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn lane_refuses_targetless_rule_fail_closed() {
+        // A prohibition with NO odrl:target applies to any target; silently
+        // under-materialising it would WIDEN access → the lane must refuse.
+        let targetless = "<urn:pol/p> <http://www.w3.org/ns/odrl/2/prohibition> _:proh .\n\
+             _:proh <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> .\n\
+             _:proh <http://www.w3.org/ns/odrl/2/assignee> <https://alice.ex/card#me> .\n";
+        let req = authz_req(format!("{CONTENT}{targetless}"), Some(ALICE));
+        let err = lane(&req, Mode::Read).err().expect("targetless rule must refuse");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn lane_refuses_unimplementable_conflict_strategy_fail_closed() {
+        // odrl:perm (permissions override prohibitions) is unrepresentable under the
+        // bridge's deny-overrides enforcement → the whole request refuses.
+        let perm_strategy = format!(
+            "{}\
+             <urn:pol/p> <http://www.w3.org/ns/odrl/2/conflict> <http://www.w3.org/ns/odrl/2/perm> .\n",
+            permit_nq(ALICE)
+        );
+        let req = authz_req(format!("{CONTENT}{perm_strategy}"), Some(ALICE));
+        let err = lane(&req, Mode::Read).err().expect("odrl:perm must refuse");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn lane_ignores_marker_inside_literal_and_stays_wac_only() {
+        // The predicate IRI appearing INSIDE A LITERAL is a detection false positive:
+        // the parsed policy has no rules, nothing materialises, and the WAC-only
+        // behaviour is preserved (the fail-closed direction).
+        let literal_marker = "<urn:x> <urn:note> \"see http://www.w3.org/ns/odrl/2/permission> docs\" .\n";
+        let dataset = format!("{CONTENT}{literal_marker}");
+        assert!(dataset_carries_odrl(&dataset), "scan fires on the literal");
+        let req = authz_req(dataset, Some(ALICE));
+        let store = lane(&req, Mode::Read).expect("rule-less policy is a no-op");
+        assert!(!reads_n1(&store, ALICE), "no grant appears from a literal marker");
     }
 }

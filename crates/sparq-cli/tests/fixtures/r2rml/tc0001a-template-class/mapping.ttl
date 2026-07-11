@@ -1,0 +1,7 @@
+# [FABLE-5] (sq-lsp7k.8) Adapted from W3C R2RML test case R2RMLTC0001A ("one column mapping,
+# subject URI generation by template"): SQL logical table -> CSV logical table.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<#TriplesMap1> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "student" ] ;
+  rr:subjectMap [ rr:template "http://example.com/{Name}" ; rr:class foaf:Person ] .

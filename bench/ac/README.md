@@ -37,6 +37,7 @@ It is also registered as the `ac-oracle` suite in `bench/benchmarks.toml` and ru
 | **W2-oracle** | result-set: the generator's closed-form rows == authorized ∩ candidate (no over-share / under-share) | runs |
 | **W3** | ACL-write churn: a grant that survives a revoke (a stale grant) flips the expected `Deny` and fails the lane | runs (base-table-checkable deltas) |
 | **W2-live** / **W4-query** | the real `query_as` output + the concurrency query sub-lane | **Skipped-with-reason** — engine-linked, owned by bead **sq-kvvcl** |
+| **overhead (A/B/C)** | ODRL-gated vs unguarded query-eval cost: materialization sweep / steady-state `query_as` vs plain-engine per-query latency (identical result sets asserted) / `refresh_odrl_grants` churn | `bench/ac/overhead/` — opt-in via `run.sh --overhead` (bead **sq-hmd7l.44**); registered as `ac-odrl-overhead` |
 
 A use-case generator that is not yet implemented (its `generate` `todo!()`s) is
 **Skipped-with-reason** for its whole suite, never counted as a pass. A documented

@@ -457,6 +457,20 @@ impl<'a> Validator<'a> {
         if shape.deactivated {
             return;
         }
+        // [FABLE-5] (sq-1jemy) Make nested shape evaluation TRANSPARENT to the
+        // caller's per-statement annotation override. Every recursing composite
+        // (`sh:node` / `sh:not` / `sh:and|or|xone` / qualified / member /
+        // reifier-shape / `sh:property`) re-enters this function via
+        // `conforms*()` / `validate_shape*()`, and the component loop below
+        // resets `self.active_meta` per component — which used to CLOBBER the
+        // outer occurrence's `{| sh:message |}` / `{| sh:severity |}` override
+        // to `None` before the composite arm's `result()` read it (a silent
+        // no-op). Saving the caller's meta here (take: the nested frame starts
+        // clean, so an outer override can never leak INTO nested results — those
+        // carry the nested shape's own metas, the reading recorded in
+        // research/shacl12-conformance-gap.md §6) and restoring it on exit lets
+        // the override survive the recursion for the composite's OWN result.
+        let caller_meta = self.active_meta.take();
         #[cfg(test)]
         let focus_id = if FORCE_NO_IDFAST.with(Cell::get) {
             Some(None) // pretend the focus is unresolved → full Term-level route
@@ -533,6 +547,10 @@ impl<'a> Validator<'a> {
             self.eval_component(sid, focus, &mut values, comp, out);
             self.active_meta = None;
         }
+        // [FABLE-5] (sq-1jemy) Hand the caller's per-statement override back
+        // (see the take() above): the composite arm that recursed into this
+        // frame reads it in `result()` after we return.
+        self.active_meta = caller_meta;
     }
 
     /// A result owned by shape `sid` for `focus`. [OPUS-4.8] (sq-pb0wm) When a

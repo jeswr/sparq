@@ -260,6 +260,12 @@ Materialize the authorization view from the access-control documents, then enfor
   over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
   `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
   that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split). The
+  **ODRL lane on `/authz/*`** (sq-lrtc3.1 + sq-3mu76) has LANDED as `sparq-server`'s opt-in
+  `odrl-authz` feature — dataset-carried ODRL policies are fed through `materialize_odrl_policy`
+  (deny-overrides, fail-closed) before the access-controlled query runs, so an ODRL policy gates a
+  SPARQL query end-to-end over HTTP; since sq-3mu76 the advisory `/authz/decide` +
+  `/authz/wac-allow` run the same lane (read-scoped advertisement), so they never report an allow
+  the query lane would refuse to honour. The
   **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
   and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
   was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer

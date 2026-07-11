@@ -198,6 +198,7 @@ pub struct StageTimings {
 pub fn graph_from_reader_timed<R: BufRead>(reader: R, t: &mut StageTimings) -> Result<Graph, Error>
 
 // WRITE (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
+// CLI: `sparq-cli to-hdt <file> <in-fmt> <out.hdt[.gz|.zst|.bz2]>` (opt-in `hdt-write` feature)
 #[cfg(feature = "write")]
 pub fn save(graph: &Graph, path: impl AsRef<Path>) -> Result<(), Error>
 ```
@@ -305,6 +306,12 @@ zeros, `xsd:double`/`decimal`, etc. stay typed strings). A *well-formed, single-
 a list cell referenced more than once, carrying an extra predicate, cyclic, or not terminated
 by `rdf:nil` — is left as ordinary `rdf:first`/`rdf:rest` triples, so the round-trip stays
 lossless either way (the empty list `()` stays an `rdf:nil` reference, never `@list`).
+
+**Comparative throughput** for the writer matrix is measured by `bench/serialize/run.sh`
+(registered `serialize-bench`, [FABLE-5] sq-hmd7l.14): sparq's buffered/streaming/pretty
+regimes in-process, plus a cross-engine pipeline panel vs serd/rapper/Jena riot/oxrdfio —
+every emitted document round-trip-gated (re-parse == source store) before its timing row
+is trusted. First-read analysis: `research/gap-serialize-2026-07.md`.
 
 **Pretty Turtle / TriG (idiomatic, deterministic).** Alongside the plain writers, the same
 feature exposes a *pretty* variant — `graph_to_turtle_pretty(&g)` / `graph_to_trig_pretty(&g)`,
@@ -414,9 +421,18 @@ exact spec error code on invalid input and threading `frameExpansion`. **Node Ma
 Flattening** (sq-oy1f.26) ship next: `sparq_jsonld::generate_node_map()` (§7.2, deterministic
 `_:bN` blank-node issuer) and `sparq_jsonld::flatten(&input, &opts, &loader)` (§7.1 = expand ∘
 node-map ∘ named-graph fold, sorted by `@id`, empty nodes dropped), with the `flatten`
-conformance lane moved to the native document oracle. Compaction / framing on this substrate,
-the surface wiring, and the remaining conformance-lane switches land in later beads; the
-RDF-first writers above remain the shipped emit path until then.
+conformance lane moved to the native document oracle. The document-level **Compaction
+Algorithm + Value Compaction** (sq-oy1f.27) ship too:
+`sparq_jsonld::compact::compact(&input, &ctx, &opts, &loader)` (and `compact_expanded` over an
+already-expanded document) runs the spec algorithm — scoped (property/type) contexts with
+previous-context reversion, `@list`/`@language`/`@index`/`@id`/`@type`/`@graph` container
+reshaping, `@nest`, `@reverse` redistribution, keyword aliasing, Value Compaction, and the
+`compactArrays`/`compactToRelative`/`ordered` options — and the `compact` conformance lane now
+compares against the W3C **expected** documents (the normative oracle; floor re-pinned 186 →
+228, one documented 1.0-era fail + 17 negative skips, see `floors::compact`). Framing on this
+substrate, the surface wiring (the engine-serialize cutover, sq-oy1f.41), and the remaining
+conformance-lane switches land in later beads; the RDF-first writers above remain the shipped
+emit path until then.
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};

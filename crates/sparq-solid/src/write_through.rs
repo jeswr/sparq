@@ -327,10 +327,14 @@ impl PodStore {
         }
     }
 
-    /// [OPUS-4.8] sq-b7k7u (issue #1571) — re-materialize the WAC or ACP view but invalidate
-    /// the session cache only at `scope` (the successful `put_acl`/`delete_acl` path scopes to
-    /// the written ACL's origin). ACP re-materializes with no provenance, exactly as the
-    /// non-scoped `materialize_acp()` the write path used before.
+    /// [OPUS-4.8] sq-b7k7u (issue #1571) — re-materialize the WAC or ACP view with
+    /// `scope`-controlled session-cache invalidation. The successful `put_acl`/`delete_acl`
+    /// path passes [`crate::ReindexScope::Origin`], which is **diff-based**: `reindex_with`
+    /// diffs the old vs new `AuthIndex` per-origin and invalidates exactly the origins whose
+    /// buckets changed — NOT merely the written ACL's own origin (a write at origin A can
+    /// affect origin B's grants; the diff catches every such case). [FABLE-5] sq-vhhl0 doc
+    /// sweep. ACP re-materializes with no provenance, exactly as the non-scoped
+    /// `materialize_acp()` the write path used before.
     fn rematerialize_scoped(&mut self, acp: bool, scope: crate::ReindexScope) -> Result<(), String> {
         if acp {
             self.materialize_acp_with_scoped(&crate::AccessProvenance::new(), scope).map(|_| ())

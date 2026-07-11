@@ -67,14 +67,13 @@
 //!
 //! # Documented generator narrowings (each carries a reason + a follow-up bead)
 //!
-//! * `isIRI/isBlank/isLiteral/isNumeric` are only generated over vars bound in the
-//!   REQUIRED part of the query: the engine returns `false` for `isIRI(?unbound)`
-//!   where SPARQL 17.2 mandates a type error (probe-verified divergence — beaded,
-//!   see sq-qeltv; the oracle is NOT fudged to the engine here, the case is
-//!   excluded from generation instead).
-//! * `STR(?v)` (inside the STRLEN BIND form) masks blank nodes out of the generated
-//!   graph: the engine extends STR to bnodes (an engine-internal label) where SPARQL
-//!   makes it a type error — same bead (sq-qeltv).
+//! * (RESOLVED, generation re-widened — sq-qeltv [FABLE-5]) `is*()` used to be
+//!   restricted to certainly-bound vars and the STRLEN-BIND form used to mask blank
+//!   nodes out of the graph, because the engine leniently returned `false` for
+//!   `isIRI(?unbound)` and an internal label for `STR(bnode)`. Both are TYPE ERRORS
+//!   per SPARQL 1.1 §17.2/§17.4.2 (differential: Oxigraph errors on both) and the
+//!   engine now conforms, so `is*()` ranges over ALL in-scope vars (including
+//!   possibly-unbound OPTIONAL/UNION/BIND vars) and `STR` sees bnodes.
 //! * `?v + k` masks xsd:double literals out of the generated graph AND rewrites any
 //!   constant xsd:double in the query's own pattern positions to an integer
 //!   (`strip_const_doubles`): a computed double's rendered lexical would require
@@ -170,8 +169,8 @@ impl T {
         }
     }
 
-    /// The SPARQL `STR()` of this term: IRI string or literal lexical form.
-    /// Blank nodes are excluded by generation (see header).
+    /// The SPARQL `STR()` of this term: IRI string or literal lexical form; a
+    /// blank node is a TYPE ERROR (`None`) per SPARQL 1.1 §17.4.2.5 (sq-qeltv).
     fn str_value(&self) -> Option<String> {
         match self {
             T::Iri(i) => Some(i.clone()),
@@ -343,27 +342,6 @@ impl Body {
         }
         out.sort_unstable();
         out
-    }
-    /// Variables bound in EVERY solution (the required part): all vars of a BGP,
-    /// the base vars of an OPTIONAL, the intersection of UNION branch vars. Used
-    /// to keep `is*()` off possibly-unbound vars (see the header narrowing note).
-    fn certain_vars(&self) -> Vec<V> {
-        match self {
-            Body::Bgp(tps) => {
-                let mut out = Vec::new();
-                for tp in tps {
-                    tp.vars(&mut out);
-                }
-                out.sort_unstable();
-                out
-            }
-            Body::Opt(l, _) => Body::Bgp(l.clone()).certain_vars(),
-            Body::Union(a, b) => {
-                let va = Body::Bgp(a.clone()).certain_vars();
-                let vb = Body::Bgp(b.clone()).certain_vars();
-                va.into_iter().filter(|v| vb.contains(v)).collect()
-            }
-        }
     }
 }
 
@@ -591,8 +569,8 @@ fn eval_expr(e: &Expr, row: &Row) -> Result<bool, ()> {
         Expr::LtVK(v, k) => Ok(cmp_int_spec(get(v)?, *k)? == std::cmp::Ordering::Less),
         Expr::GtVK(v, k) => Ok(cmp_int_spec(get(v)?, *k)? == std::cmp::Ordering::Greater),
         Expr::Bound(v) => Ok(row[*v as usize].is_some()),
-        // is* over an unbound var is a type error per SPARQL 17.2; the generator
-        // never produces that case (see header narrowing note + bead).
+        // is* over an unbound var is a type error per SPARQL 17.2 (`get(v)?`);
+        // the engine now conforms, so generation covers it (sq-qeltv widened).
         Expr::IsIri(v) => Ok(matches!(get(v)?, T::Iri(_))),
         Expr::IsBlank(v) => Ok(matches!(get(v)?, T::BNode(_))),
         Expr::IsLit(v) => Ok(!matches!(get(v)?, T::Iri(_) | T::BNode(_))),
@@ -885,13 +863,11 @@ const NEG_INF: (&str, f64) = ("-INF", f64::NEG_INFINITY);
 #[derive(Clone, Copy, Debug, Default)]
 struct DataMask {
     no_doubles: bool,
-    no_bnodes: bool,
 }
 
 fn mask_of(q: &Q) -> DataMask {
     DataMask {
         no_doubles: matches!(q.bind, Some(Bind::PlusK(..))),
-        no_bnodes: matches!(q.bind, Some(Bind::StrLenOf(..))),
     }
 }
 
@@ -917,23 +893,19 @@ fn arb_literal(mask: DataMask) -> BoxedStrategy<T> {
     proptest::strategy::Union::new(opts).boxed()
 }
 
-fn arb_subject(mask: DataMask) -> BoxedStrategy<T> {
-    if mask.no_bnodes {
-        proptest::sample::select(&SUBJ_IRIS[..]).prop_map(|i| T::Iri(i.to_string())).boxed()
-    } else {
-        prop_oneof![
-            4 => proptest::sample::select(&SUBJ_IRIS[..]).prop_map(|i| T::Iri(i.to_string())),
-            1 => proptest::sample::select(&BNODE_LABELS[..]).prop_map(|b| T::BNode(b.to_string())),
-        ]
-        .boxed()
-    }
+fn arb_subject() -> BoxedStrategy<T> {
+    prop_oneof![
+        4 => proptest::sample::select(&SUBJ_IRIS[..]).prop_map(|i| T::Iri(i.to_string())),
+        1 => proptest::sample::select(&BNODE_LABELS[..]).prop_map(|b| T::BNode(b.to_string())),
+    ]
+    .boxed()
 }
 
 fn arb_triple(mask: DataMask) -> impl Strategy<Value = [T; 3]> {
     (
-        arb_subject(mask),
+        arb_subject(),
         proptest::sample::select(&PRED_IRIS[..]).prop_map(|p| T::Iri(p.to_string())),
-        prop_oneof![2 => arb_subject(mask), 3 => arb_literal(mask)],
+        prop_oneof![2 => arb_subject(), 3 => arb_literal(mask)],
     )
         .prop_map(|(s, p, o)| [s, p, o])
 }
@@ -1009,7 +981,7 @@ enum ExprSeed {
     LtVK(u8, i64),
     GtVK(u8, i64),
     Bound(u8),
-    Is(u8, u8), // (which of the four is* forms, var seed) — needs a certain var
+    Is(u8, u8), // (which of the four is* forms, var seed) — any in-scope var (sq-qeltv widened)
     Not(Box<ExprSeed>),
     And(Box<ExprSeed>, Box<ExprSeed>),
     Or(Box<ExprSeed>, Box<ExprSeed>),
@@ -1033,10 +1005,11 @@ fn arb_expr_seed() -> impl Strategy<Value = ExprSeed> {
     })
 }
 
-/// Resolve seed var indices modulo the available variable lists. `filter_vars` is
-/// every var the FILTER may mention; `certain` restricts the `is*` forms (header
-/// narrowing note: the engine's `is*(unbound)` diverges from SPARQL 17.2).
-fn build_expr(seed: &ExprSeed, filter_vars: &[V], certain: &[V]) -> Expr {
+/// Resolve seed var indices modulo the available variable list: `filter_vars` is
+/// every var the FILTER may mention. The `is*` forms range over the SAME full list —
+/// possibly-unbound OPTIONAL/UNION/BIND vars included — since the engine now returns
+/// the SPARQL 17.2 type error for `is*(unbound)` exactly like the oracle (sq-qeltv).
+fn build_expr(seed: &ExprSeed, filter_vars: &[V]) -> Expr {
     let pick = |s: u8, pool: &[V]| pool[s as usize % pool.len()];
     match seed {
         ExprSeed::EqVV(a, b) => Expr::EqVV(pick(*a, filter_vars), pick(*b, filter_vars)),
@@ -1045,11 +1018,7 @@ fn build_expr(seed: &ExprSeed, filter_vars: &[V], certain: &[V]) -> Expr {
         ExprSeed::GtVK(v, k) => Expr::GtVK(pick(*v, filter_vars), *k),
         ExprSeed::Bound(v) => Expr::Bound(pick(*v, filter_vars)),
         ExprSeed::Is(which, v) => {
-            if certain.is_empty() {
-                // no certainly-bound var to apply is* to — degrade to BOUND.
-                return Expr::Bound(pick(*v, filter_vars));
-            }
-            let var = pick(*v, certain);
+            let var = pick(*v, filter_vars);
             match which % 4 {
                 0 => Expr::IsIri(var),
                 1 => Expr::IsBlank(var),
@@ -1057,14 +1026,14 @@ fn build_expr(seed: &ExprSeed, filter_vars: &[V], certain: &[V]) -> Expr {
                 _ => Expr::IsNum(var),
             }
         }
-        ExprSeed::Not(e) => Expr::Not(Box::new(build_expr(e, filter_vars, certain))),
+        ExprSeed::Not(e) => Expr::Not(Box::new(build_expr(e, filter_vars))),
         ExprSeed::And(a, b) => Expr::And(
-            Box::new(build_expr(a, filter_vars, certain)),
-            Box::new(build_expr(b, filter_vars, certain)),
+            Box::new(build_expr(a, filter_vars)),
+            Box::new(build_expr(b, filter_vars)),
         ),
         ExprSeed::Or(a, b) => Expr::Or(
-            Box::new(build_expr(a, filter_vars, certain)),
-            Box::new(build_expr(b, filter_vars, certain)),
+            Box::new(build_expr(a, filter_vars)),
+            Box::new(build_expr(b, filter_vars)),
         ),
     }
 }
@@ -1131,7 +1100,6 @@ fn strip_const_doubles(body: &mut Body) {
 
 fn build_query(mut seed: QSeed) -> Q {
     let body_vars = seed.body.vars();
-    let certain = seed.body.certain_vars();
     let bind = seed.bind.map(|(form, vs, k)| {
         let v = body_vars[vs as usize % body_vars.len()];
         match form % 3 {
@@ -1159,7 +1127,7 @@ fn build_query(mut seed: QSeed) -> Q {
     }
     // FILTER may mention any in-scope var (including the BIND target: BIND
     // precedes FILTER in the rendered group, so it is visible there).
-    let filter = seed.filter.as_ref().map(|f| build_expr(f, &scope, &certain));
+    let filter = seed.filter.as_ref().map(|f| build_expr(f, &scope));
     // Projection: the mask-selected subset of in-scope vars; never empty.
     let mut project: Vec<V> = scope
         .iter()
@@ -1183,17 +1151,15 @@ fn build_query(mut seed: QSeed) -> Q {
 }
 
 /// Pool of subject-position terms for pattern instantiation, mask-respecting.
-fn subject_pool(mask: DataMask) -> Vec<T> {
+fn subject_pool() -> Vec<T> {
     let mut out: Vec<T> = SUBJ_IRIS.iter().map(|i| T::Iri(i.to_string())).collect();
-    if !mask.no_bnodes {
-        out.extend(BNODE_LABELS.iter().map(|b| T::BNode(b.to_string())));
-    }
+    out.extend(BNODE_LABELS.iter().map(|b| T::BNode(b.to_string())));
     out
 }
 
 /// Pool of object-position terms for pattern instantiation, mask-respecting.
 fn object_pool(mask: DataMask) -> Vec<T> {
-    let mut out = subject_pool(mask);
+    let mut out = subject_pool();
     out.extend([-2i64, 0, 1, 3, 17].map(T::Int));
     out.extend([T::Dec(150, 2), T::Dec(-25, 2), T::Dec(40, 1)]);
     out.extend(STR_POOL.iter().map(|s| T::Str(s.to_string())));
@@ -1229,7 +1195,7 @@ fn instantiate(body: &Body, seed: &[u8], mask: DataMask) -> Vec<[T; 3]> {
         }
         class
     };
-    let subj = subject_pool(mask);
+    let subj = subject_pool();
     let obj = object_pool(mask);
     let assignment: Vec<(V, T)> = vars
         .iter()
@@ -1335,8 +1301,7 @@ proptest! {
         let build = |patterns: Vec<Tp>| {
             let body = Body::Bgp(patterns);
             let vars = body.vars();
-            let certain = body.certain_vars();
-            let filter = fseed.as_ref().map(|f| build_expr(f, &vars, &certain));
+            let filter = fseed.as_ref().map(|f| build_expr(f, &vars));
             Q { body, bind: None, filter, distinct: false, project: vars, order: None, limit: None }
         };
         let q1 = build(tps);

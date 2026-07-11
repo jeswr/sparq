@@ -28,9 +28,12 @@ use std::path::{Path, PathBuf};
 // harness's output-equality gate shares the ONE comparator this conformance
 // ratchet trusts. Re-exported here so every lane keeps spelling
 // `json_ld_equal` / `jsonld_to_canonical_dataset` / … unchanged.
+// (`read_context_member` is NOT re-exported: since sq-oy1f.27 the compact lane
+// drives the native compact() oracle, so no test module uses it — the
+// `bench_jsonld` example imports it from the lib directly.)
 pub use sparq_conformance::jsonld_bench::{
     dataset_to_nquads, json_ld_equal, jsonld_to_canonical_dataset, nquads_to_canonical_dataset,
-    read_context_member, sparq_json_to_serde,
+    sparq_json_to_serde,
 };
 
 // [FABLE-5] sq-oy1f.40 — the six ratchet floors, re-exported from the LIB-SIDE
@@ -129,6 +132,12 @@ pub struct Entry {
     /// `JsonLdOptions.expand_context`; `None` for the toRdf/fromRdf/compact/frame
     /// manifests (the expand manifest is the only one that has this option).
     pub expand_context_path: Option<String>,
+    /// [FABLE-5] sq-oy1f.27 — `option.compactArrays` / `option.compactToRelative`
+    /// (compact-manifest options). Forwarded to the native compact() oracle as
+    /// `JsonLdOptions.compact_arrays` / `.compact_to_relative`; `None` (spec default
+    /// `true`) when the manifest entry does not set them.
+    pub compact_arrays: Option<bool>,
+    pub compact_to_relative: Option<bool>,
 }
 
 /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -195,6 +204,11 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             .and_then(|o| o.get("expandContext"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        // [FABLE-5] sq-oy1f.27 — compact-manifest options (None elsewhere).
+        let compact_arrays = opt.and_then(|o| o.get("compactArrays")).and_then(Value::as_bool);
+        let compact_to_relative = opt
+            .and_then(|o| o.get("compactToRelative"))
+            .and_then(Value::as_bool);
         out.push(Entry {
             id,
             is_negative,
@@ -208,6 +222,8 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             frame,
             expect_error_code,
             expand_context_path,
+            compact_arrays,
+            compact_to_relative,
         });
     }
     Ok(out)

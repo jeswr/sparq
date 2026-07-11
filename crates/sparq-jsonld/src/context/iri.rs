@@ -374,6 +374,28 @@ pub(crate) fn relativize_iri(base: &str, iri: &str) -> Option<String> {
         return None;
     }
 
+    // [FABLE-5] (sq-oy1f.27) Same-document references (RFC 3986 §4.4): when the
+    // paths agree, prefer a fragment-only reference (queries also agreeing) or a
+    // query reference over re-stating the last path segment — the forms the W3C
+    // compact suite expects for `#fragment` / `?query` targets.
+    if b.path == r.path && !r.path.is_empty() {
+        if b.query == r.query {
+            if let Some(f) = r.fragment {
+                return Some(format!("#{}", f));
+            }
+        }
+        if let Some(q) = r.query {
+            let mut s = format!("?{}", q);
+            if let Some(f) = r.fragment {
+                s.push('#');
+                s.push_str(f);
+            }
+            return Some(s);
+        }
+        // Target has no query: fall through to the path-based form (a bare
+        // fragment reference would wrongly inherit the base's query).
+    }
+
     // Base "directory": path up to and including the last '/'.
     // e.g. "/a/b" → "/a/"   "/a/" → "/a/"   "/" → "/"
     let base_dir_end = b.path.rfind('/').map(|i| i + 1).unwrap_or(0);
