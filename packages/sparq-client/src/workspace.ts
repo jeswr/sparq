@@ -155,6 +155,15 @@ export interface Workspace {
    */
   rulesDocs?: WorkspaceRulesDoc[];
   /**
+   * [FABLE-5] sq-ixc3.14 — the per-workspace FEDERATION egress allowlist: the only SPARQL
+   * endpoints a `SERVICE` clause may dial when the desktop GUI evaluates the query over the
+   * native engine (`host` / `host:port` / `*.suffix` entries, the same grammar as
+   * sparq-server's `--service-allow`). FAIL-CLOSED: absent or empty means every SERVICE
+   * endpoint is refused. Optional + backward-compatible: an older record simply omits it
+   * (no schema bump — purely additive, like `inference`).
+   */
+  serviceAllowlist?: string[];
+  /**
    * The schema version of this persisted record. Bumped if the on-disk shape changes so a
    * loader can migrate or discard an incompatible old record rather than crash.
    */
@@ -252,8 +261,24 @@ export function parseWorkspace(value: unknown): Workspace | null {
     inference: parseInferenceMode(v.inference),
     // [sq-glo5r] — backward-compatible: an older record without `rulesDocs` → empty array.
     rulesDocs: parseRulesDocs(v.rulesDocs),
+    // [FABLE-5] sq-ixc3.14 — backward-compatible: no `serviceAllowlist` → empty (fail-closed).
+    serviceAllowlist: parseServiceAllowlist(v.serviceAllowlist),
     schema: WORKSPACE_SCHEMA,
   };
+}
+
+/**
+ * [FABLE-5] sq-ixc3.14 — validate + normalise a persisted federation egress allowlist: keep
+ * only non-empty trimmed strings, drop everything else (a hand-edited or corrupt record must
+ * degrade toward FEWER reachable endpoints, never more — fail-closed).
+ */
+export function parseServiceAllowlist(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((e) => {
+    if (typeof e !== "string") return [];
+    const trimmed = e.trim();
+    return trimmed === "" ? [] : [trimmed];
+  });
 }
 
 function parseSource(value: unknown): WorkspaceSourceMeta | null {

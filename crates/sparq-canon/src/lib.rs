@@ -64,6 +64,14 @@
 //! (only present with the feature on). With the feature OFF the crate is
 //! byte-identical to before — the standard surface still returns
 //! [`CanonError::TripleTerm`] on triple terms.
+//!
+//! The same feature also carries a **constrained ground-triple-term** variant
+//! (`canonicalize_rdf12_ground_terms` and siblings): a thin wrapper that fails
+//! closed with [`CanonError::NestedBlankNode`] if any blank node occurs inside
+//! a triple term, and otherwise delegates. With every triple term ground
+//! (blank-node-free — the common credential/VC case), none of the non-standard
+//! nested-bnode HNDQ-descent semantics are reachable: the run is exactly the
+//! RDFC-1.0 algorithm with triple terms as opaque constants. [FABLE-5] sq-iaxd.
 
 #![forbid(unsafe_code)]
 
@@ -129,8 +137,11 @@ pub mod rdf12;
 #[cfg(feature = "rdf12-triple-terms")]
 pub use rdf12::{
     canonicalize_graph_content_rdf12, canonicalize_graph_content_rdf12_with, canonicalize_rdf12,
-    canonicalize_rdf12_with, canonicalize_triples_rdf12, canonicalize_triples_rdf12_with,
-    issue_dataset_rdf12, issue_dataset_rdf12_with,
+    canonicalize_rdf12_ground_terms, canonicalize_rdf12_ground_terms_with, canonicalize_rdf12_with,
+    canonicalize_triples_rdf12, canonicalize_triples_rdf12_ground_terms,
+    canonicalize_triples_rdf12_ground_terms_with, canonicalize_triples_rdf12_with,
+    issue_dataset_rdf12, issue_dataset_rdf12_ground_terms, issue_dataset_rdf12_ground_terms_with,
+    issue_dataset_rdf12_with,
 };
 
 /// The hash-function trait RDFC-1.0 is parameterized over (`digest::Digest`),
@@ -148,6 +159,13 @@ pub enum CanonError {
     /// feature and use the non-standard `canonicalize_rdf12` /
     /// `canonicalize_triples_rdf12` profile to canonicalize triple terms.
     TripleTerm,
+    /// A blank node occurs **inside** an RDF 1.2 triple term. Returned only by
+    /// the opt-in `rdf12-triple-terms` profile's constrained ground-triple-term
+    /// entry points (`canonicalize_rdf12_ground_terms` and siblings), which
+    /// require every triple term to be blank-node-free and fail closed
+    /// otherwise. Use the full `canonicalize_rdf12` descent to relabel nested
+    /// blank nodes instead. [FABLE-5] sq-iaxd.
+    NestedBlankNode,
     /// Bridge serialization/parse failure (should not happen for RDFC-1.0-model
     /// content; surfaced rather than swallowed).
     Bridge(String),
@@ -163,6 +181,14 @@ impl std::fmt::Display for CanonError {
                     f,
                     "RDF 1.2 triple terms are outside the W3C RDFC-1.0 data model; \
                      enable the `rdf12-triple-terms` profile to canonicalize them"
+                )
+            }
+            CanonError::NestedBlankNode => {
+                write!(
+                    f,
+                    "blank node nested inside an RDF 1.2 triple term; the constrained \
+                     ground-triple-term profile requires blank-node-free triple terms \
+                     (use the full `canonicalize_rdf12` descent to relabel nested blank nodes)"
                 )
             }
             CanonError::Bridge(e) => write!(f, "oxrdf bridge error: {e}"),
@@ -749,6 +775,24 @@ mod tests {
     fn canonicalize_nquads_empty() {
         assert_eq!(canonicalize_nquads("").unwrap(), "");
         assert_eq!(canonicalize_nquads("\n\n").unwrap(), "");
+    }
+
+    /// [FABLE-5] sq-iaxd: `CanonError::NestedBlankNode` is an ungated variant
+    /// (only *constructed* by the opt-in `rdf12-triple-terms` ground-terms
+    /// wrappers), so its `Display` must render in the default feature state
+    /// too. Pins the message's two load-bearing halves: the condition and the
+    /// full-descent escape hatch.
+    #[test]
+    fn nested_blank_node_error_display_default_features() {
+        let msg = CanonError::NestedBlankNode.to_string();
+        assert!(
+            msg.contains("blank node nested inside an RDF 1.2 triple term"),
+            "Display must name the condition: {msg:?}"
+        );
+        assert!(
+            msg.contains("canonicalize_rdf12"),
+            "Display must point at the full-descent escape hatch: {msg:?}"
+        );
     }
 
     #[test]

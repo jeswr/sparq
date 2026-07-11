@@ -454,6 +454,17 @@ jobs:
       - name: Test (engine command layer)
         run: cargo test
 
+      # [FABLE-5] sq-ixc3.14 — the OPT-IN federation feature state: clippy + the native-lane
+      # federated-SERVICE tests (federation.rs), which join the live workspace snapshot with a
+      # LIVE loopback SPARQL endpoint through the real engine SERVICE client and prove the
+      # strict egress allowlist refuses an un-allowlisted endpoint pre-HTTP (fail-closed).
+      # Loopback-only — no external network. Keeps BOTH feature states green.
+      - name: Clippy (federation, -D warnings)
+        run: cargo clippy --all-targets --features federation -- -D warnings
+
+      - name: Test (federated SERVICE, native lane)
+        run: cargo test --features federation
+
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #
   # Shrunk from the multi-step sq-pnnl harness to exactly 3 meaningful assertions:

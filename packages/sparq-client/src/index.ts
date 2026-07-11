@@ -721,6 +721,8 @@ export {
   WORKSPACE_SCHEMA,
   WORKSPACE_INFERENCE_MODES,
   parseInferenceMode,
+  // [FABLE-5] sq-ixc3.14 — per-workspace federation egress allowlist (fail-closed parse).
+  parseServiceAllowlist,
   WebWorkspaceStore,
   MemoryWorkspaceStore,
   TauriWorkspaceStore,

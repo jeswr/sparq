@@ -1542,20 +1542,20 @@ records_to  = "TBD — bench/competitor-results/<engine>-jsonld-<UTC>.json (git-
 featured    = false  # registry stub; implementing bead sq-hmd7l.15
 status      = "planning"
 
-# [SONNET-4.6] sq-hmd7l.16 — RDFC-1.0 canonicalization comparison
+# [FABLE-5] sq-hmd7l.16 — RDFC-1.0 canonicalization comparison
 [[benchmark]]
 id          = "canon-bench"
 name        = "RDFC-1.0 canonicalization (vs rdf-canonize JS / rdf-canon Rust)"
 category    = "conformance"
-measures    = "W3C RDFC-1.0 conformance pass-rate + canonical-output throughput + poison-graph DoS-resistance (capped wall-clock) vs rdf-canonize and rdf-canon; byte-identical oracle"
-invoke      = "TBD — implementing bead sq-hmd7l.16"
-source      = "TBD — bench/canon-bench/; scripts/bench-adapters/canon_adapter.{sh,mjs}"
-dataset     = "TBD — W3C RDFC-1.0 test suite + poison-graph stress cases"
-quiet_box_sensitive = true
-pinning     = "TBD — W3C test-suite commit + poison-graph sha256 + competitor pinned versions"
-records_to  = "TBD — bench/competitor-results/<engine>-canon-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.16
-status      = "planning"
+measures    = "byte-identical canonical N-Quads parity on the non-pathological W3C eval fixtures (HARD gate, before any timing) + poison-graph DoS-resistance outcomes (ok/guard/capped/wrong/accepted) under a hard per-graph wall-clock cap + advisory min-of-iters sane-set timing (process wall + engine-reported in-process canon_us)"
+invoke      = "bash bench/canon/run.sh --smoke (sparq-only acceptance) | bash bench/canon/run.sh (full panel; peer columns via CANON_NODE_MODULES / CANON_RDF_CANON_BIN=auto)"
+source      = "bench/canon/{run.sh,README.md}; crates/sparq-canon/examples/canon_bench.rs (public-API runner + gen-clique poison generator); scripts/bench-adapters/canon_adapter.{mjs,sh}; first read research/gap-canon-2026-07.md"
+dataset     = "vendored W3C rdf-canon suite snapshot (crates/sparq-canon/tests/rdf-canon-testdata/, PROVENANCE.md): sane evals + poison evals + the negative clique; full mode adds deterministic generated blank-node n-cliques (gen-clique, never committed)"
+quiet_box_sensitive = true  # timing arms are wall-clock; the parity + DoS-outcome arms are deterministic
+pinning     = "vendored suite snapshot (PROVENANCE.md) + CANON_CAP_S (default 10s) + engine versions recorded per run (rdf-canonize npm version; rdf-canon crate version — default = sparq's own pin, making that column a bridge-overhead measure, see bench/canon/README.md honesty notes; rdf-canonize parity posture maxWorkFactor=3, poison rows record @default AND @wfN)"
+records_to  = "stdout (PHASE A/B/C lines) + optional CANON_JSON_OUT envelope, suggest bench/competitor-results/canon-<UTC>.json (git-ignored)"
+featured    = false  # comparative gather panel; conformance itself is CI-gated by the sparq-canon crate suite
+status      = "active"  # [FABLE-5] sq-hmd7l.16
 
 # [SONNET-4.6] sq-hmd7l.17 — browser/WASM comparison
 [[benchmark]]
@@ -1587,17 +1587,17 @@ records_to  = "bench/competitor-results/python-bindings-*-<UTC>.json (git-ignore
 featured    = false
 status      = "active"  # first-read record: research/gap-python-binding-2026-07.md
 
-# [FABLE-5] sq-hmd7l.21 — Graph Store Protocol same-box panel
+# [FABLE-5] sq-hmd7l.21 — Graph Store Protocol same-box panel (+ sq-hmd7l.36 PATCH dialects)
 [[benchmark]]
 id          = "gsp-bench"
 name        = "Graph Store Protocol same-box panel (sparq-server vs Fuseki GSP / Oxigraph GSP + CSS loose)"
 category    = "serve"
-measures    = "GSP PUT/GET/DELETE latency (p50/p99 ms per op) over a deterministic 1KB-10MB resource-size sweep + the PSS LDP-CRUD stream projected onto GSP verbs; HARD round-trip content gate BEFORE timing (returned triple SET must equal the PUT set exactly; CRUD final state must match a client-side reference model); loopback-only (the driver refuses non-loopback URLs)"
+measures    = "GSP PUT/GET/DELETE latency (p50/p99 ms per op) over a deterministic 1KB-10MB resource-size sweep + the PSS LDP-CRUD stream projected onto GSP verbs + a PATCH-dialect panel (application/sparql-update and text/n3 Solid N3-Patch: deterministic ground delete/insert patch stream, support probed per engine — 405/415/501 records honest n/a; Fuseki/Oxigraph GSP implement no PATCH dialect, sparq's text/n3 is double-opt-in via the n3-patch feature + GSP_N3_PATCH=1); HARD content-agreement gate BEFORE timing (returned triple SET must equal the PUT set exactly; CRUD + PATCH final state must match a client-side reference model); loopback-only (the driver refuses non-loopback URLs)"
 invoke      = "bash bench/gsp/run.sh --smoke   # acceptance: sparq loopback, exit 0 = gates green\n              GSP_FUSEKI_URL=http://127.0.0.1:3030/ds GSP_OXIGRAPH_URL=http://127.0.0.1:7878 GSP_CSS_URL=http://127.0.0.1:3000 bash bench/gsp/run.sh   # full panel (competitors already running)"
 source      = "bench/gsp/{run.sh,compare.py,README.md}; CRUD shapes mirror bench/pss-update-set (gh-47/gh-52)"
 dataset     = "none fetched — deterministic bnode-free ASCII N-Triples generated in-driver per size target; identical payload bytes fed to every engine in the same run"
 quiet_box_sensitive = true
-pinning     = "payloads deterministic by construction (seed-free counter form); competitor versions (Fuseki distribution / Oxigraph release sha256 / @solid/community-server npm version) recorded in the results JSON at gather time; CSS rows labelled LOOSE (Solid/LDP overhead included) and never averaged with the like-for-like columns"
+pinning     = "payloads + patch streams deterministic by construction (seed-free counter form); competitor versions (Fuseki distribution / Oxigraph release sha256 / @solid/community-server npm version) recorded in the results JSON at gather time; CSS rows labelled LOOSE (Solid/LDP overhead included; the ONLY Solid-PATCH peer) and never averaged with the like-for-like columns"
 records_to  = "bench/competitor-results/gsp-<UTC>.json via GSP_JSON_OUT (git-ignored); first-read record: research/gap-gsp-2026-07.md"
 featured    = false  # external-competitor differential harness, not a dashboard-promoted capability suite
 status      = "ok"  # smoke (sparq loopback) is self-contained; competitor columns are gather-time external cost

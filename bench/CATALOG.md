@@ -85,10 +85,14 @@ Notes on a few that need care:
   prerequisite that unblocks the HTTP opt lane (sq-7d3dj.10/.12/.13).
 - **`gsp-bench` (`bench/gsp`) is the Graph Store Protocol same-box panel** — see
   [`bench/gsp/README.md`](./gsp/README.md). GSP PUT/GET/DELETE round-trips (1 KB–10 MB
-  size sweep + the PSS LDP-CRUD stream projected onto GSP verbs) against sparq-server /
-  Fuseki / Oxigraph server, plus Community Solid Server as a **LOOSE** LDP-architecture
-  column (labelled, never averaged). A HARD round-trip content gate (returned triple set
-  must equal the PUT set exactly) runs BEFORE any timing; the driver is loopback-only
+  size sweep + the PSS LDP-CRUD stream projected onto GSP verbs) plus a **PATCH-dialect
+  panel** (`application/sparql-update` + `text/n3` Solid N3-Patch; support probed per
+  engine, 405/415/501 records honest n/a — Fuseki/Oxigraph GSP implement no PATCH
+  dialect, sparq's `text/n3` is double-opt-in via the `n3-patch` feature +
+  `GSP_N3_PATCH=1`) against sparq-server / Fuseki / Oxigraph server, plus Community
+  Solid Server as a **LOOSE** LDP-architecture column (labelled, never averaged; the
+  only Solid-PATCH peer). A HARD content-agreement gate (returned triple set must equal
+  the sent/reference set exactly) runs BEFORE any timing; the driver is loopback-only
   (refuses non-loopback URLs). `bash bench/gsp/run.sh --smoke` is the self-contained
   acceptance run. First-read record: `research/gap-gsp-2026-07.md`. [FABLE-5]
 - **`sp2b` (SP2Bench) is tiered** — see [`bench/sp2b/README.md`](./sp2b/README.md).
@@ -254,7 +258,7 @@ Notes on a few that need care:
   opt-in via `SAMEAS_TIERS` for EC2/nightly. CI emits
   `sameas_size<N>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it as
   a scaling suite (size axis).
-- **`wasm-compare` has a BROWSER half (implemented) and a competitor half (stub).**
+- **`wasm-compare` has a BROWSER half and a COMPETITOR half (both implemented).**
   [`bench/wasm-compare/browser/`](./wasm-compare/browser/README.md) (sq-3ul2n.1, the Tier-0
   measurement gate of the browser-WASM program `research/browser-wasm-perf-assessment-2026-07.md`)
   drives the SHIPPED `@jeswr/sparq` bundle through headless Chromium/Firefox/WebKit (Playwright,
@@ -264,7 +268,13 @@ Notes on a few that need care:
   and the ask→count→string→parse→chunks→wrapper boundary-marshalling ladder). Advisory
   envelopes only (`results/`, git-ignored; the cross-engine row-count oracle is the sole hard
   check; browsers that cannot launch skip-with-notice); deliberately NO CI lane. The
-  oxigraph-npm/n3js comparison half (sq-hmd7l.17) CONSUMES this harness.
+  competitor half (sq-hmd7l.17, [`bench/wasm-compare/`](./wasm-compare/README.md)) CONSUMES
+  this harness: `run.sh --bundle-only` is the DETERMINISTIC shipped-bundle-bytes comparison
+  vs the pinned `oxigraph` npm artifact (the one canonical wasm-compare metric), and
+  `browser/compare.mjs` layers the oxigraph-npm + N3.js/quadstore latency columns onto the
+  same oracle-checked workload in Node + headless Chromium (gather-only installs; per-query
+  row-count oracle + cross-library agreement gate every timing row). First-read gap record:
+  `research/gap-wasm-2026-07.md`.
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see

@@ -238,6 +238,18 @@ This is **Gate G5** territory for top-level `zk/` `bin` circuits (`snapshot_cove
 <!-- [OPUS-4.8] sq-5reoy (#1599): externalized Noir libs + toolchain-pin alignment. -->
 **Externalized Noir dependencies (sq-5reoy / #1599).** The former in-tree `zk/ieee754` and `zk/xpath` trees were split out to the [`sparq-org/noir_IEEE754`](https://github.com/sparq-org/noir_IEEE754) (`v0.11.0`) and [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPath) (`v0.2.0`) face repos and removed from this repo. `zk/compose` is the only in-tree Noir tree left; `zk/compose/compose_core/Nargo.toml` now consumes `sparq_ieee754` as a **pinned Nargo git dependency** (`{ git = "…/noir_IEEE754", tag = "v0.11.0" }`), exactly like its existing `poseidon` git dep. Two consequences for agents: (1) any `nargo compile` of `zk/compose` (the forge suite, `bench/zk-compose/scripts/gate_counts.sh`, the `sparq-zk-compose` test estate) now **fetches that git dep from GitHub** — a cold `~/.nargo` cache needs network access; a network-restricted runner must warm `~/.nargo` first. (2) **Toolchain-pin drift:** the `NARGO_VERSION`/`BB_VERSION` pins in `zk-toolchain.yml` and the face repos' pins are now maintained independently — when you bump the Noir toolchain here, confirm the released `sparq_ieee754` tag was cut on a compatible `nargo` (and re-run the forge suite, which compiles the git dep). Their nargo tests + the ieee754 differential oracle now run in the face repos' own CI, not in `zk-toolchain.yml`.
 
+### New-parser correctness checklist — shipping a hand-written parser
+
+<!-- [FABLE-5] sq-3dyje.13: codified from research/testing-strategy-assessment-2026-07.md §8 so every hand-written-parser bead (e.g. sq-jocpn) can cite it as its acceptance frame. -->
+A hand-written parser (replacing or bypassing a reference implementation) ships only with **ALL** of (design record: [`research/testing-strategy-assessment-2026-07.md`](research/testing-strategy-assessment-2026-07.md), section 8):
+
+1. **Round-trip property tests** — `parse ∘ serialize ∘ parse` fixpoint over generated inputs (proptest), plus `serialize ∘ parse` identity on canonical forms, in the parser's crate.
+2. **Differential fuzz vs the reference it replaces** — a cargo-fuzz target feeding identical bytes to both (e.g. native tokenizer vs `oxttl`), asserting identical triple streams/errors-modulo-documented-divergences; wired into the auto-discovered `fuzz/` workspace so per-PR corpus replay + nightly randomized runs apply automatically.
+3. **Conformance-suite tie** — the relevant W3C ratchet floor (e.g. TurtleTests) unchanged or raised in the same PR; byte/count-identical parse on the suite corpus.
+4. **Robustness target** — hostile-input fuzz (never panic/OOB), separate from (2), if the grammar entry point is new.
+5. **Feature/fallback discipline** — a fast-path parser that falls back to the reference on unrecognized shapes must differential-test the *dispatch decision* too (fallback taken ⇒ results identical).
+6. **Honest perf claim** — measured on the canonical bench path, never a work-box number in docs (see *No hard-coded performance numbers*).
+
 ## Documents must stay current — research records become architecture docs
 
 A document must never describe the code as it ISN'T. Concretely:
