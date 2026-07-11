@@ -644,10 +644,30 @@ fn logical_constraints_for(
         .map(|(ckey, raw)| (ckey, raw.build(lists)))
         .collect();
 
+    // (2a-bis) HEAD-position rest-only cons cells: a node asserting `rdf:rest` but no
+    // `rdf:first` is absent from the cells table (which is keyed on `rdf:first`), so as
+    // a combinator operand it would silently bypass collection validation and degrade.
+    // Collect the set so the fold can refuse it. (A MID-chain rest-only cell is already
+    // caught by `well_formed_list`'s dangling-tail check.) [FABLE-5] sq-dkuff.
+    let rest_res = sparq_engine::query(
+        graph,
+        &format!("SELECT ?n ?r WHERE {{ ?n <{RDF_NS}rest> ?r }}"),
+    )?;
+    let mut rest_only: BTreeMap<String, ()> = BTreeMap::new();
+    for row in rest_res.rows {
+        let Some(Some(n)) = row.into_iter().next() else {
+            continue;
+        };
+        let key = node_key(&n);
+        if !lists.contains_key(&key) {
+            rest_only.insert(key, ());
+        }
+    }
+
     // (2b) Fold LIST-valued combinator operands (`odrl:or ( <c1> <c2> )`) into their
     // member node keys before assembly; a malformed/degenerate collection REFUSES the
     // whole parse (fail-closed on both rule kinds). [FABLE-5] sq-dkuff.
-    fold_list_operands(&mut lc_defs, &atoms, lists)?;
+    fold_list_operands(&mut lc_defs, &atoms, lists, &rest_only)?;
 
     // (3) The rule → direct-constraint-node map (which of a rule's `odrl:constraint`
     // objects are LogicalConstraint nodes), in rule/graph order.
@@ -706,33 +726,54 @@ fn logical_constraints_for(
 /// the carve-out (deny-overrides bypassed — widening), and honouring a valid
 /// *prefix* of a broken list makes an `odrl:and` easier to satisfy than authored
 /// (widening on a permission). Refused shapes: a collection that is not
-/// well-formed ([`well_formed_list`]: broken/dangling tail, cycle, forked cell), an
-/// *empty* operand (`rdf:nil` directly — a degenerate combinator), and a
-/// nested-list member (one level only, mirroring [`fold_rights`]).
+/// well-formed ([`well_formed_list`]: broken/dangling tail, cycle, forked cell), a
+/// HEAD-position rest-only cell (`rdf:rest` with no `rdf:first` — `rest_only`,
+/// invisible to the cells table), an *empty* operand (`rdf:nil` directly — a
+/// degenerate combinator), and a nested-list member (one level only, mirroring
+/// [`fold_rights`]). The constraint-reading precedence applies to ALL of these:
+/// a node that is a known compound or atomic constraint keeps that reading (even
+/// `rdf:nil` or a cons-cell node), so no previously-working parse is refused.
 fn fold_list_operands(
     lc_defs: &mut BTreeMap<String, LcDef>,
     atoms: &BTreeMap<String, Constraint>,
     lists: &BTreeMap<String, ListCell>,
+    rest_only: &BTreeMap<String, ()>,
 ) -> Result<(), String> {
     let nil = format!("<{RDF_NS}nil>");
     // Snapshot the compound-node keys: the mutation below never adds/removes defs,
     // only rewrites operand lists, so membership checks stay sound.
     let lc_keys: BTreeMap<String, ()> = lc_defs.keys().map(|k| (k.clone(), ())).collect();
-    let expandable =
-        |k: &str| lists.contains_key(k) && !lc_keys.contains_key(k) && !atoms.contains_key(k);
+    // A node with NO constraint reading (neither compound nor atomic) — only such
+    // nodes are folded/refused; a real constraint keeps its reading.
+    let no_reading = |k: &str| !lc_keys.contains_key(k) && !atoms.contains_key(k);
+    let expandable = |k: &str| lists.contains_key(k) && no_reading(k);
+    let empty_op = |k: &str| *k == nil && no_reading(k);
+    let rest_only_op = |k: &str| rest_only.contains_key(k) && no_reading(k);
     for def in lc_defs.values_mut() {
-        if !def.operands.iter().any(|k| expandable(k) || *k == nil) {
+        if !def
+            .operands
+            .iter()
+            .any(|k| expandable(k) || empty_op(k) || rest_only_op(k))
+        {
             continue;
         }
         let old = std::mem::take(&mut def.operands);
         for okey in old {
-            if okey == nil {
+            if empty_op(&okey) {
                 return Err(
                     "a LogicalConstraint combinator has an EMPTY collection operand (`( )`); \
                      a degenerate compound cannot be honoured deterministically on both rule \
                      kinds and is refused (fail-closed)"
                         .to_owned(),
                 );
+            }
+            if rest_only_op(&okey) {
+                return Err(format!(
+                    "a LogicalConstraint combinator has a MALFORMED collection operand \
+                     ({okey}: a cons cell asserting `rdf:rest` but no `rdf:first`); a \
+                     member-less cell cannot be honoured and silently degrading it would \
+                     widen decisions on a prohibition, so the policy is refused (fail-closed)"
+                ));
             }
             if expandable(&okey) {
                 let Some(members) = well_formed_list(&okey, lists) else {
@@ -745,7 +786,9 @@ fn fold_list_operands(
                 };
                 for member in members {
                     let mkey = node_key(&member);
-                    if mkey == nil || lists.contains_key(&mkey) {
+                    if (mkey == nil || lists.contains_key(&mkey) || rest_only.contains_key(&mkey))
+                        && no_reading(&mkey)
+                    {
                         return Err(format!(
                             "a LogicalConstraint combinator collection operand ({okey}) has a \
                              NESTED-list member ({mkey}); nested collections are not a \

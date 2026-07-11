@@ -990,3 +990,48 @@ fn direct_object_operands_unchanged_by_list_fold() {
         .for_purpose(Value::Iri("urn:purpose/teaching".into()));
     assert!(evaluate(&p, &req).allow);
 }
+
+/// A HEAD-position rest-only cons cell (`rdf:rest` but NO `rdf:first`) is
+/// invisible to the `rdf:first`-keyed cells table, so it would silently bypass
+/// collection validation and degrade — disabling a PROHIBITION's compound
+/// (widening). It REFUSES the parse instead.
+#[test]
+fn rest_only_head_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/restonly> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+        odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a rest-only head cell must refuse the parse, got: {err}"
+    );
+}
+
+/// Constraint-reading PRECEDENCE: a combinator operand that is a real atomic
+/// constraint keeps that reading even when the node is `rdf:nil` (pathological,
+/// but previously accepted — the refusal paths must stay strictly narrow).
+#[test]
+fn nil_with_constraint_reading_keeps_precedence() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/nilatom> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or rdf:nil ] ] .
+rdf:nil odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+    odrl:rightOperand <urn:purpose/x> .
+"#;
+    let p = parse_policy_str(ttl, "turtle")
+        .expect("a nil node WITH a constraint reading must keep it, not refuse");
+    let base = Request::new(left("read")).on("urn:asset/x");
+    let ok = base.clone().for_purpose(Value::Iri("urn:purpose/x".into()));
+    assert!(evaluate(&p, &ok).allow, "the atomic reading must evaluate");
+    let wrong = base.for_purpose(Value::Iri("urn:purpose/y".into()));
+    assert!(!evaluate(&p, &wrong).allow);
+}
