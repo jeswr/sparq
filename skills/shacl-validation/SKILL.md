@@ -329,6 +329,13 @@ the override resolves per occurrence from that reifier (`misc/{deactivated-003,m
 severity-003}`). Supported on single-statement Core constraints (`sh:datatype`, `sh:nodeKind`,
 `sh:class`, `sh:hasValue`, `sh:rootClass`, `sh:node`, `sh:property`, `sh:not`, `sh:someValue`,
 `sh:memberShape`); list-/path-valued operands are not single statements and carry no override.
+On a RECURSING composite (`sh:node` / `sh:not` / `sh:someValue` / `sh:memberShape`) the
+message/severity override governs the composite component's OWN result and survives the
+nested shape evaluation (sq-1jemy); it does NOT govern the nested shape's results — those
+carry the nested shape's own metas (the 1.2 severity precedence keys on the reifier of the
+constraint statement that caused each result). On `sh:property` — which reports the nested
+property shape's results directly, with no composite result — only `{| sh:deactivated |}`
+is observable.
 
 **SHACL-1.2 targets & SPARQL node expressions (always on, no feature flag, sq-rnkdh).**
 Beyond `sh:targetNode`/`Class`/`SubjectsOf`/`ObjectsOf` + implicit class targets:

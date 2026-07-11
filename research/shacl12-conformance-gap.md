@@ -253,6 +253,18 @@ draft; the W3C suite pins only the cases above. Two readings had to be chosen:
    list-/path-valued operands (e.g. the disjunctive `sh:datatype ( … )`, an
    RDF-list comparand) are multi-triple and are NOT annotated.
 
+   *[FABLE-5] (sq-1jemy)* This reading was initially only PARTIALLY implemented:
+   the nested `conforms()` / `validate_shape()` recursion reset the active
+   per-statement meta before the composite arm's `result()` read it, silently
+   dropping the override on every recursing composite (`sh:node`, `sh:not`,
+   `sh:someValue`, `sh:memberShape`, …). Fixed by saving the caller's meta at
+   the single recursion entry (`validate_shape_at`) and restoring it on exit —
+   nested evaluation is now transparent to the caller's override, and a take()
+   keeps an outer override from leaking INTO nested results (pinned by
+   `per_statement_override_on_sh_property_does_not_govern_nested_results`).
+   On `sh:property` — which reports the nested shape's results directly and has
+   no composite result — only deactivation is observable, as decided above.
+
 ### oxttl / oxrdf upgrade assessment (the item-6 question)
 
 The original gap note assumed the `{| … |}` annotation syntax was unparseable
