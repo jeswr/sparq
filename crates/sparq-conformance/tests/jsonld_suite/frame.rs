@@ -1,45 +1,43 @@
-//! [FABLE-5] sq-oy1f.40 — the W3C JSON-LD 1.1 `frame` lane runner (split out of the
-//! former monolithic `tests/jsonld_suite.rs`; behaviour byte-identical). Framing
-//! runs against the SEPARATE `w3c/json-ld-framing` suite.
+//! [FABLE-5] sq-oy1f.29 — the W3C JSON-LD 1.1 `frame` lane runner, moved to the
+//! NATIVE DOCUMENT-LEVEL oracle (`sparq_jsonld::frame::frame()` + `json_ld_equal`),
+//! matching the `expand` / `flatten` / `compact` lanes. The former RDF-answer-
+//! equivalence oracle over the RDF-first engine framer is retired here: the native
+//! Framing Algorithm (JSON-LD 1.1 Framing §4, bead sq-oy1f.29) produces the framed
+//! document directly, so the oracle compares against the suite's NORMATIVE expected
+//! document rather than round-tripping through RDF. Framing runs against the
+//! SEPARATE `w3c/json-ld-framing` suite (`scripts/fetch-jsonld-framing-tests.sh`).
 
 use super::common::*;
-use sparq_core::Graph;
+use sparq_jsonld::frame::{frame as jsonld_frame, FrameOptions};
+use sparq_jsonld::{JsonLdOptions, NoopLoader, ProcessingMode};
 use std::path::Path;
 
-/// [OPUS-4.8] sq-oy1f.19 — run the SEPARATE W3C `w3c/json-ld-framing` suite
-/// against sparq's hand-rolled Framing Algorithm (`sparq_engine::serialize::
-/// graph_to_jsonld_framed`, the `serialize-rdf` feature).
+/// [FABLE-5] sq-oy1f.29 — run the SEPARATE W3C `w3c/json-ld-framing` suite against
+/// the NATIVE document-level framer.
 ///
-/// ## Pipeline (the REAL framing path)
+/// ## Pipeline (the native framing path)
 ///
-/// 1. Parse the case `input` (an arbitrary EXPANDED/`@graph` JSON-LD document) →
-///    RDF via the real oxjsonld ingest path (`parse_jsonld_dataset`). This is the
-///    expanded-document framing ENTRY PATH the bead asked for: the framer takes a
-///    `Graph`, not a JSON-LD doc, so the suite's expanded input is reduced to its
-///    RDF and loaded into a `Graph` — exactly the bridge `compact::run_compact` uses.
-/// 2. Read the case `frame` document (`*-frame.jsonld`: the frame pattern + its
-///    `@context`) with the writer's own JSON reader.
-/// 3. Run `graph_to_jsonld_framed(&graph, &frame)`.
-/// 4. **Invariant (normative answer-equivalence):** re-parse BOTH sparq's framed
-///    output AND the suite's NORMATIVE expected output (`*-out.jsonld`) to
-///    canonical [`Dataset`]s and require they are equal —
-///    `reparse(frame(D, F)) ≡ reparse(expected)`. Framing is a SELECT + RESHAPE
-///    (it legitimately prunes / fills / drops), so the oracle anchors on the
-///    W3C-expected framed document, NOT the input (see the `frame` floor). This is
-///    envelope-insensitive and value-faithful while not requiring byte-identical
-///    JSON layout (the same oxjsonld self-reparse oracle the other lanes use).
+/// 1. Parse the case `input` and `frame` documents as `sparq_jsonld::Json` ASTs.
+/// 2. Build `JsonLdOptions` from the manifest entry (`base`,
+///    `processingMode`/`specVersion`, `ordered`) and `FrameOptions` from
+///    `option.omitGraph` (mode-dependent spec default when absent).
+/// 3. Call `sparq_jsonld::frame::frame(&input, &frame, …, &NoopLoader)` — the full
+///    §4.1 composition: expand input, frame-expand the frame, node-map + `@merged`,
+///    frame matching, prune, compact against the frame's `@context`.
+/// 4. **NegativeEvaluationTests are RUN, not skipped** (the framer raises the spec's
+///    frame-validation errors since sq-oy1f.29): the case passes iff `frame()`
+///    errors with exactly the manifest's `expectErrorCode` (`invalid frame`,
+///    `invalid @embed value`).
+/// 5. A positive case compares the framed output to the suite's NORMATIVE expected
+///    document with `json_ld_equal` (object key order insignificant; array order
+///    significant only inside `@list`).
 ///
-/// ## Honest SKIP buckets (recorded, not passed, not failed)
+/// ## Honest SKIP buckets (recorded, not passed, not failed) — see the `frame` floor
 ///
 /// * `requires` optional-feature cases — out of the gated surface.
-/// * NegativeEvaluationTests (`expectErrorCode`) — sparq's framer is TOTAL and
-///   never raises the spec's frame-validation errors, so it cannot honestly
-///   "pass" by rejecting. SKIP (the compact-lane posture), never a counted pass.
-/// * A positive case with no `expect` document, or whose `expect` the real
-///   oxjsonld path cannot re-parse (out of the gated surface) — SKIP.
-/// * Remote `input`/`frame` URLs — none in the pinned suite, but guarded (SKIP).
+/// * A positive case with no `expect` document — nothing to compare.
+/// * Remote `input`/`frame` URLs — none in the pinned suite, but guarded (no network).
 pub fn run_frame(root: &Path) -> Score {
-    use sparq_engine::serialize::{graph_to_jsonld_framed, parse_context_json};
     let mut s = Score::default();
     let entries = match read_manifest(root, "frame") {
         Ok(e) => e,
@@ -53,18 +51,7 @@ pub fn run_frame(root: &Path) -> Score {
             s.skip();
             continue;
         }
-        // NegativeEvaluationTest: sparq's framer does not raise the spec's
-        // frame-validation errors, so a faithful 1.1 framer cannot "pass" by
-        // rejecting — SKIP (honest), never count as a pass.
-        if e.is_negative || e.expect_error_code.is_some() {
-            s.skip();
-            continue;
-        }
         let Some(frame_rel) = &e.frame else {
-            s.skip();
-            continue;
-        };
-        let Some(expect_rel) = &e.expect else {
             s.skip();
             continue;
         };
@@ -78,60 +65,68 @@ pub fn run_frame(root: &Path) -> Score {
             continue;
         }
 
-        // 1. Parse the EXPANDED input document → RDF (the framing input).
-        let input_path = root.join(&e.input);
-        let in_text = match std::fs::read_to_string(&input_path) {
-            Ok(t) => t,
+        // 1. Read + parse the input and frame documents as sparq_jsonld::Json.
+        let input_json = match read_sparq_json(root, &e.input) {
+            Ok(j) => j,
             Err(why) => {
-                s.fail(&e.id, format!("read input: {why}"));
+                s.fail(&e.id, why);
                 continue;
             }
         };
-        let base = frame_doc_base(e);
-        let input_ds = match parse_jsonld_dataset(&in_text, &base) {
-            Ok(ds) => ds,
-            // An input the real oxjsonld path rejects is out of scope for the
-            // framing round-trip (the toRdf lane gates ingest) — SKIP.
-            Err(_) => {
-                s.skip();
+        let frame_json = match read_sparq_json(root, frame_rel) {
+            Ok(j) => j,
+            Err(why) => {
+                s.fail(&e.id, why);
                 continue;
             }
         };
 
-        // 2. Read the frame document (the whole frame JSON: pattern + @context).
-        let frame_path = root.join(frame_rel);
-        let frame_text = match std::fs::read_to_string(&frame_path) {
-            Ok(t) => t,
-            Err(why) => {
-                s.fail(&e.id, format!("read frame: {why}"));
-                continue;
-            }
+        // 2. Options from the manifest entry.
+        let processing_mode = match (e.processing_mode.as_deref(), e.spec_version.as_deref()) {
+            (Some("json-ld-1.0"), _) | (_, Some("json-ld-1.0")) => ProcessingMode::JsonLd10,
+            _ => ProcessingMode::JsonLd11,
         };
-        let Some(frame) = parse_context_json(&frame_text) else {
-            // A non-object frame (array/string) is not drivable through the
-            // single-object framer entry — SKIP.
+        let mut opts = JsonLdOptions::default();
+        opts.base = Some(frame_doc_base(e));
+        opts.processing_mode = processing_mode;
+        opts.ordered = e.ordered.unwrap_or(false);
+        let mut fopts = FrameOptions::default();
+        fopts.omit_graph = e.omit_graph;
+
+        // 3. The native frame() composition.
+        let framed = jsonld_frame(&input_json, &frame_json, &opts, &fopts, &NoopLoader);
+
+        // 4. NegativeEvaluationTest: pass iff the framer raises EXACTLY the expected
+        //    spec error code.
+        if e.is_negative || e.expect_error_code.is_some() {
+            let want_code = e.expect_error_code.as_deref().unwrap_or("");
+            match &framed {
+                Err(err) if err.code().as_str() == want_code => s.pass(),
+                Err(err) => s.fail(
+                    &e.id,
+                    format!("expected error {want_code:?}, got {:?}", err.code().as_str()),
+                ),
+                Ok(_) => s.fail(&e.id, format!("expected error {want_code:?}, got success")),
+            }
+            continue;
+        }
+        let Some(expect_rel) = &e.expect else {
             s.skip();
             continue;
         };
-
-        // 3. Load the input RDF into a sparq Graph (named graphs preserved) and
-        //    run the REAL framing writer over the expanded-document-derived RDF.
-        let nq = dataset_to_nquads(&input_ds);
-        let graph = match Graph::load_dataset(&nq, "nquads") {
-            Ok(g) => g,
+        let framed = match framed {
+            Ok(j) => j,
             Err(why) => {
-                s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                s.fail(&e.id, format!("frame() error: {why}"));
                 continue;
             }
         };
-        let framed = graph_to_jsonld_framed(&graph, &frame);
 
-        // 4. The normative answer-equivalence invariant: re-parse BOTH sparq's
-        //    framed output and the suite's expected output, require RDF equality.
-        let got = match jsonld_to_canonical_dataset(&framed, &base) {
-            Ok(ds) => ds,
+        // 5. Document-level JSON-LD equality against the normative expected document.
+        let got = match sparq_json_to_serde(&framed) {
+            Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("re-parse framed output: {why}"));
+                s.fail(&e.id, format!("convert frame output: {why}"));
                 continue;
             }
         };
@@ -143,25 +138,24 @@ pub fn run_frame(root: &Path) -> Score {
                 continue;
             }
         };
-        let want = match jsonld_to_canonical_dataset(&exp_text, &base) {
-            Ok(ds) => ds,
+        let want = match serde_json::from_str::<serde_json::Value>(&exp_text) {
+            Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("re-parse expected output: {why}"));
+                s.fail(&e.id, format!("parse expect JSON: {why}"));
                 continue;
             }
         };
-        if got == want {
+        if json_ld_equal(&got, &want) {
             s.pass();
         } else {
-            s.fail(
-                &e.id,
-                format!(
-                    "framed RDF != expected RDF ({} vs {} quads)",
-                    got.len(),
-                    want.len()
-                ),
-            );
+            s.fail(&e.id, format!("framed JSON mismatch for {}", e.id));
         }
     }
     s
+}
+
+/// Read a suite document and parse it as a `sparq_jsonld::Json` AST.
+fn read_sparq_json(root: &Path, rel: &str) -> Result<sparq_jsonld::Json, String> {
+    let text = std::fs::read_to_string(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
+    sparq_jsonld::Json::parse(&text).map_err(|e| format!("parse {rel}: {e}"))
 }
