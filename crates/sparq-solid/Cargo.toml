@@ -129,6 +129,14 @@ serde_json = "1"
 name = "odrl_n3_spike"
 required-features = ["odrl-bridge"]
 
+# [FABLE-5] sq-lrtc3.3: the pattern-scope measured-overhead driver (design record
+# research/odrl-pattern-scoped-targets-2026-07.md §4; committed JSONs in
+# bench/pattern-scope/, work-box numbers NON-canonical). Gated on `pattern-scope`,
+# so it is NOT built in the default (feature-OFF) state. Measurement-only.
+[[example]]
+name = "pattern_scope_bench"
+required-features = ["pattern-scope"]
+
 # [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
 # `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real
 # PodStore. These are dev-only — they do not touch the default build or publish. Scoped
