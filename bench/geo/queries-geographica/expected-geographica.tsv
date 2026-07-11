@@ -1,0 +1,45 @@
+# [FABLE-5] sq-hmd7l.29 — Geographica real-world family DETERMINISTIC golden COUNTS
+# over the PINNED merged LGD/GeoNames corpus (bench/geo/geographica.sh, merged
+# sha256 48810b8d2be084c9757157d4e444b1b77da3a79a27f6ee9d9d38f747c0cdd6d7:
+# 563 885 triples, 21 990 GeoNames POINT + 12 097 LGD wktLiterals).
+# Format: <workload>\t<count>.
+#
+# COUNTS-NOT-COORDINATES: floating-point geometry is NOT bit-stable, so only
+# result-set SIZES are pinned — never a coordinate value. Every count below was
+# DERIVED BY RUNNING (not guessed) BOTH engines on the pinned corpus at pin
+# time — sparq (bench_geo query, in-process geof: registry) and
+# jena-fuseki-geosparql 5.4.0 (HTTP replay of the same pinned .rq files) —
+# with EXACT agreement on every bounded workload. Internal consistency also
+# holds: q13 + q16 = 21 990 (within + disjoint partition the GeoNames points;
+# zero boundary cases) and q09 = 12 097 − q17 (intersects is the complement of
+# disjoint over the LGD geometries).
+#
+# scripts/bench/geo-same-box.sh (GEO_GEOGRAPHICA=1) cross-checks sparq's live
+# counts against this file (drift => timing WITHHELD, recorded as a result)
+# and jena's live counts against sparq's. This file is an ORACLE for the
+# opt-in comparison family only — the hard per-commit gate stays
+# bench/geo/expected.tsv + bench/geo/run.sh.
+#
+# q19_join_intersects_geonames_lgd (the ~21 990 x 12 097 naive cross-product
+# spatial join): count 0 pinned from a SINGLE-ENGINE derivation — sparq's run
+# completed well past the default per-workload cap (roughly 10x over it on the
+# pin-time box); jena-fuseki-geosparql did NOT complete inside a ~2x-cap probe
+# (no indexed spatial-join path on either side), so its cross-check is PENDING
+# a long-cap run. 0 is the geometrically expected value (a POINT intersects a
+# LINESTRING only when it lies exactly on it in float space) and the join path
+# itself is validated non-vacuously: a synthetic corpus with a GeoNames-
+# predicate point placed exactly on an LGD linestring vertex yields count 1
+# through the same pinned query. At default caps both engines record honest
+# ERROR(timeout) rows — that absence of an indexed path IS the comparative
+# result (the jena cross-check + indexed-join follow-up is bead sq-xcly5).
+q04_buffer_geonames	21990
+q05_buffer_lgd	12097
+q07_equals_lgd_line	1
+q09_intersects_lgd_poly	216
+q12_crosses_lgd_line	14
+q13_within_geonames_poly	136
+q14_within_geonames_pointbuffer	150
+q15_distance_geonames_point	153
+q16_disjoint_geonames_poly	21854
+q17_disjoint_lgd_poly	11881
+q19_join_intersects_geonames_lgd	0

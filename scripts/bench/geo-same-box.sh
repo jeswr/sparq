@@ -49,12 +49,23 @@
 #     script still exits 0 (a skip is a missing column + a re-run action, never
 #     a sparq win — design record §4 point 6).
 #
-# Geographica: the reviewer-recognized real-world suite is deliberately NOT
-# wired here — deferred to bead sq-hmd7l.29 (recorded in the envelope).
+# GEOGRAPHICA (opt-in second workload family, GEO_GEOGRAPHICA=1) [FABLE-5]
+# (sq-hmd7l.29): the reviewer-recognized real-world suite — the LGD/GeoNames
+# slices of Geographica (ISWC 2013) fetched+pinned+normalised by
+# bench/geo/geographica.sh (gather-only, /tmp), replayed from the pinned
+# translations in bench/geo/queries-geographica/ (micro non-topological +
+# spatial selections + the one LGD/GeoNames spatial join). Same invariant:
+# sparq runs in-process (`bench_geo query`, counts recorded vs the pinned
+# expected-geographica.tsv oracle), jena replays the same pinned queries over
+# HTTP (a `.jena.rq` rendering only where the standard form is non-executable
+# on jena 5.4.0 — research/gap-geo-2026-07.md §6d), and NO TIMING enters the
+# family envelope without result-set-size agreement. Emits a SECOND envelope
+# (geo-geographica-<ts>.json); the base fixed-corpus flow is unchanged.
 #
 # USAGE
 #   scripts/bench/geo-same-box.sh                 # both engines, full iters
 #   ONLY=sparq GEO_SMOKE=1 scripts/bench/geo-same-box.sh   # the acceptance smoke
+#   GEO_GEOGRAPHICA=1 scripts/bench/geo-same-box.sh        # + the Geographica family
 #
 # TUNABLES (env; all have safe defaults):
 #   ITERS           best-of-N per workload      (default 3; 1 under GEO_SMOKE=1)
@@ -72,6 +83,10 @@
 #   FUSEKI_PORT     jena-fuseki-geosparql port              (default 3039)
 #   FUSEKI_READY_S  server load+spatial-index readiness cap (default 300)
 #   BENCH_GEO       the sparq bench_geo binary (default: build it)
+#   GEO_GEOGRAPHICA 1 = also run the Geographica real-world family (default 0)
+#   GG_WORKLOADS    Geographica workload subset (default: all pinned .rq stems)
+#   GG_TIMEOUT_S    per-workload cap for the family, s      (default TIMEOUT_S)
+#   GG_FUSEKI_PORT  the family's own fuseki port            (default FUSEKI_PORT+1)
 #
 # SCRATCH: the jar lives under /tmp/jena-geosparql (gather-only dep, NOT
 # committed — engines stay out of git per AGENTS.md): rm -rf /tmp/jena-geosparql
@@ -97,9 +112,80 @@ ADAPTER="$ROOT/scripts/bench-adapters/http_sparql_adapter.py"
 QUERIES="$ROOT/bench/geo/queries-jena"
 # The 5 query-replayable workloads (geo_compliance_pass is sparq-only, see header).
 WORKLOADS="within10km within50km nearest_k10 nearest_k100 geof_within"
+# ---- the Geographica real-world family (OPT-IN) [FABLE-5] sq-hmd7l.29 ----
+GEO_GEOGRAPHICA="${GEO_GEOGRAPHICA:-0}"
+GG_TIMEOUT_S="${GG_TIMEOUT_S:-$TIMEOUT_S}"
+GG_FUSEKI_PORT="${GG_FUSEKI_PORT:-$((FUSEKI_PORT + 1))}"
+GG_QUERIES="$ROOT/bench/geo/queries-geographica"
+GG_EXPECTED="$GG_QUERIES/expected-geographica.tsv"
+# Every pinned .rq stem: micro non-topological (q04/q05), spatial selections
+# (q07..q17) and the one LGD/GeoNames spatial join (q19 — typically an honest
+# ERROR(timeout) row on BOTH engines at the default cap; that IS the result).
+GG_WORKLOADS="${GG_WORKLOADS:-q04_buffer_geonames q05_buffer_lgd q07_equals_lgd_line \
+q09_intersects_lgd_poly q12_crosses_lgd_line q13_within_geonames_poly \
+q14_within_geonames_pointbuffer q15_distance_geonames_point \
+q16_disjoint_geonames_poly q17_disjoint_lgd_poly q19_join_intersects_geonames_lgd}"
 
 log() { printf '[geo-same-box] %s\n' "$*" >&2; }
 want() { [[ " $ONLY " == *" $1 "* ]]; }
+
+# Shared by the base and Geographica families [FABLE-5] (sq-hmd7l.29): resolve
+# java + the executable uber-jar. Prints a "skipped: ..." reason on stdout and
+# returns 1 when the engine cannot run (the graceful-skip contract).
+ensure_jena_jar() {
+  if ! command -v java >/dev/null 2>&1; then
+    echo "skipped: java not on PATH"
+    return 1
+  fi
+  if [ ! -f "$FUSEKI_GEO_JAR" ]; then
+    if [ "$GEO_FETCH_JENA" = 1 ]; then
+      log "downloading jena-fuseki-geosparql $FUSEKI_GEO_VERSION to $(dirname "$FUSEKI_GEO_JAR") (gather-only dep)"
+      mkdir -p "$(dirname "$FUSEKI_GEO_JAR")"
+      local url="https://repo1.maven.org/maven2/org/apache/jena/jena-fuseki-geosparql/$FUSEKI_GEO_VERSION/jena-fuseki-geosparql-$FUSEKI_GEO_VERSION.jar"
+      if ! curl -fsSL -o "$FUSEKI_GEO_JAR.tmp" "$url"; then
+        rm -f "$FUSEKI_GEO_JAR.tmp"
+        echo "skipped: jar download failed ($url)"
+        return 1
+      fi
+      mv "$FUSEKI_GEO_JAR.tmp" "$FUSEKI_GEO_JAR"
+    else
+      echo "skipped: jar absent at $FUSEKI_GEO_JAR and GEO_FETCH_JENA=0"
+      return 1
+    fi
+  fi
+}
+
+# Start jena-fuseki-geosparql over <corpus.nt> on <port>, logging to <logfile>;
+# wait for SPARQL readiness (cap FUSEKI_READY_S). Sets FUSEKI_PID (the EXIT trap
+# reaps it); prints the ready-seconds on stdout, or returns 1 on failure.
+start_fuseki() { # <corpus.nt> <port> <logfile>
+  local t0 deadline
+  # Format is inferred from the .nt extension; -rf = read file, -p = port.
+  java -jar "$FUSEKI_GEO_JAR" -rf "$1" -p "$2" > "$3" 2>&1 &
+  FUSEKI_PID=$!
+  t0="$(date +%s)"
+  deadline=$((t0 + FUSEKI_READY_S))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if ! kill -0 "$FUSEKI_PID" 2>/dev/null; then break; fi
+    if python3 "$ADAPTER" --endpoint "http://127.0.0.1:$2/ds" --query 'ASK {}' \
+        --engine ready >/dev/null 2>&1; then
+      echo "$(($(date +%s) - t0))"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# Stop the current fuseki instance (idempotent; used between families so two
+# JVMs never compete for the box during timing).
+stop_fuseki() {
+  if [ -n "$FUSEKI_PID" ]; then
+    kill "$FUSEKI_PID" 2>/dev/null || true
+    wait "$FUSEKI_PID" 2>/dev/null || true
+    FUSEKI_PID=""
+  fi
+}
 
 mkdir -p "$OUT_DIR"
 TMP="$(mktemp -d /tmp/geo-same-box.XXXXXX)"
@@ -146,49 +232,21 @@ JENA_JAR_SHA=""
 JENA_READY_S="n/a"
 ENDPOINT="http://127.0.0.1:$FUSEKI_PORT/ds"
 if want jena-geosparql; then
-  JENA_STATUS="pending"
-  if ! command -v java >/dev/null 2>&1; then
-    JENA_STATUS="skipped: java not on PATH"
-  elif [ ! -f "$FUSEKI_GEO_JAR" ]; then
-    if [ "$GEO_FETCH_JENA" = 1 ]; then
-      log "downloading jena-fuseki-geosparql $FUSEKI_GEO_VERSION to $(dirname "$FUSEKI_GEO_JAR") (gather-only dep)"
-      mkdir -p "$(dirname "$FUSEKI_GEO_JAR")"
-      MAVEN_URL="https://repo1.maven.org/maven2/org/apache/jena/jena-fuseki-geosparql/$FUSEKI_GEO_VERSION/jena-fuseki-geosparql-$FUSEKI_GEO_VERSION.jar"
-      if ! curl -fsSL -o "$FUSEKI_GEO_JAR.tmp" "$MAVEN_URL"; then
-        rm -f "$FUSEKI_GEO_JAR.tmp"
-        JENA_STATUS="skipped: jar download failed ($MAVEN_URL)"
-      else
-        mv "$FUSEKI_GEO_JAR.tmp" "$FUSEKI_GEO_JAR"
-      fi
-    else
-      JENA_STATUS="skipped: jar absent at $FUSEKI_GEO_JAR and GEO_FETCH_JENA=0"
-    fi
+  if SKIP_REASON="$(ensure_jena_jar)"; then
+    JENA_STATUS="pending"
+  else
+    JENA_STATUS="$SKIP_REASON"
   fi
 
   if [ "$JENA_STATUS" = "pending" ]; then
     JENA_VER="jena-fuseki-geosparql-$FUSEKI_GEO_VERSION ($(java -version 2>&1 | head -1))"
     JENA_JAR_SHA="$(sha256sum "$FUSEKI_GEO_JAR" | cut -d' ' -f1)"
     log "starting $ENDPOINT (in-memory dataset, corpus loaded as N-Triples; readiness cap ${FUSEKI_READY_S}s)"
-    T_START="$(date +%s)"
-    # Format is inferred from the .nt extension; -rf = read file, -p = port.
-    java -jar "$FUSEKI_GEO_JAR" -rf "$CORPUS" -p "$FUSEKI_PORT" \
-      > "$TMP/fuseki.log" 2>&1 &
-    FUSEKI_PID=$!
-    READY=0
-    DEADLINE=$((T_START + FUSEKI_READY_S))
-    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-      if ! kill -0 "$FUSEKI_PID" 2>/dev/null; then break; fi
-      if python3 "$ADAPTER" --endpoint "$ENDPOINT" --query 'ASK {}' \
-          --engine ready >/dev/null 2>&1; then
-        READY=1; break
-      fi
-      sleep 2
-    done
-    if [ "$READY" != 1 ]; then
+    if ! JENA_READY_S="$(start_fuseki "$CORPUS" "$FUSEKI_PORT" "$TMP/fuseki.log")"; then
+      JENA_READY_S="n/a"
       JENA_STATUS="skipped: server not ready in ${FUSEKI_READY_S}s (see fuseki.log tail below)"
       tail -5 "$TMP/fuseki.log" >&2 || true
     else
-      JENA_READY_S="$(( $(date +%s) - T_START ))"
       log "jena-geosparql ready in ${JENA_READY_S}s (load + spatial index; advisory)"
       : > "$TMP/jena-geosparql.tsv"
       for wl in $WORKLOADS; do
@@ -361,8 +419,11 @@ envelope = {
         "bench/competitors.json."
     ),
     "geographica": (
-        "TODO (deferred, recorded): wire a Geographica real-world subset as a "
-        "second workload family — bead sq-hmd7l.29; not in scope of sq-hmd7l.3."
+        "WIRED (sq-hmd7l.29): the Geographica real-world LGD/GeoNames family "
+        "is the opt-in GEO_GEOGRAPHICA=1 second workload family of this same "
+        "script (pinned recipe bench/geo/geographica.sh, pinned queries "
+        "bench/geo/queries-geographica/); it emits its own "
+        "geo-geographica-<ts>.json envelope."
     ),
     "env": {
         "host": platform.node(),
@@ -382,4 +443,308 @@ print(os.environ["OUT"])
 PYEOF
 log "envelope: $OUT"
 
-log "done. Gather-only scratch: /tmp/jena-geosparql (delete when finished)."
+# ---- 4. Geographica real-world family (OPT-IN: GEO_GEOGRAPHICA=1) --------------
+# [FABLE-5] sq-hmd7l.29 — the LGD/GeoNames slices of the Geographica suite,
+# replayed from the pinned translations in bench/geo/queries-geographica/ under
+# the SAME counts-before-timing invariant, into a SECOND envelope. All failure
+# modes degrade gracefully (a skip/ERROR is a recorded result, never an abort):
+# the hard per-commit correctness gate stays bench/geo/run.sh, untouched.
+if [ "$GEO_GEOGRAPHICA" = 1 ]; then
+  GG_FAMILY_STATUS="ok"
+  GG_SPARQ_STATUS="not-run"
+  GG_JENA_STATUS="not-run"
+  GG_JENA_READY_S="n/a"
+  GG_CORPUS=""
+  GG_CORPUS_SHA=""
+  GG_NTRIPLES=""
+  if ! GG_CORPUS="$(bash "$ROOT/bench/geo/geographica.sh")"; then
+    GG_FAMILY_STATUS="skipped: dataset unavailable (bench/geo/geographica.sh failed: download failure or upstream sha256 pin mismatch — see its stderr above)"
+    log "geographica: $GG_FAMILY_STATUS"
+  fi
+
+  if [ "$GG_FAMILY_STATUS" = ok ]; then
+    GG_CORPUS_SHA="$(sha256sum "$GG_CORPUS" | cut -d' ' -f1)"
+    GG_NTRIPLES="$(wc -l < "$GG_CORPUS")"
+    log "geographica corpus=$GG_CORPUS ($GG_NTRIPLES triples, sha256 $GG_CORPUS_SHA)"
+
+    # sparq: in-process replay via `bench_geo query` (load + geof: registry +
+    # full SPARQL eval per pinned .rq). Counts are recorded RAW; the envelope
+    # cross-checks them against the pinned expected-geographica.tsv oracle (a
+    # drift WITHHOLDS the timing and is itself the recorded result).
+    if want sparq; then
+      GG_SPARQ_STATUS="ok"
+      : > "$TMP/gg-sparq.tsv"
+      for wl in $GG_WORKLOADS; do
+        qf="$GG_QUERIES/$wl.rq"
+        if [ ! -f "$qf" ]; then
+          printf '%s\tERROR\tno-query-file\n' "$wl" >> "$TMP/gg-sparq.tsv"
+          continue
+        fi
+        log "sparq(geographica): $wl x$ITERS (cap ${GG_TIMEOUT_S}s)"
+        if GG_LINE="$(timeout "$GG_TIMEOUT_S" "$BENCH_GEO" query "$GG_CORPUS" "$qf" "$ITERS")"; then
+          printf '%s\n' "$GG_LINE" >> "$TMP/gg-sparq.tsv"
+        else
+          log "sparq(geographica): $wl FAILED/timeout"
+          printf '%s\tERROR\ttimeout-or-error\n' "$wl" >> "$TMP/gg-sparq.tsv"
+        fi
+      done
+    fi
+
+    # jena-geosparql: HTTP replay of the SAME pinned queries against a fresh
+    # in-memory dataset holding the geographica corpus (its own port; the base
+    # instance is stopped first so two JVMs never compete during timing). A
+    # `.jena.rq` rendering is used only where the standard form is
+    # non-executable on jena 5.4.0 (research/gap-geo-2026-07.md §6d).
+    if want jena-geosparql; then
+      if SKIP_REASON="$(ensure_jena_jar)"; then
+        GG_JENA_STATUS="pending"
+      else
+        GG_JENA_STATUS="$SKIP_REASON"
+      fi
+      if [ "$GG_JENA_STATUS" = pending ]; then
+        stop_fuseki
+        GG_ENDPOINT="http://127.0.0.1:$GG_FUSEKI_PORT/ds"
+        JENA_VER="jena-fuseki-geosparql-$FUSEKI_GEO_VERSION ($(java -version 2>&1 | head -1))"
+        JENA_JAR_SHA="$(sha256sum "$FUSEKI_GEO_JAR" | cut -d' ' -f1)"
+        log "starting $GG_ENDPOINT (geographica corpus; readiness cap ${FUSEKI_READY_S}s)"
+        if ! GG_JENA_READY_S="$(start_fuseki "$GG_CORPUS" "$GG_FUSEKI_PORT" "$TMP/gg-fuseki.log")"; then
+          GG_JENA_READY_S="n/a"
+          GG_JENA_STATUS="skipped: server not ready in ${FUSEKI_READY_S}s (see gg-fuseki.log tail below)"
+          tail -5 "$TMP/gg-fuseki.log" >&2 || true
+        else
+          log "jena-geosparql(geographica) ready in ${GG_JENA_READY_S}s (load; advisory)"
+          : > "$TMP/gg-jena-geosparql.tsv"
+          for wl in $GG_WORKLOADS; do
+            qf="$GG_QUERIES/$wl.jena.rq"
+            [ -f "$qf" ] || qf="$GG_QUERIES/$wl.rq"
+            if [ ! -f "$qf" ]; then
+              printf '%s\tERROR\tno-query-file\n' "$wl" >> "$TMP/gg-jena-geosparql.tsv"
+              continue
+            fi
+            log "jena-geosparql(geographica): $wl x$ITERS (cap ${GG_TIMEOUT_S}s)"
+            if timeout "$GG_TIMEOUT_S" python3 "$ADAPTER" --endpoint "$GG_ENDPOINT" \
+                --query-file "$qf" --engine jena-geosparql \
+                --iters "$ITERS" --json > "$TMP/gg-$wl.raw" 2> "$TMP/gg-$wl.json"; then
+              # Same sidecar convention as the base family: a COUNT-wrapped
+              # query's comparable size is count_value, else len(bindings).
+              if GG_PARSED="$(python3 - "$TMP/gg-$wl.json" <<'PYEOF'
+import json, sys
+line = open(sys.argv[1]).read().strip().splitlines()[-1]
+d = json.loads(line)
+c = d["count_value"] if d.get("count_value") is not None else d["count"]
+print("%s\t%s" % (c, d["query_us"]))
+PYEOF
+              )"; then
+                printf '%s\t%s\n' "$wl" "$GG_PARSED" >> "$TMP/gg-jena-geosparql.tsv"
+              else
+                printf '%s\tERROR\tsidecar-parse-error\n' "$wl" >> "$TMP/gg-jena-geosparql.tsv"
+              fi
+            else
+              log "jena-geosparql(geographica): $wl FAILED/timeout"
+              printf '%s\tERROR\ttimeout-or-error\n' "$wl" >> "$TMP/gg-jena-geosparql.tsv"
+            fi
+          done
+          GG_JENA_STATUS="ok"
+        fi
+      fi
+      [ "$GG_JENA_STATUS" = ok ] || log "jena-geosparql(geographica): $GG_JENA_STATUS"
+    fi
+  fi
+
+  # ---- the family envelope (same canonical-competitor-results JSON shape) ------
+  GG_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+  GG_OUT="$OUT_DIR/geo-geographica-${GG_TS}.json"
+  CANONICAL="$CANONICAL" GEO_SMOKE="$GEO_SMOKE" GIT_COMMIT="$GIT_COMMIT" \
+  GG_CORPUS="$GG_CORPUS" GG_CORPUS_SHA="$GG_CORPUS_SHA" GG_NTRIPLES="$GG_NTRIPLES" \
+  ITERS="$ITERS" GG_TIMEOUT_S="$GG_TIMEOUT_S" ONLY="$ONLY" \
+  GG_WORKLOADS="$GG_WORKLOADS" GG_EXPECTED="$GG_EXPECTED" TMP="$TMP" GG_OUT="$GG_OUT" \
+  GG_FAMILY_STATUS="$GG_FAMILY_STATUS" GG_SPARQ_STATUS="$GG_SPARQ_STATUS" \
+  GG_JENA_STATUS="$GG_JENA_STATUS" JENA_VER="$JENA_VER" \
+  JENA_JAR_SHA="$JENA_JAR_SHA" GG_JENA_READY_S="$GG_JENA_READY_S" \
+  python3 - <<'PYEOF'
+import json, os, platform
+
+tmp = os.environ["TMP"]
+only = os.environ["ONLY"].split()
+workloads = os.environ["GG_WORKLOADS"].split()
+canonical = os.environ["CANONICAL"] == "1"
+smoke = os.environ["GEO_SMOKE"] == "1"
+
+
+def read_tsv(name):
+    path = os.path.join(tmp, "gg-%s.tsv" % name)
+    rows = {}
+    if os.path.exists(path):
+        for line in open(path):
+            f = line.rstrip("\n").split("\t")
+            if len(f) >= 3:
+                rows[f[0]] = {"count": f[1], "us": f[2]}
+    return rows
+
+
+expected = {}
+if os.path.exists(os.environ["GG_EXPECTED"]):
+    for line in open(os.environ["GG_EXPECTED"]):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            f = line.split("\t")
+            if len(f) >= 2:
+                expected[f[0]] = f[1]
+
+engines_meta = {}
+if "sparq" in only:
+    engines_meta["sparq"] = {
+        "version": os.environ["GIT_COMMIT"],
+        "mode": (
+            "in-process (bench_geo query: load + geof: registry + full SPARQL "
+            "eval per pinned .rq, best-of-N; counts cross-checked vs the pinned "
+            "expected-geographica.tsv oracle)"
+        ),
+    }
+if "jena-geosparql" in only:
+    engines_meta["jena-geosparql"] = {
+        "version": os.environ.get("JENA_VER", ""),
+        "jar_sha256": os.environ.get("JENA_JAR_SHA", ""),
+        "mode": (
+            "HTTP (jena-fuseki-geosparql in-memory dataset over the SAME "
+            "normalised corpus; http_sparql_adapter.py POST -> SPARQL-JSON, "
+            "best-of-N; query_us includes HTTP framing + result parse — a "
+            "recorded mode ASYMMETRY vs sparq's in-process surface)"
+        ),
+        "load_ready_s_advisory": os.environ.get("GG_JENA_READY_S", "n/a"),
+    }
+
+sparq_rows = read_tsv("sparq")
+jena_rows = read_tsv("jena-geosparql")
+statuses = {"family": os.environ["GG_FAMILY_STATUS"]}
+if "sparq" in engines_meta:
+    statuses["sparq"] = os.environ["GG_SPARQ_STATUS"]
+if "jena-geosparql" in engines_meta:
+    statuses["jena-geosparql"] = os.environ["GG_JENA_STATUS"]
+
+# INVARIANT (three-way): sparq timing enters only where sparq's count equals
+# the PINNED oracle; a jena timing enters only where jena's count equals
+# sparq's live count. Every disagreement keeps both counts recorded and the
+# timing WITHHELD — never adjusted, never silently dropped.
+cross = {}
+timings = {}
+for w in workloads:
+    e = expected.get(w, "n/a")
+    s = sparq_rows.get(w, {}).get("count", "n/a")
+    j = jena_rows.get(w, {}).get("count", "n/a")
+    s_ok = s == e and s not in ("n/a", "ERROR")
+    agree = s == j and s not in ("n/a", "ERROR")
+    cross[w] = {
+        "expected": e,
+        "sparq": s,
+        "jena-geosparql": j,
+        "sparq_matches_expected": s_ok,
+        "agree": agree,
+    }
+    row = {}
+    if "sparq" in engines_meta:
+        su = sparq_rows.get(w, {}).get("us", "n/a")
+        if s in ("n/a", "ERROR"):
+            row["sparq_us"] = su
+        elif s_ok:
+            row["sparq_us"] = su
+        else:
+            row["sparq_us"] = "WITHHELD(count-drift: sparq=%s expected=%s)" % (s, e)
+    if "jena-geosparql" in engines_meta:
+        ju = jena_rows.get(w, {}).get("us", "n/a")
+        if j in ("n/a", "ERROR"):
+            row["jena_geosparql_us"] = ju
+        elif agree:
+            row["jena_geosparql_us"] = ju
+        else:
+            row["jena_geosparql_us"] = (
+                "WITHHELD(count-disagree: sparq=%s jena=%s)" % (s, j)
+            )
+    timings[w] = row
+
+note_canonical = (
+    "CANONICAL: dedicated quiet box, one engine active at a time on the SAME "
+    "pinned corpus + pinned query files; counts cross-checked before any "
+    "timing is trusted."
+    if canonical
+    else "NON-canonical FIRST READ: shared work box (not a dedicated quiet "
+    "instance). Timings are directional only — do NOT bake into docs or "
+    "dashboards. The harness + pinned recipe are the durable deliverable; the "
+    "canonical run is the quiet-box wave (sq-hmd7l.26)."
+)
+
+envelope = {
+    "gather": "geo-geographica-same-box-comparison",
+    "wave": "geo Geographica real-world family (sq-hmd7l.29)",
+    "canonical": canonical,
+    "canonical_note": note_canonical,
+    "smoke": smoke,
+    "git_commit": os.environ["GIT_COMMIT"],
+    "suite": "geo-geographica",
+    "scale": "Geographica real-world LGD/GeoNames slices, %s triples (%s, sha256 %s)"
+    % (
+        os.environ.get("GG_NTRIPLES", "n/a"),
+        os.environ.get("GG_CORPUS", "n/a"),
+        os.environ.get("GG_CORPUS_SHA", "n/a"),
+    ),
+    "corpus_provenance": (
+        "bench/geo/geographica.sh: the LGD/GeoNames slices of the Geographica "
+        "real-world workload (geographica2.di.uoa.gr), upstream tarballs and "
+        "the merged corpus PINNED by sha256 in the recipe. NORMALISATION: the "
+        "upstream Strabon-era `<.../crs/EPSG/4326> ` lon-lat anchor is "
+        "stripped -> bare CRS84 (long/lat as written), so both engines "
+        "interpret every literal identically (left as-is, jena would "
+        "axis-swap per the EPSG registry while sparq sees a non-OGC-form IRI "
+        "as an opaque CRS — divergent geometry either way)."
+    ),
+    "iters": int(os.environ["ITERS"]),
+    "timeout_s_per_workload": int(os.environ["GG_TIMEOUT_S"]),
+    "queries": (
+        "bench/geo/queries-geographica/<workload>.rq — pinned COUNT-wrapped "
+        "translations of the upstream micro queries (provenance + the exact "
+        "translation deltas in each file header); <workload>.jena.rq only "
+        "where the standard form is non-executable on jena 5.4.0 (q15: "
+        "geof:distance+uom:metre -> spatialF:nearby, same great-circle "
+        "semantic; research/gap-geo-2026-07.md §6d)."
+    ),
+    "engines": engines_meta,
+    "statuses": statuses,
+    "count_crosscheck": cross,
+    "count_crosscheck_note": (
+        "COUNTS-NOT-COORDINATES: only result-set SIZES are compared. "
+        "expected-geographica.tsv is the pinned oracle (counts derived by "
+        "RUNNING both engines on the pinned corpus at pin time, exact "
+        "agreement on every bounded workload). sparq timing requires "
+        "sparq == expected; a jena timing requires jena == sparq (live). "
+        "Disagreement is a recorded RESULT; the timing is withheld, never "
+        "adjusted."
+    ),
+    "timings": timings,
+    "timings_note": (
+        "per-workload best-of-N microseconds. MODE ASYMMETRY: sparq is "
+        "in-process, jena is a full HTTP SPARQL round-trip — recorded, not "
+        "adjusted. q19 (the naive cross-product spatial join) typically "
+        "records honest ERROR(timeout) rows on BOTH engines at the default "
+        "cap: neither engine has an indexed spatial-join path — that "
+        "absence IS the comparative result."
+    ),
+    "env": {
+        "host": platform.node(),
+        "machine": platform.machine(),
+        "os": platform.platform(),
+    },
+}
+for e, rows in (("sparq", sparq_rows), ("jena_geosparql", jena_rows)):
+    envelope["%s_tsv" % e] = "\n".join(
+        "%s\t%s\t%s" % (w, r["count"], r["us"]) for w, r in rows.items()
+    )
+
+with open(os.environ["GG_OUT"], "w") as fh:
+    json.dump(envelope, fh, indent=2)
+    fh.write("\n")
+print(os.environ["GG_OUT"])
+PYEOF
+  log "geographica envelope: $GG_OUT"
+fi
+
+log "done. Gather-only scratch: /tmp/jena-geosparql + /tmp/geographica (delete when finished)."

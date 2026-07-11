@@ -1,0 +1,22 @@
+# [FABLE-5] sq-hmd7l.29 — Geographica real-world micro SPATIAL-SELECTION (JENA RENDERING) query
+# "QUERY 15 - GeoNames_Point_Distance" (micro_selections.lst, geographica2.di.uoa.gr), pinned for
+# scripts/bench/geo-same-box.sh (the GEO_GEOGRAPHICA=1 family; corpus recipe
+# bench/geo/geographica.sh). TRANSLATIONS vs upstream (see bench/geo/README.md):
+#   * GRAPH <http://geographica.di.uoa.gr/dataset/...> wrapper dropped — both
+#     engines load the merged slice into the default graph; the per-dataset
+#     predicate IRIs keep LGD/GeoNames distinguishable.
+#   * COUNT-wrapped (counts-not-coordinates): only the result-set SIZE is
+#     cross-checked between engines before any timing is trusted.
+#   * jena-geosparql rendering: geof:distance+uom:metre is non-executable on
+#   *   jena 5.4.0 over bare-CRS84 literals (research/gap-geo-2026-07.md §6d;
+#   *   same root cause as bench/geo/queries-jena/within10km.rq), so the SAME
+#   *   workload semantic is rendered as spatialF:nearby — great-circle metres
+#   *   on the same IUGG/GRS80 mean sphere as sparq's haversine.
+# Oracle: COUNT must equal expected-geographica.tsv before timing is trusted.
+PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
+PREFIX spatialF: <http://jena.apache.org/function/spatial#>
+PREFIX uom:      <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?s1) AS ?n) WHERE {
+  ?s1 <http://www.geonames.org/ontology#asWKT> ?o1 .
+  FILTER(spatialF:nearby(?o1, "POINT(23.71622 37.97945)"^^geo:wktLiteral, 3000, uom:metre))
+}
