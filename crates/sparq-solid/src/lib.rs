@@ -29,6 +29,11 @@ pub mod odrl_bridge;
 // zero trust-graph/sparq-trust code and is byte-identical to WAC/ACP today (G6).
 #[cfg(feature = "trust-graph")]
 pub mod trust_wire;
+// [FABLE-5] sq-lrtc3.3: pattern-scoped (sub-named-graph) result masking — opt-in
+// (`pattern-scope` feature), OFF by default, zero code/deps/cost in the default build.
+// Design record: research/odrl-pattern-scoped-targets-2026-07.md.
+#[cfg(feature = "pattern-scope")]
+pub mod pattern_scope;
 mod rewrite;
 // [FABLE-5] sq-cnuqd (issue #1569): the BOUNDED, SHARDED, `&self`-readable session cache
 // that lets all read-side entry points take `&self` (concurrent `&PodStore` readers). No
@@ -70,6 +75,9 @@ pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
 // `TrustStaticOutcome` is the materialise-time (static/dynamic split, sq-xc4y) result.
 #[cfg(feature = "trust-graph")]
 pub use trust_wire::{TrustAdmissionOutcome, TrustStaticOutcome};
+// [FABLE-5] sq-lrtc3.3: the pattern-scoped masking types (feature-gated).
+#[cfg(feature = "pattern-scope")]
+pub use pattern_scope::{masked_dataset, masked_graph, GraphScope, ScopePattern, ScopedDataset};
 pub use rewrite::{rewrite_for, wrap_for_view};
 // [OPUS-4.8] sq-gq28y (issue #1546): the spec-conformant empty-default + explicit-union
 // read-path rewrite + the spec-minted reserved IRI, per the *Access-Controlled SPARQL Query
