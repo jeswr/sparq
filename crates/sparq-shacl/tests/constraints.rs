@@ -1282,3 +1282,180 @@ fn per_statement_severity_is_occurrence_scoped() {
         "un-annotated occurrence keeps the default Violation"
     );
 }
+
+// ----------------------------------------------------------------------------
+// [FABLE-5] (sq-1jemy) Per-statement overrides on RECURSING components. A
+// `{| sh:message … |}` / `{| sh:severity … |}` on a shape-referencing constraint
+// statement (`sh:node` / `sh:not`) governs the COMPOSITE component's OWN result
+// (the SHACL-1.2 severity precedence keys on the reifier of "the triples
+// containing the parameters of the constraint that caused the result"). Before
+// this fix the nested `conforms()` / `validate_shape()` recursion reset
+// `active_meta` to `None` before the composite arm's `result()` read it, so the
+// override was silently dropped. Conversely, the override does NOT govern the
+// NESTED shape's results (they are caused by the nested shape's own constraint
+// statements) — the reading recorded in research/shacl12-conformance-gap.md §6.
+// ----------------------------------------------------------------------------
+
+/// `{| sh:severity sh:Warning |}` on a `sh:node` statement survives the nested
+/// `conforms()` recursion: the NodeConstraintComponent's own result carries the
+/// override. Term-level route (literal focus, no path ⇒ `ValueNodes::Terms`).
+#[test]
+fn per_statement_severity_override_survives_sh_node_recursion() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "hello" ;
+          sh:node ex:N {| sh:severity sh:Warning |} .
+        ex:N a sh:NodeShape ; sh:nodeKind sh:IRI .
+    "#;
+    let r = run("ex:x ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "NodeConstraintComponent"), 1, "{}", r.to_text());
+    let node_res = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("NodeConstraintComponent"))
+        .expect("node result");
+    assert_eq!(
+        node_res.severity, SH_WARNING,
+        "the sh:node occurrence's severity override must survive the nested \
+         shape evaluation: {}",
+        r.to_text()
+    );
+}
+
+/// The `sh:node` override on the ID-FAST route (pathed property shape ⇒ value
+/// nodes stay dictionary ids and the id-level `Component::Node` arm calls
+/// `conforms_id`). Same invariant as the Term-level twin above.
+#[test]
+fn per_statement_severity_override_survives_sh_node_recursion_idfast() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:property ex:P .
+        ex:P a sh:PropertyShape ; sh:path ex:q ;
+          sh:node ex:N {| sh:severity sh:Warning |} .
+        ex:N a sh:NodeShape ; sh:datatype xsd:integer .
+    "#;
+    // ex:v is an IRI in the data graph (id-resolvable), not an xsd:integer.
+    let r = run("ex:n ex:q ex:v .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "NodeConstraintComponent"), 1, "{}", r.to_text());
+    let node_res = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("NodeConstraintComponent"))
+        .expect("node result");
+    assert_eq!(
+        node_res.severity, SH_WARNING,
+        "the id-level sh:node arm must also see the surviving override: {}",
+        r.to_text()
+    );
+}
+
+/// `{| sh:message … |}` on a `sh:node` statement: the composite result's
+/// message is the per-statement override, not the (absent) shape-level one.
+#[test]
+fn per_statement_message_override_survives_sh_node_recursion() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "hello" ;
+          sh:node ex:N {| sh:message "node override"@en |} .
+        ex:N a sh:NodeShape ; sh:nodeKind sh:IRI .
+    "#;
+    let r = run("ex:x ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    let node_res = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("NodeConstraintComponent"))
+        .expect("node result");
+    let want = Term::Literal(oxrdf::Literal::new_language_tagged_literal_unchecked(
+        "node override",
+        "en",
+    ));
+    assert!(
+        node_res.effective_messages().contains(&want),
+        "the sh:node occurrence's message override must survive the nested \
+         shape evaluation, got {:?}",
+        node_res.effective_messages()
+    );
+}
+
+/// `{| sh:severity sh:Warning |}` on a `sh:not` statement (the other
+/// single-statement recursing composite) survives its `conforms()` recursion.
+#[test]
+fn per_statement_severity_override_survives_sh_not_recursion() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:not ex:N {| sh:severity sh:Warning |} .
+        ex:N a sh:NodeShape ; sh:nodeKind sh:IRI .
+    "#;
+    // ex:n IS an IRI, so it conforms to the negated shape → sh:not fires.
+    let r = run("ex:n ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "NotConstraintComponent"), 1, "{}", r.to_text());
+    let not_res = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("NotConstraintComponent"))
+        .expect("not result");
+    assert_eq!(
+        not_res.severity, SH_WARNING,
+        "the sh:not occurrence's severity override must survive the nested \
+         shape evaluation: {}",
+        r.to_text()
+    );
+}
+
+/// Occurrence scoping still holds around a recursing component: the annotated
+/// `sh:node` result carries the override while an un-annotated SIBLING
+/// constraint evaluated AFTER it keeps the default sh:Violation (the restore
+/// must not bleed the override into later loop iterations).
+#[test]
+fn per_statement_override_on_sh_node_is_occurrence_scoped() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "hello" ;
+          sh:node ex:N {| sh:severity sh:Warning |} ;
+          sh:minLength 99 .
+        ex:N a sh:NodeShape ; sh:nodeKind sh:IRI .
+    "#;
+    let r = run("ex:x ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 2, "{}", r.to_text());
+    let node_res = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("NodeConstraintComponent"))
+        .expect("node result");
+    let ml = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("MinLengthConstraintComponent"))
+        .expect("minLength result");
+    assert_eq!(node_res.severity, SH_WARNING, "annotated sh:node → Warning");
+    assert_eq!(
+        ml.severity, SH_VIOLATION,
+        "un-annotated sibling keeps the default Violation: {}",
+        r.to_text()
+    );
+}
+
+/// A `{| sh:severity |}` on a `sh:property` statement does NOT govern the
+/// NESTED property shape's results: those are caused by the nested shape's own
+/// constraint statements (here its `sh:minCount`), whose reifiers — not the
+/// outer `sh:property` statement's — drive the severity precedence. Deactivation
+/// on `sh:property` (the pre-recursion skip) is covered above; message/severity
+/// on it have no composite result to govern in this implementation.
+#[test]
+fn per_statement_override_on_sh_property_does_not_govern_nested_results() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property ex:P {| sh:severity sh:Warning |} .
+        ex:P a sh:PropertyShape ; sh:path ex:q ; sh:minCount 1 .
+    "#;
+    let r = run("ex:n ex:other ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "MinCountConstraintComponent"), 1, "{}", r.to_text());
+    assert_eq!(
+        r.results[0].severity, SH_VIOLATION,
+        "the nested shape's result keeps the nested shape's own severity — the \
+         outer sh:property annotation must not leak in: {}",
+        r.to_text()
+    );
+}

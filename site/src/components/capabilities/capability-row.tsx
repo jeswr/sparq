@@ -84,6 +84,12 @@ const META: Record<LazyDemoSlug, RowMeta> = {
     readme: `${REPO_URL}/tree/main/crates/sparq-rsp`,
     skill: `${REPO_URL}/blob/main/skills/streaming-rsp/SKILL.md`,
   },
+  federation: {
+    caveat:
+      "Captured-output walkthrough: the federation crates are opt-in native code (never in the wasm bundles), so the selection and plans are the real sparq-fedplan planner's verbatim output over the declared fixture — deterministic estimates, not a live multi-endpoint run and not benchmark numbers.",
+    readme: `${REPO_URL}/tree/main/crates/sparq-fedplan`,
+    skill: `${REPO_URL}/blob/main/skills/federated-planning/SKILL.md`,
+  },
   zk: {
     caveat:
       "Research-grade: the v1 ZK verifier is NOT externally audited — sound as landed under its stated threat model, pending re-review. Indicative engineering, not an audited cryptographic guarantee. Proving runs in-tab via 3rd-party bb.js UltraHonk (the ~MB prover chunk loads only on expand).",

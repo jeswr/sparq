@@ -139,6 +139,13 @@ def _leaky_sbom() -> dict:
     abs_cli = "path+file:///home/runner/work/sparq/sparq/crates/sparq-cli#0.1.0"
     abs_core = "path+file:///home/runner/work/sparq/sparq/crates/sparq-core#0.1.0"
     reg_serde = "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"
+    # [FABLE-5] sq-gg0qq.2 (GS-6): the exact 0.5.9 GIT-dependency shape (sparq-lws-core's
+    # pinned solid-oidc-verifier) — bom-ref carries the rev query + a bare-version fragment,
+    # the purl a vcs_url qualifier. Both must canonicalise; supplier must derive (GS-1).
+    git_sov = (
+        "git+https://github.com/jeswr/solid-oidc-verifier"
+        "?rev=89c896249a726398b78302fd2f65eef0a82af681#0.1.0"
+    )
     return {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
@@ -174,10 +181,22 @@ def _leaky_sbom() -> dict:
                 "bom-ref": reg_serde,
                 "purl": "pkg:cargo/serde@1.0.0",
             },
+            {
+                "type": "library",
+                "name": "solid-oidc-verifier",
+                "version": "0.1.0",
+                "bom-ref": git_sov,
+                "purl": (
+                    "pkg:cargo/solid-oidc-verifier@0.1.0?vcs_url="
+                    "git%2Bhttps://github.com/jeswr/solid-oidc-verifier"
+                    "%4089c896249a726398b78302fd2f65eef0a82af681"
+                ),
+            },
         ],
         "dependencies": [
-            {"ref": abs_cli, "dependsOn": [abs_core, reg_serde]},
+            {"ref": abs_cli, "dependsOn": [abs_core, reg_serde, git_sov]},
             {"ref": abs_core, "dependsOn": [reg_serde]},
+            {"ref": git_sov, "dependsOn": [reg_serde]},
         ],
     }
 
@@ -210,6 +229,27 @@ class TestBomRefNormalization(unittest.TestCase):
         core = next(c for c in self.norm["components"] if c["name"] == "sparq-core")
         self.assertEqual(core["bom-ref"], "pkg:cargo/sparq-core@0.1.0")
 
+    def test_git_dep_bomref_purl_and_supplier(self):
+        # [FABLE-5] sq-gg0qq.2: a git dep canonicalises like everything else (GS-6/GS-7)
+        # and gets the honestly-derivable repository-owner supplier (GS-1).
+        sov = next(
+            c for c in self.norm["components"] if c["name"] == "solid-oidc-verifier"
+        )
+        self.assertEqual(sov["bom-ref"], "pkg:cargo/solid-oidc-verifier@0.1.0")
+        self.assertEqual(sov["purl"], "pkg:cargo/solid-oidc-verifier@0.1.0")
+        self.assertEqual(sov["supplier"]["name"], "Jesse Wright")
+        self.assertEqual(
+            sov["supplier"]["url"],
+            ["https://github.com/jeswr/solid-oidc-verifier"],
+        )
+        # The dependency graph is rewritten in lock-step: the git ref appears canonical
+        # both as an edge source and inside dependsOn.
+        refs = {d["ref"] for d in self.norm["dependencies"]}
+        self.assertIn("pkg:cargo/solid-oidc-verifier@0.1.0", refs)
+        all_depends = [r for d in self.norm["dependencies"] for r in d.get("dependsOn", [])]
+        self.assertIn("pkg:cargo/solid-oidc-verifier@0.1.0", all_depends)
+        self.assertNotIn(True, ["git+" in r for r in _walk_refs(self.norm)])
+
     def test_registry_ref_is_untouched(self):
         # Registry deps are already host-independent and must pass through verbatim.
         serde = next(c for c in self.norm["components"] if c["name"] == "serde")
@@ -230,6 +270,8 @@ class TestBomRefNormalization(unittest.TestCase):
                 [
                     "pkg:cargo/sparq-core@0.1.0",
                     "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+                    # [FABLE-5] sq-gg0qq.2: the git dep, canonicalised in lock-step too.
+                    "pkg:cargo/solid-oidc-verifier@0.1.0",
                 ]
             ),
         )
