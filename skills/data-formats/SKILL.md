@@ -198,6 +198,7 @@ pub struct StageTimings {
 pub fn graph_from_reader_timed<R: BufRead>(reader: R, t: &mut StageTimings) -> Result<Graph, Error>
 
 // WRITE (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
+// CLI: `sparq-cli to-hdt <file> <in-fmt> <out.hdt[.gz|.zst|.bz2]>` (opt-in `hdt-write` feature)
 #[cfg(feature = "write")]
 pub fn save(graph: &Graph, path: impl AsRef<Path>) -> Result<(), Error>
 ```
