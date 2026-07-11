@@ -1709,15 +1709,17 @@ jobs:
     # <pass> …` lines as the same belt-and-braces `>= floor` gate. The runner's own
     # `assert!(pass >= FLOOR)` is the primary gate. Honest baseline: NOT 100%
     # conformant (remote-context / option / negative divergences are documented gaps;
-    # compact is RDF→compacted-JSON-LD via the native Compaction Algorithm gated on a
-    # lossless round-trip; frame is RDF→framed-JSON-LD via the native Framing
-    # Algorithm gated on RDF-equivalence to the normative expected output, each with
-    # its own honest below-floor divergence + skip buckets); expand/flatten are
-    # reported as not-implemented buckets and never fail the gate. Never lower the
-    # ratchet (raise the `FLOOR` const in crates/sparq-conformance/src/floors/<lane>.rs
-    # as oxjsonld + the native writer/compactor/framer improve — [FABLE-5] sq-oy1f.40:
-    # the lib-side single source the runner + scoreboard + the grep gate below all read).
-    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 186, frame >= 61)
+    # compact is the NATIVE document-level Compaction Algorithm (sparq-jsonld) gated
+    # on document equivalence with the W3C EXPECTED output ([FABLE-5] sq-oy1f.27 —
+    # the oracle correction from the old writer self-reparse round-trip); frame is
+    # RDF→framed-JSON-LD via the native Framing Algorithm gated on RDF-equivalence
+    # to the normative expected output, each with its own honest below-floor
+    # divergence + skip buckets. Never lower the ratchet (raise the `FLOOR` const in
+    # crates/sparq-conformance/src/floors/<lane>.rs as the native pipeline improves —
+    # [FABLE-5] sq-oy1f.40: the lib-side single source the runner + scoreboard + the
+    # grep gate below all read; the floors in this job's display name are informative,
+    # the greps below read the real consts).
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 228, frame >= 61)
     # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (jsonld-suite) — skip only
     # when ENFORCED selection proves sparq-conformance unaffected (fail-closed).
     needs: [changes, select]
