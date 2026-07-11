@@ -85,10 +85,11 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
 - **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
   graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
-- **Constant-geometry parse caching** — the registry parses geometry arguments through
-  a small bounded per-thread cache keyed by the exact lexical form, so a constant
-  `FILTER` polygon is parsed once per thread instead of once per row; results are
-  identical to fresh parses and parse failures are never cached (sq-lkrgi).
+- **Constant-geometry parse + prepared-relate caching** — geometry arguments resolve
+  through a small bounded per-thread cache keyed by the exact lexical form: a constant
+  `FILTER` polygon is parsed once per thread, not once per row (sq-lkrgi), and the
+  DE-9IM relations lazily add a `geo::PreparedGeometry` per REUSED operand (sq-hq8t5).
+  Results are byte-identical (differential-tested); parse failures are never cached.
 
 **Distance accuracy.** Metric units measure great-circle distance on the GRS80 mean
 sphere; point↔point and point↔extended geometry are exact haversine (spherical

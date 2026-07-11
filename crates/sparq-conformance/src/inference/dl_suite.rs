@@ -407,12 +407,10 @@ struct Case {
     imports: bool,
 }
 
-/// Run the whole Direct arm over the export text (`tests/w3c/owl2/all.rdf`).
-///
-/// # Errors
-/// Returns `Err` only on an export-level failure (the RDF/XML export itself failed to
-/// parse) — per-case problems are accounted in the report, never dropped.
-pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
+/// Parse the export text (`tests/w3c/owl2/all.rdf`) into the manifest graph — shared by
+/// [`run_direct_arm`] and [`run_render_roundtrip_arm`] so both arms select from the SAME
+/// pinned snapshot. [FABLE-5] sq-pbz04.4.17 (extracted verbatim from `run_direct_arm`).
+fn parse_export(export_text: &str) -> Result<MiniGraph, String> {
     let fixed = fix_doctype_quotes(export_text);
     let parser = oxrdfxml::RdfXmlParser::new()
         .with_base_iri("http://owl.semanticweb.org/exports/all.rdf")
@@ -421,17 +419,25 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
     for t in parser.for_slice(fixed.as_bytes()) {
         triples.push(t.map_err(|e| format!("all.rdf: {}", e))?);
     }
-    let g = MiniGraph { triples };
+    Ok(MiniGraph { triples })
+}
 
+/// Select the DIRECT-arm test cases from the manifest graph — the shared selection both
+/// arms use (DIRECT semantics, not `test:Rejected`, carrying at least one check kind or a
+/// `ProfileIdentificationTest` typing). Returns the selected cases plus the count of
+/// `Rejected`-status cases dropped. [FABLE-5] sq-pbz04.4.17 (extracted verbatim from
+/// `run_direct_arm` so the round-trip arm cannot drift from the L5 selection).
+fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
     // Pre-scan the top-level `owl:NegativePropertyAssertion` nodes for the EXPLICIT-NEGATIVE
     // profile lane (sq-pbz04.4.16). A manifest-level profile negation is an NPA whose
     // `assertionProperty` is `test:profile`, `sourceIndividual` is a TestCase IRI, and
     // `targetIndividual` is one of {EL, QL, RL} — "case X is NOT in profile Y". NPAs embedded
     // in premise/input ontology LITERALS are test DATA (parsed later, per case) and never seen
     // here, so this only picks the manifest metadata. Keyed by the source (case) IRI.
-    let negated_profiles: HashMap<String, Vec<String>> = collect_profile_negations(&g);
+    let negated_profiles: HashMap<String, Vec<String>> = collect_profile_negations(g);
 
-    let mut report = DlReport::default();
+    let mut cases = Vec::new();
+    let mut rejected = 0usize;
     for case_node in g.subjects_with_type(&format!("{}TestCase", T)) {
         let iri_objs = |p: &str| -> Vec<String> {
             g.objects(&case_node, &format!("{}{}", T, p))
@@ -458,7 +464,7 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
         // Proposed / Extracredit / untagged cases RUN, honestly: this is an extension
         // ratchet over what the checker computes, not an Approved-only conformance claim.
         if status.as_deref() == Some("Rejected") {
-            report.rejected_cases += 1;
+            rejected += 1;
             continue;
         }
 
@@ -508,9 +514,189 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
             imports: g.object(&case_node, &format!("{}importedOntology", T)).is_some()
                 || g.object(&case_node, &format!("{}importedOntologyIRI", T)).is_some(),
         };
-        run_case(&case, &mut report);
+        cases.push(case);
+    }
+    (cases, rejected)
+}
+
+/// Run the whole Direct arm over the export text (`tests/w3c/owl2/all.rdf`).
+///
+/// # Errors
+/// Returns `Err` only on an export-level failure (the RDF/XML export itself failed to
+/// parse) — per-case problems are accounted in the report, never dropped.
+pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
+    let g = parse_export(export_text)?;
+    let (cases, rejected) = collect_cases(&g);
+    let mut report = DlReport { rejected_cases: rejected, ..DlReport::default() };
+    for case in &cases {
+        run_case(case, &mut report);
     }
     Ok(report)
+}
+
+// -----------------------------------------------------------------------------------------
+// Render round-trip arm (sq-pbz04.4.17)
+// -----------------------------------------------------------------------------------------
+
+/// Report of the RENDER ROUND-TRIP arm ([`run_render_roundtrip_arm`], sq-pbz04.4.17):
+/// the L1 forward renderer's `extract → render → re-extract` invariant, checked over
+/// every ontology document of the DIRECT-arm corpus (the same case selection as
+/// [`run_direct_arm`]). A belt-and-suspenders completeness check for the renderer's 13
+/// hand-written round-trip tests — purely syntactic (no tableau, no reasoning), so it
+/// carries no verdict semantics: it can only certify that the forward mapping is a
+/// faithful inverse of the reverse mapping ON the fragment L1 actually accepts.
+/// [FABLE-5] 🤖 SPARQ agent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderRoundTripReport {
+    /// Ontology documents examined: each PRESENT premise / input / conclusion /
+    /// non-conclusion RDF/XML literal of each selected DIRECT-arm case counts once
+    /// (documents are per-slot, not de-duplicated by content — the accounting mirrors
+    /// the corpus shape, and the arm is cheap enough not to need dedup).
+    pub documents: usize,
+    /// Documents where L1 extraction SUCCEEDED and the rendered output re-extracted to
+    /// an EQUAL structural model (`Ontology: PartialEq`) — the round-trip invariant.
+    pub round_tripped: usize,
+    /// Documents the L1 extractor refused (out-of-ALCH-fragment / malformed input). The
+    /// render round-trip invariant is scoped to SUCCESSFUL extractions (the `render`
+    /// module contract), so a refusal is out of the invariant's scope here — the
+    /// extraction boundary itself is what the L5 abstention pins already measure.
+    pub extraction_refused: usize,
+    /// Documents whose RDF/XML literal oxrdfxml rejects (the M6 mechanism) — they never
+    /// reach extraction in ANY lane.
+    pub parse_failed: usize,
+    /// Round-trip VIOLATIONS `(document key, diagnostic)`: a successful extraction whose
+    /// rendered output failed to re-extract, re-extracted to a DIFFERENT model, or
+    /// panicked. The gating test asserts this stays EMPTY — a non-empty entry is a REAL
+    /// renderer (or extractor) fidelity bug, never pinnable as acceptable.
+    pub violations: Vec<(String, String)>,
+}
+
+impl RenderRoundTripReport {
+    /// `true` iff every examined document landed in exactly one bucket.
+    #[must_use]
+    pub fn accounting_closed(&self) -> bool {
+        self.documents
+            == self.round_tripped
+                + self.extraction_refused
+                + self.parse_failed
+                + self.violations.len()
+    }
+
+    /// Render the human-readable accounting (counts only — no timings).
+    #[must_use]
+    pub fn render(&self) -> String {
+        use std::fmt::Write;
+        let mut md = String::new();
+        let _ = writeln!(
+            md,
+            "OWL 2 Direct-Semantics arm — L1 render round-trip (scoped ALCH fragment; sq-pbz04.4.17)"
+        );
+        let _ = writeln!(
+            md,
+            "  documents {} — round-tripped {}, extraction-refused {}, parse-failed {}, violations {}",
+            self.documents,
+            self.round_tripped,
+            self.extraction_refused,
+            self.parse_failed,
+            self.violations.len(),
+        );
+        md
+    }
+}
+
+/// Run the L1 render round-trip arm over the export text (`tests/w3c/owl2/all.rdf`):
+/// for every ontology document of every DIRECT-arm case (the [`run_direct_arm`]
+/// selection — DIRECT semantics, not `Rejected`), parse the RDF/XML literal with the
+/// harness convention (ontology header / `owl:imports` edges stripped), run the REAL
+/// `sparq_reason_dl::extract`, and — whenever extraction succeeds — assert the renderer
+/// contract by re-extracting `sparq_reason_dl::render_to_triples`' output and comparing
+/// the structural models for equality. Fresh blank nodes differ; the models must be `==`.
+///
+/// `owl:imports`-using cases are NOT excluded here (unlike the reasoning/profile lanes):
+/// the round-trip invariant is per-DOCUMENT and purely syntactic, so the imports closure
+/// is irrelevant — the literal text is round-tripped as-is.
+///
+/// # Errors
+/// Returns `Err` only on an export-level failure (the RDF/XML export itself failed to
+/// parse) — per-document problems are accounted in the report, never dropped.
+pub fn run_render_roundtrip_arm(export_text: &str) -> Result<RenderRoundTripReport, String> {
+    let g = parse_export(export_text)?;
+    let (cases, _rejected) = collect_cases(&g);
+    let mut report = RenderRoundTripReport::default();
+    for case in &cases {
+        let base = format!("http://owl.semanticweb.org/id/{}", case.ident);
+        for (slot, doc) in [
+            ("premise", &case.premise),
+            ("input", &case.input),
+            ("conclusion", &case.conclusion),
+            ("non-conclusion", &case.nonconclusion),
+        ] {
+            let Some(xml) = doc else {
+                continue;
+            };
+            report.documents += 1;
+            let rows = match parse_ontology(xml, &base) {
+                Ok(rows) => rows,
+                Err(_) => {
+                    report.parse_failed += 1;
+                    continue;
+                }
+            };
+            // catch_unwind defensiveness (the other lanes' convention): a panic anywhere
+            // in extract/render is a violation row, never a torn report.
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let (mut dict, ids) = intern_rows(&rows);
+                let onto1 = match sparq_reason_dl::extract(&dict, &ids) {
+                    Ok(o) => o,
+                    Err(_) => return None,
+                };
+                let rendered = sparq_reason_dl::render_to_triples(&onto1, &mut dict);
+                Some(match sparq_reason_dl::extract(&dict, &rendered) {
+                    Err(e) => Err(format!("rendered output failed re-extraction: {:?}", e)),
+                    Ok(onto2) if onto2 == onto1 => Ok(()),
+                    Ok(onto2) => Err(roundtrip_mismatch_diagnostic(&onto1, &onto2)),
+                })
+            }));
+            let key = format!("owl2-dl/render-roundtrip/{}: {}", slot, case.ident);
+            match outcome {
+                Ok(None) => report.extraction_refused += 1,
+                Ok(Some(Ok(()))) => report.round_tripped += 1,
+                Ok(Some(Err(diag))) => report.violations.push((key, diag)),
+                Err(_) => {
+                    report.violations.push((key, "render round-trip panicked".to_string()));
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Bounded diagnostic for a round-trip model mismatch: the first differing axiom index
+/// plus both models' sizes (positional `format!` args — CodeQL guard).
+fn roundtrip_mismatch_diagnostic(
+    original: &sparq_reason_dl::Ontology,
+    reextracted: &sparq_reason_dl::Ontology,
+) -> String {
+    let first_diff = original
+        .axioms
+        .iter()
+        .zip(reextracted.axioms.iter())
+        .position(|(a, b)| a != b);
+    match first_diff {
+        Some(i) => format!(
+            "re-extracted model diverges at axiom {} (original {} axioms, re-extracted {}): {:?} vs {:?}",
+            i,
+            original.len(),
+            reextracted.len(),
+            original.axioms[i],
+            reextracted.axioms[i]
+        ),
+        None => format!(
+            "re-extracted model is a strict prefix/extension: original {} axioms, re-extracted {}",
+            original.len(),
+            reextracted.len()
+        ),
+    }
 }
 
 /// Collect the manifest-level EXPLICIT-NEGATIVE profile assertions
@@ -1006,6 +1192,65 @@ mod tests {
         let report = run_direct_arm(&fs_only).expect("mini export parses");
         assert_eq!(report.consistency.out_of_scope_total(), 1);
         assert_eq!(report.consistency.pass, 0);
+    }
+
+    // ---- render round-trip arm (sq-pbz04.4.17) -----------------------------------------
+
+    /// Direct unit test of `run_render_roundtrip_arm` over the same mini export the
+    /// Direct-arm end-to-end test uses: 4 documents (three premises + one input); the
+    /// three in-fragment documents round-trip through the REAL
+    /// `extract → render_to_triples → extract` pipeline; the `owl:sameAs` premise is
+    /// refused by L1 — and a refusal is NEVER counted as a round-trip.
+    #[test]
+    fn render_roundtrip_arm_mini_export() {
+        let report = run_render_roundtrip_arm(MINI_EXPORT).expect("mini export parses");
+        assert_eq!(report.documents, 4);
+        assert_eq!(report.round_tripped, 3);
+        assert_eq!(report.extraction_refused, 1);
+        assert_eq!(report.parse_failed, 0);
+        assert!(report.violations.is_empty(), "{:?}", report.violations);
+        assert!(report.accounting_closed());
+        // The counts-only render names the arm and carries every bucket.
+        let md = report.render();
+        assert!(md.contains("render round-trip"));
+        assert!(md.contains("round-tripped 3"));
+        assert!(md.contains("extraction-refused 1"));
+    }
+
+    /// Direct unit test of `RenderRoundTripReport::accounting_closed`: closed for a
+    /// consistent report, open when a bucket is dropped.
+    #[test]
+    fn render_roundtrip_accounting_closed_detects_drops() {
+        let mut report = RenderRoundTripReport {
+            documents: 3,
+            round_tripped: 1,
+            extraction_refused: 1,
+            parse_failed: 0,
+            violations: vec![("k".to_string(), "diag".to_string())],
+        };
+        assert!(report.accounting_closed());
+        report.documents = 4; // one document unaccounted → open
+        assert!(!report.accounting_closed());
+    }
+
+    /// A malformed inline ontology literal (bad XML) lands in `parse_failed`, never in a
+    /// round-trip or refusal bucket.
+    #[test]
+    fn render_roundtrip_bad_literal_is_parse_failed() {
+        let export = MINI_EXPORT.replace(
+            "&lt;rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
+             xmlns:owl=\"http://www.w3.org/2002/07/owl#\" xml:base=\"http://example.org/\"&gt;\
+             &lt;owl:Ontology/&gt;&lt;rdf:Description rdf:about=\"a\"&gt;\
+             &lt;owl:sameAs rdf:resource=\"b\"/&gt;&lt;/rdf:Description&gt;&lt;/rdf:RDF&gt;",
+            "not xml at all",
+        );
+        let report = run_render_roundtrip_arm(&export).expect("mini export parses");
+        assert_eq!(report.documents, 4);
+        assert_eq!(report.parse_failed, 1);
+        assert_eq!(report.extraction_refused, 0);
+        assert_eq!(report.round_tripped, 3);
+        assert!(report.violations.is_empty());
+        assert!(report.accounting_closed());
     }
 
     /// Direct unit test of `collect_profile_negations` (sq-pbz04.4.16): a top-level
