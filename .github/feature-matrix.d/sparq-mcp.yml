@@ -52,3 +52,18 @@
   crate: "sparq-mcp"
   features: "solid"
   test: true
+
+# [FABLE-5] sq-lsp7k.10: the template + full-text-search tool surfaces. `templates`
+# (template_list / template_invoke over sparq-engine's `templates` module — typed
+# fail-closed JSON binding; UPDATE templates behind the same allow_update gate as the raw
+# update tool) and `text` (text_search over sparq-text's BM25 literal index,
+# default-features = false: pure index, no rayon/engine seam). Both surfaces + the
+# tests/templates_text.rs integration suite (`#![cfg(all(feature = "templates",
+# feature = "text"))]`: template invocation result-equivalence, fail-closed arguments,
+# the gated-update posture incl. the hostile-literal scenario, BM25 and/any/prefix search,
+# update-then-search reconcile) are compiled EMPTY by the default build, so this ONE
+# combined leg (they co-enable cleanly and share no cfg divergence) closes the gap.
+- name: "sparq-mcp (templates, text — named-template invocation + BM25 text search tools)"
+  crate: "sparq-mcp"
+  features: "templates,text"
+  test: true

@@ -1,0 +1,98 @@
+{
+  "gather": "rsp-bounded-count-matched-replay (sq-hmd7l.20)",
+  "design_record": "research/comparative-benchmarking-everything.md sec 5.2",
+  "suite": "rsp-throughput",
+  "canonical": false,
+  "canonical_note": "NON-canonical box: counts are deterministic and machine-independent; any timing rows are trend-only until re-gathered on the quiet EC2 reference box.",
+  "git_commit": "d680b2313d3a797c784e271d1ef304b4ffa920cd",
+  "scenario": "srbench_join",
+  "window": {
+    "range": 10,
+    "step": 10,
+    "time_scale": 1000
+  },
+  "replay": {
+    "file": "bench/rsp/replay/srbench.ts.tsv",
+    "sha256": "ce0c237e107e7c31df81bfb8b17a06100e92ae415f677d974bcc468c4f4281b7",
+    "events": 19,
+    "max_ts": 35,
+    "note": "pinned export of the fixed script in crates/sparq-rsp/examples/rsp_oracle.rs; both engines are driven from this file (identical timestamped replay)"
+  },
+  "engines": {
+    "sparq": {
+      "role": "oracle (clock-free deterministic per-window counts, bench/rsp/expected.tsv)",
+      "oracle_mode": "pdict"
+    },
+    "rsp4j-yasper": {
+      "role": "competitor",
+      "engine": "rsp4j-yasper",
+      "version": "1.0.1 (pinned c46e0f674fb740b85543e73d8013196b18763abd, locally built)",
+      "java": "21.0.11",
+      "time_scale": "1000",
+      "heartbeats": "8 dummy <http://ex/heartbeat> graphs at each window boundary + 1, per stream",
+      "consumer_dedup": "set-per-report-ts",
+      "replay_events": "19"
+    }
+  },
+  "policies": {
+    "missing_report_as_zero": true,
+    "leading_partial_windows": "excluded-by-protocol (C-SPARQL SECRET scope opens windows before t0; the oracle window sequence starts at k=0)",
+    "declared_exclusions": {}
+  },
+  "count_match": {
+    "oracle_source": "bench/rsp/expected.tsv (scenario srbench_join)",
+    "windows": {
+      "w0": {
+        "oracle": 3,
+        "competitor": 3,
+        "match": true
+      },
+      "w1": {
+        "oracle": 2,
+        "competitor": 2,
+        "match": true
+      },
+      "w2": {
+        "oracle": 2,
+        "competitor": 2,
+        "match": true
+      },
+      "w3": {
+        "oracle": 0,
+        "competitor": 0,
+        "match": true,
+        "policy": "missing_report_as_zero (an RSTREAM of an empty relation emits no elements)"
+      }
+    },
+    "excluded_windows": {},
+    "extra_competitor_windows": {},
+    "leading_partial_reports": [],
+    "conflicting_reports": [],
+    "all_matched": true,
+    "matched": 4,
+    "mismatched": 0,
+    "excluded": 0
+  },
+  "verdict": "COUNT-MATCHED",
+  "rows": [
+    {
+      "engine": "rsp4j-yasper",
+      "metric": "rsp_replay_push_wall_us",
+      "value": "210260",
+      "unit": "us",
+      "time_model_caveat": true,
+      "time_model_caveat_text": "TIME-MODEL CAVEAT: sparq-rsp is clock-free \u2014 a window closes on the pushed-timestamp watermark, so its output is a pure function of the (triple, ts) replay. RSP4J/YASPER is a service-engine framework with SECRET/C-SPARQL report semantics, driven here in its event-time (TimeImpl) configuration with the identical timestamped replay plus declared boundary heartbeats; a deployed RSP service runs wall-clock windows. Per-window result-count agreement is required before any timing is admitted, and timing remains different in KIND across the two execution models \u2014 never read it as a raw head-to-head. See research/comparative-benchmarking-everything.md sec 5.2."
+    },
+    {
+      "engine": "rsp4j-yasper",
+      "metric": "rsp_replay_push_triples_per_s",
+      "value": "90",
+      "unit": "triples_per_s",
+      "time_model_caveat": true,
+      "time_model_caveat_text": "TIME-MODEL CAVEAT: sparq-rsp is clock-free \u2014 a window closes on the pushed-timestamp watermark, so its output is a pure function of the (triple, ts) replay. RSP4J/YASPER is a service-engine framework with SECRET/C-SPARQL report semantics, driven here in its event-time (TimeImpl) configuration with the identical timestamped replay plus declared boundary heartbeats; a deployed RSP service runs wall-clock windows. Per-window result-count agreement is required before any timing is admitted, and timing remains different in KIND across the two execution models \u2014 never read it as a raw head-to-head. See research/comparative-benchmarking-everything.md sec 5.2."
+    }
+  ],
+  "rows_note": "rows is EMPTY unless every non-excluded window count-matched the oracle; every row carries the machine-attached time-model caveat.",
+  "time_model_caveat": true,
+  "time_model_caveat_text": "TIME-MODEL CAVEAT: sparq-rsp is clock-free \u2014 a window closes on the pushed-timestamp watermark, so its output is a pure function of the (triple, ts) replay. RSP4J/YASPER is a service-engine framework with SECRET/C-SPARQL report semantics, driven here in its event-time (TimeImpl) configuration with the identical timestamped replay plus declared boundary heartbeats; a deployed RSP service runs wall-clock windows. Per-window result-count agreement is required before any timing is admitted, and timing remains different in KIND across the two execution models \u2014 never read it as a raw head-to-head. See research/comparative-benchmarking-everything.md sec 5.2."
+}

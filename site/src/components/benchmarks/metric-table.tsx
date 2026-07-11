@@ -1,7 +1,8 @@
 // [OPUS-4.8] sq-vjn4 — the per-suite metrics table (sparq absolute numbers, smaller is
 // better). Pure presentational; no fabricated competitor columns — same-box competitor
 // numbers are surfaced via the same-box table + the live summary, references separately.
-import { fmtNum, type MetricRow } from "@/data/benchmarks";
+import { fmtNum } from "@/lib/fmt-num";
+import type { MetricRow } from "@/data/benchmarks";
 
 export function MetricTable({ rows }: { rows: MetricRow[] }) {
   return (

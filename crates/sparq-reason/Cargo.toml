@@ -118,6 +118,24 @@ substrate-compare = ["sparq-substrate/compare", "sparq-substrate/numeric"]
 # unchanged. Pulls the substrate `rows` + `join` slices ONLY when enabled — NO new
 # transitive crate (`sparq-core`/`smallvec`/`rustc-hash`/`regex` are already in-tree).
 compiled-rules = ["dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
+# [FABLE-5] sq-6tykl.3 (epic sq-6tykl, RDFox-parity BIG ROCK, Phase 1) — OPT-IN
+# STRATIFIED DATALOG rules: a small native rule dialect (design record
+# research/stratified-datalog-rules.md — the maintainer's open question 4 resolved to a
+# native RDFox-modelled surface) with NOT (negation as failure) and AGGREGATE COUNT
+# atoms plus a minimal exact-numeric FILTER, a stratification CHECKER (programs with a
+# recursion cycle through NOT/AGGREGATE are rejected loudly — the checked replacement
+# for the N3 compiled path's caller-discipline stratification), and a non-incremental
+# per-stratum evaluator. Joins drive the SHARED `sparq-substrate::join` kernels (the
+# compiled-rules posture: NO third join implementation, only a thin layout adapter);
+# FILTER numerics delegate to the shared substrate `numeric` tower. Correctness oracle:
+# the in-module differential suite vs an independent naive substitution evaluator on
+# fixtures + seed-randomised graphs. NON-DEFAULT by design — when off the `datalog`
+# module is cfg'd out entirely (the lean default build carries zero of it; the
+# byte/bundle ratchets are unchanged, and sparq-reason is never in the wasm dependency
+# graph anyway). Pulls the substrate `rows` + `join` slices ONLY when enabled — NO new
+# transitive crate. Semi-naive per-stratum eval, SUM/MIN/MAX/AVG and incremental
+# maintenance are LATER PHASES, beaded from the design record.
+datalog = ["sparq-substrate/rows", "sparq-substrate/join"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

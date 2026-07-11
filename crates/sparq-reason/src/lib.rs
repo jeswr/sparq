@@ -18,6 +18,13 @@ pub(crate) mod substrate_join;
 // gated behind `substrate-join` (same feature, no new dep).
 #[cfg(feature = "substrate-join")]
 mod owl_delta_adj;
+// [FABLE-5] sq-6tykl.3 (epic sq-6tykl) — opt-in STRATIFIED DATALOG rules (RDFox-parity
+// track): a small native rule dialect with NOT (negation as failure) + AGGREGATE
+// (COUNT) atoms, a stratification checker, and a non-incremental per-stratum
+// evaluator on the shared substrate join kernels. Behind the `datalog` feature; when
+// off the whole module is cfg'd out (the lean-core posture, like `compiled-rules`).
+#[cfg(feature = "datalog")]
+pub mod datalog;
 #[cfg(feature = "d-entail")]
 pub mod dtype;
 #[cfg(feature = "explain")]

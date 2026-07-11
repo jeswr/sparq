@@ -13,7 +13,8 @@ import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { LineChart, type ChartPoint } from "@/components/benchmarks/line-chart";
-import { fmtNum, type ScalingFamily } from "@/data/benchmarks";
+import { fmtNum } from "@/lib/fmt-num";
+import type { ScalingFamily } from "@/data/benchmarks";
 
 const CHART_VARS = ["--chart-2", "--chart-4", "--chart-1", "--chart-5", "--chart-3"];
 

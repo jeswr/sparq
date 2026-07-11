@@ -298,6 +298,19 @@ change-stream = ["server", "sparq-serve/change-stream"]
 # already surfaces `governing_acl` / `aclLink` in the decision BODY, so that wiring only needs to
 # lift it into a header.
 solid-authz = ["server", "dep:sparq-solid"]
+# [FABLE-5] (sq-lsp7k.10) `templates` (default OFF): the OPT-IN named-parameterized-template
+# REST surface (`/templates` — list / PUT-GET-DELETE one definition / POST-invoke with typed
+# JSON arguments). A THIN shell over `sparq_engine::templates` (which builds on the #901
+# injection-safe `params` algebra binding): definitions are validated fail-closed at
+# registration, invocations bind typed JSON arguments (fail-closed on unknown/missing/
+# mistyped parameters), a QUERY invocation runs read-gated on the current generation, and an
+# UPDATE invocation is WRITE-gated and executed through the SAME sequenced-writer path as a
+# /sparql update — the gated-update posture is never widened. Even compiled in, the surface
+# is OFF at runtime until `--templates` / `SPARQ_TEMPLATES=1` (the tpf/shacl/terse
+# double-opt-in), and the store is in-memory unless `--templates-file` names a persistence
+# file. Pulls NO new external dependency (sparq-engine is already a dependency; the feature
+# just lights its `templates` module).
+templates = ["server", "sparq-engine/templates"]
 # [SONNET-4.6] (sq-pfae.17) `solid-authz-trust` (default OFF): extends the OPT-IN
 # `POST /authz/decide` endpoint (from `solid-authz`) to accept a stateless trust block —
 # presented credential graphs + a trust policy + signed certification edges IN THE REQUEST

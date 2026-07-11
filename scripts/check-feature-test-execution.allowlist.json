@@ -48,11 +48,6 @@
       "reason": "No feature-matrix leg for sparq-server shacl yet. The shacl feature is off by default. Tracked gap: add a sparq-server (shacl) leg."
     },
     {
-      "crate": "sparq-shacl",
-      "features": ["scs"],
-      "reason": "No feature-matrix leg for sparq-shacl scs (SHACL Compact Syntax). The existing shacl-af leg does not cover scs. Tracked gap: add a sparq-shacl (scs) leg to the fragment."
-    },
-    {
       "crate": "sparq-solid",
       "features": ["trust-graph"],
       "reason": "No feature-matrix leg for sparq-solid trust-graph yet. The trust-graph feature is off by default. Tracked gap: add a sparq-solid (trust-graph) leg."
