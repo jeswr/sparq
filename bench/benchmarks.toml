@@ -1538,20 +1538,20 @@ records_to  = "TBD — bench/competitor-results/<engine>-parse-<UTC>.json (git-i
 featured    = false  # registry stub — no perf claim; implementing bead sq-hmd7l.6 promotes
 status      = "planning"
 
-# [SONNET-4.6] sq-hmd7l.14 — new serialization-throughput harness
+# [FABLE-5] sq-hmd7l.14 — serialization-throughput harness
 [[benchmark]]
 id          = "serialize-bench"
-name        = "Serialization throughput (sparq writers vs oxrdfio / Jena riot / serd)"
+name        = "Serialization throughput (sparq writers vs oxrdfio / Jena riot / serd / rapper)"
 category    = "parse"
-measures    = "MB/s serialize throughput for NT->Turtle, NT->NQuads, NT->RDF/XML round-trips vs serd, rapper, Jena riot, and oxrdfio; triple-count round-trip oracle"
-invoke      = "TBD — implementing bead sq-hmd7l.14"
-source      = "TBD — bench/parse/ (new serialize harness); scripts/bench-adapters/parse_cli_adapter.py"
-dataset     = "TBD — same pinned NT corpus as parse-competitors; sha256-pinned"
-quiet_box_sensitive = true
-pinning     = "TBD — corpus sha256 + competitor pinned version at gather time"
-records_to  = "TBD — bench/competitor-results/<engine>-serialize-<UTC>.json (git-ignored)"
-featured    = false  # registry stub; implementing bead sq-hmd7l.14
-status      = "planning"
+measures    = "two labelled regimes, never cross-compared: (A) sparq in-process serialize-only writer matrix (nt/turtle/turtle-pretty/turtle-stream/trig/trig-stream; min-of-iters, MB/s over output bytes); (C) cross-engine one-process pipeline NT->{Turtle,NT} (min-of-iters process wall; mbps_in over the shared input corpus is the cross-comparable number). Every emitted document is ROUND-TRIP GATED (re-parse == source store: count + exact canonical N-Quads lines) before its timing row is trusted; a red competitor is a recorded outcome (e.g. rapper's Turtle xsd:double->decimal rewrite), only a sparq gate failure reds the panel; a per-run corrupted-document self-check proves the gate non-vacuous"
+invoke      = "bash bench/serialize/run.sh --smoke (sparq-only acceptance) | bash bench/serialize/run.sh (full panel; peers via PATH or SERIALIZE_SERDI/SERIALIZE_RAPPER/SERIALIZE_RIOT; SERIALIZE_OXRDFIO_BIN=auto builds the shim)"
+source      = "bench/serialize/{run.sh,README.md}; crates/sparq-engine-serialize/examples/serialize_bench.rs (public-API runner: gen/bench/pipe/check); scripts/bench-adapters/serialize_oxrdfio_adapter.sh; first read research/gap-serialize-2026-07.md"
+dataset     = "deterministic generated blank-node-free NT corpus (serialize_bench gen, LCG-seeded; SERIALIZE_SUBJECTS, 8 triples/subject; never committed) — exact-match round-trip gating needs bnode-freedom, so the parse-competitors corpus is NOT reused"
+quiet_box_sensitive = true  # timing arms are wall-clock; the round-trip gates are deterministic
+pinning     = "generator seed fixed in-source + SERIALIZE_SUBJECTS recorded in the envelope; competitor versions recorded per run (serdi/rapper/riot --version; oxrdfio shim pin, default = the workspace's own oxrdf/oxttl family); JSON-LD is the jsonld-bench axis; RDF/XML out of scope (no sparq writer / no in-repo re-parse oracle)"
+records_to  = "stdout (PHASE A/B/C lines) + optional SERIALIZE_JSON_OUT envelope, suggest bench/competitor-results/serialize-<UTC>.json (git-ignored)"
+featured    = false  # comparative gather panel; writer correctness itself is CI-gated by the sparq-engine-serialize crate suite
+status      = "active"  # [FABLE-5] sq-hmd7l.14
 
 # [SONNET-4.6] sq-hmd7l.15 — JSON-LD comparison
 [[benchmark]]

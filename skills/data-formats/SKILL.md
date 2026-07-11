@@ -306,6 +306,12 @@ a list cell referenced more than once, carrying an extra predicate, cyclic, or n
 by `rdf:nil` — is left as ordinary `rdf:first`/`rdf:rest` triples, so the round-trip stays
 lossless either way (the empty list `()` stays an `rdf:nil` reference, never `@list`).
 
+**Comparative throughput** for the writer matrix is measured by `bench/serialize/run.sh`
+(registered `serialize-bench`, [FABLE-5] sq-hmd7l.14): sparq's buffered/streaming/pretty
+regimes in-process, plus a cross-engine pipeline panel vs serd/rapper/Jena riot/oxrdfio —
+every emitted document round-trip-gated (re-parse == source store) before its timing row
+is trusted. First-read analysis: `research/gap-serialize-2026-07.md`.
+
 **Pretty Turtle / TriG (idiomatic, deterministic).** Alongside the plain writers, the same
 feature exposes a *pretty* variant — `graph_to_turtle_pretty(&g)` / `graph_to_trig_pretty(&g)`,
 or the lower-level `write_turtle_pretty(triples, &prefixes, &opts)` /
