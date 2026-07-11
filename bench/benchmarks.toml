@@ -710,6 +710,32 @@ records_to  = "stdout (per-suite TSV table + pass/fail/skip summary); exit non-z
 featured    = false
 status      = "ok"
 
+# [FABLE-5] sq-hmd7l.44 (epic sq-hmd7l) — what ODRL enforcement COSTS. The sibling
+# ac-oracle suite (and the bench/ac/live driver) are correctness/decision-agreement; this
+# standalone driver (bench/ac/overhead — its own [workspace], the ONE component that turns
+# the opt-in sparq-solid odrl-bridge/count-enforcement features ON) compares gated vs
+# unguarded query-eval latency, fail-closed on any correctness disagreement while timing.
+[[benchmark]]
+id          = "ac-odrl-overhead"
+name        = "ODRL-gated vs unguarded query-eval overhead (query_as vs plain engine)"
+category    = "inference"
+measures    = "lane A: bridge materialization cost sweep (policy kind × count: permission / permission+prohibition / conditional-recipient / counted); lane B: steady-state per-query latency of PodStore::query_as over an ODRL-materialized <urn:sparq:auth> vs the SAME query unguarded via sparq_engine::query on a data-only twin (permitted subset physically = whole store; result-set EQUALITY asserted per query + stranger anti-vacuity probe, both fail-closed); lane C: refresh_odrl_grants no-op + revocation churn vs ledger size (retraction asserted). U1-U4 acbench resource universes at >=2 scale factors, min+mean of K reps"
+invoke      = "bench/ac/run.sh --overhead --smoke   # runs oracle + live FIRST (fail-closed oracle re-asserted on every gated run), then the overhead lanes; --sf N for the nightly/EC2 tier; direct: cargo run --release -- --smoke [--out FILE] (from bench/ac/overhead/)"
+source      = "bench/ac/overhead/{Cargo.toml,Cargo.lock,src/main.rs,README.md}; bench/ac/run.sh (--overhead lane); crates/sparq-solid (odrl-bridge + count-enforcement, dev-only here — the workspace core stays lean); crates/sparq-acbench (U1-U4 intent tables)"
+dataset     = "seeded deterministic in-crate generators (sparq-acbench U1-U4 intent tables -> per-resource named graphs, 8 triples each) + synthetic sweep pods for lanes A/C. No external corpus, no network"
+quiet_box_sensitive = true  # latency comparison — canonical envelopes are EC2-gated; work-box runs advisory-only (the fail-closed correctness verdict is load-robust)
+pinning     = "GenParams::smoke() (fixed seed 42); res_cap = base × sf so the >=2 scale factors genuinely vary dataset size; policies parsed OUTSIDE timed sections (parse cost is policy-odrl-eval's axis)"
+records_to  = "stdout (per-lane TSV + single-line AC_ODRL_OVERHEAD_JSON envelope incl. the explicit NOT_COMPARABLE competitor verdict) + optional --out FILE (git-ignored; suggest bench/ac/overhead-results/<UTC>.json). NO number committed to markdown"
+# COMPETITOR (sq-hmd7l per-axis mandate): honest NOT-COMPARABLE verdict recorded IN the
+# envelope — CSS enforces WAC/ACP at the HTTP resource level (no ODRL-gated SPARQL query
+# endpoint) and ODRE publishes PDP decision throughput (no query-result filtering); an
+# in-process-vs-HTTP head-to-head would be dishonest in either direction. The HTTP-level
+# same-box lane composes with sq-lrtc3.1 (server ODRL wiring) — follow-up bead sq-12pmx.
+# featured=false: internal overhead harness (the documented G3 escape hatch), not a
+# capability card; dashboard promotion, if ever, deferred to a maintainer.
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
 [[benchmark]]
 id          = "policy-odrl-eval"

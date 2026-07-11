@@ -24,12 +24,19 @@
 # bench/CATALOG.md). The HARD, load-robust contract is the fail-closed exit code.
 # AUTHORIZATION SURFACE: the live driver links sparq-solid + runs real WAC/ACP decisions.
 #
-# Usage: bench/ac/run.sh [--smoke] [--sf N]   (run from anywhere)
-#   --smoke   quick fixed-seed smoke vector (GenParams::smoke) — the CI/per-commit tier.
-#   --sf N    scale factor for a nightly/EC2 tier (default 1 when not --smoke).
+# Usage: bench/ac/run.sh [--smoke] [--sf N] [--overhead]   (run from anywhere)
+#   --smoke     quick fixed-seed smoke vector (GenParams::smoke) — the CI/per-commit tier.
+#   --sf N      scale factor for a nightly/EC2 tier (default 1 when not --smoke).
+#   --overhead  [FABLE-5] sq-hmd7l.44: ALSO run the ac-bench-overhead driver
+#               (bench/ac/overhead): ODRL-gated vs unguarded query-eval overhead lanes
+#               (materialization sweep / steady-state per-query / refresh churn), each
+#               fail-closed on any correctness disagreement while timing. The oracle +
+#               live drivers still run first, so every gated timing run re-asserts the
+#               fail-closed oracle (no correctness regression while timing).
 # Env knobs:
 #   ACBENCH_SMOKE=1    force --smoke even with no argument (per-commit default).
 #   ACBENCH_NO_LIVE=1  skip the live driver (oracle-only run; e.g. offline, no sparq-solid).
+#   ACBENCH_OVERHEAD=1 same as --overhead.
 # stdout: the drivers' per-suite TSV tables (# comment header + one row per lane) plus a
 #         per-suite pass/fail/skip summary. Exit 0 iff every lane agreed (or skipped).
 set -euo pipefail
@@ -40,7 +47,17 @@ LIVE="$ROOT/bench/ac/live"
 cd "$HERE"
 
 # Default to the smoke tier for the per-commit lane; pass-through explicit args otherwise.
-ARGS=("$@")
+# [FABLE-5] sq-hmd7l.44: --overhead is consumed HERE (the oracle/live drivers do not
+# know the flag); the remaining args go to every driver unchanged.
+RUN_OVERHEAD="${ACBENCH_OVERHEAD:-0}"
+ARGS=()
+for a in "$@"; do
+  if [ "$a" = "--overhead" ]; then
+    RUN_OVERHEAD=1
+  else
+    ARGS+=("$a")
+  fi
+done
 if [ ${#ARGS[@]} -eq 0 ] && [ "${ACBENCH_SMOKE:-0}" = "1" ]; then
   ARGS=(--smoke)
 fi
@@ -102,8 +119,40 @@ else
   cd "$HERE"
 fi
 
+# ── Overhead driver (bench/ac/overhead — ODRL-gated vs unguarded, sq-hmd7l.44) ────────
+OVERHEAD_RC=0
+OVERHEAD="$ROOT/bench/ac/overhead"
+if [ "$RUN_OVERHEAD" = "1" ]; then
+  if [ ! -d "$OVERHEAD" ]; then
+    echo "[ac] ERROR: bench/ac/overhead/ not found — overhead lanes requested but missing." >&2
+    OVERHEAD_RC=1
+  else
+    echo "[ac] building the ac-bench-overhead driver (bench/ac/overhead; odrl-bridge ON)…" >&2
+    cd "$OVERHEAD"
+    cargo build --release --locked >/dev/null 2>&1 || {
+      echo "[ac] overhead --locked build failed; retrying without --locked…" >&2
+      cargo build --release >/dev/null 2>&1
+    }
+    OVERHEAD_BIN="$OVERHEAD/target/release/ac-bench-overhead"
+    if [ ! -x "$OVERHEAD_BIN" ]; then
+      echo "[ac] ERROR: ac-bench-overhead binary not found at $OVERHEAD_BIN after build" >&2
+      OVERHEAD_RC=1
+    else
+      echo "[ac] running ODRL-gated vs unguarded overhead lanes (fail-closed while timing)…" >&2
+      "$OVERHEAD_BIN" "${ARGS[@]}"
+      OVERHEAD_RC=$?
+      if [ "$OVERHEAD_RC" -eq 0 ]; then
+        echo "[ac] overhead OK: every timed lane held its correctness gate (fail-closed)." >&2
+      else
+        echo "[ac] overhead FAILED: a correctness gate tripped while timing (rc=$OVERHEAD_RC)." >&2
+      fi
+    fi
+    cd "$HERE"
+  fi
+fi
+
 # ── Aggregate exit code ────────────────────────────────────────────────────────────────
-if [ "$ORACLE_RC" -ne 0 ] || [ "$LIVE_RC" -ne 0 ]; then
+if [ "$ORACLE_RC" -ne 0 ] || [ "$LIVE_RC" -ne 0 ] || [ "$OVERHEAD_RC" -ne 0 ]; then
   exit 1
 fi
 exit 0
