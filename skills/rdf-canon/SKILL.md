@@ -178,6 +178,21 @@ suite](https://github.com/w3c/rdf-canon) — all eval (canonical-output),
 issued-map, and negative (poison-graph) cases, under both SHA-256 and SHA-384 —
 through this crate's own public API. See `crates/sparq-canon/tests/`.
 
+## Comparative panel (bench/canon) — [FABLE-5] sq-hmd7l.16
+
+`bash bench/canon/run.sh --smoke` drives the public API over the vendored W3C
+suite via `crates/sparq-canon/examples/canon_bench.rs` (also a deterministic
+`gen-clique <n>` poison generator) and asserts **byte-identical** canonical
+N-Quads on the non-pathological set, then records poison-graph DoS outcomes
+(`ok`/`guard`/`capped`/`wrong`/`accepted`) under a HARD per-graph wall-clock
+cap. Full mode adds rdf-canonize (JS — the independent implementation; its
+shipped `maxWorkFactor=1` guard fail-closes on 18/64 approved evals, so parity
+runs at its raised `maxWorkFactor=3` posture, both postures recorded on the
+poison panel) and the rdf-canon crate driven directly (at the default matching
+pin that column measures this crate's bridge overhead — sparq-canon delegates
+its algorithm to that same crate). Honesty notes + tunables:
+`bench/canon/README.md`; first-read gap record: `research/gap-canon-2026-07.md`.
+
 ## When NOT to use it
 
 - You only need a *syntactic* serialization (N-Triples/N-Quads as-is): use the
