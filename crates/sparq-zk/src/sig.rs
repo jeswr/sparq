@@ -297,6 +297,28 @@ pub fn verify_commitment_with_scheme(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey(pub Affine<EdwardsConfig>);
 
+impl PublicKey {
+    /// True iff this is a USABLE issuer/binding key: on the Baby-JubJub curve, in
+    /// the prime-order (order-`L`) subgroup, and not the identity.
+    ///
+    /// [OPUS-4.8] sq-l15mi (audit H-1): Baby-JubJub has cofactor 8, so on-curve
+    /// points can have small order (2/4/8). Because [`PublicKey`]'s inner field is
+    /// `pub`, a caller can construct a key around such a torsion point (or an
+    /// off-curve point) DIRECTLY, bypassing `public_key_from_hex`. A torsion issuer
+    /// key breaks Schnorr soundness on the hidden-issuer path — it admits a
+    /// no-secret forgery (the in-circuit `issuer.nr` gadget mirrors this guard as
+    /// `[L]·pk == O`). Every host path that could bind a key into a key-set `K` or a
+    /// circuit witness therefore gates on this predicate; `verify` enforces the same
+    /// on the clear-issuer path. This is exactly ark's
+    /// `is_in_correct_subgroup_assuming_on_curve` (`[MODULUS]·P == 0`), plus the
+    /// on-curve and non-identity guards it assumes.
+    pub fn is_prime_order(&self) -> bool {
+        !self.0.is_zero()
+            && self.0.is_on_curve()
+            && self.0.is_in_correct_subgroup_assuming_on_curve()
+    }
+}
+
 /// An issuer secret key (a Baby-JubJub scalar). Test/issuance-side only — a
 /// relying party never sees it.
 ///
@@ -1115,6 +1137,14 @@ impl PublicKey {
 /// public root.
 // [OPUS-4.8] sq-z9l: key-set Merkle leaf (host mirror of issuer.nr::key_leaf).
 pub fn key_set_leaf(pk: &PublicKey) -> Option<Fr> {
+    // [OPUS-4.8] sq-l15mi (audit H-1): never commit a torsion / low-order /
+    // off-curve key into the key set `K`. `PublicKey`'s inner field is `pub`, so a
+    // key can be constructed around such a point directly (bypassing
+    // `public_key_from_hex`); binding it into `K` would let the hidden-issuer
+    // circuit accept a forgeable torsion key. Fail closed unless prime-order.
+    if !pk.is_prime_order() {
+        return None;
+    }
     let (x, y) = pk.coords()?;
     Some(poseidon2::hash(&[x, y]))
 }
@@ -1172,7 +1202,12 @@ pub struct InCircuitSchnorrWitness {
 /// (the circuit does), it only lays out the witness fields. Callers that want a
 /// sanity check should also call [`verify`].
 pub fn in_circuit_witness(pk: &PublicKey, m: &Fr, sig: &Signature) -> Option<InCircuitSchnorrWitness> {
-    if pk.0.is_zero() {
+    // [OPUS-4.8] sq-l15mi (audit H-1): reject a torsion / low-order / off-curve key
+    // before laying out a circuit witness. The in-circuit `schnorr_verify` now
+    // enforces `[L]·pk == O`, so a torsion-key witness would be unprovable; refuse
+    // to emit it here (fail-closed; subsumes the earlier identity-only `is_zero`
+    // guard). (`R` is checked in-circuit; an honest `R = k·G` is already in-subgroup.)
+    if !pk.is_prime_order() {
         return None;
     }
     let (pk_x, pk_y) = pk.0.xy()?;
@@ -1275,14 +1310,21 @@ pub fn public_key_to_hex(pk: &PublicKey) -> String {
 pub fn public_key_from_hex(s: &str) -> Option<PublicKey> {
     let bytes = from_hex(s)?;
     let pt = Affine::<EdwardsConfig>::deserialize_compressed(&bytes[..]).ok()?;
-    // [OPUS-4.8] codex #3: reject the identity point at parse time (fail-closed).
-    // A signature is universally forgeable for the identity key (e·pk = 0), so an
-    // identity key must never enter a key-set K or an attestation. `verify` also
-    // rejects it defensively, but rejecting here keeps it out of K entirely.
-    if pt.is_zero() {
+    let pk = PublicKey(pt);
+    // [OPUS-4.8] codex #3 + sq-l15mi (audit H-1): fail-closed unless the key is a
+    // genuine prime-order, non-identity, on-curve point. A signature is universally
+    // forgeable for the identity key (e·pk = 0), and a torsion / low-order key
+    // (Baby-JubJub cofactor 8) admits a no-secret forgery on the hidden-issuer path
+    // — neither may ever enter a key-set K or an attestation. ark's
+    // `deserialize_compressed` (`Validate::Yes`) already rejects off-curve AND
+    // non-prime-order-subgroup bytes, so a torsion key cannot reach here via hex
+    // today; this EXPLICIT gate does not rely on that ark default (a future switch
+    // to `deserialize_compressed_unchecked` / `Validate::No` for speed would
+    // silently reintroduce the hole). It subsumes the earlier identity-only reject.
+    if !pk.is_prime_order() {
         return None;
     }
-    Some(PublicKey(pt))
+    Some(pk)
 }
 
 /// Serialize a signature to hex: `compressed(R) ‖ scalar(s)` (each
@@ -1496,6 +1538,65 @@ mod tests {
         assert!(
             public_key_from_hex(&id_hex).is_none(),
             "identity key must not parse into a usable PublicKey"
+        );
+    }
+
+    /// [OPUS-4.8] sq-l15mi (audit H-1): a torsion / low-order Baby-JubJub key
+    /// (cofactor 8) must be rejected at every host boundary a key could enter a
+    /// key-set `K` or a circuit witness through. The order-2 point `(0, -1)` is
+    /// on-curve, non-identity, and NOT in the prime-order subgroup, so it slips past
+    /// the on-curve + identity guards — only the prime-order-subgroup check catches
+    /// it. Before this fix, `key_set_leaf` / `in_circuit_witness` returned `Some`
+    /// for it (a torsion key could be committed into `K`). The paired accept case
+    /// pins that a genuine `sk·G` key is unaffected (non-vacuity in both directions).
+    #[test]
+    fn torsion_key_rejected_from_key_set_and_witness() {
+        use ark_ff::One;
+        // Baby-JubJub order-2 torsion point (0, -1): on-curve, non-identity, NOT in
+        // the prime-order subgroup. Constructed directly (the `pub` inner-field
+        // vector `public_key_from_hex` cannot reach, since ark's Validate::Yes
+        // rejects it at deserialize).
+        let torsion_pt = Affine::<EdwardsConfig>::new_unchecked(Fr::zero(), -Fr::one());
+        assert!(torsion_pt.is_on_curve(), "(0,-1) is on the curve");
+        assert!(!torsion_pt.is_zero(), "(0,-1) is not the identity");
+        assert!(
+            !torsion_pt.is_in_correct_subgroup_assuming_on_curve(),
+            "(0,-1) is an order-2 torsion point, not in the prime-order subgroup"
+        );
+        let torsion = PublicKey(torsion_pt);
+        assert!(!torsion.is_prime_order(), "torsion key must not be prime-order");
+
+        // Soundness gates: a torsion key cannot enter K or a circuit witness.
+        assert!(
+            key_set_leaf(&torsion).is_none(),
+            "torsion key must not commit a key-set leaf"
+        );
+        let c = Fr::from(0xc0ffeeu64);
+        let m = commitment_message(&c);
+        let sig = signature_from_hex(&SecretKey::from_seed(9).sign_commitment(&c))
+            .expect("signature round-trips");
+        assert!(
+            in_circuit_witness(&torsion, &m, &sig).is_none(),
+            "no in-circuit witness may be laid out for a torsion key"
+        );
+        // Boundary: the hex form is fail-closed too (ark Validate::Yes at deserialize
+        // + the explicit is_prime_order gate — belt and suspenders).
+        let torsion_hex = public_key_to_hex(&torsion);
+        assert!(
+            public_key_from_hex(&torsion_hex).is_none(),
+            "torsion key must not parse into a usable PublicKey"
+        );
+
+        // Non-vacuity (accept direction): a genuine prime-order key is unaffected.
+        let good = SecretKey::from_seed(9).public_key();
+        assert!(good.is_prime_order(), "a genuine sk·G key is prime-order");
+        assert!(
+            key_set_leaf(&good).is_some(),
+            "a valid key must still commit a key-set leaf"
+        );
+        assert!(
+            in_circuit_witness(&good, &m, &sig).is_some(),
+            "a valid key must still yield an in-circuit witness"
         );
     }
 
