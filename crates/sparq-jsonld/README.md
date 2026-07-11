@@ -79,9 +79,16 @@ dropped). The `flatten` conformance lane runs the native document oracle. Post-f
 compaction to the `{ "@context": …, "@graph": … }` shape composes the Compaction Algorithm
 (bead `sq-oy1f.27`).
 
-The remaining modules (`compact`, `frame`, `from_rdf`, `to_rdf`, `api`) are documented
-stubs, filled by dependency-ordered follow-on beads. The crate is `publish = false` until
-the pipeline is real.
+Bead `sq-oy1f.28` adds **Serialize RDF as JSON-LD** (`from_rdf::from_rdf`, §8.1): an RDF
+dataset (the crate-local `RdfTerm`/`RdfQuad` model — still zero deps) becomes the expanded
+document, with `rdfDirection` in both modes, `@json` literals (strict parse, `invalid JSON
+literal` on malformed input), `rdf:List` → `@list` reconstruction (nested lists included;
+malformed/shared chains stay plain nodes), and `useNativeTypes`/`useRdfType` via
+`FromRdfOptions`. The `fromRdf` conformance lane runs this native path document-level.
+
+The remaining modules (`compact`, `frame`, `to_rdf`, `api`) are documented stubs, filled
+by dependency-ordered follow-on beads. The crate is `publish = false` until the pipeline
+is real.
 
 ## 📚 Learn more
 

@@ -334,7 +334,12 @@ const LIB_SOURCED_FLOORS: &[&str] = &[
 /// hard-coded duplicate of the number in two source files.
 const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     ("W3C JSON-LD 1.1 toRdf", 413),
-    ("W3C JSON-LD 1.1 fromRdf", 51),
+    // [FABLE-5] sq-oy1f.28 — raised 51 → 52: the lane flipped from the engine-writer
+    // round-trip oracle to the native document-level `sparq_jsonld::from_rdf` (§8.1)
+    // oracle (normative expected-doc comparison + scoped round-trip + REAL negative
+    // error-code assertions). Bumped in the SAME commit as src/floors/from_rdf.rs::FLOOR
+    // and the ci.yml job name (rise-only; side-by-side in src/floors/from_rdf.rs).
+    ("W3C JSON-LD 1.1 fromRdf", 52),
     ("W3C JSON-LD 1.1 compact", 186),
     ("W3C JSON-LD 1.1 frame", 61),
     // [SONNET-4.6] sq-oy1f.45 — raised 259 → 276 (expand() correctness: FsLoader
