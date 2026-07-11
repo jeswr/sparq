@@ -3,9 +3,12 @@
 #
 # Stands up the REAL sparq-server on a loopback port (empty default graph, no
 # auth = writable) and drives its GSP surface through bench/gsp/compare.py:
-# PUT/GET/DELETE round-trips over a resource-size sweep + the PSS LDP-CRUD
-# stream projected onto GSP verbs. The round-trip correctness gate runs BEFORE
-# any timing (compare.py exits non-zero on any gate failure).
+# PUT/GET/DELETE round-trips over a resource-size sweep, the PSS LDP-CRUD
+# stream projected onto GSP verbs, and the PATCH-dialect panel (sq-hmd7l.36:
+# application/sparql-update always; text/n3 Solid N3-Patch when opted in — see
+# GSP_N3_PATCH below). The correctness gates run BEFORE any timing is reported
+# (compare.py exits non-zero on any gate failure; an engine that does not
+# implement a PATCH dialect records an honest n/a row instead).
 #
 # Same lineage/contract as scripts/sparq-server-same-box.sh: bounded waits
 # everywhere, an EXIT trap that always stops the server, non-zero exit = the
@@ -29,6 +32,12 @@
 #   GSP_READY_TIMEOUT   readiness cap, s     (default 60)
 #   GSP_ITERS           timed iters per size (default: compare.py's per-mode default)
 #   GSP_SIZES           CSV byte sizes       (default: compare.py's per-mode default)
+#   GSP_PATCH_OPS       PATCH stream length  (default: compare.py's per-mode default)
+#   GSP_N3_PATCH        1 = enable sparq's OPT-IN text/n3 Solid N3-Patch dialect
+#                       (exports SPARQ_N3_PATCH=1 to the spawned server; the binary
+#                       must be built with `--features n3-patch` — a stock build
+#                       ignores the env var and the text/n3 row honestly reads
+#                       n/a via 415). Default 0: the panel measures a stock build.
 #   GSP_JSON_OUT        JSON results path    (default: none; git-ignored dir suggested:
 #                                             bench/competitor-results/)
 set -euo pipefail
@@ -76,6 +85,13 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+# Opt-in Solid N3-Patch dialect (sq-hmd7l.36): the env route (not --n3-patch)
+# so a stock feature-off binary starts cleanly and its text/n3 row reads n/a.
+if [ "${GSP_N3_PATCH:-0}" = 1 ]; then
+  export SPARQ_N3_PATCH=1
+  log "N3-Patch runtime opt-in requested (needs a --features n3-patch build)"
+fi
+
 log "starting sparq-server on 127.0.0.1:$GSP_PORT (empty graph, GSP writable, max-body-bytes=$GSP_MAX_BODY_BYTES)"
 "$SPARQ_SERVER_BIN" --addr "127.0.0.1:${GSP_PORT}" \
   --max-body-bytes "$GSP_MAX_BODY_BYTES" >"$SRV_LOG" 2>&1 &
@@ -101,6 +117,7 @@ ARGS=( --sparq "http://127.0.0.1:${GSP_PORT}" )
 [ "$SMOKE" = 1 ] && ARGS+=( --smoke )
 [ -n "${GSP_ITERS:-}" ] && ARGS+=( --iters "$GSP_ITERS" )
 [ -n "${GSP_SIZES:-}" ] && ARGS+=( --sizes "$GSP_SIZES" )
+[ -n "${GSP_PATCH_OPS:-}" ] && ARGS+=( --patch-ops "$GSP_PATCH_OPS" )
 [ -n "${GSP_FUSEKI_URL:-}" ] && ARGS+=( --fuseki "$GSP_FUSEKI_URL" )
 [ -n "${GSP_OXIGRAPH_URL:-}" ] && ARGS+=( --oxigraph "$GSP_OXIGRAPH_URL" )
 [ -n "${GSP_CSS_URL:-}" ] && ARGS+=( --css "$GSP_CSS_URL" )
