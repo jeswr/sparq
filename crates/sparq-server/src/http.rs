@@ -699,7 +699,10 @@ pub struct ServerConfig {
     /// `research/sparq-solid-scope.md` §4). FAIL-CLOSED: every error path DENIES. `false` (the
     /// default) leaves all three off: `/authz/*` is `404`.
     ///
-    /// This field exists only with the `solid-authz` cargo feature (like [`tpf`](Self::tpf) under
+    /// This field exists only with the `solid-authz` cargo feature (like `Self::tpf` under
+    // [FABLE-5] sq-lrtc3.1: code span, not an intra-doc link — `tpf` is itself feature-gated, so
+    // the link breaks any `solid-authz`-without-`tpf` rustdoc build (the recurring
+    // feature-gated-intra-doc-link trap; surfaced by the new `odrl-authz` feature state).
     /// `tpf`); a build without that feature compiles no Solid/access-control code and pays zero
     /// cost. Set by the binary's `--solid-authz` flag / `SPARQ_SOLID_AUTHZ=1` env.
     #[cfg(feature = "solid-authz")]
