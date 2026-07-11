@@ -45,3 +45,13 @@
   crate: "sparq-solid"
   features: "legacy-union-default-graph"
   test: true
+
+# [FABLE-5] sq-lrtc3.3: pattern-scoped (sub-named-graph) result masking. The whole
+# surface (src/pattern_scope.rs + tests/pattern_scope.rs, incl. the differential
+# battery vs a physically-reduced oracle store) is `#[cfg(feature = "pattern-scope")]`,
+# so without this leg the masking path NEVER runs in CI. No new dependency (public
+# sparq-core/sparq-engine APIs only) — keeps the opt-in ON path from rotting.
+- name: "sparq-solid (pattern-scope)"
+  crate: "sparq-solid"
+  features: "pattern-scope"
+  test: true
