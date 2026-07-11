@@ -106,7 +106,8 @@ upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 - **Spec** — GeoSPARQL 1.0/1.1; the implemented requirement subset is pinned by
   [`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs).
 - **Benchmark** — `cargo run --release -p sparq-geo --example bench_geo` (no figures
-  baked in here, per the repo's no-hard-coded-performance-numbers rule).
+  baked in here, per the repo's no-hard-coded-performance-numbers rule); its `query`
+  subcommand replays pinned `.rq` files (the Geographica family — `bench/geo/README.md`).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

@@ -83,3 +83,34 @@ a Docker EC2 box (no Docker on the dev box), so they add zero recurring CI cost.
 degree space; an external endpoint must use the same metric (and `geof:distance` semantics) for the
 **count** to agree, and the **count** must agree before any timing is meaningful. PostGIS geodesic vs
 projected distance is a different operation — it is a sub-component lower bound, not a SPARQL peer.
+
+## Geographica real-world family (opt-in) <!-- [FABLE-5] sq-hmd7l.29 -->
+
+`scripts/bench/geo-same-box.sh` grows a SECOND workload family under `GEO_GEOGRAPHICA=1`: the
+**LGD/GeoNames slices of Geographica** (Garbis/Kyzirakos/Koubarakis, ISWC 2013 — the
+reviewer-recognised real-world GeoSPARQL suite).
+
+- **Data** — `geographica.sh`: fetches the upstream tarballs (gather-only, `/tmp/geographica`),
+  verifies **pinned sha256s** (upstream AND the merged corpus — a mismatch fails, never silently
+  benchmarks different data), and **normalises** the Strabon-era `EPSG/4326` lon-lat anchor to bare
+  CRS84 so both engines interpret every literal identically (jena would axis-swap it per the EPSG
+  registry; sparq treats the non-OGC-form IRI as an opaque CRS — divergent either way).
+- **Queries** — `queries-geographica/*.rq`: pinned **COUNT-wrapped** translations of the upstream
+  micro non-topological (`q04`/`q05` buffer), spatial-selection (`q07`–`q17`) and spatial-join
+  (`q19`) queries; each file header records the exact translation deltas. `q15` gets a `.jena.rq`
+  rendering (`spatialF:nearby`) because standard `geof:distance`+`uom:metre` is non-executable on
+  jena 5.4.0 (`research/gap-geo-2026-07.md` §6d). Non-topological queries count `COUNT(?ret)` over a
+  `BIND`, so only rows where the function **evaluated** count — a real function-evaluation oracle.
+- **Oracle** — `queries-geographica/expected-geographica.tsv`: counts **derived by running BOTH
+  engines** on the pinned corpus (exact agreement on every bounded workload at pin time). The family
+  envelope (`geo-geographica-<ts>.json`) withholds a sparq timing unless sparq == expected and a
+  jena timing unless jena == sparq — same counts-before-timing invariant as the base family.
+- **sparq runner** — `bench_geo query <corpus.nt> <query.rq> [iters]` (needs the crate's default
+  `engine` feature): in-process load + `geof:` registry + full SPARQL eval, emitting the same
+  `name\tcount\tus` contract; the COUNT scalar convention matches `http_sparql_adapter.py`.
+- **q19 join** — the ~22k×12k naive cross-product spatial join has **no indexed path on either
+  engine**; at default caps it records honest `ERROR(timeout)` rows on BOTH sides. That absence is
+  the recorded comparative result, not a bug in the harness.
+
+This family is comparison-only (opt-in, no CI cost); the per-commit HARD gate stays `run.sh` +
+`expected.tsv` above, unchanged.
