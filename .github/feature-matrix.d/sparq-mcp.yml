@@ -38,3 +38,17 @@
   crate: "sparq-mcp"
   features: "nlq"
   test: true
+
+# [FABLE-5] sq-u16eq: the opt-in pod-backed MCP surface — LDP resource/container CRUD
+# tools over sparq-solid's `PodStore` per the MCP-Solid proposal draft
+# (site/specs/mcp-solid.typ §6.4/§7.3/§9.3). OFF by default — it pulls in `sparq-solid`
+# + `oxrdf`, so it must not touch the lean default build. This leg builds + tests the
+# feature-ON state — the src/solid.rs unit suite PLUS tests/solid.rs
+# (`#![cfg(feature = "solid")]`: end-to-end tool round-trips through the real JSON-RPC
+# dispatch against a real PodStore with a materialized WAC view, incl. the existence
+# non-disclosure + ACL write-through invariants) — with `clippy --all-targets
+# -D warnings`. The DEFAULT (feature-OFF) build is covered by the workspace lane.
+- name: "sparq-mcp (solid — pod-backed LDP resource/container CRUD tools)"
+  crate: "sparq-mcp"
+  features: "solid"
+  test: true

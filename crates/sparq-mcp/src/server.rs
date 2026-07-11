@@ -295,14 +295,14 @@ impl McpServer {
 }
 
 /// Extract a required string argument or produce a tool-level error message.
-fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+pub(crate) fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("missing required string argument `{}`", key))
 }
 
 /// Wrap a tool's textual output in the MCP `CallToolResult` shape.
-fn tool_text_result(text: String, is_error: bool) -> Value {
+pub(crate) fn tool_text_result(text: String, is_error: bool) -> Value {
     json!({
         "content": [ { "type": "text", "text": text } ],
         "isError": is_error,
@@ -312,7 +312,7 @@ fn tool_text_result(text: String, is_error: bool) -> Value {
 /// Serialize a response, falling back to a hand-built internal-error object if
 /// serialization itself somehow fails (it cannot for our concrete types, but we never
 /// panic on the I/O path).
-fn serialize(resp: &Response) -> String {
+pub(crate) fn serialize(resp: &Response) -> String {
     serde_json::to_string(resp).unwrap_or_else(|_| {
         format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{},\"message\":\"response serialization failed\"}}}}",

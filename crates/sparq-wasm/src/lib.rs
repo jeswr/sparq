@@ -1091,3 +1091,20 @@ mod tests {
         );
     }
 }
+
+// [FABLE-5] sq-586sh (#890 ask A): the opt-in ODRL usage-control PROBE binding —
+// `sparq-policy` compiled to wasm32 behind the non-default `policy` feature, so the
+// lean bundle carries zero policy code. Two EXPERIMENTAL free functions
+// (`policyEvaluate` / `policyConflicts`); the full JS API awaits a maintainer
+// public-contract decision. Declared at the END of the file (not beside the other
+// feature-gated `mod`s above) so a feature-OFF build's `line!()`/`Location` info for
+// everything in this file is unmoved — the lean wasm bundle stays BYTE-identical,
+// not merely size-identical (the cfg-gated-token line-drift trap).
+#[cfg(feature = "policy")]
+mod policy;
+
+// Re-export at the crate root (mirrors `canon`) so the exports are reachable from a
+// headless wasm test and any rlib consumer; `#[wasm_bindgen]` already registers them
+// in the generated JS surface.
+#[cfg(feature = "policy")]
+pub use policy::{policy_conflicts, policy_evaluate};
