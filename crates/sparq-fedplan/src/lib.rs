@@ -169,5 +169,8 @@ pub use stream::{
     blocking_hash_join, run_streaming, SpillStore, StreamJoin, StreamJoinOptions, Tuple,
 };
 // [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning surface.
+// [FABLE-5] sq-s5kd: + LatencyAggregation (per-source vs slowest-arm latency in cost).
 #[cfg(feature = "adaptive-replan")]
-pub use adaptive::{exec_oracle, AdaptiveExecutor, ReplanOutcome, ReplanPolicy, RuntimeStats};
+pub use adaptive::{
+    exec_oracle, AdaptiveExecutor, LatencyAggregation, ReplanOutcome, ReplanPolicy, RuntimeStats,
+};
