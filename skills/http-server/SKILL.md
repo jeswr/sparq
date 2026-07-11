@@ -712,7 +712,13 @@ next seq) — a raw durable cross-service feed (replication / live downstream in
 distinct from the *ephemeral* in-process WebSocket/SSE subscriptions (a disconnect misses every
 change). Same N-Quads same-lineage quad-set diff + fail-closed FNV-1a digest as the backup family
 (no new dependency; no HTTP/async in the library). At-rest encryption + authenticity are out of
-scope, same as the backup family. A `ChangeSink` trait for an external broker (Kafka/NATS) is
+scope, same as the backup family. **Retention/truncation (`sq-n9s4d`)**: `ChangeLog::apply_retention`
+(and the deterministic `apply_retention_at`) drops whole OLD segments — oldest-first, never the
+active segment, never a partial segment — under a `RetentionPolicy` composing a consumer-ack
+watermark (a HARD safety bound: any unacked record keeps its segment), `max_age`, and
+`max_total_bytes` pressure; the default policy is a no-op and nothing is ever dropped implicitly.
+A `poll` from a trimmed-away offset **fails closed** (never a silent skip) — consumers resume from
+`ChangeLog::first_seq`. A `ChangeSink` trait for an external broker (Kafka/NATS) is
 tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
 
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
