@@ -1,6 +1,6 @@
 ---
 name: frontend-design
-description: How sparq designs its TWO distinct frontends — the explanatory marketing-docs WEBSITE (site/, Next.js static export) and the operational desktop GUI (gui/, Tauri 2 + native engine). Covers the methodology that keeps them distinct, scannable, and honest: information architecture + content-reduction (fight "too much text"), explanatory-site patterns (show-don't-tell, progressive disclosure, one killer artifact), operational-GUI patterns (workbench shell, command palette, keyboard-first), the shared visual-design system, and the a11y/perf budget. Use when restructuring site/ navigation or pages, building/extending gui/, deciding whether content belongs on the site vs the GUI vs a SKILL.md, adding a surface, cutting a dense page, or reviewing a frontend PR. Grounded in research/website-redesign.md + research/gui-design.md + the real site/src tree.
+description: 'How sparq designs its TWO distinct frontends — the explanatory marketing-docs WEBSITE (site/, Next.js static export) and the operational desktop GUI (gui/, Tauri 2 + native engine). Covers the methodology that keeps them distinct, scannable, and honest: information architecture + content-reduction (fight "too much text"), explanatory-site patterns (show-don''t-tell, progressive disclosure, one killer artifact), operational-GUI patterns (workbench shell, command palette, keyboard-first), the shared visual-design system, and the a11y/perf budget. Use when restructuring site/ navigation or pages, building/extending gui/, deciding whether content belongs on the site vs the GUI vs a SKILL.md, adding a surface, cutting a dense page, or reviewing a frontend PR. Grounded in research/website-redesign.md + research/gui-design.md + the real site/src tree.'
 ---
 
 # Frontend design (sparq)
@@ -125,6 +125,38 @@ interactive components (ZK prover via `bb.js`/`noir_js` ~MB, MPC sim, geo/vector
 walkthroughs) on one route MUST `next/dynamic`/`React.lazy` each demo so its chunk loads
 **only on expand** — preserving the route-scoping `sidebar-nav.tsx` already enforces for the
 ZK prover. Otherwise the "lighter" gallery is heavier than the pages it replaced.
+
+**Optional code loads on invocation, never on initial load (standing policy).** [GPT-5.6]
+When a site/GUI capability is all three of (1) not already part of the product's core path,
+(2) uncertain-value or rarely used, and (3) bundle-size-increasing, its implementation MUST
+sit behind a literal ESM `import()` split point. Fetch it only from the user action that needs
+it: selecting a compressed format, expanding a demo, opening a specialist tool, or starting a
+prover. A feature flag, conditional render, or top-level static import is insufficient because
+the code still enters the initial bundle. Keep import specifiers literal so the bundler can
+produce deterministic chunks; use `next/dynamic(() => import("literal"), { ssr: false })` for
+React components and `await import("literal")` inside the invocation path for libraries and
+codecs. Native browser APIs and small code already used across the primary shell are not
+optional split candidates.
+
+Before adding a frontend dependency, classify it in the PR: **core/shared** (justify why it
+belongs in the initial bundle) or **optional** (name the invocation boundary and lazy chunk).
+Extend `site/scripts/check-bundle.mjs` and its synthetic-manifest unit test for every new
+optional dependency whose accidental static import would materially regress first load. The
+guard must prove both **presence** as a split point and **isolation** from the guarded route's
+first-load files; an isolation-only check can miss a dependency folded into an entry chunk.
+
+**Current audit (sq-mrrn4).** No retrofit candidate remains in the checked-in website:
+
+- capability demos and the home runner are split with `next/dynamic`;
+- `@aztec/bb.js` and `@noir-lang/noir_js` load only when proving starts;
+- `fzstd` loads only when a user invokes zstd archive decoding;
+- the reason, RSP, and text wasm helpers load route-specific glue at runtime; and
+- `cmdk`, Radix, and the small styling utilities are shared shell UI, while Playwright/Axe is
+  test-only.
+
+Re-run this audit when dependencies or entry points change; do not treat the list as permission
+to make future imports static. `site/scripts/check-bundle.mjs` is the executable guard for the
+known heavy/optional modules.
 
 ---
 
