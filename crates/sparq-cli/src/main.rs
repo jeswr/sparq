@@ -5,6 +5,12 @@
 use std::io::Read;
 use std::time::Instant;
 
+// [FABLE-5] (sq-lsp7k.8) Materializing tabular→RDF import (CSV direct mapping + the R2RML
+// materializing subset over CSV logical tables). The whole module exists only under the
+// opt-in `tabular` feature; the default CLI build carries none of it.
+#[cfg(feature = "tabular")]
+mod tabular;
+
 // T1.0 scaling lever: replace the system allocator (whose per-thread arena locks contend under
 // rayon's many-worker per-row allocation) with mimalloc (sharded, lock-light). Compile-time;
 // `--no-default-features --features mmap` builds with the system allocator for A/B.
@@ -49,6 +55,13 @@ fn main() {
         // `--features hdt-write`.
         #[cfg(feature = "hdt-write")]
         Some("to-hdt") => cmd_to_hdt(&args),
+        // [FABLE-5] (sq-lsp7k.8) `tabular` materializes RDF from CSV — direct mapping by
+        // default, R2RML (CSV logical tables) with `--mapping` — then loads the graph (and
+        // optionally queries it) or streams N-Triples to `--out`. Gated behind the opt-in
+        // `tabular` feature: the default CLI build carries no CSV/R2RML code and the
+        // subcommand is absent.
+        #[cfg(feature = "tabular")]
+        Some("tabular") => tabular::cmd_tabular(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli memstat <data-file> <format> [compressed]  # deterministic memory-composition breakdown (B/triple) + RSS\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)\n\n  env SPARQ_STORE_PROFILE=raw|compressed selects the in-RAM store profile on the shared load path (query/bench/reason/scaling); unset=raw; unknown value is a hard error");
             std::process::exit(2);

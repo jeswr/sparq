@@ -65,6 +65,12 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
   token-saving claim); the structured tools are the no-LLM default.
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update. Neither
   advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
+- **`template_list` / `template_invoke`** *(feature `templates`, OFF by default)* — named
+  parameterized templates (registered on `ServerConfig::templates`) invoked with **typed,
+  fail-closed** JSON arguments through the #901 injection-safe algebra binding; an UPDATE
+  template stays behind the same `allow_update` gate (sq-lsp7k.10).
+- **`text_search`** *(feature `text`, OFF by default)* — BM25 full-text search over the
+  graph's string literals (`sparq-text`; lazily built, incrementally reconciled).
 
 **Pod mode** *(feature `solid`, OFF by default)*: `SolidMcpServer` serves a
 `sparq-solid` `PodStore` (named graph per document, WAC/ACP-authorized, bound to one

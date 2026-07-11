@@ -55,6 +55,21 @@ citations = ["sparq-nlq?/citations"]
 # thin single-graph wrapper. `oxrdf` comes along only for named-graph Term/NamedNode
 # handling (it is already sparq-solid's public-API vocabulary — no new external dep).
 solid = ["dep:sparq-solid", "dep:oxrdf"]
+# [FABLE-5] sq-lsp7k.10: the opt-in NAMED-PARAMETERIZED-TEMPLATE tools (`template_list` +
+# `template_invoke`) over `sparq_engine::templates` (the #901 injection-safe `params`
+# algebra binding underneath). The embedder registers validated templates on
+# `ServerConfig::templates`; an agent then invokes them with typed JSON arguments
+# (fail-closed on unknown/missing/mistyped parameters) instead of writing free-form
+# SPARQL. An UPDATE template stays behind the SAME `allow_update` gate as the raw
+# `update` tool — the template layer never widens write access. OFF by default; pulls no
+# new crate (it just lights sparq-engine's `templates` module).
+templates = ["sparq-engine/templates"]
+# [FABLE-5] sq-lsp7k.10: the opt-in FULL-TEXT-SEARCH tool (`text_search`) over
+# `sparq-text`'s BM25 literal index (built lazily on first use, reconciled incrementally
+# after updates). `default-features = false` on the dep: only the pure index (tokenizer +
+# TextIndex + BM25) compiles — no engine seam, no rayon. OFF by default; in-workspace
+# path dep (no supply-chain delta).
+text = ["dep:sparq-text"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
@@ -70,6 +85,10 @@ sparq-nlq = { path = "../sparq-nlq", version = "0.1.0", optional = true }
 # `solid` feature's LDP resource tools. OPTIONAL — pulled in ONLY by that feature, so the
 # default build never compiles it (in-workspace path dep; no supply-chain delta).
 sparq-solid = { path = "../sparq-solid", version = "0.1.0", optional = true }
+# [FABLE-5] sq-lsp7k.10: the BM25 literal index behind the opt-in `text` feature's
+# `text_search` tool. OPTIONAL + lean (`default-features = false`: pure index only — no
+# engine rewrite seam, no rayon), so the default build never compiles it.
+sparq-text = { path = "../sparq-text", version = "0.1.0", optional = true, default-features = false }
 oxrdf = { workspace = true, optional = true }
 # The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
 # sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.

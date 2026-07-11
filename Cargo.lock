@@ -4744,6 +4744,7 @@ dependencies = [
  "sparq-introspect",
  "sparq-nlq",
  "sparq-solid",
+ "sparq-text",
 ]
 
 [[package]]

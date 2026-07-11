@@ -122,6 +122,18 @@
 //!                             query (the `K:<name>` keyword layer over canonical SPARQL), the server
 //!                             returns the CANONICAL SPARQL it expands to (it never executes it). Off
 //!                             by default                                 [off, env SPARQ_TERSE=1]
+//!   --templates               [FABLE-5 sq-lsp7k.10] (feature `templates`) serve the OPT-IN named
+//!                             parameterized-template REST surface: `GET /templates` lists,
+//!                             `PUT`/`GET`/`DELETE /templates/{name}` manage one definition,
+//!                             `POST /templates/{name}` invokes it with typed JSON arguments
+//!                             (fail-closed on unknown/missing/mistyped parameters). Template
+//!                             writes + UPDATE-template invocations are write-gated through the
+//!                             same sequenced-writer path as /sparql updates. Off by default
+//!                                                                        [off, env SPARQ_TEMPLATES=1]
+//!   --templates-file PATH     [FABLE-5 sq-lsp7k.10] (feature `templates`) durable template store:
+//!                             definitions load from PATH at startup (fail-closed) and every
+//!                             successful PUT/DELETE rewrites it atomically
+//!                                                                        [in-memory, env SPARQ_TEMPLATES_FILE]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -434,6 +446,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (it never executes it). Off by default (env SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             "--terse" => config.terse = true,
+            // [FABLE-5] sq-lsp7k.10: OPT-IN named-parameterized-template REST surface — the
+            // /templates store (list / PUT-GET-DELETE one definition / POST-invoke with typed
+            // JSON arguments). Query invocations are read-gated; template writes and UPDATE
+            // invocations are write-gated through the same sequenced-writer path as /sparql
+            // updates. Off by default (env SPARQ_TEMPLATES=1); --templates-file PATH (env
+            // SPARQ_TEMPLATES_FILE) makes the store durable (fail-closed load at startup).
+            #[cfg(feature = "templates")]
+            "--templates" => config.templates = true,
+            #[cfg(feature = "templates")]
+            "--templates-file" => {
+                let v: String = parse_flag(&mut args, "--templates-file")?;
+                config.templates_file = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+            }
             // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization
             // surface — POST /authz/decide, /authz/wac-allow, /authz/query, a thin HTTP shell over
             // the sparq-solid library authoriser. Fail-closed on every error path. Off by default
@@ -513,6 +538,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [FABLE-5] sq-lsp7k.10: surface the OPT-IN template-surface flags (feature templates).
+                let templates = if cfg!(feature = "templates") {
+                    " [--templates] [--templates-file PATH]"
+                } else {
+                    ""
+                };
                 // [OPUS-4.8] sq-o5bi / sq-ft7u: surface the OPT-IN restore flags (feature backup).
                 let backup = if cfg!(feature = "backup") {
                     " [--restore FILE] [--restore-persist]"
@@ -532,7 +563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{backup}{change_stream} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \

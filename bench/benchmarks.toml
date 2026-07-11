@@ -1771,3 +1771,22 @@ status      = "ok"
 # micro-bench, no head-to-head capability claim — the documented G3/drift-scan
 # escape hatch.
 featured    = false
+
+# [FABLE-5] sq-lsp7k.8 (epic sq-lsp7k): the opt-in `tabular` materializing CSV->RDF import
+# (direct mapping + R2RML subset). Two engine-internal timers: the full one-shot import
+# (map + parallel NT ingest -> Graph) and the mapping stage alone (--out /dev/null).
+[[benchmark]]
+id          = "tabular-import-smoke"
+name        = "CSV->RDF materializing import (tabular direct mapping) perf smoke"
+category    = "ingest"
+measures    = "one-shot import wall time (CLI-internal 'loaded N triples in Xs' line, M/s) + mapping-stage-only time ('wrote N triples'); min-of-N"
+invoke      = "bash bench/tabular/perf-smoke.sh [rows=1000000] [iters=3]"
+source      = "bench/tabular/perf-smoke.sh; crates/sparq-cli/src/tabular.rs"
+dataset     = "SYNTHETIC 4-column CSV generated in-script by awk — deterministic (content is a pure function of the row index, no RNG); 5 triples/row"
+quiet_box_sensitive = true
+pinning     = "pin the row count + iters; deterministic input, so triple counts are exact (rows*5)"
+records_to  = "stdout"
+status      = "ok"
+# Internal throughput smoke for the import path, no head-to-head capability claim yet
+# (competitor CSV-import comparisons belong to the sq-hmd7l comparative program).
+featured    = false
