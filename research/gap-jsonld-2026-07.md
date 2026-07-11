@@ -1,7 +1,7 @@
-<!-- [FABLE-5] sq-hmd7l.15 — per-axis gap record: JSON-LD processing. First-read
-throughput below is from a shared WORK BOX and is NON-canonical by construction;
-the canonical wave re-run (quiet EC2 box) supersedes §3 when it lands. Conformance
-numbers ARE deterministic (suite-pinned) and are canonical for the cited pins. -->
+<!-- [FABLE-5] sq-hmd7l.15 — per-axis gap record: JSON-LD processing. Throughput
+results are NEVER hard-coded here (repo rule: no perf numbers in markdown) — they
+live in git-ignored generated envelopes (§3). Conformance counts ARE deterministic
+(suite-pinned) and are canonical for the cited pins. -->
 
 # Gap record — JSON-LD (2026-07)
 
@@ -47,32 +47,33 @@ are recorded exclusions, never silent drops. Fixtures: WebDataCommons-shaped
 schema.org docs + a ~100-term context-heavy doc (`bench/jsonld/fixtures/`, synthetic —
 real WDC snippets are not license-clean to vendor).
 
-## 3. First read — 2026-07-11, WORK BOX (NON-canonical; ratios only, µs omitted)
+## 3. Throughput results — generated envelopes only (no numbers in this record)
 
-All 36 (engine × fixture × op) rows passed the equality gate. Directional read:
+Per the repo rule (AGENTS.md: no hard-coded performance numbers in markdown),
+throughput figures are NOT reproduced here. To (re)produce them:
 
-| Fixture | op | sparq vs jsonld.js | sparq vs Titanium |
-|---|---|---|---|
-| wdc-product | expand / flatten / toRdf | ~2.4–4.9× faster | ~12–15× faster |
-| people-graph | expand / flatten / toRdf | ~4.3–4.6× faster | ~15–25× faster |
-| context-heavy | **expand** | **~5× SLOWER** | ~1.2× faster |
-| context-heavy | **flatten** | **~3× SLOWER** | **~0.7× (slower)** |
-| context-heavy | toRdf | ~2× faster | ~8× faster |
-| all | compact³ | ~1–3× faster | ~3–12× faster |
+1. `bench/jsonld/run.sh --gather` — gathers peers (never committed), runs every
+   (engine × fixture × op) cell through the §2 equality gate, then times it.
+2. Envelopes land in **`bench/competitor-results/`** (git-ignored, regenerable)
+   with environment metadata (box class, CPU, pins, date) on every row; equality-gate
+   exclusions are recorded there, never silently dropped.
+3. Work-box runs are NON-canonical by construction — only the epic's canonical
+   quiet-EC2 wave produces citable numbers.
 
-³ compact compares DIFFERENT pipelines at the same task (sparq: toRdf + RDF-writer
+Note: compact compares DIFFERENT pipelines at the same task (sparq: toRdf + RDF-writer
 compaction; peers: document-level Compaction Algorithm) — the envelope carries this
 caveat on every row.
 
-**GAP (per the performance-dominance mandate):** the context-heavy fixture inverts
-the result — sparq's native `expand`/`flatten` fall behind jsonld.js (and flatten
-behind Titanium) when the inline `@context` carries ~100 term definitions. Working
+**GAP (per the performance-dominance mandate):** the first (non-canonical, work-box)
+read showed a direction inversion on the context-heavy fixture — sparq's native
+`expand`/`flatten` fell behind jsonld.js (and flatten behind Titanium) when the
+inline `@context` carries ~100 term definitions, while sparq led on the other
+fixture/op cells. Magnitudes live in the generated envelopes, not here. Working
 hypothesis (UNVERIFIED — profiling first): per-document Context Processing cost
 (term-definition creation / `ActiveContext` cloning) dominates and is not amortised,
 where jsonld.js caches processed contexts. Fix bead: `sq-hmd7l.42` (P2,
-profiling-first). Everywhere else sparq leads on this first read, but the mandate's
-bar is order(s)-of-magnitude on EVERY axis — canonical quiet-box re-run required
-before any claim.
+profiling-first). The mandate's bar is order(s)-of-magnitude on EVERY axis —
+canonical quiet-box re-run required before any claim either way.
 
 ## 4. Not measured yet (deferred, beaded)
 
