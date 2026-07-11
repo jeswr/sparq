@@ -1664,14 +1664,14 @@ id          = "reason-el-real"
 name        = "OWL 2 EL classification on real ontologies (GO / OpenGALEN) vs ELK"
 category    = "inference"
 measures    = "EL classification wall time + subsumption count on the Gene Ontology (GO) and OpenGALEN ontologies vs ELK; subsumption-count oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.8"
-source      = "TBD — bench/reason-el-real/; scripts/bench-adapters/ (ELK adapter)"
-dataset     = "TBD — Gene Ontology OWL release (sha256-pinned) + OpenGALEN OWL (sha256-pinned); downloaded at gather time"
+invoke      = "ONLY=sparq bash scripts/bench/reason-el-same-box.sh --smoke   # hermetic acceptance (pinned vendored fixture). Full gather: bash scripts/bench/reason-el-same-box.sh"
+source      = "scripts/bench/reason-el-same-box.sh (harness); crates/sparq-reason-el/examples/reason_el_real_bench.rs (sparq leg + smoke); crates/sparq-reason-el/examples/data/el_smoke.ttl (vendored fixture); ELK invoked via its standalone CLI jar (gather-only /tmp)"
+dataset     = "Gene Ontology (go-basic.owl, CC-BY-4.0) + OpenGALEN 8 (OWL); sha256 recorded per envelope at gather time; converted OWL->NT via Jena riot. gather-only /tmp, NOT committed"
 quiet_box_sensitive = true
-pinning     = "TBD — GO + OpenGALEN release SHA or URL + sha256; ELK jar pinned version"
-records_to  = "TBD — bench/competitor-results/elk-reason-el-<UTC>.json (git-ignored); research/gap-reason-el-2026-07.md"
-featured    = false  # registry stub; implementing bead sq-hmd7l.8
-status      = "planning"
+pinning     = "ontology_sha256 recorded per gather envelope; ELK_VERSION (default 0.6.0) + JENA_VERSION (default 5.4.0) pinned in the harness; the committed smoke fixture pins a subsumption COUNT (not a timing)"
+records_to  = "bench/competitor-results/ (git-ignored envelopes: reason-el-<ontology>-<UTC>.json); research/gap-reason-el-2026-07.md"
+featured    = false  # opt-in reasoner crate; non-canonical until a quiet-box gather
+status      = "harness-ready"
 
 # [SONNET-4.6] sq-hmd7l.9 — QL rewriting vs Ontop on NPD + Requiem suites
 [[benchmark]]

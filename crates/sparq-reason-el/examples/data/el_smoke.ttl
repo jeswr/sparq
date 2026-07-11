@@ -1,0 +1,31 @@
+# [FABLE-5] sq-hmd7l.8 — small VENDORED OWL 2 EL smoke ontology for the real-ontology
+# classification bench (crates/sparq-reason-el/examples/reason_el_real_bench.rs).
+#
+# This is a hand-built, hermetic EL+⊥ fixture (NOT a slice of GO/OpenGALEN — those are
+# large, fetched gather-only by scripts/bench/reason-el-same-box.sh and are NOT committed
+# per AGENTS.md). It is shaped like a biomedical anatomy/finding sub-hierarchy so the
+# example exercises the SAME classification path the real gather drives, but with a
+# closed-form, hand-verified subsumption count that can be PINNED as an oracle in CI.
+#
+# It deliberately includes a CR4 existential derivation that OWL 2 RL CANNOT reach
+# (Neuron ⊑ NucleatedCell, derived only through ∃hasPart.Nucleus), so the pinned count is
+# NON-VACUOUS: disabling the consequence-based rules would drop the count and fail loudly.
+# Uses only is-a + role-EQUALITY existentials (no property chains / transitivity), so the
+# complete closure is identical with or without the `rbox` feature — the pinned assertion
+# holds in BOTH feature states.
+
+@prefix :    <http://sparq.dev/bench/reason-el/smoke#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# --- A. is-a taxonomy ---------------------------------------------------------------------
+:Cell          rdfs:subClassOf :AnatomicalEntity .
+:Neuron        rdfs:subClassOf :Cell .
+:CellComponent rdfs:subClassOf :AnatomicalEntity .
+:Nucleus       rdfs:subClassOf :CellComponent .
+:NucleatedCell rdfs:subClassOf :Cell .
+
+# --- B. existential (CR4) — the RL-unreachable subsumption --------------------------------
+# Neuron ⊑ ∃hasPart.Nucleus ,  ∃hasPart.Nucleus ⊑ NucleatedCell   ⊨   Neuron ⊑ NucleatedCell
+:Neuron rdfs:subClassOf [ owl:onProperty :hasPart ; owl:someValuesFrom :Nucleus ] .
+[ owl:onProperty :hasPart ; owl:someValuesFrom :Nucleus ] rdfs:subClassOf :NucleatedCell .
