@@ -660,12 +660,19 @@ cargo build -p sparq-cli --features serialize-rdf
   container round-trips became lossless), with the rest still below the floor (scoped/typed
   contexts, `@nest`, `@index`/`@id` map shapes the writer does not emit) and several SKIPPED
   (negatives sparq's TOTAL compaction does not raise; JSON-LD-1.0-only; non-inline/remote
-  `@context`; empty-RDF inputs). The **frame** lane (over the separate framing suite) gates the
-  89 positive `jld:FrameTest` cases; below-floor cases are genuine framer divergences (value-pattern
-  matching over `@value` alternative arrays, `@explicit`/`@default` fill differences, named-graph
-  `@graph` framing shapes, `@list`/`@set` re-emit) tracked for a future RISE, and the 3
-  NegativeEvaluationTests are SKIPPED (sparq's framer is TOTAL — it never raises the spec's
-  frame-validation errors, so it cannot honestly "pass" by rejecting). The compact/frame oracle
+  `@context`; empty-RDF inputs). The **frame** lane (over the separate framing suite) moved to the
+  **native `sparq-jsonld` document-level framer** (`sparq_jsonld::frame::frame()`, sq-oy1f.29 —
+  frame matching over the expanded document + node map: value patterns over `@value` alternative
+  arrays, `@explicit`/`@default` fill, named-graph `@graph` framing, `@list` re-emit, blank-node
+  `@embed` with 1.1 pruning, `omitGraph`/`frameDefault`, and the framing error codes). It holds a
+  FULL score at the pinned suite revision under the normative document oracle (`json_ld_equal`
+  against the suite's expected document), the 3 NegativeEvaluationTests now RUN (pass iff
+  `frame()` raises the manifest's exact `expectErrorCode`: `invalid frame`,
+  `invalid @embed value`), and the old-oracle→new-oracle re-pin (61/92 RDF-answer-equivalence →
+  92/92 document oracle) is documented side-by-side in the lib-side floor
+  (`sparq-conformance/src/floors/frame.rs`, rise-only after). The engine's RDF-first
+  `graph_to_jsonld_framed` writer above remains the engine emit path until the serialize-cutover
+  bead (sq-oy1f.41). The compact oracle
   is oxjsonld self-reparse, so the `@reverse` double-inversion / non-string-language interop gap
   documented above (the compaction interop caveat) is NOT caught by it and is tracked separately.
   The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket and

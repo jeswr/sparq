@@ -346,7 +346,12 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     // src/floors/compact.rs for the side-by-side). Bumped in the SAME commit as the
     // lib const (rise-only).
     ("W3C JSON-LD 1.1 compact", 228),
-    ("W3C JSON-LD 1.1 frame", 61),
+    // [FABLE-5] sq-oy1f.29 — raised 61 → 92: the frame lane moved from the RDF-first
+    // framer (`graph_to_jsonld_framed`) to the NATIVE Framing pipeline compared against
+    // the W3C EXPECTED document under the stronger normative oracle (see
+    // src/floors/frame.rs for the side-by-side). Bumped in the SAME commit as the lib
+    // const src/floors/frame.rs::FLOOR and the ci.yml grep gate (rise-only).
+    ("W3C JSON-LD 1.1 frame", 92),
     // [SONNET-4.6] sq-oy1f.45 — raised 259 → 276 (expand() correctness: FsLoader
     // wiring + @id-null retention + IRI-colon scheme check + @nest scoped ctx
     // propagation + @reverse @index + 1.0-mode round-trip guard). Bumped in the

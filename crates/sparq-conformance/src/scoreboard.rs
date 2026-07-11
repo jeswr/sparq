@@ -155,10 +155,11 @@ pub struct Suite {
 ///   `FLOOR = 228` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
 ///   sq-oy1f.27's oracle correction to the native document-level Compaction
 ///   Algorithm vs the W3C EXPECTED document; opt-in `jsonld-suite` feature).
-/// * JSON-LD frame 61 — `sparq-conformance` `src/floors/frame.rs`
-///   `FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
-///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
-///   suite, compared by re-parse RDF-equivalence to the normative expected output).
+/// * JSON-LD frame 92 — `sparq-conformance` `src/floors/frame.rs`
+///   `FLOOR = 92` (sq-oy1f.19; RE-PINNED 61→92 by sq-oy1f.29 flipping the lane from
+///   the RDF-first framer to the NATIVE document-level Framing Algorithm compared to
+///   the W3C EXPECTED document with `json_ld_equal` (negatives RUN, not skipped);
+///   opt-in `jsonld-suite` feature; over the SEPARATE w3c/json-ld-framing suite).
 /// * JSON-LD expand 259 — `sparq-conformance` `src/floors/expand.rs`
 ///   `FLOOR = 259` (sq-oy1f.37 expand() correctness raise from 240; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
