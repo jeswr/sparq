@@ -932,45 +932,41 @@
     },
     {
       "id": "oxigraph-wasm",
-      "name": "Oxigraph npm WASM (@oxigraph/oxigraph)",
+      "name": "Oxigraph npm WASM (oxigraph)",
       "kind": "js-lib",
-      "role": "[SONNET-4.6 sq-hmd7l.1] @oxigraph/oxigraph is the official npm WASM package for Oxigraph (compiled from the same Oxigraph codebase). The wasm-compare suite compares sparq's WASM bundle size (deterministic bytes) vs @oxigraph/oxigraph, and in-browser latency when available. MIT -> numbers are publishable. The primary WASM peer.",
-      "pinned_version": "@oxigraph/oxigraph (npm; pin the exact npm version at gather time)",
-      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
-      "install_recipe": "`npm install @oxigraph/oxigraph` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/wasm_compare_adapter.mjs --engine oxigraph-wasm --input <data.nt> --query <q.rq>; measure WASM bundle bytes (deterministic) + in-process query time. Cross-check result count before trusting timing.",
+      "role": "[FABLE-5 sq-hmd7l.17, correcting the sq-hmd7l.1 stub] `oxigraph` (UNSCOPED — the stub's `@oxigraph/oxigraph` name does not exist on npm) is the official npm WASM package for Oxigraph, shipping web (web.js/web_bg.wasm) and Node (node.js/node_bg.wasm) wasm-bindgen builds compiled from the same Oxigraph codebase. The wasm-compare suite compares sparq's shipped WASM bundle bytes (deterministic) vs the pinned npm artifact, plus in-browser (headless Chromium) and Node latency on the shared oracle-checked workload. MIT -> numbers are publishable. The primary WASM peer.",
+      "pinned_version": "oxigraph 0.5.9 (npm; pinned at the first gather run, sq-hmd7l.17 — tarball sha256 f1f449efd747a7355840bc78bddfda10d1a859d22949153eee6a37c814bbbb99)",
+      "version_source": "the resolved npm version in bench/wasm-compare/browser/node_modules (latency) / the `npm pack oxigraph@<pin>` tarball (bundle bytes), recorded in the results envelope",
+      "install_recipe": "`npm install --no-save oxigraph@0.5.9` in bench/wasm-compare/browser/ at gather time. gather-only — NOT a committed dependency (the bundle stage needs no install: it `npm pack`s the pinned tarball into a scratch dir).",
+      "run_recipe": "bash bench/wasm-compare/run.sh --bundle-only (deterministic bundle bytes); node bench/wasm-compare/browser/compare.mjs --runtime node,chromium --lib sparq,oxigraph (latency; per-query expected-row-count oracle + cross-library agreement check gate every timing row).",
       "comparable_suites": [
         {
           "sparq_suite": "wasm-compare",
-          "note": "WASM bundle bytes (deterministic, no quiet-box requirement) vs sparq's @jeswr/sparq WASM bundle; also in-process query time. Bundle-bytes comparison is load-robust (quiet_box_sensitive = false for size); query time is advisory (quiet-box)"
+          "note": "WASM bundle bytes (deterministic, no quiet-box requirement) vs sparq's @jeswr/sparq shipped bundle; also Node + in-browser query latency. Bundle-bytes comparison is load-robust (quiet_box_sensitive = false for size); latency is advisory (quiet-box). CAVEAT: bundle comparison is shipped-artifact vs shipped-artifact — each engine's default published feature set, not an equalized feature matrix."
         }
       ],
-      "version_env_metadata": "gather records the resolved @oxigraph/oxigraph npm version, node --version, the WASM bundle byte count, and the host env block",
+      "version_env_metadata": "gather records the resolved oxigraph npm version + tarball sha256, node --version (and the Playwright chromium version for browser rows), and the host env block",
       "quiet_box_sensitive": true,
-      "dashboard_engine_id": "oxigraph-wasm",
-      "unverified_pin": true,
-      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+      "dashboard_engine_id": "oxigraph-wasm"
     },
     {
       "id": "n3js-quadstore",
       "name": "N3.js + quadstore (JavaScript RDF)",
       "kind": "js-lib",
-      "role": "[SONNET-4.6 sq-hmd7l.1] N3.js is the reference JavaScript Turtle/N-Triples parser (digitalbazaar/RDF-ext); quadstore is a persistable RDF quad store on top of LevelDB (jacoscaz/quadstore). Together they form the primary JavaScript RDF stack that the WASM comparison is most relevant to. MIT -> numbers are publishable. The JS-RDF-stack peer for the WASM latency comparison.",
-      "pinned_version": "n3 + quadstore (npm; pin exact versions at gather time)",
-      "version_source": "the resolved npm versions (n3 + quadstore) in the gather box's node_modules, recorded in the results file",
-      "install_recipe": "`npm install n3 quadstore classic-level` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/wasm_compare_adapter.mjs --engine n3-quadstore --input <data.nt> --query <q.rq>; SPARQL via the sparqljs-based query path over quadstore. Cross-check result count before trusting timing.",
+      "role": "[FABLE-5 sq-hmd7l.17, correcting the sq-hmd7l.1 stub attribution] N3.js is the reference JavaScript Turtle/N-Triples parser (rdfjs/N3.js — not digitalbazaar as the stub said); quadstore is a persistable RDF quad store over an abstract-level backend (jacoscaz/quadstore), with SPARQL via quadstore-comunica (the Comunica engine bound to quadstore). Together they form the primary pure-JavaScript RDF stack that the WASM comparison is most relevant to. MIT -> numbers are publishable. The JS-RDF-stack peer for the WASM latency comparison.",
+      "pinned_version": "n3 2.1.1 + quadstore 15.4.1 + quadstore-comunica 6.3.1 + memory-level 3.1.0 (npm; pinned at the first gather run, sq-hmd7l.17)",
+      "version_source": "the resolved npm versions in bench/wasm-compare/browser/node_modules, recorded in the results envelope",
+      "install_recipe": "`npm install --no-save n3@2.1.1 quadstore@15.4.1 quadstore-comunica@6.3.1 memory-level@3.1.0` in bench/wasm-compare/browser/ at gather time. gather-only — NOT a committed dependency. memory-level (in-memory backend) rather than classic-level (on-disk LevelDB) so the stack is not charged disk I/O the in-memory wasm engines do not pay.",
+      "run_recipe": "node bench/wasm-compare/browser/compare.mjs --runtime node --lib n3js-quadstore (SPARQL via quadstore-comunica, the Comunica engine over quadstore; per-query expected-row-count oracle + cross-library agreement check gate every timing row). Node runtime ONLY: browser use of the quadstore stack needs a bundler — compare.mjs skips it in chromium WITH NOTICE.",
       "comparable_suites": [
         {
           "sparq_suite": "wasm-compare",
-          "note": "JS-stack query latency vs sparq WASM: N3.js + quadstore + sparqljs in the same Node.js runtime. CAVEAT: quadstore's SPARQL support is partial; scope to the query subset all engines support and label clearly"
+          "note": "JS-stack query latency vs sparq WASM: N3.js parse + quadstore(memory-level) put + quadstore-comunica SPARQL in the same Node.js runtime. All five harness query shapes pass the row-count oracle at 15.4.1/6.3.1 (full Comunica SPARQL 1.1, superseding the stub's partial-support caveat)."
         }
       ],
-      "version_env_metadata": "gather records the resolved n3 + quadstore npm versions, node --version, and the host env block",
+      "version_env_metadata": "gather records the resolved n3/quadstore/quadstore-comunica/memory-level npm versions, node --version, and the host env block",
       "quiet_box_sensitive": true,
-      "dashboard_engine_id": "n3js-quadstore",
-      "unverified_pin": true,
-      "honesty_caveat": "npm versions are unverified and TBD; to be pinned to real npm versions at the first gather run."
+      "dashboard_engine_id": "n3js-quadstore"
     },
     {
       "id": "css-gsp",

@@ -258,7 +258,7 @@ Notes on a few that need care:
   opt-in via `SAMEAS_TIERS` for EC2/nightly. CI emits
   `sameas_size<N>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it as
   a scaling suite (size axis).
-- **`wasm-compare` has a BROWSER half (implemented) and a competitor half (stub).**
+- **`wasm-compare` has a BROWSER half and a COMPETITOR half (both implemented).**
   [`bench/wasm-compare/browser/`](./wasm-compare/browser/README.md) (sq-3ul2n.1, the Tier-0
   measurement gate of the browser-WASM program `research/browser-wasm-perf-assessment-2026-07.md`)
   drives the SHIPPED `@jeswr/sparq` bundle through headless Chromium/Firefox/WebKit (Playwright,
@@ -268,7 +268,13 @@ Notes on a few that need care:
   and the ask→count→string→parse→chunks→wrapper boundary-marshalling ladder). Advisory
   envelopes only (`results/`, git-ignored; the cross-engine row-count oracle is the sole hard
   check; browsers that cannot launch skip-with-notice); deliberately NO CI lane. The
-  oxigraph-npm/n3js comparison half (sq-hmd7l.17) CONSUMES this harness.
+  competitor half (sq-hmd7l.17, [`bench/wasm-compare/`](./wasm-compare/README.md)) CONSUMES
+  this harness: `run.sh --bundle-only` is the DETERMINISTIC shipped-bundle-bytes comparison
+  vs the pinned `oxigraph` npm artifact (the one canonical wasm-compare metric), and
+  `browser/compare.mjs` layers the oxigraph-npm + N3.js/quadstore latency columns onto the
+  same oracle-checked workload in Node + headless Chromium (gather-only installs; per-query
+  row-count oracle + cross-library agreement gate every timing row). First-read gap record:
+  `research/gap-wasm-2026-07.md`.
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
