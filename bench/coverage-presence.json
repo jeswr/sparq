@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "[OPUS-4.8] TEST-PRESENCE gate (sq-hbg7). Per-crate FLOOR on the number of #[test]/#[tokio::test]/#[rstest] functions + whether the crate keeps its tests/ integration dir. Catches a whole crate losing its tests \u2014 which the line-% ratchet (bench/coverage-floor.json) can miss (esp. the subprocess-driven sparq-cli). Counts are FLOORS (>=); adding tests is always fine.",
+    "[OPUS-4.8] TEST-PRESENCE gate (sq-hbg7). Per-crate FLOOR on the number of #[test]/#[tokio::test]/#[rstest] functions + whether the crate keeps its tests/ integration dir. Catches a whole crate losing its tests — which the line-% ratchet (bench/coverage-floor.json) can miss (esp. the subprocess-driven sparq-cli). Counts are FLOORS (>=); adding tests is always fine.",
     "Counted from source (no compile) by scripts/coverage-presence.py, run every commit by the .github/workflows/ci.yml coverage job. The floor only RISES (--seed will not lower without --allow-lower). Regenerate after adding tests: scripts/coverage-presence.py --seed."
   ],
   "crates": {
@@ -68,6 +68,11 @@
     "sparq-introspect": {
       "had_integration_dir": true,
       "min_tests": 15
+    },
+    "sparq-lws-core": {
+      "had_integration_dir": true,
+      "min_tests": 880,
+      "note": "[FABLE-5] sq-gg0qq.2: crate imported whole from jeswr/solid-server-rs@1e555b10 with 893 #[test]s counted (inline unit + tests/ integration); floor 880 leaves a small margin. The %-coverage floor (bench/coverage-floor.json) is deferred to the sq-gg0qq epic's split beads — the crate is presence-gated meanwhile."
     },
     "sparq-mpc": {
       "had_integration_dir": false,

@@ -46,12 +46,14 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**67 `unsafe` sites** across 7 crates (the other crates are `#![forbid(unsafe_code)]`).
+**75 `unsafe` sites** across 8 crates (the other crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
-must equal `bench/unsafe-snapshot.json`. The 7th crate, **`sparq-engine`**, is a special
-case: its **library** stays `#![forbid(unsafe_code)]` (zero shipped `unsafe`) — the 4 sites
-are confined to a single **integration test's** byte-counting `#[global_allocator]`, which a
-custom allocator unavoidably requires (see the `sparq-engine` subsection below).
+must equal `bench/unsafe-snapshot.json`. Two crates are a special NON-SHIPPING case:
+**`sparq-engine`**'s library stays `#![forbid(unsafe_code)]` (zero shipped `unsafe`) — its
+4 sites are confined to a single **integration test's** byte-counting `#[global_allocator]`
+— and **`sparq-lws-core`** (sq-gg0qq.2) likewise ships a `forbid(unsafe_code)` lib + bin
+with its 8 sites confined to two **example benchmark harnesses'** counting allocators, which
+a custom `#[global_allocator]` unavoidably requires (see each crate's subsection below).
 
 Recurring invariant shorthands used below:
 - **POD-bytes** — `[u32;3]` / `u32` / `u64` / `f64` are plain-old-data with no invalid
@@ -210,13 +212,46 @@ Miri does not cover it (Miri supplies its own allocator and does not model a
 | `tests/service_stream_bounded.rs:98` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
 | `tests/service_stream_bounded.rs:106` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the delta. |
 
+### `sparq-lws-core` — 8 sites (example-only counting global allocators) [FABLE-5]
+
+(sq-gg0qq.2 — crate imported whole from jeswr/solid-server-rs.) The **library and the
+server binary** are `#![forbid(unsafe_code)]` and ship **zero** `unsafe`. These 8 sites
+live entirely in two **example** benchmark harnesses (never the shipped server): the
+deterministic allocation-count microbench `examples/read_response_alloc_microbench.rs`
+(counts `GlobalAlloc::alloc`/`realloc` ops on the GET/HEAD read-response header path) and
+the shared harness module `examples/support/mod.rs` (`#[path]`-included by the
+`bench_harness` + `adversarial_bench` examples; counts allocation ops + bytes). A
+`#[global_allocator]` unavoidably requires `unsafe` (the `GlobalAlloc` trait is `unsafe`
+by definition; there is no safe substitute for a deterministic allocation counter) — the
+same class as `sparq-engine`'s test allocator above. **Not** a B5 (untrusted-input)
+surface: every method is a verbatim forward to the process `System` allocator with the
+identical arguments, so `System` discharges all of `GlobalAlloc`'s obligations; the
+wrappers only read `Layout::size()`/`new_size`/an armed flag and bump `Relaxed` atomics —
+no pointer `System` returns is ever dereferenced, retained, or aliased. Bounded by
+**review + the trivial forward-to-`System` argument**, enforced by the file-local
+`#![warn(clippy::undocumented_unsafe_blocks)]` in both files (each `unsafe impl` carries a
+`// SAFETY:` comment). Miri does not model a `#[global_allocator]` that calls `System`;
+the examples run on the standard toolchain.
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `examples/read_response_alloc_microbench.rs:41` | `unsafe impl GlobalAlloc for CountingAlloc` | forward-to-`System` | every method delegates verbatim to `System` with the same args; the wrapper adds only an ARMED-flag read + a `Relaxed` counter bump. EXAMPLE-only; lib + bin stay `forbid(unsafe_code)`. |
+| `examples/read_response_alloc_microbench.rs:42` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the armed counter is touched before the forward. |
+| `examples/read_response_alloc_microbench.rs:48` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
+| `examples/read_response_alloc_microbench.rs:51` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the armed counter is touched before the forward. |
+| `examples/support/mod.rs:77` | `unsafe impl GlobalAlloc for CountingAllocator` | forward-to-`System` | every method delegates verbatim to `System` with the same args; the wrapper adds only `Relaxed` op/byte counters. EXAMPLE-only harness module; lib + bin stay `forbid(unsafe_code)`. |
+| `examples/support/mod.rs:78` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; `layout.size()` is only read into the byte counter. |
+| `examples/support/mod.rs:83` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
+| `examples/support/mod.rs:86` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; `new_size` is only read into the byte counter. |
+
 ## NEEDS-REVIEW
 
-**None.** Every one of the 67 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 75 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]) — set
 crate-root on the 5 unsafe-bearing lib crates and file-local on the one `sparq-engine`
-integration test that carries the byte-counting allocator. The 6 sites that
+integration test and the two `sparq-lws-core` example files that carry counting
+allocators. The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for
 SlotPtr` pairs (`dict.rs` + `dictspill.rs`), the `MmapMut` `from_raw_parts_mut` view, and
 the test `remove_var` — were reworded so the `// SAFETY:` token sits on the line directly
