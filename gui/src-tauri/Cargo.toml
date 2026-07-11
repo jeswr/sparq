@@ -54,6 +54,13 @@ tauri-build = { version = "2", features = [] }
 # cannot. The webview-target build (Pages "Try the GUI live") never links this crate at all.
 default = []
 hdt = ["dep:sparq-hdt"]
+# [FABLE-5] sq-ixc3.14 — native federated SERVICE query execution for the Query tool. OFF by
+# default for the same lean-build reasons as `hdt`: it forwards to `sparq-engine/service`, whose
+# federation client pulls a blocking HTTP/TLS stack (ureq) the default build must not carry. The
+# desktop release build turns it ON (alongside `hdt`) so SERVICE-clause queries run over the
+# native engine — the browser build fundamentally cannot (no blocking cross-origin HTTP). Every
+# `query_service` call installs the engine's STRICT fail-closed egress allowlist (federation.rs).
+federation = ["sparq-engine/service"]
 # [FABLE-5] sq-t6492 — embed + serve the frontendDist static export instead of connecting to
 # `devUrl` (http://localhost:3001). Tauri's build script sets `cfg(dev) = !custom-protocol`
 # (tauri build.rs: `let dev = !custom_protocol`), and in dev mode the webview navigates to

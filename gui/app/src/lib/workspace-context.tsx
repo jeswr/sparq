@@ -27,6 +27,7 @@ import {
   createWorkspaceStore,
   describeWorkspaceSaveError,
   newWorkspace,
+  parseServiceAllowlist,
   type SerializedWorkspaceSaver,
   type Workspace,
   type WorkspaceBackend,
@@ -109,6 +110,18 @@ export interface WorkspaceContextValue {
    * mirroring {@link recordImport}: a write failure never breaks the in-memory selection).
    */
   setInference: (mode: WorkspaceInferenceMode) => Promise<void>;
+  /**
+   * [FABLE-5] sq-ixc3.14 — the active workspace's persisted FEDERATION egress allowlist: the
+   * only SPARQL endpoints a SERVICE clause may dial when the desktop app evaluates the query
+   * natively. FAIL-CLOSED: empty means every SERVICE endpoint is refused. The federation
+   * bridge pushes this into the engine so the two stay in lockstep.
+   */
+  serviceAllowlist: string[];
+  /**
+   * [FABLE-5] sq-ixc3.14 — persist a new federation egress allowlist for the active workspace
+   * (best-effort, mirroring {@link setInference}). Entries are trimmed; empties dropped.
+   */
+  setServiceAllowlist: (hosts: string[]) => Promise<void>;
   /**
    * [sq-glo5r] The active workspace's persisted N3 rule documents (empty when none). Drives the
    * Inference tool's N3 rules panel and the engine's N3 closure cache.
@@ -299,6 +312,22 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [applyWorkspace, persist],
   );
 
+  // [FABLE-5] sq-ixc3.14 — persist a new federation egress allowlist for the active workspace.
+  // Same best-effort discipline as setInference; normalised through the fail-closed parser
+  // (trim, drop empties) so the persisted record and the engine always see the same list.
+  // Pushed to the engine immediately (like the N3 rules), not just via the bridge.
+  const setServiceAllowlist = React.useCallback(
+    async (hosts: string[]): Promise<void> => {
+      const base = workspaceRef.current ?? newWorkspace("default workspace", STARTER_QUERY);
+      const cleaned = parseServiceAllowlist(hosts);
+      const next: Workspace = { ...base, serviceAllowlist: cleaned, updatedAt: Date.now() };
+      applyWorkspace(next);
+      engineRef.current.setServiceAllowlist(cleaned);
+      await persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
   // [sq-glo5r] — bulk-add N3 rule documents; each gets a unique addedAt (now + index offset so
   // rapid bulk adds never collide). Pushes the updated list to the engine immediately.
   const addRulesDocs = React.useCallback(
@@ -451,6 +480,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     engineRef.current.setInferenceMode(ws.inference ?? "off");
     // [sq-glo5r] — push the target workspace's N3 rules so the engine rebuilds the N3 closure.
     engineRef.current.setN3Rules(ws.rulesDocs ?? []);
+    // [FABLE-5] sq-ixc3.14 — push the target workspace's federation egress allowlist so a
+    // SERVICE run never dials under a PREVIOUS workspace's policy (fail-closed lockstep).
+    engineRef.current.setServiceAllowlist(ws.serviceAllowlist ?? []);
   }, [applyWorkspace]);
 
   const switchWorkspace = React.useCallback(
@@ -554,6 +586,8 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       switchWorkspace,
       inference: workspace?.inference ?? "off",
       setInference,
+      serviceAllowlist: workspace?.serviceAllowlist ?? [],
+      setServiceAllowlist,
       rulesDocs: workspace?.rulesDocs ?? [],
       addRulesDocs,
       removeRulesDoc,
@@ -572,6 +606,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       deleteWorkspace,
       switchWorkspace,
       setInference,
+      setServiceAllowlist,
       addRulesDocs,
       removeRulesDoc,
       setRulesDocEnabled,
