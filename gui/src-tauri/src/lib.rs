@@ -14,6 +14,7 @@
 mod disk;
 mod engine;
 mod federation;
+mod odrl;
 
 use engine::EngineState;
 
@@ -64,6 +65,14 @@ pub fn run() {
             // capability is gated behind the non-default `federation` cargo feature and a lean
             // build registers a stub that fails loudly with a rebuild hint (federation.rs).
             federation::query_service,
+            // [FABLE-5] sq-ixc3.15 — the ODRL policy tool's ONE native command: parse/validate
+            // a Turtle ODRL policy, evaluate the (party, action, target) request, materialize
+            // the policy through the odrl-bridge, and run the SAME query per requester through
+            // PodStore's fail-closed per-session named-graph gating next to the ungated run.
+            // Gated behind the non-default `odrl` cargo feature; a lean build registers a stub
+            // that fails loudly with a rebuild hint (odrl.rs). Malformed policy ⇒ nothing
+            // materializes ⇒ deny-everything with the parse error as the visible reason.
+            odrl::odrl_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the sparq Tauri application");
