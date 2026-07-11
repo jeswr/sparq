@@ -596,6 +596,10 @@ fn logical_constraints_for(
         .map(|(ckey, raw)| (ckey, raw.build(lists)))
         .collect();
 
+    // (2b) Fold LIST-valued combinator operands (`odrl:or ( <c1> <c2> )`) into their
+    // member node keys before assembly. [FABLE-5] sq-dkuff.
+    fold_list_operands(&mut lc_defs, &atoms, lists);
+
     // (3) The rule → direct-constraint-node map (which of a rule's `odrl:constraint`
     // objects are LogicalConstraint nodes), in rule/graph order.
     let rule_lc_q = format!(
@@ -626,6 +630,59 @@ fn logical_constraints_for(
         }
     }
     Ok(out)
+}
+
+/// Fold LIST-valued combinator operands into their member node keys. [FABLE-5] sq-dkuff.
+///
+/// ODRL examples mostly write a combinator's operands as several objects of the one
+/// property (`odrl:and <c1>, <c2>` — the SolidLab suite's form, handled by the edges
+/// query above), but a LIST-valued combinator (`odrl:or ( <c1> <c2> )`) appears in the
+/// wild. The edges query binds such an object to the RDF-collection HEAD node — neither
+/// a compound nor an atomic constraint — so pre-fold it degraded to the unsatisfiable
+/// guard. That was fail-closed for a *permission*'s compound (never permits), but on a
+/// **prohibition** it silently DISABLED the compound (a never-satisfied carve-out never
+/// fires → deny-overrides is bypassed — the widening direction). This pass expands the
+/// head into its member node keys via the pre-loaded [`ListCell`] table, in place and
+/// in list order, deduplicated against the combinator's already-seen operands.
+///
+/// **Strictly narrow:** a key is expanded ONLY when it would otherwise degrade — it is
+/// a list head (has a cons cell) AND is neither a known compound nor a known atomic
+/// constraint node, so no currently-working parse changes (a pathological node that is
+/// both a cons cell and a real constraint keeps its constraint reading). One level
+/// only, mirroring [`fold_rights`]: a member that is itself a nested list head stays an
+/// unmatchable key → the unsatisfiable guard (fail-closed). An *empty* list operand
+/// (`rdf:nil` directly) has no cons cell, so it is not expanded and stays the
+/// unsatisfiable guard — fail-closed (and faithful for an empty `or`/`xone`, which can
+/// never be satisfied). A cyclic/malformed list terminates via [`expand_list`].
+fn fold_list_operands(
+    lc_defs: &mut BTreeMap<String, LcDef>,
+    atoms: &BTreeMap<String, Constraint>,
+    lists: &BTreeMap<String, ListCell>,
+) {
+    // Snapshot the compound-node keys: the mutation below never adds/removes defs,
+    // only rewrites operand lists, so membership checks stay sound.
+    let lc_keys: BTreeMap<String, ()> = lc_defs.keys().map(|k| (k.clone(), ())).collect();
+    let expandable =
+        |k: &str| lists.contains_key(k) && !lc_keys.contains_key(k) && !atoms.contains_key(k);
+    for def in lc_defs.values_mut() {
+        if !def.operands.iter().any(|k| expandable(k)) {
+            continue;
+        }
+        let old = std::mem::take(&mut def.operands);
+        for okey in old {
+            if expandable(&okey) {
+                for member in expand_list(&okey, lists) {
+                    let mkey = node_key(&member);
+                    if def.seen.insert(mkey.clone(), ()).is_none() {
+                        def.operands.push(mkey);
+                    }
+                }
+            } else {
+                // Already deduplicated at absorb time — keep its position.
+                def.operands.push(okey);
+            }
+        }
+    }
 }
 
 /// Recursively assemble a [`LogicalConstraint`] from the pre-built node tables, with

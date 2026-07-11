@@ -683,3 +683,233 @@ fn recipient_status_reflects_membership_resolution() {
     let anonymous = Request::new(left("read")).on("http://example.org/x");
     assert_eq!(recipient_status(rule, &anonymous), RecipientMatch::Unprovable);
 }
+
+// ===========================================================================
+// sq-dkuff — LIST-valued LogicalConstraint combinator operands ([FABLE-5]):
+// `odrl:or ( <c1> <c2> )` binds the combinator object to the RDF-collection
+// HEAD; pre-fold that head degraded to the unsatisfiable guard (fail-closed on
+// permissions, but silently DISABLING a prohibition's compound carve-out). The
+// head is now expanded into its member constraints before assembly.
+// ===========================================================================
+
+/// `odrl:or` with a LIST-valued operand set parses to the member constraints and
+/// evaluates faithfully (grant on either member purpose, deny otherwise).
+#[test]
+fn or_list_valued_operand_set() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/orlist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or (
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/research> ]
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/teaching> ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let lcs = &p.permissions[0].logical_constraints;
+    assert_eq!(lcs.len(), 1, "the compound must parse");
+    // Structural witness: the LIST head must be replaced by its TWO member
+    // constraints (pre-fold this was ONE unsatisfiable-guard operand).
+    assert_eq!(
+        lcs[0].operands.len(),
+        2,
+        "the list head must expand to its member operands, got {:?}",
+        lcs[0].operands
+    );
+    let base = Request::new(left("read")).on("urn:asset/x");
+    for purpose in ["urn:purpose/research", "urn:purpose/teaching"] {
+        let req = base.clone().for_purpose(Value::Iri(purpose.into()));
+        assert!(evaluate(&p, &req).allow, "OR member {purpose} must grant");
+    }
+    // Non-member purpose → both operands definitely fail → deny.
+    let marketing = base
+        .clone()
+        .for_purpose(Value::Iri("urn:purpose/marketing".into()));
+    assert!(!evaluate(&p, &marketing).allow);
+    // No purpose evidence → unprovable → fail-closed.
+    assert!(!evaluate(&p, &base).allow);
+}
+
+/// `odrl:and` with a LIST-valued operand set (a closed time window) — inside the
+/// window grants, outside/unprovable denies.
+#[test]
+fn and_list_valued_time_window() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/andlist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and (
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+          odrl:rightOperand "2024-01-01T00:00:00Z"^^xsd:dateTime ]
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+          odrl:rightOperand "2024-12-31T23:59:59Z"^^xsd:dateTime ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    assert_eq!(p.permissions[0].logical_constraints[0].operands.len(), 2);
+    let base = Request::new(left("read")).on("urn:asset/x");
+    assert!(evaluate(&p, &base.clone().at("2024-06-15T12:00:00Z")).allow);
+    assert!(!evaluate(&p, &base.clone().at("2025-06-01T00:00:00Z")).allow);
+    assert!(!evaluate(&p, &base).allow, "no time evidence → fail-closed");
+}
+
+/// THE widening-hazard case the fold closes: a PROHIBITION whose compound uses a
+/// LIST-valued `odrl:and`. Pre-fold the head degraded to an unsatisfiable operand,
+/// the carve-out never fired, and the sibling permission granted INSIDE the
+/// prohibited window (deny-overrides silently bypassed).
+#[test]
+fn prohibition_list_valued_and_fires_inside_window() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/plist> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+        odrl:constraint [ a odrl:LogicalConstraint ; odrl:and (
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+              odrl:rightOperand "2024-01-01T00:00:00Z"^^xsd:dateTime ]
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+              odrl:rightOperand "2024-12-31T23:59:59Z"^^xsd:dateTime ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // Inside the prohibited window → the compound holds → DENY (pre-fold: allow).
+    assert!(
+        !evaluate(&p, &base.clone().at("2024-06-01T00:00:00Z")).allow,
+        "a list-valued prohibition compound must fire inside its window"
+    );
+    // Outside the window → the carve-out lifts → the permission grants.
+    assert!(evaluate(&p, &base.clone().at("2025-06-01T00:00:00Z")).allow);
+}
+
+/// Mixed operand forms on ONE combinator — a direct object AND a list — merge
+/// (in order, deduplicated) into one operand set.
+#[test]
+fn mixed_direct_and_list_operands_merge() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/mixed> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ;
+        odrl:or _:c1 ;
+        odrl:or ( _:c2 ) ] ] .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/research> .
+_:c2 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/teaching> .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let lcs = &p.permissions[0].logical_constraints;
+    assert_eq!(lcs.len(), 1);
+    assert_eq!(lcs[0].operands.len(), 2, "direct + list member must merge");
+    let base = Request::new(left("read")).on("urn:asset/x");
+    for purpose in ["urn:purpose/research", "urn:purpose/teaching"] {
+        let req = base.clone().for_purpose(Value::Iri(purpose.into()));
+        assert!(evaluate(&p, &req).allow, "merged member {purpose} must grant");
+    }
+    let other = base.for_purpose(Value::Iri("urn:purpose/marketing".into()));
+    assert!(!evaluate(&p, &other).allow);
+}
+
+/// A list member that is itself a NESTED compound `odrl:LogicalConstraint`
+/// recurses through the normal compound assembly (an `odrl:or` of a listed
+/// `odrl:and` window).
+#[test]
+fn list_member_nested_compound_recurses() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/nestedlist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or (
+        [ a odrl:LogicalConstraint ; odrl:and (
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+              odrl:rightOperand "2024-01-01T09:00:00Z"^^xsd:dateTime ]
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+              odrl:rightOperand "2024-01-01T17:00:00Z"^^xsd:dateTime ] ) ]
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/research> ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // In the nested window → the compound member holds → grant.
+    assert!(evaluate(&p, &base.clone().at("2024-01-01T12:00:00Z")).allow);
+    // Outside the window but the research purpose → the atomic member holds → grant.
+    let research = base
+        .clone()
+        .at("2025-01-01T12:00:00Z")
+        .for_purpose(Value::Iri("urn:purpose/research".into()));
+    assert!(evaluate(&p, &research).allow);
+    // Neither member holds → deny.
+    let neither = base
+        .at("2025-01-01T12:00:00Z")
+        .for_purpose(Value::Iri("urn:purpose/marketing".into()));
+    assert!(!evaluate(&p, &neither).allow);
+}
+
+/// An EMPTY list operand (`odrl:or ()` — `rdf:nil` directly) stays fail-closed:
+/// nil has no cons cell, is not expanded, and remains the unsatisfiable guard.
+#[test]
+fn empty_list_operand_is_fail_closed() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/emptylist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or () ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri("urn:purpose/x".into()));
+    assert!(
+        !evaluate(&p, &req).allow,
+        "an empty list combinator can never be satisfied"
+    );
+}
+
+/// A NESTED-list member (a list inside the list) is NOT recursively flattened —
+/// one level only, mirroring the rightOperand fold — so it stays an unmatchable
+/// operand (the unsatisfiable guard) and the enclosing `and` fails closed even
+/// when the inner constraint would hold.
+#[test]
+fn nested_list_member_is_fail_closed() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/nestednil> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and (
+        ( [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+            odrl:rightOperand <urn:purpose/x> ] ) ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri("urn:purpose/x".into()));
+    assert!(
+        !evaluate(&p, &req).allow,
+        "a doubly-nested list member must stay fail-closed, not silently flatten"
+    );
+}
+
+/// Regression: the direct multi-object combinator form (`odrl:or <c1>, <c2>` — the
+/// SolidLab suite's form) is untouched by the list fold.
+#[test]
+fn direct_object_operands_unchanged_by_list_fold() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/direct> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/research> ] ,
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/teaching> ] ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    assert_eq!(p.permissions[0].logical_constraints[0].operands.len(), 2);
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri("urn:purpose/teaching".into()));
+    assert!(evaluate(&p, &req).allow);
+}
