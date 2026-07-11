@@ -53,7 +53,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl` (`POST /shacl/validate`),
-  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `solid-authz` (Solid WAC/ACP `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed HTTP shell over [`sparq-solid`](../sparq-solid)), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `solid-authz` (Solid WAC/ACP `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed HTTP shell over [`sparq-solid`](../sparq-solid)), `odrl-authz` (the ODRL lane on `/authz/query` — dataset-carried ODRL policies gate the query via the `sparq-solid` bridge, fail-closed), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
   `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
   disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
