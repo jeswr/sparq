@@ -31,6 +31,15 @@ pub mod scoreboard;
 // class structurally). `ci.yml`'s `jsonld-conformance` job greps each floor from
 // `src/floors/<lane>.rs`, binding the CI grep gate to the same single source.
 pub mod floors;
+// [FABLE-5] sq-hmd7l.15 — shared JSON-LD comparison helpers (the document-level
+// `json_ld_equal` comparator + the canonical-dataset bridges), used by BOTH the
+// `tests/jsonld_suite/` conformance lanes and the `bench/jsonld` comparative
+// harness (the `bench_jsonld` example), so the bench's output-equality gate is
+// the SAME comparator the conformance ratchet trusts. Behind the OPT-IN
+// `jsonld-suite` feature (optional `sparq-jsonld` / `oxjsonld` deps),
+// `#[cfg]`-stripped from the default build — the lean opt-in posture.
+#[cfg(feature = "jsonld-suite")]
+pub mod jsonld_bench;
 // [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 // A reusable fixture that stands up a REAL `sparq_server::serve` endpoint on an ephemeral
 // `127.0.0.1:0` loopback port and drives a federated SERVICE query through the engine's

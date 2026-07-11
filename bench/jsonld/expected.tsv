@@ -1,0 +1,11 @@
+# [FABLE-5] sq-hmd7l.15 — deterministic anchors for the vendored fixtures.
+# <workload>\t<expected>: expand_nodes = top-level node count of the expanded
+# form (sparq native expand); tordf_quads = canonical dataset size via the real
+# oxjsonld ingest. Both are pure functions of the vendored fixture bytes; any
+# drift is a correctness/structure regression (run.sh exits 1).
+wdc-product_expand_nodes	1
+wdc-product_tordf_quads	47
+people-graph_expand_nodes	6
+people-graph_tordf_quads	46
+context-heavy_expand_nodes	1
+context-heavy_tordf_quads	29

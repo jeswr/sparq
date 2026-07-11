@@ -289,3 +289,11 @@ oxjsonld = { workspace = true, optional = true }
 # `jsonld-suite`) so the default harness build never links it — the lean opt-in
 # posture.
 sparq-jsonld = { path = "../sparq-jsonld", optional = true, default-features = false }
+
+# [FABLE-5] sq-hmd7l.15 — the bench/jsonld comparative-harness runner (expand /
+# flatten / compact / toRdf + the output-equality gate + advisory timing).
+# `required-features` keeps it OUT of the default `--all-targets` build: it only
+# compiles when the OPT-IN `jsonld-suite` feature is on — the lean opt-in posture.
+[[example]]
+name = "bench_jsonld"
+required-features = ["jsonld-suite"]

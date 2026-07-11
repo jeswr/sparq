@@ -671,6 +671,16 @@ cargo build -p sparq-cli --features serialize-rdf
   the gitignored suites are absent). It is registered in the central conformance scoreboard
   (`sparq-conformance-scoreboard`).
 
+- **JSON-LD comparative benchmarking lives in `bench/jsonld/`** (sq-hmd7l.15): the W3C
+  pass-rate table vs jsonld.js / titanium-json-ld's PUBLISHED results (pinned with provenance
+  in `bench/jsonld/conformance-peers.json` — sparq's compact/frame lanes use a round-trip
+  oracle, so those two rows are NOT 1:1 comparable) + an output-equality-gated
+  expand/flatten/compact/toRdf throughput harness (`bench/jsonld/run.sh --smoke|--gather`).
+  The document-level comparator + canonical-dataset helpers the ratchet AND the bench share
+  live lib-side in `sparq_conformance::jsonld_bench` (behind `jsonld-suite`); the sparq runner
+  is the `bench_jsonld` example on `sparq-conformance`. Gap record:
+  `research/gap-jsonld-2026-07.md`.
+
 ## See also
 
 - `fused-decompress-parse` — choosing gzip vs zstd vs bzip2 and fusing decode with parse (measured numbers).

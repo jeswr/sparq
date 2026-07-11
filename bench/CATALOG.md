@@ -227,6 +227,24 @@ Notes on a few that need care:
   the related fixture ratchet lives in `crates/sparq-geo/tests/ogc_compliance_ratchet.rs`). CI emits
   `geo_<name>_us` (trend-only, advisory). Competitor: GeoSPARQL-Jena/Fuseki (full GML+WKT compliance
   bar, `http-sparql`); PostGIS as a loose non-SPARQL lower bound (see the competitor map below).
+- **`jsonld-bench` is the JSON-LD PROCESSING suite** — see
+  [`bench/jsonld/README.md`](./jsonld/README.md). Two axes: (a) a CONFORMANCE pass-rate table —
+  sparq's MEASURED W3C JSON-LD 1.1 lane counts vs jsonld.js / titanium-json-ld's PUBLISHED
+  results, pinned with provenance URL + date in `bench/jsonld/conformance-peers.json` (never
+  estimated; denominators differ per suite snapshot and sparq's compact/frame lanes use a
+  round-trip-RDF oracle — the caveats travel in the file); (b) expand/flatten/compact/toRdf
+  THROUGHPUT on vendored WebDataCommons-shaped schema.org + context-heavy fixtures. The runner is
+  a crate example (`bench_jsonld` in `sparq-conformance`, behind the opt-in `jsonld-suite`
+  feature). **INVARIANT: no throughput row without output-equality agreement** — expand gated by
+  the SAME `json_ld_equal` comparator the conformance ratchet trusts
+  (`sparq_conformance::jsonld_bench`), flatten/toRdf by canonical-dataset equality, compact by
+  round-trip losslessness; failed pairs are recorded exclusions. `run.sh --smoke` is
+  self-asserting offline (deep-equality vs vendored jsonld.js-generated expectations +
+  `expected.tsv` anchors + a NEGATIVE comparator self-test; exit 1 on drift). Peers are
+  gather-only (`run.sh --gather` → `scripts/bench-adapters/jsonld_adapter.{mjs,py}`); compact
+  rows compare DIFFERENT pipelines at the same task (sparq compacts RDF via the writer; peers run
+  document-level Compaction) — the envelope carries the caveat on every row. Gap record:
+  `research/gap-jsonld-2026-07.md`.
 - **`deep-taxonomy` (DeepTaxonomy) is the rule-heavy N3 REASONING suite** — see
   [`bench/deep-taxonomy/README.md`](./deep-taxonomy/README.md). `run.sh` is self-asserting and
   REUSES the existing generator `bench/inference/gen_deeptaxonomy.py` (1 instance + a depth-deep

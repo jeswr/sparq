@@ -1,0 +1,218 @@
+[
+  {
+    "@id": "_:b0",
+    "@type": [
+      "http://schema.org/Organization"
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Analytical Engine Society"
+      }
+    ],
+    "http://schema.org/url": [
+      {
+        "@id": "https://example.org/orgs/aes"
+      }
+    ]
+  },
+  {
+    "@id": "_:b1",
+    "@type": [
+      "http://schema.org/SoftwareSourceCode"
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Bernoulli number program"
+      }
+    ],
+    "http://schema.org/programmingLanguage": [
+      {
+        "@value": "Analytical Engine order code"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/people/ada",
+    "@type": [
+      "http://schema.org/Person"
+    ],
+    "http://schema.org/affiliation": [
+      {
+        "@id": "_:b0"
+      }
+    ],
+    "http://schema.org/birthDate": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#date",
+        "@value": "1815-12-10"
+      }
+    ],
+    "http://schema.org/knows": [
+      {
+        "@id": "https://example.org/people/charles"
+      },
+      {
+        "@id": "https://example.org/people/mary"
+      }
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Ada Byron"
+      }
+    ],
+    "http://www.w3.org/2000/01/rdf-schema#label": [
+      {
+        "@value": "Ada Byron (Mathematikerin)",
+        "@language": "de"
+      },
+      {
+        "@value": "Ada Byron",
+        "@language": "en"
+      }
+    ],
+    "https://example.org/vocab/authoredInOrder": [
+      {
+        "@list": [
+          {
+            "@id": "https://example.org/people/notes-a"
+          },
+          {
+            "@id": "https://example.org/people/notes-b"
+          },
+          {
+            "@id": "https://example.org/people/notes-g"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/people/charles",
+    "@type": [
+      "http://schema.org/Person"
+    ],
+    "http://schema.org/birthDate": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#date",
+        "@value": "1791-12-26"
+      }
+    ],
+    "http://schema.org/jobTitle": [
+      {
+        "@value": "Engineer"
+      }
+    ],
+    "http://schema.org/knows": [
+      {
+        "@id": "https://example.org/people/ada"
+      }
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Charles Babbage"
+      }
+    ],
+    "http://www.w3.org/2000/01/rdf-schema#label": [
+      {
+        "@value": "Charles Babbage",
+        "@language": "en"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/people/mary",
+    "@type": [
+      "http://schema.org/Person"
+    ],
+    "http://schema.org/award": [
+      {
+        "@value": "Victoria Gold Medal"
+      },
+      {
+        "@value": "Patron's Medal"
+      }
+    ],
+    "http://schema.org/birthDate": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#date",
+        "@value": "1780-12-26"
+      }
+    ],
+    "http://schema.org/knows": [
+      {
+        "@id": "https://example.org/people/ada"
+      },
+      {
+        "@id": "https://example.org/people/charles"
+      }
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Mary Somerville"
+      }
+    ],
+    "http://www.w3.org/2000/01/rdf-schema#label": [
+      {
+        "@value": "Mary Somerville",
+        "@language": "en"
+      },
+      {
+        "@value": "Mary Somerville (scientifique)",
+        "@language": "fr"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/people/notes-a",
+    "@type": [
+      "http://schema.org/CreativeWork"
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Note A"
+      }
+    ],
+    "http://schema.org/position": [
+      {
+        "@value": 1
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/people/notes-b",
+    "@type": [
+      "http://schema.org/CreativeWork"
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Note B"
+      }
+    ],
+    "http://schema.org/position": [
+      {
+        "@value": 2
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/people/notes-g",
+    "@type": [
+      "http://schema.org/CreativeWork"
+    ],
+    "http://schema.org/about": [
+      {
+        "@id": "_:b1"
+      }
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Note G"
+      }
+    ],
+    "http://schema.org/position": [
+      {
+        "@value": 7
+      }
+    ]
+  }
+]

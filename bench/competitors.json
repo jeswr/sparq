@@ -726,10 +726,10 @@
       "name": "Titanium JSON-LD 1.1 (Java)",
       "kind": "binary",
       "role": "[SONNET-4.6 sq-hmd7l.1] Titanium-JSON-LD is a Java JSON-LD 1.1 processor (apicatalog). The jsonld-bench suite compares W3C conformance pass-rate + parse/expand throughput vs sparq's JSON-LD processor. Apache-2.0 -> numbers are publishable.",
-      "pinned_version": "titanium-json-ld (pin the exact Maven artifact com.apicatalog:titanium-json-ld:<ver> at gather time)",
-      "version_source": "the Maven artifact version (from the jar manifest or pom.xml), recorded in the gather results file",
-      "install_recipe": "download from https://github.com/filip26/titanium-json-ld/releases (Apache-2.0). gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/jsonld_adapter.py --engine titanium --input <doc.jsonld> --op expand; cross-check the expanded triple count before trusting timing.",
+      "pinned_version": "com.apicatalog:titanium-json-ld:1.7.0 (pinned at the first gather run, sq-hmd7l.15, 2026-07-11)",
+      "version_source": "the Maven artifact jar name on TITANIUM_CP, recorded by scripts/bench-adapters/jsonld_adapter.py in its envelope (engine_version)",
+      "install_recipe": "[FABLE-5 sq-hmd7l.15] download the FIVE jars from Maven Central (titanium 1.7.x splits its RDF primitives out): com.apicatalog:titanium-json-ld:1.7.0 + :titanium-rdf-api:1.0.0 + :titanium-rdf-n-quads:1.0.2, jakarta.json:jakarta.json-api:2.1.3, org.eclipse.parsson:parsson:1.1.7; export TITANIUM_CP=<all five, colon-joined>. Apache-2.0/EPL-2.0. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/jsonld_adapter.py --engine titanium --op expand|flatten|compact|tordf --input <doc.jsonld> [--context <ctx>] --out <f>; bench/jsonld/gather.py gates <f> for output-equality BEFORE trusting the timing (the jsonld-bench invariant).",
       "comparable_suites": [
         {
           "sparq_suite": "jsonld-bench",
@@ -739,18 +739,18 @@
       "version_env_metadata": "gather records the Titanium version, java -version, and the host env block",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "titanium-json-ld",
-      "unverified_pin": true,
-      "honesty_caveat": "Maven artifact version is unverified and TBD; to be pinned to a real version at the first gather run."
+      "unverified_pin": false,
+      "honesty_caveat": "Pinned + first-gathered on a WORK BOX (sq-hmd7l.15, all 12 fixture×op rows output-equality green) — those timings are NON-canonical; a quiet-box wave must re-gather before any dashboard number lands."
     },
     {
       "id": "jsonld-js",
       "name": "jsonld.js (JavaScript JSON-LD processor)",
       "kind": "js-lib",
       "role": "[SONNET-4.6 sq-hmd7l.1] jsonld.js is the reference JavaScript JSON-LD 1.1 processor (digitalbazaar). The jsonld-bench suite compares W3C conformance pass-rate + expand/serialize throughput vs sparq's JSON-LD processor. BSD-3-Clause -> numbers are publishable. The JS-ecosystem reference column.",
-      "pinned_version": "jsonld (npm; pin the exact npm version at gather time)",
-      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
-      "install_recipe": "`npm install jsonld` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/jsonld_adapter.mjs --engine jsonld --input <doc.jsonld> --op expand; cross-check the expanded triple count before trusting timing.",
+      "pinned_version": "jsonld@9.0.0 (npm; pinned at the first gather run, sq-hmd7l.15, 2026-07-11 — also the generator of bench/jsonld/fixtures/expected/*)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded by scripts/bench-adapters/jsonld_adapter.mjs in its envelope (engine_version)",
+      "install_recipe": "`npm install jsonld` into a scratch dir at gather time; pass its node_modules via bench/jsonld/gather.py --node-path. gather-only — NOT a committed dependency.",
+      "run_recipe": "scripts/bench-adapters/jsonld_adapter.mjs --engine jsonld --op expand|flatten|compact|tordf --input <doc.jsonld> [--context <ctx>] --out <f>; bench/jsonld/gather.py gates <f> for output-equality BEFORE trusting the timing (the jsonld-bench invariant).",
       "comparable_suites": [
         {
           "sparq_suite": "jsonld-bench",
@@ -760,8 +760,8 @@
       "version_env_metadata": "gather records the resolved jsonld npm version, node --version, and the host env block",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "jsonld-js",
-      "unverified_pin": true,
-      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+      "unverified_pin": false,
+      "honesty_caveat": "Pinned + first-gathered on a WORK BOX (sq-hmd7l.15, all 12 fixture×op rows output-equality green) — those timings are NON-canonical; a quiet-box wave must re-gather before any dashboard number lands."
     },
     {
       "id": "rdf-canonize-js",

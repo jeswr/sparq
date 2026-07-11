@@ -1,0 +1,49 @@
+{
+  "@context": {
+    "@vocab": "http://schema.org/",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "gtin13": {
+      "@id": "http://schema.org/gtin13"
+    },
+    "price": {
+      "@id": "http://schema.org/price",
+      "@type": "xsd:decimal"
+    },
+    "priceValidUntil": {
+      "@id": "http://schema.org/priceValidUntil",
+      "@type": "xsd:date"
+    },
+    "availability": {
+      "@id": "http://schema.org/availability",
+      "@type": "@id"
+    },
+    "url": {
+      "@id": "http://schema.org/url",
+      "@type": "@id"
+    },
+    "image": {
+      "@id": "http://schema.org/image",
+      "@type": "@id"
+    },
+    "review": {
+      "@id": "http://schema.org/review",
+      "@container": "@set"
+    },
+    "ratingValue": {
+      "@id": "http://schema.org/ratingValue",
+      "@type": "xsd:decimal"
+    },
+    "reviewCount": {
+      "@id": "http://schema.org/reviewCount",
+      "@type": "xsd:integer"
+    },
+    "bestRating": {
+      "@id": "http://schema.org/bestRating",
+      "@type": "xsd:decimal"
+    },
+    "datePublished": {
+      "@id": "http://schema.org/datePublished",
+      "@type": "xsd:date"
+    }
+  }
+}

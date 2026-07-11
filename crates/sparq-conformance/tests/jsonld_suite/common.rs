@@ -1,23 +1,37 @@
 //! [FABLE-5] sq-oy1f.40 — shared machinery for the W3C JSON-LD 1.1 conformance
 //! lane submodules (`to_rdf`, `from_rdf`, `expand`, `compact`, `flatten`,
 //! `frame`). Split out of the former monolithic `tests/jsonld_suite.rs` — the
-//! manifest walker, the `Score` scoreboard, the canonical-dataset helpers, the
-//! JSON-LD document-level comparator, and the not-implemented bucket reporting all
-//! live here; each per-lane runner lives in its own sibling submodule. Pure
-//! refactor: the CI invocation, the compiled test binary, and the pass counts are
-//! byte-identical to before the split.
+//! manifest walker, the `Score` scoreboard, and the not-implemented bucket
+//! reporting live here; each per-lane runner lives in its own sibling submodule.
+//! Pure refactor: the CI invocation, the compiled test binary, and the pass
+//! counts are byte-identical to before the split.
+//!
+//! [FABLE-5] sq-hmd7l.15 — the canonical-dataset helpers, the JSON-LD
+//! document-level comparator, and the AST bridge moved VERBATIM to the lib-side
+//! `sparq_conformance::jsonld_bench` module (re-exported below) so the
+//! `bench/jsonld` harness's output-equality gate shares this ONE comparator.
 //!
 //! The six ratchet FLOORS now live LIB-SIDE in `sparq_conformance::floors::<lane>`
 //! (sq-oy1f.40) and are re-exported here so the per-lane runners keep spelling
 //! `TORDF_FLOOR` etc. unchanged while reading the ONE compile-time source the
 //! scoreboard registry also imports (no textual drift).
 
-use oxrdf::dataset::CanonicalizationAlgorithm;
-use oxrdf::{Dataset, Quad};
+use oxrdf::Dataset;
 use serde_json::Value;
 use sparq_core::Graph;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+// [FABLE-5] sq-hmd7l.15 — the document-level comparator, the AST bridge, and the
+// canonical-dataset helpers moved VERBATIM to the LIB-SIDE `jsonld_bench` module
+// (behind the same `jsonld-suite` feature) so the `bench/jsonld` comparative
+// harness's output-equality gate shares the ONE comparator this conformance
+// ratchet trusts. Re-exported here so every lane keeps spelling
+// `json_ld_equal` / `jsonld_to_canonical_dataset` / … unchanged.
+pub use sparq_conformance::jsonld_bench::{
+    dataset_to_nquads, json_ld_equal, jsonld_to_canonical_dataset, nquads_to_canonical_dataset,
+    read_context_member, sparq_json_to_serde,
+};
 
 // [FABLE-5] sq-oy1f.40 — the six ratchet floors, re-exported from the LIB-SIDE
 // single source (`sparq_conformance::floors::<lane>::FLOOR`). The runner's
@@ -72,33 +86,6 @@ impl Score {
     pub fn skip(&mut self) {
         self.skip += 1;
     }
-}
-
-/// Parse an N-Quads file into a canonicalized oxrdf [`Dataset`] for isomorphic
-/// comparison (blank-node-blind).
-pub fn nquads_to_canonical_dataset(text: &str) -> Result<Dataset, String> {
-    let mut ds = Dataset::new();
-    for q in oxttl::NQuadsParser::new().for_slice(text.as_bytes()) {
-        let q: Quad = q.map_err(|e| e.to_string())?;
-        ds.insert(&q);
-    }
-    ds.canonicalize(CanonicalizationAlgorithm::Unstable);
-    Ok(ds)
-}
-
-/// Parse a JSON-LD document (through `oxjsonld`, the real ingest parser) into a
-/// canonicalized oxrdf [`Dataset`].
-pub fn jsonld_to_canonical_dataset(doc: &str, base: &str) -> Result<Dataset, String> {
-    let mut ds = Dataset::new();
-    let parser = oxjsonld::JsonLdParser::new()
-        .with_base_iri(base)
-        .map_err(|e| format!("invalid base {base:?}: {e}"))?;
-    for q in parser.for_slice(doc.as_bytes()) {
-        let q = q.map_err(|e| e.to_string())?;
-        ds.insert(&q);
-    }
-    ds.canonicalize(CanonicalizationAlgorithm::Unstable);
-    Ok(ds)
 }
 
 // ---- The parsed manifest entry --------------------------------------------
@@ -257,181 +244,6 @@ pub fn parse_jsonld_dataset(text: &str, base: &str) -> Result<Dataset, String> {
     jsonld_to_canonical_dataset(text, base)
 }
 
-/// [OPUS-4.8] sq-3uos5 — serialise an oxrdf [`Dataset`] to N-Quads text. The
-/// `compact` input documents are JSON-LD; to drive sparq's RDF→compacted-JSON-LD
-/// writer (which takes a [`Graph`]) the input is first parsed to RDF (via the
-/// REAL oxjsonld path) and re-emitted as N-Quads, then loaded into a `Graph`
-/// preserving named graphs — exactly the bridge `from_rdf::run_fromrdf` uses, but
-/// with the input coming from a JSON-LD document rather than an `.nq` fixture.
-/// `oxrdf`'s `Quad` Display is canonical N-Quads, so this is loss-free.
-pub fn dataset_to_nquads(ds: &Dataset) -> String {
-    let mut out = String::new();
-    for q in ds.iter() {
-        let owned: Quad = q.into_owned();
-        // [OPUS-4.8] positional format arg (avoids the CodeQL rust/unused-variable
-        // false positive on inline-captured identifiers).
-        out.push_str(&format!("{} .\n", owned));
-    }
-    out
-}
-
-/// [OPUS-4.8] sq-3uos5 — read a `compact` test's context file and extract the
-/// caller `@context` value as the writer's [`JsonLdValue`]. The suite's
-/// `*-context.jsonld` files wrap the context in `{"@context": …}`; sparq's
-/// `ActiveContext::parse` (and so `graph_to_jsonld_compact`) expects the INNER
-/// value (the term-definition object), so we unwrap one `@context` layer. When
-/// the inner value is an object we hand it straight to the writer; an
-/// array/string form (a remote-context reference or multi-context array) is NOT
-/// resolved here (no network, and the writer takes a single inline object) — the
-/// caller SKIPS such cases.
-///
-/// [`JsonLdValue`]: sparq_engine::serialize::JsonLdValue
-pub fn read_context_member(path: &Path) -> Result<sparq_engine::serialize::JsonLdValue, String> {
-    use sparq_engine::serialize::{parse_context_json, JsonLdValue};
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read context {}: {e}", path.display()))?;
-    // Parse the whole context document with the writer's own tiny JSON reader,
-    // then pull out the `@context` member (the value the writer compacts against).
-    let doc = parse_context_json(&text).ok_or_else(|| "context file is not a JSON object".to_string())?;
-    match doc {
-        JsonLdValue::Obj(members) => {
-            let inner = members
-                .into_iter()
-                .find(|(k, _)| k == "@context")
-                .map(|(_, v)| v)
-                .ok_or_else(|| "context file has no @context member".to_string())?;
-            // Only a single inline object context is drivable through the writer.
-            match inner {
-                JsonLdValue::Obj(_) => Ok(inner),
-                _ => Err("non-object @context (array/string/remote) — not drivable".to_string()),
-            }
-        }
-        _ => Err("context document is not an object".to_string()),
-    }
-}
-
-// ── JSON-LD document-level equality comparator ──────────────────────────────
-//
-// [SONNET-4.6] sq-kk1mq — the comparator for the native expand() oracle.
-//
-// Semantics (PINNED IN CODE per sq-kk1mq):
-//   • Object key order: insignificant.  Two objects are equal iff they have the
-//     same keys with deeply-equal values.
-//   • Array element order: SIGNIFICANT only when the array is the **direct value
-//     of a `"@list"` key**; insignificant everywhere else (multiset / set
-//     semantics).  In expanded JSON-LD `@list` is the only structured-sequence
-//     construct; all other arrays are bags.
-//   • Numbers: integral (i64/u64-representable) compared exactly so integers
-//     ≥ 2^53 remain distinct; non-integral (either side is a JSON float) fall
-//     back to f64, so `1` ≡ `1.0`.  [SONNET-4.6] sq-kk1mq numeric-guard.
-//   • Strings, booleans, null: exact equality.
-//
-// Why document-level rather than RDF-level?  The expansion algorithm operates
-// purely at the JSON-LD document level.  Two expansions can produce the same
-// RDF yet differ in JSON structure (e.g. `@direction` handling, `@json` literals,
-// `@list` vs plain-array shapes) — the RDF oracle missed those differences.
-//
-// PRECISION NOTE: this comparator measures JSON-LD data-model (semantic)
-// equivalence — order-insensitive outside `@list` — NOT structural identity
-// with the reference output.  ~18 of 240 passes are semantically-equal-but-
-// reordered vs. the W3C reference (strict-ordered count 222).  Tracked as
-// part of bead sq-kk1mq.
-
-/// Returns `true` iff `a` and `b` are equal under the JSON-LD comparison rules
-/// described in the module-level comment.
-///
-/// [SONNET-4.6] sq-kk1mq
-pub fn json_ld_equal(a: &Value, b: &Value) -> bool {
-    json_ld_equal_inner(a, b, false)
-}
-
-/// Recursive inner: `in_list` means the IMMEDIATE parent is a `"@list"` key, so
-/// this value (an array) must be compared in ORDER.
-fn json_ld_equal_inner(a: &Value, b: &Value, in_list: bool) -> bool {
-    match (a, b) {
-        (Value::Null, Value::Null) => true,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Number(x), Value::Number(y)) => {
-            // JSON-LD numeric equality [SONNET-4.6] sq-kk1mq numeric-guard:
-            // • Both i64-representable: compare exactly so integers ≥ 2^53 are
-            //   not wrongly collapsed by f64 rounding
-            //   (e.g. 9007199254740992 ≢ 9007199254740993 must remain distinct).
-            // • Both u64-representable (one side exceeds i64::MAX): compare exactly.
-            // • Otherwise: fall back to f64 so integer JSON `1` ≡ float JSON `1.0`.
-            if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
-                xi == yi
-            } else if let (Some(xu), Some(yu)) = (x.as_u64(), y.as_u64()) {
-                xu == yu
-            } else {
-                match (x.as_f64(), y.as_f64()) {
-                    (Some(xf), Some(yf)) => xf == yf,
-                    // Fallback for numbers outside f64 range (unlikely in JSON-LD).
-                    _ => x == y,
-                }
-            }
-        }
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::Array(xs), Value::Array(ys)) => {
-            if xs.len() != ys.len() {
-                return false;
-            }
-            if in_list {
-                // @list: element order is SIGNIFICANT.
-                xs.iter()
-                    .zip(ys.iter())
-                    .all(|(x, y)| json_ld_equal_inner(x, y, false))
-            } else {
-                // Set semantics: order INSIGNIFICANT (multiset match).
-                json_ld_array_equal_unordered(xs, ys)
-            }
-        }
-        (Value::Object(xa), Value::Object(ya)) => {
-            if xa.len() != ya.len() {
-                return false;
-            }
-            for (k, va) in xa {
-                let Some(vb) = ya.get(k) else {
-                    return false;
-                };
-                // The array VALUE of a "@list" key is ORDER-SIGNIFICANT.
-                let child_in_list = k == "@list";
-                if !json_ld_equal_inner(va, vb, child_in_list) {
-                    return false;
-                }
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Multiset-equality for arrays that are NOT inside a `@list` value: every element
-/// of `xs` must match exactly one unused element of `ys`, regardless of position.
-/// O(n²) but conformance-suite arrays are small (typically ≤ 10 elements).
-fn json_ld_array_equal_unordered(xs: &[Value], ys: &[Value]) -> bool {
-    let mut used = vec![false; ys.len()];
-    'outer: for x in xs {
-        for (j, y) in ys.iter().enumerate() {
-            if !used[j] && json_ld_equal_inner(x, y, false) {
-                used[j] = true;
-                continue 'outer;
-            }
-        }
-        return false;
-    }
-    true
-}
-
-/// Convert a `sparq_jsonld::Json` value to a `serde_json::Value` by
-/// round-tripping through a JSON string.  Used to bridge the two ASTs so the
-/// `json_ld_equal` comparator can operate on both the expand() output and the
-/// expected-document JSON that `serde_json::from_str` produces.
-pub fn sparq_json_to_serde(j: &sparq_jsonld::Json) -> Result<Value, String> {
-    let mut buf = String::new();
-    j.write(&mut buf);
-    serde_json::from_str(&buf).map_err(|e| format!("parse serialized JSON as serde_json::Value: {}", e))
-}
-
 /// The known-gap categories: present in the W3C suite but NOT a sparq-shipped
 /// gateable surface yet. Reported as not-implemented (never failed). The size
 /// is read from each manifest so the scoreboard shows the real backlog and
@@ -459,142 +271,5 @@ pub fn not_implemented_counts(root: &Path) -> BTreeMap<&'static str, usize> {
     m
 }
 
-#[cfg(test)]
-mod comparator_tests {
-    use super::*;
-    use serde_json::json;
-
-    // ── json_ld_equal unit tests (sq-kk1mq) ─────────────────────────────
-
-    /// Arrays outside @list are unordered (set semantics).
-    #[test]
-    fn arrays_outside_list_are_unordered() {
-        let a = json!([1, 2, 3]);
-        let b = json!([3, 1, 2]);
-        assert!(json_ld_equal(&a, &b), "permuted array outside @list must be equal");
-    }
-
-    /// Arrays outside @list with different elements are not equal.
-    #[test]
-    fn arrays_outside_list_different_elements() {
-        let a = json!([1, 2, 3]);
-        let b = json!([1, 2, 4]);
-        assert!(!json_ld_equal(&a, &b));
-    }
-
-    /// Arrays that are the VALUE of a "@list" key are ORDER-SIGNIFICANT.
-    #[test]
-    fn array_inside_list_is_ordered_fail() {
-        let a = json!({"@list": [1, 2, 3]});
-        let b = json!({"@list": [3, 1, 2]});
-        assert!(!json_ld_equal(&a, &b), "permuted @list must NOT be equal");
-    }
-
-    /// Arrays that are the VALUE of a "@list" key with the same order pass.
-    #[test]
-    fn array_inside_list_same_order_passes() {
-        let a = json!({"@list": [1, 2, 3]});
-        let b = json!({"@list": [1, 2, 3]});
-        assert!(json_ld_equal(&a, &b));
-    }
-
-    /// Outer array is unordered, but each inner @list is ordered.
-    #[test]
-    fn nested_outer_unordered_inner_list_ordered() {
-        // Two @list objects in different outer-array positions → equal (outer unordered).
-        let a = json!([{"@list": [1, 2]}, {"@list": [3, 4]}]);
-        let b = json!([{"@list": [3, 4]}, {"@list": [1, 2]}]);
-        assert!(json_ld_equal(&a, &b), "outer array unordered");
-
-        // But the @list contents themselves are ordered.
-        let c = json!({"@list": [2, 1]});
-        let d = json!({"@list": [1, 2]});
-        assert!(!json_ld_equal(&c, &d), "@list contents are ordered");
-    }
-
-    /// Deeply nested @list: an @list inside an outer @list is still ordered.
-    #[test]
-    fn nested_list_within_list_is_ordered() {
-        // value arrays inside @list elements: those inner arrays are NOT @list
-        // values, so they are unordered.
-        let a = json!({"@list": [{"foo": [1, 2]}, {"foo": [3, 4]}]});
-        let b = json!({"@list": [{"foo": [2, 1]}, {"foo": [4, 3]}]});
-        // @list order matters (outer), but "foo" arrays inside are unordered.
-        assert!(json_ld_equal(&a, &b));
-    }
-
-    /// Object key order is insignificant.
-    #[test]
-    fn object_key_order_insignificant() {
-        let a = json!({"@id": "http://example.org/a", "@type": ["http://example.org/T"]});
-        let b = json!({"@type": ["http://example.org/T"], "@id": "http://example.org/a"});
-        assert!(json_ld_equal(&a, &b));
-    }
-
-    /// Numeric equality: JSON integer `1` equals JSON float `1.0`.
-    #[test]
-    fn numeric_equality_int_float() {
-        let a: Value = serde_json::from_str("1").unwrap();
-        let b: Value = serde_json::from_str("1.0").unwrap();
-        assert!(
-            json_ld_equal(&a, &b),
-            "1 and 1.0 must be equal under f64 numeric comparison"
-        );
-    }
-
-    /// Different numeric values are not equal.
-    #[test]
-    fn numeric_inequality() {
-        let a = json!(1);
-        let b = json!(2);
-        assert!(!json_ld_equal(&a, &b));
-    }
-
-    /// Large integers ≥ 2^53 that are distinct as i64 must not be collapsed by f64
-    /// rounding.  Under the old f64-only path 9007199254740992 and 9007199254740993
-    /// round to the same f64 and would be wrongly equal.  The numeric-guard fix
-    /// [SONNET-4.6] sq-kk1mq compares integral values exactly via i64/u64.
-    #[test]
-    fn large_integer_numeric_guard() {
-        // 2^53 and 2^53+1 are distinct i64 values but collapse to the same f64.
-        let a: Value = serde_json::from_str("9007199254740992").unwrap();
-        let b: Value = serde_json::from_str("9007199254740993").unwrap();
-        assert!(
-            !json_ld_equal(&a, &b),
-            "2^53 and 2^53+1 must be UNEQUAL under exact i64 comparison"
-        );
-    }
-
-    /// Integer JSON `1` equals float JSON `1.0` (f64 fallback when one side
-    /// is non-integral; already covered by numeric_equality_int_float but
-    /// kept as an explicit guard for the mixed-representation case).
-    #[test]
-    fn integer_equals_float_one() {
-        let a: Value = serde_json::from_str("1").unwrap();
-        let b: Value = serde_json::from_str("1.0").unwrap();
-        assert!(
-            json_ld_equal(&a, &b),
-            "integer JSON 1 and float JSON 1.0 must be EQUAL"
-        );
-    }
-
-    /// Duplicate elements in unordered arrays use multiset semantics.
-    #[test]
-    fn unordered_array_multiset_duplicates() {
-        let a = json!([1, 1, 2]);
-        let b = json!([1, 2, 1]);
-        assert!(json_ld_equal(&a, &b), "multiset: [1,1,2] == [1,2,1]");
-
-        let c = json!([1, 1, 2]);
-        let d = json!([1, 2, 2]);
-        assert!(!json_ld_equal(&c, &d), "multiset: [1,1,2] != [1,2,2]");
-    }
-
-    /// Type mismatch: null != false, string != number.
-    #[test]
-    fn type_mismatch_not_equal() {
-        assert!(!json_ld_equal(&json!(null), &json!(false)));
-        assert!(!json_ld_equal(&json!("1"), &json!(1)));
-        assert!(!json_ld_equal(&json!([]), &json!({})));
-    }
-}
+// [FABLE-5] sq-hmd7l.15 — the `json_ld_equal` comparator unit tests moved to the
+// lib-side `sparq_conformance::jsonld_bench` module together with the comparator.
