@@ -202,7 +202,7 @@ fn expand_map(
         let has_value = has_key_expanding_to(&active_context, element, "@value");
         let single_id = is_single_entry_expanding_to(&active_context, element, "@id");
         if !has_value && !single_id {
-            active_context = *active_context.previous_context.clone().unwrap();
+            active_context = (*active_context.previous_context.clone().unwrap()).clone();
         }
     }
 
