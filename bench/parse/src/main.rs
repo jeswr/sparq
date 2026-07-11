@@ -1222,6 +1222,23 @@ fn ext_row(dataset: &str, task: &str, secs: f64, bytes: usize, triples: usize) {
     ]);
 }
 
+/// Extract the triple count from `riot --count` output: `"<file> : Triples = N"`
+/// (field name padding varies by version, and riot 5.x prints the count WITH
+/// grouping separators — `"Triples = 2,560,000"` observed from riot 5.4.0 on the
+/// wave-1 canonical box, which wrongly suppressed the row until the commas were
+/// stripped).
+fn parse_riot_count(output: &str) -> Option<usize> {
+    output.lines().find_map(|line| {
+        let pos = line.find("Triples")?;
+        let after = &line[pos..];
+        let eq = after.find('=')?;
+        after[eq + 1..]
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.replace(',', "").parse::<usize>().ok())
+    })
+}
+
 /// External parser competitor measurements (`bench-ext <file>`).
 ///
 /// Detects format from the file extension (`.nt` → N-Triples, `.ttl` /
@@ -1395,16 +1412,7 @@ fn bench_ext(path: &str) {
         );
         match subprocess_time_and_output(&["riot", "--count", abs_str]) {
             Some((secs, output)) => {
-                // "Triples = N" or "Triples      = N" (riot pads the field name)
-                let parsed_count = output.lines().find_map(|line| {
-                    let pos = line.find("Triples")?;
-                    let after = &line[pos..];
-                    let eq = after.find('=')?;
-                    after[eq + 1..]
-                        .split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse::<usize>().ok())
-                });
+                let parsed_count = parse_riot_count(&output);
                 match parsed_count {
                     Some(c) if c == expected => {
                         ext_row(name, &task, secs, nbytes, expected);
@@ -1444,6 +1452,23 @@ fn bench_ext(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: riot 5.4.0 prints grouping separators ("Triples = 2,560,000",
+    /// verbatim wave-1 canonical-box output) — the count must parse, or the riot
+    /// row is wrongly suppressed. Plain and padded forms must keep working.
+    #[test]
+    fn riot_count_parses_grouping_separators() {
+        assert_eq!(
+            parse_riot_count("/root/sparq/bench/parse/data/synthetic.nt : Triples = 2,560,000\n"),
+            Some(2_560_000)
+        );
+        assert_eq!(parse_riot_count("Triples = 400000"), Some(400_000));
+        assert_eq!(
+            parse_riot_count("INFO  riot  :: Triples      = 328"),
+            Some(328)
+        );
+        assert_eq!(parse_riot_count("no count here"), None);
+    }
 
     /// `--json <path>` is stripped from the positional argv (so the subcommands'
     /// positional indexing is unaffected) and its value is returned; the escaper

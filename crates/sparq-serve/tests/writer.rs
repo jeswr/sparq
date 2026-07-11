@@ -484,6 +484,100 @@ fn window_timing_approximately_honored() {
     );
 }
 
+/// [OPUS-4.8] (sq-p7kk5) ADAPTIVE group-commit: a serial client does NOT wait the window.
+/// The counterpart to `window_timing_approximately_honored` — with `adaptive_commit: true`
+/// the SAME lone update against a 10 s window acks in engine-time (the writer drains the
+/// empty backlog and commits immediately), never holding the batch open for the window.
+#[test]
+fn adaptive_commit_does_not_wait_the_window_for_a_serial_client() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            // A window so long that WAITING it would dominate — the whole point is that
+            // adaptive mode never touches it when the backlog is empty.
+            window: Duration::from_secs(10),
+            max_batch: 256,
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+    );
+
+    let started = Instant::now();
+    assert_eq!(writer.submit("a".into(), pods(&["p"])).unwrap(), 1);
+    let elapsed = started.elapsed();
+
+    // The windowed default would block ~10 s here (see window_timing_approximately_honored);
+    // adaptive mode commits in engine-time. A generous ceiling keeps this robust on a noisy CI
+    // box while still proving the multi-second window was NOT waited.
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "adaptive commit must not wait the 10 s window for a serial client (acked after {elapsed:?})"
+    );
+    let current = ring.current();
+    assert_eq!(current.number(), 1);
+    assert_eq!(*current.snapshot(), vec!["a".to_string()]);
+    assert_eq!(current.epochs().epoch(&PodId::from("p")), 1);
+    assert_eq!(
+        forks.load(Ordering::SeqCst),
+        1,
+        "one fork for the single-update commit"
+    );
+}
+
+/// [OPUS-4.8] (sq-p7kk5) ADAPTIVE group-commit preserves batching of a QUEUED backlog:
+/// updates already sitting in the queue when the writer wakes are all drained into ONE
+/// generation (one fork/seal/publish), so group-commit amortisation under concurrency is
+/// NOT lost — adaptive mode only skips the timed WAIT, it still batches what has arrived.
+#[test]
+fn adaptive_commit_still_batches_a_queued_backlog() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+    );
+
+    // Fire-and-forget submits enqueue WITHOUT blocking, so by the time the writer wakes on the
+    // first, several are already queued — exactly the "backlog piled up between iterations"
+    // concurrency case. A trailing sync submit's ack proves what published together.
+    for i in 0..5 {
+        writer
+            .submit_detached(format!("u{i}"), pods(&[&format!("pod:{i}"), "pod:shared"]))
+            .unwrap();
+    }
+    let generation = writer
+        .submit("u5".to_string(), pods(&["pod:5", "pod:shared"]))
+        .unwrap();
+
+    let current = ring.current();
+    // The whole drained backlog collapses into as few generations as the drain saw it — in
+    // practice generation 1 for a backlog present at wake. We assert the STRONG invariant the
+    // fix must preserve: all six updates are committed, in strict FIFO order, and the trailing
+    // sync's generation is the current one.
+    assert_eq!(current.number(), generation);
+    let expected: Log = (0..6).map(|i| format!("u{i}")).collect();
+    assert_eq!(*current.snapshot(), expected, "strict FIFO, nothing dropped");
+    for i in 0..6 {
+        assert_eq!(current.epochs().epoch(&PodId::from(format!("pod:{i}"))), 1);
+    }
+    // The queued backlog was batched, not committed one-fork-per-update: far fewer forks than
+    // six. (A pure per-update path would fork six times.)
+    assert!(
+        forks.load(Ordering::SeqCst) < 6,
+        "a queued backlog must batch (forks={}, want < 6)",
+        forks.load(Ordering::SeqCst)
+    );
+}
+
 /// Dropping the writer drains: a pending batch is committed (early, without
 /// waiting out a long window) before the thread exits.
 #[test]

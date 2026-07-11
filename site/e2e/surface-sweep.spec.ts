@@ -88,6 +88,7 @@ const BENCHMARK_FAMILY_KEYS = [
   "zk",
   "solid",
   "hdt",
+  "update",
   "rsp",
   "genai",
   "gpu",
@@ -109,6 +110,7 @@ const DEEP_SURFACE_SLUGS = [
 // Surface slugs with their own folder but serving redirect stubs (not deep pages).
 // Guard test ensures every surface folder is either here or in DEEP_SURFACE_SLUGS.
 const REDIRECT_STUB_SURFACE_SLUGS = [
+  "federation",
   "full-text",
   "genai",
   "geosparql",

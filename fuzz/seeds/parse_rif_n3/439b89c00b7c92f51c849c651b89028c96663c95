@@ -1,0 +1,2 @@
+@prefix ex: <http://example. rg/>.
+ { @forSome ex B => { ex:a efalsex:type ex:B} .

@@ -57,10 +57,12 @@
 #     perf backend with no first-party Rust code of its own, so compiling it here buys
 #     no rot-protection for sparq's own source. Left out to keep the lane fast + free
 #     of a C build dep.
-#   • `hdt` (sparq-cli) / sparq-hdt `write`: the wrapped `hdt` crate declares MSRV
-#     1.87 and pulls a heavy decode stack; sparq-hdt is already --exclude'd from the
-#     workspace MSRV/test jobs for that reason. Gating it needs its own toolchain lane
-#     (future bead) — not folded in here so this lane stays on the stable floor.
+#   • [FABLE-5] sq-8ju74: the `hdt`/`hdt-write` (sparq-cli) + `write` (sparq-hdt) legs
+#     USED to be excluded here because the wrapped `hdt` crate declares MSRV 1.87 and
+#     the workspace floor was 1.85 ("needs its own toolchain lane"). That reason is
+#     STALE — the floor is 1.88, at/above sparq-hdt's 1.87 — so the legs now exist in
+#     .github/feature-matrix.d/{sparq-cli,sparq-hdt}.yml and the former silent gaps
+#     (tests/hdt_cli.rs, tests/hdt_write_cli.rs, tests/write_roundtrip.rs) gate normally.
 #   • `live` (sparq-nlq) / `embeddings` (sparq-vectors): enable a REAL network client
 #     (reqwest against the Anthropic / OpenAI-compatible endpoints). They are off in CI
 #     by contract (the eval harness runs on recorded fixtures) and must not open a
@@ -264,6 +266,40 @@ jobs:
           echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
           echo "Assembled $LEGS opt-in leg(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
+      - name: Loud failure attribution — the opt-in matrix was NOT generated
+        # [FABLE-5] sq-2wo5t: when THIS job fails (golden leg-name drift after adding
+        # a new opt-in leg, the C1 structural guard, the tier ratchet, or a malformed
+        # fragment), the matrix output is never produced, so the `opt-in-features` job
+        # spawns ZERO legs and EVERY required `opt-in <crate> (…)` check on the PR goes
+        # expected-but-MISSING. That absence historically misread as "one specific leg
+        # failing across multiple unrelated PRs" — a false main-regression signature
+        # (the 2026-07-11 'spqv-provenance' drain-blocker alarm; none of the PRs
+        # touched the crate). This step fires ONLY when an earlier step in this job
+        # failed and emits an unmissable ::error annotation + job-summary block that
+        # attributes the missing legs to THIS job, so triage starts at the real failing
+        # step instead of chasing a phantom cross-PR leg regression. It cannot rescue
+        # the job (the earlier failure already decides the job's conclusion, which the
+        # required ci-summary gate REDs on) — the fail-closed guards are unchanged.
+        # The wiring + this script's output are pinned by
+        # scripts/tests/test_feature_matrix_assemble.py (TestAssembleFailureAnnotation).
+        if: failure()
+        run: |
+          set -euo pipefail
+          echo "::error title=opt-in feature matrix NOT generated::The 'assemble feature matrix' job failed, so NO 'opt-in *' matrix legs were spawned for this commit. Every required 'opt-in <crate> (...)' check is therefore MISSING, not failing — a missing leg is not a failing leg, and this is NOT a regression in any single opt-in leg. Fix the failing step in THIS job first. Common causes: golden leg-name drift (a new opt-in leg without a matching line in scripts/tests/feature-matrix-legnames.golden.txt), the C1 feature-gated-test-execution guard (scripts/check-feature-test-execution.py), the tier ratchet (scripts/feature-matrix-tiers.py), or a malformed .github/feature-matrix.d fragment."
+          {
+            echo "## opt-in feature matrix NOT generated"
+            echo
+            echo "This \`assemble feature matrix\` job **failed**, so the matrix JSON was never produced and **no \`opt-in *\` check-runs were spawned** for this commit."
+            echo
+            echo "**Every required \`opt-in <crate> (…)\` check on this PR is MISSING, not failing.** A missing leg is not a failing leg — do not triage individual opt-in legs, and do not suspect a cross-PR / main regression in one of them."
+            echo
+            echo "Fix the failing step above first. Common causes:"
+            echo
+            echo "- **Golden leg-name drift** — a new opt-in leg was added without updating \`scripts/tests/feature-matrix-legnames.golden.txt\` (the assembler self-test)."
+            echo "- **Structural guard C1** — a feature-gated test with no CI executor and no allowlist entry (\`scripts/check-feature-test-execution.py --check\`)."
+            echo "- **Tier ratchet** — \`scripts/feature-matrix-tiers.py --enforce\`."
+            echo "- **Malformed fragment** — a broken or duplicate-name leg in \`.github/feature-matrix.d/<crate>.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   opt-in-features:
     needs: [changes, setup]
@@ -525,6 +561,76 @@ jobs:
         run: cargo test -p sparq-server --no-default-features
       - name: Clippy (--no-default-features --all-targets -D warnings)
         run: cargo clippy -p sparq-server --no-default-features --all-targets -- -D warnings
+
+  # [FABLE-5] sq-wo5jw: THE pure-geometry-library build of sparq-geo — the crate with
+  # `--no-default-features` (the default-ON `engine` feature OFF): WKT/GML parsing, the
+  # plain-Rust `geof` API and the R-tree GeoIndex, with no SPARQL engine in the
+  # dependency graph. ci.yml exercises only the DEFAULT (engine-ON) set and the
+  # opt-in-features matrix above only ADDS features, so nothing gated this config's
+  # DOCTESTS — and the crate-level doc (the included README quickstart, which drives
+  # `geof_registry` through `sparq_engine::query_with_functions`) failed to COMPILE
+  # under --no-default-features until lib.rs feature-gated the README attachment
+  # (bead sq-wo5jw; the lib/integration suites were already green there, only no lane
+  # ran them). This job locks the whole engine-less state green: build + `cargo test`
+  # (lib + the engine-less integration suites) + an EXPLICIT `--doc` step (so the
+  # doctest target stays covered even if a later edit narrows the main test step) +
+  # `clippy --all-targets -D warnings`. The job NAME is free of the words
+  # "advisory"/"informational", so the single required `ci-summary / gate` aggregator
+  # auto-discovers it as a REQUIRED check (no edit to ci-summary.yml).
+  geo-no-default-features:
+    # Single-crate lane (`-p sparq-geo` only) — skip when ENFORCED selection proves
+    # sparq-geo unaffected (fail-closed guard: empty/missing outputs or shadow/full
+    # mode => run), mirroring server-no-default-features above.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-geo"'))
+    name: sparq-geo pure-geometry (--no-default-features)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: feature-matrix-sparq-geo-no-default-features
+          # [OPUS-4.8] sq-3sbrr: restore-only off main so PR/merge_group runs don't
+          # write branch-scoped caches that churn the shared 10 GB budget.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch dependencies (retry transient crates.io fetch)
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo fetch --locked; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo fetch failed after $n attempts (registry outage?)" >&2
+              exit 1
+            fi
+            echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
+      - name: Build (-p sparq-geo --no-default-features)
+        run: cargo build -p sparq-geo --no-default-features
+      - name: Test (-p sparq-geo --no-default-features) — lib + the engine-less suites
+        run: cargo test -p sparq-geo --no-default-features
+      - name: Doctests (-p sparq-geo --no-default-features --doc) — sq-wo5jw regression lane
+        run: cargo test -p sparq-geo --no-default-features --doc
+      - name: Rustdoc (-p sparq-geo --no-default-features, -D warnings)
+        # The repo-wide rustdoc gate runs --all-features, where an intra-doc link from
+        # an always-compiled doc-comment to an `engine`-gated item RESOLVES — the break
+        # only surfaces in the engine-less doc build (bit geof.rs -> registry::geof_registry,
+        # fixed under sq-wo5jw by demoting to a code span). This step locks that state.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p sparq-geo --no-deps --no-default-features
+      - name: Clippy (--no-default-features --all-targets -D warnings)
+        run: cargo clippy -p sparq-geo --no-default-features --all-targets -- -D warnings
 
   # [OPUS-4.8] sq-s1uy (epic sq-dnko): THE load-bearing Phase-0 deliverable. Assert the
   # lean core (sparq-core + sparq-engine) has NO dependency edge to the OPT-IN federation

@@ -75,6 +75,11 @@ rdf12-triple-terms = ["dep:sha2"]
 [dev-dependencies]
 sparq-engine = { path = "../sparq-engine" }
 serde_json = "1"
+# [FABLE-5] sq-3dyje.8: property-based RDFC-1.0 determinism suite
+# (tests/proptest_canon_determinism.rs). DEV/TEST-ONLY — covered by the
+# workspace-wide dev-only proptest supply-chain exemption (sq-3dyje program);
+# not in the shipped or wasm build.
+proptest = "1"
 # SHA-384 parameterized-hash cases of the W3C rdf-canon suite (test075).
 # [OPUS-4.8] Pinned to 0.10 (NOT 0.11): rdf-canon 0.15.3 exposes a `Digest` bound
 # from digest 0.10, and the suite feeds `sha2::Sha384` straight into

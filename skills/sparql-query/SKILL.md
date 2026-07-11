@@ -393,6 +393,17 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   graph-wide/conservative (correctness first): a graph carrying one high-precision decimal skips the
   numeric-pushdown optimisation for all its numeric FILTERs, never the wrong answer.
 - **`SELECT *`** never exposes blank-node "variables" (`_:x` in a pattern is an existential var).
+- **Non-deterministic builtins** (`sq-98w7z.1`) — `NOW()` is **query-constant** per SPARQL 1.1
+  §17.4.5.1: every evaluation within one execution (across rows, parallel workers, `EXISTS`
+  re-entry, sub-selects) returns the same `xsd:dateTime`, pinned at execution start and re-sampled
+  by the next execution (each UPDATE operation's WHERE is its own execution; second granularity).
+  `RAND()` stays fresh per call, drawn from a per-thread splitmix64 PRNG seeded once from OS
+  entropy — NOT cryptographic (SPARQL imposes no such requirement); don't derive secrets from it.
+  `UUID()`/`STRUUID()`/no-arg `BNODE()` are likewise fresh per call — the engine never memoises a
+  non-deterministic builtin (the allow/deny policy is spelled out in `eval_function_inner`).
+  `REGEX()`/`REPLACE()` memoise the compiled `(pattern, flags)` per thread (capped at 64 entries),
+  so a constant-pattern FILTER compiles once instead of per row; an invalid pattern/flag is still a
+  per-row type error — the failure outcome is memoised, the semantics are unchanged.
 - **`update` vs `update_in_place` vs `update_in_place_atomic`** — `update` returns a fresh `Graph`
   (input borrowed, untouched, atomic by construction); `update_in_place(&mut g, …)` mutates via the
   delta overlay (call `Graph::compact` periodically) but is NON-atomic on error; `update_in_place_atomic`
@@ -539,14 +550,17 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   **`query`/`query_json`/etc. return byte-identical results whether the feature is on or off** — it
   is a perf optimisation, never a semantics change. The first evaluator wiring landed in Phase 3
   (`sq-pntvh.3`): a **columnar residual-FILTER seam** inside `apply_filter` (Seam A) that, for an
-  eligible single sargable-numeric residual `?v OP const` over an **all-inline-integer** column,
-  transposes to a `DataChunk`, decodes the column once, compares over the decoded column, gathers the
-  survivors, and materialises back — provably byte-identical to the scalar row path (same rows, same
-  order). It **declines** to the row path for anything not provably identical (non-inline / negative /
-  computed / unbound cells, temporal or non-sargable filters) and is **disabled whenever the `zk`
-  trace is armed** so the row path records the complete FILTER obligation set. The M4 wiring roadmap +
-  coexistence model is `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance gate landed
-  first (Phase 1, `sq-pntvh.1`): the differential BYTE-IDENTITY harness
+  eligible single sargable-numeric residual `?v OP const`, decodes the column once and runs the
+  **hybrid tri-mask** (`src/chunk_select.rs`, bead `sq-y5ew5`): each lane is classified Confident
+  (finite f64, `v != c` — f64 verdict is unambiguous by the monotone-rounding lemma), Tie (`v == c`
+  as f64), or Unknown (NaN sentinel for non-numeric / unbound / local-vocab ids). Tie + Unknown lanes
+  are **delegated** to the full scalar `eval_expr` predicate (which handles the exact-lexical recheck
+  for ties); confident-passes and delegated-passes are merged in ascending order. This is provably
+  byte-identical by construction (design record §3). The seam **declines** entirely to the row path
+  for temporal or non-sargable filters, batches below `VEC_MIN_BATCH`, and is **disabled whenever the
+  `zk` trace is armed** so the row path records the complete FILTER obligation set. The M4 wiring
+  roadmap + coexistence model is `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance
+  gate landed first (Phase 1, `sq-pntvh.1`): the differential BYTE-IDENTITY harness
   `crates/sparq-engine/tests/vectorized_byte_identity.rs` (the columnar kernel's serialised survivors
   are byte-identical to the row `FILTER` operator over the *same batch*, order-exact — a Phase-1
   finding: cross-query byte-identity is unsound because a sargable filter re-plans the scan, so the
@@ -561,14 +575,15 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   morsel extracts only the one filter column (O(rows × 1), not a full-width transpose). The decline
   hierarchy (in order): I2 = ZK-trace armed (scalar records the full obligation set); I3 = budget
   armed (fallback rule — the debit schedule is not uniform-per-row); operator shape check (only a
-  simple sargable `?v OP const` numeric comparison); I4/`VEC_MIN_BATCH` batch-size gate; all-inline
-  dtype precheck. The aggregate seam (Seam B, `group_aggregate` → `columnar_aggregate`) is also
-  wired through the same I2/I3/`VEC_MIN_BATCH` checks. **I5 probe counters (test-facing / unstable)**:
+  simple sargable `?v OP const` numeric comparison, finite constant); `VEC_MIN_BATCH` batch-size gate.
+  The aggregate seam (Seam B, `group_aggregate` → `columnar_aggregate`) is also wired through the
+  same I2/I3/`VEC_MIN_BATCH` checks. **I5 probe counters (test-facing / unstable)**:
   `reset_stats()` / `stats_snapshot()` / `VecStats` let acceptance tests assert the seams are
-  non-vacuous (`chunks_built >= 1` for an eligible operator). Thread-local counters are used (not
-  global atomics) so parallel test threads don't interfere. The counters are **not semver-stable** —
-  external callers must not build stable logic on them; they exist only for the acceptance gate in
-  `tests/differentials/vectorized_byte_identity.rs` (T1–T4).
+  non-vacuous (`chunks_built >= 1` for an eligible operator, `rows_delegated > 0` when tie/unknown
+  lanes exist). Thread-local counters are used (not global atomics) so parallel test threads don't
+  interfere. The counters are **not semver-stable** — external callers must not build stable logic on
+  them; they exist only for the acceptance gate in `tests/differentials/vectorized_byte_identity.rs`
+  (T1–T4) and `tests/differentials/chunk_select_tri_mask.rs` (sq-y5ew5 T1–T5).
 - **Sideways information passing (SIP) — correlated graph-pattern join** is a DEFAULT-ON,
   semantics-preserving optimisation (bead `sq-7d3dj.30.3`; research/sp2bench-complex-shape-deficit.md
   §2.2). When a `Join(A, B)` is evaluated and the already-evaluated side `A` is **small** (≤ 64 rows),
@@ -584,6 +599,98 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   correlated child actually collapsed). SP2Bench q08/q12b: the 1-row `?erdoes` side seeds the Union's
   `?document dc:creator ?erdoes` scan instead of a whole-corpus creator self-join. Payoff on complex-shape
   workloads is a measurable hypothesis for the canonical perf host, not a baked-in number.
+- **Correlated (theta) anti-join for `OPTIONAL … FILTER(!bound)`** is a DEFAULT-ON,
+  semantics-preserving optimisation (bead `sq-7d3dj.30.9`, SP2Bench q06). The negation idiom
+  `Filter(!bound(?nb), LeftJoin(A, B, F))` — where `?nb` is **certain** in `B` and **absent** from `A` —
+  is exactly an anti-join: a left row survives iff **no** `b ∈ B` is compatible with it **and** makes the
+  OPTIONAL condition `F` effectively **true**. The default-off `algebra-rewrite` pass turns the simpler
+  `F = None` case into `Minus`, but declines when `F` references **outer** variables (q06's
+  `?author = ?author2 && ?yr2 < ?yr`), so the cold `left_outer_join` scans the whole corpus. This
+  eval-time path instead splits `F` into var-to-var **correlation** conjuncts `?outer θ ?inner` (with
+  `?inner` certain in `B`) and a residual theta (`?yr2 < ?yr`), and picks between two strategies. The
+  correlation relation `θ` may be value `=`, `sameTerm`, or a single-variable `?a IN (?b)` membership
+  (which desugars to `?a = ?b`); a constant / multi-element `IN` list stays in the residual (`sq-3cmr4`).
+  **Large** correlation cardinality → a **hash anti-join**: evaluate `B` **once**, partition it by the
+  `?inner` id, then probe each left row's bucket — one `B` scan, O(|A|+|B|) (SP2Bench q06's win); for a
+  **very large** anchor side the per-left-row probe is **fanned out over cores** with rayon under the
+  `parallel` feature, and only the boolean verdicts are parallelised so the result stays byte-identical
+  to the serial probe (`sq-f1emb`). **Small** cardinality → **SIP-seed**: seed the outer correlation term
+  sideways into `B` so each distinct correlation evaluates a tiny `B'`. Either way the residual theta is
+  re-checked verbatim per candidate with full 3-valued semantics (a **type error ⇒ no match**, so the
+  outer row **survives** — never spuriously eliminated). The relation `θ` is **load-bearing**: value `=`,
+  `sameTerm` and id-equality differ on value-equal id-distinct literals (`"1"` vs `"01"`). Id-hashing is
+  exact for a value-`=` correlation only on **IRI and blank-node** keys (for both, SPARQL `=` coincides
+  with term identity — per SPARQL 1.1 §17.4.1.7 RDFterm-equal, `=` on two distinct non-literal terms
+  returns **false**, a type error arising only when both arguments are literals, and false and error alike
+  mean **no match**, which an id non-match reproduces); a **literal**-valued `=` correlation (the
+  `sq-lr2ii` value-equality class) routes through a **value-correct** scan that re-checks with SPARQL `=`.
+  A **`sameTerm`** correlation is **term identity** for every kind, so a literal key is itself id-probeable
+  and any value-correct scan re-checks with `sameTerm`, never `=`. Each surviving row is emitted **once**
+  (multiplicity preserved), and any shape/scope miss (e.g. `?nb` also bound on the left, or no seedable
+  correlation) **declines** to the identical prior plan. Proven on-vs-off by `tests/theta_antijoin.rs`
+  (type-error-survives, literal value-equality, blank-node, large-cardinality hash, `sameTerm`/`IN`
+  correlation + a `=`-vs-`sameTerm` divergence witness, a `PAR_THRESHOLD`-crossing parallel probe, and a
+  randomised differential rotating all three relations across both strategies); toggle/stats behind
+  `theta_antijoin_testing`. The opt-in **`antijoin-static-decline`** feature (OFF by default, bead
+  `sq-7d3dj.30.20`) removes a redundant re-evaluation on the **no-seedable-correlation** decline path:
+  when the recogniser's shape gate matches but the OPTIONAL condition is a bare `!bound` (no var-to-var
+  correlation to seed — SP2Bench **q07**'s nested levels), the un-featured path evaluates the mandatory
+  left side, discovers `correlations.is_empty()`, and declines — after which the cold `Filter{LeftJoin}`
+  fallback **re-evaluates that same (dominant) left side**. The feature adds a purely **static** pre-check
+  (`in_scope_vars(left)` + `certain_vars(right)`, no graph access) that declines **before** the left side
+  is touched, so it is evaluated **once**. Pure evaluation-ordering, **bag-result-equivalent** to off
+  (`tests/antijoin_static_decline_differential.rs`, both feature states + the W3C ratchet); off,
+  byte-identical, no new deps.
+- **Id-level term-identity FILTER fast path** is the non-default `id-filter-fastpath` cargo feature
+  (bead `sq-7d3dj.30.11`). It removes the per-row term MATERIALIZATION the compiled FILTER evaluator
+  otherwise performs for `=`/`!=`, by two id-level short-circuits: **(a)** a static term-kind analysis
+  (`nonliteral_vars`) proves a variable is bound ONLY in BGP subject/predicate slots — never a BGP
+  object, a property-PATH endpoint (a path object can be a literal; a `Reverse`/zero-length subject
+  end too), a quoted-triple inner slot, a `BIND`/`VALUES` binding, or any variable of an un-analysed
+  construct (`SERVICE`/`Lateral`/sub-`SELECT` inner vars are all poisoned to literal-risk) — and so
+  can never be a literal — for two such operands (or a constant IRI)
+  SPARQL `=` is exactly dictionary-id equality and `!=` id inequality (the canonicalising dict gives
+  each IRI/bnode one id); **(b)** EQUAL ids of ANY kind are the same term, so `=` short-circuits `true`
+  and `!=` `false` (mirroring the `sameTerm` decision the exact path already takes — safe even for
+  ill-typed literals, which return a boolean not a type error). UNEQUAL ids of possibly-LITERAL
+  operands (numeric promotion `"1"^^integer` = `"1.0"^^decimal`, whitespace-padded lexicals — the
+  `sq-lr2ii` class) and `=` cases that can be a TYPE ERROR fall through to the exact value path
+  unchanged. Result-identical whether on or off — a differential test pairs every id kind (IRIs,
+  bnodes, numeric-promotion pairs, language-tagged, ill-typed literals) and asserts the fast verdict
+  equals the exact `term_of` + `values_equal` oracle row-for-row. When off, the fast-path column-set
+  machinery does not compile and the feature-OFF path is BEHAVIOUR-identical to the prior default build
+  (no new dependencies; no `unsafe`) — the bytes are NOT identical, because the always-compiled
+  EXISTS-re-entry refactor (splitting `eval_exists` into a thin wrapper + an always-compiled
+  `eval_exists_inner`) MOVED bytes and shifted panic locations; this byte-move is declared in
+  `bench/feature-off-declarations/1785.json` per the feature-OFF-declaration mechanism.
+  **Predicate-range widening (`sq-1ivw7`)** closes #1785's honest null result on the q08/q12b shape,
+  whose FILTER variables (`?author`, `?erdoes`) appear only as `dc:creator` OBJECT positions (which
+  the position-only analysis declined). The widened analysis credits an OBJECT-position variable as
+  non-literal when its predicate is a CONSTANT IRI whose object column has NO literal in the CURRENT
+  store snapshot — computed at query-execution time by `Graph::predicate_has_literal_object` (an
+  overlay-aware, early-exit scan of the predicate's objects; `dict::is_literal_id` classifies each
+  object id, with inline integers always literal). The requirement is NO LITERALS, not IRI-only:
+  bnode ids are identity-comparable exactly like IRIs for `=`/`!=` (distinct non-literals compare
+  FALSE per §17.4.1.7), so a bnode-object predicate still fires. Any literal object for the predicate,
+  or a VARIABLE predicate, or MIXED use of the variable (also an object of a literal-having predicate)
+  → decline. **Graph scoping (soundness):** the credit is scoped to ONE graph's object column, so an
+  object variable bound under a `GRAPH <g>`/`GRAPH ?g` block stays literal-risk at an OUTER dispatch —
+  a FILTER sitting outside the GRAPH block classifies against the default graph, but the object is
+  bound from a self-contained named sub-graph with its own store/dict, so crediting it off the default
+  column would be unsound (a named-graph literal would be id-compared). The inside-GRAPH dispatch is
+  correct and unaffected (it evaluates against the named sub-graph, so its own classifier scans the
+  right store). `Graph::predicate_has_literal_object` answers for the receiver graph only.
+  **Snapshot soundness:** a prepared query in sparq is parse-only (`PreparedQuery` carries
+  algebra, no plan); each evaluation borrows an immutable `&Graph` snapshot (a server request pins a
+  generation), so the check is re-run against the LIVE graph every eval — an UPDATE inserting a
+  literal object publishes a new snapshot the next query re-checks; the verdict never outlives its
+  snapshot (there is no plan/inference cache across snapshots; the result cache is keyed by
+  `(query, version)`). The same snapshot-aware column set is now also installed at the FUSED
+  conjunctive residual-FILTER sites (`eval_flat_conjunctive`, `eval_bgp_binary_capped`), drain-safe
+  via `with_idfast_nonlit_cols` (the set drains on the first consuming `apply_filter`, so a nested
+  EXISTS on a different `Bindings` layout sees the empty default). A differential test witnesses the
+  q08 shape now compiles `?a = ?b` to `IdEqNonLit` (fires), an update-then-requery flips the credit,
+  and the end-to-end answer is an independent recompute.
 - **DISTINCT-projection loose (skip) index scan** is a DEFAULT-ON, semantics-preserving optimisation
   (bead `sq-7d3dj.30.4`; research/sp2bench-complex-shape-deficit.md §2.3). For `SELECT DISTINCT ?p`
   over a BGP / **UNION** of BGPs where `?p` is the **single** projected variable, the executor
@@ -610,6 +717,25 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   that the scanned rows collapse to a small fraction of the full join). SP2Bench q09: the 2-branch
   `DISTINCT ?predicate` over persons answers a handful of predicates without materialising the ~77 k-row
   join. Payoff on the canonical perf host is a measurable hypothesis, not a baked-in number.
+- **Characteristic-set anchor-incidence prune** is the OPT-IN `cs-anchor-incidence` cargo feature (OFF
+  by default; bead `sq-jnb1e`) that accelerates the LARGE-anchor block scan above. For q09 the block
+  scan still proves each candidate predicate P relates NO anchor member by clipping and galloping P's
+  join-value block — for the value-typed predicates (`dc:title`, `foaf:homepage`, `rdfs:seeAlso`, 17k–27k
+  distinct objects each) that is a large no-hit scan (~250 k rows examined to answer 4 predicates). With
+  the feature on, the executor precomputes, per anchor join position, the SET of predicates that relate
+  SOME anchor member (one range-restricted scan over the anchor's id window), so a candidate P absent from
+  that set is pruned by an O(1) membership test instead of the block scan — QLever's "pattern-trick"
+  metadata answer, over sparq's permutations. It is a characteristic-set INCIDENCE summary (which
+  predicates touch a type at which position), distinct from the `cs-planner` predicate-set cardinality CS.
+  RESULT-IDENTICAL: the incidence set is EXACT on the base index, so it only ever prunes a
+  provably-empty existence check; a P in the set still takes the exact block scan, and the answer is
+  bit-for-bit the feature-off answer (differential on-vs-off in `tests/distinct_pushdown.rs`, incl. a
+  randomised straddle, a large no-hit-block prune, and answer-safety corners). It fires only when the
+  probe constrains **only** the projected predicate and the join variable (else it declines to the exact
+  scan), and **conservatively DECLINES on a graph with a pending-update overlay** (the derived set is built
+  against the base index; incremental maintenance is out of scope), so a query after an UPDATE simply
+  falls back to the exact scan. Off, zero incidence code compiles and no new deps. Payoff on the canonical
+  perf host is a measurable hypothesis, not a baked-in number.
 - **ASK / LIMIT first-solutions early exit through joins** is a DEFAULT-ON, semantics-preserving
   optimisation (bead `sq-7d3dj.30.8`; research/sp2bench-complex-shape-deficit.md §5). `ASK` is
   evaluated under an implicit `LIMIT 1`, and any `LIMIT k` (no ORDER BY / DISTINCT / aggregation
@@ -693,6 +819,26 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   for the canonical perf host, not a baked-in number. Hypergraph **DPhyp** and interesting-orders-in-
   the-DP-table are NOT implemented. When off, zero DP code compiles, the default build is byte-identical,
   and no new dependencies are added (no `unsafe`).
+- **Membership-cluster pre-materialisation** is the non-default `cluster-materialize` cargo feature
+  ([FABLE-5] bead `sq-7d3dj.30.14`; SP2Bench q07, research/sp2bench-complex-shape-deficit.md §5). It
+  targets the container-membership idiom `?bag ?member ?doc` — a pattern with an UNBOUND predicate (the
+  `rdf:_n` bag members are ordinary triples, so no single bound-predicate scan enumerates a whole bag).
+  When such a pattern sits in a BGP next to a small BOUND-predicate anchor it shares exactly one variable
+  with (q07's `?doc2 dcterms:references ?bag`), greedy GOO bind-joins the ~250k-row unbound-predicate
+  relation per driver binding through the widest permutation. With the feature on, `cluster::detect`
+  spots the shape and the executor evaluates the `{anchor, membership}` pair **standalone** (the anchor
+  bounds the shared variable to a small set → a few-thousand-row relation) and **natural-joins** it to the
+  rest. It is **ORDER-ONLY**: a BGP is a commutative/associative natural join, so partitioning into two
+  connected sub-BGPs and joining yields the SAME row bag as greedy — both sub-BGPs are evaluated
+  UNCORRELATED, so there is no sideways-information hazard (only one evaluation of the cluster; the
+  materialised relation is the full union-compatible superset), and natural join preserves multiplicity
+  exactly (no dedup). `detect` **DECLINES** (unchanged greedy plan) on any non-matching shape — not
+  exactly one membership pattern, an anchor variable that leaks into the rest, a pushed-down scan filter
+  on a cluster pattern, or the cost gate unmet. Proven by `tests/cluster_materialize_differential.rs`
+  (randomised shapes + nested-OPTIONAL + multiplicity + a non-vacuous mutation check, run in BOTH feature
+  states). The end-to-end q07 win is a measured hypothesis for the canonical perf host (bead
+  `sq-7d3dj.30.6`), not a baked-in number. When off, zero of this code compiles, the default native +
+  wasm builds are byte-identical, and no new dependencies are added (no `unsafe`).
 - **Pre-execution algebra rewrite pass** is the `algebra-rewrite` cargo feature — non-default in the
   sparq-engine LIBRARY, but lit BY DEFAULT in the shipped `sparq-cli` + `sparq-server` binaries and in
   the conformance/differential-fuzz harnesses ([FABLE-5] sq-7d3dj.30.13), so it is what real users and

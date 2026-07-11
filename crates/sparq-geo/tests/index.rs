@@ -269,6 +269,15 @@ fn assert_matches_fresh_build(index: &GeoIndex, graph: &Graph) {
     };
     assert_eq!(snapshot(index), snapshot(&fresh));
     assert_eq!(index.len(), fresh.len());
+    // [OPUS-4.8] sq-7jt80: the id-level indexed universe maintained across the
+    // delta must equal a fresh build's — proving apply_delta keeps `literal_ids`
+    // consistent (a stale id-set would be an answer-safety bug in the pushdown's
+    // fast path). Both are keyed on the SAME graph's dict, so the freshness token
+    // matches for both.
+    let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
+    let delta_ids = index.indexed_ids_for(dict_ptr).expect("same-dict freshness holds");
+    let fresh_ids = fresh.indexed_ids_for(dict_ptr).expect("fresh build over same dict");
+    assert_eq!(delta_ids, fresh_ids, "apply_delta must keep the id-level universe consistent");
     // And the R-tree answers identically.
     for center in [Point::new(0.0, 50.0), Point::new(2.0, 50.0)] {
         let a: Vec<String> = index

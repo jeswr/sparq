@@ -256,10 +256,20 @@ Materialize the authorization view from the access-control documents, then enfor
   `governing_acl`/`scope`, which `WacDecision::acl_link_header()` turns into the FR-5
   `Link: rel="acl"` surface (above). **Honest scope:** Phase-1 implements
   the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
-  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk; it is NOT the
-  full WAC HTTP surface (FR-4's `POST /authz/*` on `sparq-server` is the separate sq-snopa.6
-  architecture call), and the `decide` `scope` is the ACL-*document* discovery scope, while
-  whether a grant within that ACL applies is the verdict the oracle computes.
+  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk. The **HTTP shell**
+  over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
+  `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
+  that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split). The
+  **ODRL lane on `/authz/query`** (sq-lrtc3.1) has LANDED as `sparq-server`'s opt-in `odrl-authz`
+  feature — dataset-carried ODRL policies are fed through `materialize_odrl_policy`
+  (deny-overrides, fail-closed) before the access-controlled query runs, so an ODRL policy gates a
+  SPARQL query end-to-end over HTTP. The
+  **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
+  and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
+  was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
+  does NOT authenticate — it takes an already-resolved session, exactly as this library does. The
+  `decide` `scope` is the ACL-*document* discovery scope, while whether a grant within that ACL
+  applies is the verdict the oracle computes.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
@@ -281,7 +291,9 @@ Materialize the authorization view from the access-control documents, then enfor
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
   one-shot allow — so the granted agent is verified **per session**, not frozen to the
-  materializing party. `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`/`neq`) maps
+  materializing party. `odrl:recipient`/`odrl:assignee`
+  (`eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` — the set operators one head /
+  exception per member, [FABLE-5] sq-5fkpp) maps
   faithfully (recipient-of-data = session agent); an `odrl:dateTime` **inclusive** bound
   (`lteq` → `auth:notAfter`, `gteq` → `auth:notBefore`) maps to a **live-clock window**
   re-checked against `Session::now` per request ([OPUS-4.8] sq-0q7n — a lapsed window denies

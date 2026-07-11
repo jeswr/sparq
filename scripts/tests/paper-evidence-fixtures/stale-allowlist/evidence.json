@@ -1,0 +1,14 @@
+{
+  "_comment": "STALE-ALLOWLIST fixture: the record 'demo.sparql_floor' now HAS a passing json-pointer binding, yet it is still listed on the allowlist. A stale entry must fail so the allowlist actually shrinks. MUST fail.",
+  "schemaVersion": 2,
+  "records": {
+    "demo.sparql_floor": {
+      "value": 1229,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "bench/results.json::conformance.sparql_floor",
+      "binding": { "kind": "json-pointer", "file": "bench/results.json", "pointer": "/conformance/sparql_floor" },
+      "note": "Now migrated to a passing binding — but still stuck on the allowlist."
+    }
+  }
+}

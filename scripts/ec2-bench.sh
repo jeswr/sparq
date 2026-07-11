@@ -16,6 +16,17 @@ SCALE="${BENCH_SCALE:-2000000}"                 # ~10x the in-CI scale
 SHA="${GITHUB_SHA:-$(git rev-parse HEAD)}"
 REPO="https://github.com/jeswr/sparq.git"
 TAGSPEC='ResourceType=instance,Tags=[{Key=purpose,Value=sparq-ci-bench}]'
+# [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) OUTPUT + FULL-SUITE knobs so the nightly lane can reuse
+# this SAME script (single source of truth) instead of a forked copy:
+#   BENCH_OUT         — results filename written to the CWD (default ec2-bench-results.json, weekly heavy).
+#   BENCH_FULL_SUITE  — when set (=1), the instance installs the well-known-suite toolchains
+#                       (g++/Boost/JRE/JDK/rapper/unzip/binaryen) AND runs ci-bench.sh with
+#                       GITHUB_REF=refs/heads/main, so EVERY latency suite (sp2b/dbpsb/watdiv/bsbm/lubm
+#                       + the cargo-only fts/geo/vector/rsp/hdt/solid/nlq/zk main-tier hooks) runs — the
+#                       full NOISY timing series that was RELOCATED off the per-PR / merge_group bench
+#                       lane. Empty (weekly heavy default) = today's toolchain-light run, unchanged.
+BENCH_OUT="${BENCH_OUT:-ec2-bench-results.json}"
+BENCH_FULL_SUITE="${BENCH_FULL_SUITE:-}"
 
 WORK="$(mktemp -d)"
 KEYFILE="$WORK/key"
@@ -64,17 +75,36 @@ for i in $(seq 1 30); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && break; sleep
 echo "== build + bench on the instance (public repo: clone with no creds) =="
 # The instance clones the public repo at this SHA, installs Rust, builds, runs the same emitter at
 # a larger scale, and prints ONLY the results JSON on stdout (captured below).
+#
+# [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) FULL-SUITE mode: when BENCH_FULL_SUITE is set, ALSO
+# install the well-known-suite toolchains + the wasm target and run ci-bench.sh with
+# GITHUB_REF=refs/heads/main so the instance runs EVERY latency suite (the noisy timing series moved
+# off the per-PR / merge_group bench lane). These commands mirror bench.yml's "Install well-known-suite
+# toolchains" + the wasm target the per-commit lane sets. In the default (weekly heavy) mode the block
+# is a no-op — today's toolchain-light run is unchanged.
+if [ -n "$BENCH_FULL_SUITE" ]; then
+  SUITE_APT='sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libboost-all-dev default-jdk raptor2-utils unzip binaryen >/dev/null 2>&1'
+  SUITE_WASM='rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true'
+  SUITE_REF='export GITHUB_REF=refs/heads/main'
+else
+  SUITE_APT='true'
+  SUITE_WASM='true'
+  SUITE_REF='true'
+fi
 REMOTE=$(cat <<REMOTE_EOF
 set -e
 sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config git >/dev/null 2>&1
+$SUITE_APT
 command -v cargo >/dev/null || { curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1; }
 . "\$HOME/.cargo/env"
+$SUITE_WASM
 git clone -q "$REPO" sparq && cd sparq && git checkout -q "$SHA"
 cargo build --release -q -p sparq-cli -p sparq-bench
+$SUITE_REF
 bash scripts/ci-bench.sh "$SCALE" /tmp/out.json >/dev/null 2>&1
 cat /tmp/out.json
 REMOTE_EOF
 )
-ssh $SSHO "ubuntu@$IP" "$REMOTE" > ec2-bench-results.json
-echo "== results =="; cat ec2-bench-results.json
-python3 -c "import json,sys; json.load(open('ec2-bench-results.json')); print('valid results JSON')"
+ssh $SSHO "ubuntu@$IP" "$REMOTE" > "$BENCH_OUT"
+echo "== results ($BENCH_OUT) =="; cat "$BENCH_OUT"
+python3 -c "import json,sys; json.load(open('$BENCH_OUT')); print('valid results JSON')"

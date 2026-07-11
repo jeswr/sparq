@@ -1,0 +1,5 @@
+{
+  "_comment": "seed_count 1 but 2 keys listed — the allowlist GREW past its committed ceiling. MUST fail (shrink-only ratchet).",
+  "seed_count": 1,
+  "keys": ["demo.unmigrated_a", "demo.unmigrated_b"]
+}

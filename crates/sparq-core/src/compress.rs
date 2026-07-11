@@ -33,6 +33,26 @@ fn put_varint(out: &mut Vec<u8>, mut x: u64) {
     out.push(x as u8);
 }
 
+/// [FABLE-5] sq-7d3dj.32.2.6 — appends `x` to `out` as a ZIGZAG-mapped LEB128 varint (used by
+/// the SPQCPRM2 format to encode a col2 frame-of-reference offset, which can be negative). Zigzag
+/// maps `0,-1,1,-2,2,…` to `0,1,2,3,4,…` so a small-magnitude signed offset stays a short varint.
+/// Gated on `mmap` (not `spqcprm2`): the V2 reader ships with the on-disk store so any V2 file
+/// always decodes, whether or not this build's emitter can produce V2.
+#[cfg(feature = "mmap")]
+#[inline]
+fn put_zigzag_varint(out: &mut Vec<u8>, x: i64) {
+    put_varint(out, ((x << 1) ^ (x >> 63)) as u64);
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.6 — reads a zigzag-mapped LEB128 varint written by [`put_zigzag_varint`],
+/// advancing `*pos`. The inverse zigzag maps the unsigned varint back to a signed offset.
+#[cfg(feature = "mmap")]
+#[inline]
+fn get_zigzag_varint(buf: &[u8], pos: &mut usize) -> i64 {
+    let u = get_varint(buf, pos);
+    ((u >> 1) as i64) ^ -((u & 1) as i64)
+}
+
 /// Reads an unsigned LEB128 varint from `buf` at `*pos`, advancing `*pos`.
 ///
 /// This is the TRUSTED hot-path reader: it indexes `buf` unchecked and is sound ONLY on a
@@ -255,6 +275,97 @@ pub struct CompressedPerm {
     /// serialised). Used only to skip blocks on an equality-bound leading column in `range`.
     #[cfg(feature = "block-bloom")]
     bloom: Option<block_bloom::BlockBloomDir>,
+    /// [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7 — which block-stream encoding this perm's
+    /// `blocks` uses. Present under `mmap` (the on-disk store, where the versioned format lives
+    /// and `open` auto-detects V1 vs V2). With `mmap` off (the wasm in-RAM path) the struct is
+    /// byte-for-byte the default — there is only SPQCPRM1 and the decode hot path is unchanged.
+    /// A perm built by `encode` is always `V1`; `from_mmap` sets it from the file magic; only
+    /// `encode_v2` (and a V2-emitting `write_to`/writer) produces `V2`.
+    #[cfg(feature = "mmap")]
+    format: Format,
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.6 — the block-stream encoding a [`CompressedPerm`] carries. `V1` is
+/// the shipped `SPQCPRM1` (col2 reset written ABSOLUTE); `V2` is `SPQCPRM2` (col2 reset frame-of-
+/// reference: a zigzag delta from the block's first-row col2). The two decode through different
+/// block readers, so a perm's `format` picks the reader — see `decode_block_at`. The reader for
+/// BOTH ships with `mmap`; only whether a build can *emit* V2 is gated by the `spqcprm2` feature.
+#[cfg(feature = "mmap")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    /// The shipped absolute-col2-reset encoding (`SPQCPRM1`).
+    V1,
+    /// The frame-of-reference col2-reset encoding (`SPQCPRM2`).
+    V2,
+}
+
+// ===== [FABLE-5] sq-7d3dj.32.2.7 — the V2 EMIT config gate =====
+//
+// The V2 *reader* ships unconditionally with `mmap`, but a build EMITS `SPQCPRM1` by DEFAULT
+// (V2 is not defaulted on — a separate decision pending a clearly-positive real-data B/triple
+// measurement). Turning on the `spqcprm2` feature and selecting `EmitFormat::V2` (via
+// `with_emit_format` in tests, or `SPARQ_EMIT_FORMAT=v2` in a process) makes the store's
+// compressed save path and the streaming `CompressedPermWriter` write `SPQCPRM2` instead.
+//
+// Mirrors the `with_build_compressed` per-thread override (lib.rs): a thread-local read once
+// on the writing thread, so a test never mutates the process-global environment (the
+// `set_var`/`getenv` data race under parallel `cargo test`). With the feature OFF the whole
+// gate compiles out and `emit_format()` is a `const V1`, so the default build cannot emit V2.
+
+/// [FABLE-5] sq-7d3dj.32.2.7 — which block-stream [`Format`] a build EMITS when writing a
+/// compressed permutation. Distinct from a perm's own `format` field: this is the *policy*
+/// choice at write time, resolved by `emit_format`.
+#[cfg(feature = "spqcprm2")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EmitFormat {
+    /// Write `SPQCPRM1` (the shipped default — full backward/forward compat).
+    V1,
+    /// Write `SPQCPRM2` (frame-of-reference col2 reset). Opt-in.
+    V2,
+}
+
+#[cfg(feature = "spqcprm2")]
+thread_local! {
+    /// Per-thread override of the emit format. `None` ⇒ fall back to `SPARQ_EMIT_FORMAT`.
+    /// Read once on the writing thread before any fan-out, exactly like `BUILD_COMPRESSED_OVERRIDE`.
+    static EMIT_FORMAT_OVERRIDE: std::cell::Cell<Option<EmitFormat>> = const { std::cell::Cell::new(None) };
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.7 — TEST/BENCH hook: run `f` with the compressed-perm emit format
+/// forced to `fmt`, on THIS thread only, restoring the previous override afterwards. Used by the
+/// V2 migration differentials so they never touch the global environment.
+#[cfg(feature = "spqcprm2")]
+#[doc(hidden)]
+pub fn with_emit_format<R>(fmt: EmitFormat, f: impl FnOnce() -> R) -> R {
+    let prev = EMIT_FORMAT_OVERRIDE.with(|c| c.replace(Some(fmt)));
+    let r = f();
+    EMIT_FORMAT_OVERRIDE.with(|c| c.set(prev));
+    r
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.7 — the [`Format`] a compressed save/build should EMIT. Resolves the
+/// per-thread [`with_emit_format`] override, else `SPARQ_EMIT_FORMAT` (`v2`/`spqcprm2` ⇒ V2,
+/// anything else ⇒ V1). With the `spqcprm2` feature OFF this is a `const` `V1` — the default
+/// build never emits V2, so every shipped index stays `SPQCPRM1` bit-for-bit.
+#[cfg(feature = "mmap")]
+#[inline]
+pub(crate) fn emit_format() -> Format {
+    #[cfg(feature = "spqcprm2")]
+    {
+        if let Some(f) = EMIT_FORMAT_OVERRIDE.with(|c| c.get()) {
+            return match f {
+                EmitFormat::V1 => Format::V1,
+                EmitFormat::V2 => Format::V2,
+            };
+        }
+        if matches!(
+            std::env::var("SPARQ_EMIT_FORMAT").as_deref(),
+            Ok("v2") | Ok("V2") | Ok("spqcprm2") | Ok("SPQCPRM2")
+        ) {
+            return Format::V2;
+        }
+    }
+    Format::V1
 }
 
 /// Encodes one block (`chunk`, 1..=`BLOCK` sorted rows) into `out`, appending its
@@ -288,6 +399,52 @@ fn encode_block(chunk: &[[Id; 3]], out: &mut Vec<u8>) {
     }
 }
 
+/// [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7 — magic prefix of the `SPQCPRM2` on-disk format
+/// (frame-of-reference col2 reset), auto-detected on [`from_mmap`](CompressedPerm::from_mmap)
+/// alongside [`FILE_MAGIC`] (`SPQCPRM1`). Ships with `mmap` so any V2 file always decodes; whether
+/// this build *writes* it is a separate config gate (`EmitFormat`, behind `spqcprm2`). Held here
+/// alongside the V1 magic so the two markers stay adjacent and distinct.
+#[cfg(feature = "mmap")]
+pub const FILE_MAGIC_V2: [u8; 8] = *b"SPQCPRM2";
+
+/// [FABLE-5] sq-7d3dj.32.2.6 — encodes one block into the `SPQCPRM2` frame-of-reference
+/// stream. Byte-for-byte identical to [`encode_block`] EXCEPT the `reset_d1` col2 (written when
+/// `d0 == 0 && d1 != 0`): SPQCPRM1 emits `r[2]` absolute; SPQCPRM2 emits the zigzag delta
+/// `r[2] - first_col2`, where `first_col2` is the block's first-row col2 (the frame origin). The
+/// decoder ([`decode_block_v2_at`]) reads that same first-row col2 at block start, so it can add
+/// the offset back with no extra state. All other write sites are unchanged, so a V2 block that
+/// happens to contain no `reset_d1` row is byte-identical to its V1 block. Ships with `mmap` so a
+/// V2-emitting `write_to`/writer is available whenever the store is, gated by the `spqcprm2`
+/// emit-selector at the call site.
+#[cfg(feature = "mmap")]
+#[inline]
+fn encode_block_v2(chunk: &[[Id; 3]], out: &mut Vec<u8>) {
+    put_varint(out, chunk.len() as u64);
+    let first_col2 = chunk[0][2];
+    put_varint(out, chunk[0][0] as u64);
+    put_varint(out, chunk[0][1] as u64);
+    put_varint(out, chunk[0][2] as u64);
+    for w in chunk.windows(2) {
+        let (p, r) = (w[0], w[1]);
+        let d0 = r[0] - p[0];
+        put_varint(out, d0 as u64);
+        if d0 == 0 {
+            let d1 = r[1] - p[1];
+            put_varint(out, d1 as u64);
+            if d1 == 0 {
+                put_varint(out, (r[2] - p[2]) as u64); // strictly increasing
+            } else {
+                // FRAME-OF-REFERENCE: col2 reset written as a signed delta from the block's
+                // first-row col2 instead of the absolute id (the SPQCPRM1 `reset_d1` bucket).
+                put_zigzag_varint(out, r[2] as i64 - first_col2 as i64);
+            }
+        } else {
+            put_varint(out, r[1] as u64); // cols 1,2 reset → absolute (unchanged from V1)
+            put_varint(out, r[2] as u64);
+        }
+    }
+}
+
 impl CompressedPerm {
     /// Encodes a sorted permutation (rows already in this permutation's column order).
     pub fn encode(rows: &[[Id; 3]]) -> Self {
@@ -308,24 +465,77 @@ impl CompressedPerm {
             len: rows.len(),
             #[cfg(feature = "block-bloom")]
             bloom,
+            #[cfg(feature = "mmap")]
+            format: Format::V1,
         }
     }
 
-    /// Writes the COMPRESSED on-disk permutation format (auto-detected on open by its
-    /// [`FILE_MAGIC`]; raw files keep working). Layout, all little-endian:
+    /// [FABLE-5] sq-7d3dj.32.2.6 — SPIKE: encodes a sorted permutation into the `SPQCPRM2`
+    /// frame-of-reference block stream. Identical to [`encode`](Self::encode) except the col2
+    /// that resets after a middle-column change (the `reset_d1` bucket the sq-7d3dj.32.2.4
+    /// attribution found dominant at scale) is written as a ZIGZAG DELTA from the block's
+    /// first-row col2 rather than an absolute varint. When a block's objects cluster (the
+    /// common case for related subject/predicate rows) the frame offset is smaller than the
+    /// absolute id, so fewer varint bytes. Everything else — first row, `d0`/`d1`/`d2` deltas,
+    /// and the `reset_d0` (cols 1,2 absolute) shape — is byte-for-byte the SPQCPRM1 encoder.
+    ///
+    /// The returned perm's `format` is `V2`, so its own `decode_all` / `range` decode through
+    /// the matching reader. The store's default save path stays `SPQCPRM1`; a build opts into
+    /// V2 emission via the `emit_format` config gate ([`with_emit_format`] / `SPARQ_EMIT_FORMAT`),
+    /// which routes [`encode_emit`](Self::encode_emit) here.
+    #[cfg(feature = "spqcprm2")]
+    pub fn encode_v2(rows: &[[Id; 3]]) -> Self {
+        let mut dir = Vec::with_capacity(rows.len() / BLOCK + 1);
+        let mut blocks = Vec::with_capacity(rows.len() * 6);
+        for chunk in rows.chunks(BLOCK) {
+            dir.push((chunk[0], blocks.len() as u32));
+            encode_block_v2(chunk, &mut blocks);
+        }
+        #[cfg(feature = "block-bloom")]
+        let bloom = block_bloom::BlockBloomDir::build(&rows.chunks(BLOCK).collect::<Vec<_>>());
+        CompressedPerm {
+            dir,
+            blocks: Blocks::Owned(blocks),
+            len: rows.len(),
+            #[cfg(feature = "block-bloom")]
+            bloom,
+            format: Format::V2,
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — encodes a sorted permutation in the block-stream [`Format`]
+    /// the build's `emit_format` config gate selects: `SPQCPRM1` by default (bit-for-bit
+    /// [`encode`](Self::encode)), or `SPQCPRM2` when a `spqcprm2` build has opted in. This is the
+    /// single entry point the store's compressed save path uses, so the emit policy is honoured
+    /// in exactly one place. With the `spqcprm2` feature OFF, `emit_format()` is a const `V1` and
+    /// this is `encode` with no branch.
+    #[cfg(feature = "mmap")]
+    pub fn encode_emit(rows: &[[Id; 3]]) -> Self {
+        #[cfg(feature = "spqcprm2")]
+        if emit_format() == Format::V2 {
+            return Self::encode_v2(rows);
+        }
+        Self::encode(rows)
+    }
+
+    /// Writes the COMPRESSED on-disk permutation format (auto-detected on open by its magic;
+    /// raw files keep working). The 8-byte magic is [`FILE_MAGIC`] (`SPQCPRM1`) for a `V1` perm
+    /// and [`FILE_MAGIC_V2`] (`SPQCPRM2`) for a `V2` perm — [FABLE-5] sq-7d3dj.32.2.7. Layout past
+    /// the magic is version-independent, all little-endian:
     ///
     /// ```text
     /// magic[8] | len u64 | n_blocks u64 | blocks_len u64
     /// directory: n_blocks × { first_row [u32;3], byte_off u32 }
-    /// blocks:    blocks_len bytes (the delta+varint block stream of `encode`)
+    /// blocks:    blocks_len bytes (the delta+varint block stream of `encode`/`encode_v2`)
     /// ```
     ///
     /// The byte stream is exactly the in-memory encoding, so [`from_mmap`](Self::from_mmap)
-    /// can serve scans straight off the mapped file with no transcode.
+    /// can serve scans straight off the mapped file with no transcode. A `V1` perm writes
+    /// byte-for-byte as before the migration (the backward-compat invariant).
     #[cfg(feature = "mmap")]
     pub fn write_to<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         let blocks = self.blocks.bytes();
-        w.write_all(&FILE_MAGIC)?;
+        w.write_all(self.file_magic())?;
         w.write_all(&(self.len as u64).to_le_bytes())?;
         w.write_all(&(self.dir.len() as u64).to_le_bytes())?;
         w.write_all(&(blocks.len() as u64).to_le_bytes())?;
@@ -338,6 +548,17 @@ impl CompressedPerm {
         w.write_all(blocks)
     }
 
+    /// [FABLE-5] sq-7d3dj.32.2.7 — the 8-byte file magic that matches this perm's block-stream
+    /// [`Format`]: `SPQCPRM1` for `V1`, `SPQCPRM2` for `V2`. `from_mmap` inverts this to pick the
+    /// decode reader, so a perm always round-trips through its own format.
+    #[cfg(feature = "mmap")]
+    fn file_magic(&self) -> &'static [u8; 8] {
+        match self.format {
+            Format::V1 => &FILE_MAGIC,
+            Format::V2 => &FILE_MAGIC_V2,
+        }
+    }
+
     /// Opens a compressed permutation from a memory-mapped file written by
     /// [`write_to`](Self::write_to). Only the sparse directory is copied to the heap
     /// (~0.13 B/triple); the block stream stays on disk, decoded block-wise per scan —
@@ -346,9 +567,25 @@ impl CompressedPerm {
     pub fn from_mmap(map: memmap2::Mmap) -> std::io::Result<Self> {
         let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("compressed perm: {m}"));
         let b: &[u8] = &map;
-        if b.len() < 32 || b[..8] != FILE_MAGIC {
+        if b.len() < 32 {
             return Err(bad("missing FILE_MAGIC header"));
         }
+        // [FABLE-5] sq-7d3dj.32.2.7 — AUTO-DETECT the block-stream format from the 8-byte magic.
+        // A `SPQCPRM1` file decodes byte-identically forever (the backward-compat soundness
+        // invariant); a `SPQCPRM2` file decodes through the frame-of-reference reader
+        // (`decode_block_v2_at`). ANY OTHER 8 bytes is a loud, clean error — the caller
+        // (`TripleStore::open`) has already gated on a leading `FILE_MAGIC`/`FILE_MAGIC_V2` to
+        // reach here, but re-check inside the constructor so a corrupted magic never silently
+        // misdecodes (mutation-witness in the corruption oracle). The header layout past the
+        // magic (len/n_blocks/blocks_len + directory) is version-independent.
+        let magic: [u8; 8] = b[..8].try_into().unwrap();
+        let format = if magic == FILE_MAGIC {
+            Format::V1
+        } else if magic == FILE_MAGIC_V2 {
+            Format::V2
+        } else {
+            return Err(bad("missing FILE_MAGIC header"));
+        };
         let rd64 = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
         // [OPUS-4.8] sq-ed2i: the three header counts are attacker-controlled. Compute the
         // layout with CHECKED arithmetic — the original `32 + n_blocks*16` / `dir_end +
@@ -394,6 +631,10 @@ impl CompressedPerm {
             len,
             #[cfg(feature = "block-bloom")]
             bloom: None,
+            // [FABLE-5] sq-7d3dj.32.2.7 — the block-stream format auto-detected from the file
+            // magic above; `decode_block_at` dispatches on it, so a V1 file reads through the
+            // shipped absolute-col2 reader and a V2 file through `decode_block_v2_at`.
+            format,
         };
         // [OPUS-4.8] sq-ed2i: decode-validate every block ONCE, here, so the (unchecked,
         // hot-path) `get_varint`/`decode_block_at` are provably in-bounds on later scans.
@@ -480,6 +721,14 @@ impl CompressedPerm {
     /// Decodes the block starting at byte `off` into `out` (appending).
     #[inline]
     fn decode_block_at(&self, off: usize, out: &mut Vec<[Id; 3]>) {
+        // [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7 — dispatch on the perm's block-stream
+        // format. With `mmap` off (the wasm in-RAM path) there is only V1 and this is the
+        // original code verbatim; with `mmap` on, a V2-magic file opened by `from_mmap` reads
+        // through the frame-of-reference reader.
+        #[cfg(feature = "mmap")]
+        if self.format == Format::V2 {
+            return self.decode_block_v2_at(off, out);
+        }
         let buf = self.blocks.bytes();
         let mut pos = off;
         let count = get_varint(buf, &mut pos) as usize;
@@ -503,6 +752,45 @@ impl CompressedPerm {
                     [prev[0], prev[1], prev[2].wrapping_add(get_varint(buf, &mut pos) as Id)]
                 } else {
                     [prev[0], prev[1].wrapping_add(d1), get_varint(buf, &mut pos) as Id]
+                }
+            } else {
+                [prev[0].wrapping_add(d0), get_varint(buf, &mut pos) as Id, get_varint(buf, &mut pos) as Id]
+            };
+            out.push(cur);
+            prev = cur;
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — decodes one `SPQCPRM2` frame-of-reference block at byte
+    /// `off` into `out`. Mirrors [`decode_block_at`] exactly except the `reset_d1` col2 is
+    /// reconstructed from the zigzag frame offset plus the block's first-row col2 (captured
+    /// as `first_col2` from the absolute first row), inverting [`encode_block_v2`]. The same
+    /// `wrapping_add` id-overflow safety as the V1 decoder applies (a tampered block is
+    /// wrong-but-safe, never a panic / OOB — the documented trusted-store boundary).
+    #[cfg(feature = "mmap")]
+    #[inline]
+    fn decode_block_v2_at(&self, off: usize, out: &mut Vec<[Id; 3]>) {
+        let buf = self.blocks.bytes();
+        let mut pos = off;
+        let count = get_varint(buf, &mut pos) as usize;
+        let mut prev = [
+            get_varint(buf, &mut pos) as Id,
+            get_varint(buf, &mut pos) as Id,
+            get_varint(buf, &mut pos) as Id,
+        ];
+        let first_col2 = prev[2] as i64; // the frame origin the encoder used
+        out.push(prev);
+        for _ in 1..count {
+            let d0 = get_varint(buf, &mut pos) as Id;
+            let cur = if d0 == 0 {
+                let d1 = get_varint(buf, &mut pos) as Id;
+                if d1 == 0 {
+                    [prev[0], prev[1], prev[2].wrapping_add(get_varint(buf, &mut pos) as Id)]
+                } else {
+                    // Invert the frame-of-reference: absolute col2 = first_col2 + signed offset.
+                    let off2 = get_zigzag_varint(buf, &mut pos);
+                    let abs = (first_col2.wrapping_add(off2)) as u64 as Id;
+                    [prev[0], prev[1].wrapping_add(d1), abs]
                 }
             } else {
                 [prev[0].wrapping_add(d0), get_varint(buf, &mut pos) as Id, get_varint(buf, &mut pos) as Id]
@@ -623,11 +911,13 @@ impl CompressedPerm {
 }
 
 /// [OPUS-4.8] sq-vkz7 — STREAMING writer of the [`CompressedPerm`] on-disk format
-/// ([`FILE_MAGIC`] `SPQCPRM1`). Encodes the FoR+varint block stream as sorted rows arrive,
-/// so the external-memory build can emit compressed perms STRAIGHT FROM the merge tail —
-/// no raw-write-then-reopen-then-`decode_all`-then-`encode` recompress second pass over an
-/// 84+ GB index. The byte stream it produces is BYTE-IDENTICAL to
-/// `CompressedPerm::encode(rows).write_to(w)` for the same `rows` (proven in tests).
+/// ([`FILE_MAGIC`] `SPQCPRM1`, or [`FILE_MAGIC_V2`] `SPQCPRM2` when a `spqcprm2` build opts in
+/// via the `emit_format` config gate — [FABLE-5] sq-7d3dj.32.2.7). Encodes the FoR+varint
+/// block stream as sorted rows arrive, so the external-memory build can emit compressed perms
+/// STRAIGHT FROM the merge tail — no raw-write-then-reopen-then-`decode_all`-then-`encode`
+/// recompress second pass over an 84+ GB index. The byte stream it produces is BYTE-IDENTICAL to
+/// `CompressedPerm::encode_emit(rows).write_to(w)` for the same `rows` and emit format (proven in
+/// tests) — so in the shipped `V1` default it is byte-for-byte what it always was.
 ///
 /// The format is `header[32] | directory | blocks`, so the directory (which we only finish
 /// once the last block is sealed) must physically precede the block stream. We therefore
@@ -638,6 +928,10 @@ impl CompressedPerm {
 /// and there is no decode / re-sort — the saving the bead targets.
 #[cfg(feature = "mmap")]
 pub struct CompressedPermWriter {
+    /// [FABLE-5] sq-7d3dj.32.2.7 — the block-stream [`Format`] this writer emits (fixed at
+    /// construction from the `emit_format` config gate). Drives the per-block encoder and the
+    /// file magic, so the streamed bytes match `encode_emit(rows).write_to` for the same format.
+    format: Format,
     /// One (first-triple, byte-offset-into-blocks) entry per sealed block.
     dir: Vec<([Id; 3], u32)>,
     /// The current (not-yet-sealed) block's rows, up to [`BLOCK`].
@@ -657,15 +951,24 @@ pub struct CompressedPermWriter {
 
 #[cfg(feature = "mmap")]
 impl CompressedPermWriter {
-    /// Creates a writer that will produce the compressed perm at `out`, staging the block
-    /// stream in a sibling temp file `<out>.blocks` (same directory ⇒ same filesystem, so
-    /// the final assembly copy never crosses devices).
+    /// Creates a writer that will produce the compressed perm at `out` in the block-stream
+    /// [`Format`] the build's `emit_format` config gate selects (`SPQCPRM1` by default), staging
+    /// the block stream in a sibling temp file `<out>.blocks` (same directory ⇒ same filesystem,
+    /// so the final assembly copy never crosses devices). [FABLE-5] sq-7d3dj.32.2.7
     pub fn create(out: &std::path::Path) -> std::io::Result<Self> {
+        Self::create_with(out, emit_format())
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — like [`create`](Self::create) but with an explicit emit
+    /// [`Format`], bypassing the config gate. Used by the V2 migration differentials to pin a
+    /// format without setting the process env / thread override.
+    pub fn create_with(out: &std::path::Path, format: Format) -> std::io::Result<Self> {
         let mut body_path = out.as_os_str().to_owned();
         body_path.push(".blocks");
         let body_path = std::path::PathBuf::from(body_path);
         let body = std::io::BufWriter::new(std::fs::File::create(&body_path)?);
         Ok(CompressedPermWriter {
+            format,
             dir: Vec::new(),
             cur: Vec::with_capacity(BLOCK),
             scratch: Vec::with_capacity(BLOCK * 6),
@@ -705,7 +1008,13 @@ impl CompressedPermWriter {
         })?;
         self.dir.push((self.cur[0], off));
         self.scratch.clear();
-        encode_block(&self.cur, &mut self.scratch);
+        // [FABLE-5] sq-7d3dj.32.2.7 — the per-block encoder matches this writer's emit format,
+        // so a `V1` writer streams byte-for-byte the shipped stream and a `V2` writer streams
+        // the frame-of-reference stream (mirroring `encode`/`encode_v2` block-for-block).
+        match self.format {
+            Format::V1 => encode_block(&self.cur, &mut self.scratch),
+            Format::V2 => encode_block_v2(&self.cur, &mut self.scratch),
+        }
         let body = self.body.as_mut().expect("body present until finish() consumes the writer");
         std::io::Write::write_all(body, &self.scratch)?;
         self.blocks_len += self.scratch.len() as u64;
@@ -713,9 +1022,10 @@ impl CompressedPermWriter {
         Ok(())
     }
 
-    /// Finishes the stream: seals any partial block, then writes the final `SPQCPRM1` file to
-    /// `out` (`header | directory | blocks`) and removes the block side file. For a non-empty
-    /// perm the bytes are identical to `CompressedPerm::encode(all_rows).write_to(out)`.
+    /// Finishes the stream: seals any partial block, then writes the final compressed file to
+    /// `out` (`magic[8] | header | directory | blocks`, magic per this writer's [`Format`]) and
+    /// removes the block side file. For a non-empty perm the bytes are identical to
+    /// `CompressedPerm::encode_emit(all_rows).write_to(out)` for the matching emit format.
     ///
     /// EMPTY-PERM POLICY: when no rows were pushed, `out` is written as a ZERO-byte file
     /// (NOT a bare 32-byte header), matching `TripleStore::save_compressed` which leaves an
@@ -740,7 +1050,12 @@ impl CompressedPermWriter {
         let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
         {
             use std::io::Write;
-            w.write_all(&FILE_MAGIC)?;
+            // [FABLE-5] sq-7d3dj.32.2.7 — magic matches this writer's emit format (V1 unchanged).
+            let magic: &[u8; 8] = match self.format {
+                Format::V1 => &FILE_MAGIC,
+                Format::V2 => &FILE_MAGIC_V2,
+            };
+            w.write_all(magic)?;
             w.write_all(&self.len.to_le_bytes())?;
             w.write_all(&(self.dir.len() as u64).to_le_bytes())?;
             w.write_all(&self.blocks_len.to_le_bytes())?;
@@ -766,6 +1081,366 @@ impl Drop for CompressedPermWriter {
         // staged block side file. `finish` consumes `self`, so reaching `drop` with a path
         // still present means the writer was abandoned.
         std::fs::remove_file(&self.body_path).ok();
+    }
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.4 — SPIKE-ONLY per-field byte attribution over the
+/// [`encode_block`] stream. This whole module is `#[cfg(test)]`: it adds ZERO bytes to
+/// the shipped `SPQCPRM1` stream and does not touch the encode/decode hot path (the
+/// `wasm_bundle_bytes` `feature_off_exact` floor is unmoved). It exists to adjudicate the
+/// §4 root-cause hypotheses (H1/H2/H3) of `research/compressed-memory-profile.md` for why
+/// the compressed store's B/triple grows 36.75 (1M) → 48.75 (10M) then plateaus at 48.75
+/// (50M): it mirrors `encode_block` field-for-field and attributes each emitted varint's
+/// byte length to the field class that produced it. All numbers this module prints are
+/// NON-canonical work-box measurements (never a doc/test perf number).
+#[cfg(test)]
+mod byte_attribution {
+    use super::{encode_block, Id, BLOCK};
+
+    /// Byte length of the unsigned LEB128 varint that `put_varint` would emit for `x`
+    /// (mirrors its `while x >= 0x80 { x >>= 7 }` loop exactly): `⌈bits/7⌉`, min 1.
+    #[inline]
+    fn varint_len(x: u64) -> usize {
+        let mut x = x;
+        let mut n = 1usize;
+        while x >= 0x80 {
+            x >>= 7;
+            n += 1;
+        }
+        n
+    }
+
+    /// The disjoint field classes the block stream's bytes are attributed to. These are
+    /// exactly the write sites in [`encode_block`]; every byte the encoder emits lands in
+    /// exactly one class, so `total()` equals the real encoded block-stream length.
+    #[derive(Clone, Copy, Default, Debug)]
+    struct FieldBytes {
+        /// The per-block `count` varint (one per block).
+        count: u64,
+        /// The block's FIRST row, written as three absolute varints (col0/col1/col2).
+        first_row_abs: u64,
+        /// col1+col2 written ABSOLUTE because the leading column changed (`d0 != 0`).
+        reset_d0: u64,
+        /// col2 written ABSOLUTE because the middle column changed (`d0 == 0 && d1 != 0`).
+        reset_d1: u64,
+        /// The `d0` (leading-column) delta varint on every non-first row.
+        d0: u64,
+        /// The `d1` (middle-column) delta varint, emitted only when `d0 == 0`.
+        d1: u64,
+        /// The `d2` (trailing-column) delta varint, emitted only when `d0 == 0 && d1 == 0`.
+        d2: u64,
+    }
+
+    impl FieldBytes {
+        fn total(&self) -> u64 {
+            self.count + self.first_row_abs + self.reset_d0 + self.reset_d1 + self.d0 + self.d1 + self.d2
+        }
+
+        fn add(&mut self, o: &FieldBytes) {
+            self.count += o.count;
+            self.first_row_abs += o.first_row_abs;
+            self.reset_d0 += o.reset_d0;
+            self.reset_d1 += o.reset_d1;
+            self.d0 += o.d0;
+            self.d1 += o.d1;
+            self.d2 += o.d2;
+        }
+    }
+
+    /// Attributes the bytes of ONE block (`chunk`, sorted, 1..=`BLOCK` rows) to field
+    /// classes, mirroring [`encode_block`] write-site for write-site. This is a pure
+    /// re-derivation of the same varint lengths — no bytes are emitted — so its `total()`
+    /// is asserted equal to the real `encode_block` output length in a self-check test.
+    fn attribute_block(chunk: &[[Id; 3]], fb: &mut FieldBytes) {
+        fb.count += varint_len(chunk.len() as u64) as u64;
+        fb.first_row_abs += (varint_len(chunk[0][0] as u64)
+            + varint_len(chunk[0][1] as u64)
+            + varint_len(chunk[0][2] as u64)) as u64;
+        for w in chunk.windows(2) {
+            let (p, r) = (w[0], w[1]);
+            let d0 = r[0] - p[0];
+            fb.d0 += varint_len(d0 as u64) as u64;
+            if d0 == 0 {
+                let d1 = r[1] - p[1];
+                fb.d1 += varint_len(d1 as u64) as u64;
+                if d1 == 0 {
+                    fb.d2 += varint_len((r[2] - p[2]) as u64) as u64; // strictly increasing
+                } else {
+                    fb.reset_d1 += varint_len(r[2] as u64) as u64; // col2 resets → absolute
+                }
+            } else {
+                // cols 1,2 reset → absolute
+                fb.reset_d0 += (varint_len(r[1] as u64) + varint_len(r[2] as u64)) as u64;
+            }
+        }
+    }
+
+    /// Attributes a whole permutation (sorted rows in this permutation's column order),
+    /// blocking exactly as [`CompressedPerm::encode`] does (`rows.chunks(BLOCK)`), and
+    /// adding the resident directory cost (16 B/block: one `([Id;3], u32)` per block).
+    fn attribute_perm(rows: &[[Id; 3]]) -> (FieldBytes, u64) {
+        let mut fb = FieldBytes::default();
+        let mut n_blocks = 0u64;
+        for chunk in rows.chunks(BLOCK) {
+            attribute_block(chunk, &mut fb);
+            n_blocks += 1;
+        }
+        let dir_bytes = n_blocks * 16;
+        (fb, dir_bytes)
+    }
+
+    /// A deterministic xorshift PRNG (same family as the file's `sample`), seeded so runs
+    /// are reproducible across hosts.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+        #[inline]
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        /// A Zipf-ish skewed draw in `1..=n`: bias toward small ids (frequent terms get
+        /// small, insertion-ordered ids — the H3 mechanism). Squaring a uniform in [0,1)
+        /// concentrates mass near 0; `1 +` maps to `1..=n`.
+        #[inline]
+        fn skewed(&mut self, n: u64) -> u64 {
+            let u = (self.next() >> 11) as f64 / (1u64 << 53) as f64; // uniform [0,1)
+            1 + ((u * u) * (n.saturating_sub(1)) as f64) as u64
+        }
+    }
+
+    /// Synthesises `n_triples` canonical `[s, p, o]` triples over a term space of
+    /// `n_terms` distinct ids, mimicking WatDiv skew: a small predicate vocabulary,
+    /// skewed (Zipf-ish) subjects and objects so frequent terms take small ids — the
+    /// insertion-order-gives-small-ids property H3 turns on. Deduplicated + returned
+    /// UNSORTED (the caller re-sorts per permutation).
+    fn synth_watdiv(n_triples: usize, n_terms: u64, seed: u64) -> Vec<[Id; 3]> {
+        let mut rng = Rng::new(seed);
+        // Reserve the low id band for predicates (WatDiv has ~85 predicates); subjects &
+        // objects range across the whole term space but skewed toward small ids.
+        let n_preds: u64 = 85;
+        let mut set = std::collections::HashSet::with_capacity(n_triples);
+        let mut v = Vec::with_capacity(n_triples);
+        let mut guard = 0usize;
+        while v.len() < n_triples && guard < n_triples * 4 {
+            guard += 1;
+            let s = rng.skewed(n_terms) as Id;
+            let p = (1 + (rng.next() % n_preds)) as Id;
+            let o = rng.skewed(n_terms) as Id;
+            let t = [s, p, o];
+            if set.insert(t) {
+                v.push(t);
+            }
+        }
+        v
+    }
+
+    /// Sorts a copy of `triples` into `perm`'s column order (the exact rows
+    /// `from_triples_compressed` would hand `CompressedPerm::encode` for that permutation).
+    fn perm_rows(triples: &[[Id; 3]], order: [usize; 3]) -> Vec<[Id; 3]> {
+        let mut rows: Vec<[Id; 3]> =
+            triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows
+    }
+
+    /// The six permutation column orders (kept local so the spike does not depend on
+    /// `store::Perm`, which is out of this module's scope).
+    const PERM_ORDERS: [(&str, [usize; 3]); 6] = [
+        ("SPO", [0, 1, 2]),
+        ("SOP", [0, 2, 1]),
+        ("PSO", [1, 0, 2]),
+        ("POS", [1, 2, 0]),
+        ("OSP", [2, 0, 1]),
+        ("OPS", [2, 1, 0]),
+    ];
+
+    /// SELF-CHECK: the attribution's `total()` must equal the REAL `encode_block` output
+    /// length for every block, byte-for-byte — otherwise the attribution table is a
+    /// fiction. Runs across block boundaries and both reset shapes.
+    #[test]
+    fn attribution_total_equals_real_encoded_length() {
+        for &n_terms in &[100_000u64, 1_000_000, 5_000_000] {
+            let triples = synth_watdiv(20_000, n_terms, 0xA5A5);
+            for (_, order) in PERM_ORDERS {
+                let rows = perm_rows(&triples, order);
+                // Real encoded block-stream length.
+                let mut real = Vec::new();
+                for chunk in rows.chunks(BLOCK) {
+                    encode_block(chunk, &mut real);
+                }
+                // Attributed length.
+                let (fb, _dir) = attribute_perm(&rows);
+                assert_eq!(
+                    fb.total(),
+                    real.len() as u64,
+                    "attribution total != real encoded length (n_terms={}, order={:?})",
+                    n_terms,
+                    order
+                );
+            }
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.4 — the MEASUREMENT. Prints a per-field, per-permutation
+    /// byte-attribution table at three id-density regimes (100K / 1M / 5M distinct terms),
+    /// each with the same triple:term ratio so the ONLY moving variable is term-space bits.
+    /// Run with `cargo test -p sparq-core --lib byte_attribution -- --nocapture` to see the
+    /// tables. All numbers are NON-canonical work-box measurements. `#[ignore]` so the
+    /// default `cargo test` stays fast (the 5M-term regime allocates a few hundred MB); the
+    /// self-check test above runs unconditionally and pins the attribution's correctness.
+    #[test]
+    #[ignore = "spike measurement: run explicitly with --ignored --nocapture (allocates ~hundreds of MB)"]
+    fn measure_byte_attribution_across_id_density() {
+        // Fixed triple:term ratio (~10 triples/term, roughly WatDiv's density) so the id
+        // count grows with the term space and the regimes are comparable per-triple.
+        let regimes: [(&str, usize, u64); 3] = [
+            ("100K-term", 1_000_000, 100_000),
+            ("1M-term", 10_000_000, 1_000_000),
+            ("5M-term", 50_000_000, 5_000_000),
+        ];
+
+        println!("\n===== sq-7d3dj.32.2.4 per-field byte attribution (NON-canonical work-box) =====");
+        for (label, want_triples, n_terms) in regimes {
+            let triples = synth_watdiv(want_triples, n_terms, 0x5EED);
+            let n = triples.len() as f64;
+            let bits = (64 - (n_terms).leading_zeros()) as usize;
+            println!(
+                "\n--- regime {} : {} distinct triples, {} terms (~{} term-space bits) ---",
+                label, triples.len(), n_terms, bits
+            );
+            println!(
+                "{:<5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9}",
+                "perm", "count", "first", "reset_d0", "reset_d1", "d0", "d1", "d2", "dir", "blk_tot", "B/triple"
+            );
+
+            let mut agg = FieldBytes::default();
+            let mut agg_dir = 0u64;
+            let mut agg_rows = 0u64;
+            for (name, order) in PERM_ORDERS {
+                let rows = perm_rows(&triples, order);
+                let (fb, dir) = attribute_perm(&rows);
+                let blk_tot = fb.total();
+                let bpt = (blk_tot + dir) as f64 / rows.len().max(1) as f64;
+                println!(
+                    "{:<5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9.3}",
+                    name, fb.count, fb.first_row_abs, fb.reset_d0, fb.reset_d1, fb.d0, fb.d1, fb.d2, dir, blk_tot, bpt
+                );
+                agg.add(&fb);
+                agg_dir += dir;
+                agg_rows += rows.len() as u64;
+            }
+            // Per-triple attribution summed across the six permutations (the store's
+            // block-stream B/triple = sum over perms / #triples). This is the quantity the
+            // §4 table (6.125 → 8.125 B/triple/perm) is about.
+            let per_triple = |b: u64| b as f64 / n;
+            println!(
+                "sum/triple  count={:.3}  first={:.3}  reset_d0={:.3}  reset_d1={:.3}  d0={:.3}  d1={:.3}  d2={:.3}  dir={:.3}  ALL={:.3}",
+                per_triple(agg.count),
+                per_triple(agg.first_row_abs),
+                per_triple(agg.reset_d0),
+                per_triple(agg.reset_d1),
+                per_triple(agg.d0),
+                per_triple(agg.d1),
+                per_triple(agg.d2),
+                per_triple(agg_dir),
+                per_triple(agg.total() + agg_dir),
+            );
+            let _ = agg_rows;
+        }
+        println!("\n===== end attribution — verdict adjudicated in the bead note =====\n");
+    }
+
+    /// A UNIFORM (non-skewed) id draw in `1..=n`, for the H3 discriminator: if the growth
+    /// were purely LEB128 quantization of the term space (H1/H2, blind to id assignment),
+    /// swapping skewed→uniform ids at the SAME term-space size would not change B/triple.
+    /// If frequent-terms-get-small-ids (H3) is what holds the plateau, uniform ids should
+    /// be MORE expensive (they spread mass across the whole bit width).
+    fn synth_uniform(n_triples: usize, n_terms: u64, seed: u64) -> Vec<[Id; 3]> {
+        let mut rng = Rng::new(seed);
+        let n_preds: u64 = 85;
+        let mut set = std::collections::HashSet::with_capacity(n_triples);
+        let mut v = Vec::with_capacity(n_triples);
+        let mut guard = 0usize;
+        while v.len() < n_triples && guard < n_triples * 4 {
+            guard += 1;
+            let s = (1 + rng.next() % n_terms) as Id;
+            let p = (1 + (rng.next() % n_preds)) as Id;
+            let o = (1 + rng.next() % n_terms) as Id;
+            let t = [s, p, o];
+            if set.insert(t) {
+                v.push(t);
+            }
+        }
+        v
+    }
+
+    fn agg_per_triple(triples: &[[Id; 3]]) -> (FieldBytes, u64, u64) {
+        let mut agg = FieldBytes::default();
+        let mut agg_dir = 0u64;
+        let mut rows_tot = 0u64;
+        for (_, order) in PERM_ORDERS {
+            let rows = perm_rows(triples, order);
+            let (fb, dir) = attribute_perm(&rows);
+            agg.add(&fb);
+            agg_dir += dir;
+            rows_tot += rows.len() as u64;
+        }
+        (agg, agg_dir, rows_tot)
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.4 — H1/H2/H3 DISCRIMINATOR. Two controlled sweeps at a
+    /// FIXED triple count so the only variable is (a) term-space bits and (b) skewed vs
+    /// uniform id assignment. NON-canonical work-box. Run with `--ignored --nocapture`.
+    ///
+    /// Sweep A (bit-width, skewed): fixed 4M triples, term space 250K → 4M (18→22 bits).
+    /// Isolates how B/triple moves with term-space bits when frequent terms keep small ids.
+    ///
+    /// Sweep B (skew vs uniform): fixed 4M triples, 4M terms, skewed vs uniform id draw.
+    /// If uniform is materially costlier, the plateau is H3 (small-ids-for-frequent-terms),
+    /// not pure H1/H2 bit-width quantization.
+    #[test]
+    #[ignore = "spike discriminator: run explicitly with --ignored --nocapture"]
+    fn discriminate_h1_h2_h3() {
+        const N: usize = 4_000_000;
+        println!("\n===== sq-7d3dj.32.2.4 H1/H2/H3 discriminator (NON-canonical work-box) =====");
+
+        println!("\n--- Sweep A: fixed {} triples, vary term-space bits (SKEWED ids) ---", N);
+        println!("{:<10} {:>6} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}", "terms", "bits", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple");
+        for &n_terms in &[250_000u64, 500_000, 1_000_000, 2_000_000, 4_000_000] {
+            let triples = synth_watdiv(N, n_terms, 0xC0FFEE);
+            let n = triples.len().max(1) as f64;
+            let bits = 64 - n_terms.leading_zeros();
+            let (agg, dir, _) = agg_per_triple(&triples);
+            let pt = |b: u64| b as f64 / n;
+            println!(
+                "{:<10} {:>6} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>10.3}",
+                n_terms, bits, pt(agg.reset_d0), pt(agg.reset_d1), pt(agg.d0), pt(agg.d1), pt(agg.d2), pt(agg.first_row_abs), pt(agg.total() + dir)
+            );
+        }
+
+        println!("\n--- Sweep B: fixed {} triples, 4M terms, SKEWED vs UNIFORM ids ---", N);
+        println!("{:<10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}", "assign", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple");
+        for (label, triples) in [
+            ("skewed", synth_watdiv(N, 4_000_000, 0xC0FFEE)),
+            ("uniform", synth_uniform(N, 4_000_000, 0xC0FFEE)),
+        ] {
+            let n = triples.len().max(1) as f64;
+            let (agg, dir, _) = agg_per_triple(&triples);
+            let pt = |b: u64| b as f64 / n;
+            println!(
+                "{:<10} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>10.3}",
+                label, pt(agg.reset_d0), pt(agg.reset_d1), pt(agg.d0), pt(agg.d1), pt(agg.d2), pt(agg.first_row_abs), pt(agg.total() + dir)
+            );
+        }
+        println!("\n===== end discriminator =====\n");
     }
 }
 
@@ -1067,5 +1742,433 @@ mod tests {
             assert_eq!(c.decode_all(), rows, "decode_all mismatch at n={n}");
             assert_eq!(c.len(), rows.len(), "len mismatch at n={n}");
         }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — builds a `V2` [`CompressedPerm`] from `rows` using ONLY the
+    /// `mmap`-gated primitives (`encode_block_v2`), so the V2 READER path is exercised even in the
+    /// coverage build (which measures sparq-core under `mmap,dict-spill`, NOT `spqcprm2`). Mirrors
+    /// `encode_v2` but is available without the emit feature.
+    #[cfg(feature = "mmap")]
+    fn build_v2_perm(rows: &[[Id; 3]]) -> CompressedPerm {
+        let mut dir = Vec::with_capacity(rows.len() / BLOCK + 1);
+        let mut blocks = Vec::with_capacity(rows.len() * 6);
+        for chunk in rows.chunks(BLOCK) {
+            dir.push((chunk[0], blocks.len() as u32));
+            encode_block_v2(chunk, &mut blocks);
+        }
+        #[cfg(feature = "block-bloom")]
+        let bloom = block_bloom::BlockBloomDir::build(&rows.chunks(BLOCK).collect::<Vec<_>>());
+        CompressedPerm {
+            dir,
+            blocks: Blocks::Owned(blocks),
+            len: rows.len(),
+            #[cfg(feature = "block-bloom")]
+            bloom,
+            format: Format::V2,
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — the V2 READER ships with `mmap` (independent of the `spqcprm2`
+    /// emit feature), so this test — gated on `mmap` ALONE — drives the frame-of-reference reader,
+    /// the `SPQCPRM2` file magic (`file_magic` V2 arm), and the `from_mmap` auto-detect end-to-end.
+    /// It guarantees those lines are COVERED in the per-crate coverage run (measured under
+    /// `mmap,dict-spill`, not `spqcprm2`), so the migration cannot drag sparq-core below its floor.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn v2_reader_ships_with_mmap_roundtrips() {
+        for &n in &[1usize, 128, 129, 400, 3000] {
+            let rows = sample(n);
+            let c = build_v2_perm(&rows);
+            assert_eq!(c.format, Format::V2);
+            // In-RAM V2 decode (exercises decode_block_v2_at + get_zigzag_varint).
+            assert_eq!(c.decode_all(), rows, "V2 in-RAM decode diverged at n={n}");
+            // write_to picks the SPQCPRM2 magic (file_magic V2 arm) then from_mmap auto-detects it.
+            let mut bytes = Vec::new();
+            c.write_to(&mut bytes).unwrap();
+            assert_eq!(&bytes[..8], &FILE_MAGIC_V2, "V2 write_to must emit SPQCPRM2 magic at n={n}");
+            let dir = std::env::temp_dir().join(format!(
+                "sparq-v2reader-{}-{}-{}",
+                std::process::id(),
+                n,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("perm.bin");
+            std::fs::write(&path, &bytes).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
+            let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
+            let opened = CompressedPerm::from_mmap(map).unwrap();
+            assert_eq!(opened.format, Format::V2, "from_mmap must auto-detect V2 at n={n}");
+            assert_eq!(opened.decode_all(), rows, "V2 mmap decode diverged at n={n}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    // ===== [FABLE-5] sq-7d3dj.32.2.6 — SPQCPRM2 frame-of-reference spike =====
+
+    /// A sorted permutation whose col2 (object) CLUSTERS within each block — the shape the
+    /// frame-of-reference col2-reset targets: many `reset_d1` rows (middle column advances, so
+    /// col2 is written as an absolute in SPQCPRM1) whose objects sit near the block's first
+    /// object. Long equal-subject runs with a moving predicate produce dense `reset_d1` rows.
+    #[cfg(feature = "spqcprm2")]
+    fn clustered_col2_sample(n: usize) -> Vec<[Id; 3]> {
+        let mut v = Vec::with_capacity(n);
+        let mut state = 0x2545_f491u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        for _ in 0..n {
+            // Few subjects (long equal-col0 runs), moderate predicate churn (drives reset_d1),
+            // and objects drawn from a LOCAL window around a per-subject base so a block's col2
+            // clusters — exactly where a frame offset beats an absolute id.
+            let s = 1 + (next() % (n as u32 / 64).max(1));
+            let base = 1 + (s.wrapping_mul(97) % 4_000_000);
+            let p = 1 + (next() % 40);
+            let o = base + (next() % 4096); // objects within a 4K window of the subject's base
+            v.push([s, p, o]);
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — DIRECT unit test for `encode_v2`: the V2 in-RAM writer must
+    /// round-trip to the exact input rows across block boundaries and both reset shapes, and its
+    /// perm carries `Format::V2` (so it decodes through the frame-of-reference reader). This is
+    /// the load-bearing correctness invariant of the spike (a lossy FoR would silently corrupt).
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn encode_v2_roundtrips_and_is_v2() {
+        for &n in &[0usize, 1, 5, 127, 128, 129, 256, 1000, 5000] {
+            let rows = clustered_col2_sample(n);
+            let c = CompressedPerm::encode_v2(&rows);
+            assert_eq!(c.len(), rows.len(), "v2 len mismatch at n={n}");
+            assert_eq!(c.decode_all(), rows, "v2 decode_all mismatch at n={n}");
+            assert_eq!(c.format, Format::V2, "encode_v2 must produce a V2 perm at n={n}");
+        }
+        // Also round-trip the existing clustered/sparse `sample` shape so the FoR is proven on
+        // BOTH object distributions (clustered AND sparse), not just its favourable case.
+        for &n in &[0usize, 1, 129, 5000] {
+            let rows = sample(n);
+            assert_eq!(CompressedPerm::encode_v2(&rows).decode_all(), rows, "v2 roundtrip on sample n={n}");
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — DIFFERENTIAL: SPQCPRM1 and SPQCPRM2 are two encodings of the
+    /// SAME logical data. Decoding either must yield the IDENTICAL rows — the frame-of-reference
+    /// changes only the col2-reset BYTES, never the decoded value. We also confirm the two
+    /// encoders produce DIFFERENT block streams on data with `reset_d1` rows (so the spike is
+    /// actually exercising the new path, not silently emitting the V1 stream).
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn spqcprm1_vs_spqcprm2_decode_identical() {
+        for &n in &[0usize, 1, 129, 1000, 5000] {
+            let rows = clustered_col2_sample(n);
+            let v1 = CompressedPerm::encode(&rows);
+            let v2 = CompressedPerm::encode_v2(&rows);
+            assert_eq!(v1.decode_all(), v2.decode_all(), "v1/v2 decode divergence at n={n}");
+            assert_eq!(v1.decode_all(), rows, "v1 decode != input at n={n}");
+            assert_eq!(v2.decode_all(), rows, "v2 decode != input at n={n}");
+        }
+        // On a col2-clustered shape with many reset_d1 rows the two block streams MUST differ
+        // (otherwise the FoR path is never taken and the differential is vacuous). We compare
+        // the raw encoded bytes of a single well-populated block via the byte buffers.
+        let rows = clustered_col2_sample(4000);
+        let mut b1 = Vec::new();
+        let mut b2 = Vec::new();
+        for chunk in rows.chunks(BLOCK) {
+            encode_block(chunk, &mut b1);
+            encode_block_v2(chunk, &mut b2);
+        }
+        assert_ne!(b1, b2, "v1 and v2 block streams identical — the reset_d1 FoR path never fired");
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — a V2 perm's `range` must return EXACTLY the raw binary-search
+    /// range, identical to the V1 `range_matches_binary_search` oracle. The frame-of-reference
+    /// touches only the decode of col2-reset bytes, so random access is correctness-neutral.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn v2_range_matches_binary_search() {
+        let rows = clustered_col2_sample(5000);
+        let c = CompressedPerm::encode_v2(&rows);
+        let raw_range = |lo: [Id; 3], hi: [Id; 3]| -> Vec<[Id; 3]> {
+            let s = rows.partition_point(|r| *r < lo);
+            let e = rows.partition_point(|r| *r <= hi);
+            rows[s..e].to_vec()
+        };
+        let cases: &[([Id; 3], [Id; 3])] = &[
+            ([Id::MIN; 3], [Id::MAX; 3]),
+            ([rows[rows.len() / 4][0], Id::MIN, Id::MIN], [rows[rows.len() / 4][0], Id::MAX, Id::MAX]),
+            ([99_999_999, Id::MIN, Id::MIN], [99_999_999, Id::MAX, Id::MAX]),
+            (rows[0], rows[0]),
+            (rows[rows.len() / 2], rows[rows.len() / 2]),
+            (rows[rows.len() - 1], rows[rows.len() - 1]),
+        ];
+        for &(lo, hi) in cases {
+            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "v2 range mismatch for {lo:?}..={hi:?}");
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — DIRECT unit test for the zigzag varint round-trip
+    /// (`put_zigzag_varint` / `get_zigzag_varint`): the signed frame offset must survive
+    /// encode→decode across zero, both signs, and the extremes.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn zigzag_varint_roundtrips() {
+        let cases = [0i64, 1, -1, 2, -2, 127, -128, 300, -300, i32::MAX as i64, i32::MIN as i64, i64::MAX, i64::MIN];
+        for &x in &cases {
+            let mut buf = Vec::new();
+            put_zigzag_varint(&mut buf, x);
+            let mut pos = 0;
+            assert_eq!(get_zigzag_varint(&buf, &mut pos), x, "zigzag roundtrip failed for {x}");
+            assert_eq!(pos, buf.len(), "zigzag reader did not consume all bytes for {x}");
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — DIRECT unit test that the reserved V2 version marker is the
+    /// distinct 8-byte `SPQCPRM2` magic (never equal to the V1 magic), so a future migration can
+    /// auto-detect it without a collision.
+    #[cfg(all(feature = "spqcprm2", feature = "mmap"))]
+    #[test]
+    fn file_magic_v2_is_distinct() {
+        assert_eq!(&FILE_MAGIC_V2, b"SPQCPRM2");
+        assert_ne!(FILE_MAGIC_V2, FILE_MAGIC, "V2 magic must differ from V1");
+    }
+
+    // ===== [FABLE-5] sq-7d3dj.32.2.7 — the FORMAT MIGRATION (write + auto-detect V2) =====
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — a unique scratch dir (no dev-dep tempfile), like the
+    /// corruption oracle's helper. CI temp is ephemeral so we never remove it.
+    #[cfg(feature = "spqcprm2")]
+    fn scratch_dir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "sparq-spqcprm2-mig-{}-{}-{}",
+            std::process::id(),
+            n,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — the LOAD-BEARING migration invariant: a `V2` perm written via
+    /// `write_to` carries the `SPQCPRM2` magic on disk, is AUTO-DETECTED by `from_mmap` (which
+    /// picks the frame-of-reference reader), and decodes back to the EXACT input rows — including
+    /// the full `range` random-access path. Proves the round-trip write→open→decode holds through
+    /// the real mmap loader (not just the in-RAM encode/decode of the spike).
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn write_to_v2_roundtrips_through_from_mmap() {
+        for &n in &[1usize, 127, 128, 129, 300, 5000] {
+            let rows = clustered_col2_sample(n);
+            let dir = scratch_dir();
+            let path = dir.join("perm.bin");
+            let c = CompressedPerm::encode_v2(&rows);
+            assert_eq!(c.format, Format::V2);
+            {
+                let mut w = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+                c.write_to(&mut w).unwrap();
+                std::io::Write::flush(&mut w).unwrap();
+            }
+            // On disk the file MUST start with the V2 magic, never the V1 magic.
+            let head = std::fs::read(&path).unwrap();
+            assert_eq!(&head[..8], &FILE_MAGIC_V2, "V2 write_to must emit the SPQCPRM2 magic (n={n})");
+            assert_ne!(&head[..8], &FILE_MAGIC, "V2 file must not carry the V1 magic (n={n})");
+            // Re-open through the real mmap loader; it must auto-detect V2 and decode identically.
+            let file = std::fs::File::open(&path).unwrap();
+            // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
+            let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
+            let opened = CompressedPerm::from_mmap(map).unwrap();
+            assert_eq!(opened.format, Format::V2, "from_mmap must auto-detect V2 (n={n})");
+            assert_eq!(opened.decode_all(), rows, "V2 write→open→decode diverged (n={n})");
+            // Full random-access parity too.
+            assert_eq!(opened.range([Id::MIN; 3], [Id::MAX; 3]), rows, "V2 opened range diverged (n={n})");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — BACKWARD-COMPAT SOUNDNESS: an existing `SPQCPRM1` file on disk
+    /// must keep decoding byte-identically forever, regardless of the emit config. We write a V1
+    /// perm the ordinary way, re-open it through the loader, and require the decoded rows AND the
+    /// on-disk magic to be exactly the shipped V1 form. Also asserts the V1 on-disk bytes are
+    /// UNCHANGED by this migration (equal to `encode(rows).write_to`, the pre-migration writer).
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn v1_file_decodes_byte_identically_forever() {
+        for &n in &[1usize, 129, 5000] {
+            let rows = clustered_col2_sample(n);
+            let dir = scratch_dir();
+            let path = dir.join("perm.bin");
+            let c = CompressedPerm::encode(&rows);
+            assert_eq!(c.format, Format::V1);
+            let mut bytes = Vec::new();
+            c.write_to(&mut bytes).unwrap();
+            assert_eq!(&bytes[..8], &FILE_MAGIC, "V1 write_to must emit the SPQCPRM1 magic (n={n})");
+            std::fs::write(&path, &bytes).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
+            let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
+            let opened = CompressedPerm::from_mmap(map).unwrap();
+            assert_eq!(opened.format, Format::V1, "a SPQCPRM1 file must open as V1 (n={n})");
+            assert_eq!(opened.decode_all(), rows, "V1 decode diverged (n={n})");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — the streaming `CompressedPermWriter` in V2 mode must produce a
+    /// file BYTE-IDENTICAL to `encode_v2(rows).write_to`, mirroring the V1 byte-identity guarantee
+    /// (`stream_writer_byte_identical_to_encode_write_to`). This is the invariant that lets the
+    /// external build emit V2 straight from the merge tail with no recompress pass.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn streaming_writer_v2_byte_identical_to_encode_v2_write_to() {
+        for &n in &[1usize, 127, 128, 129, 500, 5000] {
+            let rows = clustered_col2_sample(n);
+            let dir = scratch_dir();
+            let streamed = dir.join("streamed.bin");
+            // Stream the rows through the V2 writer.
+            let mut w = CompressedPermWriter::create_with(&streamed, Format::V2).unwrap();
+            for &row in &rows {
+                w.push(row).unwrap();
+            }
+            w.finish(&streamed).unwrap();
+            // In-RAM V2 reference bytes.
+            let mut want = Vec::new();
+            CompressedPerm::encode_v2(&rows).write_to(&mut want).unwrap();
+            let got = std::fs::read(&streamed).unwrap();
+            assert_eq!(got, want, "streamed V2 bytes differ from encode_v2().write_to (n={n})");
+            assert_eq!(&got[..8], &FILE_MAGIC_V2, "streamed V2 magic wrong (n={n})");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — the emit-format CONFIG GATE. `encode_emit` writes SPQCPRM1 by
+    /// default (the shipped behaviour — V2 is NOT defaulted on), and SPQCPRM2 only inside a
+    /// `with_emit_format(V2)` scope. Proves the gate actually flips the format and restores it.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn emit_format_config_gate_selects_v2() {
+        let rows = clustered_col2_sample(500);
+        // DEFAULT: no override, no env ⇒ V1.
+        assert_eq!(CompressedPerm::encode_emit(&rows).format, Format::V1, "default emit must be V1");
+        // Opt in on this thread ⇒ V2, then restore.
+        with_emit_format(EmitFormat::V2, || {
+            assert_eq!(CompressedPerm::encode_emit(&rows).format, Format::V2, "gate did not select V2");
+            assert_eq!(emit_format(), Format::V2);
+        });
+        // Restored after the scope.
+        assert_eq!(CompressedPerm::encode_emit(&rows).format, Format::V1, "emit override leaked past scope");
+        // The V2-emitted perm still round-trips to the exact rows.
+        with_emit_format(EmitFormat::V2, || {
+            assert_eq!(CompressedPerm::encode_emit(&rows).decode_all(), rows, "V2 emit lost data");
+        });
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.7 — MUTATION WITNESS on the magic auto-detect: corrupting the
+    /// 8-byte file magic to anything that is neither `SPQCPRM1` nor `SPQCPRM2` must be a LOUD,
+    /// CLEAN error from `from_mmap` (never a silent misdecode). Also proves a V1 file whose magic
+    /// is flipped to the V2 magic does NOT silently decode as V2 to the SAME rows — the reader
+    /// applies the wrong (frame-of-reference) interpretation, so a magic swap changes the decoded
+    /// bytes (evidence the magic genuinely selects the reader), but it is still memory-safe. The
+    /// on-disk store is a TRUSTED asset (no per-record checksum, threat-model B5): the guarantee
+    /// is a clean Err on an UNKNOWN magic + never UB, not integrity of a same-magic content flip.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn corrupt_magic_is_loud_error_never_misdecode() {
+        let rows = clustered_col2_sample(600);
+        let dir = scratch_dir();
+        let path = dir.join("perm.bin");
+        let mut bytes = Vec::new();
+        CompressedPerm::encode(&rows).write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[..8], &FILE_MAGIC);
+
+        // (a) An UNKNOWN magic — every single-byte flip of the 8 magic bytes that lands on
+        // neither known marker must be a clean Err (loud rejection), never a decode.
+        for i in 0..8 {
+            for xor in [0x01u8, 0x80, 0xFF] {
+                let mut m = bytes.clone();
+                m[i] ^= xor;
+                if m[..8] == FILE_MAGIC || m[..8] == FILE_MAGIC_V2 {
+                    continue; // a flip that happens to hit the other valid magic — covered in (b)
+                }
+                std::fs::write(&path, &m).unwrap();
+                let file = std::fs::File::open(&path).unwrap();
+                // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
+                let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
+                let res = CompressedPerm::from_mmap(map);
+                assert!(res.is_err(), "corrupt magic @byte{i}^{xor:#x} silently accepted (must be a loud Err)");
+            }
+        }
+
+        // (b) Swapping a V1 file's magic to the V2 magic must NOT silently decode to the same
+        // rows: the V2 reader applies the frame-of-reference inverse to a stream the V1 encoder
+        // wrote absolute, so at least one decoded object differs. This is the witness that the
+        // magic genuinely picks the reader (a silent misdecode would be the dangerous case). It
+        // must still be memory-safe (no panic / OOB) — `from_mmap`'s validation is format-agnostic.
+        let mut swapped = bytes.clone();
+        swapped[..8].copy_from_slice(&FILE_MAGIC_V2);
+        std::fs::write(&path, &swapped).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
+        let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
+        // Whether validation accepts it or not, it must never panic; if it opens, the decode
+        // must DIFFER from the true rows (the magic swap really changed the interpretation) as
+        // long as the data actually contains reset_d1 rows (clustered_col2_sample does).
+        if let Ok(opened) = CompressedPerm::from_mmap(map) {
+            assert_eq!(opened.format, Format::V2, "swapped magic must open as V2");
+            let decoded = opened.decode_all();
+            assert_ne!(decoded, rows, "a V1 stream read as V2 must NOT decode to the same rows (reset_d1 present)");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [FABLE-5] sq-7d3dj.32.2.6 — the MEASUREMENT: block-stream B/triple for SPQCPRM1 vs
+    /// SPQCPRM2 at 1M/10M-row scale, summed over the six permutations (the store's real cost).
+    /// All numbers are NON-canonical work-box measurements (never a doc/test perf number).
+    /// `#[ignore]` so default `cargo test` stays fast; run with
+    /// `cargo test -p sparq-core --features spqcprm2 --lib v2_measure -- --ignored --nocapture`.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    #[ignore = "spike measurement: run explicitly with --ignored --nocapture (allocates hundreds of MB)"]
+    fn v2_measure_bytes_per_triple() {
+        let orders: [(&str, [usize; 3]); 6] = [
+            ("SPO", [0, 1, 2]), ("SOP", [0, 2, 1]), ("PSO", [1, 0, 2]),
+            ("POS", [1, 2, 0]), ("OSP", [2, 0, 1]), ("OPS", [2, 1, 0]),
+        ];
+        println!("\n===== sq-7d3dj.32.2.6 SPQCPRM1 vs SPQCPRM2 B/triple (NON-canonical work-box) =====");
+        for &n in &[1_000_000usize, 10_000_000] {
+            let triples = clustered_col2_sample(n);
+            let n_tri = triples.len().max(1) as f64;
+            let (mut v1_bytes, mut v2_bytes) = (0u64, 0u64);
+            for (_, order) in orders {
+                let mut rows: Vec<[Id; 3]> =
+                    triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+                rows.sort_unstable();
+                rows.dedup();
+                for chunk in rows.chunks(BLOCK) {
+                    let mut b1 = Vec::new();
+                    let mut b2 = Vec::new();
+                    encode_block(chunk, &mut b1);
+                    encode_block_v2(chunk, &mut b2);
+                    v1_bytes += b1.len() as u64;
+                    v2_bytes += b2.len() as u64;
+                }
+            }
+            let v1_bpt = v1_bytes as f64 / n_tri;
+            let v2_bpt = v2_bytes as f64 / n_tri;
+            let delta_pct = (v2_bpt - v1_bpt) / v1_bpt * 100.0;
+            println!(
+                "n={:>10} distinct={:>10}  SPQCPRM1={:>7.3} B/tri  SPQCPRM2={:>7.3} B/tri  delta={:+.2}%",
+                n, triples.len(), v1_bpt, v2_bpt, delta_pct
+            );
+        }
+        println!("===== end measurement — verdict in the bead note / PR body =====\n");
     }
 }

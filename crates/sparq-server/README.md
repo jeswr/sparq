@@ -53,10 +53,10 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl` (`POST /shacl/validate`),
-  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `solid-authz` (Solid WAC/ACP `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed HTTP shell over [`sparq-solid`](../sparq-solid)), `odrl-authz` (the ODRL lane on `/authz/query` — dataset-carried ODRL policies gate the query via the `sparq-solid` bridge, fail-closed), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
-  `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
-  disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
+  `/admin/restore` — single-flight: a second concurrent restore is an explicit `409`; on `--persist`,
+  `?persist=true`/`--restore-persist` writes the restore through to disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
   `audit-log`/`access-audit`, `zlib-ng`.
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
   server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
@@ -89,9 +89,9 @@ By default: **no auth, loopback-only.** Hardening is opt-in but honest where it 
 > *external* deployment concern.
 
 Readers pin the current immutable generation; writers commit batches as new generations
-([`sparq-serve`](../sparq-serve/README.md)). **This single writer IS the write ceiling, by design**
-— a feature for the interactive single-resource-write workload, not a gap. An in-engine
-distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012; no engine code).
+([`sparq-serve`](../sparq-serve/README.md)). **Adaptive group-commit** (on by default; `--no-adaptive-commit`
+to disable): a serial interactive client commits in engine-time (µs) instead of paying a fixed group-commit
+window, while concurrent load still batches — same FIFO/atomicity/durability, lower latency. **This single writer IS the write ceiling, by design** — an in-engine distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012).
 
 ## Durable persistence (`--persist DIR`)
 

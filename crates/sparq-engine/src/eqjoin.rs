@@ -31,9 +31,10 @@
 //!    with no provable key — local-vocab ids, RDF 1.2 triple terms,
 //!    value-comparable temporals (`xsd:dateTime`/`dateTimeStamp`/`date`, where
 //!    different lexicals can denote one instant), and numeric-DATATYPE literals
-//!    that missed the numeric cache (whose raw parse is STRICTER than the
-//!    evaluator's trimming `Num::of_literal` fallback, so a miss does not prove
-//!    the term unpairable) — fall into a [`JKey::Hard`]
+//!    that missed the numeric cache (as of sq-6b1lj the cache acceptance ⟺
+//!    `Num::of_literal`, so a miss is a genuinely ill-formed-for-datatype lexical
+//!    the exact evaluator also type-errors — `Hard` defers to it) — fall into a
+//!    [`JKey::Hard`]
 //!    class that is paired by running the EXACT evaluator (`equal_expr`) against
 //!    every row of the other side: exactly today's semantics for those rows.
 //! 2. **False positives are rechecked** — the pass NEVER consumes the FILTER: the
@@ -450,13 +451,20 @@ fn key_of(graph: &Graph, id: Id) -> JKey {
                     _ => JKey::Term(id),
                 };
             }
-            // A NUMERIC datatype reaching here missed the `numeric_value` cache — but
-            // the cache (a raw `str::parse::<f64>`) is STRICTER than the evaluator's
-            // `values_equal` fallback (`Num::of_literal`, which TRIMS the lexical): a
-            // whitespace-padded `" 1"^^xsd:integer` is a cache miss yet value-equal to
-            // `"1"^^xsd:integer` under a different id. No provable key ⇒ Hard (the
-            // exact evaluator pairs it; genuinely ill-formed lexicals then type-error
-            // exactly as today).
+            // A NUMERIC datatype reaching here missed the `numeric_value` cache. As of
+            // sq-9781x + sq-6b1lj the cache is aligned with the DATATYPE-AWARE
+            // `Num::of_literal` acceptance set (the same set `values_equal` uses): it trims
+            // (XSD `collapse` facet) and gates on per-datatype well-formedness, so a
+            // whitespace-padded `" 1"^^xsd:integer` HITS the cache above (→ `JKey::Num`), the
+            // `inf`/`nan` Rust-only spellings MISS, AND a lexical ill-formed FOR its datatype
+            // (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, an i128-overflow `xsd:decimal`)
+            // now MISSES too — reaching THIS branch. Such a lexical is a SPARQL type error
+            // under `values_equal`/`of_literal`, so `Hard` (defer to the exact evaluator,
+            // which pairs it against nothing on `=`) is the correct backstop: the fast
+            // `JKey::Num` route and `values_equal` now AGREE for every numeric lexical (the
+            // pre-fix `JKey::Num`-vs-`values_equal` residual is closed). A numeric datatype
+            // reaching `Hard` is exactly the ill-formed/`NaN`-sentinel case the exact
+            // evaluator also type-errors — no false negative.
             if is_numeric_datatype(datatype) {
                 return JKey::Hard;
             }
@@ -947,9 +955,13 @@ mod tests {
         assert_eq!(key_of(&g, id_of("\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>")), JKey::Bool(true));
         // Value-comparable temporals are the Hard class.
         assert_eq!(key_of(&g, id_of("2020-01-01T00:00:00Z")), JKey::Hard);
-        // A cache-missing numeric-datatype lexical (whitespace-padded) is Hard, NOT
-        // an identity key: the evaluator's trimming fallback can still pair it.
-        assert_eq!(key_of(&g, id_of("\" 7\"")), JKey::Hard);
+        // [FABLE-5] (sq-9781x) A whitespace-padded numeric lexical now HITS the aligned
+        // numeric cache (trim-then-parse via the shared `parse_xsd_f64`) and keys as
+        // `JKey::Num(7.0)` — the SAME key the inline id `7` gets — instead of the former
+        // `Hard` (the cache/evaluator acceptance sets are now aligned, so it no longer needs
+        // the exact-evaluator backstop for the whitespace case).
+        assert_eq!(key_of(&g, id_of("\" 7\"")), JKey::Num(7.0f64.to_bits()));
+        assert_eq!(key_of(&g, id_of("\" 7\"")), key_of(&g, dict::INLINE_BASE + 7));
         // Unknown datatype: identity key. IRIs: identity key.
         let uid = id_of("unknownDt");
         assert_eq!(key_of(&g, uid), JKey::Term(uid));

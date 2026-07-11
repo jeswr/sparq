@@ -732,5 +732,110 @@ class MainSmokeTest(unittest.TestCase):
             self.assertEqual(rc, 0)
 
 
+# --------------------------------------------------------------------------- #
+# comp_store_bytes_per_triple ratchet enforcement (sq-7d3dj.32.2.5) [SONNET-4.6]
+# --------------------------------------------------------------------------- #
+perf_gate = _load("perf_gate", "perf-gate.py")
+
+
+class CompStoreRatchetTest(unittest.TestCase):
+    """Mutation tests for the comp_store_bytes_per_triple ratchet.
+
+    [SONNET-4.6] (sq-7d3dj.32.2.5) The compressed-profile B/triple floor must:
+      1. HARD-FAIL (exit 2) when the measured value exceeds floor*(1+0.02).
+      2. PASS (exit 0) when the measured value equals or is below the floor
+         (including a genuine improvement that triggers the auto-ratchet-down).
+    These use perf-gate.py's pure evaluate() / main() entry points so they are
+    hermetic (no ci-bench.sh build needed, no network) — exactly the same
+    pattern as the perf-gate self-test in scripts/perf-gate.py --self-test.
+    """
+
+    FLOOR = 56       # the seeded floor (B/triple, SPQCPRM2 V2 post-#1824)
+    METRIC = "comp_store_bytes_per_triple"
+
+    def _baseline(self, floor=None):
+        f = self.FLOOR if floor is None else floor
+        return {
+            self.METRIC: {
+                "floor": float(f),
+                "threshold": 0.02,
+                "mode": "auto",
+            }
+        }
+
+    def test_regression_above_band_hard_fails(self):
+        # MUTATION: inject a value ABOVE floor*(1+0.02) — simulates a compressed-
+        # store regression where into_compressed() now uses more bytes per triple.
+        # The gate must exit 2 (HARD FAIL) — the regression cannot drift undetected.
+        regressed_value = self.FLOOR * 1.05  # +5%, clearly above the 2% band
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: regressed_value}, self._baseline()
+        )
+        self.assertEqual(
+            [r[0] for r in regressions],
+            [self.METRIC],
+            f"a regression of +5% above the floor must be caught; got regressions={regressions}",
+        )
+
+    def test_within_band_passes(self):
+        # A within-band reading (at the floor itself, or at floor+1%) must PASS.
+        for cur in (self.FLOOR, self.FLOOR * 1.01):
+            regressions, _ = perf_gate.evaluate(
+                {self.METRIC: cur}, self._baseline()
+            )
+            self.assertEqual(
+                regressions,
+                [],
+                f"a within-band value ({cur:g}) must pass; got regressions={regressions}",
+            )
+
+    def test_genuine_improvement_passes_and_ratchets_down(self):
+        # A value BELOW the floor is an improvement: gate passes, and
+        # update_baseline should lower the floor to the new best-ever value.
+        improved = self.FLOOR - 5  # e.g. 51 B/triple after a format optimisation
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: improved}, self._baseline()
+        )
+        self.assertEqual(
+            regressions, [], "an improved value must pass the gate"
+        )
+        new_bl, changes = perf_gate.update_baseline(
+            {self.METRIC: improved}, self._baseline()
+        )
+        self.assertEqual(
+            new_bl[self.METRIC]["floor"],
+            improved,
+            "the floor must ratchet DOWN to the genuine improvement",
+        )
+        self.assertTrue(
+            any("auto-ratchet" in c[3] for c in changes),
+            f"auto-ratchet-down change expected; got {changes}",
+        )
+
+    def test_boundary_exactly_at_plus_two_percent_passes(self):
+        # Exactly at floor*(1+0.02) is boundary-inclusive (not strictly greater).
+        boundary = self.FLOOR * 1.02
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: boundary}, self._baseline()
+        )
+        self.assertEqual(
+            regressions,
+            [],
+            f"a value exactly at the +2% boundary ({boundary:g}) must pass (inclusive)",
+        )
+
+    def test_one_byte_above_band_fails(self):
+        # Even one integer unit above the boundary must trip the ratchet.
+        just_over = self.FLOOR * 1.02 + 1  # 58.12 + 1 = 59.12 → FAIL
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: just_over}, self._baseline()
+        )
+        self.assertEqual(
+            [r[0] for r in regressions],
+            [self.METRIC],
+            f"a value just above the +2% band ({just_over:g}) must hard-fail",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

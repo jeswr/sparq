@@ -29,12 +29,16 @@
 //!
 //! The [`lex`] sub-module mirrors every function at the lexical level
 //! (wkt-literal strings in, values out) — the shape a SPARQL engine builtin
-//! receives. [`crate::registry::geof_registry`] packages these directly as a
+//! receives. `crate::registry::geof_registry` packages these directly as a
 //! `sparq_engine::FunctionRegistry`, so they run inside SPARQL FILTER/BIND via
 //! `sparq_engine::query_with_functions` (default-on `engine` cargo feature).
+//! (Code span, not an intra-doc link: `registry` is `engine`-gated, and this
+//! module doc is compiled in the engine-less build too — a link would break
+//! `--no-default-features` rustdoc. sq-wo5jw)
 
 use crate::literal::{Crs, GeoGeometry};
 use crate::GeoError;
+use geo::relate::IntersectionMatrix;
 use geo::{
     BooleanOps, BoundingRect, Buffer, Closest, ConvexHull, CoordsIter, Distance, Euclidean,
     Haversine, HaversineClosestPoint, Intersects, LineIntersection, MapCoords, Relate,
@@ -93,7 +97,9 @@ impl Unit {
 /// Both arguments must be in the same coordinate space: the two geographic
 /// CRSs (CRS84 / EPSG:4326) are mutually compatible because parsing
 /// normalised them to long/lat; any other CRS must match exactly.
-fn ensure_compatible(a: &GeoGeometry, b: &GeoGeometry) -> Result<(), GeoError> {
+/// `pub(crate)` so the engine registry's prepared-relate path (sq-hq8t5)
+/// applies the SAME compatibility rule before relating. [FABLE-5]
+pub(crate) fn ensure_compatible(a: &GeoGeometry, b: &GeoGeometry) -> Result<(), GeoError> {
     let compatible = match (&a.crs, &b.crs) {
         (x, y) if x.is_geographic() && y.is_geographic() => true,
         (Crs::Other(x), Crs::Other(y)) => x == y,
@@ -284,25 +290,33 @@ pub fn relate(a: &GeoGeometry, b: &GeoGeometry, pattern: &str) -> Result<bool, G
         .map_err(|e| GeoError::Parse(format!("invalid DE-9IM pattern {pattern:?}: {e}")))
 }
 
+/// `true` iff `matrix` matches ANY of `patterns` — the spec defines some
+/// relations as a disjunction of matrices. `pub(crate)` so the engine
+/// registry's prepared-relate path (sq-hq8t5) evaluates the SAME disjunction
+/// over a matrix it computed from a cached prepared side. [FABLE-5]
+pub(crate) fn matrix_matches_any(matrix: &IntersectionMatrix, patterns: &[&str]) -> bool {
+    // Patterns are compile-time constants below — a failure is a crate bug.
+    patterns.iter().any(|p| matrix.matches(p).expect("valid built-in DE-9IM pattern"))
+}
+
 /// `true` iff the DE-9IM matrix of `a` vs `b` matches ANY of `patterns`
 /// (the spec defines some relations as a disjunction of matrices).
 fn relate_any(a: &GeoGeometry, b: &GeoGeometry, patterns: &[&str]) -> Result<bool, GeoError> {
     ensure_compatible(a, b)?;
-    let matrix = a.geometry.relate(&b.geometry);
-    for p in patterns {
-        // Patterns are compile-time constants below — a failure is a crate bug.
-        if matrix.matches(p).expect("valid built-in DE-9IM pattern") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(matrix_matches_any(&a.geometry.relate(&b.geometry), patterns))
 }
 
 macro_rules! de9im_relation {
-    ($(#[$doc:meta])* $name:ident, [$($pattern:literal),+]) => {
+    ($(#[$doc:meta])* $name:ident, $patterns:ident, [$($pattern:literal),+]) => {
+        /// The GeoSPARQL DE-9IM matrix pattern disjunction defining the
+        /// relation of the same name. `pub(crate)` so the engine registry's
+        /// prepared-relate path (sq-hq8t5) tests the SAME spec matrices —
+        /// this const and the public function below are the single source
+        /// of truth. [FABLE-5]
+        pub(crate) const $patterns: &[&str] = &[$($pattern),+];
         $(#[$doc])*
         pub fn $name(a: &GeoGeometry, b: &GeoGeometry) -> Result<bool, GeoError> {
-            relate_any(a, b, &[$($pattern),+])
+            relate_any(a, b, $patterns)
         }
     };
 }
@@ -311,70 +325,70 @@ macro_rules! de9im_relation {
 // DE-9IM matrix patterns for each relation).
 de9im_relation!(
     /// `geof:ehEquals` — Egenhofer equal.
-    eh_equals, ["TFFFTFFFT"]
+    eh_equals, EH_EQUALS_PATTERNS, ["TFFFTFFFT"]
 );
 de9im_relation!(
     /// `geof:ehDisjoint` — Egenhofer disjoint.
-    eh_disjoint, ["FF*FF****"]
+    eh_disjoint, EH_DISJOINT_PATTERNS, ["FF*FF****"]
 );
 de9im_relation!(
     /// `geof:ehMeet` — Egenhofer meet (boundaries in contact, interiors not).
-    eh_meet, ["FT*******", "F**T*****", "F***T****"]
+    eh_meet, EH_MEET_PATTERNS, ["FT*******", "F**T*****", "F***T****"]
 );
 de9im_relation!(
     /// `geof:ehOverlap` — Egenhofer overlap.
-    eh_overlap, ["T*T***T**"]
+    eh_overlap, EH_OVERLAP_PATTERNS, ["T*T***T**"]
 );
 de9im_relation!(
     /// `geof:ehCovers` — Egenhofer covers.
-    eh_covers, ["T*TFT*FF*"]
+    eh_covers, EH_COVERS_PATTERNS, ["T*TFT*FF*"]
 );
 de9im_relation!(
     /// `geof:ehCoveredBy` — Egenhofer coveredBy.
-    eh_covered_by, ["TFF*TFT**"]
+    eh_covered_by, EH_COVERED_BY_PATTERNS, ["TFF*TFT**"]
 );
 de9im_relation!(
     /// `geof:ehInside` — Egenhofer inside.
-    eh_inside, ["TFF*FFT**"]
+    eh_inside, EH_INSIDE_PATTERNS, ["TFF*FFT**"]
 );
 de9im_relation!(
     /// `geof:ehContains` — Egenhofer contains.
-    eh_contains, ["T*TFF*FF*"]
+    eh_contains, EH_CONTAINS_PATTERNS, ["T*TFF*FF*"]
 );
 
 // The RCC8 relation family (GeoSPARQL 1.0 Req 26 / 1.1 §9). RCC8 is defined
 // over REGIONS (non-empty interiors); the matrices below are the spec's.
 de9im_relation!(
     /// `geof:rcc8eq` — equal.
-    rcc8_eq, ["TFFFTFFFT"]
+    rcc8_eq, RCC8_EQ_PATTERNS, ["TFFFTFFFT"]
 );
 de9im_relation!(
     /// `geof:rcc8dc` — disconnected.
-    rcc8_dc, ["FFTFFTTTT"]
+    rcc8_dc, RCC8_DC_PATTERNS, ["FFTFFTTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8ec` — externally connected (boundaries touch).
-    rcc8_ec, ["FFTFTTTTT"]
+    rcc8_ec, RCC8_EC_PATTERNS, ["FFTFTTTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8po` — partially overlapping.
-    rcc8_po, ["TTTTTTTTT"]
+    rcc8_po, RCC8_PO_PATTERNS, ["TTTTTTTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8tppi` — tangential proper part inverse.
-    rcc8_tppi, ["TTTFTTFFT"]
+    rcc8_tppi, RCC8_TPPI_PATTERNS, ["TTTFTTFFT"]
 );
 de9im_relation!(
     /// `geof:rcc8tpp` — tangential proper part.
-    rcc8_tpp, ["TFFTTFTTT"]
+    rcc8_tpp, RCC8_TPP_PATTERNS, ["TFFTTFTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8ntpp` — non-tangential proper part.
-    rcc8_ntpp, ["TFFTFFTTT"]
+    rcc8_ntpp, RCC8_NTPP_PATTERNS, ["TFFTFFTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8ntppi` — non-tangential proper part inverse.
-    rcc8_ntppi, ["TTTFFTFFT"]
+    rcc8_ntppi, RCC8_NTPPI_PATTERNS, ["TTTFFTFFT"]
 );
 
 // ---- Geometry-producing functions -------------------------------------------------

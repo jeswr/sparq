@@ -482,8 +482,10 @@ impl TripleStore {
             let path = dir.join(format!("perm{i}.bin"));
             if compressed && !rows.is_empty() {
                 // Unbuilt (empty) permutations stay raw-empty so `open` skips them by size.
+                // [FABLE-5] sq-7d3dj.32.2.7: `encode_emit` honours the emit-format config gate —
+                // `SPQCPRM1` by default, `SPQCPRM2` only when a `spqcprm2` build has opted in.
                 let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-                crate::compress::CompressedPerm::encode(&rows).write_to(&mut w)?;
+                crate::compress::CompressedPerm::encode_emit(&rows).write_to(&mut w)?;
                 std::io::Write::flush(&mut w)?;
             } else {
                 // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
@@ -573,9 +575,14 @@ impl TripleStore {
             // SAFETY: the file is owned by this store for its lifetime and is not mutated.
             let map = unsafe { memmap2::Mmap::map(&file)? };
             // FORMAT AUTO-DETECTION: a block-compressed file (written by `save_compressed`)
-            // starts with FILE_MAGIC; anything else is the original raw [u32;3] format.
-            // Compressed perms are served lazily — block-wise decode off the mapped file.
-            *slot = if map.len() >= 8 && map[..8] == crate::compress::FILE_MAGIC {
+            // starts with FILE_MAGIC (`SPQCPRM1`) or, for a `spqcprm2`-emitting build,
+            // FILE_MAGIC_V2 (`SPQCPRM2`); anything else is the original raw [u32;3] format.
+            // [FABLE-5] sq-7d3dj.32.2.7: both magics route to `from_mmap`, which re-checks the
+            // magic and picks the V1/V2 decode reader — a V1 file decodes byte-identically
+            // forever. Compressed perms are served lazily — block-wise decode off the mapped file.
+            *slot = if map.len() >= 8
+                && (map[..8] == crate::compress::FILE_MAGIC || map[..8] == crate::compress::FILE_MAGIC_V2)
+            {
                 PermData::Compressed(crate::compress::CompressedPerm::from_mmap(map)?)
             } else {
                 PermData::Mapped(map)

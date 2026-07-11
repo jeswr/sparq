@@ -390,9 +390,9 @@ fn granted(decision: Decision, consumed: Option<u64>) -> ExerciseDecision {
 /// `N-1`) express upper bounds and are honoured. `eq N` is treated as "exactly/at most
 /// N" (the common shorthand "count = 5" for a 5-use allowance). Order operators that do
 /// NOT bound from above (`gt`/`gteq`) and equality-set operators (`neq`/`isPartOf`/
-/// `isA`) do not express a usage *ceiling* and return `None` (the stateful path then
-/// treats them as having no limit — they are left to the stateless evaluator). A
-/// negative or non-integer right-operand is rejected (`None`).
+/// `isA`/`isAnyOf`/`isNoneOf`) do not express a usage *ceiling* and return `None` (the
+/// stateful path then treats them as having no limit — they are left to the stateless
+/// evaluator). A negative or non-integer right-operand is rejected (`None`).
 fn count_limit(op: Operator, right: &Value) -> Option<u64> {
     let n = match right {
         Value::Num(x) => *x,
@@ -409,7 +409,7 @@ fn count_limit(op: Operator, right: &Value) -> Option<u64> {
         Operator::Lteq | Operator::Eq => Some(n),
         // "< N" ⇒ at most N-1 (a 0 bound stays 0 — never exercisable).
         Operator::Lt => Some(n.saturating_sub(1)),
-        // gt/gteq/neq/isPartOf/isA do not express a usage ceiling.
+        // gt/gteq/neq/isPartOf/isA/isAnyOf/isNoneOf do not express a usage ceiling.
         _ => None,
     }
 }

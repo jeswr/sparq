@@ -222,6 +222,27 @@ pub struct ServerConfig {
     /// writer is out of scope — see `sparq_serve`'s scheduler docs). Set via
     /// `--update-where-timeout` / `SPARQ_UPDATE_WHERE_TIMEOUT` (seconds; `0` disables).
     pub update_where_timeout: Option<Duration>,
+    /// [OPUS-4.8] (sq-p7kk5) **Adaptive group-commit for the write path.** The sequenced
+    /// writer normally waits a fixed group-commit window (`sparq_serve`'s 3 ms default) after
+    /// the first update in a batch, absorbing any concurrent updates that arrive within it into
+    /// one published generation. For a **serial / low-concurrency interactive** client (one
+    /// in-flight `application/sparql-update` at a time — the LDP-CRUD shape) that window is pure
+    /// latency: the client is blocked on its own ack, so nothing can arrive to fill it, and each
+    /// update pays ~one window even though the engine's in-place apply is ~15 µs (the sq-p7kk5
+    /// update-path gap: the fixed window dominated ~99 % of a serial client's commit latency).
+    ///
+    /// When `true` (the DEFAULT — the server's write path is interactive) the writer instead
+    /// drains only the already-queued backlog after the first update and commits the moment it
+    /// empties, so a serial client commits in engine-time (µs) rather than window-time (ms). A
+    /// genuinely concurrent stream still batches every update that had piled up between the
+    /// writer's iterations, so group-commit amortisation under real load is preserved. This is a
+    /// pure LATENCY change with NO effect on the mutation/durability contract: application stays
+    /// strict FIFO, per-update atomicity is unchanged, every accepted update is still committed,
+    /// visibility and the `--persist` durability path are identical, and each committed
+    /// generation is still the serial order — only epoch-tick granularity may be finer under
+    /// overlap (a cache-key concern, never correctness). `false` restores the always-windowed
+    /// behaviour. Set via `--no-adaptive-commit` / `SPARQ_ADAPTIVE_COMMIT=0`.
+    pub adaptive_commit: bool,
     /// Maximum accepted request body, enforced before the handler reads it (413).
     pub max_body_bytes: usize,
     /// Maximum in-flight requests; excess requests are shed with 429.
@@ -668,6 +689,39 @@ pub struct ServerConfig {
     /// as the backup family); a consumer needing an authentic feed wraps its own signing.
     #[cfg(feature = "change-stream")]
     pub change_stream_dir: Option<std::path::PathBuf>,
+    /// [FABLE-5] (sq-snopa.6, issue #992 FR-4) OPT-IN Solid WAC/ACP HTTP authorization surface.
+    /// When `true`, the server serves `POST /authz/decide`, `POST /authz/wac-allow` and
+    /// `POST /authz/query` — a THIN HTTP shell over the `sparq-solid` library authoriser
+    /// (`PodStore::decide` / `wac_allow` / `query_json_as`). Each endpoint takes an
+    /// already-resolved session + the pod dataset (N-Quads) in the request body and maps the
+    /// library verdict onto HTTP; it does NOT authenticate (mapping a WebID + a request path is the
+    /// caller's job — `sparq-solid` is a library authoriser with no HTTP surface,
+    /// `research/sparq-solid-scope.md` §4). FAIL-CLOSED: every error path DENIES. `false` (the
+    /// default) leaves all three off: `/authz/*` is `404`.
+    ///
+    /// This field exists only with the `solid-authz` cargo feature (like `Self::tpf` under
+    // [FABLE-5] sq-lrtc3.1: code span, not an intra-doc link — `tpf` is itself feature-gated, so
+    // the link breaks any `solid-authz`-without-`tpf` rustdoc build (the recurring
+    // feature-gated-intra-doc-link trap; surfaced by the new `odrl-authz` feature state).
+    /// `tpf`); a build without that feature compiles no Solid/access-control code and pays zero
+    /// cost. Set by the binary's `--solid-authz` flag / `SPARQ_SOLID_AUTHZ=1` env.
+    #[cfg(feature = "solid-authz")]
+    pub solid_authz: bool,
+    /// [SONNET-4.6] (sq-pfae.17) OPT-IN stateless trust-graph extension to `POST /authz/decide`.
+    ///
+    /// When both this flag AND the `solid-authz-trust` cargo feature are active, the endpoint
+    /// accepts an optional `"trust"` JSON block carrying credential graphs + a trust policy +
+    /// signed certification edges. It runs the cert-graph closure
+    /// (`sparq_trust::derive_effective_rules`) then the UNCHANGED WAC/ACP admission gate, and
+    /// returns a minimal admission justification alongside the decision. FAIL-CLOSED: ANY
+    /// malformed/unverifiable/stale/revoked/over-depth/broadening trust input => 403 DENY.
+    /// Feature OFF => byte-identical to the `solid-authz` path. Double-opt-in: activates ONLY
+    /// when BOTH (a) this feature is compiled AND (b) the request carries a `"trust"` block.
+    ///
+    /// This field exists only with the `solid-authz-trust` cargo feature. Set by
+    /// `SPARQ_SOLID_AUTHZ_TRUST=1`.
+    #[cfg(feature = "solid-authz-trust")]
+    pub solid_authz_trust: bool,
 }
 
 impl Default for ServerConfig {
@@ -678,6 +732,13 @@ impl Default for ServerConfig {
             // update's WHERE budget is the plain query_timeout, exactly as before. An operator
             // who wants to bound writer-queue head-of-line blocking opts a shorter one in.
             update_where_timeout: None,
+            // [OPUS-4.8] sq-p7kk5: adaptive group-commit ON by default — the server's write
+            // path is interactive (a serial client blocked on its own ack), where the fixed
+            // group-commit window is pure latency. A serial client now commits in engine-time
+            // instead of window-time; concurrent load still batches. Pure latency change, no
+            // effect on the FIFO/atomicity/durability contract. Off via --no-adaptive-commit /
+            // SPARQ_ADAPTIVE_COMMIT=0. See ServerConfig::adaptive_commit.
+            adaptive_commit: true,
             max_body_bytes: 1024 * 1024, // 1 MiB
             max_concurrent: 32,
             // [OPUS-4.8] sq-2gqr: a 15s header-read deadline closes the slow-loris hole ON by
@@ -790,6 +851,16 @@ impl Default for ServerConfig {
             // SPARQ_CHANGE_STREAM).
             #[cfg(feature = "change-stream")]
             change_stream_dir: None,
+            // [FABLE-5] sq-snopa.6: safe default — the OPT-IN Solid WAC/ACP authorization surface is
+            // OFF even when the feature is compiled in (the operator opts in deliberately via
+            // --solid-authz / SPARQ_SOLID_AUTHZ=1). Fail-closed: `/authz/*` is 404 until set.
+            #[cfg(feature = "solid-authz")]
+            solid_authz: false,
+            // [SONNET-4.6] sq-pfae.17: safe default — the OPT-IN stateless trust-graph extension
+            // is OFF even when the feature is compiled in. The operator opts in deliberately via
+            // SPARQ_SOLID_AUTHZ_TRUST=1. Fail-closed: trust block is ignored until set.
+            #[cfg(feature = "solid-authz-trust")]
+            solid_authz_trust: false,
         }
     }
 }
@@ -866,6 +937,11 @@ impl ServerConfig {
         // (the update WHERE budget is then the plain query_timeout, exactly as before).
         if let Some(secs) = env_parse::<u64>("SPARQ_UPDATE_WHERE_TIMEOUT") {
             cfg.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        // [OPUS-4.8] sq-p7kk5: adaptive group-commit (ON by default). SPARQ_ADAPTIVE_COMMIT=0
+        // restores the always-windowed writer; anything else (or unset) keeps it on.
+        if let Some(n) = env_parse::<u8>("SPARQ_ADAPTIVE_COMMIT") {
+            cfg.adaptive_commit = n != 0;
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_BODY_BYTES") {
             cfg.max_body_bytes = n;
@@ -1064,6 +1140,20 @@ impl ServerConfig {
         #[cfg(feature = "change-stream")]
         if let Ok(v) = std::env::var("SPARQ_CHANGE_STREAM") {
             cfg.change_stream_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+        }
+        // [FABLE-5] sq-snopa.6: SPARQ_SOLID_AUTHZ truthy ("1"/"true"/"yes"/"on") serves the OPT-IN
+        // Solid WAC/ACP HTTP authorization surface (POST /authz/*). Off by default. Only present
+        // with the `solid-authz` feature.
+        #[cfg(feature = "solid-authz")]
+        if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ") {
+            cfg.solid_authz = env_truthy(&v);
+        }
+        // [SONNET-4.6] sq-pfae.17: SPARQ_SOLID_AUTHZ_TRUST truthy ("1"/"true"/"yes"/"on") enables
+        // the OPT-IN stateless trust-graph extension to POST /authz/decide. Off by default. Only
+        // present with the `solid-authz-trust` feature.
+        #[cfg(feature = "solid-authz-trust")]
+        if let Ok(v) = std::env::var("SPARQ_SOLID_AUTHZ_TRUST") {
+            cfg.solid_authz_trust = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -2062,6 +2152,36 @@ pub struct AppState {
     /// `(from, to)` pair is exactly that commit (gapless, monotonic — the `ChangeLog` contract).
     #[cfg(feature = "change-stream")]
     change_log: Option<Arc<std::sync::Mutex<sparq_serve::ChangeLog>>>,
+    /// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore permit. `true` while a restore is in flight.
+    /// Two concurrent restores were previously silently serialized by the single writer thread
+    /// (each individually crash-safe, last-writer-wins) — harmless but surprising: an operator
+    /// scripting parallel restores got no signal that one restore clobbered the other. This flag
+    /// lets [`try_begin_restore`](Self::try_begin_restore) reject the SECOND concurrent restore
+    /// explicitly (the route maps it to 409 Conflict) instead. Shared across handler clones
+    /// (`AppState` is `Clone`; the `Arc` is the per-server identity). `backup`-feature ONLY —
+    /// compiled out of the default build entirely, like the rest of the restore machinery.
+    #[cfg(feature = "backup")]
+    restore_in_flight: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// [FABLE-5] (sq-fy8ci) RAII permit for the SINGLE-FLIGHT restore guard: while one of these is
+/// alive, [`AppState::try_begin_restore`] returns `None` (the route maps that to 409 Conflict).
+/// Dropping it — normally, or during an unwind if the restore panics — releases the permit, so
+/// the guard can never wedge the server into permanently refusing restores. Obtain one via
+/// [`AppState::try_begin_restore`]; there is no other constructor.
+#[cfg(feature = "backup")]
+#[derive(Debug)]
+pub struct RestoreGuard {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "backup")]
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        // Release: pairs with the Acquire in `try_begin_restore` so the next permit holder
+        // observes everything this restore wrote before releasing.
+        self.flag.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl AppState {
@@ -2163,7 +2283,7 @@ impl AppState {
         let writer = Arc::new(Writer::spawn(
             ring.clone(),
             applier,
-            WriterConfig::default(),
+            writer_config(&config),
         ));
         // [OPUS-4.8] sq-gos8: open the structured access-audit sink if one is configured. A
         // failure to open (e.g. an unwritable audit-file path) is surfaced as a clean startup
@@ -2207,6 +2327,10 @@ impl AppState {
             access_audit_sink,
             #[cfg(feature = "change-stream")]
             change_log,
+            // [FABLE-5] sq-fy8ci: no restore in flight at boot (restore-on-start runs on the
+            // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
+            #[cfg(feature = "backup")]
+            restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -2448,6 +2572,28 @@ impl AppState {
     ///
     /// `persist == true` on an IN-MEMORY server is an `Err` (there is no durable dir to write
     /// through). Blocking (import parses + indexes the whole dataset): call it on the blocking pool.
+    /// [FABLE-5] (sq-fy8ci) Acquires the SINGLE-FLIGHT restore permit: `Some(guard)` if no other
+    /// restore is currently in flight on this server state, `None` if one is (the caller should
+    /// reject with a conflict — `/admin/restore` maps it to 409 — rather than let the writer
+    /// thread silently serialize a last-writer-wins pile-up). Hold the returned [`RestoreGuard`]
+    /// for the WHOLE restore ([`restore_from`](Self::restore_from) /
+    /// [`restore_from_with_deltas`](Self::restore_from_with_deltas)); dropping it (normally or
+    /// during an unwind) releases the permit. The permit is ADVISORY for embedding callers —
+    /// the restore paths stay individually crash-safe and atomic without it (the single writer
+    /// thread serializes them); it exists to make concurrency EXPLICIT instead of silent.
+    #[cfg(feature = "backup")]
+    pub fn try_begin_restore(&self) -> Option<RestoreGuard> {
+        use std::sync::atomic::Ordering;
+        self.restore_in_flight
+            // AcqRel on success: Acquire pairs with the releasing drop of the previous holder;
+            // Release publishes the claim. Acquire on failure is enough for the reject path.
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| RestoreGuard {
+                flag: self.restore_in_flight.clone(),
+            })
+    }
+
     #[cfg(feature = "backup")]
     pub fn restore_from<R: std::io::Read>(&self, input: R, persist: bool) -> Result<u64, String> {
         match (self.config.persist_dir.is_some(), persist) {
@@ -2545,7 +2691,11 @@ impl AppState {
         let ring_config = build_ring_config(&self.config);
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let applier = ServerApplier::new(self.config.clone());
-        let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
+        let writer = Arc::new(Writer::spawn(
+            ring.clone(),
+            applier,
+            writer_config(&self.config),
+        ));
         // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
         // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
         self.core.store(Arc::new(ServingCore { ring, writer }));
@@ -2736,6 +2886,20 @@ pub fn router(state: AppState) -> Router {
     // [`streams_endpoint`].
     #[cfg(feature = "change-stream")]
     let routes = routes.route("/streams", get(streams_endpoint).head(streams_endpoint));
+    // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization surface.
+    // Compiled only with the `solid-authz` feature; even then each handler refuses (404) unless the
+    // config flag is set. POST only — a thin HTTP shell over the `sparq-solid` library authoriser
+    // (`PodStore::decide` / `wac_allow` / `query_json_as`), fail-closed on every error path. The
+    // handlers live in [`crate::solid_authz`] to keep the touch surface on this conflict-hot file
+    // minimal.
+    #[cfg(feature = "solid-authz")]
+    let routes = routes
+        .route("/authz/decide", post(crate::solid_authz::decide_endpoint))
+        .route(
+            "/authz/wac-allow",
+            post(crate::solid_authz::wac_allow_endpoint),
+        )
+        .route("/authz/query", post(crate::solid_authz::query_endpoint));
     // [OPUS-4.8] (sq-pj6u) Categorised unmatched-route 404. Without an explicit fallback,
     // axum answers an unmatched path with a 404 whose body is EMPTY; `json_error_bodies`
     // then wraps that into the uncategorised `{"error":""}` envelope — leak-free but with no
@@ -4719,6 +4883,9 @@ async fn admin_backup(State(state): State<AppState>, headers: HeaderMap) -> Resp
 ///   `recover_compaction`). WITHOUT `?persist=true` a durable server REFUSES the restore (409): an
 ///   in-memory-only swap would be silently lost on the next restart, which is a footgun.
 /// - `?persist=true` on an in-memory server → 409 (no durable dir to write through).
+/// - **Single-flight** ([FABLE-5] sq-fy8ci): a second restore posted while one is still in flight
+///   is rejected 409 (`a restore is already in progress`) instead of being silently serialized
+///   into a last-writer-wins pile-up by the writer thread. Retry after the first completes.
 ///
 /// **Fail-closed.** A corrupt/mismatched/non-artifact body is rejected (400) and the live store is
 /// left UNTOUCHED — the artifact is imported + validated fully before anything is swapped, and the
@@ -4756,8 +4923,24 @@ async fn admin_restore(
              is no durable directory to write the restore through to)",
         );
     }
+    // [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT: claim the restore permit AFTER the deterministic
+    // posture 409s above (so those errors never depend on timing) and BEFORE any work. A second
+    // concurrent restore gets an explicit 409 instead of being silently serialized behind the
+    // first by the writer thread (last-writer-wins). The permit rides into the blocking closure
+    // so it is released exactly when the restore finishes — including on a panic (unwind drops
+    // it), so a failed restore can never wedge the route shut.
+    let Some(restore_permit) = state.try_begin_restore() else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "a restore is already in progress on this server; retry after it completes \
+             (concurrent restores are rejected rather than silently applied last-writer-wins)",
+        );
+    };
     let st = state.clone();
-    let task = tokio::task::spawn_blocking(move || st.restore_from(&body[..], persist));
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = restore_permit;
+        st.restore_from(&body[..], persist)
+    });
     match task.await {
         Ok(Ok(source_generation)) => text_response(
             StatusCode::OK,
@@ -5121,6 +5304,20 @@ fn update_budget(config: &ServerConfig) -> QueryBudget {
     }
 }
 
+/// [OPUS-4.8] (sq-p7kk5) The sequenced writer's config, derived from the server config: the
+/// stock `sparq_serve` group-commit window/batch defaults, but with adaptive group-commit
+/// wired from [`ServerConfig::adaptive_commit`] (ON by default — the write path is interactive,
+/// where the fixed window is pure latency for a serial client blocked on its own ack). Adaptive
+/// mode changes only WHEN the batch closes (drain the queued backlog, commit immediately when it
+/// empties); FIFO application order, per-update atomicity, visibility and durability are all
+/// unchanged.
+fn writer_config(config: &ServerConfig) -> WriterConfig {
+    WriterConfig {
+        adaptive_commit: config.adaptive_commit,
+        ..WriterConfig::default()
+    }
+}
+
 /// [OPUS-4.8] (sq-nulp) The effective WHERE-phase deadline for a SPARQL UPDATE on the writer
 /// thread: the tighter of the read [`query_timeout`](ServerConfig::query_timeout) and the
 /// opt-in [`update_where_timeout`](ServerConfig::update_where_timeout). `None` (no deadline)
@@ -5247,17 +5444,27 @@ fn render_select(
             }
             Err(e) => return engine_error_response(&e, config, true),
         },
-        _ => {
+        // CSV/TSV: row-oriented chunked streaming — mirrors the JSON T16 path; the peak
+        // never holds a second full-result copy. Byte-identical to the buffered form per
+        // the chunked invariant. XML stays buffered (prefix compaction). [SONNET-4.6]
+        Format::Csv | Format::Tsv => {
             let result = match sparq_engine::query_with_budget(graph, select, budget) {
                 Ok(r) => r,
                 Err(e) => return engine_error_response(&e, config, true),
             };
-            match fmt {
-                Format::Xml => results::select_to_xml(&result),
-                Format::Csv => results::select_to_csv(&result),
-                Format::Tsv => results::select_to_tsv(&result),
-                Format::Json => unreachable!(),
-            }
+            let chunks = match fmt {
+                Format::Csv => results::select_to_csv_chunks(&result),
+                Format::Tsv => results::select_to_tsv_chunks(&result),
+                _ => unreachable!(),
+            };
+            return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone())
+        }
+        Format::Xml => {
+            let result = match sparq_engine::query_with_budget(graph, select, budget) {
+                Ok(r) => r,
+                Err(e) => return engine_error_response(&e, config, true),
+            };
+            results::select_to_xml(&result)
         }
     };
     text_response(StatusCode::OK, ct, body, head_only)
@@ -8770,6 +8977,51 @@ mod from_env_tests {
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
         assert!(result.is_none(), "unparseable env var value must yield None from env_parse");
+    }
+
+    // [OPUS-4.8] (sq-p7kk5) Adaptive group-commit: default ON, env toggle, and the
+    // WriterConfig mapping — the write-path latency fix.
+    #[test]
+    fn adaptive_commit_is_on_by_default() {
+        assert!(
+            ServerConfig::default().adaptive_commit,
+            "the interactive write path defaults to adaptive group-commit"
+        );
+    }
+
+    #[test]
+    fn sparq_adaptive_commit_env_zero_disables_it() {
+        std::env::set_var("SPARQ_ADAPTIVE_COMMIT", "0");
+        let off = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_ADAPTIVE_COMMIT");
+        assert!(
+            !off.expect("from_env ok").adaptive_commit,
+            "SPARQ_ADAPTIVE_COMMIT=0 must disable adaptive group-commit"
+        );
+
+        std::env::set_var("SPARQ_ADAPTIVE_COMMIT", "1");
+        let on = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_ADAPTIVE_COMMIT");
+        assert!(
+            on.expect("from_env ok").adaptive_commit,
+            "SPARQ_ADAPTIVE_COMMIT=1 must keep adaptive group-commit on"
+        );
+    }
+
+    #[test]
+    fn writer_config_carries_adaptive_commit_from_server_config() {
+        // The writer the server spawns inherits the server config's adaptive-commit flag,
+        // so the fix actually reaches the sequenced writer (both polarities).
+        let on = ServerConfig {
+            adaptive_commit: true,
+            ..ServerConfig::default()
+        };
+        assert!(super::writer_config(&on).adaptive_commit);
+        let off = ServerConfig {
+            adaptive_commit: false,
+            ..ServerConfig::default()
+        };
+        assert!(!super::writer_config(&off).adaptive_commit);
     }
 
     // [OPUS-4.8] sq-qcnn.37: individual tests for each remaining SPARQ_* env-var body branch

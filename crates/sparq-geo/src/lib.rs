@@ -1,4 +1,24 @@
-#![doc = include_str!("../README.md")]
+// [FABLE-5] sq-wo5jw: the README front page embeds a RUNNABLE quickstart driving
+// `geof_registry` through `sparq_engine::query_with_functions` — an `engine`-feature
+// surface. Attached unconditionally, that doctest failed to COMPILE under
+// `--no-default-features` (its imports don't exist there). The README — and its
+// still-executed doctest — is therefore attached only when `engine` is on (the
+// default, and what docs.rs renders: all-features); the engine-less build gets the
+// short pure-geometry crate doc below instead of a broken example. The quickstart
+// stays a real, executed doctest in the default state (never demoted to `ignore`).
+#![cfg_attr(feature = "engine", doc = include_str!("../README.md"))]
+#![cfg_attr(
+    not(feature = "engine"),
+    doc = "Opt-in GeoSPARQL 1.0/1.1 core for the sparq RDF engine, built WITHOUT the",
+    doc = "default `engine` feature: the pure geometry library — `geo:wktLiteral` /",
+    doc = "`geo:gmlLiteral` parsing, the `geof` module's functions as plain Rust, and",
+    doc = "the R-tree `GeoIndex` — with no SPARQL engine in the dependency graph.",
+    doc = "",
+    doc = "The `geof_registry` SPARQL `FILTER`/`BIND` packaging requires the `engine`",
+    doc = "feature; the crate README quickstart exercises it, so the README front page",
+    doc = "(a runnable doctest) is attached only when `engine` is enabled. docs.rs",
+    doc = "builds all features and always renders the full README."
+)]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod geof;

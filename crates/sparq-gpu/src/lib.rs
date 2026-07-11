@@ -619,13 +619,18 @@ impl Gpu {
         // wgpu 29: `Maintain::Wait` became `PollType::wait_indefinitely()` (block
         // on the most recent submission, no timeout — same semantics as before),
         // and `poll` now returns a `Result` (Err only on device loss / timeout).
+        // wgpu 30: `get_mapped_range()` now returns `Result<BufferView, MapRangeError>`
+        // instead of `BufferView` directly — unwrap because a mapping error here is
+        // a GPU protocol violation (we waited for the map to succeed above).
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll failed");
         rx.recv()
             .expect("map_async callback dropped")
             .expect("readback map failed");
-        let out: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
+        let out: Vec<u32> =
+            bytemuck::cast_slice(&slice.get_mapped_range().expect("get_mapped_range failed"))
+                .to_vec();
         readback.unmap();
         out
     }

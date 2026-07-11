@@ -18,6 +18,7 @@ fn main() {
         Some("query") => cmd_query(&args),
         Some("reason") => cmd_reason(&args),
         Some("bench") => cmd_bench(&args),
+        Some("memstat") => cmd_memstat(&args),
         Some("bench-mmap") => cmd_bench_mmap(&args),
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
@@ -41,8 +42,15 @@ fn main() {
         // terse code, so the subcommand is only present when built with `--features terse`.
         #[cfg(feature = "terse")]
         Some("terse") => cmd_terse(&args),
+        // [FABLE-5] (sq-8ju74) `to-hdt` EXPORTS a loaded RDF document as a standard-layout
+        // HDT v1.0 archive via sparq-hdt's direct in-memory encoder. Gated behind the opt-in
+        // `hdt-write` cargo feature (which implies `hdt`, the loader): the default CLI build
+        // carries no HDT code, so the subcommand is only present when built with
+        // `--features hdt-write`.
+        #[cfg(feature = "hdt-write")]
+        Some("to-hdt") => cmd_to_hdt(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli memstat <data-file> <format> [compressed]  # deterministic memory-composition breakdown (B/triple) + RSS\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)\n\n  env SPARQ_STORE_PROFILE=raw|compressed selects the in-RAM store profile on the shared load path (query/bench/reason/scaling); unset=raw; unknown value is a hard error");
             std::process::exit(2);
         }
     }
@@ -670,7 +678,9 @@ fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sp
             }
         }
     }
-    sparq_core::Graph::from_parts(dict, triples)
+    // [FABLE-5] (sq-7d3dj.32.2.1) The reasoned load path also honours `SPARQ_STORE_PROFILE`, so
+    // `reason` / `query --reason` inherit the store profile uniformly with the non-reasoned path.
+    apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
 }
 
 /// Pull an optional `--reason <profile>` flag (rdfs | owl | n3) out of the argument list.
@@ -712,7 +722,8 @@ fn load_n3(path: &str) -> sparq_core::Graph {
         std::process::exit(1);
     });
     eprintln!("reasoned [N3]: {} ground triples in closure in {:.3}s", triples.len(), t.elapsed().as_secs_f64());
-    sparq_core::Graph::from_parts(dict, triples)
+    // [FABLE-5] (sq-7d3dj.32.2.1) Honour `SPARQ_STORE_PROFILE` on the N3 path too (see `load_reasoned`).
+    apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
 }
 
 /// `reason <data-file> <format> <profile> [out.nt]` — materialize the entailed closure and
@@ -868,9 +879,65 @@ fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read + Send>> {
     })
 }
 
+/// [FABLE-5] (sq-7d3dj.32.2.1) The in-RAM store profile selected by `SPARQ_STORE_PROFILE`.
+/// `Raw` is the default six-permutation layout; `Compressed` re-encodes into the
+/// block-compressed in-RAM mode (`Graph::into_compressed`). Read once per load from the env.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StoreProfile {
+    Raw,
+    Compressed,
+}
+
+/// [FABLE-5] (sq-7d3dj.32.2.1) Resolve the `SPARQ_STORE_PROFILE` env var into a [`StoreProfile`].
+/// Contract: unset or `raw` → [`StoreProfile::Raw`] (byte-identical current behaviour);
+/// `compressed` → [`StoreProfile::Compressed`]; ANY other value → hard error, exit 2 —
+/// fail-closed, no silent typo fall-through (a mistyped profile must never quietly select raw).
+/// The value is matched case-insensitively and after trimming surrounding whitespace.
+fn store_profile_from_env() -> StoreProfile {
+    match std::env::var("SPARQ_STORE_PROFILE") {
+        Err(_) => StoreProfile::Raw,
+        Ok(v) => {
+            let norm = v.trim().to_ascii_lowercase();
+            match norm.as_str() {
+                "" | "raw" => StoreProfile::Raw,
+                "compressed" => StoreProfile::Compressed,
+                _ => {
+                    eprintln!(
+                        "error: SPARQ_STORE_PROFILE={:?} is not a valid store profile (known: raw | compressed)",
+                        v
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+}
+
+/// [FABLE-5] (sq-7d3dj.32.2.1) Apply a resolved store [`StoreProfile`] to a freshly-loaded graph.
+/// `Raw` returns `g` untouched (the default path is byte-identical to before this hook existed);
+/// `Compressed` re-encodes it via `Graph::into_compressed()`. Honest scope: this reduces
+/// steady-state resident footprint only — the load-time peak RSS still includes the raw perm
+/// build `into_compressed` encodes from (see `research/compressed-memory-profile.md` §2).
+fn apply_store_profile(g: sparq_core::Graph, profile: StoreProfile) -> sparq_core::Graph {
+    match profile {
+        StoreProfile::Raw => g,
+        StoreProfile::Compressed => g.into_compressed(),
+    }
+}
+
 /// Load without the timing/size summary line — used by the scaling harness, which loads many
-/// times and prints its own table.
+/// times and prints its own table. Honours `SPARQ_STORE_PROFILE` (see [`store_profile_from_env`])
+/// so `query` / `bench` / `scaling` inherit the profile uniformly. The raw-format routing lives
+/// in `load_quiet_raw`; this wrapper adds only the post-load profile encoding.
 fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
+    apply_store_profile(load_quiet_raw(path, format), store_profile_from_env())
+}
+
+/// [FABLE-5] (sq-7d3dj.32.2.1) The unconditional raw load — format routing + parse + index build,
+/// with NO store-profile applied. Byte-identical to the pre-profile `load_quiet` body, so callers
+/// that manage their own profile decision (e.g. `memstat`, which has an explicit positional) use
+/// this to avoid a double application.
+fn load_quiet_raw(path: &str, format: &str) -> sparq_core::Graph {
     let die = |e: String| -> ! {
         eprintln!("error loading {path}: {e}");
         std::process::exit(1);
@@ -940,6 +1007,92 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
         dict as f64 / g.dict.len().max(1) as f64,
     );
     g
+}
+
+/// [FABLE-5] (sq-7d3dj.32) `memstat <data-file> <format> [compressed]` — load a document and print a
+/// DETERMINISTIC memory-composition breakdown as `name<TAB>value` lines on stdout, plus the
+/// process RSS counters. This is the at-scale extension of the CI `store_bytes_per_triple`
+/// metric (scripts/ci-bench.sh greps the same `heap_bytes()` self-accounting off the load
+/// summary line): here the total is DECOMPOSED into its components — dictionary vs the six
+/// permutation indexes vs the numeric/temporal caches — so a bytes-per-triple figure comes
+/// with its explanation, and the kernel's `VmRSS`/`VmHWM` (post-load resident + peak during
+/// load, Linux `/proc/self/status`; 0 elsewhere) sit next to the self-accounted heap so
+/// allocator/parse-transient overhead is visible rather than assumed. Consumed by
+/// `scripts/bench/bytes-per-triple.sh` (bench id `bytes-per-triple`).
+///
+/// The trailing literal `compressed` (or `SPARQ_STORE_PROFILE=compressed`) re-encodes into the
+/// memory-bound in-RAM mode (block-compressed permutations + blob dictionary,
+/// `Graph::into_compressed`) before reporting — the same graph, the other end of the in-memory
+/// footprint/latency trade, so the two framings come from one instrument. The reported `mode`
+/// line says which. Because `memstat` reads the raw load (`load_quiet_raw`) and applies the
+/// compression decision itself, the positional flag and the env are OR'd and applied exactly
+/// once (no double `into_compressed`).
+fn cmd_memstat(args: &[String]) {
+    let (path, format) = match (args.get(2), args.get(3)) {
+        (Some(p), Some(f)) => (p.as_str(), f.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli memstat <data-file> <format> [compressed]");
+            std::process::exit(2);
+        }
+    };
+    // The explicit positional `compressed` OR `SPARQ_STORE_PROFILE=compressed` (an unknown
+    // profile value still fails closed via `store_profile_from_env`). Applied exactly once
+    // over the raw load — `load_quiet_raw` never applies a profile itself.
+    let compressed = args.get(4).map(String::as_str) == Some("compressed")
+        || store_profile_from_env() == StoreProfile::Compressed;
+    let t = Instant::now();
+    let mut g = load_quiet_raw(path, format);
+    if compressed {
+        g = g.into_compressed();
+    }
+    let load_s = t.elapsed().as_secs_f64();
+
+    let triples = g.len().max(1);
+    let terms = g.dict.len().max(1);
+    let heap_total = g.heap_bytes();
+    let heap_dict = g.dict.heap_bytes();
+    let heap_store = g.store.heap_bytes();
+    // The remainder is the numerics + temporals literal-value caches (their accessors are
+    // crate-private; the subtraction is exact because Graph::heap_bytes is the plain sum).
+    let heap_caches = heap_total.saturating_sub(heap_dict + heap_store);
+    let (vm_rss, vm_hwm) = proc_vm_bytes();
+
+    println!("memstat_version\t1");
+    println!("mode\t{}", if compressed { "compressed" } else { "raw" });
+    println!("triples\t{}", g.len());
+    println!("dict_terms\t{}", g.dict.len());
+    println!("load_s\t{:.3}", load_s);
+    println!("heap_total_bytes\t{}", heap_total);
+    println!("heap_dict_bytes\t{}", heap_dict);
+    println!("heap_store_bytes\t{}", heap_store);
+    println!("heap_caches_bytes\t{}", heap_caches);
+    println!("heap_b_per_triple\t{:.2}", heap_total as f64 / triples as f64);
+    println!("store_b_per_triple\t{:.2}", heap_store as f64 / triples as f64);
+    println!("dict_b_per_triple\t{:.2}", heap_dict as f64 / triples as f64);
+    println!("caches_b_per_triple\t{:.2}", heap_caches as f64 / triples as f64);
+    println!("dict_b_per_term\t{:.2}", heap_dict as f64 / terms as f64);
+    println!("vm_rss_bytes\t{}", vm_rss);
+    println!("vm_hwm_bytes\t{}", vm_hwm);
+    println!("rss_b_per_triple\t{:.2}", vm_rss as f64 / triples as f64);
+    println!("hwm_b_per_triple\t{:.2}", vm_hwm as f64 / triples as f64);
+}
+
+/// [FABLE-5] (sq-7d3dj.32) Read the process `VmRSS` / `VmHWM` (resident set + high-water mark) in
+/// bytes from Linux `/proc/self/status`. Returns `(0, 0)` where the file is unavailable
+/// (non-Linux), so `memstat`'s deterministic heap lines still work there.
+fn proc_vm_bytes() -> (u64, u64) {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return (0, 0);
+    };
+    let field = |key: &str| -> u64 {
+        status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(0, |kib| kib * 1024)
+    };
+    (field("VmRSS:"), field("VmHWM:"))
 }
 
 /// [OPUS-4.8] (sq-678h, sq-e3pj) `dump <file[.gz|.bz2|.zst]> <in-format> <out-format>` — load an
@@ -1050,6 +1203,53 @@ fn cmd_dump(args: &[String]) {
         }
     };
     print!("{serialized}");
+}
+
+/// [FABLE-5] (sq-8ju74) `to-hdt <data-file[.gz|.bz2|.zst]> <format> <out.hdt[.gz|.zst|.bz2]>` —
+/// load an RDF document through the shared load path (any ingestible format, `.hdt` itself
+/// included) and EXPORT it as a standard-layout HDT v1.0 archive (FourSectionDictionary +
+/// BitmapTriples, SPO) via `sparq_hdt::save` — the direct in-memory encoder, no temporary
+/// N-Triples round-trip. The output container (`.hdt.gz` / `.hdt.zst` / `.hdt.bz2`, or a bare
+/// `.hdt`) is chosen by the OUTPUT path's extension (the write side cannot sniff content that
+/// does not exist yet). HDT carries a SINGLE default graph: when the loaded input has named
+/// graphs (TriG / N-Quads / JSON-LD `@graph`) they are DROPPED from the archive, and a loud
+/// warning with the dropped graph/triple counts goes to stderr — never silently. An RDF 1.2
+/// quoted-triple term cannot be represented in standard HDT; `save` fails with a term error
+/// (exit 1) rather than emitting a lossy archive. Behind the opt-in `hdt-write` cargo feature.
+#[cfg(feature = "hdt-write")]
+fn cmd_to_hdt(args: &[String]) {
+    let (path, format, out) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(f), Some(o)) => (p.as_str(), f.as_str(), o.as_str()),
+        _ => {
+            eprintln!(
+                "usage: sparq-cli to-hdt <data-file[.gz|.bz2|.zst]> <format> <out.hdt[.gz|.zst|.bz2]>\n  \
+                 exports the loaded document as a standard HDT v1.0 archive (default graph only; \
+                 output compression chosen by the output extension)"
+            );
+            std::process::exit(2);
+        }
+    };
+    let g = load_quiet(path, format);
+    // Honesty over silence: HDT has no place for named graphs, so a dataset input (TriG /
+    // N-Quads / JSON-LD `@graph`) loses them in the archive. Count what is dropped and say so.
+    let (mut named_graphs, mut named_triples) = (0usize, 0usize);
+    g.for_named_graphs_with_prefix("", |_, sub| {
+        named_graphs += 1;
+        named_triples += sub.len();
+    });
+    if named_graphs > 0 {
+        eprintln!(
+            "warning: HDT carries a single default graph — dropping {named_graphs} named graph(s) \
+             ({named_triples} triple(s)); only the {} default-graph triple(s) are written",
+            g.len()
+        );
+    }
+    let t = Instant::now();
+    sparq_hdt::save(&g, out).unwrap_or_else(|e| {
+        eprintln!("error writing {out}: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("wrote {} triples to {out} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
 }
 
 /// [OPUS-4.8] (sq-vczh2, epic sq-2m6zm) `terse <terse-query>` — transpile a *terse* query into

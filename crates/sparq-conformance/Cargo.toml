@@ -55,6 +55,12 @@ path = "src/bin/served-conformance-report.rs"
 # [SONNET-4.6] sq-kk1mq — also enables dep:sparq-jsonld so the expand lane can call
 # the native expand() algorithm directly instead of going through the RDF writer.
 jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld", "dep:sparq-jsonld"]
+# [OPUS-4.8] sq-jocpn — run the whole conformance lane (including the W3C rdf-turtle suite in
+# `turtle_suite.rs`, which parses THROUGH `sparq_core::Graph::parse_to_triples_with_base`) with the
+# native byte-level Turtle parser instead of oxttl. OFF by default; enabling it forwards to
+# `sparq-core/native-ttl` so the ratchet proves the native parser's accept/reject + resolved-term
+# set is IDENTICAL to oxttl's on the entire suite (the load-bearing conformance-set-identical claim).
+native-ttl-suite = ["sparq-core/native-ttl"]
 # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the D-entailment (datatype / value-space)
 # conformance lane (the crate-local `tests/d_entail_suite.rs` runner + the `Regime::D`
 # arm in `inference::entail`). OPT-IN and OFF by default so the default
@@ -78,6 +84,25 @@ d-entail = ["sparq-reason/d-entail"]
 # sparq EXTENSION-shaped expressivity ratchet over the RIF-CORE (monotone Horn)
 # subset — NOT a full RIF-BLD/PRD or SPARQL-RIF-entailment-regime conformance claim.
 rif-core = ["sparq-reason/rif-core"]
+
+# [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG test-suite CONFORMANCE arm,
+# Core subset (the crate-local `tests/rif_wg_core_suite.rs` runner). DISTINCT from the
+# self-asserting `rif-core` EXPRESSIVITY ratchet above: this drives the REAL W3C RIF WG
+# test cases (Core dialect) end-to-end through the real path — RIF/XML `import` →
+# `validate` → `closure` → conclusion oracle — and is tallied as a STANDARDS-suite lane
+# with an HONEST denominator (the printed per-category skip taxonomy IS the denominator's
+# honesty). OPT-IN and OFF by default so the bare `cargo test -p sparq-conformance` and
+# the default `--workspace` shards neither link the RIF/XML importer nor go red on a
+# fresh checkout — the lean-core posture. Forwards to sparq-reason's opt-in `rif-xml`
+# feature (which itself pulls `rif-core` + `quick-xml`). When OFF the lane compiles to a
+# single self-SKIP `#[test]`; when ON it reads the fetched W3C fixtures (fetched by
+# scripts/fetch-inference-suites.sh into the gitignored tests/w3c/rif-core/) and SKIPS
+# when they are absent (offline-green). Pure-Rust, no new third-party deps (the DTD
+# internal-subset entity pre-resolution is a std-only string pass in the runner). Also
+# pulls `sparq-substrate/numeric` for the VALUE-AWARE numeric conclusion comparison
+# (an entailed "2.0"^^xsd:decimal must satisfy a "2"^^xsd:decimal conclusion — no
+# lexical-form false negative), gated so the default build never links it.
+rif-wg-core = ["sparq-reason/rif-xml", "dep:sparq-substrate", "sparq-substrate/numeric"]
 
 # [OPUS-4.8] sq-kuvu3 (epic sq-pbz04) — the EXPERIMENTAL OWL 2 QL (DL-Lite_R)
 # query-rewriting arm of the entailment-regime suite (the `inference::sparql_entail`
@@ -222,6 +247,13 @@ sparq-core = { path = "../sparq-core" }
 # engine LIBRARY default stays OFF, so no lean-consumer surface changes.
 sparq-engine = { path = "../sparq-engine", features = ["algebra-rewrite"] }
 sparq-reason = { path = "../sparq-reason" }
+# [FABLE-5] sq-pbz04.5.5 — the shared numeric value-tower, used ONLY by the `rif-wg-core`
+# arm's conclusion oracle to compare numeric literals VALUE-AWARE (via `numeric::as_numeric`)
+# so an entailed `"2.0"^^xsd:decimal` is not a false negative against a `"2"^^xsd:decimal`
+# conclusion. OFF by default (optional, behind `rif-wg-core`) so the default harness build
+# links zero substrate code — the lean opt-in posture. `default-features = false` +
+# the `numeric` slice only (no rows/join/compare kernels).
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, optional = true }
 # [OPUS-4.8] sq-kuvu3 — the EXPERIMENTAL OWL 2 QL query-rewriting reasoner, used ONLY
 # by the `ql-experimental` arm to rewrite each QL-tagged entailment test's conjunctive
 # query into a certain-answer UCQ. OFF by default (optional, behind `ql-experimental`)

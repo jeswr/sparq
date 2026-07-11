@@ -8,9 +8,12 @@ SPARQL engine), cross-checks that both return the same number of solutions, and
 reports load/query timings and peak memory.
 
 Why it exists: it serves a correctness role as well as a speed one — the
-solution-count cross-check against an independent implementation is a cheap,
-continuous oracle that catches engine regressions, while the timings feed the
-benchmarks dashboard.
+cross-check against an independent implementation is a cheap, continuous
+oracle that catches engine regressions, while the timings feed the benchmarks
+dashboard. Two differential fuzzers live here: `fuzz` (queries; nightly
+`differential.yml`) and `update-fuzz` (ground-term SPARQL UPDATE sequences
+through both sparq update paths vs Oxigraph, canonical per-step store + probe
+compare; nightly `differential-update.yml`).
 
 > **Internal tooling — not published** to crates.io (`publish = false`). Run it
 > as a workspace binary; it is not a library. Measured numbers belong in the

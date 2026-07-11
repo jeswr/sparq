@@ -20,7 +20,10 @@ pub mod scs;
 mod sparql;
 pub mod view;
 
-pub use model::{Component, PreBindingFailure, Shape, ShapesModel, Target};
+// [FABLE-5] (sq-11a) `IllFormedConstruct` records a shapes-graph construct that
+// violates the SHACL syntax rules; `validate_strict` reports the shapes graph as
+// a failure (the test-suite `sht:Failure` outcome) when any were found.
+pub use model::{Component, IllFormedConstruct, PreBindingFailure, Shape, ShapesModel, Target};
 pub use path::Path;
 // [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
 // SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
@@ -46,7 +49,9 @@ use sparq_core::Graph;
 
 /// Validates `data` against the SHACL shapes in `shapes`, returning the
 /// validation report. Constructs the shapes graph never declares (or declares
-/// ill-formed — e.g. an unparsable path) are skipped rather than failing.
+/// ill-formed — e.g. an unparsable path) are skipped rather than failing; use
+/// [`validate_strict`] to report ill-formed constructs as a failure instead
+/// (the W3C test-suite `sht:Failure` outcome). [FABLE-5] (sq-11a)
 pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
     let model = ShapesModel::parse(shapes);
     validate_with_model(data, &model)
@@ -68,17 +73,22 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
 }
 
 /// [OPUS-4.8] (sq-0mjfd) A SHACL processing **failure** (W3C SHACL §3.4): the
-/// shapes graph declares a constraint a conformant processor cannot soundly
-/// evaluate, so the spec says it MUST signal a *failure* rather than produce a
-/// validation report. The only producer today is a SHACL-SPARQL pre-binding
-/// violation (a `sh:sparql` constraint or constraint-component validator using
-/// `MINUS` / `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound
-/// variable / a `BIND` that re-binds one). Carries the offending nodes + the
-/// violated rule for diagnostics.
+/// shapes graph declares something a conformant processor cannot soundly
+/// evaluate, so the spec says it signals a *failure* rather than produce a
+/// validation report. Two producers: a SHACL-SPARQL pre-binding violation (a
+/// `sh:sparql` constraint or constraint-component validator using `MINUS` /
+/// `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound variable / a
+/// `BIND` that re-binds one), and [FABLE-5] (sq-11a) an **ill-formed
+/// shapes-graph construct** (a violated SHACL syntax rule — an unparsable
+/// `sh:path`, a non-integer `sh:minCount`, a malformed SHACL list, …). Carries
+/// the offending nodes + the violated rules for diagnostics.
 #[derive(Debug, Clone)]
 pub struct ShaclFailure {
-    /// The pre-binding failures that triggered the overall failure (at least one).
+    /// The pre-binding failures found (may be empty when `ill_formed` is not).
     pub pre_binding: Vec<model::PreBindingFailure>,
+    /// [FABLE-5] (sq-11a) The ill-formed shapes-graph constructs found (may be
+    /// empty when `pre_binding` is not). At least one of the two vecs is non-empty.
+    pub ill_formed: Vec<model::IllFormedConstruct>,
 }
 
 impl std::fmt::Display for ShaclFailure {
@@ -86,11 +96,14 @@ impl std::fmt::Display for ShaclFailure {
         // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
         write!(
             f,
-            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s)",
-            self.pre_binding.len()
+            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s), {} ill-formed shapes-graph construct(s)",
+            self.pre_binding.len(),
+            self.ill_formed.len()
         )?;
         if let Some(first) = self.pre_binding.first() {
             write!(f, " — e.g. {}: {}", first.node, first.message)?;
+        } else if let Some(first) = self.ill_formed.first() {
+            write!(f, " — e.g. {} at {}: {}", first.predicate, first.node, first.message)?;
         }
         Ok(())
     }
@@ -99,10 +112,11 @@ impl std::fmt::Display for ShaclFailure {
 impl std::error::Error for ShaclFailure {}
 
 /// [OPUS-4.8] (sq-0mjfd) STRICT validation (W3C SHACL §3.4 failure outcome): like
-/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares a
-/// constraint a conformant processor MUST reject — currently a SHACL-SPARQL
-/// pre-binding violation. The lenient [`validate`] instead skips such a
-/// constraint (its lenient ill-formed-shape policy), so use this when the
+/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares
+/// something a conformant processor rejects — a SHACL-SPARQL pre-binding
+/// violation, or [FABLE-5] (sq-11a) an ill-formed shapes-graph construct
+/// ([`ShapesModel::ill_formed`]). The lenient [`validate`] instead skips such a
+/// construct (its lenient ill-formed-shape policy), so use this when the
 /// distinction matters (e.g. the W3C `mf:result sht:Failure` entries).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure> {
     let model = ShapesModel::parse(shapes);
@@ -111,15 +125,19 @@ pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport,
 
 /// [OPUS-4.8] (sq-0mjfd) [`validate_strict`] against an already-parsed model: an
 /// `Err` if the model recorded any pre-binding failure
-/// ([`ShapesModel::pre_binding_failures`]), else the lenient validation report.
+/// ([`ShapesModel::pre_binding_failures`]) or [FABLE-5] (sq-11a) any ill-formed
+/// shapes-graph construct ([`ShapesModel::ill_formed`]), else the lenient
+/// validation report.
 pub fn validate_strict_with_model(
     data: &Graph,
     model: &ShapesModel,
 ) -> Result<ValidationReport, ShaclFailure> {
-    let failures = model.pre_binding_failures();
-    if !failures.is_empty() {
+    let pre_binding = model.pre_binding_failures();
+    let ill_formed = model.ill_formed();
+    if !pre_binding.is_empty() || !ill_formed.is_empty() {
         return Err(ShaclFailure {
-            pre_binding: failures.to_vec(),
+            pre_binding: pre_binding.to_vec(),
+            ill_formed: ill_formed.to_vec(),
         });
     }
     Ok(validate_with_model(data, model))
@@ -1281,5 +1299,151 @@ mod expression_tests {
             "expected a NodeByExpression violation for ex:obs: {}",
             r.to_text()
         );
+    }
+}
+
+// [FABLE-5] (sq-7d3dj.33.4) Report-equivalence tests for the id-level
+// core-constraint fast path: the SAME (data, shapes) pair validated with the
+// fast path ON (the default) and OFF (`eval::with_id_fastpath_disabled`) must
+// produce BYTE-IDENTICAL reports — result order included (stricter than the
+// order-independent `result_keys`) — and the fast path must actually FIRE
+// (non-vacuity via the id-walk counter, mirroring the sq-7d3dj.33.1 idiom).
+#[cfg(test)]
+mod idfast_tests {
+    use super::*;
+
+    fn g(ttl: &str) -> Graph {
+        let prelude = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+            @prefix ex: <http://example.org/> .\n\
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n";
+        Graph::load_str(&format!("{prelude}{ttl}"), "turtle").unwrap()
+    }
+
+    /// Validates twice — id fast path ON then OFF — asserting (a) the fast path
+    /// fired at least `min_walks` id-level value walks (anti-vacuity), (b) the
+    /// forced-off run fired NONE (the toggle works), and (c) the two reports are
+    /// byte-identical including order (`Debug` covers every field of every
+    /// result, recursively through `sh:detail`).
+    fn assert_identical_reports(data: &Graph, shapes: &Graph, min_walks: u64) {
+        let before = eval::idfast_walks();
+        let fast = validate(data, shapes);
+        let walks = eval::idfast_walks() - before;
+        assert!(
+            walks >= min_walks,
+            "id fast path fired {walks} id walks, expected >= {min_walks} (vacuous differential)"
+        );
+        let before = eval::idfast_walks();
+        let slow = eval::with_id_fastpath_disabled(|| validate(data, shapes));
+        assert_eq!(
+            eval::idfast_walks(),
+            before,
+            "with_id_fastpath_disabled failed: the forced run still took id walks"
+        );
+        assert_eq!(fast.conforms, slow.conforms, "conforms diverged");
+        assert_eq!(
+            format!("{:?}", fast.results),
+            format!("{:?}", slow.results),
+            "id-fast-path report differs from the Term-level report"
+        );
+    }
+
+    /// Datatype (well-/ill-formed lexicals, language-tagged, IRI, blank-node and
+    /// INLINE-integer values), pattern (+flags, IRI/blank subjects), lengths
+    /// (multi-byte chars), counts and nodeKind — the id arms of the benchmarked
+    /// `datatype_range` workload shape.
+    #[test]
+    fn idfast_value_constraints_report_equivalent() {
+        let data = g(r#"
+            ex:a a ex:T ; ex:age 42 ; ex:name "Alice" ; ex:mail "a@ex.org" .
+            ex:b a ex:T ; ex:age "4.2"^^xsd:integer ; ex:name "Bo"@en ; ex:mail "nope" .
+            ex:c a ex:T ; ex:age "007"^^xsd:integer ; ex:name ex:iriName ; ex:mail _:b1 .
+            ex:d a ex:T ; ex:age "-3"^^xsd:integer , 7 ; ex:name "Δδ" ; ex:mail "X@Y.Z" .
+            ex:e a ex:T ; ex:age <<( ex:s ex:p ex:o )>> ; ex:name _:b2 .
+        "#);
+        let shapes = g(r#"
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+              sh:property [ sh:path ex:age ; sh:datatype xsd:integer ; sh:maxCount 1 ;
+                            sh:pattern "^4" ; sh:minLength 2 ] ;
+              sh:property [ sh:path ex:name ; sh:datatype xsd:string ; sh:minCount 1 ;
+                            sh:minLength 3 ; sh:maxLength 5 ; sh:nodeKind sh:Literal ;
+                            sh:pattern "^[A-Za-zΔδ]+$" ] ;
+              sh:property [ sh:path ex:mail ; sh:pattern "^[^@]+@.+$" ; sh:flags "i" ;
+                            sh:nodeKind ( sh:Literal sh:BlankNode ) ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 4);
+    }
+
+    /// Every path form (predicate / inverse / sequence / alternative /
+    /// zeroOrMore / oneOrMore / zeroOrOne / absent predicate) plus `sh:node`
+    /// through the id-keyed conformance memo — the benchmarked `node_paths`
+    /// workload shape, with a knows-cycle exercising the id closure.
+    #[test]
+    fn idfast_paths_and_node_report_equivalent() {
+        let data = g(r#"
+            ex:s1 a ex:Student ; ex:advisor ex:profHead ; ex:memberOf ex:dept ;
+                  ex:email "s1@u.edu" ; ex:knows ex:s2 ; ex:nick "n1" .
+            ex:s2 a ex:Student ; ex:advisor ex:profPlain ; ex:knows ex:s1 .
+            ex:s3 a ex:Student ; ex:memberOf ex:orphanDept ; ex:phone "555" .
+            ex:profHead ex:headOf ex:dept .
+            ex:dept ex:subOrgOf ex:univ .
+            ex:t1 ex:teaches ex:s1 . ex:t2 ex:teaches ex:s1 .
+        "#);
+        let shapes = g(r#"
+            ex:P a sh:NodeShape ; sh:targetClass ex:Student ;
+              sh:property [ sh:path ex:advisor ; sh:node ex:HeadShape ] ;
+              sh:property [ sh:path ( ex:memberOf ex:subOrgOf ) ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:inversePath ex:teaches ] ; sh:maxCount 1 ] ;
+              sh:property [ sh:path [ sh:alternativePath ( ex:email ex:phone ) ] ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:zeroOrMorePath ex:knows ] ; sh:maxCount 1 ] ;
+              sh:property [ sh:path [ sh:oneOrMorePath ex:knows ] ; sh:minCount 1 ] ;
+              sh:property [ sh:path [ sh:zeroOrOnePath ex:nick ] ; sh:minCount 2 ] ;
+              sh:property [ sh:path ex:absentPredicate ; sh:minCount 1 ] .
+            ex:HeadShape a sh:NodeShape ; sh:property [ sh:path ex:headOf ; sh:minCount 1 ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 8);
+    }
+
+    /// A cyclic `sh:node` reference: the recursion guard treats re-entry as
+    /// conforming and the context-free memo rule decides what may be cached —
+    /// `conforms_id`'s id-keyed memo layer must mirror the Term-keyed verdicts.
+    #[test]
+    fn idfast_cyclic_node_report_equivalent() {
+        let data = g(r#"
+            ex:n1 a ex:N ; ex:next ex:n2 ; ex:label "one" .
+            ex:n2 a ex:N ; ex:next ex:n1 .
+            ex:n3 a ex:N ; ex:next ex:n3 ; ex:label "three" .
+        "#);
+        let shapes = g(r#"
+            ex:A a sh:NodeShape ; sh:targetClass ex:N ;
+              sh:property [ sh:path ex:next ; sh:node ex:A ] ;
+              sh:property [ sh:path ex:label ; sh:minCount 1 ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 3);
+    }
+
+    /// A `sh:targetNode` focus ABSENT from the data graph: no id resolves, so the
+    /// whole validation of that focus takes the Term-level fallback — including
+    /// the zeroOrOne path whose value set contains the (dictionary-less) focus
+    /// term itself. `min_walks = 0`: no id walk is expected here.
+    #[test]
+    fn idfast_absent_focus_falls_back_to_term_route() {
+        let data = g("ex:present ex:p 1 .");
+        let shapes = g(r#"
+            ex:G a sh:NodeShape ; sh:targetNode ex:ghost ;
+              sh:property [ sh:path [ sh:zeroOrOnePath ex:p ] ; sh:datatype xsd:integer ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(
+            !r.conforms,
+            "the ghost focus itself flows through the zeroOrOne path and violates xsd:integer"
+        );
+        assert_identical_reports(&data, &shapes, 0);
     }
 }

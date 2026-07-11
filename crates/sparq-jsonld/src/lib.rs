@@ -28,10 +28,19 @@
 //!   `@included`, `@json`, keyword aliases), threading `frameExpansion` for the framing
 //!   pipeline.
 //!
-//! The remaining algorithm modules ([`node_map`], [`flatten`], [`compact`], [`frame`],
-//! [`from_rdf`], [`to_rdf`], [`api`]) are **stubs**: they carry the spec references and the
-//! public shape only, filled by the dependency-ordered follow-on beads. Nothing panics: the
-//! crate is `todo!()`-free.
+//! - [`node_map`] — **Node Map Generation** + Generate Blank Node Identifier (bead
+//!   `sq-oy1f.26`, JSON-LD 1.1 API §7.2/§7.4): [`node_map::generate_node_map`] indexes an
+//!   expanded document's node objects by graph and `@id`, minting deterministic blank-node
+//!   labels; the shared intermediate the flattening pipeline projects from.
+//! - [`flatten`](mod@flatten) — the document-level **Flattening Algorithm** (bead
+//!   `sq-oy1f.26`, §7.1): [`flatten::flatten`] expands, node-maps, folds named graphs under
+//!   `@graph`, sorts by `@id`, and drops empty nodes, returning the flattened expanded form.
+//!   (Post-flatten compaction against a caller context composes the document-level
+//!   Compaction Algorithm — its own bead `sq-oy1f.27`.)
+//!
+//! The remaining algorithm modules ([`compact`], [`frame`], [`from_rdf`], [`to_rdf`],
+//! [`api`]) are **stubs**: they carry the spec references and the public shape only, filled
+//! by the dependency-ordered follow-on beads. Nothing panics: the crate is `todo!()`-free.
 
 // Real, shipped surfaces.
 pub mod context;
@@ -54,6 +63,8 @@ pub use context::inverse::{compact_iri, InverseContext};
 pub use context::{ActiveContext, Direction, Override, TermDefinition};
 pub use error::{JsonLdError, JsonLdErrorCode};
 pub use expand::expand;
+pub use flatten::{flatten, flatten_expanded};
 pub use json::{Json, JsonParseError};
+pub use node_map::{generate_node_map, BlankNodeIssuer, GraphMap, NodeMap};
 pub use loader::{DocumentLoader, FsLoader, NoopLoader, RemoteDocument};
 pub use options::{EmbedFlag, JsonLdOptions, ProcessingMode, RdfDirection};

@@ -159,17 +159,60 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   1. **Equal in a rule head is REJECTED** — `validate()` returns `RifError::EqualInConclusion`. This is the RIF-Core syntactic restriction (unlike RIF-BLD, Core does not permit equality in conclusions).
   2. **`t = t` (identical after substitution) is eliminated** — `Equal { left: Term::Iri("x"), right: Term::Iri("x") }` (or `?n=?n`) is trivially true and dropped. It contributes NO bindings for range-restriction — if a head variable is SOLELY bound by a `?x=?x` atom, `validate()` rejects the rule with `UnboundHeadVar` (unifying a variable with itself binds nothing).
   3. **`?x = t` (one side a variable) is SUBSTITUTED** — `t` replaces `?x` throughout head+body at validate/lower time, so `?x` becomes **bound-by-substitution** (`?x # C :- ?x = <a>` collapses to the fact `<a> # C`). **`?x = ?y` (two distinct variables) is UNIFIED** — one name is renamed to the other everywhere, so the join requires the SAME node: same-node reflexivity fires *without* any `owl:sameAs` assertion (fixes V2), and an asserted `owl:sameAs` between DISTINCT nodes never over-derives the equality (fixes V1). Substitution runs to a fixpoint, so chained `?x=?y, ?y=t` collapse both to `t`.
-  4. **Distinct GROUND constants are REJECTED fail-closed** — `validate()` returns `RifError::DistinctGroundEqual { left, right }` (including a distinct ground *created* by substitution, e.g. `?x=<a>, ?y=<b>, ?x=?y`). Value-space equality (e.g. `"1"^^xsd:integer = "1.0"^^xsd:decimal`) depends on the sq-v5evr value-space comparator (issue #1646, not yet merged); the front-end refuses rather than answering incorrectly. No body `Equal` atom ever reaches N3 lowering — a stray one fails closed, never emits `owl:sameAs`.
+  4. **Distinct GROUND constants are REJECTED fail-closed** — `validate()` returns `RifError::DistinctGroundEqual { left, right }` (including a distinct ground *created* by substitution, e.g. `?x=<a>, ?y=<b>, ?x=?y`). Value-space equality (e.g. `"1"^^xsd:integer = "1.0"^^xsd:decimal`) needs the substrate value-space comparator (`Num::cmp_relational`, sq-v5evr / #1646 — now **merged**), which the RIF Equal-atom path has **not yet adopted**; until that wiring lands the front-end refuses rather than answering incorrectly. No body `Equal` atom ever reaches N3 lowering — a stray one fails closed, never emits `owl:sameAs`.
 - **Builtins (`rif::Builtin`).** Numeric predicates (`NumericEqual`/`LessThan`/`GreaterThan`/`NotLessThan`/`NotGreaterThan`/`NumericNotEqual`) + functions (`NumericAdd`/`Subtract`/`Multiply`/`Divide`), string predicates (`StringContains`/`StartsWith`/`EndsWith`) + functions (`StringConcat`/`StringLength`/`StringUpperCase`/`StringLowerCase`/`StringEncodeForUri`), and list `ListContains`/`ListLength`/`ListConcatenate` (variadic — `is_variadic()` returns `true`; `arity()` is the minimum). `is_filter()` distinguishes a predicate (all args inputs) from a function (last arg = computed output). Each lowers to the equivalent `math:`/`string:`/`list:` N3 builtin. A **deferral ledger** (`rif::UNIMPLEMENTED`) records builtins that are NOT mapped because no sound N3 target exists today (e.g. `func:numeric-integer-divide` truncation semantics, `pred:matches` XSD-regex vs Rust-regex dialect gap, date/time builtins lacking a temporal tower); those entries are tracked, never silently dropped.
 - **Builtin SAFETY / range-restriction (enforced).** `Document::validate()` (also called by `to_n3_source`/`closure`) **rejects** an unsafe rule with a `RifError` rather than letting the chainer loop or over-derive: a head variable not bound by a positive body atom (`UnboundHeadVar`), a builtin *input* not range-restricted (`UnboundBuiltinInput`), a builtin in a head (`BuiltinInHead`), wrong arity (`BadBuiltinArity`), Equal in a head (`EqualInConclusion`), or distinct ground constants in a body Equal (`DistinctGroundEqual`).
 - **MONOTONE — NAF is EXCLUDED by design.** RIF-Core is monotone Horn; negation-as-failure / RIF-PRD actions / aggregation are **not in the dialect** and are not representable in the `Atom` model. Adding facts only ever *adds* conclusions. Larger-RIF surface (RIF-BLD function symbols, the SPARQL-RIF Core Entailment Regime) is documented out-of-scope in `rif::UNIMPLEMENTED` — tracked, never faked. The expressivity ratchet is `sparq-conformance`'s `rif_core_suite` (opt-in `rif-core` feature; `RIF_CORE_FLOOR`, a sparq-EXTENSION row in the central scoreboard).
-- **RIF/XML importer** (`rif-xml` feature, `rif_xml::import()`): parses the W3C RIF-Core XML
-  presentation syntax into a `rif::Document`. Applies two sound desugarings at import: body
+- **RIF/XML importer** (`rif-xml` feature, `rif_xml::import()` / `rif_xml::import_with_closure()`): parses the W3C RIF-Core XML
+  presentation syntax into a `rif::Document`. Applies three sound desugarings at import: body
   `Or` → rule-splitting (Lloyd-Topor, one rule per disjunct); body `Exists` → existential
-  vars become ordinary body vars (range-restriction validated by `Document::validate`). Fail-closed:
+  vars become ordinary body vars (range-restriction validated by `Document::validate`);
+  multi-slot `Frame` → per-slot conjunction (see below, sq-jsgyn). Fail-closed:
   `Import` directives, non-Core elements, unknown `External` IRIs, named-argument uniterms,
   and malformed XML each produce a named `ImportError` variant. Parsing only — no new inference
   beyond the existing `rif-core` forward chainer. Unblocks sq-pbz04.5.5 (W3C RIF WG test-suite arm).
+  **Positional predicate atoms** (`<Atom><op>P</op><args>…</args></Atom>`, sq-n7y15): the dominant
+  form in real W3C RIF Core test files. Arity-1 maps to `Atom::Member` (membership `a # C`),
+  arity-2 maps to `Atom::Frame` (frame atom `a[P → b]`). Arity-0 and arity-3+ are rejected
+  fail-closed (`ImportError::UnrecognizedElement`) — no sound mapping exists in the Core model.
+  **Multi-slot Frame desugaring** (`obj[p1->v1 p2->v2 …]`, sq-jsgyn): a `<Frame>` with N `<slot>`
+  children desugars into N `Atom::Frame` atoms — one per `(pi, vi)` pair, sharing the same `obj`.
+  Under RIF-Core §2.3 a multi-slot frame is the conjunction of per-slot frames; in body position
+  this becomes a body `And`, in head position N head atoms are added, and as a bare fact N
+  `Rule::fact` entries are produced. Fail-closed: zero slots → `MalformedXml`; named-arg slot →
+  `NamedArgUniterm`; duplicate `<object>` → `MalformedXml`. `<slot>` is multi-cardinality;
+  `<object>` remains single-cardinality.
+  **Imports-closure consistency check** (`import_with_closure(xml_bytes, resolver)`, sq-wbql1):
+  unlike `import()` which blanket-refuses any `<Import>` directive, `import_with_closure` accepts
+  a caller-supplied `resolver: impl Fn(&str) -> Option<Vec<u8>>` and performs a GENUINE consistency
+  check: (1) profile-checks the `<Import>` `profile` attribute — a non-Core profile IRI (BLD, PRD,
+  OWL-Direct, …) → `ImportError::InconsistentImport` (a NON-VACUOUS detection, distinct from a
+  blanket refusal); (2) if the resolver returns bytes for the import location, the imported document
+  is parsed as RIF-Core and its rules are merged; the combined rule set is then validated — a
+  validation failure → `ImportError::InconsistentImport`; (3) if the resolver returns `None`, the
+  import is still rejected fail-closed with `ImportError::ImportDirective`. The fail-closed
+  invariant: an inconsistent/unresolvable/incompatible import is ALWAYS rejected; a consistent
+  import (resolvable, Core-compatible profile, combined rules pass `validate()`) is accepted and
+  the merged `Document` returned. The W3C RIF ImportRejectionTests target profile-mismatch
+  invalidity; with a file-system resolver wired to the fetched `Core_v1.22` archive, tests using
+  non-Core `profile` attributes graduate from `skip:imports` to `Outcome::Pass`.
+
+## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
+
+The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 30-XSD-datatype map via `Recognized::standard()` — the `DTYPE_TABLE` single source of truth in `dtype.rs` — plus the always-recognized `rdf:langString` (or bring a custom map via `materialize_d(d, …, …)`):
+
+**Supported datatypes** (complete signed/unsigned integer family, exact decimals/temporal):
+- String family: `xsd:string`, `xsd:normalizedString`, `xsd:token`; pattern-restricted derived types `xsd:language`, `xsd:Name`, `xsd:NCName`, `xsd:NMTOKEN`.
+- Boolean: `xsd:boolean`.
+- Integer family (13 XSD types — `xsd:integer` + 12 derived): `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte` (signed); `xsd:unsignedLong`/`xsd:unsignedInt`/`xsd:unsignedShort`/`xsd:unsignedByte` (unsigned); `xsd:nonNegativeInteger`/`xsd:positiveInteger`/`xsd:nonPositiveInteger`/`xsd:negativeInteger` (restricted).
+- Numeric: `xsd:decimal` (exact, unbounded magnitude via canonical-decimal STRING comparison, never f64), `xsd:double`, `xsd:float` (IEEE 754, distinct value spaces).
+- Temporal: `xsd:dateTime`, `xsd:dateTimeStamp`, `xsd:date`.
+- URI: `xsd:anyURI`.
+- Binary: `xsd:hexBinary`, `xsd:base64Binary` (shared octet-sequence value space).
+
+**Value-space equality (the load-bearing invariant):** `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` denote THE SAME value and must compare equal in D-entailment. Integer/decimal are compared as a canonical-decimal STRING (sign + minimal integer/fraction digits), NEVER via f64 (which aliases integers past 2^53 and loses decimal precision — silent bugs in semantic equality). `xsd:float`/`xsd:double` are IEEE value spaces; `xsd:date` and `xsd:dateTime` are disjoint temporal families (even at the same instant).
+
+**Fail-closed posture:** unmapped datatypes are not typed; facet-invalid literals (`"200"^^xsd:byte`, `" a"^^xsd:token`) are rejected before value mapping; `xsd:time`, duration types, and XML datatypes (`rdf:XMLLiteral`) are deferred — tracked in the design record (`research/d-entailment-datatype-map.md` §3.2), never silently mapped. The `Recognized::default()` set carries ONLY the always-recognized `xsd:string` / `rdf:langString` pair — safe to materialize over arbitrary data.
 
 ## OWL 2 EL classification (`sparq-reason-el`, separate opt-in crate)
 
@@ -235,6 +278,7 @@ The three profile reasoners above (RL / EL / QL) each cover a *tractable* OWL fr
 
 - **A structural OWL model** (`sparq_reason_dl::model`) — `Axiom` / `ClassExpression` / `ObjectPropertyExpression` typed enums for the ALCH fragment: named classes, `owl:Thing`/`owl:Nothing`, `owl:intersectionOf` (⊓), `owl:unionOf` (⊔), `owl:complementOf` (¬), `owl:someValuesFrom` (∃R.C) and `owl:allValuesFrom` (∀R.C) over **named object properties**; GCIs, `owl:equivalentClass`, `owl:disjointWith`, `rdfs:subPropertyOf`, `rdfs:domain`/`rdfs:range`, and a ground ABox. Purely structural — **no semantics attached at L1**.
 - **A FAIL-CLOSED reverse RDF mapping** — `extract(&Dict, &[[Id; 3]]) -> Result<Ontology, ExtractError>` maps the `(Dict, triples)` substrate into the model per the W3C *Mapping to RDF Graphs* tables restricted to ALCH. **A single out-of-fragment or malformed triple aborts the WHOLE extraction** with a typed `ExtractError`, rather than being silently dropped: the (future) checker must never reason over a graph it only *partially* understood — a dropped axiom can flip a consistency verdict. Understood in full, or refused. The rejection taxonomy has five arms — `OutOfFragment` (cardinality / nominals / inverses / `owl:sameAs` / property characteristics / chains / keys), `DataConstruct` (datatypes / data properties — no concrete domain in L1), `MalformedList`, `MalformedClassExpression`, `Unclassifiable` (an undeclared predicate that cannot be mapped soundly) — while annotations, declarations, and ontology headers are recognised and ignored.
+- **Forward RDF renderer** (`render`, bead sq-pbz04.4.7) — `render_to_triples(&Ontology, &mut Dict) -> Vec<[Id; 3]>` maps the structural model BACK to OWL RDF triples (the inverse of `extract`), enabling full-fragment round-trip testing (`RDF → extract → render → extract` yields the same structural model; blank-node identity may differ but `Ontology: PartialEq` holds). `render_to_turtle(&Ontology, &mut Dict) -> String` serialises the same output to minimal Turtle for human-readable diagnostics. No extra dependencies; always compiled (not feature-gated). The round-trip invariant is checked at TWO tiers: the hand-written `render::tests` fragments (incl. two regression cases for the sq-pbz04.4.17 fix below), and — belt-and-suspenders — EVERY ontology document of the W3C DIRECT-arm corpus via `inference::dl_suite::run_render_roundtrip_arm` in `sparq-conformance` (opt-in `dl-direct` feature, bead sq-pbz04.4.17; `RenderRoundTripReport` with EXACT-pinned counts — `DL_RENDER_ROUNDTRIP_FLOOR` — and a hard EMPTY-violations assertion: a mis-render is a REAL fidelity bug, never a pinnable divergence). The corpus arm's first run CAUGHT and fixed one: a named-composite `EquivalentClasses(A, expr)` used to render as an INLINE backbone on `A`, which re-extracts differently whenever `A` is referenced elsewhere (14 corpus mismatches) and refuses outright on a self-referential definition (`WebOnt-someValuesFrom-003`); the renderer now always emits the explicit `A owl:equivalentClass _:b` shape, which round-trips both origins.
 
 **L2 — syntactic EL/QL/RL profile-membership checker (`profile`, bead sq-pbz04.4.2):** NOW
 BUILT. `profile::profiles(onto: &Ontology) -> ProfileSet` runs a purely syntactic grammar walk
@@ -277,7 +321,9 @@ returning `ConsistencyOutcome` / `EntailmentOutcome`: a tri-state verdict PLUS t
 that produced it (traceability). `entailment()` checks `O ⊨ α` per conclusion axiom by an
 argued refutation encoding onto the tableau (`SubClassOf`, `ClassAssertion`,
 `ObjectPropertyAssertion` via a fresh-class encoding, `EquivalentClasses`, `DisjointClasses`,
-domain/range; property-axiom conclusions abstain). Every guard fails CLOSED — uncertainty is a
+domain/range, and — since sq-pbz04.4.9 — `SubObjectPropertyOf(R,S)` via the
+fresh-individual-pair lift `{R(a,b), B(b), (∀S.¬B)(a)}`, sound and complete because the
+tableau's ∀-rule fires modulo the role hierarchy). Every guard fails CLOSED — uncertainty is a
 typed `UnknownReason`, never a guessed verdict. **Conclusion anonymous individuals
 (sq-pbz04.4.13):** a blank-node individual in the CONCLUSION is read EXISTENTIALLY (per the
 official Direct-Semantics tests) — L1's skolem-constant reading is entailment-preserving on the
@@ -324,7 +370,7 @@ the whole graph, never a partial extraction):
 | Cardinality (min/max/exact/qualified) | Refused | `OutOfFragment` |
 | Nominals (`owl:oneOf`, `owl:hasValue`, `owl:hasSelf`); inverse properties (`owl:inverseOf`); property characteristics (Transitive/Functional/IFP/Sym/Asym/Refl/Irr) | Refused | `OutOfFragment` |
 | `owl:sameAs` / `owl:differentFrom`; property chains; keys; `owl:disjointUnionOf` | Refused | `OutOfFragment` |
-| Datatypes / data properties / data-range restrictions | Refused | `DataConstruct` |
+| Datatypes / data properties / data-range restrictions; a bare datatype-map IRI (`xsd:*`, `rdfs:Literal`, `owl:real`/`rational`) in ANY class position incl. an `rdfs:range`/`rdfs:domain` object (sq-pbz04.4.9) | Refused | `DataConstruct` |
 | Malformed RDF list (unterminated, cyclic, branching, empty, orphan cell, `rdf:nil` as list cell) | Refused | `MalformedList` |
 | Malformed class expression (missing filler/property, conflicting shapes, cyclic, bare blank) | Refused | `MalformedClassExpression` |
 | Undeclared predicate (role-vs-annotation ambiguous); RDF 1.2 triple term | Refused | `Unclassifiable` |
@@ -345,9 +391,10 @@ the whole graph, never a partial extraction):
 |---|---|---|
 | `SubClassOf`, `ClassAssertion`, `EquivalentClasses`, `DisjointClasses`, `ObjectPropertyDomain` / `ObjectPropertyRange` | Yes (sound + complete via refutation encoding) | — |
 | `ObjectPropertyAssertion` (fresh-class encoding — sound and complete, `check.rs` §4) | Yes | — |
+| `SubObjectPropertyOf` (fresh-individual-pair encoding `{R(a,b), B(b), (∀S.¬B)(a)}` — sound and complete; sq-pbz04.4.9) | Yes | — |
 | Tree-shaped conclusion blank node (rolls up to an existential class assertion; sq-pbz04.4.13) | Yes | — |
 | Non-tree conclusion blank node (shared / cyclic / named-successor / free-existential root) | Never | `ConclusionAnonymousIndividual` |
-| `SubObjectPropertyOf` conclusion | Never | `UnencodedConclusion` |
+| A future axiom kind without an argued encoding (none expressible today) | Never | `UnencodedConclusion` |
 | Deterministic count budget exhausted mid-search | Never | `ResourceBudget` |
 
 Deferred constructs — inverse roles, cardinality/functionality, nominals, transitivity,
@@ -439,6 +486,23 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 
 **Import cycles always terminate (with a LIVE resolver).** N3 is Turing-complete, so a `log:semantics` document whose closure re-imports a document active up the resolution stack — directly (`A→A`), indirectly (`A→B→A`), or via a re-used node in a diamond — would otherwise spin forever once a real (filesystem/network) resolver is wired (the offline conformance harness never hit it). The engine tracks the formulae whose closure is in progress; re-entering one already in progress returns it **unclosed** (cwm's "a document already being loaded is not re-loaded") instead of recursing, so reasoning terminates. A diamond that re-uses a shared document across **sibling** branches is not a cycle and still resolves on every branch — only the pathological cyclic case changes; valid acyclic imports are byte-identical to before.
 
+**Same-box materialization comparison (sparq vs Jena / VLog / Nemo).** To compare
+sparq's closure materialization against other reasoners on the LUBM `(ABox+TBox)`
+corpus, run `scripts/bench/materialize-same-box.sh` (`ONLY=sparq LUBM_UNIVS=1 …`
+for the fast self-check; supply `VLOG=`/`NEMO=` binary paths for those columns).
+The oracle is the **closure size** (pinned at `univ=1`: `owl=150589`,
+`rdfs=126732`). The VLog and Nemo columns run **validated Datalog encodings**
+(`bench/reason-encodings/{vlog/*.dlog,nemo/*.rls}`, `sq-hmd7l.30/.31`) that
+reproduce sparq's closure **set-for-set** — so all three engines' closure counts
+**AGREE** (folded into `count_crosscheck.same_ruleset_agree`). Critical honesty
+caveat: this holds because sparq `reason owl` is the **full W3C OWL 2 RL/RDF** rule
+table and the encodings transcribe exactly the rules the LUBM TBox exercises; a
+**Jena** column, by contrast, has no full OWL 2 RL reasoner (its `OWL_MICRO`/
+`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic triples) so its
+closure size *differs by construction* — recorded per column as a profile caveat,
+never reconciled. Never read a raw closure-size delta as a correctness gap without
+the profile.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Not in the *lean* wasm bundle, but wasm-portable.** `sparq-reason` pulls `regex` and (by default) `rayon`; it is never in the **lean** `sparq-wasm` triplestore bundle. For wasm or single-threaded builds use `default-features = false` (disables the `parallel`/rayon feature). The crate itself compiles to `wasm32-unknown-unknown` — `regex` (the N3 `string:matches` builtin) is pure-Rust and wasm-portable — and ships as the **tier-b `sparq-reason-wasm` ("W-reason") bundle** ([OPUS-4.8] sq-6qw3): a `Reasoner` exposing `materialize` / `entailed` / `materializeStats` / `reasonN3` (and, behind the bundle's opt-in `explain` feature, `why()` proof trees) for in-tab live inference, lazy-loaded on the showcase site's `/surface/inference` page. There is no Noir/ZK toolchain requirement here — proofs are plain Rust structs.
@@ -453,6 +517,7 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 - **The RL materializer is COMPLETE for the assertion-style RL/RDF rules — the W3C OWL-RL conformance row is at the RL ceiling (sq-350ms).** Every rule with a positive-assertion head in Profiles §4.3 Tables 5/6/9 is implemented (the `owl.rs` per-rule status table + `research/inference-completeness-audit.md` §2/§2b are the per-rule proof). The 13 documented OWL-RL conformance divergences are PROVABLY outside the RL profile, **not** missing rules: TBox-axiom conclusions, invented class expressions (`owl:complementOf`/`unionOf`), reified `owl:AllDifferent` structures, the `prp-pdw`/`prp-fp`/`prp-ifp` **contrapositives** (RL has NO rule producing `owl:differentFrom` between INDIVIDUALS — `dt-diff` emits it only between unequal-value literals, otherwise it appears only in clash bodies), `owl:ReflexiveObjectProperty` (EXCLUDED from the RL grammar — there is no `prp-rfx`), and datatype-range INTERSECTION. They stay documented divergences (closing them would be unsound or beyond-profile); the inference ratchet HOLDS — see `inference-conformance-report.md` and the central scoreboard (`scoreboard::SUITES`, CI job `inference-conformance`) for the current pinned count. Multi-round assertion-rule completeness and the prp-pdw/prp-fp soundness boundary are pinned by in-crate guards in `owl.rs::tests`; the per-divergence disposition pass (sq-pbz04.1.3) re-audited all 13 from the raw export premises/conclusions (verdict: 13/13 PERMANENT, zero in-profile fixes), tagged every report-facing rationale `PERMANENT — …` with its rule-level grounding, and pinned tag+grounding with an in-crate disposition test in `owl_suite.rs`.
 - **OWL incremental fallback is silent.** `MaterializedOwlGraph` drops to `OwlMode::Fallback` (re-materializes via `materialize_owl_rl` every mutation, still correct) when the base uses `owl:sameAs`, Functional/InverseFunctional, property chains, restrictions, cardinality, hasKey, oneOf, intersection/union — and on any TBox mutation. Check `.mode()` / `.full_rebuilds()` if incremental cost matters. These usually live in a static TBox, so the mode is decided once at load.
 - **N3 incremental qualification is narrow.** `MaterializedN3Graph` only runs `N3Mode::Counting` (truly incremental) for a monotone, input-stratified rule fragment: forward rules with ground-IRI predicates, no conclusion blank nodes, builtins limited to the parity whitelist (`log:uri`, `log:equalTo`/`notEqualTo`, `string:concatenation`/`scrape`/`encodeForUri`), and negation only via the store-scoped `?x log:notIncludes { … }` idiom over input-only predicates. Anything else → `N3Mode::Fallback`; always consult `.fallback_reason()` (`None` ⇔ counting active). The full *batch* N3 engine (`reason_n3`) supports the much larger `math:`/`string:`/`list:`/`time:`/`log:` builtin set and goal-directed `<=` rules.
+- **N3 `math:` exact arithmetic is on the SHARED substrate tower (`sq-pbz04.5.1`, seam 2).** The chainer's exact add / subtract / multiply / negate / abs core (and the scale-aligned comparison the max/min and value-equality paths use) DELEGATES to `sparq-substrate::numeric::Dec` — a base, non-optional `numeric`-slice dependency, the SAME exact fixed-point `mant * 10^-scale` decimal the SPARQL engine's FILTER/BIND path drives — so the reasoner and the engine can never diverge on exact-decimal arithmetic (`0.1 + 0.2` is exactly `0.3`; `('2.7' '2') math:difference` is exactly `0.7`). The private `NumVal` enum stays a thin EYE-compat ADAPTER over that core: EYE's own edges are byte-identical and stay adapter-resident — lexical-shape string coercion, the `numval_term` result rendering (whole-`f64` → `xsd:integer`), `math:remainder`'s divisor-sign integer semantics, `math:integerQuotient`'s floor, `math:quotient`'s scale-34 exactness rule (non-terminating → `f64`, exact integer/integer → `xsd:integer`, NOT substrate `Dec::checked_div`'s always-decimal scale-18 rounding), integer `math:exponentiation`, and the `Int`-collapse rendering of floor/ceiling. The i128↔i64 wrinkle: the chainer `Int` tier is `i128` while substrate `Num::Int` is `i64`, so an out-of-`i64`-range integer is carried as substrate `Dec { mant, scale: 0 }` (exact for the full `i128` range; a mantissa overflow falls back to `f64` exactly as before). N3/EYE differential + expressivity floors and `RIF_CORE_FLOOR` are all byte-identical (the closure is unchanged; a direct old-`NumVal`-vs-substrate differential over the `>i64::MAX` / `0.1+0.2` / INF-NaN / `2.7-2` matrix pins it).
 - **`why()` is a witness, not a proof set.** It returns the first derivation in deterministic order, or `None` if the triple isn't in the closure or `ExplainOpts` caps (default depth 128, 65 536 nodes) are exceeded — not an enumeration of all derivations.
 - **Deletion semantics:** `delete` removes *base* (asserted) triples; a deleted base triple still derivable from the remainder stays in the closure, and deleting a derived-only fact is a no-op (standard materialized-view semantics).
 
@@ -485,4 +550,4 @@ full output-mode + builtins-coverage tables.
 - `mpc-protocols` — multi-party layer over (federated) SPARQL.
 - `hdt-format`, `fused-decompress-parse`, `rust-parallel-parsing` — sibling ingest/storage skills for getting triples into the graph you then reason over.
 - `research/owl2-el-ql-reasoning-spike.md` — the EL/QL feasibility spike: why EL first, the RL-incompleteness proof (the CR4 counterexample), and the phased plan (E1–E6) `sparq-reason-el` implements.
-- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` implements through phases Q1–Q3; only the conformance-floor graduation remains deferred).
+- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` implements through phases Q1–Q3, and the sparq-extension conformance floors — the DL-Lite_R certain-answer floor `QL_DLLITE_FLOOR` and the sound-subset entailment-arm floor `QL_ENTAILMENT_FLOOR` — have both graduated, sq-qo1a9 / sq-pbz04.3.4).

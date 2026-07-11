@@ -63,7 +63,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `dict-baseline`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench`, `wasm-compare`, `graphalytics` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle`, `reason-el-real`, `reason-ql-npd`, `reason-dl-ore`, `materialize-competitors` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle`, `ac-odrl-overhead`, `reason-el-real`, `reason-ql-npd`, `reason-dl-ore`, `materialize-competitors` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | canonical loopback HTTP throughput harness; concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-throughput`, `serve-spikes`, `memtier-spikes`, `pss-update-parity`, `gsp-bench`, `python-bindings-bench` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance`, `jsonld-bench`, `canon-bench`, `rif-conformance` |
@@ -83,6 +83,18 @@ Notes on a few that need care:
   numbers come only from a quiet EC2 runner, and it is deliberately NOT wired into
   `scripts/ci-bench.sh` / `scripts/perf-gate.py` (req/s is a trend/EC2 metric). It is the
   prerequisite that unblocks the HTTP opt lane (sq-7d3dj.10/.12/.13).
+- **`gsp-bench` (`bench/gsp`) is the Graph Store Protocol same-box panel** — see
+  [`bench/gsp/README.md`](./gsp/README.md). GSP PUT/GET/DELETE round-trips (1 KB–10 MB
+  size sweep + the PSS LDP-CRUD stream projected onto GSP verbs) plus a **PATCH-dialect
+  panel** (`application/sparql-update` + `text/n3` Solid N3-Patch; support probed per
+  engine, 405/415/501 records honest n/a — Fuseki/Oxigraph GSP implement no PATCH
+  dialect, sparq's `text/n3` is double-opt-in via the `n3-patch` feature +
+  `GSP_N3_PATCH=1`) against sparq-server / Fuseki / Oxigraph server, plus Community
+  Solid Server as a **LOOSE** LDP-architecture column (labelled, never averaged; the
+  only Solid-PATCH peer). A HARD content-agreement gate (returned triple set must equal
+  the sent/reference set exactly) runs BEFORE any timing; the driver is loopback-only
+  (refuses non-loopback URLs). `bash bench/gsp/run.sh --smoke` is the self-contained
+  acceptance run. First-read record: `research/gap-gsp-2026-07.md`. [FABLE-5]
 - **`sp2b` (SP2Bench) is tiered** — see [`bench/sp2b/README.md`](./sp2b/README.md).
   The per-commit path builds+caches the real Freiburg generator (BSD; sha256-pinned, g++
   `-O2` not `-O3`) and runs 14 sub-second queries on a fixed 250k-triple corpus, emitting
@@ -246,6 +258,23 @@ Notes on a few that need care:
   opt-in via `SAMEAS_TIERS` for EC2/nightly. CI emits
   `sameas_size<N>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it as
   a scaling suite (size axis).
+- **`wasm-compare` has a BROWSER half and a COMPETITOR half (both implemented).**
+  [`bench/wasm-compare/browser/`](./wasm-compare/browser/README.md) (sq-3ul2n.1, the Tier-0
+  measurement gate of the browser-WASM program `research/browser-wasm-perf-assessment-2026-07.md`)
+  drives the SHIPPED `@jeswr/sparq` bundle through headless Chromium/Firefox/WebKit (Playwright,
+  self-contained npm dir — not a root workspace member) + a plain-Node baseline, attributing
+  wall time PER PHASE (fetch/compile/instantiate + `instantiateStreaming`, N-Triples+Turtle
+  load at 25k/100k/300k triples, five query shapes cold-vs-warm, CONSTRUCT serialization out,
+  and the ask→count→string→parse→chunks→wrapper boundary-marshalling ladder). Advisory
+  envelopes only (`results/`, git-ignored; the cross-engine row-count oracle is the sole hard
+  check; browsers that cannot launch skip-with-notice); deliberately NO CI lane. The
+  competitor half (sq-hmd7l.17, [`bench/wasm-compare/`](./wasm-compare/README.md)) CONSUMES
+  this harness: `run.sh --bundle-only` is the DETERMINISTIC shipped-bundle-bytes comparison
+  vs the pinned `oxigraph` npm artifact (the one canonical wasm-compare metric), and
+  `browser/compare.mjs` layers the oxigraph-npm + N3.js/quadstore latency columns onto the
+  same oracle-checked workload in Node + headless Chromium (gather-only installs; per-query
+  row-count oracle + cross-library agreement gate every timing row). First-read gap record:
+  `research/gap-wasm-2026-07.md`.
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
@@ -377,6 +406,7 @@ bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k poin
 cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh   # RSP-QL (cargo only): clock-free fixed (triple,ts) replay + DETERMINISTIC per-window row-count gate (3 EvalModes) + SRBench correctness oracle
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 bench/owl-sameas/run.sh               # OWL sameAs (python3 only): OWL-RL closure per size tier + closure-size (K·N·(N+M)) + query-row (K·N) gate
+bench/python/run.sh                   # Python bindings (pip pyoxigraph+rdflib + maturin sparq-py): SP2B tiny tier from Python + row-count agreement gate + binding-overhead floor/slope
 
 # --- selective bind-join + u64 value-id probes ---
 python3 bench/selective/gen.py 500000 > bench/selective/selective.nt

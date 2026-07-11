@@ -499,3 +499,80 @@ fn open_rejects_corrupt_and_wrong_magic() {
     assert!(DiskAnnIndex::open(&path).is_err());
     let _ = std::fs::remove_file(&path);
 }
+
+// [FABLE-5] (sq-98c) `open_from_bytes` — the filesystem-less / wasm read path (memmap2 is
+// target-gated out of wasm32 builds; on wasm the graph arrives as fetched/embedded bytes).
+// The owned backing must be RESULT-IDENTICAL to the memory map: same neighbours, same scores,
+// same metadata. This also exercises the f32-alignment `debug_assert` in `node_vector` over
+// the owned (`AlignedBytes`) backing — a plain `Vec<u8>` base would trip it.
+#[test]
+fn open_from_bytes_returns_identical_neighbours_to_mmap_open() {
+    const DIM: usize = 8;
+    let store_path = tmp("diskann-bytes.spqv");
+    let graph_path = tmp("diskann-bytes.spqg");
+    let mut store = VectorStore::create(&store_path, DIM).unwrap();
+    let mut state = 11_u64;
+    for id in 1..=60_u32 {
+        let v = rand_vec(&mut state, DIM);
+        store.put(id, &v).unwrap();
+    }
+    store.finalize().unwrap();
+    let cfg = VamanaConfig { degree: 8, build_beam: 16, search_beam: 24, ..Default::default() };
+    let mapped = DiskAnnIndex::build_with(&store, &graph_path, cfg).unwrap();
+
+    let bytes = std::fs::read(&graph_path).unwrap();
+    let owned = DiskAnnIndex::open_from_bytes(bytes).unwrap();
+    assert_eq!(owned.len(), mapped.len());
+    assert_eq!(owned.dim(), mapped.dim());
+    assert_eq!(owned.fingerprint(), mapped.fingerprint());
+    assert!(!owned.has_pq_cache());
+    // NOTE: `build_with` seeds `search_beam` from the config while `open`/`open_from_bytes`
+    // use the default; compare two opened handles so the traversals are identical.
+    let reopened = DiskAnnIndex::open(&graph_path).unwrap();
+    let mut state = 99_u64;
+    for _ in 0..10 {
+        let q = rand_vec(&mut state, DIM);
+        assert_eq!(owned.nearest(&q, 5), reopened.nearest(&q, 5));
+    }
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&graph_path);
+}
+
+// [FABLE-5] (sq-98c) The PQ candidate cache (trailing `.spqg` section) must also parse + serve
+// identically from owned bytes — the section offsets are relative, not map-page-dependent.
+#[test]
+fn open_from_bytes_serves_the_pq_index_identically() {
+    const DIM: usize = 8;
+    let store_path = tmp("diskann-bytes-pq.spqv");
+    let graph_path = tmp("diskann-bytes-pq.spqg");
+    let mut store = VectorStore::create(&store_path, DIM).unwrap();
+    let mut state = 13_u64;
+    for id in 1..=60_u32 {
+        let v = rand_vec(&mut state, DIM);
+        store.put(id, &v).unwrap();
+    }
+    store.finalize().unwrap();
+    let cfg = VamanaConfig { degree: 8, build_beam: 16, search_beam: 24, ..Default::default() };
+    // M (subspaces) must divide into the small test dimension; the default M=16 needs dim ≥ 16.
+    let pq_cfg = PqConfig { m: 4, ..Default::default() };
+    DiskAnnIndex::build_with_pq(&store, &graph_path, cfg, pq_cfg).unwrap();
+
+    let reopened = DiskAnnIndex::open(&graph_path).unwrap();
+    let owned = DiskAnnIndex::open_from_bytes(std::fs::read(&graph_path).unwrap()).unwrap();
+    assert!(owned.has_pq_cache(), "the PQ section must survive the owned-bytes open");
+    let mut state = 101_u64;
+    for _ in 0..10 {
+        let q = rand_vec(&mut state, DIM);
+        assert_eq!(owned.nearest(&q, 5), reopened.nearest(&q, 5));
+    }
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&graph_path);
+}
+
+// [FABLE-5] (sq-98c) Validation is identical to `open`: bad magic / truncation reject up front.
+#[test]
+fn open_from_bytes_rejects_corrupt_and_wrong_magic() {
+    assert!(DiskAnnIndex::open_from_bytes(b"NOPExxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_vec()).is_err());
+    assert!(DiskAnnIndex::open_from_bytes(b"SPQG".to_vec()).is_err());
+    assert!(DiskAnnIndex::open_from_bytes(Vec::new()).is_err());
+}

@@ -386,3 +386,8 @@ Run: `cargo test -p sparq-kb --features literature,literature-live --test core_c
   `crates/sparq-kb/src/literature/connector_core.rs`, fixture
   `crates/sparq-kb/fixtures/literature/core-batch.json`, gate
   `crates/sparq-kb/tests/core_connector.rs`.
+- **Citation renderer** (`query` feature, `sq-2489d.11`):
+  `crates/sparq-kb/src/query/citations.rs` — `render_citations(&graph, &rows)` renders
+  `prov:wasDerivedFrom` sources from `FINDING_PROVENANCE` rows as `[source: label]`
+  citations; returns `CitationReport` with `CitationMetrics` (resolution-rate + fabricated-count).
+  Gate: `crates/sparq-kb/tests/citations.rs`.

@@ -1,17 +1,29 @@
 "use client";
 
 // [SONNET-4.6] sq-kwb74 — the Streaming tool's RSP-QL tick view.
-// Loads the sparq-rsp-wasm bundle lazily via lib/rsp-wasm.ts; degrades honestly to
-// "unavailable" if the bundle is absent from this build. Every window result is real
-// engine output — never a canned replay. STREAMING_TOOL_OVERRIDE flips the honesty
-// metadata from "coming-soon stub" to "live-new-wasm / working" inside this file only,
-// keeping it disjoint from parallel tool beads.
+// [FABLE-5] sq-ixc3.16 — lit up as a full OPERATIONAL tool over the live workspace store:
+//   * the window spec is CONFIGURABLE (editable continuous SPARQL, range/step — step < range
+//     is sliding, step == range tumbling — max_delay, and the R2S operator: RSTREAM /
+//     ISTREAM / DSTREAM), applied by re-registering the continuous query;
+//   * a WORKSPACE FEED streams the live store's updates into the registered query: every
+//     store-content change (import / INSERT / DELETE / restore) is diffed against the
+//     previous snapshot (lib/rsp-feed.ts) and the ADDED triples are pushed as one logical
+//     tick — so an RSP-QL window query runs over data imported into the workspace, not only
+//     hand-typed demo events. Time is LOGICAL (one tick per update batch); the manual push
+//     form remains for explicit-timestamp event injection.
+// Loads the sparq-rsp-wasm bundle lazily via lib/rsp-wasm.ts (the main bundle stays
+// wasm-free); degrades honestly to "unavailable" if the bundle is absent from this build.
+// Every window result is real engine output — never a canned replay. STREAMING_TOOL_OVERRIDE
+// flips the honesty metadata from "coming-soon stub" to "live-new-wasm / working" inside this
+// file only, keeping it disjoint from parallel tool beads.
 
 import * as React from "react";
 import { Radio, Info, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { useEngine } from "@/lib/engine-context";
 import { loadRspModule, type WasmRspQuery, type WasmRsp } from "@/lib/rsp-wasm";
+import { diffAddedTriples, snapshotKeys } from "@/lib/rsp-feed";
 import { toolById, TIER_META } from "@/data/tools";
 import type { ToolOverride } from "@/data/tools";
 
@@ -24,6 +36,9 @@ export const STREAMING_TOOL_OVERRIDE: ToolOverride | undefined = {
   tier: "live-new-wasm",
   built: true,
   group: "working",
+  // [FABLE-5] sq-ixc3.16 — the tool now runs window queries over live workspace updates.
+  blurb:
+    "RSP-QL window queries — tumbling/sliding, R/I/DSTREAM — over live workspace updates or manual pushes.",
 };
 
 // Default query and window parameters (tumbling 60-tick window, AVG per window).
@@ -32,6 +47,11 @@ const DEFAULT_RANGE = 60;
 const DEFAULT_STEP = 60;
 const DEFAULT_MAX_DELAY = 0;
 const DEFAULT_R2S = "rstream";
+
+// [FABLE-5] sq-ixc3.16 — the per-update-batch cap on workspace-feed pushes. A huge import
+// (100k+ quads) would otherwise stall the tab pushing every triple through the window engine
+// in one effect. Excess triples are counted and reported honestly — never silently dropped.
+const FEED_BATCH_CAP = 5_000;
 
 /** A binding value in a SPARQL JSON Results row. */
 interface BindingValue {
@@ -53,12 +73,45 @@ interface ClosedWindow {
 
 type Status = "loading" | "ready" | "unavailable" | "error";
 
+/** The window/query configuration a continuous query is registered with. */
+interface RspConfig {
+  sparql: string;
+  range: number;
+  step: number;
+  maxDelay: number;
+  r2s: string;
+}
+
+const DEFAULT_CONFIG: RspConfig = {
+  sparql: DEFAULT_SPARQL,
+  range: DEFAULT_RANGE,
+  step: DEFAULT_STEP,
+  maxDelay: DEFAULT_MAX_DELAY,
+  r2s: DEFAULT_R2S,
+};
+
+/** Cumulative workspace-feed accounting shown in the feed status line (real counts). */
+interface FeedInfo {
+  /** The logical clock: ticks consumed so far (one per store-update batch). */
+  tick: number;
+  /** Triples streamed into the query so far. */
+  pushed: number;
+  /** Triples that failed to push (term the window engine rejected) — surfaced, not hidden. */
+  skipped: number;
+  /** Triples beyond {@link FEED_BATCH_CAP} in a single batch — dropped, counted honestly. */
+  dropped: number;
+}
+
+const FEED_ZERO: FeedInfo = { tick: 0, pushed: 0, skipped: 0, dropped: 0 };
+
 export function StreamingTool() {
+  const { storeEpoch, snapshotStore } = useEngine();
+
   const [status, setStatus] = React.useState<Status>("loading");
   const [errorMsg, setErrorMsg] = React.useState<string>("");
-  // A push/flush rejection (e.g. a mistyped Turtle term) is INLINE and recoverable — it must
-  // never flip `status` away from "ready", or the whole panel (incl. the form + Reset)
-  // unmounts and the tab dead-ends on a typo.
+  // A push/flush/apply rejection (e.g. a mistyped Turtle term or a bad window spec) is INLINE
+  // and recoverable — it must never flip `status` away from "ready", or the whole panel
+  // (incl. the form + Reset) unmounts and the tab dead-ends on a typo.
   const [actionError, setActionError] = React.useState<string>("");
   // The wasm module handle lives in a REF, not state: `Rsp` is a CLASS (a function), and
   // `setState(Rsp)` would invoke it as a functional updater — `Rsp(prev)` without `new`
@@ -67,6 +120,25 @@ export function StreamingTool() {
   const queryRef = React.useRef<WasmRspQuery | null>(null);
   const [windows, setWindows] = React.useState<ClosedWindow[]>([]);
   const [lateDropped, setLateDropped] = React.useState<number>(0);
+
+  // [FABLE-5] sq-ixc3.16 — window/query configuration: the FORM state (editable) and the
+  // APPLIED config the current continuous query was registered with (shown in the echo card).
+  const [form, setForm] = React.useState({
+    sparql: DEFAULT_SPARQL,
+    range: String(DEFAULT_RANGE),
+    step: String(DEFAULT_STEP),
+    maxDelay: String(DEFAULT_MAX_DELAY),
+    r2s: DEFAULT_R2S,
+  });
+  const [applied, setApplied] = React.useState<RspConfig>(DEFAULT_CONFIG);
+
+  // [FABLE-5] sq-ixc3.16 — the workspace feed. The baseline key set + logical clock live in
+  // refs (imperative bookkeeping the render never reads); the status line reads `feedInfo`.
+  const [feedOn, setFeedOn] = React.useState(false);
+  const feedKeysRef = React.useRef<Set<string>>(new Set());
+  const feedTickRef = React.useRef(0);
+  const feedEpochRef = React.useRef(0);
+  const [feedInfo, setFeedInfo] = React.useState<FeedInfo>(FEED_ZERO);
 
   // Push form state (pre-filled defaults for the demo).
   const [pushS, setPushS] = React.useState("<http://ex/s1>");
@@ -112,31 +184,88 @@ export function StreamingTool() {
       });
   }, []);
 
-  /** (Re-)create the query handle and clear accumulated window output. */
-  function handleReset() {
-    if (!rspModuleRef.current) return;
-    queryRef.current = rspModuleRef.current.select(
-      DEFAULT_SPARQL,
-      DEFAULT_RANGE,
-      DEFAULT_STEP,
-      DEFAULT_MAX_DELAY,
-      DEFAULT_R2S,
-    );
-    setWindows([]);
-    setLateDropped(0);
-    setActionError("");
+  /**
+   * Re-baseline the workspace feed at the CURRENT store content: only additions AFTER this
+   * moment stream. Called when the feed is switched on and whenever the continuous query is
+   * (re-)registered while the feed is on (a fresh query starts a fresh logical clock).
+   */
+  const rebaselineFeed = React.useCallback(() => {
+    const snap = snapshotStore();
+    feedKeysRef.current = snap === null ? new Set() : snapshotKeys(snap);
+    feedTickRef.current = 0;
+    feedEpochRef.current = storeEpoch;
+    setFeedInfo(FEED_ZERO);
+  }, [snapshotStore, storeEpoch]);
+
+  /**
+   * Register a continuous query for `cfg`, replacing the current handle and clearing the
+   * accumulated tick output. Returns false (with an inline error) when the engine rejects the
+   * spec (bad SPARQL / zero range/step) — the PREVIOUS query then keeps running untouched.
+   */
+  const registerQuery = React.useCallback(
+    (cfg: RspConfig): boolean => {
+      const mod = rspModuleRef.current;
+      if (!mod) return false;
+      let q: WasmRspQuery;
+      try {
+        q = mod.select(cfg.sparql, cfg.range, cfg.step, cfg.maxDelay, cfg.r2s);
+      } catch (err: unknown) {
+        setActionError(err instanceof Error ? err.message : String(err));
+        return false;
+      }
+      queryRef.current = q;
+      setApplied(cfg);
+      setWindows([]);
+      setLateDropped(0);
+      setActionError("");
+      if (feedOn) rebaselineFeed();
+      return true;
+    },
+    [feedOn, rebaselineFeed],
+  );
+
+  /** Apply the config form: parse + validate the numeric fields, then re-register. */
+  function handleApply() {
+    const range = Number(form.range);
+    const step = Number(form.step);
+    const maxDelay = Number(form.maxDelay);
+    for (const [label, v] of [
+      ["range", range],
+      ["step", step],
+      ["max delay", maxDelay],
+    ] as const) {
+      if (!Number.isInteger(v) || v < 0) {
+        setActionError(`${label} must be a non-negative whole number`);
+        return;
+      }
+    }
+    // Zero range/step is rejected by the engine too, but say it plainly here.
+    if (range === 0 || step === 0) {
+      setActionError("range and step must be greater than zero");
+      return;
+    }
+    registerQuery({ sparql: form.sparql, range, step, maxDelay, r2s: form.r2s });
   }
+
+  /** (Re-)create the query handle with the APPLIED config and clear accumulated output. */
+  function handleReset() {
+    registerQuery(applied);
+  }
+
+  /** Fold freshly-closed windows + the late-drop counter into the tick view. */
+  const absorbClosed = React.useCallback((q: WasmRspQuery, closed: ClosedWindow[]) => {
+    if (closed.length > 0) {
+      setWindows((prev) => [...prev, ...closed]);
+    }
+    setLateDropped(q.lateDropped());
+  }, []);
 
   function handlePush() {
     if (!queryRef.current) return;
     try {
       const ts = Number(pushTs);
       const json = queryRef.current.push(pushS, pushP, pushO, ts);
-      const closed = JSON.parse(json) as ClosedWindow[];
-      if (closed.length > 0) {
-        setWindows((prev) => [...prev, ...closed]);
-      }
-      setLateDropped(queryRef.current.lateDropped());
+      absorbClosed(queryRef.current, JSON.parse(json) as ClosedWindow[]);
       setActionError("");
     } catch (err: unknown) {
       // Recoverable input error (bad Turtle term / timestamp): keep the panel READY and
@@ -149,16 +278,64 @@ export function StreamingTool() {
     if (!queryRef.current) return;
     try {
       const json = queryRef.current.flush();
-      const closed = JSON.parse(json) as ClosedWindow[];
-      if (closed.length > 0) {
-        setWindows((prev) => [...prev, ...closed]);
-      }
-      setLateDropped(queryRef.current.lateDropped());
+      absorbClosed(queryRef.current, JSON.parse(json) as ClosedWindow[]);
       setActionError("");
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
   }
+
+  /** Toggle the workspace feed; enabling captures the baseline (only NEW triples stream). */
+  function handleFeedToggle() {
+    // The rebaseline is a side effect — keep it OUT of the setState updater (StrictMode may
+    // invoke updaters twice; the snapshot capture must run exactly once per toggle).
+    if (!feedOn) rebaselineFeed();
+    setFeedOn(!feedOn);
+  }
+
+  // [FABLE-5] sq-ixc3.16 — the workspace feed itself: on every store-content epoch bump while
+  // the feed is on, diff the new snapshot against the previous one (lib/rsp-feed.ts) and push
+  // the ADDED triples as ONE logical tick. The panel stays mounted while its tab is hidden
+  // (the workbench hides, not unmounts, inactive tabs), so updates made from the Query tab or
+  // the Import drawer stream through without the Streaming tab being visible.
+  React.useEffect(() => {
+    if (!feedOn || status !== "ready") return;
+    if (storeEpoch === feedEpochRef.current) return;
+    feedEpochRef.current = storeEpoch;
+    const q = queryRef.current;
+    if (!q) return;
+    const snap = snapshotStore();
+    if (snap === null) return;
+    const { added, keys } = diffAddedTriples(feedKeysRef.current, snap);
+    feedKeysRef.current = keys;
+    if (added.length === 0) return;
+    const batch = added.slice(0, FEED_BATCH_CAP);
+    const droppedNow = added.length - batch.length;
+    const ts = feedTickRef.current;
+    feedTickRef.current = ts + 1;
+    let pushedNow = 0;
+    let skippedNow = 0;
+    const closed: ClosedWindow[] = [];
+    for (const [s, p, o] of batch) {
+      try {
+        closed.push(...(JSON.parse(q.push(s, p, o, ts)) as ClosedWindow[]));
+        pushedNow++;
+      } catch {
+        // A term the window engine rejects (should not happen for engine-serialised
+        // snapshots) is counted and reported — never a silent gap in the stream.
+        skippedNow++;
+      }
+    }
+    absorbClosed(q, closed);
+    setFeedInfo((f) => ({
+      tick: feedTickRef.current,
+      pushed: f.pushed + pushedNow,
+      skipped: f.skipped + skippedNow,
+      dropped: f.dropped + droppedNow,
+    }));
+  }, [feedOn, status, storeEpoch, snapshotStore, absorbClosed]);
+
+  const windowShape = applied.step === applied.range ? "Tumbling" : "Sliding";
 
   return (
     <div className="h-full overflow-auto">
@@ -176,7 +353,7 @@ export function StreamingTool() {
             ) : null}
           </div>
           <p className="text-sm text-muted-foreground">
-            RSP-QL windowed stream processing with tick view, powered by the{" "}
+            RSP-QL windowed stream processing over the live workspace, powered by the{" "}
             <code className="rounded bg-muted px-1 py-0.5 text-[11px]">sparq-rsp-wasm</code>{" "}
             bundle. Every result is live engine output — not a replay.
           </p>
@@ -205,16 +382,115 @@ export function StreamingTool() {
 
           {status === "ready" && (
             <div className="space-y-4">
-              {/* Query info card */}
-              <div className="rounded-lg border bg-background p-3 space-y-1">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Registered query
-                </p>
-                <code className="block text-xs font-mono break-all">{DEFAULT_SPARQL}</code>
+              {/* [FABLE-5] sq-ixc3.16 — window/query configuration */}
+              <div className="rounded-lg border bg-background p-4 space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Continuous query
+                </h3>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11px] text-muted-foreground" htmlFor="rsp-cfg-sparql">
+                    SPARQL (SELECT over the window)
+                  </label>
+                  <textarea
+                    id="rsp-cfg-sparql"
+                    data-rsp-config-sparql=""
+                    rows={2}
+                    className="rounded border bg-muted px-2 py-1 text-xs font-mono"
+                    value={form.sparql}
+                    onChange={(e) => setForm((f) => ({ ...f, sparql: e.target.value }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] text-muted-foreground">Range (ticks)</label>
+                    <input
+                      data-rsp-config-range=""
+                      className="rounded border bg-muted px-2 py-1 text-xs font-mono"
+                      value={form.range}
+                      onChange={(e) => setForm((f) => ({ ...f, range: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] text-muted-foreground">Step (ticks)</label>
+                    <input
+                      data-rsp-config-step=""
+                      className="rounded border bg-muted px-2 py-1 text-xs font-mono"
+                      value={form.step}
+                      onChange={(e) => setForm((f) => ({ ...f, step: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] text-muted-foreground">Max delay</label>
+                    <input
+                      data-rsp-config-delay=""
+                      className="rounded border bg-muted px-2 py-1 text-xs font-mono"
+                      value={form.maxDelay}
+                      onChange={(e) => setForm((f) => ({ ...f, maxDelay: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] text-muted-foreground">R2S</label>
+                    <select
+                      data-rsp-config-r2s=""
+                      className="rounded border bg-muted px-2 py-1 text-xs font-mono"
+                      value={form.r2s}
+                      onChange={(e) => setForm((f) => ({ ...f, r2s: e.target.value }))}
+                    >
+                      <option value="rstream">RSTREAM</option>
+                      <option value="istream">ISTREAM</option>
+                      <option value="dstream">DSTREAM</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    data-rsp-apply=""
+                    onClick={handleApply}
+                    className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90"
+                  >
+                    Register
+                  </button>
+                  <p data-rsp-applied="" className="text-[11px] text-muted-foreground">
+                    {windowShape} window — range={applied.range}, step={applied.step}, max_delay=
+                    {applied.maxDelay}, r2s={applied.r2s}
+                  </p>
+                </div>
+              </div>
+
+              {/* [FABLE-5] sq-ixc3.16 — workspace feed */}
+              <div className="rounded-lg border bg-background p-4 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Workspace feed
+                  </h3>
+                  <button
+                    data-rsp-feed-toggle=""
+                    aria-pressed={feedOn}
+                    onClick={handleFeedToggle}
+                    className={
+                      feedOn
+                        ? "rounded bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90"
+                        : "rounded border px-3 py-1 text-xs hover:bg-muted"
+                    }
+                  >
+                    {feedOn ? "Feed: on" : "Feed: off"}
+                  </button>
+                </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Tumbling window — range={DEFAULT_RANGE}, step={DEFAULT_STEP}, max_delay=
-                  {DEFAULT_MAX_DELAY}, r2s={DEFAULT_R2S}
+                  Streams every triple ADDED to the live store (imports, INSERTs, merges) into
+                  the registered query — one logical tick per update batch. Named graphs are
+                  folded; only additions after the feed is enabled stream.
                 </p>
+                {feedOn ? (
+                  <p data-rsp-feed-status="" className="text-[11px] text-muted-foreground">
+                    tick {feedInfo.tick} · {feedInfo.pushed} triple
+                    {feedInfo.pushed === 1 ? "" : "s"} streamed
+                    {feedInfo.skipped > 0 ? ` · ${feedInfo.skipped} rejected` : ""}
+                    {feedInfo.dropped > 0
+                      ? ` · ${feedInfo.dropped} dropped (batch cap ${FEED_BATCH_CAP})`
+                      : ""}
+                  </p>
+                ) : null}
               </div>
 
               {/* Push form */}
@@ -367,16 +643,22 @@ export function StreamingTool() {
               canned replay.
             </li>
             <li>
-              Tumbling window (range = step = 60): the [0, 60) window closes when a push with ts
-              ≥ 60 + max_delay arrives. Flush closes all remaining open windows.
+              Time is LOGICAL: a window [t, t+range) closes when an arrival with ts ≥ end +
+              max_delay lands (the workspace feed stamps one tick per update batch; manual
+              pushes use their explicit ts). Flush closes all remaining open windows.
             </li>
             <li>
-              RSTREAM: the full result set per window. ISTREAM / DSTREAM (incremental diff) are
-              supported by the engine but not yet wired in this UI panel.
+              R2S: RSTREAM emits the full result per window; ISTREAM the rows added vs the
+              previous window; DSTREAM the rows dropped. step &lt; range slides, step = range
+              tumbles.
+            </li>
+            <li>
+              The workspace feed is append-only: a DELETE cannot retract an already-streamed
+              arrival (stream semantics), and pre-feed store content does not replay.
             </li>
           </ul>
           <div className="pt-1">
-            <Badge variant="outline">sq-kwb74</Badge>
+            <Badge variant="outline">sq-kwb74</Badge> <Badge variant="outline">sq-ixc3.16</Badge>
           </div>
         </div>
       </div>

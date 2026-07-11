@@ -14,7 +14,7 @@
 // its tier/copy/group INSIDE its own panel file — never in the shared data/tools.ts.
 
 import type { ComponentType } from "react";
-import { QueryWorkbench } from "@/components/workbench/query-workbench";
+import { QueryWorkbench, QUERY_TOOL_OVERRIDE } from "@/components/workbench/query-workbench";
 import { ShaclTool } from "@/components/workbench/shacl-tool";
 import { InferenceTool } from "@/components/workbench/inference-tool";
 import {
@@ -24,6 +24,7 @@ import {
 import { FullTextTool, FULL_TEXT_TOOL_OVERRIDE } from "@/components/workbench/full-text-tool";
 import { StreamingTool, STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool";
 import { ServerTool, SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool";
+import { OdrlTool, ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -39,7 +40,9 @@ interface ToolPanelEntry {
  * shared honest ToolStub, exactly as before.
  */
 const TOOL_PANELS: Record<string, ToolPanelEntry> = {
-  query: { Component: QueryWorkbench },
+  // [FABLE-5] sq-ixc3.14 — blurb override: the Query tool now also runs federated SERVICE
+  // (native engine on desktop, allowlist-gated fail-closed; honestly native-only in the browser).
+  query: { Component: QueryWorkbench, override: QUERY_TOOL_OVERRIDE },
   shacl: { Component: ShaclTool },
   // [OPUS-4.8] sq-tp1m — the Inference tool is a real, working panel (per-workspace RDFS /
   // OWL 2 RL entailment wired to the engine's forward-chaining reasoner), not an honest stub.
@@ -48,6 +51,10 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   "full-text": { Component: FullTextTool, override: FULL_TEXT_TOOL_OVERRIDE },
   streaming: { Component: StreamingTool, override: STREAMING_TOOL_OVERRIDE },
   server: { Component: ServerTool, override: SERVER_TOOL_OVERRIDE },
+  // [FABLE-5] sq-ixc3.15 — the ODRL policy tool: a working panel over the desktop's NATIVE
+  // engine (evaluate + fail-closed gated preview); the hosted web build degrades honestly
+  // inside the panel (the `live-native` tier's framing).
+  odrl: { Component: OdrlTool, override: ODRL_TOOL_OVERRIDE },
 };
 
 /**

@@ -36,7 +36,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { downloadText } from "@/lib/download";
 import {
@@ -61,8 +60,12 @@ import { GraphView } from "@/components/workbench/graph-view";
 // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference (RDFS / OWL 2 RL) selector, in the
 // action row so the active entailment regime is visible + controllable while querying.
 import { InferenceControl } from "@/components/workbench/inference-control";
+// [FABLE-5] sq-ixc3.14 — the federation allowlist editor + the honest run-location badge.
+import { FederationControl, RunLocationBadge } from "@/components/workbench/federation-control";
 import { useWorkspace } from "@/lib/workspace-context";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
+// [FABLE-5] sq-ixc3.14 — the honesty-override type for QUERY_TOOL_OVERRIDE (sq-5lyme seam).
+import type { ToolOverride } from "@/data/tools";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
 import { useRegisterPaletteCommands } from "@/components/workbench/command-palette";
@@ -456,6 +459,16 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
 // The workbench.
 // ---------------------------------------------------------------------------
 
+// [FABLE-5] sq-ixc3.14 — honesty override (the sq-5lyme seam: copy flips live in the panel
+// file that earns them, never by editing data/tools.ts). The Query tool now also executes
+// federated SERVICE queries — on the DESKTOP's native engine, gated by the per-workspace
+// egress allowlist; the browser build labels that half native-only instead of pretending.
+export const QUERY_TOOL_OVERRIDE: ToolOverride = {
+  blurb:
+    "Run SPARQL 1.1/1.2 over the live store — SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE, plus " +
+    "federated SERVICE on the desktop's native engine (allowlist-gated, fail-closed).",
+};
+
 export function QueryWorkbench() {
   // [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN is the canonical run(query, { mode }) path (no standalone
   // explain() method); the Cmd-K verbs and the EXPLAIN/ANALYZE buttons both drive it.
@@ -626,12 +639,16 @@ export function QueryWorkbench() {
         {/* Action row. */}
         <div className="flex items-center gap-2 border-b bg-card px-3 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">SPARQL</span>
-          <Badge variant="outline" className="h-5 gap-1 text-[10px]" title="Where this query runs">
-            LOCAL · in-tab WASM
-          </Badge>
+          {/* [FABLE-5] sq-ixc3.14 — the HONEST run-location badge: in-tab WASM for a plain
+              query; the desktop's native engine (allowlist-gated) when SERVICE is detected;
+              native-only labelling on the web build instead of pretending to federate. */}
+          <RunLocationBadge query={query} />
           {/* [OPUS-4.8] sq-tp1m — the per-workspace inference regime (queries run with the chosen
               RDFS / OWL 2 RL entailment applied by the engine). */}
           <InferenceControl className="ml-2" />
+          {/* [FABLE-5] sq-ixc3.14 — the per-workspace federation egress allowlist (fail-closed:
+              SERVICE may dial ONLY these endpoints, enforced by the native engine). */}
+          <FederationControl className="ml-1" />
           <div className="ml-auto flex items-center gap-1.5">
             <Button
               size="sm"

@@ -1,0 +1,7 @@
+{
+  "pr": 1842,
+  "bead": "sq-7d3dj.30.20",
+  "date": "2026-07-10",
+  "reason": "The antijoin-static-decline feature is OPT-IN and OFF by default, and EVERY source addition it makes is behind #[cfg(feature = \"antijoin-static-decline\")] (verified: zero always-compiled lines removed/modified in exec.rs or lib.rs). So the feature-OFF build compiles ZERO of this feature's code and its runtime behaviour is unchanged. However, inserting those compiled-out tokens into the ~9k-line crates/sparq-engine/src/exec.rs (the theta_antijoin mod's EARLY_DECLINED static + record_early_decline/early_declined fns, the early-decline pre-check in try_theta_antijoin, and the cond_has_seedable_correlation helper) shifts the line!()/panic-Location metadata baked into the surrounding ALWAYS-COMPILED functions and perturbs the optimizer's deterministic inlining/ordering, so the feature-OFF sparq-wasm bundle is no longer byte-for-byte identical to the base tree (the dynamic leg2 base-vs-head comparison against the current main tip observes a same-length content delta; on the CI merge-queue bundle it was +0 bytes). This is a purely compiler-incidental byte move, NOT a default-path/vectorized code leak and NOT a semantic change: the feature-OFF anti-join path executes the identical logic as base. No new dependencies, no unsafe. The move is far inside the wasm_bundle_bytes 2% bench.yml band, so no metrics.wasm_bundle_bytes floor raise is required.",
+  "author": "[FABLE-5]"
+}

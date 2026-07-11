@@ -54,9 +54,30 @@
 //! - The HNDQ poison-graph call limit is enforced (default 4000) and surfaces as
 //!   [`CanonError::Canonicalization`], so pathological inputs fail closed.
 //!
+//! ## Constrained ground-triple-term variant (no nested blank nodes)
+//!
+//! [`canonicalize_rdf12_ground_terms`] (and its `issue_dataset` /
+//! `canonicalize_triples` / `*_with` siblings) is a **thin wrapper** over the
+//! full profile that first checks every triple term is **ground** — contains
+//! no blank node at any nesting depth — and fails closed with
+//! [`CanonError::NestedBlankNode`] otherwise. This is the common
+//! credential/VC shape (asserted/quoted statements about ground content), and
+//! it is semantically the *least* adventurous slice of this profile: with all
+//! triple terms ground, the nested-bnode HNDQ-descent extension is
+//! unreachable (the descent finds nothing to enrol or gossip), so the run is
+//! exactly the RDFC-1.0 algorithm over an alphabet extended with opaque
+//! triple-term constants. A caller that wants a canonical form whose
+//! well-definedness does **not** rest on the novel nested-bnode gossip design
+//! uses these entry points; nested-bnode inputs are rejected rather than
+//! silently canonicalized under the extension. Top-level blank nodes (quad
+//! subject/object/graph) are ordinary RDFC-1.0 bnodes and remain fine. Still
+//! NON-STANDARD: the serialization carries RDF-1.2 `<<( … )>>` tokens, which
+//! W3C RDFC-1.0 has no notion of.
+//!
 //! [OPUS-4.8] sq-hslb — full non-standard RDF-1.2 triple-term canon profile;
 //! sq-5i1d — `*_with::<D: Digest>` hash-profile parity (SHA-384).
 //! Fable unavailable; flag for re-review when Fable returns.
+//! [FABLE-5] sq-iaxd — constrained ground-triple-term (no-nested-bnode) variant.
 
 use crate::CanonError;
 use digest::Digest;
@@ -193,6 +214,109 @@ pub fn canonicalize_graph_content_rdf12_with<D: Digest>(
     // profile too.
     let triples = crate::graph_triples(g)?;
     canonicalize_triples_rdf12_with::<D>(&triples)
+}
+
+// ---------------------------------------------------------------------------
+// Constrained ground-triple-term variant ([FABLE-5] sq-iaxd): thin wrappers
+// that fail closed on any blank node nested inside a triple term, then
+// delegate. With every triple term ground, the nested-bnode HNDQ-descent
+// extension above is unreachable, so these entry points exercise exactly the
+// RDFC-1.0 algorithm with triple terms as opaque constants (see module docs).
+// ---------------------------------------------------------------------------
+
+/// **NON-STANDARD (constrained).** Like [`canonicalize_rdf12`], but requires
+/// every triple term to be **ground** (no blank node at any nesting depth) and
+/// fails closed with [`CanonError::NestedBlankNode`] otherwise — the common
+/// credential/VC case. Top-level blank nodes are ordinary RDFC-1.0 bnodes and
+/// are relabelled as usual. On accepted input the output is byte-identical to
+/// [`canonicalize_rdf12`] (this is a thin guard + delegate wrapper), and the
+/// nested-bnode HNDQ-descent extension is never exercised.
+pub fn canonicalize_rdf12_ground_terms(dataset: &[Quad]) -> Result<String, CanonError> {
+    canonicalize_rdf12_ground_terms_with::<Sha256>(dataset)
+}
+
+/// **NON-STANDARD (constrained).** Like [`canonicalize_rdf12_ground_terms`] but
+/// parameterized over the RDFC-1.0 hash function `D` ([`crate::Digest`]); see
+/// [`canonicalize_rdf12_with`] for the hash-profile semantics.
+pub fn canonicalize_rdf12_ground_terms_with<D: Digest>(
+    dataset: &[Quad],
+) -> Result<String, CanonError> {
+    ensure_ground_triple_terms(dataset)?;
+    canonicalize_rdf12_with::<D>(dataset)
+}
+
+/// **NON-STANDARD (constrained).** Like [`issue_dataset_rdf12`], but fails
+/// closed with [`CanonError::NestedBlankNode`] if any blank node occurs inside
+/// a triple term. See [`canonicalize_rdf12_ground_terms`].
+pub fn issue_dataset_rdf12_ground_terms(
+    dataset: &[Quad],
+) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    issue_dataset_rdf12_ground_terms_with::<Sha256>(dataset)
+}
+
+/// **NON-STANDARD (constrained).** Like [`issue_dataset_rdf12_ground_terms`]
+/// but parameterized over the RDFC-1.0 hash function `D` ([`crate::Digest`]).
+pub fn issue_dataset_rdf12_ground_terms_with<D: Digest>(
+    dataset: &[Quad],
+) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    ensure_ground_triple_terms(dataset)?;
+    issue_dataset_rdf12_with::<D>(dataset)
+}
+
+/// **NON-STANDARD (constrained).** Like [`canonicalize_triples_rdf12`], but
+/// requires every triple term to be ground (no nested blank node) and fails
+/// closed with [`CanonError::NestedBlankNode`] otherwise. See
+/// [`canonicalize_rdf12_ground_terms`].
+pub fn canonicalize_triples_rdf12_ground_terms(
+    triples: &[Triple],
+) -> Result<crate::CanonicalGraph, CanonError> {
+    canonicalize_triples_rdf12_ground_terms_with::<Sha256>(triples)
+}
+
+/// **NON-STANDARD (constrained).** Like
+/// [`canonicalize_triples_rdf12_ground_terms`] but parameterized over the
+/// RDFC-1.0 hash function `D` ([`crate::Digest`]).
+pub fn canonicalize_triples_rdf12_ground_terms_with<D: Digest>(
+    triples: &[Triple],
+) -> Result<crate::CanonicalGraph, CanonError> {
+    if triples.iter().any(|t| term_has_nested_bnode(&t.object)) {
+        return Err(CanonError::NestedBlankNode);
+    }
+    canonicalize_triples_rdf12_with::<D>(triples)
+}
+
+/// The ground-triple-term guard: `Err(NestedBlankNode)` iff any blank node
+/// occurs **inside** a triple-term object of any quad, at any nesting depth.
+/// Top-level subject/object/graph blank nodes do not count — those are
+/// ordinary RDFC-1.0 blank nodes.
+fn ensure_ground_triple_terms(dataset: &[Quad]) -> Result<(), CanonError> {
+    if dataset.iter().any(|q| term_has_nested_bnode(&q.object)) {
+        return Err(CanonError::NestedBlankNode);
+    }
+    Ok(())
+}
+
+/// True iff `term` is a triple term containing a blank node at any depth.
+/// A top-level `Term::BlankNode` is NOT nested and returns `false`.
+fn term_has_nested_bnode(term: &Term) -> bool {
+    match term {
+        Term::Triple(t) => triple_contains_bnode(t),
+        _ => false,
+    }
+}
+
+/// True iff the (triple-term) triple contains a blank node in its subject or
+/// (recursively) its object. Predicates are always IRIs; in oxrdf 0.3 a
+/// triple's subject is `NamedOrBlankNode`, so only the object recurses.
+fn triple_contains_bnode(t: &Triple) -> bool {
+    if matches!(t.subject, NamedOrBlankNode::BlankNode(_)) {
+        return true;
+    }
+    match &t.object {
+        Term::BlankNode(_) => true,
+        Term::Triple(inner) => triple_contains_bnode(inner),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,5 +1386,110 @@ mod private_tests {
             relabel_graph_canonical(&GraphName::DefaultGraph, &issued),
             GraphName::DefaultGraph
         );
+    }
+
+    // ---- ground-triple-term guard helpers ([FABLE-5] sq-iaxd) ----
+
+    /// A TOP-LEVEL blank-node object is NOT "nested" — the guard must accept it
+    /// (it is an ordinary RDFC-1.0 bnode). Kills a `_ => false` → `_ => true`
+    /// arm mutation and pins the load-bearing top-level/nested distinction.
+    #[test]
+    fn term_has_nested_bnode_false_for_top_level_bnode_and_iri() {
+        assert!(!term_has_nested_bnode(&Term::BlankNode(bn("top"))));
+        assert!(!term_has_nested_bnode(&Term::NamedNode(iri("http://ex/o"))));
+        assert!(!term_has_nested_bnode(&Term::Literal(
+            oxrdf::Literal::new_simple_literal("v")
+        )));
+    }
+
+    /// A bnode in the triple term's SUBJECT position must be detected.
+    #[test]
+    fn term_has_nested_bnode_detects_inner_subject() {
+        let tt = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::BlankNode(bn("inner")),
+            iri("http://ex/p"),
+            Term::Literal(oxrdf::Literal::new_simple_literal("v")),
+        )));
+        assert!(term_has_nested_bnode(&tt));
+    }
+
+    /// A bnode in the triple term's OBJECT position must be detected, and a
+    /// fully ground triple term must NOT be.
+    #[test]
+    fn term_has_nested_bnode_detects_inner_object_and_accepts_ground() {
+        let with_bnode = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("inner")),
+        )));
+        assert!(term_has_nested_bnode(&with_bnode));
+        let ground = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::NamedNode(iri("http://ex/o")),
+        )));
+        assert!(!term_has_nested_bnode(&ground));
+    }
+
+    /// `triple_contains_bnode` must recurse through a depth-2 triple term
+    /// (a bnode only at the deepest level). Kills a "no recursion" mutation.
+    #[test]
+    fn triple_contains_bnode_recurses_to_depth_two() {
+        let deepest = Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/x")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("deep")),
+        );
+        let mid = Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/y")),
+            iri("http://ex/q"),
+            Term::Triple(Box::new(deepest)),
+        );
+        assert!(triple_contains_bnode(&mid), "depth-2 bnode must be found");
+        // Same shape but ground at every depth: not detected.
+        let ground_deepest = Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/x")),
+            iri("http://ex/p"),
+            Term::Literal(oxrdf::Literal::new_simple_literal("v")),
+        );
+        let ground_mid = Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/y")),
+            iri("http://ex/q"),
+            Term::Triple(Box::new(ground_deepest)),
+        );
+        assert!(!triple_contains_bnode(&ground_mid));
+    }
+
+    /// `ensure_ground_triple_terms` must accept a dataset whose only bnodes are
+    /// top-level (subject/graph) and reject one with a nested bnode.
+    #[test]
+    fn ensure_ground_triple_terms_guard() {
+        let ground_tt = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::NamedNode(iri("http://ex/o")),
+        )));
+        let ok = Quad::new(
+            NamedOrBlankNode::BlankNode(bn("top")),
+            iri("http://ex/says"),
+            ground_tt,
+            GraphName::BlankNode(bn("g")),
+        );
+        assert!(ensure_ground_triple_terms(std::slice::from_ref(&ok)).is_ok());
+        let bad_tt = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("inner")),
+        )));
+        let bad = Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+            iri("http://ex/says"),
+            bad_tt,
+            GraphName::DefaultGraph,
+        );
+        assert!(matches!(
+            ensure_ground_triple_terms(&[ok, bad]),
+            Err(CanonError::NestedBlankNode)
+        ));
     }
 }

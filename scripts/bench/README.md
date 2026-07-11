@@ -47,6 +47,43 @@ gather-only `/tmp` scratch (pip venv + Jena tarball) — clean with
 `rm -rf /tmp/jena-shacl /tmp/shacl-bench-venv`. First-read + root-cause:
 [`research/shacl-baseline-2026-07.md`](../../research/shacl-baseline-2026-07.md).
 
+## materialize-same-box.sh — reasoning/materialization competitor comparison (sq-hmd7l.7)
+
+Same-box **deductive-closure (materialization)** comparison — **sparq `reason`
+(OWL-RL / RDFS) vs Apache Jena rule reasoners vs VLog vs Nemo** — computing the
+SAME closure over the SAME LUBM `(ABox + TBox)` N-Triples (`bench/lubm/gen.sh`,
+READ-ONLY; `bench/lubm/run.sh` is not touched) at LUBM scales (default `univ=1`
+~103k and `univ=10` ~1.3M input triples). The `univ≥100` canonical EC2 run
+belongs to the canonical wave (sq-hmd7l.26) — this harness does **not** launch
+EC2.
+
+**Oracle = closure-size cross-check.** sparq's `reason` self-reports its closure
+count; the harness asserts it against a pinned per-scale/per-profile expected at
+`univ=1` (`owl=150589`, `rdfs=126732`) and records every engine's closure size
+in the envelope's `count_crosscheck`. INVARIANT: no throughput row without a
+closure-count agreement **or** an explicitly-recorded profile-difference caveat.
+
+**Profile / rule-set fidelity is recorded per column, never absorbed.** The
+compared "closure" is only meaningful if the rule set matches, and it does not
+across engines: sparq `reason owl` is the **full W3C OWL 2 RL/RDF** rule table
+(`crates/sparq-reason`); Jena has **no** full OWL 2 RL reasoner (its
+`OWL_MICRO`/`OWL_MINI`/RDFS rule reasoners are OWL-subset + add axiomatic triples
++ de-dup the ABox on load, so the closure size differs **by construction**); VLog
+and Nemo are **general Datalog** engines that need a separately-validated OWL-RL
+Datalog encoding (`.dlog`/`.rls`) reproducing sparq's closure. Absent a validated
+encoding (or a binary on PATH), the VLog/Nemo columns emit an honest
+`NOT-RUN-LOCALLY` with the exact blocker — never a fabricated number.
+
+Timed figure: sparq's self-reported materialize time (parse excluded); Jena's
+in-process `InfModel` materialize best-of-N (JVM start-up + parse outside the
+timed section; drivers `scripts/bench-adapters/jena_reason_adapter.java`,
+`vlog_adapter.py`, `nemo_adapter.py`). Emits one
+`bench/canonical-competitor-results/`-shaped envelope per scale;
+`canonical:false` unless `CANONICAL=1` (dedicated quiet box). Gather-only Jena
+tarball lives in `/tmp/jena-reason` — clean with `rm -rf /tmp/jena-reason`.
+Acceptance: `ONLY=sparq LUBM_UNIVS=1 scripts/bench/materialize-same-box.sh` exits
+0, asserts the pinned closure counts, emits a well-formed envelope.
+
 ## run-all-benchmarks.sh — whole-estate orchestrator
 
 `run-all-benchmarks.sh` (bead sq-hz0g2) runs the **whole benchmark estate** with

@@ -42,11 +42,17 @@ feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap i
 - **Strict verdicts** (`verdict`): wrong-result violations vs engine failures are never
   conflated; every oracle fails closed on an engine error.
 - **Seeded generator** (`generate`): in-crate SplitMix64, no wall clock or OS
-  randomness — a ledger seed reproduces its case bit-for-bit.
+  randomness — a ledger seed reproduces its case bit-for-bit per generator version
+  (entries also carry the reduced query + data inline).
 - **Found-bug ledger** (`ledger`): JSONL entries **require** an upstream issue URL and
   a developer-confirmation status; unfiled observations are not entries.
 - **Non-vacuity self-tests**: a deliberately-injected wrong-result mutant
   (`FilterDropsRow`) is flagged by all three oracles against the *real* sparq engine.
+- **Nightly CI driver** (`harness` + the `metamorph-driver` binary): seeded window ->
+  TLP + NoREC verdicts per seed, every verdict counted (fail-closed), deterministic
+  repro on failure. Driven by `.github/workflows/metamorph.yml` (advancing nightly
+  window + fixed smoke window, auto-filed findings). Red path on demand:
+  `metamorph-driver <start> <count> --inject-filter-drops-row`.
 
 ## 📚 Learn more
 

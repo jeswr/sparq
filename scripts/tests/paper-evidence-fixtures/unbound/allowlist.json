@@ -1,0 +1,5 @@
+{
+  "_comment": "Empty allowlist — the unbound canonical record is not exempted, so fail-closed fires.",
+  "seed_count": 0,
+  "keys": []
+}

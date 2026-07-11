@@ -28,6 +28,7 @@ import {
   Terminal,
   Code2,
   Info,
+  Waypoints,
 } from "lucide-react";
 
 /** Live-execution tier — drives the honesty badge colour + label. */
@@ -124,9 +125,9 @@ export const FLAGSHIPS: Surface[] = [
 //   4. Privacy (ZK / MPC)— ZK query proofs + MPC federation (the Solid flagship sits in
 //      /showcase; it is surfaced via FLAGSHIPS, not duplicated as a /surface row here)
 //   5. Serve & embed     — HTTP server, CLI, Python, streaming RSP-QL
-// The redesign's aspirational extra rows (structural-similarity, a federation surface
-// page) are NOT invented here — there is no such route today, and this regroup adds no
-// content. They become beads, not fabricated nav entries.
+// The redesign's aspirational extra rows became beads, not fabricated nav entries: the
+// federation row landed via sq-vw3ax.13 (a captured-output demo row under Serve & embed);
+// structural-similarity remains unbuilt and is still NOT invented here.
 export const GROUPS: SurfaceGroup[] = [
   {
     id: "query-data",
@@ -303,6 +304,23 @@ export const GROUPS: SurfaceGroup[] = [
         blurb: "RSP-QL windows (sliding / tumbling, R/I/DSTREAM).",
         tier: "live-new-wasm",
         icon: Radio,
+        built: true,
+      },
+      {
+        slug: "federation",
+        href: "/surface/federation",
+        title: "Federation",
+        blurb:
+          "SERVICE + multi-source federation — cost-based source selection (HiBISCuS/CostFed), brTPF/TPF streaming client, SSRF-guarded transport.",
+        // [FABLE-5] sq-vw3ax.13: walkthrough tier. All three federation crates are
+        // opt-in NATIVE code (sparq-engine-service's SERVICE transport sits behind the
+        // engine's non-default `service` feature and its HTTP stack is compiled out on
+        // wasm32; sparq-fedclient and sparq-fedplan are standalone opt-in members no
+        // wasm bundle depends on), and the static Pages site has no backend — so the
+        // honest surface replays REAL captured sparq-fedplan planner output (the
+        // committed capture harness's verbatim selection + plans), not a live run.
+        tier: "walkthrough",
+        icon: Waypoints,
         built: true,
       },
       {
