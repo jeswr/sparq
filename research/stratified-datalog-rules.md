@@ -126,20 +126,20 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
 
 ## 6. Phased decomposition (beaded)
 
-1. **Semi-naive per-stratum evaluation + scale bench** — delta-restricted positive
+1. **Semi-naive per-stratum evaluation + scale bench** (sq-8sve7) — delta-restricted positive
    joins (the `n3::compiled` `join_steps` discipline); measure before claiming.
-2. **SUM/MIN/MAX/AVG aggregate functions** — value slot on `AggAtom`, substrate `Num`
+2. **SUM/MIN/MAX/AVG aggregate functions** (sq-citho) — value slot on `AggAtom`, substrate `Num`
    tower for input values, overflow semantics decided against SPARQL's.
-3. **Incremental maintenance under insert/delete across strata** — counting/DRed for
+3. **Incremental maintenance under insert/delete across strata** (sq-4foq0, blocked by sq-6tykl.4) — counting/DRed for
    positive strata, rederivation at stratum boundaries; SEQUENCE with sq-6tykl.4.
-4. **External-engine differential arm** — the same fixtures run through Soufflé (or
+4. **External-engine differential arm** (sq-xzb9p) — the same fixtures run through Soufflé (or
    crepe) in an optional CI lane; requires a cargo-vet/tooling decision.
-5. **Fragment extensions** — `NOT` over conjunctions / `NOT EXISTS ?v IN`, FILTER
+5. **Fragment extensions** (sq-a7bmo) — `NOT` over conjunctions / `NOT EXISTS ?v IN`, FILTER
    expressions beyond binary numeric comparison, variable predicates (conservative ⊤
    dependency node), `COUNT(DISTINCT ?v)`.
-6. **Surface wiring** — CLI `--reason datalog:<rules.dlog>`, `MaterializedGraph`-style
+6. **Surface wiring** (sq-p4zci) — CLI `--reason datalog:<rules.dlog>`, `MaterializedGraph`-style
    handle, SKILL/docs examples beyond the API reference.
-7. **N3-compiled adoption of the checker** — replace the documented caller-discipline
+7. **N3-compiled adoption of the checker** (sq-pi2k0) — replace the documented caller-discipline
    stratification of `n3::compiled` `log:notIncludes` with this checked stratification.
-8. **Coverage measure-case wiring** — add `--features datalog` to the sparq-reason
+8. **Coverage measure-case wiring** (sq-iwf3c) — add `--features datalog` to the sparq-reason
    measurement in `scripts/coverage.sh` (the `sparq-reason-el` pattern).
