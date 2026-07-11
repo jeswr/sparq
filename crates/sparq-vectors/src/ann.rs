@@ -279,7 +279,7 @@ impl VectorIndex {
     /// Builds the index with the given [`HnswConfig`].
     ///
     /// [FABLE-5] (sq-jk7w7) Peak memory is ONE copy of the L2-normalised point set plus
-    /// pointer-sized bookkeeping: [`NPoint`] is `Arc`-backed, so the `points.clone()` handed to
+    /// pointer-sized bookkeeping: the internal `NPoint` is `Arc`-backed, so the `points.clone()` handed to
     /// the primary map shares the float allocations with the retained `self.points` (used for
     /// lazy per-`ef_search` secondary maps) instead of deep-copying them. Previously that clone
     /// duplicated the whole point set (~512 MB extra at 1M×128d), doubling build peak memory.
