@@ -658,6 +658,11 @@ restored store. **Fail-closed:** a corrupt / truncated / version-mismatched / no
 rejected (`400`) and the live store is left **untouched** (the new core is built fully before the
 swap). Both routes are **POST-only** and gated by the **write** token (the admin gate). Responses:
 backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact.
+**Single-flight (`sq-fy8ci`):** a restore posted while another is still in flight is rejected
+**`409`** (`a restore is already in progress`) instead of being silently serialized behind it by
+the writer thread (last-writer-wins) — retry after the first completes. Embedders driving
+`AppState::restore_from` directly can claim the same permit via `AppState::try_begin_restore()`
+(an RAII `RestoreGuard`; dropping it — even on a panic — releases the permit).
 
 **Restore into a live durable store (`sq-ft7u`).** On a `--persist` server, a plain
 `/admin/restore` (no opt-in) is **`409`** — an in-memory-only swap on a durable server would be
