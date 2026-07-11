@@ -102,11 +102,16 @@ if you want them without canonicalizing.
 
 ## Errors — fail closed
 
-`CanonError` has three variants:
+`CanonError` has four variants:
 
 - `TripleTerm` — the dataset contains an RDF 1.2 triple term as an object; these
   are outside W3C RDFC-1.0's data model, so the **standard** paths fail closed.
   Enable the opt-in `rdf12-triple-terms` profile (below) to canonicalize them.
+- `NestedBlankNode` — a blank node occurs **inside** a triple term. Only the
+  opt-in profile's constrained `*_ground_terms` entry points (below) construct
+  it: they require blank-node-free (ground) triple terms and fail closed
+  otherwise. The variant itself is always present (not feature-gated), so
+  matching on `CanonError` is identical in both feature states.
 - `Canonicalization(String)` — `rdf-canon` rejected the dataset. This includes
   the **HNDQ call-limit guard**: RDFC-1.0 has pathological-input blow-ups, so a
   poison graph trips the limit and fails closed rather than running unbounded.
@@ -143,7 +148,28 @@ let m  = sparq_canon::issue_dataset_rdf12(&dataset)?;         // issuer map
 let nq384 = sparq_canon::canonicalize_rdf12_with::<sha2::Sha384>(&dataset)?;
 let cg384 = sparq_canon::canonicalize_triples_rdf12_with::<sha2::Sha384>(&triples)?;
 let m384  = sparq_canon::issue_dataset_rdf12_with::<sha2::Sha384>(&dataset)?;
+
+// CONSTRAINED ground-triple-term variant (sq-iaxd): errors with
+// `CanonError::NestedBlankNode` if ANY blank node occurs inside a triple term
+// (at any depth — inner subject or inner object). Same `*_with` siblings.
+let vc  = sparq_canon::canonicalize_rdf12_ground_terms(&dataset)?;   // quads
+let vcg = sparq_canon::canonicalize_triples_rdf12_ground_terms(&triples)?;
+let vm  = sparq_canon::issue_dataset_rdf12_ground_terms(&dataset)?;  // issuer map
 ```
+
+**When to prefer the constrained `*_ground_terms` entry points.** The common
+credential/VC shape quotes or asserts **ground** content: triple terms with no
+blank nodes inside. On that input the constrained wrappers are byte-identical
+to the full profile (they are thin guard + delegate wrappers), but their
+well-definedness does **not** rest on the novel nested-bnode HNDQ-descent
+design — with every triple term ground, the run is exactly the RDFC-1.0
+algorithm over an alphabet extended with opaque triple-term constants, and a
+nested blank node is **rejected** (`CanonError::NestedBlankNode`) instead of
+silently canonicalized under the extension. Top-level blank nodes (quad
+subject/object/graph name) are ordinary RDFC-1.0 bnodes and stay fine. Use the
+full `canonicalize_rdf12` descent only when you actually need nested blank
+nodes relabelled. Still non-standard either way: the canonical N-Quads carry
+RDF-1.2 `<<( … )>>` tokens, which W3C RDFC-1.0 has no notion of.
 
 **Boundary / honesty:** SHA-256 is the default; a `*_with::<D: Digest>` sibling of
 each v2 entry point selects another hash (notably `sha2::Sha384`) for parity with
@@ -193,7 +219,9 @@ bridge + public API. The opt-in, off-by-default `rdf12-triple-terms` profile
 (sq-hslb [OPUS-4.8]) is a native RDFC-1.0 re-implementation extended to RDF 1.2
 triple terms — **non-standard** (W3C RDFC-1.0 is RDF-1.1-only) — now with a
 `*_with::<D: Digest>` hash-profile sibling on every entry point for SHA-384
-parity (sq-5i1d [OPUS-4.8]). The `canonicalize_nquads` / `parse_nquads` text seam
+parity (sq-5i1d [OPUS-4.8]) and a constrained ground-triple-term
+(error-on-nested-bnode) `*_ground_terms` wrapper family for the common
+credential/VC case (sq-iaxd [FABLE-5]). The `canonicalize_nquads` / `parse_nquads` text seam
 and the `sparq-wasm` opt-in `canon` feature (`canonicalizeNQuads` binding for the
 `@jeswr/sparq` RDF/JS `Dataset`) are sq-1dd5t [OPUS-4.8]; that wasm consumer pulls
 `sparq-canon` with `default-features = false` (the crate now disables
