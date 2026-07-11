@@ -24,6 +24,13 @@
 //  (8) ARTIFACT: §8 resource-availability statement (incl. what is NOT yet staged).
 //  Plus: "pre-registered" corrected to "specified" throughout — no public, timestamped
 //  registry deposit exists, so pre-registration may not be claimed.
+// REVISION 2.1 [FABLE-5] sq-zjtu1 — the loud refusal of unimplementable DECLARED
+//  `odrl:conflict` strategies LANDED (sq-ihqbl: `perm` / `invalid`-with-conflict / unknown are
+//  refused before materialisation), so the abstract, C2, the §3 table, §4.2, and Limitation #1
+//  no longer say "does not consult odrl:conflict" / "tracked future work". The remaining
+//  divergence is the UNSET default (`prohibit`, not the IM default `invalid`) — kept
+//  deliberately per the Option-1 decision on issue #1375 and documented in the sparq-policy
+//  crate README conformance note.
 // Single-source Typst. Numbers come ONLY from #headline(...) / #ev(...) (paper-evidence.json),
 // never hard-coded. Compiles to BOTH a PDF (the download) and semantic HTML (the in-site page).
 // EMPIRICAL-HONESTY (sq-gum8): no wall-clock claim (work-box timings are non-canonical and are
@@ -72,9 +79,11 @@ Turtle to compiled triples to a SPARQL audit query and its result). The contribu
 fail-closed lifecycle discipline that compilation — unlike per-request evaluation — demands:
 materialise only definite decisions under a deliberately partial, narrowest-mode action map;
 realise ODRL's `prohibit` conflict strategy structurally through the target layer's unchanged
-allow-minus-deny set subtraction, disclosing that the strategy is hard-wired — a policy
-declaring `odrl:conflict` `perm`, or relying on the ODRL-IM default `invalid`, is not
-representable (§4.2, §6); retract asymmetrically on policy refresh, dropping stale grants
+allow-minus-deny set subtraction, disclosing that it is the only strategy implemented — a
+policy declaring a strategy the bridge cannot honour (`perm`, or `invalid` with a detected
+conflict) is loudly refused rather than silently coerced, while an unset `odrl:conflict`
+operates under `prohibit` rather than the ODRL-IM default `invalid` (§4.2, §6); retract
+asymmetrically on policy refresh, dropping stale grants
 eagerly while a materialised deny survives any re-evaluation that cannot prove the prohibition
 withdrawn; and consume stateful `odrl:count` budgets atomically. We position the design
 against the ODRL enforcement systems it is nearest to (OAC, ODRE, ODRL/Solid and UMA
@@ -136,9 +145,11 @@ do not claim otherwise.
 - *C2 — The `prohibit` conflict strategy by construction* (§4.2). Given ODRL's `prohibit`
   (prohibition-overrides) strategy, the bridge realises it without a bespoke resolver, by the
   target layer's unchanged allow-minus-deny set subtraction; asserted as a machine-checked
-  invariant (holds: #headline("policy_bridge.deny_overrides_correct")). The strategy is
-  hard-wired: the bridge does not consult `odrl:conflict`, so `perm` and the ODRL-IM default
-  `invalid` are not representable — a first-class limitation (§4.2, §6), not a footnote.
+  invariant (holds: #headline("policy_bridge.deny_overrides_correct")). It is the only
+  strategy implemented: a policy declaring a strategy the bridge cannot honour (`perm`,
+  `invalid` with a detected conflict, or an unrecognised value) is loudly refused,
+  materialising nothing, and an _unset_ `odrl:conflict` operates under `prohibit` rather
+  than the ODRL-IM default `invalid` — a first-class limitation (§4.2, §6), not a footnote.
 - *C3 — Asymmetric, fail-closed retraction on policy refresh* (§4.3). Stale grants are
   dropped eagerly; a materialised _deny_ is retracted only when re-evaluation _proves_ the
   prohibition withdrawn — an ambiguous re-evaluation keeps the deny, so refresh can never
@@ -275,7 +286,7 @@ coverage matrix will replace our reading of the papers with per-construct measur
     [Conflict handling],
     [profile-level; evaluator-resolved],
     [engine-resolved at evaluation time],
-    [hard-wired `prohibit` strategy via the target layer's allow-minus-deny set subtraction (C2, machine-checked); `perm`/`invalid` not representable (§4.2, §6)],
+    [single `prohibit` strategy via the target layer's allow-minus-deny set subtraction (C2, machine-checked); unimplementable declared strategies loudly refused; unset default `prohibit`, not the ODRL-IM `invalid` (§4.2, §6)],
     [Policy change / revocation],
     [re-evaluate next request],
     [re-evaluate next request (nothing materialised)],
@@ -352,20 +363,25 @@ conflict default either; its conflict-resolution machinery is explicitly pending
 Prohibition-overrides is therefore _a_ strategy the specification admits, not "the ODRL
 default".
 
-The bridge does not consult `odrl:conflict` at all: it hard-wires the `prohibit` strategy,
-structurally, because the target layer already implements set subtraction. Three consequences
-follow, and we disclose them rather than bury them. First, a policy declaring
-`odrl:conflict odrl:perm` cannot be honoured by this design — set subtraction is
-unidirectional — and is currently processed as if it declared `prohibit`: stricter for the
-contested mode, but a silent deviation from the policy's declared semantics. Second, a policy
-declaring — or, per the specification default, implying — `invalid` is not voided: the bridge
-materialises its uncontested rules and denies only the contested (principal, mode, target)
-combinations, which is _more permissive_ than voiding the whole policy as the
-Recommendation's default demands. Third, mitigation currently lives outside the bridge: the
-policy layer ships a request-free static conflict lint (`detect_conflicts`) with which a
-deployment can refuse conflicting or strategy-declaring policies up front, but the bridge
-itself does not yet refuse them loudly — tracked as future work, and carried as the _first_
-limitation in §6.
+The bridge implements exactly one strategy — `prohibit` — structurally, because the target
+layer already implements set subtraction. It _does_ consult `odrl:conflict`, as a fail-closed
+admissibility guard run before anything is materialised: a policy declaring a strategy the
+bridge cannot faithfully honour — `perm` (set subtraction is unidirectional, so a deny always
+wins), `invalid` with a detected permission/prohibition conflict (the bridge cannot void a
+whole policy), or an unrecognised `odrl:conflict` value — is loudly _refused_, materialising
+neither grants nor denies, rather than silently coerced into deny-overrides. (A declared
+`invalid` with no detected conflict has nothing to void and is admissible.) What remains, and
+we disclose it rather than bury it, is the _unset_ default: a policy declaring no
+`odrl:conflict` is processed under `prohibit`, not the specification default `invalid`. For a
+conflicting-yet-undeclared policy the bridge therefore materialises the uncontested rules and
+denies the contested (principal, mode, target) combinations, which is _more permissive_ than
+voiding the whole policy as the Recommendation's default demands — though never fail-open:
+deny-overrides never grants a contested mode. This divergence is deliberate (honouring
+`invalid` for every undeclared conflicting policy would refuse the bridge's core
+deny-overrides use case), it is documented in the policy crate's conformance note, and it is
+carried as the _first_ limitation in §6. The request-free static conflict lint
+(`detect_conflicts`) remains available for deployments that want to refuse conflicting
+policies up front.
 
 What remains — and it is narrower than the earlier draft claimed — is C2: _given_ the
 `prohibit` strategy, the bridge realises it with no bespoke resolver code to verify, and the
@@ -652,13 +668,17 @@ designed to replace precisely those cells with measured values.
 
 Beyond the pending comparative study (§5.3), seven limitations bound the claim.
 
-First — and normatively the most important — the conflict strategy is hard-wired. The bridge
-implements ODRL's `prohibit` strategy structurally and does not consult `odrl:conflict`: a
-policy declaring `perm` is silently processed under the opposite strategy, and a policy
-relying on the specification default `invalid` has its uncontested rules honoured rather than
-the whole policy voided — more permissive than the Recommendation's stated default (§4.2).
-The static conflict lint in the policy layer is a deployment-side mitigation; loud refusal of
-policies whose declared strategy the bridge cannot honour is tracked future work.
+First — and normatively the most important — the bridge implements exactly one conflict
+strategy. ODRL's `prohibit` strategy is realised structurally, and a policy _declaring_ a
+strategy the bridge cannot honour (`perm`, `invalid` with a detected conflict, or an
+unrecognised value) is loudly refused before anything is materialised (§4.2). What diverges
+is the _unset_ default: a policy declaring no `odrl:conflict` is processed under `prohibit`,
+whereas the Recommendation's stated default is `invalid` — so a conflicting-yet-undeclared
+policy has its uncontested rules honoured rather than the whole policy voided, more
+permissive than the specification default (though never fail-open: the contested
+combinations are denied). The divergence is deliberate — deny-overrides is the fail-closed
+side of an authorization decision — and is documented as the conformance note in the policy
+crate.
 
 Second, the action-to-mode mapping is deliberately conservative and partial: the `odrl:use`
 umbrella is unmapped, so a request must name a concrete action to be bridged. This is a
