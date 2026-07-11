@@ -1,5 +1,7 @@
-//! [FABLE-5] sq-lrtc3.1 — e2e integration tests for the OPT-IN ODRL lane on `POST /authz/query`
-//! (the `odrl-authz` cargo feature; the whole file no-ops without it).
+//! [FABLE-5] sq-lrtc3.1 + sq-3mu76 — e2e integration tests for the OPT-IN ODRL lane on
+//! `POST /authz/query` and (sq-3mu76, §4) the advisory `POST /authz/decide` /
+//! `POST /authz/wac-allow` endpoints (the `odrl-authz` cargo feature; the whole file no-ops
+//! without it).
 //!
 //! Two acceptance pillars (the bead's criteria):
 //!
@@ -316,7 +318,220 @@ async fn lane_refusals_are_4xx_fail_closed() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Dormant lane: no ODRL in the dataset => plain solid-authz behaviour.
+// 4. [FABLE-5] sq-3mu76 — the lane on the ADVISORY endpoints (`/authz/decide`,
+//    `/authz/wac-allow`): a prohibition is never reported past; read-scoped
+//    advertisement; the query lane's refusal matrix.
+// ---------------------------------------------------------------------------
+
+const ACL: &str = "http://www.w3.org/ns/auth/acl#";
+
+/// The n1 content plus a root `.acl`: alice Read (+ the caller's `extra` `.acl` quads).
+fn wac_dataset(extra_acl: &str) -> String {
+    format!(
+        "{CONTENT}\
+         <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{ACL}Authorization> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#owner> <{ACL}default> <https://pod.ex/> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#owner> <{ACL}agent> <{ALICE}> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#owner> <{ACL}mode> <{ACL}Read> <https://pod.ex/.acl> .\n\
+         {extra_acl}"
+    )
+}
+
+/// A second `.acl` authorization: alice Write + PUBLIC (`foaf:Agent`) Read on the pod.
+fn extra_write_and_public_read() -> String {
+    format!(
+        "<https://pod.ex/.acl#w> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{ACL}Authorization> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#w> <{ACL}default> <https://pod.ex/> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#w> <{ACL}agent> <{ALICE}> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#w> <{ACL}mode> <{ACL}Write> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#pub> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{ACL}Authorization> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#pub> <{ACL}default> <https://pod.ex/> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#pub> <{ACL}agentClass> <http://xmlns.com/foaf/0.1/Agent> <https://pod.ex/.acl> .\n\
+         <https://pod.ex/.acl#pub> <{ACL}mode> <{ACL}Read> <https://pod.ex/.acl> .\n"
+    )
+}
+
+/// POST /authz/decide as `agent` (anonymous when `None`) for `(N1, mode)`.
+async fn decide_as(base: &str, dataset: &str, agent: Option<&str>, mode: &str) -> reqwest::Response {
+    let mut session = serde_json::Map::new();
+    if let Some(a) = agent {
+        session.insert("agent".into(), a.into());
+    }
+    let body = serde_json::json!({
+        "dataset": dataset,
+        "session": session,
+        "resource": N1,
+        "mode": mode,
+        "view": "wac",
+    });
+    client().post(format!("{base}/authz/decide")).json(&body).send().await.unwrap()
+}
+
+/// POST /authz/wac-allow as `agent` (anonymous when `None`) for N1.
+async fn wac_allow_as(base: &str, dataset: &str, agent: Option<&str>) -> reqwest::Response {
+    let mut session = serde_json::Map::new();
+    if let Some(a) = agent {
+        session.insert("agent".into(), a.into());
+    }
+    let body = serde_json::json!({
+        "dataset": dataset,
+        "session": session,
+        "resource": N1,
+        "view": "wac",
+    });
+    client().post(format!("{base}/authz/wac-allow")).json(&body).send().await.unwrap()
+}
+
+/// THE sq-3mu76 inconsistency, witnessed then fixed: a dataset-carried ODRL prohibition used to
+/// get a `/authz/decide` allow that `/authz/query` refused to honour. The differential pair
+/// (same static WAC grant, ± the prohibition) also proves the lane — not the fixture — flips
+/// the decision (knocking the endpoint's `apply_odrl_lane` call out turns this red).
+#[tokio::test]
+async fn decide_prohibition_deny_overrides_static_wac_allow() {
+    let base = spawn().await;
+    // Control: the static WAC grant alone decides allow (and the lane stays dormant).
+    let resp = decide_as(&base, &wac_dataset(""), Some(ALICE), "read").await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["allow"], serde_json::Value::Bool(true));
+    // The SAME dataset + an ODRL prohibition of alice's read: deny-overrides, exactly what
+    // `/authz/query` enforces (403 = an authoritative resolved deny).
+    let prohibited = format!("{}{}", wac_dataset(""), prohibit(ALICE));
+    let resp = decide_as(&base, &prohibited, Some(ALICE), "read").await;
+    assert_eq!(resp.status(), 403, "an ODRL prohibition must deny the advisory decision");
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["allow"], serde_json::Value::Bool(false));
+    assert!(
+        v["grantedModes"].as_array().unwrap().is_empty(),
+        "the denied read must not stay advertised"
+    );
+}
+
+/// The grant side composes too: a bridged ODRL permit (bob has NO static grant) decides allow
+/// through the same `∪ allow ∖ ∪ deny` index the query lane enforces.
+#[tokio::test]
+async fn decide_odrl_permit_grants_read_through_the_bridge() {
+    let base = spawn().await;
+    let dataset = format!("{}{}", wac_dataset(""), permit(BOB, ""));
+    // Control: without the permit, bob is denied (the .acl grants alice only).
+    let resp = decide_as(&base, &wac_dataset(""), Some(BOB), "read").await;
+    assert_eq!(resp.status(), 403);
+    // With the ODRL permit the bridge materialises bob's read grant.
+    let resp = decide_as(&base, &dataset, Some(BOB), "read").await;
+    assert_eq!(resp.status(), 200, "a bridged ODRL permit must decide allow");
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["allow"], serde_json::Value::Bool(true));
+    assert_eq!(
+        v["grantedModes"],
+        serde_json::json!(["read"]),
+        "read-scoped advertisement: exactly the lane-evidenced mode"
+    );
+}
+
+/// Read-scoped advertisement on `/authz/decide`: when the lane fires, a static WAC write grant
+/// is NOT advertised alongside the decided read (the lane evidenced no write-action rule —
+/// sq-lrtc3.2); dormant (no ODRL), the full mode set is advertised as before.
+#[tokio::test]
+async fn decide_masks_advertised_modes_to_read_when_lane_fires() {
+    let base = spawn().await;
+    let wac = wac_dataset(&extra_write_and_public_read());
+    // Dormant control: alice's advertisement carries read AND write.
+    let resp = decide_as(&base, &wac, Some(ALICE), "read").await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    let modes: Vec<&str> =
+        v["grantedModes"].as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect();
+    assert!(modes.contains(&"read") && modes.contains(&"write"));
+    // Lane fired (a permit alice already holds statically): the decision is unchanged,
+    // the advertisement is scoped to the evidenced read.
+    let resp =
+        decide_as(&base, &format!("{}{}", wac, permit(ALICE, "")), Some(ALICE), "read").await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["allow"], serde_json::Value::Bool(true));
+    assert_eq!(v["grantedModes"], serde_json::json!(["read"]));
+}
+
+/// `/authz/decide` inherits the query lane's refusal matrix: non-read mode => 400
+/// (sq-lrtc3.2 owns the wider action contract), anonymous session => 403.
+#[tokio::test]
+async fn decide_refusals_match_the_query_lane() {
+    let base = spawn().await;
+    let dataset = format!("{}{}", wac_dataset(&extra_write_and_public_read()), permit(ALICE, ""));
+    let resp = decide_as(&base, &dataset, Some(ALICE), "write").await;
+    assert_eq!(resp.status(), 400, "non-read mode + ODRL must refuse");
+    let resp = decide_as(&base, &dataset, None, "read").await;
+    assert_eq!(resp.status(), 403, "anonymous + ODRL must refuse");
+    // Dormant control: WITHOUT ODRL the same write-mode decide is an ordinary decision
+    // (alice holds Write => allow), proving the 400 above is the lane, not the endpoint.
+    let resp =
+        decide_as(&base, &wac_dataset(&extra_write_and_public_read()), Some(ALICE), "write").await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["allow"], serde_json::Value::Bool(true));
+}
+
+/// `/authz/wac-allow` under the lane: a read prohibition is never advertised past, and the
+/// advertisement is read-scoped — `user` at most `read`, `public` ALWAYS empty (an anonymous
+/// session is refused wherever the lane fires, so public access is never evidenced).
+#[tokio::test]
+async fn wac_allow_is_read_scoped_and_never_advertises_a_prohibited_read() {
+    let base = spawn().await;
+    let wac = wac_dataset(&extra_write_and_public_read());
+    // Dormant control: the full static advertisement (user read+write, public read).
+    let resp = wac_allow_as(&base, &wac, Some(ALICE)).await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    let dormant = v["wacAllow"].as_str().unwrap().to_owned();
+    assert!(dormant.contains("write") && dormant.contains(r#"public="read""#));
+    // Lane fired, permit only: read survives, write/public are scoped out (fail-closed).
+    let resp = wac_allow_as(&base, &format!("{}{}", wac, permit(ALICE, "")), Some(ALICE)).await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["wacAllow"], r#"user="read",public="""#);
+    // Lane fired, prohibition: the statically-granted read is NOT advertised past the deny.
+    let resp = wac_allow_as(&base, &format!("{}{}", wac, prohibit(ALICE)), Some(ALICE)).await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["wacAllow"], r#"user="",public="""#);
+    // And the refusal matrix holds here too: anonymous + ODRL => 403.
+    let resp = wac_allow_as(&base, &format!("{}{}", wac, permit(ALICE, "")), None).await;
+    assert_eq!(resp.status(), 403);
+}
+
+/// [FABLE-5] sq-3mu76 — the trust dispatch decides over its OWN store and would bypass the
+/// ODRL lane; the combination is refused up front rather than silently dropping a prohibition.
+#[cfg(feature = "solid-authz-trust")]
+#[tokio::test]
+async fn decide_refuses_trust_block_combined_with_odrl() {
+    let graph = Graph::load_str(BOOT, "turtle").unwrap();
+    let config = ServerConfig {
+        solid_authz: true,
+        solid_authz_trust: true,
+        ..ServerConfig::default()
+    };
+    let app = router(AppState::with_config(graph, config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let dataset = format!("{}{}", wac_dataset(""), prohibit(ALICE));
+    let body = serde_json::json!({
+        "dataset": dataset,
+        "session": {"agent": ALICE},
+        "resource": N1,
+        "mode": "read",
+        "view": "wac",
+        "trust": {"rules": [], "credentials": [], "certifications": []},
+    });
+    let resp = client().post(format!("{base}/authz/decide")).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "trust + ODRL composition must refuse (fail-closed)");
+}
+
+// ---------------------------------------------------------------------------
+// 5. Dormant lane: no ODRL in the dataset => plain solid-authz behaviour.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
