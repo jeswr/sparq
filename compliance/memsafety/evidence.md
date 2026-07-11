@@ -7,57 +7,65 @@ Each control in [`controls.md`](./controls.md) is backed here by the **exact** f
 test, or CI job, plus the command an auditor re-runs to confirm it. Paths are
 repo-relative. No timing is recorded (NON-CANONICAL EC2 box).
 
-## MS-1 — confined unsafe surface (43 `forbid` crates, 7 unsafe-bearing crates, 52 total)
+## MS-1 — confined unsafe surface (44 `forbid` crates, 8 unsafe-bearing crates, 53 total)
 
 ```sh
 grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/.*##' | sort -u | wc -l
 ```
-→ **43 crates** carry a `forbid(unsafe_code)` in their source: sparq-algos, sparq-arrow,
+→ **44 crates** carry a `forbid(unsafe_code)` in their source: sparq-algos, sparq-arrow,
 sparq-canon, sparq-conformance, sparq-engine, sparq-engine-serialize, sparq-engine-service,
 sparq-fedclient, sparq-fedplan, sparq-fedplan-mpc, sparq-geo, sparq-gpu, sparq-hdt,
-sparq-introspect, sparq-jsonld, sparq-mcp, sparq-mpc, sparq-nlq, sparq-parse, sparq-policy,
-sparq-prov, sparq-py, sparq-reason, sparq-reason-dl, sparq-reason-el, sparq-reason-ql,
-sparq-reason-wasm, sparq-rsp, sparq-rsp-wasm, sparq-serve, sparq-server, sparq-shacl,
-sparq-shacl-wasm, sparq-sim, sparq-solid, sparq-substrate, sparq-terse, sparq-text,
-sparq-text-wasm, sparq-trust, sparq-vc, sparq-wasm, sparq-zk. (42 carry an unconditional
+sparq-introspect, sparq-jsonld, sparq-lws-core, sparq-mcp, sparq-mpc, sparq-nlq, sparq-parse,
+sparq-policy, sparq-prov, sparq-py, sparq-reason, sparq-reason-dl, sparq-reason-el,
+sparq-reason-ql, sparq-reason-wasm, sparq-rsp, sparq-rsp-wasm, sparq-serve, sparq-server,
+sparq-shacl, sparq-shacl-wasm, sparq-sim, sparq-solid, sparq-substrate, sparq-terse, sparq-text,
+sparq-text-wasm, sparq-trust, sparq-vc, sparq-wasm, sparq-zk. (43 carry an unconditional
 crate-root `#![forbid(unsafe_code)]`; **sparq-py** is the one conditional case —
 `#![cfg_attr(not(feature = "arrow"), forbid(unsafe_code))]`, `deny`-level under `arrow` so its
 single Arrow FFI block is allowed with a `// SAFETY:` note.)
 
 ```sh
-ls -d crates/*/ | wc -l       # → 52 total crates
+ls -d crates/*/ | wc -l       # → 53 total crates
 ```
 Accounting (**the crates do NOT partition cleanly — the two sets overlap, so do not add them**):
-of **52 total** crates, **43** carry a source `forbid(unsafe_code)` and **7** are unsafe-bearing
+of **53 total** crates, **44** carry a source `forbid(unsafe_code)` and **8** are unsafe-bearing
 in `bench/unsafe-snapshot.json` (sparq-core, sparq-vectors, sparq-engine, sparq-py, sparq-cli,
-sparq-zk-compose, sparq-bench). Two crates appear in BOTH sets: **sparq-engine** (its src is
-`forbid`-clean — 0 `unsafe` in `src/`; its 4 counted sites are TEST-ONLY, in a bench allocator
-under `tests/`, which compile as a separate crate the crate-root `forbid` does not cover) and
-**sparq-py** (conditional `forbid`, above). The remaining 4 crates carry neither a source
-`forbid` nor counted unsafe (dev/bench helpers: sparq-acbench, sparq-difftest, sparq-kb,
-sparq-metamorph). <!-- [OPUS-4.8] sq-i6gj6: MS-1/MS-2 reconciled to the live workspace — 52
+sparq-zk-compose, sparq-bench, sparq-lws-core). THREE crates appear in BOTH sets:
+**sparq-engine** (its src is `forbid`-clean — 0 `unsafe` in `src/`; its 4 counted sites are
+TEST-ONLY, in a bench allocator under `tests/`, which compile as a separate crate the
+crate-root `forbid` does not cover), **sparq-py** (conditional `forbid`, above), and
+**sparq-lws-core** (src + bin `forbid`-clean; its 8 counted sites are EXAMPLE-only counting
+allocators under `examples/`, likewise outside the crate-root `forbid` — sq-gg0qq.2 [FABLE-5]).
+The remaining 4 crates carry neither a source `forbid` nor counted unsafe (dev/bench helpers:
+sparq-acbench, sparq-difftest, sparq-kb, sparq-metamorph). <!-- [OPUS-4.8] sq-i6gj6: MS-1/MS-2 reconciled to the live workspace — 52
 crates (was a stale 36), 43 `forbid`-in-src (was a stale 31), 7 unsafe-bearing (was a stale 5);
 the old "N forbid + M unsafe = total, no overlap" identity was FALSE (sparq-engine test-only +
 sparq-py arrow-gated overlap both sets). Numbers re-derived from the two commands shown above +
 `bench/unsafe-snapshot.json`; nothing hand-transcribed. -->
 
-## MS-2 — 76-site register, count-verified
+## MS-2 — 84-site register (ceiling; 83 live), count-verified
 
 ```sh
-python3 scripts/unsafe-gate.py --check    # → "live total = 76, snapshot total = 76"
+python3 scripts/unsafe-gate.py --check    # → "live total = 83, snapshot total = 84"
 ```
 Per-crate (from `--check`, matching `bench/unsafe-snapshot.json::crates`):
 
 | crate | snapshot | live |
 |---|---:|---:|
 | sparq-core | 50 | 50 |
-| sparq-vectors | 13 | 13 |
+| sparq-vectors | 13 | 12 |
+| sparq-lws-core | 8 | 8 |
 | sparq-engine | 4 | 4 |
 | sparq-py | 4 | 4 |
 | sparq-cli | 2 | 2 |
 | sparq-zk-compose | 2 | 2 |
 | sparq-bench | 1 | 1 |
-| **total** | **76** | **76** |
+| **total** | **84** | **83** |
+
+<!-- [FABLE-5] sq-gg0qq.2: sparq-lws-core imported with 8 EXAMPLE-only counting-allocator
+sites (register rows in unsafe-register.md). sparq-vectors live=12 sits one BELOW its 13
+snapshot ceiling (allowed — smaller is always allowed; the #1870 SIMD rework removed a site
+without re-seeding). Tightening that ceiling is beaded separately, not ridden here. -->
 
 <!-- [OPUS-4.8] sq-i6gj6: table re-synced to bench/unsafe-snapshot.json (was a stale 59/5-crate
 snapshot: sparq-core rose 45→50, sparq-vectors 9→13, and sparq-engine/sparq-py picked up

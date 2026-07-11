@@ -136,13 +136,28 @@ mod gated {
     /// The 27 pinned M7 rows (`WebOnt-I5.26-002`/`-005`, `WebOnt-disjointWith-003`…`-009`,
     /// each EL/QL/RL) whose singleton `owl:intersectionOf ( :A )` L1 now normalizes to its
     /// member all PASS; `PROFILE_DIVERGENCES` is now empty. [FABLE-5]
-    pub const DL_PROFILE_FLOOR: usize = 95;
+    /// Re-pinned by sq-pbz04.4.9 (datatype-map IRI refusal at L1): −1 (95 → 94). One
+    /// positively-tagged profile row (`WebOnt-I5.3-015`, tagged EL — the same case whose
+    /// premise carries `xsd:integer`/`xsd:string` ranges) previously EXTRACTED under the
+    /// opaque-datatype reading and passed the L2 grammar walk; L1 now refuses the datatype
+    /// IRI as a `DataConstruct`, so its profile set is `Unknown` → the row moves to the
+    /// abstained bucket (`DL_PROFILE_ABSTAINED` 117 → 118). Honest fail-closed shift — a
+    /// pass under a wrong opaque-datatype reading becomes an honest abstention (the M4
+    /// precedent). [FABLE-5]
+    pub const DL_PROFILE_FLOOR: usize = 94;
 
     /// EXPLICIT-NEGATIVE profile lane REFUTED (pass) count — checkable
     /// `owl:NegativePropertyAssertion(case, test:profile, {EL|QL|RL})` rows the L2 checker
-    /// DEFINITIVELY refuted (`NotIn`), driven `expect_in = false`. RISE-only: a genuine new
-    /// full-profile restriction only ADDS refutations. [FABLE-5] sq-pbz04.4.16
-    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 139;
+    /// DEFINITIVELY refuted (`NotIn`), driven `expect_in = false`. RISE-only in the ABSENCE
+    /// of an extraction-boundary change: a genuine new full-profile restriction only ADDS
+    /// refutations. [FABLE-5] sq-pbz04.4.16
+    /// Re-pinned by sq-pbz04.4.9 (datatype-map IRI refusal at L1): −2 (139 → 137). Two
+    /// explicit-negation rows whose input carries a bare datatype IRI in a class position now
+    /// REFUSE extraction (`DataConstruct`), so L2 can no longer answer `NotIn` on them — they
+    /// move from refuted to abstained (`DL_PROFILE_NEGATIVE_ABSTAINED` 615 → 617; checkable
+    /// denominator 319 → 317). Not a refutation regression: the rows became honestly
+    /// out-of-fragment, exactly the fail-closed L1 boundary. [FABLE-5]
+    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 137;
 
     /// EXPLICIT-NEGATIVE profile lane In-GAP — checkable explicit-negation rows where L2
     /// answered `In` (could not refute full-profile membership from axiom-grammar membership
@@ -151,13 +166,17 @@ mod gated {
     /// sq-1ivw7-style follow-ups). The In-vs-negative gap is `IN_GAP` of
     /// `REFUTED + IN_GAP` = 180 of 319 (improved from the pre-lane measurement 211/322 — the
     /// M7 normalization moved the 27 singleton cases into the checkable set on BOTH sides).
+    /// Unchanged by sq-pbz04.4.9: the two datatype rows that left the checkable set were
+    /// REFUTED (not In-gap), so IN_GAP stays 180 while the denominator drops 319 → 317.
     /// [FABLE-5] sq-pbz04.4.16
     pub const DL_PROFILE_NEGATIVE_IN_GAP: usize = 180;
 
     /// EXPLICIT-NEGATIVE profile lane ABSTAINED — explicit-negation rows where L1 extraction
     /// refused (out-of-fragment input), so L2 abstained (`Unknown`) rather than answering
     /// either direction. Pinned so the tri-state accounting closes. [FABLE-5] sq-pbz04.4.16
-    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 615;
+    /// Re-pinned by sq-pbz04.4.9 (datatype-map IRI refusal at L1): +2 (615 → 617) — the two
+    /// datatype rows that left [`DL_PROFILE_NEGATIVE_REFUTED`] land here. [FABLE-5]
+    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 617;
 
     /// EXPLICIT-NEGATIVE profile lane OUT-OF-SCOPE — explicit-negation rows excluded at
     /// selection (owl:imports / functional-syntax-only input). [FABLE-5] sq-pbz04.4.16
@@ -169,8 +188,9 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the scoped
     /// fragment — NOT full OWL 2 DL.
     ///
-    /// COMPOSITION: 97 consistency + 14 inconsistency + 69 positive-entailment +
+    /// COMPOSITION: 96 consistency + 14 inconsistency + 70 positive-entailment +
     /// 2 negative-entailment = 182. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12/.13
+    /// (was 97+14+69+2 before sq-pbz04.4.9 — see the sq-pbz04.4.9 re-pin note below.)
     /// Re-pinned by sq-pbz04.4.11 (M1 named-composite fix): +8 net.
     /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): −3 (192 → 189) — three graphs with
     /// an unconsumed anonymous composite (`WebOnt-I5.26-001`/`-006` consistency; `WebOnt-I5.5-005`
@@ -197,6 +217,22 @@ mod gated {
     /// there. Honest routing to a guarded branch, not a lost capability — the tableau would
     /// still decide these if reached; graduating them back is a deliberate future re-pin once
     /// the RL divergence guard is narrowed or a tableau fallback is added. [FABLE-5]
+    /// UNCHANGED at 182 by sq-pbz04.4.9, but COMPOSITION shifted (97+69 → 96+70 across the
+    /// consistency/positive-entailment split). TWO independent effects net to zero on the pass
+    /// total AND leave the audited fail set (M3/M5/M6, 5 rows) exactly unchanged:
+    ///   (a) the new `SubObjectPropertyOf` conclusion refutation encoding (the sq-pbz04.4.9
+    ///       feature) graduates one property-axiom-conclusion positive-entailment row from a
+    ///       (previously `UnencodedConclusion`) abstention to a definitive PASS: +1 pos-ent;
+    ///   (b) the datatype-map IRI refusal at L1 (`extract.rs` `datatype_iri_name`) makes the
+    ///       `WebOnt-I5.3-015` consistency-lane row (its premise carries `xsd:integer`/
+    ///       `xsd:string` ranges) refuse extraction, so it moves from a definitive `Consistent`
+    ///       PASS to an honest `OutOfFragment` abstention: −1 consistency. Crucially, that same
+    ///       L1 refusal is what REMOVES the would-be NEW positive-entailment divergence
+    ///       `WebOnt-I5.3-015` (whose conclusion `p ⊑ q` the RBox encoding would otherwise have
+    ///       decided `NotEntailed` — sound-as-scoped under opaque datatypes, but a wrong-looking
+    ///       definitive verdict on an input the fragment cannot actually reason about; the
+    ///       escalated soundness verdict directed refusing at L1 rather than pinning it). Net:
+    ///       DIRECT pass total 182 → 182, fail set unchanged. [FABLE-5] sq-pbz04.4.9
     pub const DL_DIRECT_FLOOR: usize = 182;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
@@ -209,7 +245,11 @@ mod gated {
     /// set is `Unknown` → abstain (previously it extracted and answered a wrong `NotIn`, the
     /// M7 singleton-intersection divergence — now superseded by the honest abstention).
     /// [OPUS-4.8] sq-pbz04.4.12
-    pub const DL_PROFILE_ABSTAINED: usize = 117;
+    /// Re-pinned by sq-pbz04.4.9 (datatype-map IRI refusal at L1): +1 (117 → 118). The
+    /// `WebOnt-I5.3-015` positive profile row (EL-tagged; its premise carries `xsd:integer`/
+    /// `xsd:string` ranges) now REFUSES extraction, moving from a pass to an abstention (see
+    /// [`DL_PROFILE_FLOOR`]). [FABLE-5]
+    pub const DL_PROFILE_ABSTAINED: usize = 118;
     /// See [`DL_PROFILE_ABSTAINED`].
     /// Re-pinned by sq-pbz04.4.11: +4 from the 4 consistency cases that shifted from
     /// Pass to OutOfFragment (budget exhaustion on the now-more-complete model).
@@ -229,6 +269,12 @@ mod gated {
     /// M7 fix re-routes from the ALCH tableau (Pass) to the RL branch move to a fail-closed
     /// `RlDivergenceGuard("owl:disjointWith")` abstention — see [`DL_DIRECT_FLOOR`] for the full
     /// mechanism (honest routing to a guarded branch, never a wrong verdict). [FABLE-5]
+    /// UNCHANGED at 472 by sq-pbz04.4.9 (measured), composition-shifted: the new
+    /// `SubObjectPropertyOf` conclusion encoding graduates property-axiom-conclusion rows OUT
+    /// of abstention (−N), while the L1 datatype-map refusal moves the `WebOnt-I5.3-015`
+    /// consistency row plus its would-be positive-entailment divergence INTO OutOfFragment
+    /// abstention (+N) — the two effects net to zero on the total; see [`DL_DIRECT_FLOOR`].
+    /// [FABLE-5] sq-pbz04.4.9
     pub const DL_DIRECT_ABSTAINED: usize = 472;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M3/M5/M6): every row
@@ -308,10 +354,19 @@ mod gated {
     /// extractor refuses) — fixed by always emitting the explicit
     /// `A owl:equivalentClass _:b` shape (see `render.rs`), which moved those 15 from
     /// violations to passes (278 → 293). [FABLE-5] sq-pbz04.4.17
-    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 293;
+    /// Re-pinned by sq-pbz04.4.9 (datatype-map IRI refusal at L1): −2 (293 → 291). Two
+    /// DIRECT-arm documents carried a bare `xsd:*` datatype IRI in a class-expression
+    /// position (an `rdfs:range`/`rdfs:domain` object) and had been round-tripping through
+    /// the OLD opaque-object-class reading; L1 now refuses that as a `DataConstruct`
+    /// (`extract.rs` `datatype_iri_name`), so they move from round-tripped to
+    /// extraction-refused (`DL_RENDER_ROUNDTRIP_REFUSED` 378 → 380). Honest shift — a
+    /// coincidental round-trip under a wrong reading becomes an honest refusal; `violations`
+    /// stays 0 (no fidelity bug). [FABLE-5]
+    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 291;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents the L1 extractor refused
     /// (out-of-ALCH-fragment; the renderer contract is scoped to successful extractions).
-    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 378;
+    /// Re-pinned by sq-pbz04.4.9: +2 (378 → 380) — see [`DL_RENDER_ROUNDTRIP_FLOOR`].
+    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 380;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents whose RDF/XML literal oxrdfxml
     /// rejects (the M6 mechanism, `FS2RDF-literals-ar`); they reach no lane's extraction.
     pub const DL_RENDER_ROUNDTRIP_PARSE_FAILED: usize = 1;

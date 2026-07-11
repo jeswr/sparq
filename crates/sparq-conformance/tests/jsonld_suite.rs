@@ -18,7 +18,8 @@
 //!
 //! * **toRdf** (JSON-LD → RDF) — see `jsonld_suite/to_rdf.rs`.
 //! * **fromRdf** (RDF → JSON-LD, round-trip) — see `jsonld_suite/from_rdf.rs`.
-//! * **compact** (RDF → compacted JSON-LD, lossless round-trip) — see
+//! * **compact** (native document-level `sparq_jsonld::compact::compact()` oracle
+//!   against the W3C expected document — [FABLE-5] sq-oy1f.27) — see
 //!   `jsonld_suite/compact.rs`.
 //! * **frame** (RDF → framed JSON-LD over the SEPARATE `w3c/json-ld-framing`
 //!   suite) — see `jsonld_suite/frame.rs`.

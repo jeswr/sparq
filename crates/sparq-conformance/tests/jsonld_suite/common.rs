@@ -142,6 +142,12 @@ pub struct Entry {
     /// `JsonLdOptions.expand_context`; `None` for the toRdf/fromRdf/compact/frame
     /// manifests (the expand manifest is the only one that has this option).
     pub expand_context_path: Option<String>,
+    /// [FABLE-5] sq-oy1f.27 — `option.compactArrays` / `option.compactToRelative`
+    /// (compact-manifest options). Forwarded to the native compact() oracle as
+    /// `JsonLdOptions.compact_arrays` / `.compact_to_relative`; `None` (spec default
+    /// `true`) when the manifest entry does not set them.
+    pub compact_arrays: Option<bool>,
+    pub compact_to_relative: Option<bool>,
 }
 
 /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -208,6 +214,11 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             .and_then(|o| o.get("expandContext"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        // [FABLE-5] sq-oy1f.27 — compact-manifest options (None elsewhere).
+        let compact_arrays = opt.and_then(|o| o.get("compactArrays")).and_then(Value::as_bool);
+        let compact_to_relative = opt
+            .and_then(|o| o.get("compactToRelative"))
+            .and_then(Value::as_bool);
         out.push(Entry {
             id,
             is_negative,
@@ -221,6 +232,8 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             frame,
             expect_error_code,
             expand_context_path,
+            compact_arrays,
+            compact_to_relative,
         });
     }
     Ok(out)
@@ -275,40 +288,6 @@ pub fn dataset_to_nquads(ds: &Dataset) -> String {
     out
 }
 
-/// [OPUS-4.8] sq-3uos5 — read a `compact` test's context file and extract the
-/// caller `@context` value as the writer's [`JsonLdValue`]. The suite's
-/// `*-context.jsonld` files wrap the context in `{"@context": …}`; sparq's
-/// `ActiveContext::parse` (and so `graph_to_jsonld_compact`) expects the INNER
-/// value (the term-definition object), so we unwrap one `@context` layer. When
-/// the inner value is an object we hand it straight to the writer; an
-/// array/string form (a remote-context reference or multi-context array) is NOT
-/// resolved here (no network, and the writer takes a single inline object) — the
-/// caller SKIPS such cases.
-///
-/// [`JsonLdValue`]: sparq_engine::serialize::JsonLdValue
-pub fn read_context_member(path: &Path) -> Result<sparq_engine::serialize::JsonLdValue, String> {
-    use sparq_engine::serialize::{parse_context_json, JsonLdValue};
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read context {}: {e}", path.display()))?;
-    // Parse the whole context document with the writer's own tiny JSON reader,
-    // then pull out the `@context` member (the value the writer compacts against).
-    let doc = parse_context_json(&text).ok_or_else(|| "context file is not a JSON object".to_string())?;
-    match doc {
-        JsonLdValue::Obj(members) => {
-            let inner = members
-                .into_iter()
-                .find(|(k, _)| k == "@context")
-                .map(|(_, v)| v)
-                .ok_or_else(|| "context file has no @context member".to_string())?;
-            // Only a single inline object context is drivable through the writer.
-            match inner {
-                JsonLdValue::Obj(_) => Ok(inner),
-                _ => Err("non-object @context (array/string/remote) — not drivable".to_string()),
-            }
-        }
-        _ => Err("context document is not an object".to_string()),
-    }
-}
 
 // ── JSON-LD document-level equality comparator ──────────────────────────────
 //
