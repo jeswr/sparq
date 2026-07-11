@@ -42,7 +42,8 @@ feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap i
 - **Strict verdicts** (`verdict`): wrong-result violations vs engine failures are never
   conflated; every oracle fails closed on an engine error.
 - **Seeded generator** (`generate`): in-crate SplitMix64, no wall clock or OS
-  randomness — a ledger seed reproduces its case bit-for-bit.
+  randomness — a ledger seed reproduces its case bit-for-bit per generator version
+  (entries also carry the reduced query + data inline).
 - **Found-bug ledger** (`ledger`): JSONL entries **require** an upstream issue URL and
   a developer-confirmation status; unfiled observations are not entries.
 - **Non-vacuity self-tests**: a deliberately-injected wrong-result mutant

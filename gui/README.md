@@ -115,6 +115,18 @@ dial ONLY the per-workspace `Federation` control's entries (host / host:port / `
 same grammar as sparq-server's `--service-allow`); everything else, including public hosts, is
 refused pre-HTTP. The browser build labels SERVICE **native-only** (CORS) instead of pretending.
 
+For **usage control** (`sq-ixc3.15`), the **Policies (ODRL) tool** runs its whole round-trip in
+one native command (`odrl_preview`, behind the crate's opt-in `odrl` feature, pulling the
+research-track `sparq-policy` evaluator + `sparq-solid` enforcement store): author/validate a
+Turtle ODRL policy, evaluate a (party, action, target) request — decision + matched rules + unmet
+constraints — then run the SAME SPARQL query ungated AND per requester through `PodStore`'s
+**fail-closed** per-session named-graph gating (the one-shot `odrl-bridge` materialization path;
+the `*_conditional` variants with the bare-assignee widening hazard, bead `sq-9n1q4`, are not
+wired). A malformed policy materializes **nothing** — deny-everything with the parser's verbatim
+reason — and an `odrl:prohibition` visibly flips a previously visible named graph to hidden in
+that requester's pane. The browser build labels the tool **native-only** (the ODRL stack is not
+in the wasm bundle) instead of pretending.
+
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 

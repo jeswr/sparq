@@ -114,7 +114,7 @@ pub(crate) fn process_inner(
 
     // step 3: when not propagating, remember the input context to revert to.
     if !propagate && result.previous_context.is_none() {
-        result.previous_context = Some(Box::new(active.clone()));
+        result.previous_context = Some(std::sync::Arc::new(active.clone()));
     }
 
     // step 4: normalise to an array of contexts.
@@ -132,7 +132,7 @@ pub(crate) fn process_inner(
             }
             let mut fresh = ActiveContext::new(active.original_base_url.as_deref());
             if !propagate {
-                fresh.previous_context = Some(Box::new(result.clone()));
+                fresh.previous_context = Some(std::sync::Arc::new(result.clone()));
             }
             result = fresh;
             continue;
@@ -405,7 +405,7 @@ pub(crate) fn create_term_definition(
     }
 
     // step 6: remove and remember any existing definition (for the protected check).
-    let previous_definition = active.term_definitions.remove(term);
+    let previous_definition = active.term_definitions_mut().remove(term);
 
     // steps 7–9: normalise the value to a map and record whether it was a simple term.
     let (value, simple_term) = match &raw {
@@ -494,9 +494,14 @@ pub(crate) fn create_term_definition(
             // The check is also skipped when the IRI mapping is a keyword (e.g. `@type`):
             // keywords are not IRIs, so the round-trip "expand term = IRI mapping" predicate
             // cannot hold and the check would always fire spuriously.
+            // [FABLE-5] (sq-oy1f.27) The round-trip check applies to a term containing
+            // a colon "anywhere but as the first or last character" (§4.2.2 step
+            // 14.3.3) — a term ENDING in a colon (the `"prefix:"` declaration form,
+            // W3C compact/p003-p004) is a regular term, not a compact-IRI form.
             if env.mode != ProcessingMode::JsonLd10
                 && !is_keyword(&expanded)
-                && (term.find(':').is_some_and(|i| i > 0) || term.contains('/'))
+                && (term.find(':').is_some_and(|i| i > 0 && i < term.len() - 1)
+                    || term.contains('/'))
             {
                 defined.insert(term.to_string(), true);
                 let rt = expand_iri_in_context(active, term, false, true, local, defined, env)?;
@@ -504,7 +509,12 @@ pub(crate) fn create_term_definition(
                     return Err(JsonLdError::new(E::InvalidIriMapping));
                 }
             }
-            // Simple-term prefix flag.
+            // Simple-term prefix flag (§4.2.2 step 23): only a SIMPLE (string-valued)
+            // term whose IRI ends in a gen-delim is a prefix — deliberately in BOTH
+            // processing modes, matching jsonld.js and pyld (W3C compact/p001 pins the
+            // 1.0-mode half: an expanded term definition is not a prefix in 1.0 either;
+            // the one suite case that presumes 1.0-era prefixing, compact/0038, is an
+            // honest FAIL for REC-conformant processors — see the compact floor doc).
             if simple_term
                 && term.find(':').is_none()
                 && !term.contains('/')
@@ -629,7 +639,7 @@ fn create_reverse_definition(
         def.index = Some(is);
     }
     def.reverse = true;
-    active.term_definitions.insert(term.to_string(), def);
+    active.term_definitions_mut().insert(term.to_string(), def);
     defined.insert(term.to_string(), true);
     Ok(())
 }
@@ -783,7 +793,7 @@ fn finish_definition(
         }
     }
 
-    active.term_definitions.insert(term.to_string(), def);
+    active.term_definitions_mut().insert(term.to_string(), def);
     defined.insert(term.to_string(), true);
     Ok(())
 }

@@ -361,6 +361,14 @@ export interface EngineContextValue {
    */
   snapshotStore: () => string | null;
   /**
+   * [FABLE-5] sq-ixc3.16 — the live store's CONTENT epoch: bumps whenever the base store's
+   * content changes (hydration / import / a successful SPARQL UPDATE). Already the internal
+   * signal the inference closure rebuilds on (sq-tp1m); exposed so an operational tool (the
+   * Streaming tool's workspace feed) can react to workspace updates without polling. Strictly
+   * monotone within a session; carries no content itself — pair with {@link snapshotStore}.
+   */
+  storeEpoch: number;
+  /**
    * [OPUS-4.8] sq-lcd6e — REPLACE the live store with a restored workspace's persisted SNAPSHOT
    * (its whole-dataset N-Quads). This is the fix for the silent data-loss-on-relaunch: the warm
    * path no longer unconditionally seeds the sample graph — the store's INITIAL content comes
@@ -1298,6 +1306,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      storeEpoch,
       hydrateFromSnapshot,
       inferenceMode,
       inferenceStatus,
@@ -1322,6 +1331,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      storeEpoch,
       hydrateFromSnapshot,
       inferenceMode,
       inferenceStatus,

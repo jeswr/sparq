@@ -658,6 +658,11 @@ restored store. **Fail-closed:** a corrupt / truncated / version-mismatched / no
 rejected (`400`) and the live store is left **untouched** (the new core is built fully before the
 swap). Both routes are **POST-only** and gated by the **write** token (the admin gate). Responses:
 backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact.
+**Single-flight (`sq-fy8ci`):** a restore posted while another is still in flight is rejected
+**`409`** (`a restore is already in progress`) instead of being silently serialized behind it by
+the writer thread (last-writer-wins) — retry after the first completes. Embedders driving
+`AppState::restore_from` directly can claim the same permit via `AppState::try_begin_restore()`
+(an RAII `RestoreGuard`; dropping it — even on a panic — releases the permit).
 
 **Restore into a live durable store (`sq-ft7u`).** On a `--persist` server, a plain
 `/admin/restore` (no opt-in) is **`409`** — an in-memory-only swap on a durable server would be
@@ -1048,6 +1053,18 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
 - `POST /authz/query` — body `{ "dataset", "session", "mode"?, "query", "view"? }` runs an
   **access-controlled** SPARQL query as the session and returns SPARQL-results JSON; a grant-less
   session sees ZERO rows (empty view), never the whole store.
+  - **ODRL lane** (`odrl-authz` cargo feature, default OFF; sq-lrtc3.1): when the request dataset
+    carries ODRL policy rules (`odrl:permission`/`odrl:prohibition`), the handler parses them from
+    the UNION of the dataset's graphs and runs the `sparq-solid` bridge
+    (`PodStore::materialize_odrl_policy`, BOTH sides, deny-overrides) for
+    (party = session agent, action = `odrl:read`, target = each rule's target graph) BEFORE the
+    query — an ODRL prohibition beats a static WAC grant through the unchanged
+    `∪ allow ∖ ∪ deny` enforcement. Fail-closed 4xx refusals (never a silent allow): malformed
+    policy, unimplementable `odrl:conflict` strategy, a rule without a concrete target graph IRI
+    (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), or an
+    anonymous session. Constraints the stateless lane cannot evidence (`odrl:purpose`,
+    `odrl:count` — stateful budgets are sq-snopa.8) never grant. Feature OFF ⇒ byte-identical
+    `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
 
 **FAIL-CLOSED (the soundness invariant):** every error path DENIES — an unparseable dataset is a
 `400` (never an empty-dataset allow), a materialisation failure a `503`, an unknown mode a `403`
