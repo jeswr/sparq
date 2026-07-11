@@ -54,12 +54,20 @@
 //! REAL here: the leaf-scan-then-adaptive-join executor, the observed-cardinality capture from
 //! the real adapter, the [`RuntimeStats`](sparq_fedplan::RuntimeStats) /
 //! [`AdaptiveExecutor`](sparq_fedplan::AdaptiveExecutor) wiring, the
-//! at-most-once-per-boundary bound, and the two correctness tests on the real interpreter path
+//! at-most-once-per-boundary bound, and the correctness tests on the real interpreter path
 //! (the in-crate canned-SRJ tests below, plus the end-to-end
-//! `tests/adaptive_result_equals_static.rs` against the REAL engine). The executor is
-//! **single-source** (it shares the Phase-3/5
-//! [`InterpError::MultiSource`](crate::operators::InterpError) guard) and each per-stage join
-//! is the materialised [`natural_join`](crate::operators).
+//! `tests/adaptive_result_equals_static.rs` against the REAL engine). Two entry points share
+//! the loop ([FABLE-5] sq-xw8zz): [`execute_adaptive_single_source`] keeps the Phase-3/5
+//! [`InterpError::MultiSource`](crate::operators::InterpError) guard (one explicit adapter for
+//! every leaf), and [`execute_adaptive_multi_source`] lifts it — a leaf the planner retained
+//! several sources for is answered as the **bag-union of per-arm fetches** (the `sq-7yf0`
+//! union semantics), with each arm's wall-clock latency recorded per source index into
+//! [`RuntimeStats`](sparq_fedplan::RuntimeStats), so the re-plan cost model's latency factor
+//! (slowest-arm by default,
+//! [`LatencyAggregation::CardinalityWeighted`](sparq_fedplan::LatencyAggregation) opt-in,
+//! `sq-s5kd`) runs on LIVE per-arm observations rather than only planner-level/test-injected
+//! ones. Each
+//! per-stage join is the materialised [`natural_join`](crate::operators).
 //!
 //! By its nature the observed-cardinality boundary is a **materialisation point** — a leaf must
 //! be drained to be counted — so the adaptive path scans each leaf fully (once) to learn its
@@ -72,8 +80,13 @@
 // [OPUS-4.8] sq-ij5x (epic sq-dnko, FINAL phase): client-side adaptive re-planning. Wires
 // sparq-fedplan's AdaptiveExecutor into the real federated execution loop. Flagged for Fable
 // re-review when available.
+// [FABLE-5] sq-xw8zz: multi-source (union-arm) adaptive execution loop — lifts the
+// MultiSource guard behind `execute_adaptive_multi_source` and feeds LIVE per-arm latencies
+// into RuntimeStats (makes the sq-s5kd CardinalityWeighted aggregation live-consumable).
 
-use crate::operators::{natural_join, InterpError, Relation};
+use crate::operators::{
+    fetch_leaf_relation, leaf_source_indices, natural_join, rel_row_project, InterpError, Relation,
+};
 use crate::planner::{lower_leaf, pattern_vars, SourceResolver};
 use crate::source::FederatedSource;
 use sparq_fedplan::{
@@ -109,6 +122,14 @@ pub struct AdaptiveOutcome {
     /// (after the seed, before each subsequent join). [`ReplanOutcome::Switched`] entries
     /// mark the boundaries the suffix order actually changed at.
     pub replans: Vec<ReplanEvent>,
+    /// The final [`RuntimeStats`] the execution accumulated — observed leaf cardinalities
+    /// from BOTH entry points, plus (multi-source only, [FABLE-5] sq-xw8zz) the LIVE per-arm
+    /// EWMA latency per source index that [`execute_adaptive_multi_source`] recorded around
+    /// each arm's fetch. Exposed so a caller can carry observations across queries, feed a
+    /// failover layer, or (as the tests do) assert exactly what the re-planner saw. The
+    /// single-source loop records NO latencies — every leaf is answered by the one shared
+    /// adapter, so there is no per-arm comparison to inform.
+    pub stats: RuntimeStats,
 }
 
 impl AdaptiveOutcome {
@@ -166,7 +187,6 @@ pub fn execute_adaptive_single_source(
     // reuse, exactly like plan_bgp). We drive it; it never touches the answer.
     let mut exec = AdaptiveExecutor::new(bgp, descriptors, selection, tree, opts, policy);
     let mut stats = RuntimeStats::new();
-    let mut replans: Vec<ReplanEvent> = Vec::new();
 
     // ---- Leaf-scan phase: materialise each leaf's relation ONCE and record its TRUE observed
     // cardinality. A leaf scan is order-independent (it is the per-pattern solution multiset
@@ -183,8 +203,85 @@ pub fn execute_adaptive_single_source(
         leaf_rel.insert(pattern, leaf);
     }
 
-    // ---- Adaptive join-ordering phase: walk the executor stage by stage, re-planning the
-    // UNJOINED REMAINDER at each operator boundary from the real observations.
+    Ok(adaptive_join_phase(&mut exec, stats, leaf_rel, resolver))
+}
+
+/// Execute a `sparq-fedplan` [`JoinTree`] across **all retained sources per leaf** with
+/// adaptive re-planning of the unjoined remainder — the Phase-7 counterpart of
+/// [`materialize_multi_source`](crate::operators::materialize_multi_source), lifting the
+/// [`InterpError::MultiSource`] guard the single-source loop keeps ([FABLE-5] sq-xw8zz).
+///
+/// Where [`execute_adaptive_single_source`] answers every leaf from one explicit adapter
+/// (and rejects a multi-source leaf), this entry point resolves each leaf's retained source
+/// **indices** ([`PatternSources::candidates`](sparq_fedplan::PatternSources)) to adapters
+/// through the `resolver` and answers the leaf as the **bag-union** of every retained arm's
+/// relation — the exact `sq-7yf0` union semantics (row concatenation re-keyed onto the
+/// pattern's canonical header, no de-duplication; a leaf whose selection retained no source
+/// is the empty relation). The leaf-scan phase additionally records, per arm:
+///
+/// * **the arm's wall-clock fetch latency** (milliseconds) into
+///   [`RuntimeStats::record_source_latency`] under the arm's SOURCE index — a leaf served by
+///   two arms yields two DISTINCT per-source observations, which is what makes the cost
+///   model's latency factor (slowest-arm by default, the opt-in per-source
+///   [`LatencyAggregation::CardinalityWeighted`](sparq_fedplan::LatencyAggregation) from
+///   `sq-s5kd`, and a future failover layer) consumable from a LIVE run rather than only
+///   from planner-level tests. A failed arm records nothing — its latency is a transport
+///   error, not an observation, and propagates as the leaf's error (fail closed, no silent
+///   arm-drop);
+/// * **the observed leaf cardinality = the union count** (total rows across arms) into
+///   [`RuntimeStats::record_leaf_cardinality`], the same divergence signal the single-source
+///   loop feeds.
+///
+/// The adaptive join-ordering phase is the SAME loop as the single-source entry point
+/// (shared code): at each operator boundary the executor may re-order only the not-yet-
+/// executed suffix, so the result-equivalence property is inherited unchanged — the returned
+/// [`AdaptiveOutcome::relation`] carries the SAME solution multiset as
+/// [`materialize_multi_source`](crate::operators::materialize_multi_source) over the same
+/// plan + selection, for ANY divergence (asserted by the tests below). Latency observations
+/// bias cost/ordering ONLY, never membership or the answer.
+///
+/// On `wasm32` (no monotonic clock in `std`) every arm's latency records as `0.0` — the
+/// union semantics and the cardinality-driven re-planning are unaffected.
+pub fn execute_adaptive_multi_source(
+    bgp: &sparq_fedplan::Bgp,
+    descriptors: &[SourceDescriptor],
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    tree: &JoinTree,
+    opts: PlanOptions,
+    policy: ReplanPolicy,
+) -> Result<AdaptiveOutcome, InterpError> {
+    let mut exec = AdaptiveExecutor::new(bgp, descriptors, selection, tree, opts, policy);
+    let mut stats = RuntimeStats::new();
+
+    // ---- Leaf-scan phase (union-arm): materialise each leaf ONCE as the bag-union of its
+    // retained arms, timing every arm's fetch and folding the observation into the per-source
+    // latency EWMA. The scan is order-independent exactly as in the single-source loop.
+    let mut leaf_rel: std::collections::HashMap<usize, Relation> = std::collections::HashMap::new();
+    for pattern in tree.join_order() {
+        let leaf = fetch_leaf_union(resolver, selection, pattern, &mut |source, latency_ms| {
+            stats.record_source_latency(source, latency_ms);
+        })?;
+        // The observed leaf cardinality IS the union count across the retained arms.
+        stats.record_leaf_cardinality(pattern, leaf.rows.len() as f64);
+        leaf_rel.insert(pattern, leaf);
+    }
+
+    Ok(adaptive_join_phase(&mut exec, stats, leaf_rel, resolver))
+}
+
+/// The adaptive join-ordering phase SHARED by both entry points: walk the executor stage by
+/// stage, at each operator boundary considering (at most once) a re-plan of the UNJOINED
+/// REMAINDER from the accumulated observations, joining each already-scanned leaf onto the
+/// running prefix with the materialised [`natural_join`]. Factored out by [FABLE-5] sq-xw8zz
+/// so the single-source and union-arm loops cannot drift. [OPUS-4.8] sq-ij5x.
+fn adaptive_join_phase(
+    exec: &mut AdaptiveExecutor<'_>,
+    stats: RuntimeStats,
+    mut leaf_rel: std::collections::HashMap<usize, Relation>,
+    resolver: &SourceResolver<'_>,
+) -> AdaptiveOutcome {
+    let mut replans: Vec<ReplanEvent> = Vec::new();
     let mut acc: Option<Relation> = None;
     let mut executed_order: Vec<usize> = Vec::new();
     let mut boundary: usize = 0;
@@ -220,18 +317,19 @@ pub fn execute_adaptive_single_source(
     // Project onto the whole-BGP variable set, matching the static interpreters.
     let project = bgp_vars(resolver);
     let relation = acc.unwrap_or_default().project(&project);
-    Ok(AdaptiveOutcome {
+    AdaptiveOutcome {
         relation,
         executed_order,
         replans,
-    })
+        stats,
+    }
 }
 
 /// Fetch + parse one leaf pattern's sub-result from the single source, enforcing the SAME
 /// single-source guard as the static interpreters (a leaf the planner retained more than one
 /// source for is rejected with [`InterpError::MultiSource`], never silently dropped — the
-/// multi-source UNION-per-leaf fan-out remains the deferred slice it is in Phase 3/5).
-/// [OPUS-4.8] sq-ij5x.
+/// union-arm fan-out is [`execute_adaptive_multi_source`]'s [`fetch_leaf_union`], [FABLE-5]
+/// sq-xw8zz). [OPUS-4.8] sq-ij5x.
 fn fetch_leaf(
     resolver: &SourceResolver<'_>,
     selection: &[PatternSources],
@@ -250,6 +348,64 @@ fn fetch_leaf(
     let sub = lower_leaf(tp);
     let body = source.execute(&sub)?;
     crate::operators::parse_srj(&body).map_err(InterpError::BadSrj)
+}
+
+/// Answer ONE leaf pattern as the **bag-union over its retained arms**, timing each arm:
+/// resolve every retained source index to its adapter, fetch the leaf relation from each arm
+/// with the SAME per-source fetch the static multi-source interpreter uses
+/// ([`fetch_leaf_relation`], so endpoint/TPF/brTPF dispatch is identical), report each
+/// successful arm's `(source index, wall-clock latency ms)` through `observe_arm`, and
+/// concatenate the rows re-keyed onto the pattern's canonical header (SPARQL UNION multiset
+/// semantics, no de-duplication — byte-compatible with `sq-7yf0`'s
+/// [`materialize_multi_source`](crate::operators::materialize_multi_source) leaf).
+///
+/// A failed arm reports NOTHING and fails the whole leaf closed (its measured duration is a
+/// transport error's, not a served answer's — folding it into the EWMA would make a
+/// fast-failing source look attractively fast). A pattern with no retained source is the
+/// empty relation over the pattern's variables. [FABLE-5] sq-xw8zz.
+fn fetch_leaf_union(
+    resolver: &SourceResolver<'_>,
+    selection: &[PatternSources],
+    pattern: usize,
+    observe_arm: &mut dyn FnMut(usize, f64),
+) -> Result<Relation, InterpError> {
+    let tp = resolver.pattern(pattern)?;
+    let vars = pattern_vars(tp);
+    let mut union = Relation {
+        vars: vars.clone(),
+        rows: Vec::new(),
+    };
+    for idx in leaf_source_indices(selection, pattern) {
+        let source = resolver.source(idx)?;
+        let (fetched, latency_ms) = timed(|| fetch_leaf_relation(source, tp));
+        let leaf = fetched?;
+        observe_arm(idx, latency_ms);
+        // Re-key onto the canonical leaf header so every arm's rows union column-aligned
+        // (a source's SRJ header may differ in order from the pattern's variable order).
+        for row in &leaf.rows {
+            union.rows.push(rel_row_project(&leaf.vars, row, &vars));
+        }
+    }
+    Ok(union)
+}
+
+/// Run `f`, returning its result plus the elapsed wall-clock time in **milliseconds** — the
+/// unit [`RuntimeStats`]' latency EWMA and [`ReplanPolicy::latency_baseline`] are documented
+/// in. On `wasm32` `std` has no monotonic clock ([`std::time::Instant::now`] aborts at
+/// runtime), so the elapsed time reports as `0.0` there — union semantics and the
+/// cardinality-driven re-planning are unaffected; only the latency bias is inert.
+/// [FABLE-5] sq-xw8zz.
+fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let start = std::time::Instant::now();
+        let out = f();
+        (out, start.elapsed().as_secs_f64() * 1_000.0)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        (f(), 0.0)
+    }
 }
 
 /// All distinct variables of the resolver's BGP, in first-seen order — the `SELECT *` scope,
@@ -695,5 +851,354 @@ mod tests {
         assert!(tree.is_some());
         let _ = SubQuery::new("ASK {}");
         let _ = FedError::Transport("x".into());
+    }
+
+    // ---- Multi-source (union-arm) adaptive loop, [FABLE-5] sq-xw8zz ------------------------
+
+    use crate::operators::materialize_multi_source;
+    use sparq_fedplan::LatencyAggregation;
+
+    /// A transport that sleeps a fixed duration before answering from canned answers — gives
+    /// an arm a REAL, measurable wall-clock fetch latency. [FABLE-5] sq-xw8zz.
+    struct SleepTransport {
+        inner: MapTransport,
+        delay: std::time::Duration,
+    }
+    impl Transport for SleepTransport {
+        fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String> {
+            std::thread::sleep(self.delay);
+            self.inner.fetch(endpoint, query)
+        }
+    }
+
+    /// A transport that always fails — proves the union-arm loop fails CLOSED on a broken arm
+    /// instead of silently dropping it. [FABLE-5] sq-xw8zz.
+    struct FailTransport;
+    impl Transport for FailTransport {
+        fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
+            Err("arm down".to_string())
+        }
+    }
+
+    /// The `star_fixture` divergence scenario SPLIT across two sources: S0 serves :a, :c and
+    /// two of :b's three rows; S1 serves :b's remaining row — so pattern 1 is a genuine 2-arm
+    /// union leaf while the per-pattern estimate totals (:a 10, :b 10+10=20, :c 1000) and the
+    /// observed union counts (3/3/2) stay IDENTICAL to `star_fixture`, hence the same static
+    /// order and the same expected mid-execution switch. [FABLE-5] sq-xw8zz.
+    #[allow(clippy::type_complexity)]
+    fn union_star_fixture() -> (
+        Bgp,
+        [SourceDescriptor; 2],
+        StdHashMap<String, String>,
+        StdHashMap<String, String>,
+    ) {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/a"), var("x")),
+            TriplePattern::new(var("s"), iri("http://ex/b"), var("y")),
+            TriplePattern::new(var("s"), iri("http://ex/c"), var("z")),
+        ]);
+        let s0 = SourceDescriptor::builder(SourceId::new("S0"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/a", 10, 10, 10))
+            .predicate(pred("http://ex/b", 10, 10, 10))
+            .predicate(pred("http://ex/c", 1000, 1000, 1000))
+            .build();
+        let s1 = SourceDescriptor::builder(SourceId::new("S1"))
+            .total_triples(100)
+            .predicate(pred("http://ex/b", 10, 10, 10))
+            .build();
+
+        let mut a0 = StdHashMap::new();
+        a0.insert(
+            "SELECT ?s ?x WHERE { ?s <http://ex/a> ?x }".to_string(),
+            srj(
+                &["s", "x"],
+                &[
+                    &[("s", "http://ex/s1"), ("x", "http://ex/x1")],
+                    &[("s", "http://ex/s2"), ("x", "http://ex/x2")],
+                    &[("s", "http://ex/s3"), ("x", "http://ex/x3")],
+                ],
+            ),
+        );
+        // :b — S0's fragment (two of the three union rows).
+        a0.insert(
+            "SELECT ?s ?y WHERE { ?s <http://ex/b> ?y }".to_string(),
+            srj(
+                &["s", "y"],
+                &[
+                    &[("s", "http://ex/s1"), ("y", "http://ex/y1")],
+                    &[("s", "http://ex/s2"), ("y", "http://ex/y2")],
+                ],
+            ),
+        );
+        a0.insert(
+            "SELECT ?s ?z WHERE { ?s <http://ex/c> ?z }".to_string(),
+            srj(
+                &["s", "z"],
+                &[
+                    &[("s", "http://ex/s1"), ("z", "http://ex/z1")],
+                    &[("s", "http://ex/s3"), ("z", "http://ex/z3")],
+                ],
+            ),
+        );
+        // :b — S1's fragment (the remaining union row; triple-disjoint from S0's).
+        let mut a1 = StdHashMap::new();
+        a1.insert(
+            "SELECT ?s ?y WHERE { ?s <http://ex/b> ?y }".to_string(),
+            srj(&["s", "y"], &[&[("s", "http://ex/s1"), ("y", "http://ex/y7")]]),
+        );
+        (bgp, [s0, s1], a0, a1)
+    }
+
+    /// sq-xw8zz core: a plan with a genuine 2-arm union leaf executes adaptively — the
+    /// divergent fixture still switches, the union leaf's observed cardinality is the UNION
+    /// count, and the answer equals the static multi-source interpreter's multiset (the
+    /// `sq-7yf0` reference whose own oracle is local union-graph engine eval). Non-vacuous:
+    /// the executed order really differs from the static order.
+    #[test]
+    fn multi_source_adaptive_replans_and_equals_materialize_multi_source() {
+        let (bgp, descriptors, a0, a1) = union_star_fixture();
+        let sel = select_sources(&bgp, &descriptors);
+        assert_eq!(sel[1].candidates.len(), 2, "pattern 1 must be a 2-arm union leaf");
+        assert_eq!(sel[0].candidates.len(), 1);
+        assert_eq!(sel[2].candidates.len(), 1);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+        assert_eq!(tree.join_order(), vec![0, 1, 2], "static order is [:a,:b,:c]");
+
+        let ep0 = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(a0)));
+        let ep1 = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(a1)));
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep0, &ep1];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+
+        // The sq-7yf0 static multi-source interpreter is the reference multiset.
+        let reference = materialize_multi_source(&resolver, &sel, &tree).unwrap();
+        assert!(!reference.rows.is_empty(), "fixture must produce rows");
+
+        let out = execute_adaptive_multi_source(
+            &bgp,
+            &descriptors,
+            &resolver,
+            &sel,
+            &tree,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        )
+        .unwrap();
+
+        // The divergence really re-plans (same shape as the single-source star fixture).
+        assert_eq!(out.switch_count(), 1, "the divergent fixture must switch exactly once");
+        assert_eq!(
+            out.executed_order,
+            vec![0, 2, 1],
+            "the now-cheap :c arm executes before the now-expensive :b arm"
+        );
+        assert_ne!(out.executed_order, tree.join_order(), "non-vacuous switch");
+
+        // The union leaf's observed cardinality is the UNION count (2 rows from S0 + 1 from S1).
+        assert_eq!(out.stats.observed_leaf(1), Some(3.0));
+
+        // Union arms + re-planning change the plan, never the answer.
+        assert!(
+            solutions_equal(
+                &out.relation.vars,
+                &out.relation.rows,
+                &reference.vars,
+                &reference.rows
+            ),
+            "adaptive multi-source result MUST equal materialize_multi_source.\n adaptive={:?}\n static={:?}",
+            out.relation,
+            reference,
+        );
+    }
+
+    /// THE sq-xw8zz acceptance: a 2-arm union pattern records TWO DISTINCT per-source
+    /// latencies from a LIVE run, and the opt-in `CardinalityWeighted` aggregation (sq-s5kd)
+    /// consumes them end-to-end — the re-planner is consulted at the operator boundaries with
+    /// exactly these live stats. (The weighted-mean fold itself is planner-tested in
+    /// `sparq-fedplan`; what THIS pins is the live feed that used to be impossible — before
+    /// sq-xw8zz the adaptive loop hard-errored on any multi-source pattern, so a live run
+    /// could never produce distinct per-arm observations.)
+    #[test]
+    fn cardinality_weighted_consumes_two_distinct_live_arm_latencies() {
+        let (bgp, descriptors, a0, a1) = union_star_fixture();
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+
+        // Arm S0 answers immediately; arm S1 sleeps — a real, measurable latency gap.
+        let ep0 = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(a0)));
+        let ep1 = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(SleepTransport {
+                inner: MapTransport::new(a1),
+                delay: std::time::Duration::from_millis(80),
+            }),
+        );
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep0, &ep1];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let reference = materialize_multi_source(&resolver, &sel, &tree).unwrap();
+
+        let policy = ReplanPolicy {
+            latency_aggregation: LatencyAggregation::CardinalityWeighted,
+            ..ReplanPolicy::default()
+        };
+        let out = execute_adaptive_multi_source(
+            &bgp,
+            &descriptors,
+            &resolver,
+            &sel,
+            &tree,
+            PlanOptions::default(),
+            policy,
+        )
+        .unwrap();
+
+        // TWO DISTINCT live per-source observations: the slow arm's EWMA reflects its sleep
+        // (`thread::sleep` guarantees AT LEAST the requested 80ms), the fast arm's stays far
+        // below it.
+        let fast = out
+            .stats
+            .observed_latency_of(0)
+            .expect("arm 0 (fast) latency recorded");
+        let slow = out
+            .stats
+            .observed_latency_of(1)
+            .expect("arm 1 (slow) latency recorded");
+        assert!(slow >= 79.0, "slow arm >= its sleep floor, got {slow}ms");
+        assert!(
+            slow > fast,
+            "per-arm latencies must be DISTINCT (slow {slow}ms > fast {fast}ms)"
+        );
+
+        // The weighted policy was consulted at the operator boundaries WITH those stats…
+        assert!(!out.replans.is_empty(), "re-plan considered at >=1 boundary");
+        // …and latency aggregation biases cost/ordering only, never the answer.
+        assert!(solutions_equal(
+            &out.relation.vars,
+            &out.relation.rows,
+            &reference.vars,
+            &reference.rows
+        ));
+    }
+
+    /// A multi-source execution whose every leaf retained exactly ONE source degrades to the
+    /// single-source loop's behaviour: same executed order, same switches, same multiset.
+    /// Also pins the [`AdaptiveOutcome::stats`] contract — BOTH loops record every leaf's
+    /// observed cardinality; only the union-arm loop records per-arm latencies (the
+    /// single-source loop answers every leaf from the one shared adapter — no per-arm
+    /// comparison to inform). [FABLE-5] sq-xw8zz.
+    #[test]
+    fn single_arm_multi_source_degrades_to_single_source_and_exposes_stats() {
+        let (bgp, descriptors, answers) = star_fixture();
+        let sel = select_sources(&bgp, &descriptors);
+        let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
+
+        let ep_s = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(answers.clone())),
+        );
+        let adapters_s: Vec<&dyn FederatedSource> = vec![&ep_s];
+        let resolver_s = SourceResolver::new(&bgp, &adapters_s);
+        let single = execute_adaptive_single_source(
+            &bgp,
+            &descriptors,
+            &resolver_s,
+            &sel,
+            &ep_s,
+            &tree,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        )
+        .unwrap();
+
+        let ep_m = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(answers)));
+        let adapters_m: Vec<&dyn FederatedSource> = vec![&ep_m];
+        let resolver_m = SourceResolver::new(&bgp, &adapters_m);
+        let multi = execute_adaptive_multi_source(
+            &bgp,
+            &descriptors,
+            &resolver_m,
+            &sel,
+            &tree,
+            PlanOptions::default(),
+            ReplanPolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(multi.executed_order, single.executed_order);
+        assert_eq!(multi.switch_count(), single.switch_count());
+        assert!(solutions_equal(
+            &multi.relation.vars,
+            &multi.relation.rows,
+            &single.relation.vars,
+            &single.relation.rows
+        ));
+
+        // stats contract: both loops record every leaf's observed (union) cardinality…
+        for p in 0..bgp.patterns.len() {
+            assert!(single.stats.observed_leaf(p).is_some());
+            assert_eq!(multi.stats.observed_leaf(p), single.stats.observed_leaf(p));
+        }
+        // …but only the union-arm loop records per-arm latencies.
+        assert!(single.stats.observed_latency_of(0).is_none());
+        assert!(multi.stats.observed_latency_of(0).is_some());
+    }
+
+    /// A pattern whose selection retained NO source is the EMPTY relation over the pattern's
+    /// variables — nothing fetched (PanicTransport proves it), nothing observed. The
+    /// source-selection layer stays the single source of truth. [FABLE-5] sq-xw8zz.
+    #[test]
+    fn fetch_leaf_union_unretained_pattern_is_empty_and_silent() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(PanicTransport));
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let mut observed: Vec<(usize, f64)> = Vec::new();
+        let rel =
+            fetch_leaf_union(&resolver, &[], 0, &mut |i, l| observed.push((i, l))).unwrap();
+        assert_eq!(rel.vars, vec!["s".to_string(), "o".to_string()]);
+        assert!(rel.rows.is_empty());
+        assert!(observed.is_empty(), "no arm, no observation");
+    }
+
+    /// A failing arm fails the WHOLE leaf closed — the error propagates (the later arm is
+    /// never reached: PanicTransport), and the broken arm records NO latency observation (a
+    /// transport error's duration is not a served answer's; folding it in would make a
+    /// fast-failing source look attractively fast). Live failover is the deferred follow-up
+    /// this seam feeds. [FABLE-5] sq-xw8zz.
+    #[test]
+    fn fetch_leaf_union_failing_arm_fails_closed_and_unobserved() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri("http://ex/p"),
+            var("o"),
+        )]);
+        let mk = |id: &str| {
+            SourceDescriptor::builder(SourceId::new(id))
+                .total_triples(10)
+                .predicate(pred("http://ex/p", 10, 10, 10))
+                .build()
+        };
+        let descriptors = [mk("A"), mk("B")];
+        let sel = select_sources(&bgp, &descriptors);
+        assert_eq!(sel[0].candidates.len(), 2, "both arms retained");
+        let ep_broken = Endpoint::new("http://8.8.8.8/sparql", Box::new(FailTransport));
+        let ep_never = Endpoint::new("http://8.8.8.8/sparql", Box::new(PanicTransport));
+        let adapters: Vec<&dyn FederatedSource> = vec![&ep_broken, &ep_never];
+        let resolver = SourceResolver::new(&bgp, &adapters);
+        let mut observed: Vec<(usize, f64)> = Vec::new();
+        let err = fetch_leaf_union(&resolver, &sel, 0, &mut |i, l| observed.push((i, l)))
+            .unwrap_err();
+        assert!(
+            matches!(err, InterpError::Source(_)),
+            "transport error propagates: {err:?}"
+        );
+        assert!(
+            observed.is_empty(),
+            "failed arm must not fold a latency observation"
+        );
     }
 }

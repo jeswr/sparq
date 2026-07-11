@@ -75,9 +75,7 @@ container maps, `@nest`, `@reverse`, `@included`, `@json`, keyword aliases (bead
 Bead `sq-oy1f.26` adds **Node Map Generation** (`generate_node_map`, §7.2) with a
 deterministic `_:bN` blank-node issuer, and the document-level **Flattening Algorithm**
 (`flatten`, §7.1 = expand ∘ node-map ∘ named-graph fold, sorted by `@id`, empty nodes
-dropped). The `flatten` conformance lane runs the native document oracle. Post-flatten
-compaction to the `{ "@context": …, "@graph": … }` shape composes the Compaction Algorithm
-(bead `sq-oy1f.27`).
+dropped). The `flatten` conformance lane runs the native document oracle.
 
 Bead `sq-oy1f.28` adds **Serialize RDF as JSON-LD** (`from_rdf::from_rdf`, §8.1): an RDF
 dataset (the crate-local `RdfTerm`/`RdfQuad` model — still zero deps) becomes the expanded
@@ -86,9 +84,18 @@ literal` on malformed input), `rdf:List` → `@list` reconstruction (nested list
 malformed/shared chains stay plain nodes), and `useNativeTypes`/`useRdfType` via
 `FromRdfOptions`. The `fromRdf` conformance lane runs this native path document-level.
 
-The remaining modules (`compact`, `frame`, `to_rdf`, `api`) are documented stubs, filled
-by dependency-ordered follow-on beads. The crate is `publish = false` until the pipeline
-is real.
+Bead `sq-oy1f.27` adds the document-level **Compaction Algorithm** + **Value
+Compaction** (`compact::compact` / `compact::compact_expanded`): scoped
+(property/type) contexts with previous-context reversion, container reshaping
+(`@list`, `@language`/`@index`/`@id`/`@type` maps, the `@graph` container forms),
+`@nest`, `@reverse` redistribution, keyword aliasing, and the `compactArrays` /
+`compactToRelative` / `ordered` options. The `compact` conformance lane compares
+against the W3C **expected** documents (the normative oracle; see
+`sparq-conformance`'s `floors::compact` for the honest fail/skip buckets).
+
+The remaining modules (`frame`, `to_rdf`, `api`) are documented stubs, filled by
+dependency-ordered follow-on beads. The crate is `publish = false` until the
+pipeline is real.
 
 ## 📚 Learn more
 

@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{is_keyword, ActiveContext, Direction, Override, TermDefinition};
+use super::{has_keyword_form, is_keyword, ActiveContext, Direction, Override, TermDefinition};
 use super::iri::relativize_iri;
 use crate::json::Json;
 
@@ -196,15 +196,16 @@ impl ActiveContext {
 /// Returns `None` when both overrides are `Unset` (the "no explicit
 /// language/direction" case, handled separately).
 ///
-/// Key format (mirrors jsonld.js):
+/// Key format (JSON-LD 1.1 API "Inverse Context Creation", the language-map
+/// entry rules — [FABLE-5] sq-oy1f.27: re-keyed to the REC's exact formats so
+/// the keys line up with the preferred values IRI Compaction derives from
+/// document values, including the `"_<dir>"` underscore-suffix rule):
 /// - `Set(lang)` + `Set(dir)` → `"<lang-lc>_<dir>"`
-/// - `Set(lang)` + `Null`     → `"<lang-lc>_"` (null direction suffix)
-/// - `Set(lang)` + `Unset`    → `"<lang-lc>"`
-/// - `Null`      + `Set(dir)` → `"@null_<dir>"`
-/// - `Null`      + `Null`     → `"@null_"`
-/// - `Null`      + `Unset`    → `"@null"`
-/// - `Unset`     + `Set(dir)` → `"@_<dir>"`
-/// - `Unset`     + `Null`     → `"@_"`
+/// - `Set(lang)` + `Null`/`Unset` → `"<lang-lc>"`
+/// - `Null`      + `Set(dir)` → `"_<dir>"`
+/// - `Null`      + `Null`/`Unset` → `"@null"`
+/// - `Unset`     + `Set(dir)` → `"_<dir>"` (the direction-only rule)
+/// - `Unset`     + `Null`     → `"@none"` (the direction-only rule, null)
 /// - `Unset`     + `Unset`    → `None` (caller handles defaults)
 fn language_dir_key(
     language: &Override<String>,
@@ -214,17 +215,11 @@ fn language_dir_key(
         (Override::Set(lang), Override::Set(dir)) => {
             Some(format!("{}_{}", lang.to_lowercase(), dir.as_str()))
         }
-        (Override::Set(lang), Override::Null) => Some(format!("{}_", lang.to_lowercase())),
-        (Override::Set(lang), Override::Unset) => Some(lang.to_lowercase()),
-        (Override::Null, Override::Set(dir)) => {
-            Some(format!("@null_{}", dir.as_str()))
-        }
-        (Override::Null, Override::Null) => Some("@null_".to_string()),
-        (Override::Null, Override::Unset) => Some("@null".to_string()),
-        (Override::Unset, Override::Set(dir)) => {
-            Some(format!("@_{}", dir.as_str()))
-        }
-        (Override::Unset, Override::Null) => Some("@_".to_string()),
+        (Override::Set(lang), _) => Some(lang.to_lowercase()),
+        (Override::Null, Override::Set(dir)) => Some(format!("_{}", dir.as_str())),
+        (Override::Null, _) => Some("@null".to_string()),
+        (Override::Unset, Override::Set(dir)) => Some(format!("_{}", dir.as_str())),
+        (Override::Unset, Override::Null) => Some("@none".to_string()),
         (Override::Unset, Override::Unset) => None,
     }
 }
@@ -277,6 +272,24 @@ pub(crate) fn select_term(
 // ---------------------------------------------------------------------------
 // §7.1 IRI Compaction
 // ---------------------------------------------------------------------------
+
+/// True iff `j` has the **graph object** shape: a map with `@graph` whose other
+/// entries are at most `@id`, `@index`, and `@context`. Used by the container-
+/// preference derivation (a graph object prefers `@graph*` containers, and its
+/// `@index` names the graph rather than an index entry).
+///
+/// [FABLE-5] (sq-oy1f.27)
+fn is_graph_object_shape(j: &Json) -> bool {
+    match j {
+        Json::Obj(members) => {
+            j.get("@graph").is_some()
+                && members
+                    .iter()
+                    .all(|(k, _)| matches!(k.as_str(), "@graph" | "@id" | "@index" | "@context"))
+        }
+        _ => false,
+    }
+}
 
 /// Computes the default language (lowercased, with optional `_<dir>` suffix)
 /// for use in building `preferred_values` during IRI compaction.  Returns
@@ -347,185 +360,252 @@ pub fn compact_iri(
         return iri.to_string();
     }
 
-    // §7.1 step 3: vocab=true AND iri appears in the inverse context.
+    // §7.1 step 3 (spec "IRI Compaction" step 2): vocab=true AND iri appears in the
+    // inverse context — derive the container preferences and the type/language lookup
+    // from the SHAPE of `value`, then run Term Selection.
+    //
+    // [FABLE-5] (sq-oy1f.27) Rewritten spec-faithful for the document-level Compaction
+    // Algorithm: the prior version pre-dated the document walk and diverged on the
+    // load-bearing shapes the W3C compact suite exercises — @index containers were not
+    // considered for reverse properties (the spec appends them BEFORE the reverse
+    // branch), reverse selected the wrong sub-map (@type/@reverse, not a "@reverse"
+    // sub-map), list objects ignored the common-type/common-language derivation across
+    // their items, graph objects had no @graph* container preferences, and the 1.1
+    // trailing @index/@language container fallbacks plus the @vocab-vs-@id preferred-
+    // value ordering and the "_<direction>" preferred-value suffix rule were missing.
     if vocab && inverse.inner.contains_key(iri) {
         let default_language = compute_default_language(ctx);
 
-            // §7.1 step 3.1–3.4: determine containers, type_language, and
-            // preferred_values from the shape of `value`.
+        // step 2.1: containers, tried in order by Term Selection.
+        let mut containers: Vec<String> = Vec::new();
+        // steps 2.2-2.3: the sub-map selector and its preferred value.
+        let mut type_language: &str = "@language";
+        let mut type_language_value: Option<String> = None; // null → "@null" below
 
-            // Containers tried in order; specific container types first,
-            // "@set" and "@none" appended below.
-            let mut containers: Vec<String> = Vec::new();
-
-            // type_language drives which inverse-context sub-map we read.
-            let type_language: &str;
-            // preferred_values are looked up within the sub-map, in order.
-            let mut preferred_values: Vec<String> = Vec::new();
-
-            // Unwrap @preserve to its first element (§7.1 step 3.1).
-            let value = value.and_then(|v| {
-                if let Some(pres) = v.get("@preserve") {
-                    match pres {
-                        Json::Arr(arr) => arr.first(),
-                        other => Some(other),
-                    }
-                } else {
-                    Some(v)
-                }
-            });
-
-            if reverse {
-                // §7.1 step 3.2: reverse property.
-                containers.push("@set".to_string());
-                type_language = "@reverse";
-                preferred_values.push("@reverse".to_string());
-            } else if let Some(v) = value {
-                let is_map = matches!(v, Json::Obj(_));
-                let has_index = is_map && v.get("@index").is_some();
-                let id_val = if is_map { v.get("@id") } else { None };
-                let type_val = if is_map { v.get("@type") } else { None };
-                let is_list = is_map && v.get("@list").is_some();
-                let is_value_obj = is_map && v.get("@value").is_some();
-                let lang_val = if is_map { v.get("@language") } else { None };
-                let dir_val = if is_map { v.get("@direction") } else { None };
-
-                if has_index && !containers.contains(&"@index".to_string()) {
-                    // §7.1 step 3.3: value has @index — add @index and
-                    // @index@set to the container search list so that
-                    // select_term can find terms whose container mapping
-                    // includes @index.
-                    //
-                    // [SONNET-4.6] sq-90mu3 defect fix: the prior code
-                    // called `ctx.term_definitions.get(iri)` using the
-                    // expanded IRI as a key.  `term_definitions` is keyed
-                    // by TERM NAME (e.g. "label"), so that lookup always
-                    // returned `None`, making the guard vacuously permissive
-                    // (containers were always extended regardless).
-                    //
-                    // The spec (§7.1 step 3.3) conditions on whether the
-                    // *outer* active property (the caller's current term, not
-                    // the IRI being compacted here) has @index in its
-                    // container.  `compact_iri` does not receive the outer
-                    // active-property term name, so the guard is not locally
-                    // implementable.  The unconditional push is the correct
-                    // local behaviour: an @index-container term for `iri` is
-                    // stored ONLY in the `"@index"` slot of the inverse
-                    // context and is unreachable without searching that slot;
-                    // adding `"@index"` when no such term exists is harmless
-                    // (select_term just finds nothing there and falls
-                    // through).  This matches the effective behaviour of the
-                    // reference jsonld.js implementation when the outer
-                    // activeProperty is not threaded through. [SONNET-4.6]
-                    containers.push("@index".to_string());
-                    containers.push("@index@set".to_string());
-                }
-
-                if is_list {
-                    // §7.1 step 3.4: @list value — try @list container first.
-                    if !has_index {
-                        containers.push("@list".to_string());
-                    }
-                    type_language = "@language";
-                    preferred_values.push(default_language.clone());
-                } else if let Some(id_v) = id_val {
-                    // §7.1 step 3.5: @id in value — compact to @id-type term.
-                    type_language = "@type";
-                    if let Json::Str(id_iri) = id_v {
-                        // Compact the nested @id IRI first and add it as the
-                        // most preferred value (the term whose type = the
-                        // compacted nested id).
-                        let compact_id =
-                            compact_iri(ctx, inverse, id_iri, None, vocab, false);
-                        preferred_values.push(compact_id);
-                    }
-                    preferred_values.push("@id".to_string());
-                    containers.push("@id".to_string());
-                    containers.push("@id@set".to_string());
-                    containers.push("@type".to_string());
-                    containers.push("@set@type".to_string());
-                } else if let Some(type_v) = type_val {
-                    // §7.1 step 3.6: @type in value.
-                    type_language = "@type";
-                    match type_v {
-                        Json::Str(t) => preferred_values.push(t.clone()),
-                        Json::Arr(ts) => {
-                            for t in ts {
-                                if let Json::Str(s) = t {
-                                    preferred_values.push(s.clone());
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    containers.push("@type".to_string());
-                    containers.push("@set@type".to_string());
-                } else if is_value_obj {
-                    // §7.1 step 3.7: @value literal.
-                    match (lang_val, dir_val) {
-                        (Some(Json::Str(lang)), Some(Json::Str(dir))) => {
-                            // Both language and direction present.
-                            let lang_dir =
-                                format!("{}_{}", lang.to_lowercase(), dir.to_lowercase());
-                            type_language = "@language";
-                            preferred_values.push(lang_dir);
-                            preferred_values.push(lang.to_lowercase());
-                            preferred_values.push(format!("@_{}", dir.to_lowercase()));
-                            containers.push("@language".to_string());
-                            containers.push("@language@set".to_string());
-                        }
-                        (Some(Json::Str(lang)), _) => {
-                            // Language only (direction absent or null).
-                            type_language = "@language";
-                            preferred_values.push(lang.to_lowercase());
-                            containers.push("@language".to_string());
-                            containers.push("@language@set".to_string());
-                        }
-                        (_, Some(Json::Str(dir))) => {
-                            // Direction only.
-                            type_language = "@language";
-                            preferred_values.push(format!("@_{}", dir.to_lowercase()));
-                            containers.push("@language".to_string());
-                            containers.push("@language@set".to_string());
-                        }
-                        _ => {
-                            // @value with no language/direction/type markers —
-                            // plain literal; prefer plain terms (type="@none").
-                            type_language = "@type";
-                            preferred_values.push("@none".to_string());
-                        }
-                    }
-                } else {
-                    // §7.1 step 3.8: other map (e.g. node object) — fall
-                    // back to language defaults.
-                    type_language = "@language";
-                    preferred_values.push(default_language.clone());
-                }
-
-                // §7.1 step 3.9: always add @set and @none to the container
-                // list (value is not null).
-                if !containers.contains(&"@set".to_string()) {
-                    containers.push("@set".to_string());
+        // Unwrap @preserve to its first element (framing input).
+        let value = value.and_then(|v| {
+            if let Some(pres) = v.get("@preserve") {
+                match pres {
+                    Json::Arr(arr) => arr.first(),
+                    other => Some(other),
                 }
             } else {
-                // §7.1 step 3.10: null value — generic language preference.
-                type_language = "@language";
-                preferred_values.push(default_language.clone());
+                Some(v)
             }
+        });
 
-            // §7.1 step 3.11: always add "@none" and "@any" to
-            // preferred_values as fallbacks.
-            if !preferred_values.contains(&"@none".to_string()) {
-                preferred_values.push("@none".to_string());
+        let is_map = matches!(value, Some(Json::Obj(_)));
+        let has_index = is_map && value.and_then(|v| v.get("@index")).is_some();
+        let graph_object = value.map(is_graph_object_shape).unwrap_or(false);
+        let list_object = is_map && value.and_then(|v| v.get("@list")).is_some();
+
+        // step 2.4: an indexed (non-graph) value prefers @index containers — for
+        // FORWARD and REVERSE properties alike (this runs before the reverse branch).
+        if has_index && !graph_object {
+            containers.push("@index".to_string());
+            containers.push("@index@set".to_string());
+        }
+
+        if reverse {
+            // step 2.5: reverse property — the @type sub-map under "@reverse".
+            type_language = "@type";
+            type_language_value = Some("@reverse".to_string());
+            containers.push("@set".to_string());
+        } else if list_object {
+            // step 2.6: list object — derive the most specific common type or
+            // language across the list items.
+            let v = value.expect("list_object implies value");
+            if v.get("@index").is_none() {
+                containers.push("@list".to_string());
             }
-            preferred_values.push("@any".to_string());
-
-            // §7.1 step 3.12: "@none" container is always tried last.
-            if !containers.contains(&"@none".to_string()) {
-                containers.push("@none".to_string());
+            let list: &[Json] = match v.get("@list") {
+                Some(Json::Arr(a)) => a.as_slice(),
+                _ => &[],
+            };
+            let mut common_type: Option<String> = None;
+            let mut common_language: Option<String> = if list.is_empty() {
+                Some(default_language.clone())
+            } else {
+                None
+            };
+            for item in list {
+                let mut item_language = "@none".to_string();
+                let mut item_type = "@none".to_string();
+                if item.get("@value").is_some() {
+                    if let Some(Json::Str(dir)) = item.get("@direction") {
+                        // Language+direction key, matching the inverse-context key
+                        // convention (language_dir_key): "<lang>_<dir>" or "_<dir>".
+                        item_language = match item.get("@language") {
+                            Some(Json::Str(lang)) => {
+                                format!("{}_{}", lang.to_lowercase(), dir.to_lowercase())
+                            }
+                            _ => format!("_{}", dir.to_lowercase()),
+                        };
+                    } else if let Some(Json::Str(lang)) = item.get("@language") {
+                        item_language = lang.to_lowercase();
+                    } else if let Some(Json::Str(t)) = item.get("@type") {
+                        item_type = t.clone();
+                    } else {
+                        item_language = "@null".to_string();
+                    }
+                } else {
+                    item_type = "@id".to_string();
+                }
+                match &common_language {
+                    None => common_language = Some(item_language.clone()),
+                    Some(cl) if *cl != item_language && item.get("@value").is_some() => {
+                        common_language = Some("@none".to_string());
+                    }
+                    _ => {}
+                }
+                match &common_type {
+                    None => common_type = Some(item_type.clone()),
+                    Some(ct) if *ct != item_type => {
+                        common_type = Some("@none".to_string());
+                    }
+                    _ => {}
+                }
+                if common_language.as_deref() == Some("@none")
+                    && common_type.as_deref() == Some("@none")
+                {
+                    break; // no common language or type amongst the items
+                }
             }
+            let common_language = common_language.unwrap_or_else(|| "@none".to_string());
+            let common_type = common_type.unwrap_or_else(|| "@none".to_string());
+            if common_type != "@none" {
+                type_language = "@type";
+                type_language_value = Some(common_type);
+            } else {
+                type_language_value = Some(common_language);
+            }
+        } else if graph_object {
+            // step 2.7: graph object — prefer the matching @graph* containers.
+            let v = value.expect("graph_object implies value");
+            if v.get("@index").is_some() {
+                containers.push("@graph@index".to_string());
+                containers.push("@graph@index@set".to_string());
+            }
+            if v.get("@id").is_some() {
+                containers.push("@graph@id".to_string());
+                containers.push("@graph@id@set".to_string());
+            }
+            containers.push("@graph".to_string());
+            containers.push("@graph@set".to_string());
+            containers.push("@set".to_string());
+            if v.get("@index").is_none() {
+                containers.push("@graph@index".to_string());
+                containers.push("@graph@index@set".to_string());
+            }
+            if v.get("@id").is_none() {
+                containers.push("@graph@id".to_string());
+                containers.push("@graph@id@set".to_string());
+            }
+            containers.push("@index".to_string());
+            containers.push("@index@set".to_string());
+            type_language = "@type";
+            type_language_value = Some("@id".to_string());
+        } else {
+            // step 2.8: value objects match on language/direction/type; node
+            // objects prefer @id/@type containers.
+            let is_value_obj = is_map && value.and_then(|v| v.get("@value")).is_some();
+            if is_value_obj {
+                let v = value.expect("value object");
+                if let Some(Json::Str(dir)) = v.get("@direction") {
+                    if v.get("@index").is_none() {
+                        type_language_value = Some(match v.get("@language") {
+                            Some(Json::Str(lang)) => {
+                                format!("{}_{}", lang.to_lowercase(), dir.to_lowercase())
+                            }
+                            _ => format!("_{}", dir.to_lowercase()),
+                        });
+                        containers.push("@language".to_string());
+                        containers.push("@language@set".to_string());
+                    }
+                } else if let Some(Json::Str(lang)) = v.get("@language") {
+                    if v.get("@index").is_none() {
+                        type_language_value = Some(lang.to_lowercase());
+                        containers.push("@language".to_string());
+                        containers.push("@language@set".to_string());
+                    }
+                } else if let Some(Json::Str(t)) = v.get("@type") {
+                    type_language = "@type";
+                    type_language_value = Some(t.clone());
+                }
+            } else {
+                type_language = "@type";
+                type_language_value = Some("@id".to_string());
+                containers.push("@id".to_string());
+                containers.push("@id@set".to_string());
+                containers.push("@type".to_string());
+                containers.push("@set@type".to_string());
+            }
+            containers.push("@set".to_string());
+        }
 
-            // §7.1 step 3.13: call term selection.
+        // step 2.9: the no-container fallback is always tried last.
+        containers.push("@none".to_string());
+        // steps 2.10-2.11 (JSON-LD 1.1): an un-indexed value may still live in an
+        // @index container; a lone-@value map may still live in a @language container.
+        if !is_map || !has_index {
+            containers.push("@index".to_string());
+            containers.push("@index@set".to_string());
+        }
+        let lone_value_map = matches!(value, Some(Json::Obj(m)) if m.len() == 1)
+            && value.and_then(|v| v.get("@value")).is_some();
+        if lone_value_map {
+            containers.push("@language".to_string());
+            containers.push("@language@set".to_string());
+        }
+
+        // step 2.12: null values are stored under "@null" in the inverse context.
+        let type_language_value = type_language_value.unwrap_or_else(|| "@null".to_string());
+
+        // steps 2.13-2.16: preferred values, most specific first.
+        let mut preferred_values: Vec<String> = Vec::new();
+        if type_language_value == "@reverse" {
+            preferred_values.push("@reverse".to_string());
+        }
+        let id_entry = value.and_then(|v| v.get("@id")).and_then(Json::as_str);
+        if let ("@id" | "@reverse", Some(id_iri)) = (type_language_value.as_str(), id_entry) {
+            // Prefer @vocab-coercing terms when the nested @id round-trips through a
+            // term; otherwise prefer @id-coercing terms.
+            let compacted_id = compact_iri(ctx, inverse, id_iri, None, true, false);
+            let round_trips = ctx
+                .term_definitions
+                .get(&compacted_id)
+                .map(|d| d.iri.as_deref() == Some(id_iri))
+                .unwrap_or(false);
+            if round_trips {
+                preferred_values.push("@vocab".to_string());
+                preferred_values.push("@id".to_string());
+            } else {
+                preferred_values.push("@id".to_string());
+                preferred_values.push("@vocab".to_string());
+            }
+            preferred_values.push("@none".to_string());
+        } else {
+            preferred_values.push(type_language_value.clone());
+            preferred_values.push("@none".to_string());
+            // An empty list matches any term (its items constrain nothing).
+            let empty_list = matches!(
+                value.and_then(|v| v.get("@list")),
+                Some(Json::Arr(a)) if a.is_empty()
+            );
+            if empty_list {
+                type_language = "@any";
+            }
+        }
+        preferred_values.push("@any".to_string());
+        // step 2.16: a "<lang>_<dir>" preferred value also tries its bare
+        // "_<dir>" suffix (any-language, fixed-direction terms).
+        let suffixes: Vec<String> = preferred_values
+            .iter()
+            .filter_map(|pv| pv.find('_').map(|i| pv[i..].to_string()))
+            .collect();
+        preferred_values.extend(suffixes);
+
+        // step 2.17: Term Selection.
         let cs: Vec<&str> = containers.iter().map(String::as_str).collect();
         let pvs: Vec<&str> = preferred_values.iter().map(String::as_str).collect();
         if let Some(term) = select_term(inverse, iri, &cs, type_language, &pvs) {
@@ -633,6 +713,12 @@ pub fn compact_iri(
     if !vocab {
         if let Some(base) = ctx.base_iri.as_deref() {
             if let Some(relative) = relativize_iri(base, iri) {
+                // [FABLE-5] (sq-oy1f.27) A relative reference with keyword form
+                // ("@" + ALPHA) would be misread as a keyword where an IRI is
+                // expected — disambiguate with a "./" prefix (W3C compact/0111).
+                if has_keyword_form(&relative) {
+                    return format!("./{}", relative);
+                }
                 return relative;
             }
         }

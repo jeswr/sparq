@@ -88,8 +88,18 @@
 //! - `DisjointClasses(C, D)` — `O ∪ {(C ⊓ D)(x)}`, `x` fresh: the `C ⊓ D ⊑ ⊥` desugaring.
 //! - `ObjectPropertyDomain(R, C)` / `ObjectPropertyRange(R, C)` — the `∃R.⊤ ⊑ C` /
 //!   `⊤ ⊑ ∀R.C` desugarings (record §3), then the GCI refutation.
-//! - `SubObjectPropertyOf` — [`UnknownReason::UnencodedConclusion`]: the record defers
-//!   property-axiom conclusions (no argued encoding is composed here).
+//! - `SubObjectPropertyOf(R, S)` — `O ∪ {R(a,b), B(b), (∀S.¬B)(a)}` with `a`, `b` FRESH
+//!   individuals and `B` a FRESH class name ([FABLE-5] sq-pbz04.4.9; record §4 as amended —
+//!   the role-subsumption lift of the fresh-class trick). Sound AND complete: if every
+//!   model of `O` has `Rᴵ ⊆ Sᴵ`, then in any model of the union `(a,b) ∈ R ⊆ S` makes `b`
+//!   an `S`-successor of `a`, so `a ∈ ∀S.¬B` forces `b ∈ ¬B`, clashing with `B(b)` — the
+//!   union is inconsistent. Conversely a model `I` of `O` with some `(u,v) ∈ Rᴵ ∖ Sᴵ`
+//!   extends to a model of the union via `aᴵ = u`, `bᴵ = v`, `Bᴵ = {v}` (`a`/`b`/`B` occur
+//!   nowhere in `O`; `(u,v) ∉ Sᴵ` means no `S`-successor of `u` is `v`, the sole member of
+//!   `B`, so `(∀S.¬B)(a)` holds) — non-entailment yields consistency. The tableau side
+//!   holds because its `∀`-rule fires modulo the role hierarchy (`System::is_subrole`,
+//!   reflexive-transitive), so the `R`-edge `a → b` is seen by `∀S` exactly when
+//!   `O ⊢ R ⊑* S`. All three additions stay inside the L1 fragment.
 //!
 //! `Entailed` needs every conclusion axiom's refutation(s) unsatisfiable; a single
 //! definitively-satisfiable refutation is `NotEntailed` (sound because the tableau is
@@ -179,8 +189,11 @@ pub enum UnknownReason {
     QlConsistencyPending,
     /// The ALCH tableau exhausted its deterministic count budget mid-search.
     ResourceBudget(ExhaustedBudget),
-    /// Entailment only: the conclusion-axiom kind has no argued refutation encoding
-    /// (property-axiom conclusions are deferred by the design record).
+    /// Entailment only: the conclusion-axiom kind has no argued refutation encoding.
+    /// Every axiom kind the L1 model can currently express HAS an argued encoding
+    /// (`SubObjectPropertyOf` gained one under sq-pbz04.4.9), so this reason is not
+    /// produced today — it is RETAINED fail-closed for future model growth (a new axiom
+    /// kind abstains here until its encoding is argued in the design record). [FABLE-5]
     UnencodedConclusion(String),
     /// Entailment only: the CONCLUSION ontology mentions a blank-node individual in a shape
     /// that does NOT roll up into a tree-shaped existential class assertion (it is shared
@@ -837,8 +850,33 @@ fn refutation_checks(conclusion: &Axiom, fresh: &mut FreshNames) -> Option<Vec<V
                 },
             ]])
         }
-        // Property-axiom conclusions are deferred by the record (§4): no encoding here.
-        Axiom::SubObjectPropertyOf { .. } => None,
+        // The fresh-individual-pair role-subsumption trick (module docs; record §4 as
+        // amended by sq-pbz04.4.9 — sound AND complete). [FABLE-5]
+        Axiom::SubObjectPropertyOf { sub, sup } => {
+            let a = fresh.mint();
+            let b = fresh.mint();
+            let witness = fresh.mint();
+            Some(vec![vec![
+                Axiom::ObjectPropertyAssertion {
+                    property: sub.clone(),
+                    source: a,
+                    target: b,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::Class(witness),
+                    individual: b,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::only(
+                        sup.named(),
+                        ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(
+                            witness,
+                        ))),
+                    ),
+                    individual: a,
+                },
+            ]])
+        }
     }
 }
 
