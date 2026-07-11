@@ -35,13 +35,12 @@
       "unviable": 73
     },
     "sparq-fedplan": {
-      "_note": "[OPUS-4.8] sq-qcnn.29: 0 mutations caught (534 survived) \u2014 the baseline build passes but no in-process assertion detects any behavioral change. sparq-fedplan tests are integration-style (exercised end-to-end via the federation engine path, not via `cargo test` in-crate unit assertions). The ceiling is the honest measured value; adding direct unit tests with value assertions is the sq-qcnn test-raise program for this crate.",
-      "caught": 0,
-      "caught_pct": 0.0,
-      "ceiling": 536,
-      "measured_surviving": 534,
-      "timeout": 0,
-      "unviable": 0
+      "caught": 415,
+      "caught_pct": 89.14,
+      "ceiling": 54,
+      "measured_surviving": 52,
+      "timeout": 12,
+      "unviable": 55
     },
     "sparq-geo": {
       "caught": 499,
