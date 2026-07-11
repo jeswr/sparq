@@ -71,7 +71,10 @@ the same default-OFF `fedclient` feature:
   bounded to at most once per operator boundary — re-planning changes the plan, never the
   answer. Behind the extra default-OFF `fedclient-adaptive` feature (it pulls
   `sparq-fedplan/adaptive-replan`); when that feature is off the `adaptive` module and its
-  `execute_adaptive_single_source` entry point are `#[cfg]`-compiled out.
+  `execute_adaptive_single_source` / `execute_adaptive_multi_source` entry points are
+  `#[cfg]`-compiled out. The multi-source loop ([FABLE-5] sq-xw8zz) lifts the
+  `MultiSource` guard — union-arm leaves with LIVE per-arm latency observations feeding
+  the planner's per-source EWMA.
 
 With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7
 all landed; epic sq-dnko closed). The public surface and the dependency boundary were made
@@ -271,10 +274,17 @@ pub use stream::{Solution, SolutionSink, SolutionStream, StreamItem};
 /// pick a cheaper suffix order — bounded to at most ONCE per operator boundary (no thrashing).
 /// Re-planning changes the plan, never the answer (result-multiset-preserving). Behind the
 /// extra default-OFF `fedclient-adaptive` feature (which pulls `sparq-fedplan/adaptive-replan`).
+/// Two entry points: single-source (the `MultiSource`-guarded loop) and multi-source
+/// ([FABLE-5] sq-xw8zz) — the latter answers a leaf as the bag-union of its retained arms
+/// and feeds LIVE per-arm fetch latencies into the planner's per-source EWMA, making the
+/// latency-aware cost bias (incl. the opt-in `LatencyAggregation::CardinalityWeighted`,
+/// sq-s5kd) consumable from a real execution.
 #[cfg(feature = "fedclient-adaptive")]
 pub mod adaptive;
 // [OPUS-4.8] sq-ij5x: re-export the Phase-7 adaptive surface at the crate root.
+// [FABLE-5] sq-xw8zz: + the multi-source (union-arm) entry point.
 #[cfg(feature = "fedclient-adaptive")]
 pub use adaptive::{
-    execute_adaptive_single_source, static_plan, AdaptiveOutcome, ReplanEvent,
+    execute_adaptive_multi_source, execute_adaptive_single_source, static_plan, AdaptiveOutcome,
+    ReplanEvent,
 };

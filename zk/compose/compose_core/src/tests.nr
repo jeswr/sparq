@@ -745,7 +745,8 @@ fn revoke_committed_wrong_index_commitment_rejected() {
 // ---------------------------------------------------------------------------
 
 use crate::issuer::{
-    hidden_issuer_attestation, key_set_membership, Point, reduction_range_bind, schnorr_verify,
+    assert_in_prime_order_subgroup, assert_on_curve, hidden_issuer_attestation, key_set_membership,
+    Point, reduction_range_bind, schnorr_verify,
 };
 
 // In-set signer (seed102, index 2 in K).
@@ -875,12 +876,56 @@ fn hidden_issuer_identity_key_rejected() {
     schnorr_verify(Point { x: 0, y: 1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
 }
 
-// (5) REJECT off-curve key: an off-curve pk (a forger's twist/small-subgroup
-// point) is rejected by the on-curve guard before the equation.
+// (5) REJECT off-curve key: an off-curve pk (a forger's twist / arbitrary point,
+// NOT on the curve) is rejected by the on-curve guard before the equation. (A
+// low-order/torsion point IS on the curve; that is a SEPARATE guard -- see (6).)
 #[test(should_fail_with = "point is not on Baby-JubJub")]
 fn hidden_issuer_off_curve_key_rejected() {
     // (1, 1) is not on Baby-JubJub (1 + 1 != 1 + d).
     schnorr_verify(Point { x: 1, y: 1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
+}
+
+// [OPUS-4.8] sq-l15mi (audit H-1): the TORSION / small-subgroup key forgery guard.
+// Baby-JubJub has cofactor 8, so `(0, -1)` (= (0, q_base - 1)) is an order-2 point
+// that is ON the curve and is NOT the identity. Before this fix `schnorr_verify`
+// accepted it (on-curve + non-identity), and a prover with NO secret key could forge
+// a satisfying `(R, s)` for such a torsion key. The prime-order-subgroup guard
+// `[L]*pk == O` now rejects it.
+
+// (6a) NON-VACUITY witness: the order-2 torsion point `(0, -1)` PASSES the two
+// pre-existing guards (on-curve, and not the identity `(0, 1)`), so ONLY the new
+// prime-order-subgroup guard can catch it. If this ever fails, the torsion vector
+// below is no longer a valid "slips past the old guards" witness.
+#[test]
+fn torsion_key_passes_on_curve_and_non_identity_guards() {
+    let torsion = Point { x: 0, y: -1 };
+    assert_on_curve(torsion); // on the curve (0 + 1 == 1 + 0)
+    assert(!((torsion.x == 0) & (torsion.y == 1)), "torsion (0,-1) is not the identity");
+}
+
+// (6b) The new guard ACCEPTS a genuine prime-order (order-L) key -- non-vacuity in
+// the accept direction: it does not reject legitimate issuer keys (`in_set_pk` is a
+// real `sk*G`, so it lies in the order-L subgroup and `[L]*pk == O`).
+#[test]
+fn prime_order_guard_accepts_valid_issuer_key() {
+    assert_in_prime_order_subgroup(in_set_pk());
+    assert_in_prime_order_subgroup(in_set_r()); // honest R = k*G is in-subgroup too
+}
+
+// (6c) The new guard in ISOLATION REJECTS the order-2 torsion point `(0, -1)`.
+#[test(should_fail_with = "not in prime-order subgroup")]
+fn prime_order_guard_rejects_order2_torsion() {
+    assert_in_prime_order_subgroup(Point { x: 0, y: -1 });
+}
+
+// (6d) FORGE REJECTION end-to-end: `schnorr_verify` rejects the torsion issuer key
+// at the prime-order-subgroup guard. Message-matched (noir-testing convention) so
+// this pins the NEW clause: before the fix this input flowed past to the equation
+// and failed with "schnorr verification equation failed" (a DIFFERENT message), so
+// the message match makes this test non-vacuous w.r.t. the fix.
+#[test(should_fail_with = "not in prime-order subgroup")]
+fn hidden_issuer_torsion_key_rejected() {
+    schnorr_verify(Point { x: 0, y: -1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
 }
 
 // [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the challenge-reduction

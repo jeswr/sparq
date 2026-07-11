@@ -728,6 +728,20 @@ fn decode_class_inner(
             "RDF 1.2 triple term in a class-expression position".to_string(),
         ));
     }
+    // [FABLE-5] sq-pbz04.4.9: a bare OWL 2 datatype-map IRI (`xsd:integer`, `rdfs:Literal`, …)
+    // in a class-expression position — including an `rdfs:range` / `rdfs:domain` object — carries
+    // concrete-domain meaning the datatype-free ALCH fragment cannot model. Reading it as an
+    // opaque object class would silently drop that meaning (e.g. `p rdfs:range xsd:integer` +
+    // `p rdfs:range xsd:string` are only jointly unsatisfiable because the value spaces are
+    // DISJOINT — invisible under an opaque-class reading, WebOnt-I5.3-015). Refuse fail-closed,
+    // the same discipline as the literal / `owl:onDatatype` / declared-datatype-property
+    // refusals; datatypes are the design-record §5 deferral pending a concrete-domain oracle.
+    if let Some(dt) = datatype_iri_name(dict, id) {
+        return Err(ExtractError::DataConstruct(format!(
+            "datatype IRI {} in a class-expression position (no concrete domain in L1)",
+            dt
+        )));
+    }
     if id == v.thing {
         return Ok(ClassExpression::Thing);
     }
@@ -1459,6 +1473,40 @@ fn term_iri(dict: &Dict, id: Id) -> String {
     }
 }
 
+/// The XSD namespace: every IRI under it is an OWL 2 datatype-map datatype ([FABLE-5]
+/// sq-pbz04.4.9, per the escalated soundness verdict).
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// The non-XSD members of the OWL 2 datatype map recognised by name (design record §5): the
+/// datatypes whose IRIs live outside the XSD namespace.
+const NON_XSD_DATATYPE_IRIS: &[&str] = &[
+    "http://www.w3.org/2000/01/rdf-schema#Literal",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
+    "http://www.w3.org/2002/07/owl#real",
+    "http://www.w3.org/2002/07/owl#rational",
+];
+
+/// `Some(display)` when `id` names a well-known OWL 2 datatype-map datatype (an `xsd:*` IRI or
+/// one of the [`NON_XSD_DATATYPE_IRIS`]). A bare datatype IRI carries CONCRETE-DOMAIN meaning
+/// (a fixed value space) that the datatype-free ALCH fragment cannot model; reading it as an
+/// opaque object class would SILENTLY DROP that meaning (design record §5 defers datatypes
+/// pending a concrete-domain oracle). Detected by IRI identity, so a datatype reaching ANY
+/// class-expression position fails closed uniformly — the same discipline as the literal /
+/// `owl:onDatatype` / declared-datatype-property refusals. [FABLE-5] sq-pbz04.4.9
+fn datatype_iri_name(dict: &Dict, id: Id) -> Option<String> {
+    if is_inline(id) {
+        return None;
+    }
+    if let TermParts::Iri { prefix, suffix } = dict.term_parts(id) {
+        let iri = format!("{}{}", prefix, suffix);
+        if iri.starts_with(XSD) || NON_XSD_DATATYPE_IRIS.contains(&iri.as_str()) {
+            return Some(iri);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,6 +1575,73 @@ mod tests {
         assert!(!is_triple_term(&dict, s));
         assert!(term_iri(&dict, s).contains("ex/s"));
         assert!(term_iri(&dict, lit).contains("lit"));
+    }
+
+    /// Direct unit test of `datatype_iri_name` ([FABLE-5] sq-pbz04.4.9): `xsd:*` IRIs and the
+    /// named non-XSD datatype-map members are recognised; an ordinary class IRI, a literal, and
+    /// `owl:Thing` are NOT.
+    #[test]
+    fn datatype_iri_name_recognises_the_datatype_map() {
+        let (dict, _t) = Graph::parse_to_triples(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             <http://ex/s> <http://ex/p> xsd:integer , xsd:string , rdfs:Literal , owl:real .\n\
+             <http://ex/s> <http://ex/q> <http://ex/A> , owl:Thing , \"lit\" .",
+            "turtle",
+        )
+        .expect("parse");
+        use oxrdf::{Literal, NamedNode, Term as OTerm};
+        let look = |iri: &str| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
+        // Recognised datatype-map members.
+        for iri in [
+            "http://www.w3.org/2001/XMLSchema#integer",
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/2000/01/rdf-schema#Literal",
+            "http://www.w3.org/2002/07/owl#real",
+        ] {
+            assert_eq!(datatype_iri_name(&dict, look(iri)).as_deref(), Some(iri));
+        }
+        // NOT datatypes: an ordinary class IRI, owl:Thing, a literal.
+        assert_eq!(datatype_iri_name(&dict, look("http://ex/A")), None);
+        assert_eq!(
+            datatype_iri_name(&dict, look("http://www.w3.org/2002/07/owl#Thing")),
+            None
+        );
+        let lit = dict.lookup(&OTerm::Literal(Literal::new_simple_literal("lit")));
+        assert_eq!(datatype_iri_name(&dict, lit), None);
+    }
+
+    /// End-to-end fail-closed refusal ([FABLE-5] sq-pbz04.4.9): a datatype IRI reaching a
+    /// class-expression position (an `rdfs:range` object here, but the check is position-uniform)
+    /// refuses extraction as a `DataConstruct` — it is NOT read as an opaque object class. This
+    /// is the WebOnt-I5.3-015 mechanism (two disjoint datatype ranges must not silently extract
+    /// to two unrelated opaque classes).
+    #[test]
+    fn datatype_range_object_refuses_extraction() {
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://ex/p> rdfs:range xsd:integer .",
+            "turtle",
+        )
+        .expect("parse");
+        assert!(
+            matches!(extract(&dict, &triples), Err(ExtractError::DataConstruct(_))),
+            "a datatype range object must refuse extraction (DataConstruct)"
+        );
+        // A datatype as a subClassOf super-CE refuses just the same (position-uniform).
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://ex/A> rdfs:subClassOf xsd:string .",
+            "turtle",
+        )
+        .expect("parse");
+        assert!(matches!(
+            extract(&dict, &triples),
+            Err(ExtractError::DataConstruct(_))
+        ));
     }
 
     /// Direct unit test of `normalize_intersection` (sq-pbz04.4.16 / M7): a one-member

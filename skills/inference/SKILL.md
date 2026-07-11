@@ -321,7 +321,9 @@ returning `ConsistencyOutcome` / `EntailmentOutcome`: a tri-state verdict PLUS t
 that produced it (traceability). `entailment()` checks `O ⊨ α` per conclusion axiom by an
 argued refutation encoding onto the tableau (`SubClassOf`, `ClassAssertion`,
 `ObjectPropertyAssertion` via a fresh-class encoding, `EquivalentClasses`, `DisjointClasses`,
-domain/range; property-axiom conclusions abstain). Every guard fails CLOSED — uncertainty is a
+domain/range, and — since sq-pbz04.4.9 — `SubObjectPropertyOf(R,S)` via the
+fresh-individual-pair lift `{R(a,b), B(b), (∀S.¬B)(a)}`, sound and complete because the
+tableau's ∀-rule fires modulo the role hierarchy). Every guard fails CLOSED — uncertainty is a
 typed `UnknownReason`, never a guessed verdict. **Conclusion anonymous individuals
 (sq-pbz04.4.13):** a blank-node individual in the CONCLUSION is read EXISTENTIALLY (per the
 official Direct-Semantics tests) — L1's skolem-constant reading is entailment-preserving on the
@@ -368,7 +370,7 @@ the whole graph, never a partial extraction):
 | Cardinality (min/max/exact/qualified) | Refused | `OutOfFragment` |
 | Nominals (`owl:oneOf`, `owl:hasValue`, `owl:hasSelf`); inverse properties (`owl:inverseOf`); property characteristics (Transitive/Functional/IFP/Sym/Asym/Refl/Irr) | Refused | `OutOfFragment` |
 | `owl:sameAs` / `owl:differentFrom`; property chains; keys; `owl:disjointUnionOf` | Refused | `OutOfFragment` |
-| Datatypes / data properties / data-range restrictions | Refused | `DataConstruct` |
+| Datatypes / data properties / data-range restrictions; a bare datatype-map IRI (`xsd:*`, `rdfs:Literal`, `owl:real`/`rational`) in ANY class position incl. an `rdfs:range`/`rdfs:domain` object (sq-pbz04.4.9) | Refused | `DataConstruct` |
 | Malformed RDF list (unterminated, cyclic, branching, empty, orphan cell, `rdf:nil` as list cell) | Refused | `MalformedList` |
 | Malformed class expression (missing filler/property, conflicting shapes, cyclic, bare blank) | Refused | `MalformedClassExpression` |
 | Undeclared predicate (role-vs-annotation ambiguous); RDF 1.2 triple term | Refused | `Unclassifiable` |
@@ -389,9 +391,10 @@ the whole graph, never a partial extraction):
 |---|---|---|
 | `SubClassOf`, `ClassAssertion`, `EquivalentClasses`, `DisjointClasses`, `ObjectPropertyDomain` / `ObjectPropertyRange` | Yes (sound + complete via refutation encoding) | — |
 | `ObjectPropertyAssertion` (fresh-class encoding — sound and complete, `check.rs` §4) | Yes | — |
+| `SubObjectPropertyOf` (fresh-individual-pair encoding `{R(a,b), B(b), (∀S.¬B)(a)}` — sound and complete; sq-pbz04.4.9) | Yes | — |
 | Tree-shaped conclusion blank node (rolls up to an existential class assertion; sq-pbz04.4.13) | Yes | — |
 | Non-tree conclusion blank node (shared / cyclic / named-successor / free-existential root) | Never | `ConclusionAnonymousIndividual` |
-| `SubObjectPropertyOf` conclusion | Never | `UnencodedConclusion` |
+| A future axiom kind without an argued encoding (none expressible today) | Never | `UnencodedConclusion` |
 | Deterministic count budget exhausted mid-search | Never | `ResourceBudget` |
 
 Deferred constructs — inverse roles, cardinality/functionality, nominals, transitivity,
