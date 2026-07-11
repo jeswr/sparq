@@ -643,6 +643,15 @@ jobs:
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
       - name: clippy (wasm32 target, jsonld feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld -- -D warnings
+      # [FABLE-5] sq-586sh: also build + clippy WITH the opt-in `policy` feature (the
+      # sparq-policy ODRL-evaluator wasm32 probe, #890 ask A) so the wasm32 compat this
+      # probe established is gate-protected. NOT in the published bundle (build:wasm) —
+      # the full JS API awaits a maintainer public-contract decision. The DEFAULT
+      # bundle stays policy-free (perf floor byte-identical).
+      - name: Build sparq-wasm for the browser target (policy feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features policy
+      - name: clippy (wasm32 target, policy feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features policy -- -D warnings
       # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
       # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
       # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
