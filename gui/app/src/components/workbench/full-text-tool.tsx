@@ -28,19 +28,11 @@ import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
 import { loadTextSearch } from "@/lib/text-wasm";
 import { TIER_META, toolById } from "@/data/tools";
-import type { ToolOverride } from "@/data/tools";
 
-/**
- * Optional honesty-metadata override merged over the base `ToolDef` (data/tools.ts) by the
- * tool-panel registry's `resolveTool` and by the stub itself. `undefined` = base metadata
- * unchanged. Omit fields you do not override.
- */
-export const FULL_TEXT_TOOL_OVERRIDE: ToolOverride | undefined = {
-  built: true,
-  group: "working" as const,
-  // [FABLE-5] sq-ixc3.16 — the tool now also surfaces the live index footprint.
-  blurb: "BM25 full-text search via text: magic predicates, with live index stats, over the workspace store.",
-};
+// [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
+// rail/tab honesty read path) so THIS panel module can stay behind a lazy dynamic import().
+// Re-exported here so the panel file remains the tool's single import surface.
+export { FULL_TEXT_TOOL_OVERRIDE } from "@/components/workbench/full-text-tool.meta";
 
 /** [FABLE-5] sq-ixc3.16 — the REAL index footprint `TextSearch.indexStats` reports. */
 interface IndexStats {
