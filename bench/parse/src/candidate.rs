@@ -30,18 +30,19 @@ pub struct Candidate {
 /// The candidate rows registered for `format` (`"ntriples"` | `"turtle"`; the future
 /// NQ/TriG lanes will query the same registry). Empty in the default build.
 pub fn candidates_for(format: &str) -> Vec<Candidate> {
-    let mut out = Vec::new();
     #[cfg(feature = "candidate-demo")]
     {
         match format {
-            "ntriples" => out.push(Candidate { name: "demo-oxttl-nt", parse: demo_oxttl_nt }),
-            "turtle" => out.push(Candidate { name: "demo-oxttl-ttl", parse: demo_oxttl_ttl }),
-            _ => {}
+            "ntriples" => vec![Candidate { name: "demo-oxttl-nt", parse: demo_oxttl_nt }],
+            "turtle" => vec![Candidate { name: "demo-oxttl-ttl", parse: demo_oxttl_ttl }],
+            _ => Vec::new(),
         }
     }
     #[cfg(not(feature = "candidate-demo"))]
-    let _ = format;
-    out
+    {
+        let _ = format;
+        Vec::new()
+    }
 }
 
 /// Demo candidate: serial oxttl N-Triples (the slot template — a real generated
