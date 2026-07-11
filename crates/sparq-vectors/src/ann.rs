@@ -35,7 +35,7 @@ use instant_distance::{Builder, HnswMap, Point, Search};
 #[cfg(feature = "approx-ann")]
 use std::collections::HashMap;
 #[cfg(feature = "approx-ann")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use oxrdf::Term;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
@@ -194,9 +194,18 @@ impl HnswConfig {
 
 /// A normalized point in the HNSW graph. Euclidean distance over unit vectors is
 /// rank-equivalent to cosine; see the module docs.
+///
+/// [FABLE-5] (sq-jk7w7) The vector data is behind an `Arc<[f32]>` so that `Clone` — which
+/// `instant_distance::Point` requires, and which [`VectorIndex::build_with`] relies on to
+/// retain the point set for lazy per-`ef_search` secondary maps — is a refcount bump, not a
+/// deep copy. Before this, `build_with` deep-cloned the whole normalised point set into the
+/// primary map (~512 MB extra peak at 1M×128d, doubling build peak memory; `instant-distance`
+/// clones each point once more internally while shuffling, so the transient peak was 3×). The
+/// distance kernel still sees a plain `&[f32]` (one indirection, same as `Vec`), so query and
+/// build speed and determinism are unchanged.
 #[cfg(feature = "approx-ann")]
 #[derive(Clone)]
-struct NPoint(Vec<f32>);
+struct NPoint(Arc<[f32]>);
 
 #[cfg(feature = "approx-ann")]
 impl Point for NPoint {
@@ -216,8 +225,9 @@ impl Point for NPoint {
 
 /// L2-normalizes `v`; `None` for an all-zero vector (no direction). Stored vectors are
 /// never zero ([`VectorStore::put`] rejects them), so `None` only arises for queries.
+/// [FABLE-5] (sq-jk7w7) Returns the shared-ownership `Arc<[f32]>` form [`NPoint`] wraps.
 #[cfg(feature = "approx-ann")]
-fn normalized(v: &[f32]) -> Option<Vec<f32>> {
+fn normalized(v: &[f32]) -> Option<Arc<[f32]>> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     (norm > 0.0).then(|| v.iter().map(|x| x / norm).collect())
 }
@@ -247,6 +257,9 @@ pub struct VectorIndex {
     seed: u64,
     /// L2-normalised points and their dict ids — retained so that secondary maps for different
     /// `ef_search` values can be built from the same normalised vectors (no store re-scan).
+    /// [FABLE-5] (sq-jk7w7) Each [`NPoint`] is `Arc`-backed, so this retention (and every
+    /// secondary-map build) SHARES the primary map's vector allocations — the per-index cost is
+    /// one pointer-sized `Vec` per map, not a second copy of the float data.
     points: Vec<NPoint>,
     values: Vec<Id>,
     /// Lazily-built secondary maps keyed by `ef_search`. Populated on the first
@@ -264,6 +277,12 @@ impl VectorIndex {
     }
 
     /// Builds the index with the given [`HnswConfig`].
+    ///
+    /// [FABLE-5] (sq-jk7w7) Peak memory is ONE copy of the L2-normalised point set plus
+    /// pointer-sized bookkeeping: [`NPoint`] is `Arc`-backed, so the `points.clone()` handed to
+    /// the primary map shares the float allocations with the retained `self.points` (used for
+    /// lazy per-`ef_search` secondary maps) instead of deep-copying them. Previously that clone
+    /// duplicated the whole point set (~512 MB extra at 1M×128d), doubling build peak memory.
     pub fn build_with(store: &VectorStore, cfg: HnswConfig) -> VectorIndex {
         let mut points = Vec::with_capacity(store.len());
         let mut values = Vec::with_capacity(store.len());
@@ -272,6 +291,7 @@ impl VectorIndex {
             points.push(NPoint(n));
             values.push(id);
         }
+        // [FABLE-5] (sq-jk7w7) Cheap: clones Vecs of `Arc` handles + ids, NOT the vector data.
         let map = Builder::default()
             .ef_search(cfg.ef_search)
             .ef_construction(cfg.ef_construction)
@@ -468,5 +488,59 @@ mod tests {
     fn cosine_panics_on_mismatched_dims() {
         // A dim mismatch is a programming error, not a silently-truncated comparison.
         cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0]);
+    }
+
+    // [FABLE-5] (sq-jk7w7) Peak-memory contract of `build_with`: the point set handed to the
+    // HNSW map must SHARE allocations with the retained `points` (for lazy per-ef secondary
+    // maps), never deep-copy them — the deep copy doubled build peak memory (~512 MB extra at
+    // 1M×128d). `Arc::strong_count` observes the sharing directly, so reintroducing a deep
+    // copy (fresh buffers for the map, or for a secondary map) flips these asserts red
+    // (mutation-checked: a deep-copying build fails with strong_count 1 vs 2).
+    #[cfg(feature = "approx-ann")]
+    mod point_set_sharing {
+        use super::super::{HnswConfig, VectorIndex, VectorStore};
+        use std::sync::Arc;
+
+        #[test]
+        fn build_shares_point_allocations_with_the_map_instead_of_deep_copying() {
+            let path = std::env::temp_dir()
+                .join(format!("sparq-vectors-arcshare-{}.spqv", std::process::id()));
+            let mut store = VectorStore::create(&path, 8).unwrap();
+            for i in 0..64u32 {
+                // Deterministic non-zero vectors; sparse ids exercise the id→slot index.
+                let v: Vec<f32> = (0..8).map(|d| ((i + d + 1) as f32).sin() + 2.0).collect();
+                store.put(i * 3 + 1, &v).unwrap();
+            }
+            store.finalize().unwrap();
+
+            let index = VectorIndex::build_with(&store, HnswConfig::default());
+            assert_eq!(index.points.len(), 64);
+            for p in &index.points {
+                assert_eq!(
+                    Arc::strong_count(&p.0),
+                    2,
+                    "primary map must share each point's allocation with the retained set \
+                     (strong_count 2 = retained + map); a deep copy leaves it at 1"
+                );
+            }
+
+            // The lazily-built secondary map (non-default ef) must share too, not deep-copy.
+            let q: Vec<f32> = (0..8).map(|d| ((d + 1) as f32).cos() + 2.0).collect();
+            let default_ef = HnswConfig::default().ef_search;
+            let via_default = index.nearest_with_ef(&q, 5, default_ef);
+            let via_secondary = index.nearest_with_ef(&q, 5, default_ef + 7);
+            for p in &index.points {
+                assert_eq!(
+                    Arc::strong_count(&p.0),
+                    3,
+                    "a secondary per-ef map must share the point allocations too"
+                );
+            }
+            // Behavioural sanity: both ef levels answer over the same shared point set.
+            assert_eq!(via_default.len(), 5);
+            assert_eq!(via_secondary.len(), 5);
+
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
