@@ -147,6 +147,13 @@ pub use http::{
     ServerConfig, GLOBAL_POD,
 }; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the bind gate; sq-zcby: AuthPosture folds the --auth-token gate into it; sq-2gqr: serve = the accept loop with the slow-loris header-read deadline
 
+/// [FABLE-5] (sq-fy8ci) The RAII single-flight restore permit, re-exported at the crate root
+/// next to [`AppState`]. Obtained via `AppState::try_begin_restore`; while one is alive a
+/// second concurrent restore is refused (the `/admin/restore` route maps that to 409 Conflict).
+/// Present only with the `backup` cargo feature (which implies `server`).
+#[cfg(feature = "backup")]
+pub use http::RestoreGuard;
+
 /// [OPUS-4.8] (sq-4w18) The SERVICE egress allowlist config type, re-exported at the
 /// crate root next to [`ServerConfig`].
 pub use service_config::ServiceAllowlist;
