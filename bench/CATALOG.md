@@ -85,10 +85,14 @@ Notes on a few that need care:
   prerequisite that unblocks the HTTP opt lane (sq-7d3dj.10/.12/.13).
 - **`gsp-bench` (`bench/gsp`) is the Graph Store Protocol same-box panel** — see
   [`bench/gsp/README.md`](./gsp/README.md). GSP PUT/GET/DELETE round-trips (1 KB–10 MB
-  size sweep + the PSS LDP-CRUD stream projected onto GSP verbs) against sparq-server /
-  Fuseki / Oxigraph server, plus Community Solid Server as a **LOOSE** LDP-architecture
-  column (labelled, never averaged). A HARD round-trip content gate (returned triple set
-  must equal the PUT set exactly) runs BEFORE any timing; the driver is loopback-only
+  size sweep + the PSS LDP-CRUD stream projected onto GSP verbs) plus a **PATCH-dialect
+  panel** (`application/sparql-update` + `text/n3` Solid N3-Patch; support probed per
+  engine, 405/415/501 records honest n/a — Fuseki/Oxigraph GSP implement no PATCH
+  dialect, sparq's `text/n3` is double-opt-in via the `n3-patch` feature +
+  `GSP_N3_PATCH=1`) against sparq-server / Fuseki / Oxigraph server, plus Community
+  Solid Server as a **LOOSE** LDP-architecture column (labelled, never averaged; the
+  only Solid-PATCH peer). A HARD content-agreement gate (returned triple set must equal
+  the sent/reference set exactly) runs BEFORE any timing; the driver is loopback-only
   (refuses non-loopback URLs). `bash bench/gsp/run.sh --smoke` is the self-contained
   acceptance run. First-read record: `research/gap-gsp-2026-07.md`. [FABLE-5]
 - **`sp2b` (SP2Bench) is tiered** — see [`bench/sp2b/README.md`](./sp2b/README.md).
