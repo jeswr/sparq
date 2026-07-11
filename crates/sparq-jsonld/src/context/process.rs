@@ -114,7 +114,7 @@ pub(crate) fn process_inner(
 
     // step 3: when not propagating, remember the input context to revert to.
     if !propagate && result.previous_context.is_none() {
-        result.previous_context = Some(Box::new(active.clone()));
+        result.previous_context = Some(std::sync::Arc::new(active.clone()));
     }
 
     // step 4: normalise to an array of contexts.
@@ -132,7 +132,7 @@ pub(crate) fn process_inner(
             }
             let mut fresh = ActiveContext::new(active.original_base_url.as_deref());
             if !propagate {
-                fresh.previous_context = Some(Box::new(result.clone()));
+                fresh.previous_context = Some(std::sync::Arc::new(result.clone()));
             }
             result = fresh;
             continue;
@@ -405,7 +405,7 @@ pub(crate) fn create_term_definition(
     }
 
     // step 6: remove and remember any existing definition (for the protected check).
-    let previous_definition = active.term_definitions.remove(term);
+    let previous_definition = active.term_definitions_mut().remove(term);
 
     // steps 7–9: normalise the value to a map and record whether it was a simple term.
     let (value, simple_term) = match &raw {
@@ -629,7 +629,7 @@ fn create_reverse_definition(
         def.index = Some(is);
     }
     def.reverse = true;
-    active.term_definitions.insert(term.to_string(), def);
+    active.term_definitions_mut().insert(term.to_string(), def);
     defined.insert(term.to_string(), true);
     Ok(())
 }
@@ -783,7 +783,7 @@ fn finish_definition(
         }
     }
 
-    active.term_definitions.insert(term.to_string(), def);
+    active.term_definitions_mut().insert(term.to_string(), def);
     defined.insert(term.to_string(), true);
     Ok(())
 }

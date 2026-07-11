@@ -29,6 +29,8 @@ const FOLDER_SLUGS = new Set([
   "streaming-rsp",
   "zk",
   "mpc",
+  // [FABLE-5] sq-vw3ax.13 — federation ships its own per-folder redirect stub.
+  "federation",
 ]);
 
 interface Stub {

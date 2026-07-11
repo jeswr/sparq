@@ -77,6 +77,11 @@ const DEMOS = {
     () => import("@/components/rsp-playground").then((m) => m.RspPlayground),
     { ssr: false, loading: () => <DemoSkeleton label="streaming RSP" /> },
   ),
+  federation: dynamic(
+    () =>
+      import("@/components/federation-walkthrough").then((m) => m.FederationWalkthrough),
+    { ssr: false, loading: () => <DemoSkeleton label="federation" /> },
+  ),
   zk: dynamic(
     () => import("@/components/zk-car-hire").then((m) => m.ZkCarHire),
     { ssr: false, loading: () => <DemoSkeleton label="ZK query proofs" /> },
