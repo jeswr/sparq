@@ -12537,7 +12537,21 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         _ => Value::Error,
     };
     Ok(match f {
-        F::Str => value_str(&ev(0)?).map(simple).unwrap_or(Value::Error),
+        // [FABLE-5] (sq-qeltv) STR is defined over LITERALS and IRIs only, per SPARQL 1.1
+        // §17.4.2.5 (`simple literal STR(literal ltrl)` / `simple literal STR(IRI rsrc)`).
+        // A blank-node operand is a TYPE ERROR — the old `value_str` coercion leaked the
+        // ENGINE-INTERNAL bnode label (not a principled §17.3.1 extension: the label is
+        // dictionary-private and unstable). Unbound / errored / triple-term operands stay
+        // errors as before; computed numerics/booleans are literal values, so they pass.
+        // Differential (bead): Oxigraph errors here too; rdflib leniently returns ITS
+        // internal label — divergent-by-engine, exactly why the label must not leak.
+        F::Str => match ev(0)? {
+            Value::Term(Term::NamedNode(n)) => simple(n.as_str().to_string()),
+            Value::Term(Term::Literal(l)) => simple(l.value().to_string()),
+            Value::Num(n) => simple(n.lexical()),
+            Value::Bool(b) => simple(b.to_string()),
+            _ => Value::Error,
+        },
         // [OPUS-4.8] STRLEN's operand is a STRING LITERAL (simple / lang-tagged /
         // xsd:string), per SPARQL 1.1 §17.4.3.2 `xsd:integer STRLEN(string literal)`.
         // An IRI / number / boolean is a TYPE ERROR — NOT its STR() length (the old
@@ -12642,14 +12656,29 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 _ => Value::Error,
             },
         },
-        F::IsIri => Value::Bool(matches!(ev(0)?, Value::Term(Term::NamedNode(_)))),
-        F::IsBlank => Value::Bool(matches!(ev(0)?, Value::Term(Term::BlankNode(_)))),
-        F::IsLiteral => Value::Bool(matches!(ev(0)?, Value::Term(Term::Literal(_)) | Value::Num(_) | Value::Bool(_))),
-        F::IsNumeric => Value::Bool(match ev(0)? {
-            Value::Num(_) => true,
-            Value::Term(Term::Literal(l)) => is_numeric_dt(&l),
-            _ => false,
-        }),
+        // [FABLE-5] (sq-qeltv) The type-test builtins take an RDF TERM: an unbound (or
+        // already-errored) operand is a TYPE ERROR per SPARQL 1.1 §17.2 — so
+        // `FILTER(!isIRI(?unbound))` DROPS the row (`!error` = error), where the old
+        // `false` leniency kept it. Mirrors the `IsTriple` / `HasLang` arms below;
+        // differential (bead): Oxigraph AND rdflib both drop the row.
+        F::IsIri => match ev(0)? {
+            Value::Unbound | Value::Error => Value::Error,
+            v => Value::Bool(matches!(v, Value::Term(Term::NamedNode(_)))),
+        },
+        F::IsBlank => match ev(0)? {
+            Value::Unbound | Value::Error => Value::Error,
+            v => Value::Bool(matches!(v, Value::Term(Term::BlankNode(_)))),
+        },
+        F::IsLiteral => match ev(0)? {
+            Value::Unbound | Value::Error => Value::Error,
+            v => Value::Bool(matches!(v, Value::Term(Term::Literal(_)) | Value::Num(_) | Value::Bool(_))),
+        },
+        F::IsNumeric => match ev(0)? {
+            Value::Unbound | Value::Error => Value::Error,
+            Value::Num(_) => Value::Bool(true),
+            Value::Term(Term::Literal(l)) => Value::Bool(is_numeric_dt(&l)),
+            _ => Value::Bool(false),
+        },
         // ABS/CEIL/FLOOR/ROUND preserve the argument's numeric DATATYPE
         // (CEIL("2.5"^^xsd:decimal) is "3"^^xsd:decimal, not xsd:integer).
         F::Abs => as_numeric(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),

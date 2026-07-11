@@ -9,6 +9,9 @@
 //! * `count_distinct` — COUNT(DISTINCT ?x) exact semantics (dedup by term equality).
 //! * `filter_three_valued_logic` — a FILTER expression that evaluates to a type error
 //!   DROPS the row (same as false), never keeps it.
+//! * `type_error_builtins` — (sq-qeltv) `is*()` over an UNBOUND argument and `STR()`
+//!   over a blank node are TYPE ERRORS per SPARQL 1.1 §17.2/§17.4.2, never lenient
+//!   `false` / an engine-internal bnode label.
 //! * `optional_scoping` — OPTIONAL left-outer-join semantics: left row survives when
 //!   no right row matches; the OPTIONAL FILTER condition is applied to combined rows.
 //! * `minus_scoping` — SPARQL MINUS: disjoint domains are a no-op; compatible rows
@@ -375,6 +378,125 @@ mod filter_three_valued_logic {
         // false || error = error → row dropped
         let r_false_or = query(&g, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(false || STRLEN(?s) > 0) }").unwrap();
         assert_eq!(r_false_or.rows.len(), 0, "false || error = error → dropped");
+    }
+}
+
+// ─── type_error_builtins (sq-qeltv) ───────────────────────────────────────────
+
+/// [FABLE-5] (sq-qeltv) SPARQL 1.1 §17.2 / §17.4.2: the type-test builtins
+/// (`isIRI`/`isBlank`/`isLiteral`/`isNumeric`) over an UNBOUND argument are a TYPE
+/// ERROR (not `false`), and `STR()` is defined over literals + IRIs ONLY (a blank
+/// node is a type error, never an engine-internal label). Differential-verified:
+/// Oxigraph agrees on both corners; rdflib agrees on the unbound corner.
+#[cfg(test)]
+mod type_error_builtins {
+    use super::*;
+
+    /// One triple; the OPTIONAL never matches, so ?u is unbound on the single row.
+    fn g_opt() -> Graph {
+        Graph::load_str("<http://ex/a> <http://ex/p> <http://ex/b> .", "ntriples").unwrap()
+    }
+    const OPT_BODY: &str = "?s <http://ex/p> ?o . OPTIONAL { ?o <http://ex/p> ?u }";
+
+    /// The bead's exact repro: `FILTER(!isIRI(?u))` with ?u unbound. isIRI(unbound)
+    /// is a type error, `!error` is still an error → the row is DROPPED. The old
+    /// lenient `false` made `!isIRI(?u)` TRUE and wrongly KEPT the row.
+    #[test]
+    fn not_isiri_of_unbound_is_error_drops_row() {
+        let q = format!("SELECT ?s WHERE {{ {OPT_BODY} FILTER(!isIRI(?u)) }}");
+        let r = query(&g_opt(), &q).unwrap();
+        assert_eq!(r.rows.len(), 0, "!isIRI(?unbound) must be a type error (row dropped), got {} rows", r.rows.len());
+    }
+
+    /// All four type tests error on unbound, in BOTH polarities (error ≠ false: the
+    /// negated form must also drop the row — that's what distinguishes the spec
+    /// semantics from the old `false`, where exactly one polarity would keep it).
+    #[test]
+    fn all_four_type_tests_error_on_unbound_both_polarities() {
+        for f in ["isIRI", "isBlank", "isLiteral", "isNumeric"] {
+            for form in [format!("{f}(?u)"), format!("!{f}(?u)")] {
+                let q = format!("SELECT ?s WHERE {{ {OPT_BODY} FILTER({form}) }}");
+                let r = query(&g_opt(), &q).unwrap();
+                assert_eq!(r.rows.len(), 0, "FILTER({form}) with ?u unbound must drop the row, got {} rows", r.rows.len());
+            }
+        }
+    }
+
+    /// Positive control (non-vacuity): the same query shapes over a BOUND argument
+    /// still evaluate to plain booleans — exactly one polarity keeps the row.
+    #[test]
+    fn type_tests_on_bound_terms_unchanged() {
+        let g = g_opt();
+        let keep = |filt: &str| {
+            let q = format!("SELECT ?s WHERE {{ ?s <http://ex/p> ?o FILTER({filt}) }}");
+            query(&g, &q).unwrap().rows.len()
+        };
+        assert_eq!(keep("isIRI(?o)"), 1, "isIRI(bound IRI) must be true");
+        assert_eq!(keep("!isIRI(?o)"), 0, "!isIRI(bound IRI) must be false");
+        assert_eq!(keep("isLiteral(?o)"), 0, "isLiteral(bound IRI) must be false");
+        assert_eq!(keep("isBlank(?o)"), 0, "isBlank(bound IRI) must be false");
+        assert_eq!(keep("isNumeric(?o)"), 0, "isNumeric(bound IRI) must be false");
+    }
+
+    /// An ERRORED (not merely unbound) argument also propagates: STRLEN(?s) on an
+    /// IRI is a type error, and isNumeric(error) must stay an error, not `false` —
+    /// so the NEGATED filter drops the row too.
+    #[test]
+    fn type_test_propagates_errored_argument() {
+        let q = "SELECT ?s WHERE { ?s <http://ex/p> ?o FILTER(!isNumeric(STRLEN(?s))) }";
+        let r = query(&g_opt(), q).unwrap();
+        assert_eq!(r.rows.len(), 0, "isNumeric(type-error) must propagate the error, got {} rows", r.rows.len());
+    }
+
+    /// STR(bnode) is a type error: a BIND of it leaves the variable UNBOUND (row
+    /// kept), and never leaks an engine-internal blank-node label. The bead observed
+    /// STRLEN(STR(?bnode)) = 11 (an internal label's length) — both forms must now
+    /// be unbound.
+    #[test]
+    fn str_of_bnode_is_error_bind_leaves_unbound() {
+        let g = Graph::load_str("_:b <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+        for bind in ["STR(?s)", "STRLEN(STR(?s))"] {
+            let q = format!("SELECT ?s ?v WHERE {{ ?s <http://ex/p> ?o . BIND({bind} AS ?v) }}");
+            let r = query(&g, &q).unwrap();
+            assert_eq!(r.rows.len(), 1, "BIND of an error keeps the row for: {bind}");
+            assert!(r.rows[0][0].is_some(), "?s (the bnode) stays bound for: {bind}");
+            assert_eq!(r.rows[0][1], None, "BIND({bind}) over a bnode must leave ?v UNBOUND, got {:?}", r.rows[0][1]);
+        }
+    }
+
+    /// Positive control (non-vacuity): STR over each type it IS defined on — IRI,
+    /// plain/lang-tagged/typed literal, computed numeric and boolean — unchanged.
+    #[test]
+    fn str_on_defined_domains_unchanged() {
+        let g = Graph::load_str(
+            "<http://ex/a> <http://ex/p> \"hi\"@en .\n<http://ex/a> <http://ex/q> \"7\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            "ntriples",
+        )
+        .unwrap();
+        let cell = |q: &str| one_cell(&g, q);
+        assert_eq!(cell("SELECT (STR(<http://ex/x>) AS ?v) WHERE {}"), Some("\"http://ex/x\"".into()));
+        assert_eq!(
+            cell("SELECT ?v WHERE { <http://ex/a> <http://ex/p> ?o BIND(STR(?o) AS ?v) }"),
+            Some("\"hi\"".into()),
+            "STR of a lang-tagged literal is its lexical form"
+        );
+        assert_eq!(
+            cell("SELECT ?v WHERE { <http://ex/a> <http://ex/q> ?o BIND(STR(?o) AS ?v) }"),
+            Some("\"7\"".into()),
+            "STR of a typed literal is its lexical form"
+        );
+        assert_eq!(cell("SELECT (STR(1+1) AS ?v) WHERE {}"), Some("\"2\"".into()), "STR of a computed numeric");
+        assert_eq!(cell("SELECT (STR(1 < 2) AS ?v) WHERE {}"), Some("\"true\"".into()), "STR of a computed boolean");
+    }
+
+    /// STR(?u) with ?u UNBOUND stays a type error (was already an error before the
+    /// bead fix; pinned so the STR domain change can't regress it).
+    #[test]
+    fn str_of_unbound_is_error() {
+        let q = format!("SELECT ?s ?v WHERE {{ {OPT_BODY} BIND(STR(?u) AS ?v) }}");
+        let r = query(&g_opt(), &q).unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][1], None, "BIND(STR(?unbound)) must leave ?v unbound");
     }
 }
 
