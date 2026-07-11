@@ -118,7 +118,7 @@ function SelectionTable() {
               </td>
               <td className="px-3 py-1.5 text-muted-foreground">
                 {sel.pruned.map((s) => (
-                  <div key={s}>
+                  <div key={s} title={pruneReason(sel.pattern, s)}>
                     <s>{SOURCES[s].label}</s>{" "}
                     <span className="font-sans text-[11px]">
                       — no {patternPredicate(sel.pattern)} partition
