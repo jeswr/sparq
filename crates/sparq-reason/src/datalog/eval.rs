@@ -19,8 +19,7 @@
 //! layout.
 
 use super::{
-    bound_slots, numeric_value, AggAtom, Atom, CmpOp, DTerm, FactStore, Program, Rule,
-    Stratification,
+    numeric_value, AggAtom, Atom, CmpOp, DTerm, FactStore, Program, Rule, Stratification,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
@@ -79,14 +78,19 @@ pub(super) fn eval_stratified(
     store.list
 }
 
+/// `(binding slot, candidate column)` pairs mapping variable slots to the atom's
+/// triple positions — used for equi-join keys and write-back slots alike.
+type SlotCols = Vec<(usize, usize)>;
+/// Per-position constants pinned for an atom's join probe (`s`, `p`, `o`).
+type AtomConsts = [Option<Id>; 3];
+/// The join plan for one atom: `(key_cols, new_writes, consts)`.
+type AtomPlan = (SlotCols, SlotCols, AtomConsts);
+
 /// The join plan for one atom given the running bound-slot set: equi-join key
 /// column pairs `(binding slot, candidate column)` for already-bound variables,
 /// write-back slots for new ones, and per-position constants. Marks the atom's
 /// new variables as bound.
-fn plan_atom(
-    atom: &Atom,
-    bound: &mut FxHashSet<u32>,
-) -> (Vec<(usize, usize)>, Vec<(usize, usize)>, [Option<Id>; 3]) {
+fn plan_atom(atom: &Atom, bound: &mut FxHashSet<u32>) -> AtomPlan {
     let mut key_cols = Vec::new();
     let mut new_writes = Vec::new();
     let mut consts = [None, None, None];

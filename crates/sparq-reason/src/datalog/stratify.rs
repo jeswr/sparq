@@ -135,7 +135,7 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
     // Collect every dependency node; strata live on nodes.
     let mut node_ix: FxHashMap<Key, usize> = FxHashMap::default();
     let mut nodes: Vec<Key> = Vec::new();
-    let mut ix = |k: Key, node_ix: &mut FxHashMap<Key, usize>, nodes: &mut Vec<Key>| -> usize {
+    let ix = |k: Key, node_ix: &mut FxHashMap<Key, usize>, nodes: &mut Vec<Key>| -> usize {
         *node_ix.entry(k).or_insert_with(|| {
             nodes.push(k);
             nodes.len() - 1
