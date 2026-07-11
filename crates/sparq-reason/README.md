@@ -58,6 +58,13 @@ let g = Graph::from_parts(dict, triples);
   pending value-space comparator. SPARQL-RIF entailment and larger RIF dialects deferred.
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
+- **Stratified Datalog** (opt-in `datalog`) — a small native rule dialect (RDFox-parity
+  track): `NOT` (negation as failure) + `AGGREGATE … BIND COUNT(?v) AS ?c` atoms and a
+  minimal exact-numeric `FILTER`, with a **stratification checker** (cycles through
+  NOT/AGGREGATE rejected loudly, class-granular for `rdf:type`) and a non-incremental
+  per-stratum evaluator on the shared substrate join kernels. Phase 1 of
+  `research/stratified-datalog-rules.md`; COUNT only, semi-naive + incremental
+  maintenance are beaded follow-ups.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
   premises, recursively down to asserted facts (a flat, ZK-witness-friendly shape).
 - **RIF/XML importer** (opt-in `rif-xml`) — parse the W3C RIF-Core XML presentation

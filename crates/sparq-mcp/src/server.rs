@@ -47,6 +47,15 @@ pub struct ServerConfig {
     pub max_rows: Option<usize>,
     /// The server name reported in the `initialize` handshake (`serverInfo.name`).
     pub server_name: String,
+    /// [FABLE-5] (sq-lsp7k.10, feature `templates`) The named parameterized templates this
+    /// server exposes through the `template_list` / `template_invoke` tools. Registered by
+    /// the embedder as ALREADY-VALIDATED [`sparq_engine::templates::Template`]s (parse +
+    /// declared-parameter validation happen at construction, fail-closed), so every listed
+    /// template is invocable. Empty (the default) ⇒ the two tools are not advertised. An
+    /// UPDATE template is advertised but only *invocable* when [`Self::allow_update`] is
+    /// also `true` — the template layer never widens the read-only posture.
+    #[cfg(feature = "templates")]
+    pub templates: Vec<sparq_engine::templates::Template>,
 }
 
 impl Default for ServerConfig {
@@ -59,6 +68,9 @@ impl Default for ServerConfig {
             query_timeout_secs: Some(30),
             max_rows: Some(1_000_000),
             server_name: "sparq-mcp".to_string(),
+            // [FABLE-5] sq-lsp7k.10: no templates unless the embedder registers them.
+            #[cfg(feature = "templates")]
+            templates: Vec::new(),
         }
     }
 }
@@ -71,18 +83,29 @@ impl Default for ServerConfig {
 pub struct McpServer {
     graph: Graph,
     config: ServerConfig,
+    /// [FABLE-5] (sq-lsp7k.10, feature `text`) The lazily-built BM25 literal index behind
+    /// the `text_search` tool. `None` until the first search; reconciled incrementally
+    /// (`O(new dictionary terms)`) before every search so it stays current across
+    /// `update` / `template_invoke` mutations without a per-call rebuild.
+    #[cfg(feature = "text")]
+    text_index: Option<sparq_text::TextIndex>,
 }
 
 impl McpServer {
     /// Build a read-only server over `graph` with the default [`ServerConfig`]
     /// (update disabled).
     pub fn new(graph: Graph) -> Self {
-        McpServer { graph, config: ServerConfig::default() }
+        Self::with_config(graph, ServerConfig::default())
     }
 
     /// Build a server over `graph` with an explicit [`ServerConfig`].
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
-        McpServer { graph, config }
+        McpServer {
+            graph,
+            config,
+            #[cfg(feature = "text")]
+            text_index: None,
+        }
     }
 
     /// Whether the mutating `update` tool is exposed (mirrors
@@ -104,6 +127,12 @@ impl McpServer {
     /// Read-only borrow of the served graph (for embedders / tests).
     pub fn graph(&self) -> &Graph {
         &self.graph
+    }
+
+    /// The server's configuration (crate-internal: template-tool advertisement reads it).
+    #[cfg(feature = "templates")]
+    pub(crate) fn config(&self) -> &ServerConfig {
+        &self.config
     }
 
     /// Handle one raw JSON-RPC message. Returns `Ok(Some(response_json))` for a
@@ -203,6 +232,12 @@ impl McpServer {
             "stats" => self.tool_stats(),
             #[cfg(feature = "nlq")]
             "ask" => self.tool_ask(&args),
+            #[cfg(feature = "templates")]
+            "template_list" => self.tool_template_list(),
+            #[cfg(feature = "templates")]
+            "template_invoke" => self.tool_template_invoke(&args),
+            #[cfg(feature = "text")]
+            "text_search" => self.tool_text_search(&args),
             "update" => self.tool_update(&args),
             other => {
                 return Err(RpcError::new(
@@ -283,6 +318,106 @@ impl McpServer {
             "namespaces": ix.vocabularies.distinct,
         });
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
+    }
+
+    /// `template_list` (feature `templates`): the registered named-template definitions
+    /// as JSON — name / kind / text / declared typed parameters / description — so an
+    /// agent can ground a `template_invoke` call. [FABLE-5] sq-lsp7k.10
+    #[cfg(feature = "templates")]
+    fn tool_template_list(&self) -> Result<String, String> {
+        let defs: Vec<Value> = self.config.templates.iter().map(|t| t.to_json()).collect();
+        let out = Value::Array(defs);
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+    }
+
+    /// `template_invoke` (feature `templates`): bind typed JSON arguments into a
+    /// registered template through the injection-safe #901 algebra rewrite and execute
+    /// it. FAIL-CLOSED: an unknown template name, an unknown/missing parameter, or a
+    /// JSON shape that does not match the declared type is a tool error, never a guess.
+    /// An UPDATE template additionally requires `allow_update` — exactly the raw
+    /// `update` tool's gate, so the template layer never widens write access.
+    /// [FABLE-5] sq-lsp7k.10
+    #[cfg(feature = "templates")]
+    fn tool_template_invoke(&mut self, args: &Value) -> Result<String, String> {
+        let name = arg_str(args, "name")?;
+        let template = self
+            .config
+            .templates
+            .iter()
+            .find(|t| t.name() == name)
+            .ok_or_else(|| format!("no such template `{}` (see template_list)", name))?
+            .clone();
+        if template.is_update() && !self.allow_update() {
+            return Err(format!(
+                "template `{}` is a SPARQL UPDATE and this server is read-only                  (start it with update enabled to allow template writes)",
+                name
+            ));
+        }
+        let params = args.get("parameters").cloned().unwrap_or_else(|| json!({}));
+        let bound = template.bind_json(&params)?;
+        // The bound algebra renders to canonical SPARQL (values escaped as data) and runs
+        // through the SAME budgeted engine entry points as the raw query/update tools.
+        let rendered = bound.render();
+        if bound.is_update() {
+            let budget = self.budget();
+            sparq_engine::update_in_place_atomic_with_budget(&mut self.graph, &rendered, &budget)?;
+            Ok(format!("ok; graph now has {} triples", self.graph.len()))
+        } else if bound.is_graph_form() {
+            sparq_engine::construct_ntriples_with_budget(&self.graph, &rendered, &self.budget())
+        } else {
+            sparq_engine::query_json_with_budget(&self.graph, &rendered, &self.budget())
+        }
+    }
+
+    /// `text_search` (feature `text`): BM25 full-text search over the graph's string
+    /// literals via `sparq-text`. The index is built lazily on first use and reconciled
+    /// incrementally (`O(new dictionary terms)`) before every search, so it stays current
+    /// after `update` / `template_invoke` mutations. Returns ranked hits as JSON —
+    /// each the matching literal (N-Triples form) plus its BM25 score. [FABLE-5]
+    /// sq-lsp7k.10
+    #[cfg(feature = "text")]
+    fn tool_text_search(&mut self, args: &Value) -> Result<String, String> {
+        let query = arg_str(args, "query")?;
+        let mode = args.get("mode").and_then(Value::as_str).unwrap_or("and");
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 1000) as usize;
+        // Lazy build / incremental reconcile (a shrunken dictionary — impossible within
+        // one live Graph, but guarded anyway — forces a rebuild).
+        let rebuild = match &self.text_index {
+            None => true,
+            Some(ix) => ix.needs_rebuild(&self.graph),
+        };
+        if rebuild {
+            self.text_index = Some(sparq_text::TextIndex::build(&self.graph));
+        }
+        let index = self.text_index.as_mut().expect("just ensured");
+        index.reconcile(&self.graph);
+        let hits = match mode {
+            "and" => index.search(query),
+            "any" => index.search_any(query),
+            other => {
+                return Err(format!(
+                    "unknown mode `{}` (expected \"and\" or \"any\")",
+                    other
+                ))
+            }
+        };
+        let total = hits.len();
+        let rows: Vec<Value> = hits
+            .iter()
+            .take(limit)
+            .map(|h| {
+                json!({
+                    "literal": self.graph.dict.term(h.id).to_string(),
+                    "score": h.score,
+                })
+            })
+            .collect();
+        let out = json!({ "total_matches": total, "returned": rows.len(), "hits": rows });
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
     }
 
     /// `update`: apply a SPARQL 1.1 Update atomically (only reachable when enabled).
