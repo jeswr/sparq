@@ -90,7 +90,15 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
 // languageIn/ignoredProperties), a literal shape ref (sh:node/not/property/…), a
 // non-boolean sh:closed/uniqueLang/…, a non-literal range comparand, an ill-formed
 // comparand path (sh:equals/lessThan/…), a non-IRI sh:target{Class,SubjectsOf,
-// ObjectsOf}, an sh:sparql node with no sh:select literal. Construct-local checks,
+// ObjectsOf}, an sh:sparql node with no sh:select literal. (sq-ehq4g) adds: a
+// PROPERTY shape with NO sh:path (an sh:property value, or a node typed
+// sh:PropertyShape), sh:qualifiedValueShape with NEITHER sh:qualifiedMinCount nor
+// sh:qualifiedMaxCount (both qualified components then miss a mandatory parameter),
+// an sh:nodeKind value outside the SIX sh:* kinds, and a PRESENT sh:select /
+// sh:sparqlExpr (on sh:sparql constraints AND on the SPARQL-based node expressions
+// of sh:targetNode/sh:values) whose text does not parse as the required query form
+// — FAIL-CLOSED relative to this engine's vendored SPARQL parser: a valid query
+// beyond the parser's coverage is also rejected strictly. Construct-local checks,
 // NOT a full SHACL-of-SHACL pass; ShaclFailure.ill_formed / ShapesModel::ill_formed()
 // carry (node, predicate, message). `validate` instead SKIPS all of the above
 // unchanged (its never-fails contract).
@@ -522,15 +530,17 @@ SHACL-spec-correct conforms/violations).
   stricter "only Violation fails" gate use `conforms_violations_only()`; for a custom
   `sh:conformanceDisallows` set use `conforms_with_disallowed(&[..])`.
 - **Ill-formed shapes are skipped by `validate`, reported as a failure by
-  `validate_strict` (sq-11a).** A shape never declared, an unparsable path, or an
-  `sh:select` that fails to parse (e.g. undeclared prefix) contributes no results;
-  the rest of validation still runs. `validate` never returns a `Result`/panics on
-  bad shapes — so a silently-empty report can mean "no targets" rather than
-  "conforms". When the distinction matters (CI shape linting, the suite's
+  `validate_strict` (sq-11a, sq-ehq4g).** A shape never declared, an unparsable path,
+  or an `sh:select` that fails to parse (e.g. undeclared prefix) contributes no
+  results; the rest of validation still runs. `validate` never returns a
+  `Result`/panics on bad shapes — so a silently-empty report can mean "no targets"
+  rather than "conforms". When the distinction matters (CI shape linting, the suite's
   `sht:Failure` entries), `validate_strict` rejects ill-formed constructs with
-  `ShaclFailure.ill_formed` (see the strict-validation list above) — but a PRESENT
-  `sh:select` whose query text our parser cannot parse stays a lenient skip (that
-  outcome depends on the engine's SPARQL parser, not on the shapes graph).
+  `ShaclFailure.ill_formed` (see the strict-validation list above). A PRESENT
+  `sh:select`/`sh:sparqlExpr` whose text does not parse is rejected strictly too
+  (sq-ehq4g) — FAIL-CLOSED relative to this engine's vendored SPARQL parser, so a
+  valid query using syntax the parser lacks is also rejected; prefer fixing the query
+  (or filing the parser gap) over weakening the strict gate.
 - **An uncompilable `sh:pattern` is SKIPPED, not fail-closed (sq-lz99x).** The Rust
   `regex` crate has no lookahead/lookbehind — neither does the XML Schema regex flavour
   the SHACL spec ties `sh:pattern` to — so e.g. `^(?!(TODO|TBD)).*` does not compile.

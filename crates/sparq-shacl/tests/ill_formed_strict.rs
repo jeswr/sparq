@@ -376,6 +376,96 @@ fn sparql_constraint_without_select_fails() {
     );
 }
 
+// ---- parser-dependent rejections (sq-ehq4g): a PRESENT query that does not
+// ---- parse. Fail-closed relative to THIS engine's SPARQL parser (README).
+
+#[test]
+fn unparsable_sparql_constraint_select_fails() {
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:sparql [ sh:select "SELECT ??? garbage {" ] ."#,
+        "select",
+    );
+}
+
+#[test]
+fn non_select_sparql_constraint_query_fails() {
+    // A parsable but non-SELECT query (ASK) — sh:select requires a SELECT.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:sparql [ sh:select "ASK { ?s ?p ?o }" ] ."#,
+        "select",
+    );
+}
+
+#[test]
+fn unparsable_target_node_select_expression_fails() {
+    // A SHACL-1.2 SPARQL-based node-expression target whose query is unparsable.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode [ sh:select "not sparql at all" ] ."#,
+        "select",
+    );
+}
+
+#[test]
+fn unparsable_values_sparql_expr_fails() {
+    // A SHACL-1.2 `sh:values [ sh:sparqlExpr … ]` whose expression is unparsable.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ; sh:values [ sh:sparqlExpr "((" ] ] ."#,
+        "sparqlExpr",
+    );
+}
+
+// ---- remaining non-construct-local syntax rules (sq-ehq4g) ----
+
+#[test]
+fn property_shape_missing_path_fails() {
+    // The value of sh:property must be a property shape, i.e. carry an sh:path.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:minCount 1 ] ."#,
+        "path",
+    );
+}
+
+#[test]
+fn typed_property_shape_missing_path_fails() {
+    // An explicitly-typed sh:PropertyShape root with no sh:path.
+    assert_ill_formed(r#"ex:P a sh:PropertyShape ; sh:targetNode ex:n ."#, "path");
+}
+
+#[test]
+fn qualified_value_shape_without_counts_fails() {
+    // sh:qualifiedValueShape with NEITHER sh:qualifiedMinCount nor
+    // sh:qualifiedMaxCount: both qualified-cardinality components are missing a
+    // mandatory parameter (SHACL §4.7.5–6 partial-parameter ill-formedness).
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ;
+               sh:qualifiedValueShape [ sh:nodeKind sh:IRI ] ] ."#,
+        "qualifiedValueShape",
+    );
+}
+
+#[test]
+fn unknown_node_kind_fails() {
+    // Not one of the six sh:* node kinds (SHACL §4.6.1).
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:nodeKind ex:SomeKind ."#,
+        "nodeKind",
+    );
+}
+
+#[test]
+fn unknown_node_kind_in_list_fails() {
+    // sh:Iri (wrong case) is in the sh: namespace but is NOT a node kind.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:nodeKind ( sh:IRI sh:Iri ) ."#,
+        "nodeKind",
+    );
+}
+
 // ---- well-formed edge cases must NOT be flagged (false-positive guard) ----
 
 #[test]
@@ -434,6 +524,51 @@ fn sequence_path_is_not_ill_formed() {
 }
 
 #[test]
+fn well_formed_sparql_queries_are_not_flagged() {
+    // (sq-ehq4g) Parsable SELECT queries in all three parser-dependent sites:
+    // an sh:sparql constraint, a node-expression target and sh:values.
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:sparql [ sh:select "SELECT $this ?value WHERE { $this <http://example.org/p> ?value }" ] .
+           ex:T2 a sh:NodeShape ;
+             sh:targetNode [ sh:select "SELECT ?n WHERE { ?n a <http://example.org/T> }" ] ;
+             sh:property [ sh:path ex:p ;
+               sh:values [ sh:sparqlExpr "STRLEN(STR($this))" ] ] ."#,
+    );
+}
+
+#[test]
+fn node_shape_without_path_is_not_flagged() {
+    // (sq-ehq4g) Only sh:property values / typed sh:PropertyShapes need a path;
+    // node shapes referenced via sh:node / sh:targetWhere never do.
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:node ex:Other ;
+             sh:targetWhere [ sh:nodeKind sh:IRI ] .
+           ex:Other a sh:NodeShape ; sh:nodeKind sh:IRI ."#,
+    );
+}
+
+#[test]
+fn qualified_value_shape_with_one_count_is_not_flagged() {
+    // (sq-ehq4g) Either count parameter alone is well-formed.
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ;
+               sh:qualifiedValueShape [ sh:nodeKind sh:IRI ] ;
+               sh:qualifiedMaxCount 3 ] ."#,
+    );
+}
+
+#[test]
+fn all_six_node_kinds_are_not_flagged() {
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:nodeKind ( sh:BlankNode sh:IRI sh:Literal sh:BlankNodeOrIRI
+                           sh:BlankNodeOrLiteral sh:IRIOrLiteral ) ."#,
+    );
+}
+
+#[test]
 fn plain_rdfs_class_root_is_not_flagged() {
     // A shapes graph that also carries vocabulary triples (a plain rdfs:Class
     // with no SHACL constructs) must not produce failures.
@@ -478,6 +613,17 @@ fn shacl_failure_display_mentions_ill_formed() {
         text
     );
     assert!(text.contains("closed"), "display names the predicate: {}", text);
+}
+
+#[test]
+fn lenient_validate_still_skips_unparsable_sparql_select() {
+    // (sq-ehq4g) The parser-dependent rejection keeps the lenient invariant:
+    // the SAME unparsable sh:select is a strict failure and a lenient skip.
+    let shapes = r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+                      sh:sparql [ sh:select "SELECT ??? garbage {" ] ."#;
+    assert!(run_strict(shapes).is_err());
+    let report = run_lenient(shapes);
+    assert!(report.conforms, "lenient skip unchanged: {}", report.to_text());
 }
 
 #[test]
