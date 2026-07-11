@@ -2031,6 +2031,31 @@
     // like-for-like axis (query-over-HDT is a NON-goal — different data structure); the
     // hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
     { key: 'HDT',           title: 'HDT load-and-decode', aliases: ['hdt', 'snikmeta'] },
+    // [GPT-5.6] sq-g3n7h: comparative suites added in #1887/#1908/#1916/#1926/#1929.
+    // These cards deliberately say what they measure: several are correctness, quality, or size
+    // panels rather than speed claims, and their wall-clock rows remain non-canonical trends.
+    { key: 'Browser / WASM', title: 'Browser / WASM comparison',
+      aliases: ['wasm-compare', 'wasm_compare', 'wasmcompare'],
+      note: 'Bundle-SIZE and compatibility card: bundle bytes are deterministic artifact-size '
+          + 'measurements, not speed. Browser and Node latency rows are correctness-gated, '
+          + 'non-canonical trend signals.' },
+    { key: 'RDFC-1.0 canonicalization', title: 'RDFC-1.0 canonicalization',
+      aliases: ['canon-bench', 'canon_bench', 'canonbench', 'canon'],
+      note: 'Correctness and DoS-resistance card: canonical bytes must match the W3C oracle; '
+          + 'poison-graph rows report guard/cap outcomes, not speed. Sane-set timings are '
+          + 'non-canonical trend signals.' },
+    { key: 'KGE quality', title: 'KGE link-prediction quality',
+      aliases: ['kge-quality-comparison', 'kge_quality_comparison', 'kgequalitycomparison', 'kge'],
+      note: 'QUALITY card: filtered MRR and Hits@k are matched-model link-prediction quality '
+          + 'measurements, not throughput or training-speed claims.' },
+    { key: 'Graph Store Protocol', title: 'Graph Store Protocol',
+      aliases: ['gsp-bench', 'gsp_bench', 'gspbench', 'gsp'],
+      note: 'Correctness-gated protocol card: round-trip RDF content must agree before timing. '
+          + 'Loopback latency rows are non-canonical trend signals.' },
+    { key: 'Python bindings', title: 'Python binding overhead',
+      aliases: ['python-bindings-bench', 'python_bindings_bench', 'pythonbindingsbench', 'python'],
+      note: 'Correctness-gated binding-overhead card: result counts must agree before timing. '
+          + 'Binding latency rows are non-canonical trend signals.' },
     // [OPUS-4.8] sq-5o5.3: PROMOTE the ZK estate to a featured card (the maintainer treats ZK as a
     // genuine differentiator, unlike the trend-only suites). One card groups the whole estate: the
     // `zk-compose` circuit-gate counts (zk_compose_<member>_gates) + the `zk` commitment-pipeline
@@ -2073,7 +2098,8 @@
         var a = f.aliases[j];
         // label-map suite match (exact, normalised) OR a name-token prefix like `deeptax_…`.
         if (suite === a) return f;
-        if (lowerName.indexOf(a.replace(/[ -]/g, '')) === 0 ||
+        if (lowerName.indexOf(a) === 0 ||
+            lowerName.indexOf(a.replace(/[ -]/g, '')) === 0 ||
             lowerName.indexOf(a.replace(/[ -]/g, '_')) === 0) return f;
       }
     }
