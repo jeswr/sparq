@@ -104,6 +104,15 @@ cs-anchor-incidence = ["sparq-engine/cs-anchor-incidence"]
 # CLI build carries none of it and is behaviour-identical). Enable to bench the fast path, e.g.
 # `cargo build --release -p sparq-cli --features topk-lazy-strkey`.
 topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
+# [FABLE-5] (sq-lsp7k.8, epic sq-lsp7k) `tabular` — the `tabular` subcommand: MATERIALIZING
+# tabular→RDF import (CSV direct mapping + the R2RML materializing subset over CSV logical
+# tables). OFF by default — the default CLI build carries no CSV/R2RML code and the subcommand
+# is absent. ZERO new dependencies: the streaming RFC-4180 CSV reader is first-party, R2RML
+# mappings parse through sparq-core's Turtle parser, and generated triples stream as N-Triples
+# chunks into the existing parallel ingest (`Graph::load_reader_parallel`) — so `.csv.gz` /
+# `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. Enable with
+# `cargo build -p sparq-cli --features tabular`.
+tabular = []
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the

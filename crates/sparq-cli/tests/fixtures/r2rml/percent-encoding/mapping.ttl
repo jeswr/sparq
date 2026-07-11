@@ -1,0 +1,9 @@
+# [FABLE-5] (sq-lsp7k.8) IRI-safe percent-encoding of template-substituted values (the rule
+# the W3C R2RMLTC0018/percent-encoding cases exercise): a space and a slash in the data must
+# be %-encoded in a template-generated IRI, but stay raw in a literal.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+<#TriplesMap1> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "country" ] ;
+  rr:subjectMap [ rr:template "http://example.com/country/{Name}" ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "Name" ] ] .

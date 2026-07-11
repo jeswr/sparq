@@ -18,6 +18,7 @@
 opt-in sparq-arrow (arrow — QueryResult -> RecordBatch columnar export)
 opt-in sparq-cli (hdt, hdt-write)
 opt-in sparq-cli (serialize-rdf)
+opt-in sparq-cli (tabular)
 opt-in sparq-cli (terse)
 opt-in sparq-core (block-bloom)
 opt-in sparq-core (compact-index)

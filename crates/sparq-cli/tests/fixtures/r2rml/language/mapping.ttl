@@ -1,0 +1,8 @@
+# [FABLE-5] (sq-lsp7k.8) rr:language on a column-valued object map (the construct the W3C
+# language test cases exercise, CSV-adapted): the literal carries the tag, no datatype.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+<#TriplesMap1> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "country" ] ;
+  rr:subjectMap [ rr:template "http://example.com/c/{Code}" ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "Name" ; rr:language "en" ] ] .
