@@ -147,8 +147,10 @@ pub struct Suite {
 ///
 /// * JSON-LD toRdf 413 — `sparq-conformance` `src/floors/to_rdf.rs`
 ///   `FLOOR = 413` (sq-oy1f.2; opt-in `jsonld-suite` feature).
-/// * JSON-LD fromRdf 51 — `sparq-conformance` `src/floors/from_rdf.rs`
-///   `FLOOR = 51` (sq-oy1f.2; opt-in `jsonld-suite` feature).
+/// * JSON-LD fromRdf 52 — `sparq-conformance` `src/floors/from_rdf.rs`
+///   `FLOOR = 52` (sq-oy1f.2; RAISED 51→52 by sq-oy1f.28 flipping the lane to the
+///   native document-level `sparq_jsonld::from_rdf` oracle; opt-in `jsonld-suite`
+///   feature).
 /// * JSON-LD compact 186 — `sparq-conformance` `src/floors/compact.rs`
 ///   `FLOOR = 186` (sq-3uos5; RAISED 163→186 by sq-oy1f.16 after #978's
 ///   faithfulness fixes; opt-in `jsonld-suite` feature; RDF → compacted JSON-LD via
@@ -455,8 +457,10 @@ pub const SUITES: &[Suite] = &[
         // [FABLE-5] sq-oy1f.40 — LIB-SIDE floor const single source.
         ratchet_floor: crate::floors::from_rdf::FLOOR,
         floor_basis: "pass",
-        note: "RDF → JSON-LD through the native serialize-rdf writer, compared by a \
-               re-parse RDF-dataset round-trip (expanded + prefix-@context forms)",
+        // [FABLE-5] sq-oy1f.28 — lane flipped to the native document-level pipeline.
+        note: "RDF → JSON-LD through the native sparq_jsonld::from_rdf (JSON-LD API \
+               §8.1), compared document-level against the normative expected docs \
+               plus a scoped re-parse round-trip; negatives assert exact error codes",
     },
     // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 `compact` ratchet (extends sq-oy1f.2,
     // epic sq-oy1f). Each `jld:CompactTest` input is parsed to RDF (the real oxjsonld
