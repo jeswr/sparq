@@ -104,14 +104,16 @@ fn rdfs(dict: &mut Dict, local: &str) -> Id {
 ///   axioms are classified via usage-based typing by the extractor without needing an
 ///   explicit declaration, but the renderer emits a declaration for those too for uniformity
 ///   and to ensure the round-trip is closed even if the ordering of axiom triples changes.
-/// - The renderer intentionally skips `EquivalentClasses(Class(A), expr)` axioms whose left
-///   side is a named class and whose right side would re-emit the SAME backbone definition on
-///   `A`. The extractor's M1 pass `emit_named_composite_equiv` synthesises such axioms during
-///   extraction; re-emitting them as inline backbone on the named class IRI would cause the
-///   re-extraction to produce DUPLICATE `EquivalentClasses` axioms (one from the backbone
-///   pass, one from a separate `owl:equivalentClass` triple). The renderer therefore detects
-///   this pattern and emits the backbone on the class node directly (without a separate
-///   `owl:equivalentClass` triple), which is exactly what the extractor expects.
+/// - `EquivalentClasses(Class(A), expr)` is ALWAYS emitted in the explicit-triple shape
+///   (`A owl:equivalentClass _:b` with the backbone on a fresh blank node), NEVER as an
+///   inline backbone on `A` itself. The two shapes extract differently: an inline backbone
+///   makes the extractor INLINE the composite at every use site of `A` (and synthesise the
+///   equivalence via the M1 pass), so re-emitting a model that holds atomic `Class(A)`
+///   references in the inline shape would CHANGE those references on re-extraction — and a
+///   self-referential definition would render as a cyclic class expression the extractor
+///   refuses. The explicit shape round-trips both origins; this was measured against the
+///   W3C Direct-Semantics corpus (sq-pbz04.4.17, replacing the sq-pbz04.4.7 special case
+///   that the corpus arm caught mis-rendering 15 documents).
 pub fn render_to_triples(onto: &Ontology, dict: &mut Dict) -> Vec<[Id; 3]> {
     let mut out: Vec<[Id; 3]> = Vec::new();
     let mut counter = BnodeCounter::new();
@@ -245,42 +247,34 @@ fn emit_axiom(
             out.push([s, p, o]);
         }
 
-        // `left owl:equivalentClass right`
+        // `left owl:equivalentClass right` — ALWAYS the explicit-triple shape, with any
+        // composite side on a FRESH blank node.
         //
-        // NAMED-COMPOSITE SPECIAL CASE (M1 round-trip):
-        // When the extractor's `emit_named_composite_equiv` pass produces
-        // `EquivalentClasses(Class(A), expr)` for a named class A, it means A is DEFINED
-        // by `expr` via an inline backbone (e.g. `A owl:intersectionOf (…)`).
-        // Re-emitting this as `A owl:equivalentClass _:bnode` would produce an EXTRA
-        // `owl:equivalentClass` axiom on re-extraction in ADDITION to the one the M1 pass
-        // synthesises from the backbone, yielding duplicate `EquivalentClasses` axioms.
+        // NAMED-COMPOSITE SHAPE CHOICE (sq-pbz04.4.17 fix; replaces the sq-pbz04.4.7
+        // special case): the extractor accepts TWO RDF shapes for a named-composite
+        // equivalence, and they have DIFFERENT model semantics —
         //
-        // Instead: when the left side is a named IRI (`Class(A)`) and the right side is a
-        // composite class expression, emit the BACKBONE directly on A (so the subject of
-        // `owl:intersectionOf`/`owl:unionOf`/`owl:complementOf`/`owl:Restriction` is A
-        // itself). The M1 pass then synthesises the `EquivalentClasses(A, expr)` axiom from
-        // the backbone — exactly matching the original extraction.
+        //   (a) explicit: `A owl:equivalentClass _:b` + backbone on `_:b`. Use sites of
+        //       `A` elsewhere in the graph extract as the ATOMIC `Class(A)`.
+        //   (b) inline:   the backbone directly on `A` (`A owl:intersectionOf (…)`). The
+        //       extractor INLINES the composite at every use site of `A`, and the M1 pass
+        //       (`emit_named_composite_equiv`) synthesises `EquivalentClasses(A, expr)`.
         //
-        // When the right side is also a named class (both sides are `Class(_)`), we fall
-        // through to the normal `owl:equivalentClass` triple — there is no backbone to emit.
+        // The renderer previously emitted shape (b) whenever the left side was a named
+        // class and the right composite. The W3C corpus round-trip arm (sq-pbz04.4.17)
+        // MEASURED that to be wrong whenever `A` is REFERENCED elsewhere in the model:
+        // atomic `Class(A)` use sites re-extract as the inlined composite (14 corpus
+        // mismatches, e.g. WebOnt-description-logic-201…209), and a SELF-referential
+        // definition (`person ≡ ∃parent.person`, WebOnt-someValuesFrom-003) renders to a
+        // cyclic class expression the extractor refuses outright.
+        //
+        // Shape (a) round-trips BOTH origins: an (a)-origin model is reproduced verbatim;
+        // a (b)-origin model has its use sites ALREADY inlined as composites (they render
+        // as anonymous nodes, never as references to `A`), and its M1-prepended
+        // `EquivalentClasses` axioms re-extract from the explicit triples in the same
+        // order — no duplicate axiom, because the rendered graph carries no inline
+        // backbone on `A` for the M1 pass to fire on.
         Axiom::EquivalentClasses(left, right) => {
-            if let ClassExpression::Class(a_id) = left {
-                if !right.is_atomic() {
-                    // Emit backbone directly on the named class node `a_id`, then skip
-                    // the `owl:equivalentClass` triple.
-                    emit_class_expr_on(right, *a_id, dict, counter, out);
-                    return;
-                }
-            }
-            // Symmetric: if RIGHT is a named class and LEFT is composite, emit backbone
-            // on the right node (less common but structurally symmetric).
-            if let ClassExpression::Class(a_id) = right {
-                if !left.is_atomic() {
-                    emit_class_expr_on(left, *a_id, dict, counter, out);
-                    return;
-                }
-            }
-            // Both sides atomic (both named classes, or one is Thing/Nothing): plain triple.
             let s = emit_class_expr(left, dict, counter, out);
             let p = owl(dict, "equivalentClass");
             let o = emit_class_expr(right, dict, counter, out);
@@ -746,6 +740,99 @@ mod tests {
                    <http://ex/AB> rdfs:subClassOf <http://ex/A> .";
         let (onto1, onto2) = round_trip(ttl);
         assert_eq!(onto1, onto2, "round-trip: EquivalentClasses(AB, A⊓B) + SubClassOf(AB, A)");
+    }
+
+    // --- EquivalentClasses regression tests for the sq-pbz04.4.17 shape fix -------------
+    //
+    // The W3C corpus round-trip arm (sparq-conformance `dl-direct`) caught the old
+    // inline-backbone emission mis-rendering 15 documents; these two hand-written cases
+    // reproduce both mechanisms so the fix stays guarded WITHOUT the (gitignored) corpus.
+
+    /// Mechanism 1 (14 corpus mismatches, e.g. WebOnt-description-logic-201…209): a named
+    /// class `A` DEFINED by an explicit `owl:equivalentClass` composite AND REFERENCED
+    /// atomically elsewhere. The old inline-backbone emission made the re-extraction
+    /// inline `A`'s definition at the reference site, changing the model.
+    #[test]
+    fn round_trip_named_composite_referenced_elsewhere() {
+        let ttl = "@prefix owl:  <http://www.w3.org/2002/07/owl#> .\n\
+                   @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+                   <http://ex/A> owl:equivalentClass [\n\
+                     owl:intersectionOf ( <http://ex/P> <http://ex/Q> )\n\
+                   ] .\n\
+                   <http://ex/S> rdfs:subClassOf [\n\
+                     a owl:Restriction ;\n\
+                     owl:onProperty <http://ex/r> ;\n\
+                     owl:someValuesFrom <http://ex/A>\n\
+                   ] .";
+        let (onto1, onto2) = round_trip(ttl);
+        assert_eq!(onto1, onto2, "round-trip: EquivalentClasses(A, P⊓Q) + SubClassOf(S, ∃r.A)");
+        // The reference site must stay ATOMIC in BOTH models — the load-bearing half of
+        // the invariant the corpus arm caught the old emission violating.
+        for onto in [&onto1, &onto2] {
+            let filler_is_atomic = onto.axioms.iter().any(|ax| {
+                matches!(
+                    ax,
+                    Axiom::SubClassOf {
+                        sup: ClassExpression::ObjectSomeValuesFrom(_, filler),
+                        ..
+                    } if matches!(**filler, ClassExpression::Class(_))
+                )
+            });
+            assert!(filler_is_atomic, "∃r.A filler must stay the atomic Class(A): {:?}", onto);
+        }
+    }
+
+    /// Mechanism 2 (WebOnt-someValuesFrom-003): a SELF-referential definition
+    /// `person ≡ ∃parent.person`. The old inline-backbone emission put the restriction
+    /// backbone on `person` itself, whose filler is `person` — a cyclic class expression
+    /// the extractor REFUSES, so the round-trip died at re-extraction.
+    #[test]
+    fn round_trip_self_referential_equivalence() {
+        let ttl = "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+                   <http://ex/person> owl:equivalentClass [\n\
+                     a owl:Restriction ;\n\
+                     owl:onProperty <http://ex/parent> ;\n\
+                     owl:someValuesFrom <http://ex/person>\n\
+                   ] .";
+        let (onto1, onto2) = round_trip(ttl);
+        assert_eq!(onto1, onto2, "round-trip: EquivalentClasses(person, ∃parent.person)");
+    }
+
+    /// Direct unit test of the emission shape: `EquivalentClasses(Class(A), composite)`
+    /// emits an explicit `owl:equivalentClass` triple whose OBJECT is a fresh blank node
+    /// carrying the backbone — never an inline backbone on `A` (sq-pbz04.4.17).
+    #[test]
+    fn render_to_triples_named_composite_equiv_is_explicit_shape() {
+        let mut dict = Dict::new();
+        let a = dict.intern_iri("http://ex/A");
+        let p = dict.intern_iri("http://ex/P");
+        let q = dict.intern_iri("http://ex/Q");
+        let onto = Ontology {
+            axioms: vec![Axiom::EquivalentClasses(
+                ClassExpression::Class(a),
+                ClassExpression::ObjectIntersectionOf(vec![
+                    ClassExpression::Class(p),
+                    ClassExpression::Class(q),
+                ]),
+            )],
+        };
+        let triples = render_to_triples(&onto, &mut dict);
+        let equivalent_class = dict.intern_iri("http://www.w3.org/2002/07/owl#equivalentClass");
+        let equiv: Vec<_> = triples.iter().filter(|[_, pred, _]| *pred == equivalent_class).collect();
+        assert_eq!(equiv.len(), 1, "exactly one owl:equivalentClass triple");
+        let [s, _, o] = equiv[0];
+        assert_eq!(*s, a, "subject is the named class A");
+        assert_ne!(*o, a, "object is a fresh node, not A");
+        // The backbone must hang off the OBJECT node, never off A.
+        let intersection_of = dict.intern_iri("http://www.w3.org/2002/07/owl#intersectionOf");
+        assert!(
+            triples.iter().any(|[s2, p2, _]| s2 == o && *p2 == intersection_of),
+            "the intersection backbone sits on the fresh object node"
+        );
+        assert!(
+            !triples.iter().any(|[s2, p2, _]| *s2 == a && *p2 == intersection_of),
+            "no inline backbone on the named class A"
+        );
     }
 
     // --- DisjointClasses ---
