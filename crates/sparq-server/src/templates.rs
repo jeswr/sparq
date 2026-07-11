@@ -57,7 +57,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use sparq_engine::templates::{Bound, Template};
+use sparq_engine::templates::Template;
 
 use crate::http::{
     auth_gate, await_worker, bad_request, engine_error_response, json_error, make_budget,
@@ -303,40 +303,33 @@ pub(crate) async fn invoke_endpoint(
         Ok(b) => b,
         Err(e) => return bad_request(&format!("template invocation failed: {}", e)),
     };
-    match bound {
-        Bound::Update(pu) => {
-            // Render the bound algebra canonically (terms are escaped by spargebra's
-            // serializer — the value substitution already happened structurally) and run
-            // it through the SAME sequenced-writer path as a /sparql update.
-            run_update(&state, pu.update().to_string()).await
-        }
-        Bound::Query(pq) => {
-            let is_graph_form = matches!(
-                pq.query(),
-                spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
-            );
-            let rendered = pq.query().to_string();
-            let pin = state.current();
-            let config = state.config().clone();
-            let budget = make_budget(&config, true);
-            let task = tokio::task::spawn_blocking(move || {
-                let result = if is_graph_form {
-                    sparq_engine::construct_ntriples_with_budget(pin.snapshot(), &rendered, &budget)
-                        .map(|nt| (nt, "application/n-triples; charset=utf-8"))
-                } else {
-                    sparq_engine::query_json_with_budget(pin.snapshot(), &rendered, &budget)
-                        .map(|json| (json, "application/sparql-results+json; charset=utf-8"))
-                };
-                match result {
-                    Ok((body, ct)) => text_response(StatusCode::OK, ct, body, false),
-                    // make_budget(_, true) applied max_results, so the shared mapper
-                    // classifies budget trips (413/503) vs genuine 400s.
-                    Err(e) => engine_error_response(&e, &config, true),
-                }
-            });
-            await_worker(task, state.config()).await
-        }
+    if bound.is_update() {
+        // Render the bound algebra canonically (terms are escaped by spargebra's
+        // serializer — the value substitution already happened structurally) and run
+        // it through the SAME sequenced-writer path as a /sparql update.
+        return run_update(&state, bound.render()).await;
     }
+    let is_graph_form = bound.is_graph_form();
+    let rendered = bound.render();
+    let pin = state.current();
+    let config = state.config().clone();
+    let budget = make_budget(&config, true);
+    let task = tokio::task::spawn_blocking(move || {
+        let result = if is_graph_form {
+            sparq_engine::construct_ntriples_with_budget(pin.snapshot(), &rendered, &budget)
+                .map(|nt| (nt, "application/n-triples; charset=utf-8"))
+        } else {
+            sparq_engine::query_json_with_budget(pin.snapshot(), &rendered, &budget)
+                .map(|json| (json, "application/sparql-results+json; charset=utf-8"))
+        };
+        match result {
+            Ok((body, ct)) => text_response(StatusCode::OK, ct, body, false),
+            // make_budget(_, true) applied max_results, so the shared mapper
+            // classifies budget trips (413/503) vs genuine 400s.
+            Err(e) => engine_error_response(&e, &config, true),
+        }
+    });
+    await_worker(task, state.config()).await
 }
 
 #[cfg(test)]

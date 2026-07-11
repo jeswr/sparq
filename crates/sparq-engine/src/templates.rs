@@ -253,6 +253,40 @@ pub enum Bound {
     Update(PreparedUpdate),
 }
 
+impl Bound {
+    /// Whether this bound template is a SPARQL UPDATE (the invocation surface's write
+    /// gate keys off this).
+    pub fn is_update(&self) -> bool {
+        matches!(self, Bound::Update(_))
+    }
+
+    /// Whether this bound template is a graph-producing query form (CONSTRUCT /
+    /// DESCRIBE) rather than a solution-producing one (SELECT / ASK) — the invocation
+    /// surface picks its result serialization (N-Triples vs SPARQL-JSON) off this.
+    /// `false` for an update.
+    pub fn is_graph_form(&self) -> bool {
+        match self {
+            Bound::Query(q) => matches!(
+                q.query(),
+                spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
+            ),
+            Bound::Update(_) => false,
+        }
+    }
+
+    /// Renders the bound algebra as canonical SPARQL text for the surface's existing
+    /// string-driven execution path. Safe by construction: the parameter values were
+    /// substituted STRUCTURALLY (the #901 algebra rewrite) and spargebra's serializer
+    /// escapes every term, so the rendered text carries them as data — a hostile value
+    /// cannot re-enter as syntax.
+    pub fn render(&self) -> String {
+        match self {
+            Bound::Query(q) => q.query().to_string(),
+            Bound::Update(u) => u.update().to_string(),
+        }
+    }
+}
+
 /// A named, storable, parameterized SPARQL query or UPDATE (see the module docs).
 #[derive(Debug, Clone)]
 pub struct Template {
@@ -759,5 +793,45 @@ mod tests {
         let b = t.bind_json(&json!({})).unwrap();
         let b2 = b.clone();
         assert!(format!("{:?}", b2).contains("Query"));
+    }
+
+    // Bound::is_update / is_graph_form / render — the surface-facing classification +
+    // canonical rendering helpers (render round-trips through a fresh parse, and the
+    // bound value survives as data).
+    #[test]
+    fn bound_classification_and_render() {
+        let ask = Template::new("t", "ASK { ?s ?p ?o }", BTreeMap::new(), None)
+            .unwrap()
+            .bind_json(&json!({}))
+            .unwrap();
+        assert!(!ask.is_update());
+        assert!(!ask.is_graph_form());
+        let construct = Template::new(
+            "t",
+            "CONSTRUCT { ?s <http://ex/p> ?o } WHERE { ?s <http://ex/knows> ?o }",
+            BTreeMap::new(),
+            None,
+        )
+        .unwrap()
+        .bind_json(&json!({}))
+        .unwrap();
+        assert!(construct.is_graph_form());
+        let upd = Template::new(
+            "t",
+            "INSERT { <http://ex/m> <http://ex/note> ?note } WHERE { }",
+            decl(&[("note", ParamType::String)]),
+            None,
+        )
+        .unwrap()
+        .bind_json(&json!({"note": "hi \"there\""}))
+        .unwrap();
+        assert!(upd.is_update());
+        assert!(!upd.is_graph_form());
+        // render() is executable canonical SPARQL: it re-parses, and the bound literal
+        // (with its quote) is carried escaped as data.
+        let rendered = upd.render();
+        assert!(PreparedUpdate::parse(&rendered).is_ok(), "{}", rendered);
+        assert!(rendered.contains(r#"hi \"there\""#), "{}", rendered);
+        assert!(PreparedQuery::parse(&ask.render()).is_ok());
     }
 }
