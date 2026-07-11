@@ -61,7 +61,7 @@ export const ODRL_ACTIONS: ReadonlyArray<{ label: string; iri: string }> = [
 ];
 
 /**
- * The self-contained sample dataset (TriG, TWO named graphs) the tool prefils so the gating
+ * The self-contained sample dataset (TriG, TWO named graphs) the tool prefills so the gating
  * demo works out of the box: per-session visibility is decided PER NAMED GRAPH, so the data
  * must be graph-structured and the sample policy must target these graph IRIs.
  */
