@@ -313,7 +313,7 @@ fn differential_fuzz_seeds_format_prefixed() {
                     candidate.name,
                     incumbent.name
                 ),
-                Err(()) => panic!("fuzz seed {} unverified (iso budget)", path.display()),
+                Err(e) => panic!("fuzz seed {} unverified: {e}", path.display()),
             }
         }
     }

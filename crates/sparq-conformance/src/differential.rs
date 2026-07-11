@@ -23,6 +23,30 @@
 use crate::quadset::{compare_quad_sets, SetCompare};
 use std::path::Path;
 
+/// [FABLE-5] Why a differential comparison could not reach a verdict.
+///
+/// A comparison normally resolves to agreement or a concrete divergence. This
+/// error is returned only when the blank-node isomorphism check exhausts its
+/// budget, so neither agreement nor divergence can be soundly asserted (the
+/// input is reported as UNVERIFIED, never counted as either).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompareError {
+    /// The blank-node isomorphism budget was exhausted before a verdict.
+    BudgetExhausted,
+}
+
+impl std::fmt::Display for CompareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompareError::BudgetExhausted => {
+                write!(f, "blank-node isomorphism budget exhausted before a verdict (unverified)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompareError {}
+
 /// A named parser under differential test: (text, base IRI) in, rendered quad set out.
 /// The base IRI is the SAME for both sides of a comparison (the corpus walkers pass the
 /// input file's own `file://` IRI), so formats without relative IRIs simply ignore it.
@@ -93,7 +117,7 @@ impl DiffReport {
         base: &str,
         candidate: &DiffParser,
         incumbent: &DiffParser,
-        outcome: Result<Option<DivergenceKind>, ()>,
+        outcome: Result<Option<DivergenceKind>, CompareError>,
     ) {
         self.compared += 1;
         match outcome {
@@ -106,7 +130,7 @@ impl DiffReport {
                     minimal_repro,
                 });
             }
-            Err(()) => self.unverified.push(label.to_string()),
+            Err(CompareError::BudgetExhausted) => self.unverified.push(label.to_string()),
         }
     }
 
@@ -134,20 +158,20 @@ impl DiffReport {
 
 /// Compare candidate vs incumbent on ONE document. `Ok(None)` = agreement (both reject,
 /// or both accept with bijection-identical quad sets); `Ok(Some(_))` = divergence;
-/// `Err(())` = isomorphism budget exhausted (unverified).
+/// `Err(CompareError::BudgetExhausted)` = isomorphism budget exhausted (unverified).
 pub fn compare_doc(
     candidate: &DiffParser,
     incumbent: &DiffParser,
     text: &str,
     base: &str,
-) -> Result<Option<DivergenceKind>, ()> {
+) -> Result<Option<DivergenceKind>, CompareError> {
     match ((candidate.parse)(text, base), (incumbent.parse)(text, base)) {
         (Ok(c), Ok(i)) => match compare_quad_sets(&c, &i) {
             SetCompare::Equal => Ok(None),
             SetCompare::Different { only_a, only_b } => {
                 Ok(Some(DivergenceKind::QuadSet { only_candidate: only_a, only_incumbent: only_b }))
             }
-            SetCompare::Unverified => Err(()),
+            SetCompare::Unverified => Err(CompareError::BudgetExhausted),
         },
         (Err(e), Ok(_)) => Ok(Some(DivergenceKind::CandidateRejects(e))),
         (Ok(_), Err(e)) => Ok(Some(DivergenceKind::CandidateAccepts(e))),
