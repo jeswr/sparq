@@ -66,6 +66,16 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update. Neither
   advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 
+**Pod mode** *(feature `solid`, OFF by default)*: `SolidMcpServer` serves a
+`sparq-solid` `PodStore` (named graph per document, WAC/ACP-authorized, bound to one
+session) with LDP tools per the MCP-Solid proposal draft — session-scoped `query`,
+`resource_get`, `container_list` (containment from stored `ldp:contains` data, never
+IRI-path guessing), and `update` / `resource_put` / `resource_delete` /
+`container_create` behind the same off-by-default write gate. A resource the session
+cannot read errors **identically to one that does not exist** (existence
+non-disclosure), and `.acl`/`.acr` writes route through the pod store's atomic
+fail-closed ACL write-through. RDF sources only (Turtle / N-Triples) in v1.
+
 Each tool ships a proper MCP `inputSchema` (JSON-Schema); `tools/list` returns
 `name` / `description` / `inputSchema` per tool. `tools/call` wraps output in the MCP
 `CallToolResult` shape; a bad query is an MCP tool error (`isError: true`), not a

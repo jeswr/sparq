@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, read stats, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, read stats, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
 ---
 
 # sparq agent-tools (MCP)
@@ -25,6 +25,31 @@ heavy MCP-SDK dependency.
 | `stats` | graph count + introspection totals | small JSON object |
 | `ask` *(feature `nlq`, OFF by default)* | `sparq_nlq` NL→SPARQL loop | executed SPARQL + real result rows (+ citations) |
 | `update` *(gated, OFF by default)* | `sparq_engine::update_in_place_atomic` | new triple count |
+
+### Pod mode (feature `solid`, OFF by default) — [FABLE-5] sq-u16eq
+
+`SolidMcpServer` serves a **`sparq_solid::PodStore`** (one named graph per pod document
++ a materialized WAC/ACP authorization view), bound to ONE authenticated session fixed
+at construction — the MCP-Solid proposal draft's local-trusted-agent deployment mode
+(`site/specs/mcp-solid.typ` §6.4/§7.3/§9.3). Tools:
+
+| tool | wraps | notes |
+| --- | --- | --- |
+| `query` | `wrap_for_view_opt_in` + `query_json_view_with_budget` | session-scoped; empty default graph, union opt-in via the reserved `FROM` IRI |
+| `resource_get` | the document's named graph, serialized | same dataset `query` reads — the two surfaces cannot disagree |
+| `container_list` | `ldp:contains` triples in the container's OWN graph | data-derived, never IRI-path guessing |
+| `update` *(gated)* | `PodStore::update_as` / `update_as_acp` | per-graph session write check, fail-closed |
+| `resource_put` *(gated)* | atomic named-graph swap (+ containment link on create) | `.acl`/`.acr` route through `put_acl`/`put_acl_acp` |
+| `resource_delete` *(gated)* | slot removal + containment unlink | non-empty containers rejected; `.acl` via `delete_acl` |
+| `container_create` *(gated)* | typed `ldp:BasicContainer` graph + containment | slash-terminated IRIs only |
+
+Key contracts: a resource the session cannot read errors **byte-identically** to a
+nonexistent one (existence non-disclosure, draft §9.3); ACL writes are gated on
+`acl:Control` of the governed resource and re-derive authorization **atomically with
+fail-closed rollback**; creation is authorized at the closest existing parent container
+(the Solid creation rule); every content write re-materializes the view so the next
+tool call sees it. RDF sources only (Turtle / N-Triples) in v1; non-RDF binaries and
+notifications are out of scope (spec gaps stay beaded, not spun).
 
 Every tool ships a proper MCP `inputSchema` (JSON-Schema). `tools/list` returns
 `name` / `description` / `inputSchema` per tool. A `tools/call` result is the MCP
@@ -101,7 +126,8 @@ was configured with.
 
 ## Status / scope
 
-Opt-in crate at workspace v0.1.0; verified against branch `main` (2026-06-23 [OPUS-4.8]).
+Opt-in crate at workspace v0.1.0; verified against branch `main` (2026-06-23 [OPUS-4.8];
+pod mode 2026-07-11 [FABLE-5]).
 Tested by a real in-memory MCP round-trip (default features) **and** a real stdio
 serve-loop round-trip (feature `stdio`). Only the **stdio** transport plus the embeddable
 `handle_message` ship today; SSE/HTTP transports are **not implemented** (follow-up beads).
