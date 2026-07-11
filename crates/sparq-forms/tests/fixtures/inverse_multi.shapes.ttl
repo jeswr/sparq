@@ -1,0 +1,28 @@
+# Multi-shape switcher + incoming references: two applicable node shapes
+# (sh:targetClass and dash:applicableToClass), an sh:inversePath field, and
+# off-shape data triples that must land read-only in "Other properties".
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dash: <http://datashapes.org/dash#> .
+@prefix ex: <http://example.org/> .
+
+ex:ProjectShape a sh:NodeShape ;
+  sh:targetClass ex:Project ;
+  sh:name "Project" ;
+  sh:property [
+    sh:path ex:title ; sh:name "Title" ; sh:order 1 ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path [ sh:inversePath ex:worksOn ] ;
+    sh:name "Team members" ; sh:order 2 ;
+    sh:class ex:Person ;
+  ] .
+
+ex:AuditableShape a sh:NodeShape ;
+  rdfs:label "Auditable thing" ;
+  dash:applicableToClass ex:Project ;
+  sh:property [
+    sh:path ex:auditedBy ; sh:name "Audited by" ; sh:nodeKind sh:IRI ;
+  ] .

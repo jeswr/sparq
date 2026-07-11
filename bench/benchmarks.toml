@@ -1748,3 +1748,26 @@ pinning     = "TBD — W3C RIF test-suite commit sha256"
 records_to  = "TBD — bench/rif-conformance/results.tsv (pass/fail counts); NOT a perf number"
 featured    = false  # registry stub; implementing bead sq-hmd7l.24. NOT-COMPARABLE perf verdict
 status      = "planning"
+
+# [FABLE-5] sq-lsp7k.1.1 — sparq-forms derivation micro-bench: the cost of one
+# shape→FormDescription derivation (shape selection + field enumeration + DASH
+# widget scoring + nested sh:node recursion) over a synthetic in-process
+# shapes+data graph. The committed STDOUT/JSON facts are the DETERMINISTIC
+# structural counts (switcher entries, fields, nested sub-forms); the per-form
+# µs are advisory + box-sensitive + NON-CANONICAL (never baked into docs/gates).
+[[benchmark]]
+id          = "forms-derive-overhead"
+name        = "sparq-forms shape-to-FormDescription derivation overhead"
+category    = "query"
+measures    = "per-derivation µs for a grouped/enum/nested person form (advisory, box-sensitive); deterministic structural counts"
+invoke      = "cargo run -p sparq-forms --example derive_form_bench --release"
+source      = "crates/sparq-forms/examples/derive_form_bench.rs"
+dataset     = "SYNTHETIC, generated in-process (200 focus nodes) — no external dataset"
+quiet_box_sensitive = true
+pinning     = "none (in-process synthetic graphs)"
+records_to  = "stdout (--json <path> for the deterministic structural counts)"
+status      = "ok"
+# [FABLE-5] trend-only DISPOSITION (featured = false): internal overhead
+# micro-bench, no head-to-head capability claim — the documented G3/drift-scan
+# escape hatch.
+featured    = false
