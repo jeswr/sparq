@@ -1,0 +1,29 @@
+# Feature-matrix fragment for `sparq-lws-core` (imported from jeswr/solid-server-rs,
+# bead sq-gg0qq.2). [FABLE-5]
+#
+# One self-contained leg mapping per opt-in feature. Assembled into the feature-matrix
+# `opt-in-features` strategy by scripts/assemble-feature-matrix.py; adding a leg for
+# THIS crate edits only THIS file (bead sq-ibrze).
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+
+# The IN-PROCESS embedded SPARQ backend (src/store/embedded.rs) — in-workspace path
+# deps on sparq-core/sparq-engine. tests/store_embedded.rs and
+# tests/embedded_read_counters.rs are entirely feature-gated on it; without this leg
+# the embedded data path never runs in CI.
+- name: "sparq-lws-core (embedded-sparq)"
+  crate: "sparq-lws-core"
+  features: "embedded-sparq"
+  test: true
+
+# The distributed Redis-backed DPoP-`jti` replay store (src/redis_replay.rs).
+# tests/redis_replay.rs is feature-gated on it; this leg compiles + runs the suite's
+# in-process tests. The LIVE-Redis tests inside stay `#[ignore]` + env-gated on
+# `PSS_IT_REDIS_URL` (no Redis service in this lane), matching the live-SPARQ IT
+# pattern — the leg still keeps the opt-in ON path compiling and its unit surface run.
+- name: "sparq-lws-core (redis-replay)"
+  crate: "sparq-lws-core"
+  features: "redis-replay"
+  test: true
