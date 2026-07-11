@@ -174,6 +174,39 @@ fn matching_type_mapping_drops_the_value_object() {
 }
 
 #[test]
+fn matching_type_with_unexpressed_index_keeps_the_value_object() {
+    // REGRESSION (sq-iika9): a matching @type must NOT drop to the bare @value when
+    // the object carries an @index that no @index container re-expresses — that
+    // would silently LOSE the @index (self-reparse-invisible data loss). The REC's
+    // literal step-6 text has no @index condition; jsonld.js guards it
+    // (`preserveIndex`) and we adjudicate with jsonld.js: fall through to the
+    // general map path, which keeps @value + @type + @index intact.
+    let got = run_default(
+        r#"[{"http://ex/p":[{"@value":"5","@type":"http://ex/T","@index":"i0"}]}]"#,
+        r#"{"p":{"@id":"http://ex/p","@type":"http://ex/T"}}"#,
+    );
+    assert_eq!(
+        got,
+        r#"{"@context":{"p":{"@id":"http://ex/p","@type":"http://ex/T"}},"p":{"@value":"5","@type":"http://ex/T","@index":"i0"}}"#
+    );
+}
+
+#[test]
+fn matching_type_with_index_container_still_drops_to_the_bare_value() {
+    // Companion non-regression: when the term's @index container DOES re-express
+    // the @index (as the map key), a matching @type still compacts to the bare
+    // @value — the guard must not over-block.
+    let got = run_default(
+        r#"[{"http://ex/p":[{"@value":"5","@type":"http://ex/T","@index":"i0"}]}]"#,
+        r#"{"p":{"@id":"http://ex/p","@type":"http://ex/T","@container":"@index"}}"#,
+    );
+    assert_eq!(
+        got,
+        r#"{"@context":{"p":{"@id":"http://ex/p","@type":"http://ex/T","@container":"@index"}},"p":{"i0":"5"}}"#
+    );
+}
+
+#[test]
 fn mismatched_type_keeps_the_value_object_with_compacted_type() {
     let got = run_default(
         r#"[{"http://ex/p":[{"@value":"5","@type":"http://ex/Custom"}]}]"#,
@@ -462,6 +495,24 @@ fn graph_index_container_maps_by_graph_index() {
     assert_eq!(
         got,
         r#"{"@context":{"@version":1.1,"input":{"@id":"http://ex/input","@container":["@graph","@index"]},"value":"http://ex/value"},"input":{"g1":{"value":"x"}}}"#
+    );
+}
+
+#[test]
+fn graph_index_container_indexless_graph_files_under_aliased_none() {
+    // REGRESSION (sq-iika9): 12.8.7.2.2 — a simple graph object WITHOUT @index files
+    // under @none, and that fallback key is IRI-COMPACTED ("IRI compacting that
+    // value"), so a context alias for @none must be honoured — exactly as in the
+    // 12.8.7.1 @graph+@id form and the 12.8.9.9 container maps. Before the fix the
+    // literal string "@none" leaked out as the map key instead of the "none" alias.
+    let got = run_default(
+        r#"[{"http://ex/input":[
+            {"@graph":[{"http://ex/value":[{"@value":"x"}]}]}]}]"#,
+        r#"{"@version":1.1,"none":"@none","input":{"@id":"http://ex/input","@container":["@graph","@index"]},"value":"http://ex/value"}"#,
+    );
+    assert_eq!(
+        got,
+        r#"{"@context":{"@version":1.1,"none":"@none","input":{"@id":"http://ex/input","@container":["@graph","@index"]},"value":"http://ex/value"},"input":{"none":{"value":"x"}}}"#
     );
 }
 

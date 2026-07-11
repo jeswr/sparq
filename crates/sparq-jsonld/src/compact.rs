@@ -540,12 +540,15 @@ fn compact_graph_item(
         return Ok(());
     }
     if has_graph && has_index && simple {
-        // 12.8.7.2: an @graph+@index map keyed by the graph's @index.
+        // 12.8.7.2: an @graph+@index map keyed by the graph's @index; an absent
+        // @index files under @none, IRI-COMPACTED (12.8.7.2.2 "IRI compacting that
+        // value") so a context alias for @none is honoured — same as 12.8.7.1 and
+        // 12.8.9.9 above/below.
         let map_key = item
             .get("@index")
             .and_then(Json::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| "@none".to_string());
+            .unwrap_or_else(|| cur.ciri("@none", None, true, false));
         let nest = nest_target(result, cur, iap)?;
         let map_obj = get_or_create_map(nest, iap);
         add_value(map_obj, &map_key, compacted_item, as_array);
@@ -737,8 +740,14 @@ fn value_compact(cur: &Ctx, active_property: Option<&str>, value: &Json) -> Opti
         }
         return None;
     }
-    // step 7: a matching @type drops to the bare @value (this is also the @json path).
-    if tval.is_some() && tval == type_mapping {
+    // step 7: a matching @type drops to the bare @value (this is also the @json path)
+    // — GUARDED by `index_ok`: the REC's literal text has no @index condition here,
+    // but dropping to a bare @value while the object carries an @index that no
+    // @index container re-expresses would silently LOSE the @index (the
+    // self-reparse-invisible data-loss class this module exists to prevent).
+    // jsonld.js guards identically (`preserveIndex`); with the guard the value
+    // falls through to the general map path, which keeps @type + @index verbatim.
+    if tval.is_some() && tval == type_mapping && index_ok {
         return value.get("@value").cloned();
     }
     // step 8: compaction disabled — @none type mapping, or a non-matching @type.
