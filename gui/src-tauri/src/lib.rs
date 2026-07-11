@@ -13,6 +13,7 @@
 
 mod disk;
 mod engine;
+mod federation;
 
 use engine::EngineState;
 
@@ -55,6 +56,14 @@ pub fn run() {
             // the resolved $APPLOCALDATA/workspaces tree and returns its REAL byte total, so the
             // status bar can show the OS-reported store footprint instead of the snapshot estimate.
             disk::disk_usage,
+            // [FABLE-5] sq-ixc3.14 — the ONE deliberate native QUERY command (the reviewed
+            // exception to the removed pre-wired surface above): evaluate a SERVICE-bearing
+            // SELECT/ASK over a snapshot of the live workspace store, because the in-tab WASM
+            // engine cannot dial remote SPARQL endpoints. Every call installs the engine's
+            // STRICT fail-closed egress allowlist (the per-workspace federation setting); the
+            // capability is gated behind the non-default `federation` cargo feature and a lean
+            // build registers a stub that fails loudly with a rebuild hint (federation.rs).
+            federation::query_service,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the sparq Tauri application");

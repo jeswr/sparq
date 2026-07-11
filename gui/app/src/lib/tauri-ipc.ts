@@ -150,6 +150,35 @@ export function hasNativeLoader(): boolean {
 }
 
 /**
+ * [FABLE-5] sq-ixc3.14 — whether the native federated-query IPC path is available (we are
+ * inside a Tauri webview). Whether the desktop build actually COMPILED the `federation`
+ * feature is only knowable at invoke time: a lean build's `query_service` stub returns a loud
+ * rebuild-hint error, which surfaces through the result panel like any other run error.
+ */
+export function hasNativeFederation(): boolean {
+  return isTauriRuntime();
+}
+
+/**
+ * [FABLE-5] sq-ixc3.14 — evaluate a SERVICE-bearing SELECT/ASK over the NATIVE engine
+ * (`query_service`, gui/src-tauri/src/federation.rs): `dataset` is the live workspace store's
+ * whole-dataset N-Quads snapshot, `allow` the per-workspace federation egress allowlist the
+ * engine enforces STRICTLY (fail-closed: an endpoint off the list is refused pre-HTTP with the
+ * stable `SERVICE egress refused` marker — see lib/federation.ts). Returns the SPARQL 1.1 JSON
+ * results document, or `null` outside the desktop shell (the web target degrades honestly in
+ * the Query tool instead). Throws the native error string on refusal / parse / HTTP failure.
+ */
+export async function nativeServiceQuery(
+  dataset: string,
+  query: string,
+  allow: string[],
+): Promise<string | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<string>("query_service", { dataset, query, allow });
+}
+
+/**
  * [OPUS-4.8] sq-cno90 (#820 follow-up) — probe the REAL on-disk byte size of the
  * `$APPLOCALDATA/workspaces` tree through the native `disk_usage` command, or `null` outside the
  * desktop shell (the web target has no native FS — the status bar falls back to the snapshot-bytes

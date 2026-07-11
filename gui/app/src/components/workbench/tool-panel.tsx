@@ -14,7 +14,7 @@
 // its tier/copy/group INSIDE its own panel file — never in the shared data/tools.ts.
 
 import type { ComponentType } from "react";
-import { QueryWorkbench } from "@/components/workbench/query-workbench";
+import { QueryWorkbench, QUERY_TOOL_OVERRIDE } from "@/components/workbench/query-workbench";
 import { ShaclTool } from "@/components/workbench/shacl-tool";
 import { InferenceTool } from "@/components/workbench/inference-tool";
 import {
@@ -39,7 +39,9 @@ interface ToolPanelEntry {
  * shared honest ToolStub, exactly as before.
  */
 const TOOL_PANELS: Record<string, ToolPanelEntry> = {
-  query: { Component: QueryWorkbench },
+  // [FABLE-5] sq-ixc3.14 — blurb override: the Query tool now also runs federated SERVICE
+  // (native engine on desktop, allowlist-gated fail-closed; honestly native-only in the browser).
+  query: { Component: QueryWorkbench, override: QUERY_TOOL_OVERRIDE },
   shacl: { Component: ShaclTool },
   // [OPUS-4.8] sq-tp1m — the Inference tool is a real, working panel (per-workspace RDFS /
   // OWL 2 RL entailment wired to the engine's forward-chaining reasoner), not an honest stub.
