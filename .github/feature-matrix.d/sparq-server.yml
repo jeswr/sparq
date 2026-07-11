@@ -130,6 +130,28 @@
   features: "solid-authz"
   test: true
 
+# [FABLE-5] sq-lrtc3.1 (epic sq-lrtc3): `odrl-authz` (default OFF) — the OPT-IN ODRL lane on
+# `POST /authz/query` (ODRL as THE access-control language for SPARQL queries, fail-closed).
+# The `solid_authz` ODRL branch, the `ServerConfig` wiring, the optional `sparq-policy`
+# dependency, and the `tests/odrl_authz.rs` integration suite are ALL `#[cfg(feature =
+# "odrl-authz")]`, so the DEFAULT build never compiled, clippy'd or tested this code — the
+# structural guard C1 (scripts/check-feature-test-execution.py) flags exactly that gap; this
+# leg is its executor. It builds the feature, runs `clippy --all-targets -D warnings` with it
+# ON (the real gate), and runs the crate's tests — which now include the gated
+# `tests/odrl_authz.rs` suite: the differential decision matrix (HTTP-lane decision ==
+# `sparq_policy::evaluate` oracle for permit / prohibit / deny-overrides / constraint /
+# conditional(recipient) / fail-closed), the two-requesters-disjoint-rows pillar, the
+# fail-closed HTTP refusals (anonymous, non-read mode, targetless rule, unimplementable
+# conflict strategy) and the dormant-lane no-ODRL invariant. `odrl-authz` implies
+# `solid-authz` + pulls `sparq-solid/odrl-bridge` + optional `sparq-policy` (workspace crates
+# only — no new external dependency). A dedicated single-feature leg mirrors the
+# `solid-authz` / `tpf` / `terse` pattern above, keeping the access-control soundness
+# surface's tests executing on their own discoverable check-run.
+- name: "sparq-server (odrl-authz — ODRL lane on POST /authz/query)"
+  crate: "sparq-server"
+  features: "odrl-authz"
+  test: true
+
 # [SONNET-4.6] sq-pfae.17: `solid-authz-trust` (default OFF) — the DOUBLE-OPT-IN stateless
 # trust-graph extension to `POST /authz/decide`. The `solid_authz_trust` config field, the
 # `trust_authz_decide` handler, and the 11-test gated `tests/solid_authz_trust.rs` integration
