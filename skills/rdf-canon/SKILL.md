@@ -155,6 +155,7 @@ let m384  = sparq_canon::issue_dataset_rdf12_with::<sha2::Sha384>(&dataset)?;
 let vc  = sparq_canon::canonicalize_rdf12_ground_terms(&dataset)?;   // quads
 let vcg = sparq_canon::canonicalize_triples_rdf12_ground_terms(&triples)?;
 let vm  = sparq_canon::issue_dataset_rdf12_ground_terms(&dataset)?;  // issuer map
+let vgc = sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&graph)?; // &sparq_core::Graph
 ```
 
 **When to prefer the constrained `*_ground_terms` entry points.** The common
