@@ -57,8 +57,10 @@
 //! constant polygon still rebuilt the constant's edge index and self-nodes on
 //! every row (the dominant remaining per-row term on that shape); with the
 //! prepared side cached, that work happens once per thread. See
-//! [`de9im_matrix`] for why the prepared path is result-identical — the
-//! differential tests below pin it across all 24 relations and `geof:relate`.
+//! `de9im_matrix` (code span: a private item — a link would break the
+//! public-module rustdoc) for why the prepared path is result-identical —
+//! the differential tests below pin it across all 24 relations and
+//! `geof:relate`.
 
 use crate::geof::{self, Unit};
 use crate::literal::GeoGeometry;
