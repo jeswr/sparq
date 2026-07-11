@@ -100,10 +100,13 @@ pub use backup_delta::{
 // the read-back forms; `ChangeLogConfig` tunes segment size + fsync; `SEGMENT_MAGIC` is the
 // distinguishing magic line. `BackupError` (re-exported here too so a change-stream-only
 // consumer can name the error type) is the shared fail-closed error of the backup family.
+// [FABLE-5] (sq-n9s4d) `RetentionPolicy`/`RetentionReport` are the retention/truncation
+// surface: `ChangeLog::apply_retention` drops whole old segments by consumer-ack (hard
+// safety bound) / age / total-size pressure; `ChangeLog::first_seq` is the trim horizon.
 #[cfg(feature = "change-stream")]
 pub use change_stream::{
-    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, DEFAULT_SEGMENT_TARGET_BYTES,
-    SEGMENT_MAGIC,
+    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, RetentionPolicy,
+    RetentionReport, DEFAULT_SEGMENT_TARGET_BYTES, SEGMENT_MAGIC,
 };
 #[cfg(all(feature = "change-stream", not(feature = "backup")))]
 pub use backup::BackupError;

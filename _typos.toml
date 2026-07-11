@@ -90,6 +90,7 @@ onn = "onn"              # deliberate near-miss garbage value in the tls.rs affi
 
 [default.extend-words]
 ND = "ND"                # [OPUS-4.8] "NDAs" (Non-Disclosure Agreements) — typos splits camelCase NDAs into ND+As
+GES = "GES"              # [FABLE-5] "PathGES" (CCS 2024 graph-encryption scheme, research/e2ee-queryable-options.md) — typos splits the camelCase name into Path+GES
 # --- SPARQL / SQL keyword fragments split across table cells or wrapped lines ---
 flate = "flate"          # flate2 crate name fragment (typos splits on the digit)
 SELEC = "SELEC"          # "SELECT" wrapped mid-token in prose

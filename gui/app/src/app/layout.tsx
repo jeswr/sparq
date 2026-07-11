@@ -5,6 +5,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { EngineProvider } from "@/lib/engine-context";
 import { WorkspaceProvider } from "@/lib/workspace-context";
+import { withBasePath } from "@/lib/base-path";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -33,6 +34,23 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} font-sans antialiased`}>
+        {/* [FABLE-5] sq-qgkwy.2 — PARALLELISE the engine cold start: the in-tab wasm engine is
+            loaded unconditionally by EngineProvider's mount effect (prewarmSparq), which means
+            the ~3 MB engine fetch used to START only after the JS bundle downloaded + React
+            hydrated. These two resource hints (React hoists rendered <link> elements into
+            <head>) start the glue-module + wasm downloads IN PARALLEL with the bundle instead,
+            so hydration finds them warm/in-flight. `as="fetch"` + `crossOrigin="anonymous"`
+            matches the wasm-pack glue's plain same-origin fetch() (mode cors / credentials
+            same-origin) so the preload cache is HIT, not doubled; the glue is a dynamic ESM
+            import → `modulepreload`. Tier-b bundles (reason/text/rsp) are opt-in tools and are
+            deliberately NOT preloaded. */}
+        <link rel="modulepreload" href={withBasePath("/wasm/sparq_wasm.js")} />
+        <link
+          rel="preload"
+          as="fetch"
+          href={withBasePath("/wasm/sparq_wasm_bg.wasm")}
+          crossOrigin="anonymous"
+        />
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"

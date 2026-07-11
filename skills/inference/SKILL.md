@@ -197,6 +197,40 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
   invalidity; with a file-system resolver wired to the fetched `Core_v1.22` archive, tests using
   non-Core `profile` attributes graduate from `skip:imports` to `Outcome::Pass`.
 
+## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
+
+RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
+rule dialect with `NOT` (negation as failure) + `AGGREGATE COUNT` atoms and a minimal
+exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
+through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
+non-incremental per-stratum evaluator on the shared substrate join kernels.
+
+```rust
+use sparq_reason::datalog::{eval, parse_program, stratify};
+
+pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String>;
+pub fn stratify(dict: &Dict, p: &Program) -> Result<Stratification, String>; // checker alone
+pub fn eval(dict: &mut Dict, facts: &[[Id;3]], p: &Program) -> Result<Vec<[Id;3]>, String>;
+impl Program { pub fn n_rules(&self) -> usize; }
+impl Stratification { pub fn n_strata(&self) -> usize; }
+```
+
+```rust
+let mut dict = Dict::new();
+let rules = parse_program(&mut dict, r#"@prefix ex: <http://ex/> .
+[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .
+[?x, a, ex:Hub]  :- [?x, ex:deg, ?c], FILTER(?c >= 3) .
+[?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."#)?;
+let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
+```
+
+Fragment honesty (all loud parse errors, never silent): constant predicates only;
+COUNT only (SUM/MIN/MAX/AVG beaded); `FILTER` is exact `xsd:integer`/`decimal`
+comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
+non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
+counts DISTINCT body matches per group; counts mint `xsd:integer` literals. Naive
+rounds per stratum (fixture-scale; semi-naive + incremental maintenance are beaded).
+
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
 The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 30-XSD-datatype map via `Recognized::standard()` — the `DTYPE_TABLE` single source of truth in `dtype.rs` — plus the always-recognized `rdf:langString` (or bring a custom map via `materialize_d(d, …, …)`):

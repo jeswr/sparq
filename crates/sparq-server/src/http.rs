@@ -673,6 +673,28 @@ pub struct ServerConfig {
     /// `vectors`-gated extension (the `V()` ambiguity caveat is tracked by `sq-26fdp`).
     #[cfg(feature = "terse")]
     pub terse: bool,
+    /// [FABLE-5] (sq-lsp7k.10) OPT-IN named-parameterized-template surface. When `true`, the
+    /// server serves the `/templates` REST store (list / `PUT`-`GET`-`DELETE`
+    /// `/templates/{name}` / `POST`-invoke) over `sparq_engine::templates` — the GraphDB
+    /// "SPARQL templates" / Stardog "stored queries" parity surface. `false` (the default)
+    /// leaves it off: every `/templates` path is `404`.
+    ///
+    /// This field exists only with the `templates` cargo feature (like [`tpf`](Self::tpf)
+    /// under `tpf`); a build without that feature compiles no template code and pays zero
+    /// cost. Set by the binary's `--templates` flag / `SPARQ_TEMPLATES=1` env. Reading /
+    /// invoking a QUERY template is read-gated; storing / deleting a template and invoking
+    /// an UPDATE template are write-gated (`--auth-token`) — the template layer never widens
+    /// the gated-update posture. See [`crate::templates`].
+    #[cfg(feature = "templates")]
+    pub templates: bool,
+    /// [FABLE-5] (sq-lsp7k.10) OPT-IN template persistence file. When `Some(path)`, the
+    /// template store is durable: definitions are loaded from `path` (a JSON array of
+    /// template definitions) at startup — fail-closed, an invalid file is a startup error —
+    /// and every successful `PUT` / `DELETE` rewrites it atomically (write-temp + rename).
+    /// `None` (the default) keeps the store in-memory only. Set by `--templates-file` /
+    /// `SPARQ_TEMPLATES_FILE`.
+    #[cfg(feature = "templates")]
+    pub templates_file: Option<std::path::PathBuf>,
     /// [OPUS-4.8] (sq-2999l, gh-906) OPT-IN durable CDC change-stream directory. When `Some(dir)`,
     /// the server (1) RECORDS every committed SPARQL Update as one ordered change record to the
     /// segmented, fsync'd append-only `sparq_serve::ChangeLog` rooted at `dir`, and (2) serves the
@@ -845,6 +867,14 @@ impl Default for ServerConfig {
             // SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             terse: false,
+            // [FABLE-5] sq-lsp7k.10: safe default — the OPT-IN template surface is OFF even
+            // when the feature is compiled in (the operator opts in deliberately via
+            // --templates / SPARQ_TEMPLATES=1), and the store is in-memory unless a
+            // persistence file is named (--templates-file / SPARQ_TEMPLATES_FILE).
+            #[cfg(feature = "templates")]
+            templates: false,
+            #[cfg(feature = "templates")]
+            templates_file: None,
             // [OPUS-4.8] sq-2999l: safe default — no durable CDC change-stream directory, so the
             // `GET /streams` endpoint is OFF (404) and nothing is recorded even when the feature is
             // compiled in (the operator opts in deliberately via --change-stream DIR /
@@ -1132,6 +1162,19 @@ impl ServerConfig {
         #[cfg(feature = "terse")]
         if let Ok(v) = std::env::var("SPARQ_TERSE") {
             cfg.terse = env_truthy(&v);
+        }
+        // [FABLE-5] sq-lsp7k.10: SPARQ_TEMPLATES truthy ("1"/"true"/"yes"/"on") serves the
+        // OPT-IN named-parameterized-template REST surface (/templates); SPARQ_TEMPLATES_FILE
+        // names the optional persistence file (empty = in-memory). Off by default. Only
+        // present with the `templates` feature.
+        #[cfg(feature = "templates")]
+        {
+            if let Ok(v) = std::env::var("SPARQ_TEMPLATES") {
+                cfg.templates = env_truthy(&v);
+            }
+            if let Ok(v) = std::env::var("SPARQ_TEMPLATES_FILE") {
+                cfg.templates_file = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+            }
         }
         // [OPUS-4.8] sq-2999l: SPARQ_CHANGE_STREAM=<DIR> enables the durable CDC change-stream
         // (recording + the `GET /streams` poll endpoint) rooted at the given directory (the
@@ -2162,6 +2205,14 @@ pub struct AppState {
     /// compiled out of the default build entirely, like the rest of the restore machinery.
     #[cfg(feature = "backup")]
     restore_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// [FABLE-5] (sq-lsp7k.10) The named-parameterized-template store backing the OPT-IN
+    /// `/templates` REST surface (feature `templates`): name → validated
+    /// `sparq_engine::templates::Template`. Seeded from
+    /// [`ServerConfig::templates_file`] at startup (fail-closed); mutated only by the
+    /// write-gated `PUT`/`DELETE` handlers in [`crate::templates`]. An `RwLock` because
+    /// invocations (reads) dominate and never block each other.
+    #[cfg(feature = "templates")]
+    templates: Arc<std::sync::RwLock<std::collections::BTreeMap<String, sparq_engine::templates::Template>>>,
 }
 
 /// [FABLE-5] (sq-fy8ci) RAII permit for the SINGLE-FLIGHT restore guard: while one of these is
@@ -2310,7 +2361,16 @@ impl AppState {
             ))),
             None => None,
         };
+        // [FABLE-5] sq-lsp7k.10: seed the named-template store from the optional persistence
+        // file. Fail-closed: an unreadable / invalid definition file is a clean startup error
+        // (the operator asked for durable templates), never a silently-empty store.
+        #[cfg(feature = "templates")]
+        let templates = Arc::new(std::sync::RwLock::new(crate::templates::load_store(
+            config.templates_file.as_deref(),
+        )?));
         Ok(Self {
+            #[cfg(feature = "templates")]
+            templates,
             // [OPUS-4.8] (sq-o5bi, sq-0g6g) DEFAULT: hold ring+writer directly (pre-#941). Under
             // `backup`: wrap them in the swappable `ServingCore` so an online restore can swap.
             #[cfg(not(feature = "backup"))]
@@ -2337,6 +2397,16 @@ impl AppState {
     /// The server's Prometheus metrics (T22).
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
         &self.metrics
+    }
+
+    /// [FABLE-5] (sq-lsp7k.10) The named-template store (see the field doc). Handlers in
+    /// [`crate::templates`] read it per invocation and mutate it under the write gate.
+    #[cfg(feature = "templates")]
+    pub(crate) fn templates(
+        &self,
+    ) -> &std::sync::RwLock<std::collections::BTreeMap<String, sparq_engine::templates::Template>>
+    {
+        &self.templates
     }
 
     /// [OPUS-4.8] (sq-2999l) Whether the durable CDC change-stream is configured (a directory was
@@ -2892,6 +2962,24 @@ pub fn router(state: AppState) -> Router {
     // (`PodStore::decide` / `wac_allow` / `query_json_as`), fail-closed on every error path. The
     // handlers live in [`crate::solid_authz`] to keep the touch surface on this conflict-hot file
     // minimal.
+    // [FABLE-5] sq-lsp7k.10: OPT-IN named-parameterized-template REST surface. Compiled only
+    // with the `templates` feature; even then every handler refuses (404) unless the config
+    // flag is set (--templates / SPARQ_TEMPLATES=1). The handlers live in [`crate::templates`]
+    // to keep the touch surface on this conflict-hot file minimal. GET /templates lists;
+    // PUT/GET/DELETE /templates/{name} manage one definition (writes are write-gated);
+    // POST /templates/{name} invokes it with typed JSON arguments (an UPDATE template
+    // invocation is write-gated and runs through the SAME sequenced-writer path as
+    // /sparql updates — the gated-update posture is preserved).
+    #[cfg(feature = "templates")]
+    let routes = routes
+        .route("/templates", get(crate::templates::list_endpoint))
+        .route(
+            "/templates/{*name}",
+            get(crate::templates::get_endpoint)
+                .put(crate::templates::put_endpoint)
+                .delete(crate::templates::delete_endpoint)
+                .post(crate::templates::invoke_endpoint),
+        );
     #[cfg(feature = "solid-authz")]
     let routes = routes
         .route("/authz/decide", post(crate::solid_authz::decide_endpoint))
@@ -5044,7 +5132,7 @@ async fn admin_backup_delta(
     }
 }
 
-async fn run_update(state: &AppState, update: String) -> Response {
+pub(crate) async fn run_update(state: &AppState, update: String) -> Response {
     let st = state.clone();
     let task = tokio::task::spawn_blocking(move || st.apply_update(&update));
     match await_update_worker(task, &state.config).await {
@@ -5342,7 +5430,7 @@ fn tighter(a: Option<usize>, b: Option<usize>) -> Option<usize> {
 
 /// Awaits a blocking engine worker under the hard timeout cap; maps a worker panic to a
 /// 500 (CatchPanicLayer cannot see panics on the blocking pool — the JoinError carries them).
-async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerConfig) -> Response {
+pub(crate) async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerConfig) -> Response {
     let joined = match config.query_timeout {
         Some(t) => match tokio::time::timeout(t + TIMEOUT_GRACE, task).await {
             Ok(j) => j,
@@ -5629,7 +5717,7 @@ async fn recv_first_chunk(
 /// "10 rows, --max-results". Gating the `max_results` consideration on `apply_max_results`
 /// makes the message path-accurate (the 413 status itself was always correct — only the
 /// human-readable knob name / row number could be wrong).
-fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool) -> Response {
+pub(crate) fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool) -> Response {
     if e.contains("query budget exceeded (timeout)") {
         return timeout_response(config);
     }
@@ -6780,7 +6868,7 @@ fn decode_gzip_bounded(body: &Bytes, config: &ServerConfig) -> Result<Bytes, Dec
 /// Builds a `text`-ish response with the given content type; for HEAD, omits the body but
 /// keeps the `Content-Type` (and an accurate `Content-Length` via the header) so HEAD
 /// mirrors GET.
-fn text_response(
+pub(crate) fn text_response(
     status: StatusCode,
     content_type: &str,
     body: String,
@@ -6895,7 +6983,7 @@ async fn json_error_bodies(resp: Response) -> Response {
     Response::from_parts(parts, jbody)
 }
 
-fn bad_request(msg: &str) -> Response {
+pub(crate) fn bad_request(msg: &str) -> Response {
     json_error(StatusCode::BAD_REQUEST, msg)
 }
 

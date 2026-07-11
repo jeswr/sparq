@@ -23,3 +23,19 @@
   crate: "sparq-shacl"
   features: "shacl-af"
   test: true
+
+# [FABLE-5] sq-tonhr.3: SHACL Compact Syntax (SCS) — the `scs` parser module
+# (sparq-shacl/src/scs.rs) and its tests (`tests/scs_roundtrip.rs` +
+# `tests/scs_error_paths.rs`, both whole-file `#[cfg(feature = "scs")]`) are
+# entirely feature-gated, so before this leg they ran in NO gating CI (they were
+# allowlisted in scripts/check-feature-test-execution.allowlist.json as a known
+# gap). This leg closes it: clippy --all-targets -D warnings with `scs` ON plus
+# the crate's tests. The W3C shacl12-cs corpus dir (tests/shacl/) is gitignored
+# and absent in CI, so scs_roundtrip records honest SKIPs there; the
+# scs_error_paths fail-closed contract tests are self-contained and always run.
+# Prerequisite hygiene for the sq-tonhr shacl-compact work, which adds its own
+# leg to this same fragment file (sequenced to avoid collisions).
+- name: "sparq-shacl (scs)"
+  crate: "sparq-shacl"
+  features: "scs"
+  test: true

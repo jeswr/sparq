@@ -4594,6 +4594,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-forms"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "oxrdf 0.3.3",
+ "serde",
+ "serde_json",
+ "sparq-core",
+ "sparq-shacl",
+]
+
+[[package]]
 name = "sparq-geo"
 version = "0.1.0"
 dependencies = [
@@ -4723,6 +4735,7 @@ dependencies = [
 name = "sparq-mcp"
 version = "0.1.0"
 dependencies = [
+ "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "serde",
  "serde_json",
@@ -4730,6 +4743,8 @@ dependencies = [
  "sparq-engine",
  "sparq-introspect",
  "sparq-nlq",
+ "sparq-solid",
+ "sparq-text",
 ]
 
 [[package]]
@@ -5121,6 +5136,7 @@ dependencies = [
  "sparq-canon",
  "sparq-core",
  "sparq-engine",
+ "sparq-policy",
  "sparq-shacl",
  "wasm-bindgen",
  "wasm-bindgen-test",

@@ -238,6 +238,17 @@ query-solution = []
 # ZERO new dependencies (oxrdf + spargebra are already direct deps) and contains no
 # `unsafe`.
 params = []
+# [FABLE-5] (sq-lsp7k.10) Named parameterized SPARQL templates — the shared
+# definition + typed-JSON-binding layer under the server's REST template store and the
+# MCP `template_invoke` tool (GraphDB "SPARQL templates" / Stardog "stored queries"
+# parity). Builds ON `params` (#901): a template is parsed once, its declared parameters
+# are validated as free bindable placeholders at registration, and an invocation binds
+# typed JSON arguments through the injection-safe algebra rewrite — fail-closed on
+# unknown/missing/mistyped parameters. OPT-IN and OFF by default: when off, zero of this
+# code compiles and the default native + wasm builds are byte-identical. The only
+# dependency delta is the workspace-ubiquitous `serde_json` (already this crate's
+# dev-dependency), pulled in behind the feature.
+templates = ["params", "dep:serde_json"]
 # [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: a typed `PlanNode` plan tree
 # (`explain_json` module) with a hand-written JSON projection, per-operator q-error
 # = max(est/actual, actual/est) attached from the existing ANALYZE trace, and a
@@ -396,6 +407,11 @@ oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
+# [FABLE-5] (sq-lsp7k.10) The `templates` module's JSON wire + typed-argument format.
+# OPTIONAL — pulled in ONLY by the `templates` feature (default off), so the default +
+# wasm builds never compile it into the library (it is already this crate's
+# dev-dependency and ubiquitous across the workspace tree — no supply-chain delta).
+serde_json = { version = "1", optional = true }
 # [OPUS-4.8] (sq-6vshe.4) Seam 1 of the facade split: the RDF `serialize` module (Turtle /
 # TriG / N-Quads / JSON-LD writers) moved to this internal sub-crate, re-exported verbatim as
 # `sparq_engine::serialize` (see src/lib.rs). OPTIONAL + pulled in ONLY by `serialize-rdf`

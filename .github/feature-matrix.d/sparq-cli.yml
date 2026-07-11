@@ -44,3 +44,16 @@
   crate: "sparq-cli"
   features: "hdt,hdt-write"
   test: true
+
+# [FABLE-5] sq-lsp7k.8: the `tabular` subcommand — materializing tabular→RDF import (CSV
+# direct mapping + the R2RML materializing subset over CSV logical tables). The module,
+# its inline unit tests, and tests/tabular_cli.rs (incl. the data-driven W3C-adapted R2RML
+# fixture suite under tests/fixtures/r2rml/) are all `#[cfg(feature = "tabular")]`, so the
+# default build never compiles or runs them — this leg is what keeps them lit in CI.
+# Zero new deps (first-party RFC-4180 reader; mappings parse via sparq-core's Turtle path).
+# Verified: `cargo test -p sparq-cli --features tabular -- --list` shows the 29 inline
+# tabular::tests + 9 tabular_cli tests.
+- name: "sparq-cli (tabular)"
+  crate: "sparq-cli"
+  features: "tabular"
+  test: true

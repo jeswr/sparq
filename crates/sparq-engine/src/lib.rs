@@ -3083,3 +3083,14 @@ mod tests {
         );
     }
 }
+
+// [FABLE-5] (sq-lsp7k.10) Named parameterized SPARQL templates — the shared definition +
+// typed-JSON-binding layer under the server's REST template store and the MCP
+// `template_invoke` tool. NON-DEFAULT `templates` feature (builds on `params`); when off,
+// zero of this code compiles. Declared at the END of this file deliberately: inserting a
+// compiled-out declaration mid-file would shift `line!()`/`Location` values of the
+// always-compiled code below it and move feature-OFF wasm bytes for no reason (the
+// vectorized-feature-off gate's drift class).
+#[cfg(feature = "templates")]
+#[cfg_attr(docsrs, doc(cfg(feature = "templates")))]
+pub mod templates;

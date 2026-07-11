@@ -67,17 +67,17 @@ cargo run -p sparq-server -- --format turtle data.ttl
   `backup::export` serialises an already-immutable pinned `Generation` to one
   self-describing artifact **while serving** (no stop-the-world); `backup::import`
   re-hydrates a `Graph` from one, **fail-closed** on a corrupt/mismatched artifact.
-  `sparq-server` mounts `/admin/backup` + `/admin/restore`; at-rest encryption out
-  of scope. (Same feature: `backup_delta` same-lineage PITR deltas — see rustdoc.)
-- **Durable change-data-capture stream** *(opt-in `change-stream`, OFF by default)*
-  — `change_stream::ChangeLog` persists each commit as an ordered,
-  monotonically-sequenced change record to a segmented, fsync'd append-only log
-  (Neptune-Streams shape); a consumer `poll(from_seq)`s from any offset and
-  **replays after a restart**. Record on the writer thread — one append per
-  published generation, no submitter serialisation — by installing
-  `ChangeLog::into_commit_hook` via `Writer::spawn_with_commit_hook`. No new
-  dependency, no HTTP/async; see rustdoc for the segment format.
-- **Response-bytes result cache** *(opt-in `result-cache`, OFF by default)* — below.
+  `sparq-server` mounts `/admin/backup` + `/admin/restore`. At-rest encryption is
+  out of scope. (Same feature: `backup_delta` incremental-delta / point-in-time
+  recovery between **same-lineage** generations — see rustdoc.)
+- **Durable change-data-capture stream** *(opt-in `change-stream`, OFF by default)* —
+  `change_stream::ChangeLog` persists each commit as an ordered, monotonically-sequenced
+  record to a segmented, fsync'd append-only log (Neptune-Streams shape), appended on the
+  writer thread (one per generation) via `ChangeLog::into_commit_hook` + `Writer::spawn_with_commit_hook`.
+  `poll(from_seq)` **replays after a restart**; explicit retention (`apply_retention`) drops old
+  segments by consumer-ack / age / size (a trimmed-offset poll **fails closed**). No HTTP/async.
+- **Response-bytes result cache** *(opt-in `result-cache`, OFF by default)* — see
+  below.
 
 ## 🗃️ Result cache (opt-in, `result-cache` feature)
 

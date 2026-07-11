@@ -1,0 +1,8 @@
+# [FABLE-5] (sq-lsp7k.8) rr:termType rr:BlankNode on a column-valued object map: the value
+# becomes a deterministic blank-node label (ASCII alphanumerics kept, other bytes -> _HH).
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+<#TriplesMap1> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "items" ] ;
+  rr:subjectMap [ rr:template "http://example.com/i/{id}" ] ;
+  rr:predicateObjectMap [ rr:predicate ex:tag ; rr:objectMap [ rr:column "tag" ; rr:termType rr:BlankNode ] ] .

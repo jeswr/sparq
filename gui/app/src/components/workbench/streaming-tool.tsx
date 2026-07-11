@@ -25,21 +25,11 @@ import { useEngine } from "@/lib/engine-context";
 import { loadRspModule, type WasmRspQuery, type WasmRsp } from "@/lib/rsp-wasm";
 import { diffAddedTriples, snapshotKeys } from "@/lib/rsp-feed";
 import { toolById, TIER_META } from "@/data/tools";
-import type { ToolOverride } from "@/data/tools";
-
-/**
- * Optional honesty-metadata override merged over the base `ToolDef` (data/tools.ts) by the
- * tool-panel registry's `resolveTool` and by the stub itself. `undefined` = base metadata
- * unchanged. Omit fields you do not override.
- */
-export const STREAMING_TOOL_OVERRIDE: ToolOverride | undefined = {
-  tier: "live-new-wasm",
-  built: true,
-  group: "working",
-  // [FABLE-5] sq-ixc3.16 — the tool now runs window queries over live workspace updates.
-  blurb:
-    "RSP-QL window queries — tumbling/sliding, R/I/DSTREAM — over live workspace updates or manual pushes.",
-};
+// [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
+// rail/tab honesty read path) so THIS panel module can stay behind a lazy dynamic import().
+// Imported (the panel reads its own effective tier below) and re-exported for compat.
+import { STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool.meta";
+export { STREAMING_TOOL_OVERRIDE };
 
 // Default query and window parameters (tumbling 60-tick window, AVG per window).
 const DEFAULT_SPARQL = "SELECT (AVG(?v) AS ?avg) WHERE { ?s <http://ex/reading> ?v }";

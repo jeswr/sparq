@@ -80,6 +80,8 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
   `Store.serialize` engine writer above (no second serialiser), so the bytes match
   `serialize("turtle", true, "  ", true)`; the parsed shapes validate data identically to
   the equivalent Turtle shapes. A malformed document throws a `JsError` with the source line.
+- **Opt-in ODRL policy probe** (`policy`, OFF by default; EXPERIMENTAL, unpublished): exposes
+  `policyEvaluate` / `policyConflicts` over `sparq-policy`'s fail-closed evaluator (sq-586sh).
 - **Persistence is native-only** — the native `Graph::save` / `open` /
   `save_compressed` family and the mmap-backed map-in path are **deliberately not
   exported**: they need a POSIX filesystem and `mmap`, which a browser/edge wasm
