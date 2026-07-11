@@ -465,6 +465,17 @@ jobs:
       - name: Test (federated SERVICE, native lane)
         run: cargo test --features federation
 
+      # [FABLE-5] sq-ixc3.15 — the OPT-IN odrl feature state: clippy + the native-lane ODRL
+      # policy-tool tests (odrl.rs), which drive the REAL sparq-policy evaluator + sparq-solid
+      # PodStore/odrl-bridge gating: a prohibition flips a previously visible named graph to
+      # hidden, a malformed policy denies everything with a visible reason, and a grant-less
+      # requester sees zero rows (fail-closed). Keeps BOTH feature states green.
+      - name: Clippy (odrl, -D warnings)
+        run: cargo clippy --all-targets --features odrl -- -D warnings
+
+      - name: Test (ODRL policy tool, native lane)
+        run: cargo test --features odrl
+
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #
   # Shrunk from the multi-step sq-pnnl harness to exactly 3 meaningful assertions:

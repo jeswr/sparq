@@ -249,6 +249,8 @@ assert!(!store.accessible(&Session { agent: Some("https://alice.ex/card#me"), cl
 
 **Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
+**Interactive surface** — [FABLE-5] sq-ixc3.15: the desktop GUI's **Policies (ODRL) tool** (`gui/`, opt-in `odrl` cargo feature on `gui/src-tauri`) drives exactly this one-shot bridge path end-to-end: author/validate a policy, evaluate a request, and preview the same SPARQL query per requester through `query_json_as` next to the ungated rows (`gui/src-tauri/src/odrl.rs`).
+
 ### Prohibitions → explicit `auth:deny*` (deny-overrides) — [OPUS-4.8] sq-w693
 
 A matched ODRL **Prohibition** is materialized as the dual triple — `principal auth:deny<Mode> target` — via `materialize_odrl_prohibition` (or `materialize_odrl_policy`, which does both sides at once). The **same** action→mode mapping picks the mode, so the deny predicate is `auth:denyRead` / `auth:denyWrite` / `auth:denyAppend` / `auth:denyControl`.
