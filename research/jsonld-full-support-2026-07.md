@@ -43,7 +43,7 @@ already pinned in the epic's beads.
 | Expansion (document-level, incl. frameExpansion) | API §5 | DONE (sq-oy1f.25/.37/.45) |
 | Node map generation + flattening | API §6.1–6.2 | DONE (sq-oy1f.26, #1811); lane close-out in flight |
 | **Compaction (document-level)** | API §7 | BEADED — sq-oy1f.27 |
-| Serialize RDF as JSON-LD (fromRdf) | API §8.1 | BEADED — sq-oy1f.28 |
+| Serialize RDF as JSON-LD (fromRdf) | API §8.1 | DONE (sq-oy1f.28) |
 | Deserialize JSON-LD to RDF (native strict toRdf) | API §8.2 | BEADED — sq-oy1f.30 (oxjsonld stays default ingest) |
 | **Framing** (`@embed`/`@explicit`/`@omitDefault`/`@requireAll`, value patterns, named graphs) | Framing REC (keywords + framing algorithm) | BEADED — sq-oy1f.29 |
 | Error codes on negative cases | API error registry | BEADED — sq-oy1f.31 (registry itself DONE, sq-oy1f.23) |
@@ -63,7 +63,8 @@ Verified against the code, not the epic text.
 - **Native pipeline crate** `crates/sparq-jsonld` (zero mandatory deps, `publish = false`):
   `json.rs` AST, full closed `JsonLdErrorCode` registry, `JsonLdOptions`, `DocumentLoader`
   (Noop deny-by-default / Fs), context processing + inverse context (~3.0 kLOC), `expand()`
-  (~1.4 kLOC), `node_map.rs` + `flatten()`. `compact.rs` / `frame.rs` / `from_rdf.rs` /
+  (~1.4 kLOC), `node_map.rs` + `flatten()`, and `from_rdf()` (§8.1: rdfDirection both
+  modes, `@json`, `rdf:List` reconstruction — sq-oy1f.28). `compact.rs` / `frame.rs` /
   `to_rdf.rs` are **declared stubs** awaiting their beads — no `todo!()` anywhere.
 - **Legacy RDF-first writers** in sparq-engine-serialize still power compacted/framed output
   today; the native pipeline replaces their internals via the cutover bead (sq-oy1f.41) with
@@ -79,7 +80,7 @@ Verified against the code, not the epic text.
   | flatten | 53 (of 58) | native `flatten()` vs normative expected document |
   | compact | 186 (of 246) | RDF round-trip equivalence (upgrades to normative document oracle in sq-oy1f.27) |
   | frame | 61 (of 92) | RDF-equivalence vs normative expected doc (native re-pin in sq-oy1f.29) |
-  | fromRdf | 51 (of 53) | writer round-trip isomorphism (document comparison added in sq-oy1f.28) |
+  | fromRdf | 52 (of 53) | native `from_rdf()` vs normative expected document + scoped round-trip + real negatives (sq-oy1f.28; the 1 non-pass is the honest `specVersion: json-ld-1.0` skip) |
 
 - **Surfaces already live**: server accept+emit `application/ld+json` on CONSTRUCT/DESCRIBE +
   GSP read AND GSP `PUT`/`POST` bodies (sq-oy1f.1, tests in
