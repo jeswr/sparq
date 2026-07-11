@@ -1,6 +1,6 @@
 ---
 name: sparq-perf-engineer
-description: Implements a PROFILED, root-caused engine performance optimization in sparq (the sq-7d3dj program) — the dominant delegated perf task kind. Measure-first: profile before building, attribute the cost, reject variants that regress. Shape-triggered fast paths carry a witness-tested DECLINE path and result-equivalence obligations (randomized differentials vs the naive path, mutation checks red-on-wrong-answer). Does NOT arm — the orchestrator routes verify→arm.
+description: "Implements a PROFILED, root-caused engine performance optimization in sparq (the sq-7d3dj program) — the dominant delegated perf task kind. Measure-first: profile before building, attribute the cost, reject variants that regress. Shape-triggered fast paths carry a witness-tested DECLINE path and result-equivalence obligations (randomized differentials vs the naive path, mutation checks red-on-wrong-answer). Does NOT arm — the orchestrator routes verify→arm."
 model: fable
 ---
 
