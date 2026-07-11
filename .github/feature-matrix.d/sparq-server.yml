@@ -172,3 +172,17 @@
   crate: "sparq-server"
   features: "solid-authz-trust"
   test: true
+
+# [FABLE-5] sq-lsp7k.10: the OPT-IN named-parameterized-template REST surface
+# (`/templates` — CRUD + typed fail-closed invocation; UPDATE-template invocations
+# write-gated through the same sequenced-writer path as /sparql updates). The
+# `crate::templates` module, the routes, the config fields and tests/templates.rs are all
+# `#[cfg(feature = "templates")]`, so the default build compiles them EMPTY and runs ZERO
+# of the 9 e2e tests (opt-in 404 posture, CRUD round-trip, fail-closed registration +
+# invocation, the gated-update posture incl. the hostile-literal injection scenario over
+# HTTP, --templates-file persistence). `templates` pulls `server` +
+# `sparq-engine/templates` (in-workspace; no new external dep).
+- name: "sparq-server (templates — named parameterized template REST surface)"
+  crate: "sparq-server"
+  features: "templates"
+  test: true

@@ -20,6 +20,14 @@
 //!   container/resource CRUD tools (`resource_get`/`container_list`, plus the gated
 //!   `resource_put`/`resource_delete`/`container_create`) with WAC/ACP-authorized,
 //!   session-scoped semantics over a `sparq_solid::PodStore`. [FABLE-5] sq-u16eq
+//! - `templates` (feature `templates`) — the `template_list` / `template_invoke` tools:
+//!   named parameterized SPARQL templates registered on `ServerConfig::templates` and
+//!   invoked with typed JSON arguments through the injection-safe algebra binding
+//!   (fail-closed on unknown/missing/mistyped parameters); an UPDATE template stays
+//!   behind the same `allow_update` gate as the raw `update` tool. [FABLE-5] sq-lsp7k.10
+//! - `text` (feature `text`) — the `text_search` tool: BM25 full-text search over the
+//!   graph's string literals via a lazily-built, incrementally-reconciled `sparq-text`
+//!   index. [FABLE-5] sq-lsp7k.10
 
 pub mod jsonrpc;
 pub mod server;
