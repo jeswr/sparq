@@ -1035,6 +1035,44 @@ feature but not the flag, `/terse/transpile` is `404`. Transpiling is query-shap
 by `--auth-token-read` like a GET. The CLI exposes the same transpiler as `sparq-cli terse` (see the
 `cli` skill).
 
+**5g. Named parameterized SPARQL templates (OPT-IN, `sq-lsp7k.10`; feature `templates`).
+[FABLE-5]** Server-stored, IRI-identified query/UPDATE templates with **typed, fail-closed
+parameter binding** — the GraphDB "SPARQL templates" (smart updates) / Stardog "stored
+queries" parity surface, and what an app backend or LLM agent should call instead of
+composing free-form UPDATE strings.
+
+- `GET /templates` — list every stored definition (read-gated). `GET /templates/{name}` —
+  one definition; the `{name}` segment is a wildcard capture, so IRI names work verbatim.
+- `PUT /templates/{name}` — store/replace (**write-gated**); the JSON body is
+  `{ "text" | "sparql", "parameters": { name → auto|iri|string|boolean|integer|decimal|double|<datatype-IRI> },
+  "description"? }`. **Fail-closed registration**: unparseable text, a declared parameter
+  that is not a free bindable placeholder (e.g. a literal type in a predicate slot), or a
+  result/aggregate/BIND output variable is a `400` — a stored template is always invocable.
+  `DELETE /templates/{name}` — remove (**write-gated**).
+- `POST /templates/{name}` — **invoke** with a JSON argument object. Binding is the #901
+  `params` **algebra rewrite** (`sparq_engine::templates`): values become typed terms inside
+  the parsed AST, never string concatenation, so a hostile value cannot inject syntax.
+  **Fail-closed invocation**: an unknown/missing/mistyped argument is a `400`. SELECT/ASK →
+  SPARQL-JSON; CONSTRUCT/DESCRIBE → N-Triples; an **UPDATE template is write-gated and runs
+  through the SAME sequenced-writer path (`run_update`) as a `/sparql` update** — budgets,
+  atomicity, durability and the gated-update posture are identical.
+- `--templates-file PATH` (env `SPARQ_TEMPLATES_FILE`) makes the store durable: loaded
+  fail-closed at startup (a corrupt file is a startup ERROR, never a silently-empty store),
+  rewritten atomically (write-temp + rename) on every successful `PUT`/`DELETE`.
+
+```sh
+cargo run -p sparq-server --features templates -- data.ttl --templates
+curl -X PUT -H 'Content-Type: application/json' http://127.0.0.1:3030/templates/friends \
+  -d '{"text":"SELECT ?f WHERE { ?who <http://ex/knows> ?f }","parameters":{"who":"iri"}}'
+curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:3030/templates/friends \
+  -d '{"who":"http://ex/alice"}'          # → SPARQL-JSON, typed + injection-safe
+```
+
+**Double opt-in**, OFF by default: compiled only with the `templates` cargo feature **and**
+served only when `--templates` / `SPARQ_TEMPLATES=1` is also set (mirrors `shacl`/`tpf`/
+`terse`); without the flag every `/templates` path is `404`. The MCP surface exposes the same
+template layer as `template_invoke` (see the `agent-tools` skill).
+
 ### Solid WAC/ACP authorization endpoints (`solid-authz` feature, default OFF; `sq-snopa.6`, issue #992 FR-4)
 
 A **thin, fail-closed HTTP shell** over the [`sparq-solid`](../../crates/sparq-solid) library

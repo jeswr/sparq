@@ -55,8 +55,9 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   containing `> } INSERT … {` or a `"` break-out) is carried as opaque DATA and cannot alter the
   query structure. Covers SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE; fail-closed (rejects an unknown
   placeholder, a `BIND`/aggregate/`VALUES` output, or a blank node in a predicate/graph slot). Off,
-  zero code compiles, the default build is byte-identical, no new deps. See
-  [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
+  zero code compiles, the default build is byte-identical, no new deps. The opt-in `templates` feature
+  layers **named parameterized templates** on top (parse-once, fail-closed typed-JSON binding — behind
+  the server's `/templates` REST + MCP `template_invoke`, sq-lsp7k.10; see [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md)).
 - **Materialised-view / query-result cache** *(opt-in `result-cache` feature, OFF by default)* —
   a bounded, version-aware LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed
   by `(parsed query algebra, caller graph-version)`, replaying it instead of re-executing the same
