@@ -184,6 +184,68 @@ async fn guard_covers_gsp_and_runtime_off_preserves_write_path() {
     assert!(accepted.status().is_success(), "{}", accepted.status());
 }
 
+/// [FABLE-5] (PR #1999 security review) A guard shapes graph whose `sh:pattern` regex does
+/// not compile: well-formed at parse time (the value IS a string literal), but the constraint
+/// is unevaluable — the lenient validator SKIPS it and reports `conforms:true`.
+const UNEVALUABLE_PATTERN_SHAPES: &str = r#"
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix ex: <http://example.org/> .
+    ex:PersonShape a sh:NodeShape ;
+      sh:targetClass ex:Person ;
+      sh:property [ sh:path ex:age ; sh:pattern "(unclosed" ] .
+"#;
+
+/// [FABLE-5] A guard shapes graph with a parse-time ill-formed construct (a non-integer
+/// `sh:minCount` — a violated SHACL syntax rule the lenient validator silently skips).
+const ILL_FORMED_SHAPES: &str = r#"
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix ex: <http://example.org/> .
+    ex:PersonShape a sh:NodeShape ;
+      sh:targetClass ex:Person ;
+      sh:property [ sh:path ex:age ; sh:minCount "one" ] .
+"#;
+
+/// [FABLE-5] (PR #1999 security review) The guard FAILS CLOSED on an unevaluable shapes
+/// graph — it must never silently ADMIT a write just because the operator's shapes graph
+/// could not be (fully) evaluated. Two layers:
+///   (a) runtime: an uncompilable `sh:pattern` (NOT parse-time detectable) rejects the
+///       write with a sanitized 500 and publishes nothing — the lenient validator would
+///       have skipped the constraint and admitted the write;
+///   (b) startup: a parse-time ill-formed construct is a hard `try_with_config` error, so a
+///       mis-authored guard never boots at all.
+#[tokio::test]
+async fn guard_fails_closed_on_unevaluable_shapes() {
+    // (a) Runtime fail-closed. Boots cleanly (the shapes graph is well-FORMED)…
+    let base = spawn_with(CONFORMING_DATA, false, ServerConfig {
+        shacl_guard: true,
+        shacl_shapes: Some(ShaclShapes::new(Graph::load_str(UNEVALUABLE_PATTERN_SHAPES, "turtle").unwrap())),
+        ..ServerConfig::default()
+    }).await;
+    let resp = client().post(format!("{base}/sparql"))
+        .header("Content-Type", "application/sparql-update")
+        .body("INSERT DATA { <http://example.org/mallory> a <http://example.org/Person> ; <http://example.org/age> \"not-an-integer\" }")
+        .send().await.unwrap();
+    // …but the guarded write is REJECTED (5xx: the operator's misconfiguration, not the
+    // client's data), never admitted past the unevaluable guard.
+    assert_eq!(resp.status(), 500, "an unevaluable guard constraint must fail CLOSED, not silently admit the write");
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains("(unclosed"), "shapes-graph fragment must not leak into the response body: {body}");
+    // Nothing was published.
+    let unchanged = client().get(format!("{base}/sparql"))
+        .query(&[("query", "ASK { <http://example.org/mallory> ?p ?o }")])
+        .send().await.unwrap().text().await.unwrap();
+    assert!(unchanged.contains("\"boolean\":false"), "{unchanged}");
+
+    // (b) Startup fail-closed: a parse-time ill-formed guard shape never boots.
+    let graph = Graph::load_str(CONFORMING_DATA, "turtle").unwrap();
+    let err = AppState::try_with_config(graph, ServerConfig {
+        shacl_guard: true,
+        shacl_shapes: Some(ShaclShapes::new(Graph::load_str(ILL_FORMED_SHAPES, "turtle").unwrap())),
+        ..ServerConfig::default()
+    }).err().expect("an ill-formed guard shapes graph must be a hard startup error");
+    assert!(err.contains("not fully evaluable"), "{err}");
+}
+
 #[test]
 fn guard_requires_loaded_shapes_graph() {
     let graph = Graph::load_str(CONFORMING_DATA, "turtle").unwrap();
