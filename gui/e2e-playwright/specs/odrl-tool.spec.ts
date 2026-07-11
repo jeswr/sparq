@@ -28,6 +28,11 @@ async function setTextareaValue(
   selector: string,
   value: string,
 ): Promise<void> {
+  // [FABLE-5] sq-qgkwy.2 — web-first guard BEFORE the raw evaluate: `page.evaluate` has no
+  // auto-wait, and the ODRL panel is now lazily code-split (tool-panel.tsx), so the textarea
+  // mounts one chunk-fetch after the rail click. The determinism doctrine's "web-first
+  // assertions only" rule covers exactly this — wait for the element, then evaluate.
+  await page.locator(selector).waitFor();
   await page.evaluate(
     ({ selector, text }) => {
       const el = document.querySelector<HTMLTextAreaElement>(selector);
