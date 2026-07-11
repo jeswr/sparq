@@ -257,8 +257,8 @@ of the evaluator entirely.
 
 ## 7. Follow-up beads (created with this PR)
 
-1. `feat(solid)`: ODRL bridge wiring — `sparq:PatternAsset` parsing +
+1. `sq-qnlj8` — `feat(solid)`: ODRL bridge wiring — `sparq:PatternAsset` parsing +
    `auth:PatternGrant` materialization + `AuthIndex` scope extraction (§5), gated on
    `pattern-scope` + `odrl-bridge`.
-2. `feat(solid)`: scoped-replica cache + write-path invalidation (§6).
-3. `spike(solid)`: pattern-scoped UPDATE enforcement design (§2.4).
+2. `sq-nc3c6` — `feat(solid)`: scoped-replica cache + write-path invalidation (§6).
+3. `sq-fznmq` — `spike(solid)`: pattern-scoped UPDATE enforcement design (§2.4).

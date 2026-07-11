@@ -135,7 +135,7 @@ pub fn masked_dataset(base: &Graph, decisions: &FxHashMap<Term, GraphScope>) -> 
     for (name, sub) in &base.named {
         if let Some(scope) = decisions.get(name) {
             let masked = masked_graph(sub, scope);
-            if masked.len() > 0 {
+            if !masked.is_empty() {
                 out.named.push((name.clone(), masked));
             }
         }
