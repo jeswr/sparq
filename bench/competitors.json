@@ -771,39 +771,39 @@
       "pinned_version": "rdf-canonize (npm; pin the exact npm version at gather time)",
       "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file",
       "install_recipe": "`npm install rdf-canonize` at gather time. gather-only — NOT a committed dependency.",
-      "run_recipe": "scripts/bench-adapters/canon_adapter.mjs --engine rdf-canonize --input <dataset.nq>; cross-check the canonical N-Quads byte-for-byte vs sparq's output before trusting timing. Poison-graph cap-hit is a result, not a failure.",
+      "run_recipe": "[FABLE-5 sq-hmd7l.16] node scripts/bench-adapters/canon_adapter.mjs --engine rdf-canonize --input <dataset.nq> [--sha384] with CANON_NODE_MODULES pointing at the npm-install dir; driven by bench/canon/run.sh (byte-parity gate before timing; poison cap-hit is a result, not a failure).",
       "comparable_suites": [
         {
           "sparq_suite": "canon-bench",
-          "note": "RDFC-1.0 canonical N-Quads on the same W3C test corpora + poison-graph stress cases — rdf-canonize vs sparq; cross-check byte-identical canonical output before trusting timing. Poison-graph cap-hits are recorded as 'capped' results, not failures"
+          "note": "RDFC-1.0 canonical N-Quads on the vendored W3C suite + poison stress cases. MEASURED (work box, 2026-07): the shipped default guard (maxWorkFactor=1) fail-closes on 18 of the 64 approved eval cases, so parity/timing run at the raised maxWorkFactor=3 posture and poison rows record BOTH postures, labelled @default/@wfN — see bench/canon/README.md"
         }
       ],
-      "version_env_metadata": "gather records the resolved rdf-canonize npm version, node --version, and the host env block",
+      "version_env_metadata": "gather records the resolved rdf-canonize npm version (the adapter prints version= on stderr), node --version, and the host env block",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "rdf-canonize-js",
       "unverified_pin": true,
-      "honesty_caveat": "npm version is unverified and TBD; to be pinned to a real npm version at the first gather run."
+      "honesty_caveat": "no canonical gather pin yet; the 2026-07 work-box harness verification resolved npm rdf-canonize 5.0.0 (byte-parity green at maxWorkFactor=3) — the canonical pin is whatever the first quiet-box gather run records."
     },
     {
       "id": "rdf-canon-rust",
       "name": "rdf-canon (Rust RDFC-1.0 crate)",
       "kind": "binary",
       "role": "[SONNET-4.6 sq-hmd7l.1] rdf-canon is a Rust crate implementing RDFC-1.0 (formerly RDF Dataset Normalization). The canon-bench suite compares W3C conformance pass-rate + throughput vs sparq's canonicalization. MIT/Apache-2.0 -> numbers are publishable. The same-language Rust peer.",
-      "pinned_version": "rdf-canon (crates.io; pin the exact crate version at gather time)",
-      "version_source": "the resolved crate version in the gather box's Cargo.lock, recorded in the results file",
-      "install_recipe": "`cargo install rdf-canon` at gather time. gather-only — NOT a committed dependency of the main workspace.",
-      "run_recipe": "scripts/bench-adapters/canon_adapter.sh --engine rdf-canon --input <dataset.nq>; cross-check canonical N-Quads byte-for-byte vs sparq's output before trusting timing.",
+      "pinned_version": "rdf-canon 0.15.3 by default (CANON_RDF_CANON_VERSION overrides) — the same version sparq-canon itself pins",
+      "version_source": "scripts/bench-adapters/canon_adapter.sh --build pins the version into the scratch CLI, which self-reports version= on stderr; recorded in the results envelope",
+      "install_recipe": "[FABLE-5 sq-hmd7l.16] the crate ships NO bin target — scripts/bench-adapters/canon_adapter.sh --build scaffolds + builds a gather-time scratch CLI (oxttl-0.1 N-Quads parse -> rdf_canon::canonicalize_quads) outside the workspace; NOT a committed dependency of the main workspace.",
+      "run_recipe": "[FABLE-5 sq-hmd7l.16] scripts/bench-adapters/canon_adapter.sh --engine rdf-canon --input <dataset.nq> [--sha384] (or CANON_RDF_CANON_BIN=auto in bench/canon/run.sh); byte-parity gate before timing.",
       "comparable_suites": [
         {
           "sparq_suite": "canon-bench",
-          "note": "RDFC-1.0 canonical N-Quads on the same W3C test corpora + poison-graph stress cases — rdf-canon Rust vs sparq; cross-check byte-identical canonical output before trusting timing. The Rust-peer row is the fairest apples-to-apples throughput comparison"
+          "note": "RDFC-1.0 canonical N-Quads on the vendored W3C suite + poison stress cases. HONESTY: sparq-canon DELEGATES its RDFC-1.0 algorithm to this same crate, so at the default matching pin this column measures sparq's oxrdf-0.3<->0.2 bridge + guard-configuration overhead, NOT an independent implementation (the independent check is rdf-canonize-js); override CANON_RDF_CANON_VERSION for an upstream-drift comparison — see bench/canon/README.md"
         }
       ],
-      "version_env_metadata": "gather records the rdf-canon crate version and the host env block",
+      "version_env_metadata": "the scratch CLI self-reports its pinned rdf-canon version on stderr; the envelope records it + the host env block",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "rdf-canon-rust",
-      "unverified_pin": true,
-      "honesty_caveat": "Crate version is unverified and TBD; to be pinned to a real crates.io version at the first gather run."
+      "unverified_pin": false,
+      "honesty_caveat": "default pin 0.15.3 equals sparq's own vendored algorithm crate — a bridge-overhead measure, not an independent-implementation comparison (see the comparable_suites note)."
     },
     {
       "id": "comunica",
