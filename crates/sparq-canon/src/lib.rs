@@ -151,8 +151,30 @@ pub use rdf12::{
 /// ([`canonicalize_quads`]).
 pub use digest::Digest;
 
+/// The crate-wide bound on RDF 1.2 triple-term **nesting depth**.
+///
+/// A triple term whose object is not itself a triple term has depth 1; each
+/// additional level of `<<( … )>>`-in-`<<( … )>>` nesting adds 1. The opt-in
+/// `rdf12-triple-terms` profile walks triple terms with recursive descent
+/// (HNDQ gossip, bnode collection, relabelling, serialization — and `oxrdf`'s
+/// own `Drop`/`Clone` recurse too), so unbounded nesting is a stack-overflow
+/// vector. Every profile entry point therefore fails closed with
+/// [`CanonError::TripleTermDepthExceeded`] — via an **iterative**
+/// (recursion-free) pre-check — when any triple term nests deeper than this
+/// bound. Real credential/VC data nests one or two levels; 128 is far above
+/// any non-adversarial input. The standard (feature-off) paths reject every
+/// triple term outright with [`CanonError::TripleTerm`] before any descent, so
+/// the bound only ever fires in the opt-in profile. [FABLE-5] sq-x3oj2.
+pub const MAX_TRIPLE_TERM_DEPTH: usize = 128;
+
 /// Canonicalization failure (RDFC-1.0 over sparq's term model).
+///
+/// `#[non_exhaustive]`: variants have been added ungated as the crate grew
+/// ([`CanonError::NestedBlankNode`], [`CanonError::TripleTermDepthExceeded`] —
+/// per the [`CanonError::TripleTerm`] precedent), so downstream `match`es keep
+/// a wildcard arm rather than assuming the set is closed. [FABLE-5] sq-x3oj2.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CanonError {
     /// RDF 1.2 triple terms are outside W3C RDFC-1.0's data model; the
     /// standard paths fail closed on them. Enable the opt-in `rdf12-triple-terms`
@@ -166,6 +188,14 @@ pub enum CanonError {
     /// otherwise. Use the full `canonicalize_rdf12` descent to relabel nested
     /// blank nodes instead. [FABLE-5] sq-iaxd.
     NestedBlankNode,
+    /// An RDF 1.2 triple term nests deeper than [`MAX_TRIPLE_TERM_DEPTH`].
+    /// Returned only by the opt-in `rdf12-triple-terms` profile's entry points
+    /// (`canonicalize_rdf12` and siblings), which pre-check depth iteratively
+    /// before any recursive descent — deeply-nested adversarial input fails
+    /// closed instead of risking a stack overflow. The variant itself is always
+    /// present (not feature-gated), per the `NestedBlankNode` precedent.
+    /// [FABLE-5] sq-x3oj2.
+    TripleTermDepthExceeded,
     /// Bridge serialization/parse failure (should not happen for RDFC-1.0-model
     /// content; surfaced rather than swallowed).
     Bridge(String),
@@ -189,6 +219,14 @@ impl std::fmt::Display for CanonError {
                     "blank node nested inside an RDF 1.2 triple term; the constrained \
                      ground-triple-term profile requires blank-node-free triple terms \
                      (use the full `canonicalize_rdf12` descent to relabel nested blank nodes)"
+                )
+            }
+            CanonError::TripleTermDepthExceeded => {
+                write!(
+                    f,
+                    "RDF 1.2 triple term nests deeper than the crate-wide bound of \
+                     {MAX_TRIPLE_TERM_DEPTH} levels; failing closed (deeply-nested \
+                     triple terms are a stack-overflow vector for recursive descent)"
                 )
             }
             CanonError::Bridge(e) => write!(f, "oxrdf bridge error: {e}"),
@@ -793,6 +831,28 @@ mod tests {
             msg.contains("canonicalize_rdf12"),
             "Display must point at the full-descent escape hatch: {msg:?}"
         );
+    }
+
+    /// [FABLE-5] sq-x3oj2: `CanonError::TripleTermDepthExceeded` is likewise an
+    /// ungated variant (only *constructed* by the opt-in `rdf12-triple-terms`
+    /// profile's iterative depth pre-check), so its `Display` must render in
+    /// the default feature state too — and must carry the actual crate-wide
+    /// bound, so the message can never drift from [`MAX_TRIPLE_TERM_DEPTH`].
+    #[test]
+    fn triple_term_depth_error_display_default_features() {
+        let msg = CanonError::TripleTermDepthExceeded.to_string();
+        assert!(
+            msg.contains("nests deeper"),
+            "Display must name the condition: {msg:?}"
+        );
+        assert!(
+            msg.contains(&MAX_TRIPLE_TERM_DEPTH.to_string()),
+            "Display must carry the crate-wide bound ({MAX_TRIPLE_TERM_DEPTH}): {msg:?}"
+        );
+        // The bound itself is a load-bearing public constant: deep enough for
+        // any real credential/VC nesting, small enough that bounded recursive
+        // descent cannot overflow the stack.
+        assert_eq!(MAX_TRIPLE_TERM_DEPTH, 128, "crate-wide depth bound");
     }
 
     #[test]

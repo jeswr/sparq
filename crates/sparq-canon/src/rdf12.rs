@@ -136,6 +136,10 @@ pub fn issue_dataset_rdf12(
 pub fn issue_dataset_rdf12_with<D: Digest>(
     dataset: &[Quad],
 ) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    // Crate-wide nesting-depth bound, checked iteratively BEFORE any recursive
+    // descent (this is the funnel every full-profile entry point drains
+    // through). [FABLE-5] sq-x3oj2.
+    ensure_triple_term_depth(dataset)?;
     let state = CanonState::compute::<D>(dataset)?;
     Ok(state.canonical_issuer.issued.into_iter().collect())
 }
@@ -157,6 +161,10 @@ pub fn canonicalize_triples_rdf12(triples: &[Triple]) -> Result<crate::Canonical
 pub fn canonicalize_triples_rdf12_with<D: Digest>(
     triples: &[Triple],
 ) -> Result<crate::CanonicalGraph, CanonError> {
+    // Depth-bound BEFORE the per-triple `clone` below: oxrdf's `Clone` (and
+    // `Drop`) recurse through nested triple terms, so an over-deep term must
+    // fail closed before it is ever cloned. [FABLE-5] sq-x3oj2.
+    ensure_triple_term_depth_triples(triples)?;
     let dataset: Vec<Quad> = triples
         .iter()
         .map(|t| {
@@ -241,6 +249,9 @@ pub fn canonicalize_rdf12_ground_terms(dataset: &[Quad]) -> Result<String, Canon
 pub fn canonicalize_rdf12_ground_terms_with<D: Digest>(
     dataset: &[Quad],
 ) -> Result<String, CanonError> {
+    // Depth-bound first: the ground guard walks nested terms, so an over-deep
+    // term reports `TripleTermDepthExceeded`, not `NestedBlankNode`.
+    ensure_triple_term_depth(dataset)?;
     ensure_ground_triple_terms(dataset)?;
     canonicalize_rdf12_with::<D>(dataset)
 }
@@ -259,6 +270,9 @@ pub fn issue_dataset_rdf12_ground_terms(
 pub fn issue_dataset_rdf12_ground_terms_with<D: Digest>(
     dataset: &[Quad],
 ) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    // Depth-bound first — same ordering rationale as
+    // `canonicalize_rdf12_ground_terms_with`.
+    ensure_triple_term_depth(dataset)?;
     ensure_ground_triple_terms(dataset)?;
     issue_dataset_rdf12_with::<D>(dataset)
 }
@@ -279,6 +293,9 @@ pub fn canonicalize_triples_rdf12_ground_terms(
 pub fn canonicalize_triples_rdf12_ground_terms_with<D: Digest>(
     triples: &[Triple],
 ) -> Result<crate::CanonicalGraph, CanonError> {
+    // Depth-bound first — same ordering rationale as
+    // `canonicalize_rdf12_ground_terms_with`.
+    ensure_triple_term_depth_triples(triples)?;
     if triples.iter().any(|t| term_has_nested_bnode(&t.object)) {
         return Err(CanonError::NestedBlankNode);
     }
@@ -306,17 +323,69 @@ fn term_has_nested_bnode(term: &Term) -> bool {
 }
 
 /// True iff the (triple-term) triple contains a blank node in its subject or
-/// (recursively) its object. Predicates are always IRIs; in oxrdf 0.3 a
-/// triple's subject is `NamedOrBlankNode`, so only the object recurses.
+/// (transitively) its object. Predicates are always IRIs; in oxrdf 0.3 a
+/// triple's subject is `NamedOrBlankNode`, so only the object chain descends —
+/// walked with a **loop**, not recursion, so the walk itself is stack-safe on
+/// any depth (the entry points additionally bound depth up front; see
+/// [`ensure_triple_term_depth`]). [FABLE-5] sq-x3oj2.
 fn triple_contains_bnode(t: &Triple) -> bool {
-    if matches!(t.subject, NamedOrBlankNode::BlankNode(_)) {
-        return true;
+    let mut cur = t;
+    loop {
+        if matches!(cur.subject, NamedOrBlankNode::BlankNode(_)) {
+            return true;
+        }
+        match &cur.object {
+            Term::BlankNode(_) => return true,
+            Term::Triple(inner) => cur = inner,
+            _ => return false,
+        }
     }
-    match &t.object {
-        Term::BlankNode(_) => true,
-        Term::Triple(inner) => triple_contains_bnode(inner),
-        _ => false,
+}
+
+// ---------------------------------------------------------------------------
+// Crate-wide triple-term nesting-depth bound ([FABLE-5] sq-x3oj2): the profile
+// walks triple terms with recursive descent (HNDQ gossip, bnode collection,
+// relabelling, `Display` serialization — and oxrdf's own `Drop`/`Clone`
+// recurse), so unbounded nesting is a stack-overflow vector. Every public
+// entry point pre-checks depth ITERATIVELY (the checker itself cannot
+// overflow) and fails closed before any recursion or deep `clone` happens.
+// ---------------------------------------------------------------------------
+
+/// The nesting depth of a term: 0 for a non-triple term; a triple term whose
+/// object is not itself a triple term has depth 1; each further level adds 1.
+/// In oxrdf 0.3 only a triple's **object** can be a triple term (the subject is
+/// [`NamedOrBlankNode`]), so nesting is a single chain — walked with a loop.
+fn triple_term_depth(term: &Term) -> usize {
+    let mut depth = 0usize;
+    let mut cur = term;
+    while let Term::Triple(t) = cur {
+        depth += 1;
+        cur = &t.object;
     }
+    depth
+}
+
+/// Depth guard over a dataset: `Err(TripleTermDepthExceeded)` iff any quad's
+/// object nests triple terms deeper than [`crate::MAX_TRIPLE_TERM_DEPTH`].
+fn ensure_triple_term_depth(dataset: &[Quad]) -> Result<(), CanonError> {
+    if dataset
+        .iter()
+        .any(|q| triple_term_depth(&q.object) > crate::MAX_TRIPLE_TERM_DEPTH)
+    {
+        return Err(CanonError::TripleTermDepthExceeded);
+    }
+    Ok(())
+}
+
+/// Depth guard over one graph's triples (see [`ensure_triple_term_depth`]).
+fn ensure_triple_term_depth_triples(triples: &[Triple]) -> Result<(), CanonError> {
+    if triples
+        .iter()
+        .any(|t| triple_term_depth(&t.object) > crate::MAX_TRIPLE_TERM_DEPTH)
+    {
+        return Err(CanonError::TripleTermDepthExceeded);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,5 +1560,96 @@ mod private_tests {
             ensure_ground_triple_terms(&[ok, bad]),
             Err(CanonError::NestedBlankNode)
         ));
+    }
+
+    // ---- [FABLE-5] sq-x3oj2: crate-wide triple-term nesting-depth bound ----
+
+    /// Builds a ground triple-term chain of exactly `depth` nesting levels
+    /// (iteratively — the test helper must not itself recurse).
+    fn ground_chain(depth: usize) -> Term {
+        let mut obj = Term::NamedNode(iri("http://ex/leaf"));
+        for _ in 0..depth {
+            obj = Term::Triple(Box::new(Triple::new(
+                NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+                iri("http://ex/p"),
+                obj,
+            )));
+        }
+        obj
+    }
+
+    /// Direct test for `triple_term_depth`: exact values at 0 / 1 / 3, killing
+    /// off-by-one and "count only the top level" mutations.
+    #[test]
+    fn triple_term_depth_exact_counts() {
+        assert_eq!(triple_term_depth(&Term::NamedNode(iri("http://ex/o"))), 0);
+        assert_eq!(triple_term_depth(&ground_chain(1)), 1);
+        assert_eq!(triple_term_depth(&ground_chain(3)), 3);
+    }
+
+    /// Direct boundary test for `ensure_triple_term_depth` (quads): depth ==
+    /// MAX is accepted, MAX+1 fails closed. Knocking out the guard turns the
+    /// Err arm into Ok — red.
+    #[test]
+    fn ensure_triple_term_depth_boundary() {
+        let quad_at = |depth: usize| {
+            Quad::new(
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+                iri("http://ex/says"),
+                ground_chain(depth),
+                GraphName::DefaultGraph,
+            )
+        };
+        assert!(ensure_triple_term_depth(&[quad_at(crate::MAX_TRIPLE_TERM_DEPTH)]).is_ok());
+        assert!(matches!(
+            ensure_triple_term_depth(&[quad_at(crate::MAX_TRIPLE_TERM_DEPTH + 1)]),
+            Err(CanonError::TripleTermDepthExceeded)
+        ));
+    }
+
+    /// Direct boundary test for `ensure_triple_term_depth_triples`.
+    #[test]
+    fn ensure_triple_term_depth_triples_boundary() {
+        let triple_at = |depth: usize| {
+            Triple::new(
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+                iri("http://ex/says"),
+                ground_chain(depth),
+            )
+        };
+        assert!(
+            ensure_triple_term_depth_triples(&[triple_at(crate::MAX_TRIPLE_TERM_DEPTH)]).is_ok()
+        );
+        assert!(matches!(
+            ensure_triple_term_depth_triples(&[triple_at(crate::MAX_TRIPLE_TERM_DEPTH + 1)]),
+            Err(CanonError::TripleTermDepthExceeded)
+        ));
+    }
+
+    /// `triple_contains_bnode` is a loop, not recursion: a chain far deeper
+    /// than any recursion budget must answer without overflowing, both for the
+    /// all-ground case (false) and with a blank node buried at the innermost
+    /// level (true). The load-bearing assert is the innermost-bnode `true`
+    /// (kills "stop at first level" mutations).
+    #[test]
+    fn triple_contains_bnode_deep_chain_loop_safe() {
+        // All-ground deep chain -> false.
+        let Term::Triple(ground) = ground_chain(2048) else {
+            panic!("ground_chain must return a triple term")
+        };
+        assert!(!triple_contains_bnode(&ground));
+        // Same chain with a bnode OBJECT at the innermost level -> true.
+        let mut obj = Term::BlankNode(bn("innermost"));
+        for _ in 0..2048 {
+            obj = Term::Triple(Box::new(Triple::new(
+                NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+                iri("http://ex/p"),
+                obj,
+            )));
+        }
+        let Term::Triple(with_bnode) = obj else {
+            panic!("chain must be a triple term")
+        };
+        assert!(triple_contains_bnode(&with_bnode));
     }
 }

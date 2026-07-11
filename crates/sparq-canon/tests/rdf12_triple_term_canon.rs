@@ -1448,3 +1448,127 @@ fn nested_blank_node_error_display() {
         "Display must point at the full-descent escape hatch: {msg:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-x3oj2: crate-wide triple-term nesting-depth bound.
+// Every profile entry point must fail closed with `TripleTermDepthExceeded`
+// on a chain one past `MAX_TRIPLE_TERM_DEPTH`, and still accept a chain
+// exactly AT the bound (so the guard is a bound, not a blanket reject).
+// Knocking out the iterative pre-check turns each Err assert into Ok — red.
+// ---------------------------------------------------------------------------
+
+/// Ground triple-term chain of exactly `depth` nesting levels, built with a
+/// loop (the test helper must not itself recurse).
+fn ground_chain(depth: usize) -> Term {
+    let mut obj = Term::NamedNode(iri("http://ex/leaf"));
+    for _ in 0..depth {
+        obj = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            obj,
+        );
+    }
+    obj
+}
+
+fn quad_with_object(o: Term) -> Quad {
+    Quad::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        o,
+        GraphName::DefaultGraph,
+    )
+}
+
+/// Full-profile dataset entry points: at the bound canonicalizes (and the
+/// issuer map is empty — the chain is ground); one past it fails closed.
+#[test]
+fn depth_bound_full_profile_dataset() {
+    let at = [quad_with_object(ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH))];
+    let over = [quad_with_object(ground_chain(
+        sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1,
+    ))];
+    let canon = sparq_canon::canonicalize_rdf12(&at).expect("depth == MAX must canonicalize");
+    assert!(canon.contains("<<("), "triple-term token preserved: truncated");
+    assert!(sparq_canon::issue_dataset_rdf12(&at)
+        .expect("depth == MAX must issue")
+        .is_empty());
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    assert!(matches!(
+        sparq_canon::issue_dataset_rdf12(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+}
+
+/// Single-graph (triples) entry points, full + constrained.
+#[test]
+fn depth_bound_triples_entry_points() {
+    let at = [Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH),
+    )];
+    let over = [Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1),
+    )];
+    assert_eq!(
+        sparq_canon::canonicalize_triples_rdf12(&at)
+            .expect("depth == MAX must canonicalize")
+            .lines
+            .len(),
+        1
+    );
+    assert!(matches!(
+        sparq_canon::canonicalize_triples_rdf12(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    assert!(matches!(
+        sparq_canon::canonicalize_triples_rdf12_ground_terms(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+}
+
+/// Constrained (ground-terms) dataset entry points: the depth guard runs
+/// BEFORE the nested-bnode guard, so an over-deep chain that ALSO carries a
+/// nested blank node reports `TripleTermDepthExceeded`, not `NestedBlankNode`
+/// (the ground guard would otherwise walk the over-deep chain to find it).
+#[test]
+fn depth_bound_precedes_ground_guard() {
+    let mut obj = Term::BlankNode(bn("innermost"));
+    for _ in 0..(sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1) {
+        obj = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            obj,
+        );
+    }
+    let over = [quad_with_object(obj)];
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    assert!(matches!(
+        sparq_canon::issue_dataset_rdf12_ground_terms(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    // At the bound, the SAME shape (nested bnode, depth == MAX) is the ground
+    // guard's territory again: `NestedBlankNode`, proving the precedence
+    // flip happens exactly at the bound.
+    let mut obj = Term::BlankNode(bn("innermost"));
+    for _ in 0..sparq_canon::MAX_TRIPLE_TERM_DEPTH {
+        obj = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            obj,
+        );
+    }
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&[quad_with_object(obj)]),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+}
