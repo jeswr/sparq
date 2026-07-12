@@ -1,6 +1,6 @@
 ---
 name: rdf-wrapper
-description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, and typed-focus proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
+description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, and typed-focus proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
 ---
 
 # Use sparq-wrapper
@@ -62,13 +62,14 @@ Typed accessors are strict:
 All return `Result<_, AccessError>`; do not silently coerce a mismatched RDF
 datatype.
 
-Three explicitly experimental features implement proposals that remain unlanded
+Four explicitly experimental features implement proposals that remain unlanded
 in rdfjs/wrapper:
 
 ```toml
 sparq-wrapper = { version = "0.1", features = [
   "proposed-distinct",
   "proposed-cardinality",
+  "proposed-codecs",
   "proposed-typed-focus",
 ] }
 ```
@@ -132,6 +133,43 @@ assert_eq!(display_name, "Alice");
 `insert`, `remove`, and `clear` write through. `insert` and `remove` return
 `true` only for an effective graph change. Encoding runs before each mutation,
 so an encoder error leaves all existing triples intact.
+
+`proposed-codecs` exposes symmetric literal mappings in
+`sparq_wrapper::proposed::codecs` ([issue #7](https://github.com/rdfjs/wrapper/issues/7),
+[draft PR #90](https://github.com/rdfjs/wrapper/pull/90),
+[draft PR #91](https://github.com/rdfjs/wrapper/pull/91)). `encode_i128` and
+`decode_i128` round-trip the full Rust `i128` range as exact `xsd:integer`
+literals. The decoder accepts only that exact datatype and returns
+`CodecError::InvalidInteger` for malformed or out-of-range lexical forms.
+`encode_lang_string` validates a BCP47 language tag and produces an
+`rdf:langString`; `decode_lang_string` returns an owned `LangString` containing
+both `value` and `language`, so a round trip cannot discard the tag. Datatype,
+integer, language-tag, and missing-language failures are represented by the
+typed `CodecError` variants. <!-- [GPT-5.6] sq-1rg2q.4 -->
+
+```rust
+use oxrdf::Literal;
+use sparq_wrapper::proposed::codecs::{
+    decode_i128, decode_lang_string, encode_i128, encode_lang_string, LangString,
+};
+
+let large = i128::from(i64::MAX) + 1;
+let integer_literal = encode_i128(large);
+assert_eq!(decode_i128(&integer_literal)?, large);
+
+let label_literal = encode_lang_string("Y llyfrgellydd", "cy")?;
+assert_eq!(
+    decode_lang_string(&label_literal)?,
+    LangString {
+        value: "Y llyfrgellydd".to_owned(),
+        language: "cy".to_owned(),
+    },
+);
+
+let plain = Literal::new_simple_literal("not language-tagged");
+assert!(decode_lang_string(&plain).is_err());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 `proposed-typed-focus` adds the `sparq_wrapper::proposed::typed_focus` module.
 Its `NodeFactory` binds one borrowed graph, store, or dataset view and can wrap
