@@ -191,10 +191,28 @@ async fn id_doc_negotiates_jsonld() {
 }
 
 #[tokio::test]
-async fn id_doc_unacceptable_accept_is_406() {
+async fn id_doc_unknown_accept_falls_back_to_turtle() {
+    // An Accept naming no producible type degrades to the Solid default (text/turtle) — the
+    // id-doc read never 406s over an exotic Accept.
     let h = Harness::new(true).await;
     let resp = h
         .anon("GET", ID_HOST, "/alice", &[("accept", "text/html")])
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "text/turtle");
+}
+
+#[tokio::test]
+async fn id_doc_explicit_q_zero_refusal_is_406() {
+    // The only remaining 406: the client explicitly refused (q=0) every producible type.
+    let h = Harness::new(true).await;
+    let resp = h
+        .anon(
+            "GET",
+            ID_HOST,
+            "/alice",
+            &[("accept", "text/turtle;q=0, application/ld+json;q=0")],
+        )
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
 }

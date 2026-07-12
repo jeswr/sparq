@@ -55,6 +55,15 @@
 //!   anchor's (constraints may only GROW). Any un-modelled selection predicate ⇒ FAIL
 //!   CLOSED. Treating "more edges ⇒ narrower" uniformly is UNSOUND: an extra
 //!   `sh:targetSubjectsOf` edge is a broadening, not a narrowing (`sq-pfae.15` review fix).
+//! - **Polarity-checked monotonicity (`sq-wh546` fix).** "Constraints may only GROW ⇒
+//!   narrower" is itself sound ONLY for purely-CONJUNCTIVE constraints. SHACL has
+//!   NON-MONOTONE components (`sh:not`, `sh:or`, `sh:xone`, `sh:maxCount`,
+//!   `sh:qualifiedValueShape`/`sh:qualifiedMaxCount`, …) under which ADDING an edge
+//!   BROADENS the admitted set (e.g. an extra `sh:datatype` INSIDE an `sh:not`). The
+//!   narrowing gate therefore first requires a monotonicity PROOF for EVERY constraint
+//!   predicate in BOTH shape closures (the `MONOTONE_CONFORMANCE_LOCALS` allowlist); any
+//!   non-monotone or unknown predicate ⇒ the edge is rejected as
+//!   [`EdgeRejection::Broadening`] (unknown ⇒ no proof ⇒ fail closed).
 //! - **A CHECKED signature, never a self-asserted one.** The edge is admitted only if a
 //!   signature over its domain-separated [`certification_message`] verifies under the
 //!   **certifier's** key — the key bound by the certifier's own anchor [`TrustRule`]
@@ -444,8 +453,81 @@ fn narrowed_shape(anchor: &ShapeRef, cert_scope: &CertScope) -> Option<ShapeRef>
 /// Returns `true` ONLY when it PROVES both — any un-decidable / broadening case is the
 /// fail-closed `false`. Splitting the two directions is the `sq-pfae.15` review fix: a
 /// uniform "more edges ⇒ narrower" is unsound because a target edge widens, not narrows.
+///
+/// ## The polarity precondition (the `sq-wh546` fix)
+///
+/// The covariant half ("more conformance constraints ⇒ fewer conforming nodes") is a
+/// MONOTONICITY argument, and it holds ONLY for purely-CONJUNCTIVE constraints. SHACL has
+/// NON-MONOTONE constraint components — `sh:not`, `sh:or`, `sh:xone`, `sh:maxCount`,
+/// `sh:qualifiedValueShape`/`sh:qualifiedMaxCount`, … — under which adding a constraint
+/// edge INVERTS the effect: a cert that adds `sh:datatype` INSIDE an anchor's
+/// `sh:not[...]` is an injective structural SUPERSET yet admits STRICTLY MORE nodes (the
+/// negated inner shape becomes harder to satisfy, so the negation admits more). A
+/// polarity-blind containment check reported that broadening cert as a narrowing —
+/// privilege escalation. So BOTH shape closures must first pass
+/// [`monotone_conjunctive_only`]: every constraint predicate must carry a monotonicity
+/// PROOF ([`is_monotone_conformance_predicate`]); any non-monotone OR unknown predicate
+/// anywhere in either closure ⇒ fail-closed `false` (the edge rejects as
+/// [`EdgeRejection::Broadening`]).
 fn shape_narrows(cert: &ShapeRef, anchor: &ShapeRef) -> bool {
-    selection_only_shrinks(cert, anchor) && conformance_contains(cert, anchor)
+    monotone_conjunctive_only(cert)
+        && monotone_conjunctive_only(anchor)
+        && selection_only_shrinks(cert, anchor)
+        && conformance_contains(cert, anchor)
+}
+
+/// SHACL constraint predicates (local names under `sh:`) with a PROVEN monotonicity for
+/// the injective-superset narrowing argument: in a purely-conjunctive node shape, ADDING
+/// an edge with one of these predicates can only SHRINK (or preserve) the conforming set.
+///
+/// - `property` — conjunctive composition: another property shape to satisfy.
+/// - `path` — a structural parameter naming which values a property shape constrains
+///   (paired with the constraints beside it; on its own it constrains nothing). Complex
+///   (blank-node) paths carry their own `sh:` structure (`sh:inversePath`,
+///   `sh:alternativePath`, …) which is NOT in this list, so they fail closed below.
+/// - `minCount` / `datatype` / `class` — conjunctive value constraints: each added edge
+///   is one more requirement every value/focus node must meet.
+///
+/// DELIBERATELY ABSENT (non-monotone — adding one, or adding an edge inside one,
+/// can GROW the admitted set): `not`, `or`, `xone`, `maxCount`, `qualifiedValueShape`,
+/// `qualifiedMaxCount`, `in`, `languageIn`, `closed`/`ignoredProperties`, … — and every
+/// OTHER predicate, known or future, for which no monotonicity proof has been written
+/// down here. Unknown ⇒ NOT monotone ⇒ reject (fail-closed).
+const MONOTONE_CONFORMANCE_LOCALS: [&str; 5] = ["property", "path", "minCount", "datatype", "class"];
+
+/// Whether `predicate` is a conformance predicate the narrowing matcher holds a
+/// monotonicity PROOF for ([`MONOTONE_CONFORMANCE_LOCALS`]). Anything else — a
+/// non-monotone SHACL component (`sh:not`, `sh:or`, `sh:xone`, `sh:maxCount`,
+/// `sh:qualifiedValueShape`, `sh:qualifiedMaxCount`, …), an unknown/future `sh:` term, or
+/// a non-SHACL predicate (a SPARQL-based custom constraint component's parameter can be
+/// ANY IRI) — is NOT monotone: unknown ⇒ reject.
+fn is_monotone_conformance_predicate(predicate: &str) -> bool {
+    predicate
+        .strip_prefix(SH_NS)
+        .is_some_and(|local| MONOTONE_CONFORMANCE_LOCALS.contains(&local))
+}
+
+/// The polarity gate (the `sq-wh546` fix): whether EVERY triple in the shape closure is
+/// one the injective-superset narrowing argument is SOUND for. Each triple must be
+/// either:
+/// - a SELECTION/target edge ([`is_selection_edge`]) — handled CONTRAVARIANTLY by
+///   [`selection_only_shrinks`], excluded from the covariant match; or
+/// - an `rdf:type` declaration — not a SHACL constraint parameter (the class-TARGET
+///   typing is already classified as selection above; `rdf:type sh:NodeShape` etc. is
+///   inert); or
+/// - a conformance predicate with a written monotonicity proof
+///   ([`is_monotone_conformance_predicate`]).
+///
+/// ANY other predicate anywhere in the closure — a non-monotone SHACL component, an
+/// un-modelled `sh:` term, or an arbitrary (possibly custom-constraint) IRI — makes the
+/// monotonicity argument unsound for the WHOLE shape (an added edge in an anti-monotone
+/// position BROADENS), so the shape is rejected wholesale: this function returns `false`
+/// and [`shape_narrows`] fails closed. Applied to BOTH the cert and the anchor closure.
+fn monotone_conjunctive_only(shape: &ShapeRef) -> bool {
+    shape.triples.iter().all(|t| {
+        let p = t.predicate.as_str();
+        is_selection_edge(p, &t.object) || p == RDF_TYPE || is_monotone_conformance_predicate(p)
+    })
 }
 
 /// Whether the cert's SELECTION/target set is a SUBSET of the anchor's — the CONTRAVARIANT
@@ -1053,6 +1135,217 @@ mod tests {
             !selection_only_shrinks(&broadening, &anchor),
             "an extra target predicate widens the selection set ⇒ rejected"
         );
+    }
+
+    // ── Polarity (monotonicity) fail-closed gate — sq-wh546 ─────────────────
+
+    /// A shape targeting subjects of `target` whose conformance contains a NEGATION:
+    /// `root sh:not [ sh:property [ sh:path schema:age ; sh:minCount 1 ] ]` — i.e. "a
+    /// conforming node must NOT have a `schema:age`". Returns the inner property blank
+    /// node so a test can add a constraint INSIDE the negation (an anti-monotone
+    /// position: adding a constraint there BROADENS the admitted set).
+    fn sh_not_age_shape(target: &str) -> (ShapeRef, BlankNode) {
+        let root = BlankNode::default();
+        let not_node = BlankNode::default();
+        let inner_prop = BlankNode::default();
+        let shape = ShapeRef {
+            root: Term::BlankNode(root.clone()),
+            triples: vec![
+                Triple::new(
+                    root.clone(),
+                    iri("http://www.w3.org/ns/shacl#targetSubjectsOf"),
+                    iri(target),
+                ),
+                Triple::new(root, iri("http://www.w3.org/ns/shacl#not"), not_node.clone()),
+                Triple::new(
+                    not_node,
+                    iri("http://www.w3.org/ns/shacl#property"),
+                    inner_prop.clone(),
+                ),
+                Triple::new(
+                    inner_prop.clone(),
+                    iri("http://www.w3.org/ns/shacl#path"),
+                    iri("https://schema.org/age"),
+                ),
+                Triple::new(
+                    inner_prop.clone(),
+                    iri("http://www.w3.org/ns/shacl#minCount"),
+                    Literal::new_simple_literal("1"),
+                ),
+            ],
+        };
+        (shape, inner_prop)
+    }
+
+    /// The sq-wh546 escalation, end-to-end: a cert shape that adds `sh:datatype
+    /// xsd:string` INSIDE the anchor's `sh:not[...]` is an injective structural
+    /// SUPERSET of the anchor — but SEMANTICALLY BROADER (the extra constraint sits in
+    /// an anti-monotone position: it makes the negated inner shape HARDER to satisfy,
+    /// so `sh:not` admits MORE nodes). The pre-fix polarity-blind containment gate
+    /// reported it as a narrowing and `explain_edge` derived a rule from it (verified
+    /// as the failing reproduction before the fix); it must reject as `Broadening`.
+    #[test]
+    fn broadening_cert_inside_sh_not_is_rejected_fail_closed() {
+        let (anchor_shape, inner_prop) = sh_not_age_shape("https://schema.org/name");
+        // The cert shape = the anchor shape + `sh:datatype xsd:string` INSIDE the sh:not.
+        let mut cert_shape = anchor_shape.clone();
+        cert_shape.triples.push(Triple::new(
+            inner_prop,
+            iri("http://www.w3.org/ns/shacl#datatype"),
+            iri("http://www.w3.org/2001/XMLSchema#string"),
+        ));
+
+        // SEMANTIC ground truth via the real SHACL validator: a node with an
+        // INTEGER-typed age is REJECTED by the anchor ("must not have an age" — it has
+        // one) but ADMITTED by the cert ("must not have a STRING age" — its age is an
+        // integer, the negated inner shape fails, so sh:not is satisfied). The cert
+        // therefore admits a node the certifier's anchor rejects ⇒ strictly BROADER.
+        let node = iri("https://pod.ex/people/n");
+        let data = sparq_shacl::graph_from_triples([
+            Triple::new(node.clone(), iri("https://schema.org/name"), Literal::new_simple_literal("Bob")),
+            Triple::new(
+                node,
+                iri("https://schema.org/age"),
+                Literal::new_typed_literal("42", iri("http://www.w3.org/2001/XMLSchema#integer")),
+            ),
+        ]);
+        let anchor_graph = sparq_shacl::graph_from_triples(anchor_shape.triples.iter().cloned());
+        let cert_graph = sparq_shacl::graph_from_triples(cert_shape.triples.iter().cloned());
+        assert!(
+            !sparq_shacl::validate(&data, &anchor_graph).conforms,
+            "ground truth: the ANCHOR rejects the integer-aged node"
+        );
+        assert!(
+            sparq_shacl::validate(&data, &cert_graph).conforms,
+            "ground truth: the CERT admits the very node the anchor rejects ⇒ the cert is BROADER"
+        );
+
+        // THE FIX (fail-closed polarity gate): the shape contains `sh:not` — a
+        // non-monotone constraint — so the injective-superset argument is unsound and the
+        // matcher must refuse to certify narrowing at every layer…
+        assert!(
+            !shape_narrows(&cert_shape, &anchor_shape),
+            "polarity gate: a cert whose closure contains sh:not must NEVER be reported as narrowing"
+        );
+        assert!(
+            narrowed_shape(&anchor_shape, &CertScope::Shape(cert_shape.clone())).is_none(),
+            "polarity gate: narrowed_shape must fail closed on a non-monotone cert scope"
+        );
+        // …and end-to-end the edge is rejected as Broadening: no derived rule, no
+        // escalation (a signed, in-window, anchored cert — ONLY the shape gate denies it).
+        let (gov_sk, gov_pk) = keypair(1);
+        let (_iss_sk, iss_pk) = keypair(2);
+        let anchor_rule = anchor(GOV_URL, gov_pk, anchor_shape, "https://pod.ex/resourceX", 30 * 86400);
+        let cert = signed_cert(
+            GOV_URL,
+            &gov_sk,
+            "https://issuer.example/dvs",
+            iss_pk,
+            CertScope::Shape(cert_shape),
+            0,
+            i64::MAX / 2,
+        );
+        assert!(
+            matches!(
+                explain_edge(std::slice::from_ref(&anchor_rule), &cert, 1_000, 1),
+                Err(EdgeRejection::Broadening)
+            ),
+            "the broadening cert must be rejected end-to-end as Broadening"
+        );
+        // And the fast path derives NOTHING from it (anchor passes through verbatim).
+        let effective =
+            derive_effective_rules(&[anchor_rule], std::slice::from_ref(&cert), 1_000, 1);
+        assert_eq!(effective.len(), 1, "the broadening edge contributes nothing");
+    }
+
+    /// The polarity gate must not OVER-block: a genuine monotone narrowing — the same
+    /// selection, plus an extra `sh:datatype` in a purely-CONJUNCTIVE position — is still
+    /// admitted end-to-end (the attenuation the module exists to provide).
+    #[test]
+    fn monotone_conjunctive_narrowing_still_admitted_end_to_end() {
+        let anchor_shape = predicate_shape("https://schema.org/age");
+        // Same target; add `sh:datatype xsd:integer` on the (conjunctive) property shape.
+        let mut cert_shape = anchor_shape.clone();
+        if let Term::BlankNode(prop) = cert_shape.triples[1].object.clone() {
+            cert_shape.triples.push(Triple::new(
+                prop,
+                iri("http://www.w3.org/ns/shacl#datatype"),
+                iri("http://www.w3.org/2001/XMLSchema#integer"),
+            ));
+        }
+        // Unit level: the polarity gate accepts the purely-conjunctive closures and the
+        // narrowing is still proven.
+        assert!(monotone_conjunctive_only(&anchor_shape));
+        assert!(monotone_conjunctive_only(&cert_shape));
+        assert!(
+            shape_narrows(&cert_shape, &anchor_shape),
+            "a purely-conjunctive datatype refinement still narrows (no over-blocking)"
+        );
+        // End-to-end: the edge is admitted and the derived shape is the (tighter) cert's.
+        let (gov_sk, gov_pk) = keypair(1);
+        let (_iss_sk, iss_pk) = keypair(2);
+        let anchor_rule = anchor(GOV_URL, gov_pk, anchor_shape, "https://pod.ex/resourceX", 30 * 86400);
+        let cert = signed_cert(
+            GOV_URL,
+            &gov_sk,
+            "https://issuer.example/dvs",
+            iss_pk,
+            CertScope::Shape(cert_shape.clone()),
+            0,
+            i64::MAX / 2,
+        );
+        let derived = explain_edge(&[anchor_rule], &cert, 1_000, 1)
+            .expect("a genuine monotone narrowing is still admitted");
+        assert_eq!(derived.source.as_str(), "https://issuer.example/dvs");
+        assert_eq!(
+            derived.shape.triples.len(),
+            cert_shape.triples.len(),
+            "the derived statement-type is the tighter cert shape"
+        );
+    }
+
+    /// DIRECT unit coverage of the polarity gate's predicate classification: every
+    /// non-monotone SHACL component the crate's validator supports — and any unknown
+    /// `sh:`/non-`sh:` constraint predicate — poisons the closure; the conjunctive
+    /// allowlist plus selection/typing edges pass.
+    #[test]
+    fn monotone_gate_rejects_every_nonmonotone_and_unknown_predicate() {
+        let base = predicate_shape("https://schema.org/age");
+        assert!(monotone_conjunctive_only(&base), "the minted conjunctive idiom passes");
+        for bad in [
+            "http://www.w3.org/ns/shacl#not",
+            "http://www.w3.org/ns/shacl#or",
+            "http://www.w3.org/ns/shacl#xone",
+            "http://www.w3.org/ns/shacl#maxCount",
+            "http://www.w3.org/ns/shacl#qualifiedValueShape",
+            "http://www.w3.org/ns/shacl#qualifiedMaxCount",
+            "http://www.w3.org/ns/shacl#in",          // closed enumeration: adding an entry BROADENS
+            "http://www.w3.org/ns/shacl#futureTerm",  // unknown sh: term ⇒ no proof ⇒ reject
+            "https://example.org/customConstraint",   // custom-component parameter ⇒ reject
+        ] {
+            let mut s = base.clone();
+            if let Term::BlankNode(root) = s.root.clone() {
+                s.triples
+                    .push(Triple::new(root, iri(bad), Term::BlankNode(BlankNode::default())));
+            }
+            assert!(
+                !monotone_conjunctive_only(&s),
+                "{bad} must poison the monotonicity proof (fail-closed)"
+            );
+            // And the poisoned shape can never be certified as narrowing, in EITHER role.
+            assert!(!shape_narrows(&s, &base), "{bad}: poisoned cert must not narrow");
+            assert!(!shape_narrows(&base, &s), "{bad}: poisoned anchor must not be narrowed");
+        }
+        // `rdf:type sh:NodeShape` stays inert (no false rejection of plain shape typing).
+        let mut typed = base.clone();
+        if let Term::BlankNode(root) = typed.root.clone() {
+            typed.triples.push(Triple::new(
+                root,
+                iri(RDF_TYPE),
+                iri("http://www.w3.org/ns/shacl#NodeShape"),
+            ));
+        }
+        assert!(monotone_conjunctive_only(&typed));
     }
 
     #[test]

@@ -741,8 +741,10 @@ pub(crate) async fn serve_read<S: Store>(
     //   read-304 fast path). A client holding the Turtle tag but asking for JSON-LD therefore gets a
     //   fresh 200, never a 304 for a representation it doesn't hold; the write path accepts either
     //   tag's STATE part for If-Match (the GET → PUT round-trip — see `conditional`'s module doc).
-    //   An Accept that matches NO producible type is a 406 here, BEFORE the precondition check (a
-    //   conditional applies to the selected representation; with none selectable there is no 304).
+    //   An Accept that EXPLICITLY refuses (q=0) every producible type it covers is a 406 here,
+    //   BEFORE the precondition check (a conditional applies to the selected representation; with
+    //   none selectable there is no 304). An Accept merely naming no producible type instead falls
+    //   back to text/turtle, the Solid default (see `content::negotiate_accept_with_profile`).
     let (rendered, etag): (Option<(Bytes, String)>, String) = if target.is_container {
         let (body, content_type) = render_container(
             state,
@@ -1716,7 +1718,8 @@ fn validate_writable(
 ///
 /// The two sets are de-duplicated (a stored triple identical to a generated one is not repeated). The
 /// negotiated format honours the `Accept` header (Turtle / JSON-LD), defaulting to the container's
-/// stored format when it is RDF (else Turtle); an Accept that admits neither is a 406.
+/// stored format when it is RDF (else Turtle); an Accept naming no producible type falls back to
+/// Turtle (the Solid default), and only an explicit q=0 refusal of every covered type is a 406.
 async fn render_container<S: Store>(
     state: &Arc<LdpState<S>>,
     container_iri: &str,
@@ -1973,7 +1976,8 @@ fn write_response(existed: bool, meta: &ResourceMeta, iri: &str) -> Response {
 
 /// Content-negotiate the response body for an RDF resource. For a non-RDF stored type the body is
 /// returned verbatim. For an RDF type, the stored bytes are re-serialised into the negotiated format
-/// when it differs from the stored one. A client that accepts NEITHER producible type ⇒ 406.
+/// when it differs from the stored one. A client that EXPLICITLY refuses (q=0) every producible
+/// type it covers ⇒ 406; an Accept naming no producible type falls back to Turtle (Solid default).
 fn negotiate_body(
     stored_body: &Bytes,
     stored_content_type: &str,
@@ -2008,7 +2012,8 @@ fn negotiate_body(
 ///   `"<state>+<variant>"` tag, distinct per negotiated media type and derived from the stored
 ///   state — so the tag a 200 carries for each negotiated type is exactly the tag that later 304s
 ///   for that type, and the write path can round-trip its state part (`conditional` module doc);
-/// - an `Accept` matching NO producible type ⇒ 406 (no selected representation, no validator).
+/// - an `Accept` that explicitly refuses (q=0) every producible type it covers ⇒ 406 (no selected
+///   representation, no validator); one merely naming no producible type falls back to Turtle.
 ///
 /// The format decision is the same [`negotiate_accept`] call [`negotiate_body`] makes, so the
 /// validator and the body it labels can never disagree.
@@ -5858,7 +5863,9 @@ mod tests {
     #[tokio::test]
     async fn get_unacceptable_accept_is_406_even_with_matching_if_none_match() {
         // With no selectable representation there is nothing a conditional can apply to: the 406
-        // wins over a matching If-None-Match (no 304 for an unproducible representation).
+        // wins over a matching If-None-Match (no 304 for an unproducible representation). Since
+        // the Solid-default fallback landed, the only unacceptable Accept is an EXPLICIT q=0
+        // refusal of every producible type (a merely-unknown type now degrades to Turtle).
         let state = state_with_owner_resource("/alice/doc", COND_DOC).await;
         let turtle_tag =
             etag_of(&get_with(&state, owner_token(), "/alice/doc", HeaderMap::new()).await);
@@ -5867,7 +5874,10 @@ mod tests {
             header::IF_NONE_MATCH,
             HeaderValue::from_str(&turtle_tag).unwrap(),
         );
-        cond.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+        cond.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/turtle;q=0, application/ld+json;q=0"),
+        );
         let uri: axum::http::Uri = "/alice/doc".parse().unwrap();
         let err = get_handler(State(state), Extension(owner_token()), uri, cond)
             .await

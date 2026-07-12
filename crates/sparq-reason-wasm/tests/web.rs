@@ -168,3 +168,22 @@ fn why_proof_tree() {
     .expect("why must not error on an absent triple");
     assert_eq!(absent, "null", "absent triple => null");
 }
+
+/// [FABLE-5] sq-ixc3.20 — `whyN3` (only compiled with the `explain` feature) returns a proof
+/// tree for an N3-rule-derived triple (naming the fired rule), and `null` for a triple that is
+/// not in the closure.
+#[cfg(feature = "explain")]
+#[wasm_bindgen_test]
+fn why_n3_proof_tree() {
+    let n3 = r#"@prefix ex: <http://ex/> .
+        ex:a ex:knows ex:b .
+        { ?x ex:knows ?y . } => { ?x ex:reaches ?y . } ."#;
+    let json = Reasoner::why_n3(n3, "<http://ex/a>", "<http://ex/reaches>", "<http://ex/b>")
+        .expect("whyN3 must succeed for a derived triple");
+    assert!(json.contains("n3-rule-"), "derivation names the rule: {json}");
+    assert!(json.contains("\"asserted\""), "leaves are asserted: {json}");
+
+    let absent = Reasoner::why_n3(n3, "<http://ex/b>", "<http://ex/reaches>", "<http://ex/a>")
+        .expect("whyN3 must not error on an absent triple");
+    assert_eq!(absent, "null", "absent triple => null");
+}

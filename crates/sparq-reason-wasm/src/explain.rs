@@ -13,7 +13,10 @@
 
 use sparq_core::dict::{Dict, Id, NO_ID};
 use sparq_core::Graph;
-use sparq_reason::{ExplainOpts, MaterializedGraph, MaterializedOwlGraph, ProofTree};
+use sparq_reason::n3::parser as n3_parser;
+use sparq_reason::{
+    ExplainOpts, MaterializedGraph, MaterializedN3Graph, MaterializedOwlGraph, ProofTree,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::Reasoner;
@@ -51,6 +54,30 @@ fn proof_to_json(proof: Option<ProofTree>) -> String {
         Some(tree) => tree.to_json(),
         None => "null".to_string(),
     }
+}
+
+/// [FABLE-5] sq-ixc3.20 — the native body of [`Reasoner::why_n3`]. Native (`String` error) so
+/// the crate's unit tests drive it end to end; the `#[wasm_bindgen]` wrapper below is a trivial
+/// error-mapping shim (the same split `n3_new_ntriples` / `n3_query_ntriples` use).
+///
+/// `n3` is the COMBINED rules + facts document (exactly what `reasonN3` consumes); `s`/`p`/`o`
+/// are N-Triples term strings for the queried triple (N-Triples terms are valid N3, so they are
+/// parsed by the N3 parser as a one-line document — no hand-rolled term lexer). A queried term
+/// that fails to parse is an error; a triple not in the closure answers the JSON literal `null`.
+fn why_n3_impl(n3: &str, s: &str, p: &str, o: &str) -> Result<String, String> {
+    let line = format!("{s} {p} {o} .");
+    let parsed = n3_parser::parse(&line)
+        .map_err(|e| format!("could not parse the queried triple {line:?}: {e}"))?;
+    let Some(fact) = parsed.facts.first() else {
+        // The line parsed but yielded no ground fact (e.g. a rule was supplied) — nothing that
+        // COULD be in the closure, so there is nothing to explain.
+        return Ok("null".to_string());
+    };
+    // `new` joins the document's facts to the base and fully materializes the closure; `why`
+    // then re-runs the batch engine with proof recording (cost paid only when asked — see
+    // `MaterializedN3Graph::why`'s own docs).
+    let g = MaterializedN3Graph::new(n3, &[])?;
+    Ok(proof_to_json(g.why_with(fact, ExplainOpts::default())))
 }
 
 #[wasm_bindgen]
@@ -112,6 +139,27 @@ impl Reasoner {
             }
         };
         Ok(proof_to_json(proof))
+    }
+
+    /// [FABLE-5] sq-ixc3.20: returns ONE derivation of the triple `(s, p, o)` under the N3
+    /// RULES + facts document `n3` (the same combined `rules + base facts` document
+    /// [`Reasoner::reason_n3`](crate::Reasoner::reason_n3) consumes), as a proof-tree JSON
+    /// document — or the JSON literal `null` if the triple is not in the N3 closure.
+    /// `s`/`p`/`o` are N-Triples term strings, matching the derived-triple lines `reasonN3`
+    /// emits, so a UI can let the user click a derived triple and ask "why?".
+    ///
+    /// The JSON is the same [`ProofTree::to_json`] shape as [`Reasoner::why`]: leaves are
+    /// `"asserted"` base facts; internal nodes are `"n3-rule-<i>"`, `i` indexing the
+    /// document's forward rules in order. One witness derivation, not all derivations —
+    /// and derivations concluding freshly-minted existential blank nodes cannot be matched
+    /// (their labels differ between runs; the documented `MaterializedN3Graph::why`
+    /// limitation), so those answer `null`. Only available when this bundle is built with
+    /// the `explain` feature.
+    ///
+    /// Errors if the rules document or the queried triple's terms fail to parse.
+    #[wasm_bindgen(js_name = whyN3)]
+    pub fn why_n3(n3: &str, s: &str, p: &str, o: &str) -> Result<String, JsError> {
+        why_n3_impl(n3, s, p, o).map_err(|e| JsError::new(&e))
     }
 }
 
@@ -195,5 +243,76 @@ mod tests {
         );
         // Sanity: the profile enum round-trips so the dispatch can't silently mis-route.
         assert_eq!(Profile::parse("owl-rl"), Some(Profile::OwlRl));
+    }
+
+    // [FABLE-5] sq-ixc3.20 — `whyN3` (the native `why_n3_impl` body the wasm shim wraps).
+
+    /// A two-rule N3 document whose closure needs a MULTI-STEP derivation (the second rule is
+    /// recursive: it consumes its own conclusions), mirroring the GUI's combined
+    /// `rules + base N-Triples` input.
+    const REACHES_N3: &str = r#"@prefix ex: <http://ex/> .
+        ex:a ex:knows ex:b .
+        ex:b ex:knows ex:c .
+        { ?x ex:knows ?y . } => { ?x ex:reaches ?y . } .
+        { ?x ex:reaches ?y . ?y ex:knows ?z . } => { ?x ex:reaches ?z . } ."#;
+
+    /// A multi-step N3 derivation (via the recursive rule) yields a proof tree whose root
+    /// concludes the queried triple, whose internal nodes name the fired `n3-rule-<i>` rules,
+    /// and whose leaves bottom out in asserted base facts.
+    #[test]
+    fn why_n3_explains_recursive_derivation() {
+        let json = why_n3_impl(
+            REACHES_N3,
+            "<http://ex/a>",
+            "<http://ex/reaches>",
+            "<http://ex/c>",
+        )
+        .expect("the queried triple and document must parse");
+        assert_ne!(json, "null", "ex:a reaches ex:c is in the closure");
+        assert!(json.contains("\"root\":"), "{json}");
+        assert!(
+            json.contains("n3-rule-"),
+            "internal nodes must name the fired rules: {json}"
+        );
+        assert!(
+            json.contains("\"asserted\""),
+            "the proof must bottom out in asserted facts: {json}"
+        );
+        // The multi-step chain derives reaches(a,c) FROM reaches(a,b): both appear.
+        assert!(json.contains("http://ex/reaches"), "{json}");
+    }
+
+    /// An ASSERTED fact answers a single-node `"asserted"` proof; a triple outside the closure
+    /// answers the JSON literal `null` (nothing to explain, not an error).
+    #[test]
+    fn why_n3_asserted_and_absent() {
+        let asserted = why_n3_impl(
+            REACHES_N3,
+            "<http://ex/a>",
+            "<http://ex/knows>",
+            "<http://ex/b>",
+        )
+        .unwrap();
+        assert!(asserted.contains("\"asserted\""), "{asserted}");
+        assert!(
+            !asserted.contains("n3-rule-"),
+            "an asserted fact needs no rule firing: {asserted}"
+        );
+        let absent = why_n3_impl(
+            REACHES_N3,
+            "<http://ex/c>",
+            "<http://ex/reaches>",
+            "<http://ex/a>",
+        )
+        .unwrap();
+        assert_eq!(absent, "null", "reaches is not symmetric here");
+    }
+
+    /// An unparseable queried term is a real error (not silently `null`), so a UI bug that
+    /// passes display strings instead of N-Triples terms is caught loudly.
+    #[test]
+    fn why_n3_bad_term_errors() {
+        let err = why_n3_impl(REACHES_N3, "not a term", "<http://ex/p>", "<http://ex/o>");
+        assert!(err.is_err(), "a junk subject term must be a parse error");
     }
 }

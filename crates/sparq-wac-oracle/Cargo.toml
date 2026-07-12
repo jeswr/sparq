@@ -24,3 +24,10 @@ readme = "README.md"
 # dependency of NOTHING in the workspace, so the deps stay off every default build path.
 sparq-core = { path = "../sparq-core", default-features = false }
 sparq-solid = { path = "../sparq-solid", default-features = false }
+
+# [FABLE-5] sq-39kps — register the `kani` cfg so the `#[cfg(kani)]` domain-coverage
+# self-check in `escalation_corpus.rs` does not trip `-D warnings` (unexpected_cfgs) on
+# the NORMAL build. `cargo kani` sets this cfg itself; under a normal build the harness is
+# stripped. Mirrors crates/sparq-core/Cargo.toml.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

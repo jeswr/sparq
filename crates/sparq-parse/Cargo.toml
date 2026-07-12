@@ -27,6 +27,9 @@ publish = false
 # reach the wasm bundle. The default flate2 backend stays pure-Rust miniz_oxide.
 [features]
 zlib-ng = ["flate2/zlib-ng"]
+# [GPT-5.6] (sq-98w7z.2) Pure-Rust zlib-rs encoder backend, opt-in and OFF by
+# default so the existing miniz_oxide default and lean/wasm graphs are unchanged.
+zlib-rs = ["flate2/zlib-rs"]
 
 [dependencies]
 # Multi-member gzip (one RFC 1952 member per result chunk).

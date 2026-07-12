@@ -55,6 +55,10 @@ import {
 import { PaletteCommandsProvider } from "@/components/palette-commands";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
+// [GPT-5.6] sq-f8ufg — the published documentation surface currently lives in the repository's
+// Agent Skills router. The mdBook build is validation-only (not deployed at /docs or /guide), so
+// link to this canonical, live index rather than presenting a dead route on the marketing site.
+const DOCS_URL = "https://github.com/sparq-org/sparq/blob/main/skills/SKILL.md";
 
 // The slim top bar's content destinations. Capabilities is the single gallery that replaces
 // the collapsed /surface/* tree; App is the live operational GUI destination (the single
@@ -67,6 +71,7 @@ const REPO_URL = "https://github.com/jeswr/sparq";
 // a hard, full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
 const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Home" },
+  { href: DOCS_URL, label: "Docs", external: true },
   { href: "/capabilities", label: "Capabilities" },
   { href: "/app", label: "App", external: true },
   { href: "/benchmarks", label: "Benchmarks" },
@@ -77,7 +82,11 @@ const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
 function useIsActive() {
   const pathname = usePathname();
   return (href: string) =>
-    href === "/" ? pathname === "/" : pathname.startsWith(href);
+    href.startsWith("http")
+      ? false
+      : href === "/"
+        ? pathname === "/"
+        : pathname.startsWith(href);
 }
 
 function NavLink({
@@ -108,9 +117,12 @@ function NavLink({
   // /sparq (Pages) vs "" (Tauri) hosts — Next does NOT auto-prefix a plain <a>. The trailing
   // slash matches `trailingSlash: true` so the static export's directory index resolves.
   if (external) {
+    const resolvedHref = href.startsWith("http")
+      ? href
+      : withBasePath(href.endsWith("/") ? href : `${href}/`);
     return (
       <a
-        href={withBasePath(href.endsWith("/") ? href : `${href}/`)}
+        href={resolvedHref}
         onClick={onNavigate}
         aria-current={active ? "page" : undefined}
         className={className}
