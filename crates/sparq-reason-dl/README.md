@@ -97,16 +97,19 @@ classification; verdicts only for a pure ⊤-free EL+⊥ TBox with zero skipped 
 **ALCH tableau** (complete for the fragment). `check::DirectChecker::entailment` decides
 premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
 (GCI / class-assertion / the fresh-class trick, its sq-pbz04.4.9 role-subsumption lift for
-`SubObjectPropertyOf`, + the record's desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY**
+`SubObjectPropertyOf`, the sq-zfwzq transitivity lift when enabled, + the record's
+desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY**
 (sq-pbz04.4.13): a tree-shaped anonymous assertion set rolls up into an `∃`-class assertion
 decided soundly, and a non-rollable shape (shared / cyclic / nominal / free-root) abstains
 `ConclusionAnonymousIndividual` — never a skolem-constant `NotEntailed`. Every verdict carries its producing `Branch`; every guard fails
 closed (`Unknown(reason)`, never a guess). The `dispatch` feature pulls `sparq-reason` +
 `sparq-reason-el` as optional deps — **off by default**, so L1–L3 stay dependency-light.
 
-**Deferred** (each rejected, never mis-mapped): inverse roles, cardinality/functionality,
-nominals (`owl:oneOf`/`owl:hasValue`), transitivity, `sameAs`/`differentFrom`, datatypes, keys —
-with a named reason and unlock path in the design record's deferral ledger.
+**Transitive roles (opt-in `dl_transitive`, OFF by default, sq-zfwzq):** `owl:TransitiveProperty`
+via the tableau's ∀₊-rule, argued in the `tableau` docs §5a. Transitivity-bearing premises may
+also supply the already-established role kind for declaration-free conclusion assertions;
+unknown conclusion predicates still fail closed. **Deferred** (each rejected, never
+mis-mapped): inverses, cardinality, nominals, `sameAs`, datatypes, keys — see the design record.
 
 ## 📚 Learn more
 

@@ -19,7 +19,8 @@
 //!   the reflexive-transitive closure of the asserted inclusions.
 //! - **ABox:** ground class assertions `C(a)` and role assertions `R(a, b)`.
 //! - **NOT in the fragment** (and structurally unrepresentable in [`crate::model`]):
-//!   inverse roles, transitivity and all other role characteristics, cardinality /
+//!   inverse roles, transitivity (opt-in-recoverable: §5a, the `dl_transitive` feature)
+//!   and all other role characteristics, cardinality /
 //!   functionality, nominals (`oneOf`/`hasValue`), datatypes and data properties,
 //!   `owl:sameAs` / `owl:differentFrom`, property chains, keys. The L1 extractor
 //!   ([`crate::extract()`]) fail-closes on all of them, so
@@ -197,7 +198,83 @@
 //! (§5), and why [`crate::model::ObjectPropertyExpression`] has no inverse variant for
 //! this module to silently mis-handle. (Transitive roles, by contrast, are the
 //! first-in-line extension: absent inverses they need a `∀₊`-propagation rule but no
-//! blocking change — Horrocks & Sattler 1999; still **not implemented here**.)
+//! blocking change — Horrocks & Sattler 1999; implemented behind the OPT-IN
+//! `dl_transitive` feature and argued in full in §5a below, [GPT-5.6] sq-zfwzq.)
+//!
+//! # 5a. Transitive roles — the opt-in `dl_transitive` extension ([GPT-5.6] sq-zfwzq)
+//!
+//! Under the OPT-IN `dl_transitive` cargo feature (OFF by default; with it off this module
+//! compiles to exactly the ALCH tableau above) the fragment grows by TRANSITIVE role
+//! declarations `Trans(T)` (`owl:TransitiveProperty`, recorded by L1 as the feature-gated
+//! `Axiom::TransitiveObjectProperty` variant — a code span, not a link, because the variant
+//! is compiled out by default): ALCH + role hierarchies + transitivity — Horrocks &
+//! Sattler's *S with role hierarchies* (SH without inverses), still **no** inverses, number
+//! restrictions, or nominals (those stay fail-closed §5-ledger deferrals in BOTH feature
+//! states). ONE completion rule is added (Horrocks & Sattler 1999; Baader & Sattler 2001
+//! §5):
+//!
+//! - **∀₊-rule:** if `∀R.C ∈ L(x)`, there is an edge `x –S→ y`, and some **transitive**
+//!   role `T` has `S ⊑* T` and `T ⊑* R`, and `∀T.C ∉ L(y)`: add `∀T.C` to `L(y)`.
+//!
+//! Like the ∀-rule it keeps firing into blocked nodes (the subset test must never see a
+//! stale label). **Blocking is UNCHANGED** — ancestor subset blocking, gating only the
+//! ∃-rule. That is the load-bearing Horrocks–Sattler claim, and it is *argued* below (the
+//! soundness/completeness/termination deltas), not asserted.
+//!
+//! ## Termination (§3 extended)
+//!
+//! Extend the interned universe to the ∀₊-closure
+//! `sub⁺(O) = sub(O) ∪ { ∀T.C : ∀R.C ∈ sub⁺(O), Trans(T), T ⊑* R }`. The fixpoint is
+//! finite: every generated concept is `∀T.C` for a transitive input role `T` and the filler
+//! `C` of a `∀`-member of `sub(O)`, so `|sub⁺(O)| ≤ |sub(O)| · (1 + |{T : Trans(T)}|)`;
+//! chained generation closes after one round because `T' ⊑* T` and `T ⊑* R` give
+//! `T' ⊑* R` (`⊑*` is transitive), so the `∀T'.C` a generated `∀T.C` would demand was
+//! already generated from the original `∀R.C`. `preprocess` pre-interns `sub⁺(O)` (the
+//! §3-step-1 debug assertion is extended by the same seeds) and expansion still moves only
+//! table indices — no rule can mint a concept outside `sub⁺(O)`. The ∀₊-rule is monotone
+//! and self-extinguishing exactly like the ∀-rule, so §3 steps 2–4 go through verbatim with
+//! `sub(O)` replaced by the finite `sub⁺(O)`: every tree path stays at most
+//! `2^|sub⁺(O)| + 1` nodes deep and the search terminates on **every** input. ∎
+//!
+//! ## Soundness (§4 extended)
+//!
+//! With `I`, `π` as in §4, every model of a transitive input interprets `T^I` transitively.
+//! Suppose the ∀₊-rule fires: `∀R.C ∈ L(x)`, edge `x –S→ y`, `Trans(T)`, `S ⊑* T ⊑* R`.
+//! For any `T`-successor `z` of `π(y)`: `(π(x), π(y)) ∈ S^I ⊆ T^I` and `(π(y), z) ∈ T^I`,
+//! so transitivity gives `(π(x), z) ∈ T^I ⊆ R^I`, hence `z ∈ C^I` from
+//! `π(x) ∈ (∀R.C)^I`. So `π(y) ∈ (∀T.C)^I`: the addition is entailed at `π(y)` and forest
+//! satisfiability is preserved; the rest of §4 is unchanged. ∎
+//!
+//! ## Completeness (§5 extended)
+//!
+//! The §5 construction must now interpret transitive roles transitively. From a quiescent,
+//! clash-free forest define per role `R` the edge set
+//! `E(R) = { (n, σ(m)) : n ∈ Δ, F-edge n –S→ m, S ⊑* R }` (exactly the §5 edges) and
+//! interpret `R^I = E(R) ∪ ⋃ { E(T)⁺ : Trans(T), T ⊑* R }` (`⁺` = transitive closure).
+//! Then (a) **role inclusions hold**: `R ⊑* Q` gives `E(R) ⊆ E(Q)` and every transitive
+//! `T ⊑* R` also has `T ⊑* Q`, so `R^I ⊆ Q^I`; (b) **every transitive `T` is transitive
+//! in `I`**: each `T' ⊑* T` gives `E(T') ⊆ E(T)`, hence `E(T')⁺ ⊆ E(T)⁺`, so
+//! `T^I = E(T)⁺` — a transitive closure. The §5 induction changes in exactly one case,
+//! `∀R.C ∈ L(n)` with `(n, z) ∈ R^I`:
+//!
+//! - `(n, z) ∈ E(R)`: as in §5 — quiescence of the ∀-rule put `C ∈ L(m) ⊆ L(σ(m))`.
+//! - `(n, z) ∈ E(T)⁺`, `Trans(T)`, `T ⊑* R`: there is an `E(T)`-path
+//!   `n = x₀ → x₁ → … → x_k = z` (`k ≥ 1`), each step `(xᵢ, xᵢ₊₁) = (xᵢ, σ(mᵢ))` for an
+//!   `F`-edge `xᵢ –Sᵢ→ mᵢ` with `Sᵢ ⊑* T` and `xᵢ ∈ Δ`. If `k = 1`, the plain ∀-rule at
+//!   `x₀ = n` (with `S₀ ⊑* T ⊑* R`) put `C ∈ L(m₀) ⊆ L(σ(m₀)) = L(z)`. Otherwise the
+//!   ∀₊-rule at `n` (`S₀ ⊑* T`, `Trans(T)`, `T ⊑* R`) put `∀T.C ∈ L(m₀) ⊆ L(x₁)`, and
+//!   inductively along the path: from `∀T.C ∈ L(xᵢ)` (`1 ≤ i < k`), the ∀₊-rule with
+//!   `Sᵢ ⊑* T`, `Trans(T)`, `T ⊑* T` re-propagates `∀T.C ∈ L(mᵢ) ⊆ L(xᵢ₊₁)`, and at the
+//!   final step the plain ∀-rule on `∀T.C ∈ L(x_{k−1})` puts
+//!   `C ∈ L(m_{k−1}) ⊆ L(σ(m_{k−1})) = L(z)`. Induction on `C` finishes as in §5.
+//!
+//! Every obligation above transfers **downward** along an edge via `L(m) ⊆ L(σ(m))` — the
+//! subset-blocking condition on the final labels — including the NEW `∀T.C` obligations the
+//! ∀₊-rule pushed into every blocked node (it fires into blocked nodes, and subset blocking
+//! is re-evaluated on current labels). Nothing propagates upward against edge direction, so
+//! subset blocking remains sufficient — exactly the "absent inverses" proviso of Horrocks &
+//! Sattler 1999; with inverses this section's argument would fail at the same point §5's
+//! does. ∎
 //!
 //! # 6. Budgets and determinism
 //!
@@ -215,7 +292,9 @@
 //! # 7. Honest scope
 //!
 //! This module decides consistency / class satisfiability **only for the exact ALCH
-//! fragment of §1**, as delivered by the L1 structural model. It is **not** an OWL 2 DL
+//! fragment of §1** — extended by transitive roles per §5a when (and only when) the
+//! opt-in `dl_transitive` feature is enabled — as delivered by the L1 structural model.
+//! It is **not** an OWL 2 DL
 //! reasoner, and no claim of soundness or completeness is made beyond the argued
 //! fragment. Anything the L1 extractor could not map — genuinely out-of-fragment
 //! constructs *or* malformed encodings — yields `Unknown(OutOfFragment)`, fail-closed,
@@ -447,6 +526,15 @@ struct System {
     /// Strict super-roles per role (transitive closure of `rdfs:subPropertyOf`);
     /// reflexivity is handled in [`System::is_subrole`].
     super_roles: FxHashMap<Id, FxHashSet<Id>>,
+    /// Roles asserted transitive (`Trans(T)`; module docs §5a). [GPT-5.6] sq-zfwzq.
+    #[cfg(feature = "dl_transitive")]
+    transitive_roles: FxHashSet<Id>,
+    /// ∀₊-propagation table (module docs §5a): the interned id of each `∀R.C` ↦ the
+    /// `(T, id of ∀T.C)` pairs for every transitive `T ⊑* R`, in ascending-`T` order
+    /// (deterministic scan order, §6). Built once in `preprocess` over the pre-interned
+    /// `sub⁺(O)` closure; empty when the input declares no transitive role.
+    #[cfg(feature = "dl_transitive")]
+    forall_plus: FxHashMap<ConceptId, Vec<(Id, ConceptId)>>,
 }
 
 impl System {
@@ -585,6 +673,12 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
         if let Axiom::SubObjectPropertyOf { sub, sup } = axiom {
             direct.entry(sub.named()).or_default().insert(sup.named());
         }
+        // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): record `Trans(T)` declarations for
+        // the ∀₊-rule (module docs §5a).
+        #[cfg(feature = "dl_transitive")]
+        if let Axiom::TransitiveObjectProperty { property } = axiom {
+            sys.transitive_roles.insert(property.named());
+        }
     }
     for &start in direct.keys() {
         let mut reach: FxHashSet<Id> = FxHashSet::default();
@@ -637,6 +731,8 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
                 );
             }
             Axiom::SubObjectPropertyOf { .. } => {} // handled above
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { .. } => {} // handled above (RBox pass)
             Axiom::ObjectPropertyDomain { property, domain } => {
                 // ∃R.⊤ ⊑ domain.
                 let some_top = ClassExpression::some(property.named(), ClassExpression::Thing);
@@ -690,6 +786,57 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
             label: BTreeSet::new(),
             parent: None,
         });
+    }
+
+    // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): pre-intern the ∀₊-closure `sub⁺(O)` and
+    // build the ∀₊-propagation table (module docs §5a). For every `∀R.C` in the closure and
+    // every transitive `T ⊑* R`, the ∀₊-rule may add `∀T.C`, so that concept must be part of
+    // the interned universe BEFORE expansion (termination step 1 stays structural: the rules
+    // move only indices). Generated `∀T.C` concepts are themselves processed (their own
+    // table entries: `T' ⊑* T` transitive), to the finite fixpoint argued in §5a — at most
+    // one `∀T.C` per (transitive role, ∀-filler) pair. Deterministic: the transitive roles
+    // are scanned in ascending id order and the worklist order is derived from the
+    // deterministic first-visit preorder of `subexpression_closure`.
+    #[cfg(feature = "dl_transitive")]
+    {
+        let mut trans_sorted: Vec<Id> = sys.transitive_roles.iter().copied().collect();
+        trans_sorted.sort_unstable();
+        if !trans_sorted.is_empty() {
+            let mut work: Vec<ClassExpression> = subexpression_closure(&seeds)
+                .into_iter()
+                .filter(|ce| matches!(ce, ClassExpression::ObjectAllValuesFrom(_, _)))
+                .collect();
+            let mut processed: FxHashSet<ConceptId> = FxHashSet::default();
+            while let Some(ce) = work.pop() {
+                let ClassExpression::ObjectAllValuesFrom(p, filler) = &ce else {
+                    unreachable!("the ∀₊ worklist holds only ∀-concepts");
+                };
+                let parent = sys.intern(&ce); // already interned (closure member) — lookup
+                if !processed.insert(parent) {
+                    continue;
+                }
+                let r = p.named();
+                let mut entries: Vec<(Id, ConceptId)> = Vec::new();
+                for &t in &trans_sorted {
+                    if sys.is_subrole(t, r) {
+                        let all_t = ClassExpression::only(t, filler.as_ref().clone());
+                        let known = sys.ids.contains_key(&all_t);
+                        let tid = sys.intern(&all_t);
+                        if !known {
+                            // A genuinely new concept: keep the §3-step-1 cross-check exact
+                            // (its own subexpressions — the filler — are already interned)
+                            // and process it for its own ∀₊ entries.
+                            seeds.push(all_t.clone());
+                            work.push(all_t);
+                        }
+                        entries.push((t, tid));
+                    }
+                }
+                if !entries.is_empty() {
+                    sys.forall_plus.insert(parent, entries);
+                }
+            }
+        }
     }
 
     // §3 step 1, enforced structurally: the interner now holds EXACTLY the (NNF)
@@ -795,6 +942,27 @@ fn saturate(f: &mut Forest, sys: &System, s: &mut Search) -> Result<Step, Exhaus
                                 return Ok(Step::Clash);
                             }
                             changed = true;
+                        }
+                        // [GPT-5.6] sq-zfwzq ∀₊-rule (module docs §5a, opt-in
+                        // `dl_transitive`): for `∀R.C ∈ L(src)` and a transitive `T` with
+                        // `S ⊑* T ⊑* R` (the `T ⊑* R` half is pre-baked into the table
+                        // entry), add `∀T.C` to `L(tgt)` — the Horrocks–Sattler propagation
+                        // that carries ∀-constraints along transitive chains. Like the plain
+                        // ∀-rule it fires into blocked nodes (the subset test must never see
+                        // a stale label), and each addition is counted against the budget.
+                        #[cfg(feature = "dl_transitive")]
+                        if let Some(entries) = sys.forall_plus.get(&cid) {
+                            for &(t, all_tc) in entries {
+                                if sys.is_subrole(role, t)
+                                    && !f.nodes[tgt].label.contains(&all_tc)
+                                {
+                                    s.count_rule()?;
+                                    if f.add(tgt, all_tc, sys) {
+                                        return Ok(Step::Clash);
+                                    }
+                                    changed = true;
+                                }
+                            }
                         }
                     }
                 }
