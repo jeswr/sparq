@@ -1,5 +1,5 @@
 //! Prefix completion for RDF IRIs, local names, and common label predicates.
-//! [GPT-5.6] sq-lsp7k.9.1.
+//! [GPT-5.6] sq-lsp7k.9.1 + incremental maintenance sq-lsp7k.9.2.
 //!
 //! The index deliberately performs prefix matching only. Fuzzy matching is out of
 //! scope: callers that need it should layer a separate matcher over the returned
@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use oxrdf::NamedNode;
+use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
 use sparq_core::{dict::Id, dict::TermParts, Graph};
 
@@ -57,12 +57,7 @@ impl CompletionIndex {
         let mut index = Self::default();
         for (id, parts) in graph.dict.iter() {
             if let TermParts::Iri { prefix, suffix } = parts {
-                let iri = format!("{prefix}{suffix}");
-                index.insert(id, &iri, CandidateKind::Iri);
-                let local = iri.rsplit(['#', '/']).next().unwrap_or(&iri);
-                if !local.is_empty() {
-                    index.insert(id, local, CandidateKind::LocalName);
-                }
+                index.insert_iri(id, prefix, suffix);
             }
         }
 
@@ -87,10 +82,116 @@ impl CompletionIndex {
     fn insert(&mut self, id: Id, key: &str, kind: CandidateKind) {
         let key: Box<str> = key.to_lowercase().into_boxed_str();
         if !key.is_empty() {
-            self.keys
-                .entry(key)
-                .or_default()
-                .push(CompletionEntry { id, kind });
+            let entries = self.keys.entry(key).or_default();
+            let entry = CompletionEntry { id, kind };
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+    }
+
+    fn insert_iri(&mut self, id: Id, prefix: &str, suffix: &str) {
+        let iri = format!("{prefix}{suffix}");
+        self.insert(id, &iri, CandidateKind::Iri);
+        let local = iri.rsplit(['#', '/']).next().unwrap_or(&iri);
+        if !local.is_empty() {
+            self.insert(id, local, CandidateKind::LocalName);
+        }
+    }
+
+    /// Mirrors a [`Graph::apply_delta`] batch into the completion index.
+    ///
+    /// Call this after applying the same batch to `graph`. Newly interned IRIs
+    /// and inserted `rdfs:label`/`skos:prefLabel` triples are indexed. Deletes
+    /// are intentionally a no-op because the graph dictionary retains terms;
+    /// this matches [`build`](Self::build)'s append-only posture.
+    pub fn apply_delta(&mut self, graph: &Graph, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) {
+        let _ = deletes;
+        self.index_appended_iris(graph, self.indexed_dict_len);
+
+        for [subject, predicate, object] in inserts {
+            let Term::NamedNode(predicate) = predicate else {
+                continue;
+            };
+            if predicate.as_str() != RDFS_LABEL && predicate.as_str() != SKOS_PREF_LABEL {
+                continue;
+            }
+            let Term::Literal(label) = object else {
+                continue;
+            };
+            let (Some(subject_id), Some(predicate_id)) = (
+                graph.id_of(subject),
+                graph.id_of(&Term::NamedNode(predicate.clone())),
+            ) else {
+                continue;
+            };
+            self.insert(
+                subject_id,
+                label.value(),
+                CandidateKind::Label(predicate_id),
+            );
+        }
+        self.indexed_dict_len = graph.dict.len();
+    }
+
+    /// Whether this index has observed the graph's current dictionary length.
+    pub fn is_consistent_with(&self, graph: &Graph) -> bool {
+        self.indexed_dict_len == graph.dict.len()
+    }
+
+    /// Whether a shorter dictionary makes append-only reconciliation unsafe.
+    pub fn needs_rebuild(&self, graph: &Graph) -> bool {
+        graph.dict.len() < self.indexed_dict_len
+    }
+
+    /// Indexes completion data introduced since the previous dictionary watermark.
+    ///
+    /// This scans only appended dictionary entries for IRIs, then label triples
+    /// whose subject or object is in that appended tail. A label triple added
+    /// between pre-existing terms cannot be inferred from dictionary growth and
+    /// must be supplied through [`apply_delta`](Self::apply_delta).
+    ///
+    /// Returns the number of newly added completion entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`needs_rebuild`](Self::needs_rebuild) is true.
+    pub fn reconcile(&mut self, graph: &Graph) -> usize {
+        assert!(
+            !self.needs_rebuild(graph),
+            "CompletionIndex::reconcile cannot repair a shrunken dictionary; rebuild with CompletionIndex::build"
+        );
+        let old_watermark = self.indexed_dict_len;
+        let before = self.len();
+        self.index_appended_iris(graph, old_watermark);
+
+        for predicate in [RDFS_LABEL, SKOS_PREF_LABEL] {
+            let predicate = NamedNode::new_unchecked(predicate);
+            let Some(pattern) = graph.pattern(None, Some(&predicate), None) else {
+                continue;
+            };
+            let predicate_id = pattern[1].expect("predicate-bound pattern");
+            let scan = graph.store.scan(&pattern);
+            for row in scan.rows.iter() {
+                let [subject, _, object] = scan.to_spo(row);
+                if subject as usize <= old_watermark && object as usize <= old_watermark {
+                    continue;
+                }
+                if let TermParts::Lit { value, .. } = graph.dict.term_parts(object) {
+                    self.insert(subject, value, CandidateKind::Label(predicate_id));
+                }
+            }
+        }
+        self.indexed_dict_len = graph.dict.len();
+        self.len() - before
+    }
+
+    fn index_appended_iris(&mut self, graph: &Graph, old_watermark: usize) {
+        for i in old_watermark..graph.dict.len() {
+            let id = (i + 1) as Id;
+            if let TermParts::Iri { prefix, suffix } = graph.dict.term_parts(id) {
+                self.insert_iri(id, prefix, suffix);
+            }
         }
     }
 
