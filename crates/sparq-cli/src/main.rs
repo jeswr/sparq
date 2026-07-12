@@ -233,10 +233,16 @@ fn cmd_ingest(args: &[String]) {
     } else if path.ends_with(".zst") || path.ends_with(".zstd") {
         // zstd decompresses ~12x faster than bzip2, so it stops being the ingestion
         // bottleneck; recompress a .bz2 source once with `zstd -9 -T0` to use it.
-        Box::new(zstd::stream::read::Decoder::new(file).unwrap_or_else(|e| {
+        // [GPT-5.6] (sq-fo528) Accept frames produced with zstd's large-window mode.
+        let mut decoder = zstd::stream::read::Decoder::new(file).unwrap_or_else(|e| {
             eprintln!("zstd decode {path}: {e}");
             std::process::exit(1);
-        }))
+        });
+        decoder.window_log_max(31).unwrap_or_else(|e| {
+            eprintln!("zstd decode {path}: {e}");
+            std::process::exit(1);
+        });
+        Box::new(decoder)
     } else {
         Box::new(file)
     };
@@ -467,10 +473,16 @@ fn cmd_build(args: &[String]) {
     } else if path.ends_with(".zst") || path.ends_with(".zstd") {
         // zstd decompresses ~12x faster than bzip2, so it stops being the ingestion
         // bottleneck; recompress a .bz2 source once with `zstd -9 -T0` to use it.
-        Box::new(zstd::stream::read::Decoder::new(file).unwrap_or_else(|e| {
+        // [GPT-5.6] (sq-fo528) Accept frames produced with zstd's large-window mode.
+        let mut decoder = zstd::stream::read::Decoder::new(file).unwrap_or_else(|e| {
             eprintln!("zstd decode {path}: {e}");
             std::process::exit(1);
-        }))
+        });
+        decoder.window_log_max(31).unwrap_or_else(|e| {
+            eprintln!("zstd decode {path}: {e}");
+            std::process::exit(1);
+        });
+        Box::new(decoder)
     } else {
         Box::new(file)
     };
@@ -886,10 +898,47 @@ fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read + Send>> {
     } else if path.ends_with(".bz2") {
         Box::new(bzip2::read::MultiBzDecoder::new(file))
     } else if path.ends_with(".zst") || path.ends_with(".zstd") {
-        Box::new(zstd::stream::read::Decoder::new(file)?)
+        // [GPT-5.6] (sq-fo528) Accept frames produced with zstd's large-window mode.
+        let mut decoder = zstd::stream::read::Decoder::new(file)?;
+        decoder.window_log_max(31)?;
+        Box::new(decoder)
     } else {
         Box::new(file)
     })
+}
+
+#[cfg(test)]
+mod open_reader_tests {
+    use super::open_reader;
+    use std::io::{Read, Write};
+
+    /// [GPT-5.6] (sq-fo528) A streaming `--long=28` encoder advertises a 256 MiB
+    /// window even for this tiny fixture. The default decoder ceiling rejects the
+    /// frame, so this witnesses the raised ceiling without a large test artifact.
+    #[test]
+    fn large_window_zstd_round_trips_byte_identically() {
+        let source = b"<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+        let path = std::env::temp_dir().join(format!(
+            "sparq-cli-zstd-long-window-{}.nt.zst",
+            std::process::id()
+        ));
+        {
+            let mut encoder =
+                zstd::stream::write::Encoder::new(std::fs::File::create(&path).unwrap(), 3)
+                    .unwrap();
+            encoder.window_log(28).unwrap();
+            encoder.write_all(source).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let mut decoded = Vec::new();
+        open_reader(path.to_str().unwrap())
+            .unwrap()
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, source);
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// [FABLE-5] (sq-7d3dj.32.2.1) The in-RAM store profile selected by `SPARQ_STORE_PROFILE`.
