@@ -5118,6 +5118,7 @@ name = "sparq-text"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rand 0.10.1",
  "rayon",
  "rustc-hash 2.1.3",
