@@ -238,6 +238,8 @@ impl McpServer {
             "template_invoke" => self.tool_template_invoke(&args),
             #[cfg(feature = "text")]
             "text_search" => self.tool_text_search(&args),
+            #[cfg(feature = "shacl")]
+            "validate" => self.tool_validate(&args),
             "update" => self.tool_update(&args),
             other => {
                 return Err(RpcError::new(
@@ -417,6 +419,53 @@ impl McpServer {
             })
             .collect();
         let out = json!({ "total_matches": total, "returned": rows.len(), "hits": rows });
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+    }
+
+    /// `validate` (feature `shacl`): parse a caller-owned shapes graph and run the
+    /// existing SHACL validator over a shared borrow of the served data. [GPT-5.6]
+    #[cfg(feature = "shacl")]
+    fn tool_validate(&self, args: &Value) -> Result<String, String> {
+        let source = arg_str(args, "shapes")?;
+        let format = args
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("turtle");
+        let shapes = Graph::load_str(source, format)
+            .map_err(|error| format!("invalid SHACL shapes graph: {error}"))?;
+
+        let report = sparq_shacl::validate(self.graph(), &shapes);
+        // ValidationReport retains below-threshold results for diagnostics. The MCP
+        // contract returns only results at severities that participate in this shapes
+        // graph's conformance decision.
+        let model = sparq_shacl::ShapesModel::parse(&shapes);
+        let disallowed: Vec<&str> = model
+            .conformance_disallows()
+            .map(|set| set.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| sparq_shacl::DEFAULT_CONFORMANCE_DISALLOWS.to_vec());
+        let results: Vec<Value> = report
+            .results
+            .iter()
+            .filter(|result| disallowed.contains(&result.severity.as_str()))
+            .map(|result| {
+                let message = result
+                    .effective_messages()
+                    .into_iter()
+                    .next()
+                    .map(|term| match term {
+                        oxrdf::Term::Literal(literal) => literal.value().to_owned(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                json!({
+                    "focusNode": result.focus_node.to_string(),
+                    "path": result.path.as_ref().map(|path| path.to_turtle()),
+                    "severity": result.severity,
+                    "message": message,
+                })
+            })
+            .collect();
+        let out = json!({ "conforms": report.conforms, "results": results });
         Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
     }
 

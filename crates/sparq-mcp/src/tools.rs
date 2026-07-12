@@ -12,6 +12,8 @@
 //!   cardinality constraints for one class IRI; structured grounding for a client LLM —
 //!   no server-side model). [OPUS-4.8] sq-zak4f
 //! - `stats` → graph triple count + introspection totals.
+//! - `validate` (feature `shacl`, OFF by default) → `sparq_shacl::validate` over
+//!   caller-supplied shapes; read-only and absent from the default tool surface.
 //! - `ask` (feature `nlq`, OFF by default) → `crate::nlq` (server-side NL→SPARQL→execute
 //!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is
 //!   configured). [OPUS-4.8] sq-jxjgr
@@ -328,6 +330,36 @@ pub const TEXT_SEARCH: ToolSpec = ToolSpec {
     },
 };
 
+/// The `validate` tool (feature `shacl`): validate the served graph against a
+/// caller-supplied SHACL shapes graph without mutating either graph. [GPT-5.6]
+#[cfg(feature = "shacl")]
+pub const VALIDATE: ToolSpec = ToolSpec {
+    name: "validate",
+    description: "Validate the loaded RDF graph against a caller-supplied SHACL shapes \
+                  graph. Returns JSON containing conforms and the disallowed-severity \
+                  validation results (focusNode, path, severity, message). The shapes \
+                  string is parsed independently and this tool never mutates the loaded \
+                  graph.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "shapes": {
+                    "type": "string",
+                    "description": "The SHACL shapes graph, as Turtle by default."
+                },
+                "format": {
+                    "type": "string",
+                    "description": "RDF syntax for shapes (default \"turtle\"; for \
+                                    example \"ntriples\")."
+                }
+            },
+            "required": ["shapes"],
+            "additionalProperties": false
+        })
+    },
+};
+
 /// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
 /// is appended by [`advertised`] only when a model backend is configured.
 pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS];
@@ -359,5 +391,9 @@ pub fn advertised(server: &McpServer) -> Vec<&'static ToolSpec> {
     // from the loaded graph), so the feature alone advertises it.
     #[cfg(feature = "text")]
     tools.push(&TEXT_SEARCH);
+    // [GPT-5.6] sq-lsp7k.22: validation is self-contained and read-only, so the
+    // opt-in feature alone is the complete advertisement gate.
+    #[cfg(feature = "shacl")]
+    tools.push(&VALIDATE);
     tools
 }
