@@ -4649,6 +4649,7 @@ dependencies = [
  "crc",
  "flate2",
  "hdt",
+ "proptest",
  "rayon",
  "serde_json",
  "sparq-core",
