@@ -6,12 +6,14 @@
 
 mod derive;
 pub mod description;
+pub mod diff;
 pub mod widgets;
 
 pub use description::{
     Constraints, FormDescription, FormField, FormGroup, FormValue, GroupKind, Mode, ShapeChoice,
     ShapeVia, TermRef, WidgetChoice,
 };
+pub use diff::{to_sparql_update, FieldValueDiff, FormDiff};
 pub use widgets::{Resolution, Scorer, Suitability, WidgetContext, WidgetRegistry, DASH};
 
 use oxrdf::Term;

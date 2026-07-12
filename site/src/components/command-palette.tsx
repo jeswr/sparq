@@ -128,6 +128,9 @@ const TOP_PAGES: { href: string; title: string; blurb: string; external?: boolea
   // ASSURANCE.md, PR #1562). Cmd-K only (like /papers, /specs, /dogfooding) so the slim
   // top bar stays at 6 destinations; the maintainer asked to surface it, not to grow the bar.
   { href: "/assurance", title: "Assurance", blurb: "How to check that sparq works in 15 minutes — the 5-minute health check, the layer-by-layer proof + testing estate, and what green does not mean." },
+  // (sq-549m0) [FABLE-5] — the honest GenAI-retrieval status ledger: implemented (crate +
+  // feature) vs proposed (bead id). Cmd-K only (like /assurance, /dogfooding) — bar stays at 6.
+  { href: "/genai-retrieval", title: "GenAI retrieval — implemented vs proposed", blurb: "The honest status ledger for the RDF-native retrieval composition — ANN-in-SPARQL, embedding provenance, NL→SPARQL, citations — implemented vs designed-only." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
