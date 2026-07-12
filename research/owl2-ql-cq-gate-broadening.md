@@ -288,12 +288,21 @@ pinned `ql_dllite_suite` floor never regresses.**
 
 ## 8. Deferred (documented, not built now)
 
-- **DL-Lite_R consistency checking.** Needed to graduate cases whose TBoxes carry negative
-  inclusions (§6 condition 3). It is itself FO-rewritable (violation-query UCQs), i.e. a
-  natural future module in this crate — but it is a new algorithm, and no current suite case
-  is known to *require* it before the `.4` taxonomy measures the `pending-consistency` bucket.
-  Disposition: `.4` reports the bucket size; the fleet files a follow-up bead iff it is
-  non-empty and the cases are otherwise eligible.
+- **DL-Lite_R consistency checking.** ~~Deferred~~ **LANDED (sq-p6yb7, 2026-07-12)** as the
+  opt-in `ql-consistency` feature (`src/consistency.rs`): a violation query per structurally
+  captured negative inclusion (`TBox::neg_incl`, from `owl:disjointWith` /
+  `owl:propertyDisjointWith`), rewritten through the existing PerfectRef saturation and
+  evaluated over the data — INCONSISTENT iff some violation query matches (sound at any
+  capture level); definitive CONSISTENT only for a fully-captured TBox with
+  `consistency_uncaptured == 0` (`owl:complementOf` is never structurally captured — it is an
+  equivalence-with-complement, stronger than a negative inclusion — so it stays fail-closed
+  Unknown). §6 condition 3 upgraded accordingly (`ql_condition3_consistency`): a
+  proven-CONSISTENT KB passes; proven-INCONSISTENT holds at the new `inconsistent-kb`
+  taxonomy label (entailment-regime behaviour on an inconsistent graph is
+  implementation-defined); Unknown stays `pending-consistency`. Measured at the current
+  rdf-tests pin the `pending-consistency` bucket was ZERO before the upgrade, so it
+  graduates no suite case today — the floor is unchanged at 15, and the check is pinned by
+  the crate's own oracle suite (`tests/consistency_oracle.rs`, hand-derived verdicts).
 - **Named-graph (`GRAPH`) rewriting semantics** — stays inconclusive in the arm, as today.
 - **`p?` / zero-length paths** — SPARQL zero-length-path semantics binds nodes reflexively
   over graph terms; no clean certain-answer story; stays rejected with `+`/`*`.

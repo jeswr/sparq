@@ -533,13 +533,27 @@ pub enum QlHoldReason {
         unrecognised_schema: usize,
     },
     /// Condition (3) failed: the TBox carries consistency-relevant (negative /
-    /// disjointness) axioms and NO consistency check exists, so an inconsistent
-    /// KB would certain-answer everything and the UCQ answers may
-    /// under-approximate. Held until a DL-Lite_R consistency check lands
-    /// (design record §8).
+    /// disjointness) axioms and the DL-Lite_R consistency check (sq-p6yb7,
+    /// `sparq_reason_ql::check_consistency_with`, opt-in `ql-consistency`)
+    /// returned UNKNOWN — some negative axiom was not structurally captured
+    /// (e.g. `owl:complementOf`), so an inconsistency could go unseen and the
+    /// UCQ answers may under-approximate. Fail-closed hold. (Before sq-p6yb7
+    /// this variant held EVERY negative-axiom TBox; a KB the check proves
+    /// CONSISTENT now passes condition (3), and a KB it proves INCONSISTENT
+    /// holds as [`QlHoldReason::InconsistentKb`].)
     PendingConsistency {
         /// Count of negative/disjointness axioms in the TBox.
         negative_axioms: usize,
+    },
+    /// Condition (3) failed: the DL-Lite_R consistency check (sq-p6yb7) proved
+    /// the KB INCONSISTENT — a definitive verdict (everything is entailed under
+    /// certain-answer semantics), but the W3C entailment-regime spec leaves a
+    /// query on an inconsistent graph to the system (it MAY raise an error), so
+    /// there is no spec-pinned oracle semantics to graduate against. Fail-closed
+    /// hold — never a guessed everything-is-entailed pass. [FABLE-5] sq-p6yb7
+    InconsistentKb {
+        /// The violated negative inclusion (Display form) — the witness.
+        violated: String,
     },
     /// Condition (4) failed: the test uses a named-graph (`qt:graphData`)
     /// dataset, or the query carries its own `FROM`/`FROM NAMED` dataset clause
@@ -582,6 +596,7 @@ impl QlHoldReason {
             QlHoldReason::PendingGate(_) => "pending-gate",
             QlHoldReason::PendingCapture { .. } => "pending-capture",
             QlHoldReason::PendingConsistency { .. } => "pending-consistency",
+            QlHoldReason::InconsistentKb { .. } => "inconsistent-kb",
             QlHoldReason::NamedGraphDataset => "named-graph-dataset",
             QlHoldReason::PendingCoincidence(_) => "pending-coincidence",
             QlHoldReason::OracleDivergent { .. } => "oracle-divergent",
@@ -609,9 +624,17 @@ impl QlHoldReason {
                 skipped, unrecognised_schema
             ),
             QlHoldReason::PendingConsistency { negative_axioms } => format!(
-                "TBox carries {} negative/disjointness axiom(s) and no consistency \
-                 check exists — certain answers may be under-approximated",
+                "TBox carries {} negative/disjointness axiom(s) and the DL-Lite_R \
+                 consistency check returned UNKNOWN (structurally-uncaptured negative \
+                 axiom) — certain answers may be under-approximated",
                 negative_axioms
+            ),
+            QlHoldReason::InconsistentKb { violated } => format!(
+                "KB proven INCONSISTENT (violated negative inclusion: {}) — the \
+                 entailment-regime behaviour on an inconsistent graph is \
+                 implementation-defined, so the case is held, never an \
+                 everything-is-entailed pass",
+                violated
             ),
             QlHoldReason::NamedGraphDataset => {
                 "named-graph or query-carried (FROM) QL dataset not wired (per-graph \
@@ -772,8 +795,10 @@ pub fn ql_experimental_notes() -> Vec<String> {
          SIX-CONDITION graduation predicate — every condition CHECKED in code: (1) the \
          fail-closed CQ-shape gate accepts the query and it carries no intensional \
          schema-vocabulary atom; (2) the DL-Lite_R TBox is totally captured \
-         (fully_captured()); (3) zero consistency-relevant (negative/disjointness) \
-         axioms; (4) default-graph dataset only; (5) the regime-coincidence guard \
+         (fully_captured()); (3) the consistency condition — zero consistency-relevant \
+         (negative/disjointness) axioms, OR the sq-p6yb7 DL-Lite_R violation-query \
+         consistency check proves the KB CONSISTENT (an INCONSISTENT or UNKNOWN verdict \
+         holds, fail-closed); (4) default-graph dataset only; (5) the regime-coincidence guard \
          holds (all body terms distinguished, or no existential-generating \
          inclusions — otherwise the crate's CERTAIN-ANSWER semantics may diverge \
          from the W3C entailment-regime solution-mapping semantics); (6) the \
@@ -783,7 +808,7 @@ pub fn ql_experimental_notes() -> Vec<String> {
          pinned by name in the `ql_entailment_floor` ratchet — a sparq-EXTENSION row, \
          NEVER summed into the standards-conformance total; every other case is held \
          with an exhaustive taxonomy reason (permanently-outside / pending-gate / \
-         pending-capture / pending-consistency / pending-coincidence / \
+         pending-capture / pending-consistency / inconsistent-kb / pending-coincidence / \
          oracle-divergent / inconclusive), never a guessed pass. In THIS binary every \
          QL row (graduated or held) stays in the out-of-scope bucket, so no QL row \
          counts toward the binary's conformance ratchet."
@@ -886,12 +911,13 @@ fn ql_graduation_one(entry: &TestEntry) -> QlGraduationVerdict {
         }
     }
 
-    // CONDITIONS (2) + (3) — total TBox capture and zero consistency-relevant
-    // axioms, on the SAME extraction the rewriter performs (sq-pbz04.3.3's
-    // accounting: `skipped == 0 && unrecognised_schema == 0` is the decisive
-    // "nothing was missed" signal; `consistency_relevant` is tallied separately
-    // because an inconsistent KB certain-answers everything and no consistency
-    // check exists).
+    // CONDITIONS (2) + (3) — total TBox capture, then the consistency condition,
+    // on the SAME extraction the rewriter performs (sq-pbz04.3.3's accounting:
+    // `skipped == 0 && unrecognised_schema == 0` is the decisive "nothing was
+    // missed" signal). Condition (3) was UPGRADED by sq-p6yb7: a TBox with
+    // negative/disjointness axioms no longer holds unconditionally — the
+    // DL-Lite_R consistency check (violation-query composition) runs, and only
+    // an Unknown (uncaptured negative axiom) or Inconsistent verdict holds.
     let tbox = sparq_reason_ql::TBox::extract(&data);
     if !tbox.fully_captured() {
         return Held(QlHoldReason::PendingCapture {
@@ -899,10 +925,8 @@ fn ql_graduation_one(entry: &TestEntry) -> QlGraduationVerdict {
             unrecognised_schema: tbox.unrecognised_schema,
         });
     }
-    if tbox.consistency_relevant > 0 {
-        return Held(QlHoldReason::PendingConsistency {
-            negative_axioms: tbox.consistency_relevant,
-        });
+    if let Err(hold) = ql_condition3_consistency(&tbox, &data) {
+        return Held(hold);
     }
 
     // CONDITION (5) — the regime-coincidence guard (design record §4).
@@ -942,6 +966,52 @@ fn ql_graduation_one(entry: &TestEntry) -> QlGraduationVerdict {
             detail: "rewritten-UCQ answers differ from the oracle".into(),
         }),
         Err(e) => Held(QlHoldReason::Inconclusive(e)),
+    }
+}
+
+/// CONDITION (3) — the consistency condition, UPGRADED by sq-p6yb7 with its written argument.
+///
+/// The hold this condition exists for: an INCONSISTENT KB certain-answers EVERYTHING, so the
+/// positive UCQ rewriting's answers under-approximate the certain answers, and blind graduation
+/// against the W3C oracle would compare the wrong quantity. With zero consistency-relevant
+/// axioms a DL-Lite_R KB is always satisfiable (the canonical model of the positive inclusions
+/// is a model) — condition (3) passes trivially, as before.
+///
+/// With negative axioms present, the DL-Lite_R consistency check
+/// (`sparq_reason_ql::check_consistency_with`, sq-p6yb7 — violation-query composition rewritten
+/// through the SAME PerfectRef machinery the rewriter uses) now decides:
+///
+/// * `Consistent` — condition (3) PASSES. Written argument: the verdict is complete over the
+///   fully-captured fragment (condition (2) already holds here, and `Consistent` is only
+///   returned when every negative axiom was structurally captured), and for a SATISFIABLE
+///   DL-Lite_R KB the certain answers of a positive (U)CQ are determined by the positive
+///   inclusions alone (the canonical model is universal), which is exactly what the rewriting
+///   computes — no under-approximation remains.
+/// * `Inconsistent` — held as [`QlHoldReason::InconsistentKb`]. The verdict is definitive, but
+///   the SPARQL 1.1 Entailment Regimes spec leaves querying an inconsistent graph to the
+///   system (it MAY raise an error), so there is no spec-pinned oracle semantics to graduate
+///   an everything-is-entailed answer against. Fail-closed (and empirically vacuous at the
+///   pinned rdf-tests revision: the pending-consistency bucket measured ZERO before this
+///   upgrade, so no current case reaches this arm either).
+/// * `Unknown` — held as [`QlHoldReason::PendingConsistency`] (fail-closed: a
+///   structurally-uncaptured negative axiom, e.g. `owl:complementOf`, could hide an
+///   inconsistency).
+#[cfg(feature = "ql-experimental")]
+fn ql_condition3_consistency(
+    tbox: &sparq_reason_ql::TBox,
+    data: &[oxrdf::Triple],
+) -> Result<(), QlHoldReason> {
+    if tbox.consistency_relevant == 0 {
+        return Ok(());
+    }
+    match sparq_reason_ql::check_consistency_with(tbox, data) {
+        sparq_reason_ql::QlConsistency::Consistent => Ok(()),
+        sparq_reason_ql::QlConsistency::Inconsistent(v) => Err(QlHoldReason::InconsistentKb {
+            violated: v.axiom.to_string(),
+        }),
+        sparq_reason_ql::QlConsistency::Unknown(_) => Err(QlHoldReason::PendingConsistency {
+            negative_axioms: tbox.consistency_relevant,
+        }),
     }
 }
 
@@ -1698,11 +1768,14 @@ mod ql_tests {
         // Every variant carries a distinct stable label, and every rendered reason
         // keeps the `QL experimental (` marker + its label — no hold can ever read
         // as a graduated pass or a conformance claim.
-        let all: [QlHoldReason; 9] = [
+        let all: [QlHoldReason; 10] = [
             QlHoldReason::PermanentlyOutside("BIND (Extend) is not conjunctive".into()),
             QlHoldReason::PendingGate("FILTER is not conjunctive".into()),
             QlHoldReason::PendingCapture { skipped: 1, unrecognised_schema: 2 },
             QlHoldReason::PendingConsistency { negative_axioms: 3 },
+            QlHoldReason::InconsistentKb {
+                violated: "<http://ex/A> ⊑ ¬<http://ex/B>".into(),
+            },
             QlHoldReason::NamedGraphDataset,
             QlHoldReason::PendingCoincidence("non-distinguished body variable ?y".into()),
             QlHoldReason::OracleDivergent { disjuncts: 1, detail: "differ".into() },
@@ -1820,6 +1893,60 @@ mod ql_tests {
             .contains("blank-node body term"));
     }
 
+    // [FABLE-5] sq-p6yb7 — CONDITION (3) upgraded: the consistency check decides, fail-closed.
+    // MUTATION WITNESS (verified during development): making `ql_condition3_consistency`
+    // return `Ok(())` unconditionally flips the `Inconsistent`/`Unknown` arms below red.
+    #[test]
+    fn condition3_runs_the_consistency_check_fail_closed() {
+        use oxrdf::{NamedNode, Triple};
+        let iri = |s: &str| NamedNode::new(s).unwrap();
+        let t = |s: &str, p: &str, o: &str| Triple::new(iri(s), iri(p), iri(o));
+        const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        const DISJOINT: &str = "http://www.w3.org/2002/07/owl#disjointWith";
+        const COMPLEMENT: &str = "http://www.w3.org/2002/07/owl#complementOf";
+
+        // No negative axioms: passes trivially (the pre-sq-p6yb7 behaviour, unchanged).
+        let data = vec![t("http://ex/i", RDF_TYPE, "http://ex/A")];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        assert!(ql_condition3_consistency(&tbox, &data).is_ok());
+
+        // Negative axioms + satisfiable KB: the check proves Consistent → condition 3 PASSES
+        // (previously this held at pending-consistency unconditionally).
+        let data = vec![
+            t("http://ex/A", DISJOINT, "http://ex/B"),
+            t("http://ex/i", RDF_TYPE, "http://ex/A"),
+            t("http://ex/j", RDF_TYPE, "http://ex/B"),
+        ];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        assert!(ql_condition3_consistency(&tbox, &data).is_ok());
+
+        // Violated disjointness: proven INCONSISTENT → held (fail-closed, with the witness).
+        let data = vec![
+            t("http://ex/A", DISJOINT, "http://ex/B"),
+            t("http://ex/i", RDF_TYPE, "http://ex/A"),
+            t("http://ex/i", RDF_TYPE, "http://ex/B"),
+        ];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        match ql_condition3_consistency(&tbox, &data) {
+            Err(QlHoldReason::InconsistentKb { violated }) => {
+                assert!(violated.contains("http://ex/A"), "witness: {violated}");
+            }
+            other => panic!("expected InconsistentKb, got {:?}", other),
+        }
+
+        // complementOf: structurally uncaptured → the check returns Unknown → held at
+        // pending-consistency (fail-closed).
+        let data = vec![
+            t("http://ex/A", COMPLEMENT, "http://ex/B"),
+            t("http://ex/i", RDF_TYPE, "http://ex/A"),
+        ];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        assert!(matches!(
+            ql_condition3_consistency(&tbox, &data),
+            Err(QlHoldReason::PendingConsistency { negative_axioms: 1 })
+        ));
+    }
+
     #[test]
     fn gate_rejections_classify_into_the_taxonomy() {
         let classify = |q: &str| {
@@ -1854,12 +1981,15 @@ mod ql_tests {
             "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y FILTER(?y = :b) }}"
         ));
         assert_eq!(r.label(), "pending-gate");
-        // Non-recursive path → pending-gate (B5); recursive path → permanent.
-        // (spargebra normalises `/` and `^` to plain BGPs — the B5 verification —
-        // so only `|` and the recursive forms reach the gate as Path patterns.)
+        // Non-recursive path → pending-gate; recursive path → permanent.
+        // (Since sq-pbz04.3.2 the gate DESUGARS an alternation into a UCQ (B5 landed), so
+        // the single-CQ gate rejects it with the UNION/B1 message — still an honest
+        // pending-gate hold, because `ql_graduation_one` runs `as_conjunctive_query`, not
+        // `as_ucq`. The stale `contains("B5")` expectation was fixed by sq-p6yb7 — this lib
+        // test lane is not in any CI leg, so the drift went unnoticed; bead filed.)
         let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x (:p|:q) ?y }}"));
         assert_eq!(r.label(), "pending-gate");
-        assert!(r.reason().contains("B5"));
+        assert!(r.reason().contains("B1 UCQ input"), "reason: {}", r.reason());
         let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x :p+ ?y }}"));
         assert_eq!(r.label(), "permanently-outside");
         // Design-permanent shapes → permanently-outside.

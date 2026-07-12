@@ -6,11 +6,14 @@
 //! The load-bearing entry points are [`as_conjunctive_query`] and [`as_ucq`] (the always-present,
 //! fail-closed **CQ/UCQ-shape gates**) and, behind the off-by-default `experimental` feature,
 //! `rewrite` (the baseline PerfectRef DL-Lite_R query rewriter) and `rewrite_production` (the
-//! production path: PerfectRef + tree-witness folding + UCQ-containment minimisation). Both are
-//! plain code spans here, not intra-doc links, since those items are absent from the
-//! default-feature doc surface. The algorithm lives in five modules: `cq` (the gate), `dllite`
-//! (TBox extraction), `perfectref` (the rewrite/reduce saturation), `treewitness` (bounded
-//! existential-witness folding), and `minimise` (UCQ-containment minimisation by homomorphism).
+//! production path: PerfectRef + tree-witness folding + UCQ-containment minimisation). Behind the
+//! off-by-default `ql-consistency` feature (which pulls `experimental`), `check_consistency` /
+//! `check_consistency_with` decide DL-Lite_R KB consistency by violation-query composition
+//! (sq-p6yb7). All are plain code spans here, not intra-doc links, since those items are absent
+//! from the default-feature doc surface. The algorithm lives in six modules: `cq` (the gate),
+//! `dllite` (TBox extraction), `perfectref` (the rewrite/reduce saturation), `treewitness`
+//! (bounded existential-witness folding), `minimise` (UCQ-containment minimisation by
+//! homomorphism), and `consistency` (the violation-query satisfiability check).
 //!
 //! The rewriter is validated against a hand-checked DL-Lite_R oracle. On the FORMAL DL-Lite_R
 //! suite (the hand-derived certain-answer oracle from sq-g19x0) the rewrite is sound AND complete
@@ -24,6 +27,8 @@
 //! computes (fail-closed abstain / computed-equivalent evidence / computed-divergent gap), never a
 //! graduated conformance pass — see the README.
 
+#[cfg(feature = "ql-consistency")]
+mod consistency;
 mod cq;
 mod dllite;
 #[cfg(feature = "experimental")]
@@ -35,8 +40,12 @@ mod perfectref;
 #[cfg(feature = "experimental")]
 mod treewitness;
 
+#[cfg(feature = "ql-consistency")]
+pub use consistency::{
+    check_consistency, check_consistency_with, QlConsistency, QlConsistencyGap, QlViolation,
+};
 pub use cq::{as_conjunctive_query, as_ucq, ConjunctiveQuery, CqError, Ucq, ValuesBlock};
-pub use dllite::{Basic, ConceptInclusion, Role, TBox};
+pub use dllite::{Basic, ConceptInclusion, NegativeInclusion, Role, TBox};
 
 #[cfg(feature = "experimental")]
 use spargebra::algebra::GraphPattern;
@@ -257,7 +266,9 @@ pub fn rewrite_production(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewri
     let ucq = as_ucq(query)?;
     // 2. Extract the DL-Lite_R TBox once (shared across branches).
     let tbox_model = TBox::extract(tbox);
-    let answer_for_minimise: Vec<String> = ucq.distinguished.iter()
+    let answer_for_minimise: Vec<String> = ucq
+        .distinguished
+        .iter()
         .map(|v| v.as_str().to_string())
         .collect();
 
@@ -390,9 +401,7 @@ mod tests {
     #[test]
     fn subclass_doubles_the_ucq() {
         let t = tbox(&[&format!("<http://ex/A> <{RDFS_SUB}> <http://ex/B> .")]);
-        let query = q(&format!(
-            "SELECT ?x WHERE {{ ?x <{TYPE}> <http://ex/B> }}"
-        ));
+        let query = q(&format!("SELECT ?x WHERE {{ ?x <{TYPE}> <http://ex/B> }}"));
         let r = rewrite(&query, &t).unwrap();
         assert_eq!(r.report.disjuncts, 2);
         // The rewritten query must serialise as a UNION (sanity that the fold happened).
@@ -418,7 +427,9 @@ mod tests {
     // [SONNET-4.6] sq-pbz04.3.1 — UCQ rewrite (B1): a top-level UNION rewrites each branch.
     #[test]
     fn ucq_input_rewrites_both_branches() {
-        let t = tbox(&[&format!("<http://ex/Manager> <{RDFS_SUB}> <http://ex/Employee> .")]);
+        let t = tbox(&[&format!(
+            "<http://ex/Manager> <{RDFS_SUB}> <http://ex/Employee> ."
+        )]);
         let query = q(&format!(
             "SELECT ?x WHERE {{ {{ ?x <{TYPE}> <http://ex/Employee> }} UNION {{ ?x <{TYPE}> <http://ex/Contractor> }} }}"
         ));
@@ -436,11 +447,9 @@ mod tests {
     // must be rejected even though it is a valid IRI constant.
     #[test]
     fn intensional_atom_rejected() {
-        let query = q(
-            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+        let query = q("PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
              PREFIX : <http://ex/> \
-             SELECT ?c WHERE { ?c rdfs:subClassOf :A }",
-        );
+             SELECT ?c WHERE { ?c rdfs:subClassOf :A }");
         let err = rewrite(&query, &[]).unwrap_err();
         assert!(
             matches!(err, CqError::OutOfScope(ref r) if r.contains("intensional")),
@@ -505,7 +514,11 @@ mod tests {
              }}"
         ));
         let r = rewrite(&query, &[]).unwrap();
-        assert_eq!(r.report.disjuncts, 2, "two branches; report = {:?}", r.report);
+        assert_eq!(
+            r.report.disjuncts, 2,
+            "two branches; report = {:?}",
+            r.report
+        );
         assert!(
             r.query.to_string().to_uppercase().contains("FILTER"),
             "branch[1]'s FILTER must be re-applied; got: {}",
@@ -527,14 +540,22 @@ mod tests {
              }}"
         ));
         let r = rewrite(&query, &[]).unwrap();
-        assert_eq!(r.report.disjuncts, 2, "two branches; report = {:?}", r.report);
+        assert_eq!(
+            r.report.disjuncts, 2,
+            "two branches; report = {:?}",
+            r.report
+        );
         assert!(
             r.query.to_string().to_uppercase().contains("VALUES"),
             "branch[1]'s VALUES must be re-applied; got: {}",
             r.query
         );
         let r2 = rewrite_production(&query, &[]).unwrap();
-        assert_eq!(r2.report.disjuncts, 2, "rewrite_production: same; report = {:?}", r2.report);
+        assert_eq!(
+            r2.report.disjuncts, 2,
+            "rewrite_production: same; report = {:?}",
+            r2.report
+        );
     }
 
     /// The SOUND case: a single-branch CQ with a FILTER on the distinguished variable
@@ -561,6 +582,9 @@ mod tests {
         );
         // rewrite_production must also accept the single-branch case.
         let r2 = rewrite_production(&query, &[]).unwrap();
-        assert_eq!(r2.report.disjuncts, 1, "rewrite_production: same single-branch result");
+        assert_eq!(
+            r2.report.disjuncts, 1,
+            "rewrite_production: same single-branch result"
+        );
     }
 }
