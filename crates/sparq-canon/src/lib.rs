@@ -398,6 +398,17 @@ pub fn graph_triples(g: &Graph) -> Result<Vec<Triple>, CanonError> {
 /// literal word `DEFAULT`, so the default graph is emitted explicitly as a
 /// 3-term line.
 fn bridge_to_02(dataset: &[Quad]) -> Result<Vec<oxrdf02::Quad>, CanonError> {
+    let doc = serialize_quads(dataset)?;
+    parse_02(&doc)
+}
+
+#[cfg(not(feature = "bridge-lowcopy"))]
+fn serialize_quads(dataset: &[Quad]) -> Result<String, CanonError> {
+    serialize_quads_default(dataset)
+}
+
+#[cfg(any(not(feature = "bridge-lowcopy"), test))]
+fn serialize_quads_default(dataset: &[Quad]) -> Result<String, CanonError> {
     let mut doc = String::new();
     for q in dataset {
         if matches!(q.object, oxrdf::Term::Triple(_)) {
@@ -415,13 +426,44 @@ fn bridge_to_02(dataset: &[Quad]) -> Result<Vec<oxrdf02::Quad>, CanonError> {
             }
         }
     }
-    parse_02(&doc)
+    Ok(doc)
+}
+
+/// [GPT-5.6] sq-occip: serialize directly into one reusable buffer. `String`'s
+/// `fmt::Write` implementation is infallible, so the expectation cannot fire.
+#[cfg(feature = "bridge-lowcopy")]
+fn serialize_quads(dataset: &[Quad]) -> Result<String, CanonError> {
+    use std::fmt::Write as _;
+
+    let mut doc = String::new();
+    for q in dataset {
+        if matches!(q.object, oxrdf::Term::Triple(_)) {
+            return Err(CanonError::TripleTerm);
+        }
+        match &q.graph_name {
+            GraphName::DefaultGraph => {
+                writeln!(doc, "{} {} {} .", q.subject, q.predicate, q.object)
+                    .expect("writing to a String cannot fail");
+            }
+            g => {
+                writeln!(doc, "{} {} {} {} .", q.subject, q.predicate, q.object, g)
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+    Ok(doc)
 }
 
 fn bridge_triples_to_02(triples: &[Triple]) -> Result<Vec<oxrdf02::Quad>, CanonError> {
     let mut doc = String::new();
+    #[cfg(feature = "bridge-lowcopy")]
+    use std::fmt::Write as _;
     for t in triples {
+        #[cfg(not(feature = "bridge-lowcopy"))]
         doc.push_str(&format!("{} {} {} .\n", t.subject, t.predicate, t.object));
+        #[cfg(feature = "bridge-lowcopy")]
+        writeln!(doc, "{} {} {} .", t.subject, t.predicate, t.object)
+            .expect("writing to a String cannot fail");
     }
     parse_02(&doc)
 }
@@ -483,6 +525,36 @@ mod tests {
 
     fn iri(s: &str) -> NamedNode {
         NamedNode::new(s).unwrap()
+    }
+
+    /// [GPT-5.6] sq-occip: witnesses that the opt-in writer preserves every
+    /// interchange byte and therefore the canonical result, including blank
+    /// nodes, escaped literals, default graphs, and named graphs.
+    #[cfg(feature = "bridge-lowcopy")]
+    #[test]
+    fn lowcopy_bridge_is_byte_identical_to_default() {
+        let datasets = [
+            parse_nquads_03("<http://ex/s> <http://ex/p> \"plain\" .\n").unwrap(),
+            parse_nquads_03(
+                "_:a <http://ex/p> _:b .\n_:b <http://ex/q> \"line\\nquote\\\"\"@en .\n",
+            )
+            .unwrap(),
+            parse_nquads_03(
+                "_:a <http://ex/p> <http://ex/o> <http://ex/g> .\n\
+                 <http://ex/s> <http://ex/p> _:a <http://ex/g> .\n",
+            )
+            .unwrap(),
+        ];
+
+        for dataset in datasets {
+            let default_doc = serialize_quads_default(&dataset).unwrap();
+            let lowcopy_doc = serialize_quads(&dataset).unwrap();
+            assert_eq!(lowcopy_doc.as_bytes(), default_doc.as_bytes());
+
+            let default_quads = parse_02(&default_doc).unwrap();
+            let default_canonical = rdf_canon::canonicalize_quads(&default_quads).unwrap();
+            assert_eq!(canonicalize(&dataset).unwrap(), default_canonical);
+        }
     }
 
     // [OPUS-4.8] sq-qcnn.14 — direct unit tests per public fn, asserting exact values.
