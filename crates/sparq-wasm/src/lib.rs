@@ -1108,3 +1108,14 @@ mod policy;
 // in the generated JS surface.
 #[cfg(feature = "policy")]
 pub use policy::{policy_conflicts, policy_evaluate};
+
+// [FABLE-5] sq-ixc3.19: the opt-in STRUCTURED-explain bindings —
+// `Store::explainPlanJson` / `Store::explainPlanAnalyzeJson` return the engine's typed
+// plan tree (`sparq_engine::explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
+// for the GUI plan explorer, behind the non-default `explain-json` feature (zero new
+// dependencies). Declared at the END of the file (the `policy` pattern above) so a
+// feature-OFF build's `line!()`/`Location` info for everything in this file is
+// unmoved — the lean wasm bundle stays BYTE-identical, not merely size-identical
+// (the cfg-gated-token line-drift trap).
+#[cfg(feature = "explain-json")]
+mod explain_plan;

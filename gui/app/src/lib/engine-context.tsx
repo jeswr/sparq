@@ -26,6 +26,10 @@ import {
   type WasmStoreCtor,
   type WorkspaceInferenceMode,
   type WorkspaceRulesDoc,
+  // [FABLE-5] sq-ixc3.19 — the typed EXPLAIN tree (the sq-jbqh4 camelCase schema
+  // contract) + its defensive parse; shared by the wasm / native / endpoint plan sources.
+  type PlanNode,
+  parsePlanJson,
 } from "@sparq/client";
 
 import { basePath } from "@/lib/base-path";
@@ -35,6 +39,7 @@ import {
   hasNativeFederation,
   hasNativeLoader,
   nativeDiskUsage,
+  nativeExplain,
   nativeLoadPath,
   nativeLoadText,
   nativeServiceQuery,
@@ -104,7 +109,18 @@ export type QueryOutcome =
   | { kind: "ask"; value: boolean; rawJson: string }
   | { kind: "graph"; ntriples: string; tripleCount: number }
   | { kind: "update"; sizeAfter: number }
-  | { kind: "explain"; mode: "explain" | "analyze"; plan: string }
+  // [FABLE-5] sq-ixc3.19 — `tree` is the STRUCTURED plan (the sq-jbqh4 schema contract)
+  // when the source can produce one; `plan` keeps the text form (the lean-bundle
+  // fallback — exactly one of the two is populated, never a fabricated tree from text).
+  // `source` drives the wall-time honesty note: the in-tab wasm engine reads 0 nanos
+  // (no monotonic clock), only the desktop-native / endpoint sources measure real time.
+  | {
+      kind: "explain";
+      mode: "explain" | "analyze";
+      plan: string;
+      tree?: PlanNode;
+      source?: "wasm" | "native";
+    }
   | { kind: "cancelled" }
   | { kind: "error"; message: string };
 
@@ -158,6 +174,15 @@ export interface RunOptions {
   rowCap?: number;
   /** A cooperative cancel signal — checked between streamed batches (the Stop button). */
   signal?: AbortSignal;
+  /**
+   * [FABLE-5] sq-ixc3.19 — with mode `"explain"`/`"analyze"`, run the explain over the
+   * DESKTOP-NATIVE engine (the `explain_native` Tauri command) instead of the in-tab wasm
+   * engine: the only source that measures REAL per-operator wall nanos (wasm reads 0 — no
+   * monotonic clock). Snapshot semantics match federation (`query_service`): the whole
+   * (possibly reasoned) target store crosses as N-Quads. Web builds degrade to a clear
+   * error, never a silent wasm fallback mislabelled as native. Ignored for mode `"run"`.
+   */
+  native?: boolean;
 }
 
 /**
@@ -169,6 +194,16 @@ export const DEFAULT_ROW_CAP = 5_000;
 
 /** The batch size {@link streamQueryRows} pulls per cursor step (one batch held at a time). */
 const STREAM_BATCH_SIZE = 1_000;
+
+/**
+ * [FABLE-5] sq-ixc3.19 — the OPT-IN structured-explain bindings (the wasm crate's
+ * `explain-json` feature, enabled in the published bundle). Feature-detected at runtime so a
+ * lean bundle (which lacks the methods) degrades to the TEXT plan — never a fabricated tree.
+ */
+interface PlanCapableStore {
+  explainPlanJson(sparql: string): string;
+  explainPlanAnalyzeJson(sparql: string): string;
+}
 
 /** Where an import came from — drives the source kind recorded in the workspace metadata. */
 export type ImportKind = "file" | "url" | "paste";
@@ -1142,8 +1177,49 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           // EXPLAIN renders the planner's chosen plan; EXPLAIN ANALYZE also EXECUTES it and
           // traces the per-operator work (the wasm `explain` / `explainAnalyze` bindings, which
           // mirror `sparq_engine::explain[_analyze]` and the server's `explain=plan|analyze`).
-          const plan = mode === "analyze" ? target.explainAnalyze(query) : target.explain(query);
-          outcome = { kind: "explain", mode, plan };
+          //
+          // [FABLE-5] sq-ixc3.19 — three-way source selection for the plan explorer:
+          //   * `native` (desktop only): the `explain_native` Tauri command over an N-Quads
+          //     snapshot of the SAME target store (federation's snapshot semantics) — the one
+          //     source with REAL per-operator wall nanos.
+          //   * structured wasm (`explainPlanJson` / `explainPlanAnalyzeJson`, present in the
+          //     published bundle): the typed tree; exact rows + q-error, nanos read 0 on wasm32.
+          //     For ANALYZE exactly ONE binding runs — the text and JSON analyze forms would
+          //     each execute the query, so calling both would double the measured work.
+          //   * text (a lean bundle without the explain-json feature): today's `<pre>` plan.
+          if (opts?.native) {
+            const json = await nativeExplain(
+              storeToNQuads(target),
+              query,
+              mode === "analyze",
+            );
+            if (signal?.aborted) {
+              outcome = { kind: "cancelled" };
+            } else if (json === null) {
+              outcome = {
+                kind: "error",
+                message:
+                  "Native EXPLAIN runs only in the desktop app — the hosted web build has no native engine. The in-tab EXPLAIN/ANALYZE still works (row counts and q-error are exact; wall times are unmeasured).",
+              };
+            } else {
+              outcome = { kind: "explain", mode, plan: "", tree: parsePlanJson(json), source: "native" };
+            }
+          } else {
+            const planCapable = target as WasmStore & Partial<PlanCapableStore>;
+            if (
+              typeof planCapable.explainPlanJson === "function" &&
+              typeof planCapable.explainPlanAnalyzeJson === "function"
+            ) {
+              const json =
+                mode === "analyze"
+                  ? planCapable.explainPlanAnalyzeJson(query)
+                  : planCapable.explainPlanJson(query);
+              outcome = { kind: "explain", mode, plan: "", tree: parsePlanJson(json), source: "wasm" };
+            } else {
+              const plan = mode === "analyze" ? target.explainAnalyze(query) : target.explain(query);
+              outcome = { kind: "explain", mode, plan, source: "wasm" };
+            }
+          }
         } else if (form === "ask") {
           const json = target.query(query);
           const parsed = JSON.parse(json) as SparqlResults;

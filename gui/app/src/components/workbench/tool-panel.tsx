@@ -26,6 +26,7 @@ import { FULL_TEXT_TOOL_OVERRIDE } from "@/components/workbench/full-text-tool.m
 import { STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool.meta";
 import { SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool.meta";
 import { ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool.meta";
+import { PLAN_TOOL_OVERRIDE } from "@/components/workbench/plan-explorer.meta";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -70,6 +71,9 @@ const ServerTool = lazyPanel(() =>
 const OdrlTool = lazyPanel(() =>
   import("@/components/workbench/odrl-tool").then((m) => ({ default: m.OdrlTool })),
 );
+const PlanExplorer = lazyPanel(() =>
+  import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
+);
 
 interface ToolPanelEntry {
   Component: ComponentType;
@@ -99,6 +103,9 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // engine (evaluate + fail-closed gated preview); the hosted web build degrades honestly
   // inside the panel (the `live-native` tier's framing).
   odrl: { Component: OdrlTool, override: ODRL_TOOL_OVERRIDE },
+  // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer (EXPLAIN/ANALYZE operator tree +
+  // q-error heat + the this-workbench query monitor with endpoint Kill).
+  plan: { Component: PlanExplorer, override: PLAN_TOOL_OVERRIDE },
 };
 
 /**
