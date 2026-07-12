@@ -277,6 +277,14 @@ required-features = ["vec-predicate"]
 name = "kge_ablation"
 required-features = ["kge"]
 
+# [FABLE-5] Kern PR-1 (quoted-terms visibility): the cross-commit byte-stability pin prints a
+# deterministic digest of the flag-off trainer/eval outputs on the quote-free slices, so a reviewer
+# can diff merge-base vs PR head and confirm the baselines are byte-identical. Needs `kge`; the body
+# is gated behind `#[cfg(feature = "kge")]` so `cargo build --all-targets` (default features) stays green.
+[[example]]
+name = "kge_pin"
+required-features = ["kge"]
+
 # [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 typed-encoder ablation harness uses the
 # `structure`-gated `encode` module, so it needs the `structure` feature. Registering the
 # requirement keeps `cargo build --all-targets` (default features) green when the feature is out of

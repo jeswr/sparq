@@ -229,7 +229,7 @@ pub use spqv_provenance::{
 #[cfg(feature = "structure")]
 pub use structure::{
     close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
-    TypeConstraints,
+    TermScope, TypeConstraints,
 };
 // [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4): the provenance-weight surface — the
 // PKG→`w(t)` reader, its on/off ablation switch, and the tunable factors. `structure` feature only.
@@ -239,10 +239,11 @@ pub use provenance::{ProvenanceWeights, WeightConfig, WeightMode};
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_weight_ablation,
-    synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
-    synthetic_relational_ttl, AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics,
-    MultiSeedCell, PairedAblation, PairedDelta, Splits, WeightAblation, SCHEMA_PREDICATES,
+    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_quoted_ablation,
+    run_weight_ablation, synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
+    synthetic_rdf12_parts, synthetic_rdf12_ttl, synthetic_relational_ttl, AblationCell, CellStats,
+    EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation, PairedDelta,
+    QuotedAblation, Rdf12Parts, Splits, WeightAblation, SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};

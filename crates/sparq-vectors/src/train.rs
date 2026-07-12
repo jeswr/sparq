@@ -56,9 +56,11 @@
 //! embeddings are **non-degenerate** (not all-equal / not collapsed to a point). The eval harness
 //! ([`crate::eval`]) then measures filtered link-prediction quality.
 
-use crate::structure::{Corrupt, NegativeSampler, SamplingMode, TypeConstraints};
+use crate::structure::{
+    is_embeddable, Corrupt, NegativeSampler, SamplingMode, TermScope, TypeConstraints,
+};
 use rustc_hash::FxHashMap;
-use sparq_core::dict::{Id, TermParts};
+use sparq_core::dict::Id;
 use sparq_core::Graph;
 
 /// SplitMix64 step — the same deterministic PRNG the rest of the crate uses (kept local so
@@ -161,6 +163,13 @@ pub struct TrainConfig {
     /// [`WeightMode::Uniform`](crate::provenance::WeightMode::Uniform) every weight is `1.0` and the
     /// loop is byte-identical to the unweighted trainer (the ablation-off baseline).
     pub weight_mode: crate::provenance::WeightMode,
+    /// The RDF 1.2 **quoted-terms ablation switch** ([`TermScope`]): under the default
+    /// [`TermScope::IriBlank`] the trainer is byte-identical to the pre-switch trainer (quoted
+    /// triple terms are invisible — the historical behaviour); under [`TermScope::Embeddable`]
+    /// triples with a quoted-term endpoint (`rdf:reifies` edges) become positives, quoted terms
+    /// get entity rows, and negative corruption is sort-preserving (see
+    /// [`NegativeSampler::sample`]). Every preset defaults this OFF.
+    pub term_scope: TermScope,
     /// Master seed for init + negative draws + positive shuffle. Fixed ⇒ reproducible.
     pub seed: u64,
 }
@@ -189,6 +198,9 @@ impl TrainConfig {
             // Default OFF: an existing caller (and the P0 ablation) keeps the unweighted baseline
             // until it explicitly opts into provenance-weighting via `weight_mode`. [OPUS-4.8]
             weight_mode: crate::provenance::WeightMode::Uniform,
+            // Default OFF (`TermScope::IriBlank`): quoted-term visibility is opt-in per ablation
+            // arm; every existing baseline stays byte-identical. [FABLE-5]
+            term_scope: TermScope::default(),
             seed,
         }
     }
@@ -348,23 +360,17 @@ impl TrainReport {
     }
 }
 
-/// Is the term id an **entity** (named/blank node), as opposed to a literal? Only entities get a
-/// row in entity space (mirrors [`crate::structure`]).
-fn is_entity(graph: &Graph, id: Id) -> bool {
-    matches!(
-        graph.dict.term_parts(id),
-        TermParts::Iri { .. } | TermParts::Blank(_)
-    )
-}
-
 /// The output of [`collect_positives`]: the positive triples, the entity id→row map, and the
 /// relation id→row map.
 type CollectedPositives = (Vec<[Id; 3]>, FxHashMap<Id, usize>, FxHashMap<Id, usize>);
 
-/// Collect the **object-property** positives `(h, r, t)` of `graph` (both ends entities) plus the
-/// distinct entity and relation id sets, assigning each a dense parameter row (sorted id order, so
-/// row assignment is deterministic and platform-independent).
-fn collect_positives(graph: &Graph) -> CollectedPositives {
+/// Collect the **object-property** positives `(h, r, t)` of `graph` (both ends embeddable under
+/// `scope` — see [`is_embeddable`]) plus the distinct entity and relation id sets, assigning each
+/// a dense parameter row (sorted id order, so row assignment is deterministic and
+/// platform-independent). Under [`TermScope::IriBlank`] this is the identical collection the
+/// pre-scope trainer performed; under [`TermScope::Embeddable`], `rdf:reifies` edges become
+/// positives and their quoted terms get entity rows.
+fn collect_positives(graph: &Graph, scope: TermScope) -> CollectedPositives {
     let mut positives: Vec<[Id; 3]> = Vec::new();
     let mut entity_ids: Vec<Id> = Vec::new();
     let mut rel_ids: Vec<Id> = Vec::new();
@@ -372,7 +378,7 @@ fn collect_positives(graph: &Graph) -> CollectedPositives {
     let mut seen_r = rustc_hash::FxHashSet::default();
 
     for [s, p, o] in graph.iter_ids() {
-        if is_entity(graph, s) && is_entity(graph, o) {
+        if is_embeddable(graph, s, scope) && is_embeddable(graph, o, scope) {
             positives.push([s, p, o]);
             if seen_e.insert(s) {
                 entity_ids.push(s);
@@ -416,7 +422,7 @@ pub fn train(
     constraints: &TypeConstraints,
     config: TrainConfig,
 ) -> (TrainedModel, TrainReport) {
-    let (positives, entity_row, rel_row) = collect_positives(graph);
+    let (positives, entity_row, rel_row) = collect_positives(graph, config.term_scope);
     // ComplEx needs an even `dim` (real + imaginary halves); round an odd value down. DistMult is
     // unconstrained. `dim.max(2)` keeps a degenerate dim=0 config from producing empty rows.
     let dim = match config.model {
@@ -439,7 +445,8 @@ pub fn train(
         *x = next_unit(&mut init_state) * scale;
     }
 
-    let sampler = NegativeSampler::new(graph, constraints, config.sampling);
+    let sampler =
+        NegativeSampler::new_scoped(graph, constraints, config.sampling, config.term_scope);
 
     // [OPUS-4.8] sq-2489d.4 (Phase 4): mine the per-triple provenance weights ONCE. Under
     // `WeightMode::Uniform` this still reads the graph but every `weight_of` returns 1.0, so the
@@ -891,5 +898,79 @@ ex:alice ex:owns ex:milo .
 
     fn iri(s: &str) -> oxrdf::Term {
         oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+    }
+
+    // ---- RDF 1.2 quoted-terms visibility (TermScope::Embeddable) ------------------------------
+
+    #[test]
+    fn presets_default_to_the_byte_stable_scope() {
+        // The presets audit: every constructor produces the OFF (byte-identical) baseline.
+        let a = TrainConfig::small(SamplingMode::TypeConstrained, 1);
+        assert_eq!(a.term_scope, TermScope::IriBlank);
+        let b = TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 2);
+        assert_eq!(b.term_scope, TermScope::IriBlank);
+    }
+
+    #[test]
+    fn embeddable_scope_gives_quoted_terms_rows_and_learns() {
+        // Under `TermScope::Embeddable` on the RDF 1.2 slice: `rdf:reifies` edges become
+        // positives, quoted terms get entity rows, training is deterministic, and loss decreases.
+        // Under the default `IriBlank` the same graph yields FEWER positives and NO quoted rows.
+        use sparq_core::dict::TermParts;
+        let ttl = crate::eval::synthetic_rdf12_ttl(48, 7);
+        let c = close_for_vectorise(&ttl, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let tc = TypeConstraints::mine(g);
+
+        let quoted: Vec<sparq_core::dict::Id> = {
+            let mut ids: Vec<_> = g
+                .iter_ids()
+                .map(|[_, _, o]| o)
+                .filter(|&o| matches!(g.dict.term_parts(o), TermParts::Triple(_)))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        assert!(
+            !quoted.is_empty(),
+            "the rdf12 slice must carry quoted terms"
+        );
+
+        let mut on_cfg = TrainConfig::small(SamplingMode::Unconstrained, 5);
+        on_cfg.term_scope = TermScope::Embeddable;
+        let off_cfg = TrainConfig::small(SamplingMode::Unconstrained, 5);
+
+        let (on_model, on_report) = train(g, &tc, on_cfg);
+        let (off_model, off_report) = train(g, &tc, off_cfg);
+
+        // Visibility: the ON arm counts every `rdf:reifies` positive the OFF arm drops, and every
+        // quoted term has a dense row; the OFF arm has none.
+        assert!(
+            on_report.positives > off_report.positives,
+            "reifies positives must be visible ON ({}) and dropped OFF ({})",
+            on_report.positives,
+            off_report.positives
+        );
+        // Statement subjects are atomic and already rowed in BOTH arms (via their `rdf:type` /
+        // `ex:assertedBy` metadata triples), so the ON−OFF row delta is EXACTLY the quoted terms.
+        assert_eq!(on_report.entities, off_report.entities + quoted.len());
+        for &tt in &quoted {
+            assert!(
+                on_model.entity_row(tt).is_some(),
+                "quoted term must have an entity row ON"
+            );
+            assert!(
+                off_model.entity_row(tt).is_none(),
+                "quoted term must have NO row OFF"
+            );
+        }
+
+        // It learns, and it reproduces.
+        assert!(on_report.loss_decreased(), "ON-arm loss must decrease");
+        let (on_model2, on_report2) = train(g, &tc, on_cfg);
+        assert_eq!(on_report.epoch_loss, on_report2.epoch_loss);
+        assert_eq!(on_model.entity_emb, on_model2.entity_emb);
+        assert_eq!(on_model.rel_emb, on_model2.rel_emb);
     }
 }

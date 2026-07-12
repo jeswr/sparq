@@ -779,7 +779,8 @@ fn render_iri(graph: &Graph, id: Id) -> Option<String> {
 }
 
 /// Render an object id to `(text, is_literal)`: an IRI bare, a literal as its lexical value, a
-/// blank node as `_:label`. Inline integers decode to their lexical value.
+/// blank node as `_:label`, an RDF 1.2 quoted triple term in its `<<( s p o )>>` term syntax.
+/// Inline integers decode to their lexical value.
 fn render_object(graph: &Graph, id: Id) -> (String, bool) {
     if dict::is_inline(id) {
         if let oxrdf::Term::Literal(l) = graph.dict.term(id) {
@@ -790,7 +791,11 @@ fn render_object(graph: &Graph, id: Id) -> (String, bool) {
         TermParts::Iri { prefix, suffix } => (format!("{}{}", prefix, suffix), false),
         TermParts::Lit { value, .. } => (value.to_string(), true),
         TermParts::Blank(b) => (format!("_:{}", b), false),
-        TermParts::Triple(_) => (String::new(), false),
+        // BUGFIX [FABLE-5]: this arm returned the EMPTY STRING, silently corrupting every
+        // NL-string / subgraph-text grounding whose object is an RDF 1.2 quoted triple. The dict
+        // reconstructs the (nested, depth-capped) term and oxrdf's `Display` renders the RDF 1.2
+        // `<<( s p o )>>` triple-term syntax.
+        TermParts::Triple(_) => (graph.dict.term(id).to_string(), false),
     }
 }
 
@@ -1359,5 +1364,87 @@ ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
             panic!("expected an NL string");
         };
         assert!(off.contains("1 MI"), "as-declared NL keeps the original mile: {off:?}");
+    }
+
+    // ---- RDF 1.2 quoted-triple verbalisation (the empty-string regression) --------------------
+
+    /// An N-Triples fixture whose subject carries a plain object property AND two RDF 1.2
+    /// quoted-triple objects — one flat, one nested.
+    const RDF12_NT: &str = "\
+<http://ex/claim> <http://ex/statedBy> <http://ex/alice> .\n\
+<http://ex/claim> <http://ex/about> <<( <http://ex/sky> <http://ex/hasColour> <http://ex/blue> )>> .\n\
+<http://ex/claim> <http://ex/aboutNested> <<( <http://ex/rumour> <http://ex/says> <<( <http://ex/sky> <http://ex/hasColour> <http://ex/green> )>> )>> .\n";
+
+    #[test]
+    fn quoted_triple_objects_render_as_triple_terms_not_empty_strings() {
+        // REGRESSION (bugfix): `render_object` returned the EMPTY STRING for a quoted-triple
+        // object, silently corrupting every NL/subgraph grounding over RDF 1.2 data.
+        let (dict, triples) = sparq_core::Graph::parse_to_triples(RDF12_NT, "ntriples").unwrap();
+        let g = sparq_core::Graph::from_parts(dict, triples);
+
+        let quoted: Vec<_> = g
+            .iter_ids()
+            .map(|[_, _, o]| o)
+            .filter(|&o| matches!(g.dict.term_parts(o), TermParts::Triple(_)))
+            .collect();
+        // Two quoted OBJECTS are asserted (flat + nested-outer); the nested-inner term is a
+        // component of the outer one and reachable only through its rendering (checked below).
+        assert_eq!(quoted.len(), 2, "flat + nested-outer quoted-term objects");
+        for &tt in &quoted {
+            let (text, is_literal) = render_object(&g, tt);
+            assert!(
+                !text.is_empty(),
+                "a quoted triple must never verbalise to the empty string"
+            );
+            assert!(!is_literal, "a quoted triple is not a literal");
+            assert!(
+                text.starts_with("<<(") && text.ends_with(")>>"),
+                "expected RDF 1.2 triple-term syntax, got: {text:?}"
+            );
+        }
+
+        // The nested term renders its inner term too (depth-capped by the dict reconstruction).
+        let nested = quoted
+            .iter()
+            .map(|&tt| render_object(&g, tt).0)
+            .find(|t| t.matches("<<(").count() >= 2)
+            .expect("the nested quoted term must render its inner triple term");
+        assert!(
+            nested.contains("http://ex/green"),
+            "inner term content present: {nested:?}"
+        );
+    }
+
+    #[test]
+    fn subgraph_grounding_over_rdf12_has_no_empty_object_fact() {
+        let (dict, triples) = sparq_core::Graph::parse_to_triples(RDF12_NT, "ntriples").unwrap();
+        let g = sparq_core::Graph::from_parts(dict, triples);
+        // `minimal_type_pattern: false`: the fixture is deliberately schema-free, so the grounding
+        // takes every asserted predicate of the node (including the quoted-triple objects).
+        let cfg = GroundingConfig {
+            minimal_type_pattern: false,
+            ..Default::default()
+        };
+        let Some(Grounding::Subgraph(facts)) = ground(
+            &g,
+            &iri("http://ex/claim"),
+            Modality::Subgraph,
+            &cfg,
+            None,
+            None,
+        ) else {
+            panic!("expected a subgraph grounding");
+        };
+        assert!(
+            facts.iter().any(|f| f.object.starts_with("<<(")),
+            "the grounding must include the quoted-triple fact(s): {facts:?}"
+        );
+        for f in &facts {
+            assert!(
+                !f.object.is_empty(),
+                "REGRESSION: empty-object fact for predicate {}",
+                f.predicate
+            );
+        }
     }
 }
