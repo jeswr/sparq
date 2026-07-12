@@ -4713,6 +4713,13 @@ name = "sparq-jsonld"
 version = "0.1.0"
 
 [[package]]
+name = "sparq-jsonld-registry"
+version = "0.1.0"
+dependencies = [
+ "sparq-jsonld",
+]
+
+[[package]]
 name = "sparq-kb"
 version = "0.1.0"
 dependencies = [
