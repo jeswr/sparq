@@ -67,6 +67,8 @@ use incremental_explain::{OwlExplain, RdfsExplain};
 
 const OWL_NS: &str = "http://www.w3.org/2002/07/owl#";
 const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
+#[cfg(feature = "quoted-triples")]
+const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 /// An RDFS-materialized triple set maintained **incrementally** under base inserts/deletes.
 ///
@@ -410,6 +412,13 @@ struct OwlIds {
     /// Occurrence-guarded ids: `owl:Thing`, `owl:Nothing`, every XSD tower datatype. A delta
     /// triple mentioning one of these can change the batch `pre_monotone` facts → rebuild.
     special: FxHashSet<Id>,
+    /// [Kern] `quoted-triples`: the reify trigger ids — `rdf:reifies` + the classic
+    /// `rdf:subject`/`rdf:predicate`/`rdf:object`. Mirrors `reify::occurs`: an
+    /// ANY-position occurrence in the base routes it to [`OwlMode::Fallback`] (the batch
+    /// reify rules are not modelled by the counting modes), and a mutation mentioning one
+    /// forces a re-detection rebuild.
+    #[cfg(feature = "quoted-triples")]
+    reify: [Id; 4],
 }
 
 impl OwlIds {
@@ -490,6 +499,11 @@ impl OwlIds {
             owl_class,
             xsd,
             special,
+            // rdf:type is NOT a trigger (reif-dtr only CONCLUDES rdf:type) — mirrors
+            // the `reify::occurs` trigger set exactly.
+            #[cfg(feature = "quoted-triples")]
+            reify: ["reifies", "subject", "predicate", "object"]
+                .map(|frag| dict.intern_iri(&format!("{RDF_NS}{frag}"))),
         }
     }
 }
@@ -627,6 +641,12 @@ impl MaterializedOwlGraph {
 
     /// Does mutating `t` require a full rebuild (TBox / axiom typing / occurrence-guarded id)?
     fn triggers_rebuild(&self, t: &[Id; 3]) -> bool {
+        // [Kern] `quoted-triples`: a mutation mentioning the reification vocabulary in ANY
+        // position re-detects the mode (`rematerialize` then routes the base to Fallback).
+        #[cfg(feature = "quoted-triples")]
+        if t.iter().any(|id| self.ow.reify.contains(id)) {
+            return true;
+        }
         self.tbox_preds.contains(&t[1])
             || (t[1] == self.v.ty && self.axiom_types.contains(&t[2]))
             || t.iter().any(|id| self.ow.special.contains(id))
@@ -700,6 +720,15 @@ impl MaterializedOwlGraph {
                 }
             }
             if fallback_preds.contains(&p) {
+                fallback = true;
+            }
+            // [Kern] `quoted-triples`: ANY-position occurrence of the reification
+            // vocabulary (mirroring `reify::occurs` — `ex:p rdfs:subPropertyOf
+            // rdf:subject` mentions it only as an OBJECT, yet rdfs7 later derives
+            // premises the batch reify rules see) routes the base to Fallback: the
+            // counting modes do not model the reify rules.
+            #[cfg(feature = "quoted-triples")]
+            if [s, p, o].iter().any(|id| ow.reify.contains(id)) {
                 fallback = true;
             }
             for id in [s, p, o] {
