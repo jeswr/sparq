@@ -2,7 +2,7 @@
 
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
-use sparq_engine::{enumerate_paths, PathMode, PathSolution, PathSpec};
+use sparq_engine::{enumerate_paths, PathMode, PathSolution, PathSpec, Via};
 use std::collections::{BTreeMap, BTreeSet};
 
 const EX: &str = "http://example/";
@@ -29,7 +29,7 @@ fn spec(mode: PathMode, start: &str, end: Option<&str>, max_length: Option<usize
         cyclic: end.is_none(),
         start: Some(iri(start)),
         end: end.map(iri),
-        via: via(),
+        via: Via::Predicate(via()),
         max_length,
     }
 }
@@ -185,7 +185,7 @@ fn seeded_random_graph_agrees_with_recursive_reference() {
             cyclic: false,
             start: None,
             end: None,
-            via: via(),
+            via: Via::Predicate(via()),
             max_length: (mode == PathMode::All).then_some(4),
         };
         let got: BTreeSet<Vec<usize>> = enumerate_paths(&g, &request)
