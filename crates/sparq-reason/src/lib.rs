@@ -34,6 +34,15 @@ mod owl;
 #[cfg(feature = "profile")]
 pub mod profile;
 mod rdfs;
+// [Kern] kern/quoted-triple-infer — opt-in QUOTED-TRIPLE (RDF 1.2 reifier) inference
+// for the OWL 2 RL profile: the reif-dtr destructure / reif-ctr construct rules, with
+// reif-ctr restricted to EXISTING triples and leaf-component terms so the Herbrand
+// base stays finite (termination argument in the module docs). Behind the
+// `quoted-triples` feature; when off the whole module is cfg'd out (the lean-core
+// posture, like `dtype` / `datalog`) and `Profile::OwlRl` closures are byte-identical
+// to before this module existed.
+#[cfg(feature = "quoted-triples")]
+mod reify;
 // [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the opt-in RIF-Core (monotone Horn) rule
 // front-end over the N3 chainer. Behind the `rif-core` feature; when off the whole
 // module is cfg'd out (the lean-core posture, like `dtype` / `explain`).

@@ -59,3 +59,15 @@
   crate: "sparq-reason"
   features: "compiled-rules"
   test: true
+
+# [Kern] kern/quoted-triple-infer (first increment): the opt-in quoted-triple
+# (RDF 1.2 reifier) RL rules — reif-dtr destructure / reif-ctr construct with the
+# finite-Herbrand-base restrictions (src/reify.rs docs). This leg builds + tests +
+# clippies the feature-ON state: the in-module unit suite AND tests/owl_reify.rs
+# (the Turtle-1.2 end-to-end fixtures + MaterializedOwlGraph Fallback parity — a
+# `required-features` target that would otherwise run in NO CI lane, per the C1
+# feature-gated-test-execution guard).
+- name: "sparq-reason (quoted-triples)"
+  crate: "sparq-reason"
+  features: "quoted-triples"
+  test: true
