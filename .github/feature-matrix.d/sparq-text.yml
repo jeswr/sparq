@@ -1,0 +1,9 @@
+# Feature-matrix fragment for `sparq-text`.
+#
+# [GPT-5.6] sq-lsp7k.14: bounded fuzzy lookup is default-OFF, and
+# tests/fuzzy.rs is feature-gated. The workspace lane covers the default build;
+# this leg compiles, lints, and runs the feature-ON suite.
+- name: "sparq-text (fuzzy — bounded typo-tolerant search)"
+  crate: "sparq-text"
+  features: "fuzzy"
+  test: true
