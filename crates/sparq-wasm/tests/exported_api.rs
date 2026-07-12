@@ -627,6 +627,44 @@ fn exported_explain_analyze() {
     assert!(r.contains("Plan:"), "analyze output includes the plan: {r}");
 }
 
+// ---- explain-json: the exported structured-plan success arms ----------------
+//
+// [FABLE-5] sq-ixc3.19. Only the OK arm runs natively (the `Err` arm constructs
+// `JsError`); the negative arms stay covered by the wasm32 `tests/web.rs`.
+#[cfg(feature = "explain-json")]
+mod explain_json {
+    use super::*;
+
+    /// The exported `Store::explainPlanJson` returns the camelCase typed plan tree
+    /// (the sq-jbqh4 schema contract) as a planning-only dry run.
+    #[test]
+    fn exported_explain_plan_json() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let json = store
+            .explain_plan_json("PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }")
+            .unwrap();
+        assert!(json.contains("\"operator\":"), "schema keys: {json}");
+        assert!(json.contains("\"children\":"), "schema keys: {json}");
+        // Planning-only: nothing executed.
+        assert!(json.contains("\"actual\":null"), "dry run: {json}");
+        assert!(json.contains("\"qError\":null"), "dry run: {json}");
+    }
+
+    /// The exported `Store::explainPlanAnalyzeJson` executes and fills `actual` rows
+    /// (2 `ex:name` matches in DATA) — the field the GUI's est-vs-actual view keys on.
+    #[test]
+    fn exported_explain_plan_analyze_json() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let json = store
+            .explain_plan_analyze_json(
+                "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }",
+            )
+            .unwrap();
+        assert!(json.contains("\"actual\":2"), "executed actuals: {json}");
+        assert!(!json.contains("\"nanos\":null"), "analyze fills nanos: {json}");
+    }
+}
+
 // ---- shacl: the exported `Store::validate` success arm ----------------------
 //
 // Only the OK arm runs natively (the parse-error `Err` arm constructs `JsError`); the

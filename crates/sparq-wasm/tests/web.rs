@@ -927,3 +927,49 @@ mod canon {
         assert!(canonicalize_nquads("_:b0 <http://ex/p>").is_err());
     }
 }
+
+// ---- explain-json (feature-gated): the structured plan tree across the boundary ----
+//
+// [FABLE-5] sq-ixc3.19. The native `tests/exported_api.rs::explain_json` covers the Ok
+// arms for coverage; these drive the genuine wasm32 exports through the JS boundary —
+// including the `Err` (JsError) arms `JsError::new` makes wasm32-only — and pin the
+// wasm32 honesty caveat the GUI renders around: ANALYZE `nanos` reads 0 (no monotonic
+// clock) while `actual` row counts stay exact.
+#[cfg(feature = "explain-json")]
+mod explain_json {
+    use super::*;
+
+    /// `explainPlanJson` returns the camelCase planning-only tree (nothing executed).
+    #[wasm_bindgen_test]
+    fn explain_plan_json_dry_run() {
+        let store = Store::load(DATA, "turtle").expect("load");
+        let json = store
+            .explain_plan_json("PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }")
+            .expect("explainPlanJson");
+        assert!(json.contains("\"operator\":"), "schema keys: {json}");
+        assert!(json.contains("\"actual\":null"), "dry run: {json}");
+    }
+
+    /// `explainPlanAnalyzeJson` executes: exact `actual` rows, and `nanos` present as a
+    /// NUMBER but 0 on wasm32 (the documented no-monotonic-clock caveat).
+    #[wasm_bindgen_test]
+    fn explain_plan_analyze_json_fills_actuals_zero_nanos() {
+        let store = Store::load(DATA, "turtle").expect("load");
+        let json = store
+            .explain_plan_analyze_json("PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }")
+            .expect("explainPlanAnalyzeJson");
+        assert!(json.contains("\"actual\":2"), "exact rows: {json}");
+        assert!(json.contains("\"nanos\":0"), "wasm32 nanos read 0: {json}");
+    }
+
+    /// A malformed query and a graph-valued ANALYZE cross the boundary as the `Err`
+    /// (JsError) arm, not a trap.
+    #[wasm_bindgen_test]
+    fn explain_json_err_arms() {
+        let store = Store::load(DATA, "turtle").expect("load");
+        assert!(store.explain_plan_json("SELECT WHERE {").is_err());
+        assert!(store
+            .explain_plan_analyze_json("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+            .is_err());
+    }
+}

@@ -44,3 +44,34 @@ test('explainAnalyze() runs SELECT/ASK and appends the operator trace', async ()
     /EXPLAIN ANALYZE/,
   );
 });
+
+// [FABLE-5] sq-ixc3.19 — the STRUCTURED plan bindings (explain-json, in the published
+// bundle): the typed camelCase tree (the sq-jbqh4 schema contract) the GUI plan explorer
+// renders. Same engine functions as the text forms; JSON.parse-able verbatim.
+test('explainPlanJson() returns the camelCase typed tree (planning-only)', async () => {
+  const store = await load();
+  const tree = JSON.parse(
+    store.explainPlanJson('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }'),
+  );
+  assert.equal(typeof tree.operator, 'string');
+  assert.ok(Array.isArray(tree.children));
+  // A dry run executes nothing.
+  assert.equal(tree.actual, null);
+  assert.equal(tree.qError, null);
+});
+
+test('explainPlanAnalyzeJson() executes and fills exact actual rows (nanos read 0 on wasm)', async () => {
+  const store = await load();
+  const tree = JSON.parse(
+    store.explainPlanAnalyzeJson('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }'),
+  );
+  // Two ex:name triples in the fixture — exact row counts cross the boundary.
+  assert.equal(tree.actual, 2);
+  // The documented wasm32 caveat: wall nanos read 0 (a NUMBER, not null) — unmeasured, not free.
+  assert.equal(tree.nanos, 0);
+  // Graph-valued forms are rejected, matching the Rust API.
+  assert.throws(
+    () => store.explainPlanAnalyzeJson('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+    /EXPLAIN ANALYZE/,
+  );
+});

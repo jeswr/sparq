@@ -38,6 +38,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { downloadText } from "@/lib/download";
+// [FABLE-5] sq-ixc3.19 — the shared EXPLAIN/ANALYZE operator-tree renderer (plan explorer).
+import { PlanTree } from "@/components/workbench/plan-tree";
 import {
   useEngine,
   DEFAULT_ROW_CAP,
@@ -366,6 +368,20 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
     );
   }
   if (outcome.kind === "explain") {
+    // [FABLE-5] sq-ixc3.19 — the structured plan renders as the navigable operator tree
+    // (per-operator est/actual rows, q-error heat, time); a lean bundle without the
+    // explain-json binding still gets the text plan verbatim (never a synthesised tree).
+    if (outcome.tree) {
+      return (
+        <div data-result-kind="explain">
+          <PlanTree
+            tree={outcome.tree}
+            analyzed={outcome.mode === "analyze"}
+            source={outcome.source ?? "wasm"}
+          />
+        </div>
+      );
+    }
     return (
       <pre
         className="overflow-auto whitespace-pre p-3 font-mono text-xs"
