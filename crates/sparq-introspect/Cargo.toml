@@ -17,6 +17,12 @@ readme = "README.md"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = []
+# [GPT-5.6] sq-lsp7k.29: numeric range/histogram facet summaries are opt-in so
+# the crate's existing facet response and work stay byte-for-byte unchanged by default.
+numeric-facets = []
+
 # Opt-in schema introspection (GenAI phase 2 — see research/genai-design.md and
 # research/genai-ontology-introspection.md). This is a SEPARATE crate so the core
 # engine carries zero introspection code; it consumes only sparq-core's PUBLIC

@@ -124,6 +124,11 @@ sparq_introspect::facets(graph: &Graph, request: &FacetRequest) -> FacetResponse
 // FacetResponse { candidates, types, predicates, values }
 // PredicateValues { predicate, values: Vec<Counted>, elided }
 // `facet_predicates: None` computes values for every predicate on the candidates.
+// With sparq-introspect feature `numeric-facets` (default off), FacetResponse also has:
+//   numeric: Vec<NumericFacet>  // predicate order; predicates without finite numerics omitted
+// NumericFacet { predicate, min, max, count, buckets: Vec<NumericBucket> }
+// NumericBucket { lo, hi, count }  // ten equal-width buckets; final bucket includes `hi`
+// Non-numeric / ill-formed / NaN / infinite objects remain in `values` but are excluded here.
 ```
 
 `sparq-nlq`:
