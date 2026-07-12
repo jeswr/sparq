@@ -35,6 +35,9 @@ sparq-introspect = "0.1"
 sparq-nlq        = "0.1"   # add features = ["live"] for the Anthropic backend
 ```
 
+Add `features = ["schema-diff"]` to `sparq-introspect` when comparing two mined
+schemas. The feature is off by default.
+
 Grounding context from a graph (no LLM, no network):
 
 ```rust
@@ -93,6 +96,15 @@ Introspection::to_json(&self) -> String                                // pretty
 Introspection::to_void(&self, dataset_iri: &str) -> String             // VoID N-Triples
 Introspection::to_shacl(&self) -> String                               // CS → SHACL node shapes (N-Triples)
 Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String
+
+// With sparq-introspect feature `schema-diff` (default off), compare two mined
+// schemas. Every entry vector is sorted by ascending IRI.
+Introspection::diff(&self, other: &Introspection) -> SchemaDiff
+// SchemaDiff { triples_base, triples_new, added_classes, removed_classes,
+//              changed_classes, added_predicates, removed_predicates,
+//              changed_predicates }
+// DiffEntry { iri, base, new }; added entries have base=0, removed entries have new=0.
+SchemaDiff::to_json(&self) -> String
 
 // Persisted *.introspect sidecar (sq-3n4): mine once, summarise forever — reload is
 // O(output), no graph rescan. Format is exactly to_json's (plain JSON).
