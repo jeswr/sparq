@@ -74,6 +74,15 @@ sparq-geo = { path = "../crates/sparq-geo", default-features = false }
 # Terse SPARQL parser: terse_to_sparql is the single public entry point that covers
 # keyword expansion + the underlying spargebra SPARQL parser. [SONNET-4.6]
 sparq-terse = { path = "../crates/sparq-terse" }
+# Solid WAC/ACP access control: the `wac_fail_closed` target fuzzes the per-resource
+# DECISION surface (PodStore::decide / decide_batch) for the fail-closed invariant --
+# a corrupted/partial/unmaterialized AuthIndex must never allow (bead sq-b9afe).
+# Default features only: the decision surface is always-present (no cargo gate). [FABLE-5]
+sparq-solid = { path = "../crates/sparq-solid" }
+# oxrdf: the wac_fail_closed harness pattern-matches `Graph::named` graph-name Terms to
+# harvest candidate resource IRIs from the fuzzed dataset. Same 0.3 line the workspace
+# pins, so the standalone lockfile resolves to the one sparq-core/sparq-solid use. [FABLE-5]
+oxrdf = "0.3"
 
 # A fast-but-instrumentable profile: opt-level 3 keeps the fuzzer throughput high
 # while `debug-assertions = true` + `overflow-checks = true` turn latent UB / integer
@@ -202,6 +211,22 @@ bench = false
 [[bin]]
 name = "parse_terse"
 path = "fuzz_targets/parse_terse.rs"
+test = false
+doc = false
+bench = false
+
+# bead sq-b9afe: the WAC decision-contract fail-closed target. Fuzzes
+# `sparq_solid::PodStore::decide`/`decide_batch` over corrupted/partial/hostile N-Quads
+# datasets (truncated fixtures via per-line salvage, unmaterialized AuthIndex, forged
+# `<urn:sparq:auth>` views, malformed resource IRIs) and ASSERTS the fail-closed
+# invariant: allow==true ⇒ status==Resolved with a discovered governing ACL; a
+# partial/errored index never allows; decide_batch ≡ decide; a panic in `decide` is
+# itself a finding. Auto-discovered by the CI fuzz lane's `cargo fuzz list`; seed corpus
+# committed at fuzz/seeds/wac_fail_closed/. De-risks gg0qq.5's fail-closed acceptance
+# clause. [FABLE-5]
+[[bin]]
+name = "wac_fail_closed"
+path = "fuzz_targets/wac_fail_closed.rs"
 test = false
 doc = false
 bench = false

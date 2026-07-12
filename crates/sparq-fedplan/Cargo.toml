@@ -35,6 +35,9 @@ all-features = true
 # pays zero for it unless `fedplan` is enabled. OFF by default.
 default = []
 fedplan = []
+# [GPT-5.6] sq-ioeih: opt-in descriptor-map hasher A/B. Enabling the A/B arm
+# also enables the planner it measures; the default build remains unchanged.
+foldhash-maps = ["fedplan", "dep:foldhash"]
 # [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning. OFF by default; IMPLIES
 # `fedplan` (it re-invokes the static planner on the remaining plan). A build that does not
 # enable it compiles zero adaptive code — the adaptive module is `#[cfg]`-gated out.
@@ -47,6 +50,7 @@ adaptive-replan = ["fedplan"]
 oxrdf = { workspace = true }
 oxttl = { workspace = true }
 rustc-hash = { workspace = true }
+foldhash = { version = "0.1.5", optional = true }
 
 # [SONNET-4.6] sq-my8wd.3: criterion for the select_sources + plan_bgp micro-bench
 # (dev-only, never reaches the lean default or wasm build). Pinned at "0.5" to match

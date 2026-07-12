@@ -27,6 +27,10 @@ pub mod count_backend;
 #[cfg(feature = "secprop-leftoperands")]
 pub mod secprop;
 
+// [GPT-5.6] sq-mu4au: opt-in, read-only summaries of already-computed decisions.
+#[cfg(feature = "decision-report")]
+pub mod report;
+
 // [OPUS-4.8] sq-zabv: static (request-free) policy analysis — permission/prohibition
 // conflict + policy containment/refinement, on the query-containment comparison
 // semantics. Always compiled (no feature gate); it adds no deps and no core cost.

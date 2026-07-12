@@ -1,0 +1,7 @@
+<http://ex.org/hasUncle> <http://www.w3.org/2002/07/owl#propertyChainAxiom> <http://ex.org/chain1> .
+<http://ex.org/chain1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://ex.org/hasParent> .
+<http://ex.org/chain1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://ex.org/chain2> .
+<http://ex.org/chain2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://ex.org/hasBrother> .
+<http://ex.org/chain2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> .
+<http://ex.org/tom> <http://ex.org/hasParent> <http://ex.org/mary> .
+<http://ex.org/mary> <http://ex.org/hasBrother> <http://ex.org/john> .

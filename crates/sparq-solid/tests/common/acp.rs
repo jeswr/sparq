@@ -187,6 +187,25 @@ fn mode_independence() -> AcpScenario {
         .expect(Expect::agent(ALICE).write(ro).is(Decision::Deny))
 }
 
+/// [GPT-5.6] sq-61uvs: the ACP analogue exercises the ACR as a resource. Unlike WAC,
+/// ACP does not translate Control on the governed resource into Read/Write on its ACR;
+/// nor may a member Read policy disclose the control document.
+fn acr_document_control_gate() -> AcpScenario {
+    let container = "https://pod.example/control/";
+    let acr_doc = "https://pod.example/control/.acr";
+    let mut acr = AcrBuilder::new();
+    acr.access_control(container, |p| p.allow(Mode::Control).any_of_agent(ALICE));
+    acr.member_access_control(container, |p| p.allow(Mode::Read).any_of_agent(BOB));
+    acr.document(container);
+    AcpScenario::new("acr-document-control-gate")
+        .acr(acr)
+        .expect(Expect::agent(ALICE).control(container).is(Decision::Allow))
+        .expect(Expect::agent(ALICE).read(acr_doc).is(Decision::Deny))
+        .expect(Expect::agent(ALICE).write(acr_doc).is(Decision::Deny))
+        .expect(Expect::agent(BOB).read(acr_doc).is(Decision::Deny))
+        .expect(Expect::anonymous().read(acr_doc).is(Decision::Deny))
+}
+
 /// ACP fail-closed: a resource with NO access control grants nobody (not even the
 /// anonymous requestor, not any authenticated agent). An unprotected resource is
 /// invisible.
@@ -233,6 +252,7 @@ pub fn acp_corpus() -> Vec<AcpScenario> {
         member_access_control_inheritance(),
         cumulative_inheritance(),
         mode_independence(),
+        acr_document_control_gate(),
         fail_closed_no_policy(),
         anyof_disjunction(),
     ]

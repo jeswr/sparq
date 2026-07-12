@@ -2012,6 +2012,16 @@
     // [OPUS-4.8] sq-msl6: OWL sameAs equality micro-suite (sameas_size<N>_* — the owl:sameAs
     // closure-correctness analogue of Deep Taxonomy). `sameas` is the metric-name prefix.
     { key: 'OWL sameAs', title: 'OWL sameAs', aliases: ['owl sameas', 'owl-sameas', 'sameas'] },
+    // [GPT-5.6] Comparative OWL 2 QL answer gate: sparq rewrite+execute vs Ontop end-to-end.
+    { key: 'OWL 2 QL end-to-end', title: 'OWL 2 QL end-to-end comparison',
+      aliases: ['reason-ql-e2e', 'reason_ql_e2e', 'reasonqle2e', 'ql-endtoend', 'ql_endtoend'],
+      note: 'Correctness-gated comparison: complete answer counts must agree before timing. '
+          + 'Rewriter-only and end-to-end rows are separate; timings are non-canonical.' },
+    // [GPT-5.6] Browser SHACL comparison: sparq-shacl-wasm vs rdf-validate-shacl in one Node process.
+    { key: 'SHACL WASM', title: 'Browser SHACL same-runtime comparison',
+      aliases: ['shacl-wasm', 'shacl_wasm', 'shaclwasm'],
+      note: 'Correctness-gated same-runtime comparison: violation counts and conforms must agree '
+          + 'before timing. Bundle bytes are deterministic per toolchain; timings are non-canonical.' },
     // [OPUS-4.8] sq-7iai: SHACL validation suite (LUBM ABox x 5 hand-authored shape graphs).
     { key: 'SHACL',         title: 'SHACL validation', aliases: ['shacl', 'shacl validation'] },
     // [OPUS-4.8] sq-ustq: Full-text-search suite (synthetic BM25 corpus; text:matches/phrase/near).
@@ -2024,6 +2034,11 @@
     // SRBench oracle + advisory rsp_persistentdict_triples_per_s) — the `rsp` alias prefix-matches the
     // whole family. Correctness/expressivity card; perf head-to-head OUT OF SCOPE (clock-free vs the
     // wall-clock RSP peers C-SPARQL/CQELS/RSP4J — different time model). No competitor perf column.
+    // [GPT-5.6] Put the narrower differential alias before the broad `rsp` family alias.
+    { key: 'RSP window differential', title: 'RSP window-semantics differential',
+      aliases: ['rsp-window-differential', 'rsp_window_differential', 'rspwindowdifferential'],
+      note: 'Correctness comparison against a pinned RSP4J/YASPER event-time capture. Complete '
+          + 'window multisets are compared; advisory emit latency is not cross-engine throughput.' },
     { key: 'RSP-QL',        title: 'RSP-QL streaming', aliases: ['rsp-ql', 'rsp', 'rspql'] },
     // [OPUS-4.8] sq-lrp9: HDT load-and-decode suite. Metrics are the deterministic snikmeta_*
     // counts (load-and-decode gate) + advisory hdt_load_s / hdt_vs_ntgz_load_s. The `hdt` /
