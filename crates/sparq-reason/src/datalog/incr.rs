@@ -32,6 +32,12 @@
 //!   the stratification guarantee makes recomputation from the maintained lower
 //!   layers exact. The new derived set is diffed against the old one, so higher
 //!   strata still see a minimal delta.
+//! * **[GPT-5.6] Variable-predicate relevance.** A variable-predicate read is
+//!   marked `read_any`, and a variable-predicate head is marked `head_any`.
+//!   Therefore no changed predicate can be skipped at that stratum (including
+//!   removal/re-ownership through a dynamic head), mirroring the stratifier's
+//!   conservative top node. Grouped `NOT` and projected DISTINCT remain boundary
+//!   recomputations, so each maintained layer stays set-equal to from-scratch eval.
 //!
 //! # Honest scope (v1)
 //!
@@ -112,8 +118,12 @@ pub struct MaterializedProgram {
     stratum_rules: Vec<Vec<usize>>,
     /// Per stratum: predicates its rules READ (positive + `NOT` + aggregate bodies).
     read_preds: Vec<FxHashSet<Id>>,
+    /// Per stratum: a variable-predicate body reads every predicate.
+    read_any: Vec<bool>,
     /// Per stratum: predicates its rules DERIVE (head predicates).
     head_preds: Vec<FxHashSet<Id>>,
+    /// Per stratum: a variable-predicate head may derive every predicate.
+    head_any: Vec<bool>,
     /// Per stratum: no rule carries `NOT`/`AGGREGATE` (DRed-eligible).
     positive_only: Vec<bool>,
 }
@@ -146,20 +156,41 @@ impl MaterializedProgram {
         let n = strat.n_strata();
         let mut stratum_rules: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut read_preds: Vec<FxHashSet<Id>> = vec![FxHashSet::default(); n];
+        let mut read_any = vec![false; n];
         let mut head_preds: Vec<FxHashSet<Id>> = vec![FxHashSet::default(); n];
+        let mut head_any = vec![false; n];
         let mut positive_only = vec![true; n];
         for (i, (rule, &s)) in program.rules.iter().zip(&strat.rule_stratum).enumerate() {
             stratum_rules[s].push(i);
-            for a in rule.positive.iter().chain(&rule.negated) {
-                read_preds[s].insert(a.pred);
+            for a in &rule.positive {
+                if let Some(pred) = a.pred {
+                    read_preds[s].insert(pred);
+                } else {
+                    read_any[s] = true;
+                }
+            }
+            for a in rule.negated.iter().flatten() {
+                if let Some(pred) = a.pred {
+                    read_preds[s].insert(pred);
+                } else {
+                    read_any[s] = true;
+                }
             }
             for agg in &rule.aggregates {
                 for a in &agg.body {
-                    read_preds[s].insert(a.pred);
+                    if let Some(pred) = a.pred {
+                        read_preds[s].insert(pred);
+                    } else {
+                        read_any[s] = true;
+                    }
                 }
             }
             for a in &rule.head {
-                head_preds[s].insert(a.pred);
+                if let Some(pred) = a.pred {
+                    head_preds[s].insert(pred);
+                } else {
+                    head_any[s] = true;
+                }
             }
             if !rule.negated.is_empty() || !rule.aggregates.is_empty() {
                 positive_only[s] = false;
@@ -187,7 +218,9 @@ impl MaterializedProgram {
             derived,
             stratum_rules,
             read_preds,
+            read_any,
             head_preds,
+            head_any,
             positive_only,
         })
     }
@@ -424,8 +457,10 @@ impl MaterializedProgram {
             let affected = adds
                 .iter()
                 .chain(&rems)
-                .any(|f| self.read_preds[s].contains(&f[1]))
-                || rems.iter().any(|f| self.head_preds[s].contains(&f[1]));
+                .any(|f| self.read_any[s] || self.read_preds[s].contains(&f[1]))
+                || rems
+                    .iter()
+                    .any(|f| self.head_any[s] || self.head_preds[s].contains(&f[1]));
             let derived_new: FxHashSet<[Id; 3]> = if !affected {
                 stats.skipped_strata += 1;
                 // Derivations are unchanged; only ownership bookkeeping: an

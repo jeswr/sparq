@@ -1,6 +1,5 @@
-# [GPT-5.6] Feature-matrix executor for the default-OFF fuzzy text index and
-# SPARQL magic predicate. The fuzzy integration suite is cfg-gated on this
-# feature and therefore is not exercised by the workspace default lane.
+# [GPT-5.6] Bounded typo-tolerant lookup is default-OFF; exercise the feature-gated
+# implementation and its differential/property tests in CI.
 - name: "sparq-text (fuzzy)"
   crate: "sparq-text"
   features: "fuzzy"
