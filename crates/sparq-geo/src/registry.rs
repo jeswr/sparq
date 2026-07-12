@@ -22,7 +22,7 @@
 //! ```
 //!
 //! Argument/result conventions (each function has the same semantics as its
-//! [`crate::geof::lex`] mirror):
+//! typed [`crate::geof`] implementation):
 //!
 //! * geometry arguments must be `geo:wktLiteral` literals (anything else — wrong
 //!   datatype, an IRI, a plain string — is a SPARQL *expression* error: the row is
@@ -31,6 +31,8 @@
 //!   result `xsd:double`;
 //! * `geof:metricArea`, `metricLength`, and `metricPerimeter` return
 //!   `xsd:double` in square metres / metres;
+//! * `geof:maxX`, `minX`, `maxY`, and `minY` return the corresponding envelope
+//!   coordinate as `xsd:double`;
 //! * the `geof:sf*` relations return `xsd:boolean`;
 //! * `geof:envelope` / `geof:boundary` / `geof:centroid` /
 //!   `geof:convexHull` / `geof:simplify` return `geo:wktLiteral`;
@@ -437,6 +439,8 @@ type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>
 /// * `distance(g1, g2, unitIri)` -> `xsd:double`;
 /// * `metricArea(g)` -> square-metre `xsd:double`, and `metricLength(g)` /
 ///   `metricPerimeter(g)` -> metre `xsd:double`;
+/// * `maxX(g)` / `minX(g)` / `maxY(g)` / `minY(g)` -> the corresponding
+///   envelope coordinate as `xsd:double`;
 /// * the relation families, all `(g1, g2)` -> `xsd:boolean`: simple features
 ///   `sfEquals sfDisjoint sfIntersects sfTouches sfCrosses sfWithin sfContains
 ///   sfOverlaps`, Egenhofer `ehEquals ehDisjoint ehMeet ehOverlap ehCovers
@@ -479,12 +483,15 @@ pub fn geof_registry() -> FunctionRegistry {
         Ok(Term::Literal(Literal::from(d)))
     });
 
-    // Metric measurement functions: unary geometry -> xsd:double. [GPT-5.6]
-    // sq-lsp7k.18
-    let measurements: [(&'static str, NumericUnary); 3] = [
+    // Unary numeric functions: geometry -> xsd:double.
+    let measurements: [(&'static str, NumericUnary); 7] = [
         ("metricArea", geof::metric_area),
         ("metricLength", geof::metric_length),
         ("metricPerimeter", geof::metric_perimeter),
+        ("maxX", geof::max_x),
+        ("minX", geof::min_x),
+        ("maxY", geof::max_y),
+        ("minY", geof::min_y),
     ];
     for (name, f) in measurements {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
@@ -636,10 +643,11 @@ mod tests {
     #[test]
     fn registry_contents() {
         let reg = geof_registry();
-        assert_eq!(reg.len(), 40);
+        assert_eq!(reg.len(), 44);
         for name in [
             "distance", "relate", "getSRID", "buffer",
             "metricArea", "metricLength", "metricPerimeter", "centroid",
+            "maxX", "minX", "maxY", "minY",
             "sfEquals", "sfDisjoint", "sfIntersects", "sfTouches", "sfCrosses",
             "sfWithin", "sfContains", "sfOverlaps",
             "ehEquals", "ehDisjoint", "ehMeet", "ehOverlap", "ehCovers", "ehCoveredBy",
@@ -672,6 +680,22 @@ mod tests {
         let Term::Literal(value) = centroid(&[square]).unwrap() else { panic!("literal") };
         assert_eq!(value.datatype().as_str(), WKT_LITERAL);
         assert!(value.value().contains("0.5"), "got {value}");
+    }
+
+    #[test]
+    fn bounding_coordinate_function_term_level() {
+        let reg = geof_registry();
+        let polygon = wkt("POLYGON((0 0, 4 0, 4 3, 0 3, 0 0))");
+        let max_x = reg
+            .get(&format!("{GEOF_NS}maxX"))
+            .expect("registered geof:maxX");
+
+        let Term::Literal(value) = max_x(std::slice::from_ref(&polygon)).unwrap() else {
+            panic!("literal")
+        };
+        assert_eq!(value.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+        assert!((value.value().parse::<f64>().unwrap() - 4.0).abs() < 1e-12);
+        assert!(max_x(&[]).is_err(), "geof:maxX must enforce unary arity");
     }
 
     #[test]

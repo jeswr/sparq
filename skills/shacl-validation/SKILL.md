@@ -1,14 +1,15 @@
 ---
 name: shacl-validation
-description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor, and the SHACL-1.2 value constraints sh:subsetOf / sh:someValue / sh:singleLine / sh:rootClass with path-valued sh:equals/disjoint/lessThan comparands and severity-threshold sh:conforms), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
+description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor, and the SHACL-1.2 value constraints sh:subsetOf / sh:someValue / sh:singleLine / sh:rootClass with path-valued sh:equals/disjoint/lessThan comparands and severity-threshold sh:conforms), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report as deterministic JSON, W3C report-vocabulary Turtle, or human text. Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
 ---
 
 # sparq-shacl-validation
 
 Validate a data `Graph` against a shapes `Graph` and get back a `ValidationReport`
-(conformance flag + per-violation results, renderable as W3C-vocabulary Turtle or
-plain text). Covers the full SHACL Core component set, SHACL-SPARQL (`sh:sparql`,
-§5.2), and custom SPARQL-based constraint components (`sh:ConstraintComponent`, §6).
+(conformance flag + per-violation results, renderable as deterministic JSON,
+W3C-vocabulary Turtle, or plain text). Covers the full SHACL Core component set,
+SHACL-SPARQL (`sh:sparql`, §5.2), and custom SPARQL-based constraint components
+(`sh:ConstraintComponent`, §6).
 
 `sparq-shacl` is an **opt-in** crate: depending on it is what turns on SHACL. It is
 NOT a dependency of any other sparq crate by default, so the core engine and the
@@ -60,6 +61,7 @@ assert!(!report.conforms);                 // sh:conforms = false
 assert_eq!(report.results.len(), 1);       // one DatatypeConstraintComponent violation
 eprintln!("{}", report.to_text());         // human-readable
 println!("{}", report.to_turtle());        // W3C sh:ValidationReport graph
+println!("{}", report.to_json());          // deterministic machine-readable object
 ```
 
 CLI-style end-to-end run via the bundled example (exits 0 iff the data conforms):
@@ -190,6 +192,7 @@ pub fn results_with_severity<'a>(&'a self, severity: &'a str)         // full IR
     -> impl Iterator<Item = &'a ValidationResult>;
 pub fn to_turtle(&self) -> String;          // W3C report vocabulary (valid, round-trippable Turtle)
 pub fn to_text(&self) -> String;            // human-readable summary
+pub fn to_json(&self) -> String;            // deterministic JSON; fixed keys and result order
 ```
 
 `ValidationResult` (`sparq_shacl::ValidationResult`) — all fields public:

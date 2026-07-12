@@ -286,7 +286,7 @@ impl BlobStore for InMemoryBlobStore {
             key.to_string(),
             StoredBlob {
                 body,
-                last_modified: SystemTime::now(),
+                last_modified: crate::clock::now(),
                 generation,
             },
         );

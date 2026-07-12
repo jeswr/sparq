@@ -287,6 +287,51 @@ pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
     })
 }
 
+/// Cardinalities stored in an HDT archive's dictionary and triples sections.
+///
+/// These values are read directly from the validated HDT metadata without
+/// decoding dictionary strings, materializing triples, or building indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HdtStats {
+    /// The exact number of triples in the archive.
+    pub triples: usize,
+    /// Terms used in both subject and object position.
+    pub shared: usize,
+    /// Terms used only in subject position.
+    pub subjects_only: usize,
+    /// Terms used only in object position.
+    pub objects_only: usize,
+    /// Distinct predicates.
+    pub predicates: usize,
+}
+
+impl HdtStats {
+    /// Returns the number of distinct subjects.
+    pub const fn distinct_subjects(&self) -> usize {
+        self.shared + self.subjects_only
+    }
+
+    /// Returns the number of distinct objects.
+    pub const fn distinct_objects(&self) -> usize {
+        self.shared + self.objects_only
+    }
+}
+
+/// Reads HDT dictionary cardinalities and the exact triple count from a file.
+///
+/// This validates the header, dictionary, and triples-section checksums but does
+/// not decode dictionary strings, materialize triples, or build HDT query indexes.
+/// Compressed containers are detected and streamed as in [`load`].
+pub fn stats(path: impl AsRef<Path>) -> Result<HdtStats, Error> {
+    let file = std::fs::File::open(path)?;
+    stats_reader(std::io::BufReader::new(file))
+}
+
+/// [`stats`] from any buffered reader positioned at the start of the HDT data.
+pub fn stats_reader<R: BufRead>(reader: R) -> Result<HdtStats, Error> {
+    with_hdt_stream(reader, |r| decode::stats_from_reader(r))
+}
+
 /// Converts an already-decoded [`hdt::Hdt`] into a sparq [`Graph`] — the seam for
 /// callers that hold an `Hdt` (e.g. to also query its header metadata).
 pub fn graph_from_hdt(hdt: &Hdt) -> Result<Graph, Error> {

@@ -4,3 +4,10 @@
   crate: "sparq-text"
   features: "fuzzy"
   test: true
+
+# [GPT-5.6] Literal highlighting is default-OFF; exercise the direct snippet
+# tests so the feature's implementation cannot compile silently empty in CI.
+- name: "sparq-text (highlight)"
+  crate: "sparq-text"
+  features: "highlight"
+  test: true

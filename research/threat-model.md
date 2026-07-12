@@ -19,7 +19,7 @@ actually verifies.
 | Crate / path | Why in scope | `unsafe`? |
 |---|---|---|
 | `sparq-core` | Storage, dictionary, mmap on-disk format, RDF text parsers, fused decompress ingest | **Yes — 42 sites** (mmap, dict-spill, parallel scatter, SIMD); canonical count via `scripts/unsafe-gate.py` |
-| `sparq-engine` | SPARQL planner + streaming executor, `QueryBudget`, optional `SERVICE` | No `unsafe` in the executor itself |
+| `sparq-engine` | SPARQL planner + streaming executor, `QueryBudget`, optional `SERVICE` | Four registered `CancelPtr` sites: `Arc`-owned `AtomicBool`, lifetime-bound guard, atomic loads only (sq-kq9ia) |
 | `sparq-server` | The W3C SPARQL 1.1 Protocol HTTP surface | No |
 | `sparq-reason` | RDFS / OWL-RL / N3 materialization, inference-conformance-gated | **No `unsafe`** (pure-safe Rust) |
 | `sparq-shacl` | SHACL validation, W3C-SHACL-conformance-gated | **No `unsafe`** |

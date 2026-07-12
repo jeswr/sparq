@@ -56,8 +56,7 @@ use spargebra::{Query, SparqlParser};
 
 #[cfg(feature = "arrow")]
 mod arrow_export;
-
-const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+mod term_render;
 
 /// Map an engine `Err(String)` (parse/eval failure) to a Python `ValueError`.
 fn engine_err(e: String) -> PyErr {
@@ -141,28 +140,13 @@ impl Term {
 
     /// N-Triples-style rendering (shared by `__repr__`).
     fn n3(&self) -> String {
-        match self.kind.as_str() {
-            "uri" => format!("<{}>", self.value),
-            "bnode" => format!("_:{}", self.value),
-            "triple" => self.value.clone(), // already rendered as << s p o >>
-
-            _ => {
-                let v = self.value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                if let Some(lang) = &self.language {
-                    // [OPUS-4.8] sq-bj7o: a directional language string renders as
-                    // `"v"@lang--dir` (the RDF 1.2 / Turtle surface form).
-                    match &self.direction {
-                        Some(dir) => format!("\"{v}\"@{lang}--{dir}"),
-                        None => format!("\"{v}\"@{lang}"),
-                    }
-                } else {
-                    match self.datatype.as_deref() {
-                        None | Some(XSD_STRING) => format!("\"{v}\""),
-                        Some(dt) => format!("\"{v}\"^^<{dt}>"),
-                    }
-                }
-            }
-        }
+        term_render::render_n3(
+            &self.kind,
+            &self.value,
+            self.language.as_deref(),
+            self.datatype.as_deref(),
+            self.direction.as_deref(),
+        )
     }
 }
 

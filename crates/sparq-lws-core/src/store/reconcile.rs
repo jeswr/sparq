@@ -119,7 +119,7 @@
 //! future admin endpoint / CLI / a one-shot boot sweep. That is the right primary shape — GC is a rare,
 //! operator-or-schedule-triggered maintenance op, not part of the hot request path, and an on-demand
 //! function is trivially testable and composable. A periodic background runner is OFFERED as an
-//! opt-in convenience ([`spawn_periodic`], gated behind `SOLID_SERVER_RECONCILE_INTERVAL_SECS`, OFF by
+//! opt-in convenience (`spawn_periodic`, gated behind `SOLID_SERVER_RECONCILE_INTERVAL_SECS`, OFF by
 //! default) for a single-instance deployment that wants a self-driving sweep; in a horizontally-scaled
 //! deployment GC should instead be a single scheduled job (a leader-elected task / a cron hitting the
 //! admin endpoint), NOT a per-replica timer racing N sweeps — which is why periodic is opt-in and
@@ -242,7 +242,7 @@ pub async fn reconcile_orphans<S: SparqClient + ?Sized, B: BlobStore + ?Sized>(
     // 2. The physically-stored blobs.
     let stored = blob.list().await.map_err(ReconcileError::ListBlobs)?;
 
-    let now = SystemTime::now();
+    let now = crate::clock::now();
     let mut report = ReconcileReport {
         scanned: stored.len(),
         ..Default::default()
@@ -550,6 +550,7 @@ struct Candidate {
 /// `interval`, not immediately, so it never contends with boot.
 ///
 /// Returns the [`tokio::task::JoinHandle`] so a caller that wants graceful teardown can abort it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_periodic<S, B>(
     sparq: S,
     blob: B,

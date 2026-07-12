@@ -1,0 +1,10 @@
+PREFIX ex: <http://example.test/federation/>
+SELECT ?product WHERE {
+  SERVICE <{{catalog}}> {
+    ?product ex:kind ex:Book ; ex:price 10 .
+  }
+  SERVICE <{{reviews}}> {
+    ?review ex:about ?product ; ex:score ?score .
+    VALUES ?score { 5 5 }
+  }
+}

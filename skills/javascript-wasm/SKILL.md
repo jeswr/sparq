@@ -102,6 +102,31 @@ Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNo
 
 Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
+### Solid server wasm adapter (host integration)
+
+The dedicated `sparq-lws-wasm` crate is the opt-in request adapter for a Solid-server wasm host; it
+is separate from the `@jeswr/sparq` RDF/JS store package. It owns the real axum LDP routes and WAC
+evaluator over `CompositeStore<InMemorySparqClient, InMemoryBlobStore>`, while excluding the native
+listener, Tokio runtime, TLS/PoP/notifications, live OIDC verifier, and non-memory backends.
+
+Build it with `wasm-pack build crates/sparq-lws-wasm --target web`. Construct `SolidServer` with the
+pod base URL and the WebID that owns its provisioned root ACL, then call the Promise-returning
+`handleRequest(method, path, headers, body, authenticatedWebid)`. Header arguments and response
+headers are flat name/value arrays. Omit `authenticatedWebid` for a public request.
+
+```js
+const owner = "https://id.example/alice#me";
+const pod = new SolidServer("https://pod.example", owner);
+const response = await pod.handleRequest(
+  "PUT", "/card", ["content-type", "text/turtle"], turtleBytes, owner,
+);
+```
+
+The host MUST complete OIDC validation before supplying an authenticated WebID; the constructor's
+owner parameter only provisions WAC and is not authentication. Do not enable or stub
+`solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only. This v1 adapter is
+single-process and ephemeral. The Node listener and npm wrapper are separate work.
+
 ## Common recipes
 
 **Decompress a browser dataset before loading it (`@sparq/client`).** The shared site/GUI client

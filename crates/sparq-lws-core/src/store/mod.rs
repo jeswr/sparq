@@ -20,12 +20,12 @@ pub mod counting;
 // the FIRST-CLASS `SparqClient` impl now that this crate lives in the sparq workspace. Build with
 // `--no-default-features` for the engine-free profile (the in-memory double only). See
 // [`embedded`] + decisions/0001-embed-sparq-in-process.md.
-#[cfg(feature = "embedded-sparq")]
+#[cfg(all(feature = "embedded-sparq", not(target_arch = "wasm32")))]
 pub mod embedded;
 // The live SPARQL-over-HTTP client (opt-in `http-sparq` feature — sq-gg0qq.3): the REMOTE
 // shared-service backend, `PSS_SPARQ_BACKEND=http`. Off by default — in-workspace builds bind the
 // engine in-process (`embedded` above) instead of paying an HTTP round-trip per index operation.
-#[cfg(feature = "http-sparq")]
+#[cfg(all(feature = "http-sparq", not(target_arch = "wasm32")))]
 pub mod http;
 pub mod reconcile;
 pub mod sparq;
@@ -33,8 +33,6 @@ pub mod sparql;
 // SystemTime ↔ `xsd:dateTime` round-trip for the `pss:modified` index timestamp (jx3c). Kept in the
 // storage layer (where the timestamp is written + read), dependency-free — see the module doc.
 pub mod timestamp;
-
-use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -45,13 +43,14 @@ pub use body_cache::{BodyCache, DEFAULT_BODY_CACHE_BYTES};
 pub use counting::{
     BackendCounters, CounterSnapshot, CountingBlobStore, CountingSparqClient, MeasureScope,
 };
-#[cfg(feature = "embedded-sparq")]
+#[cfg(all(feature = "embedded-sparq", not(target_arch = "wasm32")))]
 pub use embedded::EmbeddedSparqClient;
-#[cfg(feature = "http-sparq")]
+#[cfg(all(feature = "http-sparq", not(target_arch = "wasm32")))]
 pub use http::{HttpSparqClient, SparqHttpError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use reconcile::spawn_periodic;
 pub use reconcile::{
-    reconcile_orphans, spawn_periodic, ReconcileError, ReconcileOptions, ReconcileReport,
-    DEFAULT_GRACE,
+    reconcile_orphans, ReconcileError, ReconcileOptions, ReconcileReport, DEFAULT_GRACE,
 };
 pub use sparq::{
     DeleteOutcome, InMemorySparqClient, ReadPlan, ResourceMeta, SparqClient, SparqError,
@@ -415,7 +414,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
             etag,
             // Stamp the write instant so `If-Modified-Since` sees a real Last-Modified: a re-write
             // bumps it, so a later conditional GET correctly re-serves the changed representation.
-            last_modified: Some(SystemTime::now()),
+            last_modified: Some(crate::clock::now()),
         };
         self.sparq
             .put_meta(iri, meta.clone())
@@ -455,7 +454,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
             etag,
             // Stamp the create instant (see `write`) — the new child's Last-Modified for
             // `If-Modified-Since`.
-            last_modified: Some(SystemTime::now()),
+            last_modified: Some(crate::clock::now()),
         };
         match self
             .sparq

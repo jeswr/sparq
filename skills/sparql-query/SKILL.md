@@ -68,14 +68,16 @@ All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + 
   unbound), `sol.iter()` over the bound `(VariableRef, &Term)` pairs (unbound cells skipped),
   `&sol[var]` (panicking `Index`), plus `variables()` / `values()` / `len()` / `is_empty()`. Use it
   for ergonomic Rust Oxigraph interop / migration; the underlying `{vars, rows}` layout is unchanged.
-- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize> }`
+- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize>, pub cancel: Option<Arc<AtomicBool>> }`
   — `QueryBudget::unlimited()` is the no-op default. `max_rows` caps the working-set ROW count;
   `max_bytes` (`sq-s5is`) is the byte-accounted companion — it prices row WIDTH
   (`rows × vars × size_of::<Id>()`) plus the bytes of query-computed (BIND/aggregate/CONSTRUCT)
   literals, so a few very wide rows or a huge computed literal is bounded where the row cap is
   blind. Both are coarse cooperative ceilings (checked at operator entry / per outer loop), a
   conservative LOWER bound on heap — not an exact RSS quota; whichever trips first aborts with
-  `query budget exceeded (max-rows|max-bytes)`.
+  `query budget exceeded (max-rows|max-bytes)`. `with_cancel(Arc<AtomicBool>)` adds a cross-thread
+  cancellation handle; a `Relaxed` store of `true` aborts cooperatively at the next coarse poll with
+  `query budget exceeded (cancelled)`. `cancelled_by(flag)` creates an otherwise-unlimited budget.
 
 SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` variants):
 
@@ -388,17 +390,21 @@ over a computed expression.
 
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
 sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"` /
-`"... (max-bytes)"`:
+`"... (max-bytes)"` / `"... (cancelled)"`:
 
 ```rust
 use sparq_engine::QueryBudget;
+use std::sync::{Arc, atomic::AtomicBool};
+let cancel = Arc::new(AtomicBool::new(false));
 let budget = QueryBudget {
     max_rows: Some(10_000),
     max_bytes: Some(64 << 20), // byte-accounted companion (sq-s5is); None = off
     #[cfg(not(target_arch = "wasm32"))]
     deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(2)),
-};
+    ..QueryBudget::unlimited()
+}.with_cancel(Arc::clone(&cancel));
 let r = sparq_engine::query_with_budget(&g, "SELECT * WHERE { ?s ?p ?o }", &budget);
+// Another thread may call cancel.store(true, std::sync::atomic::Ordering::Relaxed).
 // For existence checks prefer ask()/ASK — it streams under an implicit LIMIT 1 (cheapest early exit).
 ```
 

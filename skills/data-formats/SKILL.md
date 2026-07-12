@@ -197,6 +197,13 @@ pub fn load_reader_filtered<R: BufRead>(reader: R, pattern: &TriplePattern) -> R
 
 pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT header metadata as a Graph
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
+pub fn stats(path: impl AsRef<Path>) -> Result<HdtStats, Error>     // dictionary counts + exact triples
+pub fn stats_reader<R: BufRead>(reader: R) -> Result<HdtStats, Error>
+pub struct HdtStats {
+    pub triples: usize, pub shared: usize, pub subjects_only: usize,
+    pub objects_only: usize, pub predicates: usize,
+}
+// HdtStats also provides distinct_subjects() and distinct_objects().
 // also: load_reader_via_upstream (differential oracle), graph_from_hdt, graph_from_reader
 
 // MEASUREMENT-ONLY (bench/parse's HDT stage split — NOT a production loader):
@@ -251,6 +258,8 @@ assert_eq!(g.named.len(), 1);          // each named graph is its own sub-Graph
 ```rust
 let g    = sparq_hdt::load("dataset.hdt")?;        // .hdt / .hdt.gz / .hdt.zst / .hdt.bz2 (by magic bytes)
 let meta = sparq_hdt::header("dataset.hdt")?;      // VoID stats / provenance as a queryable Graph
+let stats = sparq_hdt::stats("dataset.hdt")?;      // exact counts without a full graph decode
+assert_eq!(stats.distinct_subjects(), stats.shared + stats.subjects_only);
 let bytes = std::fs::read("dataset.hdt")?;
 // from memory: sparq_hdt::load_reader(std::io::Cursor::new(bytes.clone()))?
 // Predicate-filtered from memory (needs `load-filter`; None is a wildcard):
