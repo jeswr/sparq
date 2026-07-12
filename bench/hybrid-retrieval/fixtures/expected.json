@@ -1,0 +1,59 @@
+{
+  "ablation": {
+    "claim": "parity",
+    "demonstrated": "parity",
+    "relevant_at_k": {
+      "fused": 5,
+      "single_arms": {"dense": 3, "sparse": 4, "structural": 5}
+    }
+  },
+  "parameters": {
+    "rrf_k": 60,
+    "top_k": 3,
+    "weights": {"dense": 1.0, "sparse": 1.0, "structural": 0.75}
+  },
+  "queries": [
+    {
+      "fused": [
+        {"document": "bravo", "ranks": {"dense": 2, "sparse": 1}, "score": "0.032522474881"},
+        {"document": "alpha", "ranks": {"dense": 1, "structural": 2}, "score": "0.028490216816"},
+        {"document": "delta", "ranks": {"sparse": 2, "structural": 1}, "score": "0.028424114225"}
+      ],
+      "id": "q1",
+      "overlap_at_k": {"dense": 2, "sparse": 2, "structural": 2},
+      "rank_deltas": {
+        "dense": {"alpha": -1, "bravo": 1, "delta": 1},
+        "sparse": {"alpha": 2, "bravo": 0, "delta": -1},
+        "structural": {"alpha": 0, "bravo": 3, "delta": -2}
+      }
+    },
+    {
+      "fused": [
+        {"document": "hotel", "ranks": {"dense": 2, "sparse": 1, "structural": 3}, "score": "0.044427236786"},
+        {"document": "golf", "ranks": {"dense": 1, "sparse": 2}, "score": "0.032522474881"},
+        {"document": "kilo", "ranks": {"sparse": 3, "structural": 1}, "score": "0.028168097840"}
+      ],
+      "id": "q2",
+      "overlap_at_k": {"dense": 2, "sparse": 3, "structural": 2},
+      "rank_deltas": {
+        "dense": {"golf": -1, "hotel": 1, "kilo": 1},
+        "sparse": {"golf": 0, "hotel": 0, "kilo": 0},
+        "structural": {"golf": 2, "hotel": 2, "kilo": -2}
+      }
+    },
+    {
+      "fused": [
+        {"document": "mike", "ranks": {"dense": 2, "sparse": 1, "structural": 2}, "score": "0.044619249075"},
+        {"document": "lima", "ranks": {"dense": 1, "sparse": 2, "structural": 3}, "score": "0.044427236786"},
+        {"document": "november", "ranks": {"dense": 3, "structural": 1}, "score": "0.028168097840"}
+      ],
+      "id": "q3",
+      "overlap_at_k": {"dense": 3, "sparse": 2, "structural": 3},
+      "rank_deltas": {
+        "dense": {"lima": -1, "mike": 1, "november": 0},
+        "sparse": {"lima": 0, "mike": 0, "november": 1},
+        "structural": {"lima": 1, "mike": 1, "november": -2}
+      }
+    }
+  ]
+}
