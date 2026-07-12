@@ -329,6 +329,10 @@ fn reject_out_of_fragment_nominal_oneof() {
     ));
 }
 
+/// With the opt-in `dl_transitive` feature OFF (the default), `owl:TransitiveProperty`
+/// stays a fail-closed out-of-fragment refusal — byte-identical to the pre-sq-zfwzq
+/// behaviour. (The feature-ON extraction is pinned in the `transitive` module below.)
+#[cfg(not(feature = "dl_transitive"))]
 #[test]
 fn reject_out_of_fragment_property_characteristic() {
     let (d, t) = parse(":p a owl:TransitiveProperty .");
@@ -926,6 +930,87 @@ fn named_class_intersection_emits_equivalent_classes() {
         "only the EquivalentClasses name-binding should be emitted; got {:?}",
         o.axioms
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`)
+// -------------------------------------------------------------------------------------------
+
+#[cfg(feature = "dl_transitive")]
+mod transitive {
+    use super::*;
+    use sparq_reason_dl::model::ObjectPropertyExpression;
+
+    /// With the feature ON, `owl:TransitiveProperty` EXTRACTS as
+    /// `Axiom::TransitiveObjectProperty` on the named property — no longer refused.
+    #[test]
+    fn transitive_property_extracts_as_axiom() {
+        let (d, t) = parse(":p a owl:TransitiveProperty .");
+        let onto = extract(&d, &t).expect("in-fragment under dl_transitive");
+        let p = ex(&d, "p");
+        assert_eq!(
+            onto.axioms,
+            vec![Axiom::TransitiveObjectProperty {
+                property: ObjectPropertyExpression::ObjectProperty(p),
+            }]
+        );
+    }
+
+    /// The transitivity typing also TYPES the subject as an object property, so a role
+    /// assertion over it classifies without a separate `owl:ObjectProperty` declaration.
+    #[test]
+    fn transitivity_typing_enables_role_assertion_classification() {
+        let (d, t) = parse(":p a owl:TransitiveProperty .\n:a :p :b .");
+        let onto = extract(&d, &t).expect("extracts");
+        assert!(onto
+            .axioms
+            .iter()
+            .any(|a| matches!(a, Axiom::ObjectPropertyAssertion { .. })));
+        assert!(onto
+            .axioms
+            .iter()
+            .any(|a| matches!(a, Axiom::TransitiveObjectProperty { .. })));
+    }
+
+    /// Fail-closed edges stay closed: a BLANK-node subject of the transitivity typing is
+    /// refused (named object properties only in L1), and a cross-type punned subject
+    /// (also declared AnnotationProperty) is Unclassifiable — in EITHER assertion order.
+    #[test]
+    fn transitivity_on_blank_or_punned_subject_refuses() {
+        let (d, t) = parse("_:b a owl:TransitiveProperty .");
+        assert!(matches!(
+            extract(&d, &t),
+            Err(ExtractError::Unclassifiable(_))
+        ));
+        let (d, t) = parse(":p a owl:AnnotationProperty .\n:p a owl:TransitiveProperty .");
+        assert!(matches!(
+            extract(&d, &t),
+            Err(ExtractError::Unclassifiable(_))
+        ));
+        let (d, t) = parse(":p a owl:TransitiveProperty .\n:p a owl:AnnotationProperty .");
+        assert!(matches!(
+            extract(&d, &t),
+            Err(ExtractError::Unclassifiable(_))
+        ));
+    }
+
+    /// The OTHER property characteristics remain out-of-fragment refusals under the
+    /// feature — the opt-in admits transitivity ONLY.
+    #[test]
+    fn other_property_characteristics_still_refused() {
+        for ttl in [
+            ":p a owl:FunctionalProperty .",
+            ":p a owl:SymmetricProperty .",
+            ":p a owl:ReflexiveProperty .",
+        ] {
+            let (d, t) = parse(ttl);
+            assert!(
+                matches!(extract(&d, &t), Err(ExtractError::OutOfFragment(_))),
+                "{} must stay refused",
+                ttl
+            );
+        }
+    }
 }
 
 /// A NAMED class carrying an owl:unionOf definition must produce
