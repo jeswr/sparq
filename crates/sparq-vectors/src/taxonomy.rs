@@ -979,11 +979,21 @@ ex:Animal owl:disjointWith ex:Plant .
         let mut oracle = DisjointnessOracle::mine(&c.graph);
         let dog = class(&c.graph, "Dog");
         let lt = class(&c.graph, "LivingThing");
-        assert!(!oracle.is_disjoint(dog, lt), "not disjoint before absorbing");
+        assert!(
+            !oracle.is_disjoint(dog, lt),
+            "not disjoint before absorbing"
+        );
         let before = oracle.pair_count();
         oracle.absorb_proven_pairs([(dog, lt), (dog, dog)]);
-        assert_eq!(oracle.pair_count(), before + 1, "self-pair ignored, real pair added");
-        assert!(oracle.is_disjoint(dog, lt) && oracle.is_disjoint(lt, dog), "symmetric");
+        assert_eq!(
+            oracle.pair_count(),
+            before + 1,
+            "self-pair ignored, real pair added"
+        );
+        assert!(
+            oracle.is_disjoint(dog, lt) && oracle.is_disjoint(lt, dog),
+            "symmetric"
+        );
         let kept = oracle.mask_candidates(&[dog], &[(lt, 1u8)]);
         assert!(kept.is_empty(), "absorbed pair drives the hard mask");
     }

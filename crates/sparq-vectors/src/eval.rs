@@ -565,7 +565,12 @@ impl UfoMask {
                 range_of.entry(s).or_default().push(o);
             }
         }
-        UfoMask { oracle, types_of, domain_of, range_of }
+        UfoMask {
+            oracle,
+            types_of,
+            domain_of,
+            range_of,
+        }
     }
 
     /// Is candidate `c` **provably excluded** from the `(r, side)` ranking — i.e. does some
@@ -583,8 +588,7 @@ impl UfoMask {
             Side::Head => self.domain_of.get(&r),
             Side::Tail => self.range_of.get(&r),
         };
-        let (Some(query_classes), Some(cand_types)) = (query_classes, self.types_of.get(&c))
-        else {
+        let (Some(query_classes), Some(cand_types)) = (query_classes, self.types_of.get(&c)) else {
             return false;
         };
         query_classes
@@ -634,7 +638,11 @@ pub fn run_ablation(
         // [FABLE-5] kern/ufo-priors: the gUFO serve-time mask, built ONCE per closure arm and
         // ONLY when the axis is explicitly on — with it off (the default) no UFO code runs and
         // the run is byte-identical to the pre-wiring baseline (asserted by tests).
-        let ufo_mask = if cfg.gufo_prior { Some(UfoMask::build(graph, cfg.gufo_ns)) } else { None };
+        let ufo_mask = if cfg.gufo_prior {
+            Some(UfoMask::build(graph, cfg.gufo_ns))
+        } else {
+            None
+        };
 
         for type_constrained in [false, true] {
             let mode = if type_constrained {
@@ -1602,7 +1610,10 @@ ex:c ex:rel ex:y .
                 bit = true;
             }
         }
-        assert!(bit, "on a gUFO-annotated slice the mask must actually remove distractors");
+        assert!(
+            bit,
+            "on a gUFO-annotated slice the mask must actually remove distractors"
+        );
     }
 
     #[test]
