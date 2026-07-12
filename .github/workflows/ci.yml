@@ -652,6 +652,15 @@ jobs:
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features policy
       - name: clippy (wasm32 target, policy feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features policy -- -D warnings
+      # [FABLE-5] sq-ixc3.19: also build + clippy WITH the opt-in `explain-json` feature
+      # (the structured `Store::explainPlanJson` / `explainPlanAnalyzeJson` plan-tree
+      # bindings the GUI plan explorer renders) so the surface is gate-protected. IN the
+      # published bundle (js `build:wasm` enables it); the DEFAULT bundle stays
+      # plan-tree-free (perf floor byte-identical — module declared at end-of-file).
+      - name: Build sparq-wasm for the browser target (explain-json feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features explain-json
+      - name: clippy (wasm32 target, explain-json feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features explain-json -- -D warnings
       # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
       # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
       # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
@@ -744,6 +753,14 @@ jobs:
       - name: Headless wasm tests (sparq-reason-wasm, wasm-pack test --node, explain feature)
         working-directory: crates/sparq-reason-wasm
         run: wasm-pack test --node --features explain
+      # [FABLE-5] sq-ixc3.19: run the headless wasm tests WITH the explain-json feature
+      # so the real exported `Store::explainPlanJson` / `explainPlanAnalyzeJson` bindings
+      # (the structured plan tree the GUI plan explorer renders — including the wasm32
+      # `nanos: 0` no-monotonic-clock caveat + the JsError arms) are exercised in a
+      # genuine wasm runtime.
+      - name: Headless wasm tests (wasm-pack test --node, explain-json feature)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node --features explain-json
       # [OPUS-4.8] sq-nzcb (W-rsp): drive the REAL #[wasm_bindgen] Rsp exports
       # (crates/sparq-rsp-wasm/tests/web.rs) in a genuine wasm runtime — windowed continuous
       # SELECT + SPARQL-1.1-JSON serialisation across the JS boundary, which `cargo build
