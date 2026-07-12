@@ -4406,6 +4406,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-schema",
  "oxrdf 0.3.3",
+ "proptest",
  "sparq-core",
  "sparq-engine",
 ]
