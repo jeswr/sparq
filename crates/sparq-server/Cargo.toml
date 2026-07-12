@@ -47,7 +47,19 @@ required-features = ["server"]
 # (#1735 — result-equivalent, zero new deps; see the feature's own comment below). Like
 # `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
 # `--no-default-features --features server,jsonld` drops it for an explicit rewrite-dark build.
-default = ["server", "jsonld", "algebra-rewrite"]
+default = ["server", "jsonld", "algebra-rewrite", "explain-json"]
+# [FABLE-5] (sq-ixc3.19) `explain-json` (default ON): the STRUCTURED explain response —
+# `Accept: application/x-sparq-explain+json` on `/sparql` answers with sparq-engine's typed
+# plan tree (`explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
+# (`operator`/`estimated`/`actual`/`nanos`/`qError`/`children` — the sq-jbqh4 schema
+# contract) instead of the plan TEXT, powering the GUI plan explorer's endpoint mode
+# (per-operator time / cardinality / q-error heat). BINARY-crate default like
+# `algebra-rewrite` above: sparq-engine's LIBRARY default stays OFF, the feature pulls
+# ZERO new dependencies (`explain-json = []` in the engine), and
+# `--no-default-features --features server,jsonld` drops it — a lean build then answers a
+# structured-explain request with 406 (the text explain surface is unaffected either way).
+# The pure serialiser library build (`--no-default-features`) is unaffected.
+explain-json = ["sparq-engine/explain-json"]
 # [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` (default ON, see above): forwards sparq-engine's
 # opt-in pre-execution algebra rewrite pass (#1735 / sq-7d3dj.30.1) — the result-equivalent
 # FILTER `?v = <iri>` constant substitution + `FILTER(!bound) → Minus` anti-join applied by

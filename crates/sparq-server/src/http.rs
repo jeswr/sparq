@@ -4228,6 +4228,23 @@ const SPARQL_QUERY_CT: &str = "application/sparql-query";
 const FORM_CT: &str = "application/x-www-form-urlencoded";
 /// `Accept` media type that turns a query request into an EXPLAIN response (T22).
 const EXPLAIN_CT: &str = "text/x-sparq-explain";
+/// [FABLE-5] sq-ixc3.19: the STRUCTURED explain media type. `Accept`ing it answers an
+/// EXPLAIN request with the engine's typed plan tree (`explain_json::PlanNode`,
+/// sq-u4lgr/#902) as camelCase JSON — `operator`/`estimated`/`actual`/`nanos`/`qError`/
+/// `children`, the sq-jbqh4 schema contract the GUI plan explorer renders — instead of
+/// the plan text. Like [`EXPLAIN_CT`] it also *requests* explain by itself (plan-only
+/// unless `explain=analyze` says otherwise). Requires the `explain-json` feature
+/// (default-on for the server binary); a lean build answers 406 so callers can fall
+/// back to the text plan.
+const EXPLAIN_JSON_CT: &str = "application/x-sparq-explain+json";
+
+/// Whether the request `Accept`s the structured JSON plan tree. [FABLE-5] sq-ixc3.19
+fn accepts_explain_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains(EXPLAIN_JSON_CT))
+}
 
 /// How a `/sparql` query request should be answered (T22 EXPLAIN).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4243,7 +4260,8 @@ enum ExplainMode {
 /// EXPLAIN is requested via an `explain` parameter (URL query string, or the
 /// url-encoded POST body — the body wins) — `explain`, `explain=true`,
 /// `explain=plan` for the dry run, `explain=analyze` to execute and trace — or
-/// via `Accept: text/x-sparq-explain` (plan only).
+/// via `Accept: text/x-sparq-explain` (plan only) / `Accept:
+/// application/x-sparq-explain+json` (plan only, structured — sq-ixc3.19).
 fn explain_mode(
     url_params: &HashMap<String, String>,
     body_params: Option<&HashMap<String, String>>,
@@ -4262,7 +4280,7 @@ fn explain_mode(
     let accepts_explain = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains(EXPLAIN_CT));
+        .is_some_and(|a| a.contains(EXPLAIN_CT) || a.contains(EXPLAIN_JSON_CT));
     if accepts_explain {
         ExplainMode::Plan
     } else {
@@ -5210,6 +5228,25 @@ async fn run_query_pinned(
     // but both run on the blocking pool and under the worker timeout cap anyway;
     // analyze executes, so it gets the standard per-request budget.
     if explain != ExplainMode::Off {
+        // [FABLE-5] sq-ixc3.19: structured-plan negotiation. Resolved HERE (headers are
+        // not `'static`) and moved into the worker. A build without the `explain-json`
+        // feature answers a structured request 406 up front — never a silent text
+        // fallback the caller would then mis-parse as JSON — so clients (the GUI plan
+        // explorer) can degrade to the text plan explicitly.
+        let wants_json = accepts_explain_json(headers);
+        #[cfg(not(feature = "explain-json"))]
+        if wants_json {
+            return text_response(
+                StatusCode::NOT_ACCEPTABLE,
+                "text/plain; charset=utf-8",
+                format!(
+                    "this server was built without the `explain-json` feature; \
+                     the structured plan ({EXPLAIN_JSON_CT}) is unavailable. \
+                     Use the text explain (`explain=plan|analyze`, or Accept: {EXPLAIN_CT}).\n"
+                ),
+                head_only,
+            );
+        }
         let config = state.config.clone();
         let cfg = config.clone();
         let q = sparql.to_string();
@@ -5220,6 +5257,32 @@ async fn run_query_pinned(
         let allow = config.resolve_service_allow(headers);
         let task = tokio::task::spawn_blocking(move || {
             let graph = gen.snapshot();
+            // [FABLE-5] sq-ixc3.19: the STRUCTURED explain response — the caller
+            // `Accept`ed `application/x-sparq-explain+json`, so answer with the typed
+            // plan tree (camelCase JSON, the sq-jbqh4 schema contract) instead of the
+            // plan text. Same budget + egress-allowlist envelope as the text arm.
+            #[cfg(feature = "explain-json")]
+            if wants_json {
+                let r = with_engine_scope_allow(&allow, || {
+                    if analyze {
+                        sparq_engine::explain_plan_analyze_with_budget(graph, &q, &budget)
+                    } else {
+                        sparq_engine::explain_plan(graph, &q)
+                    }
+                });
+                return match r {
+                    Ok(plan) => text_response(
+                        StatusCode::OK,
+                        "application/x-sparq-explain+json; charset=utf-8",
+                        plan.to_json(),
+                        head_only,
+                    ),
+                    // ANALYZE of a non-SELECT/ASK form is a client error, not a server one.
+                    Err(e) if e.contains("EXPLAIN ANALYZE supports") => bad_request(&e),
+                    // EXPLAIN ANALYZE used `make_budget(_, true)` → max_results applied.
+                    Err(e) => engine_error_response(&e, &cfg, true),
+                };
+            }
             // [OPUS-4.8] sq-4w18: EXPLAIN ANALYZE executes (can hit SERVICE), so it runs
             // under the egress allowlist policy like a normal query; plan-only is a dry
             // run but is wrapped identically for uniformity (it never dials).

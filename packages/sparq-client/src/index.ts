@@ -628,6 +628,26 @@ export {
 } from "./endpoint.js";
 
 // ---------------------------------------------------------------------------
+// [FABLE-5] sq-ixc3.19 — the STRUCTURED query-plan client: the typed EXPLAIN tree
+// (`explain_json::PlanNode`, the sq-jbqh4 camelCase schema contract) shared by all
+// three plan sources (in-tab wasm `explainPlanJson`, desktop-native `explain_native`,
+// server `Accept: application/x-sparq-explain+json`), the defensive parse, and the
+// endpoint fetch with its honest structured → text degradation ladder.
+// ---------------------------------------------------------------------------
+
+export {
+  type PlanNode,
+  type PlanExplainMode,
+  type EndpointExplainResult,
+  EXPLAIN_JSON_CT,
+  EXPLAIN_TEXT_CT,
+  buildExplainRequest,
+  parsePlanJson,
+  parsePlanNode,
+  runEndpointExplain,
+} from "./plan.js";
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-9ij6 — live subscriptions: the SSE transport of the server's
 // `/subscriptions` surface. Subscribe a SELECT and stream the result DELTAS as the dataset
 // mutates, reusing the SAME `EndpointConfig` + bearer posture as the endpoint query client
