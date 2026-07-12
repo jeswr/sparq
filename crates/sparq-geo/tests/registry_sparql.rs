@@ -170,6 +170,37 @@ fn unary_geometry_function_roundtrips_through_relations() {
 }
 
 #[test]
+fn simplify_through_sparql_drops_the_midpoint() {
+    // [GPT-5.6] sq-lsp7k.23: witness the real custom-function dispatch, numeric
+    // tolerance parsing, and geometry-literal result type.
+    let graph = Graph::load_str(
+        r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+           <http://ex/line> <http://ex/loc> "LINESTRING(0 0,1 0.1,2 0)"^^geo:wktLiteral ."#,
+        "turtle",
+    )
+    .unwrap();
+    let result = query_with_functions(
+        &graph,
+        &format!(
+            "{PREFIXES} SELECT ?simplified WHERE {{ \
+               ex:line ex:loc ?line . \
+               BIND(geof:simplify(?line, 0.2) AS ?simplified) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        names(&result, 0),
+        vec![
+            "\"LINESTRING(0 0,2 0)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral>"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn select_expression_boolean() {
     let r = query_with_functions(
         &cities(),
