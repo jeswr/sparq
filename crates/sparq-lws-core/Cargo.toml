@@ -17,12 +17,12 @@ publish = false
 # framework-agnostic LDP handler seam in prod-solid-server. The `ws` feature enables the
 # WebSocketChannel2023 notification receive endpoint (axum's WebSocket upgrade); it pulls in
 # tokio-tungstenite + sha1 + base64 as transitive deps OF axum (no NEW top-level crate).
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", default-features = false }
 # `time` is required by the M3 HttpSparqClient's per-request `tokio::time::timeout`; `fs` is required
 # by `tls::read_pem`'s `tokio::fs::read`; `sync` is required by the notifications hub's
 # `broadcast`/`Mutex` (the per-topic subscription fan-out). Declare them directly — do NOT rely on a
 # transitive enable, which is fragile under feature-unification changes.
-tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+# Declared for native targets below.
 # tower-http middleware layer set (spike §4). M2 wires in security-headers/trace/body-limit. CORS is a
 # hand-rolled axum middleware (`ldp::cors`) rather than `tower-http`'s `CorsLayer`, because the Solid
 # CTH asserts case-sensitive `Vary: Origin` + expose-headers on the preflight, which the layer does
@@ -31,9 +31,9 @@ tower = "0.5"
 # `timeout` adds the request-timeout layer (504 on a stuck request — the overload/backpressure slice).
 # It only enables already-resolved deps (tokio/time is already on; http-body is in the tree), so it
 # adds NO new crate — just the layer code. `trace` is the existing tracing layer.
-tower-http = { version = "0.7", features = ["trace", "timeout"] }
+# Declared for native targets below.
 # TLS: rustls + aws-lc-rs (spike §4 — the house rule, FIPS-capable backend).
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+# Declared for native targets below.
 # HTTPS serving: axum-server is the maintained, widely-used (26M+ downloads) axum/hyper TLS-serving
 # path. We take the `tls-rustls-no-provider` feature (NOT `tls-rustls`) deliberately: that variant
 # does NOT activate its own `rustls/aws-lc-rs` provider — it reuses the process-wide default crypto
@@ -41,7 +41,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", 
 # provider in the tree, no double-install conflict, and TLS termination stays on the house rustls
 # stack. PEM cert/key are loaded from file paths via `RustlsConfig::from_pem`. Config-gated: only
 # linked into the serve path when both TLS env vars are set (plain TCP otherwise).
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+# Declared for native targets below.
 # PoP Tier-1b (mTLS-bound tokens, `SOLID_SERVER_MTLS_BOUND_TOKENS=1`). BOTH crates are ALREADY resolved
 # in the tree (transitively via axum-server's tls-rustls stack + the dev TLS tests), so promoting them
 # to non-dev [dependencies] adds NO new crate to the build — it only makes the existing types nameable
@@ -51,8 +51,7 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 # `tokio-rustls` (matching the in-tree rustls 0.23 / aws-lc-rs) names `server::TlsStream` so the
 # per-connection acceptor can read `peer_certificates()` ONCE after the handshake. Both stay behind the
 # mTLS env flag: the default (flag-off) TLS + plain serve paths are byte-identical.
-rustls-pemfile = "2"
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+# Declared for native targets below.
 # Auth: consume the standalone DPoP/Solid-OIDC verifier as a git dependency — do NOT reimplement.
 # The verifier's M2 landed the DNS-pinned SSRF-guarded network adapters (`NetworkJwksProvider` +
 # `NetworkWebIdResolver` over `SafeFetcher`); we enable its `network` feature so the binary performs
@@ -91,7 +90,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc
 # `None` when the flag is off / no cert), so the flag-off path passes `None` and is byte-identical.
 # Additive field on a pre-1.0 struct consumers construct — the two `AuthRequest` sites in `src/auth.rs`
 # set it; everything else compiles unchanged.
-solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", rev = "89c896249a726398b78302fd2f65eef0a82af681", features = ["network"] }
+# Declared for native targets below. The verifier is intentionally absent on wasm because its
+# unconditional jsonwebtoken AWS-LC backend does not support wasm32-unknown-unknown.
 # EMBEDDED SPARQ (opt-in `embedded-sparq` feature): the SPARQ query engine consumed DIRECTLY as a
 # library (NOT over its HTTP service) for the in-process data path. `sparq-core` gives the
 # `Graph` store (`load_str`/`open`/`save`/`apply_delta`) and `sparq-engine` the query/update
@@ -104,8 +104,7 @@ solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", re
 # `mmap` enables `Graph::open`/`save` (the directory-backed persistence seam — memory-mapped
 # on-disk indexes); without it only the in-memory path is available. The default `parallel` feature
 # rides along (parallel index build).
-sparq-core = { path = "../sparq-core", features = ["mmap"], optional = true }
-sparq-engine = { path = "../sparq-engine", optional = true }
+# Declared for native targets below; the wasm profile uses the in-memory store doubles.
 # RDF parse/serialise: oxttl (Turtle/N-Triples) + oxjsonld (JSON-LD ↔ RDF), via oxrdf model (spike §4).
 # The WORKSPACE dep set (which enables `rdf-12`): the sparq workspace unifies `rdf-12` into oxrdf/
 # oxttl in any `--workspace` build anyway, so this crate takes it unconditionally and handles the
@@ -114,7 +113,7 @@ oxrdf.workspace = true
 oxttl.workspace = true
 oxjsonld.workspace = true
 # Blob storage seam: object_store gives one trait over S3/GCS/Azure/Local (spike §4).
-object_store = "0.13"
+# Declared for native targets below.
 # Async trait support for the Store / SparqClient / BlobStore seams.
 async-trait = "0.1"
 bytes = "1"
@@ -124,21 +123,20 @@ http = "1"
 # structural pin is not allowed; `pin-project-lite` generates the projection safely (a declarative macro,
 # NOT a proc-macro). It is ALREADY in the resolved tree (tokio / hyper / tower depend on it), so naming
 # it here adds NO new crate to the build — the same pattern as `bytes` / `tokio-rustls`. MIT-OR-Apache.
-pin-project-lite = "0.2"
+# Declared for native targets below.
 # Live SPARQ HTTP client (M3, now behind the opt-in `http-sparq` feature — sq-gg0qq.3): a SPARQL
 # 1.1 Protocol client over the SPARQ /sparql endpoint. Built on the hyper 1.x client + hyper-util's
 # legacy pooled Client — both ALREADY in the tree (axum + the verifier pull them in), so this adds
 # NO new crates, only enables already-resolved client features (which therefore stay enabled
 # unconditionally; the `http-sparq` gate is a pure CODE gate). Plain HTTP to a trusted internal
 # endpoint; TLS is an M3-next adapter behind the same type.
-hyper = { version = "1", features = ["client", "http1"] }
+# Declared for native targets below.
 # `server-auto` + `server-graceful` name the `hyper_util::server::conn::auto::Builder` + `TokioTimer`
 # the transport DoS-hardening (`transport.rs`) configures (HTTP/2 max-concurrent-streams + rapid-reset
 # cap, the slowloris header-read timeout, keep-alive). These features are ALREADY resolved in the tree
 # (axum + axum-server pull `server-auto`), so naming them here adds NO new crate — it only makes the
 # already-compiled builder + timer nameable from this crate's serve path.
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server-auto", "server-graceful"] }
-http-body-util = "0.1"
+# Declared for native targets below.
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -158,23 +156,21 @@ getrandom = "0.2"
 # parsing), so naming them directly at the same versions adds NO new crate — it only makes the
 # existing deps callable from this server's own cache code. The cache reuses the verifier's PUBLIC
 # crypto/thumbprint/replay primitives (R1: it does not reimplement verification — see `auth_cache`).
-sha2 = "0.10"
-base64 = "0.22"
-url = "2"
+# Declared for native targets below.
 # PoP Tier 2 (DPoP-SK, `SOLID_SERVER_DPOP_SK`): HKDF-SHA256 session-key derivation + the
 # per-request HMAC-SHA256 attestation verify (`src/pop/sk/derive.rs`). `aws-lc-rs` is ALREADY the
 # process-wide rustls crypto provider (resolved transitively via rustls/axum-server and installed
 # by `main`), so naming it directly at the resolved 1.x line adds NO new crate — it only makes the
 # existing provider's vetted `hkdf`/`hmac` primitives callable from this crate (the design-doc §7
 # choice: "HMAC verify via aws-lc-rs/ring HMAC"; house rule — never hand-roll crypto).
-aws-lc-rs = "1"
+# Declared for native targets below.
 # Constant-time byte comparison for the RFC 8705 certificate-thumbprint match (`src/pop/cert_bound.rs`,
 # the tiered proof-of-possession T1a increment). `subtle` is the vetted, no-`unsafe`, no-`std`-required
 # primitive for this (AGENTS.md: security-critical compares go through a vetted library, never a
 # hand-rolled `==`). It is ALREADY resolved in the non-dev tree (transitively via `aws-lc-rs`/the
 # crypto stack), so naming it directly at the resolved version adds NO new crate — it only makes the
 # existing dep callable from the cert-bound verification core.
-subtle = "2.6"
+# Declared for native targets below.
 # Heap-free integer→decimal formatting for the read-response `Content-Length` / `Content-Range`
 # numerals (the public-GET hot path, MALLOC-bound per the round-4 profile). `itoa` writes into a
 # stack buffer, avoiding the `u64::to_string()` heap `String` allocation per response. It is ALREADY
@@ -190,8 +186,7 @@ itoa = "1"
 # verifier's `net.rs` off-runtime pattern) — a blocking client + blocking pool fits that thread with no
 # "runtime within a runtime" hazard. `redis` is BSD-3-Clause (allowed by deny.toml). No async runtime
 # features are enabled (default-features = false), keeping the dep surface to the blocking client + r2d2.
-redis = { version = "1", default-features = false, features = ["r2d2"], optional = true }
-r2d2 = { version = "0.8", optional = true }
+# Declared for native targets below.
 # Global allocator: mimalloc (Microsoft's drop-in performance-oriented allocator) installed as the
 # process `#[global_allocator]` in `main.rs`. The default-libc allocator path (nano-malloc on
 # macOS, the libc allocator elsewhere) was the dominant non-app cost in the local profile — the perf
@@ -211,7 +206,40 @@ r2d2 = { version = "0.8", optional = true }
 # NOT enable the `secure` feature (guard pages / encrypted free-lists, ~10% perf penalty) here — that
 # is an available hardening lever to evaluate separately. A C toolchain is REQUIRED in the build image
 # (already true for the musl release build). Cargo.lock is committed for a reproducible, reviewable build.
+# Declared for native targets below.
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Preserve the native dependency graph and feature set exactly. The target split keeps listener,
+# runtime, verifier, filesystem, TLS, PoP, notification, and non-memory backend code out of wasm.
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tower-http = { version = "0.7", features = ["trace", "timeout"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", rev = "89c896249a726398b78302fd2f65eef0a82af681", features = ["network"] }
+sparq-core = { path = "../sparq-core", features = ["mmap"], optional = true }
+sparq-engine = { path = "../sparq-engine", optional = true }
+object_store = "0.13"
+pin-project-lite = "0.2"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server-auto", "server-graceful"] }
+http-body-util = "0.1"
+sha2 = "0.10"
+base64 = "0.22"
+url = "2"
+aws-lc-rs = "1"
+subtle = "2.6"
+redis = { version = "1", default-features = false, features = ["r2d2"], optional = true }
+r2d2 = { version = "0.8", optional = true }
 mimalloc = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# getrandom 0.2 predates the workspace's getrandom_backend cfg and needs its explicit JS shim.
+getrandom = { version = "0.2", features = ["js"] }
+# oxrdf's random vocabulary identifiers use getrandom 0.3, paired with the workspace wasm_js cfg.
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 # Mint test JWS access tokens + DPoP proofs for the auth-middleware unit tests (mirrors the
@@ -282,3 +310,6 @@ embedded-sparq = ["dep:sparq-core", "dep:sparq-engine"]
 # shape, not the default. Pure code gate — its deps (hyper client + hyper-util legacy pool) stay
 # resolved for the server transport either way.
 http-sparq = []
+# Opt-in wasm request-handling core. Target cfgs remove native transport, runtime, crypto, OIDC,
+# notifications, and non-memory backends; the native target remains unchanged when this is enabled.
+wasm = []
