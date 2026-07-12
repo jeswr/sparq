@@ -1,6 +1,6 @@
 ---
 name: streaming-rsp
-description: Use when running continuous/standing SPARQL over a live RDF triple stream with the sparq engine — sliding/tumbling time windows (RANGE/STEP), count (ROWS) windows, opt-in gap-triggered session windows, RSTREAM/ISTREAM/DSTREAM output, RSP-QL surface syntax (REGISTER STREAM, FROM NAMED WINDOW ... ON ... RANGE/STEP), and multi-window joins (WINDOW <w1>{} JOIN WINDOW <w2>{}). Covers the sparq-rsp crate's ContinuousQuery / ContinuousConstruct / ContinuousAsk / ContinuousMultiQuery / RspqlQuery / WindowSpec.
+description: Use when running continuous/standing SPARQL over a live RDF triple stream with the sparq engine — sliding/tumbling time windows (RANGE/STEP), count (ROWS) windows, opt-in gap-triggered session windows, opt-in closed-window scalar aggregates, RSTREAM/ISTREAM/DSTREAM output, RSP-QL surface syntax (REGISTER STREAM, FROM NAMED WINDOW ... ON ... RANGE/STEP), and multi-window joins (WINDOW <w1>{} JOIN WINDOW <w2>{}). Covers the sparq-rsp crate's ContinuousQuery / ContinuousConstruct / ContinuousAsk / ContinuousMultiQuery / RspqlQuery / WindowSpec / window_aggregate.
 ---
 
 # sparq-streaming-rsp
@@ -13,7 +13,7 @@ description: Use when running continuous/standing SPARQL over a live RDF triple 
 
 ```toml
 [dependencies]
-sparq-rsp = { path = "../sparq/crates/sparq-rsp" } # add features = ["session_windows"] for sessions
+sparq-rsp = { path = "../sparq/crates/sparq-rsp" } # features: session_windows, window-aggregate
 oxrdf = { version = "0.3", features = ["rdf-12"] } # the term model (Term/NamedNode/Literal)
 ```
 
@@ -89,6 +89,10 @@ ContinuousQuery::register(sparql: &str, spec: WindowSpec) -> Result<ContinuousQu
   .flush(on_result: impl FnMut(WindowResult)) -> Result<(), String>
   .late_dropped() -> u64            // arrivals dropped because every covering window had closed
 
+// --- Optional closed-window scalar fold (feature = "window-aggregate") ---
+enum Agg { Count, Sum, Min, Max }
+window_aggregate(window: &WindowResult, var: &str, aggregate: Agg) -> Option<f64>
+
 // --- Continuous CONSTRUCT: GraphResult { start, end, triples: Vec<Triple> } (stream->stream) ---
 ContinuousConstruct::register(sparql: &str, spec: WindowSpec) -> Result<_, String>
   .with_r2s / .with_mode / .push(.., FnMut(GraphResult)) / .flush / .late_dropped
@@ -144,6 +148,12 @@ share a session; events at `t` and `t + 10` start separate sessions. The gap is
 measured in the stream's application-supplied `u64` timestamp ticks, never wall
 clock, and reported bounds are inclusive `[first_event_ts, last_event_ts]`.
 
+**Fold an emitted SELECT window to a scalar:** enable `window-aggregate`, then call
+`window_aggregate(&result, "v", Agg::Sum)`. `Count` includes every emitted row,
+even when `v` is unbound or non-numeric. `Sum`/`Min`/`Max` use well-formed XSD
+numeric literal bindings only. An unknown projected variable returns `None`; an
+empty numeric input returns `Some(0.0)` for `Sum` and `None` for `Min`/`Max`.
+
 **CONSTRUCT to transform a stream into another stream (each window -> a graph):**
 
 ```rust
@@ -188,7 +198,7 @@ q.flush(|_| {})?;
 
 ## Gotchas / feature flags / prerequisites
 
-- **No async and no clock.** Timestamps are **application-supplied `u64`s** (logical ticks, epoch millis, sequence numbers — your scale); the engine never reads the wall clock. Time advances only through pushed timestamps. A quiet stream closes nothing until the next push or `flush()`. The only cargo feature is default-off `session_windows`; time/count behaviour is unchanged without it.
+- **No async and no clock.** Timestamps are **application-supplied `u64`s** (logical ticks, epoch millis, sequence numbers — your scale); the engine never reads the wall clock. Time advances only through pushed timestamps. A quiet stream closes nothing until the next push or `flush()`. Default-off features are `session_windows` and `window-aggregate`; time/count behaviour is unchanged without them.
 - **Window bounds depend on the window type.** Time windows are half-open `[start, end)`: `RANGE 10 STEP 10` gives `[0,10) [10,20) …` (a triple at `ts=10` is in `[10,20)` only). `step < range` ⇒ overlapping (sliding) windows; `step > range` leaves uncovered gaps. Count and session windows report inclusive `[first.ts, last.ts]` content bounds. For sessions, a consecutive gap `< gap` extends the run and a gap `>= gap` splits it.
 - **Watermark + lateness.** A window closes when `max_ts_seen − max_delay` reaches its `end`. `with_max_delay(d)` is the out-of-order tolerance (default 0 = close at first sight of a newer-window triple). An arrival whose *every* covering window has already closed is dropped and counted in `late_dropped()`. `flush()` ignores `max_delay` and closes everything up to the last timestamp seen.
 - **Empty windows are reported** (evaluated + delivered) when the watermark jumps a gap — DSTREAM needs to observe results disappear. Windows wholly closed before the first arrival's watermark are skipped (a stream starting at `ts=10⁹` won't replay a billion empties).
