@@ -1,0 +1,8 @@
+# Feature-matrix fragment for `sparq-text`.
+
+# [GPT-5.6] Bounded typo-tolerant lookup is default-OFF, and tests/fuzzy.rs is
+# compiled only with this feature.
+- name: "sparq-text (fuzzy)"
+  crate: "sparq-text"
+  features: "fuzzy"
+  test: true

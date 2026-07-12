@@ -1,0 +1,15 @@
+# Feature-matrix fragment for `sparq-algos`.
+
+# [GPT-5.6] Exact shortest-path centrality is default-OFF, and
+# tests/centrality_extended.rs is compiled only with this feature.
+- name: "sparq-algos (centrality-extended)"
+  crate: "sparq-algos"
+  features: "centrality-extended"
+  test: true
+
+# [GPT-5.6] Directed SCC and topological sorting are default-OFF, and
+# tests/topology.rs is compiled only with this feature.
+- name: "sparq-algos (topology)"
+  crate: "sparq-algos"
+  features: "topology"
+  test: true
