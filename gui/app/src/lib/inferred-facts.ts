@@ -1,0 +1,176 @@
+// [FABLE-5] sq-ixc3.20 — pure term/triple identity logic for marking INFERRED facts in the
+// results views (no React, no DOM), unit-tested with the gui/app node test runner.
+//
+// The problem this file owns: the closure text the reasoner emits (Rust N-Triples writer),
+// the base-store snapshot (the JS `termToNT` writer below), the graph view's parsed
+// `RdfTerm`s (verbatim-escaped `parseNTriples` slices), and the table view's SPARQL-JSON
+// `SparqlTerm`s (DECODED lexical forms) are FOUR spellings of the same triples. Deciding
+// "is this row/edge inferred?" by comparing raw serialisations would break the moment two
+// writers disagree on an escape or on `^^xsd:string` suppression — so every source is
+// reduced to ONE canonical, decoded triple key here, and the entailed set is a `Set` of
+// those keys. Membership is therefore exact: an affordance can never appear on a fact the
+// closure does not actually add (false positives are structurally impossible; a term shape
+// this file cannot canonicalise — RDF-star triple terms — falls back to its verbatim `nt`
+// on both sides, which only ever errs towards NO affordance).
+
+import { parseNTriples, type RdfTerm, type SparqlTerm } from "@sparq/client";
+
+const XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
+/** Key-field separator: a control char no IRI / lang tag / decoded lexical form contains
+ *  un-escaped ambiguity with (it may appear IN a literal, but then it appears identically
+ *  on both sides of any comparison — the key stays injective per term kind). */
+const SEP = "";
+
+// ---------------------------------------------------------------------------
+// N-Triples term writing (the engine wire shape) — moved here from engine-context so the
+// click-to-explain path and the snapshot writer share ONE writer.
+// ---------------------------------------------------------------------------
+
+/** Escape a literal lexical form for an N-Triples/N-Quads double-quoted string. */
+export function escapeNTLiteral(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+/**
+ * Emit a single canonical N-Triples/N-Quads TERM (IRI / blank node / literal) from a
+ * SPARQL-JSON term. Unlike a DISPLAY helper this writes the FULL datatype IRI and escapes
+ * the lexical form, so it round-trips losslessly through the engine's parsers — and it is
+ * exactly the term form the reasoner's `why()` expects for the clicked triple.
+ */
+export function termToNT(t: SparqlTerm): string {
+  if (t.type === "uri") return `<${t.value}>`;
+  if (t.type === "bnode") return `_:${t.value}`;
+  // Literal.
+  const lex = `"${escapeNTLiteral(t.value)}"`;
+  if (t["xml:lang"]) return `${lex}@${t["xml:lang"]}`;
+  if (t.datatype && t.datatype !== XSD_STRING) return `${lex}^^<${t.datatype}>`;
+  return lex;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical (decoded) term keys.
+// ---------------------------------------------------------------------------
+
+/**
+ * Decode the N-Triples string escapes (`\\`, `\"`, `\n`, `\r`, `\t`, `\b`, `\f`, `\uXXXX`,
+ * `\UXXXXXXXX`) of a verbatim-escaped lexical form. An unrecognised escape is kept verbatim
+ * (never dropped), so a malformed input still yields a deterministic key.
+ */
+export function unescapeNT(s: string): string {
+  if (!s.includes("\\")) return s;
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c !== "\\" || i === s.length - 1) {
+      out += c;
+      continue;
+    }
+    const e = s[i + 1];
+    if (e === "\\" || e === '"' || e === "'") {
+      out += e;
+      i++;
+    } else if (e === "n") {
+      out += "\n";
+      i++;
+    } else if (e === "r") {
+      out += "\r";
+      i++;
+    } else if (e === "t") {
+      out += "\t";
+      i++;
+    } else if (e === "b") {
+      out += "\b";
+      i++;
+    } else if (e === "f") {
+      out += "\f";
+      i++;
+    } else if (e === "u" || e === "U") {
+      const width = e === "u" ? 4 : 8;
+      const hex = s.slice(i + 2, i + 2 + width);
+      if (hex.length === width && /^[0-9A-Fa-f]+$/.test(hex)) {
+        out += String.fromCodePoint(Number.parseInt(hex, 16));
+        i += 1 + width;
+      } else {
+        out += c; // malformed escape: keep verbatim
+      }
+    } else {
+      out += c; // unrecognised escape: keep verbatim
+    }
+  }
+  return out;
+}
+
+/** Canonical key of a parsed (verbatim-escaped) `RdfTerm` from {@link parseNTriples}. */
+export function keyOfRdfTerm(t: RdfTerm): string {
+  switch (t.kind) {
+    case "iri":
+      return `I${SEP}${unescapeNT(t.value)}`;
+    case "bnode":
+      return `B${SEP}${t.label}`;
+    case "literal": {
+      const value = unescapeNT(t.value);
+      if (t.lang) return `L${SEP}${value}${SEP}@${t.lang.toLowerCase()}`;
+      return `L${SEP}${value}${SEP}${t.datatype ?? XSD_STRING}`;
+    }
+    case "triple":
+      // RDF-star triple term: no decoded canonical form here — verbatim `nt` on both sides
+      // (errs only towards "not marked inferred", never a false affordance).
+      return `T${SEP}${t.nt}`;
+  }
+}
+
+/** Canonical key of a SPARQL-JSON term (already-decoded lexical form). */
+export function keyOfSparqlTerm(t: SparqlTerm): string {
+  if (t.type === "uri") return `I${SEP}${t.value}`;
+  if (t.type === "bnode") return `B${SEP}${t.value}`;
+  const lang = t["xml:lang"];
+  if (lang) return `L${SEP}${t.value}${SEP}@${lang.toLowerCase()}`;
+  return `L${SEP}${t.value}${SEP}${t.datatype ?? XSD_STRING}`;
+}
+
+/** Canonical key of a whole triple from three SPARQL-JSON terms. */
+export function tripleKeyOfBindings(s: SparqlTerm, p: SparqlTerm, o: SparqlTerm): string {
+  return `${keyOfSparqlTerm(s)} ${keyOfSparqlTerm(p)} ${keyOfSparqlTerm(o)}`;
+}
+
+/** Canonical key of a whole triple from three parsed `RdfTerm`s (the graph view's shape). */
+export function tripleKeyOfTerms(s: RdfTerm, p: RdfTerm, o: RdfTerm): string {
+  return `${keyOfRdfTerm(s)} ${keyOfRdfTerm(p)} ${keyOfRdfTerm(o)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Entailed-set construction (fed by the closure build in engine-context).
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical triple keys of every statement in an N-Triples/N-Quads document (a named
+ * graph term, if present, is IGNORED — the reasoner folds named graphs into the default
+ * graph, so identity is s/p/o). Unparseable lines are skipped (they cannot be clicked as
+ * facts either).
+ */
+export function tripleKeysOfNTriples(text: string): Set<string> {
+  const keys = new Set<string>();
+  if (!text.trim()) return keys;
+  const { statements } = parseNTriples(text);
+  for (const st of statements) keys.add(tripleKeyOfTerms(st.s, st.p, st.o));
+  return keys;
+}
+
+/**
+ * The ENTAILED triple keys: every key of `closureText` that is not a key of `baseKeys`
+ * (set difference — `closureText` is the reasoner's base+entailed output; what remains is
+ * exactly what reasoning added).
+ */
+export function entailedKeysFromClosure(
+  closureText: string,
+  baseKeys: ReadonlySet<string>,
+): Set<string> {
+  const keys = tripleKeysOfNTriples(closureText);
+  for (const k of baseKeys) keys.delete(k);
+  return keys;
+}
