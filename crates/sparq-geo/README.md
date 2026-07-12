@@ -83,8 +83,8 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   entry points stay W3C-conformant and untouched (a `geo:sfWithin` triple matches only
   asserted triples there), so default SPARQL semantics never change. A conformance
   ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
-- **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
-  graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
+- **R-tree `GeoIndex`** — packed-STR `rstar` build over all graphs, with antimeridian-safe windows,
+  incremental `apply_delta`, and opt-in prepared exact region scans via `topology_index`.
 - **Constant-geometry parse + prepared-relate caching** — geometry arguments resolve
   through a small bounded per-thread cache keyed by the exact lexical form: a constant
   `FILTER` polygon is parsed once per thread, not once per row (sq-lkrgi), and the

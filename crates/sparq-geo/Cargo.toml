@@ -49,10 +49,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 # matches only ASSERTED triples there) — the rewrite is a strict opt-in superset,
 # never a change to default SPARQL semantics. Implies `engine` (the rewrite hands a
 # rewritten `spargebra::Query` to the engine). [OPUS-4.8] sq-wf9qg
+# `topology_index` (opt-in, OFF by default): exact DE-9IM refinement for constant-region
+# containment scans. The R-tree first finds the AABB superset, then a prepared constant
+# region filters it to the exact winning geometry literals. [GPT-5.6] sq-jrdds
 default = ["engine"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
 geosparql_rewrite = ["engine"]
 reproject = ["dep:proj4rs"]
+topology_index = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
