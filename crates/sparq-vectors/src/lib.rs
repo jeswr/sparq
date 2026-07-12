@@ -119,6 +119,15 @@ pub mod train;
 // materialised closure via the P0 `close_for_vectorise` path and adds no new dependency.
 #[cfg(feature = "structure")]
 pub mod taxonomy;
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO PRIORS READER — mines gUFO
+// meta-types (Kind/Role/Phase/Category/…), rigidity, identity providers, ontological natures, and
+// mediation/inherence witnesses from the graph, and derives a UFO-PROVABLE disjointness +
+// subsumption mask fed into the P3 `DisjointnessOracle` (answer-safe: only proven pairs, fail
+// closed on ill-formed models). Same `structure` feature (off by default); no new dependency —
+// the default build carries zero UFO-prior code. The eval harness's `gufo_prior` axis (default
+// OFF) is the only consumer that changes behaviour, and only when explicitly enabled.
+#[cfg(feature = "structure")]
+pub mod ufo_priors;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -277,6 +286,10 @@ pub use taxonomy::{
     DisjointnessOracle, DistortionReport, EuclideanTaxonomyEncoder, Geometry, GeometryGate,
     HyperbolicTaxonomyEncoder, TaxonomyDag,
 };
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO priors surface — the reader,
+// its meta-type/rigidity/nature vocabulary, and the canonical gUFO namespace. `structure` only.
+#[cfg(feature = "structure")]
+pub use ufo_priors::{MetaType, Nature, Rigidity, UfoPriors, GUFO_NS};
 // [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the structure-aware-vectorisation P4 surface — the
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]

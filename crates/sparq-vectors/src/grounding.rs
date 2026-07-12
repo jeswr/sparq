@@ -47,7 +47,7 @@
 //! **Ambiguous default = subgraph (exact, re-validated).** When the consumer's needs are unclear,
 //! the design's default is subgraph grounding: it is built directly from the graph's own triples
 //! (never an approximate signal), so it is exact and re-checkable. This module never serves an
-//! approximate signal as a final answer — the ANN candidate seam is the [`crate::filter`] /
+//! approximate signal as a final answer — the ANN candidate seam is the `crate::filter` /
 //! `vec:`-predicate path the *exact engine* re-evaluates, not this projector.
 //!
 //! # What is NOT here (honest scope)

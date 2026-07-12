@@ -881,7 +881,41 @@ so the closure axis is not distorted by trivially-derivable entailed types). The
 non-canonical) and are **never** baked into docs. **Adoption gate:** no prior is adopted from these
 synthetic, work-box, single-seed figures — adoption requires a **real dataset** (WN18RR/FB15k-237
 subset), on a **canonical machine**, under the **asymmetric model**, with **multi-seed** reporting.
-The gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
+
+### 14a. UFO/gUFO priors — answer-safe serve-time disjointness mask (opt-in, feature = `kge`)
+
+<!-- [GPT-5.6] PR #2143 / issue #2149: document the public UFO-prior surface. -->
+The gUFO-prior cell is wired as an explicitly selected serve-time ablation. `EvalConfig::small`
+sets `gufo_prior = false`, so the default run does not construct the mask and retains the baseline
+ranking path. Set it to `true` to mine only UFO-provable disjointness from the input graph and remove
+provably incompatible candidates using the predicate's declared `rdfs:domain` or `rdfs:range`.
+Training is unchanged. The reader fails closed when identity or nature evidence is ambiguous, and an
+untyped candidate or predicate without a declared signature is never excluded.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_ablation, EvalConfig, GUFO_NS};
+
+let mut cfg = EvalConfig::small(13);
+assert!(!cfg.gufo_prior); // the behavioural prior is default OFF
+cfg.gufo_prior = true;
+cfg.gufo_ns = GUFO_NS; // or an explicitly declared non-canonical namespace
+let cells = run_ablation(turtle_src, "turtle", cfg)?;
+assert!(cells.iter().all(|cell| cell.gufo_prior));
+# Ok::<(), String>(())
+```
+
+The `structure` feature exposes the read-only `UfoPriors`, `UfoVocabulary`, `Rigidity`,
+`OntologicalNature`, and `GUFO_NS` API without the trainer. Use `UfoPriors::mine(graph)` for the
+canonical namespace or `mine_with_namespace(graph, ns)` when the dataset explicitly uses another
+namespace. `proven_disjoint_pairs()` and `proven_subsumptions()` return dictionary-id facts only;
+`augment_oracle()` feeds the proven pairs into `DisjointnessOracle::absorb_proven_pairs`. These APIs
+do not mint terms or write inferred triples back into the graph.
+
+The load-bearing guards are exact: the feature is absent from `default = []`, `kge` merely implies
+the already opt-in `structure` feature, `EvalConfig::small` keeps the behavioural switch false, and
+tests compare OFF runs deterministically plus ON/OFF output exactly on a gUFO-free graph. The mask
+may improve or preserve a filtered rank, never remove the held-out answer.
 
 ### 14b. Provenance-weighting `w(t)` — weight training by PROV-O/DQV quality (opt-in, feature = `structure`; measurement under `kge`)
 
