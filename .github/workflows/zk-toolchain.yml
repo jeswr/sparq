@@ -288,13 +288,33 @@ jobs:
       # compiled above, so a plain `cargo build` of the harness here is near-free and
       # makes that schema drift a visible RED check on the PR that introduces it. (Build
       # only — no `cargo run`: catching the compile/API break needs no real bb proving.)
-      # `--locked` so the build honours family_curve's OWN committed Cargo.lock and
-      # FAILS if it has drifted from Cargo.toml (rather than silently rewriting it),
-      # keeping the schema-drift guard reproducible. [OPUS-4.8] sq-kep2
+      #
+      # [FABLE-5] sq-q134e — deliberately NOT `--locked`. The harness path-deps on
+      # in-repo crates (sparq-zk → … → sparq-substrate) whose manifests bump
+      # dependencies on lanes that do NOT trigger this zk lane, so the committed
+      # harness Cargo.lock drifts SILENTLY on main and `--locked` then spuriously
+      # failed the NEXT zk-touching PR (bit #1962 via a main-side hashbrown bump the
+      # ZK PR never made). A plain `cargo build` keeps every still-compatible pin
+      # from the committed lock (cargo re-resolves MINIMALLY) and only absorbs the
+      # in-repo manifest bumps — so the guard still goes RED on a real schema/API
+      # break in the harness, while pure lock drift becomes an advisory notice (with
+      # the lock diff in the step summary) asking for a refresh commit instead of a
+      # spurious failure on an innocent PR. [FABLE-5] sq-q134e
       - name: Build the standalone family_curve harness (schema-drift guard)
         if: steps.changes.outputs.zk == 'true'
         working-directory: bench/zk-compose/family_curve
-        run: cargo build --locked
+        run: |
+          set -euo pipefail
+          cargo build
+          if ! git diff --quiet -- Cargo.lock; then
+            echo "::notice file=bench/zk-compose/family_curve/Cargo.lock::family_curve Cargo.lock drifted from an in-repo dep bump that landed on a lane which does not run this guard. The build used the minimally refreshed lock; commit the refreshed Cargo.lock to re-pin (sq-q134e)."
+            {
+              echo '### family_curve Cargo.lock drift (sq-q134e) — commit this refresh to re-pin'
+              echo '```diff'
+              git diff -- Cargo.lock
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
       # toolchain on PATH the forge tests do a REAL bb prove and assert every forgery is
