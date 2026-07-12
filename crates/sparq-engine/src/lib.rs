@@ -1,5 +1,5 @@
 #![doc = include_str!("../README.md")]
-#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 // [OPUS-4.8] (sq-a9cn) Opt-in materialised-view / query-result cache. NON-DEFAULT
 // `result-cache` feature — when off, zero cache code compiles and the default native +
@@ -265,8 +265,8 @@ use spargebra::{Query, SparqlParser};
 /// an unlimited budget (the default) costs nothing on the hot paths. When a limit
 /// trips, evaluation stops and the query fails with
 /// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"` /
-/// `"query budget exceeded (max-bytes)"`.
-#[derive(Debug, Clone, Copy, Default)]
+/// `"query budget exceeded (max-bytes)"` / `"query budget exceeded (cancelled)"`.
+#[derive(Debug, Clone, Default)]
 pub struct QueryBudget {
     /// Wall-clock deadline. Native only: `std::time::Instant` is unusable on
     /// `wasm32-unknown-unknown` (it panics), so the field does not exist there —
@@ -292,12 +292,30 @@ pub struct QueryBudget {
     /// anti-OOM ceiling, not an exact RSS quota. `None` (the default) disables it; it
     /// composes with `max_rows` (whichever trips first aborts).
     pub max_bytes: Option<usize>,
+    /// Cross-thread cooperative cancellation flag. The executor observes `true`
+    /// at the same coarse polling sites as the other limits and aborts with
+    /// `"query budget exceeded (cancelled)"`; cancellation is therefore prompt at
+    /// the next poll, not immediate. The flag controls evaluation only and does
+    /// not publish shared query data.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl QueryBudget {
     /// The do-nothing budget every non-budgeted entry point uses.
     pub fn unlimited() -> Self {
         Self::default()
+    }
+
+    /// Creates an otherwise unlimited budget cancelled by `flag`.
+    pub fn cancelled_by(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self::unlimited().with_cancel(flag)
+    }
+
+    /// Adds a cross-thread cooperative cancellation flag to this budget.
+    #[must_use]
+    pub fn with_cancel(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = Some(flag);
+        self
     }
 }
 

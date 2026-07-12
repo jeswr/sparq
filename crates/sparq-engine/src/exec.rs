@@ -69,6 +69,25 @@ pub(crate) mod budget {
     use crate::QueryBudget;
     use sparq_core::dict::Id;
     use std::cell::Cell;
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Copyable view of a cancellation flag owned by the installed [`QueryBudget`].
+    ///
+    /// The [`Guard`] lifetime keeps that budget (and therefore its `Arc<AtomicBool>`)
+    /// alive until the pointer has been cleared from the thread-local state. Rayon
+    /// snapshots are consumed only by scoped parallel iterators that join before the
+    /// guard is dropped. The pointer is dereferenced only for atomic loads.
+    #[derive(Clone, Copy)]
+    struct CancelPtr(NonNull<AtomicBool>);
+
+    // SAFETY: `AtomicBool` is `Sync`; moving this shared pointer to a worker is
+    // sound because it is only dereferenced for atomic loads while `Guard` keeps
+    // the owning `Arc` alive, including across scoped rayon work.
+    unsafe impl Send for CancelPtr {}
+    // SAFETY: `AtomicBool` is `Sync`; all shared access through `CancelPtr` is an
+    // atomic load, and `Guard` keeps the allocation alive until worker joins finish.
+    unsafe impl Sync for CancelPtr {}
 
     /// Bytes one id-level binding cell occupies in a materialised `Row`. The
     /// byte-accounted cap ([OPUS-4.8] sq-s5is) costs the id-level working set as
@@ -98,6 +117,7 @@ pub(crate) mod budget {
         /// the row cap also misses. A running high-water sum, added to the working-set
         /// estimate on every check.
         extra_bytes: usize,
+        cancel: Option<CancelPtr>,
     }
 
     const OFF: Limits = Limits {
@@ -108,6 +128,7 @@ pub(crate) mod budget {
         max_bytes: usize::MAX,
         byte_width: BYTES_PER_ID,
         extra_bytes: 0,
+        cancel: None,
     };
 
     impl Limits {
@@ -140,6 +161,13 @@ pub(crate) mod budget {
             if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return true;
             }
+            if let Some(cancel) = self.cancel {
+                // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard`
+                // keep the `AtomicBool` alive for this scoped snapshot load.
+                if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
+                    return true;
+                }
+            }
             false
         }
     }
@@ -151,19 +179,29 @@ pub(crate) mod budget {
 
     /// Clears the budget when the `*_with_budget` entry point returns (also on
     /// error/unwind, so a poisoned thread never leaks a stale budget).
-    pub(crate) struct Guard;
-    impl Drop for Guard {
+    pub(crate) struct Guard<'a> {
+        _budget: std::marker::PhantomData<&'a QueryBudget>,
+        _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for Guard<'_> {
         fn drop(&mut self) {
             ACTIVE.with(|a| a.set(OFF));
             EXCEEDED.with(|e| e.set(None));
         }
     }
 
-    pub(crate) fn install(b: &QueryBudget) -> Guard {
+    pub(crate) fn install(b: &QueryBudget) -> Guard<'_> {
+        let cancel = b
+            .cancel
+            .as_ref()
+            .map(|flag| CancelPtr(NonNull::from(flag.as_ref())));
         #[cfg(not(target_arch = "wasm32"))]
-        let on = b.deadline.is_some() || b.max_rows.is_some() || b.max_bytes.is_some();
+        let on = b.deadline.is_some()
+            || b.max_rows.is_some()
+            || b.max_bytes.is_some()
+            || cancel.is_some();
         #[cfg(target_arch = "wasm32")]
-        let on = b.max_rows.is_some() || b.max_bytes.is_some();
+        let on = b.max_rows.is_some() || b.max_bytes.is_some() || cancel.is_some();
         ACTIVE.with(|a| {
             a.set(Limits {
                 on,
@@ -173,10 +211,14 @@ pub(crate) mod budget {
                 max_bytes: b.max_bytes.unwrap_or(usize::MAX),
                 byte_width: BYTES_PER_ID,
                 extra_bytes: 0,
+                cancel,
             })
         });
         EXCEEDED.with(|e| e.set(None));
-        Guard
+        Guard {
+            _budget: std::marker::PhantomData,
+            _not_send: std::marker::PhantomData,
+        }
     }
 
     /// [OPUS-4.8] (sq-s5is) Sets the per-row byte width (= `width_in_ids ×
@@ -364,6 +406,17 @@ pub(crate) mod budget {
             EXCEEDED.with(|e| e.set(Some("timeout")));
             return true;
         }
+        if let Some(cancel) = a.cancel {
+            // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard` keep
+            // the `AtomicBool` alive until this thread-local pointer is cleared.
+            // Relaxed is sufficient because cancellation gates control flow only;
+            // it never publishes or guards a shared query buffer. If that changes,
+            // the load/store pair must become Acquire/Release.
+            if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
+                EXCEEDED.with(|e| e.set(Some("cancelled")));
+                return true;
+            }
+        }
         false
     }
 
@@ -407,6 +460,78 @@ pub(crate) mod budget {
             .unwrap_or(usize::MAX)
             .saturating_add(1);
         cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
+    }
+
+    #[cfg(test)]
+    mod cancel_tests {
+        use super::*;
+        use sparq_core::Graph;
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn cancel_flag_zero_vs_one_trips_both_poll_paths() {
+            let flag = Arc::new(AtomicBool::new(false));
+            let budget = QueryBudget::unlimited().with_cancel(Arc::clone(&flag));
+            let _guard = install(&budget);
+
+            assert!(!snapshot().hit(0), "false control must not trip the rayon snapshot");
+            assert_eq!(check(0), Ok(()), "false control must not trip the local poll");
+
+            flag.store(true, Ordering::Relaxed);
+            assert!(snapshot().hit(0), "true flag must trip the rayon snapshot");
+            assert_eq!(check(0), Err("query budget exceeded (cancelled)".to_owned()));
+            assert_eq!(EXCEEDED.with(Cell::get), Some("cancelled"));
+        }
+
+        #[test]
+        fn cancel_from_another_thread_stops_large_query_promptly() {
+            let mut nt = String::new();
+            for i in 0..12_000 {
+                nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            }
+            let graph = Graph::load_str(&nt, "ntriples").expect("test graph parses");
+            let flag = Arc::new(AtomicBool::new(false));
+            let budget = QueryBudget::unlimited().with_cancel(Arc::clone(&flag));
+            let started = Arc::new(Barrier::new(2));
+            let worker_started = Arc::clone(&started);
+
+            let worker = std::thread::spawn(move || {
+                worker_started.wait();
+                crate::query_with_budget(
+                    &graph,
+                    "SELECT ?s ?x WHERE { ?s <http://ex/p> ?o . ?x <http://ex/p> ?y }",
+                    &budget,
+                )
+                .map(|_| ())
+            });
+
+            started.wait();
+            let cancelled_at = Instant::now();
+            flag.store(true, Ordering::Relaxed);
+            let result = worker.join().expect("query worker must not panic");
+            assert_eq!(result, Err("query budget exceeded (cancelled)".to_owned()));
+            assert!(
+                cancelled_at.elapsed() < Duration::from_secs(5),
+                "cancelled query did not return within the cooperative bound"
+            );
+        }
+
+        #[test]
+        fn cancelled_query_does_not_leak_flag_into_next_query_on_same_thread() {
+            let graph = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples")
+                .expect("test graph parses");
+            let cancelled = QueryBudget::cancelled_by(Arc::new(AtomicBool::new(true)));
+            let query = "SELECT * WHERE { ?s ?p ?o }";
+
+            assert_eq!(
+                crate::query_with_budget(&graph, query, &cancelled).map(|_| ()),
+                Err("query budget exceeded (cancelled)".to_owned())
+            );
+            let clean = crate::query_with_budget(&graph, query, &QueryBudget::unlimited())
+                .expect("guard must clear the stale cancellation pointer");
+            assert_eq!(clean.len(), 1);
+        }
     }
 
 }
@@ -15019,7 +15144,7 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "SUBSTR (non-numeric length)",
-                valid: ("SUBSTR(\"hello\", 1, 3)", "\"hel\""),
+                valid: ("SUBSTR(\"hello\", 1, 4)", "\"hell\""),
                 type_err: "SUBSTR(\"hello\", 1, \"y\")",
                 boundary: None,
             },
