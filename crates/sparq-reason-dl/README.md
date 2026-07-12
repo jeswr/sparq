@@ -57,14 +57,10 @@ match extract(&dict, &triples) {
   fragment aborts the whole extraction** with a typed `ExtractError`, rather than being silently
   dropped: the downstream checker must never reason over a graph it only *partially* understood
   (a dropped axiom can flip a consistency verdict). Understood in full, or refused.
-- **Structured rejection taxonomy** — `ExtractError` has five arms: `OutOfFragment` (cardinality,
-  nominals, inverses, `owl:sameAs`, property characteristics, chains, keys, …), `DataConstruct`
-  (datatypes / data properties — no concrete domain in L1), `MalformedList` (ill-formed
-  `owl:intersectionOf`/`owl:unionOf` lists), `MalformedClassExpression` (a restriction missing
-  its property/filler, conflicting shapes, cyclic nesting), and `Unclassifiable` (a predicate
-  that cannot be mapped soundly without a declaration). Every arm has a diagnostic and a unit
-  test; annotations, declarations, and ontology headers are recognised and ignored (they carry
-  no ALCH-logical import).
+- **Structured rejection taxonomy** — `ExtractError` distinguishes unsupported logical
+  constructs, data constructs, malformed lists/expressions, and unclassifiable predicates.
+  Every arm has a diagnostic and unit test. Annotations, declarations, and ontology headers
+  are recognised and ignored because they carry no ALCH-logical import.
 - **Forward RDF renderer** (`render`, bead sq-pbz04.4.7) — `render_to_triples(&Ontology, &mut Dict)`
   maps the structural model back to OWL RDF triples (the inverse of `extract`), enabling
   full-fragment round-trip testing (`RDF → extract → render → extract` ≡ same model) and
