@@ -1,5 +1,18 @@
 # getrandom 0.3 has no default backend for wasm32-unknown-unknown; select the browser backend
 # (crypto.getRandomValues) so the wasm build (oxrdf -> rand -> getrandom, for blank-node ids)
 # compiles. Pairs with `getrandom = { features = ["wasm_js"] }` in crates/sparq-wasm/Cargo.toml.
+#
+# [FABLE-5] sq-3ul2n.2: `+simd128` is set HERE at the workspace level (not in a crate-level
+# .cargo/config.toml) so EVERY wasm32 build — the shipped `wasm-pack` build, the root-invoked
+# `wasm_bundle_bytes` gate build in scripts/ci-bench.sh, and all five wasm crates — compiles
+# with WASM SIMD128 identically. cargo discovers `.cargo/config.toml` by CWD and a crate-level
+# `rustflags` REPLACES (not merges) the root one, so keeping both files would silently drop
+# getrandom_backend for a root build or simd128 for a crate build. These flags are
+# target-scoped (`[target.wasm32-unknown-unknown]`) — native builds are byte-identical.
+# NOTE: simd128 is ~speed-neutral for sparq today (no hand-written vector kernels; measured in
+# research/hardware/consumer-and-targets.md §5) and gives a small one-time bundle-size decrease;
+# the browser support floor (Chrome 91+/Firefox 89+/Safari 16.4+) is already required by the
+# shipped bundle, so this is not a support-floor change. scripts/check-wasm-features.py asserts
+# the built artifact actually carries the simd128 target_features flag.
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '-C', 'target-feature=+simd128']

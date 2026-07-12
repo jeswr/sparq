@@ -111,6 +111,11 @@ access-audit = ["server"]
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
 server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+# [GPT-5.6] (sq-abhuq) Opt-in outbound gzip/zstd negotiation for HTTP result bodies.
+# The default build remains byte-identical: without this feature the response middleware is
+# cfg-stripped and tower-http's compression codecs are not compiled. The middleware preserves
+# streaming bodies and its default predicate excludes SSE and already-encoded responses.
+response-compression = ["server", "tower-http/compression-gzip", "tower-http/compression-zstd"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak

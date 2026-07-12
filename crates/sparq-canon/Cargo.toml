@@ -64,6 +64,9 @@ sha2 = { version = "0.10", optional = true }
 # for native; a wasm consumer disables it via `default-features = false`.
 default = ["parallel"]
 parallel = ["sparq-core/parallel"]
+# [GPT-5.6] sq-occip: reuse one N-Quads bridge buffer instead of allocating a
+# temporary String for every serialized quad. OFF by default; text is identical.
+bridge-lowcopy = []
 # NON-STANDARD, OFF BY DEFAULT. RDF-1.2 triple-term canonicalization: a native
 # RDFC-1.0 re-implementation over oxrdf-0.3 whose Hash-N-Degree-Quads descent
 # reaches blank nodes nested inside `Term::Triple` objects. This is NOT W3C
