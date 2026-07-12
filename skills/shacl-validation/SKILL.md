@@ -164,8 +164,11 @@ use sparq_shaclc::{parse, parse_strict, parse_extended, Profile, DEFAULT_BASE};
 //    nodeKind, reifierShape/reificationRequired) and PROVABLY rejects the
 //    four shaclc-js extensions; Profile::Extended accepts them.
 // sparq_shaclc::raw::{shaclc12, shaclc12ext} — streaming + chunked push
-// parsing on the generated zero-dependency term model. Parse-only (the
-// residual-verdict serializer lands with the gen-rs printer port).
+// parsing on the generated zero-dependency term model.
+use sparq_shaclc::write; // (triples, base, prefixes, Profile) -> Result<String, ShaclcWriteError>
+// The derived residual-consumption printer (first Rust-side SHACL-CS
+// writer): all-or-nothing — a non-expressible graph returns the typed
+// residual verdict (exact unconsumed triples), never a lossy document.
 ```
 
 `ShapesModel` (`sparq_shacl::ShapesModel`):

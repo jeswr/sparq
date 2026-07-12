@@ -42,10 +42,13 @@ push APIs on their zero-dependency term model.
   `sparq-shacl`'s hand-rolled `scs` parser on every fixture both accept
   (divergences are root-caused, beaded, and pinned so the list can only
   shrink); and push-vs-one-shot chunking invariance.
-- **Parse-only today**: the print direction (serializer with the
-  residual-based "not compact-expressible" verdict) lands when rdf-shuttle
-  `gen-rs` grows the residual-consumption printer its `gen-js` backend
-  already derives.
+- **Both directions**: `write(...)` is the derived residual-consumption
+  printer — the first Rust-side SHACL-CS writer. Printing consumes the
+  triples each construct re-emits on parse; a graph the profile cannot
+  express returns the typed `ShaclcWriteError` verdict (exact residual
+  triples), never a lossy document. Round-trips the whole corpus
+  graph-isomorphically, and printed documents re-parse with
+  `shaclc-parse@2.0.0` to oracle-isomorphic graphs (58/58 cross-impl).
 
 ## 📚 Docs
 

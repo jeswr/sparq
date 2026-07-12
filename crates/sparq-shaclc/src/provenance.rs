@@ -3,7 +3,7 @@
 
 /// The `jeswr/rdf-shuttle` commit whose `gen-rs` backend generated the
 /// artifacts in `src/raw/` (and whose grammar is vendored in `grammar/`).
-pub const RDF_SHUTTLE_COMMIT: &str = "20062110dc80752e306724be7d7a984b7702e7a9";
+pub const RDF_SHUTTLE_COMMIT: &str = "b7801c577f6087bc7d5065b89052e71e909662ab";
 
 /// SHA-256 of the vendored `grammar/shaclc12ext.shuttle` at generation time.
 /// `tests/provenance_drift.rs` recomputes this from the vendored file, so a

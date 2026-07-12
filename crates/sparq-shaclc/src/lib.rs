@@ -26,10 +26,12 @@
 //! hand-rolled `scs` feature; the two are differential-tested against each
 //! other on every fixture both accept (`tests/differential_scs.rs`).
 //!
-//! Parse-only today: the print direction (serializer with the
-//! residual-based "not compact-expressible" verdict) lands once rdf-shuttle
-//! gen-rs derives the residual-consumption printer its gen-js backend
-//! already has.
+//! Both directions ship: parsing (above) and the derived
+//! **residual-consumption printer** — [`write()`] starts with the whole graph
+//! as a residual, each printed construct consumes the triples it re-emits
+//! on parse, and a non-empty residual is the typed
+//! "not compact-expressible" verdict ([`ShaclcWriteError`]), never a lossy
+//! document. This is the first Rust-side SHACL-CS writer.
 
 #![forbid(unsafe_code)]
 
@@ -92,7 +94,7 @@ pub struct Outcome {
 macro_rules! oxrdf_bridge {
     ($m:path, $modname:ident) => {
         mod $modname {
-            use super::{Outcome, ShaclcError};
+            use super::{Outcome, ShaclcError, ShaclcWriteError};
             use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
             use $m as m;
 
@@ -156,6 +158,72 @@ macro_rules! oxrdf_bridge {
                 Ok(Triple { subject, predicate, object: term(&t.object)? })
             }
 
+            fn from_ox_term(t: &Term) -> Result<m::Term, ShaclcWriteError> {
+                Ok(match t {
+                    Term::NamedNode(n) => m::Term::NamedNode(std::rc::Rc::from(n.as_str())),
+                    Term::BlankNode(b) => m::Term::BlankNode(std::rc::Rc::from(b.as_str())),
+                    Term::Literal(l) => {
+                        let (language, direction): (std::rc::Rc<str>, Option<std::rc::Rc<str>>) =
+                            match (l.language(), l.direction()) {
+                                (Some(lang), Some(d)) => (
+                                    std::rc::Rc::from(lang),
+                                    Some(std::rc::Rc::from(match d {
+                                        oxrdf::BaseDirection::Ltr => "ltr",
+                                        oxrdf::BaseDirection::Rtl => "rtl",
+                                    })),
+                                ),
+                                (Some(lang), None) => (std::rc::Rc::from(lang), None),
+                                (None, _) => (std::rc::Rc::from(""), None),
+                            };
+                        m::Term::Literal(std::rc::Rc::new(m::LiteralData {
+                            value: std::rc::Rc::from(l.value()),
+                            language,
+                            direction,
+                            datatype: m::Term::NamedNode(std::rc::Rc::from(l.datatype().as_str())),
+                        }))
+                    }
+                    Term::Triple(q) => m::Term::Triple(std::rc::Rc::new(from_ox_triple(q)?)),
+                })
+            }
+
+            fn from_ox_triple(t: &Triple) -> Result<m::Triple, ShaclcWriteError> {
+                let subject = match &t.subject {
+                    NamedOrBlankNode::NamedNode(n) => m::Term::NamedNode(std::rc::Rc::from(n.as_str())),
+                    NamedOrBlankNode::BlankNode(b) => m::Term::BlankNode(std::rc::Rc::from(b.as_str())),
+                };
+                Ok(m::Triple {
+                    subject,
+                    predicate: m::Term::NamedNode(std::rc::Rc::from(t.predicate.as_str())),
+                    object: from_ox_term(&t.object)?,
+                })
+            }
+
+            pub(super) fn write(
+                triples: &[Triple],
+                base_iri: Option<&str>,
+                prefixes: &[(String, String)],
+            ) -> Result<String, ShaclcWriteError> {
+                let mut raw: Vec<m::Triple> = Vec::with_capacity(triples.len());
+                for t in triples {
+                    raw.push(from_ox_triple(t)?);
+                }
+                m::write_triples(&raw, base_iri, prefixes).map_err(|e| {
+                    let mut residual = Vec::with_capacity(e.residual.len());
+                    for t in &e.residual {
+                        // the residual came FROM our conversion of valid
+                        // oxrdf terms, so converting back cannot fail
+                        if let Ok(ox) = triple(t) {
+                            residual.push(ox);
+                        }
+                    }
+                    ShaclcWriteError {
+                        message: e.message,
+                        residual,
+                        missing_ontology: e.missing.is_some(),
+                    }
+                })
+            }
+
             pub(super) fn parse(text: &str, base: &str) -> Result<(Vec<Triple>, Outcome), ShaclcError> {
                 let mut raw_triples: Vec<m::Triple> = Vec::new();
                 let outcome = m::parse(text, Some(base), |t| raw_triples.push(t)).map_err(|e| {
@@ -193,6 +261,49 @@ pub fn parse_strict(text: &str, base: &str) -> Result<(Vec<Triple>, Outcome), Sh
 /// [`parse`] with [`Profile::Extended`].
 pub fn parse_extended(text: &str, base: &str) -> Result<(Vec<Triple>, Outcome), ShaclcError> {
     bridge_ext::parse(text, base)
+}
+
+/// The residual "not compact-expressible" write verdict: the graph could
+/// not be printed faithfully in the chosen profile. Carries the exact
+/// unconsumed triples so callers can report (or route) them — printing is
+/// all-or-nothing, never silently lossy.
+#[derive(Debug, Clone)]
+pub struct ShaclcWriteError {
+    /// Human-readable verdict.
+    pub message: String,
+    /// The triples no printable construct could consume.
+    pub residual: Vec<Triple>,
+    /// True when the required `<base> rdf:type owl:Ontology` pattern is
+    /// absent (the document clause re-emits it, so no faithful print
+    /// exists without it).
+    pub missing_ontology: bool,
+}
+
+impl std::fmt::Display for ShaclcWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ShaclcWriteError {}
+
+/// Prints shapes triples as a SHACL Compact Syntax document with the chosen
+/// [`Profile`] — the residual-consumption print mode: the document IRI is
+/// read off the graph (the IRI typed `owl:Ontology`; `base_iri` is a
+/// preference among candidates), `prefixes` come from an [`Outcome`] or the
+/// caller (predeclared ones are implicit), and a graph the profile cannot
+/// express returns the typed [`ShaclcWriteError`] verdict instead of a
+/// lossy document. `write(parse(doc))` re-parses to an isomorphic graph.
+pub fn write(
+    triples: &[Triple],
+    base_iri: Option<&str>,
+    prefixes: &[(String, String)],
+    profile: Profile,
+) -> Result<String, ShaclcWriteError> {
+    match profile {
+        Profile::Strict => bridge_strict::write(triples, base_iri, prefixes),
+        Profile::Extended => bridge_ext::write(triples, base_iri, prefixes),
+    }
 }
 
 #[cfg(test)]
