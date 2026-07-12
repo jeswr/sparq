@@ -4540,6 +4540,7 @@ name = "sparq-engine-serialize"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "serde_json",
  "sparq-core",
  "sparq-jsonld",
