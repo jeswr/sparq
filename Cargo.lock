@@ -4508,6 +4508,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-geo",
  "sparq-jsonld",
  "sparq-reason",
  "sparq-reason-dl",
@@ -4617,6 +4618,7 @@ name = "sparq-fedplan"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "foldhash 0.1.5",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "rustc-hash 2.1.3",
@@ -4711,6 +4713,13 @@ name = "sparq-jsonld"
 version = "0.1.0"
 
 [[package]]
+name = "sparq-jsonld-registry"
+version = "0.1.0"
+dependencies = [
+ "sparq-jsonld",
+]
+
+[[package]]
 name = "sparq-kb"
 version = "0.1.0"
 dependencies = [
@@ -4793,6 +4802,7 @@ dependencies = [
 name = "sparq-metamorph"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "serde",
  "serde_json",
  "sparq-core",
@@ -5108,6 +5118,7 @@ name = "sparq-text"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rand 0.10.1",
  "rayon",
  "rustc-hash 2.1.3",

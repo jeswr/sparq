@@ -3,12 +3,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use oxrdf::Term;
+use oxrdf::{NamedOrBlankNode, Term, Triple};
 use proptest::prelude::*;
 use sparq_core::Graph;
 use sparq_engine_serialize::serialize::{
     default_prefixes, graph_to_nquads, graph_to_trig, graph_to_trig_streaming, graph_to_turtle,
-    graph_to_turtle_streaming,
+    graph_to_turtle_streaming, write_nquads, write_trig, write_trig_streaming, write_turtle,
+    write_turtle_streaming, NamedGraph,
 };
 
 #[derive(Clone, Debug)]
@@ -175,6 +176,36 @@ fn default_only(graph: &Graph) -> Graph {
     Graph::load_str(&graph_to_turtle(graph), "turtle").expect("writer emitted invalid Turtle")
 }
 
+// [GPT-5.6] (sq-zd6hq) Exercise the slice-level writers in addition to their graph wrappers.
+fn graph_triples(graph: &Graph) -> Vec<Triple> {
+    graph
+        .iter_ids()
+        .map(|[s, p, o]| Triple {
+            subject: match graph.dict.term(s) {
+                Term::NamedNode(node) => NamedOrBlankNode::NamedNode(node),
+                Term::BlankNode(node) => NamedOrBlankNode::BlankNode(node),
+                other => panic!("invalid RDF subject: {other}"),
+            },
+            predicate: match graph.dict.term(p) {
+                Term::NamedNode(node) => node,
+                other => panic!("invalid RDF predicate: {other}"),
+            },
+            object: graph.dict.term(o),
+        })
+        .collect()
+}
+
+fn dataset_parts(graph: &Graph) -> Vec<(Option<Term>, Vec<Triple>)> {
+    std::iter::once((None, graph_triples(graph)))
+        .chain(
+            graph
+                .named
+                .iter()
+                .map(|(name, part)| (Some(name.clone()), graph_triples(part))),
+        )
+        .collect()
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
@@ -204,12 +235,30 @@ proptest! {
         let parsed_nquads = Graph::load_dataset(&nquads, "nquads").expect("invalid N-Quads output");
         prop_assert!(isomorphic(&graph, &parsed_nquads));
 
+        let parts = dataset_parts(&graph);
+        let view: Vec<NamedGraph<'_>> = parts
+            .iter()
+            .map(|(name, triples)| (name.as_ref(), triples.as_slice()))
+            .collect();
+        let prefixes = default_prefixes();
+        prop_assert_eq!(write_turtle(&parts[0].1, &prefixes), turtle.clone());
+        prop_assert_eq!(write_trig(&view, &prefixes), trig.clone());
+        prop_assert_eq!(write_nquads(&view), nquads);
+
         let mut streamed_turtle = Vec::new();
-        graph_to_turtle_streaming(&graph, &default_prefixes(), &mut streamed_turtle).unwrap();
+        graph_to_turtle_streaming(&graph, &prefixes, &mut streamed_turtle).unwrap();
         prop_assert_eq!(turtle.as_bytes(), streamed_turtle.as_slice());
 
         let mut streamed_trig = Vec::new();
-        graph_to_trig_streaming(&graph, &default_prefixes(), &mut streamed_trig).unwrap();
+        graph_to_trig_streaming(&graph, &prefixes, &mut streamed_trig).unwrap();
+        prop_assert_eq!(trig.as_bytes(), streamed_trig.as_slice());
+
+        streamed_turtle.clear();
+        write_turtle_streaming(&parts[0].1, &prefixes, &mut streamed_turtle).unwrap();
+        prop_assert_eq!(turtle.as_bytes(), streamed_turtle.as_slice());
+
+        streamed_trig.clear();
+        write_trig_streaming(&view, &prefixes, &mut streamed_trig).unwrap();
         prop_assert_eq!(trig.as_bytes(), streamed_trig.as_slice());
     }
 }

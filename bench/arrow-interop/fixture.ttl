@@ -1,0 +1,4 @@
+@prefix ex: <http://example.test/> .
+ex:a ex:label "Alice"@en ; ex:score 7 ; ex:group ex:g1 .
+ex:b ex:label "Bob" ; ex:score 11 ; ex:group ex:g1 .
+ex:c ex:label "Carol"@fr ; ex:score 7 ; ex:group ex:g2 .
