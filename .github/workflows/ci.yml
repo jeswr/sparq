@@ -1357,7 +1357,7 @@ jobs:
     # `<WAC|ACP> scenarios pass N / fail M (floor F)` line as the same
     # belt-and-braces `>= floor` gate the SHACL/geo jobs use. Never lower the floor
     # (raise WAC_SCENARIO_FLOOR / ACP_SCENARIO_FLOOR as the corpus grows).
-    name: Solid WAC/ACP conformance (ratchet — wac >= 12, acp >= 12)
+    name: Solid WAC/ACP conformance (ratchet — wac >= 13, acp >= 13)
     # [FABLE-5] sq-fmx4u.3: runs `cargo test -p sparq-solid` AND the
     # sparq-conformance scoreboard bin — skip only when BOTH are unaffected.
     needs: [changes, select]
@@ -1406,8 +1406,9 @@ jobs:
           done
       - name: Enforce ratchet (scenario counts must not regress)
         run: |
-          WAC_FLOOR=12
-          ACP_FLOOR=12
+          # [GPT-5.6] sq-61uvs raised both corpora with control-document vectors.
+          WAC_FLOOR=13
+          ACP_FLOOR=13
           # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "scoreboard
           # never produced" (an infra/compile flake) from a GENUINE regression, so an
           # empty scoreboard is never mis-reported as "regressed below the ratchet".

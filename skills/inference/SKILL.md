@@ -58,6 +58,12 @@ pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id;3]>)
 pub fn materialize_rdfs (dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
 
+// Opt-in `profile` feature: closure growth/time by stable rule group.
+pub fn materialize_profiled(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id;3]>)
+    -> (usize, profile::Report);
+// Pass `profile::Profiler::with_progress(callback)` to `materialize_profiled_with`
+// when progress notifications are required.
+
 // D-entailment (datatype / value-space) — opt-in `d-entail` feature, `sparq_reason::dtype`.
 // rdfD1 datatype-typing under a recognized datatype map; CORRECT TYPED value equality
 // ("1"^^xsd:integer ≡ "1.0"^^xsd:decimal — canonical decimal, NOT an f64 fast path).
@@ -251,6 +257,17 @@ The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typi
 **Value-space equality (the load-bearing invariant):** `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` denote THE SAME value and must compare equal in D-entailment. Integer/decimal are compared as a canonical-decimal STRING (sign + minimal integer/fraction digits), NEVER via f64 (which aliases integers past 2^53 and loses decimal precision — silent bugs in semantic equality). `xsd:float`/`xsd:double` are IEEE value spaces; `xsd:date` and `xsd:dateTime` are disjoint temporal families (even at the same instant).
 
 **Fail-closed posture:** unmapped datatypes are not typed; facet-invalid literals (`"200"^^xsd:byte`, `" a"^^xsd:token`) are rejected before value mapping; `xsd:time`, duration types, and XML datatypes (`rdf:XMLLiteral`) are deferred — tracked in the design record (`research/d-entailment-datatype-map.md` §3.2), never silently mapped. The `Recognized::default()` set carries ONLY the always-recognized `xsd:string` / `rdf:langString` pair — safe to materialize over arbitrary data.
+
+## Quoted-triple (RDF 1.2 reifier) inference (opt-in `quoted-triples` feature) <!-- [Kern] kern/quoted-triple-infer -->
+
+The loaders desugar every RDF 1.2 quotation form (`<< :s :p :o >>`, `:s :p :o ~ :r`, `{| … |}` annotation blocks) to a reifier node `R` with `R rdf:reifies <<( s p o )>>`, the triple term being ONE opaque structural dictionary id. With `features = ["quoted-triples"]`, `materialize(Profile::OwlRl, …)` additionally runs the two **bridge rules** between that shape and the classic reification vocabulary, alternated with the RL closure to their joint fixpoint:
+
+- **reif-dtr (destructure):** `(r rdf:reifies <<( s p o )>>)` ⊢ `(r rdf:type rdf:Statement)`, `(r rdf:subject s)`, `(r rdf:predicate p)`, `(r rdf:object o)` — so domain/range/subPropertyOf/sameAs reasoning reaches the recovered components.
+- **reif-ctr (construct):** `(r rdf:subject s)`, `(r rdf:predicate p)`, `(r rdf:object o)` **and `(s p o)` present in the closure** ⊢ `(r rdf:reifies <<( s p o )>>)`, minting the triple term. Two finiteness guards: only EXISTING triples are ever reified (asserted or derived — never invented), and no component of a constructed triple term may itself be a triple term (quotation-of-a-quotation is never constructed), which keeps the Herbrand base FINITE, materialization terminating AND idempotent (termination argument in `sparq-reason/src/reify.rs`).
+
+**Opacity:** quotation never asserts — `:r rdf:reifies <<( :s :p :o )>>` does NOT entail `:s :p :o` — and no rule rewrites inside a triple term (`owl:sameAs` substitutes whole ids only). Reifier ANNOTATIONS are ordinary triples and get full RL reasoning without touching the quoted content.
+
+**OFF by default** (the bridge is a deliberate, non-normative entailment extension): plain `Profile::OwlRl` closures are byte-identical without the feature, and occurrence-guarded even with it (reify-free data pays nothing). `MaterializedOwlGraph` routes reify-vocabulary bases to its documented Fallback mode (incremental == from-scratch parity preserved). No new `Profile` variant, no new deps.
 
 ## OWL 2 EL classification (`sparq-reason-el`, separate opt-in crate)
 

@@ -511,40 +511,77 @@ fn join_key(row: &[Option<Term>], shared: &[(usize, usize)], from_left: bool) ->
 /// from a solution object is UNBOUND (`None`). An ASK `boolean` body is rejected (this
 /// interpreter only joins SELECT relations). [OPUS-4.8] sq-j27p.
 pub fn parse_srj(text: &str) -> Result<Relation, String> {
-    let v: serde_json::Value =
+    // [GPT-5.6] sq-1rtc2: borrow the document envelope and each binding cell from the input.
+    // Cells outside `head.vars` remain undecoded, matching the previous parser's semantics.
+    let document: SrjDocument<'_> =
         serde_json::from_str(text).map_err(|e| format!("invalid results JSON: {}", e))?;
-    if v.get("boolean").is_some() {
+    if document.boolean.is_some() {
         return Err("endpoint returned an ASK boolean, expected SELECT bindings".to_string());
     }
-    let vars: Vec<String> = v
-        .pointer("/head/vars")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                .collect()
+    let vars = document
+        .head
+        .and_then(|head| head.vars)
+        .map(|vars| {
+            serde_json::from_str::<Vec<&serde_json::value::RawValue>>(vars.get())
+                .map_err(|_| "results JSON missing head.vars".to_string())
+        })
+        .transpose()?
+        .map(|vars| {
+            vars.into_iter()
+                .filter_map(|var| serde_json::from_str::<String>(var.get()).ok())
+                .collect::<Vec<_>>()
         })
         .ok_or_else(|| "results JSON missing head.vars".to_string())?;
 
     let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
-    for sol in v
-        .pointer("/results/bindings")
-        .and_then(|a| a.as_array())
+    for solution in document
+        .results
+        .and_then(|results| results.bindings)
+        .map(|bindings| {
+            serde_json::from_str::<Vec<&serde_json::value::RawValue>>(bindings.get())
+                .map_err(|_| "results JSON missing results.bindings".to_string())
+        })
+        .transpose()?
         .ok_or_else(|| "results JSON missing results.bindings".to_string())?
     {
-        let obj = sol
-            .as_object()
-            .ok_or_else(|| "a solution binding is not a JSON object".to_string())?;
+        let object: std::collections::HashMap<String, &serde_json::value::RawValue> =
+            serde_json::from_str(solution.get())
+                .map_err(|_| "a solution binding is not a JSON object".to_string())?;
         let mut row: Vec<Option<Term>> = Vec::with_capacity(vars.len());
         for var in &vars {
-            match obj.get(var) {
-                Some(cell) => row.push(Some(srj_term(cell)?)),
+            match object.get(var) {
+                Some(cell) => {
+                    let value: serde_json::Value = serde_json::from_str(cell.get())
+                        .map_err(|e| format!("invalid results JSON: {}", e))?;
+                    row.push(Some(srj_term(&value)?));
+                }
                 None => row.push(None),
             }
         }
         rows.push(row);
     }
     Ok(Relation { vars, rows })
+}
+
+#[derive(serde::Deserialize)]
+struct SrjDocument<'a> {
+    #[serde(borrow)]
+    head: Option<SrjHead<'a>>,
+    #[serde(borrow)]
+    results: Option<SrjResults<'a>>,
+    boolean: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct SrjHead<'a> {
+    #[serde(borrow)]
+    vars: Option<&'a serde_json::value::RawValue>,
+}
+
+#[derive(serde::Deserialize)]
+struct SrjResults<'a> {
+    #[serde(borrow)]
+    bindings: Option<&'a serde_json::value::RawValue>,
 }
 
 /// Reconstruct one `oxrdf::Term` from an SRJ binding value object — the inbound counterpart

@@ -1,0 +1,14 @@
+# [FABLE-5] sq-iwulr GOLDEN truth-table: probe within buffer(geom, radius) (geom\tradius\tprobe\ttrue|false)
+# Captured OFFLINE by bench/geo/function-golden/capture.py — DO NOT regenerate in CI.
+# Oracle: GEOS 3.13.1 via shapely 2.1.2 (planar/Cartesian over lon-lat coordinates, CRS84).
+# Captured: 2026-07-12
+sq_big	1.0	POINT(-0.5 5)	true
+sq_big	1.0	POINT(-1.5 5)	false
+sq_big	1.0	POINT(10.5 10.5)	true
+sq_big	1.0	POINT(11 11)	false
+line_diag	0.5	POINT(0.3 0)	true
+line_diag	0.5	POINT(1 0)	false
+pt_a	2.0	POINT(3 3)	true
+pt_a	2.0	POINT(4.5 2)	false
+poly_hole	1.0	POINT(10 10)	false
+mpoly	0.5	POINT(4 4)	false

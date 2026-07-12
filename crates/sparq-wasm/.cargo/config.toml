@@ -1,7 +1,0 @@
-# Select getrandom's browser backend for the wasm target (see Cargo.toml), and
-# enable WASM SIMD128 — a free bundle-size win today (~-3.6% raw, no perf
-# regression; measured by research/hardware/consumer-and-targets.md). It also
-# unlocks LLVM autovectorization and is the prerequisite for the explicit
-# core::simd FILTER kernel that is the highest-reach consumer optimisation.
-[target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '-C', 'target-feature=+simd128']

@@ -33,6 +33,10 @@ use spargebra::Query;
 use sparq_core::dict::TermParts;
 use sparq_core::Graph;
 
+mod distance;
+
+use distance::edit_distance;
+
 /// `rdf:type` — the predicate whose *object* is a class IRI, the one object position
 /// we treat as a vocabulary term (every other object is data, not schema).
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -182,30 +186,6 @@ fn nearest_known(graph: &Graph, iri: &str) -> Vec<String> {
     scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     scored.truncate(MAX_SUGGESTIONS);
     scored.into_iter().map(|(_, iri)| iri).collect()
-}
-
-/// Levenshtein edit distance (two rolling rows). Local names are short, so the
-/// quadratic cost is trivial; no allocation beyond the two rows.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
 }
 
 // ---------------------------------------------------------------------------

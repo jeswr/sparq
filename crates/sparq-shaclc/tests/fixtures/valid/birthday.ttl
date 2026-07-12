@@ -1,0 +1,47 @@
+@prefix bday: <http://localhost:3002/BirthdayShape#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix rel: <http://purl.org/vocab/relationship/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+bday:WorkShape a sh:NodeShape ;
+  sh:targetClass foaf:Person ;
+  sh:property [
+    sh:path [
+      sh:alternativePath (rel:worksWith rel:colleagueOf)
+    ] ;
+    sh:minCount 1 ;
+    sh:node bday:BirthdayShape
+  ] .
+
+bday:BirthdayShape a sh:NodeShape ;
+  sh:targetClass foaf:Person ;
+  sh:property [
+    sh:path foaf:birthday ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:dateTime
+  ] .
+
+bday:PersonalShape a sh:NodeShape ;
+  sh:targetClass foaf:Person ;
+  sh:property [
+    sh:path [
+      sh:alternativePath (rel:friendOf rel:relatedTo)
+    ] ;
+    sh:minCount 1 ;
+    sh:node bday:BirthdayShape
+  ] .
+
+bday:KnowsShape a sh:NodeShape ;
+  sh:targetClass foaf:Person ;
+  sh:property [
+    sh:path [
+      sh:alternativePath (foaf:knows rel:friendOf)
+    ] ;
+    sh:minCount 1 ;
+    sh:node bday:BirthdayShape
+  ] .
+
+<http://localhost:3002/BirthdayShape> a owl:Ontology .

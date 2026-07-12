@@ -35,6 +35,121 @@
 # QUERY — engine compute + differential correctness vs reference engines
 # =============================================================================
 
+# [GPT-5.6] sq-1rg2q M1 — deterministic public-API smoke for the opt-in OO wrapper.
+[[benchmark]]
+id          = "sparq-wrapper-smoke"
+name        = "Rust-native RDF object traversal correctness smoke"
+category    = "conformance"
+measures    = "correctness: outgoing traversal plus typed string access over a fixed two-triple graph; self-asserting, emits wrapper_smoke=ok"
+invoke      = "cargo run -p sparq-wrapper --example wrapper_smoke"
+source      = "crates/sparq-wrapper/examples/wrapper_smoke.rs"
+dataset     = "fixed two-triple Turtle fixture embedded in the example"
+quiet_box_sensitive = false
+pinning     = "fixture and expected value are source-pinned"
+records_to  = "stdout; nonzero exit or assertion panic on mismatch"
+featured    = false
+status      = "ok"
+
+# [GPT-5.6] Flow-on reconciliation for seven merged suite directories that predated a registry
+# disposition. Comparative suites omit `featured`; internal/reference micro-harnesses use the G3
+# escape hatch. The two other flow-on suites (reason-deletion and trust-graph-closure) are already
+# registered elsewhere in this catalog with `featured = false`.
+
+[[benchmark]]
+id          = "reason-ql-e2e"
+name        = "OWL 2 QL end-to-end query answering — sparq vs Ontop"
+category    = "inference"
+measures    = "per case: complete answer count, sparq rewriter-phase milliseconds, sparq rewrite+execute end-to-end milliseconds, and optional gathered Ontop end-to-end milliseconds; no timing row is emitted until answer counts match expected.tsv"
+invoke      = "bash bench/reason-ql-e2e/run.sh --smoke   # omit --smoke for release; set ONTOP_RESULTS=/path/to/ontop.tsv for the competitor column"
+source      = "bench/reason-ql-e2e/{run.sh,expected.tsv,README.md}; crates/sparq-reason-ql/examples/ql_endtoend_bench.rs"
+dataset     = "deterministic embedded NPD/Requiem-shaped TBox, ABox, and conjunctive-query fixtures in ql_endtoend_bench.rs; no redistributed upstream corpus"
+quiet_box_sensitive = true
+pinning     = "committed expected.tsv answer counts + embedded fixtures; Ontop input schema is case/answers/end_to_end_ms and must pass the same answer gate"
+records_to  = "stdout TSV: case/answers/sparq_rewriter_phase_ms/sparq_end_to_end_ms/ontop_end_to_end_ms"
+status      = "ok"
+
+[[benchmark]]
+id          = "hybrid-retrieval"
+name        = "Hybrid-retrieval weighted-RRF reference and ablation gate"
+category    = "query"
+measures    = "deterministic fused ranking, per-arm rank provenance, overlap@k, rank deltas, and relevant@k fused-vs-single-arm ablation verdict over pinned ranking lists"
+invoke      = "bash bench/hybrid-retrieval/run.sh"
+source      = "bench/hybrid-retrieval/{run.sh,analyze.py,README.md,fixtures/rankings.json,fixtures/expected.json}"
+dataset     = "committed synthetic dense/sparse/structural ranking lists with pinned relevance labels"
+quiet_box_sensitive = false
+pinning     = "fixtures/rankings.json inputs + fixtures/expected.json byte-meaning oracle; stable document-id tie-break"
+records_to  = "stdout PASS; analyze.py emits the checked JSON report when run directly"
+status      = "ok"
+featured    = false  # bench-only deterministic reference; no engine/model/network or dashboard performance series
+
+[[benchmark]]
+id          = "builtins"
+name        = "Scalar builtin-cost micro-benchmark"
+category    = "query"
+measures    = "materialized result rows, minimum microseconds, and derived rows/s for constant-pattern REGEX/REPLACE, RAND projection, and query-constant NOW probes; cardinality and timing fields are fail-closed"
+invoke      = "cargo build --release -p sparq-cli && bench/builtins/run.sh   # ROWS/ITERS/CLI/BUILTINS_CACHE are optional"
+source      = "bench/builtins/{run.sh,test.sh,README.md,queries/*.rq}; crates/sparq-cli/src/main.rs (query-suite bench runner)"
+dataset     = "deterministic generated N-Triples corpus under /tmp/sparq-builtin-cost; one string literal row per sequential subject"
+quiet_box_sensitive = true
+pinning     = "pin ROWS, ITERS, CLI revision, and query files; test.sh mutation-witnesses malformed/cardinality/timing output rejection"
+records_to  = "stdout Markdown table; generated corpus and raw scratch results remain outside the checkout"
+status      = "ok"
+featured    = false  # internal scalar-cost trend aid, not a comparative capability card
+
+[[benchmark]]
+id          = "rsp-window-differential"
+name        = "RSP event-time window-content differential vs RSP4J/YASPER"
+category    = "query"
+measures    = "complete canonical solution multiset equality at every report timestamp against a pinned RSP4J/YASPER capture, plus advisory sparq-rsp emit latency per window; a mutation witness proves content differences are rejected"
+invoke      = "bench/rsp-window-differential/run.sh"
+source      = "bench/rsp-window-differential/{run.sh,compare.py,README.md,Cargo.toml,Cargo.lock,src/main.rs,fixtures/*.tsv}"
+dataset     = "fixed timestamped SRBench-shaped stream + committed RSP4J/YASPER event-time golden capture"
+quiet_box_sensitive = true
+pinning     = "fixtures/srbench.ts.tsv + fixtures/rsp4j.golden.tsv + standalone Cargo.lock; comparison is timestamped canonical-multiset equality"
+records_to  = "stdout equality/mutation-witness verdicts + optional RSP_WINDOW_ENVELOPE JSON with per-window emit_latency_ns"
+status      = "ok"
+
+[[benchmark]]
+id          = "jsonld-context"
+name        = "JSON-LD context-processing stage micro-benchmark"
+category    = "parse"
+measures    = "term-count correctness oracles plus context-process/inverse-context elapsed nanoseconds and contexts/s for flat, deep-import, and many-term-vocab shapes"
+invoke      = "bench/jsonld-context/run.sh --smoke   # omit --smoke for the release measurement tier"
+source      = "bench/jsonld-context/{run.sh,Cargo.toml,Cargo.lock,src/main.rs}; crates/sparq-jsonld context implementation"
+dataset     = "deterministic in-process JSON contexts and an in-memory document loader; no network or external corpus"
+quiet_box_sensitive = true
+pinning     = "fixture shapes and expected term counts are fixed in src/main.rs; standalone Cargo.lock pins the build"
+records_to  = "stdout oracle and timing lines; timings are explicitly non-canonical"
+status      = "ok"
+featured    = false  # internal parser-stage micro-benchmark, not the external JSON-LD comparison panel
+
+[[benchmark]]
+id          = "lws-core-readpath"
+name        = "lws-core read-response allocation-path harness"
+category    = "query"
+measures    = "deterministic before/after heap allocation-or-reallocation operation counts and saved/percent-fewer delta after byte-identical header-set assertion"
+invoke      = "bash bench/lws-core-readpath/run.sh --smoke   # --release for the optimized profile"
+source      = "bench/lws-core-readpath/{run.sh,emit_envelope.py,README.md}; crates/sparq-lws-core example read_response_alloc_microbench"
+dataset     = "fixed in-example read-response/header fixture; no external data"
+quiet_box_sensitive = false
+pinning     = "source revision, rustc version, and profile are recorded; envelope validation rejects missing or inconsistent deltas"
+records_to  = "git-ignored bench/lws-core-readpath/results/*.json envelope + stdout"
+status      = "ok"
+featured    = false  # internal allocation instrument, not a capability comparison card
+
+[[benchmark]]
+id          = "shacl-wasm"
+name        = "Browser SHACL same-runtime comparison — sparq-shacl-wasm vs rdf-validate-shacl"
+category    = "query"
+measures    = "per-workload violations/conforms agreement before end-to-end microsecond timing for both engines in one Node process; peer validate-only timing; deterministic wasm/js artifact and gzip-9 byte sizes per toolchain"
+invoke      = "bash bench/shacl-wasm/run.sh --smoke   # gather-only peer npm packages install under /tmp; omit --smoke for best-of-ITERS"
+source      = "bench/shacl-wasm/{run.sh,harness.mjs,README.md,expected.tsv,data/abox.ttl}; bench/shacl/shapes*/; crates/sparq-shacl-wasm"
+dataset     = "vendored hand-countable micro-ABox x the committed bench/shacl Core and SHACL-SPARQL shape workloads"
+quiet_box_sensitive = true
+pinning     = "expected.tsv violation/conforms oracle; wasm-pack and peer package versions recorded in each envelope; both engines execute in the same Node process"
+records_to  = "git-ignored bench/shacl-wasm/results/*.json canonical-competitor-shaped envelope + gated stdout rows"
+status      = "ok"
+
 [[benchmark]]
 id          = "sparq-bench-compare"
 name        = "sparq vs Oxigraph differential + perf"
@@ -60,6 +175,22 @@ dataset     = "synthetic preferential-attachment graph generated in-process (det
 quiet_box_sensitive = true
 featured    = false  # in-crate micro-bench for an opt-in capability crate; not a dashboard series
 pinning     = "generator deterministic (fixed xorshift seed); pin nodes/avg_degree for comparable numbers"
+records_to  = "stdout (metric_us lines); not a committed regression number"
+status      = "ok"
+
+# [FABLE-5] sq-tonhr.6: the opt-in sparq-shaclc SHACL Compact Syntax surface
+# (rdf-shuttle-generated strict/extended parsers + the residual printer).
+[[benchmark]]
+id          = "sparq-shaclc"
+name        = "SHACL Compact Syntax parse + residual-print throughput"
+category    = "scaling"
+measures    = "min-of-3 microseconds for strict parse, extended parse, and residual-print of a generated shapes corpus (metric_us lines)"
+invoke      = "bench/shaclc/run.sh   # use --smoke for a small harness check"
+source      = "bench/shaclc/{run.sh,README.md}; crates/sparq-shaclc/examples/bench_shaclc.rs; crates/sparq-shaclc/src/lib.rs"
+dataset     = "synthetic shapes corpus generated in-process (deterministic; one representative shape per index); args = [shapes=2000]"
+quiet_box_sensitive = true
+featured    = false  # in-crate micro-bench for an opt-in capability crate; not a dashboard series
+pinning     = "generator deterministic; pin the shapes count for comparable numbers"
 records_to  = "stdout (metric_us lines); not a committed regression number"
 status      = "ok"
 
@@ -1831,4 +1962,19 @@ records_to  = "stdout"
 status      = "ok"
 # Internal throughput smoke for the import path, no head-to-head capability claim yet
 # (competitor CSV-import comparisons belong to the sq-hmd7l comparative program).
+featured    = false
+
+# [GPT-5.6] sq-vwnzh — correctness-gated Arrow/tabular export interop panel.
+[[benchmark]]
+id          = "arrow-interop"
+name        = "Arrow/tabular SELECT result export interop — sparq-arrow vs pyoxigraph"
+category    = "query"
+measures    = "exact serialized solution-multiset equality before advisory export latency"
+invoke      = "python3 bench/arrow-interop/test_arrow_interop.py; python3 bench/arrow-interop/arrow_interop.py --sparq-bin target/release/examples/arrow_interop"
+source      = "bench/arrow-interop/; crates/sparq-arrow/examples/arrow_interop.rs; research/gap-arrow-interop-2026-07.md"
+dataset     = "pinned synthetic Turtle fixture with two fixed SELECT workloads"
+quiet_box_sensitive = true
+pinning     = "fixture.ttl + select-all.rq + select-group.rq + expected.tsv committed oracle"
+records_to  = "stdout JSON or --json-out; loose/in-process scope is machine-labelled"
+status      = "implemented"
 featured    = false
