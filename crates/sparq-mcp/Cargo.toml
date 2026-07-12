@@ -35,6 +35,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 # their own transport. [OPUS-4.8]
 default = []
 stdio = []
+# [GPT-5.6] sq-bvkn6: JSON-LD ingest for the Solid resource_put path. OFF by
+# default; forwarding sparq-core's opt-in parser keeps the lean MCP build free of
+# oxjsonld while allowing application/ld+json pod documents when requested.
+jsonld = ["sparq-core/jsonld"]
 # [OPUS-4.8] sq-jxjgr: the opt-in server-side natural-language `ask` tool. OFF by default —
 # it pulls in `sparq-nlq` (and through it the configurable LLM backends), so the default
 # `sparq-mcp` build stays a thin, model-free wrapper exactly as before. The structured

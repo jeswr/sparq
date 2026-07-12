@@ -42,3 +42,4 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 [dev-dependencies]
 # Golden-file tests serialize FormDescription to canonical pretty JSON.
 serde_json = "1"
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }

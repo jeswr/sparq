@@ -254,6 +254,12 @@ required-features = ["approx-ann"]
 name = "sift_ef_sweep"
 required-features = ["approx-ann"]
 
+# [GPT-5.6] sq-0ut5x: the internal matched-recall build Pareto harness compares HNSW with the
+# always-available DiskANN/PQ implementations, so only the HNSW side needs this opt-in feature.
+[[example]]
+name = "pareto_bench"
+required-features = ["approx-ann"]
+
 # [OPUS-4.8] sq-dwdm: the site /surface/vector capture harness exercises the `vec:`
 # magic predicate (query_vec), so it needs `vec-predicate`. Registering the requirement
 # keeps `cargo build --all-targets` (default features) green when the feature is out of

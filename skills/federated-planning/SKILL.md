@@ -58,6 +58,16 @@ enable authority pruning, build via `.builder(..)` and call `.authorities_comple
 only when you truly enumerate every authority the source mints (a HiBISCuS-style
 capability set / `void:uriSpace` declaration).
 
+A descriptor may also carry an **optional GenAI retrieval capability**
+(`RetrievalCapability` — declared vector/text retrieval endpoints + a per-request
+cardinality hint), served under the `sret:` vocab (`http://sparq.dev/ns/retrieval#`,
+`RETRIEVAL_NS`) next to the VoID partitions and round-tripped via
+`RetrievalCapability::to_void_nt` / `from_void_nt`. It defaults to absent
+(`descriptor.retrieval() == None`) and is **advisory planner metadata only**: it may
+reorder source selection in a follow-up, but can never change which triples answer a
+BGP (the same answer-safe discipline as the cardinality estimators). Set it with
+`.retrieval(..)` on the builder.
+
 ## Select sources for a BGP (recall-safe)
 
 ```rust

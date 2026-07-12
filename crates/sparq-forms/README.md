@@ -61,6 +61,10 @@ assert_eq!(field.widget.editor.as_deref(),
 - **Constraints carried per field** — counts, datatypes, classes, node kinds,
   `sh:in` enumerations, pattern/length/range bounds, `sh:or` unions — the
   renderer's live-validation hints (F3) and the widget-scoring inputs.
+- **Pure edit diff** — `FormDiff::between(&before, &after)` reports added and
+  removed RDF terms, while `to_sparql_update` renders them as one SPARQL 1.1
+  `DELETE`/`INSERT` request. It intentionally excludes read-only, inverse,
+  computed, and non-bare-property-path fields.
 - **Headless & opt-in** — consumes `sparq-shacl`'s shapes model; no GUI deps;
   builds for `wasm32-unknown-unknown`; nothing in the default workspace
   depends on it, so the engine core stays lean.
