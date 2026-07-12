@@ -177,8 +177,10 @@ mod gated {
         }
     }
 
+    // [GPT-5.6] Keep the cfg-gated constant in code spans so rustdoc does not resolve it
+    // when this optional lane is disabled (the #926 intra-doc-link trap).
     /// One `distance.tsv` row: degree-unit (planar coordinate-space) distance
-    /// within [`DISTANCE_RTOL`].
+    /// within `DISTANCE_RTOL`.
     fn check_distance_row(
         corpus: &std::collections::BTreeMap<String, String>,
         row: &[String],
