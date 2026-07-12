@@ -1,4 +1,4 @@
-# sparq-arrow (gh-910, beads sq-v78l4 + sq-lsp7k.16): opt-in Apache Arrow columnar
+# sparq-arrow (gh-910, beads sq-v78l4 + sq-lsp7k.16 + sq-lsp7k.21): opt-in Apache Arrow columnar
 # import/export for SPARQL SELECT results. Converts between a sparq-engine `QueryResult`
 # and an Arrow `RecordBatch` for dataframe / analytics interoperability.
 # [OPUS-4.8] [GPT-5.6]
@@ -37,6 +37,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 # off the default workspace build), and the Arrow dependency is opt-in on top of that.
 default = []
 arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
+# [GPT-5.6] Parquet is a second opt-in layer over the Arrow term-struct projection.
+# Enabling it necessarily enables `arrow`; without it, the Parquet dependency is absent.
+parquet = ["arrow", "dep:bytes", "dep:parquet"]
 
 [dependencies]
 # The SELECT result we project (`QueryResult { vars, rows }`). Always present — the
@@ -56,6 +59,12 @@ arrow-schema = { version = "59", optional = true }
 # `NullBuffer` for the per-row struct validity (unbound cells). It is `arrow-array`'s
 # own dependency; named directly because the code references `arrow_buffer::NullBuffer`.
 arrow-buffer = { version = "59", optional = true }
+# Parquet serialization only; the `arrow` feature provides RecordBatch integration.
+# Compression codecs stay disabled so this opt-in surface pulls the narrowest closure.
+parquet = { version = "59", optional = true, default-features = false, features = ["arrow"] }
+# `Bytes` is parquet-rs's in-memory `ChunkReader`; it is optional with Parquet and is
+# already in that dependency's closure.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 # The integration tests (tests/record_batch.rs, `#![cfg(feature = "arrow")]`) drive the

@@ -48,6 +48,9 @@
 //! * This is a **projection for transport**, not a canonical RDF serialisation:
 //!   `from_record_batch` reconstructs terms from the five fields, but the Arrow batch is not
 //!   itself an RDF document.
+//! * With the opt-in `parquet` feature, `to_parquet_bytes` / `from_parquet_bytes`
+//!   serialize and restore this exact RecordBatch projection. Parquet adds a container;
+//!   it does not define a second RDF-term encoding.
 
 /// Struct field name: the term kind — `"uri"`, `"bnode"`, `"literal"`, or `"triple"`.
 pub const FIELD_KIND: &str = "kind";
@@ -80,6 +83,9 @@ mod export;
 #[cfg(feature = "arrow")]
 mod import;
 
+#[cfg(feature = "parquet")]
+mod parquet;
+
 #[cfg(feature = "arrow")]
 #[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub use export::{term_schema, term_struct_type, to_record_batch, ArrowExportError};
@@ -87,3 +93,7 @@ pub use export::{term_schema, term_struct_type, to_record_batch, ArrowExportErro
 #[cfg(feature = "arrow")]
 #[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub use import::{from_record_batch, ArrowError};
+
+#[cfg(feature = "parquet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
+pub use parquet::{from_parquet_bytes, to_parquet_bytes};
