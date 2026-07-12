@@ -11,3 +11,4 @@
 #[cfg(feature = "proposed-typed-focus")]
 pub mod typed_focus;
 #[cfg(feature = "proposed-cardinality")] pub mod cardinality;
+#[cfg(feature = "proposed-codecs")] pub mod codecs;
