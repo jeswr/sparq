@@ -4818,6 +4818,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
+ "proptest",
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
@@ -4904,6 +4905,7 @@ name = "sparq-rsp"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
