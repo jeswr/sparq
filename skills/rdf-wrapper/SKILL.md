@@ -78,6 +78,60 @@ term once ([issue #25](https://github.com/rdfjs/wrapper/issues/25),
 [draft PR #88](https://github.com/rdfjs/wrapper/pull/88)).
 `proposed-cardinality` adds `Node::required_out` / `optional_out` and typed
 `CardinalityError` data ([draft PR #89](https://github.com/rdfjs/wrapper/pull/89)).
+Its `sparq_wrapper::proposed::cardinality` module also adds mapped
+`required`, `optional`, and `many` reads plus the `live_mapped` write-through
+collection ([issue #8](https://github.com/rdfjs/wrapper/issues/8),
+[draft PR #92](https://github.com/rdfjs/wrapper/pull/92)).
+
+Use the mapped reads when a property has an explicit RDF cardinality. The
+required and optional variants wrap M1 `CardinalityError` data in
+`CardinalityViewError`; `many` returns a `Vec`, preserving every distinct RDF
+term even when two terms map to equal Rust values. A mapper error is returned
+without changing the store. <!-- [GPT-5.6] sq-1rg2q.3 -->
+
+```rust
+use oxrdf::{Literal, NamedNode, Term};
+use sparq_wrapper::proposed::cardinality::{live_mapped, required};
+use sparq_wrapper::Store;
+
+let mut store = Store::new();
+let alice = NamedNode::new("http://example.org/alice")?;
+let name = NamedNode::new("http://example.org/name")?;
+let tag = NamedNode::new("http://example.org/tag")?;
+store.insert(
+    alice.clone(),
+    name.clone(),
+    Literal::new_simple_literal("Alice"),
+)?;
+
+let display_name = required(&store.node(alice.clone()), &name, |node| {
+    node.as_str().map(str::to_owned)
+})?;
+assert_eq!(display_name, "Alice");
+
+{
+    let mut tags = live_mapped(
+        &mut store,
+        alice.clone(),
+        tag,
+        |node| node.as_str().map(str::to_owned),
+        |value: &String| Ok::<Term, std::convert::Infallible>(
+            Literal::new_simple_literal(value).into(),
+        ),
+    );
+    assert!(tags.insert(&"rdf".to_owned())?);
+    assert_eq!(tags.values()?, vec!["rdf"]);
+    assert!(tags.remove(&"rdf".to_owned())?);
+    assert!(tags.is_empty());
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`LiveMappedCollection` holds a mutable store borrow for its lifetime. Its
+`values`, `len`, `is_empty`, and `contains` methods query current triples;
+`insert`, `remove`, and `clear` write through. `insert` and `remove` return
+`true` only for an effective graph change. Encoding runs before each mutation,
+so an encoder error leaves all existing triples intact.
 
 `proposed-typed-focus` adds the `sparq_wrapper::proposed::typed_focus` module.
 Its `NodeFactory` binds one borrowed graph, store, or dataset view and can wrap
