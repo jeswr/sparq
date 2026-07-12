@@ -88,6 +88,42 @@ fn narrower_shape(p: &str) -> ShapeRef {
     s
 }
 
+/// An anchor with a negated property shape, plus the broader certificate variant that adds
+/// `sh:datatype` inside the negation. Inside `sh:not`, adding a constraint makes the nested
+/// shape harder to satisfy and therefore makes the outer negation easier to satisfy.
+fn negated_property_shape(p: &str, add_nested_datatype: bool) -> ShapeRef {
+    let root = BlankNode::default();
+    let negated = BlankNode::default();
+    let prop = BlankNode::default();
+    let pred = iri(p);
+    let mut triples = vec![
+        Triple::new(
+            root.clone(),
+            iri("http://www.w3.org/ns/shacl#targetSubjectsOf"),
+            pred.clone(),
+        ),
+        Triple::new(root.clone(), iri("http://www.w3.org/ns/shacl#not"), negated.clone()),
+        Triple::new(negated, iri("http://www.w3.org/ns/shacl#property"), prop.clone()),
+        Triple::new(prop.clone(), iri("http://www.w3.org/ns/shacl#path"), pred),
+        Triple::new(
+            prop.clone(),
+            iri("http://www.w3.org/ns/shacl#minCount"),
+            Literal::new_simple_literal("1"),
+        ),
+    ];
+    if add_nested_datatype {
+        triples.push(Triple::new(
+            prop,
+            iri("http://www.w3.org/ns/shacl#datatype"),
+            iri("http://www.w3.org/2001/XMLSchema#integer"),
+        ));
+    }
+    ShapeRef {
+        root: Term::BlankNode(root),
+        triples,
+    }
+}
+
 /// A shape that ADDS an extra `sh:targetSubjectsOf q` root triple to `predicate_shape(p)`.
 /// Every constraint of `predicate_shape(p)` is present PLUS one more target predicate — an
 /// injective structural SUPERSET of `predicate_shape(p)`. It is a **broadening**, not a
@@ -242,6 +278,35 @@ fn positive_shape_scoped_cert_narrows_to_the_tighter_shape() {
     assert!(
         d.shape.triples.len() > anchor_rule.shape.triples.len(),
         "derived shape is the strictly-tighter cert shape (a narrowing)"
+    );
+}
+
+// [GPT-5.6] sq-wh546 — polarity-sensitive SHACL must fail closed at attenuation.
+#[test]
+fn datatype_added_under_not_is_denied_as_broadening() {
+    let (gov_sk, gov_pk) = keypair(1);
+    let (_iss_sk, iss_pk) = keypair(2);
+    let anchor_rule = anchor(GOV, gov_pk, negated_property_shape(AGE, false), RES);
+    let broadening = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::Shape(negated_property_shape(AGE, true)),
+        NOW - 10,
+        NOW + 10,
+    );
+
+    assert!(
+        matches!(
+            explain_edge(std::slice::from_ref(&anchor_rule), &broadening, NOW, 1),
+            Err(EdgeRejection::Broadening)
+        ),
+        "adding a nested constraint under sh:not broadens the outer shape and must fail closed"
+    );
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&broadening),
     );
 }
 

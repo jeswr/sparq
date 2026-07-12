@@ -445,7 +445,30 @@ fn narrowed_shape(anchor: &ShapeRef, cert_scope: &CertScope) -> Option<ShapeRef>
 /// fail-closed `false`. Splitting the two directions is the `sq-pfae.15` review fix: a
 /// uniform "more edges ⇒ narrower" is unsound because a target edge widens, not narrows.
 fn shape_narrows(cert: &ShapeRef, anchor: &ShapeRef) -> bool {
-    selection_only_shrinks(cert, anchor) && conformance_contains(cert, anchor)
+    // [GPT-5.6] sq-wh546: structural edge containment is sound only for the positive,
+    // conjunctive fragment. Under negation/disjunction/cardinality ceilings, adding an edge
+    // can broaden the represented node set. Until containment models those operators with
+    // their proper polarity, their presence on either side makes narrowing unprovable.
+    polarity_is_monotone(cert)
+        && polarity_is_monotone(anchor)
+        && selection_only_shrinks(cert, anchor)
+        && conformance_contains(cert, anchor)
+}
+
+/// Whether every SHACL operator in `shape` belongs to the fragment where adding a
+/// conformance edge can only remove conforming nodes.
+fn polarity_is_monotone(shape: &ShapeRef) -> bool {
+    !shape.triples.iter().any(|triple| {
+        matches!(
+            triple.predicate.as_str(),
+            "http://www.w3.org/ns/shacl#not"
+                | "http://www.w3.org/ns/shacl#or"
+                | "http://www.w3.org/ns/shacl#xone"
+                | "http://www.w3.org/ns/shacl#maxCount"
+                | "http://www.w3.org/ns/shacl#qualifiedMaxCount"
+                | "http://www.w3.org/ns/shacl#qualifiedValueShape"
+        )
+    })
 }
 
 /// Whether the cert's SELECTION/target set is a SUBSET of the anchor's — the CONTRAVARIANT

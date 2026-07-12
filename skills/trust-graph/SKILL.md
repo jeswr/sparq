@@ -19,6 +19,11 @@ that certifier has **certified**, without me enumerating that issuer myself?"*
 pre-processing: it produces the `Vec<TrustRule>` that the **UNCHANGED** admission gate
 (`sparq_trust::admit`) then consumes exactly as it consumes a hand-authored policy.
 
+Shape-scope narrowing is proven only for the positive conjunctive SHACL fragment. A scope
+or anchor containing `sh:not`, `sh:or`, `sh:xone`, `sh:maxCount`,
+`sh:qualifiedMaxCount`, or `sh:qualifiedValueShape` fails closed as `Broadening`: adding
+structural edges under those operators does not prove that the admitted node set shrank.
+
 ```text
   direct_rules (Control-gated trust:TrustRule anchors)   signed trustx:Certification edges
                                   │                            │
