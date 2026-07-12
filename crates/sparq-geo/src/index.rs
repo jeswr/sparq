@@ -49,6 +49,8 @@
 use crate::literal::GeoGeometry;
 use crate::{geof, vocab};
 use geo::{BoundingRect, Intersects};
+#[cfg(feature = "topology_index")]
+use geo::{PreparedGeometry, Relate};
 use geo_types::Point;
 use oxrdf::{NamedNode, Term};
 use rstar::{Envelope, PointDistance, RTree, RTreeObject, SelectionFunction, AABB};
@@ -693,6 +695,59 @@ impl GeoIndex {
             .map(|item| self.slots[item.idx as usize].as_ref().expect("live slot").literal.clone())
             .collect();
         dedupe(out)
+    }
+
+    /// The distinct indexed geometry literals that satisfy
+    /// `geof:sfWithin(literal, region)` exactly.
+    ///
+    /// This opt-in topology-index path window-scans the region's bounding box,
+    /// prepares the constant region once, and applies the DE-9IM relation to
+    /// each candidate. Unlike [`bbox_candidate_literals`](Self::bbox_candidate_literals),
+    /// the returned set is exact rather than a candidate superset. Empty and
+    /// non-geographic regions return an empty set.
+    #[cfg(feature = "topology_index")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "topology_index")))]
+    pub fn within_region_literals(&self, region: &GeoGeometry) -> Vec<Term> {
+        let rect = match region.geometry.bounding_rect() {
+            Some(rect) => rect,
+            None => return Vec::new(),
+        };
+        if !region.crs.is_geographic() {
+            return Vec::new();
+        }
+
+        // [GPT-5.6] sq-jrdds: prepare the CONSTANT side once per scan. Each
+        // candidate still contributes its own geometry graph, but never rebuilds
+        // the region's topology graph.
+        let prepared_region = PreparedGeometry::from(region.geometry.clone());
+        let window = AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y]);
+        let out = self
+            .tree
+            .locate_in_envelope_intersecting(window)
+            .filter_map(|item| {
+                let entry = self.slots[item.idx as usize].as_ref().expect("live slot");
+                entry
+                    .geometry
+                    .geometry
+                    .relate(&prepared_region)
+                    .is_within()
+                    .then(|| entry.literal.clone())
+            })
+            .collect();
+        dedupe(out)
+    }
+
+    /// The distinct indexed geometry literals that satisfy
+    /// `geof:sfContains(region, literal)` exactly.
+    ///
+    /// This is the constant-first orientation of
+    /// [`within_region_literals`](Self::within_region_literals): Simple Features
+    /// defines `contains(a, b)` as the converse of `within(b, a)`, so both
+    /// methods return the same exact literal set.
+    #[cfg(feature = "topology_index")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "topology_index")))]
+    pub fn contains_region_literals(&self, region: &GeoGeometry) -> Vec<Term> {
+        self.within_region_literals(region)
     }
 }
 
