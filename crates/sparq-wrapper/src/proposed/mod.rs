@@ -1,0 +1,12 @@
+// [FABLE-5] sq-1rg2q: namespace for still-unlanded rdfjs/wrapper proposals.
+
+//! Ports of still-unlanded rdfjs/wrapper proposals, each behind its own
+//! default-off `proposed-*` cargo feature.
+//!
+//! Every submodule here only exists when its feature is enabled; with no
+//! `proposed-*` feature this module is empty and contributes no code. The
+//! typed focus kinds and bound node factories live in the feature-gated
+//! `typed_focus` submodule (cargo feature `proposed-typed-focus`).
+
+#[cfg(feature = "proposed-typed-focus")]
+pub mod typed_focus;
