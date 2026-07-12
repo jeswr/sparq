@@ -37,9 +37,9 @@ module docs on `src/main.rs`.
   tiered PoP: RFC 8705 mTLS cert-bound tokens and HKDF/HMAC DPoP-SK attestation.
 - **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: in-memory
   double, live SPARQ HTTP client, and `object_store` blob backends.
-- **Transport hardening** — HTTP/2 rapid-reset + slowloris guards, request
-  timeouts, body limits, per-connection max-requests, rate limiting, overload
-  shedding.
+- **Transport hardening** — HTTP/2 rapid-reset guards; explicit HTTP/1 header
+  count, aggregate-byte, and slow-header timeout bounds; request timeouts, body
+  limits, per-connection max-requests, rate limiting, and overload shedding.
 - Cargo features (all **off** by default; the default build carries no
   sparq-engine or redis dependency):
   - `embedded-sparq` — the in-process SPARQ engine backend (in-workspace path
