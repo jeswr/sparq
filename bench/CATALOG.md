@@ -71,6 +71,10 @@ conventions first, then a per-category map that points at the registry, then a
 
 Notes on a few that need care:
 
+- **`lws-core-readpath` (`bench/lws-core-readpath`)** wraps the in-crate read-response
+  allocation example and emits validated, git-ignored JSON envelopes; see its
+  [`README.md`](./lws-core-readpath/README.md). [GPT-5.6]
+
 - **`bench/serve` + `bench/memtier` are research SPIKES, not maintained
   regression benchmarks.** Their numbers calibrate research docs; re-run on the
   target hardware before trusting any absolute value.
