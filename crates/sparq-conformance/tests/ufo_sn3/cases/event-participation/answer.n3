@@ -1,0 +1,10 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:event:> .
+
+ex:work ufo:hasParticipant ex:alice;
+    ufo:existsIn ex:w.
+
+ex:alice ufo:participatesIn ex:work;
+    ufo:existsIn ex:w.
+
+ex:aliceAtWork ufo:existsIn ex:w.
