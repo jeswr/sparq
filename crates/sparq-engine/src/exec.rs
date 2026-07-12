@@ -15144,7 +15144,7 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "SUBSTR (non-numeric length)",
-                valid: ("SUBSTR(\"hello\", 1, 3)", "\"hel\""),
+                valid: ("SUBSTR(\"hello\", 1, 4)", "\"hell\""),
                 type_err: "SUBSTR(\"hello\", 1, \"y\")",
                 boundary: None,
             },

@@ -1,0 +1,5 @@
+{
+  "pr": 2216,
+  "date": "2026-07-12",
+  "reason": "[GPT-5.6] sq-kq9ia adds an always-on cross-thread query-cancellation poll to the sparq-engine evaluation path; the feature-OFF wasm byte change is intentional and remains governed separately by the wasm size ratchet."
+}
