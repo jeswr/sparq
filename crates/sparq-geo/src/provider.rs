@@ -136,6 +136,32 @@ impl SpatialProvider for GeoIndexProvider {
         // checks return the SAME keep/drop verdict. [OPUS-4.8]
         self.index.indexed_ids_for(dict_ptr).map(|_| Arc::clone(&self.indexed_ids))
     }
+
+    /// [FABLE-5] (sq-lk3aw.4) EXACT certification for a constant-region containment
+    /// scan: serves `geof:sfWithin(?g, REGION)` / `geof:sfContains(REGION, ?g)` from
+    /// the opt-in topology index ([`GeoIndex::within_region_literals`] — an R-tree
+    /// AABB window scan refined by a prepared-region DE-9IM relate), whose result is
+    /// EXACTLY the indexed literals satisfying the predicate. Equivalence with the
+    /// `geof:` registry semantics is pinned by `tests/topology_index.rs`
+    /// (`assert_exact_for_region` compares the set against per-literal `geof::sf_within`)
+    /// and end-to-end by `tests/exact_pushdown.rs`. Declines (`None`) on an
+    /// unparsable, empty, or non-geographic region — mirroring the `candidates`
+    /// guards — so the engine falls back to the superset + residual-FILTER path.
+    #[cfg(feature = "topology_index")]
+    fn candidates_exact(&self, query: &sparq_engine::SpatialExactQuery) -> Option<Vec<Term>> {
+        match query {
+            sparq_engine::SpatialExactQuery::WithinRegion { region_wkt } => {
+                let g = crate::parse_wkt_literal(region_wkt).ok()?;
+                // A non-geographic or empty region shares no window with the index's
+                // geographic entries: DECLINE rather than certify an empty set the
+                // exact `geof:` check might disagree with on edge cases.
+                if !g.crs.is_geographic() || geo::BoundingRect::bounding_rect(&g.geometry).is_none() {
+                    return None;
+                }
+                Some(self.index.within_region_literals(&g))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

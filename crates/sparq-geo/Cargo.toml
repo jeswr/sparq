@@ -56,7 +56,12 @@ default = ["engine"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
 geosparql_rewrite = ["engine"]
 reproject = ["dep:proj4rs"]
-topology_index = []
+# [FABLE-5] (sq-lk3aw.4) topology_index also lights the ENGINE's exact-candidate seam
+# (weak feature: only when the optional sparq-engine dep is in the graph), so
+# `GeoIndexProvider::candidates_exact` can certify the exact set and the engine can
+# skip the residual DE-9IM FILTER for certified rows. Without `engine`, the pure
+# geometry library gets the index-level refinement only.
+topology_index = ["sparq-engine?/spatial-exact-pushdown"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

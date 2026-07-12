@@ -84,7 +84,7 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   asserted triples there), so default SPARQL semantics never change. A conformance
   ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
 - **R-tree `GeoIndex`** — packed-STR `rstar` build over all graphs, with antimeridian-safe windows,
-  incremental `apply_delta`, and opt-in prepared exact region scans via `topology_index`.
+  incremental `apply_delta`, and opt-in prepared exact region scans via `topology_index` — which also certifies exact constant-region `sfWithin`/`sfContains` sets to the engine (`candidates_exact`), letting it skip the residual DE-9IM FILTER for indexed rows (sq-lk3aw.4).
 - **Constant-geometry parse + prepared-relate caching** — geometry arguments resolve
   through a small bounded per-thread cache keyed by the exact lexical form: a constant
   `FILTER` polygon is parsed once per thread, not once per row (sq-lkrgi), and the

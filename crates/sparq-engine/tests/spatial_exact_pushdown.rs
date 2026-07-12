@@ -359,6 +359,33 @@ fn declining_exact_certification_falls_back_to_the_superset_path() {
     }
 }
 
+/// A pre-existing provider that never heard of `candidates_exact` (does NOT override
+/// the default) keeps working unchanged: the ADDITIVE default declines, the superset
+/// path runs, answers identical — the trait extension is backwards-compatible.
+#[test]
+fn provider_without_candidates_exact_inherits_the_declining_default() {
+    struct SupersetOnly(DiamondProvider);
+    impl SpatialProvider for SupersetOnly {
+        fn candidates(&self, q: &SpatialQuery) -> Option<Vec<Term>> {
+            self.0.candidates(q)
+        }
+        fn is_indexed(&self, term: &Term) -> bool {
+            self.0.is_indexed(term)
+        }
+        // Deliberately NOT overriding `candidates_exact` -> the default `None`.
+    }
+    let g = mixed_graph();
+    let inner = DiamondProvider::new(&g, INDEXED, true, false);
+    let superset_calls = inner.superset_calls.clone();
+    let (rows, _, checks_pushed) = differential(&g, &q_within(), Arc::new(SupersetOnly(inner)));
+    assert_eq!(
+        subjects(&rows),
+        vec!["<http://ex/i0>", "<http://ex/i1>", "<http://ex/u_in>"]
+    );
+    assert!(superset_calls.load(Ordering::Relaxed) >= 1);
+    assert!(checks_pushed >= 1, "no certification -> the residual FILTER always runs");
+}
+
 /// The certified-exact restriction also EXCLUDES indexed rows outside the certified
 /// set before the residual runs: on the mixed corpus the pushed residual judges only
 /// the survivors (2 not-indexed rows), never the excluded indexed ones.
