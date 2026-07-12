@@ -936,6 +936,20 @@ pub(crate) async fn serve_read<S: Store>(
                 Ok((StatusCode::PARTIAL_CONTENT, out).into_response())
             }
         }
+        // [GPT-5.6] Multipart byte-range response emission.
+        RangeOutcome::Multipart(ranges) => {
+            let multipart = Bytes::from(range::encode_multipart(&body, &content_type, &ranges));
+            set_str(
+                &mut out,
+                header::CONTENT_TYPE,
+                &format!(
+                    "multipart/byteranges; boundary={}",
+                    range::MULTIPART_BOUNDARY
+                ),
+            );
+            set_u64(&mut out, header::CONTENT_LENGTH, multipart.len() as u64);
+            Ok((StatusCode::PARTIAL_CONTENT, out, multipart).into_response())
+        }
         RangeOutcome::Full => {
             set_u64(&mut out, header::CONTENT_LENGTH, total_len);
             if with_body {
