@@ -1,0 +1,67 @@
+# sparq-wrapper
+
+Rust-native RDF object traversal over `sparq-core`: bind a focus term to a
+store, follow predicates, and convert literal values without handling raw
+dictionary IDs or triples. The crate is opt-in; `sparq-core` and
+`sparq-engine` do not depend on it.
+
+> Model: GPT-5.6 [GPT-5.6] (sq-1rg2q M1).
+
+## 🚀 Quickstart
+
+```rust
+use oxrdf::NamedNode;
+use sparq_core::Graph;
+use sparq_wrapper::Store;
+
+let graph = Graph::load_str(
+    "@prefix ex: <http://example.org/> . ex:alice ex:knows ex:bob . ex:bob ex:name \"Bob\" .",
+    "turtle",
+)?;
+let store = Store::borrowed(&graph);
+let alice = NamedNode::new("http://example.org/alice")?;
+let knows = NamedNode::new("http://example.org/knows")?;
+let name = NamedNode::new("http://example.org/name")?;
+
+let bob = store.node(alice).out(&knows).next().expect("friend");
+assert_eq!(bob.out(&name).next().expect("name").as_str()?, "Bob");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Use `Store::borrowed(&graph)` for a read-only wrapper, or
+`Store::owned(graph)` / `Store::new()` when the wrapper should own and mutate
+the graph. A `Node<'a>` borrows the graph, owns its focus `Term`, and cannot
+outlive or overlap a mutable borrow of its store. Reacquire nodes after writes.
+Traversal is currently over the default graph; use `node.dataset().graph()` as
+the explicit raw-graph escape hatch.
+
+## ✨ Features
+
+- `.out(&predicate)` and `.r#in(&predicate)` return exact-size Rust iterators
+  of wrapped nodes; `.values()` unwraps a traversal to RDF terms. The raw
+  identifier is Rust's required spelling for a method named `in`.
+- `as_str`, `as_i64`, `as_bool`, and `as_typed_literal` validate the RDF
+  datatype and return typed `Result` errors.
+- Owned stores expose predicate-typed insert/remove operations; borrowed
+  stores reject mutation with `StoreError::Borrowed`.
+- `proposed-distinct` adds distinct dataset helpers based on rdfjs/wrapper
+  issue #25 and draft PR #88. This proposal is not landed upstream.
+- `proposed-cardinality` adds required/optional singular traversal with typed
+  cardinality errors based on rdfjs/wrapper draft PR #89. This proposal is not
+  landed upstream.
+- All crate features are off by default, and the dependency on `sparq-core`
+  disables its default features to keep this capability isolated.
+
+## 📚 Learn more
+
+- [`skills/rdf-wrapper/SKILL.md`](../../skills/rdf-wrapper/SKILL.md) — usage
+  recipes and the feature matrix.
+- [rdfjs/wrapper](https://github.com/rdfjs/wrapper) — object-mapping prior art.
+- [Grapoi](https://github.com/rdf-ext/grapoi) and
+  [Clownface](https://github.com/zazuko/clownface) — traversal ergonomics.
+- SHACL-to-Rust object generation is decomposed after M1; `sparq-shacl` and
+  `sparq-forms` provide the in-repo shape model and derivation precedents.
+
+## License
+
+MIT — see the workspace root `LICENSE`.

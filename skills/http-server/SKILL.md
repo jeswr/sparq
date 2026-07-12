@@ -13,6 +13,16 @@ with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; se
 content negotiation, hardening guards, Prometheus `/metrics`, WebSocket + SSE subscriptions,
 and opt-in time-travel + GeoSPARQL.
 
+Build with the default-off `response-compression` feature to negotiate gzip or zstd for outbound
+result bodies from `Accept-Encoding`. Compression is transport-transparent and streaming; SSE
+subscription responses and bodies that already have a `Content-Encoding` are left uncompressed:
+
+```sh
+cargo run -p sparq-server --features response-compression
+curl --compressed -G http://127.0.0.1:3030/sparql \
+  --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }'
+```
+
 ## Quickstart
 
 Run the binary (server stack is the default-on `server` feature):

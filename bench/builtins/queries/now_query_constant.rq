@@ -1,0 +1,4 @@
+# [GPT-5.6] Materialization observes the query-constant NOW projection for every input row.
+SELECT ?s (NOW() AS ?instant) WHERE {
+  ?s <urn:value> ?value .
+}

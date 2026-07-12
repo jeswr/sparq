@@ -1,7 +1,7 @@
 //! [OPUS-4.8] sq-t58w.6 — the **single reusable source** for the WAC/ACP parity corpus.
 //!
 //! The scenario corpus (the `AclBuilder`/`AcrBuilder`-emitted `.acl`/`.acr` data + the
-//! `Expect` decision tables, 12 WAC + 12 ACP) lived inline in `conformance_wac.rs` /
+//! `Expect` decision tables, 13 WAC + 13 ACP) lived inline in `conformance_wac.rs` /
 //! `conformance_acp.rs`. It is extracted here, unchanged, so it is reachable by a SECOND
 //! integration-test target without copy-paste — the differential oracle (`sq-t58w.7`,
 //! `tests/differential_oracle.rs`) consumes the IDENTICAL scenarios. "One corpus, two
@@ -32,9 +32,9 @@ pub use acp::acp_corpus;
 pub use wac::wac_corpus;
 
 /// The agreed scenario floors (the guard the parity tests assert and the differential
-/// oracle inherits): 12 WAC + 12 ACP minimal-per-construct scenarios.
-pub const WAC_SCENARIO_FLOOR: usize = 12;
-pub const ACP_SCENARIO_FLOOR: usize = 12;
+/// oracle inherits): 13 WAC + 13 ACP minimal-per-construct scenarios.
+pub const WAC_SCENARIO_FLOOR: usize = 13;
+pub const ACP_SCENARIO_FLOOR: usize = 13;
 
 /// Test WebIDs / origins shared by both corpora. Kept here so the two corpus modules — and
 /// any second consumer — name the same principals.

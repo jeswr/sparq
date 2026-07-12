@@ -217,6 +217,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # closures, so the LIBRARY stays decoupled — `sparq-sim` is a test/example dependency
 # only and never enters the published dependency graph.
 [dev-dependencies]
+proptest = "1"
 sparq-sim = { path = "../sparq-sim" }
 # [OPUS-4.8] sq-wlzi: DEV-only. The id-keyed-staleness-contract test (tests/staleness_contract.rs)
 # demonstrates the SOUND serving path — persist the build graph with `Graph::save`, reopen it with
@@ -240,6 +241,12 @@ rayon = { workspace = true }
 # OPTIONAL runtime dep (the `provider`/`embeddings` features) — listing it here makes it
 # available to the test targets in BOTH feature states, independent of those features.
 serde_json = "1"
+
+# [GPT-5.6] sq-lyf31: the codebook algebra property test exercises the opt-in
+# structure surface, so Cargo must skip that integration target in lean builds.
+[[test]]
+name = "proptest_quant"
+required-features = ["structure"]
 
 # [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
 # approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)

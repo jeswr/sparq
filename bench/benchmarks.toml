@@ -35,6 +35,21 @@
 # QUERY — engine compute + differential correctness vs reference engines
 # =============================================================================
 
+# [GPT-5.6] sq-1rg2q M1 — deterministic public-API smoke for the opt-in OO wrapper.
+[[benchmark]]
+id          = "sparq-wrapper-smoke"
+name        = "Rust-native RDF object traversal correctness smoke"
+category    = "conformance"
+measures    = "correctness: outgoing traversal plus typed string access over a fixed two-triple graph; self-asserting, emits wrapper_smoke=ok"
+invoke      = "cargo run -p sparq-wrapper --example wrapper_smoke"
+source      = "crates/sparq-wrapper/examples/wrapper_smoke.rs"
+dataset     = "fixed two-triple Turtle fixture embedded in the example"
+quiet_box_sensitive = false
+pinning     = "fixture and expected value are source-pinned"
+records_to  = "stdout; nonzero exit or assertion panic on mismatch"
+featured    = false
+status      = "ok"
+
 [[benchmark]]
 id          = "sparq-bench-compare"
 name        = "sparq vs Oxigraph differential + perf"
@@ -1831,4 +1846,19 @@ records_to  = "stdout"
 status      = "ok"
 # Internal throughput smoke for the import path, no head-to-head capability claim yet
 # (competitor CSV-import comparisons belong to the sq-hmd7l comparative program).
+featured    = false
+
+# [GPT-5.6] sq-vwnzh — correctness-gated Arrow/tabular export interop panel.
+[[benchmark]]
+id          = "arrow-interop"
+name        = "Arrow/tabular SELECT result export interop — sparq-arrow vs pyoxigraph"
+category    = "query"
+measures    = "exact serialized solution-multiset equality before advisory export latency"
+invoke      = "python3 bench/arrow-interop/test_arrow_interop.py; python3 bench/arrow-interop/arrow_interop.py --sparq-bin target/release/examples/arrow_interop"
+source      = "bench/arrow-interop/; crates/sparq-arrow/examples/arrow_interop.rs; research/gap-arrow-interop-2026-07.md"
+dataset     = "pinned synthetic Turtle fixture with two fixed SELECT workloads"
+quiet_box_sensitive = true
+pinning     = "fixture.ttl + select-all.rq + select-group.rq + expected.tsv committed oracle"
+records_to  = "stdout JSON or --json-out; loose/in-process scope is machine-labelled"
+status      = "implemented"
 featured    = false

@@ -16,7 +16,7 @@ use rand::rngs::StdRng;
 // [OPUS-4.8] sq-8xug: `random_range` moved from `Rng` to `RngExt` in rand 0.10.
 use rand::{RngExt, SeedableRng};
 use sparq_core::Graph;
-use sparq_text::TextIndex;
+use sparq_text::{Analyzer, TextIndex};
 
 const WORDS: &[&str] = &[
     "quick",
@@ -153,6 +153,70 @@ fn reconcile_equals_rebuilt_across_random_growth() {
             "round {round}: idempotent reconcile added docs"
         );
         assert_eq!(index, rebuilt);
+    }
+}
+
+#[test]
+fn reconcile_preserves_cjk_analyzer_across_random_growth() {
+    // [GPT-5.6] sq-halqn: reconcile must use the analyzer selected at build time
+    // for every appended literal, not silently fall back to Unicode tokenization.
+    let mut rng = StdRng::seed_from_u64(0xc1a0_6e5e);
+    let mut graph = Graph::load_str(
+        r#"<http://ex/seed> <http://ex/comment> "東京都に住む" .
+<http://ex/separated> <http://ex/comment> "京都の東" ."#,
+        "ntriples",
+    )
+    .unwrap();
+    let mut index = TextIndex::build_with_analyzer(&graph, Analyzer::CjkNgram);
+    assert_eq!(index.analyzer(), Analyzer::CjkNgram);
+
+    const CJK_TEXT: &[&str] = &[
+        "東京湾を望む",
+        "京都府を訪問",
+        "北京の東門",
+        "大阪市の資料",
+        "南京東京街",
+        "東の京都案内",
+    ];
+
+    for round in 0..24 {
+        let batch_len = rng.random_range(1..=6);
+        let inserts: Vec<[Term; 3]> = (0..batch_len)
+            .map(|item| {
+                let text = CJK_TEXT[rng.random_range(0..CJK_TEXT.len())];
+                [
+                    Term::NamedNode(NamedNode::new_unchecked(format!(
+                        "http://ex/growth/{round}/{item}"
+                    ))),
+                    Term::NamedNode(NamedNode::new_unchecked("http://ex/comment")),
+                    Term::Literal(Literal::new_simple_literal(format!(
+                        "{text} 第{round}-{item}号"
+                    ))),
+                ]
+            })
+            .collect();
+        graph.apply_delta(&inserts, &[]).unwrap();
+
+        assert!(
+            index.reconcile(&graph) > 0,
+            "round {round}: no CJK document added"
+        );
+        assert_eq!(
+            index.analyzer(),
+            Analyzer::CjkNgram,
+            "round {round}: reconcile changed the configured analyzer"
+        );
+
+        let rebuilt = TextIndex::build_with_analyzer(&graph, Analyzer::CjkNgram);
+        assert_eq!(
+            index, rebuilt,
+            "round {round}: reconciled CJK index != rebuild"
+        );
+        assert_eq!(
+            index.search("東京"),
+            rebuilt.search("東京"),
+            "round {round}: reconciled CJK bigram query != rebuild"
+        );
     }
 }
 

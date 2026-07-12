@@ -58,6 +58,12 @@ pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id;3]>)
 pub fn materialize_rdfs (dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
 
+// Opt-in `profile` feature: closure growth/time by stable rule group.
+pub fn materialize_profiled(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id;3]>)
+    -> (usize, profile::Report);
+// Pass `profile::Profiler::with_progress(callback)` to `materialize_profiled_with`
+// when progress notifications are required.
+
 // D-entailment (datatype / value-space) — opt-in `d-entail` feature, `sparq_reason::dtype`.
 // rdfD1 datatype-typing under a recognized datatype map; CORRECT TYPED value equality
 // ("1"^^xsd:integer ≡ "1.0"^^xsd:decimal — canonical decimal, NOT an f64 fast path).
