@@ -26,6 +26,13 @@
   features: "count-enforcement"
   test: true
 
+# [GPT-5.6] sq-mu4au: the decision-report integration test is entirely gated by
+# this default-OFF feature, so execute it explicitly in the opt-in matrix.
+- name: "sparq-policy (decision-report)"
+  crate: "sparq-policy"
+  features: "decision-report"
+  test: true
+
 # [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4): the sparq security-property
 # ODRL PROFILE in sparq-policy — the `secx:requires…` leftOperands made
 # first-class. The whole `secprop` module (Rust constants + leftOperand→

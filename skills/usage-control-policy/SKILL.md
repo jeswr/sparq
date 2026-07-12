@@ -187,6 +187,25 @@ assert!(!evaluate_and_exercise(&policy, &req, &store).allow); // 4th: limit reac
 
 ## Static conflict + containment analysis (request-free) — [OPUS-4.8] sq-zabv
 
+## Decision reports (opt-in `decision-report`) — [GPT-5.6] sq-mu4au
+
+Enable `sparq-policy`'s default-off `decision-report` feature to aggregate already-computed
+decisions without re-running or changing authorization. Supply the request action beside each
+`Decision`; the report sorts action buckets and emits byte-stable compact JSON.
+
+```rust,ignore
+use sparq_policy::report::DecisionReport;
+
+let decisions = [(request.action.as_str(), &decision)];
+let report = DecisionReport::summarize(decisions);
+assert_eq!(report.permitted + report.denied, report.total);
+let stable_json = report.to_json();
+```
+
+`conflicts` counts denials whose completed decision contains `evaluate`'s canonical
+matching-prohibition audit explanation. The helper is read-only and never makes or re-derives
+an allow/deny decision.
+
 Where `evaluate` answers *"may THIS request go through?"*, two **request-free** functions answer questions about the policies themselves (the query-containment comparison semantics, [arXiv 2509.05139 §comparison](https://arxiv.org/html/2509.05139v1)). Both are always compiled (no feature, no deps) and both are **sound / fail-closed — never over-claimed**.
 
 ```rust,ignore
