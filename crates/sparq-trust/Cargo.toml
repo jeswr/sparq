@@ -15,6 +15,10 @@ readme = "README.md"
 # signature but does NOT deliver unlinkable/anonymous presentation. NOT published.
 publish = false
 
+[[example]]
+name = "admission_cost"
+required-features = ["cert-graph"]
+
 # [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg.
 [package.metadata.docs.rs]
 all-features = true

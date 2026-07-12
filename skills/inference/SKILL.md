@@ -457,7 +457,7 @@ let g = Graph::from_parts(dict, triples);
 # Ok::<(), String>(())
 ```
 
-**2. Notation3 rules + facts in one document → entailed ground triples.** The rules and data live in the same N3 source; only ground facts survive the closure.
+**2. Notation3 rules + facts in one document → entailed ground triples.** The rules and data live in the same N3 source; only ground facts survive the closure. RDF 1.2 quoted-triple TERMS (`<< s p o >>` / `<<( s p o )>>`) are first-class in rule bodies AND heads: premises match them structurally (variables inside the quotation bind, nesting included), heads derive them, and `reason_n3` interns ground triple terms via the Dict's content-addressed RDF 1.2 triple-term path (GH #2012; outside the `compiled-rules` subset and the incremental counting profile — both fall back to the text engine).
 
 ```rust
 use sparq_core::dict::Dict;
