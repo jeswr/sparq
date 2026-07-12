@@ -5129,6 +5129,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-wac-oracle"
+version = "0.1.0"
+dependencies = [
+ "sparq-core",
+ "sparq-solid",
+]
+
+[[package]]
 name = "sparq-wasm"
 version = "0.1.0"
 dependencies = [
