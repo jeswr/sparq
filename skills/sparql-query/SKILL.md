@@ -210,6 +210,19 @@ assert!(paths.iter().all(|path| path.nodes.len() == path.edges.len() + 1));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+The same feature exposes a dedicated non-standard query form through `query_paths` and
+`explain_paths`. It is intentionally rejected by the ordinary `query` entry point:
+
+```rust
+let result = sparq_engine::query_paths(&g,
+    "PREFIX ex: <http://ex/> PATHS SHORTEST START ?s = ex:alice END ?e = ex:bob VIA ex:knows")?;
+// Columns: ?s ?e ?pathIndex ?hopIndex ?node ?edge; one row per traversed hop.
+let plan = sparq_engine::explain_paths(&g,
+    "PREFIX ex: <http://ex/> PATHS SHORTEST START ?s = ex:alice END ?e = ex:bob VIA ex:knows")?;
+assert!(plan.starts_with("Paths mode=shortest"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 **RDF 1.2 triple terms** (`<<( s p o )>>`) — stored structurally; patterns with variables
 inside the triple term match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
 this workspace). In Turtle/TriG you can write the reified triple `<< s p o >>` (the
