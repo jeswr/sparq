@@ -33,9 +33,42 @@
     "memory-exhaustion DoS) are BOTH recorded below as `exploitable` (NOT not_affected): sparq's own",
     "RDF/XML parse paths are on the patched 0.41, but the transitive quick-xml 0.37.5 pinned by the",
     "oxigraph 0.5.x stack IS reachable when oxigraph parses untrusted RDF/XML and has no fixed",
-    "upstream release yet. Both are fixed by the same upgrade (>= 0.41.0)."
+    "upstream release yet. Both are fixed by the same upgrade (>= 0.41.0).",
+    "[GPT-5.6] sq-cx4w2: RUSTSEC-2024-0436 records that paste is unmaintained, not a",
+    "vulnerability. parquet 59 reintroduces it for sparq-arrow's default-OFF parquet feature;",
+    "remove the deny ignore and matching VEX statement together when parquet drops paste."
   ],
   "vulnerabilities": [
+    {
+      "id": "RUSTSEC-2024-0436",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2024-0436"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "RustSec"
+          },
+          "severity": "none"
+        }
+      ],
+      "description": "paste is archived and no longer maintained. This is an informational maintenance-status advisory: it reports no vulnerability, CVE, or known exploit.",
+      "detail": "[GPT-5.6] parquet 59 pulls paste 1.0.15 transitively for sparq-arrow's separate default-OFF parquet feature. parquet currently publishes no paste-free release, so sparq cannot remove this transitive crate without dropping the requested Parquet capability.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "response": [
+          "will_not_fix"
+        ],
+        "detail": "The advisory describes project maintenance status rather than vulnerable behavior, so there is no exploit path to reach. The proc macro is present only while compiling the opt-in parquet dependency closure and is absent from default sparq-arrow, lean core, and WebAssembly builds. Follow-up bead sq-cx4w2 tracks parquet upstream; remove this statement and the matching deny.toml ignore together once parquet drops paste."
+      },
+      "affects": [
+        {
+          "ref": "pkg:cargo/sparq"
+        }
+      ]
+    },
     {
       "id": "RUSTSEC-2025-0134",
       "source": {

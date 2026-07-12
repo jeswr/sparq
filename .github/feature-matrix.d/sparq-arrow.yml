@@ -31,3 +31,11 @@
   crate: "sparq-arrow"
   features: "arrow"
   test: true
+
+# [GPT-5.6] sq-lsp7k.21: the Parquet byte round-trip is a separate default-OFF
+# feature. Its two integration suites are cfg-gated on `parquet`, so this leg is
+# their required CI executor and also clippies the complete optional closure.
+- name: "sparq-arrow (parquet — in-memory byte round-trip)"
+  crate: "sparq-arrow"
+  features: "parquet"
+  test: true

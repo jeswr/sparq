@@ -106,9 +106,19 @@ criteria = "safe-to-deploy"
 version = "59.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.arrow-ipc]]
+version = "59.0.0"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
 [[exemptions.arrow-schema]]
 version = "59.0.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.arrow-select]]
+version = "59.0.0"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.async-compression]]
 version = "0.4.42"
@@ -421,6 +431,11 @@ criteria = "safe-to-run"
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.flatbuffers]]
+version = "25.12.19"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.flate2]]
 version = "1.1.9"
@@ -966,6 +981,16 @@ criteria = "safe-to-deploy"
 version = "0.9.12"
 criteria = "safe-to-deploy"
 
+[[exemptions.parquet]]
+version = "59.0.0"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
+[[exemptions.paste]]
+version = "1.0.15"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
 [[exemptions.peg]]
 version = "0.5.7"
 criteria = "safe-to-deploy"
@@ -1286,6 +1311,11 @@ criteria = "safe-to-deploy"
 version = "1.0.28"
 criteria = "safe-to-deploy"
 
+[[exemptions.seq-macro]]
+version = "0.3.6"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
 [[exemptions.serde_json]]
 version = "1.0.150"
 criteria = "safe-to-deploy"
@@ -1549,6 +1579,11 @@ criteria = "safe-to-deploy"
 [[exemptions.tungstenite]]
 version = "0.29.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.twox-hash]]
+version = "2.1.2"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.typenum]]
 version = "1.20.1"
