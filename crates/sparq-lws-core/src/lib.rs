@@ -48,6 +48,11 @@ pub mod app;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[path = "app_wasm.rs"]
 pub mod app;
+// [GPT-5.6] Compile the portable implementation in native unit tests so the native coverage
+// ratchet directly exercises the exact wasm router source without changing native runtime exports.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "app_wasm.rs"]
+mod app_wasm_native_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod auth;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
@@ -55,6 +60,9 @@ pub mod auth;
 pub mod auth;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod auth_cache;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "auth_wasm.rs"]
+mod auth_wasm_native_tests;
 pub mod authz;
 pub mod body_limit;
 pub mod error;

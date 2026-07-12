@@ -67,3 +67,51 @@ async fn ensure_host_identity(mut request: Request, next: Next) -> Response {
     }
     next.run(request).await
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::{build_router, AppState};
+    use crate::ldp::handler::LdpState;
+    use crate::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient};
+
+    fn ldp_state() -> LdpState<CompositeStore<InMemorySparqClient, InMemoryBlobStore>> {
+        let store = CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new());
+        LdpState::new(store, "https://pod.example")
+    }
+
+    // [GPT-5.6] Direct native coverage witness for the portable public constructor.
+    #[test]
+    fn app_state_new_preserves_ldp_state() {
+        let state = AppState::new(ldp_state());
+
+        assert_eq!(state.ldp.base_url(), "https://pod.example");
+    }
+
+    // [GPT-5.6] Direct native coverage witness for the portable public router builder.
+    #[tokio::test]
+    async fn build_router_mounts_ldp_methods() {
+        let response = build_router(AppState::new(ldp_state()))
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router service is infallible");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response
+            .headers()
+            .get(header::ALLOW)
+            .expect("OPTIONS response advertises methods")
+            .to_str()
+            .expect("Allow is ASCII")
+            .contains("GET"));
+    }
+}
