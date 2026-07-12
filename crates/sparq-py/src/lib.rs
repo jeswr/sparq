@@ -49,10 +49,10 @@
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
+use spargebra::{Query, SparqlParser};
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph as CoreGraph;
 use sparq_text::TextIndex;
-use spargebra::{Query, SparqlParser};
 
 #[cfg(feature = "arrow")]
 mod arrow_export;
@@ -147,7 +147,11 @@ impl Term {
             "triple" => self.value.clone(), // already rendered as << s p o >>
 
             _ => {
-                let v = self.value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                let v = self
+                    .value
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n");
                 if let Some(lang) = &self.language {
                     // [OPUS-4.8] sq-bj7o: a directional language string renders as
                     // `"v"@lang--dir` (the RDF 1.2 / Turtle surface form).
@@ -163,6 +167,142 @@ impl Term {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_n3_literal_with_escaping() {
+        // Test that backslash, double-quote, and newline are escaped exactly
+        let term = Term {
+            kind: "literal".into(),
+            value: "line1\nline2\\value\"quoted".into(),
+            language: None,
+            datatype: Some(XSD_STRING.into()),
+            direction: None,
+        };
+        let result = term.n3();
+        // Expected: backslash → \\, quote → \", newline → \n
+        assert_eq!(result, "\"line1\\nline2\\\\value\\\"quoted\"");
+    }
+
+    #[test]
+    fn test_n3_literal_with_language_and_direction() {
+        // Test lang + direction form: "@lang--dir"
+        let term = Term {
+            kind: "literal".into(),
+            value: "hello".into(),
+            language: Some("en".into()),
+            datatype: Some("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into()),
+            direction: Some("ltr".into()),
+        };
+        let result = term.n3();
+        assert_eq!(result, "\"hello\"@en--ltr");
+    }
+
+    #[test]
+    fn test_n3_literal_with_language_only() {
+        // Test language-tagged form without direction: "@lang"
+        let term = Term {
+            kind: "literal".into(),
+            value: "hello".into(),
+            language: Some("fr".into()),
+            datatype: Some("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into()),
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, "\"hello\"@fr");
+    }
+
+    #[test]
+    fn test_n3_literal_with_custom_datatype() {
+        // Test custom datatype form: "v"^^<dt>
+        let term = Term {
+            kind: "literal".into(),
+            value: "42".into(),
+            language: None,
+            datatype: Some("http://www.w3.org/2001/XMLSchema#integer".into()),
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+    }
+
+    #[test]
+    fn test_n3_literal_xsd_string_datatype_suppressed() {
+        // Test that xsd:string datatype is suppressed in rendering
+        let term = Term {
+            kind: "literal".into(),
+            value: "plain text".into(),
+            language: None,
+            datatype: Some(XSD_STRING.into()),
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, "\"plain text\"");
+        // Verify that ^^< is NOT in the result
+        assert!(!result.contains("^^<"));
+    }
+
+    #[test]
+    fn test_n3_literal_plain_no_datatype() {
+        // Test plain literal (no datatype specified, None)
+        let term = Term {
+            kind: "literal".into(),
+            value: "plain literal".into(),
+            language: None,
+            datatype: None,
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, "\"plain literal\"");
+    }
+
+    #[test]
+    fn test_n3_uri_wrapped_in_angle_brackets() {
+        // Test URI rendering with angle brackets
+        let term = Term {
+            kind: "uri".into(),
+            value: "http://example.com/resource".into(),
+            language: None,
+            datatype: None,
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, "<http://example.com/resource>");
+    }
+
+    #[test]
+    fn test_n3_bnode_with_underscore_colon_prefix() {
+        // Test blank node rendering with _: prefix
+        let term = Term {
+            kind: "bnode".into(),
+            value: "b1".into(),
+            language: None,
+            datatype: None,
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, "_:b1");
+    }
+
+    #[test]
+    fn test_n3_triple_passthrough() {
+        // Test that triple kind passes through the value as-is
+        let triple_str =
+            "<< <http://example.com/s> <http://example.com/p> <http://example.com/o> >>";
+        let term = Term {
+            kind: "triple".into(),
+            value: triple_str.to_string(),
+            language: None,
+            datatype: None,
+            direction: None,
+        };
+        let result = term.n3();
+        assert_eq!(result, triple_str);
     }
 }
 
@@ -205,12 +345,20 @@ impl QueryResult {
 
     /// Delegates to the underlying list, so negative indices and slices work,
     /// and Python's sequence-protocol fallback makes the result iterable.
-    fn __getitem__<'py>(&self, py: Python<'py>, index: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        index: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         self.rows.bind(py).as_any().get_item(index)
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {
-        format!("QueryResult(vars={:?}, rows={})", self.vars, self.rows.bind(py).len())
+        format!(
+            "QueryResult(vars={:?}, rows={})",
+            self.vars,
+            self.rows.bind(py).len()
+        )
     }
 }
 
@@ -256,7 +404,9 @@ fn resolve_source(source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<(
     } else {
         // pathlib.Path / any os.PathLike.
         let path: std::path::PathBuf = source.extract().map_err(|_| {
-            PyValueError::new_err("Graph.load expects a str (RDF data or file path) or an os.PathLike")
+            PyValueError::new_err(
+                "Graph.load expects a str (RDF data or file path) or an os.PathLike",
+            )
         })?;
         from_file(&path, format)
     }
@@ -292,7 +442,10 @@ fn select_result(py: Python<'_>, res: &sparq_engine::QueryResult) -> PyResult<Qu
         }
         rows.append(d)?;
     }
-    Ok(QueryResult { vars, rows: rows.unbind() })
+    Ok(QueryResult {
+        vars,
+        rows: rows.unbind(),
+    })
 }
 
 /// An immutable, dictionary-encoded RDF graph with SPARQL query / update and
@@ -421,11 +574,14 @@ impl Graph {
     /// ASK runs on the engine's native entry point (evaluation early-exits at the
     /// first solution); a SELECT is answered by the engine's lazy solution count.
     fn ask(&self, py: Python<'_>, sparql: &str) -> PyResult<bool> {
-        let parsed = SparqlParser::new().parse_query(sparql).map_err(|e| engine_err(e.to_string()))?;
+        let parsed = SparqlParser::new()
+            .parse_query(sparql)
+            .map_err(|e| engine_err(e.to_string()))?;
         match parsed {
             Query::Ask { .. } => {
                 let prepared = parsed.into();
-                py.detach(|| sparq_engine::ask_prepared(&self.inner, &prepared)).map_err(engine_err)
+                py.detach(|| sparq_engine::ask_prepared(&self.inner, &prepared))
+                    .map_err(engine_err)
             }
             Query::Select { .. } => {
                 let prepared = parsed.into();
@@ -434,7 +590,9 @@ impl Graph {
                     .map_err(engine_err)?;
                 Ok(n > 0)
             }
-            _ => Err(PyValueError::new_err("ask() takes an ASK (or SELECT) query")),
+            _ => Err(PyValueError::new_err(
+                "ask() takes an ASK (or SELECT) query",
+            )),
         }
     }
 
@@ -469,7 +627,9 @@ impl Graph {
     /// and the graph-management operations all work on named graphs.
     fn update(&mut self, py: Python<'_>, sparql: &str) -> PyResult<()> {
         let inner = &self.inner;
-        let new = py.detach(|| sparq_engine::update(inner, sparql)).map_err(engine_err)?;
+        let new = py
+            .detach(|| sparq_engine::update(inner, sparql))
+            .map_err(engine_err)?;
         self.inner = new;
         self.text = None; // rebuilt graph: the cached text index is stale
         Ok(())
@@ -490,13 +650,18 @@ impl Graph {
             ));
         }
         let prof = sparq_reason::Profile::parse(profile).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown reasoning profile {profile:?} (known: \"rdfs\", \"owl\")"))
+            PyValueError::new_err(format!(
+                "unknown reasoning profile {profile:?} (known: \"rdfs\", \"owl\")"
+            ))
         })?;
         // Take the graph apart through its public fields (no Clone on Dict/Graph):
         // move `dict` and `store` out, re-derive the canonical triples, materialize,
         // rebuild (re-attaching the named graphs, which reasoning does not touch).
         // A placeholder empty graph holds the slot during the closure.
-        let g = std::mem::replace(&mut self.inner, CoreGraph::from_parts(Dict::new(), Vec::new()));
+        let g = std::mem::replace(
+            &mut self.inner,
+            CoreGraph::from_parts(Dict::new(), Vec::new()),
+        );
         let (inner, added) = py.detach(move || {
             let mut triples = all_triples(&g);
             let named = g.named;
@@ -540,7 +705,10 @@ impl Graph {
                         let term = inner.dict.term(id);
                         match term {
                             oxrdf::Term::Triple(_) => {
-                                return Err("RDF 1.2 triple terms cannot participate in N3 reasoning".into());
+                                return Err(
+                                    "RDF 1.2 triple terms cannot participate in N3 reasoning"
+                                        .into(),
+                                );
                             }
                             // [OPUS-4.8] roborev 1961: rename this graph's blank
                             // nodes under the reserved `sparqg` prefix before
@@ -599,8 +767,13 @@ impl Graph {
         self.ensure_text_index(py);
         let index = self.text.as_ref().expect("ensure_text_index just built it");
         let inner = &self.inner;
-        let mut hits =
-            py.detach(|| if any { index.search_any(query) } else { index.search(query) });
+        let mut hits = py.detach(|| {
+            if any {
+                index.search_any(query)
+            } else {
+                index.search(query)
+            }
+        });
         if let Some(n) = limit {
             hits.truncate(n);
         }
@@ -640,7 +813,10 @@ impl Graph {
     fn build_text_index(&mut self, py: Python<'_>) -> usize {
         self.text = None;
         self.ensure_text_index(py);
-        self.text.as_ref().expect("ensure_text_index just built it").len()
+        self.text
+            .as_ref()
+            .expect("ensure_text_index just built it")
+            .len()
     }
 
     /// Drop the cached full-text index, freeing its memory. Purely a resource
@@ -688,7 +864,10 @@ impl Graph {
         // drops the read-only wrapper, leaving an independently-mutable `Graph`
         // that already owns its own Arc-shared base + per-generation delta.
         let copied = py.detach(|| inner.snapshot().into_graph());
-        Graph { inner: copied, text: None }
+        Graph {
+            inner: copied,
+            text: None,
+        }
     }
 
     /// Number of triples in the default graph.
@@ -713,7 +892,9 @@ impl Graph {
     // unwind path is wired correctly. The leading underscore marks it private;
     // it is intentionally undocumented in SKILL.md (not part of the public API).
     fn _panic_for_test(&self) {
-        panic!("sparq-py panic-surface test: this must reach Python as a PanicException, not abort");
+        panic!(
+            "sparq-py panic-surface test: this must reach Python as a PanicException, not abort"
+        );
     }
 }
 
