@@ -1,0 +1,5 @@
+{
+  "pr": 2129,
+  "date": "2026-07-12",
+  "reason": "[GPT-5.6] sq-aej8u: feature-OFF posture declaration for the new `sparq-reason/profile` instrumentation surface. The profiler module, entry points, and tests are all behind the default-OFF `profile` feature, and `sparq-reason` is not part of the lean `sparq-wasm` dependency graph; therefore no profiling behavior is enabled in the feature-OFF bundle. Any deterministic artifact movement caused by the additive manifest/cfg surface is intentional and remains governed separately by the wasm size ratchet."
+}

@@ -17,7 +17,7 @@
 //! floor; the authoritative RATCHET lives in `sparq-conformance`
 //! (`src/floors/flatten.rs`, `FLOOR = 46`).
 
-use sparq_jsonld::{flatten, Json, JsonLdOptions, NoopLoader, ProcessingMode};
+use sparq_jsonld::{flatten, flatten_expanded, Json, JsonLdOptions, NoopLoader, ProcessingMode};
 use std::path::{Path, PathBuf};
 
 /// The pinned suite root (mirrors the conformance crate's `suite_root`).
@@ -161,6 +161,83 @@ fn array_equal_unordered(xs: &[Json], ys: &[Json]) -> bool {
         return false;
     }
     true
+}
+
+/// [GPT-5.6] `flatten_expanded` is a normaliser: representative expanded inputs reach a
+/// fixed point after one pass, while a nested input demonstrates that the first pass does
+/// real normalisation work.
+#[test]
+fn flatten_expanded_is_idempotent() {
+    let single_node = Json::parse(
+        r#"[{"@id":"http://example.com/a","http://example.com/name":[{"@value":"Alice"}]}]"#,
+    )
+    .expect("valid single-node fixture");
+    let named_graph = Json::parse(
+        r#"[
+            {"@id":"http://example.com/g","@graph":[
+                {"@id":"http://example.com/b","http://example.com/name":[{"@value":"B"}]},
+                {"@id":"http://example.com/a","http://example.com/name":[{"@value":"A"}]}
+            ]},
+            {"@id":"http://example.com/root","http://example.com/graph":[{"@id":"http://example.com/g"}]}
+        ]"#,
+    )
+    .expect("valid named-graph fixture");
+    let blank_node_cross_references = Json::parse(
+        r#"[
+            {"@id":"_:left","http://example.com/link":[
+                {"@id":"_:right","http://example.com/name":[{"@value":"right"}]}
+            ]},
+            {"@id":"_:right","http://example.com/back":[{"@id":"_:left"}]}
+        ]"#,
+    )
+    .expect("valid blank-node fixture");
+    let empty = Json::Arr(Vec::new());
+    let stress = Json::Arr(
+        (0..100)
+            .rev()
+            .map(|index| {
+                Json::Obj(vec![
+                    (
+                        "http://example.com/name".to_string(),
+                        Json::Arr(vec![Json::Obj(vec![(
+                            "@value".to_string(),
+                            Json::Str(format!("node-{index}")),
+                        )])]),
+                    ),
+                    (
+                        "@id".to_string(),
+                        Json::Str(format!("http://example.com/node/{index:03}")),
+                    ),
+                ])
+            })
+            .collect(),
+    );
+
+    let fixtures = [
+        ("single node with property", &single_node),
+        ("multiple nodes with named graph", &named_graph),
+        (
+            "blank nodes with cross-references",
+            &blank_node_cross_references,
+        ),
+        ("empty array", &empty),
+        ("100-node stress document", &stress),
+    ];
+
+    for (name, input) in fixtures {
+        let once = flatten_expanded(input);
+        let twice = flatten_expanded(&once);
+        assert!(
+            json_ld_equal(&once, &twice),
+            "flattening was not idempotent for {name}: once={once:?}, twice={twice:?}"
+        );
+    }
+
+    let normalized = flatten_expanded(&blank_node_cross_references);
+    assert!(
+        !json_ld_equal(&blank_node_cross_references, &normalized),
+        "blank-node fixture must require real flattening, not already be a fixed point"
+    );
 }
 
 /// Run the native flatten over every positive `flatten` case and return `(pass, fail, skip,

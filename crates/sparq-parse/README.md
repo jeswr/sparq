@@ -13,6 +13,10 @@ compression overlaps serialization instead of following it.
 Hard constraint: this crate must **not** enter `sparq-wasm`'s dependency graph
 (flate2 / zstd / rayon stay out of the browser bundle).
 
+<!-- [GPT-5.6] sq-98w7z.2: document the opt-in backend selection. -->
+Gzip defaults to pure-Rust `miniz_oxide`; opt-in `zlib-rs` selects flate2's
+pure-Rust zlib-rs backend, while `zlib-ng` remains available for native builds.
+
 > **Internal crate — not on crates.io** (`publish = false`). The design is gated
 > on a measured baseline; it is consumed inside the workspace, not as a
 > standalone public API.

@@ -1,0 +1,39 @@
+{
+  "rrf_k": 60,
+  "top_k": 3,
+  "weights": {
+    "dense": 1.0,
+    "sparse": 1.0,
+    "structural": 0.75
+  },
+  "queries": [
+    {
+      "id": "q1",
+      "relevant": ["alpha", "delta"],
+      "arms": {
+        "dense": ["alpha", "bravo", "charlie", "delta"],
+        "sparse": ["bravo", "delta", "echo", "alpha"],
+        "structural": ["delta", "alpha", "foxtrot", "bravo"]
+      }
+    },
+    {
+      "id": "q2",
+      "relevant": ["hotel", "kilo"],
+      "arms": {
+        "dense": ["golf", "hotel", "india", "juliet"],
+        "sparse": ["hotel", "golf", "kilo", "india"],
+        "structural": ["kilo", "india", "hotel", "golf"]
+      }
+    },
+    {
+      "id": "q3",
+      "relevant": ["lima"],
+      "arms": {
+        "dense": ["lima", "mike", "november", "oscar"],
+        "sparse": ["mike", "lima", "oscar", "november"],
+        "structural": ["november", "mike", "lima", "oscar"]
+      }
+    }
+  ],
+  "claim": "parity"
+}

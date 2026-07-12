@@ -1,25 +1,9 @@
-# GOLDEN: the GATE-CRITICAL set of check-run names emitted by feature-matrix.yml's
-# `opt-in-features` job (each leg is `opt-in <name>`). [OPUS-4.8] bead sq-ibrze.
-#
-# The single required `ci-summary / gate` aggregator + branch protection discover every
-# REQUIRED opt-in leg BY THIS NAME. This snapshot is the byte-for-byte set from BEFORE
-# the static `include:` list was split into per-crate fragment files, so the test
-# scripts/tests/test_feature_matrix_assemble.py can prove the dynamic assembler still
-# emits the IDENTICAL set — i.e. the split did not rename, drop, or add any gating leg.
-#
-# When you ADD a legitimate new opt-in leg (edit a `.github/feature-matrix.d/<crate>.yml`
-# fragment), this test will FAIL until you ALSO add the new `opt-in <name>` line here.
-# That failure is the intended tripwire: a new gating check has appeared and the golden
-# must be updated DELIBERATELY (and the new name must stay free of the whole words
-# "advisory"/"informational" or it will not gate). Keep this list sorted (LC_ALL=C).
-# Lines starting with '#' are comments; blank lines are ignored.
-#
-
 opt-in sparq-arrow (arrow — QueryResult -> RecordBatch columnar export)
 opt-in sparq-cli (hdt, hdt-write)
 opt-in sparq-cli (serialize-rdf)
 opt-in sparq-cli (tabular)
 opt-in sparq-cli (terse)
+opt-in sparq-conformance (geo)
 opt-in sparq-core (block-bloom)
 opt-in sparq-core (compact-index)
 opt-in sparq-core (jsonld)
@@ -68,13 +52,17 @@ opt-in sparq-mpc (insecure-test-rng)
 opt-in sparq-nlq (citations — provenance-join + citations + answer-qualification)
 opt-in sparq-nlq (nlq-endpoint — configurable OpenAI-compatible endpoint client)
 opt-in sparq-policy (count-enforcement)
+opt-in sparq-policy (decision-report)
 opt-in sparq-policy (secprop-leftoperands — ODRL security-property profile)
 opt-in sparq-py (arrow — Graph.query_arrow -> pyarrow.Table export)
 opt-in sparq-reason (compiled-rules)
 opt-in sparq-reason (explain)
+opt-in sparq-reason (profile)
+opt-in sparq-reason (quoted-triples)
 opt-in sparq-reason (rif-xml)
 opt-in sparq-reason (substrate-compare)
 opt-in sparq-reason (substrate-join)
+opt-in sparq-reason-diff (rl-oracle)
 opt-in sparq-reason-el (abox — ABox realisation + whole-ontology consistency)
 opt-in sparq-reason-el (cdomain — CR7–CR9 concrete domains)
 opt-in sparq-reason-el (hasse — transitive reduction / direct-subsumer Hasse)
@@ -86,6 +74,7 @@ opt-in sparq-server (brtpf)
 opt-in sparq-server (change-stream — GET /streams CDC poll endpoint)
 opt-in sparq-server (federation-descriptors, service, time-travel, geo, test-seams)
 opt-in sparq-server (odrl-authz — ODRL lane on POST /authz/query)
+opt-in sparq-server (response-compression)
 opt-in sparq-server (solid-authz — POST /authz/* WAC/ACP HTTP surface)
 opt-in sparq-server (solid-authz-trust — stateless trust-graph /authz/decide extension)
 opt-in sparq-server (templates — named parameterized template REST surface)
@@ -115,4 +104,5 @@ opt-in sparq-vectors (neuro-symbolic — propose-then-verify grounding)
 opt-in sparq-vectors (spqv-provenance — v3 embedding-provenance write + fail-closed rejection)
 opt-in sparq-vectors (vec-predicate, filtered-ann)
 opt-in sparq-vectors (vec-predicate, provider)
+opt-in sparq-zk (dual-leaf — identity/desync regression guard)
 opt-in sparq-zk (secprop-annotations — per-method annotation graph + over-claim guards)

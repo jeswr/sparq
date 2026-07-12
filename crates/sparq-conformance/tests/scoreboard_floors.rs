@@ -337,6 +337,19 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/ufo_sn3_suite.rs",
         "UFO_SN3_FLOOR",
     ),
+    // [KERN] the RDF 1.2 quoted-triple opacity ratchet. The floor const
+    // (`pub const QUOTED_OPACITY_FLOOR`) lives top-level in THIS crate's
+    // `tests/quoted_triple_opacity.rs` (UNGATED — the lane calls plain
+    // `sparq_reason::materialize` on committed fixtures and runs in ordinary
+    // `cargo test --workspace`; its feature-gated EL arm does not count toward
+    // the floor). A sparq EXTENSION-shaped ratchet pinning the normative
+    // RDF 1.2 triple-term semantics (quoting never asserts; closure
+    // non-interference), NOT a W3C-suite pass count.
+    (
+        "RDF 1.2 quoted-triple opacity (reasoning)",
+        "crates/sparq-conformance/tests/quoted_triple_opacity.rs",
+        "QUOTED_OPACITY_FLOOR",
+    ),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the suite labels whose ratchet floor is sourced at
@@ -572,8 +585,12 @@ fn scoreboard_renders_all_suites() {
     // as a sparq EXTENSION (no normative UFO/gUFO conformance suite exists; NOT
     // folded into the conformance total).
     assert!(md.contains("UFO-SN3 finite-world expressibility"));
+    // [KERN] — the RDF 1.2 quoted-triple opacity ratchet, HONESTLY rendered as a
+    // sparq EXTENSION (self-authored fixtures pinning the normative RDF 1.2
+    // triple-term semantics; NOT folded into the conformance total).
+    assert!(md.contains("RDF 1.2 quoted-triple opacity (reasoning)"));
     assert!(
-        md.contains("sparq-extension (10 rows, NOT conformance)"),
-        "ten extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (11 rows, NOT conformance)"),
+        "eleven extension rows should be tallied separately and pluralised"
     );
 }

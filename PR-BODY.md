@@ -1,3 +1,5 @@
+> 🤖 SPARQ agent — landing Kern PR, hygiene by **GPT-5.6**
+
 # vectors: RDF 1.2 quoted-triple visibility as an off-by-default ablation axis; fix empty-string verbalisation of quoted triples
 
 ## What

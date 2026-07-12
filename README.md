@@ -96,6 +96,9 @@ standard it implements.
   ([guide](skills/sparql-query/SKILL.md)).
 - **RDF parsing & ingest** — load and parse Turtle, N-Triples, N-Quads, and TriG, with
   transparent `.gz` / `.bz2` / `.zst` decompression ([guide](skills/data-formats/SKILL.md)).
+- **Rust-native RDF objects** — bind a focus term to an owned or borrowed store, traverse
+  outgoing/incoming predicates, and convert typed literal values without handling raw triples
+  ([guide](skills/rdf-wrapper/SKILL.md)). <!-- [GPT-5.6] sq-1rg2q M1 -->
 - **RDF 1.2 triple terms** — store and query triple terms per
   [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/) ([guide](skills/sparql-query/SKILL.md)).
 - **Custom extension functions** — register your own Rust functions under IRIs and call them in
