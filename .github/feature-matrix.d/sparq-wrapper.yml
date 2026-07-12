@@ -13,6 +13,11 @@
   features: "proposed-cardinality"
   test: true
 
+- name: "sparq-wrapper (proposed-codecs)"
+  crate: "sparq-wrapper"
+  features: "proposed-codecs"
+  test: true
+
 - name: "sparq-wrapper (proposed-distinct)"
   crate: "sparq-wrapper"
   features: "proposed-distinct"
