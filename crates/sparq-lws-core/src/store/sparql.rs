@@ -14,7 +14,8 @@
 //! resource IRI**; the resource's authoritative index record (content type + blob-key byte-pointer +
 //! ETag) and its containment edges live as triples *in that graph* under the reserved `pss:` vocab.
 //! Existence/metadata/listing are SELECT/ASK over those graphs; the resource RDF itself is the rest
-//! of the graph (read via CONSTRUCT). See the module docs in [`super::http`] for the live-endpoint
+//! of the graph (read via CONSTRUCT). See the module docs in `super::http` (behind the opt-in
+//! `http-sparq` feature) for the live-endpoint
 //! deviation note (today's `sparq-server` HTTP store folds named graphs into one default graph, so
 //! the isolation the model assumes is enforced at the engine layer but not yet over HTTP — FR-4).
 

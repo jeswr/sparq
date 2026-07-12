@@ -14,6 +14,11 @@
 //!
 //! A LIVE integration test against a real SPARQ is at the bottom, `#[ignore]`'d + env-gated
 //! (`PSS_LIVE_SPARQ_URL`) — running it needs a SPARQ instance (a `needs:user` item).
+//!
+//! The whole file is gated on the opt-in `http-sparq` feature (sq-gg0qq.3 — the remote HTTP
+//! backend is no longer compiled by default); it is a no-op test binary when the feature is off.
+//! CI runs it in the `opt-in sparq-lws-core (http-sparq)` feature-matrix leg.
+#![cfg(feature = "http-sparq")]
 
 use std::collections::HashMap;
 use std::convert::Infallible;

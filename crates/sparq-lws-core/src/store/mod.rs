@@ -16,11 +16,16 @@ pub mod body_cache;
 // read-path perf plan — docs/design/backend-read-path.md §7). Decorators used by the pinned
 // counter tests + the bench harness; zero-cost when not wired in.
 pub mod counting;
-// The in-process embedded SPARQ backend (opt-in `embedded-sparq` feature) — a THIRD `SparqClient`
-// impl alongside the HTTP client + the in-memory double. Off by default so the standard build
-// carries no sparq dependency. See [`embedded`] + decisions/0001-embed-sparq-in-process.md.
+// The in-process embedded SPARQ backend (`embedded-sparq` feature, ON BY DEFAULT — sq-gg0qq.3):
+// the FIRST-CLASS `SparqClient` impl now that this crate lives in the sparq workspace. Build with
+// `--no-default-features` for the engine-free profile (the in-memory double only). See
+// [`embedded`] + decisions/0001-embed-sparq-in-process.md.
 #[cfg(feature = "embedded-sparq")]
 pub mod embedded;
+// The live SPARQL-over-HTTP client (opt-in `http-sparq` feature — sq-gg0qq.3): the REMOTE
+// shared-service backend, `PSS_SPARQ_BACKEND=http`. Off by default — in-workspace builds bind the
+// engine in-process (`embedded` above) instead of paying an HTTP round-trip per index operation.
+#[cfg(feature = "http-sparq")]
 pub mod http;
 pub mod reconcile;
 pub mod sparq;
@@ -42,6 +47,7 @@ pub use counting::{
 };
 #[cfg(feature = "embedded-sparq")]
 pub use embedded::EmbeddedSparqClient;
+#[cfg(feature = "http-sparq")]
 pub use http::{HttpSparqClient, SparqHttpError};
 pub use reconcile::{
     reconcile_orphans, spawn_periodic, ReconcileError, ReconcileOptions, ReconcileReport,
