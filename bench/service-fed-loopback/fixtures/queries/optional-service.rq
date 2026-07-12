@@ -1,0 +1,11 @@
+PREFIX ex: <http://example.test/federation/>
+SELECT ?product ?review WHERE {
+  SERVICE <{{catalog}}> {
+    ?product ex:kind ex:Book .
+  }
+  OPTIONAL {
+    SERVICE <{{reviews}}> {
+      ?review ex:about ?product ; ex:score 5 .
+    }
+  }
+}

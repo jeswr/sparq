@@ -1,0 +1,13 @@
+{
+  "suite_id": "federation-fedshop",
+  "endpoints": [
+    { "id": "catalog", "data": "data/catalog.ttl" },
+    { "id": "reviews", "data": "data/reviews.ttl" }
+  ],
+  "fixtures": [
+    { "id": "cross-endpoint-join", "query": "queries/cross-endpoint-join.rq", "expected_rows": 2 },
+    { "id": "duplicate-multiset", "query": "queries/duplicate-multiset.rq", "expected_rows": 2 },
+    { "id": "optional-service", "query": "queries/optional-service.rq", "expected_rows": 3 },
+    { "id": "remote-union", "query": "queries/remote-union.rq", "expected_rows": 3 }
+  ]
+}

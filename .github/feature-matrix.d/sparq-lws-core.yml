@@ -38,3 +38,11 @@
   crate: "sparq-lws-core"
   features: "redis-replay"
   test: true
+
+# The wasm request-handling core: real axum routing, LDP handlers, WAC, and in-memory storage with
+# native listener/runtime/crypto/network dependencies excluded by target cfg. The feature-gated
+# dependency-boundary test proves those exclusions against the wasm32 normal dependency graph.
+- name: "sparq-lws-core (wasm)"
+  crate: "sparq-lws-core"
+  features: "wasm"
+  test: true

@@ -31,7 +31,7 @@
 //! `WAC-Allow` header. It reads `.acl` documents through the [`store::Store`] seam; when the SPARQ
 //! access-control design lands the per-resource decision can move behind the same seam.
 //!
-//! Solid Notifications (WebSocketChannel2023) are implemented as a net-new, isolated [`notifications`]
+//! Solid Notifications (WebSocketChannel2023) are implemented as a net-new, isolated `notifications`
 //! module: an in-process subscription registry + AS2.0 notification builder, an axum WebSocket receive
 //! endpoint, a subscribe endpoint, and discovery (storage description + `Link` rels). The LDP write
 //! path makes a single emit call after a successful mutation. Everything else network-facing (the live
@@ -43,9 +43,26 @@
 //! in-memory test doubles.
 
 pub mod acl_cache;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod app;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[path = "app_wasm.rs"]
+pub mod app;
+// [GPT-5.6] Compile the portable implementation in native unit tests so the native coverage
+// ratchet directly exercises the exact wasm router source without changing native runtime exports.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "app_wasm.rs"]
+mod app_wasm_native_tests;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[path = "auth_wasm.rs"]
+pub mod auth;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth_cache;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "auth_wasm.rs"]
+mod auth_wasm_native_tests;
 pub mod authz;
 pub mod body_limit;
 pub mod error;
@@ -55,23 +72,34 @@ pub mod error;
 /// WAC grant can ever apply), served GET/HEAD-only by a Host-keyed route with no authorization.
 pub mod identity;
 pub mod ldp;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod nodelay;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod notifications;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod overload;
 /// Tiered proof-of-possession (RFC 8705 cert-bound tokens, later DPoP-SK) — the negotiated,
 /// opt-in fast paths that keep DPoP as the mandatory Solid-OIDC baseline. See
 /// `docs/design/high-throughput-pop-auth.md`. T1a lands the confirmation dispatch + cert-bound
 /// verification core; the acceptor + verifier wiring are tracked follow-ups.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pop;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rate_limit;
 /// The distributed (shared) Redis-backed DPoP-`jti` replay store — the horizontal-scaling enabler.
 /// Behind the opt-in `redis-replay` feature (OFF by default → byte-identical default build/conformance).
-#[cfg(feature = "redis-replay")]
+#[cfg(all(feature = "redis-replay", not(target_arch = "wasm32")))]
 pub mod redis_replay;
 pub mod seed;
 pub mod store;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod transport;
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "wasm")
+))]
 pub use app::{build_router, AppState};
 pub use error::{ServerError, ServerResult};
