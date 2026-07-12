@@ -10,7 +10,7 @@
 //!
 //! HONESTY SCOPE: a green run claims exactly "sparq-reason's RL closure matches the
 //! pinned external oracle on this corpus, under the documented normalization in
-//! [`rl::normalize`], modulo the explicitly-dispositioned PERMANENT divergences" —
+//! `rl::normalize`, modulo the explicitly-dispositioned PERMANENT divergences" —
 //! nothing more (no completeness claim; the corpus is small and hand-picked). Any
 //! UNdispositioned mismatch fails loud, per the sq-pbz04.1 disposition-ledger
 //! precedent.

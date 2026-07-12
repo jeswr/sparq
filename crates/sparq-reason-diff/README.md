@@ -15,7 +15,7 @@ sq-pbz04.1 audit precedent).
 
 Everything is behind the `rl-oracle` feature (default build is an empty lib):
 
-```
+```sh
 cargo test -p sparq-reason-diff --features rl-oracle \
     rl_differential_vs_owlrl_golden -- --nocapture
 ```
