@@ -3,6 +3,12 @@
 //!
 //! Each request carries a fresh, well-formed DPoP-bound token + a per-request proof (a new jti) so
 //! the verifier's single-use replay protection does not reject the second request of a PUT→GET pair.
+//!
+//! **Backend under test (sq-gg0qq.3):** with the DEFAULT feature set this WHOLE suite runs against
+//! the EMBEDDED in-process SPARQ engine ([`sparq_lws_core::store::embedded`]) — the first-class
+//! in-workspace backend — so every LDP verb/conneg/conditional behavior here is proven on the real
+//! engine, not assumed from a double. Under `--no-default-features` (the engine-free profile) it
+//! falls back to the in-memory double, keeping that profile's LDP surface covered too.
 
 mod common;
 
@@ -15,11 +21,33 @@ use solid_oidc_verifier::verifier::Verifier;
 use sparq_lws_core::app::{build_router, AppState};
 use sparq_lws_core::auth::AuthContext;
 use sparq_lws_core::ldp::handler::LdpState;
-use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient};
+#[cfg(not(feature = "embedded-sparq"))]
+use sparq_lws_core::store::InMemorySparqClient;
+use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore};
 use tower::ServiceExt;
 
 const TURTLE: &str =
     "<https://pod.example/alice/data#me> <http://xmlns.com/foaf/0.1/name> \"Alice\" .";
+
+/// The [`sparq_lws_core::store::SparqClient`] backend this suite exercises: the EMBEDDED in-process
+/// engine on the default build, the in-memory double on `--no-default-features`.
+#[cfg(feature = "embedded-sparq")]
+type BackendSparqClient = sparq_lws_core::store::EmbeddedSparqClient;
+#[cfg(not(feature = "embedded-sparq"))]
+type BackendSparqClient = InMemorySparqClient;
+
+/// A fresh, empty backend instance (one per [`Harness`], so tests stay isolated).
+fn backend_sparq_client() -> BackendSparqClient {
+    #[cfg(feature = "embedded-sparq")]
+    {
+        sparq_lws_core::store::EmbeddedSparqClient::in_memory()
+            .expect("fresh in-memory embedded graph")
+    }
+    #[cfg(not(feature = "embedded-sparq"))]
+    {
+        InMemorySparqClient::new()
+    }
+}
 
 /// Seed a ROOT `<base>/.acl` granting `owner_webid` Read/Write/Control on the base root AND on all
 /// descendants (`acl:default`), so every resource these LDP tests touch inherits owner control under
@@ -27,7 +55,7 @@ const TURTLE: &str =
 /// Turtle string — a test fixture, not production RDF construction). This mirrors the pod-root
 /// owner-default the real conformance seed (`seed_conformance`) writes per user.
 async fn seed_root_owner_acl(
-    store: &CompositeStore<InMemorySparqClient, InMemoryBlobStore>,
+    store: &CompositeStore<BackendSparqClient, InMemoryBlobStore>,
     base_url: &str,
     owner_webid: &str,
 ) {
@@ -64,7 +92,7 @@ impl Harness {
         let replay = InMemoryReplayStore::with_window(config.replay_ttl());
         let verifier = Verifier::new(config, jwks_provider(&issuer_key), replay).unwrap();
         let ctx = AuthContext::new(verifier, BASE_URL);
-        let store = CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new());
+        let store = CompositeStore::new(backend_sparq_client(), InMemoryBlobStore::new());
         // WAC is now ENFORCED, so the test caller (Alice, `common::WEBID`) needs an effective ACL
         // granting her access to every path these tests exercise. Seed a ROOT `.acl` granting Alice
         // Read/Write/Control on the base root AND on all descendants (`acl:default`), so every

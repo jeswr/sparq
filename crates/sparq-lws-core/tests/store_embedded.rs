@@ -10,8 +10,9 @@
 //! [`sparq_lws_core::store::sparql`] with the same semantics the HTTP/in-mem impls give — the whole
 //! point of the embed (same queries, different transport).
 //!
-//! The whole file is gated on the opt-in `embedded-sparq` feature (the default build carries no
-//! sparq dependency); it is a no-op test binary when the feature is off.
+//! The whole file is gated on the `embedded-sparq` feature — ON BY DEFAULT since sq-gg0qq.3 (the
+//! embedded engine is the first-class in-workspace backend); it is a no-op test binary only under
+//! `--no-default-features` (the engine-free profile).
 #![cfg(feature = "embedded-sparq")]
 
 use axum::body::Bytes;
@@ -525,4 +526,191 @@ async fn referenced_blob_keys_on_the_embedded_client_collects_all_pointers() {
         !keys.contains("k1") && keys.contains("k2"),
         "k1 should drop out: {keys:?}"
     );
+}
+
+// --- sq-gg0qq.3 promotion invariants -----------------------------------------------------------
+// The two properties the first-class promotion must re-prove on the REAL engine: (1) per-resource
+// NAMED-GRAPH ISOLATION (graph IRI == resource IRI — the WAC-design model), and (2) the held-lock
+// check-then-act ATOMICITY of `create_child` / `delete_meta_if_empty` under actual concurrency
+// (many tokio tasks racing one engine), not just sequentially.
+
+#[tokio::test]
+async fn named_graph_isolation_mutating_one_resource_never_bleeds_into_another() {
+    // Every resource lives in its OWN named graph (graph IRI == resource IRI), so a rewrite of `a`'s
+    // record and then a full delete of `a` must leave `b`'s record — and a third CONTAINER's
+    // membership set — byte-identical. A bleed (shared-graph storage, a DELETE WHERE that matches
+    // across graphs) flips one of these assertions.
+    let sparq = EmbeddedSparqClient::in_memory().unwrap();
+    let m = |bk: &str, etag: &str| ResourceMeta {
+        content_type: "text/turtle".into(),
+        blob_key: bk.into(),
+        etag: format!("\"{etag}\""),
+        last_modified: None,
+    };
+    let a = "https://pod.example/alice/a";
+    let b = "https://pod.example/alice/b";
+    let container = "https://pod.example/alice/";
+    let child = "https://pod.example/alice/c1";
+    sparq.put_meta(a, m("ka", "ea")).await.unwrap();
+    sparq.put_meta(b, m("kb", "eb")).await.unwrap();
+    sparq.put_meta(container, m("kc", "ec")).await.unwrap();
+    sparq
+        .create_child(container, child, m("kchild", "echild"))
+        .await
+        .unwrap();
+
+    // Rewrite `a` (same graph, new record) — `b` must be untouched.
+    sparq.put_meta(a, m("ka2", "ea2")).await.unwrap();
+    let got_b = sparq.get_meta(b).await.unwrap();
+    assert_eq!(got_b.blob_key, "kb");
+    assert_eq!(got_b.etag, "\"eb\"");
+
+    // Delete `a` entirely — `b`, the container record, AND the containment edge all survive.
+    sparq.delete_meta(a).await.unwrap();
+    assert!(matches!(
+        sparq.get_meta(a).await.unwrap_err(),
+        sparq_lws_core::store::SparqError::NotFound
+    ));
+    assert_eq!(sparq.get_meta(b).await.unwrap().blob_key, "kb");
+    assert_eq!(
+        sparq.list_children(container).await.unwrap(),
+        vec![child.to_string()],
+        "deleting an unrelated resource must not disturb a container's membership graph"
+    );
+    // And the referenced-key set reflects exactly the survivors (a's key gone, nothing else lost).
+    let keys = sparq.referenced_blob_keys().await.unwrap();
+    assert!(!keys.contains("ka") && !keys.contains("ka2"), "{keys:?}");
+    for live in ["kb", "kc", "kchild"] {
+        assert!(keys.contains(live), "missing {live}: {keys:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_child_creates_commit_exactly_one_untorn_record() {
+    // 16 tasks race `create_child(container, SAME child)` with CORRELATED metadata (blob_key `k<i>`
+    // ⇄ etag `"e<i>"`). The held-lock guarded insert must leave exactly ONE membership edge and a
+    // record whose (blob_key, etag) pair comes from ONE writer — a torn mix (k3 with "e7") or a
+    // duplicated edge means the check-then-act interleaved.
+    let sparq = EmbeddedSparqClient::in_memory().unwrap();
+    let container = "https://pod.example/alice/";
+    let child = "https://pod.example/alice/note";
+    sparq
+        .put_meta(
+            container,
+            ResourceMeta {
+                content_type: "text/turtle".into(),
+                blob_key: "kc".into(),
+                etag: "\"ec\"".into(),
+                last_modified: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..16u32 {
+        let sparq = sparq.clone();
+        handles.push(tokio::spawn(async move {
+            sparq
+                .create_child(
+                    container,
+                    child,
+                    ResourceMeta {
+                        content_type: "text/turtle".into(),
+                        blob_key: format!("k{i}"),
+                        etag: format!("\"e{i}\""),
+                        last_modified: None,
+                    },
+                )
+                .await
+        }));
+    }
+    for h in handles {
+        h.await.unwrap().expect("create_child on a present container succeeds");
+    }
+
+    assert_eq!(
+        sparq.list_children(container).await.unwrap(),
+        vec![child.to_string()],
+        "16 racing creators must leave exactly ONE membership edge"
+    );
+    let got = sparq.get_meta(child).await.unwrap();
+    let i: u32 = got
+        .blob_key
+        .strip_prefix('k')
+        .and_then(|s| s.parse().ok())
+        .expect("blob_key is one of the writers' keys");
+    assert_eq!(
+        got.etag,
+        format!("\"e{i}\""),
+        "record is TORN: blob_key {} paired with etag {}",
+        got.blob_key,
+        got.etag
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_delete_if_empty_vs_create_child_never_leaves_a_torn_state() {
+    // The TOCTOU pair the trait doc promises away: `delete_meta_if_empty(C)` racing
+    // `create_child(C, child)`. Under the held engine lock exactly one of two CONSISTENT worlds may
+    // remain per round — (1) delete won: C gone, child refused NotFound, parent edge detached; or
+    // (2) create won: delete reports NotEmpty, C present with the child. `Deleted` AND a successful
+    // create in the same round is the torn interleaving this test exists to catch.
+    for round in 0..24u32 {
+        let sparq = EmbeddedSparqClient::in_memory().unwrap();
+        let m = |bk: &str| ResourceMeta {
+            content_type: "text/turtle".into(),
+            blob_key: bk.into(),
+            etag: "\"e\"".into(),
+            last_modified: None,
+        };
+        let parent = "https://pod.example/";
+        let container = "https://pod.example/dir/";
+        let child = "https://pod.example/dir/item";
+        sparq.put_meta(parent, m("kp")).await.unwrap();
+        sparq.create_child(parent, container, m("kc")).await.unwrap();
+
+        let deleter = {
+            let sparq = sparq.clone();
+            tokio::spawn(
+                async move { sparq.delete_meta_if_empty(container, Some(parent)).await },
+            )
+        };
+        let creator = {
+            let sparq = sparq.clone();
+            tokio::spawn(async move { sparq.create_child(container, child, m("kx")).await })
+        };
+        let deleted = deleter.await.unwrap().unwrap();
+        let created = creator.await.unwrap();
+
+        let container_exists = sparq.exists(container).await.unwrap();
+        let child_exists = sparq.exists(child).await.unwrap();
+        let parent_children = sparq.list_children(parent).await.unwrap();
+        match (deleted, created.is_ok()) {
+            (DeleteOutcome::Deleted, false) => {
+                assert!(
+                    !container_exists && !child_exists && parent_children.is_empty(),
+                    "round {round}: delete won but state is torn \
+                     (container={container_exists}, child={child_exists}, parent={parent_children:?})"
+                );
+            }
+            (DeleteOutcome::NotEmpty, true) => {
+                assert!(
+                    container_exists && child_exists,
+                    "round {round}: create won but state is torn \
+                     (container={container_exists}, child={child_exists})"
+                );
+                assert_eq!(
+                    sparq.list_children(container).await.unwrap(),
+                    vec![child.to_string()],
+                    "round {round}"
+                );
+                assert_eq!(parent_children, vec![container.to_string()], "round {round}");
+            }
+            (outcome, created_ok) => panic!(
+                "round {round}: TORN interleaving — delete={outcome:?}, create_ok={created_ok} \
+                 (the held-lock check-then-act admitted both, or refused both)"
+            ),
+        }
+    }
 }

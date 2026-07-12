@@ -5,7 +5,9 @@
 //! ## What this measures (and why it is deterministic)
 //! [`CountingSparqClient`] / [`CountingBlobStore`] are transparent decorators that count, per trait
 //! method, **the number of backend protocol requests the LIVE client issues for that method** —
-//! verified against [`super::http::HttpSparqClient`], where every read method is exactly ONE SPARQL
+//! verified against `super::http::HttpSparqClient` (a code span — the module is behind the opt-in
+//! `http-sparq` feature, so an intra-doc link would break the default build's rustdoc), where
+//! every read method is exactly ONE SPARQL
 //! Protocol query (the protocol permits exactly one query string per request, so there is no
 //! request-level batching to blur the count). The counts are integers derived from the code path
 //! taken, not from timing — so a test can PIN them exactly (the repo's perf-gate discipline:
