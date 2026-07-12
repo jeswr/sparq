@@ -12,7 +12,7 @@ pub mod topology;
 
 pub use centrality::{degree_centrality, degree_centrality_normalized, top_k, Direction};
 #[cfg(feature = "centrality-extended")]
-pub use centrality_extended::{betweenness_centrality, closeness_centrality};
+pub use centrality_extended::{betweenness_centrality, closeness_centrality, core_number};
 pub use community::{
     label_propagation, num_communities, weakly_connected_components, LabelPropConfig,
 };

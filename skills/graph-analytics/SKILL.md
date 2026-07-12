@@ -1,6 +1,6 @@
 ---
 name: graph-analytics
-description: "Graph analytics over a sparq RDF graph with the opt-in sparq-algos crate: project the graph onto a directed NodeGraph and run PageRank, centrality, community detection, and feature-gated directed strongly connected components or topological sorting — all read directly from sparq-core's permutation indexes, deterministic, no model, no network. Use when ranking entities, finding communities, classifying directed cycles, or ordering a DAG; topology-only (edges are predicate-erased and unweighted — filter the source graph for a per-predicate sub-graph)."
+description: "Graph analytics over a sparq RDF graph with the opt-in sparq-algos crate: project the graph onto a directed NodeGraph and run PageRank, centrality, k-core decomposition, community detection, and feature-gated directed strongly connected components or topological sorting — all read directly from sparq-core's permutation indexes, deterministic, no model, no network. Use when ranking entities, measuring node cohesion, finding communities, classifying directed cycles, or ordering a DAG; topology-only (edges are predicate-erased and unweighted — filter the source graph for a per-predicate sub-graph)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -11,7 +11,8 @@ metadata:
 
 `sparq-algos` is an **opt-in** crate (vendor-parity, epic sq-3183) that runs classic graph
 algorithms over a `sparq_core::Graph`: **PageRank**, **degree centrality** (in / out /
-total), feature-gated exact **Brandes betweenness** and **harmonic closeness**,
+total), feature-gated exact **Brandes betweenness**, **harmonic closeness**, and **k-core
+decomposition**,
 **weakly-connected components**, and a deterministic **label-propagation** community
 heuristic, plus feature-gated directed **strongly connected components** and
 **topological sorting**. It consumes only sparq-core's public read API (the borrowing
@@ -41,7 +42,7 @@ use sparq_algos::{
     NodeGraph, NodeFilter,
     pagerank, PageRankConfig,
     degree_centrality, degree_centrality_normalized, Direction, top_k,
-    betweenness_centrality, closeness_centrality,
+    betweenness_centrality, closeness_centrality, core_number,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
     strongly_connected_components, topological_sort,
 };
@@ -64,6 +65,7 @@ let top10 = top_k(&indeg, 10);                             // Vec<(node_index, s
 // --- Exact shortest-path centrality over the weak (undirected) topology ---
 let between = betweenness_centrality(&g);                  // unnormalised; unordered pairs
 let close   = closeness_centrality(&g);                    // normalised harmonic mean, [0, 1]
+let cores   = core_number(&g);                             // largest k-core containing each node
 
 // --- Community detection ---
 let comp = weakly_connected_components(&g);                // exact, union-find; Vec<usize> labels
@@ -90,6 +92,7 @@ let order = topological_sort(&g)?;                         // canonical DAG orde
 | `top_k(&scores, k)` | top-`k` `(node_index, score)`, ties → ascending index |
 | `betweenness_centrality(&g)` | exact unnormalised Brandes score over unordered endpoint pairs; requires `centrality-extended` |
 | `closeness_centrality(&g)` | normalised harmonic mean inverse distance; requires `centrality-extended` |
+| `core_number(&g)` | exact weak-topology k-core number (`Vec<usize>`); requires `centrality-extended` |
 | `weakly_connected_components(&g)` | exact component labels (`Vec<usize>`) |
 | `label_propagation(&g, LabelPropConfig)` | heuristic community labels (`Vec<usize>`) |
 | `num_communities(&labels)` | distinct community count |
@@ -110,14 +113,16 @@ let order = topological_sort(&g)?;                         // canonical DAG orde
   (it does not optimise modularity and a connected component may split into several LP
   communities — or, on dense graphs, collapse into one); WCC is the exact answer to
   "which entities are connected at all".
-- **Extended centrality uses weak topology.** Betweenness and closeness traverse each
+- **Extended centrality uses weak topology.** Betweenness, closeness, and k-core decomposition
+  treat each directed edge as an undirected connection. Betweenness and closeness traverse each
   directed edge in either direction, like WCC and label propagation. A reciprocal edge is
-  still one connection, and a self-loop contributes no shortest path. Betweenness is
+  still one connection, and a self-loop contributes neither a shortest path nor k-core degree.
+  Betweenness is
   unnormalised and counts unordered endpoint pairs; closeness is the harmonic mean
   `sum(1/d)/(V-1)`, with unreachable nodes contributing zero.
-- **Extended centrality is exact and all-pairs.** It is not sampled or approximate. Both
-  algorithms take `O(V * (V + E))` time, so callers should use them only where that cost is
-  acceptable. Enable the default-OFF `centrality-extended` feature to compile them.
+- **Extended centrality is exact.** It is not sampled or approximate. Betweenness and
+  closeness take `O(V * (V + E))` time, while k-core decomposition takes `O(V + E)`.
+  Enable the default-OFF `centrality-extended` feature to compile them.
 - **Directed topology preserves direction.** SCC follows out-edges and identifies mutual
   directed reachability. Topological sorting succeeds only for a DAG; self-loops and larger
   cycles return `CycleError`. Both are deterministic, with ascending node indices fixing
