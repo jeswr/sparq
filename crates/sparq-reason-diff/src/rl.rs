@@ -395,6 +395,30 @@ mod tests {
         assert!(e1.is_empty() && e2.is_empty());
     }
 
+    // [GPT-5.6] sq-kcld6 — swapping inputs swaps the multiset-diff halves.
+    #[test]
+    fn diff_multisets_is_antisymmetric_under_argument_swap() {
+        let a = v(&[
+            "<http://example.com/a> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/b> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/b> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/d> <http://example.com/p> <http://example.com/o> .",
+        ]);
+        let b = v(&[
+            "<http://example.com/b> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/c> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/d> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/e> <http://example.com/p> <http://example.com/o> .",
+            "<http://example.com/e> <http://example.com/p> <http://example.com/o> .",
+        ]);
+
+        let forward = diff_multisets(&a, &b);
+        let reverse = diff_multisets(&b, &a);
+
+        assert!(!forward.0.is_empty() && !forward.1.is_empty());
+        assert_eq!(forward, (reverse.1, reverse.0));
+    }
+
     #[test]
     fn judge_matrix_is_fail_loud() {
         let base = |oracle_only: &[&str], disposition: Option<Disposition>| CaseOutcome {
