@@ -1043,6 +1043,11 @@ fn n3_term(t: &N3Term) -> String {
         }
         // A nested formula cannot appear in a lowered RIF-Core document.
         N3Term::Formula(_) => "{ }".to_string(),
+        // RIF-Core has no frame/term form that lowers to an RDF-star quoted
+        // triple, but render one faithfully if it ever flows through. [FABLE-5]
+        N3Term::Triple(tr) => {
+            format!("<< {} {} {} >>", n3_term(&tr[0]), n3_term(&tr[1]), n3_term(&tr[2]))
+        }
     }
 }
 
