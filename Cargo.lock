@@ -5087,6 +5087,7 @@ name = "sparq-terse"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "spargebra",
  "sparq-core",
  "sparq-nlq",
