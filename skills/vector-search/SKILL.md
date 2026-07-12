@@ -905,10 +905,10 @@ assert!(cells.iter().all(|cell| cell.gufo_prior));
 # Ok::<(), String>(())
 ```
 
-The `structure` feature exposes the read-only `UfoPriors`, `UfoVocabulary`, `Rigidity`,
-`OntologicalNature`, and `GUFO_NS` API without the trainer. Use `UfoPriors::mine(graph)` for the
-canonical namespace or `mine_with_namespace(graph, ns)` when the dataset explicitly uses another
-namespace. `proven_disjoint_pairs()` and `proven_subsumptions()` return dictionary-id facts only;
+The `structure` feature exposes the read-only `UfoPriors`, `MetaType`, `Rigidity`, `Nature`, and
+`GUFO_NS` API without the trainer. Use `UfoPriors::mine(graph)` for the canonical namespace or
+`mine_with_namespace(graph, ns)` when the dataset explicitly uses another namespace.
+`provable_disjoint_pairs()` and `proven_subsumptions()` return dictionary-id facts only;
 `augment_oracle()` feeds the proven pairs into `DisjointnessOracle::absorb_proven_pairs`. These APIs
 do not mint terms or write inferred triples back into the graph.
 
@@ -1135,8 +1135,9 @@ let kept = oracle.mask_candidates(&query_types, &candidates);            // drop
 **Honesty.** Mask answer-safety (removes only provably-disjoint, never invents), the metric guard on a
 hyperbolic block, and the gate's decision rule are **proven** (`taxonomy.rs` tests). Whether the
 taxonomy block (or hyperbolic geometry) raises retrieval is **empirical/dataset-dependent** — no
-accuracy claim; the gate adopts non-Euclidean only on **measured** lift. The gUFO rigid/role split
-(design §2/§9.5, rare annotations) is the optional/last prior and is **deferred**.
+accuracy claim; the gate adopts non-Euclidean only on **measured** lift. The optional gUFO prior is
+implemented by the read-only `UfoPriors` reader and the default-off `EvalConfig::gufo_prior`
+ablation documented in recipe 14a.
 
 ### 18. Flexible minimal-complete grounding — modality chosen per request (opt-in, feature = `structure`)
 

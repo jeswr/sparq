@@ -32,21 +32,25 @@
 
 # [OPUS-4.8] sq-2489d.4 (GenAI-KB Phase 4): the structure-aware-vectorisation `kge`
 # measurement foundation + the NEW provenance-weighting surface. `kge` IMPLIES `structure`,
+# [GPT-5.6] PR #2143: this leg also covers the UFO reader and behavioural mask assertions.
 # so this single leg compiles + clippies + tests BOTH the `kge`-gated suites AND the
 # `structure`-gated ones — the gap this leg closes: NO prior leg exercised `structure`/`kge`
 # at all, so the whole structure-aware estate (closure-before-vectorise, NegativeSampler,
 # typed encoders, taxonomy, grounding, the DistMult/ComplEx trainer + eval harness) plus the
-# net-new provenance-weighting reader/ablation went UNGATED in CI (the default workspace
-# archive in ci.yml carries only approx-ann/filtered-ann/vec-predicate, per its GUARD). The
+# net-new provenance-weighting reader/ablation and the UFO/gUFO priors reader went UNGATED in CI
+# (the default workspace archive in ci.yml carries only approx-ann/filtered-ann/vec-predicate, per
+# its GUARD). The
 # net-new tests are `tests/kge.rs` (`#![cfg(feature = "kge")]` — incl. the 3 Phase-4
 # weight-ablation tests: the exact-zero no-op on a provenance-free graph, the end-to-end
-# ablation run, and "the weight reaches the SGD step") and `src/provenance.rs`'s 6 unit tests
-# (`#[cfg(feature = "structure")]`). No new dep: `kge` is hand-rolled CPU-only SGD over
+# ablation run, and "the weight reaches the SGD step"), `src/provenance.rs`'s 6 unit tests,
+# and `src/ufo_priors.rs`'s fail-closed/proven-only reader tests (`#[cfg(feature = "structure")]`).
+# The `kge` state additionally executes the default-off/byte-identical and answer-safe UFO mask
+# assertions in `eval.rs`. No new dep: `kge` is hand-rolled CPU-only SGD over
 # sparq-reason/sparq-introspect (already in the `structure` graph). Verified locally: `cargo
 # nextest list -p sparq-vectors --features kge` shows the kge + provenance tests; `clippy
 # --all-targets -D warnings` is clean with the feature ON. Heavier than a typical leg (it
 # trains small models), but bounded to the work-box-sized synthetic slices the tests use.
-- name: "sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)"
+- name: "sparq-vectors (kge — structure-aware + provenance/UFO priors)"
   crate: "sparq-vectors"
   features: "kge"
   test: true
