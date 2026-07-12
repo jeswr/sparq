@@ -69,6 +69,9 @@ fn read_only_server_lists_read_tools_only() {
     assert!(names.contains(&"introspect"));
     assert!(names.contains(&"shapes"));
     assert!(names.contains(&"stats"));
+    // [GPT-5.6] sq-lsp7k.22: the validator dependency and tool stay opt-in.
+    #[cfg(not(feature = "shacl"))]
+    assert!(!names.contains(&"validate"));
     assert!(!names.contains(&"update"), "update must NOT be advertised by default");
     // The NL `ask` tool is feature-gated AND backend-gated: never advertised in the
     // default build (the `nlq` feature is off here).

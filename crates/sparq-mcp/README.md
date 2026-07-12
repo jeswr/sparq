@@ -71,6 +71,7 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
   template stays behind the same `allow_update` gate (sq-lsp7k.10).
 - **`text_search`** *(feature `text`, OFF by default)* — BM25 full-text search over the
   graph's string literals (`sparq-text`; lazily built, incrementally reconciled).
+- **`validate`** *(feature `shacl`, OFF by default)* — read-only validation against caller-supplied shapes; returns `{conforms, results}`, with parse failures as tool errors. [GPT-5.6] sq-lsp7k.22
 
 **Pod mode** *(feature `solid`, OFF by default)*: `SolidMcpServer` serves a
 `sparq-solid` `PodStore` (named graph per document, WAC/ACP-authorized, bound to one
@@ -94,8 +95,7 @@ built-in authentication or authorization**: the MCP transport (stdio) is a trust
 you, the operator, establish — whoever can speak to the server has exactly the access the
 server was configured with. Run it only against a client you trust.
 
-- **Read-only by default.** A default `McpServer` advertises and accepts only
-  `query` / `construct` / `introspect` / `stats`. It **cannot mutate** the dataset.
+- **Read-only by default.** The default tools cannot mutate; feature-gated `validate` is also read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
   `ServerConfig::allow_update = true` (or a binary's `--allow-update` flag). Turn it on
   only when the client is trusted to issue writes. There is no per-tool ACL beyond this

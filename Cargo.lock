@@ -4795,6 +4795,7 @@ dependencies = [
  "sparq-engine",
  "sparq-introspect",
  "sparq-nlq",
+ "sparq-shacl",
  "sparq-solid",
  "sparq-text",
 ]
