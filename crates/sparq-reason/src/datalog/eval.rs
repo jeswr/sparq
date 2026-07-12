@@ -43,11 +43,12 @@
 //! layout.
 
 use super::{
-    numeric_value, AggAtom, Atom, CmpOp, DTerm, FactStore, Program, Rule, Stratification,
+    numeric_value, AggAtom, AggFunc, Atom, CmpOp, DTerm, FactStore, Program, Rule, Stratification,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 use sparq_substrate::join::{self as sjoin, JoinKeys, NoBudget};
+use sparq_substrate::numeric::{as_numeric, ArithOp, Num};
 use sparq_substrate::rows::{Row, NO_ID};
 
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -133,7 +134,15 @@ pub(super) fn eval_stratified_with_stats(
                     // Semi-naive: once per positive-atom position, with that atom
                     // restricted to the delta (dedup happens at store insertion).
                     for k in 0..r.positive.len() {
-                        run_rule(dict, r, tables, &store, Some((&delta, k)), stats, &mut produced);
+                        run_rule(
+                            dict,
+                            r,
+                            tables,
+                            &store,
+                            Some((&delta, k)),
+                            stats,
+                            &mut produced,
+                        );
                     }
                 }
             }
@@ -243,7 +252,15 @@ fn join_rows(
     let tables = vec![sjoin::build_table(rows, &keys)];
     let probe_only: Vec<usize> = (0..cand_width).collect();
     let mut combined: Vec<Row> = Vec::new();
-    sjoin::hash_probe_serial(cands, &keys, rows, &tables, &probe_only, &NoBudget, &mut combined);
+    sjoin::hash_probe_serial(
+        cands,
+        &keys,
+        rows,
+        &tables,
+        &probe_only,
+        &NoBudget,
+        &mut combined,
+    );
     let mut out = Vec::with_capacity(combined.len());
     'row: for c in &combined {
         let (b, f) = c.split_at(width);
@@ -261,8 +278,8 @@ fn join_rows(
 
 /// Evaluate an `AGGREGATE` atom's positive body over the (stratum-complete) store,
 /// de-duplicate the full binding tuples (set semantics), group by the `ON`
-/// variables and COUNT the matches per group, minting the count as an
-/// `xsd:integer` literal. Returns rows `[on₀ … onₖ₋₁, count]` in the OUTER join
+/// variables and fold the selected aggregate, minting computed numeric results.
+/// Returns rows `[on₀ … onₖ₋₁, value]` in the OUTER join
 /// layout (`ON` columns first, in `ON` order). Empty groups produce no row.
 fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row> {
     let empty: Row = std::iter::repeat_n(NO_ID, agg.n_slots).collect();
@@ -273,21 +290,75 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
         let cands = candidates(atom, store, None);
         rows = join_rows(&rows, &key_cols, &new_writes, &cands, agg.n_slots, 3);
     }
-    // Distinct full tuples, then count per ON-group. (`COUNT(?v)` counts distinct
-    // body matches — see the module docs; the counted slot is always bound in the
-    // Phase-1 fragment, `parser` guarantees it occurs in the body.)
+    // [GPT-5.6] Distinct full tuples, then aggregate per ON-group. A non-numeric
+    // input fails only that body row, matching FILTER's fail-closed posture.
     let distinct: FxHashSet<Row> = rows.into_iter().collect();
-    let mut groups: FxHashMap<Vec<Id>, u64> = FxHashMap::default();
+    let mut groups: FxHashMap<Vec<Id>, Vec<(Id, Num)>> = FxHashMap::default();
+    let mut counts: FxHashMap<Vec<Id>, u64> = FxHashMap::default();
     for r in &distinct {
         let key: Vec<Id> = agg.on.iter().map(|&(l, _)| r[l as usize]).collect();
-        *groups.entry(key).or_insert(0) += 1;
+        if agg.func == AggFunc::Count {
+            *counts.entry(key).or_insert(0) += 1;
+        } else {
+            let id = r[agg.value.expect("numeric aggregate has a value slot") as usize];
+            let oxrdf::Term::Literal(lit) = dict.term(id) else {
+                continue;
+            };
+            let Some(num) = as_numeric(&lit) else {
+                continue;
+            };
+            groups.entry(key).or_default().push((id, num));
+        }
     }
-    let mut out = Vec::with_capacity(groups.len());
-    for (key, cnt) in groups {
-        let cnt_id = dict.intern_lit(&cnt.to_string(), XSD_INTEGER, None);
+    let mut out = Vec::with_capacity(groups.len() + counts.len());
+    for (key, cnt) in counts {
+        let value_id = dict.intern_lit(&cnt.to_string(), XSD_INTEGER, None);
         let mut row: Row = Row::from_slice(&key);
-        row.push(cnt_id);
+        row.push(value_id);
         out.push(row);
+    }
+    for (key, values) in groups {
+        let value_id = match agg.func {
+            AggFunc::Count => unreachable!(),
+            AggFunc::Min | AggFunc::Max => values
+                .iter()
+                .copied()
+                .reduce(|a, b| {
+                    let ord = a.1.cmp_total(b.1);
+                    if (agg.func == AggFunc::Min && ord.is_le())
+                        || (agg.func == AggFunc::Max && ord.is_ge())
+                    {
+                        a
+                    } else {
+                        b
+                    }
+                })
+                .map(|(id, _)| id),
+            AggFunc::Sum | AggFunc::Avg => {
+                let count = values.len() as i64;
+                values
+                    .iter()
+                    .map(|(_, n)| *n)
+                    .reduce(|a, b| a.binop(b, ArithOp::Add).expect("addition is total"))
+                    .and_then(|sum| {
+                        let result = if agg.func == AggFunc::Avg {
+                            sum.binop(Num::Int(count), ArithOp::Div)?
+                        } else {
+                            sum
+                        };
+                        Some(dict.intern_lit(
+                            &result.canonical_lexical(),
+                            result.datatype().as_str(),
+                            None,
+                        ))
+                    })
+            }
+        };
+        if let Some(value_id) = value_id {
+            let mut row: Row = Row::from_slice(&key);
+            row.push(value_id);
+            out.push(row);
+        }
     }
     out
 }
@@ -347,7 +418,14 @@ fn run_rule(
         }
         new_writes.push((agg.out as usize, agg.on.len()));
         bound.insert(agg.out);
-        rows = join_rows(&rows, &key_cols, &new_writes, table, rule.n_slots, cand_width);
+        rows = join_rows(
+            &rows,
+            &key_cols,
+            &new_writes,
+            table,
+            rule.n_slots,
+            cand_width,
+        );
         if rows.is_empty() {
             return;
         }

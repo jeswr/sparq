@@ -200,7 +200,8 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 ## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
 
 RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
-rule dialect with `NOT` (negation as failure) + `AGGREGATE COUNT` atoms and a minimal
+rule dialect with `NOT` (negation as failure), `AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
+atoms and a minimal
 exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
 through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
 non-incremental per-stratum evaluator on the shared substrate join kernels.
@@ -225,11 +226,14 @@ let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
 ```
 
 Fragment honesty (all loud parse errors, never silent): constant predicates only;
-COUNT only (SUM/MIN/MAX/AVG beaded); `FILTER` is exact `xsd:integer`/`decimal`
+aggregate numeric inputs use the shared XSD numeric tower and non-numeric rows fail
+closed; `FILTER` is exact `xsd:integer`/`decimal`
 comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
-counts DISTINCT body matches per group; counts mint `xsd:integer` literals. Naive
-rounds per stratum (fixture-scale; semi-naive + incremental maintenance are beaded).
+counts DISTINCT body matches per group; counts mint `xsd:integer` literals. `SUM`
+and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
+`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum;
+incremental maintenance is beaded. <!-- [GPT-5.6] sq-citho -->
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
