@@ -532,6 +532,38 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
+    /// Allocation-free PROOF-ONLY equivalent of [`is_acl_shaped`] for ASCII input:
+    /// same semantics (drop one trailing `/`, take the final `/`-segment, case-fold,
+    /// `.acl` suffix) but case-folds the last four bytes in place instead of calling
+    /// `to_ascii_lowercase()`, whose heap-allocating `String` blows CBMC's string/heap
+    /// model past the harness wall-clock budget. The proof asserts `is_ascii()` on every
+    /// input it classifies, under which the two predicates coincide byte-for-byte, so
+    /// the verified property is UNCHANGED. Production paths still use [`is_acl_shaped`].
+    fn is_acl_shaped_ascii_noalloc(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        // Tolerate one trailing '/' (a container child), as is_acl_shaped does.
+        let mut end = bytes.len();
+        if end > 0 && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
+        // Start of the final path segment.
+        let mut start = 0;
+        let mut j = 0;
+        while j < end {
+            if bytes[j] == b'/' {
+                start = j + 1;
+            }
+            j += 1;
+        }
+        if end - start < 4 {
+            return false;
+        }
+        bytes[end - 4] == b'.'
+            && bytes[end - 3].to_ascii_lowercase() == b'a'
+            && bytes[end - 2].to_ascii_lowercase() == b'c'
+            && bytes[end - 1].to_ascii_lowercase() == b'l'
+    }
+
     #[kani::proof]
     #[kani::unwind(20)]
     fn domain_corpus_exhibits_a_surviving_escalation() {
@@ -546,7 +578,12 @@ mod kani_proofs {
                     "a flagged evader must actually evade the naive exact-suffix guard"
                 );
                 assert!(
-                    is_acl_shaped(entry.effective_child),
+                    entry.effective_child.is_ascii(),
+                    "corpus effective names are ASCII (precondition for the \
+                     allocation-free .acl classification below)"
+                );
+                assert!(
+                    is_acl_shaped_ascii_noalloc(entry.effective_child),
                     "a flagged evader must still decode to an .acl control document"
                 );
                 assert!(
