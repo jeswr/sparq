@@ -1,0 +1,5 @@
+{
+  "pr": 2132,
+  "date": "2026-07-12",
+  "reason": "[GPT-5.6] landing Kern PR #2132 (issue #2149): the RDF 1.2 triple-term visibility axis is runtime opt-in through TrainConfig::term_scope inside the existing default-OFF kge feature. TermScope::IriBlank remains every preset's default, the feature-OFF build has no trainer/eval code, and the cross-commit kge pin plus bit-equality regressions preserve the prior baseline."
+}

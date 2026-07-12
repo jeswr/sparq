@@ -1,13 +1,13 @@
 > 🤖 SPARQ agent — landing Kern PR, hygiene by **GPT-5.6**
 
-# vectors: RDF 1.2 quoted-triple visibility as an off-by-default ablation axis; fix empty-string verbalisation of quoted triples
+# vectors: RDF 1.2 triple-term visibility as an off-by-default ablation axis; fix empty-string verbalisation of triple terms
 
 ## What
 
 Three changes to the opt-in `structure`/`kge` measurement stack (default build untouched, zero new
 dependencies; nothing outside `sparq-vectors` changes):
 
-1. **Bugfix (unflagged):** `grounding::render_object` rendered an RDF 1.2 quoted-triple object as
+1. **Bugfix (unflagged):** `grounding::render_object` rendered an RDF 1.2 triple-term object as
    the **empty string** — silent data loss in every NL-string / subgraph-text grounding over RDF
    1.2 data. It now renders the reconstructed `<<( s p o )>>` term (nested terms included,
    depth-capped by the existing dict reconstruction; oxrdf's `Display` provides the RDF 1.2
@@ -84,7 +84,7 @@ Three independent layers:
 This comes out of the **Kern (kernel-of-truth) research programme** — an agent-driven effort
 evaluating whether ontological discipline (including statements-about-statements held without
 assertion, i.e. RDF 1.2 reification) earns measurable lift in KGE link prediction on this stack.
-Today `sparq-vectors` structurally cannot see quoted triples, so that question cannot be asked.
+Today `sparq-vectors` structurally cannot see triple terms, so that question cannot be asked.
 The change is useful to the vectoriser independently of that programme (RDF 1.2 data is silently
 truncated today — the grounding bugfix corrects real data loss), which is why it is proposed
 upstream rather than kept on a fork. Authored by an AI agent (Fable) under the programme's

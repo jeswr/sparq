@@ -30,8 +30,10 @@
   features: "vec-predicate,filtered-ann"
   test: true
 
-# [OPUS-4.8] sq-2489d.4 (GenAI-KB Phase 4): the structure-aware-vectorisation `kge`
-# measurement foundation + the NEW provenance-weighting surface. `kge` IMPLIES `structure`,
+# [GPT-5.6] PR #2132 extends the existing structure-aware-vectorisation `kge` leg with the
+# RDF 1.2 triple-term visibility surface. `TermScope` is a runtime ablation axis inside `kge`,
+# not a second Cargo feature, so this one feature-on leg covers both its OFF default and ON tests.
+# It also retains the Phase-4 provenance-weighting coverage. `kge` IMPLIES `structure`,
 # so this single leg compiles + clippies + tests BOTH the `kge`-gated suites AND the
 # `structure`-gated ones — the gap this leg closes: NO prior leg exercised `structure`/`kge`
 # at all, so the whole structure-aware estate (closure-before-vectorise, NegativeSampler,
@@ -46,7 +48,7 @@
 # nextest list -p sparq-vectors --features kge` shows the kge + provenance tests; `clippy
 # --all-targets -D warnings` is clean with the feature ON. Heavier than a typical leg (it
 # trains small models), but bounded to the work-box-sized synthetic slices the tests use.
-- name: "sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)"
+- name: "sparq-vectors (kge — structure, provenance + triple-term scope)"
   crate: "sparq-vectors"
   features: "kge"
   test: true

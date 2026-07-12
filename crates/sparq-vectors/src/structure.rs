@@ -261,7 +261,7 @@ impl TypeConstraints {
 /// without a measured, multi-seed, paired-delta result).
 ///
 /// [`TermScope::IriBlank`] is the pre-existing behaviour and the **default everywhere**: with it,
-/// [`is_embeddable`] reduces to the exact named-node/blank-node match the trainer, eval, and
+/// `is_embeddable` reduces to the exact named-node/blank-node match the trainer, eval, and
 /// sampler previously performed via three private `is_entity` copies — baselines are
 /// byte-identical (asserted bit-for-bit by the `kge` tests). [`TermScope::Embeddable`]
 /// additionally admits RDF 1.2 quoted-triple terms (`TermParts::Triple`, the object of
@@ -278,7 +278,7 @@ impl TypeConstraints {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TermScope {
     /// Named + blank nodes only — the ablation **OFF** baseline (and the default). Reduces
-    /// [`is_embeddable`] to exactly the former `is_entity` matcher, so every existing caller's
+    /// `is_embeddable` to exactly the former `is_entity` matcher, so every existing caller's
     /// behaviour is byte-identical.
     #[default]
     IriBlank,

@@ -223,6 +223,14 @@ fuse_scores(a: &[(T,f64)], b: &[(T,f64)], alpha /*1.0=a only*/, top_k) -> Vec<(T
 hybrid_search(query: &Q, top_k, k /*RRF_K*/, &mut [Retriever<'_, Q, T>]) -> Vec<(T, f64)>   // [OPUS-4.8] lifetime on alias use
 //   Retriever<'r, Q, T> = &'r mut dyn FnMut(&Q) -> Vec<(T, f64)>  (e.g. nearest_term / most_similar closures)
 
+// --- RDF 1.2 triple-term visibility for KGE --- feature = "structure" / "kge" [GPT-5.6] PR #2132
+TermScope::{IriBlank, Embeddable}                                    // IriBlank is the byte-stable default
+NegativeSampler::new_scoped(&Graph, &TypeConstraints, SamplingMode, TermScope)
+TrainConfig { term_scope: TermScope, .. }                             // field exists with feature = "kge"
+run_quoted_ablation(text, format, EvalConfig, seeds) -> Result<QuotedAblation, String>
+synthetic_rdf12_parts(n_entities, seed) -> Rdf12Parts                 // three N-Triples layers
+synthetic_rdf12_ttl(n_entities, seed) -> String                       // full deterministic slice
+
 // --- `vec:` magic predicate (src/rewrite.rs) --- feature = "vec-predicate" ONLY; pulls sparq-engine [OPUS-4.8] sq-k6ex
 query_vec(&Graph, sparql: &str, &VectorStore) -> Result<QueryResult, String>      // parse + rewrite + evaluate
 query_vec_with_budget(&Graph, &str, &VectorStore, &QueryBudget) -> Result<QueryResult, String>
@@ -883,6 +891,45 @@ synthetic, work-box, single-seed figures — adoption requires a **real dataset*
 subset), on a **canonical machine**, under the **asymmetric model**, with **multi-seed** reporting.
 The gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
 
+### 14a. RDF 1.2 triple-term visibility ablation (opt-in, feature = `kge`)
+
+<!-- [GPT-5.6] PR #2132: public TermScope + paired triple-term visibility measurement surface. -->
+`TermScope` controls which RDF term sorts receive KGE entity rows. Every constructor and preset uses
+`TermScope::IriBlank` by default, preserving the former IRI-and-blank-node-only trainer. Set
+`TermScope::Embeddable` to admit RDF 1.2 triple terms reached through `rdf:reifies`; literals remain
+excluded. Triple-term and atomic negative corruptions use separate pools, so the sampler never creates
+a negative that is distinguishable only by term sort. The triple term is an opaque node: the trainer
+sees its graph connectivity and shared-node structure, not a compositional encoding of its `(s, p, o)`
+components.
+
+For a direct training run, set `TrainConfig::term_scope`. For a paired measurement, use
+`run_quoted_ablation`; it holds the parsed graph, split, ranking pool, and random seed fixed while
+changing only the term scope:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{
+    run_quoted_ablation, synthetic_rdf12_ttl, EvalConfig, SamplingMode, TermScope, TrainConfig,
+};
+
+let text = synthetic_rdf12_ttl(96, 7); // despite the legacy suffix, this returns N-Triples text
+let template = EvalConfig::small(13);
+let result = run_quoted_ablation(&text, "ntriples", template, &[1, 2, 3, 4])?;
+let paired_mrr = result.mrr; // ON minus OFF for each seed; no lift is assumed
+
+let mut direct = TrainConfig::small(SamplingMode::TypeConstrained, 7);
+assert_eq!(direct.term_scope, TermScope::IriBlank); // default OFF
+direct.term_scope = TermScope::Embeddable;          // explicit ON arm
+# Ok::<(), String>(())
+```
+
+`Rdf12Parts` exposes `base`, `reifications`, and `metadata` separately for byte-identity and
+visibility experiments; `Rdf12Parts::full` concatenates them. Split membership and the evaluation
+ranking pool stay atomic under both scopes, so the paired delta measures training-side visibility
+rather than a different candidate population. On a graph without triple terms, ON and OFF are
+bit-identical and the paired delta is exactly zero. This is a measurement surface, not an accuracy
+claim.
+
 ### 14b. Provenance-weighting `w(t)` — weight training by PROV-O/DQV quality (opt-in, feature = `structure`; measurement under `kge`)
 
 <!-- [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4; design research/provenance-driven-genai-kb.md §USE-1 / §5 Phase 4). -->
@@ -1310,7 +1357,9 @@ NOT frozen, so the reserved area stays opaque here — it is the remaining, deli
   / `TrainedModel` / `ModelKind` (DistMult **or** the asymmetric ComplEx), the filtered
   link-prediction harness (`run_ablation` / `run_ablation_multiseed` / `EvalConfig` / `Splits` /
   `Metrics` / `LongTail` / `AblationCell` / `MultiSeedCell` / `CellStats` / `MeanStd`), the
-  synthetic-graph generators, and `SCHEMA_PREDICATES` (recipe 14). It is the *measurement instrument*
+  paired triple-term visibility surface (`TermScope` / `run_quoted_ablation` / `QuotedAblation` /
+  `Rdf12Parts`, recipe 14a), the synthetic-graph generators, and `SCHEMA_PREDICATES` (recipe 14).
+  It is the *measurement instrument*
   the design requires before any prior is adopted — **no accuracy claim**, indicative numbers only
   (work-box non-canonical). **DistMult is symmetric → near-random on directional relations; read
   ablation deltas off the asymmetric ComplEx, multi-seed.**
