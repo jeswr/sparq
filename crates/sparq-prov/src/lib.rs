@@ -39,8 +39,9 @@
 //! inferred fact, one `prov:Activity` per rule firing, with
 //! `wasGeneratedBy`/`used`/`wasDerivedFrom` edges. Inference *is* derivation, and
 //! the proof tree is a finer-grained provenance (it names the rule and exact
-//! premises for each fact) than a single CONSTRUCT-style activity. See the
-//! `reason` module.
+//! premises for each fact) than a single CONSTRUCT-style activity.
+//! `prov_ntriples` renders that lineage as N-Triples in one call. See the
+//! `reason` module. <!-- [GPT-5.6] sq-8jn86 -->
 //!
 //! **Missing-answer explanation** is available under the non-default `why-not`
 //! feature. The `why_not` function accepts one basic graph pattern and a fully
@@ -79,7 +80,7 @@ pub use update::{derive_update, derive_update_with_budget, UpdateDerivation};
 #[cfg(feature = "reason")]
 pub mod reason;
 #[cfg(feature = "reason")]
-pub use reason::{prov_from_proof, ProvProofConfig};
+pub use reason::{prov_from_proof, prov_ntriples, ProvProofConfig};
 // [GPT-5.6] sq-lsp7k.17: exact missing-conjunct explanation, opt-in so the
 // default public API remains unchanged.
 #[cfg(feature = "why-not")]

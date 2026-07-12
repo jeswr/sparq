@@ -69,6 +69,7 @@ fn read_only_server_lists_read_tools_only() {
     assert!(names.contains(&"introspect"));
     assert!(names.contains(&"shapes"));
     assert!(names.contains(&"stats"));
+    assert!(names.contains(&"void"));
     // [GPT-5.6] sq-lsp7k.22: the validator dependency and tool stay opt-in.
     #[cfg(not(feature = "shacl"))]
     assert!(!names.contains(&"validate"));
@@ -181,6 +182,66 @@ fn introspect_and_stats_reflect_the_graph() {
     );
     let summary = ix["result"]["content"][0]["text"].as_str().unwrap();
     assert!(summary.contains("Schema summary"), "got: {}", summary);
+}
+
+#[test]
+fn void_tool_emits_dataset_descriptor() {
+    let mut server = McpServer::new(graph());
+    let descriptor = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"void","arguments":{"dataset":"http://example.org/ds"}}}"#,
+    );
+    let result = &descriptor["result"];
+    assert_eq!(result["isError"], false, "{descriptor}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "<http://example.org/ds> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://rdfs.org/ns/void#Dataset> ."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "<http://example.org/ds> <http://rdfs.org/ns/void#triples> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("<http://rdfs.org/ns/void#class> <http://ex/Person>"),
+        "{text}"
+    );
+}
+
+#[test]
+fn void_tool_defaults_dataset_iri_and_optionally_emits_characteristic_sets() {
+    let mut server = McpServer::new(graph());
+    let default_descriptor = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"void","arguments":{}}}"#,
+    );
+    let default_text = default_descriptor["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        default_text.contains(
+            "<urn:sparq:dataset> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://rdfs.org/ns/void#Dataset> ."
+        ),
+        "{default_text}"
+    );
+    assert!(
+        !default_text.contains("http://sparq.dev/ns/cs#characteristicSet"),
+        "bare VoID must omit characteristic-set statistics: {default_text}"
+    );
+
+    let with_cs = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"void","arguments":{"characteristic_sets":true}}}"#,
+    );
+    let with_cs_text = with_cs["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        with_cs_text.contains("http://sparq.dev/ns/cs#characteristicSet"),
+        "{with_cs_text}"
+    );
 }
 
 #[test]

@@ -4676,6 +4676,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
+ "arrow-ipc",
  "arrow-schema",
  "bytes",
  "oxrdf 0.3.3",
