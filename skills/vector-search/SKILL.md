@@ -68,6 +68,9 @@ impl VectorStore {
     fn get(&self, id: Id) -> Option<&[f32]>;  fn iter(&self) -> impl Iterator<Item=(Id, &[f32])>
     fn dim(&self) -> usize;  fn len(&self) -> usize;  fn is_empty(&self) -> bool
 }
+# feature = "metadata-sidecar": opaque per-vector tags persisted in `.spqv` v4; no new dependency
+store.put_with_meta(id, vector, meta: &str) -> Result<(), String>               // build phase; exact UTF-8 bytes retained
+store.meta(id) -> Option<&str>                                                  // None for untagged or absent ids
 StreamingWriter::create(path, dim);  fn put(&mut self, id, &[f32]); fn finalize(self) -> Result<VectorStore, String>  // O(1) build RAM, byte-identical output
 
 // --- bulk import of externally-computed embeddings (src/import.rs) --- bring-your-own vectors; reuses the store writer
@@ -147,6 +150,8 @@ VectorStore::sibling_delta_path(&Path) -> PathBuf;  VectorStore::has_persisted_d
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
+# feature = "metadata-sidecar": same ranking/scores, decorated after ranking
+nearest_exact_with_meta(&VectorStore, query: &[f32], k) -> Vec<(Id, f32, Option<String>)>
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
 nearest_term_exact_checked(&VectorStore, &Graph, &Term, k) -> Result<Vec<(Term, f32)>, String>  // errs on stale store
 cosine(a: &[f32], b: &[f32]) -> f32
@@ -1319,6 +1324,40 @@ container was knowingly **non-conforming** on that reproducibility obligation (i
 dimension + graph fingerprint). The v3 format + the mandatory `check_provenance` **close that gap** for
 the DEFINED axes. The extensible-provenance profile itself (the `#1746` reserved-area semantics) is
 NOT frozen, so the reserved area stays opaque here — it is the remaining, deliberately-deferred, part.
+
+### 21. Carry opaque metadata beside exact-search hits (opt-in, feature = `metadata-sidecar`)
+
+Use the metadata sidecar when each vector needs a caller-owned label, partition token, or
+post-filtering tag without a second id-to-tag lookup table. Tags do not affect similarity or rank.
+
+```toml
+sparq-vectors = { path = "../sparq-vectors", features = ["metadata-sidecar"] }
+```
+
+```rust,ignore
+use sparq_vectors::{nearest_exact_with_meta, VectorStore};
+
+let mut store = VectorStore::create("graph.spqv", 2)?;
+store.put_with_meta(10, &[1.0, 0.0], "tenant-a")?;
+store.put(20, &[0.0, 1.0])?; // untagged is valid
+store.finalize()?;
+
+let hits = nearest_exact_with_meta(&store, &[1.0, 0.0], 2);
+assert_eq!(hits[0].2.as_deref(), Some("tenant-a"));
+assert_eq!(store.meta(20), None);
+
+let reopened = VectorStore::open_from_bytes(std::fs::read("graph.spqv")?)?;
+assert_eq!(reopened.meta(10), Some("tenant-a"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The first `put_with_meta` selects `.spqv` v4. A build that only calls `put` still emits the existing
+v2 format, or v3 when embedding provenance is bound, even when `metadata-sidecar` is enabled. Tagged
+and untagged vectors can be mixed; an empty string is a present tag (`Some("")`), distinct from
+`None`. The metadata is returned only after `nearest_exact` has fixed the top-`k`, so the `(id,
+score)` sequence and deterministic tie-break are identical to the undecorated search. The v4 reader
+and writer are both feature-gated; enable `metadata-sidecar` in every process that opens a tagged
+store. A feature-off build continues to support the pre-existing v1/v2/v3 formats only.
 
 ## Gotchas / feature flags / prerequisites
 

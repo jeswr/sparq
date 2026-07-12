@@ -45,6 +45,15 @@
 //! provenance, so `check_provenance` fails closed against it unless the caller opts into
 //! [`LegacyMode::Allow`].
 //!
+//! # Version 4 — opt-in per-vector metadata
+//!
+//! With the default-OFF `metadata-sidecar` feature, calling `put_with_meta` selects v4. It adds a
+//! deterministic, length-delimited metadata block between the optional provenance block and the
+//! aligned vector data. Each entry is `(id, opaque UTF-8 bytes)`, sorted by id. Ordinary `put` calls
+//! write v2 (or v3 when provenance is bound) exactly as before, even when the feature is enabled.
+//! Metadata is accessed with `meta` and decorates `nearest_exact_with_meta`; it never participates
+//! in scoring or ordering.
+//!
 //! [OPUS-4.8] (sq-32i5) The **fingerprint** binds the store to the graph it was built against
 //! (see [`crate::fingerprint`]): a store keyed by dictionary id is meaningless against a graph
 //! whose ids have shifted, so [`VectorStore::check_graph`] errors on a mismatch instead of letting
@@ -104,6 +113,10 @@ pub const SPQV_VERSION: u32 = 2;
 /// `spqv-provenance` feature is on and a provenance was bound (`VectorStore::with_provenance`); READ
 /// always (a v3 file opens regardless of features).
 pub const SPQV_VERSION_V3: u32 = 3;
+/// Metadata-bearing `.spqv` format, written only by the opt-in `metadata-sidecar` feature when at
+/// least one vector carries a tag.
+#[cfg(feature = "metadata-sidecar")]
+pub const SPQV_VERSION_V4: u32 = 4;
 /// Header length of a version-1 file (no fingerprint block).
 const HEADER_LEN_V1: usize = 32;
 /// Header length of the version-2 format: the v1 header + the fingerprint block. Also the length of
@@ -258,6 +271,10 @@ pub struct VectorStore {
     /// feature, so the default build carries no delta state. See [`crate::delta`].
     #[cfg(feature = "delta")]
     delta: Option<crate::delta::VectorDelta>,
+    /// Opaque per-vector tags. Present only in `metadata-sidecar` builds, so the default store
+    /// carries neither the map nor the v4 codec.
+    #[cfg(feature = "metadata-sidecar")]
+    metadata: FxHashMap<Id, String>,
 }
 
 impl VectorStore {
@@ -280,6 +297,8 @@ impl VectorStore {
             inverse: std::sync::OnceLock::new(),
             #[cfg(feature = "delta")]
             delta: None,
+            #[cfg(feature = "metadata-sidecar")]
+            metadata: FxHashMap::default(),
         })
     }
 
@@ -359,6 +378,16 @@ impl VectorStore {
             return Err(format!("{origin}: not a .spqv file (bad magic)"));
         }
         let version = u32::from_le_bytes(map[4..8].try_into().unwrap());
+        let dim = u32::from_le_bytes(map[8..12].try_into().unwrap()) as usize;
+        let count64 = u64::from_le_bytes(map[12..20].try_into().unwrap());
+        if dim == 0 {
+            return Err(format!("{origin}: zero dimension"));
+        }
+        let count: usize = count64
+            .try_into()
+            .map_err(|_| format!("{origin}: count {count64} exceeds the address space"))?;
+        #[cfg(feature = "metadata-sidecar")]
+        let mut metadata = FxHashMap::default();
         // [OPUS-4.8] (sq-32i5) v1 (no fingerprint, 32-byte header), v2 (fingerprint, 56-byte header),
         // and [FABLE-5] (sq-lhcot.1) v3 (v2 header + a length-prefixed embedding-provenance block)
         // all open; the header length and the offset where the vector data begins depend on the
@@ -420,16 +449,70 @@ impl VectorStore {
                     }
                     (padded, fp, Some(prov))
                 }
+                #[cfg(feature = "metadata-sidecar")]
+                4 => {
+                    if map.len() < HEADER_LEN + 4 {
+                        return Err(format!(
+                            "{origin}: truncated version-4 header (provenance length prefix)"
+                        ));
+                    }
+                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                    let prov_len =
+                        u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
+                            as usize;
+                    if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
+                        return Err(format!(
+                            "{origin}: version-4 provenance block length {prov_len} exceeds the cap"
+                        ));
+                    }
+                    let prov_start = HEADER_LEN + 4;
+                    let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
+                        format!("{origin}: version-4 provenance length {prov_len} overflows")
+                    })?;
+                    let meta_len_end = prov_end.checked_add(8).ok_or_else(|| {
+                        format!("{origin}: version-4 metadata length offset overflows")
+                    })?;
+                    if map.len() < meta_len_end {
+                        return Err(format!(
+                            "{origin}: truncated version-4 header (metadata length prefix)"
+                        ));
+                    }
+                    let provenance = if prov_len == 0 {
+                        None
+                    } else {
+                        Some(
+                            EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
+                                .map_err(|e| format!("{origin}: {e}"))?,
+                        )
+                    };
+                    let meta_len64 =
+                        u64::from_le_bytes(map[prov_end..meta_len_end].try_into().unwrap());
+                    let meta_len: usize = meta_len64.try_into().map_err(|_| {
+                        format!("{origin}: metadata block length exceeds the address space")
+                    })?;
+                    let meta_end = meta_len_end.checked_add(meta_len).ok_or_else(|| {
+                        format!("{origin}: version-4 metadata length {meta_len} overflows")
+                    })?;
+                    if map.len() < meta_end {
+                        return Err(format!(
+                            "{origin}: truncated version-4 metadata block (need {meta_len} bytes)"
+                        ));
+                    }
+                    metadata = crate::metadata::decode(
+                        &map[meta_len_end..meta_end],
+                        count,
+                        origin,
+                    )?;
+                    let padded = meta_end.div_ceil(4) * 4;
+                    if map.len() < padded {
+                        return Err(format!(
+                            "{origin}: truncated version-4 header (metadata padding)"
+                        ));
+                    }
+                    (padded, fp, provenance)
+                }
                 v => return Err(format!("{origin}: unsupported .spqv version {v}")),
             };
-        let dim = u32::from_le_bytes(map[8..12].try_into().unwrap()) as usize;
-        let count64 = u64::from_le_bytes(map[12..20].try_into().unwrap());
-        if dim == 0 {
-            return Err(format!("{origin}: zero dimension"));
-        }
-        let count: usize = count64
-            .try_into()
-            .map_err(|_| format!("{origin}: count {count64} exceeds the address space"))?;
         // Checked size arithmetic: a malformed header must be rejected here, not wrap
         // around and pass the size check (or panic later in `get`/`iter`).
         let expect = count
@@ -451,9 +534,12 @@ impl VectorStore {
         // `iter`'s inverse map assumes). After this, no read path can panic on a
         // corrupt index.
         {
-            let index = &map[data_offset + count * dim * 4..];
+            let index_start = data_offset + count * dim * 4;
+            let index = &map[index_start..index_start + count * 8];
             let mut slot_seen = vec![false; count];
             let mut prev_id: Option<Id> = None;
+            #[cfg(feature = "metadata-sidecar")]
+            let mut metadata_matches = 0usize;
             for i in 0..count {
                 let id = u32::from_le_bytes(index[i * 8..i * 8 + 4].try_into().unwrap());
                 let slot =
@@ -470,6 +556,16 @@ impl VectorStore {
                     ));
                 }
                 slot_seen[slot] = true;
+                #[cfg(feature = "metadata-sidecar")]
+                if metadata.contains_key(&id) {
+                    metadata_matches += 1;
+                }
+            }
+            #[cfg(feature = "metadata-sidecar")]
+            if metadata_matches != metadata.len() {
+                return Err(format!(
+                    "{origin}: metadata references an id that has no vector"
+                ));
             }
         }
         Ok(VectorStore {
@@ -482,6 +578,8 @@ impl VectorStore {
             inverse: std::sync::OnceLock::new(),
             #[cfg(feature = "delta")]
             delta: None,
+            #[cfg(feature = "metadata-sidecar")]
+            metadata,
         })
     }
 
@@ -504,6 +602,22 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Appends `vector` for `id` and associates an opaque UTF-8 metadata tag with it.
+    ///
+    /// Validation and build-phase restrictions are identical to [`put`](Self::put). The tag is
+    /// persisted byte-for-byte by [`finalize`](Self::finalize), including an empty string. Writing
+    /// the first tag selects the opt-in v4 format; stores built exclusively with `put` retain the
+    /// existing v2/v3 format exactly.
+    #[cfg(feature = "metadata-sidecar")]
+    pub fn put_with_meta(&mut self, id: Id, vector: &[f32], meta: &str) -> Result<(), String> {
+        if meta.len() > u32::MAX as usize {
+            return Err(format!("metadata for id {id} exceeds the .spqv length limit"));
+        }
+        self.put(id, vector)?;
+        self.metadata.insert(id, meta.to_owned());
+        Ok(())
+    }
+
     /// Writes the `.spqv` file and re-opens it memory-mapped; the handle then serves
     /// reads from the map and rejects further [`put`](Self::put)s. Idempotent on an
     /// already-finalized/opened store.
@@ -515,7 +629,14 @@ impl VectorStore {
         // [FABLE-5] (sq-lhcot.1) Build the header: v3 (with the embedding-provenance block) if a
         // provenance is bound, else v2 exactly as before. `build_header` is the single seam that both
         // this in-RAM writer and the `StreamingWriter` share, so the two writers stay byte-identical.
-        let header = build_header(self.dim, count, self.fingerprint, self.provenance.as_ref());
+        let header = build_header(
+            self.dim,
+            count,
+            self.fingerprint,
+            self.provenance.as_ref(),
+            #[cfg(feature = "metadata-sidecar")]
+            (!self.metadata.is_empty()).then_some(&self.metadata),
+        );
 
         let mut index: Vec<(Id, u32)> = slots.iter().map(|(&id, &slot)| (id, slot)).collect();
         index.sort_unstable();
@@ -551,6 +672,10 @@ impl VectorStore {
         self.provenance = reopened.provenance;
         self.data_offset = reopened.data_offset;
         self.inverse = std::sync::OnceLock::new();
+        #[cfg(feature = "metadata-sidecar")]
+        {
+            self.metadata = reopened.metadata;
+        }
         Ok(())
     }
 
@@ -571,6 +696,14 @@ impl VectorStore {
             }
         }
         self.base_get(id)
+    }
+
+    /// Returns `id`'s opaque metadata tag, or `None` when the id has no effective vector or was
+    /// written with [`put`](Self::put) rather than [`put_with_meta`](Self::put_with_meta).
+    #[cfg(feature = "metadata-sidecar")]
+    pub fn meta(&self, id: Id) -> Option<&str> {
+        self.get(id)?;
+        self.metadata.get(&id).map(String::as_str)
     }
 
     /// The vector for `id` from the immutable base only (no delta) — the original `get` body. The
@@ -861,6 +994,8 @@ impl VectorStore {
                     *s -= 1;
                 }
             }
+            #[cfg(feature = "metadata-sidecar")]
+            self.metadata.remove(&id);
             return true;
         }
         let had = self.get(id).is_some();
@@ -868,6 +1003,8 @@ impl VectorStore {
             let delta = self.delta_mut();
             delta.appended.remove(&id);
             delta.tombstones.insert(id);
+            #[cfg(feature = "metadata-sidecar")]
+            self.metadata.remove(&id);
         }
         had
     }
@@ -965,6 +1102,11 @@ impl VectorStore {
         let pairs: Vec<(Id, Vec<f32>)> =
             self.iter().map(|(id, v)| (id, v.to_vec())).collect();
         for (id, v) in &pairs {
+            #[cfg(feature = "metadata-sidecar")]
+            if let Some(meta) = self.meta(*id) {
+                fresh.put_with_meta(*id, v, meta)?;
+                continue;
+            }
             fresh.put(*id, v)?;
         }
         fresh.finalize()?;
@@ -1112,15 +1254,16 @@ fn describe_generation(fp: Option<Fingerprint>) -> String {
 }
 
 /// [FABLE-5] (sq-lhcot.1) Builds the `.spqv` header bytes for a store with `count` vectors of the
-/// given `dim`, optional graph `fingerprint`, and optional embedding `provenance`. Emits the **v3**
-/// format (v2 header + a `u32`-length-prefixed provenance block) when `provenance` is `Some`, else
-/// the **v2** format (byte-identical to the pre-v3 writer). The single header seam both the in-RAM
-/// [`VectorStore::finalize`] and the [`StreamingWriter`] share, so the two writers agree byte-for-byte.
+/// given `dim`, optional graph `fingerprint`, optional embedding `provenance`, and (when enabled)
+/// optional metadata. Emits v4 when metadata is present, v3 when only provenance is present, and v2
+/// otherwise. The single header seam both the in-RAM [`VectorStore::finalize`] and the
+/// [`StreamingWriter`] share, so untagged stores agree byte-for-byte.
 fn build_header(
     dim: usize,
     count: usize,
     fingerprint: Option<Fingerprint>,
     provenance: Option<&EmbeddingProvenance>,
+    #[cfg(feature = "metadata-sidecar")] metadata: Option<&FxHashMap<Id, String>>,
 ) -> Vec<u8> {
     // The provenance-block bytes (empty ⇒ v2). The `EmbeddingProvenance` codec is always compiled
     // (v3 read path), so this seam works in both feature states — v3 is written only when a
@@ -1128,7 +1271,18 @@ fn build_header(
     let prov_bytes = provenance.map(|p| p.to_bytes());
     let mut header = vec![0u8; HEADER_LEN];
     header[0..4].copy_from_slice(&SPQV_MAGIC);
-    // Version tag: v3 iff a provenance is present, else v2.
+    #[cfg(feature = "metadata-sidecar")]
+    let metadata_bytes = metadata.map(crate::metadata::encode);
+    // Version tag: v4 iff metadata is present, otherwise v3 iff provenance is present, else v2.
+    #[cfg(feature = "metadata-sidecar")]
+    let version = if metadata_bytes.is_some() {
+        SPQV_VERSION_V4
+    } else if prov_bytes.is_some() {
+        SPQV_VERSION_V3
+    } else {
+        SPQV_VERSION
+    };
+    #[cfg(not(feature = "metadata-sidecar"))]
     let version = if prov_bytes.is_some() { SPQV_VERSION_V3 } else { SPQV_VERSION };
     header[4..8].copy_from_slice(&version.to_le_bytes());
     header[8..12].copy_from_slice(&(dim as u32).to_le_bytes());
@@ -1142,6 +1296,18 @@ fn build_header(
     // ZERO-PAD to the next 4-byte boundary so the dense f32 data section that follows stays
     // 4-byte-aligned (the `slot_vector` f32 cast requires it — a misaligned cast is UB). The stored
     // `prov_len` is the REAL block length; the reader recomputes the same padded data offset.
+    #[cfg(feature = "metadata-sidecar")]
+    if let Some(metadata_bytes) = metadata_bytes {
+        let provenance_bytes = prov_bytes.as_deref().unwrap_or_default();
+        header.extend_from_slice(&(provenance_bytes.len() as u32).to_le_bytes());
+        header.extend_from_slice(provenance_bytes);
+        header.extend_from_slice(&(metadata_bytes.len() as u64).to_le_bytes());
+        header.extend_from_slice(&metadata_bytes);
+        let pad = (4 - header.len() % 4) % 4;
+        header.extend(std::iter::repeat_n(0u8, pad));
+        debug_assert_eq!(header.len() % 4, 0, "v4 data section must start 4-byte aligned");
+        return header;
+    }
     if let Some(bytes) = prov_bytes {
         header.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         header.extend_from_slice(&bytes);
@@ -1255,7 +1421,14 @@ impl StreamingWriter {
         // (offset 32..56) and — for v3 — the length-prefixed provenance block are known up front, so
         // they are written here (via the shared `build_header` seam), not patched. `build_header`
         // emits v3 iff a provenance is present, else v2 (byte-identical to the pre-v3 streaming header).
-        let header = build_header(dim, 0, fingerprint, provenance.as_ref());
+        let header = build_header(
+            dim,
+            0,
+            fingerprint,
+            provenance.as_ref(),
+            #[cfg(feature = "metadata-sidecar")]
+            None,
+        );
         file.write_all(&header).map_err(|e| format!("write {}: {e}", path.display()))?;
         let ids_path = {
             let mut p = path.clone().into_os_string();
@@ -1768,7 +1941,14 @@ mod provenance_read_tests {
     /// always-compiled `build_header` seam (no `with_provenance`, so this works with the feature off).
     fn write_v3(path: &std::path::Path, dim: usize, rows: &[(Id, Vec<f32>)], p: &EmbeddingProvenance) {
         let count = rows.len();
-        let header = build_header(dim, count, None, Some(p));
+        let header = build_header(
+            dim,
+            count,
+            None,
+            Some(p),
+            #[cfg(feature = "metadata-sidecar")]
+            None,
+        );
         let mut bytes = header;
         // Dense data in insertion-slot order.
         for (_, v) in rows {

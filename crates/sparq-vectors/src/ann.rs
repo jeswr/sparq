@@ -88,6 +88,24 @@ pub fn nearest_exact(store: &VectorStore, query: &[f32], k: usize) -> Vec<(Id, f
     scored
 }
 
+/// Exact cosine top-`k` with each hit's opaque metadata tag attached.
+///
+/// Ranking is delegated to [`nearest_exact`] and is therefore identical, including its ascending-id
+/// tie-break. Metadata only decorates the completed ranking and never filters or reorders it. IDs
+/// written with [`VectorStore::put`] return `None`; IDs written with
+/// [`VectorStore::put_with_meta`] return the tag byte-for-byte as a `String`.
+#[cfg(feature = "metadata-sidecar")]
+pub fn nearest_exact_with_meta(
+    store: &VectorStore,
+    query: &[f32],
+    k: usize,
+) -> Vec<(Id, f32, Option<String>)> {
+    nearest_exact(store, query, k)
+        .into_iter()
+        .map(|(id, score)| (id, score, store.meta(id).map(str::to_owned)))
+        .collect()
+}
+
 /// Like [`nearest_exact`] but query-by-term: resolves `term` through the graph's
 /// dictionary, looks its vector up in the store, excludes the term itself from the
 /// results and maps neighbor ids back to [`Term`]s. Empty if the term is absent from
