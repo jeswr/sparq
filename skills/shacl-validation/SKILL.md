@@ -151,6 +151,26 @@ corpus exercises (32/32 fixtures round-trip graph-isomorphically): directives,
 graph as a Turtle string, behind `sparq-wasm`'s non-default `scs` feature; see the
 `javascript-wasm` skill for the JS API.
 
+**Generated SCS 1.2 + extended parser — the `sparq-shaclc` crate** *(opt-in by
+being a separate crate; epic sq-tonhr)* — rdf-shuttle-generated strict/extended
+parsers from one Shuttle grammar, COEXISTING with (not replacing) the `scs`
+feature above and differential-tested against it:
+
+```rust
+use sparq_shaclc::{parse, parse_strict, parse_extended, Profile, DEFAULT_BASE};
+// -> Result<(Vec<oxrdf::Triple>, Outcome), ShaclcError>; Outcome carries
+//    prefixes (5 predeclared first) + final base. Profile::Strict = W3C CG
+//    surface + RDF 1.2 layer (triple terms, dir-lang tags, TripleTerm
+//    nodeKind, reifierShape/reificationRequired) and PROVABLY rejects the
+//    four shaclc-js extensions; Profile::Extended accepts them.
+// sparq_shaclc::raw::{shaclc12, shaclc12ext} — streaming + chunked push
+// parsing on the generated zero-dependency term model.
+use sparq_shaclc::write; // (triples, base, prefixes, Profile) -> Result<String, ShaclcWriteError>
+// The derived residual-consumption printer (first Rust-side SHACL-CS
+// writer): all-or-nothing — a non-expressible graph returns the typed
+// residual verdict (exact unconsumed triples), never a lossy document.
+```
+
 `ShapesModel` (`sparq_shacl::ShapesModel`):
 
 ```rust

@@ -1,0 +1,3 @@
+BASE <http://example.org/basic-shape-with-targets>
+
+shape <TestShape> -> <TestClass> {}
