@@ -38,6 +38,28 @@
 //! not any server logic. See the `Cargo.toml` dependency comment for the trust-surface delta (a
 //! vendored-C `*-sys` crate compiled at build time) and why mimalloc over jemalloc (musl page-size).
 
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use sparq_lws_core::ldp::handler::LdpState;
+    use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient};
+    use sparq_lws_core::{build_router, AppState};
+
+    let store = CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new());
+    let state = AppState::new(LdpState::new(store, "http://localhost"));
+    let _router = build_router(state);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! native_main {
+    ($($item:item)*) => {
+        $($item)*
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[rustfmt::skip]
+native_main! {
+
 /// Process-wide allocator. mimalloc replaces the default libc allocator on the hot alloc/dealloc
 /// path. Declared at the TOP of the binary so it is the allocator from the first allocation onward.
 /// Behaviour-neutral: no server logic depends on it; conformance + tests are unchanged.
@@ -1477,4 +1499,6 @@ mod tests {
             Some(5_000_000)
         );
     }
+}
+
 }
