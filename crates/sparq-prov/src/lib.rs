@@ -42,6 +42,11 @@
 //! premises for each fact) than a single CONSTRUCT-style activity. See the
 //! `reason` module.
 //!
+//! **Missing-answer explanation** is available under the non-default `why-not`
+//! feature. The `why_not` function accepts one basic graph pattern and a fully
+//! ground target binding, then reports exactly the substituted triples absent
+//! from the graph. More general SPARQL algebra is rejected as unsupported.
+//!
 //! **Out of scope for per-triple lineage** (a deliberate honesty boundary, not a TODO):
 //! the structural UPDATE operations `CLEAR` / `DROP` / `CREATE` change a graph's
 //! existence/emptiness rather than its triples-as-data and carry no resolved triple set,
@@ -75,6 +80,12 @@ pub use update::{derive_update, derive_update_with_budget, UpdateDerivation};
 pub mod reason;
 #[cfg(feature = "reason")]
 pub use reason::{prov_from_proof, ProvProofConfig};
+// [GPT-5.6] sq-lsp7k.17: exact missing-conjunct explanation, opt-in so the
+// default public API remains unchanged.
+#[cfg(feature = "why-not")]
+mod why_not;
+#[cfg(feature = "why-not")]
+pub use why_not::{why_not, MissingPattern, WhyNotError};
 
 // ── PROV-O vocabulary IRIs ─────────────────────────────────────────────────
 const PROV: &str = "http://www.w3.org/ns/prov#";

@@ -1,6 +1,6 @@
 ---
 name: prov-lineage
-description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, a SPARQL UPDATE (INSERT…WHERE / INSERT DATA / DELETE) changes a store, OR a reasoner materializes inferred triples (RDFS/OWL-RL/N3), record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom; wasInvalidatedBy for deletes) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived/mutated data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, attribution of constructed graphs or UPDATE writes to their source(s), or per-fact inference lineage from a why() proof tree (the `reason` feature). Off by default; does not touch sparq-core/sparq-engine's lean build."
+description: "Capture W3C PROV-O data lineage for DERIVED RDF, or explain a missing BGP target binding: record CONSTRUCT/DESCRIBE, SPARQL UPDATE, and reasoner-materialization lineage; under the opt-in `why-not` feature, report exactly which grounded BGP triple patterns are absent. Off by default; does not touch sparq-core/sparq-engine's lean build."
 ---
 
 # sparq-prov — W3C PROV-O lineage for derived data
@@ -191,6 +191,63 @@ DAG (the same shared fact names the same entity).
 For the reasoner's per-fact proof itself (the input to `prov_from_proof`), see the
 [`inference`](../inference/SKILL.md) skill's `explain` feature (`why()` produces
 a proof tree — derivation provenance at the rule/premise level).
+
+## Missing-answer explanation (`why-not` feature)
+
+<!-- [GPT-5.6] sq-lsp7k.17 -->
+
+The non-default `why-not` feature handles one bounded case: a fully-ground target
+binding that did not appear in the answers to a single basic graph pattern (BGP).
+`why_not(&Graph, &GraphPattern, &HashMap<Variable, Term>)` substitutes the target
+through each BGP triple pattern and returns a `Vec<MissingPattern>` containing
+exactly the absent concrete triples, in BGP order. If every triple is present,
+the vector is empty because that target would satisfy the BGP.
+
+```toml
+[dependencies]
+sparq-prov = { path = "crates/sparq-prov", features = ["why-not"] }
+spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
+```
+
+The accepted algebra node is exactly `GraphPattern::Bgp`. `OPTIONAL`, `UNION`,
+`FILTER`, property paths, named graphs, and every other algebra variant return
+`WhyNotError::UnsupportedAlgebra`. A target missing a referenced variable, a
+literal bound in subject position, or a non-IRI predicate binding also returns
+an error. The explainer never treats an invalid substitution as evidence of an
+absent RDF triple.
+
+```rust
+use std::collections::HashMap;
+
+use oxrdf::{NamedNode, Term, Variable};
+use spargebra::algebra::GraphPattern;
+use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use sparq_core::Graph;
+use sparq_prov::why_not;
+
+let ex = |local: &str| NamedNode::new_unchecked(format!("http://example.com/{local}"));
+let var = |name: &str| Variable::new_unchecked(name);
+let triple_pattern = |predicate: &str, object_variable: &str| TriplePattern {
+    subject: TermPattern::Variable(var("x")),
+    predicate: NamedNodePattern::NamedNode(ex(predicate)),
+    object: TermPattern::Variable(var(object_variable)),
+};
+
+let graph = Graph::load_str("@prefix : <http://example.com/> . :a :p :b .", "turtle")?;
+let bgp = GraphPattern::Bgp {
+    patterns: vec![triple_pattern("p", "y"), triple_pattern("q", "z")],
+};
+let target = HashMap::from([
+    (var("x"), Term::NamedNode(ex("a"))),
+    (var("y"), Term::NamedNode(ex("b"))),
+    (var("z"), Term::NamedNode(ex("c"))),
+]);
+
+let missing = why_not(&graph, &bgp, &target)?;
+assert_eq!(missing.len(), 1);
+assert_eq!(missing[0].grounded().predicate, ex("q"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## See also
 
