@@ -9,7 +9,8 @@
 **Opt-in RDFS / OWL-RL / Notation3 reasoning** for the [sparq](../../README.md) RDF engine.
 
 It forward-chains the deductive closure (RDFS, the OWL 2 RL property/class axioms, or
-user-supplied N3 rules) over dictionary-encoded triples and **materializes** the entailed
+user-supplied N3 rules — including RDF 1.2 `<< s p o >>` quoted-triple terms in rule
+bodies and heads) over dictionary-encoded triples and **materializes** the entailed
 facts, so querying stays exactly as fast as before. Reasoning runs over integer ids (joins
 on fixed-width keys); the closure can be maintained incrementally under inserts/deletes, and
 the non-default `explain` feature answers `why(triple)` with a proof tree. This crate is

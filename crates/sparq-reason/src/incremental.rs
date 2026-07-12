@@ -2325,6 +2325,17 @@ fn n3_write_term(t: &N3Term, out: &mut String) {
             }
             out.push_str(" }");
         }
+        // RDF-star quoted-triple term — round-trips through the N3 parser's
+        // `<< s p o >>` form (GH #2012). [FABLE-5]
+        N3Term::Triple(tr) => {
+            out.push_str("<< ");
+            n3_write_term(&tr[0], out);
+            out.push(' ');
+            n3_write_term(&tr[1], out);
+            out.push(' ');
+            n3_write_term(&tr[2], out);
+            out.push_str(" >>");
+        }
     }
 }
 
