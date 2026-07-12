@@ -525,4 +525,3 @@ Property tests provide evidence and regression protection; they are not a formal
   <https://doi.org/10.1016/j.jpdc.2010.12.006>
 - W3C. “SPARQL 1.1 Update.” Recommendation, 2013.
   <https://www.w3.org/TR/sparql11-update/>
-
