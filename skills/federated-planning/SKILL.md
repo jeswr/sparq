@@ -91,6 +91,44 @@ class section — the source is **kept**. The cardinality estimate never prunes 
 with a tiny or zero estimate is still retained). This is HiBISCuS's design goal: maximise
 pruning subject to never losing a result.
 
+### Optional live pattern probes in `sparq-fedclient`
+
+`sparq-fedplan` itself remains pure and never contacts the network. When served VoID statistics
+are missing, the separate federation client can refine its `PatternSources` through the
+default-OFF `sparq-fedclient/pattern_probe` feature (which implies `fedclient`):
+
+```toml
+[dependencies]
+sparq-fedclient = { path = "crates/sparq-fedclient", features = ["pattern_probe"] }
+```
+
+Create one `PatternProbeSession` per query, using the same SSRF-policy-controlled `Fetcher` as
+capability discovery, then pass endpoint/optional-descriptor pairs in planner source-index order:
+
+```rust
+use sparq_fedclient::{
+    select_sources_with_pattern_probes, PatternProbeConfig, PatternProbeSession, ProbeSource,
+};
+
+let fetcher = sparq_fedclient::discovery::HttpFetcher::new();
+let mut session = PatternProbeSession::new(&fetcher, PatternProbeConfig::default());
+let selection = select_sources_with_pattern_probes(
+    &bgp,
+    &[ProbeSource {
+        endpoint: "https://example.org/sparql",
+        descriptor: discovered_descriptor.as_ref(),
+    }],
+    &mut session,
+);
+```
+
+The request budget is per query and counts every ASK/SELECT HTTP request; repeated
+source-pattern pairs are cached. Served VoID cardinalities issue no probe. Recall safety is
+load-bearing: only an exact ASK `false` removes a source. Timeout, HTTP/parse error,
+inconsistent responses, or budget exhaustion retain it with the uniform fallback. A successful
+capped SELECT row count replaces that fallback and can change ranking/join order, never the
+answer multiset. [GPT-5.6] sq-fx5id.
+
 ## Plan the join (bind vs hash)
 
 ```rust

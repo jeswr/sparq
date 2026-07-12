@@ -29,12 +29,15 @@ The crate began as the **Phase-0 compiling skeleton** (design §6) — the publi
 layout the design §4 names ([`source`], [`discovery`], [`planner`], [`pushdown`],
 [`operators`], [`stream`]), the **opt-in feature** ([`fedclient`](#opt-in-hard-constraint),
 OFF by default), and the **dependency-boundary proof** (below). Landed since, each behind
-the same default-OFF `fedclient` feature:
+the same default-OFF `fedclient` feature (with live pattern probing behind the additional
+default-OFF `pattern_probe` feature):
 
 * **Phase 1 — capability discovery** ([`discovery`], bead `sq-nfxl`): GET the source's
   Service Description + `/.well-known/void`, parse them to a `Capability` +
   `SourceDescriptor`, with a FedX-style ASK-probe fallback, all behind a default-deny
-  SSRF-guarded fetch seam.
+  SSRF-guarded fetch seam. The extra default-OFF `pattern_probe` feature (bead `sq-fx5id`)
+  adds bounded, per-query pattern ASK/capped-SELECT observations through that same fetch seam;
+  only definitive ASK `false` prunes, while every failure keeps the source.
 * **Phase 2 — source-type abstraction + Endpoint adapter** ([`source`], bead `sq-rsxf`):
   [`SourceType`] (`Endpoint | BrTpf | Tpf | Local`), the [`FederatedSource`] trait, the
   fine-grained [`Capability`](source::Capability) descriptor, and the real [`Endpoint`] SRJ
@@ -207,6 +210,12 @@ pub use wire::{
 /// SSRF-guarded [`Fetcher`](discovery::Fetcher) seam (default-deny private/internal IPs).
 #[cfg(feature = "fedclient")]
 pub mod discovery;
+// [GPT-5.6] sq-fx5id: the live pattern-probe surface is separately default-OFF even though it
+// reuses the always-fedclient discovery module and Fetcher policy seam.
+#[cfg(feature = "pattern_probe")]
+pub use discovery::{
+    PatternProbeConfig, PatternProbeOutcome, PatternProbeSession, PatternProbeStats,
+};
 
 /// §4.2 — **planner bridge**: lower the parsed query's BGP into `sparq-fedplan`'s light
 /// `Bgp`/`TriplePattern`/`Term`/`Var`, build one `SourceDescriptor` per discovered source,
@@ -220,6 +229,8 @@ pub mod planner;
 // source (the fragment-source twin of `lower_leaf`'s SPARQL `SubQuery`).
 #[cfg(feature = "fedclient")]
 pub use planner::{lower_leaf, lower_leaf_fragment, pattern_vars, ResolveError, SourceResolver};
+#[cfg(feature = "pattern_probe")]
+pub use planner::{select_sources_with_pattern_probes, ProbeSource};
 
 /// §4.3 — **capability-aware pushdown**: per leaf / FedX exclusive group, build the
 /// MOST PRECISE sub-query a source can answer (projection + common-variable-checked
