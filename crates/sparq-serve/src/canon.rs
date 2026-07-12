@@ -304,4 +304,70 @@ mod tests {
         let r = canonicalize(q);
         assert!(r.contains(r#""a \" b""#));
     }
+
+    #[test]
+    fn canonicalize_idempotent() {
+        // Verify that applying canonicalize twice is idempotent.
+        // After one pass whitespace is already collapsed/trimmed and comments removed,
+        // so a second pass finds nothing to normalize.
+        let test_cases = vec![
+            // Whitespace runs
+            "SELECT  ?x\n WHERE {\t?x ?y ?z }",
+            // Leading/trailing space
+            "   SELECT ?x WHERE { ?x }  ",
+            // Comments with variables
+            "SELECT ?x # comment with ?y\n WHERE { ?x ?p ?o }",
+            // String literal containing ?x-like data
+            r#"SELECT ?x { ?x ?p "contains ?y inside" }"#,
+            // Mixed ? and $ sigils
+            "SELECT ?x { $x ?y ?z }",
+            // Empty input
+            "",
+            // Complex: whitespace + comments + literals + mixed sigils
+            "  SELECT  ?a   # this comment has ?unused\n { $a  ?b  \"string with ?data\"  }  ",
+        ];
+
+        for q in test_cases {
+            let once = canonicalize(q);
+            let twice = canonicalize(&once);
+            assert_eq!(
+                once, twice,
+                "canonicalize is not idempotent for query: {:?}",
+                q
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalize_renamed_idempotent() {
+        // Verify that applying canonicalize_renamed twice is idempotent.
+        // After one pass, variables are already renamed to ?v0,?v1,... in
+        // first-occurrence order, so a re-rename is the identity map.
+        let test_cases = vec![
+            // Simple query with multiple variables
+            "SELECT ?x WHERE { ?x ?y ?z }",
+            // Variables renamed already but with whitespace
+            "SELECT  ?v0\n WHERE {\t?v0 ?v1 ?v2 }",
+            // Mixed ? and $ sigils (collapse to same variable)
+            "SELECT ?x { $x ?y ?x }",
+            // String literal with variable-like data
+            r#"SELECT ?myvar { ?myvar ?p "contains ?unused inside" }"#,
+            // Comment containing variable-like text
+            "SELECT ?x # comment ?y\n WHERE { ?x ?p ?o }",
+            // Empty input
+            "",
+            // Complex: multiple distinct vars + literals + comments + whitespace
+            "  SELECT  ?author  ?title   # find ?unused\n { ?author  <dc:title>  ?title  ;  \"string ?data\" }  ",
+        ];
+
+        for q in test_cases {
+            let once = canonicalize_renamed(q);
+            let twice = canonicalize_renamed(&once);
+            assert_eq!(
+                once, twice,
+                "canonicalize_renamed is not idempotent for query: {:?}",
+                q
+            );
+        }
+    }
 }
