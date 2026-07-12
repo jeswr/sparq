@@ -65,6 +65,7 @@ Index (always available, `index` module — re-exported at crate root as `TextIn
 Completion (always available, `complete` module — re-exported at crate root):
 - `CompletionIndex::build(&graph)` indexes every IRI under its full IRI and local name,
   plus literal values attached through `rdfs:label` or `skos:prefLabel`.
+- `CompletionIndex::apply_delta(&mut self, graph, inserts, deletes)` mirrors newly interned IRIs and inserted `rdfs:label`/`skos:prefLabel` triples after `Graph::apply_delta`; deletes are a documented no-op. `reconcile(&graph)` scans the appended dictionary tail plus label triples involving a new subject or object, while `is_consistent_with` / `needs_rebuild` expose the same append-only staleness contract as `TextIndex`. Label triples added solely between pre-existing terms must be forwarded through `apply_delta`.
 - `complete(prefix, k, scores)` returns case-insensitive prefix matches ordered by
   descending injected entity score, then key and id. Pass `None` for lexical ordering.
 - Results are `Candidate { id, key, kind, score }`; label candidates carry the subject
