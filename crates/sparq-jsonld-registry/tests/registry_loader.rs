@@ -3,6 +3,21 @@ use sparq_jsonld_registry::RegistryLoader;
 
 const SCHEMA_CONTEXT: &str = include_str!("../contexts/schema-org.jsonld");
 const SCHEMA_IRI: &str = "https://schema.org/docs/jsonldcontext.jsonld";
+const REGISTERED_CONTEXTS: &[(&str, &str)] = &[
+    (SCHEMA_IRI, SCHEMA_CONTEXT),
+    (
+        "https://www.w3.org/ns/activitystreams",
+        include_str!("../contexts/activitystreams.jsonld"),
+    ),
+    (
+        "https://www.w3.org/2018/credentials/v1",
+        include_str!("../contexts/credentials-v1.jsonld"),
+    ),
+    (
+        "https://www.w3.org/ns/did/v1",
+        include_str!("../contexts/did-v1.jsonld"),
+    ),
+];
 
 #[test]
 fn registered_context_round_trips_vendored_bytes() {
@@ -13,6 +28,34 @@ fn registered_context_round_trips_vendored_bytes() {
         document.content_type.as_deref(),
         Some("application/ld+json")
     );
+}
+
+#[test]
+fn every_registered_context_load_is_complete_and_idempotent() {
+    // [GPT-5.6] sq-sw1yr — pin the complete registry so deleting an expected entry
+    // cannot silently reduce the coverage of the per-context assertions below.
+    assert_eq!(REGISTERED_CONTEXTS.len(), 4);
+
+    let loader = RegistryLoader::new();
+    for &(iri, embedded_document) in REGISTERED_CONTEXTS {
+        let first = loader
+            .load_document(iri)
+            .unwrap_or_else(|error| panic!("failed to load registered context {iri}: {error}"));
+        let second = loader.load_document(iri).unwrap_or_else(|error| {
+            panic!("failed to load registered context {iri} a second time: {error}")
+        });
+
+        assert_eq!(first, second, "successive loads differ for {iri}");
+        assert_eq!(first.document.as_bytes(), embedded_document.as_bytes());
+        assert_eq!(first.document_url, iri);
+        assert_eq!(
+            first.content_type.as_deref(),
+            Some("application/ld+json"),
+            "registered context {iri} has no JSON-LD content type"
+        );
+        Json::parse(&first.document)
+            .unwrap_or_else(|error| panic!("registered context {iri} is not JSON: {error}"));
+    }
 }
 
 #[test]
