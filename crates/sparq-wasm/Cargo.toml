@@ -71,6 +71,14 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"], optio
 
 [features]
 default = []
+# [FABLE-5] sq-3ul2n.3: expose the `Store::loadBytes(Uint8Array, format)` /
+# `Store::loadBytesWithBase(...)` byte-ingest bindings — a `Uint8Array` (from
+# `response.arrayBuffer()` / `File.arrayBuffer()`) is copied ONCE into linear memory (no
+# UTF-16 JS-string round-trip), validated as UTF-8 fail-closed, and fed the SAME parse path
+# as `load`. ZERO new dependencies (`std::str::from_utf8` + the existing `sparq-core`
+# loader). OFF by default so the lean `wasm_bundle_bytes` baseline is byte-identical; the
+# published bundle (js `build:wasm`) turns it on (that script change is sq-3ul2n.5, not here).
+bytes-ingest = []
 # [OPUS-4.8] sq-yqi1 (#162): expose `sparq-shacl`'s SHACL Core + SHACL-SPARQL
 # validation as the `Store::validate(data, shapes)` wasm binding (a drop-in for
 # `rdf-validate-shacl` behind PSS's ADR-0014 ShaclValidator seam). OFF by default so
