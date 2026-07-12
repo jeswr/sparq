@@ -261,6 +261,55 @@ fn odrl_permission_overrides_matching_prohibition() {
     );
 }
 
+/// `AllExcept` matches agents outside its exclusion list, for both effects and both
+/// policy models that support deny. The excluded-agent deny cases deliberately remain
+/// fail-closed: exclusion means that row does not match, not that access is granted.
+///
+/// The `Allow` assertions are the mutation witness: inverting the exclusion membership
+/// check swaps the two decisions and makes this test fail for both ACP and ODRL.
+#[test]
+fn all_except_membership_controls_acp_and_odrl_effects() {
+    // [GPT-5.6] sq-n489k — behavioral oracle coverage for AllExcept membership polarity.
+    const EXCLUDED_AGENT: &str = "excluded-agent";
+
+    let non_excluded_request = read_request(ALICE, RES);
+    let excluded_request = read_request(EXCLUDED_AGENT, RES);
+
+    for (effect, expected_non_excluded) in [
+        (Effect::Deny, Decision::Deny),
+        (Effect::Allow, Decision::Allow),
+    ] {
+        let row = IntentRow {
+            audience: Audience::AllExcept(vec![EXCLUDED_AGENT.to_string()]),
+            effect: effect.clone(),
+            ..allow_read(ALICE, RES)
+        };
+
+        for (model, non_excluded_decision, excluded_decision) in [
+            (
+                AcModel::Acp,
+                oracle_acp(&non_excluded_request, std::slice::from_ref(&row)),
+                oracle_acp(&excluded_request, std::slice::from_ref(&row)),
+            ),
+            (
+                AcModel::Odrl,
+                oracle_odrl(&non_excluded_request, std::slice::from_ref(&row)),
+                oracle_odrl(&excluded_request, std::slice::from_ref(&row)),
+            ),
+        ] {
+            assert_eq!(
+                non_excluded_decision, expected_non_excluded,
+                "{model:?} oracle: a non-excluded agent must match an AllExcept {effect:?} row"
+            );
+            assert_eq!(
+                excluded_decision,
+                Decision::Deny,
+                "{model:?} oracle: an excluded agent must not match an AllExcept {effect:?} row"
+            );
+        }
+    }
+}
+
 // ── 3. condition gating flips the decision ────────────────────────────────────────────
 
 /// Condition gating is load-bearing, not ignored: the SAME `Allow` intent flips

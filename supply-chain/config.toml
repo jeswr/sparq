@@ -110,6 +110,11 @@ criteria = "safe-to-deploy"
 version = "59.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.async-compression]]
+version = "0.4.42"
+criteria = "safe-to-deploy"
+notes = "all-features tower-http compression dependency inherited from the merged workspace graph; exemption closes the frozen cargo-vet deployment criterion gap [GPT-5.6]"
+
 [[exemptions.async-trait]]
 version = "0.1.89"
 criteria = "safe-to-deploy"
@@ -228,6 +233,16 @@ criteria = "safe-to-deploy"
 [[exemptions.combine]]
 version = "4.6.7"
 criteria = "safe-to-deploy"
+
+[[exemptions.compression-codecs]]
+version = "0.4.38"
+criteria = "safe-to-deploy"
+notes = "async-compression codec layer in the all-features tower-http graph; frozen cargo-vet requires the deployment criterion explicitly [GPT-5.6]"
+
+[[exemptions.compression-core]]
+version = "0.4.32"
+criteria = "safe-to-deploy"
+notes = "shared async-compression core in the all-features tower-http graph; frozen cargo-vet requires the deployment criterion explicitly [GPT-5.6]"
 
 [[exemptions.console_log]]
 version = "1.0.0"
@@ -1908,6 +1923,11 @@ criteria = "safe-to-deploy"
 [[exemptions.zerovec-derive]]
 version = "0.11.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.zlib-rs]]
+version = "0.6.3"
+criteria = "safe-to-deploy"
+notes = "pure-Rust flate2 backend reached by tower-http compression in the all-features workspace graph; frozen cargo-vet requires the deployment criterion explicitly [GPT-5.6]"
 
 [[exemptions.zmij]]
 version = "1.0.21"

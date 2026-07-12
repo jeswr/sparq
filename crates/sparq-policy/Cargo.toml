@@ -60,3 +60,7 @@ count-enforcement = []
 # property of any method (sparq's ZK estate is research-grade + externally UNAUDITED,
 # sq-qhy4 — the admissibility reduction itself is Phases 2/5, not this profile).
 secprop-leftoperands = []
+
+# [GPT-5.6] sq-mu4au: deterministic, read-only aggregation of already-computed
+# authorization decisions. OFF by default and std-only; does not alter evaluation.
+decision-report = []

@@ -39,9 +39,10 @@ module docs on `src/main.rs`.
   double, live SPARQ HTTP client, and `object_store` blob backends.
 - **Notification observability** — [GPT-5.6] process-wide backlog-overflow totals
   are available through `notifications::ws::NotificationMetrics::snapshot()`.
-- **Transport hardening** — HTTP/2 rapid-reset + slowloris guards, request
-  timeouts, body limits, per-connection max-requests, rate limiting, overload
-  shedding.
+- **Transport hardening** — HTTP/2 rapid-reset and HTTP/1 slowloris guards,
+  including explicit header-count, aggregate-byte, and slow-header timeout
+  bounds; request timeouts, body limits, per-connection max-requests, rate
+  limiting, and overload shedding.
 - Cargo features (all **off** by default; the default build carries no
   sparq-engine or redis dependency):
   - `embedded-sparq` — the in-process SPARQ engine backend (in-workspace path

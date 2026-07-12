@@ -1,0 +1,5 @@
+select-all.rq	<http://example.test/a>	"Alice"@en	"7"^^<http://www.w3.org/2001/XMLSchema#integer>
+select-all.rq	<http://example.test/b>	"Bob"^^<http://www.w3.org/2001/XMLSchema#string>	"11"^^<http://www.w3.org/2001/XMLSchema#integer>
+select-all.rq	<http://example.test/c>	"Carol"@fr	"7"^^<http://www.w3.org/2001/XMLSchema#integer>
+select-group.rq	<http://example.test/a>	"Alice"@en
+select-group.rq	<http://example.test/b>	"Bob"^^<http://www.w3.org/2001/XMLSchema#string>

@@ -54,6 +54,10 @@ pub mod commit;
 // INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally audited.
 #[cfg(feature = "dual-leaf")]
 pub mod dual_leaf;
+// [FABLE-5] sq-hh7a4: dual-leaf `xsd:boolean` host encoder (same feature gate,
+// same INV-VL downgrade + CR-G8 / sq-qhy4 audit obligation as `dual_leaf`).
+#[cfg(feature = "dual-leaf")]
+pub mod dual_leaf_boolean;
 pub mod encode;
 pub mod field;
 pub mod ingest;
