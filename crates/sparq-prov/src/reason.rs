@@ -214,6 +214,16 @@ pub fn prov_from_proof(proof: &ProofTree, config: &ProvProofConfig) -> Vec<Tripl
     out
 }
 
+/// Render one reasoner proof tree's W3C PROV-O lineage as N-Triples.
+///
+/// This is the string-serialization counterpart to `prov_from_proof`; it preserves
+/// that function's deterministic triple order and content-addressed IRIs.
+///
+/// [GPT-5.6] sq-8jn86
+pub fn prov_ntriples(proof: &ProofTree, config: &ProvProofConfig) -> String {
+    sparq_engine::triples_to_ntriples(&prov_from_proof(proof, config))
+}
+
 /// Mint a stable `…fact:<hash>` entity IRI from a fact's term strings. The
 /// conclusion strings are canonical (one rendering per term), so the same fact
 /// always names the same entity — letting lineage from different proofs stitch.
