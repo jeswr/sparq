@@ -202,6 +202,21 @@ pub const DEFAULT_H2_MAX_CONCURRENT_STREAMS: u32 = 256;
 /// connection is reclaimed promptly. hyper's own default is ~30s; we set 15s explicitly + own it.
 pub const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 15;
 
+/// Maximum number of HTTP/1 request header fields accepted by the transport parser. Requests above
+/// this fail closed with `431 Request Header Fields Too Large` before the service sees a body.
+///
+/// [GPT-5.6] This is set explicitly instead of relying on hyper's current default, so dependency
+/// upgrades cannot silently remove or relax the header-count guard.
+pub const MAX_REQUEST_HEADER_COUNT: usize = 100;
+
+/// Maximum bytes hyper may buffer while parsing an HTTP/1 request head. This bounds the aggregate
+/// request-line + header bytes retained for a connection; an incomplete head that exceeds the bound
+/// is rejected before request/body dispatch.
+///
+/// [GPT-5.6] Hyper requires this value to be at least 8 KiB. The chosen ceiling remains generous for
+/// normal HTTP metadata while making the allocation bound explicit and dependency-version independent.
+pub const MAX_REQUEST_HEADER_BYTES: usize = 64 * 1024;
+
 /// Default concurrent-connection cap. Deliberately HIGH — a safety bound against a connection flood,
 /// NOT a throughput throttle: it must never trip during normal use OR the conformance run (which uses
 /// a handful of connections). An operator tunes it to their box's fd/memory budget. Sized to match
@@ -337,7 +352,8 @@ impl TransportConfig {
     ///   permit until it disconnects — bounded instead by the connection cap),
     /// - the h1 header-read (slowloris) timeout — which REQUIRES a [`TokioTimer`], so we install one
     ///   on both the h1 and h2 sub-builders whenever a timeout-bearing knob is active (hyper PANICS if
-    ///   `header_read_timeout` is set without a timer).
+    ///   `header_read_timeout` is set without a timer),
+    /// - the h1 request-header count and aggregate buffered-byte ceilings.
     ///
     /// It does NOT touch ALPN / TLS — those stay exactly as the caller built them (the TLS path's
     /// rustls config owns ALPN; see [`crate::tls`]).
@@ -367,6 +383,8 @@ impl TransportConfig {
         // (an explicit `0`/disable env value). The timer installed above makes it take effect.
         builder
             .http1()
+            .max_headers(MAX_REQUEST_HEADER_COUNT)
+            .max_buf_size(MAX_REQUEST_HEADER_BYTES)
             .header_read_timeout(self.header_read_timeout);
 
         // h2 keep-alive PING (interval + ack-timeout): hyper sends a PING every `ka` and DROPS the
