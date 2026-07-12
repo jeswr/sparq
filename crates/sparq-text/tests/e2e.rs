@@ -329,9 +329,10 @@ fn rewrite_errors() {
             "SELECT ?t WHERE { ?t <http://sparq.dev/text#matches> ?q }",
             "constant query-string literal",
         ),
-        // Unknown text: predicate is a typo guard.
+        // Unknown text: predicate is a typo guard (`fuzzy` is now feature-gated).
+        // [GPT-5.6] sq-lsp7k.14
         (
-            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#fuzzy> "fox" }"#,
+            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#fuzzzy> "fox" }"#,
             "unknown magic predicate",
         ),
         // text:score needs a match pattern on the same variable.
