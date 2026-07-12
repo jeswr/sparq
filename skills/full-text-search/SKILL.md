@@ -63,6 +63,9 @@ Index (always available, `index` module — re-exported at crate root as `TextIn
 - `TextIndex::has_positions(&self) -> bool`, `len()`, `is_empty()`, `token_count()`, `heap_bytes()`.
 - `struct Hit { pub id: sparq_core::dict::Id, pub score: f32 }` (`score` comparable within one query only).
 
+Highlighting (default-OFF `highlight` feature — re-exported at crate root as `snippet`, `Snippet`):
+- `snippet(text: &str, query_token: &str, context_chars: usize) -> Option<Snippet>` — after resolving a hit id to its literal lexical form, find every occurrence of one default-analyzer token and render a word-trimmed contiguous window with `<mark>` / `</mark>` around each occurrence. Matching is case-insensitive; `Snippet.spans` contains absolute half-open UTF-8 byte ranges into the complete `text`. Empty text, a query that is not exactly one token, and no match return `None`. [GPT-5.6] sq-lsp7k.19
+
 Completion (always available, `complete` module — re-exported at crate root):
 - `CompletionIndex::build(&graph)` indexes every IRI under its full IRI and local name,
   plus literal values attached through `rdfs:label` or `skos:prefLabel`.
@@ -107,6 +110,20 @@ let hits = index.fuzzy("quixkly", 1)?; // matches the indexed token "quickly"
 //   ?title text:fuzzy "quixkly" .
 //   ?title text:maxDistance 1 .
 //   ?title text:score ?s .
+```
+
+**Highlight a resolved hit (default-OFF `highlight` feature).** The hit carries only a dictionary id and score, so pass the literal text after resolving the id:
+```toml
+sparq-text = { path = "../sparq-text", features = ["highlight"] }
+```
+
+```rust
+use sparq_text::snippet;
+
+let text = "the quick fox jumps";
+let excerpt = snippet(text, "fox", 10).expect("matching token");
+assert_eq!(excerpt.spans, [(10, 13)]);
+assert_eq!(excerpt.rendered, "quick <mark>fox</mark> jumps");
 ```
 
 **Relevance-ranked SPARQL results.** `VALUES` rows carry no order through joins — always sort on a `text:score` variable:
@@ -161,7 +178,7 @@ sparq-text = { path = "../sparq-text", default-features = false }   # or default
 
 ## Gotchas / feature flags / prerequisites
 
-- **Feature flags.** `engine` (default on) brings in the `rewrite` module + `sparq-engine`/`spargebra` (with NO engine default features) — needed for `query_text`/`prepare_text`/`rewrite_query` and all `text:` magic predicates. `engine-builtins` (default on) turns the engine's `regex` (SPARQL REGEX/REPLACE) + `digest` (hash builtins) back on, so a `text:` rewrite over a query that ALSO uses those builtins works. `parallel` (default on) rayon-shards `TextIndex::build` and forwards the engine's parallel execution. `fuzzy` is default-OFF and adds only the bounded deletion-neighbour index/API plus the `text:fuzzy`/`text:maxDistance` rewrite arms. Disable defaults for the bare index (tokenizer + `TextIndex` + BM25) with no engine in the graph; take `features = ["engine"]` ONLY for the lean wasm shape (engine present, but no rayon/regex/digest/fuzzy — what the `sparq-text-wasm` bundle does). [GPT-5.6] sq-lsp7k.14
+- **Feature flags.** `engine` (default on) brings in the `rewrite` module + `sparq-engine`/`spargebra` (with NO engine default features) — needed for `query_text`/`prepare_text`/`rewrite_query` and all `text:` magic predicates. `engine-builtins` (default on) turns the engine's `regex` (SPARQL REGEX/REPLACE) + `digest` (hash builtins) back on, so a `text:` rewrite over a query that ALSO uses those builtins works. `parallel` (default on) rayon-shards `TextIndex::build` and forwards the engine's parallel execution. `fuzzy` is default-OFF and adds only the bounded deletion-neighbour index/API plus the `text:fuzzy`/`text:maxDistance` rewrite arms. `highlight` is default-OFF and adds only literal snippet extraction; it has no index, engine, or dependency edge. Disable defaults for the bare index (tokenizer + `TextIndex` + BM25) with no engine in the graph; take `features = ["engine"]` ONLY for the lean wasm shape (engine present, but no rayon/regex/digest/fuzzy/highlight — what the `sparq-text-wasm` bundle does). [GPT-5.6] sq-lsp7k.14 sq-lsp7k.19
 - **Fuzzy constraints.** `TextIndex::fuzzy` and `text:fuzzy` accept exactly one analyzed token (not a phrase or prefix expression); `max_distance`/`text:maxDistance` must be `0..=2`. Each result is admitted iff exact Levenshtein distance is within the bound. When one literal contains several admitted tokens, its best `(distance, -BM25, term)` candidate wins, so each literal appears once. [GPT-5.6]
 - **In-browser ("W-text") bundle.** `crates/sparq-text-wasm` ([OPUS-4.8] sq-jbe6) compiles the `engine`-on `sparq-text` (BM25 index + `text:` rewrite + `sparq-engine`) to `wasm32-unknown-unknown` as a SEPARATE, lazy-loaded bundle (NOT in the lean `sparq-wasm` bundle), for the showcase site's `/surface/full-text` page. It exposes a stateless one-shot `TextSearch`: `query(data, format, sparql)` (parse → build a **positions-enabled** index → rewrite + run the `text:` query → SPARQL-1.1-JSON) and `indexStats(data, format)` (a `{docs,tokens,heapBytes,hasPositions}` footprint — the index-build memory is the bundle's risk, so keep the corpus small). `parallel` is off (no wasm threads); the tokenizer's `unicode-segmentation` is pure-Rust and wasm-portable. Build with `wasm-pack build crates/sparq-text-wasm --target web --release`.
 - **What gets indexed.** Only plain/`xsd:string` and language-tagged literals from the graph's dictionary. Typed literals (numbers, dates, `geo:wktLiteral`, ...) are skipped.
