@@ -541,9 +541,11 @@ measure() {
     # without it only the cheap CQ-shape gate types compile in and the PerfectRef
     # rewriter is compiled OUT — a non-representative (low) number. Mirrors the
     # sparq-reason-el rbox+hasse quirk and the sparq-fedplan `fedplan` quirk above.
+    # [FABLE-5] sq-p6yb7: + `ql-consistency` (the DL-Lite_R violation-query consistency
+    # check module; without it consistency.rs compiles out and its tests run zero).
     sparq-reason-ql)
-      cargo_args+=(--features experimental)
-      features+=("experimental") ;;
+      cargo_args+=(--features experimental,ql-consistency)
+      features+=("experimental" "ql-consistency") ;;
     # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
     # (Turtle/TriG/N-Quads/JSON-LD) peeled into this internal sub-crate. Its WHOLE surface is
     # behind DEFAULT-OFF `serialize-rdf` (mirroring the gating it had inside sparq-engine), so a
