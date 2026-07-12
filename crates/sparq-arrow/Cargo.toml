@@ -64,3 +64,7 @@ arrow-buffer = { version = "59", optional = true }
 # (default-features=false) edge.
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine" }
+
+[[example]]
+name = "arrow_interop"
+required-features = ["arrow"]
