@@ -103,63 +103,80 @@ pub(super) fn eval_stratified_with_stats(
             .filter(|(_, rs)| **rs == s)
             .map(|(r, _)| r)
             .collect();
-        if rules.is_empty() {
-            continue;
-        }
-        // Aggregate tables: computed once per stratum (bodies read lower strata).
-        let agg_tables: Vec<Vec<Vec<Row>>> = rules
-            .iter()
-            .map(|r| {
-                r.aggregates
-                    .iter()
-                    .map(|a| aggregate_table(dict, a, &store))
-                    .collect()
-            })
-            .collect();
-        // Round 0: everything derived so far (inputs + lower strata) is the delta.
-        let mut delta: Vec<[Id; 3]> = store.list.clone();
-        let mut first_round = true;
-        loop {
-            stats.rounds += 1;
-            let mut produced: Vec<[Id; 3]> = Vec::new();
-            for (r, tables) in rules.iter().zip(&agg_tables) {
-                if force_full || needs_full(r) || r.positive.is_empty() {
-                    // Full re-run (non-monotonic-conservative), or a rule with no
-                    // positive atoms whose inputs are constant within the stratum:
-                    // the latter fires in round 0 only.
-                    if force_full || needs_full(r) || first_round {
-                        run_rule(dict, r, tables, &store, None, stats, &mut produced);
-                    }
-                } else {
-                    // Semi-naive: once per positive-atom position, with that atom
-                    // restricted to the delta (dedup happens at store insertion).
-                    for k in 0..r.positive.len() {
-                        run_rule(
-                            dict,
-                            r,
-                            tables,
-                            &store,
-                            Some((&delta, k)),
-                            stats,
-                            &mut produced,
-                        );
-                    }
-                }
-            }
-            let mut new_delta: Vec<[Id; 3]> = Vec::new();
-            for f in produced {
-                if store.insert(f) {
-                    new_delta.push(f);
-                }
-            }
-            first_round = false;
-            if new_delta.is_empty() {
-                break;
-            }
-            delta = new_delta;
-        }
+        run_stratum(dict, &rules, &mut store, stats, force_full);
     }
     store.list
+}
+
+/// Run ONE stratum's rules to fixpoint over `store`, which must already hold the
+/// stratum's COMPLETE input (base facts plus every lower stratum's derivations —
+/// the stratification contract). New derivations append to `store.list`, so the
+/// caller can slice everything this stratum derived from the pre-call length.
+/// Shared by [`eval_stratified_with_stats`] and the incremental maintainer's
+/// stratum-recompute path (`super::incr`).
+pub(super) fn run_stratum(
+    dict: &mut Dict,
+    rules: &[&Rule],
+    store: &mut FactStore,
+    stats: &mut EvalStats,
+    force_full: bool,
+) {
+    if rules.is_empty() {
+        return;
+    }
+    // Aggregate tables: computed once per stratum (bodies read lower strata).
+    let agg_tables: Vec<Vec<Vec<Row>>> = rules
+        .iter()
+        .map(|r| {
+            r.aggregates
+                .iter()
+                .map(|a| aggregate_table(dict, a, store))
+                .collect()
+        })
+        .collect();
+    // Round 0: everything derived so far (inputs + lower strata) is the delta.
+    let mut delta: Vec<[Id; 3]> = store.list.clone();
+    let mut first_round = true;
+    loop {
+        stats.rounds += 1;
+        let mut produced: Vec<[Id; 3]> = Vec::new();
+        for (r, tables) in rules.iter().zip(&agg_tables) {
+            if force_full || needs_full(r) || r.positive.is_empty() {
+                // Full re-run (non-monotonic-conservative), or a rule with no
+                // positive atoms whose inputs are constant within the stratum:
+                // the latter fires in round 0 only.
+                if force_full || needs_full(r) || first_round {
+                    run_rule(dict, r, tables, store, None, stats, &mut produced, false);
+                }
+            } else {
+                // Semi-naive: once per positive-atom position, with that atom
+                // restricted to the delta (dedup happens at store insertion).
+                for k in 0..r.positive.len() {
+                    run_rule(
+                        dict,
+                        r,
+                        tables,
+                        store,
+                        Some((&delta, k)),
+                        stats,
+                        &mut produced,
+                        false,
+                    );
+                }
+            }
+        }
+        let mut new_delta: Vec<[Id; 3]> = Vec::new();
+        for f in produced {
+            if store.insert(f) {
+                new_delta.push(f);
+            }
+        }
+        first_round = false;
+        if new_delta.is_empty() {
+            break;
+        }
+        delta = new_delta;
+    }
 }
 
 /// Conservative non-monotonicity flag, mirroring the n3 compiled path's
@@ -371,8 +388,13 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
 /// atom admits no delta fact the whole conjunction is empty, so the run is skipped
 /// up front — this keeps `stats.tuples_considered` an honest work measure (the
 /// other atoms' candidates are never materialised for a run that cannot fire).
+///
+/// `emit_known`: when `false` (forward evaluation), conclusions already in the
+/// store are suppressed; when `true`, every conclusion is emitted — the DRed
+/// overdeletion pass (`super::incr`) needs heads that ARE in the store, because
+/// it is hunting facts to retract, not facts to add.
 #[allow(clippy::too_many_arguments)]
-fn run_rule(
+pub(super) fn run_rule(
     dict: &Dict,
     rule: &Rule,
     agg_tables: &[Vec<Row>],
@@ -380,6 +402,7 @@ fn run_rule(
     delta: Option<(&[[Id; 3]], usize)>,
     stats: &mut EvalStats,
     out: &mut Vec<[Id; 3]>,
+    emit_known: bool,
 ) {
     if let Some((d, k)) = delta {
         if !d.iter().any(|f| atom_admits(&rule.positive[k], f)) {
@@ -469,7 +492,7 @@ fn run_rule(
                 resolve(&head.t[1], r),
                 resolve(&head.t[2], r),
             ];
-            if !store.all.contains(&g) {
+            if emit_known || !store.all.contains(&g) {
                 out.push(g);
             }
         }

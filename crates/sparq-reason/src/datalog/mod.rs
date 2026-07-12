@@ -1,15 +1,18 @@
 //! [FABLE-5] sq-6tykl.3 (epic sq-6tykl, RDFox-parity BIG ROCK) — **stratified Datalog
 //! rules** with negation-as-failure and aggregation, behind the opt-in `datalog` feature.
 //!
-//! This is Phase 1 of the stratified-Datalog program (design record
+//! The stratified-Datalog program (design record
 //! `research/stratified-datalog-rules.md`): a small **native rule dialect** modelled on
 //! RDFox's Datalog surface (the maintainer's open question 4 — see the record §2 for the
-//! decision), a **stratification checker**, and a **semi-naive per-stratum evaluator**
+//! decision), a **stratification checker**, a **semi-naive per-stratum evaluator**
 //! (Phase 2, sq-8sve7 — delta-restricted positive joins; see `eval`) supporting `NOT`
-//! (store-scoped negation as failure) and `AGGREGATE … BIND COUNT(?v) AS ?c` atoms plus
-//! a minimal numeric `FILTER`. The remaining aggregate functions (`SUM`/`MIN`/`MAX`/`AVG`)
-//! and incremental maintenance under insert/delete are **later phases**, beaded from the
-//! design record — this module is honest about being the fixture-scale foundation.
+//! (store-scoped negation as failure), `AGGREGATE … BIND
+//! COUNT/SUM/MIN/MAX/AVG(?v) AS ?c` atoms (Phase 2b, sq-citho) and a minimal numeric
+//! `FILTER`, plus **incremental maintenance under insert/delete across strata**
+//! (Phase 3, sq-4foq0 — see [`MaterializedProgram`]: DRed for positive strata,
+//! rederivation at stratum boundaries for `NOT`/`AGGREGATE` strata). Later phases
+//! (fragment extensions, surface wiring, an external-engine differential arm) stay
+//! beaded from the design record — this module is honest about being fixture-scale.
 //!
 //! # The dialect (Phase-1 fragment)
 //!
@@ -76,11 +79,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod eval;
+mod incr;
 #[cfg(test)]
 mod oracle;
 mod parser;
 mod stratify;
 
+pub use incr::MaterializedProgram;
 pub use stratify::{stratify, Stratification};
 
 /// One term position of a parsed atom: a dictionary constant or a rule-scoped

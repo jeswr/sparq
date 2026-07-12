@@ -205,21 +205,35 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 
 ## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
 
-RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
+RDFox-parity track (`research/stratified-datalog-rules.md`): a small native
 rule dialect with `NOT` (negation as failure), `AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
 atoms and a minimal
 exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
-through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
-non-incremental per-stratum evaluator on the shared substrate join kernels.
+through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), a
+semi-naive per-stratum evaluator on the shared substrate join kernels, and
+**incrementally maintained materialization** (`MaterializedProgram`: DRed for positive
+strata, stratum-boundary rederivation for `NOT`/`AGGREGATE` strata).
 
 ```rust
-use sparq_reason::datalog::{eval, parse_program, stratify};
+use sparq_reason::datalog::{eval, parse_program, stratify, MaterializedProgram};
 
 pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String>;
 pub fn stratify(dict: &Dict, p: &Program) -> Result<Stratification, String>; // checker alone
 pub fn eval(dict: &mut Dict, facts: &[[Id;3]], p: &Program) -> Result<Vec<[Id;3]>, String>;
 impl Program { pub fn n_rules(&self) -> usize; }
 impl Stratification { pub fn n_strata(&self) -> usize; }
+
+// Incrementally maintained materialization (sq-4foq0). insert/delete return the
+// exact closure delta; delete of a still-derivable fact keeps it (owner changes);
+// update() is one batch: new base = (base \ deletes) ∪ inserts.
+impl MaterializedProgram {
+    pub fn new(dict: &mut Dict, facts: &[[Id;3]], p: Program) -> Result<Self, String>;
+    pub fn insert(&mut self, dict: &mut Dict, facts: &[[Id;3]]) -> usize;
+    pub fn delete(&mut self, dict: &mut Dict, facts: &[[Id;3]]) -> usize;
+    pub fn update(&mut self, dict: &mut Dict, ins: &[[Id;3]], del: &[[Id;3]]) -> (usize, usize);
+    pub fn contains(&self, f: &[Id;3]) -> bool;
+    pub fn closure(&self) -> Vec<[Id;3]>;   // a SET; also len() / is_empty()
+}
 ```
 
 ```rust
@@ -238,8 +252,12 @@ comparison, fail-closed on anything else; head/FILTER vars must be bound positiv
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
 counts DISTINCT body matches per group; counts mint `xsd:integer` literals. `SUM`
 and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
-`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum;
-incremental maintenance is beaded. <!-- [GPT-5.6] sq-citho -->
+`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum.
+Incremental maintenance is differential-pinned (closure == from-scratch `eval` after
+every randomized insert/delete step) and skips strata whose input predicates did not
+change; its per-update set/index bookkeeping is O(affected visible input) — the
+incrementality win is delta-driven RULE-FIRING work (deterministic counters), not set
+ops. <!-- [GPT-5.6] sq-citho --> <!-- [FABLE-5] sq-4foq0 -->
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
