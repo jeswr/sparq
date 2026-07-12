@@ -1,0 +1,53 @@
+# [FABLE-5] sq-on7r4 — certification-edge trust-graph closure benchmark DRIVER.
+#
+# DELIBERATELY a STANDALONE cargo project (own `[workspace]` table, same isolation
+# pattern as bench/ac + bench/parse + bench/dict + bench/zk). It is NOT a workspace
+# member; it path-depends on `sparq-trust` with the default-OFF `cert-graph` feature
+# ON, purely so `bench/trust-graph/run.sh` has a runnable entry point WITHOUT turning
+# the feature on anywhere in the root workspace. Feature-OFF safety is STRUCTURAL:
+# nothing in the workspace's default build sees this project, so the lean core stays
+# byte-identical. HONESTY NOTE: the driver's only direct dependency is sparq-trust
+# (+ sparq-zk for fixture signing), but sparq-trust itself transitively links
+# sparq-engine via sparq-shacl's SHACL-SPARQL path — same linkage the production
+# `cert-graph` consumer carries; the driver never invokes engine code.
+#
+# Nothing here is production code. No number produced here is committed to markdown;
+# wall-clock output is advisory + NON-CANONICAL on this shared work box (see the
+# QUIET-BOX convention in bench/CATALOG.md). The HARD contract is the fail-closed
+# strict-additivity envelope: zero (surviving) certifications MUST yield a derived
+# rule set byte-EQUAL to the input direct_rules, and every timed lane asserts its
+# expected admitted/rejected count — any mismatch => non-zero exit. Because the
+# closure under test is a PURE function over in-process fixtures, timing it here
+# cannot perturb the system under test regardless of what the binary links.
+[package]
+name = "trust-graph-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root — keeps this driver (and its resolved lockfile) out of the
+# root workspace, exactly like bench/ac and bench/parse.
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork;
+# sparq-trust's dep graph (sparq-shacl / sparq-zk) resolves the same crate, so this
+# detached project must apply the same patch (same as bench/parse + bench/zk).
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+# The closure under measurement: `derive_effective_rules` behind the default-OFF
+# `cert-graph` feature (crates/sparq-trust/src/graph.rs, sq-pfae.15). Turning the
+# feature ON here — in a detached project — is the whole point: the workspace's
+# default build stays byte-identical.
+sparq-trust = { path = "../../crates/sparq-trust", features = ["cert-graph"] }
+# Fixture signing only: `SecretKey::from_seed` + `sign_commitment` mint the CHECKED
+# certifier signatures the closure's signature gate verifies. Already a sparq-trust
+# dependency — no new crate enters the graph.
+sparq-zk = { path = "../../crates/sparq-zk" }
+# RDF terms for the fixture SHACL shapes (already a sparq-trust dependency).
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+
+[[bin]]
+name = "trust-graph-bench"
+path = "src/main.rs"
