@@ -4,10 +4,10 @@
 //! This is Phase 1 of the stratified-Datalog program (design record
 //! `research/stratified-datalog-rules.md`): a small **native rule dialect** modelled on
 //! RDFox's Datalog surface (the maintainer's open question 4 — see the record §2 for the
-//! decision), a **stratification checker**, and a **non-incremental per-stratum
-//! evaluator** supporting `NOT` (store-scoped negation as failure) and
-//! `AGGREGATE … BIND COUNT(?v) AS ?c` atoms plus a minimal numeric `FILTER`. Semi-naive
-//! per-stratum evaluation, the remaining aggregate functions (`SUM`/`MIN`/`MAX`/`AVG`)
+//! decision), a **stratification checker**, and a **semi-naive per-stratum evaluator**
+//! (Phase 2, sq-8sve7 — delta-restricted positive joins; see `eval`) supporting `NOT`
+//! (store-scoped negation as failure) and `AGGREGATE … BIND COUNT(?v) AS ?c` atoms plus
+//! a minimal numeric `FILTER`. The remaining aggregate functions (`SUM`/`MIN`/`MAX`/`AVG`)
 //! and incremental maintenance under insert/delete are **later phases**, beaded from the
 //! design record — this module is honest about being the fixture-scale foundation.
 //!
@@ -211,9 +211,10 @@ pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String> {
 /// Check stratifiability and evaluate `program` over `facts`: run the per-stratum
 /// forward fixpoint to completion and return the full ground closure — input facts
 /// plus every derivation, de-duplicated. Treat the result as a SET (order is
-/// unspecified). Non-incremental Phase-1 evaluation (naive rounds per stratum);
-/// `dict` is needed mutably because aggregation MINTS `xsd:integer` count literals
-/// into the caller's id space.
+/// unspecified). Non-incremental semi-naive evaluation (delta-restricted rounds per
+/// stratum — identical derived-fact sets to the naive discipline, by differential
+/// test); `dict` is needed mutably because aggregation MINTS `xsd:integer` count
+/// literals into the caller's id space.
 ///
 /// # Errors
 ///

@@ -609,3 +609,143 @@ fn differential_multi_head_and_global_count() {
         0..25,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Semi-naive vs naive (sq-8sve7): SET-identical closures + strictly less work
+// ---------------------------------------------------------------------------
+
+/// Three-way differential on one (program, facts) input: the semi-naive engine,
+/// the same engine forced to full (naive) re-runs, and the independent oracle
+/// must produce the SAME closure set.
+fn assert_semi_naive_equals_naive(src: &str, facts_of: &dyn Fn(&mut Dict) -> Vec<[Id; 3]>) {
+    let mut d = Dict::new();
+    let program = parse_program(&mut d, src).expect("parse");
+    let strat = stratify(&d, &program).expect("stratifiable");
+    let facts = facts_of(&mut d);
+    let mut semi_stats = eval::EvalStats::default();
+    let semi: FxHashSet<[Id; 3]> =
+        eval::eval_stratified_with_stats(&mut d, &facts, &program, &strat, &mut semi_stats, false)
+            .into_iter()
+            .collect();
+    let mut naive_stats = eval::EvalStats::default();
+    let naive: FxHashSet<[Id; 3]> =
+        eval::eval_stratified_with_stats(&mut d, &facts, &program, &strat, &mut naive_stats, true)
+            .into_iter()
+            .collect();
+    assert_eq!(
+        semi, naive,
+        "semi-naive/naive closure divergence ({} facts) program:\n{src}",
+        facts.len()
+    );
+    let reference = oracle::eval_naive(&mut d, &facts, &program, &strat);
+    assert_eq!(
+        semi, reference,
+        "engine/oracle closure divergence ({} facts) program:\n{src}",
+        facts.len()
+    );
+}
+
+/// The sq-8sve7 soundness invariant, as a battery: recursive, NAF, aggregate and
+/// multi-stratum programs × {empty graph, single fact, seeded random graphs} —
+/// semi-naive output == naive output as SET equality on every input.
+///
+/// NON-VACUITY (verified by hand-run mutation, see the PR body): restricting the
+/// semi-naive loop to `k = 0` only — or starting the delta empty instead of
+/// all-facts — flips this test red on the recursive programs.
+#[test]
+fn differential_semi_naive_equals_naive_battery() {
+    let programs = [
+        // Pure positive recursion (transitive closure).
+        format!(
+            "{P}[?x, ex:reach, ?y] :- [?x, ex:edge, ?y] .\n\
+             [?x, ex:reach, ?z] :- [?x, ex:reach, ?y], [?y, ex:edge, ?z] ."
+        ),
+        // Transitive closure with the RECURSIVE atom in the SECOND body position —
+        // the delta restriction must cover every positive-atom index k, not just
+        // k = 0 (a k=0-only mutation goes red exactly here).
+        format!(
+            "{P}[?x, ex:reach, ?y] :- [?x, ex:edge, ?y] .\n\
+             [?x, ex:reach, ?z] :- [?y, ex:edge, ?z], [?x, ex:reach, ?y] ."
+        ),
+        // Recursion + NAF across strata (needs_full path + delta path together).
+        format!(
+            "{P}[?x, ex:reach, \"y\"] :- [?x, ex:seed, \"y\"] .\n\
+             [?y, ex:reach, \"y\"] :- [?x, ex:reach, \"y\"], [?x, ex:edge, ?y] .\n\
+             [?x, ex:unreach, \"y\"] :- [?x, a, ex:Node], NOT [?x, ex:reach, \"y\"] ."
+        ),
+        // Aggregate + threshold FILTER + NAF over a derived class (3 strata).
+        format!(
+            "{P}[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .\n\
+             [?x, a, ex:Hub] :- [?x, ex:deg, ?c], FILTER(?c >= 2) .\n\
+             [?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."
+        ),
+        // Multi-head + recursion over a derived predicate + global count over the
+        // recursive closure + a wildcard-NAF constant rule.
+        format!(
+            "{P}[?x, ex:out, ?y], [?y, ex:in, ?x] :- [?x, ex:edge, ?y] .\n\
+             [?x, ex:reach, ?y] :- [?x, ex:out, ?y] .\n\
+             [?x, ex:reach, ?z] :- [?x, ex:reach, ?y], [?y, ex:out, ?z] .\n\
+             [ex:world, ex:nreach, ?c] :- AGGREGATE([?x, ex:reach, ?y] BIND COUNT(?x) AS ?c) .\n\
+             [ex:world, ex:quiet, \"y\"] :- [ex:world, a, ex:Nothing], NOT [?z, ex:edge, ?z] ."
+        ),
+    ];
+    for src in &programs {
+        // Empty input graph.
+        assert_semi_naive_equals_naive(src, &|_| Vec::new());
+        // Single fact.
+        assert_semi_naive_equals_naive(src, &|d| {
+            let (a, e, b) = (iri(d, "a"), iri(d, "edge"), iri(d, "b"));
+            vec![[a, e, b]]
+        });
+        // Seed-randomised graphs (typed nodes + random edges + one seed).
+        for seed in 0..10 {
+            assert_semi_naive_equals_naive(src, &move |d| random_graph(d, seed, 6, 9));
+        }
+    }
+}
+
+/// sq-8sve7 acceptance: on a 30-node linear-chain transitive closure, semi-naive
+/// delta restriction feeds STRICTLY fewer candidate tuples into the join steps
+/// than the forced-full (naive) discipline — while deriving the identical set,
+/// cross-checked against the independent oracle. Deterministic counters only.
+#[test]
+fn semi_naive_considers_fewer_tuples_than_naive() {
+    let mut d = Dict::new();
+    let src = format!(
+        "{P}[?x, ex:reach, ?y] :- [?x, ex:edge, ?y] .\n\
+         [?x, ex:reach, ?z] :- [?x, ex:reach, ?y], [?y, ex:edge, ?z] ."
+    );
+    let program = parse_program(&mut d, &src).expect("parse");
+    let strat = stratify(&d, &program).expect("stratifiable");
+    let edge = iri(&mut d, "edge");
+    let nodes: Vec<Id> = (0..30).map(|i| iri(&mut d, &format!("c{i}"))).collect();
+    let facts: Vec<[Id; 3]> = nodes.windows(2).map(|w| [w[0], edge, w[1]]).collect();
+
+    let mut semi_stats = eval::EvalStats::default();
+    let semi: FxHashSet<[Id; 3]> =
+        eval::eval_stratified_with_stats(&mut d, &facts, &program, &strat, &mut semi_stats, false)
+            .into_iter()
+            .collect();
+    let mut naive_stats = eval::EvalStats::default();
+    let naive: FxHashSet<[Id; 3]> =
+        eval::eval_stratified_with_stats(&mut d, &facts, &program, &strat, &mut naive_stats, true)
+            .into_iter()
+            .collect();
+
+    // Identical derived sets, and both equal the independent oracle.
+    let reference = oracle::eval_naive(&mut d, &facts, &program, &strat);
+    assert_eq!(semi, reference);
+    assert_eq!(naive, reference);
+    // 30-node chain: 29 input edges + C(30,2) = 435 reach facts.
+    assert_eq!(semi.len(), 29 + 435);
+
+    // The point of the phase: strictly less join work, same fixpoint depth order.
+    assert!(
+        semi_stats.tuples_considered < naive_stats.tuples_considered,
+        "semi-naive must consider strictly fewer tuples: semi={} naive={}",
+        semi_stats.tuples_considered,
+        naive_stats.tuples_considered
+    );
+    assert!(semi_stats.rounds >= 2, "chain TC needs multiple rounds");
+    assert!(semi_stats.tuples_considered > 0, "counter must be live");
+}
