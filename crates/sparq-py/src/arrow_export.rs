@@ -67,32 +67,28 @@ impl ArrowStream {
         requested_schema: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let _ = requested_schema; // schema negotiation is a no-op (see the doc above)
-        let batch = self.batch.take().ok_or_else(|| {
-            PyValueError::new_err("this Arrow stream has already been consumed")
-        })?;
+        let batch = self
+            .batch
+            .take()
+            .ok_or_else(|| PyValueError::new_err("this Arrow stream has already been consumed"))?;
         batch_into_stream_capsule(py, batch)
     }
 }
 
 /// Wrap a single `RecordBatch` into an `FFI_ArrowArrayStream` and hand its pointer to a
 /// `PyCapsule` named `arrow_array_stream` (the Arrow C Data Interface contract).
-fn batch_into_stream_capsule(
-    py: Python<'_>,
-    batch: RecordBatch,
-) -> PyResult<Bound<'_, PyCapsule>> {
+fn batch_into_stream_capsule(py: Python<'_>, batch: RecordBatch) -> PyResult<Bound<'_, PyCapsule>> {
     let schema = batch.schema();
     // A `RecordBatchReader` over exactly one batch; `FFI_ArrowArrayStream::new` adopts it
     // and exposes the C-stream get_schema/get_next/release callbacks over it.
-    let reader: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
-        std::iter::once(Ok(batch)),
-        schema,
-    ));
+    let reader: Box<dyn RecordBatchReader + Send> =
+        Box::new(RecordBatchIterator::new(std::iter::once(Ok(batch)), schema));
     let stream = FFI_ArrowArrayStream::new(reader);
 
     // Leak the stream to a stable heap pointer; the capsule's C destructor reclaims it.
     let boxed = Box::new(stream);
-    let ptr = NonNull::new(Box::into_raw(boxed).cast::<c_void>())
-        .expect("Box::into_raw is never null");
+    let ptr =
+        NonNull::new(Box::into_raw(boxed).cast::<c_void>()).expect("Box::into_raw is never null");
 
     // SAFETY (the single unsafe surface of this crate — see the module docs):
     // * `ptr` is a freshly-leaked, non-null, properly-aligned `*mut FFI_ArrowArrayStream`
@@ -135,8 +131,8 @@ pub(crate) fn query_result_to_pyarrow_table<'py>(
     // The actual RDF-term → Arrow column mapping is the shared `sparq-arrow` code, so the
     // native and Python exports are byte-identical. Its error (a duplicate SELECT variable,
     // or an Arrow construction failure) maps to a Python `ValueError`.
-    let batch: RecordBatch = sparq_arrow::to_record_batch(result)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let batch: RecordBatch =
+        sparq_arrow::to_record_batch(result).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let stream = Bound::new(py, ArrowStream { batch: Some(batch) })?;
 
