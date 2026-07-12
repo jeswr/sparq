@@ -152,12 +152,17 @@ sparq-reason = { path = "crates/sparq-reason", features = ["explain"] }
 ```
 
 ```rust
-use sparq_prov::{prov_from_proof, ProvProofConfig};
+use sparq_prov::{prov_from_proof, prov_ntriples, ProvProofConfig};
 
 // g: a sparq_reason::MaterializedGraph / MaterializedOwlGraph / MaterializedN3Graph.
 let proof   = g.why(&dict, inferred_fact).expect("fact is in the closure");
 let lineage = prov_from_proof(&proof, &ProvProofConfig::default());  // Vec<Triple>
+let ntriples = prov_ntriples(&proof, &ProvProofConfig::default());   // String
 ```
+
+`prov_ntriples` is the one-call serializer for the same ordered lineage triples.
+With the default clock-free configuration, both the triples and their
+content-addressed IRIs are deterministic. <!-- [GPT-5.6] sq-8jn86 -->
 
 Emitted shape — for each proof node (fact) `F` and the rule firing `R` that
 generated a non-leaf `F` from premises `Pᵢ`:
@@ -184,7 +189,7 @@ DAG (the same shared fact names the same entity).
 | Derivation path | Status |
 |---|---|
 | `CONSTRUCT` / `DESCRIBE` | ✅ covered (`derive_construct`) |
-| Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature → `prov_from_proof`) |
+| Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature → `prov_from_proof` / `prov_ntriples`) |
 | SPARQL UPDATE data ops (`INSERT … WHERE`, `INSERT DATA`, `DELETE …`, `LOAD`) | ✅ covered (`derive_update`) — inserts ⇒ generated/derived, deletes ⇒ `wasInvalidatedBy` |
 | SPARQL UPDATE structural ops (`CLEAR` / `DROP` / `CREATE`) | ⛔ no per-triple entity (deliberate boundary — recorded only as the activity kind) |
 
