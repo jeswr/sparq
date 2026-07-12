@@ -217,6 +217,32 @@ print(json.dumps([{"name": n, "unit": u, "value": float(v)} for n, u, v in rows]
 PY
 }
 
+# [FABLE-5] (sq-3ul2n.2) assert_wasm_simd128 — prove the root-invoked wasm32 gate build actually
+# carries +simd128. `+simd128` lives in the WORKSPACE .cargo/config.toml (not a crate-level file
+# cargo discovers by CWD), so every wasm32 build — this gate build AND the shipped wasm-pack build —
+# gets it identically. The `release-wasm` profile's `strip = "symbols"` REMOVES the tiny
+# `target_features` custom section that records the feature, so we cannot read it off the
+# byte-ratchet artifact directly. Instead we build ONE probe with stripping disabled
+# (CARGO_PROFILE_RELEASE_WASM_STRIP=none) — identical profile / config / target otherwise — and
+# assert its `target_features` section contains simd128. It shares the dependency compile cache with
+# the ratchet build (same target dir; only the final crate re-links), and it CLOBBERS the ratchet
+# `.wasm` at that path, so this must be called ONLY AFTER wasm_bundle_bytes (and wasm_opt) have read
+# the stripped artifact. HARD failure (exit 1) if simd128 is absent: a silent drop would ship the
+# gate build without SIMD while the crate-dir build had it (the exact parity gap this closes).
+# Skipped gracefully when the wasm target or python3 is unavailable — same posture as the byte metric.
+assert_wasm_simd128() {
+  rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -f scripts/check-wasm-features.py ] || return 0
+  local probe="target/wasm32-unknown-unknown/release-wasm/sparq_wasm.wasm"
+  if CARGO_PROFILE_RELEASE_WASM_STRIP=none cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
+    if [ -f "$probe" ] && ! python3 scripts/check-wasm-features.py "$probe" --require simd128; then
+      echo "ci-bench: FATAL — wasm gate build is missing +simd128 (workspace .cargo/config.toml regressed?)" >&2
+      exit 1
+    fi
+  fi
+}
+
 # [OPUS-4.8] (sq-dzfu) measure_parse — the TIMING metric (parse_ns_per_byte) over the FIXED corpus.
 # Factored out so BOTH the full run and the cheap `--parse-only` re-measure path use the IDENTICAL
 # measurement (min-of-5 parse timing on the deterministic byte count). Leaves $TMP/fe populated so the
@@ -285,6 +311,9 @@ if [ "$DET_ONLY" = "1" ]; then
       [ -n "${DET_WASM:-}" ] && add wasm_bundle_bytes bytes "$(wc -c < "$DET_WASM" | tr -d ' ')"
     fi
   fi
+  # [FABLE-5] (sq-3ul2n.2) assert the gate build carries +simd128 — AFTER wasm_bundle_bytes read the
+  # stripped artifact (this clobbers it with an unstripped probe; nothing below reuses it).
+  assert_wasm_simd128
   emit_json > "$OUT"
   echo "wrote $OUT (--deterministic-only):"; cat "$OUT"
   exit 0
@@ -1050,6 +1079,10 @@ if command -v wasm-opt >/dev/null 2>&1 && [ -n "${WASM_BIN:-}" ] && [ -f "${WASM
     add wasm_opt_bundle_bytes bytes "$(wc -c < "$WASM_OPT_OUT" | tr -d ' ')"
   fi
 fi
+
+# [FABLE-5] (sq-3ul2n.2) assert the gate build carries +simd128 — LAST, after wasm_bundle_bytes and
+# wasm_opt have read the stripped artifact ($WASM_BIN); this clobbers it with an unstripped probe.
+assert_wasm_simd128
 
 emit_json > "$OUT"
 echo "wrote $OUT:"; cat "$OUT"
