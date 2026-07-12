@@ -1,0 +1,48 @@
+# [FABLE-5] sq-xg6uu — OWL 2 RL differential-vs-external-oracle harness.
+#
+# A READ-ONLY differential test crate: it consumes sparq-reason's PUBLIC
+# `materialize(Profile::OwlRl, ..)` as a library dependency and diffs the closure
+# against pre-captured golden vectors from the Python `owlrl` reference implementation
+# (captured OFFLINE by bench/reason-diff/rl/capture.py — owlrl is NEVER run in CI).
+# It does NOT touch sparq-reason itself, and nothing in the shipping graph depends on
+# this crate, so the lean core/engine/wasm builds never link it.
+#
+# `publish = false`: DEV/TEST tooling (the sparq-difftest / sparq-metamorph posture) —
+# the G1 stub exemption applies (no bench registry entry, no SKILL.md; the README is
+# the ≤30-line internal stub).
+#
+# EVERYTHING is additionally behind the `rl-oracle` feature (bead requirement): a
+# default build of this crate is an EMPTY lib (both deps are optional and unlinked),
+# so the default workspace build stays byte-identical modulo the empty leaf crate.
+[package]
+name = "sparq-reason-diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# The whole harness: golden loader + canonicalizer + differ + disposition ledger + the
+# rl_differential_vs_owlrl_golden test. OFF by default — the CI leg
+# `opt-in sparq-reason-diff (rl-oracle)` turns it on.
+rl-oracle = ["dep:sparq-reason", "dep:sparq-core"]
+
+[dependencies]
+# The engine under test, via its PUBLIC API only (default features: the parallel
+# fixpoint, exactly what a library consumer gets). OPTIONAL — linked only by `rl-oracle`.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
+# Dict/Id + the N-Triples parser (Graph::parse_to_triples) + oxrdf Term rendering.
+sparq-core = { path = "../sparq-core", version = "0.1.0", optional = true }
+
+# The differential test itself. Compiled only with the feature it exercises, so default
+# `--all-targets` builds carry none of it (the sparq-reason [[test]] posture).
+[[test]]
+name = "rl_differential"
+required-features = ["rl-oracle"]
+
+# Triage helper: dump sparq's normalized canonical RL closure for one .nt file (compare
+# by eye / re-diff against a golden vector while updating the corpus).
+[[example]]
+name = "dump_closure"
+required-features = ["rl-oracle"]

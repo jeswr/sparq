@@ -1,0 +1,6 @@
+<http://ex.org/Human> <http://www.w3.org/2002/07/owl#equivalentClass> <http://ex.org/Person> .
+<http://ex.org/sam> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex.org/Human> .
+<http://ex.org/pat> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex.org/Person> .
+<http://ex.org/employs> <http://www.w3.org/2002/07/owl#equivalentProperty> <http://ex.org/hasEmployee> .
+<http://ex.org/acme> <http://ex.org/employs> <http://ex.org/sam> .
+<http://ex.org/globex> <http://ex.org/hasEmployee> <http://ex.org/pat> .
