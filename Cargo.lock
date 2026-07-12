@@ -4925,6 +4925,7 @@ name = "sparq-parse"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "proptest",
  "rayon",
  "zstd",
 ]
