@@ -21,9 +21,7 @@
 //!     the intent count.
 
 use sparq_acbench::financial::FinancialDataset;
-use sparq_acbench::{
-    AcModel, Condition, ConstraintComplexity, Decision, Expressibility, GenParams,
-};
+use sparq_acbench::{AcModel, Condition, ConstraintComplexity, Decision, Expressibility, GenParams};
 
 /// Compile-time import check.
 #[test]
@@ -161,9 +159,12 @@ fn generate_u3_oracle_consistency() {
             AcModel::Odrl => oracle_odrl(&ed.request, &ds.intents),
         };
         assert_eq!(
-            oracle_result, ed.decision,
+            oracle_result,
+            ed.decision,
             "Oracle mismatch for {:?} model, request agent={}, resource={}",
-            ed.model, ed.request.agent, ed.request.resource,
+            ed.model,
+            ed.request.agent,
+            ed.request.resource,
         );
     }
 }
@@ -182,9 +183,12 @@ fn generate_u3_oracle_consistency_temporal() {
             AcModel::Odrl => oracle_odrl(&ed.request, &ds.intents),
         };
         assert_eq!(
-            oracle_result, ed.decision,
+            oracle_result,
+            ed.decision,
             "Oracle mismatch (Temporal) for {:?} model, agent={}, resource={}",
-            ed.model, ed.request.agent, ed.request.resource,
+            ed.model,
+            ed.request.agent,
+            ed.request.resource,
         );
     }
 }
@@ -204,14 +208,8 @@ fn generate_u3_expected_decisions_non_vacuous() {
         .expected_decisions
         .iter()
         .any(|ed| ed.decision == Decision::Deny);
-    assert!(
-        has_allow,
-        "Expected decisions must contain at least one Allow"
-    );
-    assert!(
-        has_deny,
-        "Expected decisions must contain at least one Deny (fail-closed proof)"
-    );
+    assert!(has_allow, "Expected decisions must contain at least one Allow");
+    assert!(has_deny, "Expected decisions must contain at least one Deny (fail-closed proof)");
 }
 
 // ── (6) Data graph non-empty ─────────────────────────────────────────────────────────
@@ -257,7 +255,7 @@ fn generate_u3_queries_non_empty() {
 
 #[test]
 fn generate_u3_all_four_query_classes_at_sf2() {
-    use sparq_acbench::{financial, QueryClass};
+    use sparq_acbench::{QueryClass, financial};
     let mut params = GenParams::smoke();
     params.sf = 2;
     let ds = financial::generate(&params);

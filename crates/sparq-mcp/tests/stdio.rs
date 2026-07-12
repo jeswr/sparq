@@ -32,12 +32,7 @@ fn serve_handles_a_line_delimited_session() {
 
     let text = String::from_utf8(out).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "two responses, the notification produced none: {:?}",
-        lines
-    );
+    assert_eq!(lines.len(), 2, "two responses, the notification produced none: {:?}", lines);
 
     let init: Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(init["id"], 1);

@@ -14,7 +14,7 @@ mod window;
 pub use eval::EvalMode;
 pub use multi::ContinuousMultiQuery;
 pub use query::{
-    AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, WindowResult, R2S,
+    AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, R2S, WindowResult,
 };
 pub use rspql::{RspqlQuery, WindowDecl};
 pub use stream::{Timestamped, TimestampedTriple, TripleStream};

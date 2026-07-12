@@ -154,9 +154,10 @@ pub(crate) fn process_inner(
             }
             env.remote_contexts.push(resolved.clone());
             // 5.2.5: dereference through the loader (deny-by-default).
-            let doc = env.loader.load_document(&resolved).map_err(|e| {
-                JsonLdError::with_detail(E::LoadingRemoteContextFailed, e.to_string())
-            })?;
+            let doc = env
+                .loader
+                .load_document(&resolved)
+                .map_err(|e| JsonLdError::with_detail(E::LoadingRemoteContextFailed, e.to_string()))?;
             let parsed = Json::parse(&doc.document)
                 .map_err(|e| JsonLdError::with_detail(E::InvalidRemoteContext, e.to_string()))?;
             let loaded_ctx = match parsed.get("@context") {
@@ -209,9 +210,10 @@ pub(crate) fn process_inner(
                 Some(b) => resolve_iri(b, imp_iri),
                 None => imp_iri.clone(),
             };
-            let doc = env.loader.load_document(&resolved).map_err(|e| {
-                JsonLdError::with_detail(E::LoadingRemoteContextFailed, e.to_string())
-            })?;
+            let doc = env
+                .loader
+                .load_document(&resolved)
+                .map_err(|e| JsonLdError::with_detail(E::LoadingRemoteContextFailed, e.to_string()))?;
             let parsed = Json::parse(&doc.document)
                 .map_err(|e| JsonLdError::with_detail(E::InvalidRemoteContext, e.to_string()))?;
             let import_members = match parsed.get("@context") {
@@ -281,9 +283,8 @@ pub(crate) fn process_inner(
             if is_null(v) {
                 result.default_base_direction = None;
             } else if let Json::Str(s) = v {
-                result.default_base_direction = Some(
-                    Direction::parse(s).ok_or_else(|| JsonLdError::new(E::InvalidBaseDirection))?,
-                );
+                result.default_base_direction =
+                    Some(Direction::parse(s).ok_or_else(|| JsonLdError::new(E::InvalidBaseDirection))?);
             } else {
                 return Err(JsonLdError::new(E::InvalidBaseDirection));
             }
@@ -330,14 +331,7 @@ pub(crate) fn process_inner(
 fn is_context_keyword(key: &str) -> bool {
     matches!(
         key,
-        "@base"
-            | "@direction"
-            | "@import"
-            | "@language"
-            | "@propagate"
-            | "@protected"
-            | "@version"
-            | "@vocab"
+        "@base" | "@direction" | "@import" | "@language" | "@propagate" | "@protected" | "@version" | "@vocab"
     )
 }
 
@@ -457,16 +451,7 @@ pub(crate) fn create_term_definition(
 
     // step 13: @reverse — a self-contained branch that stores and returns.
     if let Some(rev) = value.get("@reverse") {
-        return create_reverse_definition(
-            active,
-            local,
-            term,
-            defined,
-            env,
-            &value,
-            rev.clone(),
-            def,
-        );
+        return create_reverse_definition(active, local, term, defined, env, &value, rev.clone(), def);
     }
     def.reverse = false;
 
@@ -676,8 +661,7 @@ fn finish_definition(
 ) -> Result<(), JsonLdError> {
     // @container.
     if let Some(c) = value.get("@container") {
-        let members =
-            normalize_container(c).ok_or_else(|| JsonLdError::new(E::InvalidContainerMapping))?;
+        let members = normalize_container(c).ok_or_else(|| JsonLdError::new(E::InvalidContainerMapping))?;
         if !valid_container(&members, env.mode) {
             return Err(JsonLdError::new(E::InvalidContainerMapping));
         }
@@ -739,9 +723,7 @@ fn finish_definition(
             def.direction = if is_null(d) {
                 Override::Null
             } else if let Json::Str(s) = d {
-                Override::Set(
-                    Direction::parse(s).ok_or_else(|| JsonLdError::new(E::InvalidBaseDirection))?,
-                )
+                Override::Set(Direction::parse(s).ok_or_else(|| JsonLdError::new(E::InvalidBaseDirection))?)
             } else {
                 return Err(JsonLdError::new(E::InvalidBaseDirection));
             };
@@ -857,10 +839,7 @@ fn valid_container(members: &[String], mode: ProcessingMode) -> bool {
     }
     if set.contains("@graph") {
         let extra: BTreeSet<&str> = set.iter().filter(|m| **m != "@graph").copied().collect();
-        if !extra
-            .iter()
-            .all(|m| matches!(*m, "@id" | "@index" | "@set"))
-        {
+        if !extra.iter().all(|m| matches!(*m, "@id" | "@index" | "@set")) {
             return false;
         }
         return !(extra.contains("@id") && extra.contains("@index"));

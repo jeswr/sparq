@@ -160,12 +160,7 @@ fn fresh_inserts(dict: &mut Dict, n: usize, tag: &str) -> Vec<[Id; 3]> {
             "http://www.w3.org/2001/XMLSchema#integer",
             None,
         );
-        for f in [
-            [a, ty, person],
-            [a, p_team, team],
-            [a, p_age, age],
-            [r, p_athlete, a],
-        ] {
+        for f in [[a, ty, person], [a, p_team, team], [a, p_age, age], [r, p_athlete, a]] {
             if out.len() < n {
                 out.push(f);
             }
@@ -205,10 +200,7 @@ fn bench_rdfs(base: &[[Id; 3]], dict: &mut Dict, tbox_preds: &[Id]) {
     let mut full: Vec<[Id; 3]> = base.to_vec();
     materialize_rdfs(dict, &mut full);
     let full_secs = secs(t);
-    println!(
-        "full materialize_rdfs (v1 path): {full_secs:8.3}s   closure {}",
-        full.len()
-    );
+    println!("full materialize_rdfs (v1 path): {full_secs:8.3}s   closure {}", full.len());
 
     let mut rng = Rng(0xBEEF_0001);
     for &n in &[1usize, 100, 10_000] {
@@ -229,10 +221,7 @@ fn bench_rdfs(base: &[[Id; 3]], dict: &mut Dict, tbox_preds: &[Id]) {
             full_secs / td
         );
     }
-    assert_eq!(
-        g.len(),
-        full.iter().collect::<rustc_hash::FxHashSet<_>>().len()
-    );
+    assert_eq!(g.len(), full.iter().collect::<rustc_hash::FxHashSet<_>>().len());
 }
 
 fn bench_owl(base: &[[Id; 3]], dict: &mut Dict, tbox_preds: &[Id], label: &str, expect: OwlMode) {
@@ -252,10 +241,7 @@ fn bench_owl(base: &[[Id; 3]], dict: &mut Dict, tbox_preds: &[Id], label: &str, 
     let mut full: Vec<[Id; 3]> = base.to_vec();
     materialize_owl_rl(dict, &mut full);
     let full_secs = secs(t);
-    println!(
-        "full materialize_owl_rl:         {full_secs:8.3}s   closure {}",
-        full.len()
-    );
+    println!("full materialize_owl_rl:         {full_secs:8.3}s   closure {}", full.len());
 
     let mut rng = Rng(0xBEEF_0002);
     for &n in &[1usize, 100, 10_000] {
@@ -276,10 +262,7 @@ fn bench_owl(base: &[[Id; 3]], dict: &mut Dict, tbox_preds: &[Id], label: &str, 
         );
     }
     assert_eq!(g.full_rebuilds(), 0, "ABox deltas must not rebuild");
-    assert_eq!(
-        g.len(),
-        full.iter().collect::<rustc_hash::FxHashSet<_>>().len()
-    );
+    assert_eq!(g.len(), full.iter().collect::<rustc_hash::FxHashSet<_>>().len());
 }
 
 // ---- N3 / WAC ------------------------------------------------------------------------------
@@ -298,11 +281,8 @@ fn wac_pod() -> Vec<[Term; 3]> {
     let vcard = |l: &str| iri(format!("http://www.w3.org/2006/vcard/ns#{l}"));
     let foaf_agent = iri("http://xmlns.com/foaf/0.1/Agent".into());
     let ty = iri(RDF_TYPE.into());
-    let b_true = Term::Lit(
-        "true".into(),
-        "http://www.w3.org/2001/XMLSchema#boolean".into(),
-        None,
-    );
+    let b_true =
+        Term::Lit("true".into(), "http://www.w3.org/2001/XMLSchema#boolean".into(), None);
     let pod = "https://pod.ex/";
     let res = |p: &str| iri(format!("{pod}{p}"));
     let alice = iri("https://alice.ex/profile#me".into());
@@ -322,27 +302,17 @@ fn wac_pod() -> Vec<[Term; 3]> {
     // one group document
     let group = iri(format!("{pod}groups#team"));
     for k in 0..8 {
-        f.push([
-            group.clone(),
-            vcard("hasMember"),
-            iri(format!("https://member{k}.ex/#me")),
-        ]);
+        f.push([group.clone(), vcard("hasMember"), iri(format!("https://member{k}.ex/#me"))]);
     }
     // PODN scales the pod (default 200 containers = the 1k-doc fixture shape); used to
     // verify the incremental build scales linearly (the n3_fire anchoring fix).
-    let n_containers: usize = std::env::var("PODN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(200);
+    let n_containers: usize =
+        std::env::var("PODN").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     for c in 0..n_containers {
         let cont = format!("c{c}/");
         f.push([res(&cont), solidx("isResource"), b_true.clone()]);
         for d in 0..5 {
-            f.push([
-                res(&format!("{cont}doc{d}")),
-                solidx("isResource"),
-                b_true.clone(),
-            ]);
+            f.push([res(&format!("{cont}doc{d}")), solidx("isResource"), b_true.clone()]);
         }
         if c % 10 == 0 {
             let acl_doc = res(&format!("{cont}.acl"));
@@ -392,10 +362,7 @@ fn bench_n3_wac() {
         std::fs::read_to_string(format!("{dir}/wac.n3")).expect("wac.n3")
     );
     let pod = wac_pod();
-    println!(
-        "pod: {} reasoner input facts (1,201 resources, 21 ACL docs)",
-        pod.len()
-    );
+    println!("pod: {} reasoner input facts (1,201 resources, 21 ACL docs)", pod.len());
 
     // Baseline: the v1 story — a full engine re-run of rules + facts on every ACL change.
     let src: String = {
@@ -429,14 +396,7 @@ fn bench_n3_wac() {
         g.mode()
     );
     assert_eq!(g.mode(), N3Mode::Counting, "{:?}", g.fallback_reason());
-    assert_eq!(
-        g.len(),
-        closure
-            .facts
-            .iter()
-            .collect::<rustc_hash::FxHashSet<_>>()
-            .len()
-    );
+    assert_eq!(g.len(), closure.facts.iter().collect::<rustc_hash::FxHashSet<_>>().len());
 
     let acl = |l: &str| iri(format!("http://www.w3.org/ns/auth/acl#{l}"));
     // 1-triple ACL edits (the live-pod hot path): grant + revoke a mode; add + remove an
@@ -444,14 +404,7 @@ fn bench_n3_wac() {
     let owner = iri("https://pod.ex/.acl#owner".into());
     let edits: Vec<(&str, [Term; 3])> = vec![
         ("grant mode", [owner.clone(), acl("mode"), acl("Append")]),
-        (
-            "new agent",
-            [
-                owner.clone(),
-                acl("agent"),
-                iri("https://bob.ex/#me".into()),
-            ],
-        ),
+        ("new agent", [owner.clone(), acl("agent"), iri("https://bob.ex/#me".into())]),
     ];
     for (label, t3) in &edits {
         let t = Instant::now();
@@ -487,11 +440,7 @@ fn bench_n3_wac() {
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../bench/qlever-olympics/olympics.nt"
-        )
-        .into()
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/qlever-olympics/olympics.nt").into()
     });
     match std::fs::read_to_string(&path) {
         Ok(text) => {
@@ -528,13 +477,7 @@ fn main() {
             let mut base = abox;
             base.extend(olympics_tbox(&mut dict, true, true));
             base.extend(located_chain(&mut dict));
-            bench_owl(
-                &base,
-                &mut dict,
-                &tbox_preds,
-                "fixpoint",
-                OwlMode::CountingFixpoint,
-            );
+            bench_owl(&base, &mut dict, &tbox_preds, "fixpoint", OwlMode::CountingFixpoint);
         }
         Err(e) => {
             println!("olympics dataset not found ({path}: {e}) — skipping RDFS/OWL workloads");

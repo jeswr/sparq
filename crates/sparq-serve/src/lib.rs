@@ -7,6 +7,19 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod applier;
+/// [OPUS-4.8] sq-xa15c (#1248 items 1+2) — the **in-process embedding seam**: a small,
+/// documented facade over the engine's read/write/probe entry points
+/// ([`query_json`](embed::query_json) / [`ask`](embed::ask) /
+/// [`update_in_place`](embed::update_in_place) / [`apply_delta_nquads`](embed::apply_delta_nquads)
+/// / [`exists`](embed::exists)+[`metadata`](embed::metadata)) plus a re-export of the
+/// runtime-agnostic concurrency wrapper ([`GenerationRing`] + [`GraphApplier`] / [`Writer`]),
+/// so an external host can call sparq in-process instead of over HTTP. **API tier-1
+/// (proposed-stable)** — the proposed semver-stable embedding surface in the [API stability
+/// policy]; the formal freeze is **pending maintainer ratification on #1248** (see the module
+/// docs), not unilaterally frozen here. Thin re-exports only; no new behaviour.
+///
+/// [API stability policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
+pub mod embed;
 /// [OPUS-4.8] (sq-o5bi) ONLINE consistent-snapshot backup + restore for the serving store
 /// — export an already-immutable pinned [`Generation`] to a single self-describing artifact
 /// WHILE SERVING (no stop-the-world), and re-hydrate a [`sparq_core::Graph`] from one
@@ -25,14 +38,6 @@ pub mod backup;
 #[cfg(all(feature = "change-stream", not(feature = "backup")))]
 #[allow(dead_code)]
 pub(crate) mod backup;
-/// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
-/// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
-/// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
-/// deltas forward onto a restored base to reach a chosen recovery point (fail-closed on a corrupt
-/// or discontinuous stream). Compiled only behind the opt-in `backup` feature (default OFF). See
-/// the module docs for the delta artifact format and the same-lineage boundary.
-#[cfg(feature = "backup")]
-pub mod backup_delta;
 /// [OPUS-4.8] (sq-b4fns, gh-906) DURABLE, REPLAYABLE change-data-capture stream in the
 /// Neptune-Streams shape — each commit emits an ordered, monotonically-sequenced change
 /// record (op, quad(s), commit seq/generation, timestamp) persisted to a segmented, fsync'd
@@ -43,19 +48,14 @@ pub mod backup_delta;
 /// the same-lineage / fail-closed boundaries.
 #[cfg(feature = "change-stream")]
 pub mod change_stream;
-/// [OPUS-4.8] sq-xa15c (#1248 items 1+2) — the **in-process embedding seam**: a small,
-/// documented facade over the engine's read/write/probe entry points
-/// ([`query_json`](embed::query_json) / [`ask`](embed::ask) /
-/// [`update_in_place`](embed::update_in_place) / [`apply_delta_nquads`](embed::apply_delta_nquads)
-/// / [`exists`](embed::exists)+[`metadata`](embed::metadata)) plus a re-export of the
-/// runtime-agnostic concurrency wrapper ([`GenerationRing`] + [`GraphApplier`] / [`Writer`]),
-/// so an external host can call sparq in-process instead of over HTTP. **API tier-1
-/// (proposed-stable)** — the proposed semver-stable embedding surface in the [API stability
-/// policy]; the formal freeze is **pending maintainer ratification on #1248** (see the module
-/// docs), not unilaterally frozen here. Thin re-exports only; no new behaviour.
-///
-/// [API stability policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
-pub mod embed;
+/// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
+/// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
+/// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
+/// deltas forward onto a restored base to reach a chosen recovery point (fail-closed on a corrupt
+/// or discontinuous stream). Compiled only behind the opt-in `backup` feature (default OFF). See
+/// the module docs for the delta artifact format and the same-lineage boundary.
+#[cfg(feature = "backup")]
+pub mod backup_delta;
 mod epoch;
 mod footprint;
 mod ring;
@@ -103,14 +103,14 @@ pub use backup_delta::{
 // [FABLE-5] (sq-n9s4d) `RetentionPolicy`/`RetentionReport` are the retention/truncation
 // surface: `ChangeLog::apply_retention` drops whole old segments by consumer-ack (hard
 // safety bound) / age / total-size pressure; `ChangeLog::first_seq` is the trim horizon.
-pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
-#[cfg(all(feature = "change-stream", not(feature = "backup")))]
-pub use backup::BackupError;
 #[cfg(feature = "change-stream")]
 pub use change_stream::{
-    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, RetentionPolicy, RetentionReport,
-    DEFAULT_SEGMENT_TARGET_BYTES, SEGMENT_MAGIC,
+    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, RetentionPolicy,
+    RetentionReport, DEFAULT_SEGMENT_TARGET_BYTES, SEGMENT_MAGIC,
 };
+#[cfg(all(feature = "change-stream", not(feature = "backup")))]
+pub use backup::BackupError;
+pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};
 pub use ring::{Generation, GenerationRing, RingConfig, TimeTravelConfig, DEFAULT_RETAIN};

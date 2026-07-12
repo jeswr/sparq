@@ -81,19 +81,12 @@ impl fmt::Display for TerseError {
             TerseError::FeatureRequired { phrase, why } => {
                 write!(f, "cannot resolve V(\"{}\"): {}", phrase, why)
             }
-            TerseError::CanaryFailed {
-                sparql,
-                parse_error,
-            } => write!(
+            TerseError::CanaryFailed { sparql, parse_error } => write!(
                 f,
                 "silent-rewrite canary failed: emitted SPARQL does not parse ({}): {}",
                 parse_error, sparql
             ),
-            TerseError::Unresolved {
-                phrase,
-                why,
-                candidates,
-            } => {
+            TerseError::Unresolved { phrase, why, candidates } => {
                 write!(f, "V(\"{}\") not bound ({}); candidates: [", phrase, why)?;
                 for (i, (iri, score)) in candidates.iter().enumerate() {
                     if i > 0 {
@@ -108,11 +101,7 @@ impl fmt::Display for TerseError {
                 "V(\"{}\") aborted: vector store is stale vs the graph ({})",
                 phrase, detail
             ),
-            TerseError::UnknownKeyword {
-                keyword,
-                legend_version,
-                suggestions,
-            } => {
+            TerseError::UnknownKeyword { keyword, legend_version, suggestions } => {
                 write!(
                     f,
                     "unknown keyword K:{} (not in the frozen legend {})",

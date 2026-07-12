@@ -121,13 +121,13 @@
 use std::collections::BTreeSet;
 
 use oxrdf::{NamedNode, Term};
-use spargebra::Query;
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
 use sparq_engine::PreparedQuery;
+use spargebra::Query;
 
 // [SONNET-4.6] sq-2n1q3.3: import diff_rows for ISTREAM/DSTREAM support.
-use crate::query::{diff_rows, WindowResult, R2S};
+use crate::query::{diff_rows, R2S, WindowResult};
 use crate::rspql::{RspqlQuery, WindowDecl};
 use crate::window::{Window, WindowedStream};
 
@@ -344,11 +344,7 @@ impl ContinuousMultiQuery {
         let mut boundaries: BTreeSet<u64> = BTreeSet::new();
         let mut closed: Vec<Vec<Window<[Term; 3]>>> = Vec::with_capacity(self.windows.len());
         for w in &mut self.windows {
-            let wins = if flush {
-                w.ws.flush()
-            } else {
-                w.ws.take_closed()
-            };
+            let wins = if flush { w.ws.flush() } else { w.ws.take_closed() };
             for win in &wins {
                 boundaries.insert(win.end);
             }
@@ -391,12 +387,9 @@ impl ContinuousMultiQuery {
         // crate::query), then advance the diff base.
         let rows = match self.r2s {
             R2S::RStream => result.rows,
-            R2S::IStream | R2S::DStream => diff_rows(
-                self.r2s,
-                result.rows,
-                &mut self.prev_rows,
-                &mut self.prev_hashes,
-            ),
+            R2S::IStream | R2S::DStream => {
+                diff_rows(self.r2s, result.rows, &mut self.prev_rows, &mut self.prev_hashes)
+            }
         };
         // For RSTREAM we skip updating prev_rows / prev_hashes — they are never
         // read, and keeping them empty avoids a pointless clone. [SONNET-4.6]
@@ -409,12 +402,7 @@ impl ContinuousMultiQuery {
             .filter_map(|w| w.latest.as_ref().map(|win| win.start))
             .min()
             .unwrap_or(tick);
-        on_result(WindowResult {
-            start,
-            end: tick,
-            vars: result.vars,
-            rows,
-        });
+        on_result(WindowResult { start, end: tick, vars: result.vars, rows });
         Ok(())
     }
 
@@ -445,13 +433,7 @@ fn sub_graph(win: &Window<[Term; 3]>) -> Graph {
     let ids: Vec<[Id; 3]> = win
         .triples
         .iter()
-        .map(|t| {
-            [
-                dict.intern(&t.triple[0]),
-                dict.intern(&t.triple[1]),
-                dict.intern(&t.triple[2]),
-            ]
-        })
+        .map(|t| [dict.intern(&t.triple[0]), dict.intern(&t.triple[1]), dict.intern(&t.triple[2])])
         .collect();
     Graph::from_parts(dict, ids)
 }

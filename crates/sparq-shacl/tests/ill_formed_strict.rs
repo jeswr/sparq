@@ -69,10 +69,7 @@ fn assert_ill_formed(shapes: &str, expect_predicate_local: &str) {
 
 fn assert_well_formed(shapes: &str) {
     if let Err(e) = run_strict(shapes) {
-        panic!(
-            "well-formed shapes graph wrongly rejected: {}\n{}",
-            e, shapes
-        );
+        panic!("well-formed shapes graph wrongly rejected: {}\n{}", e, shapes);
     }
 }
 
@@ -217,10 +214,7 @@ fn literal_sh_property_shape_ref_fails() {
 
 #[test]
 fn literal_target_class_fails() {
-    assert_ill_formed(
-        r#"ex:S a sh:NodeShape ; sh:targetClass "ex:T" ."#,
-        "targetClass",
-    );
+    assert_ill_formed(r#"ex:S a sh:NodeShape ; sh:targetClass "ex:T" ."#, "targetClass");
 }
 
 #[test]
@@ -596,18 +590,9 @@ fn shapes_model_ill_formed_accessor_reports_records() {
     );
     let model = ShapesModel::parse(&g);
     let recs = model.ill_formed();
-    assert_eq!(
-        recs.len(),
-        1,
-        "exactly one ill-formed construct: {:?}",
-        recs
-    );
+    assert_eq!(recs.len(), 1, "exactly one ill-formed construct: {:?}", recs);
     assert_eq!(recs[0].predicate, "http://www.w3.org/ns/shacl#minCount");
-    assert!(
-        recs[0].message.contains("integer"),
-        "message: {}",
-        recs[0].message
-    );
+    assert!(recs[0].message.contains("integer"), "message: {}", recs[0].message);
     // The carrying node is the property shape (a blank node).
     assert!(matches!(recs[0].node, oxrdf::Term::BlankNode(_)));
     // A well-formed graph records nothing.
@@ -627,11 +612,7 @@ fn shacl_failure_display_mentions_ill_formed() {
         "display: {}",
         text
     );
-    assert!(
-        text.contains("closed"),
-        "display names the predicate: {}",
-        text
-    );
+    assert!(text.contains("closed"), "display names the predicate: {}", text);
 }
 
 #[test]
@@ -642,11 +623,7 @@ fn lenient_validate_still_skips_unparsable_sparql_select() {
                       sh:sparql [ sh:select "SELECT ??? garbage {" ] ."#;
     assert!(run_strict(shapes).is_err());
     let report = run_lenient(shapes);
-    assert!(
-        report.conforms,
-        "lenient skip unchanged: {}",
-        report.to_text()
-    );
+    assert!(report.conforms, "lenient skip unchanged: {}", report.to_text());
 }
 
 #[test]
@@ -658,9 +635,5 @@ fn lenient_validate_still_skips_ill_formed_constructs() {
                       sh:property [ sh:path ex:missing ; sh:minCount "three" ] ."#;
     assert!(run_strict(shapes).is_err());
     let report = run_lenient(shapes);
-    assert!(
-        report.conforms,
-        "lenient skip unchanged: {}",
-        report.to_text()
-    );
+    assert!(report.conforms, "lenient skip unchanged: {}", report.to_text());
 }

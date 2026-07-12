@@ -57,9 +57,9 @@ pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
 // fragment verification entry point (dispatch routing + the shared crypto stage,
 // stage-1a routed through `fragment_query`). NOT-yet-sound (sq-qhy4); the
 // disclosed-solution term binding is deferred to sq-1zf94.
-pub use verifier::EntailmentPolicy;
 #[cfg(feature = "extended-fragment")]
 pub use verifier::{dispatch_fragment, verify_fragment_manifest, FragmentDispatchError};
+pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
@@ -68,8 +68,8 @@ pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitn
 // registry (e.g. a holder set) — BIT-IDENTICAL root + path to the dense builders,
 // so the depth-generic member is unchanged; only the host build is bounded no more.
 pub use issuer::{
-    hidden_issuer_prover_toml, key_membership_witness, key_membership_witness_sparse, key_set_root,
-    key_set_root_sparse, HiddenIssuerWitness,
+    hidden_issuer_prover_toml, key_membership_witness, key_membership_witness_sparse,
+    key_set_root, key_set_root_sparse, HiddenIssuerWitness,
 };
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host helpers (the
 // B2 hidden-key tier — `hpk = hsk·G` + holder-key-digest binding).

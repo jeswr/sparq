@@ -219,17 +219,8 @@ mod tests {
 
     #[test]
     fn regime_admits_only_matching_rules() {
-        assert!(!regime_admits(
-            EntailmentRegime::Simple,
-            EntailmentRule::Rdfs9SubClassType
-        ));
-        assert!(regime_admits(
-            EntailmentRegime::Rdfs,
-            EntailmentRule::Rdfs7SubProperty
-        ));
-        assert!(regime_admits(
-            EntailmentRegime::Owl,
-            EntailmentRule::Rdfs9SubClassType
-        ));
+        assert!(!regime_admits(EntailmentRegime::Simple, EntailmentRule::Rdfs9SubClassType));
+        assert!(regime_admits(EntailmentRegime::Rdfs, EntailmentRule::Rdfs7SubProperty));
+        assert!(regime_admits(EntailmentRegime::Owl, EntailmentRule::Rdfs9SubClassType));
     }
 }

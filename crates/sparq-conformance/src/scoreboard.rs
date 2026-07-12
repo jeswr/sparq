@@ -84,11 +84,7 @@ impl Runner {
             Runner::CrateTest { krate, target } => {
                 format!("cargo test -p {krate} --test {target}")
             }
-            Runner::FeatureGatedCrateTest {
-                krate,
-                target,
-                feature,
-            } => {
+            Runner::FeatureGatedCrateTest { krate, target, feature } => {
                 format!("cargo test -p {krate} --features {feature} --test {target}")
             }
         }
@@ -290,10 +286,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SHACL core",
         family: "W3C SHACL",
-        runner: Runner::CrateTest {
-            krate: "sparq-shacl",
-            target: "w3c_core",
-        },
+        runner: Runner::CrateTest { krate: "sparq-shacl", target: "w3c_core" },
         ci_job: "shacl-conformance",
         ratchet_floor: 98,
         floor_basis: "pass",
@@ -302,10 +295,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SHACL-SPARQL",
         family: "W3C SHACL",
-        runner: Runner::CrateTest {
-            krate: "sparq-shacl",
-            target: "w3c_sparql",
-        },
+        runner: Runner::CrateTest { krate: "sparq-shacl", target: "w3c_sparql" },
         ci_job: "shacl-conformance",
         ratchet_floor: 5,
         floor_basis: "pass",
@@ -314,10 +304,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "OGC GeoSPARQL topology compliance",
         family: "OGC GeoSPARQL",
-        runner: Runner::CrateTest {
-            krate: "sparq-geo",
-            target: "ogc_compliance_ratchet",
-        },
+        runner: Runner::CrateTest { krate: "sparq-geo", target: "ogc_compliance_ratchet" },
         ci_job: "geo-conformance",
         // [OPUS-4.8] sq-cbe4t — raised 119 -> 158: 39 net-new hand-derived DE-9IM
         // assertions (reverse-order/symmetry coverage + MULTI* operands). The
@@ -376,10 +363,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "Solid WAC decision parity",
         family: "Solid WAC",
-        runner: Runner::CrateTest {
-            krate: "sparq-solid",
-            target: "conformance_wac",
-        },
+        runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_wac" },
         ci_job: "solid-conformance",
         ratchet_floor: 12,
         floor_basis: "scenario",
@@ -388,10 +372,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "Solid ACP decision parity",
         family: "Solid ACP",
-        runner: Runner::CrateTest {
-            krate: "sparq-solid",
-            target: "conformance_acp",
-        },
+        runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_acp" },
         ci_job: "solid-conformance",
         ratchet_floor: 12,
         floor_basis: "scenario",
@@ -413,10 +394,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "Solid WAC differential oracle",
         family: "Solid WAC",
-        runner: Runner::CrateTest {
-            krate: "sparq-solid",
-            target: "differential_oracle",
-        },
+        runner: Runner::CrateTest { krate: "sparq-solid", target: "differential_oracle" },
         ci_job: "solid-conformance",
         ratchet_floor: 0,
         floor_basis: "0 divergences",
@@ -426,10 +404,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "Solid ACP differential oracle",
         family: "Solid ACP",
-        runner: Runner::CrateTest {
-            krate: "sparq-solid",
-            target: "differential_oracle",
-        },
+        runner: Runner::CrateTest { krate: "sparq-solid", target: "differential_oracle" },
         ci_job: "solid-conformance",
         ratchet_floor: 0,
         floor_basis: "0 divergences",
@@ -619,10 +594,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "SolidLab ODRL Test Suite",
         family: "SolidLab ODRL",
-        runner: Runner::CrateTest {
-            krate: "sparq-policy",
-            target: "odrl_test_suite",
-        },
+        runner: Runner::CrateTest { krate: "sparq-policy", target: "odrl_test_suite" },
         ci_job: "odrl-conformance",
         ratchet_floor: 67,
         floor_basis: "scenario",
@@ -835,8 +807,7 @@ pub const SUITES: &[Suite] = &[
         ci_job: "service-federation-conformance",
         ratchet_floor: 39,
         floor_basis: "pass",
-        note:
-            "the GET /sparql (no query) Service-Description advertises exactly the \
+        note: "the GET /sparql (no query) Service-Description advertises exactly the \
                formats/languages/versions/features the server genuinely implements (no \
                over-advertising), PLUS a GET/PUT/POST/DELETE Graph-Store-Protocol round-trip \
                (named + default graph, indirect + direct identification) verifying store state \
@@ -866,10 +837,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "text-search differential oracle",
         family: "sparq extension",
-        runner: Runner::CrateTest {
-            krate: "sparq-text",
-            target: "bm25_oracle",
-        },
+        runner: Runner::CrateTest { krate: "sparq-text", target: "bm25_oracle" },
         ci_job: "text-oracle",
         ratchet_floor: 18750,
         floor_basis: "score-exact assertions (sparq EXTENSION, NOT standards conformance)",
@@ -909,14 +877,10 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "RSP expressivity / SRBench correctness",
         family: "sparq extension",
-        runner: Runner::CrateTest {
-            krate: "sparq-rsp",
-            target: "srbench_oracle",
-        },
+        runner: Runner::CrateTest { krate: "sparq-rsp", target: "srbench_oracle" },
         ci_job: "rsp-oracle",
         ratchet_floor: 317, // [SONNET-4.6] sq-2n1q3.3 raised from 303 (from 149 sq-mcb3q baseline)
-        floor_basis:
-            "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
+        floor_basis: "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
         note: "EXTENSION ratchet — no normative RDF-Stream-Processing standard / RSP \
                conformance suite exists (RSP-QL is a W3C-community spec; SRBench a \
                benchmark): sparq-rsp's windowed continuous queries vs an INDEPENDENT \
@@ -1224,7 +1188,7 @@ pub const SUITES: &[Suite] = &[
     // per-case negative-entailment guards (open-world absence is never falsity;
     // anti-rigid memberships do not propagate; `ufo:sameContinuant` never becomes
     // `owl:sameAs`; the reification-node projection never asserts the encoded
-    // triple — the honest stand-in for RDF-star triple-term matching the N3
+    // triple — the honest stand-in for RDF 1.2 triple-term matching the N3
     // engine's Term model lacks, a tracked feature gap, never faked). The floor is
     // the MEASURED assertion count (the `UFO-SN3 expressibility assertions N` line)
     // — it may only RISE; `UFO_SN3_FLOOR` is mirrored here and kept in lock-step by
@@ -1232,10 +1196,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "UFO-SN3 finite-world expressibility",
         family: "sparq extension",
-        runner: Runner::CrateTest {
-            krate: "sparq-conformance",
-            target: "ufo_sn3_suite",
-        },
+        runner: Runner::CrateTest { krate: "sparq-conformance", target: "ufo_sn3_suite" },
         ci_job: "test",
         ratchet_floor: 42,
         floor_basis: "expressibility assertions — answer-triple superset entailments + \
@@ -1248,7 +1209,7 @@ pub const SUITES: &[Suite] = &[
                identity, relators, events, dispositions, norms, and situations) \
                driven through the REAL reason_n3 closure over committed vocab + rules \
                + fixture cases, with per-case negative-entailment guards; the \
-               reification-node projection stands in for RDF-star triple-term \
+               reification-node projection stands in for RDF 1.2 triple-term \
                matching (a tracked sparq-reason gap), never faked as native support",
     },
     // [FABLE-5] sq-tonhr.2 (epic sq-tonhr) — the W3C rdf-n-triples / rdf-n-quads /
@@ -1330,7 +1291,10 @@ pub fn render_scoreboard() -> String {
          consolidated total below counts ONLY the standards-conformance suites; the \
          extension rows are reported separately.\n"
     );
-    let _ = writeln!(md, "| suite | family | floor | basis | CI job | run |");
+    let _ = writeln!(
+        md,
+        "| suite | family | floor | basis | CI job | run |"
+    );
     let _ = writeln!(md, "|---|---|---:|---|---|---|");
     for s in SUITES {
         let _ = writeln!(

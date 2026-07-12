@@ -17,19 +17,12 @@ fn consortium_types_accessible() {
 /// Determinism: same params → byte-identical data N-Quads on every call.
 #[test]
 fn generate_u4_determinism() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds1 = consortium::generate(&params);
     let ds2 = consortium::generate(&params);
-    assert_eq!(
-        ds1.data_nquads, ds2.data_nquads,
-        "data_nquads must be byte-identical"
-    );
-    assert_eq!(
-        ds1.intents.len(),
-        ds2.intents.len(),
-        "intent table length must be identical"
-    );
+    assert_eq!(ds1.data_nquads, ds2.data_nquads, "data_nquads must be byte-identical");
+    assert_eq!(ds1.intents.len(), ds2.intents.len(), "intent table length must be identical");
     assert_eq!(
         ds1.expected_decisions.len(),
         ds2.expected_decisions.len(),
@@ -45,7 +38,7 @@ fn generate_u4_determinism() {
 /// Embargo flips produce exact decision deltas by construction.
 #[test]
 fn generate_u4_embargo_flips_have_deltas() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
     assert!(
@@ -67,7 +60,7 @@ fn generate_u4_embargo_flips_have_deltas() {
 /// Non-vacuity: the generator produces a non-empty data graph.
 #[test]
 fn generate_u4_data_graph_non_empty() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
     assert!(
@@ -79,7 +72,7 @@ fn generate_u4_data_graph_non_empty() {
 /// Non-vacuity: the generator produces all three model policy graphs.
 #[test]
 fn generate_u4_policy_graphs_non_empty() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
     // WAC and ACP may produce fewer triples (embargo intents are Unsupported in both),
@@ -92,7 +85,7 @@ fn generate_u4_policy_graphs_non_empty() {
 /// Non-vacuity: the generator produces expected decisions.
 #[test]
 fn generate_u4_expected_decisions_non_empty() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
     assert!(
@@ -104,7 +97,7 @@ fn generate_u4_expected_decisions_non_empty() {
 /// Non-vacuity: the generator produces W2 query fixtures.
 #[test]
 fn generate_u4_queries_non_empty() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
     assert!(
@@ -120,15 +113,14 @@ fn generate_u4_queries_non_empty() {
 /// embargoed dataset must be Deny across all models.
 #[test]
 fn generate_u4_embargoed_dataset_external_agent_is_deny_odrl() {
-    use sparq_acbench::{consortium, AcModel, AccessMode, Decision, GenParams, Request};
+    use sparq_acbench::{AcModel, Decision, GenParams, Request, AccessMode, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
 
     // Find an embargoed dataset (one whose ODRL policy has a Temporal condition).
-    let embargoed_res = ds
-        .intents
-        .iter()
-        .find(|r| matches!(&r.condition, sparq_acbench::Condition::Temporal { .. }));
+    let embargoed_res = ds.intents.iter().find(|r| {
+        matches!(&r.condition, sparq_acbench::Condition::Temporal { .. })
+    });
 
     if let Some(row) = embargoed_res {
         let ext_req = Request {
@@ -167,8 +159,8 @@ fn generate_u4_embargoed_dataset_external_agent_is_deny_odrl() {
 /// Expressibility matrix: temporal ODRL intents are Unsupported in WAC and ACP.
 #[test]
 fn generate_u4_temporal_intents_are_odrl_only() {
+    use sparq_acbench::{Condition, Expressibility, GenParams, consortium, AcModel};
     use sparq_acbench::consortium::expressibility_for;
-    use sparq_acbench::{consortium, AcModel, Condition, Expressibility, GenParams};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
 
@@ -180,20 +172,17 @@ fn generate_u4_temporal_intents_are_odrl_only() {
             assert_eq!(
                 wac_exp,
                 Expressibility::Unsupported,
-                "Temporal intent must be Unsupported in WAC: {:?}",
-                row.resource_uri
+                "Temporal intent must be Unsupported in WAC: {:?}", row.resource_uri
             );
             assert_eq!(
                 acp_exp,
                 Expressibility::Unsupported,
-                "Temporal intent must be Unsupported in ACP: {:?}",
-                row.resource_uri
+                "Temporal intent must be Unsupported in ACP: {:?}", row.resource_uri
             );
             assert_eq!(
                 odrl_exp,
                 Expressibility::Native,
-                "Temporal intent must be Native in ODRL: {:?}",
-                row.resource_uri
+                "Temporal intent must be Native in ODRL: {:?}", row.resource_uri
             );
         }
     }
@@ -202,7 +191,7 @@ fn generate_u4_temporal_intents_are_odrl_only() {
 /// Owner-always-allowed: the owner of a resource is always allowed across all models.
 #[test]
 fn generate_u4_owner_always_allowed() {
-    use sparq_acbench::{consortium, AcModel, Decision, GenParams};
+    use sparq_acbench::{AcModel, Decision, GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
 
@@ -215,28 +204,23 @@ fn generate_u4_owner_always_allowed() {
                 ed.decision,
                 Decision::Allow,
                 "Owner must always be allowed (model={:?}, resource={})",
-                ed.model,
-                ed.request.resource
+                ed.model, ed.request.resource
             );
         }
     }
 
     // Also verify at least one owner decision was checked.
-    let owner_count = ds
-        .expected_decisions
-        .iter()
-        .filter(|ed| ed.request.agent.ends_with("#owner") && ed.model == AcModel::Wac)
-        .count();
-    assert!(
-        owner_count > 0,
-        "Must have at least one WAC owner decision in expected_decisions"
-    );
+    let owner_count = ds.expected_decisions.iter().filter(|ed| {
+        ed.request.agent.ends_with("#owner")
+            && ed.model == AcModel::Wac
+    }).count();
+    assert!(owner_count > 0, "Must have at least one WAC owner decision in expected_decisions");
 }
 
 /// Scale factor 2 produces more resources than SF=1.
 #[test]
 fn generate_u4_sf2_is_larger_than_sf1() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let mut p1 = GenParams::smoke();
     let mut p2 = GenParams::smoke();
     p1.sf = 1;
@@ -256,7 +240,7 @@ fn generate_u4_sf2_is_larger_than_sf1() {
 /// Determinism: different seeds produce different outputs.
 #[test]
 fn generate_u4_different_seeds_differ() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let mut p1 = GenParams::smoke();
     let mut p2 = GenParams::smoke();
     p1.seed = 42;
@@ -278,27 +262,23 @@ fn generate_u4_different_seeds_differ() {
 /// Policy graphs have non-trivial ODRL content (temporal constraints compile).
 #[test]
 fn generate_u4_odrl_policy_contains_embargo_triples() {
-    use sparq_acbench::{consortium, AcModel, Expressibility, GenParams};
+    use sparq_acbench::{GenParams, AcModel, Expressibility, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
 
     // At least one ODRL policy entry must be Native (temporal constraint compiles).
-    let native_odrl_count = ds
-        .odrl_policy
-        .iter()
-        .filter(|p| p.model == AcModel::Odrl && p.expressibility == Expressibility::Native)
-        .count();
+    let native_odrl_count = ds.odrl_policy.iter().filter(|p| {
+        p.model == AcModel::Odrl && p.expressibility == Expressibility::Native
+    }).count();
     assert!(
         native_odrl_count > 0,
         "ODRL policy must contain at least one Native entry (temporal or unconditional)"
     );
 
     // At least one WAC policy entry must be Unsupported (embargo cannot be expressed).
-    let unsupported_wac_count = ds
-        .wac_policy
-        .iter()
-        .filter(|p| p.model == AcModel::Wac && p.expressibility == Expressibility::Unsupported)
-        .count();
+    let unsupported_wac_count = ds.wac_policy.iter().filter(|p| {
+        p.model == AcModel::Wac && p.expressibility == Expressibility::Unsupported
+    }).count();
     // Only true if there are embargoed datasets in the corpus. With seed=42 this holds.
     // Accept vacuous pass if RNG produced no embargoes (covered by `generate_u4_embargo_flips_have_deltas`).
     let _ = unsupported_wac_count;
@@ -307,7 +287,7 @@ fn generate_u4_odrl_policy_contains_embargo_triples() {
 /// Embargo flip descriptions are unique and non-empty.
 #[test]
 fn generate_u4_embargo_flip_descriptions_non_empty() {
-    use sparq_acbench::{consortium, GenParams};
+    use sparq_acbench::{GenParams, consortium};
     let params = GenParams::smoke();
     let ds = consortium::generate(&params);
     for flip in &ds.embargo_flips {

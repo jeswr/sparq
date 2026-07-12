@@ -257,9 +257,7 @@ pub fn rewrite_production(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewri
     let ucq = as_ucq(query)?;
     // 2. Extract the DL-Lite_R TBox once (shared across branches).
     let tbox_model = TBox::extract(tbox);
-    let answer_for_minimise: Vec<String> = ucq
-        .distinguished
-        .iter()
+    let answer_for_minimise: Vec<String> = ucq.distinguished.iter()
         .map(|v| v.as_str().to_string())
         .collect();
 
@@ -392,7 +390,9 @@ mod tests {
     #[test]
     fn subclass_doubles_the_ucq() {
         let t = tbox(&[&format!("<http://ex/A> <{RDFS_SUB}> <http://ex/B> .")]);
-        let query = q(&format!("SELECT ?x WHERE {{ ?x <{TYPE}> <http://ex/B> }}"));
+        let query = q(&format!(
+            "SELECT ?x WHERE {{ ?x <{TYPE}> <http://ex/B> }}"
+        ));
         let r = rewrite(&query, &t).unwrap();
         assert_eq!(r.report.disjuncts, 2);
         // The rewritten query must serialise as a UNION (sanity that the fold happened).
@@ -418,9 +418,7 @@ mod tests {
     // [SONNET-4.6] sq-pbz04.3.1 — UCQ rewrite (B1): a top-level UNION rewrites each branch.
     #[test]
     fn ucq_input_rewrites_both_branches() {
-        let t = tbox(&[&format!(
-            "<http://ex/Manager> <{RDFS_SUB}> <http://ex/Employee> ."
-        )]);
+        let t = tbox(&[&format!("<http://ex/Manager> <{RDFS_SUB}> <http://ex/Employee> .")]);
         let query = q(&format!(
             "SELECT ?x WHERE {{ {{ ?x <{TYPE}> <http://ex/Employee> }} UNION {{ ?x <{TYPE}> <http://ex/Contractor> }} }}"
         ));
@@ -438,9 +436,11 @@ mod tests {
     // must be rejected even though it is a valid IRI constant.
     #[test]
     fn intensional_atom_rejected() {
-        let query = q("PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+        let query = q(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
              PREFIX : <http://ex/> \
-             SELECT ?c WHERE { ?c rdfs:subClassOf :A }");
+             SELECT ?c WHERE { ?c rdfs:subClassOf :A }",
+        );
         let err = rewrite(&query, &[]).unwrap_err();
         assert!(
             matches!(err, CqError::OutOfScope(ref r) if r.contains("intensional")),
@@ -505,11 +505,7 @@ mod tests {
              }}"
         ));
         let r = rewrite(&query, &[]).unwrap();
-        assert_eq!(
-            r.report.disjuncts, 2,
-            "two branches; report = {:?}",
-            r.report
-        );
+        assert_eq!(r.report.disjuncts, 2, "two branches; report = {:?}", r.report);
         assert!(
             r.query.to_string().to_uppercase().contains("FILTER"),
             "branch[1]'s FILTER must be re-applied; got: {}",
@@ -531,22 +527,14 @@ mod tests {
              }}"
         ));
         let r = rewrite(&query, &[]).unwrap();
-        assert_eq!(
-            r.report.disjuncts, 2,
-            "two branches; report = {:?}",
-            r.report
-        );
+        assert_eq!(r.report.disjuncts, 2, "two branches; report = {:?}", r.report);
         assert!(
             r.query.to_string().to_uppercase().contains("VALUES"),
             "branch[1]'s VALUES must be re-applied; got: {}",
             r.query
         );
         let r2 = rewrite_production(&query, &[]).unwrap();
-        assert_eq!(
-            r2.report.disjuncts, 2,
-            "rewrite_production: same; report = {:?}",
-            r2.report
-        );
+        assert_eq!(r2.report.disjuncts, 2, "rewrite_production: same; report = {:?}", r2.report);
     }
 
     /// The SOUND case: a single-branch CQ with a FILTER on the distinguished variable
@@ -573,9 +561,6 @@ mod tests {
         );
         // rewrite_production must also accept the single-branch case.
         let r2 = rewrite_production(&query, &[]).unwrap();
-        assert_eq!(
-            r2.report.disjuncts, 1,
-            "rewrite_production: same single-branch result"
-        );
+        assert_eq!(r2.report.disjuncts, 1, "rewrite_production: same single-branch result");
     }
 }

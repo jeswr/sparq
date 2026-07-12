@@ -84,9 +84,9 @@ pub mod quant;
 // and the demanding query check are gated behind the opt-in `spqv-provenance` feature. Lean: a
 // hand-rolled fixed-width LE codec, no new dependency. The extension point stays a reserved, opaque,
 // versioned area with NO fields defined (pending the #1746 profile freeze — the KERN boundary).
+pub mod spqv_provenance;
 #[cfg(feature = "vec-predicate")]
 pub mod rewrite;
-pub mod spqv_provenance;
 pub mod store;
 // [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the P0 structure-aware-vectorisation preprocessing +
 // sampling-logic layer — closure-before-vectorise + type-constrained negative sampling. `structure`
@@ -215,9 +215,7 @@ pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 // (`save_delta`/`open_with_delta`/`sibling_delta_path`) live on `VectorStore` (also `delta`-gated).
 #[cfg(feature = "delta")]
 pub use delta::{VectorDelta, SPQD_MAGIC, SPQD_VERSION};
-pub use store::{
-    LegacyMode, StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION, SPQV_VERSION_V3,
-};
+pub use store::{StreamingWriter, VectorStore, LegacyMode, SPQV_MAGIC, SPQV_VERSION, SPQV_VERSION_V3};
 // [FABLE-5] sq-lhcot.1: the `.spqv` v3 embedding-provenance surface — the record, its typed metric /
 // normalization axes, and the RDF vocabulary IRIs. Always compiled (the v3 read path); the vocab
 // namespace lets a caller assert provenance in RDF (see `skills/vector-search/SKILL.md`).

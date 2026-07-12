@@ -221,16 +221,12 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             .and_then(Value::as_str)
             .map(str::to_string);
         // [FABLE-5] sq-oy1f.27 — compact-manifest options (None elsewhere).
-        let compact_arrays = opt
-            .and_then(|o| o.get("compactArrays"))
-            .and_then(Value::as_bool);
+        let compact_arrays = opt.and_then(|o| o.get("compactArrays")).and_then(Value::as_bool);
         let compact_to_relative = opt
             .and_then(|o| o.get("compactToRelative"))
             .and_then(Value::as_bool);
         // [FABLE-5] sq-oy1f.29 — frame-manifest options (None elsewhere).
-        let omit_graph = opt
-            .and_then(|o| o.get("omitGraph"))
-            .and_then(Value::as_bool);
+        let omit_graph = opt.and_then(|o| o.get("omitGraph")).and_then(Value::as_bool);
         let ordered = opt.and_then(|o| o.get("ordered")).and_then(Value::as_bool);
         out.push(Entry {
             id,
@@ -288,6 +284,7 @@ pub fn parse_jsonld_dataset(text: &str, base: &str) -> Result<Dataset, String> {
 // [FABLE-5] sq-oy1f.29 — `dataset_to_nquads` (the RDF bridge for the retired
 // RDF-oracle frame lane) was removed with the lane's move to the native
 // document-level framer; the remaining lanes never re-serialise datasets.
+
 
 // ── JSON-LD document-level equality comparator ──────────────────────────────
 //
@@ -408,8 +405,7 @@ fn json_ld_array_equal_unordered(xs: &[Value], ys: &[Value]) -> bool {
 pub fn sparq_json_to_serde(j: &sparq_jsonld::Json) -> Result<Value, String> {
     let mut buf = String::new();
     j.write(&mut buf);
-    serde_json::from_str(&buf)
-        .map_err(|e| format!("parse serialized JSON as serde_json::Value: {}", e))
+    serde_json::from_str(&buf).map_err(|e| format!("parse serialized JSON as serde_json::Value: {}", e))
 }
 
 /// The known-gap categories: present in the W3C suite but NOT a sparq-shipped
@@ -451,10 +447,7 @@ mod comparator_tests {
     fn arrays_outside_list_are_unordered() {
         let a = json!([1, 2, 3]);
         let b = json!([3, 1, 2]);
-        assert!(
-            json_ld_equal(&a, &b),
-            "permuted array outside @list must be equal"
-        );
+        assert!(json_ld_equal(&a, &b), "permuted array outside @list must be equal");
     }
 
     /// Arrays outside @list with different elements are not equal.

@@ -65,7 +65,7 @@
 
 # A rigid membership proposition propagates to an accessible situation only
 # while the represented individual exists there. The proposition node is
-# reused; no RDF-star triple term or fresh proposition is required.
+# reused; no RDF 1.2 triple term or fresh proposition is required.
 {
     ?type ufo:rigidity ufo:Rigid.
     ?membership a ufo:Proposition;

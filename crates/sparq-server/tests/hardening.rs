@@ -63,10 +63,7 @@ fn client() -> reqwest::Client {
 
 #[tokio::test]
 async fn timeout_fires_on_slow_query() {
-    let config = ServerConfig {
-        query_timeout: Some(Duration::from_secs(1)),
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { query_timeout: Some(Duration::from_secs(1)), ..ServerConfig::default() };
     let base = spawn_with(&dense_graph_ttl(), config).await;
 
     let started = std::time::Instant::now();
@@ -78,25 +75,15 @@ async fn timeout_fires_on_slow_query() {
         .unwrap();
     assert_eq!(resp.status(), 503);
     // 1s budget deadline + 2s hard grace; anything beyond means the guard didn't fire.
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "503 took {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(5), "503 took {:?}", started.elapsed());
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
     assert!(body.contains("timed out"), "got: {body}");
 }
 
 #[tokio::test]
 async fn fast_query_unaffected_by_timeout() {
-    let config = ServerConfig {
-        query_timeout: Some(Duration::from_secs(1)),
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { query_timeout: Some(Duration::from_secs(1)), ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
     let resp = client()
         .get(format!("{base}/sparql"))
@@ -114,10 +101,7 @@ async fn fast_query_unaffected_by_timeout() {
 
 #[tokio::test]
 async fn oversized_body_is_413() {
-    let config = ServerConfig {
-        max_body_bytes: 256,
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { max_body_bytes: 256, ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
     // A syntactically valid (huge) query body over the limit — rejected before parsing.
     let big = format!("SELECT * WHERE {{ ?s ?p ?o }} # {}", "x".repeat(1024));
@@ -130,10 +114,7 @@ async fn oversized_body_is_413() {
         .unwrap();
     assert_eq!(resp.status(), 413);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
 
     // Under the limit still works.
     let resp = client()
@@ -162,11 +143,7 @@ async fn concurrency_limit_sheds_with_429() {
     // Occupy the single slot with the slow query…
     let base2 = base.clone();
     let slow = tokio::spawn(async move {
-        client()
-            .get(format!("{base2}/sparql"))
-            .query(&[("query", SLOW_QUERY)])
-            .send()
-            .await
+        client().get(format!("{base2}/sparql")).query(&[("query", SLOW_QUERY)]).send().await
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -179,10 +156,7 @@ async fn concurrency_limit_sheds_with_429() {
         .unwrap();
     assert_eq!(resp.status(), 429);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
 
     // The occupying request still terminates via the timeout guard (503).
     let slow_resp = slow.await.unwrap().unwrap();
@@ -195,10 +169,7 @@ async fn concurrency_limit_sheds_with_429() {
 
 #[tokio::test]
 async fn max_results_refuses_with_413() {
-    let config = ServerConfig {
-        max_results: Some(2),
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { max_results: Some(2), ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
 
     // 3 matching rows > cap of 2 → refused, with the limit named in the error.
@@ -210,15 +181,9 @@ async fn max_results_refuses_with_413() {
         .unwrap();
     assert_eq!(resp.status(), 413);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
     assert!(body.contains("max-results"), "got: {body}");
-    assert!(
-        !body.contains("bindings"),
-        "must refuse, not truncate: {body}"
-    );
+    assert!(!body.contains("bindings"), "must refuse, not truncate: {body}");
 
     // Within the cap → normal result (and LIMIT keeps queries under the cap usable).
     let resp = client()
@@ -228,14 +193,7 @@ async fn max_results_refuses_with_413() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.text()
-            .await
-            .unwrap()
-            .matches("\"type\":\"uri\"")
-            .count(),
-        2
-    );
+    assert_eq!(resp.text().await.unwrap().matches("\"type\":\"uri\"").count(), 2);
 
     // The cap applies to every SELECT serialisation, not just JSON.
     let resp = client()
@@ -268,10 +226,7 @@ async fn max_query_rows_caps_every_form() {
     // 3 ex:age triples. A cap of 2 must trip on the SELECT working set AND on a CONSTRUCT,
     // whose WHERE pattern materialises the same 3 rows — --max-query-rows is the coarse
     // working-set ceiling that applies on EVERY form, the property under test here.
-    let config = ServerConfig {
-        max_query_rows: Some(2),
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { max_query_rows: Some(2), ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
 
     // SELECT over 3 rows > cap → 413, naming the memory cap.
@@ -283,27 +238,17 @@ async fn max_query_rows_caps_every_form() {
         .unwrap();
     assert_eq!(resp.status(), 413);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("max-query-rows"),
-        "should name the memory cap: {body}"
-    );
+    assert!(body.contains("max-query-rows"), "should name the memory cap: {body}");
 
     // CONSTRUCT materialises the same 3 WHERE rows → also 413, bounded by --max-query-rows
     // (the every-form working-set ceiling this test sets and asserts).
     let resp = client()
         .get(format!("{base}/sparql"))
-        .query(&[(
-            "query",
-            "CONSTRUCT { ?s <http://ex/a> ?a } WHERE { ?s <http://ex/age> ?a }",
-        )])
+        .query(&[("query", "CONSTRUCT { ?s <http://ex/a> ?a } WHERE { ?s <http://ex/age> ?a }")])
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        413,
-        "CONSTRUCT working set must be bounded by --max-query-rows"
-    );
+    assert_eq!(resp.status(), 413, "CONSTRUCT working set must be bounded by --max-query-rows");
 
     // Within the cap → normal 200.
     let resp = client()
@@ -329,31 +274,17 @@ async fn max_query_rows_caps_every_form() {
 async fn row_cap_413_names_the_applied_knob_on_non_select_paths() {
     // --max-results (1) is SMALLER than --max-query-rows (2) but does NOT apply to a GSP-read
     // (which uses make_budget(_, false)); the real cap there is --max-query-rows.
-    let config = ServerConfig {
-        max_query_rows: Some(2),
-        max_results: Some(1),
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { max_query_rows: Some(2), max_results: Some(1), ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
 
     // GSP-read of the default graph (6 triples) > the working-set cap of 2 → 413, and the
     // message must name --max-query-rows (the cap that fed this path's budget), never
     // --max-results (not applied on a GSP-read).
-    let resp = client()
-        .get(format!("{base}/sparql/graph?default"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client().get(format!("{base}/sparql/graph?default")).send().await.unwrap();
     assert_eq!(resp.status(), 413);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("max-query-rows"),
-        "GSP-read 413 must name --max-query-rows: {body}"
-    );
-    assert!(
-        !body.contains("--max-results"),
-        "GSP-read 413 must NOT name --max-results: {body}"
-    );
+    assert!(body.contains("max-query-rows"), "GSP-read 413 must name --max-query-rows: {body}");
+    assert!(!body.contains("--max-results"), "GSP-read 413 must NOT name --max-results: {body}");
 
     // SELECT, by contrast, DOES fold in --max-results: with --max-results (1) tighter than
     // --max-query-rows (2) the projection cap is the one that trips → name it.
@@ -365,10 +296,7 @@ async fn row_cap_413_names_the_applied_knob_on_non_select_paths() {
         .unwrap();
     assert_eq!(resp.status(), 413);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("--max-results"),
-        "SELECT 413 must name --max-results: {body}"
-    );
+    assert!(body.contains("--max-results"), "SELECT 413 must name --max-results: {body}");
 }
 
 // ---------------------------------------------------------------------------
@@ -379,10 +307,7 @@ async fn row_cap_413_names_the_applied_knob_on_non_select_paths() {
 
 #[tokio::test]
 async fn update_path_honours_timeout() {
-    let config = ServerConfig {
-        query_timeout: Some(Duration::from_secs(1)),
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { query_timeout: Some(Duration::from_secs(1)), ..ServerConfig::default() };
     let base = spawn_with(&dense_graph_ttl(), config).await;
 
     // A DELETE/INSERT … WHERE whose WHERE is the same never-finishing 3-way cross-product.
@@ -398,11 +323,7 @@ async fn update_path_honours_timeout() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 503, "slow UPDATE must time out, not hang");
-    assert!(
-        started.elapsed() < Duration::from_secs(8),
-        "503 took {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(8), "503 took {:?}", started.elapsed());
     let body = resp.text().await.unwrap();
     assert!(body.contains("timed out"), "got: {body}");
 
@@ -475,10 +396,7 @@ async fn update_where_timeout_bounds_head_of_line_blocking() {
 
     let (slow_status, slow_elapsed) = slow_task.await.unwrap();
     // The slow update is refused (503): its WHERE hit the writer-side cooperative deadline.
-    assert_eq!(
-        slow_status, 503,
-        "slow update must be cut at the writer WHERE deadline"
-    );
+    assert_eq!(slow_status, 503, "slow update must be cut at the writer WHERE deadline");
     // Bounded by the SHORT writer deadline (1 s + grace + scheduling slack), NOT the 8 s
     // read timeout — proving head-of-line blocking is bounded by --update-where-timeout.
     assert!(
@@ -510,11 +428,7 @@ fn gzip(data: &[u8]) -> Vec<u8> {
 async fn decompress_ratio_cap_rejects_zip_bomb() {
     // Small ratio cap (3×) + a generous body limit so the COMPRESSED bytes pass the
     // body-size gate and the ratio cap is what actually trips.
-    let config = ServerConfig {
-        max_decompress_ratio: 3,
-        max_body_bytes: 1 << 20,
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { max_decompress_ratio: 3, max_body_bytes: 1 << 20, ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
 
     // A highly compressible Turtle body: ~200 KiB of valid triples compresses to a few KiB,
@@ -539,16 +453,9 @@ async fn decompress_ratio_cap_rejects_zip_bomb() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        413,
-        "high-ratio gzip body must be refused as a possible zip bomb"
-    );
+    assert_eq!(resp.status(), 413, "high-ratio gzip body must be refused as a possible zip bomb");
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("decompression-ratio") || body.contains("zip bomb"),
-        "got: {body}"
-    );
+    assert!(body.contains("decompression-ratio") || body.contains("zip bomb"), "got: {body}");
 
     // A benign small gzip body whose ratio is under the cap decodes and writes fine.
     let small = "@prefix ex: <http://ex/> . ex:a ex:p ex:b .";
@@ -562,20 +469,13 @@ async fn decompress_ratio_cap_rejects_zip_bomb() {
         .send()
         .await
         .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "benign gzip body should write, got {}",
-        resp.status()
-    );
+    assert!(resp.status().is_success(), "benign gzip body should write, got {}", resp.status());
 }
 
 #[tokio::test]
 async fn decompress_disabled_refuses_gzip_body() {
     // ratio 0 => Content-Encoding: gzip bodies are refused outright (fail-closed).
-    let config = ServerConfig {
-        max_decompress_ratio: 0,
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { max_decompress_ratio: 0, ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
     let gz = gzip(b"@prefix ex: <http://ex/> . ex:a ex:p ex:b .");
     let resp = client()
@@ -586,11 +486,7 @@ async fn decompress_disabled_refuses_gzip_body() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        413,
-        "gzip body must be refused when decompression is disabled"
-    );
+    assert_eq!(resp.status(), 413, "gzip body must be refused when decompression is disabled");
 }
 
 // ---------------------------------------------------------------------------
@@ -613,10 +509,7 @@ async fn handler_panic_is_500_not_dead_connection() {
     let resp = cl.get(format!("{base}/panic")).send().await.unwrap();
     assert_eq!(resp.status(), 500);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
 
     // The server (and the client's pooled connection) survives the panic.
     let resp = cl.get(format!("{base}/panic")).send().await.unwrap();
@@ -674,22 +567,11 @@ async fn no_echo_query_parse_error() {
     // A malformed query whose offending token is the sentinel — `spargebra` would normally
     // quote it verbatim in the parse error.
     let q = format!("SELECT * WHERE {{ {SENTINEL} }}");
-    let resp = client()
-        .get(format!("{base}/sparql"))
-        .query(&[("query", q.as_str())])
-        .send()
-        .await
-        .unwrap();
+    let resp = client().get(format!("{base}/sparql")).query(&[("query", q.as_str())]).send().await.unwrap();
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
-    assert!(
-        !body.contains(SENTINEL),
-        "query parse error echoed caller input: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "query parse error echoed caller input: {body}");
 }
 
 #[tokio::test]
@@ -706,14 +588,8 @@ async fn no_echo_update_parse_error() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
-    assert!(
-        !body.contains(SENTINEL),
-        "update parse error echoed caller input: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "update parse error echoed caller input: {body}");
 }
 
 #[tokio::test]
@@ -731,14 +607,8 @@ async fn no_echo_rdf_body_parse_error() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
-    assert!(
-        !body.contains(SENTINEL),
-        "RDF-body parse error echoed loaded-data fragment: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "RDF-body parse error echoed loaded-data fragment: {body}");
 }
 
 #[tokio::test]
@@ -759,14 +629,8 @@ async fn no_echo_malformed_gzip_body() {
         .unwrap();
     assert_eq!(resp.status(), 400, "a corrupt gzip stream is a 400");
     let body = resp.text().await.unwrap();
-    assert!(
-        body.starts_with("{\"error\":"),
-        "structured JSON error, got: {body}"
-    );
-    assert!(
-        !body.contains(SENTINEL),
-        "gzip decode error echoed caller body bytes: {body}"
-    );
+    assert!(body.starts_with("{\"error\":"), "structured JSON error, got: {body}");
+    assert!(!body.contains(SENTINEL), "gzip decode error echoed caller body bytes: {body}");
 }
 
 #[tokio::test]
@@ -776,20 +640,10 @@ async fn no_echo_execution_error() {
     // embed term text drawn from the query/graph. Use a sentinel IRI in a construct so the
     // engine error (if any) would quote it; assert it never reaches the body. Even when the
     // query SUCCEEDS this is a no-op assertion (no error body), so it is robust either way.
-    let q = format!(
-        "SELECT * WHERE {{ ?s ?p ?o . FILTER(?s = <http://ex/{SENTINEL}> && SAMETERM(?s, 1/0)) }}"
-    );
-    let resp = client()
-        .get(format!("{base}/sparql"))
-        .query(&[("query", q.as_str())])
-        .send()
-        .await
-        .unwrap();
+    let q = format!("SELECT * WHERE {{ ?s ?p ?o . FILTER(?s = <http://ex/{SENTINEL}> && SAMETERM(?s, 1/0)) }}");
+    let resp = client().get(format!("{base}/sparql")).query(&[("query", q.as_str())]).send().await.unwrap();
     let body = resp.text().await.unwrap();
-    assert!(
-        !body.contains(SENTINEL),
-        "execution error echoed query/graph content: {body}"
-    );
+    assert!(!body.contains(SENTINEL), "execution error echoed query/graph content: {body}");
 }
 
 // ---------------------------------------------------------------------------
@@ -810,17 +664,10 @@ async fn no_echo_execution_error() {
 /// `Debug` of the crate's own internal error types tends to name them.
 const FORBIDDEN_INTERNALS: &[&str] = &[
     "/home/", // an absolute POSIX path (build/run dir, --persist dir, an io::Error path)
-    "/Users/",
-    "/tmp/",
-    "/var/",
-    "/etc/", // other absolute-path roots
-    "src/http.rs",
-    "src/exec.rs", // a source-file path (a Debug/panic-location leak)
-    "WriteError::",
-    "PrepareError::",
-    "DecodeError::", // a `Debug` of an internal enum
-    "Custom { kind:",
-    "Os { code:", // the `Debug` of a std::io::Error
+    "/Users/", "/tmp/", "/var/", "/etc/", // other absolute-path roots
+    "src/http.rs", "src/exec.rs", // a source-file path (a Debug/panic-location leak)
+    "WriteError::", "PrepareError::", "DecodeError::", // a `Debug` of an internal enum
+    "Custom { kind:", "Os { code:", // the `Debug` of a std::io::Error
 ];
 
 /// Asserts an error body is the structured JSON envelope, names a useful category, and
@@ -871,10 +718,7 @@ async fn no_echo_gsp_write_rejection_stays_clean() {
     );
     if status.is_client_error() || status.is_server_error() {
         for marker in FORBIDDEN_INTERNALS {
-            assert!(
-                !body.contains(marker),
-                "GSP-write error leaked {marker:?}: {body}"
-            );
+            assert!(!body.contains(marker), "GSP-write error leaked {marker:?}: {body}");
         }
     }
 }
@@ -901,10 +745,7 @@ async fn unauthorized_error_is_clean_and_actionable() {
     let body = resp.text().await.unwrap();
     assert_clean_error(&body, "authentication");
     // The 401 must NEVER carry the configured secret.
-    assert!(
-        !body.contains("the-write-token"),
-        "401 leaked the token: {body}"
-    );
+    assert!(!body.contains("the-write-token"), "401 leaked the token: {body}");
 }
 
 /// The not-found (404) class: structured shape, an actionable category, and no internals.
@@ -919,11 +760,7 @@ async fn unauthorized_error_is_clean_and_actionable() {
 async fn not_found_error_is_clean() {
     let base = spawn_with(DATA, ServerConfig::default()).await;
     // Bare unmatched route: now the categorised `{"error":"not found"}` body, still clean.
-    let resp = client()
-        .get(format!("{base}/no-such-route"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client().get(format!("{base}/no-such-route")).send().await.unwrap();
     assert_eq!(resp.status(), 404);
     let body = resp.text().await.unwrap();
     // [OPUS-4.8] (sq-pj6u) Non-empty, categorised `not found` — no longer `{"error":""}`.
@@ -982,10 +819,7 @@ async fn main_failure_classes_are_clean() {
 /// and a streamed response below.
 const EXPECTED_SECURITY_HEADERS: &[(&str, &str)] = &[
     ("x-content-type-options", "nosniff"),
-    (
-        "content-security-policy",
-        "default-src 'none'; frame-ancestors 'none'",
-    ),
+    ("content-security-policy", "default-src 'none'; frame-ancestors 'none'"),
     ("x-frame-options", "DENY"),
     ("referrer-policy", "no-referrer"),
 ];
@@ -1039,10 +873,7 @@ async fn security_headers_on_error_response() {
 
     // A 413 produced INSIDE the middleware stack (body over the limit) — confirms the headers
     // are stamped even on extractor-level rejections rewritten by `json_error_bodies`.
-    let cfg = ServerConfig {
-        max_body_bytes: 16,
-        ..ServerConfig::default()
-    };
+    let cfg = ServerConfig { max_body_bytes: 16, ..ServerConfig::default() };
     let base = spawn_with(DATA, cfg).await;
     let big = "SELECT * WHERE { ?s ?p ?o }".repeat(64);
     let resp = client()
@@ -1206,10 +1037,7 @@ async fn slow_loris_partial_headers_closed_by_deadline() {
 /// (then we drop it), so the test is fast and not flaky.
 #[tokio::test]
 async fn slow_loris_held_open_when_deadline_disabled() {
-    let config = ServerConfig {
-        header_read_timeout: None,
-        ..ServerConfig::default()
-    };
+    let config = ServerConfig { header_read_timeout: None, ..ServerConfig::default() };
     let addr = spawn_serve(config).await;
 
     let mut sock = TcpStream::connect(addr).await.unwrap();
@@ -1257,8 +1085,7 @@ async fn serve_loop_handles_complete_request() {
     );
     // The hardened stack still runs on this path — the X-Content-Type-Options header must land.
     assert!(
-        text.to_ascii_lowercase()
-            .contains("x-content-type-options: nosniff"),
+        text.to_ascii_lowercase().contains("x-content-type-options: nosniff"),
         "security headers must still be stamped by the serve loop: {text:?}"
     );
 }

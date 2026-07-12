@@ -205,14 +205,8 @@ mod gated {
         // mirroring the RSP/BM25 EXTENSION ratchet shape. Positional `println!`
         // args per the CodeQL `rust/unused-variable` false-positive guard.
         println!("\nRIF-Core (monotone Horn subset) expressivity ratchet");
-        println!(
-            "RIF-Core expressivity assertions {} (floor {})",
-            tally.n, RIF_CORE_FLOOR
-        );
-        println!(
-            "documented out-of-scope (not faked): {} items",
-            OUT_OF_SCOPE.len()
-        );
+        println!("RIF-Core expressivity assertions {} (floor {})", tally.n, RIF_CORE_FLOOR);
+        println!("documented out-of-scope (not faked): {} items", OUT_OF_SCOPE.len());
 
         assert!(
             tally.n >= RIF_CORE_FLOOR,
@@ -230,76 +224,34 @@ mod gated {
     fn positive_atoms(t: &mut Tally) {
         // Frame propagation: { ?x p ?y } => { ?x q ?y } ; a p b.
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("p"),
-            val: iri("b"),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("p"), val: iri("b") }));
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("q"),
-                val: var("y"),
-            }],
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("p"),
-                val: var("y"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("q"), val: var("y") }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("p"), val: var("y") }],
         ));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe frame doc");
-        t.ok(
-            has(&dict, &c, &ns("a"), &ns("p"), &ns("b")),
-            "frame fact present",
-        );
-        t.ok(
-            has(&dict, &c, &ns("a"), &ns("q"), &ns("b")),
-            "frame rule derives q",
-        );
+        t.ok(has(&dict, &c, &ns("a"), &ns("p"), &ns("b")), "frame fact present");
+        t.ok(has(&dict, &c, &ns("a"), &ns("q"), &ns("b")), "frame rule derives q");
 
         // Membership + subclass: { ?x # C , C ## D } => ... — emulate the rdfs
         // subclass-of-membership Horn rule directly (RIF-Core has no built-in RDFS
         // semantics; the rule is the user's).
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Member {
-            obj: iri("a"),
-            class: iri("C"),
-        }));
-        doc.push(Rule::fact(Atom::Subclass {
-            sub: iri("C"),
-            sup: iri("D"),
-        }));
+        doc.push(Rule::fact(Atom::Member { obj: iri("a"), class: iri("C") }));
+        doc.push(Rule::fact(Atom::Subclass { sub: iri("C"), sup: iri("D") }));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: var("d"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: var("d") }],
             vec![
-                Atom::Member {
-                    obj: var("x"),
-                    class: var("c"),
-                },
-                Atom::Subclass {
-                    sub: var("c"),
-                    sup: var("d"),
-                },
+                Atom::Member { obj: var("x"), class: var("c") },
+                Atom::Subclass { sub: var("c"), sup: var("d") },
             ],
         ));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe membership doc");
-        t.ok(
-            has(&dict, &c, &ns("a"), RDF_TYPE, &ns("C")),
-            "membership fact present",
-        );
-        t.ok(
-            has(&dict, &c, &ns("C"), RDFS_SUBCLASS_OF, &ns("D")),
-            "subclass fact present",
-        );
-        t.ok(
-            has(&dict, &c, &ns("a"), RDF_TYPE, &ns("D")),
-            "membership+subclass derives a # D",
-        );
+        t.ok(has(&dict, &c, &ns("a"), RDF_TYPE, &ns("C")), "membership fact present");
+        t.ok(has(&dict, &c, &ns("C"), RDFS_SUBCLASS_OF, &ns("D")), "subclass fact present");
+        t.ok(has(&dict, &c, &ns("a"), RDF_TYPE, &ns("D")), "membership+subclass derives a # D");
     }
 
     /// Recursion / transitivity — the monotone Horn fixpoint.
@@ -307,43 +259,19 @@ mod gated {
         // ancestor is the transitive closure of parent.
         let mut doc = Document::new();
         for (a, b) in [("a", "b"), ("b", "c"), ("c", "d")] {
-            doc.push(Rule::fact(Atom::Frame {
-                obj: iri(a),
-                pred: iri("parent"),
-                val: iri(b),
-            }));
+            doc.push(Rule::fact(Atom::Frame { obj: iri(a), pred: iri("parent"), val: iri(b) }));
         }
         // ancestor(?x,?y) :- parent(?x,?y)
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("ancestor"),
-                val: var("y"),
-            }],
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("parent"),
-                val: var("y"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("ancestor"), val: var("y") }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("parent"), val: var("y") }],
         ));
         // ancestor(?x,?z) :- parent(?x,?y), ancestor(?y,?z)
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("ancestor"),
-                val: var("z"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("ancestor"), val: var("z") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("parent"),
-                    val: var("y"),
-                },
-                Atom::Frame {
-                    obj: var("y"),
-                    pred: iri("ancestor"),
-                    val: var("z"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("parent"), val: var("y") },
+                Atom::Frame { obj: var("y"), pred: iri("ancestor"), val: var("z") },
             ],
         ));
         let mut dict = Dict::new();
@@ -355,10 +283,7 @@ mod gated {
             );
         }
         // Non-edges are NOT derived (soundness).
-        t.ok(
-            !has(&dict, &c, &ns("d"), &ns("ancestor"), &ns("a")),
-            "no spurious reverse ancestor",
-        );
+        t.ok(!has(&dict, &c, &ns("d"), &ns("ancestor"), &ns("a")), "no spurious reverse ancestor");
     }
 
     /// Numeric predicate + function builtins (with range-restricted inputs).
@@ -371,37 +296,14 @@ mod gated {
             (Builtin::NumericDivide, "2"),
         ] {
             let mut doc = Document::new();
-            doc.push(Rule::fact(Atom::Frame {
-                obj: iri("a"),
-                pred: iri("x"),
-                val: Term::int(6),
-            }));
-            doc.push(Rule::fact(Atom::Frame {
-                obj: iri("a"),
-                pred: iri("y"),
-                val: Term::int(3),
-            }));
+            doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("x"), val: Term::int(6) }));
+            doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("y"), val: Term::int(3) }));
             doc.push(Rule::implies(
-                vec![Atom::Frame {
-                    obj: iri("a"),
-                    pred: iri("r"),
-                    val: var("z"),
-                }],
+                vec![Atom::Frame { obj: iri("a"), pred: iri("r"), val: var("z") }],
                 vec![
-                    Atom::Frame {
-                        obj: iri("a"),
-                        pred: iri("x"),
-                        val: var("u"),
-                    },
-                    Atom::Frame {
-                        obj: iri("a"),
-                        pred: iri("y"),
-                        val: var("v"),
-                    },
-                    Atom::Builtin {
-                        op,
-                        args: vec![var("u"), var("v"), var("z")],
-                    },
+                    Atom::Frame { obj: iri("a"), pred: iri("x"), val: var("u") },
+                    Atom::Frame { obj: iri("a"), pred: iri("y"), val: var("v") },
+                    Atom::Builtin { op, args: vec![var("u"), var("v"), var("z")] },
                 ],
             ));
             let mut dict = Dict::new();
@@ -415,53 +317,22 @@ mod gated {
 
         // Predicates: filter `age > 18` keeps only the adult.
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("p1"),
-            pred: iri("age"),
-            val: Term::int(20),
-        }));
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("p2"),
-            pred: iri("age"),
-            val: Term::int(18),
-        }));
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("p3"),
-            pred: iri("age"),
-            val: Term::int(10),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("p1"), pred: iri("age"), val: Term::int(20) }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("p2"), pred: iri("age"), val: Term::int(18) }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("p3"), pred: iri("age"), val: Term::int(10) }));
         // Adult :- age ?n , ?n >= 18 (notLessThan)
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("p"),
-                class: iri("Adult"),
-            }],
+            vec![Atom::Member { obj: var("p"), class: iri("Adult") }],
             vec![
-                Atom::Frame {
-                    obj: var("p"),
-                    pred: iri("age"),
-                    val: var("n"),
-                },
-                Atom::Builtin {
-                    op: Builtin::NumericNotLessThan,
-                    args: vec![var("n"), Term::int(18)],
-                },
+                Atom::Frame { obj: var("p"), pred: iri("age"), val: var("n") },
+                Atom::Builtin { op: Builtin::NumericNotLessThan, args: vec![var("n"), Term::int(18)] },
             ],
         ));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe numeric pred doc");
-        t.ok(
-            has(&dict, &c, &ns("p1"), RDF_TYPE, &ns("Adult")),
-            "age 20 >= 18 ⇒ Adult",
-        );
-        t.ok(
-            has(&dict, &c, &ns("p2"), RDF_TYPE, &ns("Adult")),
-            "age 18 >= 18 ⇒ Adult (boundary)",
-        );
-        t.ok(
-            !has(&dict, &c, &ns("p3"), RDF_TYPE, &ns("Adult")),
-            "age 10 < 18 ⇒ NOT Adult",
-        );
+        t.ok(has(&dict, &c, &ns("p1"), RDF_TYPE, &ns("Adult")), "age 20 >= 18 ⇒ Adult");
+        t.ok(has(&dict, &c, &ns("p2"), RDF_TYPE, &ns("Adult")), "age 18 >= 18 ⇒ Adult (boundary)");
+        t.ok(!has(&dict, &c, &ns("p3"), RDF_TYPE, &ns("Adult")), "age 10 < 18 ⇒ NOT Adult");
 
         // numeric-less-than / greater-than / equal each filter as expected.
         for (op, who_passes) in [
@@ -471,36 +342,14 @@ mod gated {
             (Builtin::NumericNotGreaterThan, "p3"), // 10 <= 18
         ] {
             let mut doc = Document::new();
-            doc.push(Rule::fact(Atom::Frame {
-                obj: iri("p1"),
-                pred: iri("age"),
-                val: Term::int(20),
-            }));
-            doc.push(Rule::fact(Atom::Frame {
-                obj: iri("p2"),
-                pred: iri("age"),
-                val: Term::int(18),
-            }));
-            doc.push(Rule::fact(Atom::Frame {
-                obj: iri("p3"),
-                pred: iri("age"),
-                val: Term::int(10),
-            }));
+            doc.push(Rule::fact(Atom::Frame { obj: iri("p1"), pred: iri("age"), val: Term::int(20) }));
+            doc.push(Rule::fact(Atom::Frame { obj: iri("p2"), pred: iri("age"), val: Term::int(18) }));
+            doc.push(Rule::fact(Atom::Frame { obj: iri("p3"), pred: iri("age"), val: Term::int(10) }));
             doc.push(Rule::implies(
-                vec![Atom::Member {
-                    obj: var("p"),
-                    class: iri("Sel"),
-                }],
+                vec![Atom::Member { obj: var("p"), class: iri("Sel") }],
                 vec![
-                    Atom::Frame {
-                        obj: var("p"),
-                        pred: iri("age"),
-                        val: var("n"),
-                    },
-                    Atom::Builtin {
-                        op,
-                        args: vec![var("n"), Term::int(18)],
-                    },
+                    Atom::Frame { obj: var("p"), pred: iri("age"), val: var("n") },
+                    Atom::Builtin { op, args: vec![var("n"), Term::int(18)] },
                 ],
             ));
             let mut dict = Dict::new();
@@ -522,103 +371,45 @@ mod gated {
             val: Term::string("alphabet"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("o"),
-                class: iri("HasPha"),
-            }],
+            vec![Atom::Member { obj: var("o"), class: iri("HasPha") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("name"),
-                    val: var("s"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringContains,
-                    args: vec![var("s"), Term::string("pha")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("name"), val: var("s") },
+                Atom::Builtin { op: Builtin::StringContains, args: vec![var("s"), Term::string("pha")] },
             ],
         ));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("o"),
-                class: iri("StartsAl"),
-            }],
+            vec![Atom::Member { obj: var("o"), class: iri("StartsAl") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("name"),
-                    val: var("s"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringStartsWith,
-                    args: vec![var("s"), Term::string("alph")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("name"), val: var("s") },
+                Atom::Builtin { op: Builtin::StringStartsWith, args: vec![var("s"), Term::string("alph")] },
             ],
         ));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("o"),
-                class: iri("EndsBet"),
-            }],
+            vec![Atom::Member { obj: var("o"), class: iri("EndsBet") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("name"),
-                    val: var("s"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringEndsWith,
-                    args: vec![var("s"), Term::string("bet")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("name"), val: var("s") },
+                Atom::Builtin { op: Builtin::StringEndsWith, args: vec![var("s"), Term::string("bet")] },
             ],
         ));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe string pred doc");
-        t.ok(
-            has(&dict, &c, &ns("x"), RDF_TYPE, &ns("HasPha")),
-            "string:contains filter",
-        );
-        t.ok(
-            has(&dict, &c, &ns("x"), RDF_TYPE, &ns("StartsAl")),
-            "string:startsWith filter",
-        );
-        t.ok(
-            has(&dict, &c, &ns("x"), RDF_TYPE, &ns("EndsBet")),
-            "string:endsWith filter",
-        );
+        t.ok(has(&dict, &c, &ns("x"), RDF_TYPE, &ns("HasPha")), "string:contains filter");
+        t.ok(has(&dict, &c, &ns("x"), RDF_TYPE, &ns("StartsAl")), "string:startsWith filter");
+        t.ok(has(&dict, &c, &ns("x"), RDF_TYPE, &ns("EndsBet")), "string:endsWith filter");
 
         // string-length function.
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("x"),
-            pred: iri("name"),
-            val: Term::string("abcd"),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("name"), val: Term::string("abcd") }));
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("nameLen"),
-                val: var("n"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("nameLen"), val: var("n") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("name"),
-                    val: var("s"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringLength,
-                    args: vec![var("s"), var("n")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("name"), val: var("s") },
+                Atom::Builtin { op: Builtin::StringLength, args: vec![var("s"), var("n")] },
             ],
         ));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe string length doc");
-        t.eq(
-            int_obj(&dict, &c, &ns("x"), &ns("nameLen")).as_deref(),
-            Some("4"),
-            "string length 4",
-        );
+        t.eq(int_obj(&dict, &c, &ns("x"), &ns("nameLen")).as_deref(), Some("4"), "string length 4");
     }
 
     /// List builtins (contains predicate, length function).
@@ -627,66 +418,30 @@ mod gated {
         let list = Term::List(vec![Term::int(1), Term::int(2), Term::int(3)]);
         let mut doc = Document::new();
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: iri("a"),
-                pred: iri("len"),
-                val: var("n"),
-            }],
+            vec![Atom::Frame { obj: iri("a"), pred: iri("len"), val: var("n") }],
             vec![
-                Atom::Frame {
-                    obj: iri("a"),
-                    pred: iri("items"),
-                    val: var("l"),
-                },
-                Atom::Builtin {
-                    op: Builtin::ListLength,
-                    args: vec![var("l"), var("n")],
-                },
+                Atom::Frame { obj: iri("a"), pred: iri("items"), val: var("l") },
+                Atom::Builtin { op: Builtin::ListLength, args: vec![var("l"), var("n")] },
             ],
         ));
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("items"),
-            val: list.clone(),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("items"), val: list.clone() }));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe list length doc");
-        t.eq(
-            int_obj(&dict, &c, &ns("a"), &ns("len")).as_deref(),
-            Some("3"),
-            "list length 3",
-        );
+        t.eq(int_obj(&dict, &c, &ns("a"), &ns("len")).as_deref(), Some("3"), "list length 3");
 
         // pred:list-contains — the list contains 2.
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("items"),
-            val: list.clone(),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("items"), val: list.clone() }));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: iri("a"),
-                class: iri("HasTwo"),
-            }],
+            vec![Atom::Member { obj: iri("a"), class: iri("HasTwo") }],
             vec![
-                Atom::Frame {
-                    obj: iri("a"),
-                    pred: iri("items"),
-                    val: var("l"),
-                },
-                Atom::Builtin {
-                    op: Builtin::ListContains,
-                    args: vec![var("l"), Term::int(2)],
-                },
+                Atom::Frame { obj: iri("a"), pred: iri("items"), val: var("l") },
+                Atom::Builtin { op: Builtin::ListContains, args: vec![var("l"), Term::int(2)] },
             ],
         ));
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe list contains doc");
-        t.ok(
-            has(&dict, &c, &ns("a"), RDF_TYPE, &ns("HasTwo")),
-            "list:member finds 2",
-        );
+        t.ok(has(&dict, &c, &ns("a"), RDF_TYPE, &ns("HasTwo")), "list:member finds 2");
     }
 
     /// Tests for the 5 new soundly-mapped RIF-Core DTB builtins (sq-pbz04.5.2):
@@ -696,27 +451,12 @@ mod gated {
         // --- pred:numeric-not-equal → math:notEqualTo ---
         // Positive: filter keeps only the subject where value ≠ 5
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("v"),
-            val: Term::int(5),
-        }));
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("b"),
-            pred: iri("v"),
-            val: Term::int(7),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("v"), val: Term::int(5) }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("b"), pred: iri("v"), val: Term::int(7) }));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("NotFive"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("NotFive") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("v"),
-                    val: var("n"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("v"), val: var("n") },
                 Atom::Builtin {
                     op: Builtin::NumericNotEqual,
                     args: vec![var("n"), Term::int(5)],
@@ -736,29 +476,16 @@ mod gated {
         // Negative: wrong arity → rejected
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("C"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
             vec![
-                Atom::Member {
-                    obj: var("x"),
-                    class: iri("D"),
-                },
-                Atom::Builtin {
-                    op: Builtin::NumericNotEqual,
-                    args: vec![var("x")],
-                },
+                Atom::Member { obj: var("x"), class: iri("D") },
+                Atom::Builtin { op: Builtin::NumericNotEqual, args: vec![var("x")] },
             ],
         ));
         t.ok(
             matches!(
                 d.validate(),
-                Err(RifError::BadBuiltinArity {
-                    op: Builtin::NumericNotEqual,
-                    got: 1,
-                    want: 2
-                })
+                Err(RifError::BadBuiltinArity { op: Builtin::NumericNotEqual, got: 1, want: 2 })
             ),
             "pred:numeric-not-equal: wrong arity rejected",
         );
@@ -766,27 +493,12 @@ mod gated {
         // --- func:upper-case → string:upperCase ---
         // Positive: upper-cases ASCII string
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("x"),
-            pred: iri("s"),
-            val: Term::string("hello"),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("s"), val: Term::string("hello") }));
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("u"),
-                val: var("r"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("u"), val: var("r") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("s"),
-                    val: var("sv"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringUpperCase,
-                    args: vec![var("sv"), var("r")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
+                Atom::Builtin { op: Builtin::StringUpperCase, args: vec![var("sv"), var("r")] },
             ],
         ));
         let mut dict = Dict::new();
@@ -799,17 +511,9 @@ mod gated {
         // Negative: wrong arity (3 args for a 2-arg function) → rejected
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("r"),
-                val: var("z"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("r"), val: var("z") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("s"),
-                    val: var("sv"),
-                },
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
                 Atom::Builtin {
                     op: Builtin::StringUpperCase,
                     args: vec![var("sv"), var("z"), var("extra")],
@@ -819,11 +523,7 @@ mod gated {
         t.ok(
             matches!(
                 d.validate(),
-                Err(RifError::BadBuiltinArity {
-                    op: Builtin::StringUpperCase,
-                    got: 3,
-                    want: 2
-                })
+                Err(RifError::BadBuiltinArity { op: Builtin::StringUpperCase, got: 3, want: 2 })
             ),
             "func:upper-case: wrong arity rejected",
         );
@@ -831,27 +531,12 @@ mod gated {
         // --- func:lower-case → string:lowerCase ---
         // Positive: lower-cases correctly
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("x"),
-            pred: iri("s"),
-            val: Term::string("WORLD"),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("s"), val: Term::string("WORLD") }));
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("l"),
-                val: var("r"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("l"), val: var("r") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("s"),
-                    val: var("sv"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringLowerCase,
-                    args: vec![var("sv"), var("r")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
+                Atom::Builtin { op: Builtin::StringLowerCase, args: vec![var("sv"), var("r")] },
             ],
         ));
         let mut dict = Dict::new();
@@ -864,17 +549,9 @@ mod gated {
         // Negative: wrong arity → rejected
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("l"),
-                val: var("r"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("l"), val: var("r") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("s"),
-                    val: var("sv"),
-                },
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
                 Atom::Builtin {
                     op: Builtin::StringLowerCase,
                     args: vec![var("sv"), var("r"), var("extra")],
@@ -884,11 +561,7 @@ mod gated {
         t.ok(
             matches!(
                 d.validate(),
-                Err(RifError::BadBuiltinArity {
-                    op: Builtin::StringLowerCase,
-                    got: 3,
-                    want: 2
-                })
+                Err(RifError::BadBuiltinArity { op: Builtin::StringLowerCase, got: 3, want: 2 })
             ),
             "func:lower-case: wrong arity rejected",
         );
@@ -902,21 +575,10 @@ mod gated {
             val: Term::string("hello world"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("enc"),
-                val: var("e"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("enc"), val: var("e") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("raw"),
-                    val: var("r"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringEncodeForUri,
-                    args: vec![var("r"), var("e")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("raw"), val: var("r") },
+                Atom::Builtin { op: Builtin::StringEncodeForUri, args: vec![var("r"), var("e")] },
             ],
         ));
         let mut dict = Dict::new();
@@ -929,21 +591,10 @@ mod gated {
         // Negative: wrong arity (1 arg, need 2) → rejected
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("o"),
-                pred: iri("enc"),
-                val: var("e"),
-            }],
+            vec![Atom::Frame { obj: var("o"), pred: iri("enc"), val: var("e") }],
             vec![
-                Atom::Frame {
-                    obj: var("o"),
-                    pred: iri("raw"),
-                    val: var("r"),
-                },
-                Atom::Builtin {
-                    op: Builtin::StringEncodeForUri,
-                    args: vec![var("r")],
-                },
+                Atom::Frame { obj: var("o"), pred: iri("raw"), val: var("r") },
+                Atom::Builtin { op: Builtin::StringEncodeForUri, args: vec![var("r")] },
             ],
         ));
         t.ok(
@@ -963,34 +614,14 @@ mod gated {
         let list_a = Term::List(vec![Term::int(10), Term::int(20)]);
         let list_b = Term::List(vec![Term::int(30)]);
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("x"),
-            pred: iri("la"),
-            val: list_a,
-        }));
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("x"),
-            pred: iri("lb"),
-            val: list_b,
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("la"), val: list_a }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("lb"), val: list_b }));
         // func:concatenate(?la, ?lb, ?out) → out is [10, 20, 30]
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("concat_out"),
-                val: var("out"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("concat_out"), val: var("out") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("la"),
-                    val: var("la"),
-                },
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("lb"),
-                    val: var("lb"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("la"), val: var("la") },
+                Atom::Frame { obj: var("x"), pred: iri("lb"), val: var("lb") },
                 Atom::Builtin {
                     op: Builtin::ListConcatenate,
                     args: vec![var("la"), var("lb"), var("out")],
@@ -999,21 +630,10 @@ mod gated {
         ));
         // Derive the length of the concatenated list
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("concat_len"),
-                val: var("n"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("concat_len"), val: var("n") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("concat_out"),
-                    val: var("out"),
-                },
-                Atom::Builtin {
-                    op: Builtin::ListLength,
-                    args: vec![var("out"), var("n")],
-                },
+                Atom::Frame { obj: var("x"), pred: iri("concat_out"), val: var("out") },
+                Atom::Builtin { op: Builtin::ListLength, args: vec![var("out"), var("n")] },
             ],
         ));
         let mut dict = Dict::new();
@@ -1030,44 +650,16 @@ mod gated {
         let list_y = Term::List(vec![Term::int(3)]);
         let list_z = Term::List(vec![Term::int(4), Term::int(5)]);
         let mut doc3 = Document::new();
-        doc3.push(Rule::fact(Atom::Frame {
-            obj: iri("r"),
-            pred: iri("lx"),
-            val: list_x,
-        }));
-        doc3.push(Rule::fact(Atom::Frame {
-            obj: iri("r"),
-            pred: iri("ly"),
-            val: list_y,
-        }));
-        doc3.push(Rule::fact(Atom::Frame {
-            obj: iri("r"),
-            pred: iri("lz"),
-            val: list_z,
-        }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("lx"), val: list_x }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("ly"), val: list_y }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("lz"), val: list_z }));
         // func:concatenate(?lx, ?ly, ?lz, ?out) — variadic 3-input form
         doc3.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("r"),
-                pred: iri("cat3_out"),
-                val: var("out"),
-            }],
+            vec![Atom::Frame { obj: var("r"), pred: iri("cat3_out"), val: var("out") }],
             vec![
-                Atom::Frame {
-                    obj: var("r"),
-                    pred: iri("lx"),
-                    val: var("lx"),
-                },
-                Atom::Frame {
-                    obj: var("r"),
-                    pred: iri("ly"),
-                    val: var("ly"),
-                },
-                Atom::Frame {
-                    obj: var("r"),
-                    pred: iri("lz"),
-                    val: var("lz"),
-                },
+                Atom::Frame { obj: var("r"), pred: iri("lx"), val: var("lx") },
+                Atom::Frame { obj: var("r"), pred: iri("ly"), val: var("ly") },
+                Atom::Frame { obj: var("r"), pred: iri("lz"), val: var("lz") },
                 Atom::Builtin {
                     op: Builtin::ListConcatenate,
                     args: vec![var("lx"), var("ly"), var("lz"), var("out")],
@@ -1075,27 +667,14 @@ mod gated {
             ],
         ));
         doc3.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("r"),
-                pred: iri("cat3_len"),
-                val: var("n"),
-            }],
+            vec![Atom::Frame { obj: var("r"), pred: iri("cat3_len"), val: var("n") }],
             vec![
-                Atom::Frame {
-                    obj: var("r"),
-                    pred: iri("cat3_out"),
-                    val: var("out"),
-                },
-                Atom::Builtin {
-                    op: Builtin::ListLength,
-                    args: vec![var("out"), var("n")],
-                },
+                Atom::Frame { obj: var("r"), pred: iri("cat3_out"), val: var("out") },
+                Atom::Builtin { op: Builtin::ListLength, args: vec![var("out"), var("n")] },
             ],
         ));
         let mut dict3 = Dict::new();
-        let c3 = doc3
-            .closure(&mut dict3)
-            .expect("safe 3-input concatenate doc");
+        let c3 = doc3.closure(&mut dict3).expect("safe 3-input concatenate doc");
         t.eq(
             int_obj(&dict3, &c3, &ns("r"), &ns("cat3_len")).as_deref(),
             Some("5"),
@@ -1104,37 +683,18 @@ mod gated {
         // Negative: too few args (1 < min 2) → rejected
         let list_c = Term::List(vec![Term::int(1)]);
         let mut d = Document::new();
-        d.push(Rule::fact(Atom::Frame {
-            obj: iri("x"),
-            pred: iri("l"),
-            val: list_c,
-        }));
+        d.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("l"), val: list_c }));
         d.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("r"),
-                val: var("out"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("r"), val: var("out") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("l"),
-                    val: var("l"),
-                },
-                Atom::Builtin {
-                    op: Builtin::ListConcatenate,
-                    args: vec![var("out")],
-                },
+                Atom::Frame { obj: var("x"), pred: iri("l"), val: var("l") },
+                Atom::Builtin { op: Builtin::ListConcatenate, args: vec![var("out")] },
             ],
         ));
         t.ok(
             matches!(
                 d.validate(),
-                Err(RifError::BadBuiltinArity {
-                    op: Builtin::ListConcatenate,
-                    got: 1,
-                    ..
-                })
+                Err(RifError::BadBuiltinArity { op: Builtin::ListConcatenate, got: 1, .. })
             ),
             "func:concatenate: too few args (< min 2) rejected",
         );
@@ -1159,10 +719,7 @@ mod gated {
         // --- 1. Equal in a CONCLUSION is rejected ---
         // (a) as a fact head
         let mut d = Document::new();
-        d.push(Rule::fact(Atom::Equal {
-            left: iri("a"),
-            right: iri("b"),
-        }));
+        d.push(Rule::fact(Atom::Equal { left: iri("a"), right: iri("b") }));
         t.ok(
             matches!(d.validate(), Err(RifError::EqualInConclusion)),
             "Equal as a fact head (conclusion) is rejected with EqualInConclusion",
@@ -1177,14 +734,8 @@ mod gated {
         // (b) as a rule head atom
         let mut d2 = Document::new();
         d2.push(Rule::implies(
-            vec![Atom::Equal {
-                left: var("x"),
-                right: iri("b"),
-            }],
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("C"),
-            }],
+            vec![Atom::Equal { left: var("x"), right: iri("b") }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
         ));
         t.ok(
             matches!(d2.validate(), Err(RifError::EqualInConclusion)),
@@ -1202,24 +753,13 @@ mod gated {
             val: Term::int(30),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("Adult"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("Adult") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("age"),
-                    val: var("n"),
-                },
-                Atom::Equal {
-                    left: var("n"),
-                    right: var("n"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("age"), val: var("n") },
+                Atom::Equal { left: var("n"), right: var("n") },
             ],
         ));
-        doc.validate()
-            .expect("ground-identity body Equal is valid (sq-pbz04.5.4)");
+        doc.validate().expect("ground-identity body Equal is valid (sq-pbz04.5.4)");
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("closure succeeds");
         t.ok(
@@ -1233,15 +773,9 @@ mod gated {
         let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
         let mut d3 = Document::new();
         d3.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("C"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
             vec![
-                Atom::Member {
-                    obj: var("x"),
-                    class: iri("D"),
-                },
+                Atom::Member { obj: var("x"), class: iri("D") },
                 Atom::Equal {
                     left: Term::Lit {
                         lex: "1".into(),
@@ -1279,20 +813,10 @@ mod gated {
             val: iri("carol"),
         }));
         d4.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("SelfManaged"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("SelfManaged") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("manager"),
-                    val: var("y"),
-                },
-                Atom::Equal {
-                    left: var("x"),
-                    right: var("y"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("manager"), val: var("y") },
+                Atom::Equal { left: var("x"), right: var("y") },
             ],
         ));
         d4.validate().expect("?x=?y unifies; valid (sq-26vwp)");
@@ -1311,36 +835,14 @@ mod gated {
         // DISTINCT nodes must NOT satisfy ?x=?y; a genuine same-node pair DOES.
         let owl_same = Term::Iri("http://www.w3.org/2002/07/owl#sameAs".to_string());
         let mut d5 = Document::new();
-        d5.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("rel"),
-            val: iri("b"),
-        }));
-        d5.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: owl_same,
-            val: iri("b"),
-        }));
-        d5.push(Rule::fact(Atom::Frame {
-            obj: iri("c"),
-            pred: iri("rel"),
-            val: iri("c"),
-        }));
+        d5.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("rel"), val: iri("b") }));
+        d5.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: owl_same, val: iri("b") }));
+        d5.push(Rule::fact(Atom::Frame { obj: iri("c"), pred: iri("rel"), val: iri("c") }));
         d5.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("SelfRel"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("SelfRel") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("rel"),
-                    val: var("y"),
-                },
-                Atom::Equal {
-                    left: var("x"),
-                    right: var("y"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("rel"), val: var("y") },
+                Atom::Equal { left: var("x"), right: var("y") },
             ],
         ));
         let mut dict5 = Dict::new();
@@ -1356,31 +858,13 @@ mod gated {
 
         // ?x = <t> substitution end-to-end: ?x # Special :- ?x p ?v, ?v = <target>.
         let mut d6 = Document::new();
-        d6.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("p"),
-            val: iri("target"),
-        }));
-        d6.push(Rule::fact(Atom::Frame {
-            obj: iri("b"),
-            pred: iri("p"),
-            val: iri("other"),
-        }));
+        d6.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("p"), val: iri("target") }));
+        d6.push(Rule::fact(Atom::Frame { obj: iri("b"), pred: iri("p"), val: iri("other") }));
         d6.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("Special"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("Special") }],
             vec![
-                Atom::Frame {
-                    obj: var("x"),
-                    pred: iri("p"),
-                    val: var("v"),
-                },
-                Atom::Equal {
-                    left: var("v"),
-                    right: iri("target"),
-                },
+                Atom::Frame { obj: var("x"), pred: iri("p"), val: var("v") },
+                Atom::Equal { left: var("v"), right: iri("target") },
             ],
         ));
         d6.validate().expect("?v=<target> substitutes; valid");
@@ -1399,20 +883,10 @@ mod gated {
         // collapses to the fact <a> # C) — contrast the ?x=?x sole-binder case.
         let mut d7 = Document::new();
         d7.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("C"),
-            }],
-            vec![Atom::Equal {
-                left: var("x"),
-                right: iri("a"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
+            vec![Atom::Equal { left: var("x"), right: iri("a") }],
         ));
-        t.eq(
-            d7.validate(),
-            Ok(()),
-            "?x=<a> binds ?x by substitution (valid; not UnboundHeadVar)",
-        );
+        t.eq(d7.validate(), Ok(()), "?x=<a> binds ?x by substitution (valid; not UnboundHeadVar)");
         let mut dict7 = Dict::new();
         let c7 = d7.closure(&mut dict7).expect("closure succeeds");
         t.ok(
@@ -1422,30 +896,13 @@ mod gated {
 
         // Chained ?x=?y, ?y=<target> collapse both to the ground term (fixpoint).
         let mut d8 = Document::new();
-        d8.push(Rule::fact(Atom::Frame {
-            obj: iri("s"),
-            pred: iri("p"),
-            val: iri("target"),
-        }));
+        d8.push(Rule::fact(Atom::Frame { obj: iri("s"), pred: iri("p"), val: iri("target") }));
         d8.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("z"),
-                class: iri("Matched"),
-            }],
+            vec![Atom::Member { obj: var("z"), class: iri("Matched") }],
             vec![
-                Atom::Frame {
-                    obj: var("z"),
-                    pred: iri("p"),
-                    val: var("x"),
-                },
-                Atom::Equal {
-                    left: var("x"),
-                    right: var("y"),
-                },
-                Atom::Equal {
-                    left: var("y"),
-                    right: iri("target"),
-                },
+                Atom::Frame { obj: var("z"), pred: iri("p"), val: var("x") },
+                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Equal { left: var("y"), right: iri("target") },
             ],
         ));
         d8.validate().expect("chained equalities resolve; valid");
@@ -1459,23 +916,11 @@ mod gated {
         // Substitution can CREATE a distinct-ground equality -> fail-closed.
         let mut d9 = Document::new();
         d9.push(Rule::implies(
-            vec![Atom::Member {
-                obj: iri("s"),
-                class: iri("C"),
-            }],
+            vec![Atom::Member { obj: iri("s"), class: iri("C") }],
             vec![
-                Atom::Equal {
-                    left: var("x"),
-                    right: iri("a"),
-                },
-                Atom::Equal {
-                    left: var("y"),
-                    right: iri("b"),
-                },
-                Atom::Equal {
-                    left: var("x"),
-                    right: var("y"),
-                },
+                Atom::Equal { left: var("x"), right: iri("a") },
+                Atom::Equal { left: var("y"), right: iri("b") },
+                Atom::Equal { left: var("x"), right: var("y") },
             ],
         ));
         t.ok(
@@ -1488,51 +933,26 @@ mod gated {
     /// conclusions (a closure SUPERSET), never retracts one.
     fn monotonicity(t: &mut Tally) {
         let rule = Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("q"),
-                val: var("y"),
-            }],
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("p"),
-                val: var("y"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("q"), val: var("y") }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("p"), val: var("y") }],
         );
 
         let mut doc1 = Document::new();
         doc1.push(rule.clone());
-        doc1.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("p"),
-            val: iri("b"),
-        }));
+        doc1.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("p"), val: iri("b") }));
         let mut d1 = Dict::new();
         let c1 = doc1.closure(&mut d1).expect("doc1");
 
         let mut doc2 = doc1.clone();
-        doc2.push(Rule::fact(Atom::Frame {
-            obj: iri("c"),
-            pred: iri("p"),
-            val: iri("d"),
-        }));
+        doc2.push(Rule::fact(Atom::Frame { obj: iri("c"), pred: iri("p"), val: iri("d") }));
         let mut d2 = Dict::new();
         let c2 = doc2.closure(&mut d2).expect("doc2");
 
         // Every conclusion of doc1 is still a conclusion of doc2 (superset).
-        t.ok(
-            has(&d2, &c2, &ns("a"), &ns("q"), &ns("b")),
-            "doc1 conclusion survives in doc2",
-        );
+        t.ok(has(&d2, &c2, &ns("a"), &ns("q"), &ns("b")), "doc1 conclusion survives in doc2");
         // The new fact added its own conclusion.
-        t.ok(
-            has(&d2, &c2, &ns("c"), &ns("q"), &ns("d")),
-            "new fact adds a conclusion",
-        );
-        t.ok(
-            c2.len() > c1.len(),
-            "monotone: superset closure, never a retraction",
-        );
+        t.ok(has(&d2, &c2, &ns("c"), &ns("q"), &ns("d")), "new fact adds a conclusion");
+        t.ok(c2.len() > c1.len(), "monotone: superset closure, never a retraction");
     }
 
     /// Builtin SAFETY / range-restriction — unsafe rules are GENUINELY REJECTED.
@@ -1540,172 +960,81 @@ mod gated {
         // Unbound head var.
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("x"),
-                pred: iri("p"),
-                val: var("y"),
-            }],
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("C"),
-            }],
+            vec![Atom::Frame { obj: var("x"), pred: iri("p"), val: var("y") }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
         ));
-        t.eq(
-            d.validate(),
-            Err(RifError::UnboundHeadVar {
-                var: "y".to_string(),
-            }),
-            "reject unbound head var",
-        );
+        t.eq(d.validate(), Err(RifError::UnboundHeadVar { var: "y".to_string() }), "reject unbound head var");
         {
             let mut dict = Dict::new();
-            t.ok(
-                d.closure(&mut dict).is_err(),
-                "closure refuses an unsafe document",
-            );
+            t.ok(d.closure(&mut dict).is_err(), "closure refuses an unsafe document");
         }
 
         // Unbound builtin input.
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("p"),
-                class: iri("C"),
-            }],
+            vec![Atom::Member { obj: var("p"), class: iri("C") }],
             vec![
-                Atom::Member {
-                    obj: var("p"),
-                    class: iri("D"),
-                },
-                Atom::Builtin {
-                    op: Builtin::NumericGreaterThan,
-                    args: vec![var("n"), Term::int(0)],
-                },
+                Atom::Member { obj: var("p"), class: iri("D") },
+                Atom::Builtin { op: Builtin::NumericGreaterThan, args: vec![var("n"), Term::int(0)] },
             ],
         ));
         t.eq(
             d.validate(),
-            Err(RifError::UnboundBuiltinInput {
-                var: "n".to_string(),
-            }),
+            Err(RifError::UnboundBuiltinInput { var: "n".to_string() }),
             "reject unbound builtin input",
         );
 
         // Builtin in head.
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Builtin {
-                op: Builtin::NumericLessThan,
-                args: vec![var("a"), var("b")],
-            }],
-            vec![Atom::Frame {
-                obj: var("a"),
-                pred: iri("p"),
-                val: var("b"),
-            }],
+            vec![Atom::Builtin { op: Builtin::NumericLessThan, args: vec![var("a"), var("b")] }],
+            vec![Atom::Frame { obj: var("a"), pred: iri("p"), val: var("b") }],
         ));
         t.eq(
             d.validate(),
-            Err(RifError::BuiltinInHead {
-                op: Builtin::NumericLessThan,
-            }),
+            Err(RifError::BuiltinInHead { op: Builtin::NumericLessThan }),
             "reject builtin in head",
         );
 
         // Bad arity.
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member {
-                obj: var("x"),
-                class: iri("C"),
-            }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
             vec![
-                Atom::Member {
-                    obj: var("x"),
-                    class: iri("D"),
-                },
-                Atom::Builtin {
-                    op: Builtin::NumericAdd,
-                    args: vec![var("x")],
-                },
+                Atom::Member { obj: var("x"), class: iri("D") },
+                Atom::Builtin { op: Builtin::NumericAdd, args: vec![var("x")] },
             ],
         ));
         t.ok(
-            matches!(
-                d.validate(),
-                Err(RifError::BadBuiltinArity {
-                    op: Builtin::NumericAdd,
-                    got: 1,
-                    want: 3
-                })
-            ),
+            matches!(d.validate(), Err(RifError::BadBuiltinArity { op: Builtin::NumericAdd, got: 1, want: 3 })),
             "reject bad builtin arity",
         );
 
         // A SAFE function builtin (output bound by the builtin) is accepted —
         // confirming the rejection is precise, not blanket.
         let mut d = Document::new();
-        d.push(Rule::fact(Atom::Frame {
-            obj: iri("a"),
-            pred: iri("x"),
-            val: Term::int(1),
-        }));
+        d.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("x"), val: Term::int(1) }));
         d.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: iri("a"),
-                pred: iri("r"),
-                val: var("z"),
-            }],
+            vec![Atom::Frame { obj: iri("a"), pred: iri("r"), val: var("z") }],
             vec![
-                Atom::Frame {
-                    obj: iri("a"),
-                    pred: iri("x"),
-                    val: var("u"),
-                },
-                Atom::Builtin {
-                    op: Builtin::NumericAdd,
-                    args: vec![var("u"), Term::int(1), var("z")],
-                },
+                Atom::Frame { obj: iri("a"), pred: iri("x"), val: var("u") },
+                Atom::Builtin { op: Builtin::NumericAdd, args: vec![var("u"), Term::int(1), var("z")] },
             ],
         ));
-        t.eq(
-            d.validate(),
-            Ok(()),
-            "a range-restricted function builtin is accepted",
-        );
+        t.eq(d.validate(), Ok(()), "a range-restricted function builtin is accepted");
     }
 
     /// The canonical RIF-Core "uncle" example (the rule the W3C `rif01` test
     /// models): uncle(?n, ?u) :- parent(?n, ?p) , brother(?p, ?u).
     fn canonical_uncle(t: &mut Tally) {
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("Emeka"),
-            pred: iri("parent"),
-            val: iri("Okechukwu"),
-        }));
-        doc.push(Rule::fact(Atom::Frame {
-            obj: iri("Okechukwu"),
-            pred: iri("brother"),
-            val: iri("Chijoke"),
-        }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("Emeka"), pred: iri("parent"), val: iri("Okechukwu") }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("Okechukwu"), pred: iri("brother"), val: iri("Chijoke") }));
         doc.push(Rule::implies(
-            vec![Atom::Frame {
-                obj: var("n"),
-                pred: iri("uncle"),
-                val: var("u"),
-            }],
+            vec![Atom::Frame { obj: var("n"), pred: iri("uncle"), val: var("u") }],
             vec![
-                Atom::Frame {
-                    obj: var("n"),
-                    pred: iri("parent"),
-                    val: var("p"),
-                },
-                Atom::Frame {
-                    obj: var("p"),
-                    pred: iri("brother"),
-                    val: var("u"),
-                },
+                Atom::Frame { obj: var("n"), pred: iri("parent"), val: var("p") },
+                Atom::Frame { obj: var("p"), pred: iri("brother"), val: var("u") },
             ],
         ));
         let mut dict = Dict::new();

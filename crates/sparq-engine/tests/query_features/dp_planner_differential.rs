@@ -46,14 +46,7 @@ fn result_bag(graph: &Graph, q: &str) -> Vec<Vec<(String, String)>> {
             let mut cells: Vec<(String, String)> = vars
                 .iter()
                 .zip(row.iter())
-                .map(|(v, cell)| {
-                    (
-                        v.clone(),
-                        cell.as_ref()
-                            .map(|t| t.to_string())
-                            .unwrap_or_else(|| UNBOUND.to_string()),
-                    )
-                })
+                .map(|(v, cell)| (v.clone(), cell.as_ref().map(|t| t.to_string()).unwrap_or_else(|| UNBOUND.to_string())))
                 .collect();
             cells.sort();
             cells
@@ -73,18 +66,10 @@ fn run_all(g: &Graph, q: &str) -> Vec<Vec<(String, String)>> {
     {
         for &budget in &[0usize, 1, 4096, 1 << 16] {
             let dp = sparq_engine::with_dp_planner_budget(budget, || result_bag(g, q));
-            assert_eq!(
-                greedy, dp,
-                "DP (budget={}) must match greedy for: {}",
-                budget, q
-            );
+            assert_eq!(greedy, dp, "DP (budget={}) must match greedy for: {}", budget, q);
         }
         let dp = sparq_engine::with_dp_planner(|| result_bag(g, q));
-        assert_eq!(
-            greedy, dp,
-            "DP (default budget) must match greedy for: {}",
-            q
-        );
+        assert_eq!(greedy, dp, "DP (default budget) must match greedy for: {}", q);
     }
     greedy
 }
@@ -151,10 +136,7 @@ fn project(bag: Vec<Vec<(String, String)>>, keep: &[&str]) -> Vec<Vec<(String, S
     let mut out: Vec<Vec<(String, String)>> = bag
         .into_iter()
         .map(|row| {
-            let mut r: Vec<(String, String)> = row
-                .into_iter()
-                .filter(|(v, _)| keep.contains(&v.as_str()))
-                .collect();
+            let mut r: Vec<(String, String)> = row.into_iter().filter(|(v, _)| keep.contains(&v.as_str())).collect();
             r.sort();
             r
         })
@@ -174,18 +156,10 @@ fn social_dataset(n: usize) -> Vec<T> {
             "<http://ex/age>".into(),
             format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", i % 50),
         ));
-        v.push((
-            p,
-            "<http://ex/city>".into(),
-            format!("<http://ex/city{}>", i % 7),
-        ));
+        v.push((p, "<http://ex/city>".into(), format!("<http://ex/city{}>", i % 7)));
     }
     for c in 0..7 {
-        v.push((
-            format!("<http://ex/city{c}>"),
-            "<http://ex/country>".into(),
-            format!("<http://ex/country{}>", c % 3),
-        ));
+        v.push((format!("<http://ex/city{c}>"), "<http://ex/country>".into(), format!("<http://ex/country{}>", c % 3)));
     }
     v
 }
@@ -197,22 +171,11 @@ fn chain_join_matches_brute_force() {
     let len = 300usize;
     let mut triples: Vec<T> = vec![];
     for i in 0..len {
-        triples.push((
-            format!("<http://ex/e/{i}>"),
-            "<http://ex/next>".into(),
-            format!("<http://ex/e/{}>", i + 1),
-        ));
-        triples.push((
-            format!("<http://ex/e/{i}>"),
-            "<http://ex/next>".into(),
-            format!("<http://ex/dead/{i}>"),
-        ));
+        triples.push((format!("<http://ex/e/{i}>"), "<http://ex/next>".into(), format!("<http://ex/e/{}>", i + 1)));
+        triples.push((format!("<http://ex/e/{i}>"), "<http://ex/next>".into(), format!("<http://ex/dead/{i}>")));
     }
     let g = load(&triples);
-    let engine = run_all(
-        &g,
-        "SELECT ?a ?b ?c ?d WHERE { ?a ex:next ?b . ?b ex:next ?c . ?c ex:next ?d }",
-    );
+    let engine = run_all(&g, "SELECT ?a ?b ?c ?d WHERE { ?a ex:next ?b . ?b ex:next ?c . ?c ex:next ?d }");
     let reference = brute(
         &triples,
         &[
@@ -221,10 +184,7 @@ fn chain_join_matches_brute_force() {
             ["?c", "<http://ex/next>", "?d"],
         ],
     );
-    assert_eq!(
-        engine, reference,
-        "chain result must equal the brute-force bag"
-    );
+    assert_eq!(engine, reference, "chain result must equal the brute-force bag");
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -232,10 +192,7 @@ fn chain_join_matches_brute_force() {
 fn star_join_matches_brute_force() {
     let triples = social_dataset(120);
     let g = load(&triples);
-    let engine = run_all(
-        &g,
-        "SELECT ?p ?name ?age WHERE { ?p ex:name ?name . ?p ex:age ?age . ?p ex:city ?c }",
-    );
+    let engine = run_all(&g, "SELECT ?p ?name ?age WHERE { ?p ex:name ?name . ?p ex:age ?age . ?p ex:city ?c }");
     let reference = project(
         brute(
             &triples,
@@ -283,33 +240,14 @@ fn disconnected_cross_product_matches_brute_force() {
     // Two patterns sharing NO variable ⇒ a disconnected BGP (cartesian product). The DP
     // declines (returns None) and greedy performs the cross product; result must match.
     let triples: Vec<T> = vec![
-        (
-            "<http://ex/a1>".into(),
-            "<http://ex/p>".into(),
-            "\"x\"".into(),
-        ),
-        (
-            "<http://ex/a2>".into(),
-            "<http://ex/p>".into(),
-            "\"y\"".into(),
-        ),
-        (
-            "<http://ex/b1>".into(),
-            "<http://ex/q>".into(),
-            "\"m\"".into(),
-        ),
-        (
-            "<http://ex/b2>".into(),
-            "<http://ex/q>".into(),
-            "\"n\"".into(),
-        ),
+        ("<http://ex/a1>".into(), "<http://ex/p>".into(), "\"x\"".into()),
+        ("<http://ex/a2>".into(), "<http://ex/p>".into(), "\"y\"".into()),
+        ("<http://ex/b1>".into(), "<http://ex/q>".into(), "\"m\"".into()),
+        ("<http://ex/b2>".into(), "<http://ex/q>".into(), "\"n\"".into()),
     ];
     let g = load(&triples);
     let engine = run_all(&g, "SELECT ?s ?o ?t ?u WHERE { ?s ex:p ?o . ?t ex:q ?u }");
-    let reference = brute(
-        &triples,
-        &[["?s", "<http://ex/p>", "?o"], ["?t", "<http://ex/q>", "?u"]],
-    );
+    let reference = brute(&triples, &[["?s", "<http://ex/p>", "?o"], ["?t", "<http://ex/q>", "?u"]]);
     assert_eq!(engine, reference);
     assert_eq!(engine.len(), 4, "2x2 cross product");
 }
@@ -319,39 +257,16 @@ fn cyclic_triangle_matches_brute_force() {
     // A cyclic BGP (?a->?b->?c->?a) routes to LFTJ (never the binary DP path), but with the
     // planner installed the answer must still be correct.
     let triples: Vec<T> = vec![
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/b>".into(),
-        ),
-        (
-            "<http://ex/b>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/c>".into(),
-        ),
-        (
-            "<http://ex/c>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/a>".into(),
-        ),
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/x>".into(),
-        ),
+        ("<http://ex/a>".into(), "<http://ex/e>".into(), "<http://ex/b>".into()),
+        ("<http://ex/b>".into(), "<http://ex/e>".into(), "<http://ex/c>".into()),
+        ("<http://ex/c>".into(), "<http://ex/e>".into(), "<http://ex/a>".into()),
+        ("<http://ex/a>".into(), "<http://ex/e>".into(), "<http://ex/x>".into()),
     ];
     let g = load(&triples);
-    let engine = run_all(
-        &g,
-        "SELECT ?a ?b ?c WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }",
-    );
+    let engine = run_all(&g, "SELECT ?a ?b ?c WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }");
     let reference = brute(
         &triples,
-        &[
-            ["?a", "<http://ex/e>", "?b"],
-            ["?b", "<http://ex/e>", "?c"],
-            ["?c", "<http://ex/e>", "?a"],
-        ],
+        &[["?a", "<http://ex/e>", "?b"], ["?b", "<http://ex/e>", "?c"], ["?c", "<http://ex/e>", "?a"]],
     );
     assert_eq!(engine, reference);
     assert_eq!(engine.len(), 3, "the single triangle, once per rotation");
@@ -368,11 +283,7 @@ fn pushed_filter_in_chain_matches_brute_force() {
             "<http://ex/age>".into(),
             format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", i),
         ));
-        triples.push((
-            format!("<http://ex/p{i}>"),
-            "<http://ex/name>".into(),
-            format!("\"n{i}\""),
-        ));
+        triples.push((format!("<http://ex/p{i}>"), "<http://ex/name>".into(), format!("\"n{i}\"")));
     }
     let g = load(&triples);
     let engine = run_all(
@@ -380,13 +291,7 @@ fn pushed_filter_in_chain_matches_brute_force() {
         "SELECT ?p ?age ?name WHERE { ?p ex:age ?age . ?p ex:name ?name . FILTER(?age > 30) }",
     );
     // Brute-force the two-pattern join, then filter numerically in the reference.
-    let joined = brute(
-        &triples,
-        &[
-            ["?p", "<http://ex/age>", "?age"],
-            ["?p", "<http://ex/name>", "?name"],
-        ],
-    );
+    let joined = brute(&triples, &[["?p", "<http://ex/age>", "?age"], ["?p", "<http://ex/name>", "?name"]]);
     let mut reference: Vec<Vec<(String, String)>> = joined
         .into_iter()
         .filter(|row| {
@@ -407,36 +312,14 @@ fn repeated_variable_pattern_matches_brute_force() {
     // A pattern with a repeated variable (?x ex:knows ?x — self-edges) plus a join: the DP
     // leaf scan must honour the same repeated-variable consistency check as greedy.
     let triples: Vec<T> = vec![
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/knows>".into(),
-            "<http://ex/a>".into(),
-        ),
-        (
-            "<http://ex/b>".into(),
-            "<http://ex/knows>".into(),
-            "<http://ex/c>".into(),
-        ),
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/name>".into(),
-            "\"A\"".into(),
-        ),
-        (
-            "<http://ex/b>".into(),
-            "<http://ex/name>".into(),
-            "\"B\"".into(),
-        ),
+        ("<http://ex/a>".into(), "<http://ex/knows>".into(), "<http://ex/a>".into()),
+        ("<http://ex/b>".into(), "<http://ex/knows>".into(), "<http://ex/c>".into()),
+        ("<http://ex/a>".into(), "<http://ex/name>".into(), "\"A\"".into()),
+        ("<http://ex/b>".into(), "<http://ex/name>".into(), "\"B\"".into()),
     ];
     let g = load(&triples);
     let engine = run_all(&g, "SELECT ?x ?n WHERE { ?x ex:knows ?x . ?x ex:name ?n }");
-    let reference = brute(
-        &triples,
-        &[
-            ["?x", "<http://ex/knows>", "?x"],
-            ["?x", "<http://ex/name>", "?n"],
-        ],
-    );
+    let reference = brute(&triples, &[["?x", "<http://ex/knows>", "?x"], ["?x", "<http://ex/name>", "?n"]]);
     assert_eq!(engine, reference);
     assert_eq!(engine.len(), 1, "only the self-loop node a joins");
 }
@@ -476,8 +359,5 @@ fn empty_result_matches_brute_force() {
         &g,
         "SELECT ?p WHERE { ?p ex:name ?name . ?p ex:age ?age . ?p ex:nonexistent ?z }",
     );
-    assert!(
-        engine.is_empty(),
-        "no such predicate ⇒ empty under every plan"
-    );
+    assert!(engine.is_empty(), "no such predicate ⇒ empty under every plan");
 }

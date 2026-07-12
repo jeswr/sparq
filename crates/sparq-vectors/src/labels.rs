@@ -29,10 +29,7 @@ pub struct LabelConfig {
 
 impl Default for LabelConfig {
     fn default() -> Self {
-        LabelConfig {
-            predicates: label_predicates(),
-            batch: 256,
-        }
+        LabelConfig { predicates: label_predicates(), batch: 256 }
     }
 }
 

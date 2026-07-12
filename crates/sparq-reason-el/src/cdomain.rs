@@ -308,10 +308,7 @@ fn finalize_dec(lo: DecBound, hi: DecBound) -> Option<NormRange> {
                 }
                 let (m, s) = dec_norm(*l);
                 return Some(if s == 0 {
-                    NormRange::Int {
-                        lo: Some(m),
-                        hi: Some(m),
-                    }
+                    NormRange::Int { lo: Some(m), hi: Some(m) }
                 } else {
                     NormRange::Dec {
                         lo: Some((m, s, false)),
@@ -328,10 +325,7 @@ fn finalize_dec(lo: DecBound, hi: DecBound) -> Option<NormRange> {
             (m, s, e)
         })
     };
-    Some(NormRange::Dec {
-        lo: key(lo),
-        hi: key(hi),
-    })
+    Some(NormRange::Dec { lo: key(lo), hi: key(hi) })
 }
 
 /// Scale-minimal `(mantissa, scale)` of a `Dec` (strips trailing fraction zeros; zero is
@@ -519,16 +513,8 @@ pub(crate) fn base_of(iri: &str) -> Option<(Sort, Option<i128>, Option<i128>)> {
     Some(match local {
         "decimal" => (Sort::Decimal, None, None),
         "integer" => (Sort::Integer, None, None),
-        "long" => (
-            Sort::Integer,
-            Some(i128::from(i64::MIN)),
-            Some(i128::from(i64::MAX)),
-        ),
-        "int" => (
-            Sort::Integer,
-            Some(i128::from(i32::MIN)),
-            Some(i128::from(i32::MAX)),
-        ),
+        "long" => (Sort::Integer, Some(i128::from(i64::MIN)), Some(i128::from(i64::MAX))),
+        "int" => (Sort::Integer, Some(i128::from(i32::MIN)), Some(i128::from(i32::MAX))),
         "short" => (Sort::Integer, Some(-32768), Some(32767)),
         "byte" => (Sort::Integer, Some(-128), Some(127)),
         "nonNegativeInteger" => (Sort::Integer, Some(0), None),
@@ -563,25 +549,14 @@ fn datatype_iri(dict: &Dict, id: Id) -> Option<String> {
 fn facet_value(dict: &Dict, id: Id) -> Option<Dec> {
     if is_inline(id) {
         // An inline id IS a canonical non-negative xsd:integer value.
-        return Some(Dec {
-            mant: i128::from(id - INLINE_BASE),
-            scale: 0,
-        });
+        return Some(Dec { mant: i128::from(id - INLINE_BASE), scale: 0 });
     }
-    let TermParts::Lit {
-        value,
-        datatype,
-        lang: None,
-    } = dict.term_parts(id)
-    else {
+    let TermParts::Lit { value, datatype, lang: None } = dict.term_parts(id) else {
         return None;
     };
     let lit = oxrdf::Literal::new_typed_literal(value, oxrdf::NamedNode::new_unchecked(datatype));
     let d = match as_numeric(&lit)? {
-        Num::Int(i) => Dec {
-            mant: i128::from(i),
-            scale: 0,
-        },
+        Num::Int(i) => Dec { mant: i128::from(i), scale: 0 },
         Num::Dec(d) => d,
         Num::Float(_) | Num::Double(_) => return None,
     };
@@ -603,10 +578,7 @@ fn point_value(dict: &Dict, id: Id) -> Option<NormRange> {
     let d = facet_value(dict, id)?;
     let (m, s) = dec_norm(d);
     Some(if s == 0 {
-        NormRange::Int {
-            lo: Some(m),
-            hi: Some(m),
-        }
+        NormRange::Int { lo: Some(m), hi: Some(m) }
     } else {
         NormRange::Dec {
             lo: Some((m, s, false)),
@@ -629,14 +601,8 @@ mod tests {
 
     #[test]
     fn base_of_covers_the_ladder_and_defers_the_rest() {
-        assert_eq!(
-            base_of("http://www.w3.org/2001/XMLSchema#integer"),
-            Some((Sort::Integer, None, None))
-        );
-        assert_eq!(
-            base_of("http://www.w3.org/2001/XMLSchema#decimal"),
-            Some((Sort::Decimal, None, None))
-        );
+        assert_eq!(base_of("http://www.w3.org/2001/XMLSchema#integer"), Some((Sort::Integer, None, None)));
+        assert_eq!(base_of("http://www.w3.org/2001/XMLSchema#decimal"), Some((Sort::Decimal, None, None)));
         assert_eq!(
             base_of("http://www.w3.org/2001/XMLSchema#byte"),
             Some((Sort::Integer, Some(-128), Some(127)))
@@ -667,7 +633,7 @@ mod tests {
         assert_eq!(int_upper(d(55, 1), true), Some(5)); // <  5.5 → 5
         assert_eq!(int_upper(d(5, 0), false), Some(5)); // <= 5   → 5
         assert_eq!(int_upper(d(5, 0), true), Some(4)); // <  5   → 4
-                                                       // Negative values: > -5.5 → -5, < -5.5 → -6.
+        // Negative values: > -5.5 → -5, < -5.5 → -6.
         assert_eq!(int_lower(d(-55, 1), true), Some(-5));
         assert_eq!(int_upper(d(-55, 1), true), Some(-6));
         // i128 overflow at the extremes → None (defer, no verdict).
@@ -678,94 +644,43 @@ mod tests {
     #[test]
     fn tighter_picks_the_stricter_bound() {
         // Lower side: the LARGER value wins; ties promote exclusivity.
-        assert_eq!(
-            tighter((d(3, 0), false), (d(5, 0), true), true),
-            Some((d(5, 0), true))
-        );
-        assert_eq!(
-            tighter((d(5, 0), true), (d(3, 0), false), true),
-            Some((d(5, 0), true))
-        );
-        assert_eq!(
-            tighter((d(5, 0), false), (d(50, 1), true), true),
-            Some((d(5, 0), true))
-        );
+        assert_eq!(tighter((d(3, 0), false), (d(5, 0), true), true), Some((d(5, 0), true)));
+        assert_eq!(tighter((d(5, 0), true), (d(3, 0), false), true), Some((d(5, 0), true)));
+        assert_eq!(tighter((d(5, 0), false), (d(50, 1), true), true), Some((d(5, 0), true)));
         // Upper side: the SMALLER value wins.
-        assert_eq!(
-            tighter((d(3, 0), false), (d(5, 0), true), false),
-            Some((d(3, 0), false))
-        );
+        assert_eq!(tighter((d(3, 0), false), (d(5, 0), true), false), Some((d(3, 0), false)));
     }
 
     #[test]
     fn finalize_integer_detects_unsat_and_sat() {
         // minInclusive 18 / maxInclusive 10 → EMPTY (the bead's acceptance range).
         assert_eq!(
-            finalize(
-                Sort::Integer,
-                None,
-                None,
-                &[(true, false, d(18, 0)), (false, false, d(10, 0))]
-            ),
+            finalize(Sort::Integer, None, None, &[(true, false, d(18, 0)), (false, false, d(10, 0))]),
             Some(NormRange::Empty)
         );
         // minInclusive 10 / maxInclusive 18 → the non-empty [10, 18].
         assert_eq!(
-            finalize(
-                Sort::Integer,
-                None,
-                None,
-                &[(true, false, d(10, 0)), (false, false, d(18, 0))]
-            ),
-            Some(NormRange::Int {
-                lo: Some(10),
-                hi: Some(18)
-            })
+            finalize(Sort::Integer, None, None, &[(true, false, d(10, 0)), (false, false, d(18, 0))]),
+            Some(NormRange::Int { lo: Some(10), hi: Some(18) })
         );
         // DISCRETE tightening: (5, 6) holds NO integer → EMPTY; (5, 7) holds {6}.
         assert_eq!(
-            finalize(
-                Sort::Integer,
-                None,
-                None,
-                &[(true, true, d(5, 0)), (false, true, d(6, 0))]
-            ),
+            finalize(Sort::Integer, None, None, &[(true, true, d(5, 0)), (false, true, d(6, 0))]),
             Some(NormRange::Empty)
         );
         assert_eq!(
-            finalize(
-                Sort::Integer,
-                None,
-                None,
-                &[(true, true, d(5, 0)), (false, true, d(7, 0))]
-            ),
-            Some(NormRange::Int {
-                lo: Some(6),
-                hi: Some(6)
-            })
+            finalize(Sort::Integer, None, None, &[(true, true, d(5, 0)), (false, true, d(7, 0))]),
+            Some(NormRange::Int { lo: Some(6), hi: Some(6) })
         );
         // Implicit derived-type bounds participate: byte + minInclusive 1000 → EMPTY.
         assert_eq!(
-            finalize(
-                Sort::Integer,
-                Some(-128),
-                Some(127),
-                &[(true, false, d(1000, 0))]
-            ),
+            finalize(Sort::Integer, Some(-128), Some(127), &[(true, false, d(1000, 0))]),
             Some(NormRange::Empty)
         );
         // Repeated same-side facets conjoin (the tightest wins).
         assert_eq!(
-            finalize(
-                Sort::Integer,
-                None,
-                None,
-                &[(true, false, d(3, 0)), (true, false, d(7, 0))]
-            ),
-            Some(NormRange::Int {
-                lo: Some(7),
-                hi: None
-            })
+            finalize(Sort::Integer, None, None, &[(true, false, d(3, 0)), (true, false, d(7, 0))]),
+            Some(NormRange::Int { lo: Some(7), hi: None })
         );
     }
 
@@ -774,61 +689,27 @@ mod tests {
         // (5.0, 6.0) over xsd:decimal is NON-empty (5.5 lies inside) — the dense-order
         // contrast with the integer case above.
         assert_eq!(
-            finalize(
-                Sort::Decimal,
-                None,
-                None,
-                &[(true, true, d(50, 1)), (false, true, d(60, 1))]
-            ),
-            Some(NormRange::Dec {
-                lo: Some((5, 0, true)),
-                hi: Some((6, 0, true))
-            })
+            finalize(Sort::Decimal, None, None, &[(true, true, d(50, 1)), (false, true, d(60, 1))]),
+            Some(NormRange::Dec { lo: Some((5, 0, true)), hi: Some((6, 0, true)) })
         );
         // [5.0, 5.0] is the integral point → canonical Int{5,5}; making a side exclusive
         // empties it.
         assert_eq!(
-            finalize(
-                Sort::Decimal,
-                None,
-                None,
-                &[(true, false, d(50, 1)), (false, false, d(5, 0))]
-            ),
-            Some(NormRange::Int {
-                lo: Some(5),
-                hi: Some(5)
-            })
+            finalize(Sort::Decimal, None, None, &[(true, false, d(50, 1)), (false, false, d(5, 0))]),
+            Some(NormRange::Int { lo: Some(5), hi: Some(5) })
         );
         assert_eq!(
-            finalize(
-                Sort::Decimal,
-                None,
-                None,
-                &[(true, true, d(50, 1)), (false, false, d(5, 0))]
-            ),
+            finalize(Sort::Decimal, None, None, &[(true, true, d(50, 1)), (false, false, d(5, 0))]),
             Some(NormRange::Empty)
         );
         // A NON-integral point stays decimal-sorted.
         assert_eq!(
-            finalize(
-                Sort::Decimal,
-                None,
-                None,
-                &[(true, false, d(25, 1)), (false, false, d(25, 1))]
-            ),
-            Some(NormRange::Dec {
-                lo: Some((25, 1, false)),
-                hi: Some((25, 1, false))
-            })
+            finalize(Sort::Decimal, None, None, &[(true, false, d(25, 1)), (false, false, d(25, 1))]),
+            Some(NormRange::Dec { lo: Some((25, 1, false)), hi: Some((25, 1, false)) })
         );
         // lo > hi → EMPTY.
         assert_eq!(
-            finalize(
-                Sort::Decimal,
-                None,
-                None,
-                &[(true, false, d(6, 0)), (false, false, d(5, 0))]
-            ),
+            finalize(Sort::Decimal, None, None, &[(true, false, d(6, 0)), (false, false, d(5, 0))]),
             Some(NormRange::Empty)
         );
     }
@@ -872,31 +753,16 @@ mod tests {
 
     #[test]
     fn contains_int_in_dec_and_never_dec_in_int() {
-        let int = NormRange::Int {
-            lo: Some(5),
-            hi: Some(10),
-        };
-        let dec_wide = NormRange::Dec {
-            lo: Some((0, 0, false)),
-            hi: Some((100, 0, false)),
-        };
+        let int = NormRange::Int { lo: Some(5), hi: Some(10) };
+        let dec_wide = NormRange::Dec { lo: Some((0, 0, false)), hi: Some((100, 0, false)) };
         assert!(contains(&dec_wide, &int)); // integers are decimal values
-        let dec_excl5 = NormRange::Dec {
-            lo: Some((5, 0, true)),
-            hi: Some((100, 0, false)),
-        };
+        let dec_excl5 = NormRange::Dec { lo: Some((5, 0, true)), hi: Some((100, 0, false)) };
         assert!(!contains(&dec_excl5, &int)); // 5 is excluded by the outer bound
-                                              // Boundary-EQUAL inclusive endpoints on BOTH sides admit the integer interval;
-                                              // an exclusive UPPER endpoint at 10 rejects it.
-        let dec_tight = NormRange::Dec {
-            lo: Some((5, 0, false)),
-            hi: Some((10, 0, false)),
-        };
+        // Boundary-EQUAL inclusive endpoints on BOTH sides admit the integer interval;
+        // an exclusive UPPER endpoint at 10 rejects it.
+        let dec_tight = NormRange::Dec { lo: Some((5, 0, false)), hi: Some((10, 0, false)) };
         assert!(contains(&dec_tight, &int));
-        let dec_excl10 = NormRange::Dec {
-            lo: Some((5, 0, false)),
-            hi: Some((10, 0, true)),
-        };
+        let dec_excl10 = NormRange::Dec { lo: Some((5, 0, false)), hi: Some((10, 0, true)) };
         assert!(!contains(&dec_excl10, &int));
         // Documented sound incompleteness: decimal-sorted inner never derives ⊆ Int.
         assert!(!contains(&int, &dec_wide));
@@ -918,10 +784,7 @@ mod tests {
 
     #[test]
     fn contains_empty_edges() {
-        let some = NormRange::Int {
-            lo: Some(0),
-            hi: Some(1),
-        };
+        let some = NormRange::Int { lo: Some(0), hi: Some(1) };
         assert!(contains(&some, &NormRange::Empty)); // ∅ ⊆ anything
         assert!(!contains(&NormRange::Empty, &some)); // nothing non-empty ⊆ ∅
     }
@@ -929,29 +792,14 @@ mod tests {
     #[test]
     fn emit_bottoms_empties_and_orders_containments() {
         let e = NormRange::Empty;
-        let narrow = NormRange::Int {
-            lo: Some(5),
-            hi: Some(10),
-        };
-        let wide = NormRange::Int {
-            lo: Some(0),
-            hi: Some(20),
-        };
+        let narrow = NormRange::Int { lo: Some(5), hi: Some(10) };
+        let wide = NormRange::Int { lo: Some(0), hi: Some(20) };
         let minted = vec![(7u32, e), (8u32, narrow), (9u32, wide)];
         let ax = emit(&minted);
-        assert!(
-            ax.contains(&Normal::Sub(7, BOTTOM)),
-            "empty range ⊑ ⊥ (CR7)"
-        );
+        assert!(ax.contains(&Normal::Sub(7, BOTTOM)), "empty range ⊑ ⊥ (CR7)");
         assert!(ax.contains(&Normal::Sub(8, 9)), "narrow ⊑ wide (CR8)");
-        assert!(
-            !ax.contains(&Normal::Sub(9, 8)),
-            "wide ⊑ narrow must NOT be emitted"
-        );
-        assert!(
-            !ax.contains(&Normal::Sub(8, BOTTOM)),
-            "a satisfiable range is not ⊥"
-        );
+        assert!(!ax.contains(&Normal::Sub(9, 8)), "wide ⊑ narrow must NOT be emitted");
+        assert!(!ax.contains(&Normal::Sub(8, BOTTOM)), "a satisfiable range is not ⊥");
         assert_eq!(ax.len(), 2);
     }
 
@@ -974,16 +822,12 @@ mod tests {
             let p = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
                 format!("http://ex/{}", pred),
             )));
-            triples
-                .iter()
-                .find(|t| t[1] == p)
-                .map(|t| t[2])
-                .expect("triple")
+            triples.iter().find(|t| t[1] == p).map(|t| t[2]).expect("triple")
         };
         assert_eq!(facet_value(&dict, obj("small")), Some(d(18, 0)));
         assert_eq!(facet_value(&dict, obj("neg")), Some(d(-7, 0)));
         assert_eq!(facet_value(&dict, obj("dec")), Some(d(250, 2))); // written scale kept
-                                                                     // Ill-formed for its own datatype / float tier / non-numeric / non-literal → defer.
+        // Ill-formed for its own datatype / float tier / non-numeric / non-literal → defer.
         assert_eq!(facet_value(&dict, obj("bad")), None);
         assert_eq!(facet_value(&dict, obj("dbl")), None);
         assert_eq!(facet_value(&dict, obj("str")), None);
@@ -1003,24 +847,14 @@ mod tests {
             let p = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
                 format!("http://ex/{}", pred),
             )));
-            triples
-                .iter()
-                .find(|t| t[1] == p)
-                .map(|t| t[2])
-                .expect("triple")
+            triples.iter().find(|t| t[1] == p).map(|t| t[2]).expect("triple")
         };
-        let five = NormRange::Int {
-            lo: Some(5),
-            hi: Some(5),
-        };
+        let five = NormRange::Int { lo: Some(5), hi: Some(5) };
         assert_eq!(point_value(&dict, obj("int")), Some(five.clone()));
         assert_eq!(point_value(&dict, obj("intdec")), Some(five)); // {5.0} = {5}
         assert_eq!(
             point_value(&dict, obj("frac")),
-            Some(NormRange::Dec {
-                lo: Some((55, 1, false)),
-                hi: Some((55, 1, false))
-            })
+            Some(NormRange::Dec { lo: Some((55, 1, false)), hi: Some((55, 1, false)) })
         );
     }
 
@@ -1028,10 +862,7 @@ mod tests {
     fn datatype_iri_only_for_iris() {
         let ttl = r#"@prefix : <http://ex/> . :a :p :b . :a :q "lit" ."#;
         let (dict, triples) = Graph::parse_to_triples(ttl, "turtle").expect("parse");
-        assert_eq!(
-            datatype_iri(&dict, triples[0][2]).as_deref(),
-            Some("http://ex/b")
-        );
+        assert_eq!(datatype_iri(&dict, triples[0][2]).as_deref(), Some("http://ex/b"));
         let lit = triples.iter().find(|t| t[2] != triples[0][2]).unwrap()[2];
         assert_eq!(datatype_iri(&dict, lit), None);
     }
@@ -1117,13 +948,9 @@ mod tests {
         assert_eq!(out.node_range[&node("n1")], out.node_range[&node("n2")]);
         let empty_c = out.node_range[&node("n3")];
         assert_ne!(out.node_range[&node("n1")], empty_c);
+        assert!(out.axioms.contains(&Normal::Sub(empty_c, BOTTOM)), "CR7: empty range ⊑ ⊥");
         assert!(
-            out.axioms.contains(&Normal::Sub(empty_c, BOTTOM)),
-            "CR7: empty range ⊑ ⊥"
-        );
-        assert!(
-            !out.axioms
-                .contains(&Normal::Sub(out.node_range[&node("n1")], BOTTOM)),
+            !out.axioms.contains(&Normal::Sub(out.node_range[&node("n1")], BOTTOM)),
             "a satisfiable range must NOT be ⊑ ⊥ (a flipped verdict here is unsound)"
         );
     }

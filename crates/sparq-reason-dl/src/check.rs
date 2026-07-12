@@ -617,9 +617,9 @@ fn implicated_construct(ce: &ClassExpression) -> Option<String> {
              New-Feature-ObjectQCR-002)"
                 .to_string(),
         ),
-        ClassExpression::ObjectUnionOf(_) => {
-            Some("owl:unionOf (implicated by DOCUMENTED_DIVERGENCES WebOnt-I5.5-005)".to_string())
-        }
+        ClassExpression::ObjectUnionOf(_) => Some(
+            "owl:unionOf (implicated by DOCUMENTED_DIVERGENCES WebOnt-I5.5-005)".to_string(),
+        ),
         ClassExpression::ObjectIntersectionOf(members) => {
             members.iter().find_map(implicated_construct)
         }
@@ -1029,14 +1029,7 @@ fn roll_conclusion_anonymous(dict: &Dict, concl: &Ontology) -> Result<Vec<Axiom>
     let mut consumed: FxHashSet<Id> = FxHashSet::default();
     for &(property, source, target) in &top_edges {
         let mut visiting: FxHashSet<Id> = FxHashSet::default();
-        let filler = roll_bnode(
-            dict,
-            target,
-            &types,
-            &outgoing,
-            &mut visiting,
-            &mut consumed,
-        )?;
+        let filler = roll_bnode(dict, target, &types, &outgoing, &mut visiting, &mut consumed)?;
         rolled.push(Axiom::ClassAssertion {
             class: ClassExpression::ObjectSomeValuesFrom(
                 ObjectPropertyExpression::ObjectProperty(property),

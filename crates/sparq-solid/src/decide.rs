@@ -186,13 +186,7 @@ impl WacDecision {
     /// A fail-closed deny with the given status and no governing ACL — the single
     /// constructor for every uncertainty path, so deny-by-default is impossible to forget.
     fn deny(status: AclStatus) -> WacDecision {
-        WacDecision {
-            allow: false,
-            granted_modes: Vec::new(),
-            governing_acl: None,
-            scope: None,
-            status,
-        }
+        WacDecision { allow: false, granted_modes: Vec::new(), governing_acl: None, scope: None, status }
     }
 
     /// The Solid [`Link: rel="acl"`](https://solidproject.org/TR/protocol#acl-resource)
@@ -264,10 +258,7 @@ impl AclIndex {
                 control.insert(iri.to_owned());
             }
         }
-        AclIndex {
-            control,
-            materialized,
-        }
+        AclIndex { control, materialized }
     }
 
     /// The control-document IRI governing `resource`, if one exists in the dataset
@@ -295,19 +286,13 @@ impl AclIndex {
     pub(crate) fn resolve_acl(&self, resource: &str) -> Option<EffectiveAcl> {
         // Own ACL → accessTo scope.
         if let Some(acl) = self.own_acl(resource) {
-            return Some(EffectiveAcl {
-                acl: NamedNode::new_unchecked(acl),
-                scope: AclScope::AccessTo,
-            });
+            return Some(EffectiveAcl { acl: NamedNode::new_unchecked(acl), scope: AclScope::AccessTo });
         }
         // Walk up the container chain; the nearest ancestor with an ACL governs by default.
         let mut cur = resource;
         while let Some(parent) = parent_iri(cur) {
             if let Some(acl) = self.own_acl(parent) {
-                return Some(EffectiveAcl {
-                    acl: NamedNode::new_unchecked(acl),
-                    scope: AclScope::Default,
-                });
+                return Some(EffectiveAcl { acl: NamedNode::new_unchecked(acl), scope: AclScope::Default });
             }
             cur = parent;
         }
@@ -374,11 +359,7 @@ fn held_modes(auth: &AuthIndex, session: &Session, resource: &NamedNode) -> Vec<
     let origin = crate::loader::iri_origin(resource.as_str());
     MODES
         .into_iter()
-        .filter(|&m| {
-            auth.accessible_in_origin(session, m, origin)
-                .iter()
-                .any(|g| g == resource)
-        })
+        .filter(|&m| auth.accessible_in_origin(session, m, origin).iter().any(|g| g == resource))
         .collect()
 }
 

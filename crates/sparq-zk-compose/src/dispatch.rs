@@ -67,10 +67,7 @@ pub enum DispatchError {
 impl std::fmt::Display for DispatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DispatchError::IllegalPair {
-                method_iri,
-                circuit,
-            } => write!(
+            DispatchError::IllegalPair { method_iri, circuit } => write!(
                 f,
                 "illegal (commitment-method, circuit) pair: circuit {} is not legal \
                  for a graph committed under {} (fail-closed dispatch matrix, sq-cfmv)",
@@ -103,7 +100,9 @@ impl std::error::Error for DispatchError {}
 fn is_value_lane_member(id: &CircuitId) -> bool {
     matches!(
         id,
-        CircuitId::FilterValueDl | CircuitId::FilterValueDlF64 | CircuitId::FilterValueDlDecimal
+        CircuitId::FilterValueDl
+            | CircuitId::FilterValueDlF64
+            | CircuitId::FilterValueDlDecimal
     )
 }
 
@@ -166,9 +165,7 @@ pub fn resolve_circuit(
 ) -> Result<CircuitId, DispatchError> {
     // (3) reject-list (v): an identity op must never be a value-lane member.
     if is_value_lane_member(id) && is_identity_op_member(id) {
-        return Err(DispatchError::IdentityOpAtValueLane {
-            circuit: id.package(),
-        });
+        return Err(DispatchError::IdentityOpAtValueLane { circuit: id.package() });
     }
 
     let legal = if is_value_lane_member(id) {
@@ -200,9 +197,7 @@ pub fn resolve_circuit_for_scheme(
 ) -> Result<CircuitId, DispatchError> {
     match CommitmentMethod::from_scheme_iri(scheme_iri) {
         Some(method) => resolve_circuit(method, id),
-        None => Err(DispatchError::UnknownMethod {
-            method_iri: scheme_iri.to_string(),
-        }),
+        None => Err(DispatchError::UnknownMethod { method_iri: scheme_iri.to_string() }),
     }
 }
 
@@ -229,10 +224,7 @@ mod tests {
             Ok(CircuitId::FilterValueDlF64)
         );
         assert_eq!(
-            resolve_circuit(
-                CommitmentMethod::DualLeafV1,
-                &CircuitId::FilterValueDlDecimal
-            ),
+            resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::FilterValueDlDecimal),
             Ok(CircuitId::FilterValueDlDecimal)
         );
     }
@@ -252,45 +244,19 @@ mod tests {
         // dual-leaf carries the lexical_component, so the blake3-token FILTER + the
         // identity ops (scan, join) stay legal (term FILTER / identity on the
         // lexical leaf).
-        assert!(
-            resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::FilterInt { d: 2 }).is_ok()
-        );
-        assert!(resolve_circuit(
-            CommitmentMethod::DualLeafV1,
-            &CircuitId::Scan { k: 1, n: 16, r: 4 }
-        )
-        .is_ok());
-        assert!(resolve_circuit(
-            CommitmentMethod::DualLeafV1,
-            &CircuitId::JoinEq { n_a: 16, n_b: 16 }
-        )
-        .is_ok());
+        assert!(resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::FilterInt { d: 2 }).is_ok());
+        assert!(resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::Scan { k: 1, n: 16, r: 4 }).is_ok());
+        assert!(resolve_circuit(CommitmentMethod::DualLeafV1, &CircuitId::JoinEq { n_a: 16, n_b: 16 }).is_ok());
     }
 
     #[test]
     fn string_canonical_admits_the_blake3_lane() {
         // The conservative default + back-compat anchor: every existing member is
         // legal.
-        assert!(resolve_circuit(
-            CommitmentMethod::StringCanonicalV1,
-            &CircuitId::FilterInt { d: 2 }
-        )
-        .is_ok());
-        assert!(resolve_circuit(
-            CommitmentMethod::StringCanonicalV1,
-            &CircuitId::FilterF64 { d: 1 }
-        )
-        .is_ok());
-        assert!(resolve_circuit(
-            CommitmentMethod::StringCanonicalV1,
-            &CircuitId::Scan { k: 2, n: 64, r: 8 }
-        )
-        .is_ok());
-        assert!(resolve_circuit(
-            CommitmentMethod::StringCanonicalV1,
-            &CircuitId::JoinEq { n_a: 16, n_b: 64 }
-        )
-        .is_ok());
+        assert!(resolve_circuit(CommitmentMethod::StringCanonicalV1, &CircuitId::FilterInt { d: 2 }).is_ok());
+        assert!(resolve_circuit(CommitmentMethod::StringCanonicalV1, &CircuitId::FilterF64 { d: 1 }).is_ok());
+        assert!(resolve_circuit(CommitmentMethod::StringCanonicalV1, &CircuitId::Scan { k: 2, n: 64, r: 8 }).is_ok());
+        assert!(resolve_circuit(CommitmentMethod::StringCanonicalV1, &CircuitId::JoinEq { n_a: 16, n_b: 64 }).is_ok());
     }
 
     // --- the FAIL-CLOSED refusals (the load-bearing property) -------------
@@ -300,17 +266,10 @@ mod tests {
         // A string-canonical graph has NO value handle, so the value-FILTER member
         // is UNPROVABLE against it — the resolver MUST reject the pair, never
         // silently dispatch it.
-        let r = resolve_circuit(
-            CommitmentMethod::StringCanonicalV1,
-            &CircuitId::FilterValueDl,
-        );
+        let r = resolve_circuit(CommitmentMethod::StringCanonicalV1, &CircuitId::FilterValueDl);
         assert!(matches!(r, Err(DispatchError::IllegalPair { .. })));
         // The error names the offending method + circuit.
-        if let Err(DispatchError::IllegalPair {
-            method_iri,
-            circuit,
-        }) = r
-        {
+        if let Err(DispatchError::IllegalPair { method_iri, circuit }) = r {
             assert_eq!(circuit, "filter_value_dl_int");
             assert_eq!(method_iri, "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1");
         } else {
@@ -357,17 +316,11 @@ mod tests {
         // is rejected (no lexical leaf to bind / no term identity to read).
         assert!(resolve_circuit(CommitmentMethod::ValueOnlyV1, &CircuitId::FilterValueDl).is_ok());
         assert!(matches!(
-            resolve_circuit(
-                CommitmentMethod::ValueOnlyV1,
-                &CircuitId::FilterInt { d: 2 }
-            ),
+            resolve_circuit(CommitmentMethod::ValueOnlyV1, &CircuitId::FilterInt { d: 2 }),
             Err(DispatchError::IllegalPair { .. })
         ));
         assert!(matches!(
-            resolve_circuit(
-                CommitmentMethod::ValueOnlyV1,
-                &CircuitId::Scan { k: 1, n: 16, r: 4 }
-            ),
+            resolve_circuit(CommitmentMethod::ValueOnlyV1, &CircuitId::Scan { k: 1, n: 16, r: 4 }),
             Err(DispatchError::IllegalPair { .. })
         ));
     }
@@ -392,10 +345,7 @@ mod tests {
         // Every (method, circuit) pair resolves to EITHER Ok OR a typed
         // DispatchError — the resolver is total and never panics / defaults.
         #[allow(unused_mut)]
-        let mut methods = vec![
-            CommitmentMethod::StringCanonicalV1,
-            CommitmentMethod::DualLeafV1,
-        ];
+        let mut methods = vec![CommitmentMethod::StringCanonicalV1, CommitmentMethod::DualLeafV1];
         #[cfg(feature = "commitment-value-only")]
         methods.push(CommitmentMethod::ValueOnlyV1);
 
@@ -435,10 +385,7 @@ mod tests {
             resolve_circuit(CommitmentMethod::StringCanonicalV1, &id),
             Ok(id.clone())
         );
-        assert_eq!(
-            resolve_circuit(CommitmentMethod::DualLeafV1, &id),
-            Ok(id.clone())
-        );
+        assert_eq!(resolve_circuit(CommitmentMethod::DualLeafV1, &id), Ok(id.clone()));
         #[cfg(feature = "commitment-value-only")]
         assert!(matches!(
             resolve_circuit(CommitmentMethod::ValueOnlyV1, &id),
@@ -459,19 +406,8 @@ mod tests {
         assert!(is_value_lane_member(&CircuitId::FilterValueDlDecimal));
         assert!(!is_identity_op_member(&CircuitId::FilterValueDlF64));
         assert!(!is_identity_op_member(&CircuitId::FilterValueDlDecimal));
-        assert!(is_identity_op_member(&CircuitId::Scan {
-            k: 1,
-            n: 16,
-            r: 4
-        }));
-        assert!(is_identity_op_member(&CircuitId::JoinEq {
-            n_a: 16,
-            n_b: 16
-        }));
-        assert!(!is_value_lane_member(&CircuitId::Scan {
-            k: 1,
-            n: 16,
-            r: 4
-        }));
+        assert!(is_identity_op_member(&CircuitId::Scan { k: 1, n: 16, r: 4 }));
+        assert!(is_identity_op_member(&CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        assert!(!is_value_lane_member(&CircuitId::Scan { k: 1, n: 16, r: 4 }));
     }
 }

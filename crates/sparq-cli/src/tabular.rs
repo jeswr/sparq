@@ -90,10 +90,7 @@ impl<R: Read> CsvRows<R> {
             if self.eof {
                 return Ok(None);
             }
-            self.len = self
-                .src
-                .read(&mut self.buf)
-                .map_err(|e| format!("CSV read error: {e}"))?;
+            self.len = self.src.read(&mut self.buf).map_err(|e| format!("CSV read error: {e}"))?;
             self.pos = 0;
             if self.len == 0 {
                 self.eof = true;
@@ -141,9 +138,8 @@ impl<R: Read> CsvRows<R> {
         }
         fn finish(fields: &mut Vec<String>, field: &mut Vec<u8>) -> Result<(), String> {
             let bytes = std::mem::take(field);
-            fields.push(
-                String::from_utf8(bytes).map_err(|_| "CSV field is not valid UTF-8".to_string())?,
-            );
+            fields
+                .push(String::from_utf8(bytes).map_err(|_| "CSV field is not valid UTF-8".to_string())?);
             Ok(())
         }
         let mut fields: Vec<String> = Vec::new();
@@ -277,11 +273,7 @@ impl<R: Read> Iterator for CsvRows<R> {
 enum GenTerm {
     Iri(String),
     Blank(String),
-    Lit {
-        value: String,
-        datatype: Option<String>,
-        lang: Option<String>,
-    },
+    Lit { value: String, datatype: Option<String>, lang: Option<String> },
 }
 
 /// N-Triples serialisation of one term.
@@ -289,11 +281,7 @@ fn nt_term(t: &GenTerm) -> String {
     match t {
         GenTerm::Iri(i) => format!("<{i}>"),
         GenTerm::Blank(l) => format!("_:{l}"),
-        GenTerm::Lit {
-            value,
-            datatype,
-            lang,
-        } => {
+        GenTerm::Lit { value, datatype, lang } => {
             let mut s = format!("\"{}\"", escape_literal(value));
             if let Some(l) = lang {
                 s.push('@');
@@ -348,20 +336,14 @@ fn check_iri(iri: &str) -> Result<(), String> {
         .map(|(scheme, _)| {
             !scheme.is_empty()
                 && scheme.as_bytes()[0].is_ascii_alphabetic()
-                && scheme
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+                && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
         })
         .unwrap_or(false);
     if !absolute {
         return Err(format!("generated IRI {iri:?} is not absolute (no scheme; pass --base to resolve relative IRIs)"));
     }
-    if let Some(bad) = iri.chars().find(|&c| {
-        (c as u32) <= 0x20 || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
-    }) {
-        return Err(format!(
-            "generated IRI {iri:?} contains forbidden character {bad:?}"
-        ));
+    if let Some(bad) = iri.chars().find(|&c| (c as u32) <= 0x20 || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')) {
+        return Err(format!("generated IRI {iri:?} contains forbidden character {bad:?}"));
     }
     Ok(())
 }
@@ -493,29 +475,20 @@ struct CompiledMap {
 /// (SQL unquoted-identifier semantics) — ambiguity is an error.
 fn resolve_col(name: &str, header: &[String]) -> Result<usize, String> {
     let delimited = name.len() >= 2 && name.starts_with('"') && name.ends_with('"');
-    let bare = if delimited {
-        &name[1..name.len() - 1]
-    } else {
-        name
-    };
+    let bare = if delimited { &name[1..name.len() - 1] } else { name };
     if let Some(i) = header.iter().position(|h| h == bare) {
         return Ok(i);
     }
     if !delimited {
-        let ci: Vec<usize> = (0..header.len())
-            .filter(|&i| header[i].eq_ignore_ascii_case(bare))
-            .collect();
+        let ci: Vec<usize> =
+            (0..header.len()).filter(|&i| header[i].eq_ignore_ascii_case(bare)).collect();
         match ci.len() {
             1 => return Ok(ci[0]),
-            n if n > 1 => return Err(format!(
-                "column reference {name:?} is ambiguous (case-insensitive) in header {header:?}"
-            )),
+            n if n > 1 => return Err(format!("column reference {name:?} is ambiguous (case-insensitive) in header {header:?}")),
             _ => {}
         }
     }
-    Err(format!(
-        "column {name:?} not found in CSV header {header:?}"
-    ))
+    Err(format!("column {name:?} not found in CSV header {header:?}"))
 }
 
 /// Parse an R2RML-style string template: `{column}` references, `\{` `\}` `\\` escapes.
@@ -619,39 +592,18 @@ fn gen_term(
             GenTerm::Iri(iri)
         }
         TermKind::Blank => GenTerm::Blank(blank_label(&raw)),
-        TermKind::LitPlain => GenTerm::Lit {
-            value: raw,
-            datatype: None,
-            lang: None,
-        },
-        TermKind::LitTyped(dt) => GenTerm::Lit {
-            value: raw,
-            datatype: Some(dt.clone()),
-            lang: None,
-        },
-        TermKind::LitLang(l) => GenTerm::Lit {
-            value: raw,
-            datatype: None,
-            lang: Some(l.clone()),
-        },
+        TermKind::LitPlain => GenTerm::Lit { value: raw, datatype: None, lang: None },
+        TermKind::LitTyped(dt) => GenTerm::Lit { value: raw, datatype: Some(dt.clone()), lang: None },
+        TermKind::LitLang(l) => GenTerm::Lit { value: raw, datatype: None, lang: Some(l.clone()) },
         TermKind::LitInfer => {
             let dt = infer_datatype(&raw).map(str::to_owned);
-            GenTerm::Lit {
-                value: raw,
-                datatype: dt,
-                lang: None,
-            }
+            GenTerm::Lit { value: raw, datatype: dt, lang: None }
         }
     }))
 }
 
 /// Emit the N-Triples lines one CSV row generates under a compiled map.
-fn emit_row(
-    map: &CompiledMap,
-    row: &[String],
-    row_num: u64,
-    out: &mut String,
-) -> Result<(), String> {
+fn emit_row(map: &CompiledMap, row: &[String], row_num: u64, out: &mut String) -> Result<(), String> {
     if row.len() != map.width {
         return Err(format!(
             "ragged CSV row {row_num}: {} field(s), header has {}",
@@ -681,9 +633,7 @@ fn emit_row(
                 None => {}
                 Some(GenTerm::Iri(i)) => preds.push(format!("<{i}>")),
                 Some(other) => {
-                    return Err(format!(
-                        "predicate map generated a non-IRI term {other:?} on row {row_num}"
-                    ))
+                    return Err(format!("predicate map generated a non-IRI term {other:?} on row {row_num}"))
                 }
             }
         }
@@ -758,12 +708,7 @@ struct NtReader {
 
 impl NtReader {
     fn new(srcs: Vec<Box<dyn Iterator<Item = Result<String, String>> + Send>>) -> Self {
-        NtReader {
-            srcs,
-            idx: 0,
-            buf: Vec::new(),
-            pos: 0,
-        }
+        NtReader { srcs, idx: 0, buf: Vec::new(), pos: 0 }
     }
 }
 
@@ -776,9 +721,7 @@ impl Read for NtReader {
                 self.pos += n;
                 return Ok(n);
             }
-            let Some(src) = self.srcs.get_mut(self.idx) else {
-                return Ok(0);
-            };
+            let Some(src) = self.srcs.get_mut(self.idx) else { return Ok(0) };
             match src.next() {
                 None => self.idx += 1,
                 Some(Ok(chunk)) => {
@@ -805,21 +748,14 @@ struct DirectOpts {
 }
 
 /// Compile the direct mapping of one CSV header.
-fn compile_direct(
-    header: &[String],
-    table: &str,
-    opts: &DirectOpts,
-) -> Result<CompiledMap, String> {
+fn compile_direct(header: &[String], table: &str, opts: &DirectOpts) -> Result<CompiledMap, String> {
     check_header(header)?;
     let t_enc = iri_safe(table);
     let tpl = match &opts.template {
         Some(t) => t.clone(),
         None => format!("{}{t_enc}/row/{{_row}}", opts.base),
     };
-    let subject = TermSpec {
-        value: ValueSpec::Template(parse_template(&tpl, header, true)?),
-        kind: TermKind::Iri,
-    };
+    let subject = TermSpec { value: ValueSpec::Template(parse_template(&tpl, header, true)?), kind: TermKind::Iri };
     let classes: Vec<String> = match &opts.class {
         None => vec![format!("{}{t_enc}", opts.base)],
         Some(None) => Vec::new(),
@@ -835,28 +771,15 @@ fn compile_direct(
             let pred = format!("{}{t_enc}#{}", opts.base, iri_safe(col));
             check_iri(&pred)?;
             Ok(CompiledPom {
-                predicates: vec![TermSpec {
-                    value: ValueSpec::Constant(GenTerm::Iri(pred)),
-                    kind: TermKind::Iri,
-                }],
+                predicates: vec![TermSpec { value: ValueSpec::Constant(GenTerm::Iri(pred)), kind: TermKind::Iri }],
                 objects: vec![TermSpec {
                     value: ValueSpec::Column(i),
-                    kind: if opts.infer {
-                        TermKind::LitInfer
-                    } else {
-                        TermKind::LitPlain
-                    },
+                    kind: if opts.infer { TermKind::LitInfer } else { TermKind::LitPlain },
                 }],
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(CompiledMap {
-        subject,
-        classes,
-        poms,
-        base: Some(opts.base.clone()),
-        width: header.len(),
-    })
+    Ok(CompiledMap { subject, classes, poms, base: Some(opts.base.clone()), width: header.len() })
 }
 
 /// Header sanity: no empty and no duplicate column names (both would map ambiguously).
@@ -911,11 +834,7 @@ impl RrGraph {
     /// Values of `pred` on `node` (node key = the term's N-Triples-ish display form).
     fn props<'a>(&'a self, node: &str, pred: &str) -> impl Iterator<Item = &'a oxrdf::Term> {
         let full = format!("{RR}{pred}");
-        self.adj
-            .get(node)
-            .into_iter()
-            .flatten()
-            .filter_map(move |(p, o)| (p == &full).then_some(o))
+        self.adj.get(node).into_iter().flatten().filter_map(move |(p, o)| (p == &full).then_some(o))
     }
 
     /// At most one value of `pred` on `node` (two is a mapping error).
@@ -960,15 +879,13 @@ fn parse_r2rml(mapping_ttl: &str) -> Result<R2rmlMapping, String> {
     // Resolve relative IRIs (the conventional `<#TriplesMap1>` style) against the same base
     // the W3C R2RML test suite uses; map-node identity is internal, so the exact base is
     // immaterial to the generated triples.
-    let g =
-        sparq_core::Graph::load_str_with_base(mapping_ttl, "turtle", "http://example.com/base/")
-            .map_err(|e| format!("parsing R2RML mapping: {e}"))?;
+    let g = sparq_core::Graph::load_str_with_base(mapping_ttl, "turtle", "http://example.com/base/")
+        .map_err(|e| format!("parsing R2RML mapping: {e}"))?;
     let res = sparq_engine::query(&g, "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
         .map_err(|e| format!("reading R2RML mapping graph: {e}"))?;
     let mut adj: HashMap<String, Vec<(String, oxrdf::Term)>> = HashMap::new();
     for row in &res.rows {
-        let (Some(Some(s)), Some(Some(p)), Some(Some(o))) = (row.first(), row.get(1), row.get(2))
-        else {
+        let (Some(Some(s)), Some(Some(p)), Some(Some(o))) = (row.first(), row.get(1), row.get(2)) else {
             return Err("unexpected unbound value in mapping graph".into());
         };
         let p_iri = iri_value(p, "predicate")?;
@@ -988,19 +905,13 @@ fn parse_r2rml(mapping_ttl: &str) -> Result<R2rmlMapping, String> {
     let mut keys: Vec<&String> = rr.adj.keys().collect();
     keys.sort(); // deterministic emission order
     for node in keys {
-        let Some(lt) = rr.prop1(node, "logicalTable")? else {
-            continue;
-        };
+        let Some(lt) = rr.prop1(node, "logicalTable")? else { continue };
         let lt_key = term_key(lt);
-        let name = rr.prop1(&lt_key, "tableName")?.ok_or_else(|| {
-            format!("logical table of {node} has no rr:tableName (CSV logical tables only)")
-        })?;
+        let name = rr
+            .prop1(&lt_key, "tableName")?
+            .ok_or_else(|| format!("logical table of {node} has no rr:tableName (CSV logical tables only)"))?;
         let name = lit_value(name, "rr:tableName")?;
-        let name = name
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .unwrap_or(&name)
-            .to_owned();
+        let name = name.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(&name).to_owned();
         tms.push((node.clone(), name));
     }
     Ok(R2rmlMapping { rr, tms })
@@ -1008,35 +919,23 @@ fn parse_r2rml(mapping_ttl: &str) -> Result<R2rmlMapping, String> {
 
 /// Build the [`TermSpec`] of one term-map node. `pos`: 0 = subject, 1 = predicate, 2 = object
 /// (drives the R2RML default term type + which properties are legal).
-fn term_spec(rr: &RrGraph, node: &str, pos: u8, header: &[String]) -> Result<TermSpec, String> {
-    let template = rr
-        .prop1(node, "template")?
-        .map(|t| lit_value(t, "rr:template"))
-        .transpose()?;
-    let column = rr
-        .prop1(node, "column")?
-        .map(|t| lit_value(t, "rr:column"))
-        .transpose()?;
+fn term_spec(
+    rr: &RrGraph,
+    node: &str,
+    pos: u8,
+    header: &[String],
+) -> Result<TermSpec, String> {
+    let template = rr.prop1(node, "template")?.map(|t| lit_value(t, "rr:template")).transpose()?;
+    let column = rr.prop1(node, "column")?.map(|t| lit_value(t, "rr:column")).transpose()?;
     let constant = rr.prop1(node, "constant")?.cloned();
-    let n_kinds = [template.is_some(), column.is_some(), constant.is_some()]
-        .iter()
-        .filter(|b| **b)
-        .count();
+    let n_kinds = [template.is_some(), column.is_some(), constant.is_some()].iter().filter(|b| **b).count();
     if n_kinds != 1 {
         return Err(format!("term map {node} must have exactly one of rr:template / rr:column / rr:constant (found {n_kinds})"));
     }
-    let datatype = rr
-        .prop1(node, "datatype")?
-        .map(|t| iri_value(t, "rr:datatype"))
-        .transpose()?;
-    let language = rr
-        .prop1(node, "language")?
-        .map(|t| lit_value(t, "rr:language"))
-        .transpose()?;
+    let datatype = rr.prop1(node, "datatype")?.map(|t| iri_value(t, "rr:datatype")).transpose()?;
+    let language = rr.prop1(node, "language")?.map(|t| lit_value(t, "rr:language")).transpose()?;
     if datatype.is_some() && language.is_some() {
-        return Err(format!(
-            "term map {node} has both rr:datatype and rr:language"
-        ));
+        return Err(format!("term map {node} has both rr:datatype and rr:language"));
     }
     let term_type = match rr.prop1(node, "termType")? {
         None => {
@@ -1050,15 +949,11 @@ fn term_spec(rr: &RrGraph, node: &str, pos: u8, header: &[String]) -> Result<Ter
         }
         Some(t) => {
             let t = iri_value(t, "rr:termType")?;
-            t.strip_prefix(RR)
-                .ok_or_else(|| format!("invalid rr:termType {t}"))?
-                .to_owned()
+            t.strip_prefix(RR).ok_or_else(|| format!("invalid rr:termType {t}"))?.to_owned()
         }
     };
     if (datatype.is_some() || language.is_some()) && term_type != "Literal" {
-        return Err(format!(
-            "term map {node}: rr:datatype/rr:language require rr:termType rr:Literal"
-        ));
+        return Err(format!("term map {node}: rr:datatype/rr:language require rr:termType rr:Literal"));
     }
     let kind = match term_type.as_str() {
         "IRI" => TermKind::Iri,
@@ -1070,9 +965,7 @@ fn term_spec(rr: &RrGraph, node: &str, pos: u8, header: &[String]) -> Result<Ter
         }
         "Literal" => {
             if pos != 2 {
-                return Err(format!(
-                    "term map {node}: rr:Literal is only valid in object position"
-                ));
+                return Err(format!("term map {node}: rr:Literal is only valid in object position"));
             }
             if let Some(l) = &language {
                 TermKind::LitLang(l.clone())
@@ -1104,9 +997,7 @@ fn constant_term(t: &oxrdf::Term, pos: u8) -> Result<GenTerm, String> {
         oxrdf::Term::NamedNode(n) => Ok(GenTerm::Iri(n.as_str().to_owned())),
         oxrdf::Term::Literal(l) => {
             if pos != 2 {
-                return Err(format!(
-                    "constant literal {l} is only valid in object position"
-                ));
+                return Err(format!("constant literal {l} is only valid in object position"));
             }
             let lang = l.language().map(str::to_owned);
             let dt = if lang.is_some() || l.datatype().as_str() == XSD_STRING {
@@ -1114,15 +1005,9 @@ fn constant_term(t: &oxrdf::Term, pos: u8) -> Result<GenTerm, String> {
             } else {
                 Some(l.datatype().as_str().to_owned())
             };
-            Ok(GenTerm::Lit {
-                value: l.value().to_owned(),
-                datatype: dt,
-                lang,
-            })
+            Ok(GenTerm::Lit { value: l.value().to_owned(), datatype: dt, lang })
         }
-        other => Err(format!(
-            "unsupported constant term {other} (blank-node constants are not shared-scope-safe)"
-        )),
+        other => Err(format!("unsupported constant term {other} (blank-node constants are not shared-scope-safe)")),
     }
 }
 
@@ -1150,36 +1035,19 @@ fn compile_tm(
             (spec, classes)
         }
         (None, Some(c)) => (
-            TermSpec {
-                value: ValueSpec::Constant(constant_term(c, 0)?),
-                kind: TermKind::Iri,
-            },
+            TermSpec { value: ValueSpec::Constant(constant_term(c, 0)?), kind: TermKind::Iri },
             Vec::new(),
         ),
-        (None, None) => {
-            return Err(format!(
-                "triples map {tm_key} has no rr:subjectMap / rr:subject"
-            ))
-        }
-        (Some(_), Some(_)) => {
-            return Err(format!(
-                "triples map {tm_key} has both rr:subjectMap and rr:subject"
-            ))
-        }
+        (None, None) => return Err(format!("triples map {tm_key} has no rr:subjectMap / rr:subject")),
+        (Some(_), Some(_)) => return Err(format!("triples map {tm_key} has both rr:subjectMap and rr:subject")),
     };
     let mut poms: Vec<CompiledPom> = Vec::new();
-    let mut pom_keys: Vec<String> = rr
-        .props(tm_key, "predicateObjectMap")
-        .map(term_key)
-        .collect();
+    let mut pom_keys: Vec<String> = rr.props(tm_key, "predicateObjectMap").map(term_key).collect();
     pom_keys.sort(); // deterministic emission order
     for pom_key in pom_keys {
         let mut predicates: Vec<TermSpec> = Vec::new();
         for p in rr.props(&pom_key, "predicate") {
-            predicates.push(TermSpec {
-                value: ValueSpec::Constant(constant_term(p, 1)?),
-                kind: TermKind::Iri,
-            });
+            predicates.push(TermSpec { value: ValueSpec::Constant(constant_term(p, 1)?), kind: TermKind::Iri });
         }
         for pm in rr.props(&pom_key, "predicateMap") {
             predicates.push(term_spec(rr, &term_key(pm), 1, header)?);
@@ -1191,23 +1059,15 @@ fn compile_tm(
                 GenTerm::Iri(_) => TermKind::Iri,
                 _ => TermKind::LitPlain, // kind is unused for constants; value wins
             };
-            objects.push(TermSpec {
-                value: ValueSpec::Constant(c),
-                kind,
-            });
+            objects.push(TermSpec { value: ValueSpec::Constant(c), kind });
         }
         for om in rr.props(&pom_key, "objectMap") {
             objects.push(term_spec(rr, &term_key(om), 2, header)?);
         }
         if predicates.is_empty() || objects.is_empty() {
-            return Err(format!(
-                "predicate-object map {pom_key} needs at least one predicate and one object"
-            ));
+            return Err(format!("predicate-object map {pom_key} needs at least one predicate and one object"));
         }
-        poms.push(CompiledPom {
-            predicates,
-            objects,
-        });
+        poms.push(CompiledPom { predicates, objects });
     }
     Ok(CompiledMap {
         subject,
@@ -1386,10 +1246,7 @@ fn build_sources(f: &Flags) -> Result<Vec<ChunkIter>, String> {
     match &f.mapping {
         None => {
             let opts = DirectOpts {
-                base: f
-                    .base
-                    .clone()
-                    .unwrap_or_else(|| "http://example.com/".to_owned()),
+                base: f.base.clone().unwrap_or_else(|| "http://example.com/".to_owned()),
                 template: f.template.clone(),
                 class: match f.class.as_deref() {
                     None => None,
@@ -1401,14 +1258,8 @@ fn build_sources(f: &Flags) -> Result<Vec<ChunkIter>, String> {
             for (name, path) in &f.files {
                 let table = name.clone().unwrap_or_else(|| table_stem(path));
                 let (header, rows) = open_csv(path, f.sep)?;
-                let map =
-                    compile_direct(&header, &table, &opts).map_err(|e| format!("{path}: {e}"))?;
-                srcs.push(Box::new(MappedRows {
-                    rows,
-                    map,
-                    row_num: 0,
-                    failed: false,
-                }));
+                let map = compile_direct(&header, &table, &opts).map_err(|e| format!("{path}: {e}"))?;
+                srcs.push(Box::new(MappedRows { rows, map, row_num: 0, failed: false }));
             }
         }
         Some(mapping_path) => {
@@ -1421,23 +1272,16 @@ fn build_sources(f: &Flags) -> Result<Vec<ChunkIter>, String> {
             let bound: Vec<(String, String)> = f
                 .files
                 .iter()
-                .map(|(name, path)| {
-                    (
-                        name.clone().unwrap_or_else(|| table_stem(path)),
-                        path.clone(),
-                    )
-                })
+                .map(|(name, path)| (name.clone().unwrap_or_else(|| table_stem(path)), path.clone()))
                 .collect();
             let mut used = vec![false; bound.len()];
             for (tm_key, table) in &m.tms {
-                let exact: Vec<usize> =
-                    (0..bound.len()).filter(|&i| &bound[i].0 == table).collect();
+                let exact: Vec<usize> = (0..bound.len()).filter(|&i| &bound[i].0 == table).collect();
                 let idx = match exact.len() {
                     1 => exact[0],
                     0 => {
-                        let ci: Vec<usize> = (0..bound.len())
-                            .filter(|&i| bound[i].0.eq_ignore_ascii_case(table))
-                            .collect();
+                        let ci: Vec<usize> =
+                            (0..bound.len()).filter(|&i| bound[i].0.eq_ignore_ascii_case(table)).collect();
                         match ci.len() {
                             1 => ci[0],
                             0 => {
@@ -1449,23 +1293,13 @@ fn build_sources(f: &Flags) -> Result<Vec<ChunkIter>, String> {
                             _ => return Err(format!("logical table {table:?} matches multiple CSV files case-insensitively")),
                         }
                     }
-                    _ => {
-                        return Err(format!(
-                            "logical table {table:?} matches multiple CSV files"
-                        ))
-                    }
+                    _ => return Err(format!("logical table {table:?} matches multiple CSV files")),
                 };
                 used[idx] = true;
                 let path = &bound[idx].1;
                 let (header, rows) = open_csv(path, f.sep)?;
-                let map = compile_tm(&m, tm_key, &header, f.base.as_deref())
-                    .map_err(|e| format!("{path}: {e}"))?;
-                srcs.push(Box::new(MappedRows {
-                    rows,
-                    map,
-                    row_num: 0,
-                    failed: false,
-                }));
+                let map = compile_tm(&m, tm_key, &header, f.base.as_deref()).map_err(|e| format!("{path}: {e}"))?;
+                srcs.push(Box::new(MappedRows { rows, map, row_num: 0, failed: false }));
             }
             for (i, (table, path)) in bound.iter().enumerate() {
                 if !used[i] {
@@ -1489,10 +1323,7 @@ impl OutSink {
     fn create(path: &str) -> std::io::Result<OutSink> {
         let w = std::io::BufWriter::new(std::fs::File::create(path)?);
         Ok(if path.ends_with(".gz") {
-            OutSink::Gz(flate2::write::GzEncoder::new(
-                w,
-                flate2::Compression::default(),
-            ))
+            OutSink::Gz(flate2::write::GzEncoder::new(w, flate2::Compression::default()))
         } else if path.ends_with(".zst") || path.ends_with(".zstd") {
             OutSink::Zst(Box::new(zstd::stream::write::Encoder::new(w, 0)?))
         } else {
@@ -1524,8 +1355,7 @@ pub(crate) fn cmd_tabular(args: &[String]) {
 
     if let Some(out_path) = &flags.out {
         // Stream N-Triples straight out — no graph build, constant memory.
-        let mut sink =
-            OutSink::create(out_path).unwrap_or_else(|e| die(format!("creating {out_path}: {e}")));
+        let mut sink = OutSink::create(out_path).unwrap_or_else(|e| die(format!("creating {out_path}: {e}")));
         let mut buf = vec![0u8; 64 * 1024];
         let mut triples: u64 = 0;
         loop {
@@ -1534,16 +1364,10 @@ pub(crate) fn cmd_tabular(args: &[String]) {
                 break;
             }
             triples += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64;
-            sink.writer()
-                .write_all(&buf[..n])
-                .unwrap_or_else(|e| die(format!("writing {out_path}: {e}")));
+            sink.writer().write_all(&buf[..n]).unwrap_or_else(|e| die(format!("writing {out_path}: {e}")));
         }
-        sink.finish()
-            .unwrap_or_else(|e| die(format!("finishing {out_path}: {e}")));
-        eprintln!(
-            "wrote {triples} triples to {out_path} in {:.3}s",
-            t.elapsed().as_secs_f64()
-        );
+        sink.finish().unwrap_or_else(|e| die(format!("finishing {out_path}: {e}")));
+        eprintln!("wrote {triples} triples to {out_path} in {:.3}s", t.elapsed().as_secs_f64());
         return;
     }
 
@@ -1585,35 +1409,23 @@ mod tests {
 
     #[test]
     fn csv_basic_lf_and_crlf_and_no_trailing_newline() {
-        assert_eq!(
-            rows("a,b\r\n1,2\n3,4"),
-            vec![vec!["a", "b"], vec!["1", "2"], vec!["3", "4"]]
-        );
+        assert_eq!(rows("a,b\r\n1,2\n3,4"), vec![vec!["a", "b"], vec!["1", "2"], vec!["3", "4"]]);
     }
 
     #[test]
     fn csv_quoted_separator_newline_and_escaped_quote() {
         let got = rows("name,quote\n\"Doe, Jane\",\"said \"\"hi\"\"\nbye\"\n");
-        assert_eq!(
-            got,
-            vec![vec!["name", "quote"], vec!["Doe, Jane", "said \"hi\"\nbye"]]
-        );
+        assert_eq!(got, vec![vec!["name", "quote"], vec!["Doe, Jane", "said \"hi\"\nbye"]]);
     }
 
     #[test]
     fn csv_bom_stripped_and_blank_lines_skipped() {
-        assert_eq!(
-            rows("\u{feff}a,b\n\n1,2\n"),
-            vec![vec!["a", "b"], vec!["1", "2"]]
-        );
+        assert_eq!(rows("\u{feff}a,b\n\n1,2\n"), vec![vec!["a", "b"], vec!["1", "2"]]);
     }
 
     #[test]
     fn csv_empty_fields_kept() {
-        assert_eq!(
-            rows("a,b,c\n,,\n"),
-            vec![vec!["a", "b", "c"], vec!["", "", ""]]
-        );
+        assert_eq!(rows("a,b,c\n,,\n"), vec![vec!["a", "b", "c"], vec!["", "", ""]]);
     }
 
     #[test]
@@ -1641,37 +1453,14 @@ mod tests {
     #[test]
     fn datatype_inference_exact() {
         let xsd = "http://www.w3.org/2001/XMLSchema#";
-        assert_eq!(
-            infer_datatype("42"),
-            Some(format!("{xsd}integer")).as_deref()
-        );
-        assert_eq!(
-            infer_datatype("-7"),
-            Some(format!("{xsd}integer")).as_deref()
-        );
-        assert_eq!(
-            infer_datatype("3.25"),
-            Some(format!("{xsd}decimal")).as_deref()
-        );
-        assert_eq!(
-            infer_datatype("-0.5"),
-            Some(format!("{xsd}decimal")).as_deref()
-        );
-        assert_eq!(
-            infer_datatype("6.02e23"),
-            Some(format!("{xsd}double")).as_deref()
-        );
-        assert_eq!(
-            infer_datatype("1E-9"),
-            Some(format!("{xsd}double")).as_deref()
-        );
-        assert_eq!(
-            infer_datatype("true"),
-            Some(format!("{xsd}boolean")).as_deref()
-        );
-        for s in [
-            "", "hello", "1.2.3", "1e", "e9", ".", "+", "TRUE", "NaN", "INF", "0x1F", "12 ",
-        ] {
+        assert_eq!(infer_datatype("42"), Some(format!("{xsd}integer")).as_deref());
+        assert_eq!(infer_datatype("-7"), Some(format!("{xsd}integer")).as_deref());
+        assert_eq!(infer_datatype("3.25"), Some(format!("{xsd}decimal")).as_deref());
+        assert_eq!(infer_datatype("-0.5"), Some(format!("{xsd}decimal")).as_deref());
+        assert_eq!(infer_datatype("6.02e23"), Some(format!("{xsd}double")).as_deref());
+        assert_eq!(infer_datatype("1E-9"), Some(format!("{xsd}double")).as_deref());
+        assert_eq!(infer_datatype("true"), Some(format!("{xsd}boolean")).as_deref());
+        for s in ["", "hello", "1.2.3", "1e", "e9", ".", "+", "TRUE", "NaN", "INF", "0x1F", "12 "] {
             assert_eq!(infer_datatype(s), None, "{s:?} must stay a plain string");
         }
     }
@@ -1709,12 +1498,7 @@ mod tests {
         let mut all = CsvRows::new(Cursor::new(csv.as_bytes().to_vec()), b',');
         let header = all.next().unwrap().unwrap();
         let map = compile_direct(&header, table, opts).unwrap();
-        let mr = MappedRows {
-            rows: all,
-            map,
-            row_num: 0,
-            failed: false,
-        };
+        let mr = MappedRows { rows: all, map, row_num: 0, failed: false };
         let mut lines: Vec<String> = Vec::new();
         for chunk in mr {
             lines.extend(chunk.unwrap().lines().map(str::to_owned));
@@ -1724,12 +1508,7 @@ mod tests {
     }
 
     fn dopts() -> DirectOpts {
-        DirectOpts {
-            base: "http://example.com/".into(),
-            template: None,
-            class: None,
-            infer: true,
-        }
+        DirectOpts { base: "http://example.com/".into(), template: None, class: None, infer: true }
     }
 
     #[test]
@@ -1781,12 +1560,8 @@ mod tests {
 
     #[test]
     fn direct_mapping_header_errors() {
-        assert!(compile_direct(&["a".into(), "a".into()], "t", &dopts())
-            .unwrap_err()
-            .contains("duplicate"));
-        assert!(compile_direct(&["a".into(), String::new()], "t", &dopts())
-            .unwrap_err()
-            .contains("empty"));
+        assert!(compile_direct(&["a".into(), "a".into()], "t", &dopts()).unwrap_err().contains("duplicate"));
+        assert!(compile_direct(&["a".into(), String::new()], "t", &dopts()).unwrap_err().contains("empty"));
     }
 
     #[test]
@@ -1794,14 +1569,9 @@ mod tests {
         let mut all = CsvRows::new(Cursor::new(b"a,b\n1\n".to_vec()), b',');
         let header = all.next().unwrap().unwrap();
         let map = compile_direct(&header, "t", &dopts()).unwrap();
-        let err = MappedRows {
-            rows: all,
-            map,
-            row_num: 0,
-            failed: false,
-        }
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_err();
+        let err = MappedRows { rows: all, map, row_num: 0, failed: false }
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_err();
         assert!(err.contains("ragged"), "{err}");
     }
 
@@ -1809,18 +1579,10 @@ mod tests {
     fn template_parsing_escapes_and_errors() {
         let hdr = vec!["a".to_string()];
         assert!(parse_template("x\\{y\\}z{a}", &hdr, false).is_ok());
-        assert!(parse_template("{missing}", &hdr, false)
-            .unwrap_err()
-            .contains("not found"));
-        assert!(parse_template("{a", &hdr, false)
-            .unwrap_err()
-            .contains("unclosed"));
-        assert!(parse_template("a}b", &hdr, false)
-            .unwrap_err()
-            .contains("unbalanced"));
-        assert!(parse_template("{_row}", &hdr, false)
-            .unwrap_err()
-            .contains("_row"));
+        assert!(parse_template("{missing}", &hdr, false).unwrap_err().contains("not found"));
+        assert!(parse_template("{a", &hdr, false).unwrap_err().contains("unclosed"));
+        assert!(parse_template("a}b", &hdr, false).unwrap_err().contains("unbalanced"));
+        assert!(parse_template("{_row}", &hdr, false).unwrap_err().contains("_row"));
         assert!(parse_template("{_row}", &hdr, true).is_ok());
     }
 
@@ -1831,9 +1593,7 @@ mod tests {
         assert_eq!(resolve_col("age", &hdr).unwrap(), 2); // case-insensitive fallback
         assert!(resolve_col("name", &hdr).unwrap_err().contains("ambiguous"));
         assert_eq!(resolve_col("\"NAME\"", &hdr).unwrap(), 1); // delimited = exact only
-        assert!(resolve_col("\"name\"", &hdr)
-            .unwrap_err()
-            .contains("not found"));
+        assert!(resolve_col("\"name\"", &hdr).unwrap_err().contains("not found"));
     }
 
     // ---- R2RML -------------------------------------------------------------------------
@@ -1850,12 +1610,7 @@ mod tests {
             let mut all = CsvRows::new(Cursor::new(csv.as_bytes().to_vec()), b',');
             let header = all.next().ok_or("empty csv")??;
             let map = compile_tm(&m, tm_key, &header, None)?;
-            for chunk in (MappedRows {
-                rows: all,
-                map,
-                row_num: 0,
-                failed: false,
-            }) {
+            for chunk in (MappedRows { rows: all, map, row_num: 0, failed: false }) {
                 lines.extend(chunk?.lines().map(str::to_owned));
             }
         }
@@ -1920,15 +1675,8 @@ mod tests {
                  rr:objectMap [ rr:column \"tag\" ; rr:termType rr:BlankNode ]\n\
                ] .\n"
         );
-        let got = r2rml_nt(
-            &mapping,
-            &[("t", "who,prop,tag\nhttp://example.com/alice,knows,x 1\n")],
-        )
-        .unwrap();
-        assert_eq!(
-            got,
-            vec!["<http://example.com/alice> <http://example.com/p/knows> _:x_201 ."]
-        );
+        let got = r2rml_nt(&mapping, &[("t", "who,prop,tag\nhttp://example.com/alice,knows,x 1\n")]).unwrap();
+        assert_eq!(got, vec!["<http://example.com/alice> <http://example.com/p/knows> _:x_201 ."]);
     }
 
     #[test]
@@ -1940,10 +1688,7 @@ mod tests {
                rr:predicateObjectMap [ rr:predicate ex:v ; rr:objectMap [ rr:column \"v\" ] ] .\n"
         );
         let got = r2rml_nt(&mapping, &[("t", "id,v\n,gone\n1,kept\n")]).unwrap();
-        assert_eq!(
-            got,
-            vec!["<http://example.com/r/1> <http://example.com/v> \"kept\" ."]
-        );
+        assert_eq!(got, vec!["<http://example.com/r/1> <http://example.com/v> \"kept\" ."]);
     }
 
     #[test]
@@ -2016,12 +1761,7 @@ mod tests {
         let got = r2rml_nt(&mapping, &[("t", "id,a,b\n1,x,y\n")]).unwrap();
         assert_eq!(got.len(), 4, "{got:?}");
         for (p, o) in [("p1", "x"), ("p1", "y"), ("p2", "x"), ("p2", "y")] {
-            assert!(
-                got.contains(&format!(
-                    "<http://example.com/r/1> <http://example.com/{p}> \"{o}\" ."
-                )),
-                "{got:?}"
-            );
+            assert!(got.contains(&format!("<http://example.com/r/1> <http://example.com/{p}> \"{o}\" .")), "{got:?}");
         }
     }
 
@@ -2037,22 +1777,12 @@ mod tests {
 
     #[test]
     fn nt_reader_streams_and_surfaces_errors() {
-        let ok: ChunkIter = Box::new(
-            vec![
-                Ok("a\n".to_string()),
-                Ok(String::new()),
-                Ok("b\n".to_string()),
-            ]
-            .into_iter(),
-        );
+        let ok: ChunkIter = Box::new(vec![Ok("a\n".to_string()), Ok(String::new()), Ok("b\n".to_string())].into_iter());
         let mut out = String::new();
         NtReader::new(vec![ok]).read_to_string(&mut out).unwrap();
         assert_eq!(out, "a\nb\n");
-        let bad: ChunkIter =
-            Box::new(vec![Ok("a\n".to_string()), Err("boom".to_string())].into_iter());
-        let err = NtReader::new(vec![bad])
-            .read_to_string(&mut String::new())
-            .unwrap_err();
+        let bad: ChunkIter = Box::new(vec![Ok("a\n".to_string()), Err("boom".to_string())].into_iter());
+        let err = NtReader::new(vec![bad]).read_to_string(&mut String::new()).unwrap_err();
         assert!(err.to_string().contains("boom"));
     }
 
@@ -2064,14 +1794,8 @@ mod tests {
         let mut all = CsvRows::new(Cursor::new(csv.as_bytes().to_vec()), b',');
         let header = all.next().unwrap().unwrap();
         let map = compile_direct(&header, "people", &dopts()).unwrap();
-        let src: ChunkIter = Box::new(MappedRows {
-            rows: all,
-            map,
-            row_num: 0,
-            failed: false,
-        });
-        let g =
-            sparq_core::Graph::load_reader_parallel(NtReader::new(vec![src]), "ntriples").unwrap();
+        let src: ChunkIter = Box::new(MappedRows { rows: all, map, row_num: 0, failed: false });
+        let g = sparq_core::Graph::load_reader_parallel(NtReader::new(vec![src]), "ntriples").unwrap();
         assert_eq!(g.len(), 6); // 2 rows × (2 columns + rdf:type)
         let r = sparq_engine::query(
             &g,
@@ -2079,11 +1803,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(
-            r.rows[0][0],
-            Some(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal(
-                "alice"
-            )))
-        );
+        assert_eq!(r.rows[0][0], Some(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal("alice"))));
     }
 }

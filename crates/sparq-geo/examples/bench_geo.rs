@@ -100,11 +100,7 @@ fn main() {
         }
         Some("bench") => bench_mode(&args[1..]),
         Some("query") => query_mode(&args[1..]),
-        _ => report_mode(
-            args.first()
-                .and_then(|a| a.parse().ok())
-                .unwrap_or(CORPUS_N),
-        ),
+        _ => report_mode(args.first().and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N)),
     }
 }
 
@@ -143,11 +139,7 @@ fn query_mode(args: &[String]) {
         us = us.min(t.elapsed().as_secs_f64() * 1e6);
         let c = comparable_count(&r);
         if let Some(prev) = count {
-            assert_eq!(
-                prev, c,
-                "nondeterministic count across iters for {}",
-                query_path
-            );
+            assert_eq!(prev, c, "nondeterministic count across iters for {}", query_path);
         }
         count = Some(c);
     }
@@ -236,10 +228,7 @@ fn bench_mode(args: &[String]) {
         );
         let points: Vec<String> = corpus_point_literals(&nt);
         let (count, us) = best_of(iters, || {
-            points
-                .iter()
-                .filter(|wkt| lex::sf_within(wkt, &qbox).unwrap_or(false))
-                .count()
+            points.iter().filter(|wkt| lex::sf_within(wkt, &qbox).unwrap_or(false)).count()
         });
         emit("geof_within", count, us);
     }
@@ -272,10 +261,8 @@ fn report_mode(n: usize) {
     let mut rng = StdRng::seed_from_u64(CORPUS_SEED ^ 0xC0FFEE);
     let mut query_points: Vec<Point<f64>> = Vec::new();
     for _ in 0..1000 {
-        query_points.push(Point::new(
-            rng.random_range(LON.0..LON.1),
-            rng.random_range(LAT.0..LAT.1),
-        ));
+        query_points
+            .push(Point::new(rng.random_range(LON.0..LON.1), rng.random_range(LAT.0..LAT.1)));
     }
 
     for radius in [1_000.0, 10_000.0, 50_000.0] {

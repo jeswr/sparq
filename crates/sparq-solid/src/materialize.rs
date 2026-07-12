@@ -226,13 +226,7 @@ fn elapsed_millis() -> f64 {
 fn closure_to_n3(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> String {
     let mut out = String::with_capacity(closure.len() * 64);
     for t in closure {
-        let _ = writeln!(
-            out,
-            "{} {} {} .",
-            dict.term(t[0]),
-            dict.term(t[1]),
-            dict.term(t[2])
-        );
+        let _ = writeln!(out, "{} {} {} .", dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
     }
     out
 }
@@ -240,11 +234,7 @@ fn closure_to_n3(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> String {
 /// Whether a closure triple belongs in the auth view: `auth:*` predicates, `rdf:type`
 /// with an `auth:` class, plus the accept-set facts of matchers referenced by
 /// `auth:exceptMatcher` (collected in a first pass).
-fn install_auth_view(
-    graph: &mut Graph,
-    dict: &Dict,
-    closure: &[[sparq_core::dict::Id; 3]],
-) -> MaterializeStats {
+fn install_auth_view(graph: &mut Graph, dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> MaterializeStats {
     // pass 1: matchers referenced by conditional grants
     let mut except_matchers: FxHashSet<sparq_core::dict::Id> = FxHashSet::default();
     for t in closure {
@@ -258,9 +248,7 @@ fn install_auth_view(
     let mut adict = Dict::new();
     let mut ids: Vec<[sparq_core::dict::Id; 3]> = Vec::new();
     for t in closure {
-        let Term::NamedNode(p) = dict.term(t[1]) else {
-            continue;
-        };
+        let Term::NamedNode(p) = dict.term(t[1]) else { continue };
         let keep = p.as_str().starts_with(AUTH_NS)
             || (p.as_str() == RDF_TYPE
                 && matches!(dict.term(t[2]), Term::NamedNode(o) if o.as_str().starts_with(AUTH_NS)))
@@ -272,16 +260,9 @@ fn install_auth_view(
         }
         let s = dict.term(t[0]);
         let o = dict.term(t[2]);
-        ids.push([
-            adict.intern(&s),
-            adict.intern(&Term::NamedNode(p)),
-            adict.intern(&o),
-        ]);
+        ids.push([adict.intern(&s), adict.intern(&Term::NamedNode(p)), adict.intern(&o)]);
     }
-    let stats = MaterializeStats {
-        auth_triples: ids.len(),
-        ..Default::default()
-    };
+    let stats = MaterializeStats { auth_triples: ids.len(), ..Default::default() };
     let auth = Graph::from_parts(adict, ids);
     let name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
     if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == name) {

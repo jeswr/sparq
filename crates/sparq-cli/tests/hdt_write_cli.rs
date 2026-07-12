@@ -63,28 +63,17 @@ fn to_hdt_roundtrips_through_query() {
     std::fs::write(&nt, ZOO_NT).unwrap();
     let hdt = dir.join("zoo.hdt");
 
-    let (status, _, stderr) = run(&[
-        "to-hdt",
-        nt.to_str().unwrap(),
-        "ntriples",
-        hdt.to_str().unwrap(),
-    ]);
+    let (status, _, stderr) = run(&["to-hdt", nt.to_str().unwrap(), "ntriples", hdt.to_str().unwrap()]);
     assert!(status.success(), "to-hdt failed: {stderr}");
     assert!(
         stderr.contains("wrote 6 triples"),
         "summary line must report the written triple count: {stderr}"
     );
     // A pure-triples input has nothing to drop — the named-graph warning must NOT fire.
-    assert!(
-        !stderr.contains("warning:"),
-        "spurious warning on a triples-only input: {stderr}"
-    );
+    assert!(!stderr.contains("warning:"), "spurious warning on a triples-only input: {stderr}");
 
     let (status, stdout, stderr) = run(&["query", hdt.to_str().unwrap(), "hdt", COUNT_ALL]);
-    assert!(
-        status.success(),
-        "query over the exported archive failed: {stderr}"
-    );
+    assert!(status.success(), "query over the exported archive failed: {stderr}");
     assert!(stdout.contains("(6 row(s))"), "stdout: {stdout}");
 }
 
@@ -98,12 +87,7 @@ fn to_hdt_gz_extension_writes_gzip_container() {
     std::fs::write(&nt, ZOO_NT).unwrap();
     let gz = dir.join("zoo.hdt.gz");
 
-    let (status, _, stderr) = run(&[
-        "to-hdt",
-        nt.to_str().unwrap(),
-        "ntriples",
-        gz.to_str().unwrap(),
-    ]);
+    let (status, _, stderr) = run(&["to-hdt", nt.to_str().unwrap(), "ntriples", gz.to_str().unwrap()]);
     assert!(status.success(), "to-hdt failed: {stderr}");
 
     let bytes = std::fs::read(&gz).unwrap();
@@ -114,10 +98,7 @@ fn to_hdt_gz_extension_writes_gzip_container() {
     );
 
     let (status, stdout, stderr) = run(&["query", gz.to_str().unwrap(), "hdt", COUNT_ALL]);
-    assert!(
-        status.success(),
-        "query over the gzipped archive failed: {stderr}"
-    );
+    assert!(status.success(), "query over the gzipped archive failed: {stderr}");
     assert!(stdout.contains("(6 row(s))"), "stdout: {stdout}");
 }
 
@@ -131,12 +112,7 @@ fn to_hdt_drops_named_graphs_loudly() {
     std::fs::write(&trig, DATASET_TRIG).unwrap();
     let hdt = dir.join("dataset.hdt");
 
-    let (status, _, stderr) = run(&[
-        "to-hdt",
-        trig.to_str().unwrap(),
-        "trig",
-        hdt.to_str().unwrap(),
-    ]);
+    let (status, _, stderr) = run(&["to-hdt", trig.to_str().unwrap(), "trig", hdt.to_str().unwrap()]);
     assert!(status.success(), "to-hdt failed: {stderr}");
     assert!(
         stderr.contains("dropping 1 named graph(s) (2 triple(s))"),
@@ -144,14 +120,8 @@ fn to_hdt_drops_named_graphs_loudly() {
     );
 
     let (status, stdout, stderr) = run(&["query", hdt.to_str().unwrap(), "hdt", COUNT_ALL]);
-    assert!(
-        status.success(),
-        "query over the exported archive failed: {stderr}"
-    );
-    assert!(
-        stdout.contains("(1 row(s))"),
-        "only the default graph is written: {stdout}"
-    );
+    assert!(status.success(), "query over the exported archive failed: {stderr}");
+    assert!(stdout.contains("(1 row(s))"), "only the default graph is written: {stdout}");
 }
 
 /// Missing positional arguments are a usage error: exit 2 (the CLI-wide contract), with
@@ -160,10 +130,7 @@ fn to_hdt_drops_named_graphs_loudly() {
 fn to_hdt_usage_error_exits_2() {
     let (status, _, stderr) = run(&["to-hdt", "only-one-arg"]);
     assert_eq!(status.code(), Some(2), "stderr: {stderr}");
-    assert!(
-        stderr.contains("usage: sparq-cli to-hdt"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("usage: sparq-cli to-hdt"), "stderr: {stderr}");
 }
 
 /// An unknown input format must die loudly (exit 2) BEFORE writing anything — the shared
@@ -175,15 +142,7 @@ fn to_hdt_unknown_format_exits_2_and_writes_nothing() {
     std::fs::write(&nt, ZOO_NT).unwrap();
     let hdt = dir.join("never.hdt");
 
-    let (status, _, _) = run(&[
-        "to-hdt",
-        nt.to_str().unwrap(),
-        "no-such-format",
-        hdt.to_str().unwrap(),
-    ]);
+    let (status, _, _) = run(&["to-hdt", nt.to_str().unwrap(), "no-such-format", hdt.to_str().unwrap()]);
     assert_eq!(status.code(), Some(2));
-    assert!(
-        !hdt.exists(),
-        "no output file may be created on a usage error"
-    );
+    assert!(!hdt.exists(), "no output file may be created on a usage error");
 }

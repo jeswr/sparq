@@ -69,18 +69,12 @@ pub const PKG_DISCOVERED_FROM: &str = "https://sparq.dev/ns/pkg#discoveredFrom";
 /// The three `secx:` epistemic-basis IRIs (`pkg:assurance` objects). The `secx:` namespace is the
 /// sec-prop extension the PKG reuses for the assurance axis; the design records both the
 /// `sparq.dev/ns/secx#` form (used by the Phase-1 fixtures) and the canonical `w3id.org` form.
-const SECX_PROVEN: [&str; 2] = [
-    "https://sparq.dev/ns/secx#Proven",
-    "https://w3id.org/zkp-sparql/sec-prop#Proven",
-];
-const SECX_CLAIMED: [&str; 2] = [
-    "https://sparq.dev/ns/secx#Claimed",
-    "https://w3id.org/zkp-sparql/sec-prop#Claimed",
-];
-const SECX_CONJECTURED: [&str; 2] = [
-    "https://sparq.dev/ns/secx#Conjectured",
-    "https://w3id.org/zkp-sparql/sec-prop#Conjectured",
-];
+const SECX_PROVEN: [&str; 2] =
+    ["https://sparq.dev/ns/secx#Proven", "https://w3id.org/zkp-sparql/sec-prop#Proven"];
+const SECX_CLAIMED: [&str; 2] =
+    ["https://sparq.dev/ns/secx#Claimed", "https://w3id.org/zkp-sparql/sec-prop#Claimed"];
+const SECX_CONJECTURED: [&str; 2] =
+    ["https://sparq.dev/ns/secx#Conjectured", "https://w3id.org/zkp-sparql/sec-prop#Conjectured"];
 
 /// The **ablation switch** for provenance-weighting (design §5 Phase 4). The trainer runs
 /// identically under both modes except for the per-positive weight, so a harness can measure
@@ -115,13 +109,7 @@ pub struct WeightConfig {
 
 impl Default for WeightConfig {
     fn default() -> WeightConfig {
-        WeightConfig {
-            proven: 1.0,
-            claimed: 0.7,
-            conjectured: 0.4,
-            default_assurance: 1.0,
-            floor: 0.05,
-        }
+        WeightConfig { proven: 1.0, claimed: 0.7, conjectured: 0.4, default_assurance: 1.0, floor: 0.05 }
     }
 }
 
@@ -203,12 +191,7 @@ impl ProvenanceWeights {
             }
         }
 
-        ProvenanceWeights {
-            confidence,
-            assurance,
-            derived_from,
-            config,
-        }
+        ProvenanceWeights { confidence, assurance, derived_from, config }
     }
 
     /// The configured factors (so a harness can read what it swept).
@@ -444,9 +427,7 @@ ex:carol ex:knows ex:alice .
     fn graph() -> Graph {
         // Close so any pkg:discoveredFrom → prov:wasDerivedFrom entailment is materialised; the
         // fixture uses the super-property directly, so the closure simply confirms the read path.
-        close_for_vectorise(PKG, "turtle", Profile::Rdfs)
-            .unwrap()
-            .graph
+        close_for_vectorise(PKG, "turtle", Profile::Rdfs).unwrap().graph
     }
 
     fn id(g: &Graph, s: &str) -> Id {
@@ -484,10 +465,7 @@ ex:carol ex:knows ex:alice .
 
         // bob's lower-assurance + so-so source down-weights it below alice (the load-bearing
         // ordering: high-assurance facts rank higher).
-        assert!(
-            wb < wa,
-            "lower-assurance/source fact must weigh less ({wb} < {wa})"
-        );
+        assert!(wb < wa, "lower-assurance/source fact must weigh less ({wb} < {wa})");
     }
 
     #[test]
@@ -498,10 +476,7 @@ ex:carol ex:knows ex:alice .
         let carol = id(&g, "http://ex/carol");
         let alice = id(&g, "http://ex/alice");
         // carol has NO confidence/assurance/source → w = 1.0 (a plain fact is unchanged).
-        assert_eq!(
-            pw.weight_of([carol, knows, alice], WeightMode::Provenance),
-            1.0
-        );
+        assert_eq!(pw.weight_of([carol, knows, alice], WeightMode::Provenance), 1.0);
     }
 
     #[test]
@@ -531,19 +506,13 @@ ex:x pkg:assurance secx:Conjectured ; pkg:confidence "0.0" ; ex:rel ex:y .
 ex:y ex:rel ex:x .
 "#;
         let g = Graph::load_str(ttl, "turtle").unwrap();
-        let cfg = WeightConfig {
-            conjectured: 0.0,
-            ..WeightConfig::default()
-        };
+        let cfg = WeightConfig { conjectured: 0.0, ..WeightConfig::default() };
         let pw = ProvenanceWeights::mine_with(&g, cfg);
         let x = id(&g, "http://ex/x");
         let y = id(&g, "http://ex/y");
         let rel = id(&g, "http://ex/rel");
         let w = pw.weight_of([x, rel, y], WeightMode::Provenance);
-        assert!(
-            w >= cfg.floor.max(f32::MIN_POSITIVE),
-            "w = {w} must be floor-clamped > 0"
-        );
+        assert!(w >= cfg.floor.max(f32::MIN_POSITIVE), "w = {w} must be floor-clamped > 0");
         assert!(w > 0.0, "w must never be zero (would drop the positive)");
     }
 
@@ -576,20 +545,11 @@ ex:b ex:rel ex:a .
         let alice = id(&g, "http://ex/alice");
         let bob = id(&g, "http://ex/bob");
         let carol = id(&g, "http://ex/carol");
-        let contribs = vec![
-            (alice, vec![3.0, 0.0]),
-            (bob, vec![0.0, 3.0]),
-            (carol, vec![3.0, 3.0]),
-        ];
-        let pooled = pw
-            .pool_weighted(&contribs, WeightMode::Uniform)
-            .unwrap()
-            .unwrap();
+        let contribs =
+            vec![(alice, vec![3.0, 0.0]), (bob, vec![0.0, 3.0]), (carol, vec![3.0, 3.0])];
+        let pooled = pw.pool_weighted(&contribs, WeightMode::Uniform).unwrap().unwrap();
         // Mean of (3,0),(0,3),(3,3) = (2,2).
-        assert!(
-            (pooled[0] - 2.0).abs() < 1e-6 && (pooled[1] - 2.0).abs() < 1e-6,
-            "{pooled:?}"
-        );
+        assert!((pooled[0] - 2.0).abs() < 1e-6 && (pooled[1] - 2.0).abs() < 1e-6, "{pooled:?}");
     }
 
     #[test]
@@ -606,29 +566,13 @@ ex:b ex:rel ex:a .
 
         // alice → (1,0), bob → (0,1). Weighted pool = (wa, wb)/(wa+wb): more mass on dim 0.
         let contribs = vec![(alice, vec![1.0, 0.0]), (bob, vec![0.0, 1.0])];
-        let pooled = pw
-            .pool_weighted(&contribs, WeightMode::Provenance)
-            .unwrap()
-            .unwrap();
+        let pooled = pw.pool_weighted(&contribs, WeightMode::Provenance).unwrap().unwrap();
         let expect0 = wa / (wa + wb);
         let expect1 = wb / (wa + wb);
-        assert!(
-            (pooled[0] - expect0).abs() < 1e-6,
-            "dim0 {} vs {}",
-            pooled[0],
-            expect0
-        );
-        assert!(
-            (pooled[1] - expect1).abs() < 1e-6,
-            "dim1 {} vs {}",
-            pooled[1],
-            expect1
-        );
+        assert!((pooled[0] - expect0).abs() < 1e-6, "dim0 {} vs {}", pooled[0], expect0);
+        assert!((pooled[1] - expect1).abs() < 1e-6, "dim1 {} vs {}", pooled[1], expect1);
         // The load-bearing invariant: alice's (higher-quality) contribution dominates.
-        assert!(
-            pooled[0] > pooled[1],
-            "higher-quality contribution must dominate the pool"
-        );
+        assert!(pooled[0] > pooled[1], "higher-quality contribution must dominate the pool");
     }
 
     #[test]
@@ -637,15 +581,9 @@ ex:b ex:rel ex:a .
         let pw = ProvenanceWeights::mine(&g);
         let alice = id(&g, "http://ex/alice");
         let bob = id(&g, "http://ex/bob");
-        assert!(pw
-            .pool_weighted(&[], WeightMode::Provenance)
-            .unwrap()
-            .is_none());
+        assert!(pw.pool_weighted(&[], WeightMode::Provenance).unwrap().is_none());
         let bad = vec![(alice, vec![1.0, 2.0]), (bob, vec![1.0])];
-        assert!(
-            pw.pool_weighted(&bad, WeightMode::Provenance).is_err(),
-            "length mismatch is Err"
-        );
+        assert!(pw.pool_weighted(&bad, WeightMode::Provenance).is_err(), "length mismatch is Err");
     }
 
     #[test]
@@ -657,11 +595,7 @@ ex:b ex:rel ex:a .
         let one = vec![(bob, vec![7.0, -2.0, 0.5])];
         for mode in [WeightMode::Uniform, WeightMode::Provenance] {
             let pooled = pw.pool_weighted(&one, mode).unwrap().unwrap();
-            assert_eq!(
-                pooled,
-                vec![7.0, -2.0, 0.5],
-                "single contribution pools to itself ({mode:?})"
-            );
+            assert_eq!(pooled, vec![7.0, -2.0, 0.5], "single contribution pools to itself ({mode:?})");
         }
     }
 
@@ -676,39 +610,24 @@ ex:b ex:rel ex:a .
         let carol = id(&g, "http://ex/carol"); // no provenance → 1.0
 
         // Uniform: always 1.0 (ablation-off baseline).
-        assert_eq!(
-            pw.block_weight([alice, bob, carol], WeightMode::Uniform),
-            1.0
-        );
+        assert_eq!(pw.block_weight([alice, bob, carol], WeightMode::Uniform), 1.0);
 
         // Provenance: the MEAN of the per-subject weights.
         let wa = pw.weight_for_subject(alice);
         let wb = pw.weight_for_subject(bob);
         let wc = pw.weight_for_subject(carol); // 1.0
         let got = pw.block_weight([alice, bob, carol], WeightMode::Provenance);
-        assert!(
-            (got - (wa + wb + wc) / 3.0).abs() < 1e-6,
-            "block weight is the mean: {got}"
-        );
+        assert!((got - (wa + wb + wc) / 3.0).abs() < 1e-6, "block weight is the mean: {got}");
         // It is a valid (0,1] fuse weight.
-        assert!(
-            got > 0.0 && got <= 1.0,
-            "block weight must be a valid fuse weight: {got}"
-        );
+        assert!(got > 0.0 && got <= 1.0, "block weight must be a valid fuse weight: {got}");
 
         // A block fed by only low-quality edges weighs less than one fed by high-quality edges.
         let high = pw.block_weight([alice], WeightMode::Provenance);
         let low = pw.block_weight([bob], WeightMode::Provenance);
-        assert!(
-            low < high,
-            "lower-quality block must get a smaller fusion weight ({low} < {high})"
-        );
+        assert!(low < high, "lower-quality block must get a smaller fusion weight ({low} < {high})");
 
         // An empty subject set is the fail-open 1.0 (a block with no provenance edges).
-        assert_eq!(
-            pw.block_weight(std::iter::empty(), WeightMode::Provenance),
-            1.0
-        );
+        assert_eq!(pw.block_weight(std::iter::empty(), WeightMode::Provenance), 1.0);
     }
 
     #[test]
@@ -729,18 +648,9 @@ ex:b ex:rel ex:a .
         // high-quality modality's top item should win the fusion.
         let high_list: Vec<(&str, f64)> = vec![("from_high", 1.0)];
         let low_list: Vec<(&str, f64)> = vec![("from_low", 1.0)];
-        let fused = fuse_rrf_weighted(
-            &[(&high_list, high_w), (&low_list, low_w)],
-            crate::RRF_K,
-            10,
-        );
-        assert_eq!(
-            fused[0].0, "from_high",
-            "the higher-provenance modality must rank first"
-        );
-        assert!(
-            fused[0].1 > fused[1].1,
-            "and strictly outrank the lower-provenance one"
-        );
+        let fused =
+            fuse_rrf_weighted(&[(&high_list, high_w), (&low_list, low_w)], crate::RRF_K, 10);
+        assert_eq!(fused[0].0, "from_high", "the higher-provenance modality must rank first");
+        assert!(fused[0].1 > fused[1].1, "and strictly outrank the lower-provenance one");
     }
 }

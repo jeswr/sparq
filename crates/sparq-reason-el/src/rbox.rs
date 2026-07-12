@@ -139,8 +139,13 @@ impl RoleBox {
     pub fn inclusion_pairs(&self) -> impl Iterator<Item = (Role, Role)> + '_ {
         self.super_of.iter().enumerate().flat_map(|(r, sups)| {
             let r = r as Role;
-            sups.iter()
-                .filter_map(move |&s| if r != s { Some((r, s)) } else { None })
+            sups.iter().filter_map(move |&s| {
+                if r != s {
+                    Some((r, s))
+                } else {
+                    None
+                }
+            })
         })
     }
 }
@@ -190,11 +195,7 @@ mod tests {
         let rb = RoleBox::build(&[RoleAxiom::Sub(0, 1), RoleAxiom::Sub(1, 2)], 3);
         let mut pairs: Vec<(Role, Role)> = rb.inclusion_pairs().collect();
         pairs.sort_unstable();
-        assert_eq!(
-            pairs,
-            vec![(0, 1), (0, 2), (1, 2)],
-            "chain yields 3 non-reflexive pairs"
-        );
+        assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)], "chain yields 3 non-reflexive pairs");
         // No self-pairs.
         assert!(
             !pairs.iter().any(|&(r, s)| r == s),

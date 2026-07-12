@@ -124,10 +124,7 @@ fn project(bag: Vec<Vec<(String, String)>>, keep: &[&str]) -> Vec<Vec<(String, S
     let mut out: Vec<Vec<(String, String)>> = bag
         .into_iter()
         .map(|row| {
-            let mut r: Vec<(String, String)> = row
-                .into_iter()
-                .filter(|(v, _)| keep.contains(&v.as_str()))
-                .collect();
+            let mut r: Vec<(String, String)> = row.into_iter().filter(|(v, _)| keep.contains(&v.as_str())).collect();
             r.sort();
             r
         })
@@ -150,18 +147,10 @@ fn social_dataset(n: usize) -> Vec<T> {
             "<http://ex/age>".into(),
             format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", i % 50),
         ));
-        v.push((
-            p,
-            "<http://ex/city>".into(),
-            format!("<http://ex/city{}>", i % 7),
-        ));
+        v.push((p, "<http://ex/city>".into(), format!("<http://ex/city{}>", i % 7)));
     }
     for c in 0..7 {
-        v.push((
-            format!("<http://ex/city{c}>"),
-            "<http://ex/country>".into(),
-            format!("<http://ex/country{}>", c % 3),
-        ));
+        v.push((format!("<http://ex/city{c}>"), "<http://ex/country>".into(), format!("<http://ex/country{}>", c % 3)));
     }
     v
 }
@@ -178,17 +167,9 @@ fn chain_join_matches_brute_force() {
     let len = 2200usize;
     let mut triples: Vec<T> = vec![];
     for i in 0..len {
-        triples.push((
-            format!("<http://ex/e/{i}>"),
-            "<http://ex/next>".into(),
-            format!("<http://ex/e/{}>", i + 1),
-        ));
+        triples.push((format!("<http://ex/e/{i}>"), "<http://ex/next>".into(), format!("<http://ex/e/{}>", i + 1)));
         // A dead-end edge out of node i that has no outgoing `next` (drops in the join).
-        triples.push((
-            format!("<http://ex/e/{i}>"),
-            "<http://ex/next>".into(),
-            format!("<http://ex/dead/{i}>"),
-        ));
+        triples.push((format!("<http://ex/e/{i}>"), "<http://ex/next>".into(), format!("<http://ex/dead/{i}>")));
     }
     let g = load(&triples);
     let engine = result_bag(
@@ -203,10 +184,7 @@ fn chain_join_matches_brute_force() {
             ["?c", "<http://ex/next>", "?d"],
         ],
     );
-    assert_eq!(
-        engine, reference,
-        "chain result must equal the brute-force bag"
-    );
+    assert_eq!(engine, reference, "chain result must equal the brute-force bag");
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -233,10 +211,7 @@ fn star_join_large_matches_brute_force() {
         ),
         &["p", "name", "age"],
     );
-    assert_eq!(
-        engine, reference,
-        "large star result must equal the brute-force bag"
-    );
+    assert_eq!(engine, reference, "large star result must equal the brute-force bag");
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -261,10 +236,7 @@ fn star_join_small_matches_brute_force() {
         ),
         &["p", "name", "age"],
     );
-    assert_eq!(
-        engine, reference,
-        "small star result must equal the brute-force bag"
-    );
+    assert_eq!(engine, reference, "small star result must equal the brute-force bag");
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -291,10 +263,7 @@ fn snowflake_join_matches_brute_force() {
         ),
         &["p", "co"],
     );
-    assert_eq!(
-        engine, reference,
-        "snowflake result must equal the brute-force bag"
-    );
+    assert_eq!(engine, reference, "snowflake result must equal the brute-force bag");
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -318,11 +287,7 @@ fn no_reduction_case_matches_brute_force() {
         ],
     );
     assert_eq!(engine, reference, "complete star: prepass removes nothing");
-    assert_eq!(
-        engine.len(),
-        4200,
-        "every person contributes exactly one row"
-    );
+    assert_eq!(engine.len(), 4200, "every person contributes exactly one row");
 }
 
 /// CYCLIC triangle: `?x->?y, ?y->?z, ?z->?x`. A cyclic BGP must route to LFTJ, NOT the
@@ -332,37 +297,14 @@ fn no_reduction_case_matches_brute_force() {
 fn cyclic_triangle_matches_brute_force() {
     // A small graph with exactly one directed triangle a->b->c->a plus distractor edges.
     let triples: Vec<T> = vec![
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/b>".into(),
-        ),
-        (
-            "<http://ex/b>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/c>".into(),
-        ),
-        (
-            "<http://ex/c>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/a>".into(),
-        ),
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/d>".into(),
-        ), // dangling
-        (
-            "<http://ex/d>".into(),
-            "<http://ex/e>".into(),
-            "<http://ex/a>".into(),
-        ),
+        ("<http://ex/a>".into(), "<http://ex/e>".into(), "<http://ex/b>".into()),
+        ("<http://ex/b>".into(), "<http://ex/e>".into(), "<http://ex/c>".into()),
+        ("<http://ex/c>".into(), "<http://ex/e>".into(), "<http://ex/a>".into()),
+        ("<http://ex/a>".into(), "<http://ex/e>".into(), "<http://ex/d>".into()), // dangling
+        ("<http://ex/d>".into(), "<http://ex/e>".into(), "<http://ex/a>".into()),
     ];
     let g = load(&triples);
-    let engine = result_bag(
-        &g,
-        "SELECT ?x ?y ?z WHERE { ?x ex:e ?y . ?y ex:e ?z . ?z ex:e ?x }",
-    );
+    let engine = result_bag(&g, "SELECT ?x ?y ?z WHERE { ?x ex:e ?y . ?y ex:e ?z . ?z ex:e ?x }");
     let reference = brute(
         &triples,
         &[
@@ -371,10 +313,7 @@ fn cyclic_triangle_matches_brute_force() {
             ["?z", "<http://ex/e>", "?x"],
         ],
     );
-    assert_eq!(
-        engine, reference,
-        "cyclic triangle (LFTJ path) must equal brute force"
-    );
+    assert_eq!(engine, reference, "cyclic triangle (LFTJ path) must equal brute force");
     assert!(!engine.is_empty(), "the triangle exists");
 }
 
@@ -383,16 +322,8 @@ fn cyclic_triangle_matches_brute_force() {
 #[test]
 fn disjoint_join_is_empty_both_ways() {
     let triples: Vec<T> = vec![
-        (
-            "<http://ex/a>".into(),
-            "<http://ex/r>".into(),
-            "<http://ex/x>".into(),
-        ),
-        (
-            "<http://ex/b>".into(),
-            "<http://ex/s>".into(),
-            "<http://ex/y>".into(),
-        ),
+        ("<http://ex/a>".into(), "<http://ex/r>".into(), "<http://ex/x>".into()),
+        ("<http://ex/b>".into(), "<http://ex/s>".into(), "<http://ex/y>".into()),
     ];
     let g = load(&triples);
     let engine = result_bag(&g, "SELECT ?m WHERE { ?a ex:r ?m . ?m ex:s ?o }");
@@ -416,30 +347,18 @@ fn filtered_join_matches_brute_force() {
     // Reference: full join, then filter on the integer value of ?age < 10.
     let joined = brute(
         &triples,
-        &[
-            ["?p", "<http://ex/age>", "?age"],
-            ["?p", "<http://ex/name>", "?name"],
-        ],
+        &[["?p", "<http://ex/age>", "?age"], ["?p", "<http://ex/name>", "?name"]],
     );
     let filtered: Vec<Vec<(String, String)>> = joined
         .into_iter()
         .filter(|row| {
             let age_lex = &row.iter().find(|(v, _)| v == "age").unwrap().1;
             // Lexical form is `"NN"^^<...integer>`; parse the leading quoted integer.
-            let n: i64 = age_lex
-                .trim_start_matches('"')
-                .split('"')
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
+            let n: i64 = age_lex.trim_start_matches('"').split('"').next().unwrap().parse().unwrap();
             n < 10
         })
         .collect();
     let reference = project(filtered, &["p", "age", "name"]);
-    assert_eq!(
-        engine, reference,
-        "filtered join must equal the brute-force bag"
-    );
+    assert_eq!(engine, reference, "filtered join must equal the brute-force bag");
     assert!(!engine.is_empty(), "non-vacuous");
 }

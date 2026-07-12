@@ -50,11 +50,7 @@ fn multiset(g: &Graph, q: &str) -> Table {
     let mut rows: Table = r
         .rows
         .iter()
-        .map(|row| {
-            row.iter()
-                .map(|c| c.as_ref().map(|t| t.to_string()))
-                .collect()
-        })
+        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
         .collect();
     rows.sort();
     rows
@@ -138,15 +134,9 @@ fn q06_dataset() -> Graph {
 fn q07_shape_bag_equivalence() {
     let g = q07_dataset();
     let (cold, live) = cold_vs_live(&g, Q07_LIKE);
-    assert_eq!(
-        cold, live,
-        "q07 anti-join result differs between cold and early-decline paths"
-    );
+    assert_eq!(cold, live, "q07 anti-join result differs between cold and early-decline paths");
     // Sanity: the query returns SOME rows (else the equivalence is vacuous on empty).
-    assert!(
-        !cold.is_empty(),
-        "q07 fixture produced no rows — fixture is degenerate"
-    );
+    assert!(!cold.is_empty(), "q07 fixture produced no rows — fixture is degenerate");
 }
 
 /// q06-shaped CORRELATED anti-join: unchanged (the feature must not touch a real correlation).
@@ -154,14 +144,8 @@ fn q07_shape_bag_equivalence() {
 fn q06_shape_correlated_equivalence() {
     let g = q06_dataset();
     let (cold, live) = cold_vs_live(&g, Q06_LIKE);
-    assert_eq!(
-        cold, live,
-        "q06 correlated anti-join result differs between cold and live paths"
-    );
-    assert!(
-        !cold.is_empty(),
-        "q06 fixture produced no rows — fixture is degenerate"
-    );
+    assert_eq!(cold, live, "q06 correlated anti-join result differs between cold and live paths");
+    assert!(!cold.is_empty(), "q06 fixture produced no rows — fixture is degenerate");
 }
 
 /// NON-VACUITY (feature-ON build only): the static early-decline gate FIRES on the q07 shape
@@ -176,19 +160,13 @@ fn early_decline_fires_on_q07_not_on_q06() {
     theta_antijoin_testing::reset_stats();
     let _ = query(&g07, &format!("{PFX}{Q07_LIKE}")).unwrap();
     let early_q07 = sparq_engine::theta_antijoin_testing::early_declined();
-    assert!(
-        early_q07 > 0,
-        "static early-decline did not fire on the q07 (bare !bound) shape"
-    );
+    assert!(early_q07 > 0, "static early-decline did not fire on the q07 (bare !bound) shape");
 
     let g06 = q06_dataset();
     theta_antijoin_testing::reset_stats();
     let _ = query(&g06, &format!("{PFX}{Q06_LIKE}")).unwrap();
     let early_q06 = sparq_engine::theta_antijoin_testing::early_declined();
-    assert_eq!(
-        early_q06, 0,
-        "static early-decline WRONGLY fired on a genuinely correlated q06 shape"
-    );
+    assert_eq!(early_q06, 0, "static early-decline WRONGLY fired on a genuinely correlated q06 shape");
 
     theta_antijoin_testing::set_enabled(prev);
 }
@@ -202,8 +180,5 @@ fn mutation_equivalence_is_non_vacuous() {
     let (cold, _live) = cold_vs_live(&g, Q07_LIKE);
     let mut mutated = cold.clone();
     mutated.push(vec![Some("__phantom_title__".to_string())]);
-    assert_ne!(
-        cold, mutated,
-        "mutation guard: a changed result set must not compare equal"
-    );
+    assert_ne!(cold, mutated, "mutation guard: a changed result set must not compare equal");
 }

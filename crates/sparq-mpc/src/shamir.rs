@@ -2159,10 +2159,7 @@ mod tests {
         let b = ShamirBackend::new_seeded(5, 0x0DDD).unwrap();
         let dealer = b.dealer();
         let dbg = format!("{dealer:?}");
-        assert!(
-            dbg.contains("ShamirDealer"),
-            "Debug must name the struct: {dbg}"
-        );
+        assert!(dbg.contains("ShamirDealer"), "Debug must name the struct: {dbg}");
         assert!(
             dbg.contains("<live masking RNG>"),
             "Debug must redact the live RNG state: {dbg}"
@@ -2179,10 +2176,7 @@ mod tests {
         let mut dealer = b.dealer();
         let session = dealer.new_mac_session();
         let dbg = format!("{session:?}");
-        assert!(
-            dbg.contains("MacSession"),
-            "Debug must name the struct: {dbg}"
-        );
+        assert!(dbg.contains("MacSession"), "Debug must name the struct: {dbg}");
         assert!(
             dbg.contains("<secret session MAC key"),
             "Debug must carry the α redaction label: {dbg}"

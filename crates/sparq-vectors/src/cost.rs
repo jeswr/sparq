@@ -295,18 +295,17 @@ mod tests {
         let query = [1.0f32, 0.0];
         // A few masks of different selectivity, including ones smaller than k.
         for ids in [
-            vec![1u32, 5, 9, 13, 33],         // selective, scattered
-            (1u32..=64).step_by(2).collect(), // ~half
-            (1u32..=64).collect(),            // full
-            vec![2u32, 4],                    // smaller than k=5
+            vec![1u32, 5, 9, 13, 33],           // selective, scattered
+            (1u32..=64).step_by(2).collect(),   // ~half
+            (1u32..=64).collect(),              // full
+            vec![2u32, 4],                      // smaller than k=5
         ] {
             let mask: IdMask = ids.into_iter().collect();
             for k in [1usize, 3, 5, 10] {
                 let pre = nearest_exact_filtered(&store, &query, &mask, k);
                 let post = postfilter_exact(&store, &query, &mask, k);
                 assert_eq!(
-                    pre,
-                    post,
+                    pre, post,
                     "pre/post-filter must be identical (mask_len={}, k={k})",
                     mask.len()
                 );
@@ -378,10 +377,7 @@ mod tests {
         let mask: IdMask = vec![3u32, 7, 11, 19].into_iter().collect();
         let hits = postfilter_exact(&store, &query, &mask, 10);
         for &(id, _) in &hits {
-            assert!(
-                mask.contains(id),
-                "post-filter returned an unmasked id {id}"
-            );
+            assert!(mask.contains(id), "post-filter returned an unmasked id {id}");
         }
         // Scores are non-increasing (best-first).
         for w in hits.windows(2) {

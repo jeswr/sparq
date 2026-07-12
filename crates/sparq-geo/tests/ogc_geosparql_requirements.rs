@@ -726,8 +726,12 @@ fn distance_accuracy_boundary_is_as_documented() {
 
     // (2) Point↔geometry: exact spherical closest point. A point due west of a
     // small box equals the haversine to the box's nearest (west) edge.
-    let d_pg = lex::distance("POINT(0 0)", "POLYGON((1 -1, 2 -1, 2 1, 1 1, 1 -1))", METRE)
-        .expect("metric point-polygon");
+    let d_pg = lex::distance(
+        "POINT(0 0)",
+        "POLYGON((1 -1, 2 -1, 2 1, 1 1, 1 -1))",
+        METRE,
+    )
+    .expect("metric point-polygon");
     // Nearest edge point is (1,0); haversine (0,0)->(1,0) ≈ 1° of longitude at the
     // equator ≈ the same 1-degree arc. Must be finite and ~111 km.
     assert!(

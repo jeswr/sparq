@@ -487,36 +487,16 @@ pub fn train(
             // its own; weighting only the positive is the canonical CKRL form). Under
             // `WeightMode::Uniform` `w == 1.0`, so `lr * w == lr` and the step is unchanged.
             let w = prov_weights.weight_of([h, r, t], config.weight_mode);
-            let (l, _) = step(
-                config.model,
-                &mut entity_emb,
-                &mut rel_emb,
-                dim,
-                hr,
-                rr,
-                tr,
-                1.0,
-                lr * w,
-                l2,
-            );
+            let (l, _) =
+                step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, tr, 1.0, lr * w, l2);
             loss_sum += l as f64;
             loss_terms += 1;
 
             // Tail-corrupted negatives.
             for neg in sampler.sample([h, r, t], Corrupt::Tail, half_neg, neg_seed) {
                 let ntr = entity_row[&neg[2]];
-                let (l, _) = step(
-                    config.model,
-                    &mut entity_emb,
-                    &mut rel_emb,
-                    dim,
-                    hr,
-                    rr,
-                    ntr,
-                    0.0,
-                    lr,
-                    l2,
-                );
+                let (l, _) =
+                    step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, ntr, 0.0, lr, l2);
                 loss_sum += l as f64;
                 loss_terms += 1;
             }
@@ -528,18 +508,8 @@ pub fn train(
                 neg_seed ^ 0xDEAD_BEEF,
             ) {
                 let nhr = entity_row[&neg[0]];
-                let (l, _) = step(
-                    config.model,
-                    &mut entity_emb,
-                    &mut rel_emb,
-                    dim,
-                    nhr,
-                    rr,
-                    tr,
-                    0.0,
-                    lr,
-                    l2,
-                );
+                let (l, _) =
+                    step(config.model, &mut entity_emb, &mut rel_emb, dim, nhr, rr, tr, 0.0, lr, l2);
                 loss_sum += l as f64;
                 loss_terms += 1;
             }
@@ -588,12 +558,8 @@ fn step(
     l2: f32,
 ) -> (f32, f32) {
     match model {
-        ModelKind::DistMult => {
-            step_distmult(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2)
-        }
-        ModelKind::ComplEx => {
-            step_complex(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2)
-        }
+        ModelKind::DistMult => step_distmult(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2),
+        ModelKind::ComplEx => step_complex(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2),
     }
 }
 
@@ -846,32 +812,26 @@ ex:alice ex:owns ex:milo .
         // DistMult: the forward and reverse scores are MATHEMATICALLY identical (structural
         // symmetry); they differ only by f32 summation-order rounding, which is exactly the point —
         // DistMult cannot represent any directional preference, so it is near-random on this slice.
-        let dm_cfg =
-            TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 7);
+        let dm_cfg = TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 7);
         let (dm, _) = train(&c.graph, &tc, dm_cfg);
         let fwd = dm.score(a0, next, a1).unwrap();
         let rev = dm.score(a1, next, a0).unwrap();
         assert!(
             (fwd - rev).abs() <= 1e-5 * fwd.abs().max(1.0),
             "DistMult MUST be (mathematically) symmetric: (a0 next a1)={} vs (a1 next a0)={}",
-            fwd,
-            rev
+            fwd, rev
         );
 
         // ComplEx: trained on the forward-only chain, it must learn to score the forward edge above
         // its reverse on average over the chain (the asymmetry it exists to capture).
-        let cx_cfg =
-            TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 7);
+        let cx_cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 7);
         let (cx, _) = train(&c.graph, &tc, cx_cfg);
         let mut wins = 0usize;
         let mut nontrivial_gap = 0usize;
         let mut total = 0usize;
         for i in 0..39 {
             let x = c.graph.id_of(&iri(&format!("http://ex/a{}", i))).unwrap();
-            let y = c
-                .graph
-                .id_of(&iri(&format!("http://ex/a{}", i + 1)))
-                .unwrap();
+            let y = c.graph.id_of(&iri(&format!("http://ex/a{}", i + 1))).unwrap();
             let f = cx.score(x, next, y).unwrap();
             let r = cx.score(y, next, x).unwrap();
             if f > r {
@@ -904,8 +864,7 @@ ex:alice ex:owns ex:milo .
     fn complex_trains_and_is_non_degenerate_and_deterministic() {
         let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
         let tc = TypeConstraints::mine(&c.graph);
-        let cfg =
-            TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::TypeConstrained, 5);
+        let cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::TypeConstrained, 5);
         let (m1, r1) = train(&c.graph, &tc, cfg);
         assert!(r1.loss_decreased(), "ComplEx loss must decrease");
         assert!(m1.row_spread() > 1e-3, "ComplEx rows collapsed");
@@ -924,8 +883,7 @@ ex:alice ex:owns ex:milo .
     fn complex_odd_dim_rounds_down_to_even() {
         let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
         let tc = TypeConstraints::mine(&c.graph);
-        let mut cfg =
-            TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 1);
+        let mut cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 1);
         cfg.dim = 31; // odd → rounded to 30
         let (m, _) = train(&c.graph, &tc, cfg);
         assert_eq!(m.dim, 30, "odd ComplEx dim must round down to even");

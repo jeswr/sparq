@@ -20,7 +20,9 @@
 
 use sparq_zk::verify::VerifyError;
 use sparq_zk_compose::manifest::{CircuitId, EntailmentRegime, StatusListSnapshot};
-use sparq_zk_compose::verifier::{CheckError, EntailmentPolicy, HolderRegistry, RevocationPolicy};
+use sparq_zk_compose::verifier::{
+    CheckError, EntailmentPolicy, HolderRegistry, RevocationPolicy,
+};
 // KeySet is re-used from sparq-zk; the compose crate's verifier re-exports it.
 use sparq_zk_compose::verifier::KeySet;
 
@@ -58,15 +60,9 @@ fn check_error_display_covers_structural_reject_reasons() {
     assert_display_carries(&CheckError::BindingInconsistent { edge: 7 }, &["edge", "7"]);
     assert_display_carries(&CheckError::ProofRejected { proof: 1 }, &["bb", "1"]);
     assert_display_carries(&CheckError::MissingProof { proof: 2 }, &["2"]);
+    assert_display_carries(&CheckError::MalformedProof { proof: 4 }, &["4", "malformed"]);
     assert_display_carries(
-        &CheckError::MalformedProof { proof: 4 },
-        &["4", "malformed"],
-    );
-    assert_display_carries(
-        &CheckError::MalformedField {
-            proof: 0,
-            what: "bound",
-        },
+        &CheckError::MalformedField { proof: 0, what: "bound" },
         &["bound"],
     );
     assert_display_carries(
@@ -88,14 +84,8 @@ fn check_error_display_covers_structural_reject_reasons() {
         &["strictly increasing", "S2.5"],
     );
     // [OPUS-4.8] sq-sfsi: hidden cross-credential JOIN bind_joins reject reasons.
-    assert_display_carries(
-        &CheckError::JoinDanglingEdge { edge: 2 },
-        &["join edge", "2"],
-    );
-    assert_display_carries(
-        &CheckError::JoinEdgeKindMismatch { edge: 3 },
-        &["join edge", "3"],
-    );
+    assert_display_carries(&CheckError::JoinDanglingEdge { edge: 2 }, &["join edge", "2"]);
+    assert_display_carries(&CheckError::JoinEdgeKindMismatch { edge: 3 }, &["join edge", "3"]);
     assert_display_carries(
         &CheckError::JoinCommitmentMismatch { edge: 4 },
         &["join edge", "4", "commit_a"],
@@ -113,39 +103,22 @@ fn check_error_display_covers_structural_reject_reasons() {
 
 #[test]
 fn check_error_display_covers_query_correctness_reasons() {
+    assert_display_carries(&CheckError::UnboundPattern { pattern: 2 }, &["pattern", "2"]);
     assert_display_carries(
-        &CheckError::UnboundPattern { pattern: 2 },
-        &["pattern", "2"],
-    );
-    assert_display_carries(
-        &CheckError::UnboundFilter {
-            variable: "age".into(),
-        },
+        &CheckError::UnboundFilter { variable: "age".into() },
         &["age", "FILTER"],
     );
     assert_display_carries(
-        &CheckError::UnmappableFilterVar {
-            variable: "x".into(),
-        },
+        &CheckError::UnmappableFilterVar { variable: "x".into() },
         &["x", "FILTER"],
     );
     assert_display_carries(
-        &CheckError::AttributionUnderDeclared {
-            pattern: 0,
-            proof_graph: 1,
-        },
+        &CheckError::AttributionUnderDeclared { pattern: 0, proof_graph: 1 },
         &["pattern", "1"],
     );
+    assert_display_carries(&CheckError::AttributionUnbound { pattern: 3 }, &["pattern", "3"]);
     assert_display_carries(
-        &CheckError::AttributionUnbound { pattern: 3 },
-        &["pattern", "3"],
-    );
-    assert_display_carries(
-        &CheckError::AttributionMalformed {
-            proof: 0,
-            expected: 2,
-            got: 1,
-        },
+        &CheckError::AttributionMalformed { proof: 0, expected: 2, got: 1 },
         &["2", "1"],
     );
 }
@@ -153,28 +126,19 @@ fn check_error_display_covers_query_correctness_reasons() {
 #[test]
 fn check_error_display_covers_issuer_and_salt_reasons() {
     assert_display_carries(
-        &CheckError::UnattestedCommitment {
-            proof: 0,
-            commitment: "0xc0".into(),
-        },
+        &CheckError::UnattestedCommitment { proof: 0, commitment: "0xc0".into() },
         &["0xc0", "attestation"],
     );
     assert_display_carries(
-        &CheckError::InvalidIssuerSignature {
-            commitment: "0xc1".into(),
-        },
+        &CheckError::InvalidIssuerSignature { commitment: "0xc1".into() },
         &["0xc1", "signature"],
     );
     assert_display_carries(
-        &CheckError::IssuerKeyNotInKeySet {
-            commitment: "0xc2".into(),
-        },
+        &CheckError::IssuerKeyNotInKeySet { commitment: "0xc2".into() },
         &["0xc2", "K"],
     );
     assert_display_carries(
-        &CheckError::UntrustedDeclaredKey {
-            key: "0xkey".into(),
-        },
+        &CheckError::UntrustedDeclaredKey { key: "0xkey".into() },
         &["0xkey"],
     );
     assert_display_carries(
@@ -184,15 +148,9 @@ fn check_error_display_covers_issuer_and_salt_reasons() {
         },
         &["0xc3", "0xk3"],
     );
+    assert_display_carries(&CheckError::SaltReused { salt: "0xs".into() }, &["0xs", "salt"]);
     assert_display_carries(
-        &CheckError::SaltReused { salt: "0xs".into() },
-        &["0xs", "salt"],
-    );
-    assert_display_carries(
-        &CheckError::ScanCommitmentSaltMissing {
-            proof: 1,
-            commitment: "0xc4".into(),
-        },
+        &CheckError::ScanCommitmentSaltMissing { proof: 1, commitment: "0xc4".into() },
         &["0xc4", "salt"],
     );
 }
@@ -202,56 +160,34 @@ fn check_error_display_covers_nonce_and_revocation_reasons() {
     assert_display_carries(&CheckError::NonceReplay, &["nonce", "single-use"]);
     assert_display_carries(&CheckError::NonceBindingMismatch, &["nonce"]);
     assert_display_carries(
-        &CheckError::ScanCommitmentStatusMissing {
-            proof: 0,
-            commitment: "0xc5".into(),
-        },
+        &CheckError::ScanCommitmentStatusMissing { proof: 0, commitment: "0xc5".into() },
         &["0xc5", "status"],
     );
     assert_display_carries(&CheckError::RevocationReferenceMissing { proof: 2 }, &["2"]);
     assert_display_carries(
-        &CheckError::RevocationReferenceMismatch {
-            commitment: "0xc6".into(),
-        },
+        &CheckError::RevocationReferenceMismatch { commitment: "0xc6".into() },
         &["0xc6"],
     );
     assert_display_carries(
-        &CheckError::RevocationReferenceModeInvalid {
-            commitment: "0xc7".into(),
-        },
+        &CheckError::RevocationReferenceModeInvalid { commitment: "0xc7".into() },
         &["0xc7"],
     );
     assert_display_carries(&CheckError::HiddenRevocationRequired { proof: 1 }, &["1"]);
+    assert_display_carries(&CheckError::HiddenRevocationIndexCommitmentMismatch, &["index commitment"]);
     assert_display_carries(
-        &CheckError::HiddenRevocationIndexCommitmentMismatch,
-        &["index commitment"],
-    );
-    assert_display_carries(
-        &CheckError::StatusSnapshotMissing {
-            status_list: "http://ex/l".into(),
-            version: 3,
-        },
+        &CheckError::StatusSnapshotMissing { status_list: "http://ex/l".into(), version: 3 },
         &["http://ex/l", "3"],
     );
     assert_display_carries(
-        &CheckError::StatusSnapshotTampered {
-            status_list: "http://ex/l".into(),
-            version: 4,
-        },
+        &CheckError::StatusSnapshotTampered { status_list: "http://ex/l".into(), version: 4 },
         &["http://ex/l", "4"],
     );
     assert_display_carries(
-        &CheckError::CredentialRevoked {
-            status_list: "http://ex/l".into(),
-            index: 5,
-        },
+        &CheckError::CredentialRevoked { status_list: "http://ex/l".into(), index: 5 },
         &["http://ex/l", "5", "REVOKED"],
     );
     assert_display_carries(
-        &CheckError::StatusListStale {
-            status_list: "http://ex/l".into(),
-            version: 6,
-        },
+        &CheckError::StatusListStale { status_list: "http://ex/l".into(), version: 6 },
         &["http://ex/l", "6"],
     );
 }
@@ -260,10 +196,7 @@ fn check_error_display_covers_nonce_and_revocation_reasons() {
 fn check_error_display_covers_hidden_revocation_reasons() {
     assert_display_carries(&CheckError::HiddenRevocationNotEnabled, &["hidden-index"]);
     assert_display_carries(
-        &CheckError::HiddenRevocationDepthMismatch {
-            declared: 10,
-            policy: 8,
-        },
+        &CheckError::HiddenRevocationDepthMismatch { declared: 10, policy: 8 },
         &["10", "8"],
     );
     assert_display_carries(
@@ -282,24 +215,17 @@ fn check_error_display_covers_hidden_revocation_reasons() {
 fn check_error_display_covers_hidden_issuer_reasons() {
     assert_display_carries(&CheckError::HiddenIssuerNotEnabled, &["hidden-issuer"]);
     assert_display_carries(
-        &CheckError::HiddenIssuerDepthMismatch {
-            declared: 4,
-            policy: 5,
-        },
+        &CheckError::HiddenIssuerDepthMismatch { declared: 4, policy: 5 },
         &["4", "5"],
     );
     assert_display_carries(&CheckError::HiddenIssuerRootUnavailable, &["key-set"]);
     assert_display_carries(&CheckError::HiddenIssuerRootMismatch, &["root"]);
     assert_display_carries(
-        &CheckError::HiddenIssuerMessageMismatch {
-            commitment: "0xc8".into(),
-        },
+        &CheckError::HiddenIssuerMessageMismatch { commitment: "0xc8".into() },
         &["0xc8", "message"],
     );
     assert_display_carries(
-        &CheckError::HiddenIssuerUnreferencedCommitment {
-            commitment: "0xc9".into(),
-        },
+        &CheckError::HiddenIssuerUnreferencedCommitment { commitment: "0xc9".into() },
         &["0xc9"],
     );
     assert_display_carries(&CheckError::HiddenIssuerProofRejected, &["bb"]);
@@ -312,55 +238,38 @@ fn check_error_display_covers_hidden_issuer_reasons() {
 #[test]
 fn check_error_display_covers_holder_pok_reasons() {
     assert_display_carries(
-        &CheckError::HolderPokUnreferencedCommitment {
-            commitment: "0xd1".into(),
-        },
+        &CheckError::HolderPokUnreferencedCommitment { commitment: "0xd1".into() },
         &["0xd1", "sq-c2ql"],
     );
     assert_display_carries(
-        &CheckError::HolderPokBindingMissing {
-            commitment: "0xd2".into(),
-        },
+        &CheckError::HolderPokBindingMissing { commitment: "0xd2".into() },
         &["0xd2", "sq-c2ql"],
     );
     assert_display_carries(
-        &CheckError::HolderPokMissing {
-            commitment: "0xd3".into(),
-        },
+        &CheckError::HolderPokMissing { commitment: "0xd3".into() },
         &["0xd3", "sq-c2ql"],
     );
     assert_display_carries(
-        &CheckError::HolderPokDigestMismatch {
-            commitment: "0xd4".into(),
-        },
+        &CheckError::HolderPokDigestMismatch { commitment: "0xd4".into() },
         &["0xd4", "binding edge"],
     );
     assert_display_carries(
-        &CheckError::HolderPokProofRejected {
-            commitment: "0xd5".into(),
-        },
+        &CheckError::HolderPokProofRejected { commitment: "0xd5".into() },
         &["0xd5", "bb"],
     );
-    assert_display_carries(
-        &CheckError::HolderPokMalformedProof,
-        &["malformed", "sq-c2ql"],
-    );
+    assert_display_carries(&CheckError::HolderPokMalformedProof, &["malformed", "sq-c2ql"]);
 }
 
 #[test]
 fn check_error_display_covers_holder_pop_and_entailment_reasons() {
     assert_display_carries(&CheckError::HolderRegistryEmpty, &["HolderPop", "registry"]);
     assert_display_carries(
-        &CheckError::HolderNotTrusted {
-            holder: "0xh".into(),
-        },
+        &CheckError::HolderNotTrusted { holder: "0xh".into() },
         &["0xh", "registry"],
     );
     assert_display_carries(&CheckError::HolderPopMalformed, &["HolderPop"]);
     assert_display_carries(
-        &CheckError::HolderPopInvalid {
-            holder: "0xh2".into(),
-        },
+        &CheckError::HolderPopInvalid { holder: "0xh2".into() },
         &["0xh2"],
     );
     assert_display_carries(
@@ -374,10 +283,7 @@ fn check_error_display_covers_holder_pop_and_entailment_reasons() {
     );
     assert_display_carries(&CheckError::MalformedDerivationStep { step: 2 }, &["2"]);
     assert_display_carries(
-        &CheckError::UngroundedDerivationAntecedent {
-            step: 1,
-            antecedent: 0,
-        },
+        &CheckError::UngroundedDerivationAntecedent { step: 1, antecedent: 0 },
         &["1", "0"],
     );
 }
@@ -398,10 +304,7 @@ fn check_error_is_a_std_error() {
 #[test]
 fn keyset_empty_trusts_nothing_and_overflow_root_is_none() {
     let k = KeySet::empty();
-    assert!(
-        k.is_empty(),
-        "an empty KeySet trusts no issuer (fail-closed default)"
-    );
+    assert!(k.is_empty(), "an empty KeySet trusts no issuer (fail-closed default)");
     // No keys => no authoritative hidden-issuer root member index.
     assert_eq!(k.member_index("00"), None);
     // A hidden-issuer root over an empty set at depth 0 is defined (single padding
@@ -414,10 +317,7 @@ fn keyset_from_hex_drops_unparseable_keys_failclosed() {
     // Unparseable / non-curve hex entries are DROPPED (they can never match a real
     // attestation key, so dropping is fail-closed — never a silent trust widening).
     let k = KeySet::from_hex_keys(["not-a-key", "zzzz", ""]);
-    assert!(
-        k.is_empty(),
-        "garbage keys are dropped, leaving an empty (no-trust) set"
-    );
+    assert!(k.is_empty(), "garbage keys are dropped, leaving an empty (no-trust) set");
 
     // A KeySet builder enabling the hidden-issuer path keeps the trust set intact.
     let enabled = KeySet::empty().with_hidden_issuer_depth(4);
@@ -427,15 +327,9 @@ fn keyset_from_hex_drops_unparseable_keys_failclosed() {
 #[test]
 fn holder_registry_empty_and_garbage_are_failclosed() {
     let r = HolderRegistry::empty();
-    assert!(
-        r.is_empty(),
-        "an empty registry trusts no holder (HolderPop rejected)"
-    );
+    assert!(r.is_empty(), "an empty registry trusts no holder (HolderPop rejected)");
     let g = HolderRegistry::from_hex_keys(["nope", "1g"]);
-    assert!(
-        g.is_empty(),
-        "unparseable holder keys are dropped fail-closed"
-    );
+    assert!(g.is_empty(), "unparseable holder keys are dropped fail-closed");
     // Default == empty.
     assert_eq!(HolderRegistry::default(), HolderRegistry::empty());
 }
@@ -451,10 +345,7 @@ fn entailment_policy_default_is_simple_only_and_owl_subsumes_rdfs() {
     // rdfs-then-owl chain, demonstrating the subsumption the builder documents.
     let owl = EntailmentPolicy::simple_only().with_owl();
     let rdfs_then_owl = EntailmentPolicy::simple_only().with_rdfs().with_owl();
-    assert_eq!(
-        owl, rdfs_then_owl,
-        "with_owl implies with_rdfs (Owl subsumes RDFS)"
-    );
+    assert_eq!(owl, rdfs_then_owl, "with_owl implies with_rdfs (Owl subsumes RDFS)");
     // rdfs-only differs from owl-enabled.
     assert_ne!(EntailmentPolicy::simple_only().with_rdfs(), owl);
     // EntailmentRegime is Copy/Eq — touch it so the import is load-bearing.

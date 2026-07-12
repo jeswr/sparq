@@ -60,10 +60,7 @@ fn main() {
     println!("# sq-0wo9e P0 ablation — INDICATIVE numbers on a NON-CANONICAL work-box");
     println!("# filtered link-prediction: MRR / Hits@1 / Hits@3 / Hits@10 (higher is better)");
     println!("# matrix: closure {{off,on}} x negatives {{uniform,type-constrained}}");
-    println!(
-        "# reported as MEAN +/- STD over {} seeds; read the ASYMMETRIC ComplEx run for any",
-        seeds.len()
-    );
+    println!("# reported as MEAN +/- STD over {} seeds; read the ASYMMETRIC ComplEx run for any", seeds.len());
     println!("# inter-cell delta (DistMult is near-random on these 100%-directional slices).");
     println!();
 

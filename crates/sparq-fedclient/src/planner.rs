@@ -443,10 +443,7 @@ mod tests {
             iri("http://ex/bob"),
         );
         let sub = lower_leaf(&tp);
-        assert!(
-            sub.project.is_empty(),
-            "fully bound pattern projects nothing"
-        );
+        assert!(sub.project.is_empty(), "fully bound pattern projects nothing");
         assert_eq!(
             sub.sparql,
             "SELECT * WHERE { <http://ex/alice> <http://ex/knows> <http://ex/bob> } LIMIT 1"
@@ -485,22 +482,9 @@ mod tests {
             iri("http://ex/bob"),
         );
         let pat = lower_leaf_fragment(&tp);
-        assert_eq!(
-            pat.subject,
-            PatternTerm::Bound(FragTerm::Iri("http://ex/alice".into()))
-        );
-        assert_eq!(
-            pat.predicate,
-            PatternTerm::Bound(FragTerm::Iri("http://ex/knows".into()))
-        );
-        assert_eq!(
-            pat.object,
-            PatternTerm::Bound(FragTerm::Iri("http://ex/bob".into()))
-        );
-        assert_eq!(
-            pat.vars(),
-            Vec::<String>::new(),
-            "fully bound pattern has no variables"
-        );
+        assert_eq!(pat.subject, PatternTerm::Bound(FragTerm::Iri("http://ex/alice".into())));
+        assert_eq!(pat.predicate, PatternTerm::Bound(FragTerm::Iri("http://ex/knows".into())));
+        assert_eq!(pat.object, PatternTerm::Bound(FragTerm::Iri("http://ex/bob".into())));
+        assert_eq!(pat.vars(), Vec::<String>::new(), "fully bound pattern has no variables");
     }
 }

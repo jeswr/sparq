@@ -190,11 +190,7 @@ impl<'g> Sim<'g> {
         elems.dedup();
         let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
         let total = weights.iter().sum();
-        Signature {
-            elems,
-            weights,
-            total,
-        }
+        Signature { elems, weights, total }
     }
 
     /// Weighted Jaccard similarity of two terms' structural signatures, in `[0, 1]`:
@@ -310,16 +306,11 @@ impl<'g> Sim<'g> {
         // 4. Neighbor-sparse fallback: when index-driven generation starves
         // (fewer than k candidates), fill the remaining slots with
         // predicate-PROFILE matches (see `profile_fallback`).
-        if self.profile_fallback
-            && self.mode == SignatureMode::PredicateNeighbor
-            && scored.len() < k
+        if self.profile_fallback && self.mode == SignatureMode::PredicateNeighbor && scored.len() < k
         {
             self.fill_profile_fallback(sig, k, exclude, &mut scored);
         }
-        scored
-            .into_iter()
-            .map(|(c, s)| (self.graph.dict.term(c), s))
-            .collect()
+        scored.into_iter().map(|(c, s)| (self.graph.dict.term(c), s)).collect()
     }
 
     /// The neighbor-sparse fallback of [`most_similar`](Self::most_similar):
@@ -363,10 +354,7 @@ impl<'g> Sim<'g> {
             // Who else plays this role? Every subject (OUT) / object (IN) of
             // the predicate's block.
             let sorted_by = if dir == OUT { 0 } else { 2 };
-            let scan = self
-                .graph
-                .store
-                .scan_sorted(&[None, Some(p), None], sorted_by);
+            let scan = self.graph.store.scan_sorted(&[None, Some(p), None], sorted_by);
             let mut last: Option<Id> = None;
             for row in scan.rows.iter() {
                 let cand = scan.to_spo(row)[sorted_by];
@@ -390,12 +378,7 @@ impl<'g> Sim<'g> {
         let probe = self.profile_of(sig);
         let mut fb: Vec<(Id, f64)> = acc
             .into_keys()
-            .map(|c| {
-                (
-                    c,
-                    weighted_jaccard(&probe, &self.signature_of_id_mode(c, false)),
-                )
-            })
+            .map(|c| (c, weighted_jaccard(&probe, &self.signature_of_id_mode(c, false))))
             .filter(|&(_, s)| s > 0.0)
             .collect();
         fb.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -413,11 +396,7 @@ impl<'g> Sim<'g> {
         elems.dedup();
         let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
         let total = weights.iter().sum();
-        Signature {
-            elems,
-            weights,
-            total,
-        }
+        Signature { elems, weights, total }
     }
 
     /// Whether an id names an entity (IRI or blank node) — literals (incl. inline
@@ -475,19 +454,12 @@ mod tests {
     }
 
     fn unweighted(g: &Graph) -> Sim<'_> {
-        Sim::with_config(
-            g,
-            SimConfig {
-                idf: false,
-                ..SimConfig::default()
-            },
-        )
+        Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
     }
 
     #[test]
     fn identical_signatures_similarity_one() {
-        let g =
-            graph(":alice :knows :bob ; :worksAt :acme . :carol :knows :bob ; :worksAt :acme .");
+        let g = graph(":alice :knows :bob ; :worksAt :acme . :carol :knows :bob ; :worksAt :acme .");
         let sim = unweighted(&g);
         assert_eq!(sim.similarity(&iri("alice"), &iri("carol")), 1.0);
         assert_eq!(sim.similarity(&iri("alice"), &iri("alice")), 1.0);
@@ -498,9 +470,7 @@ mod tests {
         // sig(alice) = {(out,knows,bob), (out,knows,eve), (out,worksAt,acme)}  (3 elems)
         // sig(dave)  = {(out,knows,eve), (out,plays,chess)}                    (2 elems)
         // intersection = {(out,knows,eve)} = 1; union = 4 → 0.25.
-        let g = graph(
-            ":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .",
-        );
+        let g = graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
         let sim = unweighted(&g);
         assert_eq!(sim.similarity(&iri("alice"), &iri("dave")), 0.25);
         // symmetric
@@ -533,11 +503,7 @@ mod tests {
         let g = graph(":a :knows :x ; :worksAt :acme . :b :knows :y ; :worksAt :corp .");
         let pred_only = Sim::with_config(
             &g,
-            SimConfig {
-                mode: SignatureMode::Predicates,
-                idf: false,
-                ..SimConfig::default()
-            },
+            SimConfig { mode: SignatureMode::Predicates, idf: false, ..SimConfig::default() },
         );
         // Same predicate profile, different neighbors.
         assert_eq!(pred_only.similarity(&iri("a"), &iri("b")), 1.0);
@@ -557,10 +523,7 @@ mod tests {
         let plain = unweighted(&g);
         let ab = plain.similarity(&iri("a"), &iri("b"));
         let ac = plain.similarity(&iri("a"), &iri("c"));
-        assert_eq!(
-            ab, ac,
-            "unweighted: both pairs share exactly one of a's two elements"
-        );
+        assert_eq!(ab, ac, "unweighted: both pairs share exactly one of a's two elements");
         let idf = Sim::new(&g);
         assert!(
             idf.similarity(&iri("a"), &iri("b")) > idf.similarity(&iri("a"), &iri("c")),
@@ -576,11 +539,7 @@ mod tests {
         assert!(with_type.similarity(&iri("a"), &iri("b")) > 0.0);
         let no_type = Sim::with_config(
             &g,
-            SimConfig {
-                idf: false,
-                exclude_predicates: vec![rdf_type],
-                ..SimConfig::default()
-            },
+            SimConfig { idf: false, exclude_predicates: vec![rdf_type], ..SimConfig::default() },
         );
         assert_eq!(no_type.similarity(&iri("a"), &iri("b")), 0.0);
         assert_eq!(no_type.signature(&iri("a")).unwrap().len(), 1); // just (out, :p, :x)
@@ -601,23 +560,14 @@ mod tests {
         assert_eq!(top[0].1, 1.0);
         assert_eq!(names[1], "<http://ex.org/half>"); // shares 1 elem; union = 3+2-1 → 1/4
         assert_eq!(top[1].1, 0.25);
-        assert!(
-            !names.iter().any(|n| n == "<http://ex.org/a>"),
-            "self must be excluded"
-        );
-        assert!(
-            !names.iter().any(|n| n == "<http://ex.org/far>"),
-            "disjoint entity must not appear"
-        );
+        assert!(!names.iter().any(|n| n == "<http://ex.org/a>"), "self must be excluded");
+        assert!(!names.iter().any(|n| n == "<http://ex.org/far>"), "disjoint entity must not appear");
         // most_similar scores must agree with the pairwise API.
         assert_eq!(top[1].1, sim.similarity(&iri("a"), &iri("half")));
         // … and literals must never be returned as entities.
         let g2 = graph(":s1 :p \"lit\" . :s2 :p \"lit\" .");
         let sim2 = unweighted(&g2);
-        assert!(sim2
-            .most_similar(&iri("s1"), 5)
-            .iter()
-            .all(|(t, _)| !matches!(t, Term::Literal(_))));
+        assert!(sim2.most_similar(&iri("s1"), 5).iter().all(|(t, _)| !matches!(t, Term::Literal(_))));
     }
 
     #[test]
@@ -657,10 +607,7 @@ mod tests {
         );
         let top = strict.most_similar(&iri("a"), 10);
         assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
-        assert_eq!(
-            top[0].1, 1.0,
-            "re-score must include the capped hub element"
-        );
+        assert_eq!(top[0].1, 1.0, "re-score must include the capped hub element");
         // c..f share only the capped hub element → not generated (the approximation;
         // fallback disabled pins the strict v1 behaviour).
         assert_eq!(top.len(), 1);
@@ -669,11 +616,7 @@ mod tests {
         // (c..f share 1 of a's 2 roles → 0.5).
         let sim = Sim::with_config(
             &g,
-            SimConfig {
-                idf: false,
-                max_pair_frequency: 5,
-                ..SimConfig::default()
-            },
+            SimConfig { idf: false, max_pair_frequency: 5, ..SimConfig::default() },
         );
         let top = sim.most_similar(&iri("a"), 10);
         assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
@@ -696,11 +639,7 @@ mod tests {
         );
         let strict = Sim::with_config(
             &g,
-            SimConfig {
-                idf: false,
-                profile_fallback: false,
-                ..SimConfig::default()
-            },
+            SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() },
         );
         assert!(
             strict.most_similar(&iri("s1"), 5).is_empty(),
@@ -730,15 +669,9 @@ mod tests {
         let sim = unweighted(&g);
         let top = sim.most_similar(&iri("a"), 5);
         let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
-        assert_eq!(
-            names[0], "<http://ex.org/twin>",
-            "exact match first: {names:?}"
-        );
+        assert_eq!(names[0], "<http://ex.org/twin>", "exact match first: {names:?}");
         assert_eq!(top[0].1, sim.similarity(&iri("a"), &iri("twin")));
-        assert!(
-            names.contains(&"<http://ex.org/role>".to_string()),
-            "{names:?}"
-        );
+        assert!(names.contains(&"<http://ex.org/role>".to_string()), "{names:?}");
         // No fallback when generation already yields k candidates.
         let top1 = sim.most_similar(&iri("a"), 1);
         assert_eq!(top1.len(), 1);
@@ -783,19 +716,14 @@ mod tests {
         let rdf_type = NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap();
         let sim = Sim::with_config(
             &g,
-            SimConfig {
-                exclude_predicates: vec![rdf_type],
-                ..SimConfig::default()
-            },
+            SimConfig { exclude_predicates: vec![rdf_type], ..SimConfig::default() },
         );
         // All pairwise similarities over the population, labelled by same-class.
         let entities: Vec<(usize, Term)> = (0..CLASSES)
             .flat_map(|c| (0..PER_CLASS).map(move |e| (c, iri(&format!("c{c}e{e}")))))
             .collect();
-        let sigs: Vec<(usize, Signature)> = entities
-            .iter()
-            .map(|(c, t)| (*c, sim.signature(t).unwrap()))
-            .collect();
+        let sigs: Vec<(usize, Signature)> =
+            entities.iter().map(|(c, t)| (*c, sim.signature(t).unwrap())).collect();
         let mut pos: Vec<f64> = Vec::new();
         let mut neg: Vec<f64> = Vec::new();
         for i in 0..sigs.len() {

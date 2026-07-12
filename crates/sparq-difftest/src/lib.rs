@@ -63,6 +63,6 @@ pub use json::{parse_results_json, QueryResults, Solution};
 pub use multiset::{multiset_equal, order_by_equal};
 pub use numeric::{canonical_double_string, numeric_equal, parse_numeric, NumericValue};
 pub use temporal::{
-    dt_compare, duration_compare, parse_datetime, parse_duration, Duration, TemporalOrder,
+    duration_compare, dt_compare, parse_datetime, parse_duration, Duration, TemporalOrder,
 };
 pub use term::{canonical_key, term_equal_rdf, Term};

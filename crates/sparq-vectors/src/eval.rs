@@ -570,11 +570,7 @@ impl MeanStd {
         }
         let mean = xs.iter().sum::<f64>() / n as f64;
         let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
-        MeanStd {
-            mean,
-            std: var.sqrt(),
-            n,
-        }
+        MeanStd { mean, std: var.sqrt(), n }
     }
 }
 
@@ -876,12 +872,7 @@ pub fn run_weight_ablation(
         let closed: ClosedGraph =
             materialise_closure(base_dict.clone(), base_triples.clone(), template.profile);
         let graph = &closed.graph;
-        let splits = Splits::split(
-            graph,
-            template.train_frac,
-            template.valid_frac,
-            seed ^ 0xF00D,
-        );
+        let splits = Splits::split(graph, template.train_frac, template.valid_frac, seed ^ 0xF00D);
 
         // Train graph + type constraints are shared across the two arms (no leakage either way).
         let train_graph = restrict_to_train(graph, &splits);

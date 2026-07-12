@@ -29,20 +29,13 @@ fn olympics_most_similar_sanity() {
     let text = std::fs::read_to_string(&path).expect("read olympics.nt");
     let g = Graph::load_str(&text, "ntriples").expect("parse olympics.nt");
     drop(text);
-    assert!(
-        g.len() > 1_700_000,
-        "expected the 1.78M-triple olympics dataset, got {}",
-        g.len()
-    );
+    assert!(g.len() > 1_700_000, "expected the 1.78M-triple olympics dataset, got {}", g.len());
 
     // Type triples excluded (the eval discipline: rdf:type is the ground truth).
     let rdf_type = NamedNode::new(RDF_TYPE).unwrap();
     let sim = Sim::with_config(
         &g,
-        SimConfig {
-            exclude_predicates: vec![rdf_type],
-            ..SimConfig::default()
-        },
+        SimConfig { exclude_predicates: vec![rdf_type], ..SimConfig::default() },
     );
 
     let athlete = Term::NamedNode(
@@ -50,11 +43,7 @@ fn olympics_most_similar_sanity() {
             .unwrap(),
     );
     let top = sim.most_similar(&athlete, 10);
-    assert_eq!(
-        top.len(),
-        10,
-        "a 134k-athlete graph must yield 10 structural neighbours"
-    );
+    assert_eq!(top.len(), 10, "a 134k-athlete graph must yield 10 structural neighbours");
     // Scores are valid similarities, sorted best-first, self excluded.
     let mut prev = f64::INFINITY;
     for (t, s) in &top {
@@ -73,8 +62,5 @@ fn olympics_most_similar_sanity() {
         .iter()
         .filter(|(t, _)| t.to_string().contains("/olympics/athlete/"))
         .count();
-    assert!(
-        athletes >= 5,
-        "expected mostly athlete neighbours, got {athletes}/10: {top:?}"
-    );
+    assert!(athletes >= 5, "expected mostly athlete neighbours, got {athletes}/10: {top:?}");
 }

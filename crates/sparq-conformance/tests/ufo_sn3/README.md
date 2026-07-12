@@ -33,7 +33,7 @@ The comparison is deliberately superset entailment. Input facts and additional v
 
 ## Reification-node projection
 
-SPARQ’s N3 `Term` model has variables, lists, and quoted N3 formulae, but no RDF-star triple-term variant. Rules therefore cannot bind a pattern such as `<<( ?s ?p ?o )>>`.
+SPARQ’s N3 `Term` model has variables, lists, and quoted N3 formulae, but no RDF 1.2 triple-term variant. Rules therefore cannot bind a pattern such as `<<( ?s ?p ?o )>>`.
 
 UFO-SN3 v1 uses an explicit proposition node instead:
 
@@ -47,7 +47,7 @@ ex:p1 a ufo:Proposition;
 
 The proposition node may hold, fail to hold, or be necessary in multiple represented situations without asserting the encoded subject-predicate-object triple in the enclosing graph.
 
-The N3 engine lacks RDF-star triple terms, so v1 uses this reification-node projection. Native RDF 1.2 quoted-triple parsing, matching, normalization, and proof serialization are a separate engine gap and are not claimed by this artifact.
+The N3 engine lacks RDF 1.2 triple terms, so v1 uses this reification-node projection. Native RDF 1.2 quoted-triple parsing, matching, normalization, and proof serialization are a separate engine gap and are not claimed by this artifact.
 
 ## Decidable profile
 
@@ -96,7 +96,7 @@ The profile does not provide:
 - general counterfactual causation;
 - defeasible normative conflict resolution;
 - anti-rigidity validation from missing counter-situations;
-- RDF-star quoted-triple matching.
+- RDF 1.2 triple-term matching.
 
 Required events, propositions, worlds, manifestations, obligations, commitments, and validation records must be supplied and finitely named. The rules may classify or relate those resources but never invent them.
 

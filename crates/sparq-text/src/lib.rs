@@ -12,9 +12,9 @@ pub mod tokenize;
 
 pub use complete::{Candidate, CandidateKind, CompletionIndex};
 pub use index::{Hit, TextIndex};
+pub use tokenize::Analyzer;
 #[cfg(feature = "engine")]
 pub use rewrite::{prepare_text, query_text, query_text_with_budget, rewrite_query};
-pub use tokenize::Analyzer;
 
 /// The `text:` vocabulary — magic predicates recognised by [`rewrite`]
 /// (`http://sparq.dev/text#`, the sparq extension namespace).

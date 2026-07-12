@@ -44,10 +44,10 @@
 // `PathReach.subject`/`object`). Re-export them so a downstream verifier
 // (`sparq-zk-compose`) can name and MATCH on them (the disclosed-solution term
 // binding) without a direct `sparq-engine` dependency.
+pub use sparq_engine::zk::{PatternKey, SlotPattern};
 use spargebra::algebra::{Expression, GraphPattern, PropertyPathExpression};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
-pub use sparq_engine::zk::{PatternKey, SlotPattern};
 use std::collections::{BTreeSet, HashMap};
 
 /// Verifier-side re-check failure. Every variant is a rejection: the
@@ -60,10 +60,7 @@ pub enum VerifyError {
     UnsupportedFragment(String),
     /// The manifest's attribution list does not match the query's pattern
     /// count (one public graph-set per BGP pattern, in query order).
-    ArityMismatch {
-        patterns: usize,
-        attributions: usize,
-    },
+    ArityMismatch { patterns: usize, attributions: usize },
     /// A pattern with an empty attribution set (a pattern no graph supports
     /// cannot contribute witnesses; the manifest is malformed).
     EmptyAttribution { pattern: usize },
@@ -119,7 +116,9 @@ pub fn fragment_patterns(sparql: &str) -> Result<Vec<PatternKey>, VerifyError> {
         Query::Construct { .. } => {
             return Err(VerifyError::UnsupportedFragment("CONSTRUCT".into()))
         }
-        Query::Describe { .. } => return Err(VerifyError::UnsupportedFragment("DESCRIBE".into())),
+        Query::Describe { .. } => {
+            return Err(VerifyError::UnsupportedFragment("DESCRIBE".into()))
+        }
     };
     let mut out = Vec::new();
     collect_patterns(pattern, &mut out)?;
@@ -139,9 +138,7 @@ fn collect_patterns(gp: &GraphPattern, out: &mut Vec<PatternKey>) -> Result<(), 
             // expression — non-monotone (NOT EXISTS) and traced unlabelled
             // by the engine seam; outside the stage-1 fragment.
             if expression_has_exists(expr) {
-                return Err(VerifyError::UnsupportedFragment(
-                    "EXISTS / NOT EXISTS".into(),
-                ));
+                return Err(VerifyError::UnsupportedFragment("EXISTS / NOT EXISTS".into()));
             }
             collect_patterns(inner, out)
         }
@@ -153,7 +150,9 @@ fn collect_patterns(gp: &GraphPattern, out: &mut Vec<PatternKey>) -> Result<(), 
         | GraphPattern::Distinct { inner }
         | GraphPattern::Reduced { inner }
         | GraphPattern::Slice { inner, .. } => collect_patterns(inner, out),
-        GraphPattern::Path { .. } => Err(VerifyError::UnsupportedFragment("property path".into())),
+        GraphPattern::Path { .. } => {
+            Err(VerifyError::UnsupportedFragment("property path".into()))
+        }
         GraphPattern::LeftJoin { .. } => Err(VerifyError::UnsupportedFragment("OPTIONAL".into())),
         GraphPattern::Minus { .. } => Err(VerifyError::UnsupportedFragment("MINUS".into())),
         GraphPattern::Union { .. } => Err(VerifyError::UnsupportedFragment("UNION".into())),
@@ -281,23 +280,17 @@ fn comparison_filter(op: FilterCmp, a: &Expression, b: &Expression) -> Option<Qu
         _ => None,
     };
     let int_of = |e: &Expression| match e {
-        Expression::Literal(l) if l.datatype().as_str() == XSD_INTEGER => canonical_u64(l.value()),
+        Expression::Literal(l) if l.datatype().as_str() == XSD_INTEGER => {
+            canonical_u64(l.value())
+        }
         _ => None,
     };
     if let (Some(variable), Some(bound)) = (var_of(a), int_of(b)) {
-        return Some(QueryFilter {
-            variable,
-            op,
-            bound,
-        });
+        return Some(QueryFilter { variable, op, bound });
     }
     // `const op ?var` — flip so the variable is on the left.
     if let (Some(bound), Some(variable)) = (int_of(a), var_of(b)) {
-        return Some(QueryFilter {
-            variable,
-            op: flip_cmp(op),
-            bound,
-        });
+        return Some(QueryFilter { variable, op: flip_cmp(op), bound });
     }
     None
 }
@@ -387,9 +380,7 @@ pub fn fragment_filters(sparql: &str) -> Result<Vec<QueryFilter>, VerifyError> {
         .map_err(|e| VerifyError::Parse(e.to_string()))?;
     let pattern = match &query {
         Query::Select { pattern, .. } | Query::Ask { pattern, .. } => pattern,
-        Query::Construct { .. } => {
-            return Err(VerifyError::UnsupportedFragment("CONSTRUCT".into()))
-        }
+        Query::Construct { .. } => return Err(VerifyError::UnsupportedFragment("CONSTRUCT".into())),
         Query::Describe { .. } => return Err(VerifyError::UnsupportedFragment("DESCRIBE".into())),
     };
     let mut out = Vec::new();
@@ -402,9 +393,7 @@ fn collect_filters_gp(gp: &GraphPattern, out: &mut Vec<QueryFilter>) -> Result<(
         GraphPattern::Bgp { .. } => Ok(()),
         GraphPattern::Filter { expr, inner } => {
             if expression_has_exists(expr) {
-                return Err(VerifyError::UnsupportedFragment(
-                    "EXISTS / NOT EXISTS".into(),
-                ));
+                return Err(VerifyError::UnsupportedFragment("EXISTS / NOT EXISTS".into()));
             }
             collect_filter_expr(expr, out)?;
             collect_filters_gp(inner, out)
@@ -449,7 +438,9 @@ pub fn variable_slots(patterns: &[PatternKey]) -> Vec<(String, usize, usize)> {
 /// constant-swap). Returned in the same query order as [`fragment_patterns`]
 /// (and `attributions`), as `oxrdf::Term`s so a downstream crate need not
 /// depend on `sparq-engine`/`PatternKey`.
-pub fn fragment_pattern_consts(patterns: &[PatternKey]) -> Vec<[Option<oxrdf::Term>; 3]> {
+pub fn fragment_pattern_consts(
+    patterns: &[PatternKey],
+) -> Vec<[Option<oxrdf::Term>; 3]> {
     patterns
         .iter()
         .map(|key| {
@@ -805,10 +796,7 @@ pub fn fragment_query(sparql: &str) -> Result<FragmentQuery, VerifyError> {
     }
     let (projected, body): (Vec<String>, &GraphPattern) =
         if let GraphPattern::Project { inner, variables } = node {
-            (
-                variables.iter().map(|v| v.as_str().to_string()).collect(),
-                inner.as_ref(),
-            )
+            (variables.iter().map(|v| v.as_str().to_string()).collect(), inner.as_ref())
         } else {
             // The parser always emits an outer Project; tolerate its absence
             // (an empty projection claims nothing extra — safe direction).
@@ -821,11 +809,7 @@ pub fn fragment_query(sparql: &str) -> Result<FragmentQuery, VerifyError> {
     // still wraps the pattern in a Project of every in-scope variable —
     // peeled above, ignored here).
     let projected = if ask { Vec::new() } else { projected };
-    Ok(FragmentQuery {
-        branches,
-        projected,
-        ask,
-    })
+    Ok(FragmentQuery { branches, projected, ask })
 }
 
 /// Recursive extended-fragment collector: returns the query subtree's
@@ -1154,10 +1138,7 @@ fn values_block(
         }
         rows.push(cells);
     }
-    Ok(ValuesBlock {
-        variables: vars,
-        rows,
-    })
+    Ok(ValuesBlock { variables: vars, rows })
 }
 
 /// Extended-gate triple-pattern conversion: like [`triple_pattern_key`] but
@@ -1176,9 +1157,7 @@ fn triple_pattern_key_ext(
         NamedNodePattern::Variable(v) => SlotPattern::Var(v.as_str().to_string()),
     };
     let object = term_slot_ext(&tp.object, fresh)?;
-    Ok(PatternKey {
-        slots: [subject, predicate, object],
-    })
+    Ok(PatternKey { slots: [subject, predicate, object] })
 }
 
 fn term_slot_ext(t: &TermPattern, fresh: &mut FreshNames) -> Result<SlotPattern, VerifyError> {
@@ -1242,10 +1221,7 @@ pub fn branch_obligations(
         .filter(|(_, a)| a.len() > 1)
         .map(|(i, _)| i)
         .collect();
-    Ok(BranchObligations {
-        join_edges,
-        path_link_non_bnode,
-    })
+    Ok(BranchObligations { join_edges, path_link_non_bnode })
 }
 
 #[cfg(test)]
@@ -1265,32 +1241,21 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].slots[2], SlotPattern::Var("org".into()));
         assert_eq!(keys[1].slots[0], SlotPattern::Var("org".into()));
-        assert!(
-            matches!(&keys[0].slots[1], SlotPattern::Term(t) if t.to_string().contains("worksAt"))
-        );
+        assert!(matches!(&keys[0].slots[1], SlotPattern::Term(t) if t.to_string().contains("worksAt")));
     }
 
     #[test]
     fn outside_fragment_fails_closed() {
         for (q, what) in [
-            (
-                "SELECT * WHERE { ?s ?p ?o OPTIONAL { ?o ?q ?r } }",
-                "OPTIONAL",
-            ),
+            ("SELECT * WHERE { ?s ?p ?o OPTIONAL { ?o ?q ?r } }", "OPTIONAL"),
             ("SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }", "GRAPH"),
-            (
-                "SELECT * WHERE { { ?s ?p ?o } UNION { ?o ?p ?s } }",
-                "UNION",
-            ),
+            ("SELECT * WHERE { { ?s ?p ?o } UNION { ?o ?p ?s } }", "UNION"),
             // One-or-more survives as an algebra-level Path…
             ("SELECT * WHERE { ?s <http://ex/a>+ ?o }", "property path"),
             // …while a fixed-length sequence path is flattened by the parser
             // into a BGP with an intermediate blank node — caught by the
             // bnode-in-pattern rejection (still fail-closed).
-            (
-                "SELECT * WHERE { ?s <http://ex/a>/<http://ex/b> ?o }",
-                "blank node",
-            ),
+            ("SELECT * WHERE { ?s <http://ex/a>/<http://ex/b> ?o }", "blank node"),
             ("SELECT * WHERE { ?s ?p ?o BIND(1 AS ?x) }", "BIND"),
             (
                 "SELECT * WHERE { ?s ?p ?o FILTER NOT EXISTS { ?o ?q ?r } }",
@@ -1314,26 +1279,25 @@ mod tests {
 
     #[test]
     fn same_single_graph_join_needs_no_obligation() {
-        let keys =
-            fragment_patterns("SELECT * WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }")
-                .unwrap();
+        let keys = fragment_patterns(
+            "SELECT * WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }",
+        )
+        .unwrap();
         let edges = cross_graph_join_obligations(&keys, &attrs(&[&[0], &[0]])).unwrap();
         assert!(edges.is_empty(), "within-graph joins may bind bnodes");
     }
 
     #[test]
     fn cross_graph_join_requires_obligation() {
-        let keys =
-            fragment_patterns("SELECT * WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }")
-                .unwrap();
+        let keys = fragment_patterns(
+            "SELECT * WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }",
+        )
+        .unwrap();
         // Disjoint attributions.
         let edges = cross_graph_join_obligations(&keys, &attrs(&[&[0], &[1]])).unwrap();
         assert_eq!(
             edges,
-            vec![JoinEdge {
-                variable: "x".into(),
-                patterns: (0, 1)
-            }]
+            vec![JoinEdge { variable: "x".into(), patterns: (0, 1) }]
         );
         // Overlapping-but-plural attributions are still cross-capable
         // (coarser than the prover guard, by design).
@@ -1347,10 +1311,7 @@ mod tests {
         let a = attrs(&[&[0], &[1]]);
         let err = recheck(q, &a, &[]).unwrap_err();
         assert!(matches!(err, VerifyError::MissingObligation(_)));
-        let edge = JoinEdge {
-            variable: "x".into(),
-            patterns: (0, 1),
-        };
+        let edge = JoinEdge { variable: "x".into(), patterns: (0, 1) };
         let required = recheck(q, &a, std::slice::from_ref(&edge)).unwrap();
         assert_eq!(required, vec![edge]);
     }
@@ -1362,10 +1323,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             cross_graph_join_obligations(&keys, &attrs(&[&[0]])),
-            Err(VerifyError::ArityMismatch {
-                patterns: 2,
-                attributions: 1
-            })
+            Err(VerifyError::ArityMismatch { patterns: 2, attributions: 1 })
         );
         assert_eq!(
             cross_graph_join_obligations(&keys, &attrs(&[&[0], &[]])),
@@ -1376,7 +1334,9 @@ mod tests {
     // [OPUS-4.8] FILTER query-binding extraction tests (audit #5/#6/#10).
 
     fn xint(v: u64) -> String {
-        format!("\"{v}\"^^<http://www.w3.org/2001/XMLSchema#integer>")
+        format!(
+            "\"{v}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        )
     }
 
     #[test]
@@ -1388,11 +1348,7 @@ mod tests {
         let fs = fragment_filters(&q).unwrap();
         assert_eq!(
             fs,
-            vec![QueryFilter {
-                variable: "age".into(),
-                op: FilterCmp::Ge,
-                bound: 18
-            }]
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 }]
         );
         // `const op ?var` flips to `?var op' const`.
         let q2 = format!(
@@ -1402,11 +1358,7 @@ mod tests {
         let fs2 = fragment_filters(&q2).unwrap();
         assert_eq!(
             fs2,
-            vec![QueryFilter {
-                variable: "age".into(),
-                op: FilterCmp::Ge,
-                bound: 18
-            }],
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 }],
             "18 <= ?age must normalize to ?age >= 18"
         );
     }
@@ -1422,16 +1374,8 @@ mod tests {
         assert_eq!(
             fs,
             vec![
-                QueryFilter {
-                    variable: "age".into(),
-                    op: FilterCmp::Ge,
-                    bound: 18
-                },
-                QueryFilter {
-                    variable: "age".into(),
-                    op: FilterCmp::Lt,
-                    bound: 65
-                },
+                QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 },
+                QueryFilter { variable: "age".into(), op: FilterCmp::Lt, bound: 65 },
             ]
         );
     }
@@ -1448,11 +1392,7 @@ mod tests {
         let fs = fragment_filters(&q).unwrap();
         assert_eq!(
             fs,
-            vec![QueryFilter {
-                variable: "age".into(),
-                op: FilterCmp::Ne,
-                bound: 18
-            }],
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ne, bound: 18 }],
             "?age != 18 must bind to Ne"
         );
         // `const != ?var` → Ne (Ne is symmetric, so the flip is a no-op).
@@ -1463,11 +1403,7 @@ mod tests {
         let fs2 = fragment_filters(&q2).unwrap();
         assert_eq!(
             fs2,
-            vec![QueryFilter {
-                variable: "age".into(),
-                op: FilterCmp::Ne,
-                bound: 18
-            }],
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ne, bound: 18 }],
             "18 != ?age must also normalize to ?age != 18 (Ne)"
         );
     }
@@ -1484,16 +1420,8 @@ mod tests {
         assert_eq!(
             fs,
             vec![
-                QueryFilter {
-                    variable: "age".into(),
-                    op: FilterCmp::Ge,
-                    bound: 18
-                },
-                QueryFilter {
-                    variable: "age".into(),
-                    op: FilterCmp::Ne,
-                    bound: 21
-                },
+                QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 },
+                QueryFilter { variable: "age".into(), op: FilterCmp::Ne, bound: 21 },
             ]
         );
     }
@@ -1572,18 +1500,9 @@ mod tests {
     #[test]
     fn wave1_closures_map_to_path_reach_family() {
         for (q, closure) in [
-            (
-                "SELECT * WHERE { ?s <http://ex/a>+ ?o }",
-                PathClosure::OneOrMore,
-            ),
-            (
-                "SELECT * WHERE { ?s <http://ex/a>* ?o }",
-                PathClosure::ZeroOrMore,
-            ),
-            (
-                "SELECT * WHERE { ?s <http://ex/a>? ?o }",
-                PathClosure::ZeroOrOne,
-            ),
+            ("SELECT * WHERE { ?s <http://ex/a>+ ?o }", PathClosure::OneOrMore),
+            ("SELECT * WHERE { ?s <http://ex/a>* ?o }", PathClosure::ZeroOrMore),
+            ("SELECT * WHERE { ?s <http://ex/a>? ?o }", PathClosure::ZeroOrOne),
         ] {
             let fq = fragment_query(q).unwrap();
             assert!(!fq.ask);
@@ -1628,14 +1547,13 @@ mod tests {
 
     #[test]
     fn wave1_alternative_desugars_to_union_branches() {
-        let fq = fragment_query("SELECT * WHERE { ?s <http://ex/a>|<http://ex/b> ?o }").unwrap();
+        let fq =
+            fragment_query("SELECT * WHERE { ?s <http://ex/a>|<http://ex/b> ?o }").unwrap();
         assert_eq!(fq.branches.len(), 2);
         for (branch, iri) in fq.branches.iter().zip(["http://ex/a", "http://ex/b"]) {
             assert_eq!(
                 branch.patterns,
-                vec![PatternKey {
-                    slots: [var("s"), pred(iri), var("o")]
-                }]
+                vec![PatternKey { slots: [var("s"), pred(iri), var("o")] }]
             );
             assert!(branch.path_reach.is_empty());
         }
@@ -1666,7 +1584,8 @@ mod tests {
     fn wave1_sequence_inside_closure_body_rejected_but_plain_reverse_ok() {
         // `^(a/b)` flattens in the parser (no closure) — accepted as two
         // patterns with swapped endpoints.
-        let fq = fragment_query("SELECT * WHERE { ?s ^(<http://ex/a>/<http://ex/b>) ?o }").unwrap();
+        let fq =
+            fragment_query("SELECT * WHERE { ?s ^(<http://ex/a>/<http://ex/b>) ?o }").unwrap();
         assert_eq!(fq.branches[0].patterns.len(), 2);
         assert_eq!(fq.branches[0].patterns[0].slots[0], var("o"));
         assert_eq!(fq.branches[0].patterns[1].slots[2], var("s"));
@@ -1680,11 +1599,7 @@ mod tests {
         .unwrap();
         assert_eq!(fq.branches.len(), 2);
         for (branch, iri) in fq.branches.iter().zip(["http://ex/a", "http://ex/b"]) {
-            assert_eq!(
-                branch.patterns.len(),
-                2,
-                "join distributes into each branch"
-            );
+            assert_eq!(branch.patterns.len(), 2, "join distributes into each branch");
             assert_eq!(branch.patterns[0].slots[1], pred("http://ex/p"));
             assert_eq!(branch.patterns[1].slots[1], pred(iri));
         }
@@ -1706,9 +1621,7 @@ mod tests {
         assert_eq!(
             vb.rows[0],
             vec![
-                Some(oxrdf::Term::NamedNode(
-                    oxrdf::NamedNode::new("http://ex/1").unwrap()
-                )),
+                Some(oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/1").unwrap())),
                 None
             ]
         );
@@ -1719,18 +1632,13 @@ mod tests {
     fn wave1_subquery_renames_inner_vars_apart() {
         // Outer ?x is shared (projected by the subquery); inner ?y is
         // existential and must NOT be conflated with any outer ?y.
-        let q =
-            "SELECT * WHERE { { SELECT ?x WHERE { ?x <http://ex/p> ?y } } ?x <http://ex/q> ?y }";
+        let q = "SELECT * WHERE { { SELECT ?x WHERE { ?x <http://ex/p> ?y } } ?x <http://ex/q> ?y }";
         let fq = fragment_query(q).unwrap();
         assert_eq!(fq.branches.len(), 1);
         let pats = &fq.branches[0].patterns;
         assert_eq!(pats.len(), 2);
         assert_eq!(pats[0].slots[0], var("x"), "projected subquery var kept");
-        assert_eq!(
-            pats[0].slots[2],
-            var("!subq0:y"),
-            "inner-only var renamed apart"
-        );
+        assert_eq!(pats[0].slots[2], var("!subq0:y"), "inner-only var renamed apart");
         assert_eq!(pats[1].slots[2], var("y"), "outer ?y untouched");
         // Determinism across parses.
         assert_eq!(fq, fragment_query(q).unwrap());
@@ -1749,11 +1657,7 @@ mod tests {
         assert_eq!(b.path_reach[0].object, var("!subq0:y"));
         assert_eq!(
             b.filters,
-            vec![QueryFilter {
-                variable: "!subq0:y".into(),
-                op: FilterCmp::Ge,
-                bound: 18
-            }]
+            vec![QueryFilter { variable: "!subq0:y".into(), op: FilterCmp::Ge, bound: 18 }]
         );
     }
 
@@ -1768,11 +1672,7 @@ mod tests {
         for b in &fq.branches {
             assert_eq!(
                 b.filters,
-                vec![QueryFilter {
-                    variable: "age".into(),
-                    op: FilterCmp::Ge,
-                    bound: 18
-                }],
+                vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 }],
                 "a FILTER above a UNION constrains every branch"
             );
         }
@@ -1783,14 +1683,12 @@ mod tests {
         let fq = fragment_query("ASK { ?s <http://ex/a>* ?o }").unwrap();
         assert!(fq.ask);
         assert!(fq.projected.is_empty());
-        assert_eq!(
-            fq.branches[0].path_reach[0].closure,
-            PathClosure::ZeroOrMore
-        );
+        assert_eq!(fq.branches[0].path_reach[0].closure, PathClosure::ZeroOrMore);
 
-        let fq =
-            fragment_query("SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o } LIMIT 5 OFFSET 2")
-                .unwrap();
+        let fq = fragment_query(
+            "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o } LIMIT 5 OFFSET 2",
+        )
+        .unwrap();
         assert_eq!(fq.projected, vec!["s".to_string()]);
         assert_eq!(fq.branches[0].patterns.len(), 1);
     }
@@ -1799,21 +1697,21 @@ mod tests {
     fn wave1_user_bnodes_are_nondistinguished_variables() {
         // A query bnode denotes a non-distinguished variable; same label =
         // same variable, deterministically renamed.
-        let fq = fragment_query("SELECT * WHERE { _:b <http://ex/p> ?o . _:b <http://ex/q> ?o2 }")
-            .unwrap();
+        let fq = fragment_query(
+            "SELECT * WHERE { _:b <http://ex/p> ?o . _:b <http://ex/q> ?o2 }",
+        )
+        .unwrap();
         let pats = &fq.branches[0].patterns;
         assert_eq!(pats[0].slots[0], var("!bnode:0"));
-        assert_eq!(
-            pats[1].slots[0],
-            var("!bnode:0"),
-            "shared label, shared variable"
-        );
+        assert_eq!(pats[1].slots[0], var("!bnode:0"), "shared label, shared variable");
     }
 
     #[test]
     fn wave1_branch_obligations_cover_paths_coarsely() {
-        let fq = fragment_query("SELECT * WHERE { ?s <http://ex/p> ?x . ?x <http://ex/a>+ ?o }")
-            .unwrap();
+        let fq = fragment_query(
+            "SELECT * WHERE { ?s <http://ex/p> ?x . ?x <http://ex/a>+ ?o }",
+        )
+        .unwrap();
         let b = &fq.branches[0];
         assert_eq!((b.patterns.len(), b.path_reach.len()), (1, 1));
 
@@ -1828,10 +1726,7 @@ mod tests {
         let ob = branch_obligations(b, &attrs(&[&[0]]), &attrs(&[&[0, 1]])).unwrap();
         assert_eq!(
             ob.join_edges,
-            vec![JoinEdge {
-                variable: "x".into(),
-                patterns: (0, 1)
-            }]
+            vec![JoinEdge { variable: "x".into(), patterns: (0, 1) }]
         );
         assert_eq!(ob.path_link_non_bnode, vec![0]);
 
@@ -1839,10 +1734,7 @@ mod tests {
         // matching total are still rejected).
         assert_eq!(
             branch_obligations(b, &attrs(&[&[0], &[0]]), &attrs(&[])),
-            Err(VerifyError::ArityMismatch {
-                patterns: 2,
-                attributions: 2
-            })
+            Err(VerifyError::ArityMismatch { patterns: 2, attributions: 2 })
         );
         // Empty attribution sets are rejected (inherited from the stage-1
         // rule; the path obligation occupies the combined index space).
@@ -1868,11 +1760,7 @@ mod tests {
         assert_eq!(b.patterns.len(), 2);
         assert_eq!(
             b.filters,
-            vec![QueryFilter {
-                variable: "y".into(),
-                op: FilterCmp::Ge,
-                bound: 18
-            }]
+            vec![QueryFilter { variable: "y".into(), op: FilterCmp::Ge, bound: 18 }]
         );
         assert_eq!(b.values.len(), 1);
         assert_eq!(b.values[0].variables, vec!["y".to_string()]);
@@ -1944,10 +1832,7 @@ mod tests {
                 other => panic!("{q}: expected UnsupportedFragment({why}), got {other:?}"),
             }
         }
-        assert!(matches!(
-            fragment_query("SELECT WHERE"),
-            Err(VerifyError::Parse(_))
-        ));
+        assert!(matches!(fragment_query("SELECT WHERE"), Err(VerifyError::Parse(_))));
     }
 
     #[test]
@@ -1965,14 +1850,8 @@ mod tests {
             other => panic!("expected the branch cap, got {other:?}"),
         }
         // Join-side multiplication is capped too: 8 × 9 alternatives = 72.
-        let alt8 = (0..8)
-            .map(|i| format!("<http://ex/a{i}>"))
-            .collect::<Vec<_>>()
-            .join("|");
-        let alt9 = (0..9)
-            .map(|i| format!("<http://ex/b{i}>"))
-            .collect::<Vec<_>>()
-            .join("|");
+        let alt8 = (0..8).map(|i| format!("<http://ex/a{i}>")).collect::<Vec<_>>().join("|");
+        let alt9 = (0..9).map(|i| format!("<http://ex/b{i}>")).collect::<Vec<_>>().join("|");
         let q = format!("SELECT * WHERE {{ ?s ({alt8}) ?m . ?m ({alt9}) ?o }}");
         assert!(
             matches!(fragment_query(&q), Err(VerifyError::UnsupportedFragment(m)) if m.contains("exceeds the cap"))
@@ -1990,10 +1869,7 @@ mod tests {
             "SELECT * WHERE { VALUES ?a { <http://ex/1> } ?s <http://ex/p> ?a }",
         ] {
             assert!(
-                matches!(
-                    fragment_patterns(q),
-                    Err(VerifyError::UnsupportedFragment(_))
-                ),
+                matches!(fragment_patterns(q), Err(VerifyError::UnsupportedFragment(_))),
                 "stage-1 gate must still reject: {q}"
             );
             assert!(fragment_query(q).is_ok(), "wave-1 gate accepts: {q}");

@@ -256,14 +256,7 @@ struct Question {
 }
 
 impl Question {
-    fn new(
-        graph: &Graph,
-        cfg: &ComposeConfig,
-        kind: &str,
-        prompt: &str,
-        bindings: &[Term],
-        gold: &str,
-    ) -> Self {
+    fn new(graph: &Graph, cfg: &ComposeConfig, kind: &str, prompt: &str, bindings: &[Term], gold: &str) -> Self {
         let raw = compose(graph, bindings, View::UriVisible, cfg);
         let hidden = compose(graph, bindings, View::UriHidden, cfg);
         let raw_block = raw
@@ -330,22 +323,17 @@ impl<'g> Index<'g> {
     }
 
     fn pid(&self, iri: &str) -> Option<dict::Id> {
-        self.graph
-            .id_of(&Term::NamedNode(oxrdf::NamedNode::new_unchecked(iri)))
+        self.graph.id_of(&Term::NamedNode(oxrdf::NamedNode::new_unchecked(iri)))
     }
 
     /// All subjects of a given `rdf:type`.
     fn instances_of(&self, class_local: &str) -> Vec<String> {
-        let Some(type_pid) = self.pid(RDF_TYPE) else {
-            return vec![];
-        };
+        let Some(type_pid) = self.pid(RDF_TYPE) else { return vec![] };
         let scan = self.graph.store.scan(&[None, Some(type_pid), None]);
         let mut out = std::collections::BTreeSet::new();
         for row in scan.rows.iter() {
             let [s, _, o] = scan.to_spo(row);
-            let (Some(c), Some(subj)) = (self.iri(o), self.iri(s)) else {
-                continue;
-            };
+            let (Some(c), Some(subj)) = (self.iri(o), self.iri(s)) else { continue };
             if c.ends_with(class_local) {
                 out.insert(subj);
             }
@@ -369,9 +357,7 @@ impl<'g> Index<'g> {
     }
 
     fn objects(&self, subj: &str, pred: &str) -> Vec<String> {
-        let (Some(sid), Some(pid)) = (self.pid(subj), self.pid(pred)) else {
-            return vec![];
-        };
+        let (Some(sid), Some(pid)) = (self.pid(subj), self.pid(pred)) else { return vec![] };
         let scan = self.graph.store.scan(&[Some(sid), Some(pid), None]);
         let mut out = Vec::new();
         for row in scan.rows.iter() {
@@ -387,9 +373,7 @@ impl<'g> Index<'g> {
 
     /// First literal object of (subj, pred).
     fn object_lit(&self, subj: &str, pred: &str) -> Option<String> {
-        let (Some(sid), Some(pid)) = (self.pid(subj), self.pid(pred)) else {
-            return None;
-        };
+        let (Some(sid), Some(pid)) = (self.pid(subj), self.pid(pred)) else { return None };
         let scan = self.graph.store.scan(&[Some(sid), Some(pid), None]);
         for row in scan.rows.iter() {
             let [_, _, o] = scan.to_spo(row);

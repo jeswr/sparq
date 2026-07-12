@@ -8,7 +8,7 @@ ufo:
     a owl:Ontology ;
     rdfs:label "UFO-SN3 reference vocabulary" ;
     rdfs:comment
-        "Finite, situation-scoped UFO projection for range-restricted N3 reasoning. Proposition nodes use explicit subject, predicate, and object properties because the SPARQ N3 Term model does not contain RDF-star triple terms." .
+        "Finite, situation-scoped UFO projection for range-restricted N3 reasoning. Proposition nodes use explicit subject, predicate, and object properties because the SPARQ N3 Term model does not contain RDF 1.2 triple terms." .
 
 # Core categories
 

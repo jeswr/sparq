@@ -126,17 +126,8 @@ struct GenState {
 
 /// A random fresh ground quad: `(graph slot, triple text)`.
 fn gen_quad(rng: &mut Rng) -> (Option<String>, String) {
-    let t = format!(
-        "{} {} {} .",
-        gen_subject(rng),
-        gen_predicate(rng),
-        gen_object(rng)
-    );
-    let slot = if rng.chance(2, 5) {
-        Some(gen_graph_iri(rng))
-    } else {
-        None
-    };
+    let t = format!("{} {} {} .", gen_subject(rng), gen_predicate(rng), gen_object(rng));
+    let slot = if rng.chance(2, 5) { Some(gen_graph_iri(rng)) } else { None };
     (slot, t)
 }
 
@@ -196,12 +187,7 @@ fn gen_where_op(rng: &mut Rng, st: &GenState) -> String {
                     None => t.clone(),
                 }
             } else {
-                format!(
-                    "{} {} {} .",
-                    gen_subject(rng),
-                    gen_predicate(rng),
-                    gen_object(rng)
-                )
+                format!("{} {} {} .", gen_subject(rng), gen_predicate(rng), gen_object(rng))
             };
             format!(
                 "INSERT {{ {} {} {} }} WHERE {{ {} }}",

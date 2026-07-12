@@ -362,9 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (env SPARQ_RESTORE=<file>). Fail-closed: a corrupt artifact aborts startup.
             #[cfg(feature = "backup")]
             "--restore" => {
-                let file = args
-                    .next()
-                    .ok_or("--restore requires an artifact file path")?;
+                let file = args.next().ok_or("--restore requires an artifact file path")?;
                 if file.is_empty() {
                     return Err("--restore must not be empty".into());
                 }
@@ -376,9 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // gapped delta aborts startup. Off by default (env SPARQ_RESTORE_DELTA=<files>).
             #[cfg(feature = "backup")]
             "--restore-delta" => {
-                let file = args
-                    .next()
-                    .ok_or("--restore-delta requires an artifact file path")?;
+                let file = args.next().ok_or("--restore-delta requires an artifact file path")?;
                 if file.is_empty() {
                     return Err("--restore-delta must not be empty".into());
                 }
@@ -475,9 +471,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // gaplessly when DIR already holds segments. Off by default (env SPARQ_CHANGE_STREAM=DIR).
             #[cfg(feature = "change-stream")]
             "--change-stream" => {
-                let dir = args
-                    .next()
-                    .ok_or("--change-stream requires a directory path")?;
+                let dir = args.next().ok_or("--change-stream requires a directory path")?;
                 if dir.is_empty() {
                     return Err("--change-stream must not be empty".into());
                 }
@@ -506,10 +500,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             "--cors-allow-origin-file" => {
-                cors_allow_file = Some(
-                    args.next()
-                        .ok_or("--cors-allow-origin-file requires a path")?,
-                );
+                cors_allow_file =
+                    Some(args.next().ok_or("--cors-allow-origin-file requires a path")?);
             }
             "-h" | "--help" => {
                 let time_travel = if cfg!(feature = "time-travel") {
@@ -756,12 +748,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("--restore: rejected {} ({e})", file.display()))?;
             // Crash-safe two-rename swap of the durable dir to the restored image (fail-closed:
             // a corrupt artifact already aborted above; an interrupted swap is healed on open).
-            Graph::restore_into_durable(dir, fresh).map_err(|e| {
-                format!(
-                    "--restore-persist: durable restore into {} failed: {e}",
-                    dir.display()
-                )
-            })?;
+            Graph::restore_into_durable(dir, fresh)
+                .map_err(|e| format!("--restore-persist: durable restore into {} failed: {e}", dir.display()))?;
             eprintln!(
                 "restored durable store from artifact taken at generation {} ({} triples) — survives restart",
                 meta.generation, meta.triples
@@ -771,10 +759,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // --restore WITHOUT --persist: the historical in-memory restore (RAM-only).
         (Some(file), None, _) => {
-            eprintln!(
-                "restoring in-memory store from backup artifact {} ...",
-                file.display()
-            );
+            eprintln!("restoring in-memory store from backup artifact {} ...", file.display());
             let f = std::fs::File::open(file)
                 .map_err(|e| format!("--restore: cannot open {}: {e}", file.display()))?;
             let (mut g, meta) = sparq_serve::backup_import(std::io::BufReader::new(f))
@@ -788,9 +773,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !config.restore_delta.is_empty() {
                 let mut decoded = Vec::with_capacity(config.restore_delta.len());
                 for d in &config.restore_delta {
-                    let df = std::fs::File::open(d).map_err(|e| {
-                        format!("--restore-delta: cannot open {}: {e}", d.display())
-                    })?;
+                    let df = std::fs::File::open(d)
+                        .map_err(|e| format!("--restore-delta: cannot open {}: {e}", d.display()))?;
                     let delta = sparq_serve::backup_import_delta(std::io::BufReader::new(df))
                         .map_err(|e| format!("--restore-delta: rejected {} ({e})", d.display()))?;
                     decoded.push(delta);
@@ -820,9 +804,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // [OPUS-4.8] sq-bu1a: --restore-delta is meaningless without a --restore base; refuse
             // it loudly rather than silently ignoring an operator's PITR intent.
             if !config.restore_delta.is_empty() {
-                return Err(
-                    "--restore-delta requires --restore (a base artifact to replay onto)".into(),
-                );
+                return Err("--restore-delta requires --restore (a base artifact to replay onto)".into());
             }
             graph
         }
@@ -928,10 +910,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // [OPUS-4.8] sq-o7o0: surface the CORS posture at startup. Empty (the default) = no CORS
     // headers; configured = the exact first-party origins a browser may read responses from.
-    eprintln!(
-        "CORS first-party origin allowlist: {}",
-        config.cors_allow.display()
-    );
+    eprintln!("CORS first-party origin allowlist: {}", config.cors_allow.display());
     #[cfg(feature = "time-travel")]
     eprintln!(
         "time travel: ?generation=N enabled — generations={} max-age={} (each retained generation is a full graph)",

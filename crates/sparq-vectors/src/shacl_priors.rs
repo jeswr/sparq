@@ -144,9 +144,7 @@ impl ShaclPriors {
         for shape in &model.shapes {
             // Only property shapes whose path is a single predicate carry per-predicate priors. A
             // complex path (inverse / sequence / alternative) has no single predicate to key on.
-            let Some(Path::Predicate(pred)) = shape.path.as_ref() else {
-                continue;
-            };
+            let Some(Path::Predicate(pred)) = shape.path.as_ref() else { continue };
 
             let mut enum_members: Option<Vec<Term>> = None;
             let mut datatype_set: Option<Vec<String>> = None;
@@ -166,12 +164,10 @@ impl ShaclPriors {
                 }
             }
 
-            let functional = max_count == Some(1) || functional_axioms.contains(pred.as_str());
-            let cardinality = if functional {
-                Cardinality::Functional
-            } else {
-                Cardinality::Multi
-            };
+            let functional =
+                max_count == Some(1) || functional_axioms.contains(pred.as_str());
+            let cardinality =
+                if functional { Cardinality::Functional } else { Cardinality::Multi };
 
             let enum_codebook = enum_members.map(Codebook::new);
             let datatype_encoder = datatype_set.as_deref().map(resolve_datatype_encoder);
@@ -240,9 +236,7 @@ fn resolve_datatype_encoder(datatypes: &[String]) -> Encoder {
 fn functional_properties(data: &sparq_core::Graph) -> rustc_hash::FxHashSet<String> {
     use oxrdf::NamedNode;
     let type_id = data.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDF_TYPE)));
-    let fp_id = data.id_of(&Term::NamedNode(NamedNode::new_unchecked(
-        OWL_FUNCTIONAL_PROPERTY,
-    )));
+    let fp_id = data.id_of(&Term::NamedNode(NamedNode::new_unchecked(OWL_FUNCTIONAL_PROPERTY)));
     let (Some(type_id), Some(fp_id)) = (type_id, fp_id) else {
         return rustc_hash::FxHashSet::default();
     };
@@ -286,10 +280,7 @@ ex:PersonShape a sh:NodeShape ;
         let m = shapes(SHAPES);
         let priors = ShaclPriors::from_model(&m);
         let status = priors.get("http://ex/status").expect("status prior");
-        let cb = status
-            .enum_codebook
-            .as_ref()
-            .expect("status declares sh:in → codebook");
+        let cb = status.enum_codebook.as_ref().expect("status declares sh:in → codebook");
         assert_eq!(cb.member_count(), 3, "3 enum members");
         // Slot match, not a cosine threshold: a member is hot at its own slot; an outsider is the
         // reserved invalid code.
@@ -305,10 +296,7 @@ ex:PersonShape a sh:NodeShape ;
         let m = shapes(SHAPES);
         let priors = ShaclPriors::from_model(&m);
         // The declared sh:datatype confirms the encoder family the router would pick.
-        assert_eq!(
-            priors.get("http://ex/age").unwrap().datatype_encoder,
-            Some(Encoder::Numeric)
-        );
+        assert_eq!(priors.get("http://ex/age").unwrap().datatype_encoder, Some(Encoder::Numeric));
         assert_eq!(
             priors.get("http://ex/nickname").unwrap().datatype_encoder,
             Some(Encoder::Other),
@@ -327,10 +315,7 @@ ex:PersonShape a sh:NodeShape ;
         assert_eq!(age.min_count, Some(1));
         assert_eq!(age.max_count, Some(1));
         // No maxCount on nickname → Multi (permutation-invariant pooled block).
-        assert_eq!(
-            priors.get("http://ex/nickname").unwrap().cardinality,
-            Cardinality::Multi
-        );
+        assert_eq!(priors.get("http://ex/nickname").unwrap().cardinality, Cardinality::Multi);
     }
 
     #[test]
@@ -351,10 +336,7 @@ ex:ssn a owl:FunctionalProperty .
 
         // Without the data graph, ssn has no maxCount → Multi.
         assert_eq!(
-            ShaclPriors::from_model(&m)
-                .get("http://ex/ssn")
-                .unwrap()
-                .cardinality,
+            ShaclPriors::from_model(&m).get("http://ex/ssn").unwrap().cardinality,
             Cardinality::Multi
         );
         // With the data graph, the OWL axiom makes it Functional.
@@ -369,10 +351,7 @@ ex:ssn a owl:FunctionalProperty .
     fn predicate_with_no_shape_has_no_prior_fail_open() {
         let m = shapes(SHAPES);
         let priors = ShaclPriors::from_model(&m);
-        assert!(
-            priors.get("http://ex/undeclared").is_none(),
-            "no shape → no prior (fail-open)"
-        );
+        assert!(priors.get("http://ex/undeclared").is_none(), "no shape → no prior (fail-open)");
     }
 
     #[test]

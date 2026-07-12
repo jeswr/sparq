@@ -528,10 +528,7 @@ fn assert_error(input: &str, code: JsonLdErrorCode) {
 
 #[test]
 fn invalid_id_value() {
-    assert_error(
-        r#"{"@id": 42, "http://ex/p": "v"}"#,
-        JsonLdErrorCode::InvalidIdValue,
-    );
+    assert_error(r#"{"@id": 42, "http://ex/p": "v"}"#, JsonLdErrorCode::InvalidIdValue);
 }
 
 #[test]

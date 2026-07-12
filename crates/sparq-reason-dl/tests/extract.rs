@@ -32,9 +32,7 @@ fn parse(body: &str) -> (Dict, Vec<[Id; 3]>) {
 }
 
 fn iri(dict: &Dict, full: &str) -> Id {
-    dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(
-        full.to_string(),
-    )))
+    dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(full.to_string())))
 }
 
 /// `http://ex/{frag}` dict id.
@@ -80,9 +78,7 @@ fn equivalent_and_disjoint() {
 
 #[test]
 fn some_values_from() {
-    let (d, t) = parse(
-        ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:someValuesFrom :C ] .",
-    );
+    let (d, t) = parse(":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:someValuesFrom :C ] .");
     let o = extract(&d, &t).expect("accept");
     assert_eq!(
         o.axioms,
@@ -95,9 +91,7 @@ fn some_values_from() {
 
 #[test]
 fn all_values_from() {
-    let (d, t) = parse(
-        ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:allValuesFrom :C ] .",
-    );
+    let (d, t) = parse(":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:allValuesFrom :C ] .");
     let o = extract(&d, &t).expect("accept");
     assert_eq!(
         o.axioms,
@@ -218,8 +212,7 @@ fn object_property_assertion_declared() {
 
 #[test]
 fn thing_and_nothing() {
-    let (d, t) =
-        parse(":A rdfs:subClassOf owl:Thing .\n:B rdfs:subClassOf owl:Nothing .\n:x a owl:Thing .");
+    let (d, t) = parse(":A rdfs:subClassOf owl:Thing .\n:B rdfs:subClassOf owl:Nothing .\n:x a owl:Thing .");
     let o = extract(&d, &t).expect("accept");
     assert!(o.axioms.contains(&Axiom::SubClassOf {
         sub: class(&d, "A"),
@@ -291,10 +284,7 @@ fn round_trip_flat_subset() {
     let onto1 = extract(&d, &t).expect("accept");
     let t2 = render_flat(&mut d, &onto1);
     let onto2 = extract(&d, &t2).expect("re-extract");
-    assert_eq!(
-        onto1.axioms, onto2.axioms,
-        "model → RDF → model must be identity"
-    );
+    assert_eq!(onto1.axioms, onto2.axioms, "model → RDF → model must be identity");
     // Sanity: the flat subset really was present.
     assert_eq!(onto1.len(), 3);
 }
@@ -369,8 +359,7 @@ fn reject_data_construct_data_property() {
 #[test]
 fn reject_malformed_list_unterminated() {
     // A list cell with rdf:first but no rdf:rest.
-    let (d, t) =
-        parse(":C rdfs:subClassOf _:x .\n_:x owl:intersectionOf _:l .\n_:l rdf:first :A .");
+    let (d, t) = parse(":C rdfs:subClassOf _:x .\n_:x owl:intersectionOf _:l .\n_:l rdf:first :A .");
     assert!(matches!(
         extract(&d, &t),
         Err(ExtractError::MalformedList(_))
@@ -447,10 +436,7 @@ fn reject_duplicate_intersection_of_definition() {
          :A owl:intersectionOf ( :E :F ) .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "double owl:intersectionOf on a named class must be refused"
     );
 }
@@ -465,10 +451,7 @@ fn reject_duplicate_some_values_from() {
          _:r owl:someValuesFrom :C .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "duplicate someValuesFrom must be refused"
     );
 }
@@ -483,10 +466,7 @@ fn reject_duplicate_on_property() {
          _:r owl:someValuesFrom :B .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "duplicate owl:onProperty must be refused"
     );
 }
@@ -624,9 +604,7 @@ fn accept_unambiguous_property_in_domain() {
     let (d, t) = parse(":p a owl:ObjectProperty .\n:p rdfs:domain :C .");
     let o = extract(&d, &t).expect("accept");
     assert!(
-        o.axioms
-            .iter()
-            .any(|ax| matches!(ax, Axiom::ObjectPropertyDomain { .. })),
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::ObjectPropertyDomain { .. })),
         "unambiguous ObjectProperty in rdfs:domain must produce ObjectPropertyDomain"
     );
 }
@@ -637,9 +615,7 @@ fn accept_unambiguous_property_in_range() {
     let (d, t) = parse(":p a owl:ObjectProperty .\n:p rdfs:range :C .");
     let o = extract(&d, &t).expect("accept");
     assert!(
-        o.axioms
-            .iter()
-            .any(|ax| matches!(ax, Axiom::ObjectPropertyRange { .. })),
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::ObjectPropertyRange { .. })),
         "unambiguous ObjectProperty in rdfs:range must produce ObjectPropertyRange"
     );
 }
@@ -654,9 +630,7 @@ fn accept_unambiguous_property_in_sub_property_of() {
     );
     let o = extract(&d, &t).expect("accept");
     assert!(
-        o.axioms
-            .iter()
-            .any(|ax| matches!(ax, Axiom::SubObjectPropertyOf { .. })),
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::SubObjectPropertyOf { .. })),
         "unambiguous ObjectProperty in rdfs:subPropertyOf must produce SubObjectPropertyOf"
     );
 }
@@ -689,11 +663,7 @@ fn accept_unambiguous_property_in_on_property() {
 fn accept_deprecated_class_as_declaration() {
     let (d, t) = parse(":A a owl:DeprecatedClass .");
     let o = extract(&d, &t).expect("accept");
-    assert!(
-        o.is_empty(),
-        "owl:DeprecatedClass must be ignored, got {:?}",
-        o.axioms
-    );
+    assert!(o.is_empty(), "owl:DeprecatedClass must be ignored, got {:?}", o.axioms);
 }
 
 /// owl:DeprecatedProperty is a structural meta-class — no logical axioms.
@@ -701,11 +671,7 @@ fn accept_deprecated_class_as_declaration() {
 fn accept_deprecated_property_as_declaration() {
     let (d, t) = parse(":p a owl:DeprecatedProperty .");
     let o = extract(&d, &t).expect("accept");
-    assert!(
-        o.is_empty(),
-        "owl:DeprecatedProperty must be ignored, got {:?}",
-        o.axioms
-    );
+    assert!(o.is_empty(), "owl:DeprecatedProperty must be ignored, got {:?}", o.axioms);
 }
 
 // ============================== REJECT (existing guards, now explicitly pinned) ==============================
@@ -719,10 +685,7 @@ fn reject_cyclic_class_expression() {
          _:x owl:complementOf _:x .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "cyclic complementOf must be refused"
     );
 }
@@ -739,10 +702,7 @@ fn reject_max_ce_depth() {
     // depth 513 (513 > MAX_CE_DEPTH=512), before any properties of _:n513 are inspected.
     let (d, t) = parse(&ttl);
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "expression exceeding MAX_CE_DEPTH must be refused"
     );
 }
@@ -757,10 +717,7 @@ fn reject_multi_shape_node() {
          _:x owl:unionOf ( :D :E ) .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "node with multiple class-expression shapes must be refused"
     );
 }
@@ -774,10 +731,7 @@ fn reject_restriction_both_some_and_all_values_from() {
          owl:someValuesFrom :B ; owl:allValuesFrom :C ] .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "restriction with both someValuesFrom and allValuesFrom must be refused"
     );
 }
@@ -792,10 +746,7 @@ fn reject_structural_node_used_as_individual() {
          _:r a owl:Restriction .",
     );
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "structural (restriction) node used as a role-assertion individual must be refused"
     );
 }
@@ -877,18 +828,9 @@ fn extract_verdict_order_independent_pun_permutation() {
     let v1 = kind(extract(&d, &t));
     t.sort_by(|a, b| b.cmp(a));
     let v2 = kind(extract(&d, &t));
-    assert_eq!(
-        "unclassifiable", v0,
-        "original order must refuse as Unclassifiable"
-    );
-    assert_eq!(
-        "unclassifiable", v1,
-        "sorted-asc order must refuse as Unclassifiable"
-    );
-    assert_eq!(
-        "unclassifiable", v2,
-        "sorted-desc order must refuse as Unclassifiable"
-    );
+    assert_eq!("unclassifiable", v0, "original order must refuse as Unclassifiable");
+    assert_eq!("unclassifiable", v1, "sorted-asc order must refuse as Unclassifiable");
+    assert_eq!("unclassifiable", v2, "sorted-desc order must refuse as Unclassifiable");
 }
 
 // ============================== REJECT (bare blank in class-expression position) ==============================
@@ -903,10 +845,7 @@ fn reject_bare_blank_in_class_expression_position() {
     // owl:complementOf / owl:Restriction typing. A bare blank in subClassOf object position.
     let (d, t) = parse(":A rdfs:subClassOf _:b .");
     assert!(
-        matches!(
-            extract(&d, &t),
-            Err(ExtractError::MalformedClassExpression(_))
-        ),
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
         "bare blank node in class-expression position must be refused as MalformedClassExpression"
     );
 }
@@ -976,8 +915,7 @@ fn named_class_intersection_emits_equivalent_classes() {
     let a = class(&d, "A");
     let expected_expr = CE::ObjectIntersectionOf(vec![class(&d, "B"), class(&d, "C")]);
     assert!(
-        o.axioms
-            .contains(&Axiom::EquivalentClasses(a.clone(), expected_expr.clone())),
+        o.axioms.contains(&Axiom::EquivalentClasses(a.clone(), expected_expr.clone())),
         "named intersectionOf must emit EquivalentClasses(A, B⊓C); got {:?}",
         o.axioms
     );
@@ -1000,8 +938,7 @@ fn named_class_union_emits_equivalent_classes() {
     let a = class(&d, "A");
     let expected_expr = CE::ObjectUnionOf(vec![class(&d, "Human"), class(&d, "Animal")]);
     assert!(
-        o.axioms
-            .contains(&Axiom::EquivalentClasses(a, expected_expr)),
+        o.axioms.contains(&Axiom::EquivalentClasses(a, expected_expr)),
         "named unionOf must emit EquivalentClasses(A, Human⊔Animal); got {:?}",
         o.axioms
     );
@@ -1017,8 +954,7 @@ fn named_class_complement_emits_equivalent_classes() {
     let a = class(&d, "A");
     let expected_expr = CE::ObjectComplementOf(Box::new(class(&d, "B")));
     assert!(
-        o.axioms
-            .contains(&Axiom::EquivalentClasses(a, expected_expr)),
+        o.axioms.contains(&Axiom::EquivalentClasses(a, expected_expr)),
         "named complementOf must emit EquivalentClasses(A, ¬B); got {:?}",
         o.axioms
     );
@@ -1030,14 +966,12 @@ fn named_class_complement_emits_equivalent_classes() {
 #[test]
 fn named_class_restriction_backbone_emits_equivalent_classes() {
     // :z a owl:Restriction; owl:onProperty :p; owl:someValuesFrom :C  (z is named IRI)
-    let (d, t) =
-        parse(":z a owl:Restriction .\n:z owl:onProperty :p .\n:z owl:someValuesFrom :C .");
+    let (d, t) = parse(":z a owl:Restriction .\n:z owl:onProperty :p .\n:z owl:someValuesFrom :C .");
     let o = extract(&d, &t).expect("accept");
     let z = class(&d, "z");
     let expected_expr = CE::ObjectSomeValuesFrom(prop(&d, "p"), Box::new(class(&d, "C")));
     assert!(
-        o.axioms
-            .contains(&Axiom::EquivalentClasses(z, expected_expr)),
+        o.axioms.contains(&Axiom::EquivalentClasses(z, expected_expr)),
         "named restriction must emit EquivalentClasses(z, ∃p.C); got {:?}",
         o.axioms
     );
@@ -1055,11 +989,7 @@ fn named_composite_equiv_prepended_before_use_site_axioms() {
          :D rdfs:subClassOf :A .",
     );
     let o = extract(&d, &t).expect("accept");
-    assert!(
-        o.len() >= 2,
-        "expected at least 2 axioms, got {:?}",
-        o.axioms
-    );
+    assert!(o.len() >= 2, "expected at least 2 axioms, got {:?}", o.axioms);
     // The FIRST axiom must be the name-binding EquivalentClasses.
     assert!(
         matches!(&o.axioms[0], Axiom::EquivalentClasses(CE::Class(_), _)),
@@ -1077,12 +1007,7 @@ fn blank_node_backbone_does_not_emit_equivalent_classes() {
     let (d, t) = parse(":D rdfs:subClassOf [ owl:intersectionOf ( :A :B ) ] .");
     let o = extract(&d, &t).expect("accept");
     // The only axiom must be the SubClassOf (the anonymous blank carries no binding).
-    assert_eq!(
-        o.len(),
-        1,
-        "blank backbone must yield only SubClassOf, got {:?}",
-        o.axioms
-    );
+    assert_eq!(o.len(), 1, "blank backbone must yield only SubClassOf, got {:?}", o.axioms);
     assert!(
         matches!(&o.axioms[0], Axiom::SubClassOf { .. }),
         "sole axiom must be SubClassOf, got {:?}",
@@ -1135,8 +1060,7 @@ fn named_union_with_class_assertion_emits_both_equiv_and_assertion() {
     assert!(
         equiv_pos < assert_pos,
         "EquivalentClasses must precede ClassAssertion (position {} vs {})",
-        equiv_pos,
-        assert_pos
+        equiv_pos, assert_pos
     );
 }
 
@@ -1295,9 +1219,7 @@ fn accept_named_intersection_with_use_site() {
     );
     let o = extract(&d, &t).expect("named intersectionOf with use-site should be accepted");
     assert!(
-        o.axioms
-            .iter()
-            .any(|ax| matches!(ax, Axiom::EquivalentClasses(CE::Class(_), _))),
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::EquivalentClasses(CE::Class(_), _))),
         "named intersectionOf must still emit EquivalentClasses; got {:?}",
         o.axioms
     );

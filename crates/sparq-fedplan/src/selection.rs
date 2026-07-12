@@ -484,15 +484,9 @@ mod tests {
             .build();
         let both = TriplePattern::new(iri("http://ex/x"), iri("http://ex/p"), iri("http://ex/y"));
         let est = estimate_cardinality(&both, &degenerate);
-        assert!(
-            est.is_finite(),
-            "no division by zero on a degenerate partition"
-        );
+        assert!(est.is_finite(), "no division by zero on a degenerate partition");
         assert!(est >= 0.0, "estimate is floored at 0");
-        assert_eq!(
-            est, 1.0,
-            "triples.max(1)/(1*1) = 1 for an all-zero partition"
-        );
+        assert_eq!(est, 1.0, "triples.max(1)/(1*1) = 1 for an all-zero partition");
     }
 
     // ---- The open-predicate estimate is the source's total triples, floored at 1 even for

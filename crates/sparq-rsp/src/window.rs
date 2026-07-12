@@ -62,12 +62,7 @@ pub enum WindowSpec {
     /// late arrivals (0 = closed at the first sight of a newer-window triple).
     /// `t0` is the RSP-QL window origin: window `k` covers
     /// `[t0 + k·step, t0 + k·step + range)`.
-    Time {
-        range: u64,
-        step: u64,
-        max_delay: u64,
-        t0: u64,
-    },
+    Time { range: u64, step: u64, max_delay: u64, t0: u64 },
     /// `ROWS rows` — count window over the last `rows` arrivals, reported
     /// every `slide` arrivals (CQL default: every arrival, `slide = 1`).
     Count { rows: usize, slide: usize },
@@ -82,12 +77,7 @@ impl WindowSpec {
     pub fn time(range: u64, step: u64) -> Self {
         assert!(range > 0, "window RANGE must be > 0");
         assert!(step > 0, "window STEP must be > 0");
-        WindowSpec::Time {
-            range,
-            step,
-            max_delay: 0,
-            t0: 0,
-        }
+        WindowSpec::Time { range, step, max_delay: 0, t0: 0 }
     }
 
     /// `ROWS rows`, reported on every arrival.
@@ -106,14 +96,9 @@ impl WindowSpec {
     /// not apply).
     pub fn with_max_delay(self, max_delay: u64) -> Self {
         match self {
-            WindowSpec::Time {
-                range, step, t0, ..
-            } => WindowSpec::Time {
-                range,
-                step,
-                max_delay,
-                t0,
-            },
+            WindowSpec::Time { range, step, t0, .. } => {
+                WindowSpec::Time { range, step, max_delay, t0 }
+            }
             WindowSpec::Count { .. } => panic!("max_delay applies to time windows only"),
         }
     }
@@ -127,17 +112,9 @@ impl WindowSpec {
     /// On a count window (count windows have no time axis).
     pub fn with_t0(self, t0: u64) -> Self {
         match self {
-            WindowSpec::Time {
-                range,
-                step,
-                max_delay,
-                ..
-            } => WindowSpec::Time {
-                range,
-                step,
-                max_delay,
-                t0,
-            },
+            WindowSpec::Time { range, step, max_delay, .. } => {
+                WindowSpec::Time { range, step, max_delay, t0 }
+            }
             WindowSpec::Count { .. } => panic!("t0 applies to time windows only"),
         }
     }
@@ -242,12 +219,9 @@ impl<T: Clone> WindowedStream<T> {
     /// [`take_closed`](Self::take_closed).
     pub fn push(&mut self, triple: T, ts: u64) {
         match self.spec {
-            WindowSpec::Time {
-                range,
-                step,
-                max_delay,
-                t0,
-            } => self.push_time(triple, ts, range, step, max_delay, t0),
+            WindowSpec::Time { range, step, max_delay, t0 } => {
+                self.push_time(triple, ts, range, step, max_delay, t0)
+            }
             WindowSpec::Count { rows, slide } => self.push_count(triple, ts, rows, slide),
         }
     }
@@ -266,11 +240,7 @@ impl<T: Clone> WindowedStream<T> {
         // eventually emitted empty — not silently skipped (roborev 1693).
         if self.next_close.is_none() {
             let wm = ts.saturating_sub(max_delay).saturating_sub(t0);
-            let k_min = if wm >= range {
-                (wm - range) / step + 1
-            } else {
-                0
-            };
+            let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
             self.next_close = Some(k_min);
         }
         // Window k covers [t0 + k·step, t0 + k·step + range). The LAST window
@@ -323,22 +293,12 @@ impl<T: Clone> WindowedStream<T> {
     /// tracked and eventually emitted, possibly empty), matching the documented
     /// gap-first-arrival rule.
     pub fn advance(&mut self, ts: u64) {
-        let WindowSpec::Time {
-            range,
-            step,
-            max_delay,
-            t0,
-        } = self.spec
-        else {
+        let WindowSpec::Time { range, step, max_delay, t0 } = self.spec else {
             return; // count windows have no time axis / watermark
         };
         if self.next_close.is_none() {
             let wm = ts.saturating_sub(max_delay).saturating_sub(t0);
-            let k_min = if wm >= range {
-                (wm - range) / step + 1
-            } else {
-                0
-            };
+            let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
             self.next_close = Some(k_min);
         }
         if ts > self.max_ts {
@@ -363,17 +323,10 @@ impl<T: Clone> WindowedStream<T> {
             .buffer
             .range(start..end)
             .flat_map(|(&ts, ts_triples)| {
-                ts_triples.iter().map(move |t| Timestamped {
-                    triple: t.clone(),
-                    ts,
-                })
+                ts_triples.iter().map(move |t| Timestamped { triple: t.clone(), ts })
             })
             .collect();
-        self.closed.push(Window {
-            start,
-            end,
-            triples,
-        });
+        self.closed.push(Window { start, end, triples });
         self.next_close = Some(k + 1);
         // Evict: nothing below the next window's start can be read again.
         self.buffer = self.buffer.split_off(&(t0 + (k + 1) * step));
@@ -391,11 +344,7 @@ impl<T: Clone> WindowedStream<T> {
             // Reported on arrival, so the ring is never empty here.
             let start = self.ring.front().expect("non-empty ring").ts;
             let end = self.ring.back().expect("non-empty ring").ts;
-            self.closed.push(Window {
-                start,
-                end,
-                triples: self.ring.iter().cloned().collect(),
-            });
+            self.closed.push(Window { start, end, triples: self.ring.iter().cloned().collect() });
         }
     }
 
@@ -405,10 +354,7 @@ impl<T: Clone> WindowedStream<T> {
     /// count windows beyond draining. After a flush, further pushes at or
     /// below the flushed horizon count as late.
     pub fn flush(&mut self) -> Vec<Window<T>> {
-        if let WindowSpec::Time {
-            range, step, t0, ..
-        } = self.spec
-        {
+        if let WindowSpec::Time { range, step, t0, .. } = self.spec {
             while let Some(k) = self.next_close {
                 if t0 + k * step > self.max_ts {
                     break; // window starts after every triple we ever saw

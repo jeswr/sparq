@@ -122,7 +122,10 @@ impl NodeMap {
 
     /// Borrows the [`GraphMap`] for graph `name`, or `None` if it has no entry.
     pub fn graph(&self, name: &str) -> Option<&GraphMap> {
-        self.graphs.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+        self.graphs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 
     /// The graph names present, in first-insertion order (always includes `@default`).
@@ -196,12 +199,7 @@ fn node_map_gen(
             if is_value_object(members) {
                 let value = element.clone();
                 append_value(
-                    node_map,
-                    active_graph,
-                    active_subject,
-                    active_property,
-                    list,
-                    value,
+                    node_map, active_graph, active_subject, active_property, list, value,
                 );
                 return None;
             }
@@ -304,7 +302,15 @@ fn process_node_members(
             }
             // step 5.6: @included — a set of node objects to fold into this graph.
             "@included" => {
-                node_map_gen(value, node_map, active_graph, None, None, &mut None, issuer);
+                node_map_gen(
+                    value,
+                    node_map,
+                    active_graph,
+                    None,
+                    None,
+                    &mut None,
+                    issuer,
+                );
             }
             // step 5.7 (@reverse): each reverse property points from its objects back at
             // this node. Materialise each reverse value ONCE via node-map generation
@@ -314,7 +320,8 @@ fn process_node_members(
             // duplicate node — the 0039 bug.)
             "@reverse" => {
                 if let Json::Obj(reverse_map) = value {
-                    let reference = Json::Obj(vec![("@id".to_string(), Json::Str(id.to_string()))]);
+                    let reference =
+                        Json::Obj(vec![("@id".to_string(), Json::Str(id.to_string()))]);
                     for (property, values) in reverse_map {
                         for v in as_array(values) {
                             // Recurse as a top-level node (no active subject/property): this

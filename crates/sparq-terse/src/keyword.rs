@@ -85,11 +85,7 @@ struct Entry {
 }
 
 const fn e(name: &'static str, namespace: &'static str, local: &'static str) -> Entry {
-    Entry {
-        name,
-        namespace,
-        local,
-    }
+    Entry { name, namespace, local }
 }
 
 /// The small, fixed keyword legend (design §3.1, scoped to the PKG ontology's actual hot
@@ -250,11 +246,7 @@ mod tests {
         // SPARQL — the load-bearing invariant for the keyword layer).
         let mut seen = std::collections::HashSet::new();
         for (name, iri) in legend() {
-            assert!(
-                seen.insert(name),
-                "duplicate keyword in the frozen legend: {}",
-                name
-            );
+            assert!(seen.insert(name), "duplicate keyword in the frozen legend: {}", name);
             assert!(
                 oxiri_ok(&iri),
                 "legend IRI for K:{} is not a valid absolute IRI: {}",
@@ -303,11 +295,7 @@ mod tests {
         let card = legend_card();
         assert!(card.contains(LEGEND_VERSION));
         for (name, iri) in legend() {
-            assert!(
-                card.contains(&format!("K:{} -> <{}>", name, iri)),
-                "missing {}",
-                name
-            );
+            assert!(card.contains(&format!("K:{} -> <{}>", name, iri)), "missing {}", name);
         }
     }
 }

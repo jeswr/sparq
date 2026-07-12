@@ -125,10 +125,7 @@ mod tests {
         }
     }
     fn sol(pairs: &[(&str, Term)]) -> Solution {
-        pairs
-            .iter()
-            .map(|(k, t)| (k.to_string(), t.clone()))
-            .collect()
+        pairs.iter().map(|(k, t)| (k.to_string(), t.clone())).collect()
     }
 
     #[test]

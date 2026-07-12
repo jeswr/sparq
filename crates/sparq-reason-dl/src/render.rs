@@ -232,7 +232,12 @@ pub fn render_to_turtle(onto: &Ontology, dict: &mut Dict) -> String {
 // Axiom → triples
 // -------------------------------------------------------------------------------------------
 
-fn emit_axiom(axiom: &Axiom, dict: &mut Dict, counter: &mut BnodeCounter, out: &mut Vec<[Id; 3]>) {
+fn emit_axiom(
+    axiom: &Axiom,
+    dict: &mut Dict,
+    counter: &mut BnodeCounter,
+    out: &mut Vec<[Id; 3]>,
+) {
     match axiom {
         // GCI: `sub rdfs:subClassOf sup`
         Axiom::SubClassOf { sub, sup } => {
@@ -317,11 +322,7 @@ fn emit_axiom(axiom: &Axiom, dict: &mut Dict, counter: &mut BnodeCounter, out: &
         }
 
         // `source property target` (a role assertion)
-        Axiom::ObjectPropertyAssertion {
-            property,
-            source,
-            target,
-        } => {
+        Axiom::ObjectPropertyAssertion { property, source, target } => {
             let p = prop_id(property);
             out.push([*source, p, *target]);
         }
@@ -493,19 +494,12 @@ pub fn triples_to_turtle(triples: &[[Id; 3]], dict: &Dict) -> String {
         if is_inline(id) {
             // Inline integer literals — rare in OWL ontologies but possible for bnode ids
             // that happen to be in the inline range; render as a diagnostic tag.
-            return format!(
-                "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>",
-                id as i64
-            );
+            return format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", id as i64);
         }
         match dict.term_parts(id) {
             TermParts::Iri { prefix, suffix } => format!("<{}{}>", prefix, suffix),
             TermParts::Blank(label) => format!("_:{}", label),
-            TermParts::Lit {
-                value,
-                datatype,
-                lang,
-            } => {
+            TermParts::Lit { value, datatype, lang } => {
                 if let Some(lang) = lang {
                     format!("\"{}\"@{}", value, lang)
                 } else {
@@ -745,10 +739,7 @@ mod tests {
                    <http://ex/AB> owl:intersectionOf ( <http://ex/A> <http://ex/B> ) .\n\
                    <http://ex/AB> rdfs:subClassOf <http://ex/A> .";
         let (onto1, onto2) = round_trip(ttl);
-        assert_eq!(
-            onto1, onto2,
-            "round-trip: EquivalentClasses(AB, A⊓B) + SubClassOf(AB, A)"
-        );
+        assert_eq!(onto1, onto2, "round-trip: EquivalentClasses(AB, A⊓B) + SubClassOf(AB, A)");
     }
 
     // --- EquivalentClasses regression tests for the sq-pbz04.4.17 shape fix -------------
@@ -774,10 +765,7 @@ mod tests {
                      owl:someValuesFrom <http://ex/A>\n\
                    ] .";
         let (onto1, onto2) = round_trip(ttl);
-        assert_eq!(
-            onto1, onto2,
-            "round-trip: EquivalentClasses(A, P⊓Q) + SubClassOf(S, ∃r.A)"
-        );
+        assert_eq!(onto1, onto2, "round-trip: EquivalentClasses(A, P⊓Q) + SubClassOf(S, ∃r.A)");
         // The reference site must stay ATOMIC in BOTH models — the load-bearing half of
         // the invariant the corpus arm caught the old emission violating.
         for onto in [&onto1, &onto2] {
@@ -790,11 +778,7 @@ mod tests {
                     } if matches!(**filler, ClassExpression::Class(_))
                 )
             });
-            assert!(
-                filler_is_atomic,
-                "∃r.A filler must stay the atomic Class(A): {:?}",
-                onto
-            );
+            assert!(filler_is_atomic, "∃r.A filler must stay the atomic Class(A): {:?}", onto);
         }
     }
 
@@ -811,10 +795,7 @@ mod tests {
                      owl:someValuesFrom <http://ex/person>\n\
                    ] .";
         let (onto1, onto2) = round_trip(ttl);
-        assert_eq!(
-            onto1, onto2,
-            "round-trip: EquivalentClasses(person, ∃parent.person)"
-        );
+        assert_eq!(onto1, onto2, "round-trip: EquivalentClasses(person, ∃parent.person)");
     }
 
     /// Direct unit test of the emission shape: `EquivalentClasses(Class(A), composite)`
@@ -837,10 +818,7 @@ mod tests {
         };
         let triples = render_to_triples(&onto, &mut dict);
         let equivalent_class = dict.intern_iri("http://www.w3.org/2002/07/owl#equivalentClass");
-        let equiv: Vec<_> = triples
-            .iter()
-            .filter(|[_, pred, _]| *pred == equivalent_class)
-            .collect();
+        let equiv: Vec<_> = triples.iter().filter(|[_, pred, _]| *pred == equivalent_class).collect();
         assert_eq!(equiv.len(), 1, "exactly one owl:equivalentClass triple");
         let [s, _, o] = equiv[0];
         assert_eq!(*s, a, "subject is the named class A");
@@ -848,15 +826,11 @@ mod tests {
         // The backbone must hang off the OBJECT node, never off A.
         let intersection_of = dict.intern_iri("http://www.w3.org/2002/07/owl#intersectionOf");
         assert!(
-            triples
-                .iter()
-                .any(|[s2, p2, _]| s2 == o && *p2 == intersection_of),
+            triples.iter().any(|[s2, p2, _]| s2 == o && *p2 == intersection_of),
             "the intersection backbone sits on the fresh object node"
         );
         assert!(
-            !triples
-                .iter()
-                .any(|[s2, p2, _]| *s2 == a && *p2 == intersection_of),
+            !triples.iter().any(|[s2, p2, _]| *s2 == a && *p2 == intersection_of),
             "no inline backbone on the named class A"
         );
     }
@@ -960,10 +934,7 @@ mod tests {
         };
         let ttl = render_to_turtle(&onto, &mut dict);
         // Must contain the key vocabulary IRI fragment.
-        assert!(
-            ttl.contains("subClassOf"),
-            "Turtle output must mention rdfs:subClassOf"
-        );
+        assert!(ttl.contains("subClassOf"), "Turtle output must mention rdfs:subClassOf");
         assert!(ttl.contains("ex/A"), "Turtle output must mention ex/A");
         assert!(ttl.contains("ex/B"), "Turtle output must mention ex/B");
         // Must end with a '.' terminator line.
@@ -1010,11 +981,7 @@ mod tests {
             }],
         };
         let triples = render_to_triples(&onto, &mut dict);
-        assert_eq!(
-            triples.len(),
-            5,
-            "expected 5 triples for SubClassOf(S, ∃r.C)"
-        );
+        assert_eq!(triples.len(), 5, "expected 5 triples for SubClassOf(S, ∃r.C)");
     }
 
     // --- render_to_triples direct unit test for intersection ---
@@ -1043,10 +1010,6 @@ mod tests {
             }],
         };
         let triples = render_to_triples(&onto, &mut dict);
-        assert_eq!(
-            triples.len(),
-            6,
-            "expected 6 triples for SubClassOf(S, A⊓B)"
-        );
+        assert_eq!(triples.len(), 6, "expected 6 triples for SubClassOf(S, A⊓B)");
     }
 }

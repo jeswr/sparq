@@ -42,7 +42,9 @@
 //! probe side = candidate rows, combined rows reshaped back into the rule's slot
 //! layout.
 
-use super::{numeric_value, AggAtom, Atom, CmpOp, DTerm, FactStore, Program, Rule, Stratification};
+use super::{
+    numeric_value, AggAtom, Atom, CmpOp, DTerm, FactStore, Program, Rule, Stratification,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 use sparq_substrate::join::{self as sjoin, JoinKeys, NoBudget};
@@ -241,15 +243,7 @@ fn join_rows(
     let tables = vec![sjoin::build_table(rows, &keys)];
     let probe_only: Vec<usize> = (0..cand_width).collect();
     let mut combined: Vec<Row> = Vec::new();
-    sjoin::hash_probe_serial(
-        cands,
-        &keys,
-        rows,
-        &tables,
-        &probe_only,
-        &NoBudget,
-        &mut combined,
-    );
+    sjoin::hash_probe_serial(cands, &keys, rows, &tables, &probe_only, &NoBudget, &mut combined);
     let mut out = Vec::with_capacity(combined.len());
     'row: for c in &combined {
         let (b, f) = c.split_at(width);
@@ -353,14 +347,7 @@ fn run_rule(
         }
         new_writes.push((agg.out as usize, agg.on.len()));
         bound.insert(agg.out);
-        rows = join_rows(
-            &rows,
-            &key_cols,
-            &new_writes,
-            table,
-            rule.n_slots,
-            cand_width,
-        );
+        rows = join_rows(&rows, &key_cols, &new_writes, table, rule.n_slots, cand_width);
         if rows.is_empty() {
             return;
         }

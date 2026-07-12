@@ -19,9 +19,7 @@ fn check(name: &str, focus: &str, opts: &FormOptions) {
     };
     let data = load("data");
     let shapes = load("shapes");
-    let focus = Term::from(NamedNode::new_unchecked(format!(
-        "http://example.org/{focus}"
-    )));
+    let focus = Term::from(NamedNode::new_unchecked(format!("http://example.org/{focus}")));
     let form = derive_form(&data, &shapes, &focus, opts);
     let mut json = serde_json::to_string_pretty(&form).expect("FormDescription serializes");
     json.push('\n');

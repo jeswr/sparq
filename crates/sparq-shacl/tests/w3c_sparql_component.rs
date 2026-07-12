@@ -278,12 +278,7 @@ fn check(
             summarize(&report.results)
         ));
     }
-    if !bipartite_match(
-        &expected,
-        &report.results,
-        &mut vec![false; expected.len()],
-        0,
-    ) {
+    if !bipartite_match(&expected, &report.results, &mut vec![false; expected.len()], 0) {
         return Outcome::Fail(format!(
             "results do not correspond — got {}",
             summarize(&report.results)

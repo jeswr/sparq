@@ -666,10 +666,7 @@ _:st2 <http://sparq.dev/ns/cs#avgMultiplicity> "2.0"^^<http://www.w3.org/2001/XM
 <http://s/> <http://rdfs.org/ns/void#triples> "300"^^<http://www.w3.org/2001/XMLSchema#integer> .
 "#;
         let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), nt).unwrap();
-        assert_eq!(
-            d.total_triples, 500,
-            "dataset total is the max of the served values"
-        );
+        assert_eq!(d.total_triples, 500, "dataset total is the max of the served values");
     }
 
     // ---- The builder DROPS a characteristic set with `subjects == 0` (degenerate, mirrors

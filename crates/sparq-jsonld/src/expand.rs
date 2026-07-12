@@ -209,14 +209,8 @@ fn expand_map(
     // step 8: apply a property-scoped context (override protected — it was already validated
     // at definition time, so it may legally redefine a protected term).
     if let Some((sctx, sbase)) = &prop_scoped {
-        active_context = active_context.process_scoped(
-            sctx,
-            sbase.as_deref(),
-            true,
-            true,
-            ctx.loader,
-            ctx.options,
-        )?;
+        active_context =
+            active_context.process_scoped(sctx, sbase.as_deref(), true, true, ctx.loader, ctx.options)?;
     }
 
     // step 9: a local @context on the element.
@@ -411,8 +405,8 @@ fn expand_object(
             nest_processed = active_context.process_scoped(
                 sctx,
                 sbase.as_deref(),
-                true, // override_protected: may redefine protected terms
-                true, // propagate: keep context in child nodes (not a type-scoped ctx)
+                true,  // override_protected: may redefine protected terms
+                true,  // propagate: keep context in child nodes (not a type-scoped ctx)
                 ctx.loader,
                 ctx.options,
             )?;
@@ -495,7 +489,9 @@ fn expand_keyword(
                 Json::Obj(m) if frame_expansion && m.is_empty() => {
                     set_obj(result, "@type", Json::Arr(vec![Json::obj()]));
                 }
-                Json::Obj(m) if frame_expansion && m.len() == 1 && m[0].0 == "@default" => {
+                Json::Obj(m)
+                    if frame_expansion && m.len() == 1 && m[0].0 == "@default" =>
+                {
                     let defaults: Vec<Json> = as_array(m[0].1.clone())
                         .iter()
                         .filter_map(|t| {
@@ -738,8 +734,8 @@ fn expand_property_value(
                     return Err(JsonLdError::new(E::InvalidLanguageMapValue));
                 };
                 let mut v = vec![("@value".to_string(), Json::Str(s.clone()))];
-                let drop_lang = lang == "@none"
-                    || active_context.expand_iri(&lang, false, true).as_deref() == Some("@none");
+                let drop_lang =
+                    lang == "@none" || active_context.expand_iri(&lang, false, true).as_deref() == Some("@none");
                 if !drop_lang {
                     // [FABLE-5] sq-oy1f.29 — language tags normalise to lower case.
                     v.push(("@language".to_string(), Json::Str(lang.to_lowercase())));
@@ -870,15 +866,7 @@ fn expand_property_value(
     }
 
     // step 13.8 (else): the general recursion.
-    expand_element(
-        ctx,
-        active_context,
-        Some(key),
-        value,
-        base_url,
-        frame_expansion,
-        false,
-    )
+    expand_element(ctx, active_context, Some(key), value, base_url, frame_expansion, false)
 }
 
 /// **Value Expansion** (JSON-LD 1.1 API §5.3.2): expands a scalar `value` for `active_property`
@@ -897,15 +885,11 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
     // reference processors.
     if let Json::Str(s) = value {
         if type_mapping == Some("@id") {
-            let id = active_context
-                .expand_iri(s, true, false)
-                .map_or_else(json_null, Json::Str);
+            let id = active_context.expand_iri(s, true, false).map_or_else(json_null, Json::Str);
             return Json::Obj(vec![("@id".to_string(), id)]);
         }
         if type_mapping == Some("@vocab") {
-            let id = active_context
-                .expand_iri(s, true, true)
-                .map_or_else(json_null, Json::Str);
+            let id = active_context.expand_iri(s, true, true).map_or_else(json_null, Json::Str);
             return Json::Obj(vec![("@id".to_string(), id)]);
         }
     }
@@ -1044,11 +1028,7 @@ fn cleanup(
         }
         if has(&members, "@set") {
             // Unwrap @set to its value.
-            let set_val = members
-                .into_iter()
-                .find(|(k, _)| k == "@set")
-                .map(|(_, v)| v)
-                .unwrap();
+            let set_val = members.into_iter().find(|(k, _)| k == "@set").map(|(_, v)| v).unwrap();
             return Ok(Some(set_val));
         }
         return Ok(Some(Json::Obj(members)));
@@ -1138,11 +1118,7 @@ fn sorted_obj(element: &Json, ordered: bool) -> Vec<(String, Json)> {
 fn string_values(j: &Json) -> Vec<String> {
     match j {
         Json::Str(s) => vec![s.clone()],
-        Json::Arr(items) => items
-            .iter()
-            .filter_map(Json::as_str)
-            .map(str::to_string)
-            .collect(),
+        Json::Arr(items) => items.iter().filter_map(Json::as_str).map(str::to_string).collect(),
         _ => Vec::new(),
     }
 }
@@ -1195,15 +1171,10 @@ fn has_key_expanding_to(active_context: &ActiveContext, element: &Json, keyword:
 }
 
 /// True iff `element` has exactly one entry whose key IRI-expands (vocab) to `keyword`.
-fn is_single_entry_expanding_to(
-    active_context: &ActiveContext,
-    element: &Json,
-    keyword: &str,
-) -> bool {
+fn is_single_entry_expanding_to(active_context: &ActiveContext, element: &Json, keyword: &str) -> bool {
     match element {
         Json::Obj(m) => {
-            m.len() == 1
-                && active_context.expand_iri(&m[0].0, false, true).as_deref() == Some(keyword)
+            m.len() == 1 && active_context.expand_iri(&m[0].0, false, true).as_deref() == Some(keyword)
         }
         _ => false,
     }
@@ -1357,15 +1328,9 @@ mod tests {
     fn as_array_and_array_of_round_trip() {
         assert_eq!(as_array(Json::Arr(vec![raw("1")])), vec![raw("1")]);
         assert_eq!(as_array(Json::Str("x".into())), vec![Json::Str("x".into())]);
-        assert_eq!(
-            array_of(Json::Str("x".into())),
-            Json::Arr(vec![Json::Str("x".into())])
-        );
+        assert_eq!(array_of(Json::Str("x".into())), Json::Arr(vec![Json::Str("x".into())]));
         // Already an array: array_of is the identity.
-        assert_eq!(
-            array_of(Json::Arr(vec![raw("1")])),
-            Json::Arr(vec![raw("1")])
-        );
+        assert_eq!(array_of(Json::Arr(vec![raw("1")])), Json::Arr(vec![raw("1")]));
     }
 
     #[test]
@@ -1373,28 +1338,19 @@ mod tests {
         let mut m = Vec::new();
         // Absent key → a fresh single-item array.
         prepend_value(&mut m, "p", Json::Str("b".into()));
-        assert_eq!(
-            obj_get(&m, "p"),
-            Some(&Json::Arr(vec![Json::Str("b".into())]))
-        );
+        assert_eq!(obj_get(&m, "p"), Some(&Json::Arr(vec![Json::Str("b".into())])));
         // Present key → the new value goes FIRST (§5.1.2 step 13.8.3.7.3 ordering).
         prepend_value(&mut m, "p", Json::Str("a".into()));
         assert_eq!(
             obj_get(&m, "p"),
-            Some(&Json::Arr(vec![
-                Json::Str("a".into()),
-                Json::Str("b".into())
-            ]))
+            Some(&Json::Arr(vec![Json::Str("a".into()), Json::Str("b".into())]))
         );
         // A non-array existing value is array-wrapped with the new value first.
         let mut m2 = vec![("q".to_string(), Json::Str("old".into()))];
         prepend_value(&mut m2, "q", Json::Str("new".into()));
         assert_eq!(
             obj_get(&m2, "q"),
-            Some(&Json::Arr(vec![
-                Json::Str("new".into()),
-                Json::Str("old".into())
-            ]))
+            Some(&Json::Arr(vec![Json::Str("new".into()), Json::Str("old".into())]))
         );
     }
 
@@ -1449,19 +1405,13 @@ mod tests {
     fn string_values_extracts_only_strings() {
         let arr = Json::Arr(vec![Json::Str("a".into()), raw("1"), Json::Str("b".into())]);
         assert_eq!(string_values(&arr), vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(
-            string_values(&Json::Str("solo".into())),
-            vec!["solo".to_string()]
-        );
+        assert_eq!(string_values(&Json::Str("solo".into())), vec!["solo".to_string()]);
         assert!(string_values(&raw("1")).is_empty());
     }
 
     #[test]
     fn type_values_validates() {
-        assert_eq!(
-            type_values(&Json::Str("T".into()), false).unwrap(),
-            vec!["T".to_string()]
-        );
+        assert_eq!(type_values(&Json::Str("T".into()), false).unwrap(), vec!["T".to_string()]);
         assert!(type_values(&raw("42"), false).is_err());
         // Frame expansion tolerates a map / non-string members.
         assert!(type_values(&Json::obj(), true).unwrap().is_empty());
@@ -1475,12 +1425,7 @@ mod tests {
         )
         .unwrap();
         ActiveContext::new(None)
-            .process(
-                &ctx,
-                None,
-                &crate::loader::NoopLoader,
-                &JsonLdOptions::default(),
-            )
+            .process(&ctx, None, &crate::loader::NoopLoader, &JsonLdOptions::default())
             .expect("context processes")
     }
 
@@ -1490,10 +1435,7 @@ mod tests {
         // A resolvable absolute IRI under `@id` coercion → a `{"@id": <iri>}` node reference.
         assert_eq!(
             expand_value(&ac, "id_term", &Json::Str("http://ex/target".into())),
-            Json::Obj(vec![(
-                "@id".to_string(),
-                Json::Str("http://ex/target".into())
-            )]),
+            Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/target".into()))]),
         );
         // A keyword-shaped token IRI-expands to null under `@id` coercion (document-relative,
         // no vocab). §5.3.2 step 1 is literal: the result is `{"@id": null}` — the `@id`
@@ -1519,10 +1461,7 @@ mod tests {
         // A plain term under `@vocab` coercion resolves against `@vocab`.
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("thing".into())),
-            Json::Obj(vec![(
-                "@id".to_string(),
-                Json::Str("http://ex/v#thing".into())
-            )]),
+            Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/v#thing".into()))]),
         );
         // A keyword-shaped token still expands to null under `@vocab` coercion → the
         // spec-literal `{"@id": null}` (§5.3.2 step 2).

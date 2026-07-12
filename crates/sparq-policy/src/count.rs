@@ -242,15 +242,9 @@ pub fn count_status(rule: &Rule, request: &Request, store: &dyn UsageCounterStor
         return CountStatus::Unprovable; // store unavailable → fail-closed
     };
     if consumed >= effective {
-        CountStatus::DefinitelyUnsatisfied {
-            consumed,
-            limit: effective,
-        }
+        CountStatus::DefinitelyUnsatisfied { consumed, limit: effective }
     } else {
-        CountStatus::Satisfied {
-            consumed,
-            limit: effective,
-        }
+        CountStatus::Satisfied { consumed, limit: effective }
     }
 }
 
@@ -275,12 +269,7 @@ pub struct ExerciseDecision {
 
 impl ExerciseDecision {
     fn deny(matched: Vec<String>, reasons: Vec<String>) -> ExerciseDecision {
-        ExerciseDecision {
-            allow: false,
-            matched_rules: matched,
-            reasons,
-            consumed: None,
-        }
+        ExerciseDecision { allow: false, matched_rules: matched, reasons, consumed: None }
     }
 }
 
@@ -357,10 +346,7 @@ pub fn evaluate_and_exercise(
             // A count constraint was present but malformed → fail-closed.
             return ExerciseDecision::deny(
                 vec![rule.id.clone()],
-                vec![format!(
-                    "permission {} has a malformed odrl:count limit",
-                    rule.id
-                )],
+                vec![format!("permission {} has a malformed odrl:count limit", rule.id)],
             );
         }
         None => return granted(decision, None),

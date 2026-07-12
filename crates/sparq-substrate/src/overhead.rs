@@ -213,10 +213,7 @@ impl OverheadReport {
             "  \"environment\": {},\n",
             json_str(&self.environment)
         ));
-        s.push_str(&format!(
-            "  \"host_note\": {},\n",
-            json_str(&self.host_note)
-        ));
+        s.push_str(&format!("  \"host_note\": {},\n", json_str(&self.host_note)));
         s.push_str(&format!("  \"reps_min_of\": {},\n", self.reps));
         s.push_str(&format!("  \"all_kernels_agree\": {},\n", self.all_agree()));
         s.push_str(

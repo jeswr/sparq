@@ -65,6 +65,6 @@ pub use error::{JsonLdError, JsonLdErrorCode};
 pub use expand::expand;
 pub use flatten::{flatten, flatten_expanded};
 pub use json::{Json, JsonParseError};
-pub use loader::{DocumentLoader, FsLoader, NoopLoader, RemoteDocument};
 pub use node_map::{generate_node_map, BlankNodeIssuer, GraphMap, NodeMap};
+pub use loader::{DocumentLoader, FsLoader, NoopLoader, RemoteDocument};
 pub use options::{EmbedFlag, JsonLdOptions, ProcessingMode, RdfDirection};

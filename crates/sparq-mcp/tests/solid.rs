@@ -84,10 +84,7 @@ fn tool(server: &mut SolidMcpServer, name: &str, args: Value) -> (String, bool) 
         "tools/call must yield a tool result (got protocol error: {resp})"
     );
     (
-        result["content"][0]["text"]
-            .as_str()
-            .expect("text content")
-            .to_string(),
+        result["content"][0]["text"].as_str().expect("text content").to_string(),
         result["isError"].as_bool().unwrap_or(false),
     )
 }
@@ -117,35 +114,21 @@ fn write_enabled_pod_server_advertises_the_mutating_tools() {
     let names = tool_names(&mut s);
     assert_eq!(
         names,
-        [
-            "query",
-            "resource_get",
-            "container_list",
-            "update",
-            "resource_put",
-            "resource_delete",
-            "container_create"
-        ]
+        ["query", "resource_get", "container_list", "update", "resource_put",
+         "resource_delete", "container_create"]
     );
 }
 
 #[test]
 fn resource_get_serves_the_document_as_ntriples() {
     let mut s = server_for(ALICE, false);
-    let (text, is_err) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
+    let (text, is_err) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
     assert!(!is_err, "authorized read must succeed: {text}");
     let v: Value = serde_json::from_str(&text).expect("result is JSON");
     assert_eq!(v["url"], "https://pod.ex/notes/n1");
     assert_eq!(v["content_type"], "application/n-triples");
     let content = v["content"].as_str().expect("content");
-    assert!(
-        content.contains("\"hello\""),
-        "the document body is served: {content}"
-    );
+    assert!(content.contains("\"hello\""), "the document body is served: {content}");
     assert!(
         !content.contains("classified"),
         "resource_get must serve ONE document, not the dataset"
@@ -160,10 +143,7 @@ fn resource_get_rejects_a_non_ntriples_accept_instead_of_coercing() {
         "resource_get",
         json!({"url": "https://pod.ex/notes/n1", "accept": "application/ld+json"}),
     );
-    assert!(
-        is_err,
-        "unsupported accept must be a tool error, not silent coercion"
-    );
+    assert!(is_err, "unsupported accept must be a tool error, not silent coercion");
     assert!(text.contains("unsupported accept"), "honest error: {text}");
 }
 
@@ -173,16 +153,10 @@ fn unauthorized_read_is_byte_identical_to_nonexistent() {
     // byte-identical to the error for a document that does not exist, so existence is
     // never disclosed. This test fails if denial gets its own message.
     let mut s = server_for(ALICE, false);
-    let (denied, e1) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/secret/s1"}),
-    );
-    let (absent, e2) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/secret/nope"}),
-    );
+    let (denied, e1) =
+        tool(&mut s, "resource_get", json!({"url": "https://pod.ex/secret/s1"}));
+    let (absent, e2) =
+        tool(&mut s, "resource_get", json!({"url": "https://pod.ex/secret/nope"}));
     assert!(e1 && e2, "both must be tool errors");
     assert_eq!(
         denied.replace("secret/s1", "X"),
@@ -190,39 +164,24 @@ fn unauthorized_read_is_byte_identical_to_nonexistent() {
         "unauthorized-read and nonexistent errors must be indistinguishable"
     );
     // And the same template covers a readable-but-absent target.
-    let (readable_absent, e3) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/nope"}),
-    );
+    let (readable_absent, e3) =
+        tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/nope"}));
     assert!(e3);
-    assert_eq!(
-        readable_absent,
-        "resource not found: <https://pod.ex/notes/nope>"
-    );
+    assert_eq!(readable_absent, "resource not found: <https://pod.ex/notes/nope>");
     assert_eq!(denied, "resource not found: <https://pod.ex/secret/s1>");
 }
 
 #[test]
 fn container_list_derives_members_from_stored_containment_only() {
     let mut s = server_for(ALICE, false);
-    let (text, is_err) = tool(
-        &mut s,
-        "container_list",
-        json!({"url": "https://pod.ex/notes/"}),
-    );
+    let (text, is_err) = tool(&mut s, "container_list", json!({"url": "https://pod.ex/notes/"}));
     assert!(!is_err, "{text}");
     let v: Value = serde_json::from_str(&text).expect("JSON");
     let members: Vec<(&str, bool)> = v["members"]
         .as_array()
         .expect("members")
         .iter()
-        .map(|m| {
-            (
-                m["url"].as_str().unwrap(),
-                m["container"].as_bool().unwrap(),
-            )
-        })
+        .map(|m| (m["url"].as_str().unwrap(), m["container"].as_bool().unwrap()))
         .collect();
     // The out-of-path member IS listed (containment is data, not IRI prefixes)…
     assert!(members.contains(&("https://elsewhere.example/shared/doc", false)));
@@ -249,11 +208,7 @@ fn container_list_derives_members_from_stored_containment_only() {
 #[test]
 fn container_list_non_disclosure_matches_resource_get() {
     let mut s = server_for(ALICE, false);
-    let (denied, e1) = tool(
-        &mut s,
-        "container_list",
-        json!({"url": "https://pod.ex/secret/"}),
-    );
+    let (denied, e1) = tool(&mut s, "container_list", json!({"url": "https://pod.ex/secret/"}));
     assert!(e1);
     assert_eq!(denied, "resource not found: <https://pod.ex/secret/>");
 }
@@ -268,18 +223,12 @@ fn query_tool_is_session_scoped() {
     let mut alice = server_for(ALICE, false);
     let (text, is_err) = tool(&mut alice, "query", q.clone());
     assert!(!is_err, "{text}");
-    assert!(
-        text.contains("hello") && !text.contains("classified"),
-        "{text}"
-    );
+    assert!(text.contains("hello") && !text.contains("classified"), "{text}");
 
     let mut bob = server_for(BOB, false);
     let (text, is_err) = tool(&mut bob, "query", q);
     assert!(!is_err, "{text}");
-    assert!(
-        text.contains("classified") && !text.contains("hello"),
-        "{text}"
-    );
+    assert!(text.contains("classified") && !text.contains("hello"), "{text}");
 }
 
 // ───────────────────────── Class U (gated writes) ─────────────────────────
@@ -287,22 +236,14 @@ fn query_tool_is_session_scoped() {
 #[test]
 fn mutating_tools_are_refused_when_updates_are_disabled() {
     let mut s = server_for(ALICE, false);
-    for name in [
-        "update",
-        "resource_put",
-        "resource_delete",
-        "container_create",
-    ] {
+    for name in ["update", "resource_put", "resource_delete", "container_create"] {
         let req = json!({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": name, "arguments": {"url": "https://pod.ex/x"} }
         });
         let resp = rpc(&mut s, &req.to_string());
         assert!(
-            resp["error"]["message"]
-                .as_str()
-                .unwrap_or("")
-                .contains("read-only"),
+            resp["error"]["message"].as_str().unwrap_or("").contains("read-only"),
             "`{name}` must be refused at the protocol level: {resp}"
         );
     }
@@ -326,15 +267,8 @@ fn resource_put_create_links_containment_and_is_visible_to_query() {
     assert_eq!(v["triples"], 1);
 
     // Containment: the parent listing now includes n2.
-    let (text, _) = tool(
-        &mut s,
-        "container_list",
-        json!({"url": "https://pod.ex/notes/"}),
-    );
-    assert!(
-        text.contains("https://pod.ex/notes/n2"),
-        "created doc must be contained: {text}"
-    );
+    let (text, _) = tool(&mut s, "container_list", json!({"url": "https://pod.ex/notes/"}));
+    assert!(text.contains("https://pod.ex/notes/n2"), "created doc must be contained: {text}");
 
     // Shared dataset (§6.4): the SPARQL tool sees the new document immediately.
     let (text, is_err) = tool(
@@ -343,17 +277,10 @@ fn resource_put_create_links_containment_and_is_visible_to_query() {
         json!({"sparql":
             "ASK { GRAPH <https://pod.ex/notes/n2> { ?s <https://ex.dev/ns#title> \"second\" } }"}),
     );
-    assert!(
-        !is_err && text.contains("true"),
-        "query must see the put: {text}"
-    );
+    assert!(!is_err && text.contains("true"), "query must see the put: {text}");
 
     // And resource_get round-trips it.
-    let (text, is_err) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n2"}),
-    );
+    let (text, is_err) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n2"}));
     assert!(!is_err && text.contains("second"), "{text}");
 }
 
@@ -371,20 +298,10 @@ fn resource_put_replace_swaps_the_named_graph_atomically() {
     );
     assert!(!is_err, "{text}");
     let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        v["created"], false,
-        "replacing an existing doc is not a create"
-    );
-    let (text, _) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
+    assert_eq!(v["created"], false, "replacing an existing doc is not a create");
+    let (text, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
     assert!(text.contains("rewritten"), "{text}");
-    assert!(
-        !text.contains("hello"),
-        "PUT is a full replacement, not a merge: {text}"
-    );
+    assert!(!text.contains("hello"), "PUT is a full replacement, not a merge: {text}");
 }
 
 #[test]
@@ -400,15 +317,8 @@ fn resource_put_malformed_body_mutates_nothing() {
         }),
     );
     assert!(is_err, "malformed content must be rejected: {text}");
-    let (text, _) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
-    assert!(
-        text.contains("hello"),
-        "parse-first: the prior content survives: {text}"
-    );
+    let (text, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
+    assert!(text.contains("hello"), "parse-first: the prior content survives: {text}");
 }
 
 #[test]
@@ -445,57 +355,32 @@ fn resource_put_write_gates_follow_non_disclosure() {
 #[test]
 fn resource_delete_removes_doc_and_containment() {
     let mut s = server_for(ALICE, true);
-    let (text, is_err) = tool(
-        &mut s,
-        "resource_delete",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
+    let (text, is_err) =
+        tool(&mut s, "resource_delete", json!({"url": "https://pod.ex/notes/n1"}));
     assert!(!is_err, "{text}");
-    let (text, is_err) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
+    let (text, is_err) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
     assert!(is_err);
     assert_eq!(text, "resource not found: <https://pod.ex/notes/n1>");
-    let (text, _) = tool(
-        &mut s,
-        "container_list",
-        json!({"url": "https://pod.ex/notes/"}),
-    );
-    assert!(
-        !text.contains("notes/n1"),
-        "containment link must be gone: {text}"
-    );
+    let (text, _) = tool(&mut s, "container_list", json!({"url": "https://pod.ex/notes/"}));
+    assert!(!text.contains("notes/n1"), "containment link must be gone: {text}");
 }
 
 #[test]
 fn resource_delete_rejects_a_non_empty_container() {
     let mut s = server_for(ALICE, true);
-    let (text, is_err) = tool(
-        &mut s,
-        "resource_delete",
-        json!({"url": "https://pod.ex/notes/"}),
-    );
+    let (text, is_err) = tool(&mut s, "resource_delete", json!({"url": "https://pod.ex/notes/"}));
     assert!(is_err);
     assert!(text.contains("not empty"), "{text}");
     // Still listable afterwards — nothing was deleted.
-    let (text, is_err) = tool(
-        &mut s,
-        "container_list",
-        json!({"url": "https://pod.ex/notes/"}),
-    );
+    let (text, is_err) = tool(&mut s, "container_list", json!({"url": "https://pod.ex/notes/"}));
     assert!(!is_err && text.contains("notes/n1"), "{text}");
 }
 
 #[test]
 fn container_create_creates_a_typed_linked_empty_container() {
     let mut s = server_for(ALICE, true);
-    let (text, is_err) = tool(
-        &mut s,
-        "container_create",
-        json!({"url": "https://pod.ex/projects/"}),
-    );
+    let (text, is_err) =
+        tool(&mut s, "container_create", json!({"url": "https://pod.ex/projects/"}));
     assert!(!is_err, "{text}");
     // Linked into the root listing, flagged as a container.
     let (text, _) = tool(&mut s, "container_list", json!({"url": "https://pod.ex/"}));
@@ -506,32 +391,18 @@ fn container_create_creates_a_typed_linked_empty_container() {
         .iter()
         .any(|m| m["url"] == "https://pod.ex/projects/" && m["container"] == true));
     // Typed, empty, and listable.
-    let (text, is_err) = tool(
-        &mut s,
-        "container_list",
-        json!({"url": "https://pod.ex/projects/"}),
-    );
+    let (text, is_err) =
+        tool(&mut s, "container_list", json!({"url": "https://pod.ex/projects/"}));
     assert!(!is_err, "{text}");
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["members"].as_array().unwrap().len(), 0);
-    let (text, _) = tool(
-        &mut s,
-        "resource_get",
-        json!({"url": "https://pod.ex/projects/"}),
-    );
+    let (text, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/projects/"}));
     assert!(text.contains("BasicContainer"), "{text}");
     // Slash discipline + duplicate rejection.
-    let (text, is_err) = tool(
-        &mut s,
-        "container_create",
-        json!({"url": "https://pod.ex/x"}),
-    );
+    let (text, is_err) = tool(&mut s, "container_create", json!({"url": "https://pod.ex/x"}));
     assert!(is_err && text.contains("slash-terminated"), "{text}");
-    let (text, is_err) = tool(
-        &mut s,
-        "container_create",
-        json!({"url": "https://pod.ex/projects/"}),
-    );
+    let (text, is_err) =
+        tool(&mut s, "container_create", json!({"url": "https://pod.ex/projects/"}));
     assert!(is_err && text.contains("already exists"), "{text}");
 }
 
@@ -545,10 +416,7 @@ fn update_tool_enforces_session_write_authorization() {
         json!({"sparql":
             "INSERT DATA { GRAPH <https://pod.ex/secret/s1> { <urn:x> <urn:y> \"z\" } }"}),
     );
-    assert!(
-        is_err,
-        "unwritable target must reject the whole update: {text}"
-    );
+    assert!(is_err, "unwritable target must reject the whole update: {text}");
     // Alice CAN write under notes/.
     let mut alice = server_for(ALICE, true);
     let (text, is_err) = tool(
@@ -568,11 +436,7 @@ fn acl_put_and_delete_rederive_authorization_atomically() {
 
     // Before: bob cannot see notes/n1 (non-disclosure not-found).
     let mut bob = server_for(BOB, false);
-    let (text, is_err) = tool(
-        &mut bob,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
+    let (text, is_err) = tool(&mut bob, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
     assert!(is_err && text == "resource not found: <https://pod.ex/notes/n1>");
 
     // Alice (Control via the root ACL) PUTs notes/.acl granting alice full + bob Read.
@@ -612,15 +476,8 @@ fn acl_put_and_delete_rederive_authorization_atomically() {
         issuer: None,
         now: None,
     };
-    let d = alice.store().decide(
-        &bob_session,
-        "https://pod.ex/notes/n1",
-        sparq_solid::Mode::Read,
-    );
-    assert!(
-        d.allow,
-        "the ACL write-through must re-derive authorization atomically"
-    );
+    let d = alice.store().decide(&bob_session, "https://pod.ex/notes/n1", sparq_solid::Mode::Read);
+    assert!(d.allow, "the ACL write-through must re-derive authorization atomically");
 
     // A malformed ACL body is rejected parse-first and changes nothing.
     let (text, is_err) = tool(
@@ -633,32 +490,15 @@ fn acl_put_and_delete_rederive_authorization_atomically() {
         }),
     );
     assert!(is_err, "{text}");
-    let d = alice.store().decide(
-        &bob_session,
-        "https://pod.ex/notes/n1",
-        sparq_solid::Mode::Read,
-    );
-    assert!(
-        d.allow,
-        "a failed ACL write must leave the prior policy in force"
-    );
+    let d = alice.store().decide(&bob_session, "https://pod.ex/notes/n1", sparq_solid::Mode::Read);
+    assert!(d.allow, "a failed ACL write must leave the prior policy in force");
 
     // DELETE the ACL: bob's grant disappears with it (delete narrows, atomically).
-    let (text, is_err) = tool(
-        &mut alice,
-        "resource_delete",
-        json!({"url": "https://pod.ex/notes/.acl"}),
-    );
+    let (text, is_err) =
+        tool(&mut alice, "resource_delete", json!({"url": "https://pod.ex/notes/.acl"}));
     assert!(!is_err, "{text}");
-    let d = alice.store().decide(
-        &bob_session,
-        "https://pod.ex/notes/n1",
-        sparq_solid::Mode::Read,
-    );
-    assert!(
-        !d.allow,
-        "deleting the ACL must revoke its grants immediately"
-    );
+    let d = alice.store().decide(&bob_session, "https://pod.ex/notes/n1", sparq_solid::Mode::Read);
+    assert!(!d.allow, "deleting the ACL must revoke its grants immediately");
 }
 
 #[test]
@@ -677,19 +517,12 @@ fn acl_write_requires_control_and_non_discloses_without_it() {
     );
     assert!(is_err);
     assert_eq!(text, "resource not found: <https://pod.ex/secret/.acl>");
-    let (text, is_err) = tool(
-        &mut bob,
-        "resource_delete",
-        json!({"url": "https://pod.ex/secret/.acl"}),
-    );
+    let (text, is_err) =
+        tool(&mut bob, "resource_delete", json!({"url": "https://pod.ex/secret/.acl"}));
     assert!(is_err);
     assert_eq!(text, "resource not found: <https://pod.ex/secret/.acl>");
     // Bob still reads s1 — the policy was not touched.
-    let (text, is_err) = tool(
-        &mut bob,
-        "resource_get",
-        json!({"url": "https://pod.ex/secret/s1"}),
-    );
+    let (text, is_err) = tool(&mut bob, "resource_get", json!({"url": "https://pod.ex/secret/s1"}));
     assert!(!is_err && text.contains("classified"), "{text}");
 }
 
@@ -717,23 +550,12 @@ fn anonymous_session_fails_closed_everywhere() {
     let mut anon =
         SolidMcpServer::with_config(pod(), SolidServerConfig::default()).expect("materializes");
     assert!(!anon.allow_update(), "default config must be read-only");
-    let (text, is_err) = tool(
-        &mut anon,
-        "resource_get",
-        json!({"url": "https://pod.ex/notes/n1"}),
-    );
+    let (text, is_err) = tool(&mut anon, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
     assert!(is_err && text == "resource not found: <https://pod.ex/notes/n1>");
-    let (text, is_err) = tool(
-        &mut anon,
-        "container_list",
-        json!({"url": "https://pod.ex/"}),
-    );
+    let (text, is_err) = tool(&mut anon, "container_list", json!({"url": "https://pod.ex/"}));
     assert!(is_err && text == "resource not found: <https://pod.ex/>");
-    let (text, is_err) = tool(
-        &mut anon,
-        "query",
-        json!({"sparql": "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }"}),
-    );
+    let (text, is_err) =
+        tool(&mut anon, "query", json!({"sparql": "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }"}));
     assert!(!is_err, "query never errors on authorization: {text}");
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 0);
@@ -742,10 +564,7 @@ fn anonymous_session_fails_closed_everywhere() {
 #[test]
 fn initialize_reports_the_pod_server_name() {
     let mut s = server_for(ALICE, false);
-    let resp = rpc(
-        &mut s,
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-    );
+    let resp = rpc(&mut s, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
     assert_eq!(resp["result"]["serverInfo"]["name"], "sparq-mcp-solid");
     assert!(resp["result"]["protocolVersion"].is_string());
 }

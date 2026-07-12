@@ -88,14 +88,8 @@ pub fn query_text_with_budget(
 /// engine's `*_prepared` entry points (`ask_prepared`, `construct_prepared`,
 /// …). Note the hits are frozen at rewrite time: re-prepare after the graph
 /// (and index) change.
-pub fn prepare_text(
-    graph: &Graph,
-    sparql: &str,
-    index: &TextIndex,
-) -> Result<PreparedQuery, String> {
-    let query = spargebra::SparqlParser::new()
-        .parse_query(sparql)
-        .map_err(|e| e.to_string())?;
+pub fn prepare_text(graph: &Graph, sparql: &str, index: &TextIndex) -> Result<PreparedQuery, String> {
+    let query = spargebra::SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     Ok(PreparedQuery::from(rewrite_query(query, graph, index)?))
 }
 
@@ -201,9 +195,7 @@ fn rewrite_bgp(
         let subject_var = |s: &TermPattern| -> Result<Variable, String> {
             match s {
                 TermPattern::Variable(v) => Ok(v.clone()),
-                other => Err(format!(
-                    "text: the subject of <{iri}> must be a variable, got {other}"
-                )),
+                other => Err(format!("text: the subject of <{iri}> must be a variable, got {other}")),
             }
         };
         match iri {
@@ -221,12 +213,7 @@ fn rewrite_bgp(
                     vocab::NEAR => ReqKind::Near { slop: None },
                     _ => ReqKind::All,
                 };
-                reqs.push(MatchReq {
-                    var,
-                    query: q.value().to_string(),
-                    kind,
-                    score: None,
-                });
+                reqs.push(MatchReq { var, query: q.value().to_string(), kind, score: None });
             }
             vocab::SLOP => {
                 let var = subject_var(&tp.subject)?;
@@ -338,16 +325,10 @@ fn rewrite_bgp(
         // proximity `text:near`) also carry a score, the positional phrase mode
         // is unscored (id only). [OPUS-4.8]
         let hits: Vec<(Id, Option<f32>)> = match req.kind {
-            ReqKind::All => index
-                .search(&req.query)
-                .into_iter()
-                .map(|h| (h.id, Some(h.score)))
-                .collect(),
-            ReqKind::Any => index
-                .search_any(&req.query)
-                .into_iter()
-                .map(|h| (h.id, Some(h.score)))
-                .collect(),
+            ReqKind::All => index.search(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect(),
+            ReqKind::Any => {
+                index.search_any(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect()
+            }
             ReqKind::Phrase => {
                 if !index.has_positions() {
                     return Err(
@@ -356,11 +337,7 @@ fn rewrite_bgp(
                             .to_string(),
                     );
                 }
-                index
-                    .phrase(&req.query)
-                    .into_iter()
-                    .map(|id| (id, None))
-                    .collect()
+                index.phrase(&req.query).into_iter().map(|id| (id, None)).collect()
             }
             ReqKind::Near { slop } => {
                 if !index.has_positions() {
@@ -371,11 +348,7 @@ fn rewrite_bgp(
                     );
                 }
                 let slop = slop.unwrap_or(DEFAULT_SLOP);
-                index
-                    .phrase_near(&req.query, slop)
-                    .into_iter()
-                    .map(|h| (h.id, Some(h.score)))
-                    .collect()
+                index.phrase_near(&req.query, slop).into_iter().map(|h| (h.id, Some(h.score))).collect()
             }
         };
         let mut variables = vec![req.var];
@@ -396,17 +369,11 @@ fn rewrite_bgp(
                 row
             })
             .collect();
-        let values = GraphPattern::Values {
-            variables,
-            bindings,
-        };
+        let values = GraphPattern::Values { variables, bindings };
         out = match out {
             // An all-magic BGP leaves an empty Bgp behind: drop the unit table.
             GraphPattern::Bgp { ref patterns } if patterns.is_empty() => values,
-            other => GraphPattern::Join {
-                left: Box::new(values),
-                right: Box::new(other),
-            },
+            other => GraphPattern::Join { left: Box::new(values), right: Box::new(other) },
         };
     }
     Ok(out)

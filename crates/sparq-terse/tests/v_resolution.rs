@@ -44,8 +44,7 @@ fn lexical_exact_match_resolves_and_splices_canonical_iri() {
 
     // The canonical SPARQL has the resolved IRI spliced in (no V() left).
     assert!(
-        exp.canonical_sparql
-            .contains("<http://example.org/cardEst>"),
+        exp.canonical_sparql.contains("<http://example.org/cardEst>"),
         "expected the resolved IRI, got: {}",
         exp.canonical_sparql
     );
@@ -86,10 +85,7 @@ fn verbatim_punctuated_preflabel_resolves_through_the_public_surface() {
     assert_eq!(r.iri, "http://example.org/zkDisc");
     assert_eq!(r.method, Method::Lexical);
     assert_eq!(r.score, 1.0);
-    assert!(
-        r.runner_up.is_none(),
-        "the verbatim label is the sole candidate"
-    );
+    assert!(r.runner_up.is_none(), "the verbatim label is the sole candidate");
     assert_eq!(r.confidence, 1.0);
 }
 
@@ -152,8 +148,7 @@ fn keyword_layer_and_v_resolution_compose() {
 
     // Lever 1: K:about became the canonical PKG IRI and is echoed.
     assert!(
-        exp.canonical_sparql
-            .contains("<https://sparq.dev/ns/pkg#about>"),
+        exp.canonical_sparql.contains("<https://sparq.dev/ns/pkg#about>"),
         "got: {}",
         exp.canonical_sparql
     );
@@ -162,13 +157,8 @@ fn keyword_layer_and_v_resolution_compose() {
     assert_eq!(exp.keywords[0].iri, "https://sparq.dev/ns/pkg#about");
 
     // Lever 3: the phrase resolved and was spliced; no terse token remains.
-    assert!(exp
-        .canonical_sparql
-        .contains("<http://example.org/cardEst>"));
-    assert!(
-        !exp.canonical_sparql.contains("K:"),
-        "no keyword token must remain"
-    );
+    assert!(exp.canonical_sparql.contains("<http://example.org/cardEst>"));
+    assert!(!exp.canonical_sparql.contains("K:"), "no keyword token must remain");
     assert!(!exp.canonical_sparql.contains("V("), "no V() must remain");
     assert_eq!(exp.resolutions.len(), 1);
 
@@ -185,10 +175,7 @@ fn unknown_keyword_is_loud_even_on_the_vectors_path() {
     let ctx = ResolveCtx::lexical(&g);
     let err = terse_to_sparql_with("ASK { ?s K:nope ?o }", &ctx, |_p| None)
         .expect_err("an unknown keyword must fail loudly on the vectors path too");
-    assert!(
-        matches!(err, TerseError::UnknownKeyword { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, TerseError::UnknownKeyword { .. }), "got {err:?}");
 }
 
 #[test]
@@ -212,14 +199,9 @@ fn confidence_floor_refuses_a_weak_vector_match() {
     )
     .expect_err("a below-floor vector match must be refused");
     match err {
-        TerseError::Unresolved {
-            why, candidates, ..
-        } => {
+        TerseError::Unresolved { why, candidates, .. } => {
             assert!(why.contains("floor"), "expected a floor reason, got {why}");
-            assert!(
-                !candidates.is_empty(),
-                "candidates must be surfaced for disambiguation"
-            );
+            assert!(!candidates.is_empty(), "candidates must be surfaced for disambiguation");
         }
         other => panic!("expected Unresolved(floor), got {other:?}"),
     }
@@ -270,10 +252,7 @@ fn lexical_beats_vector_when_both_could_fire() {
     assert_eq!(exp.resolutions[0].iri, "http://example.org/cardEst");
     // The embedder is consulted (it is eager in terse_to_sparql_with), but the lexical
     // result is what binds: the method is Lexical and the IRI is the exact-label match.
-    assert!(
-        embed_calls <= 1,
-        "the splice path embeds at most once per phrase"
-    );
+    assert!(embed_calls <= 1, "the splice path embeds at most once per phrase");
 }
 
 #[test]
@@ -283,8 +262,8 @@ fn ambiguity_margin_refuses_a_too_close_runner_up() {
     let g = graph();
     let store = build_store(&g);
     let gate = ResolveGate {
-        min_score: -1.0,     // accept any score: isolate the ambiguity gate
-        min_confidence: 0.5, // demand a clear margin
+        min_score: -1.0,        // accept any score: isolate the ambiguity gate
+        min_confidence: 0.5,    // demand a clear margin
     };
     let ctx = ResolveCtx::lexical(&g)
         .with_vector_store(&store)
@@ -298,10 +277,7 @@ fn ambiguity_margin_refuses_a_too_close_runner_up() {
     .expect_err("an ambiguous (close-runner-up) match must be refused");
     match err {
         TerseError::Unresolved { why, .. } => {
-            assert!(
-                why.contains("ambiguous"),
-                "expected an ambiguity reason, got {why}"
-            );
+            assert!(why.contains("ambiguous"), "expected an ambiguity reason, got {why}");
         }
         other => panic!("expected Unresolved(ambiguous), got {other:?}"),
     }

@@ -594,22 +594,13 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "Stewie ∈ Boy ⊓ Girl ⊑ ⊥ ⇒ inconsistent"
-        );
-        assert!(
-            r.type_assertions().is_empty(),
-            "no realisation for an inconsistent ontology"
-        );
+        assert!(r.is_inconsistent(), "Stewie ∈ Boy ⊓ Girl ⊑ ⊥ ⇒ inconsistent");
+        assert!(r.type_assertions().is_empty(), "no realisation for an inconsistent ontology");
         // The load-bearing invariant: Boy/Girl are each individually SATISFIABLE — the clash is
         // ABox-only, so the TBox classifier (byte-identical here) flags NO unsatisfiable class.
         let h = Classifier::classify(&dict, &triples);
         assert!(h.unsatisfiable_classes().is_empty());
-        assert!(
-            !h.is_inconsistent(),
-            "TBox path never decides whole-ontology consistency"
-        );
+        assert!(!h.is_inconsistent(), "TBox path never decides whole-ontology consistency");
     }
 
     // --- New-Feature-BottomObjectProperty-001: an ABox instance of ∃⊥.⊤ ⊑ ⊥. -----------------
@@ -625,10 +616,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "∃⊥.⊤ is empty ⇒ {{i}} ⊑ ⊥ ⇒ inconsistent"
-        );
+        assert!(r.is_inconsistent(), "∃⊥.⊤ is empty ⇒ {{i}} ⊑ ⊥ ⇒ inconsistent");
     }
 
     // --- WebOnt-Restriction-001: an ABox instance of ∃op.owl:Nothing (CR5 clash). -------------
@@ -644,15 +632,9 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "∃op.⊥ ⊑ ⊥ (CR5) ⇒ asserted instances ⇒ inconsistent"
-        );
+        assert!(r.is_inconsistent(), "∃op.⊥ ⊑ ⊥ (CR5) ⇒ asserted instances ⇒ inconsistent");
         let h = Classifier::classify(&dict, &triples);
-        assert!(
-            h.unsatisfiable_classes().is_empty(),
-            "no NAMED class is unsatisfiable"
-        );
+        assert!(h.unsatisfiable_classes().is_empty(), "no NAMED class is unsatisfiable");
     }
 
     // --- WebOnt-Thing-003: a global ⊤ ⊑ ⊥ inconsistency, no individuals needed. ----------------
@@ -661,10 +643,7 @@ mod tests {
         let ttl = format!("{PRE} owl:Thing owl:equivalentClass owl:Nothing .");
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "⊤ ≡ ⊥ ⇒ ⊥ ∈ S(⊤) ⇒ global inconsistency"
-        );
+        assert!(r.is_inconsistent(), "⊤ ≡ ⊥ ⇒ ⊥ ∈ S(⊤) ⇒ global inconsistency");
         // The TBox classifier, by its documented contract, decides only named-class satisfiability
         // and flags nothing (⊤/⊥ are excluded from that surface).
         let h = Classifier::classify(&dict, &triples);
@@ -703,16 +682,9 @@ mod tests {
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
         assert!(!r.is_inconsistent());
-        assert_eq!(
-            r.report().skipped_assertions,
-            1,
-            "the data-property assertion is skipped"
-        );
+        assert_eq!(r.report().skipped_assertions, 1, "the data-property assertion is skipped");
         // The class assertion still classifies the individual.
-        let (alice, person) = (
-            iri(&dict, "http://ex/alice"),
-            iri(&dict, "http://ex/Person"),
-        );
+        let (alice, person) = (iri(&dict, "http://ex/alice"), iri(&dict, "http://ex/Person"));
         assert!(r.type_assertions().contains(&(alice, person)));
     }
 
@@ -726,15 +698,9 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.report().skipped_assertions >= 1,
-            "the unionOf class assertion is skipped"
-        );
+        assert!(r.report().skipped_assertions >= 1, "the unionOf class assertion is skipped");
         let (y, c) = (iri(&dict, "http://ex/y"), iri(&dict, "http://ex/C"));
-        assert!(
-            r.type_assertions().contains(&(y, c)),
-            "the EL class assertion still classifies"
-        );
+        assert!(r.type_assertions().contains(&(y, c)), "the EL class assertion still classifies");
     }
 
     // --- ObjectPropertyAssertion with a structural bnode object is a counted skip. -------------
@@ -761,10 +727,7 @@ mod tests {
             "the OPA with a structural-bnode object must be counted as a skip"
         );
         // The ClassAssertion still classifies alice correctly.
-        let (alice, person) = (
-            iri(&dict, "http://ex/alice"),
-            iri(&dict, "http://ex/Person"),
-        );
+        let (alice, person) = (iri(&dict, "http://ex/alice"), iri(&dict, "http://ex/Person"));
         assert!(
             r.type_assertions().contains(&(alice, person)),
             "alice rdf:type Person still realized"
@@ -783,10 +746,7 @@ mod tests {
         let before = triples.len();
         let rep = realize_graph(&mut dict, &mut triples);
         assert!(!rep.inconsistent);
-        assert!(
-            rep.emitted_type_assertions >= 1,
-            "at least i rdf:type A/B/owl:Thing emitted"
-        );
+        assert!(rep.emitted_type_assertions >= 1, "at least i rdf:type A/B/owl:Thing emitted");
         assert!(triples.len() > before);
         let (i, a, b) = (
             iri(&dict, "http://ex/i"),
@@ -794,14 +754,8 @@ mod tests {
             iri(&dict, "http://ex/B"),
         );
         let rdf_type = iri(&dict, RDF_TYPE);
-        assert!(
-            triples.contains(&[i, rdf_type, a]),
-            "i rdf:type A materialized"
-        );
-        assert!(
-            triples.contains(&[i, rdf_type, b]),
-            "i rdf:type B (derived) materialized"
-        );
+        assert!(triples.contains(&[i, rdf_type, a]), "i rdf:type A materialized");
+        assert!(triples.contains(&[i, rdf_type, b]), "i rdf:type B (derived) materialized");
         let rep2 = realize_graph(&mut dict, &mut triples);
         assert_eq!(rep2.emitted_type_assertions, 0, "second call is idempotent");
         assert_eq!(rep2.emitted_same_as, 0);
@@ -821,11 +775,7 @@ mod tests {
         assert!(rep.inconsistent);
         assert_eq!(rep.emitted_type_assertions, 0);
         assert_eq!(rep.emitted_same_as, 0);
-        assert_eq!(
-            triples.len(),
-            before,
-            "no rows appended for an inconsistent ontology"
-        );
+        assert_eq!(triples.len(), before, "no rows appended for an inconsistent ontology");
     }
 
     // --- owl:sameAs readoff from a derived nominal subsumption (singleton oneOf ClassAssertion). -
@@ -879,15 +829,9 @@ mod tests {
         let (mut dict, mut triples) = parse(&ttl);
         let rep = realize_graph(&mut dict, &mut triples);
         assert!(!rep.inconsistent);
-        assert_eq!(
-            rep.emitted_self_assertions, 1,
-            "Peter likes Peter emitted once"
-        );
+        assert_eq!(rep.emitted_self_assertions, 1, "Peter likes Peter emitted once");
         let (peter, likes) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/likes"));
-        assert!(
-            triples.contains(&[peter, likes, peter]),
-            "Peter likes Peter materialized"
-        );
+        assert!(triples.contains(&[peter, likes, peter]), "Peter likes Peter materialized");
         let rep2 = realize_graph(&mut dict, &mut triples);
         assert_eq!(rep2.emitted_self_assertions, 0, "second call is idempotent");
     }
@@ -908,10 +852,7 @@ mod tests {
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
         assert!(!r.is_inconsistent());
-        let (peter, sociable) = (
-            iri(&dict, "http://ex/Peter"),
-            iri(&dict, "http://ex/Sociable"),
-        );
+        let (peter, sociable) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/Sociable"));
         assert!(
             r.type_assertions().contains(&(peter, sociable)),
             "the likes-self-loop must let CR4 derive Peter : Sociable"
@@ -936,23 +877,14 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            !r.is_inconsistent(),
-            "a self-loving individual is consistent"
-        );
-        let (peter, self_lover) = (
-            iri(&dict, "http://ex/Peter"),
-            iri(&dict, "http://ex/SelfLover"),
-        );
+        assert!(!r.is_inconsistent(), "a self-loving individual is consistent");
+        let (peter, self_lover) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/SelfLover"));
         assert!(
             !r.type_assertions().contains(&(peter, self_lover)),
             "the raw self-link is NOT ∃likes.Self — CRs2 must not fire without a positive premise"
         );
         // And the asserted OPA is never mistaken for a hasSelf readoff.
-        assert!(
-            r.self_assertions().is_empty(),
-            "no ∃r.Self concept exists in S({{Peter}})"
-        );
+        assert!(r.self_assertions().is_empty(), "no ∃r.Self concept exists in S({{Peter}})");
     }
 
     // ======================================================================================
@@ -972,19 +904,10 @@ mod tests {
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
         assert!(!r.is_inconsistent());
-        let (peter, pg) = (
-            iri(&dict, "http://ex/Peter"),
-            iri(&dict, "http://ex/Peter_Griffin"),
-        );
+        let (peter, pg) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/Peter_Griffin"));
         let sa = r.same_as();
-        assert!(
-            sa.contains(&(peter, pg)),
-            "Peter owl:sameAs Peter_Griffin (owl:hasKey)"
-        );
-        assert!(
-            sa.contains(&(pg, peter)),
-            "owl:sameAs is emitted symmetrically"
-        );
+        assert!(sa.contains(&(peter, pg)), "Peter owl:sameAs Peter_Griffin (owl:hasKey)");
+        assert!(sa.contains(&(pg, peter)), "owl:sameAs is emitted symmetrically");
     }
 
     // --- New-Feature-Keys-003: a LOCALIZED key merges only members of the key class. ------------
@@ -1031,10 +954,7 @@ mod tests {
             r.is_inconsistent(),
             "the key forces Peter=Peter_Griffin against an asserted differentFrom"
         );
-        assert!(
-            r.same_as().is_empty(),
-            "no realisation rows for an inconsistent ontology"
-        );
+        assert!(r.same_as().is_empty(), "no realisation rows for an inconsistent ontology");
         assert!(r.different_from().is_empty());
     }
 
@@ -1054,14 +974,8 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            !r.is_inconsistent(),
-            "a single-member key never fires (functional-prop clash is out of fragment)"
-        );
-        assert!(
-            r.same_as().is_empty(),
-            "no spurious merge from a one-member key"
-        );
+        assert!(!r.is_inconsistent(), "a single-member key never fires (functional-prop clash is out of fragment)");
+        assert!(r.same_as().is_empty(), "no spurious merge from a one-member key");
     }
 
     // --- A PARTIAL key match (only SOME key properties agree) must NOT merge (the negative test). -
@@ -1098,10 +1012,7 @@ mod tests {
         let r = realize(&dict, &triples);
         assert!(!r.is_inconsistent());
         let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
-        assert!(
-            r.same_as().contains(&(a, b)),
-            "both key properties agree ⇒ a owl:sameAs b"
-        );
+        assert!(r.same_as().contains(&(a, b)), "both key properties agree ⇒ a owl:sameAs b");
         assert!(r.same_as().contains(&(b, a)));
     }
 
@@ -1118,10 +1029,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "¬(Peter hasSon Meg) contradicts the asserted positive"
-        );
+        assert!(r.is_inconsistent(), "¬(Peter hasSon Meg) contradicts the asserted positive");
     }
 
     // --- The NPA positive can be DERIVED (not asserted) — the object hasValue link. -------------
@@ -1139,10 +1047,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "the DERIVED p-link to {{b}} clashes with ¬(a p b)"
-        );
+        assert!(r.is_inconsistent(), "the DERIVED p-link to {{b}} clashes with ¬(a p b)");
     }
 
     // --- An NPA WITHOUT a matching positive is consistent (a clash needs the positive). ---------
@@ -1157,10 +1062,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            !r.is_inconsistent(),
-            "an NPA alone (no positive) is satisfiable"
-        );
+        assert!(!r.is_inconsistent(), "an NPA alone (no positive) is satisfiable");
     }
 
     // --- New-Feature-NegativeDataPropertyAssertion-001: data NPA + asserted positive ⇒ inconsistent. -
@@ -1177,10 +1079,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "¬(Meg hasAge 5) contradicts the asserted data value"
-        );
+        assert!(r.is_inconsistent(), "¬(Meg hasAge 5) contradicts the asserted data value");
     }
 
     // --- A data NPA WITHOUT a matching positive value is consistent. ----------------------------
@@ -1197,10 +1096,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            !r.is_inconsistent(),
-            "the asserted value differs from the negated one — consistent"
-        );
+        assert!(!r.is_inconsistent(), "the asserted value differs from the negated one — consistent");
     }
 
     // --- WebOnt-differentFrom-001: owl:differentFrom is symmetric (asserted (a,b) ⊨ (b,a)). ------
@@ -1212,10 +1108,7 @@ mod tests {
         assert!(!r.is_inconsistent());
         let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
         let df = r.different_from();
-        assert!(
-            df.contains(&(a, b)) && df.contains(&(b, a)),
-            "differentFrom is symmetric"
-        );
+        assert!(df.contains(&(a, b)) && df.contains(&(b, a)), "differentFrom is symmetric");
     }
 
     // --- WebOnt-disjointWith-001: members of disjoint classes are owl:differentFrom. ------------
@@ -1230,20 +1123,11 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            !r.is_inconsistent(),
-            "a≠b: the individuals are distinct, so no single-individual clash"
-        );
+        assert!(!r.is_inconsistent(), "a≠b: the individuals are distinct, so no single-individual clash");
         let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
         let df = r.different_from();
-        assert!(
-            df.contains(&(a, b)) && df.contains(&(b, a)),
-            "disjoint members are differentFrom"
-        );
-        assert!(
-            !r.same_as().iter().any(|&(x, y)| (x, y) == (a, b)),
-            "and never merged"
-        );
+        assert!(df.contains(&(a, b)) && df.contains(&(b, a)), "disjoint members are differentFrom");
+        assert!(!r.same_as().iter().any(|&(x, y)| (x, y) == (a, b)), "and never merged");
     }
 
     // --- A key merge that CONTRADICTS a derived disjointness clash ⇒ inconsistent. --------------
@@ -1259,10 +1143,7 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
-        assert!(
-            r.is_inconsistent(),
-            "key-derived sameAs vs derived differentFrom ⇒ inconsistent"
-        );
+        assert!(r.is_inconsistent(), "key-derived sameAs vs derived differentFrom ⇒ inconsistent");
         assert!(r.same_as().is_empty() && r.different_from().is_empty());
     }
 
@@ -1278,16 +1159,10 @@ mod tests {
         let (mut dict, mut triples) = parse(&ttl);
         let rep = realize_graph(&mut dict, &mut triples);
         assert!(!rep.inconsistent);
-        assert!(
-            rep.emitted_different_from >= 1,
-            "a owl:differentFrom b materialized"
-        );
+        assert!(rep.emitted_different_from >= 1, "a owl:differentFrom b materialized");
         let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
         let df = iri(&dict, OWL_DIFFERENT_FROM);
-        assert!(
-            triples.contains(&[a, df, b]),
-            "a owl:differentFrom b in the graph"
-        );
+        assert!(triples.contains(&[a, df, b]), "a owl:differentFrom b in the graph");
         let rep2 = realize_graph(&mut dict, &mut triples);
         assert_eq!(rep2.emitted_different_from, 0, "second call is idempotent");
     }
@@ -1304,10 +1179,7 @@ mod tests {
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
         assert!(!r.is_inconsistent());
-        assert!(
-            r.report().skipped_assertions >= 1,
-            "an empty key list is a counted skip"
-        );
+        assert!(r.report().skipped_assertions >= 1, "an empty key list is a counted skip");
         let (a, b) = (iri(&dict, "http://ex/a"), iri(&dict, "http://ex/b"));
         assert!(
             !r.same_as().contains(&(a, b)),

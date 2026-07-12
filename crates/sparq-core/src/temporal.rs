@@ -59,19 +59,12 @@ impl Timeline {
         // ":" of "±hh:mm" at the right position.
         let (date, tz) = if let Some(d) = s.strip_suffix('Z') {
             (d, Some(0))
-        } else if s.len() > 10
-            && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-')
-            && s.as_bytes()[s.len() - 3] == b':'
-        {
+        } else if s.len() > 10 && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-') && s.as_bytes()[s.len() - 3] == b':' {
             (&s[..s.len() - 6], Some(parse_tz(&s[s.len() - 6..])?))
         } else {
             (s, None)
         };
-        Some(Timeline {
-            secs: parse_civil_date(date)? * 86_400,
-            frac: 0.0,
-            tz,
-        })
+        Some(Timeline { secs: parse_civil_date(date)? * 86_400, frac: 0.0, tz })
     }
 
     /// The absolute instant (treating an absent timezone as UTC) in seconds.
@@ -160,17 +153,11 @@ impl Temporal {
     /// temporals stay on the slow path, which yields the type-error semantics).
     pub fn of_lit(value: &str, datatype: &str) -> Option<Temporal> {
         let (kind, tl) = match datatype {
-            XSD_DATE_TIME | XSD_DATE_TIME_STAMP => {
-                (TemporalKind::DateTime, Timeline::parse_datetime(value)?)
-            }
+            XSD_DATE_TIME | XSD_DATE_TIME_STAMP => (TemporalKind::DateTime, Timeline::parse_datetime(value)?),
             XSD_DATE => (TemporalKind::Date, Timeline::parse_date(value)?),
             _ => return None,
         };
-        Some(Temporal {
-            instant: tl.instant(),
-            has_tz: tl.tz.is_some(),
-            kind,
-        })
+        Some(Temporal { instant: tl.instant(), has_tz: tl.tz.is_some(), kind })
     }
 
     /// XPath comparison of two cached temporals: `None` for cross-family operands
@@ -235,19 +222,10 @@ mod tests {
     #[test]
     fn cache_cell_matches_per_row_parse() {
         // The cell must carry EXACTLY the parsed Timeline's instant/tz-presence.
-        for lex in [
-            "2024-03-15T13:45:30.123456Z",
-            "2024-03-15T13:45:30-09:30",
-            "-0044-03-15T12:00:00",
-            "9999-12-31T23:59:59.999Z",
-        ] {
+        for lex in ["2024-03-15T13:45:30.123456Z", "2024-03-15T13:45:30-09:30", "-0044-03-15T12:00:00", "9999-12-31T23:59:59.999Z"] {
             let tl = Timeline::parse_datetime(lex).unwrap();
             let t = dt(lex);
-            assert_eq!(
-                t.instant.to_bits(),
-                tl.instant().to_bits(),
-                "instant differs for {lex}"
-            );
+            assert_eq!(t.instant.to_bits(), tl.instant().to_bits(), "instant differs for {lex}");
             assert_eq!(t.has_tz, tl.tz.is_some());
         }
     }
@@ -280,20 +258,11 @@ mod tests {
             Some(Equal),
         );
         // Both floating (no tz): a direct compare.
-        assert_eq!(
-            Timeline::cmp_tl(p("2024-03-15T12:00:00"), p("2024-03-15T13:00:00")),
-            Some(Less)
-        );
+        assert_eq!(Timeline::cmp_tl(p("2024-03-15T12:00:00"), p("2024-03-15T13:00:00")), Some(Less));
         // Mixed presence inside the ±14h window: indeterminate (a SPARQL type error).
-        assert_eq!(
-            Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00")),
-            None
-        );
+        assert_eq!(Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00")), None);
         // Mixed presence OUTSIDE the window: decidable.
-        assert_eq!(
-            Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-17T13:00:00")),
-            Some(Less)
-        );
+        assert_eq!(Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-17T13:00:00")), Some(Less));
 
         // And `cmp_tl` agrees with the cached `Temporal::cmp_t` on the same lexicals.
         for (a, b) in [
@@ -302,11 +271,7 @@ mod tests {
             ("2024-03-15T13:00:00Z", "2024-03-17T13:00:00"),
             ("2024-03-15T12:00:00", "2024-03-15T13:00:00"),
         ] {
-            assert_eq!(
-                Timeline::cmp_tl(p(a), p(b)),
-                Temporal::cmp_t(dt(a), dt(b)),
-                "cmp_tl/cmp_t disagree on {a} vs {b}"
-            );
+            assert_eq!(Timeline::cmp_tl(p(a), p(b)), Temporal::cmp_t(dt(a), dt(b)), "cmp_tl/cmp_t disagree on {a} vs {b}");
         }
     }
 
@@ -336,10 +301,7 @@ mod tests {
         // A NEGATIVE-YEAR bare date must not be read as having a trailing offset (its leading
         // `-` is the year sign, and there is no `:` six chars from the end).
         let bce = Timeline::parse_date("-0044-03-15").unwrap();
-        assert!(
-            bce.tz.is_none(),
-            "a BCE year sign must not be parsed as a timezone offset"
-        );
+        assert!(bce.tz.is_none(), "a BCE year sign must not be parsed as a timezone offset");
         assert!(bce.secs < 0, "44 BCE is before the epoch");
     }
 
@@ -373,17 +335,11 @@ mod tests {
         assert!(parse_civil_date("-0001-12-31").unwrap() < 0);
 
         // Rejections: month/day out of the 1..=12 / 1..=31 ranges, and an extra component.
-        assert!(
-            parse_civil_date("2024-13-01").is_none(),
-            "month 13 rejected"
-        );
+        assert!(parse_civil_date("2024-13-01").is_none(), "month 13 rejected");
         assert!(parse_civil_date("2024-00-01").is_none(), "month 0 rejected");
         assert!(parse_civil_date("2024-01-32").is_none(), "day 32 rejected");
         assert!(parse_civil_date("2024-01-00").is_none(), "day 0 rejected");
-        assert!(
-            parse_civil_date("2024-01-01-01").is_none(),
-            "extra component rejected"
-        );
+        assert!(parse_civil_date("2024-01-01-01").is_none(), "extra component rejected");
         assert!(parse_civil_date("notanumber").is_none());
     }
 
@@ -393,11 +349,7 @@ mod tests {
     #[test]
     fn datetime_and_datetimestamp_share_a_family_date_is_disjoint() {
         let stamp = Temporal::of_lit("2024-03-15T13:00:00Z", XSD_DATE_TIME_STAMP).unwrap();
-        assert_eq!(
-            stamp.kind,
-            TemporalKind::DateTime,
-            "dateTimeStamp caches as the DateTime family"
-        );
+        assert_eq!(stamp.kind, TemporalKind::DateTime, "dateTimeStamp caches as the DateTime family");
         let dttime = dt("2024-03-15T13:00:00Z");
         // Same instant, both in the DateTime family: comparable and Equal.
         assert_eq!(Temporal::cmp_t(stamp, dttime), Some(Equal));

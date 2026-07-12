@@ -70,11 +70,8 @@ fn n3_new_ntriples(n3: &str) -> Result<String, String> {
     let mut dict = sparq_core::dict::Dict::default();
     let (_closure, steps) = sparq_reason::reason_n3_proof(&mut dict, n3)?;
     let mut seen = std::collections::HashSet::new();
-    let derived: Vec<[sparq_core::dict::Id; 3]> = steps
-        .into_iter()
-        .map(|s| s.conclusion)
-        .filter(|c| seen.insert(*c))
-        .collect();
+    let derived: Vec<[sparq_core::dict::Id; 3]> =
+        steps.into_iter().map(|s| s.conclusion).filter(|c| seen.insert(*c)).collect();
     let graph = Graph::from_parts(dict, derived);
     sparq_engine::construct_ntriples(&graph, ECHO_CONSTRUCT)
 }
@@ -369,10 +366,7 @@ mod tests {
     #[test]
     fn n3_new_is_the_derivations_delta() {
         let nt = n3_new_ntriples(SOCRATES_N3_DATA).expect("derivations delta");
-        assert!(
-            nt.contains(SOC_MORTAL),
-            "derived Mortal typing present: {nt}"
-        );
+        assert!(nt.contains(SOC_MORTAL), "derived Mortal typing present: {nt}");
         assert!(
             !nt.contains(SOC_HUMAN),
             "asserted `Socrates a Human` must NOT be in the derivations delta: {nt}"
@@ -389,19 +383,10 @@ mod tests {
     #[test]
     fn n3_query_selects_over_closure() {
         let nt = n3_query_ntriples(SOCRATES_N3_DATA, SOCRATES_N3_QUERY).expect("query filter");
-        assert!(
-            nt.contains(SOC_MORTAL),
-            "entailed Mortal typing selected: {nt}"
-        );
-        assert!(
-            nt.contains(SOC_HUMAN),
-            "asserted Human typing selected: {nt}"
-        );
+        assert!(nt.contains(SOC_MORTAL), "entailed Mortal typing selected: {nt}");
+        assert!(nt.contains(SOC_HUMAN), "asserted Human typing selected: {nt}");
         // The subClassOf axiom does NOT match the query pattern `:Socrates a ?WHAT`.
-        assert!(
-            !nt.contains("subClassOf"),
-            "non-matching axiom excluded: {nt}"
-        );
+        assert!(!nt.contains("subClassOf"), "non-matching axiom excluded: {nt}");
     }
 
     /// A query using an unsupported builtin fails closed (an error, never a wrong answer).

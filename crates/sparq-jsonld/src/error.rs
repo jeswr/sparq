@@ -263,10 +263,7 @@ mod tests {
             JsonLdErrorCode::IriConfusedWithPrefix.as_str(),
             "IRI confused with prefix"
         );
-        assert_eq!(
-            JsonLdErrorCode::InvalidEmbedValue.as_str(),
-            "invalid @embed value"
-        );
+        assert_eq!(JsonLdErrorCode::InvalidEmbedValue.as_str(), "invalid @embed value");
     }
 
     #[test]
@@ -295,10 +292,8 @@ mod tests {
     fn display_includes_detail_when_present() {
         let bare = JsonLdError::new(JsonLdErrorCode::LoadingDocumentFailed);
         assert_eq!(bare.to_string(), "loading document failed");
-        let detailed = JsonLdError::with_detail(
-            JsonLdErrorCode::LoadingDocumentFailed,
-            "remote fetch denied",
-        );
+        let detailed =
+            JsonLdError::with_detail(JsonLdErrorCode::LoadingDocumentFailed, "remote fetch denied");
         assert_eq!(
             detailed.to_string(),
             "loading document failed: remote fetch denied"
