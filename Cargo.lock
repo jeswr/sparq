@@ -5221,6 +5221,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-wrapper"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "sparq-core",
+]
+
+[[package]]
 name = "sparq-zk"
 version = "0.1.0"
 dependencies = [
