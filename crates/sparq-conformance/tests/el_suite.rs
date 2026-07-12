@@ -731,6 +731,52 @@ mod gated {
                 // The `unsatisfiable_classes` from step 1 covers named-class TBox clashes;
                 // `abox_report.inconsistent` covers whole-ontology ABox clashes.
                 let tbox_report = classify_graph(&mut dict, &mut ids);
+                // [FABLE-5] sq-wy3i6 (Phase E4, `el-suite-par`): the parallel-saturation
+                // differential over the REAL W3C EL corpus — `classify_graph_par` at
+                // thread counts 1/2/8 must reproduce the sequential closure EXACTLY
+                // (term-level triple-set equality; a fresh Dict per run, so id spaces
+                // are independent) and the same unsatisfiable-class count. Runs INSIDE
+                // the per-case watchdog so a livelocked parallel round cannot hang the
+                // lane; a mismatch panics → the case is a recorded FAIL → the
+                // undocumented-fail guard turns the lane red (loud, never silent).
+                #[cfg(feature = "el-suite-par")]
+                {
+                    let seq_set: std::collections::HashSet<Row> = ids
+                        .iter()
+                        .map(|&[s, p, o]| [dict.term(s), dict.term(p), dict.term(o)])
+                        .collect();
+                    for threads in [1usize, 2, 8] {
+                        let mut par_dict = Dict::new();
+                        let mut par_ids: Vec<[Id; 3]> = premise
+                            .iter()
+                            .map(|[s, p, o]| {
+                                [par_dict.intern(s), par_dict.intern(p), par_dict.intern(o)]
+                            })
+                            .collect();
+                        let par_report = sparq_reason_el::classify_graph_par(
+                            &mut par_dict,
+                            &mut par_ids,
+                            std::num::NonZeroUsize::new(threads).expect("non-zero"),
+                        );
+                        let par_set: std::collections::HashSet<Row> = par_ids
+                            .iter()
+                            .map(|&[s, p, o]| {
+                                [par_dict.term(s), par_dict.term(p), par_dict.term(o)]
+                            })
+                            .collect();
+                        assert_eq!(
+                            par_set, seq_set,
+                            "classify_graph_par(threads={threads}) closure diverged \
+                             from the sequential engine on this EL case"
+                        );
+                        assert_eq!(
+                            par_report.unsatisfiable_classes,
+                            tbox_report.unsatisfiable_classes,
+                            "classify_graph_par(threads={threads}) unsatisfiable-class \
+                             count diverged on this EL case"
+                        );
+                    }
+                }
                 let abox_report = realize_graph(&mut dict, &mut ids);
                 let closure: Vec<Row> = ids
                     .into_iter()
