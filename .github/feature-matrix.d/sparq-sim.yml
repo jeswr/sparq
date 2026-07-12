@@ -1,0 +1,6 @@
+# [GPT-5.6] sq-lsp7k.26: exercise deterministic multi-hop signature expansion and its
+# weighted-Jaccard property witnesses; the feature is default-OFF.
+- name: "sparq-sim (multi-hop)"
+  crate: "sparq-sim"
+  features: "multi-hop"
+  test: true

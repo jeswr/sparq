@@ -25,6 +25,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 # and similarity is a predicate-IDF-weighted Jaccard over those sets — no embeddings,
 # no model, no network; incrementally correct because the indexes ARE the feature store.
 
+[features]
+default = []
+# Deterministic breadth-first structural expansion beyond the existing one-hop signature.
+multi-hop = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
