@@ -481,6 +481,51 @@ mod tests {
     }
 
     #[test]
+    fn dt_compare_is_symmetric_under_argument_reversal() {
+        // [GPT-5.6] sq-dfoik: exercise every timezone pairing and both mixed-pair outcomes.
+        let cases = [
+            (
+                "both timezoned",
+                dt("2020-01-01T00:00:00Z"),
+                dt("2020-01-02T00:00:00Z"),
+                TemporalOrder::Less,
+            ),
+            (
+                "both timezone-less",
+                dt("2020-01-01T00:00:00"),
+                dt("2020-01-02T00:00:00"),
+                TemporalOrder::Less,
+            ),
+            (
+                "mixed outside the 14-hour window",
+                dt("2020-01-01T00:00:00Z"),
+                dt("2020-01-03T00:00:00"),
+                TemporalOrder::Less,
+            ),
+            (
+                "mixed within the 14-hour window",
+                dt("2020-01-01T00:00:00Z"),
+                dt("2020-01-01T06:00:00"),
+                TemporalOrder::Indeterminate,
+            ),
+        ];
+
+        for (case, a, b, expected) in cases {
+            let forward = dt_compare(&a, &b);
+            assert_eq!(forward, expected, "unexpected forward order for {case}");
+            assert_eq!(
+                flip(forward),
+                dt_compare(&b, &a),
+                "argument reversal did not flip the order for {case}"
+            );
+        }
+
+        for value in [dt("2020-01-01T00:00:00Z"), dt("2020-01-01T00:00:00")] {
+            assert_eq!(dt_compare(&value, &value), TemporalOrder::Equal);
+        }
+    }
+
+    #[test]
     fn parse_datetime_rejects_invalid_calendar_fields() {
         // Out-of-range month/day must NOT value-canonicalise — they fall back to exact-lexical keying.
         assert!(parse_datetime("2020-00-01T00:00:00Z", DT).is_none(), "month 0");
