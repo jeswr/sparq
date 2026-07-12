@@ -84,9 +84,9 @@ pub mod quant;
 // and the demanding query check are gated behind the opt-in `spqv-provenance` feature. Lean: a
 // hand-rolled fixed-width LE codec, no new dependency. The extension point stays a reserved, opaque,
 // versioned area with NO fields defined (pending the #1746 profile freeze — the KERN boundary).
-pub mod spqv_provenance;
 #[cfg(feature = "vec-predicate")]
 pub mod rewrite;
+pub mod spqv_provenance;
 pub mod store;
 // [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the P0 structure-aware-vectorisation preprocessing +
 // sampling-logic layer — closure-before-vectorise + type-constrained negative sampling. `structure`
@@ -119,6 +119,15 @@ pub mod train;
 // materialised closure via the P0 `close_for_vectorise` path and adds no new dependency.
 #[cfg(feature = "structure")]
 pub mod taxonomy;
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO PRIORS READER — mines gUFO
+// meta-types (Kind/Role/Phase/Category/…), rigidity, identity providers, ontological natures, and
+// mediation/inherence witnesses from the graph, and derives a UFO-PROVABLE disjointness +
+// subsumption mask fed into the P3 `DisjointnessOracle` (answer-safe: only proven pairs, fail
+// closed on ill-formed models). Same `structure` feature (off by default); no new dependency —
+// the default build carries zero UFO-prior code. The eval harness's `gufo_prior` axis (default
+// OFF) is the only consumer that changes behaviour, and only when explicitly enabled.
+#[cfg(feature = "structure")]
+pub mod ufo_priors;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -215,7 +224,9 @@ pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 // (`save_delta`/`open_with_delta`/`sibling_delta_path`) live on `VectorStore` (also `delta`-gated).
 #[cfg(feature = "delta")]
 pub use delta::{VectorDelta, SPQD_MAGIC, SPQD_VERSION};
-pub use store::{StreamingWriter, VectorStore, LegacyMode, SPQV_MAGIC, SPQV_VERSION, SPQV_VERSION_V3};
+pub use store::{
+    LegacyMode, StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION, SPQV_VERSION_V3,
+};
 // [FABLE-5] sq-lhcot.1: the `.spqv` v3 embedding-provenance surface — the record, its typed metric /
 // normalization axes, and the RDF vocabulary IRIs. Always compiled (the v3 read path); the vocab
 // namespace lets a caller assert provenance in RDF (see `skills/vector-search/SKILL.md`).
@@ -278,6 +289,10 @@ pub use taxonomy::{
     DisjointnessOracle, DistortionReport, EuclideanTaxonomyEncoder, Geometry, GeometryGate,
     HyperbolicTaxonomyEncoder, TaxonomyDag,
 };
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO priors surface — the reader,
+// its meta-type/rigidity/nature vocabulary, and the canonical gUFO namespace. `structure` only.
+#[cfg(feature = "structure")]
+pub use ufo_priors::{MetaType, Nature, Rigidity, UfoPriors, GUFO_NS};
 // [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the structure-aware-vectorisation P4 surface — the
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]

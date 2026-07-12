@@ -14,27 +14,27 @@ dependencies; nothing outside `sparq-vectors` changes):
    triple-term syntax). Regression-tested: no grounding fact may have an empty object. Happy to
    split this into its own PR if preferred.
 
-2. **`TermScope` — the quoted-terms ablation axis (default OFF, byte-stable):** the trainer, eval,
+2. **`TermScope` — the triple-term ablation axis (default OFF, byte-stable):** the trainer, eval,
    and negative sampler each carried a private `is_entity` that excluded `TermParts::Triple`, so a
-   graph's statement-level structure (`rdf:reifies` edges, content-addressed shared quoted-term
+   graph's statement-level structure (`rdf:reifies` edges, content-addressed shared triple-term
    nodes) was structurally invisible to the KGE embedding — the axis could not even be measured.
    The reifier node itself (an IRI/blank node) was already embeddable; what was dropped is the
-   `rdf:reifies` edge to the quoted term, leaving the reifier a disconnected metadata stub.
+   `rdf:reifies` edge to the triple term, leaving the reifier a disconnected metadata stub.
    - One shared `is_embeddable(graph, id, scope)` replaces the three copies.
      `TermScope::IriBlank` — the default in **every** constructor and preset — reduces to the
      identical match, so all existing baselines are **byte-identical** (see below).
-   - `TermScope::Embeddable` (opt-in per ablation arm via `TrainConfig::term_scope`) admits quoted
-     terms to entity space, with **sort-preserving negative corruption**: a quoted-term slot is
-     corrupted only from the quoted pool and an atomic slot only from the atomic pool (a
+   - `TermScope::Embeddable` (opt-in per ablation arm via `TrainConfig::term_scope`) admits triple
+     terms to entity space, with **sort-preserving negative corruption**: a triple-term slot is
+     corrupted only from the triple-term pool and an atomic slot only from the atomic pool (a
      cross-sort negative is detectable from term class alone and would pollute the training
-     margin). Quoted candidates bypass the type-constraint class filter — a quoted term carries no
-     `rdf:type`, and statements have no class discipline yet.
+     margin). Triple-term candidates bypass the type-constraint class filter — a triple term
+     carries no `rdf:type`, and statements have no class discipline yet.
    - **Split membership and the ranking pool stay atomic under BOTH scopes** — the eval population
      is scope-invariant, so paired ON/OFF deltas isolate the training-side visibility effect
      rather than comparing rankings over different candidate sets.
 
 3. **Measurement plumbing:** a `synthetic_rdf12` eval slice (deterministic in seed, N-Triples,
-   honesty-guarded like the existing gUFO/relational/provenance slices: shared quoted-term
+   honesty-guarded like the existing gUFO/relational/provenance slices: shared triple-term
    reifier hubs, noise reifications, and ≥15% overlapping-but-uncorroborated decoy source pairs so
    claim overlap alone cannot separate the `ex:corroborates` target) and `run_quoted_ablation`
    (paired per-seed ON−OFF deltas with common random numbers, mirroring `run_weight_ablation`;
@@ -47,7 +47,7 @@ dependencies; nothing outside `sparq-vectors` changes):
 Three independent layers:
 
 1. **Structural:** `TermScope::IriBlank` reduces `is_embeddable` to the exact former match arms;
-   the sampler's quoted pool is empty under it, so the draw loop, PRNG stream, and rejection
+   the sampler's triple-term pool is empty under it, so the draw loop, PRNG stream, and rejection
    sequence are bit-identical; `Splits` and the ranking pool are untouched. No float path, PRNG
    constant, or iteration order changes when OFF. (`grep -n "fn is_entity"
    crates/sparq-vectors/src` now returns nothing; `TermScope::Embeddable` is constructed only in
@@ -67,9 +67,9 @@ Three independent layers:
 
 ## What this PR deliberately does NOT do
 
-- **No compositional statement encoder:** the ON arm embeds a quoted term as a *node* (its
+- **No compositional statement encoder:** the ON arm embeds a triple term as a *node* (its
   `rdf:reifies` edges and content-addressed hub-sharing become visible structure); access to the
-  quoted `(s, p, o)` content itself is a separate, measurement-gated follow-up PR.
+  term's `(s, p, o)` content itself is a separate, measurement-gated follow-up PR.
 - **No widening of the eval ranking pool** (rejected: incomparable filtered ranks across arms).
 - **`vec:` VALUES rows still drop triple-term neighbours** (`rewrite::term_to_ground`); the
   vendored spargebra exposes `GroundTerm::Triple`, so this is mappable, but it is query-surface

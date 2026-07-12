@@ -1241,21 +1241,44 @@ ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
                 if *value == 1.0 && unit.ends_with("/MI")),
             "as-declared mile: {mi_raw:?}"
         );
-        assert_ne!(mi_raw, km_raw, "different units must read as distinct when not reconciled");
+        assert_ne!(
+            mi_raw, km_raw,
+            "different units must read as distinct when not reconciled"
+        );
 
         // Reconciled (reconcile ON): BOTH collapse to the canonical metre with the SAME value.
         let mi = quantity_of(&g, "http://ex/a", true);
         let km = quantity_of(&g, "http://ex/b", true);
-        let (TypedValue::Quantity { value: vm, unit: um }, TypedValue::Quantity { value: vk, unit: uk }) =
-            (&mi, &km)
+        let (
+            TypedValue::Quantity {
+                value: vm,
+                unit: um,
+            },
+            TypedValue::Quantity {
+                value: vk,
+                unit: uk,
+            },
+        ) = (&mi, &km)
         else {
             panic!("expected reconciled quantities: {mi:?} {km:?}");
         };
-        assert_eq!(um, "http://qudt.org/vocab/unit/M", "reconciled to canonical metre");
-        assert_eq!(uk, "http://qudt.org/vocab/unit/M", "reconciled to canonical metre");
+        assert_eq!(
+            um, "http://qudt.org/vocab/unit/M",
+            "reconciled to canonical metre"
+        );
+        assert_eq!(
+            uk, "http://qudt.org/vocab/unit/M",
+            "reconciled to canonical metre"
+        );
         assert!((vm - 1_609.344).abs() < 1e-9, "1 mi == 1609.344 m: {vm}");
-        assert!((vm - vk).abs() < 1e-9, "1 mi == 1.609344 km after reconciliation: {vm} vs {vk}");
-        assert_eq!(mi, km, "commensurable quantities reconcile to an identical value");
+        assert!(
+            (vm - vk).abs() < 1e-9,
+            "1 mi == 1.609344 km after reconciliation: {vm} vs {vk}"
+        );
+        assert_eq!(
+            mi, km,
+            "commensurable quantities reconcile to an identical value"
+        );
     }
 
     // POSITIVE affine round-trip: °C and K (offset units) reconcile to the same kelvin value.
@@ -1264,16 +1287,30 @@ ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
         let g = units_graph();
         let c = quantity_of(&g, "http://ex/c", true);
         let k = quantity_of(&g, "http://ex/d", true);
-        let (TypedValue::Quantity { value: vc, unit: uc }, TypedValue::Quantity { value: vk, unit: uk }) =
-            (&c, &k)
+        let (
+            TypedValue::Quantity {
+                value: vc,
+                unit: uc,
+            },
+            TypedValue::Quantity {
+                value: vk,
+                unit: uk,
+            },
+        ) = (&c, &k)
         else {
             panic!("expected reconciled temperatures: {c:?} {k:?}");
         };
         assert_eq!(uc, "http://qudt.org/vocab/unit/K");
         assert_eq!(uk, "http://qudt.org/vocab/unit/K");
         assert!((vc - 273.15).abs() < 1e-9, "0 °C == 273.15 K: {vc}");
-        assert!((vc - vk).abs() < 1e-9, "0 °C == 273.15 K after reconciliation: {vc} vs {vk}");
-        assert_eq!(c, k, "affine-commensurable quantities reconcile to an identical value");
+        assert!(
+            (vc - vk).abs() < 1e-9,
+            "0 °C == 273.15 K after reconciliation: {vc} vs {vk}"
+        );
+        assert_eq!(
+            c, k,
+            "affine-commensurable quantities reconcile to an identical value"
+        );
     }
 
     // NEGATIVE: a compound / unknown unit (km/h) is left AS DECLARED even with reconcile ON — never
@@ -1306,8 +1343,13 @@ ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
         assert!(matches!(r, TypedValue::Quantity { value, unit }
             if (value - 1000.0).abs() < 1e-9 && unit == "http://qudt.org/vocab/unit/M"));
         // Bare local name resolves too (units.rs accepts either form).
-        let r2 = reconcile_quantity(TypedValue::Quantity { value: 1.0, unit: "MI".into() });
-        assert!(matches!(r2, TypedValue::Quantity { value, .. } if (value - 1609.344).abs() < 1e-9));
+        let r2 = reconcile_quantity(TypedValue::Quantity {
+            value: 1.0,
+            unit: "MI".into(),
+        });
+        assert!(
+            matches!(r2, TypedValue::Quantity { value, .. } if (value - 1609.344).abs() < 1e-9)
+        );
         // Unknown unit → unchanged (NOT fabricated).
         let unknown = TypedValue::Quantity {
             value: 42.0,
@@ -1344,8 +1386,14 @@ ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
         ) else {
             panic!("expected an NL string");
         };
-        assert!(on.contains("1609.344 M"), "reconciled NL should render canonical metres: {on:?}");
-        assert!(!on.contains(" MI"), "reconciled NL should not keep the declared mile: {on:?}");
+        assert!(
+            on.contains("1609.344 M"),
+            "reconciled NL should render canonical metres: {on:?}"
+        );
+        assert!(
+            !on.contains(" MI"),
+            "reconciled NL should not keep the declared mile: {on:?}"
+        );
 
         let cfg_off = GroundingConfig {
             render_typed_values: true,
@@ -1363,7 +1411,10 @@ ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
         ) else {
             panic!("expected an NL string");
         };
-        assert!(off.contains("1 MI"), "as-declared NL keeps the original mile: {off:?}");
+        assert!(
+            off.contains("1 MI"),
+            "as-declared NL keeps the original mile: {off:?}"
+        );
     }
 
     // ---- RDF 1.2 quoted-triple verbalisation (the empty-string regression) --------------------
