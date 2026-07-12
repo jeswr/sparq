@@ -142,6 +142,26 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-policy/tests/odrl_test_suite.rs",
         "ODRL_SUITE_FLOOR",
     ),
+    // [FABLE-5] sq-tonhr.2 (epic sq-tonhr) — the W3C rdf-n-triples / rdf-n-quads /
+    // rdf-trig syntax-suite ratchets. The three floor consts live in this crate's
+    // `tests/rdf_line_syntax_ratchet.rs` (default-on, self-skipping without the fetched
+    // w3c/rdf-tests data); the guard reads them textually so the central scoreboard's
+    // `ratchet_floor`s can never drift from what the runner asserts.
+    (
+        "W3C N-Triples syntax (rdf11 rdf-n-triples)",
+        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "NT_SYNTAX_FLOOR",
+    ),
+    (
+        "W3C N-Quads syntax (rdf11 rdf-n-quads)",
+        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "NQ_SYNTAX_FLOOR",
+    ),
+    (
+        "W3C TriG syntax + eval (rdf11 rdf-trig)",
+        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "TRIG_SYNTAX_FLOOR",
+    ),
     // [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the W3C SPARQL 1.1 D-entailment ratchet.
     // `pub const D_ENTAIL_FLOOR` lives in this crate's `tests/d_entail_suite.rs`
     // (behind the opt-in `d-entail` feature, inside the `gated` module — the guard

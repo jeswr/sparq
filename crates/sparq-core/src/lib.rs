@@ -1189,12 +1189,39 @@ impl Graph {
         }
     }
 
+    /// [FABLE-5] (sq-tonhr.2) Like [`load_dataset`](Self::load_dataset) but resolves the
+    /// document's relative IRIs against `base` — the DATASET companion to
+    /// [`load_str_with_base`](Self::load_str_with_base), preserving named graphs instead of
+    /// folding them. The entry point for base-relative dataset documents addressed by their
+    /// location (e.g. the W3C rdf-trig conformance suite, whose expectation files bake in the
+    /// suite's canonical base). Parses serially — base-IRI documents are typically small
+    /// (manifests, test actions), so the parallel chunked path is not worth base-rewriting
+    /// complexity here (mirroring `parse_to_triples_with_base`). The line-based N-Quads format
+    /// has no relative IRIs, so `base` has no effect on it; non-dataset formats defer to
+    /// `load_str_with_base` (named-graph-free).
+    pub fn load_dataset_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String> {
+        if !is_dataset_format(format) {
+            #[cfg(feature = "jsonld")]
+            if is_jsonld_format(format) {
+                return Self::load_dataset_serial_base(text, format, Some(base));
+            }
+            return Self::load_str_with_base(text, format, base);
+        }
+        Self::load_dataset_serial_base(text, format, Some(base))
+    }
+
     /// [OPUS-4.8] (sq-25r3) Serial dataset loader (the correctness reference + the non-`parallel`
     /// and TriG fallback). Routes each quad to a per-graph bucket and builds one sub-graph per
     /// graph, with the default graph as the main graph. Named graphs are emitted in
     /// FIRST-OCCURRENCE document order (deterministic — the old `HashMap` iteration order was not),
     /// so the parallel path can be a byte-identical drop-in.
     fn load_dataset_serial(text: &str, format: &str) -> Result<Graph, String> {
+        Self::load_dataset_serial_base(text, format, None)
+    }
+
+    /// [FABLE-5] (sq-tonhr.2) [`load_dataset_serial`] with an optional base IRI — the shared
+    /// body behind the no-base serial loader and [`load_dataset_with_base`].
+    fn load_dataset_serial_base(text: &str, format: &str, base: Option<&str>) -> Result<Graph, String> {
         use oxrdf::GraphName;
         use std::collections::HashMap;
         let bytes = text.as_bytes();
@@ -1223,23 +1250,34 @@ impl Graph {
                 }
             };
         }
+        // [FABLE-5] (sq-tonhr.2) Attach the optional base IRI to a parser that supports one.
+        macro_rules! with_base {
+            ($parser:expr) => {
+                match base {
+                    Some(b) => $parser
+                        .with_base_iri(b)
+                        .map_err(|e| format!("invalid base IRI {b:?}: {e}"))?,
+                    None => $parser,
+                }
+            };
+        }
         match format {
             // [OPUS-4.8] (sq-01yr) The N-Quads alias set (incl. `nq`/`application/n-quads`,
             // mirroring the `parse_to_triples` set from sq-m2pc) — single authority in
-            // `is_nquads_format`.
+            // `is_nquads_format`. N-Quads has no relative IRIs, so `base` is ignored.
             _ if is_nquads_format(format) => group!(NQuadsParser::new()),
             // [OPUS-4.8] sq-dvyi: JSON-LD yields quads with a graph name, so the same
             // per-graph bucketing applies — `@graph`/`@id` named graphs are preserved.
             // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
             #[cfg(feature = "jsonld")]
-            _ if is_jsonld_format(format) => group!(JsonLdParser::new()),
+            _ if is_jsonld_format(format) => group!(with_base!(JsonLdParser::new())),
             // [OPUS-4.8] (sq-01yr) TriG is gated on its explicit alias set — NOT a catch-all —
             // mirroring the `parse_to_triples` Turtle fix (sq-m2pc). A typo'd or unsupported
             // dataset `format` now ERRORS here instead of silently parsing as TriG and
             // returning `Ok`. `load_dataset` already routes non-dataset formats to `load_str`,
             // but the direct callers (the `jsonld`/non-`parallel` paths and the TriG-parallel
             // serial fallback) inherited this independent silent fallback.
-            _ if is_trig_format(format) => group!(TriGParser::new()),
+            _ if is_trig_format(format) => group!(with_base!(TriGParser::new())),
             _ => return Err(unknown_format_err(format)),
         }
         let build_terms = |triples: &[[Term; 3]]| -> Graph {
@@ -8159,6 +8197,43 @@ mod tests {
             canon_dataset(&ser),
             "public load_dataset must equal serial"
         );
+    }
+
+    /// [FABLE-5] (sq-tonhr.2) `load_dataset_with_base` — the DATASET companion to
+    /// `load_str_with_base` — must resolve a TriG document's relative IRIs (subjects, objects
+    /// AND graph names) against the given base while preserving named graphs, ignore the base
+    /// for the no-relative-IRI N-Quads format, reject an invalid base, and keep rejecting
+    /// unknown formats (the sq-m2pc no-silent-Turtle-fallback contract).
+    #[test]
+    fn load_dataset_with_base_resolves_and_preserves_named_graphs() {
+        let trig = "<s> <p> <o> .\nGRAPH <g> { <s2> <p2> \"lit\" . }\n";
+        let g = Graph::load_dataset_with_base(trig, "trig", "http://base.example/dir/").unwrap();
+        assert_eq!(g.len(), 1, "default graph triple count");
+        assert!(
+            g.id_of(&Term::NamedNode(
+                oxrdf::NamedNode::new("http://base.example/dir/s").unwrap()
+            ))
+            .is_some(),
+            "relative subject must resolve against the base"
+        );
+        let gname = Term::NamedNode(oxrdf::NamedNode::new("http://base.example/dir/g").unwrap());
+        let named = g.named_graph(&gname).expect("named graph resolved against the base");
+        assert_eq!(named.len(), 1, "named graph triple count");
+        // N-Quads: absolute IRIs only — base has no effect, quads still bucket per graph.
+        let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n";
+        let g = Graph::load_dataset_with_base(nq, "nquads", "http://base.example/").unwrap();
+        assert_eq!(g.len(), 0, "N-Quads named-graph quad must not land in the default graph");
+        assert!(g.named_graph(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/g").unwrap())).is_some());
+        // An invalid base IRI is a loud error, and a relative-IRI TriG doc with NO usable base
+        // (the serial oxttl reference behaviour) stays an error through the with-base entry too.
+        assert!(Graph::load_dataset_with_base(trig, "trig", "not a base iri").is_err());
+        // Unknown formats keep erroring (never silently parsed as TriG/Turtle).
+        assert!(Graph::load_dataset_with_base(trig, "nosuch", "http://base.example/").is_err());
+        // Non-dataset formats defer to load_str_with_base (named-graph-free fold path).
+        let ttl = "<s> <p> <o> .\n";
+        let g = Graph::load_dataset_with_base(ttl, "turtle", "http://base.example/dir/").unwrap();
+        assert_eq!(g.len(), 1);
+        assert!(g.named.is_empty());
     }
 
     /// [OPUS-4.8] (sq-ev37) Malformed / not-cleanly-splittable TriG must NOT be silently accepted:

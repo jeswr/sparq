@@ -75,3 +75,18 @@ pub mod sd_gsp;
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.
 pub mod turtle_suite;
+// [FABLE-5] (sq-tonhr.2, epic sq-tonhr) The W3C rdf-n-triples / rdf-n-quads / rdf-trig
+// syntax suites run THROUGH the real sparq parse paths (native nt.rs N-Triples, the
+// chunk-parallel N-Quads dataset loader, the with-base TriG dataset loader) — pins the
+// bar every rdf-shuttle generated candidate parser is differential-gated against.
+// Gating runner: `tests/rdf_line_syntax_ratchet.rs`.
+pub mod line_syntax;
+// [FABLE-5] (sq-tonhr.2) Shared quad-set rendering + blank-node-bijection set comparison
+// for the line-syntax suites and the differential harness (never line-by-line identity).
+pub mod quadset;
+// [FABLE-5] (sq-tonhr.2) The reusable candidate-vs-incumbent parser DIFFERENTIAL harness
+// (identical input -> identical accept/reject verdict + quad set) over any W3C suite's
+// actions or any corpus directory (e.g. the committed fuzz seeds), with minimal-repro
+// line shrinking — the epic's zero-regression gate for generated parsers. Non-vacuity is
+// proven by seeded mutants in `tests/parser_differential.rs`.
+pub mod differential;
