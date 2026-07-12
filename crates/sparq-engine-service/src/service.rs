@@ -3792,7 +3792,23 @@ mod tests {
         );
     }
 
-    // --- resolve_xml_entity: numeric character references --------------------
+    // --- resolve_xml_entity: named and numeric character references ----------
+
+    /// The five predefined XML entities resolve to their exact characters.
+    #[test]
+    fn resolve_xml_entity_predefined_named_entities() {
+        // [GPT-5.6] (sq-5kh4d) Directly cover the named-entity branch rather than
+        // relying only on the SRX parser integration test.
+        for (name, expected) in [
+            ("amp", "&"),
+            ("lt", "<"),
+            ("gt", ">"),
+            ("quot", "\""),
+            ("apos", "'"),
+        ] {
+            assert_eq!(super::resolve_xml_entity(name).unwrap(), expected);
+        }
+    }
 
     /// Decimal numeric character reference `#38` resolves to `&` (U+0026).
     #[test]
