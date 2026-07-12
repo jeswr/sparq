@@ -30,6 +30,10 @@ fn main() {
         Some("save") => cmd_save(&args),
         Some("recompress") => cmd_recompress(&args),
         Some("compact") => cmd_compact(&args),
+        // [GPT-5.6] (sq-lsp7k.28) Deterministic RDF triple-set diff. The entire command
+        // is opt-in, so feature-OFF builds retain the previous dispatch and binary surface.
+        #[cfg(feature = "diff")]
+        Some("diff") => cmd_diff(&args),
         Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
         Some("probe-compress") => cmd_probe_compress(&args),
@@ -428,6 +432,94 @@ fn cmd_compact(args: &[String]) {
         after,
         t.elapsed().as_secs_f64()
     );
+}
+
+/// Infers an RDF input format from a path, after removing one compression extension.
+#[cfg(feature = "diff")]
+fn diff_format(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    let uncompressed = [".gz", ".bz2", ".zst", ".zstd"]
+        .into_iter()
+        .find_map(|suffix| lower.strip_suffix(suffix))
+        .unwrap_or(&lower);
+    match std::path::Path::new(uncompressed)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("nt" | "ntriples") => "ntriples",
+        Some("ttl" | "turtle") => "turtle",
+        Some("nq" | "nquads") => "nquads",
+        Some("trig") => "trig",
+        Some("jsonld") => "jsonld",
+        _ => {
+            eprintln!(
+                "cannot infer RDF format from `{path}`; expected .nt, .ttl, .nq, .trig, or .jsonld (optionally compressed)"
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Renders every triple in a loaded RDF document as a canonical set of N-Triples lines.
+/// Named-graph names are intentionally discarded: this command compares triple sets, not quads.
+#[cfg(feature = "diff")]
+fn diff_triples(graph: &sparq_core::Graph) -> std::collections::BTreeSet<String> {
+    fn extend(graph: &sparq_core::Graph, triples: &mut std::collections::BTreeSet<String>) {
+        for [s, p, o] in graph.iter_ids() {
+            triples.insert(format!(
+                "{} {} {} .",
+                graph.dict.term(s),
+                graph.dict.term(p),
+                graph.dict.term(o)
+            ));
+        }
+        for (_, named) in &graph.named {
+            extend(named, triples);
+        }
+    }
+
+    let mut triples = std::collections::BTreeSet::new();
+    extend(graph, &mut triples);
+    triples
+}
+
+/// `diff <file-a> <file-b> [--exact]` — emit removed lines, then added lines, with
+/// each block sorted lexicographically. `--exact` is currently a compatibility alias:
+/// both modes compare rendered triple sets, including blank-node labels exactly as loaded.
+#[cfg(feature = "diff")]
+fn cmd_diff(args: &[String]) {
+    let (left_path, right_path) = match args {
+        [_, _, left, right] => (left.as_str(), right.as_str()),
+        [_, _, left, right, exact] if exact == "--exact" => (left.as_str(), right.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli diff <file-a> <file-b> [--exact]");
+            std::process::exit(2);
+        }
+    };
+
+    let left = diff_triples(&load_quiet(left_path, diff_format(left_path)));
+    let right = diff_triples(&load_quiet(right_path, diff_format(right_path)));
+    let different = left != right;
+
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let write_result = (|| -> std::io::Result<()> {
+        for triple in left.difference(&right) {
+            writeln!(out, "- {triple}")?;
+        }
+        for triple in right.difference(&left) {
+            writeln!(out, "+ {triple}")?;
+        }
+        out.flush()
+    })();
+    if let Err(error) = write_result {
+        eprintln!("error writing diff: {error}");
+        std::process::exit(1);
+    }
+    if different {
+        std::process::exit(1);
+    }
 }
 
 /// `build <file[.gz|.bz2]> <format> <dir> [chunk_millions]` — EXTERNAL-MEMORY build:

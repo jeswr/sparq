@@ -57,3 +57,10 @@
   crate: "sparq-cli"
   features: "tabular"
   test: true
+
+# [GPT-5.6] sq-lsp7k.28: the deterministic RDF triple-set `diff` subcommand and its
+# subprocess contract suite are compiled only when this default-OFF feature is enabled.
+- name: "sparq-cli (diff)"
+  crate: "sparq-cli"
+  features: "diff"
+  test: true
