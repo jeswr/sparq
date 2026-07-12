@@ -21,6 +21,7 @@ default = []
 proposed-distinct = []
 proposed-cardinality = []
 proposed-codecs = []
+proposed-observe = []
 # [FABLE-5] sq-1rg2q.2: typed focus kinds + bound node factories (rdfjs/wrapper #83-#87).
 proposed-typed-focus = []
 

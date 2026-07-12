@@ -1,6 +1,6 @@
 ---
 name: rdf-wrapper
-description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, and typed-focus proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
+description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
 ---
 
 # Use sparq-wrapper
@@ -62,7 +62,7 @@ Typed accessors are strict:
 All return `Result<_, AccessError>`; do not silently coerce a mismatched RDF
 datatype.
 
-Four explicitly experimental features implement proposals that remain unlanded
+Five explicitly experimental features implement proposals that remain unlanded
 in rdfjs/wrapper:
 
 ```toml
@@ -70,6 +70,7 @@ sparq-wrapper = { version = "0.1", features = [
   "proposed-distinct",
   "proposed-cardinality",
   "proposed-codecs",
+  "proposed-observe",
   "proposed-typed-focus",
 ] }
 ```
@@ -133,6 +134,34 @@ assert_eq!(display_name, "Alice");
 `insert`, `remove`, and `clear` write through. `insert` and `remove` return
 `true` only for an effective graph change. Encoding runs before each mutation,
 so an encoder error leaves all existing triples intact.
+
+`proposed-observe` exposes a self-contained `proposed::observe::ObservableStore`
+for the effective-change subscription proposals in rdfjs/wrapper draft PRs #93
+and #94. Dataset callbacks receive a typed `ChangeEvent`; `LiveValues::subscribe`
+filters by subject and predicate and maps the changed RDF object into an
+application `ValueChange<T>`. Duplicate adds and absent deletes stay silent,
+and callbacks receive the committed graph only after the mutable graph borrow
+has ended. <!-- [GPT-5.6] sq-1rg2q.5 -->
+
+```rust
+use oxrdf::{Literal, NamedNode};
+use sparq_wrapper::proposed::observe::{ChangeKind, ObservableStore};
+
+let mut store = ObservableStore::new();
+let alice = NamedNode::new("http://example.org/alice")?;
+let tag = NamedNode::new("http://example.org/tag")?;
+let subscription = store.subscribe(|event, committed| {
+    assert!(matches!(event.kind, ChangeKind::Add | ChangeKind::Delete));
+    let _committed_triple_count = committed.len();
+});
+
+let mut tags = store.live_values(alice, tag);
+assert!(tags.insert(Literal::new_simple_literal("rdf"))?);
+assert!(!tags.insert(Literal::new_simple_literal("rdf"))?);
+drop(tags);
+assert!(store.unsubscribe(subscription));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 `proposed-codecs` exposes symmetric literal mappings in
 `sparq_wrapper::proposed::codecs` ([issue #7](https://github.com/rdfjs/wrapper/issues/7),
