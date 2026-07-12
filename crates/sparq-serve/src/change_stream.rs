@@ -594,6 +594,45 @@ impl ChangeLog {
     pub fn poll(&self, from_seq: u64) -> Result<Vec<ChangeRecord>, BackupError> {
         read_from(&self.dir, from_seq)
     }
+
+    /// [FABLE-5] (sq-bdaw5) Consumes the log into a **commit hook** for
+    /// [`Writer::spawn_with_commit_hook`](crate::Writer::spawn_with_commit_hook): every
+    /// commit the writer publishes is recorded via [`record_commit`](Self::record_commit)
+    /// ON THE WRITER THREAD — once per published generation, so recording rides the
+    /// group-commit batch instead of serialising submitters (the pre-hook wiring held a
+    /// caller-side `Mutex<ChangeLog>` across `submit`, forcing one commit per recording
+    /// update while the stream was on). The writer being the ring's sole publisher is
+    /// exactly what makes the recorded `(from, to)` pairs gapless and monotonic — the
+    /// [`record_commit`](Self::record_commit) contract — with no lock anywhere.
+    ///
+    /// **Error policy (a recording failure never fails the write):** by the time the
+    /// hook runs, the commit is already published (and, for a durable applier, already
+    /// durably sealed) — so a recording failure must not reject or roll back the write.
+    /// The failed append is DROPPED and reported to `on_error` (surface it to the
+    /// operator's log). Fail-closed honesty is preserved downstream: the log's
+    /// [`last_generation`](Self::last_generation) does not advance on a dropped record,
+    /// so the NEXT [`record_commit`](Self::record_commit) fails its discontinuity check
+    /// (and every later one, until the log is re-based) rather than silently papering
+    /// over the gap — `on_error` keeps firing, never a quietly incomplete stream.
+    /// Re-baselining a broken stream (as after a [`Writer::restore`](crate::Writer::restore),
+    /// which also breaks lineage and deliberately never fires the hook) is a separate,
+    /// explicit operator action.
+    ///
+    /// The hook performs the append + fsync on the writer thread, adding one record
+    /// write per generation to write-ack latency (amortised across the whole batch).
+    pub fn into_commit_hook<E>(
+        mut self,
+        mut on_error: E,
+    ) -> impl FnMut(&Generation<Graph>, &Generation<Graph>) + Send
+    where
+        E: FnMut(&BackupError) + Send,
+    {
+        move |from, to| {
+            if let Err(e) = self.record_commit(from, to) {
+                on_error(&e);
+            }
+        }
+    }
 }
 
 /// Reads all records with `seq >= from_seq` from the segments in `dir`, in order. Shared by

@@ -72,10 +72,10 @@ cargo run -p sparq-server -- --format turtle data.ttl
   recovery between **same-lineage** generations — see rustdoc.)
 - **Durable change-data-capture stream** *(opt-in `change-stream`, OFF by default)* —
   `change_stream::ChangeLog` persists each commit as an ordered, monotonically-sequenced
-  change record to a segmented, fsync'd append-only log (Neptune-Streams shape);
-  `poll(from_seq)` **replays after a restart**, and explicit retention (`apply_retention`)
-  drops whole old segments by consumer-ack / age / size (a trimmed-offset poll **fails
-  closed**). No new dependency, no HTTP/async; encryption + authenticity out of scope.
+  record to a segmented, fsync'd append-only log (Neptune-Streams shape), appended on the
+  writer thread (one per generation) via `ChangeLog::into_commit_hook` + `Writer::spawn_with_commit_hook`.
+  `poll(from_seq)` **replays after a restart**; explicit retention (`apply_retention`) drops old
+  segments by consumer-ack / age / size (a trimmed-offset poll **fails closed**). No HTTP/async.
 - **Response-bytes result cache** *(opt-in `result-cache`, OFF by default)* — see
   below.
 

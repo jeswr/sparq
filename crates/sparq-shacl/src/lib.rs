@@ -47,6 +47,21 @@ pub use rules::{
 use oxrdf::Triple;
 use sparq_core::Graph;
 
+/// [GPT-5.6] (sq-lsp7k.2.1) Selects which facts validation can observe.
+///
+/// This surface is available only with the `shacl-af` feature because
+/// [`AssertedPlusInferred`](Self::AssertedPlusInferred) computes the SHACL-AF
+/// rule closure before validating.
+#[cfg(feature = "shacl-af")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactDomain {
+    /// Validate the input data graph without applying SHACL-AF rules.
+    Asserted,
+    /// Validate a fresh graph containing the input data and its SHACL-AF rule
+    /// closure.
+    AssertedPlusInferred,
+}
+
 /// Validates `data` against the SHACL shapes in `shapes`, returning the
 /// validation report. Constructs the shapes graph never declares (or declares
 /// ill-formed — e.g. an unparsable path) are skipped rather than failing; use
@@ -70,6 +85,39 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
         diagnostics,
         model.conformance_disallows(),
     )
+}
+
+/// [GPT-5.6] (sq-lsp7k.2.1) Validates over the selected [`FactDomain`].
+///
+/// [`FactDomain::Asserted`] is identical to [`validate`].
+/// [`FactDomain::AssertedPlusInferred`] first computes the SHACL-AF rule
+/// fixpoint, then validates `data ∪ inferred`. The input graph is not mutated.
+#[cfg(feature = "shacl-af")]
+pub fn validate_with_domain(data: &Graph, shapes: &Graph, domain: FactDomain) -> ValidationReport {
+    let model = ShapesModel::parse(shapes);
+    validate_with_domain_and_model(data, shapes, &model, domain)
+}
+
+/// [GPT-5.6] (sq-lsp7k.2.1) [`validate_with_domain`] against an already-parsed
+/// shapes model, amortising shape parsing across data graphs.
+///
+/// `shapes` remains required for the inferred domain because SHACL-AF rule node
+/// expressions and CONSTRUCT prefixes are read directly from the shapes graph.
+#[cfg(feature = "shacl-af")]
+pub fn validate_with_domain_and_model(
+    data: &Graph,
+    shapes: &Graph,
+    model: &ShapesModel,
+    domain: FactDomain,
+) -> ValidationReport {
+    match domain {
+        FactDomain::Asserted => validate_with_model(data, model),
+        FactDomain::AssertedPlusInferred => {
+            let inference = rules::apply_rules_with_model(data, shapes, model);
+            let expanded = rules::expand_graph(data, &inference.triples);
+            validate_with_model(&expanded, model)
+        }
+    }
 }
 
 /// [OPUS-4.8] (sq-0mjfd) A SHACL processing **failure** (W3C SHACL §3.4): the

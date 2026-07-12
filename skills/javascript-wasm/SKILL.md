@@ -215,6 +215,22 @@ const trace = raw.explainAnalyze('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s e
 // plan + per-operator output rows (wall times read 0 on wasm32 — no monotonic clock)
 ```
 
+**Structured plan tree (`explainPlanJson` / `explainPlanAnalyzeJson`, explain-json bundle
+only — the published bundle enables it; sq-ixc3.19).** The TYPED plan the GUI plan explorer
+renders: `sparq-engine`'s `explain_json::PlanNode` as camelCase JSON — per operator
+`{"operator", "estimated", "actual", "nanos", "qError", "children"}` (the sq-jbqh4 schema
+contract, identical to the server's `Accept: application/x-sparq-explain+json` response).
+The dry-run form populates only `estimated`; the analyze form (SELECT/ASK only) fills
+`actual` rows and `qError` = max(est/actual, actual/est) exactly — `nanos` still reads 0 on
+wasm32 (the same no-monotonic-clock caveat as `explainAnalyze`; real per-operator wall
+times come from the desktop-native or server paths). `@sparq/client` exports the matching
+`PlanNode` type + the `parsePlanJson` defensive parse.
+
+```js
+const tree = JSON.parse(raw.explainPlanAnalyzeJson('SELECT ?n WHERE { ?s <http://ex/name> ?n }'));
+// { operator: "...", estimated: ..., actual: ..., nanos: 0, qError: ..., children: [...] }
+```
+
 **SHACL validation (`SparqStore.validate`, shipped by default).** `validate(data, shapes, format?)` validates an RDF **data graph** against a SHACL **shapes graph** and returns a typed `ValidationReport` (the JSON the wasm binding emits, parsed for you). It runs `sparq-shacl`'s SHACL Core + SHACL-SPARQL (`sh:sparql`) engine inside wasm — a drop-in for `rdf-validate-shacl`. It is **stateless** (does not consult the store's own triples). `format` defaults to `'turtle'` and accepts the same set as `fromString`.
 
 ```ts

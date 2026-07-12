@@ -1,6 +1,6 @@
 ---
 name: full-text-search
-description: "Full-text search over RDF string literals in sparq via the sparq-text crate: build a BM25 inverted index (TextIndex) and run text: magic predicates (text:matches / text:matchesAny / text:phrase / text:near / text:slop / text:score) inside plain SPARQL. Use when an agent needs keyword/prefix/phrase/proximity search, BM25 or proximity relevance ranking, or autocomplete over literals in a sparq Graph."
+description: "Full-text search and IRI/label prefix completion via sparq-text: build TextIndex or CompletionIndex and run text: magic predicates inside SPARQL. Use for keyword/prefix/phrase/proximity search, relevance ranking, or entity autocomplete in a sparq Graph."
 ---
 
 # sparq full-text search (sparq-text)
@@ -61,6 +61,16 @@ Index (always available, `index` module — re-exported at crate root as `TextIn
 - `TextIndex::indexed_dict_len(&self) -> usize` — generation marker: the graph `dict.len()` the index has indexed up to. `is_consistent_with(&graph) -> bool` — cheap staleness check (has it seen every term the graph now holds?). `needs_rebuild(&graph) -> bool` — flags the one unrepairable case: a **shorter** dictionary (a reopened, durably-recompacted base), mandating a fresh `build`. [OPUS-4.8] sq-oddt
 - `TextIndex::has_positions(&self) -> bool`, `len()`, `is_empty()`, `token_count()`, `heap_bytes()`.
 - `struct Hit { pub id: sparq_core::dict::Id, pub score: f32 }` (`score` comparable within one query only).
+
+Completion (always available, `complete` module — re-exported at crate root):
+- `CompletionIndex::build(&graph)` indexes every IRI under its full IRI and local name,
+  plus literal values attached through `rdfs:label` or `skos:prefLabel`.
+- `CompletionIndex::apply_delta(&mut self, graph, inserts, deletes)` mirrors newly interned IRIs and inserted `rdfs:label`/`skos:prefLabel` triples after `Graph::apply_delta`; deletes are a documented no-op. `reconcile(&graph)` scans the appended dictionary tail plus label triples involving a new subject or object, while `is_consistent_with` / `needs_rebuild` expose the same append-only staleness contract as `TextIndex`. Label triples added solely between pre-existing terms must be forwarded through `apply_delta`.
+- `complete(prefix, k, scores)` returns case-insensitive prefix matches ordered by
+  descending injected entity score, then key and id. Pass `None` for lexical ordering.
+- Results are `Candidate { id, key, kind, score }`; label candidates carry the subject
+  entity id, and `CandidateKind::Label(predicate_id)` records their predicate.
+- Matching is prefix-only; fuzzy completion is intentionally outside this index.
 
 SPARQL rewrite (`engine` feature, default on — `rewrite` module):
 - `query_text(graph: &Graph, sparql: &str, index: &TextIndex) -> Result<QueryResult, String>` — parse, rewrite `text:` patterns, evaluate.

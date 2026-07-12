@@ -116,9 +116,33 @@ sparq_introspect::SIDECAR_EXTENSION: &str                    // "introspect"
 // caps, no string resolution). Feeds sparq-engine's `cs-planner` CsTable.
 sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>
 //   CsIdSet { predicates: Box<[Id]>, subjects: u64, predicate_triples: Box<[u64]> }
+
+// One-call faceted browsing counts. Candidate subjects match the optional class
+// and every `(predicate IRI, object N-Triples term)` constraint. Results are ordered
+// by count descending then value ascending; `top_k` bounds each distribution.
+sparq_introspect::facets(graph: &Graph, request: &FacetRequest) -> FacetResponse
+// FacetResponse { candidates, types, predicates, values }
+// PredicateValues { predicate, values: Vec<Counted>, elided }
+// `facet_predicates: None` computes values for every predicate on the candidates.
 ```
 
 `sparq-nlq`:
+
+With the default-off `query-policy` feature, classify generated SPARQL after
+parsing its algebra (never by scanning keywords):
+
+```rust
+use spargebra::SparqlParser;
+use sparq_nlq::policy::{classify_query, classify_update, QueryPolicy};
+
+let parser = SparqlParser::new();
+let query = parser.parse_query("SELECT * WHERE { ?s ?p ?o }")?;
+assert_eq!(classify_query(&query), QueryPolicy::ReadOnly);
+
+let update = parser.parse_update("CLEAR DEFAULT")?;
+assert_eq!(classify_update(&update), QueryPolicy::Mutating);
+# Ok::<(), spargebra::SparqlSyntaxError>(())
+```
 
 ```rust
 // The single seam to any model — synchronous, stateless (the whole prompt is in `prompt`).

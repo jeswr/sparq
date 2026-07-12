@@ -290,11 +290,20 @@ impl ActiveContext {
 }
 
 /// The set of JSON-LD 1.1 keywords recognised by the processing algorithms.
+///
+/// [FABLE-5] sq-oy1f.29 — the Framing keywords (`@default`, `@embed`, `@explicit`,
+/// `@omitDefault`, `@preserve`, `@requireAll`) ARE keywords of the grammar
+/// (json-ld11-framing "Syntax Tokens and Keywords"). Without them here, Expansion
+/// step 13.3 dropped them as free terms before the `frameExpansion` keyword arm
+/// could retain them, so expanded frames lost their flags.
 pub(crate) const KEYWORDS: &[&str] = &[
     "@base",
     "@container",
     "@context",
+    "@default",
     "@direction",
+    "@embed",
+    "@explicit",
     "@graph",
     "@id",
     "@import",
@@ -305,9 +314,12 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "@list",
     "@nest",
     "@none",
+    "@omitDefault",
     "@prefix",
+    "@preserve",
     "@propagate",
     "@protected",
+    "@requireAll",
     "@reverse",
     "@set",
     "@type",

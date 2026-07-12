@@ -1,0 +1,16 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:accessibility:> .
+
+ex:w1 a ufo:World;
+    ufo:accessible ex:w2.
+ex:w2 a ufo:World.
+
+ex:alice a ufo:Agent.
+ex:delivery a ufo:Goal.
+
+ex:intendsDelivery a ufo:Proposition;
+    ufo:subj ex:alice;
+    ufo:pred ex:intends;
+    ufo:obj ex:delivery;
+    ufo:holdsIn ex:w1;
+    ufo:necessaryIn ex:w1.

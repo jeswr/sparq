@@ -333,3 +333,17 @@
   crate: "sparq-engine"
   features: "templates"
   test: true
+
+# [FABLE-5] (sq-lsp7k.3.1, PR #2007): programmatic full-path enumeration over one
+# predicate (`paths` module: `enumerate_paths`, `PathSpec`, `PathMode`, `PathSolution`).
+# `paths = []` — dependency-free, OFF by default; the whole module (`pub mod paths` in
+# lib.rs) and the whole-file suite `tests/paths_core.rs` (`#![cfg(feature = "paths")]`)
+# are `#[cfg(feature = "paths")]`, so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiles them EMPTY and runs
+# ZERO of the tests — the silent "compiled EMPTY ... tests never ran" gap this lane
+# exists to close (tripped the C1 structural guard on #2007). No new dep and no
+# `not(feature=…)` divergence, so a single isolated leg covers it.
+- name: "sparq-engine (paths)"
+  crate: "sparq-engine"
+  features: "paths"
+  test: true

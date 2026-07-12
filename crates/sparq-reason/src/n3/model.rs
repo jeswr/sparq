@@ -13,6 +13,15 @@ pub enum Term {
     Var(String),
     Formula(Vec<[Term; 3]>),
     List(Vec<Term>),
+    /// An RDF-star / RDF 1.2 quoted-triple TERM (`<< s p o >>` / `<<( s p o )>>`,
+    /// GH #2012): a first-class term whose value IS the `(s, p, o)` triple.
+    ///
+    /// Unlike a [`Term::Formula`] (a graph VALUE whose inner variables are
+    /// formula-scoped), a quoted triple is TRANSPARENT structure, exactly like
+    /// [`Term::List`]: variables inside it are ordinary rule variables that
+    /// match and bind against the corresponding component of a quoted triple
+    /// in the data (SPARQL-star / RDF-star triple-pattern semantics). [FABLE-5]
+    Triple(Box<[Term; 3]>),
 }
 
 impl Term {
@@ -24,6 +33,10 @@ impl Term {
             // log:conclusion, log:parsedAsN3 results).
             Term::Formula(ts) => ts.iter().all(|r| r.iter().all(Term::is_ground)),
             Term::List(ms) => ms.iter().all(Term::is_ground),
+            // A quoted triple is ground when its three components are (its
+            // inner variables are RULE variables, not term-scoped — see the
+            // variant docs).
+            Term::Triple(t) => t.iter().all(Term::is_ground),
             _ => true,
         }
     }

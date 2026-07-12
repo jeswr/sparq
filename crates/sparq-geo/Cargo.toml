@@ -99,6 +99,8 @@ proj4rs = { version = "0.1", optional = true }
 rustc-hash.workspace = true
 
 [dev-dependencies]
+# [GPT-5.6] Random accepted WKT geometries for parse/serialize fixpoint coverage.
+proptest = "1"
 # Deterministic random geometries for property tests + the benchmark example.
 # [OPUS-4.8] sq-8xug: rand-ecosystem 0.10. `random_range` moved from the `Rng`
 # trait to `RngExt` in 0.10, so the test/example imports use the prelude.

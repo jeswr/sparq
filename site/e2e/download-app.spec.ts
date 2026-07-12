@@ -3,13 +3,17 @@
 // WHAT IT GUARDS.
 //
 // 1. /download · GitHub API hermetic fixture (release / notFound / error):
-//    – Windows primary row: static alias href + version tag + sha256 from the checked-in fixture.
+//    – Windows primary row: version-agnostic alias href + version tag + sha256 from the checked-in
+//      fixture.
 //    – macOS primary row: arm64-darwin alias promoted by a macOS UA.
-//    – All five platform aliases are present in the DOM (static alias-asset scheme — no per-release
-//      rebuild required for the hrefs).
-//    – 404 state: every button degrades to "No release yet — watch releases" → Releases page; NO
-//      direct-download hrefs in the DOM.
-//    – 500 state: graceful degradation — buttons stay live with the static latest/download hrefs.
+//    – All five GUI platform aliases render in the DOM under the FAIL-CLOSED ready scheme
+//      (sq-vw3ax.11.2): a direct latest/download/<alias> button appears iff that alias name is in
+//      the release's asset map — the checked-in `release` fixture carries the full canonical alias
+//      set, so every card renders its direct button.
+//    – 404 state (no stable release, prerelease-list empty): every button degrades to
+//      "No release yet — watch releases" → Releases page; NO direct-download hrefs in the DOM.
+//    – 500 state: graceful degradation — buttons stay live optimistically with the static
+//      latest/download hrefs (the alias URL needs no API).
 //
 // 2. /app hard-document-navigation guard (regression):
 //    – The "App" nav slot is a PLAIN <a> (hard navigation), not a next/link soft-nav. If it were
@@ -27,8 +31,10 @@
 import type { Page } from "@playwright/test";
 import { test, expect, gotoAppReady } from "./support";
 
-const LATEST_DL = "https://github.com/jeswr/sparq/releases/latest/download";
-const RELEASES_URL = "https://github.com/jeswr/sparq/releases";
+// [FABLE-5] sq-vw3ax.11.2 — repo renamed jeswr/sparq → sparq-org/sparq; the /download client's
+// stable-alias hrefs and Releases link now point at the canonical org.
+const LATEST_DL = "https://github.com/sparq-org/sparq/releases/latest/download";
+const RELEASES_URL = "https://github.com/sparq-org/sparq/releases";
 const FIXTURE_VERSION = "v0.4.2-e2e-fixture";
 const FIXTURE_WIN_SHA256 = "1".repeat(64);
 
@@ -160,6 +166,25 @@ test.describe("/download · 404 fixture (no release yet)", () => {
 
   test("buttons degrade to watch-releases link in the no-release state", async ({ page }) => {
     const consoleErrors = trackConsoleErrors(page);
+
+    // [FABLE-5] sq-vw3ax.11.2 — the hermetic layer fixture-routes only `/releases/latest`. On a
+    // definitive 404 the client falls back to `/releases?per_page=1` (newest incl. prereleases) to
+    // detect a dev pre-release. That list endpoint is NOT covered by the hermetic route, so mock it
+    // here to return an EMPTY list → the client resolves to the "none" (no-release) state cleanly
+    // (a blocked/aborted fetch would otherwise log a net::ERR_FAILED console error). The RegExp
+    // matches the list endpoint (query string present) but NOT `/releases/latest`, so the hermetic
+    // 404 fixture still drives the first fetch.
+    await page.route(/api\.github\.com\/repos\/[^/]+\/sparq\/releases\?/, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: {
+          "access-control-allow-origin": "*",
+          "cross-origin-resource-policy": "cross-origin",
+        },
+        body: "[]",
+      });
+    });
 
     await page.goto("download/", { waitUntil: "domcontentloaded" });
 

@@ -102,7 +102,10 @@ serde_json = "1"
 # (`graph_to_nquads`), the named-graph-preserving wire format the Import drawer's native
 # loader hands a parsed disk/URL/HDT document back to the in-tab store as.
 sparq-core = { path = "../../crates/sparq-core", features = ["jsonld"] }
-sparq-engine = { path = "../../crates/sparq-engine", features = ["serialize-rdf"] }
+# [FABLE-5] sq-ixc3.19 — `explain-json` (zero new dependencies: `explain-json = []` in the
+# engine) turns on the typed plan tree (`explain_json::PlanNode`) the always-compiled
+# `explain_native` command (explain.rs) serialises for the GUI plan explorer.
+sparq-engine = { path = "../../crates/sparq-engine", features = ["serialize-rdf", "explain-json"] }
 
 # [OPUS-4.8] sq-ixc3.13 — opt-in native-only HDT reader (loads .hdt[.gz] straight into a
 # sparq Graph; the wasm read-replica cannot). Pulled in only under this crate's `hdt` feature.

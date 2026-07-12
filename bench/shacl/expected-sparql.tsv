@@ -1,0 +1,31 @@
+# [FABLE-5] (sq-pymgf) SPARQL-constraint SLICE deterministic golden counts for the
+# LUBM(1) seed-0 ABox (bench/shacl/gen.sh 1 0, ~103k triples) x the 3 sh:sparql shapes
+# in shapes-sparql/sparql_heavy.ttl, PER SHAPE (workload = the shape IRI local name)
+# plus the TOTAL row (all 3 shapes validated together as one model).
+# Format: <workload>\t<conforms>\t<violations>\t<focus_nodes>  (bench/shacl/expected.tsv's format).
+#   conforms     report.conforms as 0/1 (0 = does not conform).
+#   violations   report.results.len() — one result per sh:select SOLUTION (sparq does not
+#                dedup; the same PER-ENGINE caveat as expected.tsv applies to comparisons).
+#   focus_nodes  distinct focus nodes the shape's sh:targetClass selects (engine-independent).
+# Consumed ONLY by crates/sparq-shacl/examples/sparql_constraint_bench.rs, which asserts
+# every value BEFORE emitting any timing (exit 1 on drift — a correctness finding, never
+# rounded). bench/shacl/run.sh and its expected.tsv gate are untouched (they cover exactly
+# the shapes/ dir; this slice lives in shapes-sparql/ — see sparql_heavy.ttl's header).
+#
+# DERIVED by running the example on the pinned corpus, and independently CROSS-CHECKED
+# against the raw ABox (typed-edge solution counts, no SHACL engine): for sh:sparql, each
+# solution of the constraint SELECT (with $this in the target class) is one result, so
+#   GradCourseShape        1874 GraduateStudents; 3738 (this, takesCourse, o a GraduateCourse)
+#                          typed edge pairs                                          => 3738
+#   ProfessorLoadShape     125 FullProfessors; 183 (this, teacherOf, o a GraduateCourse)
+#                          typed edge pairs                                          => 183
+#   UndergradAdvisorShape  5916 UndergraduateStudents; 422 (this, advisor, o a FullProfessor)
+#                          typed edge pairs                                          => 422
+#   TOTAL                  3738 + 183 + 422 = 4343 results — the same total the 3-engine
+#                          same-box crosscheck agreed on (research/shacl-baseline-2026-07.md
+#                          §2, "sparql_heavy 4343"); the 3 target classes are disjoint in
+#                          the raw ABox, so focus nodes sum: 1874 + 125 + 5916      => 7915
+GradCourseShape	0	3738	1874
+ProfessorLoadShape	0	183	125
+UndergradAdvisorShape	0	422	5916
+TOTAL	0	4343	7915
