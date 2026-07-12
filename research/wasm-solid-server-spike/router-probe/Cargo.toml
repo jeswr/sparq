@@ -1,0 +1,25 @@
+[package]
+name = "sparq-lws-wasm-router-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false }
+bytes = "1"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.122"
+wasm-bindgen-futures = "=0.4.72"
+
+[dev-dependencies]
+futures-executor = "0.3"
+wasm-bindgen-test = "=0.3.72"
+
+[workspace]

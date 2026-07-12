@@ -1,0 +1,15 @@
+[package]
+name = "solid-oidc-verifier-wasm-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", rev = "89c896249a726398b78302fd2f65eef0a82af681", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Remove the verifier graph's first, mechanical wasm blocker so this probe reaches
+# the crypto backend question sq-6xasp.1 is intended to settle.
+getrandom = { version = "0.2", features = ["js"] }
+
+[workspace]
