@@ -129,6 +129,24 @@ single-process and ephemeral. The Node listener and npm wrapper are separate wor
 
 ## Common recipes
 
+**Decompress a browser dataset before loading it (`@sparq/client`).** The shared site/GUI client
+selects gzip, ZIP, zstd, or bzip2 by payload magic first and filename extension second. gzip and
+ZIP use native browser streams; zstd and bzip2 are separate lazy chunks fetched only when invoked.
+
+```ts
+import { decompressDatasetBytes } from '@sparq/client';
+
+const compressed = new Uint8Array(await file.arrayBuffer());
+const { bytes, innerName, codec } = await decompressDatasetBytes(compressed, file.name);
+const rdfText = new TextDecoder().decode(bytes);
+// Route rdfText using innerName (for example, "dataset.nt") and record codec if useful.
+```
+
+ZIP selects the first RDF-looking STORED or DEFLATE member and reports its member name. Encrypted
+ZIP, ZIP64, unsupported ZIP methods, zstd dictionary frames, and malformed streams reject rather
+than returning undecoded bytes. Browser gzip follows `DecompressionStream` semantics; do not rely
+on it to concatenate multiple gzip members.
+
 **Stream a large SELECT without holding the whole result.** One solution at a time, from ~64 KiB wasm-boundary chunks; `break` frees the cursor.
 
 ```js
