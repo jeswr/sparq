@@ -26,6 +26,7 @@ import {
   Users,
   Server,
   Scale,
+  Gauge,
 } from "lucide-react";
 
 /**
@@ -98,6 +99,20 @@ export const TOOLS: ToolDef[] = [
     blurb: "Run SPARQL 1.1/1.2 over the live store — SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE.",
     tier: "live",
     icon: Database,
+    built: true,
+    group: "working",
+  },
+  {
+    id: "plan",
+    label: "Plan",
+    // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer: EXPLAIN / EXPLAIN ANALYZE as a
+    // navigable operator tree (per-operator time / cardinality / q-error heat), over the
+    // in-tab store, the desktop native engine (real wall times), or a server endpoint;
+    // plus the this-workbench live query monitor with endpoint Kill.
+    blurb:
+      "Explore EXPLAIN / EXPLAIN ANALYZE as an operator tree — est vs actual rows, q-error heat, per-operator time — and monitor/kill in-flight queries.",
+    tier: "live",
+    icon: Gauge,
     built: true,
     group: "working",
   },

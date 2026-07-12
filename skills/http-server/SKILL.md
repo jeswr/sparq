@@ -447,6 +447,21 @@ curl -G 'http://127.0.0.1:3030/sparql?explain=true' \
      --data-urlencode 'query=SELECT * WHERE { ?a <http://ex/knows> ?b . ?b <http://ex/age> ?age }'
 ```
 
+**Structured plan tree (`explain-json` feature, default-on for the server binary —
+sq-ixc3.19).** `Accept: application/x-sparq-explain+json` answers the SAME `explain` /
+`explain=analyze` surface with the typed plan tree (`explain_json::PlanNode`) as camelCase
+JSON — per operator `{"operator", "estimated", "actual", "nanos", "qError", "children"}`
+(the sq-jbqh4 schema contract the GUI plan explorer renders; `qError` =
+max(est/actual, actual/est)). Like the text CT, the JSON `Accept` alone requests a
+plan-only explain. A `--no-default-features --features server,…` build answers it **406**
+(the text explain still works) so clients degrade explicitly, never mis-parse text as JSON:
+
+```sh
+curl -G -H 'Accept: application/x-sparq-explain+json' \
+     'http://127.0.0.1:3030/sparql?explain=analyze' \
+     --data-urlencode 'query=SELECT * WHERE { ?a <http://ex/knows> ?b . ?b <http://ex/age> ?age }'
+```
+
 **3. Generation-pinned snapshot reads (DEFAULT build — `sq-ci2d6`).** Every `/sparql` response
 carries the `Sparq-Generation` header (the generation the response was produced against; an
 update's `204` carries the generation *containing* the write — the read-your-writes token).

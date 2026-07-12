@@ -147,6 +147,26 @@ export class Store {
      */
     explainAnalyze(sparql: string): string;
     /**
+     * STRUCTURED `EXPLAIN ANALYZE` — executes the query (SELECT / ASK only) and
+     * returns the typed plan tree as camelCase JSON with each operator's `actual`
+     * output rows, wall `nanos` (0 on `wasm32` — no monotonic clock), and `qError`
+     * (= max(est/actual, actual/est)) filled in.
+     *
+     * A CONSTRUCT / DESCRIBE / UPDATE query is rejected with a clear error — use
+     * [`explainPlanJson`](Self::explain_plan_json) for the graph-valued forms.
+     */
+    explainPlanAnalyzeJson(sparql: string): string;
+    /**
+     * STRUCTURED planning-only `EXPLAIN` — the typed plan tree as camelCase JSON
+     * (`operator` / `estimated` / `actual` / `nanos` / `qError` / `children`).
+     *
+     * A dry run: nothing executes, so every node's `actual` / `nanos` / `qError` is
+     * `null` and only the planner's `estimated` cardinalities are populated. Works
+     * for every query form (SELECT / ASK / CONSTRUCT / DESCRIBE); a malformed query
+     * is rejected with the parser's error.
+     */
+    explainPlanJson(sparql: string): string;
+    /**
      * A rough estimate of the store's in-memory footprint, in bytes.
      */
     heapBytes(): number;
@@ -469,6 +489,8 @@ export interface InitOutput {
     readonly store_count: (a: number, b: number, c: number) => [number, number, number];
     readonly store_explain: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_explainAnalyze: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly store_explainPlanAnalyzeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly store_explainPlanJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_heapBytes: (a: number) => number;
     readonly store_load: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadCompressed: (a: number, b: number, c: number, d: number) => [number, number, number];
