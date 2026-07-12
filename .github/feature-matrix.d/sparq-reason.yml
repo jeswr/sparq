@@ -60,6 +60,13 @@
   features: "compiled-rules"
   test: true
 
+# [GPT-5.6] The existing default-OFF `datalog` surface now includes incremental
+# insert/delete maintenance; exercise its feature-gated implementation and tests.
+- name: "sparq-reason (datalog)"
+  crate: "sparq-reason"
+  features: "datalog"
+  test: true
+
 # [Kern] kern/quoted-triple-infer (first increment): the opt-in quoted-triple
 # (RDF 1.2 reifier) RL rules — reif-dtr destructure / reif-ctr construct with the
 # finite-Herbrand-base restrictions (src/reify.rs docs). This leg builds + tests +
