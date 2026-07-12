@@ -1,6 +1,6 @@
 ---
 name: geosparql
-description: "Use when adding GeoSPARQL spatial support to the sparq RDF/SPARQL engine — parsing geo:wktLiteral and geo:gmlLiteral (GML Simple-Features) geometries, calling geof: functions (distance, metricArea/metricLength/metricPerimeter/centroid, simplify, sf*/eh*/rcc8* DE-9IM relations, geometry/set operations, getSRID) inside SPARQL FILTER/BIND/SELECT via the sparq-engine extension-function registry, or building an R-tree GeoIndex over a Graph for within_distance / nearest / intersects queries. Crate: sparq-geo."
+description: "Use when adding GeoSPARQL spatial support to the sparq RDF/SPARQL engine — parsing geo:wktLiteral and geo:gmlLiteral (GML Simple-Features) geometries, calling geof: functions (distance, metricArea/metricLength/metricPerimeter/centroid, bounding coordinates, simplify, sf*/eh*/rcc8* DE-9IM relations, geometry/set operations, getSRID) inside SPARQL FILTER/BIND/SELECT via the sparq-engine extension-function registry, or building an R-tree GeoIndex over a Graph for within_distance / nearest / intersects queries. Crate: sparq-geo."
 ---
 
 # sparq-geosparql
@@ -30,7 +30,7 @@ let g = Graph::load_str(r#"
     <http://ex/paris>  <http://ex/loc> "POINT(2.3522 48.8566)"^^geo:wktLiteral .
 "#, "turtle").unwrap();
 
-let reg = geof_registry();               // 40 functions; clone-cheap, Send + Sync
+let reg = geof_registry();               // 44 functions; clone-cheap, Send + Sync
 let r = query_with_functions(&g,
     "PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
      PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
@@ -91,6 +91,7 @@ pub fn metric_area(g: &GeoGeometry) -> Result<f64, GeoError>;       // square me
 pub fn metric_length(g: &GeoGeometry) -> Result<f64, GeoError>;     // metres
 pub fn metric_perimeter(g: &GeoGeometry) -> Result<f64, GeoError>;  // metres
 pub fn centroid(g: &GeoGeometry) -> Result<GeoGeometry, GeoError>;  // POINT, same CRS
+pub fn max_x|min_x|max_y|min_y(g: &GeoGeometry) -> Result<f64, GeoError>; // envelope coordinate, stored CRS
 pub fn simplify(g: &GeoGeometry, tolerance: f64) -> Result<GeoGeometry, GeoError>; // RDP, same CRS
 pub fn sf_within(a, b) -> Result<bool, GeoError>;   // + sf_equals/disjoint/intersects/touches/
                                                     //   crosses/contains/overlaps, eh_*, rcc8_*
@@ -99,7 +100,7 @@ pub fn envelope|boundary|convex_hull(g: &GeoGeometry) -> Result<GeoGeometry, Geo
 pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, GeoError>;
 pub fn intersection|union|difference|sym_difference(a, b) -> Result<GeoGeometry, GeoError>;
 pub enum Unit { Metre, Kilometre, Mile, Degree, Radian }        // Unit::from_iri(uom_iri)
-// geof::lex::* mirrors every function at the wktLiteral-string level (str in, value/str out).
+// geof::lex::* provides wktLiteral-string helpers for geometry operations and relations.
 
 // --- GeoIndex: R-tree over a Graph (always available) ---
 pub fn GeoIndex::build(graph: &sparq_core::Graph) -> GeoIndex;
@@ -113,7 +114,7 @@ pub fn apply_delta(&mut self, graph: &Graph, inserts: &[[Term;3]], deletes: &[[T
 pub fn entries(&self) -> impl Iterator<Item=&Entry>;  // len() / is_empty() / skipped()
 ```
 
-Function IRIs are all under `http://www.opengis.net/def/function/geosparql/`. Result types in SPARQL: `geof:distance` / `metricArea` / `metricLength` / `metricPerimeter` → `xsd:double`; the relation families → `xsd:boolean`; `envelope`/`boundary`/`centroid`/`convexHull`/`simplify`/`buffer`/the four set ops → `geo:wktLiteral`; `getSRID` → `xsd:anyURI`.
+Function IRIs are all under `http://www.opengis.net/def/function/geosparql/`. Result types in SPARQL: `geof:distance` / `metricArea` / `metricLength` / `metricPerimeter` / `maxX` / `minX` / `maxY` / `minY` → `xsd:double`; the relation families → `xsd:boolean`; `envelope`/`boundary`/`centroid`/`convexHull`/`simplify`/`buffer`/the four set ops → `geo:wktLiteral`; `getSRID` → `xsd:anyURI`.
 
 ## Common recipes
 
@@ -170,6 +171,7 @@ let b = parse_wkt_literal("POINT(2.3522 48.8566)").unwrap();
 let km = geof::distance(&a, &b, Unit::Kilometre).unwrap();        // ≈ 343.6
 let inside = geof::sf_within(&b, &parse_wkt_literal(
                 "POLYGON((-1 42.5,7 42.5,7 51,-1 51,-1 42.5))").unwrap()).unwrap();
+let eastern_edge = geof::max_x(&b).unwrap(); // coordinate in b's stored CRS
 ```
 
 **Parse or serialise a GML literal (or dispatch parsing by datatype):** GML rides the same `GeoGeometry` as WKT, so it works everywhere a parsed geometry does. `to_gml_literal` emits the GML 3 Simple Features form and preserves CRS axis order:
