@@ -1,0 +1,17 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:relator:> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+ex:w a ufo:World.
+
+ex:employment a ufo:Relator;
+    ufo:mediates ex:alice, ex:acme;
+    ufo:existsIn ex:w.
+
+ex:alice owl:differentFrom ex:acme.
+
+ex:employmentStatement a ufo:Proposition;
+    ufo:truthmaker ex:employment;
+    ufo:subj ex:alice;
+    ufo:pred ex:employedBy;
+    ufo:obj ex:acme.

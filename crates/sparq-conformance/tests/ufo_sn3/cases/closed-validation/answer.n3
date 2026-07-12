@@ -1,0 +1,5 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:validation:> .
+
+ex:aliceEmployed ufo:refutedIn ex:w.
+ex:employmentScope ufo:hasFinding ex:aliceEmployed.

@@ -1,0 +1,38 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:identity:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+ex:Person a ufo:Kind;
+    ufo:identityCriterion ex:personIdentity.
+
+ex:Employee a ufo:Role;
+    ufo:identityProvider ex:Person.
+
+ex:personIdentity a ufo:IdentityCriterion;
+    ufo:keyProperty ex:employeeNumber.
+
+ex:w a ufo:World.
+
+ex:aliceEmployee a ufo:Proposition;
+    ufo:subj ex:alice;
+    ufo:pred rdf:type;
+    ufo:obj ex:Employee;
+    ufo:holdsIn ex:w.
+
+ex:aliceNumber a ufo:Proposition;
+    ufo:subj ex:alice;
+    ufo:pred ex:employeeNumber;
+    ufo:obj "E-7";
+    ufo:holdsIn ex:w.
+
+ex:aliceRecordEmployee a ufo:Proposition;
+    ufo:subj ex:aliceRecord;
+    ufo:pred rdf:type;
+    ufo:obj ex:Employee;
+    ufo:holdsIn ex:w.
+
+ex:aliceRecordNumber a ufo:Proposition;
+    ufo:subj ex:aliceRecord;
+    ufo:pred ex:employeeNumber;
+    ufo:obj "E-7";
+    ufo:holdsIn ex:w.
