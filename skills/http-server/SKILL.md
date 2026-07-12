@@ -1316,7 +1316,7 @@ quota:
 
 Library callers set these on `ServerConfig` (`query_timeout`, `max_query_rows`,
 `max_query_bytes`, `max_decompress_ratio`, `service_allow`). Embedders driving the engine
-directly thread a `sparq_engine::QueryBudget { deadline, max_rows, max_bytes }` into
+directly thread a `sparq_engine::QueryBudget { deadline, max_rows, max_bytes, ..QueryBudget::unlimited() }` into
 `*_with_budget` query entry points and `update_in_place_with_budget`, and wrap calls in
 `sparq_engine::with_service_egress_policy(strict, [host], || …)`.
 

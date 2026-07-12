@@ -130,8 +130,9 @@ cargo deny check advisories bans sources licenses
   language, push/PR/schedule.
 - **Daily advisory watchdog + Dependabot.** `.github/workflows/dependency-monitoring.yml`;
   Dependabot config (4 ecosystems).
-- **No unsafe in the parser/executor.** `compliance/memsafety/` MS-13;
-  `grep -rl "forbid(unsafe_code)" crates/sparq-engine crates/sparq-parse crates/sparq-shacl`.
+- **Parser safe-only; executor unsafe confined to cancellation.** `compliance/memsafety/` MS-13;
+  `sparq-engine` has four registered atomic-cancellation pointer sites whose lifetime is bound by
+  the query-budget guard, while `sparq-parse` and `sparq-shacl` remain `forbid(unsafe_code)`.
 
 ## V11 — DoS / anti-automation limits
 
