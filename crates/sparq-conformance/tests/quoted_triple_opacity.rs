@@ -59,6 +59,9 @@ pub const QUOTED_OPACITY_FLOOR: usize = 84;
 const NS: &str = "urn:sparq:qto:";
 const RDF_TYPE: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>";
 const RDF_REIFIES: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>";
+// Used only by the feature-gated EL arm below; cfg-gated to match so the
+// default-feature build stays dead-code-clean (clippy gates -D warnings).
+#[cfg(feature = "el-suite")]
 const RDFS_SUBCLASS_OF: &str = "<http://www.w3.org/2000/01/rdf-schema#subClassOf>";
 
 const NEVER_ASSERTS: &str = include_str!("quoted_opacity/never_asserts.ttl");
@@ -180,29 +183,65 @@ fn quoting_never_asserts(tally: &mut Tally, profile: Profile) {
     // The reification triples themselves are present and inert.
     tally.must_edge(&closure, &iri("r1"), RDF_REIFIES, &ctx);
     tally.must_edge(&closure, &iri("r2"), RDF_REIFIES, &ctx);
-    tally.must(&closure, &spo(&iri("r2"), &iri("statedBy"), &iri("carol")), &ctx);
+    tally.must(
+        &closure,
+        &spo(&iri("r2"), &iri("statedBy"), &iri("carol")),
+        &ctx,
+    );
     tally.must_edge(&closure, &iri("carol"), &iri("claims"), &ctx);
 
     // POSITIVE CONTROL — the annotation form asserts its base triple, so every
     // guarded rule fires on :frank / :initech.
-    tally.must(&closure, &spo(&iri("frank"), &iri("worksFor"), &iri("initech")), &ctx);
-    tally.must(&closure, &spo(&iri("frank"), RDF_TYPE, &iri("Employee")), &ctx);
-    tally.must(&closure, &spo(&iri("frank"), RDF_TYPE, &iri("Person")), &ctx);
-    tally.must(&closure, &spo(&iri("initech"), RDF_TYPE, &iri("Company")), &ctx);
-    tally.must(&closure, &spo(&iri("frank"), &iri("affiliatedWith"), &iri("initech")), &ctx);
+    tally.must(
+        &closure,
+        &spo(&iri("frank"), &iri("worksFor"), &iri("initech")),
+        &ctx,
+    );
+    tally.must(
+        &closure,
+        &spo(&iri("frank"), RDF_TYPE, &iri("Employee")),
+        &ctx,
+    );
+    tally.must(
+        &closure,
+        &spo(&iri("frank"), RDF_TYPE, &iri("Person")),
+        &ctx,
+    );
+    tally.must(
+        &closure,
+        &spo(&iri("initech"), RDF_TYPE, &iri("Company")),
+        &ctx,
+    );
+    tally.must(
+        &closure,
+        &spo(&iri("frank"), &iri("affiliatedWith"), &iri("initech")),
+        &ctx,
+    );
 
     // The quoted triples are NOT asserted…
     for who in ["alice", "bob", "eve"] {
-        tally.must_not(&closure, &spo(&iri(who), &iri("worksFor"), &iri("acme")), &ctx);
+        tally.must_not(
+            &closure,
+            &spo(&iri(who), &iri("worksFor"), &iri("acme")),
+            &ctx,
+        );
         // …and none of their consequences exists either: no domain typing,
         tally.must_not(&closure, &spo(&iri(who), RDF_TYPE, &iri("Employee")), &ctx);
         // no subclass hop above it,
         tally.must_not(&closure, &spo(&iri(who), RDF_TYPE, &iri("Person")), &ctx);
         // no sub-property fan-out.
-        tally.must_not(&closure, &spo(&iri(who), &iri("affiliatedWith"), &iri("acme")), &ctx);
+        tally.must_not(
+            &closure,
+            &spo(&iri(who), &iri("affiliatedWith"), &iri("acme")),
+            &ctx,
+        );
     }
     // No range typing from any quoted `… :worksFor :acme` either.
-    tally.must_not(&closure, &spo(&iri("acme"), RDF_TYPE, &iri("Company")), &ctx);
+    tally.must_not(
+        &closure,
+        &spo(&iri("acme"), RDF_TYPE, &iri("Company")),
+        &ctx,
+    );
 }
 
 /// (2) Closure non-interference: the base closure is byte-identical with or
@@ -228,17 +267,32 @@ fn closure_non_interference(tally: &mut Tally, profile: Profile) {
     }
     // …and REMOVING exactly the overlay yields closure(base), byte-identical:
     // the overlay derived NOTHING and interfered with NOTHING.
-    let stripped: BTreeSet<String> =
-        combined_closure.difference(&overlay).cloned().collect();
+    let stripped: BTreeSet<String> = combined_closure.difference(&overlay).cloned().collect();
     tally.byte_identical(&stripped, expected, &ctx);
 
     // Negative guards spelled out (also implied by the byte-identity above):
     // the false quoted triple, its range consequence, the reversed part-of and
     // its transitive consequence never enter the closure.
-    tally.must_not(&combined_closure, &spo(&iri("alice"), &iri("worksFor"), &iri("globex")), &ctx);
-    tally.must_not(&combined_closure, &spo(&iri("globex"), RDF_TYPE, &iri("Company")), &ctx);
-    tally.must_not(&combined_closure, &spo(&iri("megacorp"), &iri("partOf"), &iri("acme")), &ctx);
-    tally.must_not(&combined_closure, &spo(&iri("megacorp"), &iri("partOf"), &iri("megacorp")), &ctx);
+    tally.must_not(
+        &combined_closure,
+        &spo(&iri("alice"), &iri("worksFor"), &iri("globex")),
+        &ctx,
+    );
+    tally.must_not(
+        &combined_closure,
+        &spo(&iri("globex"), RDF_TYPE, &iri("Company")),
+        &ctx,
+    );
+    tally.must_not(
+        &combined_closure,
+        &spo(&iri("megacorp"), &iri("partOf"), &iri("acme")),
+        &ctx,
+    );
+    tally.must_not(
+        &combined_closure,
+        &spo(&iri("megacorp"), &iri("partOf"), &iri("megacorp")),
+        &ctx,
+    );
 }
 
 /// (3) A reifier's own annotations are reasoned over normally — domain typing
@@ -249,15 +303,35 @@ fn annotated_reifier(tally: &mut Tally, profile: Profile) {
 
     // Normal reasoning over the reifier node :r5.
     tally.must_edge(&closure, &iri("r5"), RDF_REIFIES, &ctx);
-    tally.must(&closure, &spo(&iri("r5"), &iri("statedBy"), &iri("carol")), &ctx);
-    tally.must(&closure, &spo(&iri("r5"), &iri("certainty"), "\"0.9\""), &ctx);
+    tally.must(
+        &closure,
+        &spo(&iri("r5"), &iri("statedBy"), &iri("carol")),
+        &ctx,
+    );
+    tally.must(
+        &closure,
+        &spo(&iri("r5"), &iri("certainty"), "\"0.9\""),
+        &ctx,
+    );
     tally.must(&closure, &spo(&iri("r5"), RDF_TYPE, &iri("Claim")), &ctx);
-    tally.must(&closure, &spo(&iri("r5"), RDF_TYPE, &iri("Statement")), &ctx);
+    tally.must(
+        &closure,
+        &spo(&iri("r5"), RDF_TYPE, &iri("Statement")),
+        &ctx,
+    );
 
     // No leak: the quoted triple and its domain consequence stay out, and the
     // reifier is never conflated with the quoted subject.
-    tally.must_not(&closure, &spo(&iri("alice"), &iri("worksFor"), &iri("globex")), &ctx);
-    tally.must_not(&closure, &spo(&iri("alice"), RDF_TYPE, &iri("Employee")), &ctx);
+    tally.must_not(
+        &closure,
+        &spo(&iri("alice"), &iri("worksFor"), &iri("globex")),
+        &ctx,
+    );
+    tally.must_not(
+        &closure,
+        &spo(&iri("alice"), RDF_TYPE, &iri("Employee")),
+        &ctx,
+    );
     tally.must_not(&closure, &spo(&iri("r5"), RDF_TYPE, &iri("Employee")), &ctx);
 }
 
@@ -323,8 +397,14 @@ fn quoted_axiom_does_not_interfere_with_el_classification() {
 
     // The completed chain is classified in both runs.
     let a_sub_c = spo(&iri("A"), RDFS_SUBCLASS_OF, &iri("C"));
-    assert!(base_closure.contains(&a_sub_c), "EL classifier must complete :A ⊑ :C");
-    assert!(combined_closure.contains(&a_sub_c), "EL classifier must complete :A ⊑ :C");
+    assert!(
+        base_closure.contains(&a_sub_c),
+        "EL classifier must complete :A ⊑ :C"
+    );
+    assert!(
+        combined_closure.contains(&a_sub_c),
+        "EL classifier must complete :A ⊑ :C"
+    );
 
     // The QUOTED axiom never enters the TBox.
     let c_sub_d = spo(&iri("C"), RDFS_SUBCLASS_OF, &iri("D"));

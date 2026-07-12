@@ -1235,7 +1235,10 @@ pub const SUITES: &[Suite] = &[
     Suite {
         label: "RDF 1.2 quoted-triple opacity (reasoning)",
         family: "sparq extension",
-        runner: Runner::CrateTest { krate: "sparq-conformance", target: "quoted_triple_opacity" },
+        runner: Runner::CrateTest {
+            krate: "sparq-conformance",
+            target: "quoted_triple_opacity",
+        },
         ci_job: "test",
         ratchet_floor: 84,
         floor_basis: "opacity assertions — quoting-never-asserts negative-entailment guards, \

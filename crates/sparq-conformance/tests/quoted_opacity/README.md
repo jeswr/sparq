@@ -17,11 +17,11 @@ asserts exactly ONE triple — that `:r` reifies the triple TERM `<<( :s :p :o )
 triple terms) makes triple terms REFERENTIALLY OPAQUE: quoting never asserts.
 The reasoner must therefore
 
-1. **never assert the quoted triple** — `<< :s :p :o >>` in a graph does not
-   entail `:s :p :o` (nor anything, e.g. domain/range typings, that would follow
-   from it), unless `:s :p :o` is SEPARATELY asserted;
-2. **not let quoted triples interfere with closure** — the RL/EL closure of a
-   base graph is byte-identical whether or not quoted triples referring to it
+1. **never assert the reified triple's content** — `<< :s :p :o >>` in a graph
+   does not entail `:s :p :o` (nor anything, e.g. domain/range typings, that
+   would follow from it), unless `:s :p :o` is SEPARATELY asserted;
+2. **not let triple terms interfere with closure** — the RL/EL closure of a
+   base graph is byte-identical whether or not reified triples referring to it
    (true, false, or entailed-but-unasserted ones) are present;
 3. **reason over the reifier node normally** — a reifier's own annotations
    (type, certainty, provenance) participate in closure like any other triples,
@@ -35,9 +35,9 @@ is the positive control proving the harness' negative guards are meaningful.
 
 | file | role |
 |---|---|
-| `never_asserts.ttl` | quoted triples in all three surface forms (`rdf:reifies` + triple term, `<< … ~ :r >>` as subject, `<< … >>` as object) plus the asserted annotation-syntax control |
-| `base.ttl` | the base graph (NO quoted triples): RDFS schema + OWL RL (transitive, inverse) axioms + facts |
-| `quoted_overlay.ttl` | quoted triples REFERRING to `base.ttl` (an asserted, a false, an entailed-but-unasserted, and a reversed one) + an inert reifier annotation |
+| `never_asserts.ttl` | reified triples in all three surface forms (`rdf:reifies` + triple term, `<< … ~ :r >>` as subject, `<< … >>` as object) plus the asserted annotation-syntax control |
+| `base.ttl` | the base graph (NO triple terms): RDFS schema + OWL RL (transitive, inverse) axioms + facts |
+| `quoted_overlay.ttl` | reified triples REFERRING to `base.ttl` (an asserted, a false, an entailed-but-unasserted, and a reversed one) + an inert reifier annotation |
 | `annotated_reifier.ttl` | a reifier carrying annotations that the schema reasons over normally |
 | `el_base.ttl` / `el_overlay.ttl` | the EL-classifier variant: a subclass chain, and a quoted (never asserted) `rdfs:subClassOf` axiom |
 | `expected/base_rdfs_closure.nt` | committed expected answer: the FULL RDFS closure of `base.ttl`, sorted N-Triples, byte-pinned |

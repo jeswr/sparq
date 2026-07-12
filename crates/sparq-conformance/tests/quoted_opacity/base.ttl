@@ -10,6 +10,10 @@
 #   OWL RL (additionally)
 #         — prp-trp (transitive): :acme :partOf :conglomerate
 #           prp-inv (inverse):    :acme :employs :alice
+#           inverse schema lift:  :employs rdfs:domain :Company   (= range of :worksFor)
+#                                 :employs rdfs:range  :Employee  (= domain of :worksFor)
+#           scm-dom1 (subclass):  :worksFor rdfs:domain :Person   (Employee ⊑ Person)
+#           scm-rng1 (subclass):  :employs  rdfs:range  :Person   (Employee ⊑ Person)
 @prefix : <urn:sparq:qto:> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
