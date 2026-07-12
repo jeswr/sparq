@@ -133,10 +133,12 @@ pub struct Suite {
 ///   [SONNET-4.6] strengthened semantics-preserving comparison + extended coverage;
 ///   opt-in `geosparql_rewrite` feature; topology PROPERTY forms answered via the
 ///   rewrite, MEASURED pass count).
-/// * Solid WAC 12 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 12`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
-/// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
+/// * Solid WAC 13 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 13`
+///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
+///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
+/// * Solid ACP 13 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 13`
+///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
+///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
 ///
 /// [FABLE-5] sq-oy1f.40 — the SIX JSON-LD floors below now live LIB-SIDE in
 /// `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are IMPORTED directly into
@@ -365,7 +367,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid WAC",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_wac" },
         ci_job: "solid-conformance",
-        ratchet_floor: 12,
+        ratchet_floor: 13,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct WAC .acl scenarios",
     },
@@ -374,7 +376,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid ACP",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_acp" },
         ci_job: "solid-conformance",
-        ratchet_floor: 12,
+        ratchet_floor: 13,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct ACP ACR scenarios",
     },
