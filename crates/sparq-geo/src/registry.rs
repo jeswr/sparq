@@ -33,7 +33,7 @@
 //!   `xsd:double` in square metres / metres;
 //! * the `geof:sf*` relations return `xsd:boolean`;
 //! * `geof:envelope` / `geof:boundary` / `geof:centroid` /
-//!   `geof:convexHull` return `geo:wktLiteral`;
+//!   `geof:convexHull` / `geof:simplify` return `geo:wktLiteral`;
 //! * every [`crate::GeoError`] (WKT parse failure, CRS mismatch, unknown unit, …)
 //!   is the same expression error.
 //!
@@ -445,6 +445,7 @@ type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>
 ///   `relate(g1, g2, de9imPattern)`;
 /// * `envelope` / `boundary` / `centroid` / `convexHull` `(g)` ->
 ///   `geo:wktLiteral`;
+/// * `simplify(g, tolerance)` -> Douglas–Peucker-simplified `geo:wktLiteral`;
 /// * `buffer(g, radius, unitIri)` -> `geo:wktLiteral` (a MULTIPOLYGON);
 /// * `intersection` / `union` / `difference` / `symDifference` `(g1, g2)` ->
 ///   `geo:wktLiteral` (point-set ops: polygon overlay plus the well-defined
@@ -573,6 +574,18 @@ pub fn geof_registry() -> FunctionRegistry {
         });
     }
 
+    // geof:simplify(?g, ?tolerance) -> geo:wktLiteral. [GPT-5.6] sq-lsp7k.23
+    reg.register(format!("{GEOF_NS}simplify"), |args: &[Term]| {
+        arity("simplify", args, 2)?;
+        let g = geom_arg("simplify", args, 0)?;
+        let tolerance = num_arg("simplify", args, 1)?;
+        Ok(wkt_term(
+            geof::simplify(&g, tolerance)
+                .map_err(|e| e.to_string())?
+                .to_wkt_literal(),
+        ))
+    });
+
     // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (point-set ops over
     // polygon/line/point operands; see geof for the supported matrix).
     let set_ops: [(&'static str, GeomSetOp); 4] = [
@@ -623,7 +636,7 @@ mod tests {
     #[test]
     fn registry_contents() {
         let reg = geof_registry();
-        assert_eq!(reg.len(), 39);
+        assert_eq!(reg.len(), 40);
         for name in [
             "distance", "relate", "getSRID", "buffer",
             "metricArea", "metricLength", "metricPerimeter", "centroid",
@@ -633,7 +646,7 @@ mod tests {
             "ehInside", "ehContains",
             "rcc8eq", "rcc8dc", "rcc8ec", "rcc8po", "rcc8tppi", "rcc8tpp", "rcc8ntpp",
             "rcc8ntppi",
-            "envelope", "boundary", "convexHull",
+            "envelope", "boundary", "convexHull", "simplify",
             "intersection", "union", "difference", "symDifference",
         ] {
             assert!(reg.get(&format!("{GEOF_NS}{name}")).is_some(), "missing geof:{name}");
@@ -659,6 +672,27 @@ mod tests {
         let Term::Literal(value) = centroid(&[square]).unwrap() else { panic!("literal") };
         assert_eq!(value.datatype().as_str(), WKT_LITERAL);
         assert!(value.value().contains("0.5"), "got {value}");
+    }
+
+    #[test]
+    fn simplify_term_level() {
+        let reg = geof_registry();
+        let simplify = reg.get(&format!("{GEOF_NS}simplify")).unwrap();
+        let tolerance = Term::Literal(Literal::from(0.2));
+        let Term::Literal(value) =
+            simplify(&[wkt("LINESTRING(0 0,1 0.1,2 0)"), tolerance]).unwrap()
+        else {
+            panic!("literal")
+        };
+
+        assert_eq!(value.datatype().as_str(), WKT_LITERAL);
+        assert_eq!(value.value(), "LINESTRING(0 0,2 0)");
+        assert!(simplify(&[wkt("POINT(0 0)")]).is_err());
+        assert!(simplify(&[
+            wkt("POINT(0 0)"),
+            Term::Literal(Literal::new_simple_literal("not-a-number")),
+        ])
+        .is_err());
     }
 
     #[test]
