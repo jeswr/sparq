@@ -5551,6 +5551,7 @@ pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> Que
         // [OPUS-4.8] (sq-s5is) byte-accounted cap applies on every form (it has no
         // `--max-results` analogue — it bounds the working set, not the projection).
         max_bytes: config.max_query_bytes,
+        cancel: None,
     }
 }
 
@@ -5573,6 +5574,7 @@ fn update_budget(config: &ServerConfig) -> QueryBudget {
         max_rows: config.max_query_rows,
         // [OPUS-4.8] (sq-s5is) the byte cap reaches the UPDATE's WHERE evaluation too.
         max_bytes: config.max_query_bytes,
+        cancel: None,
     }
 }
 
