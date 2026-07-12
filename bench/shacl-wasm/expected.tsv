@@ -1,0 +1,38 @@
+# [FABLE-5] sq-i858h — expected constants for the VENDORED micro-ABox
+# (data/abox.ttl) under the COMMITTED bench/shacl workloads. Derivation is
+# BY HAND from the ABox (each line re-derivable by eye; also confirmed by
+# RUNNING both engines AND an independent pySHACL oracle — see the PR):
+#   cardinality      (4 FullProfessor; teacherOf fan-out 2/3/2/4)
+#                    maxCount 1 fires once per focus => 4; minCount 3 fires for
+#                    the two fan-out-2 profs => 2.  TOTAL 6, conforms=false.
+#   class_nodekind   worksFor is a Department (never University) => sh:class
+#                    fires once per prof's single worksFor value => 4; all IRIs
+#                    => nodeKind 0.  TOTAL 4, conforms=false.
+#   datatype_range   5 GraduateStudent plain-literal names => sh:datatype
+#                    xsd:integer fires once per name => 5; emails all match the
+#                    pattern => 0.  TOTAL 5, conforms=false.
+#   node_paths       advisors prof0/prof1/prof2/prof3/prof1; only prof0 has
+#                    ub:headOf => sh:node fires for gs1..gs4 => 4; every grad is
+#                    memberOf dept0 subOrganizationOf univ0 => sequence-path
+#                    minCount 0 violations.  TOTAL 4, conforms=false.
+#                    (TOP-LEVEL results — the report.results contract; engines
+#                    that ALSO nest the inner minCount failure under sh:detail
+#                    keep it out of report.results.)
+#   sparql_constraint grads taking a GraduateCourse: gs0=1, gs1=2, gs2=0,
+#                    gs3=1, gs4=0 => 4 SELECT solutions.  conforms=false.
+#                    SPARQ-ONLY: rdf-validate-shacl is SHACL Core only (no
+#                    sh:sparql) — peer column ABSENT, never a fabricated 0.
+#   sparql_heavy     GradCourse 4 (as above) + ProfessorLoad prof1=2,prof3=1
+#                    => 3 + UndergradAdvisor us0/us1/us2 => 3.  TOTAL 10,
+#                    conforms=false.  SPARQ-ONLY (sh:sparql).
+#
+# All committed core shapes are SINGLE-ROUTE, so sparq's per-occurrence
+# (no-dedup) counting and a dedup engine agree (bench/shacl/README.md caveat).
+#
+# format: workload \t conforms(0|1) \t violations \t engines(both|sparq-only)
+cardinality	0	6	both
+class_nodekind	0	4	both
+datatype_range	0	5	both
+node_paths	0	4	both
+sparql_constraint	0	4	sparq-only
+sparql_heavy	0	10	sparq-only
