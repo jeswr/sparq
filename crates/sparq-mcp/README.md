@@ -8,7 +8,7 @@
 </p>
 
 A **Model Context Protocol (MCP)** server exposing a sparq RDF graph as **agent tools** —
-an **opt-in** crate. An LLM/agent can `query`, `introspect`, and read `stats` over a
+an **opt-in** crate. An LLM/agent can use `query`, `introspect`, `stats`, and `void` over a
 dataset as first-class MCP tools; SPARQL **`update` is OFF by default**. It is a thin
 wrapper over the existing engine read API (`sparq-engine` query path + `sparq-introspect`
 schema mining): nothing in the workspace depends on it, the default engine build does not
@@ -53,8 +53,8 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
   cardinalities the data supports (`min_count`/`max_count` only when proven, never
   fabricated). Structured grounding so a **client** LLM can write NL→SPARQL — **no
   server-side model**. Ships in the default build.
-- **`stats`** — dataset totals (triples, distinct subjects, typed entities, class /
-  predicate / namespace counts).
+- **`stats`** — dataset totals (triples, distinct subjects, typed entities, class / predicate / namespace counts).
+- **`void`** — emit a W3C VoID dataset descriptor as N-Triples, optionally including characteristic-set statistics; `dataset` defaults to `urn:sparq:dataset`.
 - **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question
   **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
   SPARQL + the real result rows (+ in-graph citations). It embeds a **configurable** LLM
@@ -95,7 +95,7 @@ built-in authentication or authorization**: the MCP transport (stdio) is a trust
 you, the operator, establish — whoever can speak to the server has exactly the access the
 server was configured with. Run it only against a client you trust.
 
-- **Read-only by default.** The default tools cannot mutate; feature-gated `validate` is also read-only.
+- **Read-only by default.** Default tools cannot mutate; feature-gated `validate` is read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
   `ServerConfig::allow_update = true` (or a binary's `--allow-update` flag). Turn it on
   only when the client is trusted to issue writes. There is no per-tool ACL beyond this

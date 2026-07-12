@@ -12,6 +12,7 @@
 //!   cardinality constraints for one class IRI; structured grounding for a client LLM —
 //!   no server-side model). [OPUS-4.8] sq-zak4f
 //! - `stats` → graph triple count + introspection totals.
+//! - `void` → `sparq_introspect::Introspection::to_void` (W3C VoID N-Triples).
 //! - `validate` (feature `shacl`, OFF by default) → `sparq_shacl::validate` over
 //!   caller-supplied shapes; read-only and absent from the default tool surface.
 //! - `ask` (feature `nlq`, OFF by default) → `crate::nlq` (server-side NL→SPARQL→execute
@@ -167,6 +168,33 @@ pub const STATS: ToolSpec = ToolSpec {
         json!({
             "type": "object",
             "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// [GPT-5.6] sq-2kkym: the `void` tool, a W3C VoID dataset descriptor in N-Triples.
+pub const VOID: ToolSpec = ToolSpec {
+    name: "void",
+    description: "Return a W3C VoID dataset descriptor as N-Triples: exact dataset \
+                  totals plus class and property partitions. The optional dataset IRI \
+                  defaults to urn:sparq:dataset; characteristic_sets=true appends \
+                  sparq's characteristic-set statistics for federated planning.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "dataset": {
+                    "type": "string",
+                    "description": "IRI naming the described dataset (default \
+                                    \"urn:sparq:dataset\")."
+                },
+                "characteristic_sets": {
+                    "type": "boolean",
+                    "description": "Append characteristic-set statistics when true \
+                                    (default false)."
+                }
+            },
             "additionalProperties": false
         })
     },
@@ -362,7 +390,7 @@ pub const VALIDATE: ToolSpec = ToolSpec {
 
 /// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
 /// is appended by [`advertised`] only when a model backend is configured.
-pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS];
+pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS, &VOID];
 
 /// The full list of tools this server advertises, given its config — `UPDATE` is
 /// appended only when [`McpServer`] was built with update enabled, and `ask` (feature
