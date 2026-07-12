@@ -1,0 +1,6 @@
+# [GPT-5.6] sq-aej8u: exercise the default-OFF materialization profiler and its
+# parity/progress-reporting integration tests in an explicit opt-in matrix leg.
+- name: "sparq-reason (profile)"
+  crate: "sparq-reason"
+  features: "profile"
+  test: true
