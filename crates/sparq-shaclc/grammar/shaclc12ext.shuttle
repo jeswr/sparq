@@ -1,0 +1,752 @@
+/* ===================================================================
+ * shaclc12ext.shuttle — SHACL Compact Syntax 1.2 (+ extended) in Shuttle
+ *
+ * One specification, three layers, selected by @profile labels:
+ *
+ *   (core)            standard SHACL-CS per the W3C Community Group
+ *                     spec (BASE/IMPORTS/PREFIX, shape/shapeClass,
+ *                     '->' targetClass, the full parameter vocabulary,
+ *                     nodeKinds, [min..max], the path algebra, '!' →
+ *                     sh:not, '|' → sh:or lists, '@' shape refs,
+ *                     nested bodies, value arrays);
+ *   @profile(rdf12)   the RDF 1.2 / SHACL 1.2 delta: triple terms in
+ *                     value positions, directional language tags,
+ *                     sh:TripleTerm nodeKind, sh:reifierShape,
+ *                     sh:reificationRequired (see "RDF 1.2 surface"
+ *                     below — this surface is INVENTED here, ahead of
+ *                     any W3C ED surface, coordinated with
+ *                     jeswr/shaclc-1.2);
+ *   @profile(ext)     the four shaclc-js extensions (turtle-style
+ *                     node-shape annotations after ';', '% … %'
+ *                     property-shape escapes, trailing turtle
+ *                     statements, the 'a' keyword) as a DISTINCT
+ *                     layer, so the strict artifact provably rejects
+ *                     them by construction — the parse tables of a
+ *                     '--profile rdf12' build simply do not contain
+ *                     the extended alternatives. This fixes, by
+ *                     construction, the strict-mode enforcement leak
+ *                     in shaclc-js 2.x, where '% … %' escapes and
+ *                     trailing turtle statements are accepted even
+ *                     with extendedSyntax:false.
+ *
+ * Artifacts (packages/gen-js):
+ *   --profile rdf12       → strict SHACL-CS 1.2   (generated/shaclc12.js)
+ *   --profile rdf12,ext   → extended SHACL-CS 1.2 (generated/shaclc12ext.js)
+ *
+ * The @profile alternative annotation is the NOTE 3 proposal of
+ * grammars/turtle12.shuttle, implemented: v0.1 had no per-alternative
+ * profile gate, and the alternative considered (two grammar variants
+ * sharing productions) double-maintains every shared production. An
+ * alternative with no label is in every profile; a labelled
+ * alternative is included only when its label is selected.
+ *
+ * Reference semantics: the jeswr/shaclcjs jison grammar (shaclc-parse
+ * 2.x, MIT), validated fixture-for-fixture (44 valid + 12 extended
+ * pairs, RDF graph isomorphism) — see tests/conformance/shaclc/.
+ * Emission invariants reproduced exactly:
+ *   - `<resolve(base, "")> rdf:type owl:Ontology` at end of document;
+ *   - `sh:NodeShape` typing on every shape; `rdfs:Class` additionally
+ *     for shapeClass;
+ *   - sh:minCount OMITTED when the lower bound is 0; sh:maxCount
+ *     omitted for '*';
+ *   - the xsd-datatype-whitelist oracle deciding sh:datatype vs
+ *     sh:class for a bare-IRI property atom (the @oracle declaration
+ *     below carries shaclc-js's exact 19-entry registry);
+ *   - exact sh:or / sh:not / path-algebra RDF-list shapes;
+ *   - the five predeclared prefixes (rdf, rdfs, sh, xsd, owl).
+ *
+ * DOCUMENTED DEVIATIONS from shaclc-js (each is a bug there, not a
+ * compat surface — mirrored to upstream issues):
+ *   D1 keywords are CASE-SENSITIVE (W3C grammar), where the jison
+ *      lexer is case-insensitive ('SHAPE', 'TRUE' accepted). All
+ *      fixtures use canonical casing, so conformance is unaffected.
+ *   D2 a '% … %' escape is attached to a PROPERTY shape only; after a
+ *      node-level constraint shaclc-js consults a stale/undefined
+ *      currentPropertyNode (crash or mis-attributed quads).
+ *   D3 a nested shape body inside a '|' alternative chain crashes
+ *      shaclc-js (propertyAtom returns undefined into addList); here
+ *      it is an ordinary (sh:node, body) element of the sh:or list.
+ *   D4 DOUBLE lexical forms are preserved verbatim (lexical fidelity,
+ *      spec §2); shaclc-js lowercases them ('1E5' → '1e5').
+ *   D5 directives must precede shapes (as in the jison grammar); the
+ *      trailing-turtle section (ext) must follow all shapes.
+ *
+ * RDF 1.2 surface (invented here — no W3C CG/ED surface exists yet;
+ * pinned for coordination with jeswr/shaclc-1.2, tracked there):
+ *   R1 triple terms use RDF 1.2 Turtle's '<<(' … ')>>' in any value
+ *      position (param values, array members), nesting via the object
+ *      slot only; subject/predicate are IRIs (SHACL-CS has no blank
+ *      node syntax);
+ *   R2 directional language tags use RDF 1.2 Turtle's LANG_DIR
+ *      ('@en--ltr' / '@ar--rtl') on string literals, yielding
+ *      rdf:dirLangString;
+ *   R3 'TripleTerm' joins the nodeKind keywords → sh:nodeKind
+ *      sh:TripleTerm;
+ *   R4 'reifierShape' and 'reificationRequired' join the parameter
+ *      keywords with ordinary values ('reifierShape=ex:ReifierShape',
+ *      'reificationRequired=true'). Whether reifierShape should also
+ *      admit '@'-refs and inline bodies is an open design question
+ *      recorded for jeswr/shaclc-1.2.
+ *
+ * PRINT MODE (serializer): gen-js derives the residual-consumption
+ * printer for this grammar (spec §8; residual-serializer-gen.js) —
+ * printing consumes quads from the graph-as-residual and succeeds iff
+ * the residual empties, so a non-empty residual IS the "not
+ * compact-expressible" verdict. The oracle below is discharged by the
+ * consumed quad's predicate (never run backward), the propertyCount
+ * print { } block inverts the conditional emission ([0..1] from a
+ * lone sh:maxCount; an explicit sh:minCount 0 is refused, since the
+ * parse-side when-guard would not re-emit it), and in a strict build
+ * the ext fallback layers do not exist, so their graphs residualize
+ * by construction (examples/shacl-compact.md shows all three).
+ *
+ * Meta-notation: spec/SHUTTLE.md §4 (v0.1 surface), grammar/shuttle.ebnf.
+ * =================================================================== */
+
+grammar shaclc12ext ;
+target rdf-1.2 ;
+spec-ref "SHACL Compact Syntax, W3C Community Group Report (https://w3c.github.io/shacl/shacl-compact-syntax/); SHACL 1.2 Compact Syntax Editor's Draft (https://w3c.github.io/data-shapes/shacl12-cs/ — no RDF 1.2 surface as of 2026-07; the rdf12 layer here is a proposal coordinated with jeswr/shaclc-1.2); extended layer per jeswr/shaclcjs (shaclc-parse 2.x); RDF 1.2 constructs per RDF 1.2 Turtle WD (https://www.w3.org/TR/rdf12-turtle/)" ;
+start shaclcDoc ;
+emits triples ;
+profile shaclc ;
+import core-terms, shacl-terms ;   // rdf:/xsd: + sh:/owl:/rdfs: compile-time curies
+skip WS, COMMENT ;
+
+/* -------------------------------------------------------------------
+ * Environment. The five predeclared prefixes are shaclc-js semantics
+ * (usable without declaration; surfaced in the parse result).
+ * Callers supply the document IRI via options.baseIRI (shaclc-parse
+ * defaults to urn:x-base:default at its API layer, not here).
+ * ------------------------------------------------------------------- */
+
+env {
+  base     : iri = <> ;
+  prefixes : map<string, iri> = {
+    "rdf"  = <http://www.w3.org/1999/02/22-rdf-syntax-ns#> ;
+    "rdfs" = <http://www.w3.org/2000/01/rdf-schema#> ;
+    "sh"   = <http://www.w3.org/ns/shacl#> ;
+    "xsd"  = <http://www.w3.org/2001/XMLSchema#> ;
+    "owl"  = <http://www.w3.org/2002/07/owl#> ;
+  } ;
+}
+
+/* -------------------------------------------------------------------
+ * The recognized-datatype oracle (spec §4.3 clause 7; declared side
+ * condition with an explicit finite decision set so the generated
+ * artifact is self-contained). This is shaclc-js's exact registry: a
+ * bare-IRI property atom emits sh:datatype iff its IRI is listed,
+ * sh:class otherwise. Print reading (future): the consumed quad's
+ * predicate discharges the oracle — it never runs backward.
+ * ------------------------------------------------------------------- */
+
+@oracle xsdDatatype(iri) =
+    xsd:integer | xsd:decimal | xsd:float | xsd:double | xsd:string
+  | xsd:boolean | xsd:dateTime | xsd:nonPositiveInteger
+  | xsd:negativeInteger | xsd:long | xsd:int | xsd:short | xsd:byte
+  | xsd:nonNegativeInteger | xsd:unsignedLong | xsd:unsignedShort
+  | xsd:unsignedByte | xsd:positiveInteger | rdf:langString ;
+
+/* ===================================================================
+ * 1. Tokens
+ *
+ * Strictly regular; longest-match/maximal-munch resolves every overlap
+ * the specs resolve in prose ("honest lexing", spec §5):
+ *   - '<'  vs '<<('                  (IRIREF / triple term)
+ *   - '@'  vs '@ex:' vs '@en--ltr'   (shape-ref '@' IRIREF / ATPNAME /
+ *                                     LANG_DIR: length decides; a bare
+ *                                     '@' wins only when neither
+ *                                     longer token matches)
+ *   - '.'  vs '..' vs DECIMAL        ('0..1' lexes INTEGER '..' INTEGER:
+ *                                     DECIMAL needs a digit after '.')
+ *   - keyword vs PNAME               ('class=' is a keyword; 'class:x'
+ *                                     lexes PNAME_LN by longest match)
+ * Keyword literals ('shape', 'targetNode', 'class', 'IRI', …) are
+ * written inline in the productions; the generator tokenizes them.
+ * =================================================================== */
+
+/* ---- skip tokens --------------------------------------------------- */
+
+token WS      : unit ::= [\u0020\u0009\u000D\u000A]+ ;
+token COMMENT : unit ::= '#' [^\u000A\u000D]* ;
+
+/* ---- IRIs and prefixed names (W3C SHACL-CS terminals, verbatim) ---- */
+
+token IRIREF : string
+  ::= '<' ([^\u0000-\u0020<>"{}|^`\\] | UCHAR)* '>'
+  => unescapeU(body)
+  unparse s = '<' escapeU(s) '>' ;
+
+token PNAME_NS : string
+  ::= PN_PREFIX? ':'
+  => prefixLabel(body)
+  unparse p = p ':' ;
+
+token PNAME_LN : (string, string)
+  ::= PNAME_NS PN_LOCAL
+  => (prefixLabel(ns), unescapeLocal(local))
+  unparse (p, l) = p ':' escapeLocal(l) ;
+
+/* ---- '@'-prefixed tokens ------------------------------------------- *
+ * Shape refs and language tags share the '@' first character; the
+ * three tokens below plus the bare '@' literal (used before IRIREF in
+ * shapeRef) are disambiguated purely by longest match, exactly the
+ * jison lexer's resolution. */
+
+token ATPNAME_NS : string
+  ::= '@' PN_PREFIX? ':'
+  => prefixLabel(body)
+  unparse p = '@' p ':' ;
+
+token ATPNAME_LN : (string, string)
+  ::= '@' PNAME_NS PN_LOCAL
+  => (prefixLabel(ns), unescapeLocal(local))
+  unparse (p, l) = '@' p ':' escapeLocal(l) ;
+
+token LANG_DIR : (string, dir?)                                    // rdf12: '--' dir suffix
+  ::= '@' [a-zA-Z]+ ('-' [a-zA-Z0-9]+)* ('--' ('ltr' | 'rtl'))?
+  => (langCanon(lang), dir)
+  unparse (l, d) = '@' l (d? '--' d : '') ;
+
+/* ---- numbers (verbatim lexical forms; lexical fidelity, spec §2) --- */
+
+token INTEGER : string ::= [+-]? [0-9]+                        => body unparse n = n ;
+token DECIMAL : string ::= [+-]? [0-9]* '.' [0-9]+             => body unparse n = n ;
+token DOUBLE  : string
+  ::= [+-]? ( [0-9]+ '.' [0-9]* EXPONENT
+            | '.' [0-9]+ EXPONENT
+            | [0-9]+ EXPONENT )                                => body unparse n = n ;
+
+token EXPONENT : string ::= [eE] [+-]? [0-9]+ ;                    // fragment
+
+/* ---- strings -------------------------------------------------------- */
+
+token STRING_LITERAL_QUOTE : string
+  ::= '"' ([^\u0022\u005C\u000A\u000D] | ECHAR | UCHAR)* '"'
+  => unescapeString(body, dquote)
+  unparse s = '"' escapeString(s, dquote) '"' ;
+
+token STRING_LITERAL_SINGLE_QUOTE : string
+  ::= "'" ([^\u0027\u005C\u000A\u000D] | ECHAR | UCHAR)* "'"
+  => unescapeString(body, squote)
+  unparse s = "'" escapeString(s, squote) "'" ;
+
+token STRING_LITERAL_LONG_QUOTE : string
+  ::= '"""' (('"' | '""')? ([^\u0022\u005C] | ECHAR | UCHAR))* '"""'
+  => unescapeString(body, longDquote)
+  unparse s = '"""' escapeString(s, longDquote) '"""' ;
+
+token STRING_LITERAL_LONG_SINGLE_QUOTE : string
+  ::= "'''" (("'" | "''")? ([^\u0027\u005C] | ECHAR | UCHAR))* "'''"
+  => unescapeString(body, longSquote)
+  unparse s = "'''" escapeString(s, longSquote) "'''" ;
+
+/* ---- shared fragments (W3C terminals, verbatim) -------------------- */
+
+token UCHAR : string                                               // fragment
+  ::= '\u' HEX HEX HEX HEX | '\U' HEX HEX HEX HEX HEX HEX HEX HEX ;
+token ECHAR : string ::= '\' [tbnrf"'\\] ;                         // fragment
+token HEX   : string ::= [0-9A-Fa-f] ;                             // fragment
+
+token PN_CHARS_BASE : string                                       // fragment
+  ::= [A-Za-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\U00010000-\U000EFFFF] ;
+token PN_CHARS_U : string ::= PN_CHARS_BASE | '_' ;                // fragment
+token PN_CHARS   : string                                          // fragment
+  ::= PN_CHARS_U | '-' | [0-9·̀-ͯ‿-⁀] ;
+token PN_PREFIX  : string                                          // fragment
+  ::= PN_CHARS_BASE ((PN_CHARS | '.')* PN_CHARS)? ;
+token PN_LOCAL   : string                                          // fragment
+  ::= (PN_CHARS_U | ':' | [0-9] | PLX) ((PN_CHARS | '.' | ':' | PLX)* (PN_CHARS | ':' | PLX))? ;
+token PLX        : string ::= PERCENT | PN_LOCAL_ESC ;             // fragment
+token PERCENT    : string ::= '%' HEX HEX ;                        // fragment
+token PN_LOCAL_ESC : string                                        // fragment
+  ::= '\' [_~.\-!$&'()*+,;=/?#@%] ;
+
+/* ===================================================================
+ * 2. Document structure and directives
+ *
+ * shaclc-js emission detail reproduced exactly: the owl:Ontology quad
+ * uses the FINAL base, resolved with an empty relative reference
+ * (fragment stripped); each IMPORTS emits immediately, so its subject
+ * is the base AT THAT POINT and its object is the written IRI,
+ * unresolved.
+ * =================================================================== */
+
+shaclcDoc : graph
+  [emits, gen, reads env.base, reads env.prefixes, writes env.base, writes env.prefixes]
+  ::= directive* ( nodeShape | shapeClass )* ttlStatement*
+      { emit resolve(env.base, "") rdf:type owl:Ontology } ;
+
+directive : graph [reads env.base, writes env.base, writes env.prefixes]
+  ::= baseDecl | importsDecl | prefixDecl ;
+
+baseDecl : unit [reads env.base, writes env.base]
+  ::= 'BASE' i=IRIREF
+      { env.base := resolve(env.base, i) } ;
+
+importsDecl : graph [emits, reads env.base]
+  ::= 'IMPORTS' i=IRIREF
+      { emit env.base owl:imports i } ;
+
+prefixDecl : unit [reads env.base, writes env.prefixes]
+  ::= 'PREFIX' ns=PNAME_NS i=IRIREF
+      { env.prefixes := bind(env.prefixes, ns, resolve(env.base, i)) } ;
+
+/* ===================================================================
+ * 3. Shapes
+ * =================================================================== */
+
+nodeShape : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= 'shape' n=iri { emit n rdf:type sh:NodeShape }
+      targetClass(n)? shapeBodyTail(n) ;
+
+shapeClass : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= 'shapeClass' n=iri { emit n rdf:type sh:NodeShape ; emit n rdf:type rdfs:Class }
+      shapeBodyTail(n) ;
+
+targetClass(n: subjT) : graph [emits, reads env.base, reads env.prefixes]
+  ::= '->' ( c=iri { emit n sh:targetClass c } )+ ;
+
+/* The optional extended annotation sits between the shape header and
+ * the body; splitting the seam as a two-alternative production is what
+ * lets @profile(ext) carve it out mechanically. */
+shapeBodyTail(n: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= @profile(ext) annotation(n) nodeShapeBody(n)
+    | nodeShapeBody(n)
+  ;
+
+nodeShapeBody(n: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '{' constraint(n)* '}' ;
+
+constraint(n: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= ( nodeOrEmit(n) )+ '.'
+    | propertyShape(n) '.'
+  ;
+  /* Deviation D2: the '% … %' escape belongs to propertyShape below;
+   * shaclc-js nominally allows it after node-level constraints too,
+   * where its focus node is stale or undefined. */
+
+/* ---- node-level constraints (TARGET/PARAM '=' value, '!', '|') ----- */
+
+nodeOrEmit(n: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=nodeNot t=nodeOrTail(p)?
+      { emit n fst(p) snd(p) when t == none ;
+        emit n sh:or t when t != none } ;
+
+/* '|' decides list-vs-direct one nonterminal late: the (predicate,
+ * value) pair defers emission until the decision token — precisely
+ * the deferral the jison parser gets from LR reductions. */
+nodeOrTail(first: pair) : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '|' q=nodeNot
+      { fresh b1 ; emit b1 fst(first) snd(first) ;
+        fresh h  ; emit h rdf:first b1 ;
+        fresh b2 ; emit b2 fst(q) snd(q) ;
+        fresh c1 ; emit h rdf:rest c1 ; emit c1 rdf:first b2 }
+      thread prev : subjT = c1 in
+      ( '|' q2=nodeNot
+        { fresh b3 ; emit b3 fst(q2) snd(q2) ;
+          fresh c2 ; emit prev rdf:rest c2 ; emit c2 rdf:first b3 ;
+          prev := c2 }
+      )*
+      { emit prev rdf:rest rdf:nil ; value = h }
+  ;
+
+nodeNot : pair
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=nodeValue { value = p }
+    | '!' q=nodeValue { fresh b ; emit b fst(q) snd(q) ; value = (sh:not, b) }
+  ;
+
+nodeValue : pair
+  [gen, reads env.base, reads env.prefixes]
+  ::= k=nodeParamName '=' v=iriOrLiteralOrArray { value = (k, v) } ;
+
+nodeParamName : term
+  ::= t=targetName { value = t }
+    | p=paramName  { value = p }
+  ;
+
+targetName : term
+  ::= 'targetNode'       { value = sh:targetNode }
+    | 'targetObjectsOf'  { value = sh:targetObjectsOf }
+    | 'targetSubjectsOf' { value = sh:targetSubjectsOf }
+  ;
+
+paramName : term
+  ::= 'deactivated'      { value = sh:deactivated }
+    | 'severity'         { value = sh:severity }
+    | 'message'          { value = sh:message }
+    | 'class'            { value = sh:class }
+    | 'datatype'         { value = sh:datatype }
+    | 'nodeKind'         { value = sh:nodeKind }
+    | 'minExclusive'     { value = sh:minExclusive }
+    | 'minInclusive'     { value = sh:minInclusive }
+    | 'maxExclusive'     { value = sh:maxExclusive }
+    | 'maxInclusive'     { value = sh:maxInclusive }
+    | 'minLength'        { value = sh:minLength }
+    | 'maxLength'        { value = sh:maxLength }
+    | 'pattern'          { value = sh:pattern }
+    | 'flags'            { value = sh:flags }
+    | 'languageIn'       { value = sh:languageIn }
+    | 'uniqueLang'       { value = sh:uniqueLang }
+    | 'equals'           { value = sh:equals }
+    | 'disjoint'         { value = sh:disjoint }
+    | 'lessThan'         { value = sh:lessThan }
+    | 'lessThanOrEquals' { value = sh:lessThanOrEquals }
+    | 'qualifiedValueShape'          { value = sh:qualifiedValueShape }
+    | 'qualifiedMinCount'            { value = sh:qualifiedMinCount }
+    | 'qualifiedMaxCount'            { value = sh:qualifiedMaxCount }
+    | 'qualifiedValueShapesDisjoint' { value = sh:qualifiedValueShapesDisjoint }
+    | 'closed'            { value = sh:closed }
+    | 'ignoredProperties' { value = sh:ignoredProperties }
+    | 'hasValue'          { value = sh:hasValue }
+    | 'in'                { value = sh:in }
+    | @profile(rdf12) 'reifierShape'          { value = sh:reifierShape }          // rdf12 (R4)
+    | @profile(rdf12) 'reificationRequired'   { value = sh:reificationRequired }   // rdf12 (R4)
+  ;
+
+/* ---- property shapes ------------------------------------------------ */
+
+propertyShape(n: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=pathAlternative
+      { fresh ps ; emit n sh:property ps ; emit ps sh:path p }
+      ( propertyCount(ps) | propertyOr(ps) )*
+      pcSection(ps)?
+  ;
+  /* fresh-before-descent: sh:property/sh:path stream out before the
+   * atoms are parsed, matching the jison parser's path-trigger. */
+
+propertyCount(ps: subjT) : graph
+  [emits, gen]
+  ::= '[' mn=INTEGER '..' mx=propertyMaxCount ']'
+      { emit ps sh:minCount literal(mn, xsd:integer) when int(mn) > 0 ;
+        emit ps sh:maxCount literal(mx, xsd:integer) when mx != none }
+  print { mn = lookup(ps, sh:minCount) ?? 0 ; mx = lookup(ps, sh:maxCount) ?? * } ;
+  /* min > 0 / '*' omission per shaclc-js; the print block records the
+   * conditional-emit inversion for the future derived writer. */
+
+propertyMaxCount : string
+  ::= m=INTEGER { value = m }
+    | '*'       { value = none }
+  ;
+
+propertyOr(ps: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=propertyNot t=propOrTail(p)?
+      { emit ps fst(p) snd(p) when t == none ;
+        emit ps sh:or t when t != none } ;
+
+propOrTail(first: pair) : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '|' q=propertyNot
+      { fresh b1 ; emit b1 fst(first) snd(first) ;
+        fresh h  ; emit h rdf:first b1 ;
+        fresh b2 ; emit b2 fst(q) snd(q) ;
+        fresh c1 ; emit h rdf:rest c1 ; emit c1 rdf:first b2 }
+      thread prev : subjT = c1 in
+      ( '|' q2=propertyNot
+        { fresh b3 ; emit b3 fst(q2) snd(q2) ;
+          fresh c2 ; emit prev rdf:rest c2 ; emit c2 rdf:first b3 ;
+          prev := c2 }
+      )*
+      { emit prev rdf:rest rdf:nil ; value = h }
+  ;
+
+propertyNot : pair
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=propertyAtom { value = p }
+    | '!' q=propertyAtom { fresh b ; emit b fst(q) snd(q) ; value = (sh:not, b) }
+  ;
+
+propertyAtom : pair
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= dt=iri
+      { oracle xsdDatatype(dt) -> value = (sh:datatype, dt) ;
+        otherwise              -> value = (sh:class, dt) }
+    | k=nodeKindName { value = (sh:nodeKind, k) }
+    | r=shapeRef     { value = (sh:node, r) }
+    | pm=paramName '=' v=iriOrLiteralOrArray { value = (pm, v) }
+    | { fresh b } nodeShapeBody(b) { value = (sh:node, b) }
+  ;
+  /* Deviation D3: the nested-body atom is an ordinary pair, so it
+   * composes with '!' and '|' instead of crashing. */
+
+nodeKindName : term
+  ::= 'BlankNode'          { value = sh:BlankNode }
+    | 'IRI'                { value = sh:IRI }
+    | 'Literal'            { value = sh:Literal }
+    | 'BlankNodeOrIRI'     { value = sh:BlankNodeOrIRI }
+    | 'BlankNodeOrLiteral' { value = sh:BlankNodeOrLiteral }
+    | 'IRIOrLiteral'       { value = sh:IRIOrLiteral }
+    | @profile(rdf12) 'TripleTerm' { value = sh:TripleTerm }       // rdf12 (R3)
+  ;
+
+shapeRef : term [reads env.base, reads env.prefixes]
+  ::= '@' r=IRIREF { value = resolve(env.base, r) }
+    | a=ATPNAME_LN
+      { require boundPrefix(env.prefixes, fst(a)) else error UNDECLARED_PREFIX ;
+        value = expandPName(env.prefixes, a) }
+    | a=ATPNAME_NS
+      { require boundPrefix(env.prefixes, a) else error UNDECLARED_PREFIX ;
+        value = expandPName(env.prefixes, (a, "")) }
+  ;
+
+/* The '% … %' property-shape escape (extended): arbitrary predicates
+ * on the property node. Strict builds do not tokenize '%' at all. */
+pcSection(ps: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= @profile(ext) '%' predicate(ps) ( ';' predicate(ps) )* '%' ;
+
+/* ===================================================================
+ * 4. Paths (SHACL path algebra; exact shaclc-js RDF-list shapes)
+ * =================================================================== */
+
+pathAlternative : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= e=pathSequence t=pathAltTail(e)? { value = t ?? e } ;
+
+pathAltTail(first: term) : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '|' e2=pathSequence
+      { fresh h  ; emit h rdf:first first ;
+        fresh c1 ; emit h rdf:rest c1 ; emit c1 rdf:first e2 }
+      thread prev : subjT = c1 in
+      ( '|' e3=pathSequence
+        { fresh c2 ; emit prev rdf:rest c2 ; emit c2 rdf:first e3 ;
+          prev := c2 }
+      )*
+      { emit prev rdf:rest rdf:nil ;
+        fresh n ; emit n sh:alternativePath h ; value = n }
+  ;
+
+pathSequence : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= e=pathEltOrInverse t=pathSeqTail(e)? { value = t ?? e } ;
+
+pathSeqTail(first: term) : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '/' e2=pathEltOrInverse
+      { fresh h  ; emit h rdf:first first ;
+        fresh c1 ; emit h rdf:rest c1 ; emit c1 rdf:first e2 }
+      thread prev : subjT = c1 in
+      ( '/' e3=pathEltOrInverse
+        { fresh c2 ; emit prev rdf:rest c2 ; emit c2 rdf:first e3 ;
+          prev := c2 }
+      )*
+      { emit prev rdf:rest rdf:nil ; value = h }
+  ;
+
+pathEltOrInverse : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= e=pathElt { value = e }
+    | '^' e=pathElt { fresh b ; emit b sh:inversePath e ; value = b }
+  ;
+
+pathElt : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=pathPrimary
+      ( m=pathMod { fresh b ; emit b m p ; value = b }
+      |           { value = p }
+      )
+  ;
+
+pathMod : term
+  ::= '?' { value = sh:zeroOrOnePath }
+    | '*' { value = sh:zeroOrMorePath }
+    | '+' { value = sh:oneOrMorePath }
+  ;
+
+pathPrimary : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= i=iri { value = i }
+    | '(' p=pathAlternative ')' { value = p }
+  ;
+
+/* ===================================================================
+ * 5. Values
+ * =================================================================== */
+
+iriOrLiteralOrArray : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= v=iriOrLiteral { value = v }
+    | '[' { fresh h } b=arrayBody(h)? ']'
+      { emit h rdf:rest rdf:nil when b == none ; value = h }
+  ;
+  /* Empty-array shape reproduced from shaclc-js addList([]): a fresh
+   * blank with only rdf:rest rdf:nil (NOT rdf:nil itself — that is
+   * the ttl-list behaviour below). */
+
+arrayBody(h: subjT) : term
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= o=iriOrLiteral { emit h rdf:first o }
+      thread prev : subjT = h in
+      ( o2=iriOrLiteral
+        { fresh c ; emit prev rdf:rest c ; emit c rdf:first o2 ;
+          prev := c }
+      )*
+      { emit prev rdf:rest rdf:nil ; value = h }
+  ;
+
+iriOrLiteral : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= i=iri     { value = i }
+    | l=literal { value = l }
+    | @profile(rdf12) t=tripleTerm { value = t }                   // rdf12 (R1)
+  ;
+
+/* ---- RDF 1.2 triple terms (R1): object-only nesting --------------- */
+
+tripleTerm : term
+  [gen, reads env.base, reads env.prefixes]
+  ::= '<<(' s=iri p=iri o=ttObject ')>>' { value = tt(s, p, o) } ;
+
+ttObject : term!
+  [gen, reads env.base, reads env.prefixes]
+  ::= i=iri        { value = i }
+    | l=literal    { value = l }
+    | t=tripleTerm { value = t }
+  ;
+
+/* ---- literals (LANG_DIR carries the rdf12 direction suffix, R2) ---- */
+
+literal : term [reads env.base, reads env.prefixes]
+  ::= @prefer(1) n=NumericLiteral { value = n }
+    | @prefer(2) b=BooleanLiteral { value = b }
+    | @prefer(3) r=RDFLiteral     { value = r }                    // guard-free fallback
+  ;
+
+RDFLiteral : term [reads env.base, reads env.prefixes]
+  ::= lex=String
+      ( ld=LANG_DIR   { value = case ld of (l, none)   -> literal(lex, rdf:langString, l)
+                                           (l, some d) -> literal(lex, rdf:dirLangString, l, d) }
+      | '^^' dt=iri   { value = literal(lex, dt) }
+      |               { value = literal(lex, xsd:string) }
+      ) ;
+
+NumericLiteral : term
+  ::= n=INTEGER { value = literal(n, xsd:integer) }
+    | n=DECIMAL { value = literal(n, xsd:decimal) }
+    | n=DOUBLE  { value = literal(n, xsd:double) }                 // verbatim lexical (D4)
+  ;
+
+BooleanLiteral : term
+  ::= 'true'  { value = literal("true",  xsd:boolean) }
+    | 'false' { value = literal("false", xsd:boolean) }
+  ;
+
+String : string
+  ::= @prefer(1) @when(needsLongQuoting(value))
+                 s=STRING_LITERAL_LONG_QUOTE        { value = s }
+    | @prefer(2) s=STRING_LITERAL_QUOTE             { value = s }  // guard-free fallback
+    | @prefer(3) s=STRING_LITERAL_SINGLE_QUOTE      { value = s }
+    | @prefer(4) s=STRING_LITERAL_LONG_SINGLE_QUOTE { value = s }
+  ;
+
+/* ---- IRIs ----------------------------------------------------------- */
+
+iri : term [reads env.base, reads env.prefixes]
+  ::= @prefer(2) r=IRIREF { value = resolve(env.base, r) }         // guard-free fallback
+    | @prefer(1) @when(abbreviable(env.prefixes, value))
+                 p=PrefixedName { value = p }
+    | @profile(ext) 'a' { value = rdf:type }                       // extended 'a' keyword
+  ;
+
+PrefixedName : term [reads env.prefixes]
+  ::= n=PNAME_LN
+      { require boundPrefix(env.prefixes, fst(n)) else error UNDECLARED_PREFIX ;
+        value = expandPName(env.prefixes, n) }
+    | n=PNAME_NS
+      { require boundPrefix(env.prefixes, n) else error UNDECLARED_PREFIX ;
+        value = expandPName(env.prefixes, (n, "")) }
+  ;
+
+/* ===================================================================
+ * 6. Extended layer: turtle annotations, escapes, trailing statements
+ *
+ * Everything below is reachable only from @profile(ext) alternatives
+ * (shapeBodyTail / pcSection / ttlStatement / the 'a' keyword), so no
+ * further gating is needed: in a strict build these productions are
+ * dead and ';' '%' never tokenize.
+ * =================================================================== */
+
+/* '; p o1, o2 ; p2 o3' — after a shape header, on the shape's node. */
+annotation(n: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= ( ';' predicate(n) )+ ;
+
+predicate(s: subjT) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= p=iri objectList(s, p) ;
+
+objectList(s: subjT, p: iri) : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= ( o=object { emit s p o } ) % ',' ;
+
+object : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= v=iriOrLiteral { value = v }
+    | b=bnSection    { value = b }
+    | l=ttlList      { value = l }
+  ;
+
+/* '[ p o ; p2 o2 ]' — a fresh focus node (jison's LB/RB stack, as a
+ * typed parameter instead of mutable parser state). */
+bnSection : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '[' { fresh b } predicate(b) ( ';' predicate(b) )* ']' { value = b } ;
+
+/* '( o1 o2 … )' — a turtle collection; empty is rdf:nil. */
+ttlList : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= '(' inner=ttlListBody? ')' { value = inner ?? rdf:nil } ;
+
+ttlListBody : term!
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= o=object { fresh h ; emit h rdf:first o }
+      thread prev : subjT = h in
+      ( o2=object
+        { fresh c ; emit prev rdf:rest c ; emit c rdf:first o2 ;
+          prev := c }
+      )*
+      { emit prev rdf:rest rdf:nil ; value = h }
+  ;
+
+/* Trailing turtle statements after all shapes: 'ex:a ex:b ex:c .' */
+ttlStatement : graph
+  [emits, gen, reads env.base, reads env.prefixes]
+  ::= @profile(ext) s=iri predicate(s) ( ';' predicate(s) )* '.' ;
+
+/* ===================================================================
+ * NOTES — v0.1 meta-language feedback from this grammar
+ *
+ * NOTE A (@profile): implemented here per turtle12.shuttle NOTE 3 —
+ *   a per-alternative layer label; the generator's --profile flag
+ *   selects which labelled layers are compiled in. Restriction is
+ *   subtractive and mechanical, satisfying "strict rejects extended
+ *   by construction".
+ *
+ * NOTE B (pair semType): productions synthesizing a (predicate,
+ *   value) pair are required by every '<atom> ("|" <atom>)*' shape in
+ *   SHACL-CS: whether an atom's quad hangs off the focus node or an
+ *   sh:or list element is decided ONE NONTERMINAL LATE, so the pair
+ *   defers the emission (shuttle.ebnf §9 tuples; previously
+ *   unimplemented in gen-js).
+ *
+ * NOTE C (oracle sets): the @oracle declaration takes an explicit
+ *   finite IRI set so the artifact is self-contained; a future
+ *   external-registry binding would be a backend option, not grammar
+ *   data.
+ *
+ * NOTE D (start-production shape): shaclcDoc is a three-phase
+ *   sequence, not a single statement star, so the gen-js push driver
+ *   falls back to whole-buffer parsing (documents are small); a
+ *   statement-level push loop would need FOLLOW-driven phase
+ *   transitions in the driver.
+ * =================================================================== */

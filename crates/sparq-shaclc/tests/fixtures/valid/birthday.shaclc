@@ -1,0 +1,22 @@
+BASE <http://localhost:3002/BirthdayShape>
+PREFIX cont: <http://localhost:3002/BirthdayShape#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX rel: <http://purl.org/vocab/relationship/>
+PREFIX : <http://localhost:3002/BirthdayShape#>
+
+shape :WorkShape -> foaf:Person {
+  rel:worksWith|rel:colleagueOf [1..*] @:BirthdayShape .
+}
+
+shape :PersonalShape -> foaf:Person {
+  rel:friendOf|rel:relatedTo [1..*] @:BirthdayShape .
+}
+
+shape :KnowsShape -> foaf:Person {
+  foaf:knows|rel:friendOf [1..*] @:BirthdayShape .
+}
+
+shape :BirthdayShape -> foaf:Person {
+	foaf:birthday [1..1] xsd:dateTime .
+}

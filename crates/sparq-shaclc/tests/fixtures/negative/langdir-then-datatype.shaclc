@@ -1,0 +1,5 @@
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape {
+	ex:p hasValue="x"@en--ltr^^ex:dt .
+}

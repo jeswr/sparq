@@ -1,0 +1,23 @@
+@base <http://example.org/rdf12> .
+@prefix ex: <http://example.org/test#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<> a owl:Ontology .
+
+ex:ReifierShape a sh:NodeShape ;
+	sh:property [
+		sh:path ex:confidence ;
+		sh:datatype xsd:decimal ;
+		sh:minCount 1 ;
+		sh:maxCount 1 ;
+	] .
+
+ex:TestShape a sh:NodeShape ;
+	sh:property [
+		sh:path ex:spouse ;
+		sh:reifierShape ex:ReifierShape ;
+		sh:reificationRequired true ;
+	] .
