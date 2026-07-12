@@ -7,21 +7,21 @@ Each control in [`controls.md`](./controls.md) is backed here by the **exact** f
 test, or CI job, plus the command an auditor re-runs to confirm it. Paths are
 repo-relative. No timing is recorded (NON-CANONICAL EC2 box).
 
-## MS-1 — confined unsafe surface (49 `forbid` crates, 8 unsafe-bearing crates, 59 total)
+## MS-1 — confined unsafe surface (50 `forbid` crates, 8 unsafe-bearing crates, 60 total)
 
 ```sh
 grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/.*##' | sort -u | wc -l
 ```
-→ **49 crates** carry a `forbid(unsafe_code)` in their source (the command above is the
+→ **50 crates** carry a `forbid(unsafe_code)` in their source (the command above is the
 authoritative generated list). **sparq-py** is the conditional case —
 `#![cfg_attr(not(feature = "arrow"), forbid(unsafe_code))]`, `deny`-level under `arrow` so its
 single Arrow FFI block is allowed with a `// SAFETY:` note.)
 
 ```sh
-ls -d crates/*/ | wc -l       # → 59 total crates
+ls -d crates/*/ | wc -l       # → 60 total crates
 ```
 Accounting (**the crates do NOT partition cleanly — the two sets overlap, so do not add them**):
-of **59 total** crates, **49** carry a source `forbid(unsafe_code)` and **8** are unsafe-bearing
+of **60 total** crates, **50** carry a source `forbid(unsafe_code)` and **8** are unsafe-bearing
 in `bench/unsafe-snapshot.json` (sparq-core, sparq-vectors, sparq-engine, sparq-py, sparq-cli,
 sparq-zk-compose, sparq-bench, sparq-lws-core). TWO crates appear in BOTH sets:
 **sparq-py** (conditional `forbid`, above), and
