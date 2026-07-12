@@ -66,6 +66,10 @@ sparq-vectors = { path = "../sparq-vectors", version = "0.1.0", optional = true 
 # behind `vectors`; workspace-pinned so the term type is byte-identical to sparq-core's.
 oxrdf = { workspace = true, optional = true }
 
+[dev-dependencies]
+# [GPT-5.6] sq-v7li4 — deterministic metamorphic coverage for the lean keyword layer.
+proptest = "1"
+
 # [OPUS-4.8] sq-bzign — the deterministic transpile-and-echo tool the Phase-5 A/B harness
 # (`bench/terse/`) calls. It needs `terse_to_sparql_with` + the `Graph`, so it is gated on
 # `vectors` and only built with `--features vectors` (never in the lean default gate).
