@@ -1,0 +1,7 @@
+<http://ex.org/Dog> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/Mammal> .
+<http://ex.org/Mammal> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/Animal> .
+<http://ex.org/hasPet> <http://www.w3.org/2000/01/rdf-schema#domain> <http://ex.org/Person> .
+<http://ex.org/hasPet> <http://www.w3.org/2000/01/rdf-schema#range> <http://ex.org/Animal> .
+<http://ex.org/walks> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex.org/hasPet> .
+<http://ex.org/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex.org/Dog> .
+<http://ex.org/alice> <http://ex.org/walks> <http://ex.org/rex> .

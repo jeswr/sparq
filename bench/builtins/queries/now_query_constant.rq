@@ -1,0 +1,5 @@
+# [GPT-5.6] NOW must remain equal across calls and rows within one query execution.
+SELECT ?s (NOW() AS ?instant) WHERE {
+  ?s <urn:value> ?value .
+  FILTER(NOW() = NOW())
+}

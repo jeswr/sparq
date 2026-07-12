@@ -80,6 +80,14 @@
   features: "terse"
   test: true
 
+# [GPT-5.6] sq-abhuq: outbound gzip/zstd response negotiation is opt-in and its
+# middleware + integration suite are cfg-gated, so compile and test the real
+# response-compression surface explicitly.
+- name: "sparq-server (response-compression)"
+  crate: "sparq-server"
+  features: "response-compression"
+  test: true
+
 # [OPUS-4.8] sq-2999l (gh-906): the OPT-IN CDC change-stream poll endpoint (`GET /streams`) in the
 # Amazon-Neptune-Streams `GetRecords` shape, over the merged durable change-stream (sq-b4fns /
 # #1223). The `streams_endpoint` handler, the `streams::*` pure builder (iterator-type resolution +

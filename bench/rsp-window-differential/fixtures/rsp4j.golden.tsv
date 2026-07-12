@@ -1,0 +1,7 @@
+# [GPT-5.6] sq-no6iy — captured RSP4J/YASPER event-time output, canonicalized as a multiset.
+# report_ts<TAB>canonical_multiset
+10	<http://ex/stA>|<http://ex/NY>|"12"^^<http://www.w3.org/2001/XMLSchema#integer> ; <http://ex/stB>|<http://ex/NY>|"15"^^<http://www.w3.org/2001/XMLSchema#integer> ; <http://ex/stC>|<http://ex/CA>|"20"^^<http://www.w3.org/2001/XMLSchema#integer>
+20	<http://ex/stA>|<http://ex/NY>|"11"^^<http://www.w3.org/2001/XMLSchema#integer> ; <http://ex/stC>|<http://ex/CA>|"25"^^<http://www.w3.org/2001/XMLSchema#integer>
+30	<http://ex/stA>|<http://ex/NY>|"9"^^<http://www.w3.org/2001/XMLSchema#integer> ; <http://ex/stC>|<http://ex/CA>|"30"^^<http://www.w3.org/2001/XMLSchema#integer>
+40	
+

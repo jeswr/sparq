@@ -1,0 +1,4 @@
+# [GPT-5.6] Forces one RAND evaluation for every input binding.
+SELECT ?s (RAND() AS ?random) WHERE {
+  ?s <urn:value> ?value .
+}

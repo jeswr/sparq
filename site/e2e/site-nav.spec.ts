@@ -28,7 +28,7 @@ async function gotoSettled(page: Page, route: string): Promise<void> {
   await gotoAppReady(page, route);
 }
 
-test("the slim top bar shows the 6 destinations (no Try item) and no full sidebar tree", async ({
+test("the slim top bar shows the destinations (no Try item) and no full sidebar tree", async ({
   page,
 }) => {
   await gotoSettled(page, "");
@@ -37,6 +37,7 @@ test("the slim top bar shows the 6 destinations (no Try item) and no full sideba
   // [OPUS-4.8] sq-1scgk — "Papers" is now a first-class bar destination alongside the rest.
   for (const label of [
     "Home",
+    "Docs",
     "Capabilities",
     "App",
     "Benchmarks",
@@ -45,6 +46,12 @@ test("the slim top bar shows the 6 destinations (no Try item) and no full sideba
   ]) {
     await expect(primary.getByRole("link", { name: label, exact: true })).toBeVisible();
   }
+  // [GPT-5.6] sq-f8ufg — mutation witness: removing Docs or pointing it at the nonexistent
+  // /docs route makes this assertion fail. The Skills router is the canonical live docs index.
+  await expect(primary.getByRole("link", { name: "Docs", exact: true })).toHaveAttribute(
+    "href",
+    "https://github.com/sparq-org/sparq/blob/main/skills/SKILL.md",
+  );
   // [OPUS-4.8] sq-4hiqe — the "Try" nav item is REMOVED (the /try playground is gone). The bar
   // must expose NO "Try" destination now.
   await expect(primary.getByRole("link", { name: "Try", exact: true })).toHaveCount(0);
