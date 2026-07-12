@@ -45,6 +45,9 @@ nlq-endpoint = ["dep:reqwest"]
 # `sparq-core`. Citations are emitted from in-graph `prov:wasDerivedFrom`/`dcterms:source`
 # provenance ONLY — never guessed; absent provenance yields "no source recorded".
 citations = []
+# [GPT-5.6] sq-9zs3g: generated-query policy inspection is opt-in so the
+# default NLQ surface remains unchanged.
+query-policy = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
