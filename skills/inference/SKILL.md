@@ -200,7 +200,8 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 ## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
 
 RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
-rule dialect with `NOT` (negation as failure) + `AGGREGATE COUNT` atoms and a minimal
+rule dialect with `NOT` (negation as failure), `AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
+atoms and a minimal
 exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
 through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
 non-incremental per-stratum evaluator on the shared substrate join kernels.
@@ -225,11 +226,14 @@ let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
 ```
 
 Fragment honesty (all loud parse errors, never silent): constant predicates only;
-COUNT only (SUM/MIN/MAX/AVG beaded); `FILTER` is exact `xsd:integer`/`decimal`
+aggregate numeric inputs use the shared XSD numeric tower and non-numeric rows fail
+closed; `FILTER` is exact `xsd:integer`/`decimal`
 comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
-counts DISTINCT body matches per group; counts mint `xsd:integer` literals. Naive
-rounds per stratum (fixture-scale; semi-naive + incremental maintenance are beaded).
+counts DISTINCT body matches per group; counts mint `xsd:integer` literals. `SUM`
+and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
+`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum;
+incremental maintenance is beaded. <!-- [GPT-5.6] sq-citho -->
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
@@ -453,7 +457,7 @@ let g = Graph::from_parts(dict, triples);
 # Ok::<(), String>(())
 ```
 
-**2. Notation3 rules + facts in one document → entailed ground triples.** The rules and data live in the same N3 source; only ground facts survive the closure.
+**2. Notation3 rules + facts in one document → entailed ground triples.** The rules and data live in the same N3 source; only ground facts survive the closure. RDF 1.2 quoted-triple TERMS (`<< s p o >>` / `<<( s p o )>>`) are first-class in rule bodies AND heads: premises match them structurally (variables inside the quotation bind, nesting included), heads derive them, and `reason_n3` interns ground triple terms via the Dict's content-addressed RDF 1.2 triple-term path (GH #2012; outside the `compiled-rules` subset and the incremental counting profile — both fall back to the text engine).
 
 ```rust
 use sparq_core::dict::Dict;
@@ -585,3 +589,4 @@ full output-mode + builtins-coverage tables.
 - `hdt-format`, `fused-decompress-parse`, `rust-parallel-parsing` — sibling ingest/storage skills for getting triples into the graph you then reason over.
 - `research/owl2-el-ql-reasoning-spike.md` — the EL/QL feasibility spike: why EL first, the RL-incompleteness proof (the CR4 counterexample), and the phased plan (E1–E6) `sparq-reason-el` implements.
 - `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` implements through phases Q1–Q3, and the sparq-extension conformance floors — the DL-Lite_R certain-answer floor `QL_DLLITE_FLOOR` and the sound-subset entailment-arm floor `QL_ENTAILMENT_FLOOR` — have both graduated, sq-qo1a9 / sq-pbz04.3.4).
+- `crates/sparq-conformance/tests/ufo_sn3/` — **UFO-SN3**: a finite-world, function-free, range-restricted N3 projection of representative UFO (Unified Foundational Ontology) concepts — rigidity, identity criteria, relators, events/participation, dispositions, commitments/norms, situations/worlds/accessibility — run as committed vocab + rules + fixture cases through plain `reason_n3` (`tests/ufo_sn3_suite.rs`, `UFO_SN3_FLOOR`, an UNGATED sparq-EXTENSION row in the central scoreboard). Demonstrates the reification-node projection for statement-level (triple-term-shaped) claims, since the N3 `Term` model has no triple-term variant (a tracked gap). [FABLE-5]

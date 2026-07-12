@@ -399,6 +399,14 @@ fn expand_lists(rows: &[[NTerm; 3]]) -> Vec<[NTerm; 3]> {
                 rows.append(&mut inner);
                 NTerm::Formula(rows)
             }
+            // A quoted `<< s p o >>` triple term is transparent structure:
+            // recurse so a list/formula nested in a component still expands
+            // (GH #2012). [FABLE-5]
+            NTerm::Triple(tr) => NTerm::Triple(Box::new([
+                expand(&tr[0], counter, out),
+                expand(&tr[1], counter, out),
+                expand(&tr[2], counter, out),
+            ])),
             _ => t.clone(),
         }
     }
@@ -426,7 +434,16 @@ fn oxrdf_to_n3(t: &oxrdf::Term) -> NTerm {
             l.datatype().as_str().to_string(),
             l.language().map(|s| s.to_string()),
         ),
-        oxrdf::Term::Triple(_) => NTerm::Iri("urn:sparq:unsupported-triple-term".into()),
+        // RDF 1.2 quoted-triple term: convert faithfully now the N3 model has
+        // a first-class `NTerm::Triple` (GH #2012). [FABLE-5]
+        oxrdf::Term::Triple(t) => NTerm::Triple(Box::new([
+            match &t.subject {
+                oxrdf::NamedOrBlankNode::NamedNode(n) => NTerm::Iri(n.as_str().to_string()),
+                oxrdf::NamedOrBlankNode::BlankNode(b) => NTerm::Blank(b.as_str().to_string()),
+            },
+            NTerm::Iri(t.predicate.as_str().to_string()),
+            oxrdf_to_n3(&t.object),
+        ])),
     }
 }
 
@@ -746,6 +763,12 @@ fn term_iso(a: &NTerm, b: &NTerm, bij: &mut Bij, steps: &mut usize) -> bool {
         // First-class lists: ordered, member by member.
         (NTerm::List(x), NTerm::List(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(p, q)| term_iso(p, q, bij, steps))
+        }
+        // Quoted `<< s p o >>` triple terms: transparent structure, component
+        // by component (so a blank inside one still joins the bijection —
+        // GH #2012). [FABLE-5]
+        (NTerm::Triple(x), NTerm::Triple(y)) => {
+            x.iter().zip(y.iter()).all(|(p, q)| term_iso(p, q, bij, steps))
         }
         // Same-datatype numeric literals compare by VALUE (cwm's serializer
         // and the engine may format the same number differently: 0.0e0 = 0e0,

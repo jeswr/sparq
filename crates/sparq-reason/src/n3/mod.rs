@@ -5,7 +5,11 @@
 //! `@forAll`/`@forSome` quantifiers), first-class lists (`( … )` is a TERM, not
 //! rdf:first/rest structure), quoted formulae (`{ … }`; the empty formula `{}`
 //! IS the literal `true`) and **builtins** (`math:`, `string:`, `log:`, …) on
-//! top of Turtle. The engine: a parser (`parser`, with a STRICT Turtle mode),
+//! top of Turtle. RDF-star / RDF 1.2 **quoted-triple terms** (`<< s p o >>` /
+//! `<<( s p o )>>`, GH #2012) are first-class [`Term::Triple`] values: rule
+//! premises match them structurally (variables inside the quotation bind,
+//! nesting included), rule heads derive them, and ground quoted triples intern
+//! into the dictionary through the content-addressed RDF 1.2 triple-term path. The engine: a parser (`parser`, with a STRICT Turtle mode),
 //! a term model (`model`), and a semi-naive forward chainer that applies rules
 //! to a fixpoint. Premises are reordered so each builtin runs only after the
 //! atoms that can produce its inputs (cwm evaluates builtins "when ready").
@@ -404,6 +408,9 @@ fn run_closure(
                         vars.insert(v.clone());
                     }
                     Term::List(ms) => ms.iter().for_each(|m| scan(m, blanks, vars)),
+                    // Quoted triples are transparent structure: their blanks are
+                    // conclusion existentials, their vars part of the firing key.
+                    Term::Triple(t) => t.iter().for_each(|m| scan(m, blanks, vars)),
                     _ => {}
                 }
             }
@@ -711,6 +718,16 @@ impl ListExpander {
         [self.expand(&row[0]), self.expand(&row[1]), self.expand(&row[2])]
     }
     fn expand(&mut self, t: &Term) -> Term {
+        // A quoted triple may carry list values in its components; expand them
+        // in place (the chain structure is asserted in the OUTER graph) so the
+        // triple term itself stays dictionary-representable. [FABLE-5]
+        if let Term::Triple(tr) = t {
+            return Term::Triple(Box::new([
+                self.expand(&tr[0]),
+                self.expand(&tr[1]),
+                self.expand(&tr[2]),
+            ]));
+        }
         let Term::List(ms) = t else { return t.clone() };
         if ms.is_empty() {
             return Term::Iri(parser::RDF_NIL.into());
@@ -932,6 +949,7 @@ fn order_premise(premise: &[[Term; 3]]) -> Vec<[Term; 3]> {
             Term::Formula(ts) => ts
                 .iter()
                 .for_each(|r| r.iter().for_each(|m| term_vars(m, out))),
+            Term::Triple(tr) => tr.iter().for_each(|m| term_vars(m, out)),
             _ => {}
         }
     }
@@ -1065,6 +1083,11 @@ fn rename_vars(t: &Term, n: usize) -> Term {
             ts.iter().map(|tr| [rename_vars(&tr[0], n), rename_vars(&tr[1], n), rename_vars(&tr[2], n)]).collect(),
         ),
         Term::List(ms) => Term::List(ms.iter().map(|m| rename_vars(m, n)).collect()),
+        Term::Triple(tr) => Term::Triple(Box::new([
+            rename_vars(&tr[0], n),
+            rename_vars(&tr[1], n),
+            rename_vars(&tr[2], n),
+        ])),
         _ => t.clone(),
     }
 }
@@ -1107,6 +1130,11 @@ fn unify_walked(a: &Term, c: &Term, s: &mut Binding) -> bool {
         (Term::List(xs), Term::List(ys)) => {
             xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify_walked(x, y, s))
         }
+        // Structural quoted-triple unification (backward goals over
+        // quoted-triple arguments). [FABLE-5]
+        (Term::Triple(xs), Term::Triple(ys)) => {
+            xs.iter().zip(ys.iter()).all(|(x, y)| unify_walked(x, y, s))
+        }
         _ => false,
     }
 }
@@ -1147,6 +1175,9 @@ fn rename_blanks(t: &[Term; 3], map: &FxHashMap<String, String>) -> [Term; 3] {
                 None => t.clone(),
             },
             Term::List(ms) => Term::List(ms.iter().map(|m| go(m, map)).collect()),
+            Term::Triple(tr) => {
+                Term::Triple(Box::new([go(&tr[0], map), go(&tr[1], map), go(&tr[2], map)]))
+            }
             _ => t.clone(),
         }
     }
@@ -1182,6 +1213,12 @@ fn unify_term(pat: &Term, val: &Term, b: &mut Binding) -> bool {
         // value when their triple multisets correspond under the binding
         // (pattern variables may bind quoted terms — cwm unify1/unify2).
         (Term::Formula(ps), Term::Formula(vs)) => formula_unify(ps, vs, b),
+        // Quoted triples unify STRUCTURALLY, component by component (so
+        // `<< ?s :p ?o >>` matches `<< :a :p :b >>` binding ?s/?o —
+        // SPARQL-star / RDF-star triple-pattern semantics). [FABLE-5]
+        (Term::Triple(ps), Term::Triple(vs)) => {
+            ps.iter().zip(vs.iter()).all(|(p, v)| unify_term(p, v, b))
+        }
         (other, _) => other == val,
     }
 }
@@ -1234,6 +1271,9 @@ fn apply(t: &Term, b: &Binding) -> Term {
     match t {
         Term::Var(v) => b.get(v).cloned().unwrap_or_else(|| t.clone()),
         Term::List(ms) => Term::List(ms.iter().map(|m| apply(m, b)).collect()),
+        Term::Triple(tr) => {
+            Term::Triple(Box::new([apply(&tr[0], b), apply(&tr[1], b), apply(&tr[2], b)]))
+        }
         _ => t.clone(),
     }
 }
@@ -1253,6 +1293,9 @@ fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
             Term::Var(_) => false,
             Term::List(ms) => ms.iter().all(instantiated),
             Term::Formula(_) => true, // opaque value; inner vars are formula-scoped
+            // TRANSPARENT structure (unlike a formula): a variable left inside
+            // a concluded quoted triple leaves the conclusion uninstantiated.
+            Term::Triple(tr) => tr.iter().all(instantiated),
             _ => true,
         }
     }
@@ -1484,6 +1527,11 @@ fn apply_deep(t: &Term, b: &Binding) -> Term {
                 .map(|r| [apply_deep(&r[0], b), apply_deep(&r[1], b), apply_deep(&r[2], b)])
                 .collect(),
         ),
+        Term::Triple(tr) => Term::Triple(Box::new([
+            apply_deep(&tr[0], b),
+            apply_deep(&tr[1], b),
+            apply_deep(&tr[2], b),
+        ])),
         _ => t.clone(),
     }
 }
@@ -2867,8 +2915,60 @@ fn intern(dict: &mut Dict, t: &Term) -> Result<Id, String> {
         Term::Iri(i) => dict.intern_iri(i),
         Term::Lit(v, dt, lang) => dict.intern_lit(v, dt, lang.as_deref()),
         Term::Blank(b) => dict.intern_blank(b),
+        // A ground quoted triple interns through `Dict`'s RDF 1.2 triple-term
+        // path (content-addressed by component ids), via the same `oxrdf`
+        // representation the Turtle/N-Triples loaders use — so an N3-derived
+        // `<< s p o >>` and a store-loaded `<<( s p o )>>` share one id. [FABLE-5]
+        Term::Triple(_) => dict.intern(&n3_term_to_oxrdf(t)?),
         Term::Var(_) | Term::Formula(_) => return Err("non-ground term in closure".into()),
         Term::List(_) => return Err("unexpanded list term in closure".into()),
+    })
+}
+
+/// Convert a GROUND N3 term into its `oxrdf` form for dictionary interning of
+/// quoted-triple components. Mirrors the acceptance of the component interners
+/// exactly (`intern_iri`/`intern_blank` validate nothing, so `new_unchecked` —
+/// the SAME strings intern identically inside and outside a quoted triple).
+/// RDF 1.2 structural constraints apply: a triple term's subject must be an
+/// IRI or blank node and its predicate an IRI — anything else (incl. N3's
+/// generalized literal-subject triples, formulae, unexpanded lists) is a loud
+/// error, never a silent re-encoding. [FABLE-5]
+fn n3_term_to_oxrdf(t: &Term) -> Result<oxrdf::Term, String> {
+    Ok(match t {
+        Term::Iri(i) => oxrdf::NamedNode::new_unchecked(i).into(),
+        Term::Lit(v, dt, lang) => match lang {
+            Some(l) => oxrdf::Literal::new_language_tagged_literal_unchecked(v, l).into(),
+            None => {
+                oxrdf::Literal::new_typed_literal(v, oxrdf::NamedNode::new_unchecked(dt)).into()
+            }
+        },
+        Term::Blank(b) => oxrdf::BlankNode::new_unchecked(b).into(),
+        Term::Triple(tr) => {
+            let s: oxrdf::NamedOrBlankNode = match &tr[0] {
+                Term::Iri(i) => oxrdf::NamedNode::new_unchecked(i).into(),
+                Term::Blank(b) => oxrdf::BlankNode::new_unchecked(b).into(),
+                other => {
+                    return Err(format!(
+                        "quoted-triple subject {other:?} is not an IRI or blank node (RDF 1.2 triple terms admit no other subject kind)"
+                    ))
+                }
+            };
+            let Term::Iri(p) = &tr[1] else {
+                return Err(format!(
+                    "quoted-triple predicate {:?} is not an IRI (RDF 1.2 triple terms admit no other predicate kind)",
+                    tr[1]
+                ));
+            };
+            let o = n3_term_to_oxrdf(&tr[2])?;
+            oxrdf::Term::Triple(Box::new(oxrdf::Triple::new(
+                s,
+                oxrdf::NamedNode::new_unchecked(p),
+                o,
+            )))
+        }
+        Term::Var(_) | Term::Formula(_) | Term::List(_) => {
+            return Err(format!("term {t:?} inside a quoted triple has no dictionary representation"))
+        }
     })
 }
 

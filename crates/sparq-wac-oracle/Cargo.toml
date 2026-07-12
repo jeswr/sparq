@@ -1,0 +1,26 @@
+# [FABLE-5] sq-t999y — server-independent WAC/ACP decision test-vector oracle.
+#
+# DEV-ONLY corpus crate: `publish = false`. Nothing in the shipping graph depends on
+# it (opt-in crate architecture — sparq-core/sparq-engine untouched); it is a leaf
+# the PSS-parity suite and the future solid-server landing (epic sq-gg0qq) consume as
+# a dev-dependency. The crate embeds protocol-agnostic WAC + ACP decision fixtures
+# (N-Quads corpus + expected `(session, resource, mode) -> {allow, granted_modes,
+# scope, status}` rows) and a `run_vectors` runner asserting `PodStore::decide` /
+# `decide_batch` (crates/sparq-solid) matches every row. EXPERIMENTAL — the corpus
+# may grow rows/fixtures; the row schema itself is stable-intent.
+[package]
+name = "sparq-wac-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Server-independent WAC/ACP decision test-vectors + a PodStore::decide oracle runner (sq-t999y)."
+readme = "README.md"
+
+[dependencies]
+# Path-only (publish = false): the decision engine under test and the dataset loader.
+# Heavy by nature (sparq-solid pulls sparq-core/engine/reason), but this crate is a
+# dependency of NOTHING in the workspace, so the deps stay off every default build path.
+sparq-core = { path = "../sparq-core", default-features = false }
+sparq-solid = { path = "../sparq-solid", default-features = false }

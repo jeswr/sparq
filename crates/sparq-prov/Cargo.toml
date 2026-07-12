@@ -43,3 +43,5 @@ sparq-reason = { path = "../sparq-reason", features = ["explain"], optional = tr
 # Round-trip the emitted PROV-O graph back through the loader to prove it is
 # well-formed RDF (Turtle ⊇ N-Triples).
 oxttl = { workspace = true }
+# [GPT-5.6] sq-hggpo: generate derivation shapes for structural PROV-O properties.
+proptest = "1"

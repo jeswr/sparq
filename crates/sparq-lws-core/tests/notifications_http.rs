@@ -21,6 +21,9 @@ use solid_oidc_verifier::verifier::Verifier;
 use sparq_lws_core::app::{build_router, AppState};
 use sparq_lws_core::auth::AuthContext;
 use sparq_lws_core::ldp::handler::LdpState;
+use sparq_lws_core::notifications::activity::ActivityType;
+use sparq_lws_core::notifications::ws::NotificationMetrics;
+use sparq_lws_core::notifications::NotificationHub;
 use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient};
 use tower::ServiceExt;
 
@@ -309,7 +312,7 @@ async fn receive_with_valid_token_for_wrong_topic_is_rejected() {
 
 /// A really-bound server whose base URL matches the bound address, so DPoP htu + the WS upgrade work
 /// against `127.0.0.1:<port>`. Returns the base URL + the keys.
-async fn bind_live_server() -> (String, KeyKit, KeyKit) {
+async fn bind_live_server() -> (String, KeyKit, KeyKit, NotificationHub) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
@@ -343,6 +346,7 @@ async fn bind_live_server() -> (String, KeyKit, KeyKit) {
             .expect("seed live root owner acl");
     }
     let ldp = LdpState::new(store, base_url.clone());
+    let notification_hub = ldp.notifications.clone();
     let app = build_router(AppState {
         auth: Arc::new(ctx),
         ldp: Arc::new(ldp),
@@ -353,7 +357,81 @@ async fn bind_live_server() -> (String, KeyKit, KeyKit) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (base_url, issuer_key, client_key)
+    (base_url, issuer_key, client_key, notification_hub)
+}
+
+// [GPT-5.6] A current-thread runtime makes the burst deterministic: the receive task cannot drain
+// the broadcast channel until this task yields after filling it beyond its fixed capacity.
+#[tokio::test(flavor = "current_thread")]
+async fn live_websocket_overflow_closes_and_increments_metrics() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let before = NotificationMetrics::snapshot();
+    let (base_url, issuer_key, client_key, hub) = bind_live_server().await;
+    let topic = format!("{base_url}/alice/overflow");
+    let access = mint_access_token(&issuer_key, &client_key.thumbprint);
+    let htu = format!("{base_url}/.notifications/WebSocketChannel2023/");
+    let proof = mint_dpop_proof(&client_key, "POST", &htu, &access);
+    let sub = reqwest_like_client()
+        .post(htu)
+        .header("authorization", format!("DPoP {access}"))
+        .header("dpop", proof)
+        .header("content-type", "application/ld+json")
+        .body(
+            serde_json::json!({
+                "type": WS_TYPE,
+                "topic": topic,
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sub.status(), 200);
+    let channel: serde_json::Value = sub.json().await.unwrap();
+    let receive_from = channel["receiveFrom"].as_str().unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(receive_from)
+        .await
+        .expect("ws connects");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while hub.subscriber_count(&topic).await != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("subscriber registered");
+
+    for _ in 0..65 {
+        hub.notify(&topic, ActivityType::Update, None).await;
+    }
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("overflow close arrived")
+        .expect("websocket stream yielded a frame")
+        .expect("close frame is valid");
+    match frame {
+        WsMessage::Close(Some(close)) => {
+            assert_eq!(
+                close.code,
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+            );
+            assert_eq!(
+                close.reason,
+                "notification backlog overflow; reconnect and reconcile"
+            );
+        }
+        other => panic!("expected overflow close frame, got {other:?}"),
+    }
+
+    let after = NotificationMetrics::snapshot();
+    assert_eq!(
+        after.dropped_subscribers_total,
+        before.dropped_subscribers_total + 1
+    );
+    assert_eq!(after.lagged_events_total, before.lagged_events_total + 1);
 }
 
 /// Default-ignored: a full subscribe → connect WebSocket → PUT → receive an AS2.0 Update over the
@@ -365,7 +443,7 @@ async fn live_websocket_delivers_update_on_put() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-    let (base_url, issuer_key, client_key) = bind_live_server().await;
+    let (base_url, issuer_key, client_key, _hub) = bind_live_server().await;
     let topic = format!("{base_url}/alice/data");
 
     let auth = |method: &str, path: &str| {

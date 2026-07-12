@@ -28,6 +28,15 @@ publish = false
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+# [FABLE-5] sq-w42s3 — the W3C JSON-LD 1.1 self-conformance scoreboard runner
+# (per-operation pass-rate row over the pinned fetched suites; see the example's
+# module docs). `test = true` so its hermetic comparator / N-Quads-reader unit
+# tests run under plain `cargo test -p sparq-jsonld` (no suite checkout needed —
+# the suite-driven paths themselves stay offline-green by SKIPping).
+[[example]]
+name = "jsonld_conformance"
+test = true
+
 # ZERO mandatory dependencies (design §3.1). The optional `http-loader` / `html`
 # features and their deps arrive with later beads (sq-oy1f.32 / sq-oy1f.33); the
 # scaffold pulls in nothing so a consumer that only needs the `Json` AST + the error

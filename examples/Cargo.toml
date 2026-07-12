@@ -1,0 +1,15 @@
+[package]
+name = "jsonld-roundtrip-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sparq-jsonld = { path = "../crates/sparq-jsonld" }
+
+[workspace]
+
+[[bin]]
+name = "jsonld-roundtrip-example"
+path = "jsonld_roundtrip.rs"
+

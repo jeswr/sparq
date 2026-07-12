@@ -1,0 +1,372 @@
+@prefix ufo:  <urn:ufo-sn3:> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ufo:
+    a owl:Ontology ;
+    rdfs:label "UFO-SN3 reference vocabulary" ;
+    rdfs:comment
+        "Finite, situation-scoped UFO projection for range-restricted N3 reasoning. Proposition nodes use explicit subject, predicate, and object properties because the SPARQ N3 Term model does not contain RDF 1.2 triple terms." .
+
+# Core categories
+
+ufo:Entity a owl:Class .
+ufo:Type a owl:Class .
+ufo:Endurant a owl:Class ; rdfs:subClassOf ufo:Entity .
+ufo:Substantial a owl:Class ; rdfs:subClassOf ufo:Endurant .
+ufo:Moment a owl:Class ; rdfs:subClassOf ufo:Endurant .
+ufo:Sortal a owl:Class ; rdfs:subClassOf ufo:Type .
+ufo:NonSortal a owl:Class ; rdfs:subClassOf ufo:Type .
+
+# UFO-A substantials and type metaproperties
+
+ufo:Kind
+    a owl:Class ;
+    rdfs:subClassOf ufo:Sortal .
+
+ufo:Role
+    a owl:Class ;
+    rdfs:subClassOf ufo:Sortal .
+
+ufo:Phase
+    a owl:Class ;
+    rdfs:subClassOf ufo:Sortal .
+
+ufo:Category
+    a owl:Class ;
+    rdfs:subClassOf ufo:NonSortal .
+
+ufo:RoleMixin
+    a owl:Class ;
+    rdfs:subClassOf ufo:NonSortal .
+
+ufo:Mixin
+    a owl:Class ;
+    rdfs:subClassOf ufo:NonSortal .
+
+ufo:RigidityMarker a owl:Class .
+ufo:Rigid a ufo:RigidityMarker .
+ufo:AntiRigid a ufo:RigidityMarker .
+ufo:SemiRigid a ufo:RigidityMarker .
+
+ufo:rigidity
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Type ;
+    rdfs:range ufo:RigidityMarker .
+
+ufo:IdentityCriterion a owl:Class .
+
+ufo:identityCriterion
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Type ;
+    rdfs:range ufo:IdentityCriterion .
+
+ufo:identityProvider
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Type ;
+    rdfs:range ufo:Kind .
+
+ufo:keyProperty
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:IdentityCriterion ;
+    rdfs:range rdf:Property .
+
+ufo:identityKey
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Type ;
+    rdfs:range rdf:Property .
+
+ufo:sameContinuant
+    a owl:ObjectProperty, owl:SymmetricProperty ;
+    rdfs:domain ufo:Endurant ;
+    rdfs:range ufo:Endurant .
+
+ufo:contingentFor
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Type ;
+    rdfs:range ufo:Endurant .
+
+# UFO-A moments
+
+ufo:Quality
+    a owl:Class ;
+    rdfs:subClassOf ufo:Moment .
+
+ufo:Quale a owl:Class .
+
+ufo:QualityStructure a owl:Class .
+
+ufo:Mode
+    a owl:Class ;
+    rdfs:subClassOf ufo:Moment .
+
+ufo:Disposition
+    a owl:Class ;
+    rdfs:subClassOf ufo:Mode .
+
+ufo:Relator
+    a owl:Class ;
+    rdfs:subClassOf ufo:Moment .
+
+ufo:QuaIndividual
+    a owl:Class ;
+    rdfs:subClassOf ufo:Mode .
+
+ufo:inheresIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Moment ;
+    rdfs:range ufo:Endurant .
+
+ufo:existentiallyDependsOn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Entity ;
+    rdfs:range ufo:Entity .
+
+ufo:externallyDependsOn
+    a owl:ObjectProperty ;
+    rdfs:subPropertyOf ufo:existentiallyDependsOn .
+
+ufo:hasQuale
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Quality ;
+    rdfs:range ufo:Quale .
+
+ufo:inStructure
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Quale ;
+    rdfs:range ufo:QualityStructure .
+
+ufo:mediates
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Relator ;
+    rdfs:range ufo:Endurant .
+
+ufo:truthmaker
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range ufo:Relator .
+
+ufo:triggerCondition
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Disposition ;
+    rdfs:range ufo:Proposition .
+
+ufo:activatedIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Disposition ;
+    rdfs:range ufo:Situation .
+
+ufo:manifestsIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Disposition ;
+    rdfs:range ufo:Event .
+
+ufo:manifestationOf
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Event ;
+    rdfs:range ufo:Disposition .
+
+# UFO-B
+
+ufo:Event
+    a owl:Class ;
+    rdfs:subClassOf ufo:Entity .
+
+ufo:Participation a owl:Class .
+ufo:Activation
+    a owl:Class ;
+    rdfs:subClassOf ufo:Event .
+
+ufo:Manifestation
+    a owl:Class ;
+    rdfs:subClassOf ufo:Event .
+
+ufo:event
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Participation ;
+    rdfs:range ufo:Event .
+
+ufo:participant
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Participation ;
+    rdfs:range ufo:Endurant .
+
+ufo:participantRole
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Participation ;
+    rdfs:range ufo:Type .
+
+ufo:hasParticipant
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Event ;
+    rdfs:range ufo:Endurant .
+
+ufo:participatesIn
+    a owl:ObjectProperty ;
+    owl:inverseOf ufo:hasParticipant .
+
+ufo:occursIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Event ;
+    rdfs:range ufo:Situation .
+
+# UFO-C
+
+ufo:Agent
+    a owl:Class ;
+    rdfs:subClassOf ufo:Substantial .
+
+ufo:Goal a owl:Class .
+
+ufo:SocialObject
+    a owl:Class ;
+    rdfs:subClassOf ufo:Entity .
+
+ufo:Commitment
+    a owl:Class ;
+    rdfs:subClassOf ufo:Mode .
+
+ufo:Claim
+    a owl:Class ;
+    rdfs:subClassOf ufo:Mode .
+
+ufo:Norm
+    a owl:Class ;
+    rdfs:subClassOf ufo:SocialObject .
+
+ufo:NormativeDescription
+    a owl:Class ;
+    rdfs:subClassOf ufo:SocialObject .
+
+ufo:Obligation
+    a owl:Class ;
+    rdfs:subClassOf ufo:SocialObject .
+
+ufo:goal
+    a owl:ObjectProperty ;
+    rdfs:range ufo:Goal .
+
+ufo:debtor
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Commitment ;
+    rdfs:range ufo:Agent .
+
+ufo:creditor
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Commitment ;
+    rdfs:range ufo:Agent .
+
+ufo:content
+    a owl:ObjectProperty ;
+    rdfs:range ufo:Proposition .
+
+ufo:counterpart
+    a owl:ObjectProperty, owl:SymmetricProperty .
+
+ufo:condition
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Norm ;
+    rdfs:range ufo:Proposition .
+
+ufo:consequent
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Norm ;
+    rdfs:range ufo:Proposition .
+
+ufo:generatedBy
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Obligation ;
+    rdfs:range ufo:Norm .
+
+ufo:groundedIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Commitment ;
+    rdfs:range ufo:Obligation .
+
+ufo:appliesIn
+    a owl:ObjectProperty ;
+    rdfs:range ufo:Situation .
+
+ufo:activeIn
+    a owl:ObjectProperty ;
+    rdfs:range ufo:Situation .
+
+# Situations, worlds, and reification-node propositions
+
+ufo:Situation a owl:Class .
+
+ufo:World
+    a owl:Class ;
+    rdfs:subClassOf ufo:Situation .
+
+ufo:Proposition a owl:Class .
+
+ufo:subj
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition .
+
+ufo:pred
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range rdf:Property .
+
+ufo:obj
+    a rdf:Property ;
+    rdfs:domain ufo:Proposition .
+
+ufo:holdsIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range ufo:Situation .
+
+ufo:notHoldsIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range ufo:Situation .
+
+ufo:existsIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Entity ;
+    rdfs:range ufo:Situation .
+
+ufo:accessible
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Situation ;
+    rdfs:range ufo:Situation .
+
+ufo:necessaryIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range ufo:Situation .
+
+# Closed validation
+
+ufo:ValidationScope a owl:Class .
+ufo:ValidationResult a owl:Class .
+
+ufo:closedFor
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Situation ;
+    rdfs:range ufo:ValidationScope .
+
+ufo:requiredProposition
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:ValidationScope ;
+    rdfs:range ufo:Proposition .
+
+ufo:refutedIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range ufo:Situation .
+
+ufo:hasFinding
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:ValidationScope ;
+    rdfs:range ufo:Proposition .
+
+ufo:rigidityViolationIn
+    a owl:ObjectProperty ;
+    rdfs:domain ufo:Proposition ;
+    rdfs:range ufo:Situation .

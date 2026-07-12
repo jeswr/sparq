@@ -128,6 +128,22 @@ sparq_introspect::facets(graph: &Graph, request: &FacetRequest) -> FacetResponse
 
 `sparq-nlq`:
 
+With the default-off `query-policy` feature, classify generated SPARQL after
+parsing its algebra (never by scanning keywords):
+
+```rust
+use spargebra::SparqlParser;
+use sparq_nlq::policy::{classify_query, classify_update, QueryPolicy};
+
+let parser = SparqlParser::new();
+let query = parser.parse_query("SELECT * WHERE { ?s ?p ?o }")?;
+assert_eq!(classify_query(&query), QueryPolicy::ReadOnly);
+
+let update = parser.parse_update("CLEAR DEFAULT")?;
+assert_eq!(classify_update(&update), QueryPolicy::Mutating);
+# Ok::<(), spargebra::SparqlSyntaxError>(())
+```
+
 ```rust
 // The single seam to any model — synchronous, stateless (the whole prompt is in `prompt`).
 pub trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }

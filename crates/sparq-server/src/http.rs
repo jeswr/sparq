@@ -192,6 +192,28 @@ impl std::fmt::Debug for ServiceAllowOverride {
     }
 }
 
+/// [GPT-5.6] Loaded, immutable SHACL shapes used by transaction guard mode.
+#[cfg(feature = "shacl")]
+#[derive(Clone)]
+pub struct ShaclShapes(Arc<Graph>);
+
+#[cfg(feature = "shacl")]
+impl ShaclShapes {
+    /// Wraps a parsed shapes graph for [`ServerConfig::shacl_shapes`].
+    pub fn new(graph: Graph) -> Self {
+        Self(Arc::new(graph))
+    }
+
+    fn graph(&self) -> &Graph { &self.0 }
+}
+
+#[cfg(feature = "shacl")]
+impl std::fmt::Debug for ShaclShapes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShaclShapes").field("triples", &self.0.len()).finish()
+    }
+}
+
 /// Tunable guards that make the endpoint safe to expose publicly (T15).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -641,6 +663,20 @@ pub struct ServerConfig {
     /// is a READ over the store, so the endpoint is gated by the read auth like any GET.
     #[cfg(feature = "shacl")]
     pub shacl: bool,
+    /// [GPT-5.6] (sq-lsp7k.2.4) Reject writes whose post-state does not conform to
+    /// [`shacl_shapes`](Self::shacl_shapes). Validation runs before persistence or publish.
+    ///
+    /// [FABLE-5] (PR #1999 security review) Guard mode is STRICT / fail-CLOSED: a shapes
+    /// graph the validator cannot fully evaluate is a hard startup error (ill-formed
+    /// constructs, SHACL-SPARQL pre-binding violations), and a constraint skipped at
+    /// evaluation time (e.g. an uncompilable `sh:pattern`) rejects the write (HTTP 500)
+    /// instead of silently admitting it. Only the guard is strict — the read-only
+    /// `/shacl/validate` endpoint keeps the lenient W3C-report behaviour.
+    #[cfg(feature = "shacl")]
+    pub shacl_guard: bool,
+    /// [GPT-5.6] Loaded shapes graph used by SHACL guard mode. Required when the guard is on.
+    #[cfg(feature = "shacl")]
+    pub shacl_shapes: Option<ShaclShapes>,
     /// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** (`text/n3`) dialect for the
     /// Graph-Store-Protocol `PATCH` method. When `true`, a `PATCH` whose body is `text/n3` (a
     /// `solid:InsertDeletePatch`) is parsed into its `solid:deletes` / `solid:inserts` /
@@ -857,6 +893,10 @@ impl Default for ServerConfig {
             // SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             shacl: false,
+            #[cfg(feature = "shacl")]
+            shacl_guard: false,
+            #[cfg(feature = "shacl")]
+            shacl_shapes: None,
             // [OPUS-4.8] sq-hj4n: safe default — the OPT-IN N3-Patch PATCH dialect is OFF even when
             // the feature is compiled in (the operator opts in deliberately via --n3-patch /
             // SPARQ_N3_PATCH=1). The always-on application/sparql-update PATCH dialect is unaffected.
@@ -1149,6 +1189,10 @@ impl ServerConfig {
         #[cfg(feature = "shacl")]
         if let Ok(v) = std::env::var("SPARQ_SHACL") {
             cfg.shacl = env_truthy(&v);
+        }
+        #[cfg(feature = "shacl")]
+        if let Ok(v) = std::env::var("SPARQ_SHACL_GUARD") {
+            cfg.shacl_guard = env_truthy(&v);
         }
         // [OPUS-4.8] sq-hj4n: SPARQ_N3_PATCH truthy ("1"/"true"/"yes"/"on") enables the OPT-IN
         // Solid N3-Patch PATCH dialect (text/n3). Off by default. Only present with the
@@ -1837,6 +1881,14 @@ fn open_or_create_durable(dir: &std::path::Path, seed: Graph) -> Result<Graph, S
 /// default 400 (client error). Never leaves the process — stripped before the message
 /// reaches the client.
 const DURABLE_UNAVAILABLE_PREFIX: &str = "\u{1}durable-unavailable\u{1}";
+#[cfg(feature = "shacl")]
+const SHACL_GUARD_REJECTED_PREFIX: &str = "\u{1}shacl-guard-rejected\u{1}";
+/// [FABLE-5] (PR #1999 security review) Marker for a write the SHACL guard refused because
+/// the guard shapes graph could not be FULLY evaluated (a strict-validation failure or a
+/// skipped/unevaluable constraint) — the fail-closed outcome, mapped to HTTP 500 (an
+/// operator-side guard misconfiguration, not a client error). Never leaves the process.
+#[cfg(feature = "shacl")]
+const SHACL_GUARD_UNEVALUABLE_PREFIX: &str = "\u{1}shacl-guard-unevaluable\u{1}";
 
 struct ServerApplier {
     inner: GraphApplier,
@@ -2000,6 +2052,39 @@ impl ApplyUpdates for ServerApplier {
             with_engine_scope(&self.config, || {
                 sparq_engine::update_in_place_with_budget(working, update, &budget)
             })?;
+        }
+        // [GPT-5.6] sq-lsp7k.2.4: validate the private candidate before seal/publish.
+        //
+        // [FABLE-5] (PR #1999 security review) The guard is FAIL-CLOSED on an unevaluable
+        // shapes graph. The lenient `sparq_shacl::validate` SKIPS constraints it cannot
+        // evaluate (ill-formed constructs, an uncompilable `sh:pattern`, SHACL-SPARQL
+        // pre-binding violations) and reports `conforms` over only the rest — which would
+        // silently ADMIT writes past a guard the operator believes is enforced. So guard
+        // mode uses `validate_strict` (well-formedness failures reject the write; they are
+        // also a hard STARTUP error, see `try_with_config`) AND rejects when the report
+        // carries skipped-constraint diagnostics (e.g. an uncompilable `sh:pattern`, which
+        // is NOT parse-time detectable). Only the write-guard is strict: the read-only
+        // `/shacl/validate` endpoint keeps the lenient W3C-report behaviour.
+        #[cfg(feature = "shacl")]
+        if self.config.shacl_guard {
+            let shapes = self.config.shacl_shapes.as_ref()
+                .expect("shacl_guard configuration validated at startup");
+            let report = match sparq_shacl::validate_strict(working, shapes.graph()) {
+                Ok(report) => report,
+                Err(failure) => {
+                    return Err(format!("{SHACL_GUARD_UNEVALUABLE_PREFIX}{failure}"));
+                }
+            };
+            if let Some(first) = report.diagnostics.first() {
+                return Err(format!(
+                    "{SHACL_GUARD_UNEVALUABLE_PREFIX}{} guard constraint(s) could not be evaluated and were SKIPPED (fail-closed) — e.g. {}",
+                    report.diagnostics.len(),
+                    first.message
+                ));
+            }
+            if !report.conforms {
+                return Err(format!("{SHACL_GUARD_REJECTED_PREFIX}{}", shacl_report_to_json(&report)));
+            }
         }
         Ok(())
     }
@@ -2262,6 +2347,33 @@ impl AppState {
     /// `ServerApplier::seal`). With `persist_dir == None` this is exactly the historical
     /// in-memory path (the ring is seeded from `graph`; no durable mirror; never errors).
     pub fn try_with_config(graph: Graph, config: ServerConfig) -> Result<Self, String> {
+        #[cfg(feature = "shacl")]
+        if config.shacl_guard {
+            let Some(shapes) = &config.shacl_shapes else {
+                return Err("SHACL guard requires a loaded shapes graph (set ServerConfig::shacl_shapes or --shacl-shapes)".to_string());
+            };
+            // [FABLE-5] (PR #1999 security review) FAIL-CLOSED at startup: a guard shapes
+            // graph the strict validator rejects (an ill-formed construct the lenient
+            // validator would silently SKIP, or a SHACL-SPARQL pre-binding violation) is a
+            // hard configuration error HERE — a mis-authored guard must never boot a server
+            // that silently admits non-conforming writes. (Constraints only detectable at
+            // evaluation time, e.g. an uncompilable `sh:pattern`, additionally fail closed
+            // per-write in `ServerApplier::apply`.)
+            let model = sparq_shacl::ShapesModel::parse(shapes.graph());
+            if !model.pre_binding_failures().is_empty() || !model.ill_formed().is_empty() {
+                return Err(format!(
+                    "SHACL guard shapes graph is not fully evaluable (the guard would fail closed on every write): {} ill-formed construct(s), {} SHACL-SPARQL pre-binding violation(s) — e.g. {}",
+                    model.ill_formed().len(),
+                    model.pre_binding_failures().len(),
+                    model
+                        .ill_formed()
+                        .first()
+                        .map(|c| c.message.clone())
+                        .or_else(|| model.pre_binding_failures().first().map(|f| f.message.clone()))
+                        .unwrap_or_default(),
+                ));
+            }
+        }
         Self::try_with_config_inner(
             graph,
             config,
@@ -5825,6 +5937,23 @@ pub(crate) fn engine_error_response(e: &str, config: &ServerConfig, apply_max_re
 /// hit (the memory cap / deadline tripped inside a `DELETE/INSERT … WHERE`) is a 413 / 503,
 /// exactly like a query; any other rejection (parse / semantic error) is the client's 400.
 fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
+    #[cfg(feature = "shacl")]
+    if let Some(report_json) = e.strip_prefix(SHACL_GUARD_REJECTED_PREFIX) {
+        return text_response(StatusCode::UNPROCESSABLE_ENTITY, "application/json; charset=utf-8", report_json.to_string(), false);
+    }
+    // [FABLE-5] (PR #1999 security review) The guard could not FULLY evaluate its shapes
+    // graph → the write was refused fail-CLOSED. This is the operator's guard
+    // misconfiguration (a 5xx), not the client's data (422); the detail (which quotes
+    // shapes-graph fragments) goes to the server log, not the response body.
+    #[cfg(feature = "shacl")]
+    if let Some(detail) = e.strip_prefix(SHACL_GUARD_UNEVALUABLE_PREFIX) {
+        return sanitized_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "shacl-guard-unevaluable",
+            "SHACL guard shapes graph could not be fully evaluated; the write was refused (fail-closed) — the operator must fix the guard shapes graph",
+            detail,
+        );
+    }
     // [OPUS-4.8] (sq-vpx4) A durable-write refusal is a retryable 503, NOT a 400. The write
     // was valid but could not be made durable (transient ENOSPC/I/O on the `--persist` mirror);
     // nothing was published or acked, the server is still serving reads, and the client should
@@ -6208,6 +6337,14 @@ async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode)
             with_generation_header(success.into_response(), number)
         }
         UpdateOutcome::Rejected(e) => {
+            // [GPT-5.6] sq-lsp7k.2.4: preserve the shared 422 + report mapping for GSP writes.
+            // [FABLE-5] (PR #1999 security review) …and the fail-closed unevaluable-guard 500.
+            #[cfg(feature = "shacl")]
+            if e.starts_with(SHACL_GUARD_REJECTED_PREFIX)
+                || e.starts_with(SHACL_GUARD_UNEVALUABLE_PREFIX)
+            {
+                return update_rejection_response(&e, &state.config);
+            }
             // [OPUS-4.8] sq-ebii: a budget hit (timeout / memory cap) inside a GSP write's
             // WHERE maps to 503/413; a genuine parse/semantic failure stays a 400.
             if e.contains("query budget exceeded") {

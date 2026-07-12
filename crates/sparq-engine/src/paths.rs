@@ -1,6 +1,9 @@
-//! Full-path enumeration over a single RDF predicate.
+//! Full-path enumeration over an RDF predicate or materialized graph pattern.
 
-use oxrdf::{NamedNode, Term};
+use oxrdf::vocab::xsd;
+use oxrdf::{Literal, NamedNode, Term};
+use spargebra::algebra::GraphPattern;
+use spargebra::{Query, SparqlParser};
 use sparq_core::{dict::Id, store::Perm, Graph};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -13,7 +16,20 @@ pub enum PathMode {
     All,
 }
 
-/// Parameters for path enumeration over one predicate.
+/// Defines the directed edge relation used for path enumeration.
+///
+/// [GPT-5.6] `sq-lsp7k.3.3`: pattern relations are materialized once, then
+/// consumed by the same deterministic T1 enumerator as predicate relations.
+#[derive(Clone, Debug)]
+pub enum Via {
+    /// Every triple using this predicate is one directed edge.
+    Predicate(NamedNode),
+    /// A SPARQL group graph pattern whose reserved `?from` and `?to` variables
+    /// designate each directed edge's endpoints.
+    Pattern(String),
+}
+
+/// Parameters for path enumeration over an edge relation.
 #[derive(Clone, Debug)]
 pub struct PathSpec {
     /// Enumeration mode.
@@ -24,8 +40,8 @@ pub struct PathSpec {
     pub start: Option<Term>,
     /// Optional fixed ending node; otherwise every edge object is considered.
     pub end: Option<Term>,
-    /// Predicate defining the directed edge relation.
-    pub via: NamedNode,
+    /// Predicate or graph pattern defining the directed edge relation.
+    pub via: Via,
     /// Maximum edge count. Required for [`PathMode::All`].
     pub max_length: Option<usize>,
 }
@@ -35,7 +51,8 @@ pub struct PathSpec {
 pub struct PathSolution {
     /// Path nodes, including both endpoints.
     pub nodes: Vec<Term>,
-    /// Edge terms, one fewer than `nodes`; currently each is `PathSpec::via`.
+    /// Edge terms, one fewer than `nodes`. Pattern edges use the pattern source
+    /// as a canonical, blank-node-free `xsd:string` marker.
     pub edges: Vec<Term>,
 }
 
@@ -48,24 +65,12 @@ pub fn enumerate_paths(graph: &Graph, spec: &PathSpec) -> Result<Vec<PathSolutio
         return Err("PATHS ALL requires MAX LENGTH".to_owned());
     }
 
-    let Some(via_id) = graph.id_of(&Term::NamedNode(spec.via.clone())) else {
-        return Ok(Vec::new());
-    };
-    let scan = graph
-        .store
-        .scan_perm(&[None, Some(via_id), None], Perm::Pso)
-        .or_else(|| {
-            graph
-                .store
-                .scan_perm(&[None, Some(via_id), None], Perm::Pos)
-        })
-        .expect("a predicate-leading permutation is always built");
+    let (edge_pairs, edge) = edge_relation(graph, &spec.via)?;
     let mut adjacency: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
     let mut sinks = BTreeSet::new();
-    for row in scan.rows.iter() {
-        let [subject, _, object] = scan.to_spo(row);
-        adjacency.entry(subject).or_default().push(object);
-        sinks.insert(object);
+    for (from, to) in edge_pairs {
+        adjacency.entry(from).or_default().push(to);
+        sinks.insert(to);
     }
     for next in adjacency.values_mut() {
         next.sort_unstable();
@@ -93,7 +98,6 @@ pub fn enumerate_paths(graph: &Graph, spec: &PathSpec) -> Result<Vec<PathSolutio
     }
 
     paths.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
-    let edge = Term::NamedNode(spec.via.clone());
     Ok(paths
         .into_iter()
         .map(|ids| PathSolution {
@@ -101,6 +105,90 @@ pub fn enumerate_paths(graph: &Graph, spec: &PathSpec) -> Result<Vec<PathSolutio
             nodes: ids.into_iter().map(|id| graph.dict.term(id)).collect(),
         })
         .collect())
+}
+
+fn edge_relation(graph: &Graph, via: &Via) -> Result<(Vec<(Id, Id)>, Term), String> {
+    match via {
+        Via::Predicate(predicate) => {
+            let edge = Term::NamedNode(predicate.clone());
+            let Some(via_id) = graph.id_of(&edge) else {
+                return Ok((Vec::new(), edge));
+            };
+            let scan = graph
+                .store
+                .scan_perm(&[None, Some(via_id), None], Perm::Pso)
+                .or_else(|| {
+                    graph
+                        .store
+                        .scan_perm(&[None, Some(via_id), None], Perm::Pos)
+                })
+                .expect("a predicate-leading permutation is always built");
+            let pairs = scan
+                .rows
+                .iter()
+                .map(|row| {
+                    let [subject, _, object] = scan.to_spo(row);
+                    (subject, object)
+                })
+                .collect();
+            Ok((pairs, edge))
+        }
+        Via::Pattern(pattern) => {
+            let source = format!("SELECT ?from ?to WHERE {{ {pattern} }}");
+            let parsed = SparqlParser::new()
+                .parse_query(&source)
+                .map_err(|error| format!("invalid PATHS VIA pattern: {error}"))?;
+            let Query::Select {
+                pattern: GraphPattern::Project { inner, .. },
+                ..
+            } = parsed
+            else {
+                return Err("invalid SELECT projection for PATHS VIA pattern".to_owned());
+            };
+            let mut binds_from = false;
+            let mut binds_to = false;
+            inner.on_in_scope_variable(|variable| match variable.as_str() {
+                "from" => binds_from = true,
+                "to" => binds_to = true,
+                _ => {}
+            });
+            if !binds_from {
+                return Err("PATHS VIA pattern must bind ?from".to_owned());
+            }
+            if !binds_to {
+                return Err("PATHS VIA pattern must bind ?to".to_owned());
+            }
+            let result = crate::query(graph, &source)?;
+            let from = result
+                .vars
+                .iter()
+                .position(|var| var.as_str() == "from")
+                .ok_or_else(|| "PATHS VIA pattern must bind ?from".to_owned())?;
+            let to = result
+                .vars
+                .iter()
+                .position(|var| var.as_str() == "to")
+                .ok_or_else(|| "PATHS VIA pattern must bind ?to".to_owned())?;
+            let mut pairs = Vec::with_capacity(result.rows.len());
+            for row in result.rows {
+                let from_term = row[from].as_ref().ok_or_else(|| {
+                    "PATHS VIA pattern must bind ?from in every solution".to_owned()
+                })?;
+                let to_term = row[to].as_ref().ok_or_else(|| {
+                    "PATHS VIA pattern must bind ?to in every solution".to_owned()
+                })?;
+                let Some(from_id) = graph.id_of(from_term) else {
+                    continue;
+                };
+                let Some(to_id) = graph.id_of(to_term) else {
+                    continue;
+                };
+                pairs.push((from_id, to_id));
+            }
+            let marker = Term::Literal(Literal::new_typed_literal(pattern.clone(), xsd::STRING));
+            Ok((pairs, marker))
+        }
+    }
 }
 
 fn selected_ids(graph: &Graph, fixed: Option<&Term>, all: impl Iterator<Item = Id>) -> Vec<Id> {

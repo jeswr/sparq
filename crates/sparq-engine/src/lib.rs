@@ -43,7 +43,13 @@ pub mod params;
 #[cfg(feature = "paths")]
 pub mod paths;
 #[cfg(feature = "paths")]
-pub use paths::{enumerate_paths, PathMode, PathSolution, PathSpec};
+pub use paths::{enumerate_paths, PathMode, PathSolution, PathSpec, Via};
+// [GPT-5.6] (sq-lsp7k.3.2) Dedicated non-standard PATHS syntax. The ordinary
+// SPARQL parser remains untouched, so this surface is available only by explicit opt-in.
+#[cfg(feature = "paths")]
+mod paths_syntax;
+#[cfg(feature = "paths")]
+pub use paths_syntax::{explain_paths, query_paths};
 // [OPUS-4.8] (sq-7d3dj.30.1) Pre-execution SPARQL algebra rewrite pass (result-equivalent
 // FILTER `?v = <iri>` constant-substitution + `OPTIONAL … !bound` → anti-join). NON-DEFAULT
 // `algebra-rewrite` feature; when off, zero of this code compiles, `PreparedQuery::parse`

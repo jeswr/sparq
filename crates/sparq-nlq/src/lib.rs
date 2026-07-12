@@ -29,6 +29,10 @@ pub mod constrain;
 pub mod eval;
 pub mod link;
 
+/// Read-only versus mutating classification for parsed SPARQL algebra.
+#[cfg(feature = "query-policy")]
+pub mod policy;
+
 // [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1): the cross-cutting provenance-join primitive
 // and the PKG-native citation renderer, behind the opt-in `citations` feature so the lean
 // NL→SPARQL loop carries zero provenance machinery in the default build.

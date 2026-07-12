@@ -46,9 +46,10 @@
 //!
 //! # Honest v1 limits
 //!
-//! - RDF sources only: `content_type` must be Turtle or N-Triples, and `resource_get`
-//!   serves `application/n-triples` (an `accept` for anything else is a tool error,
-//!   never silent coercion). Non-RDF (binary) resources are out of scope.
+//! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when
+//!   the opt-in `jsonld` feature is enabled), and `resource_get` serves
+//!   `application/n-triples` (an `accept` for anything else is a tool error, never
+//!   silent coercion). Non-RDF (binary) resources are out of scope. [GPT-5.6]
 //! - The SPARQL `update` tool delegates to the session-checked
 //!   `PodStore::update_as` / `update_as_acp`, which applies the per-graph write
 //!   permission check but not the wall-clock/row budget the read tools enforce.
@@ -335,6 +336,8 @@ fn rdf_format(content_type: &str) -> Option<&'static str> {
     match base.as_str() {
         "text/turtle" | "turtle" | "ttl" => Some("turtle"),
         "application/n-triples" | "ntriples" | "n-triples" | "nt" => Some("ntriples"),
+        #[cfg(feature = "jsonld")]
+        "application/ld+json" | "jsonld" | "json-ld" => Some("jsonld"), // [GPT-5.6]
         _ => None,
     }
 }
@@ -988,7 +991,68 @@ mod unit {
         assert_eq!(rdf_format("text/turtle; charset=utf-8"), Some("turtle"));
         assert_eq!(rdf_format("application/n-triples"), Some("ntriples"));
         assert_eq!(rdf_format("application/octet-stream"), None);
-        assert_eq!(rdf_format("application/ld+json"), None); // honest v1 limit
+        #[cfg(not(feature = "jsonld"))]
+        assert_eq!(rdf_format("application/ld+json"), None); // fail closed without parser
+    }
+
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn rdf_format_accepts_jsonld_when_feature_on() {
+        assert_eq!(rdf_format("application/ld+json"), Some("jsonld"));
+        assert_eq!(rdf_format("application/ld+json; charset=utf-8"), Some("jsonld"));
+        assert_eq!(rdf_format("jsonld"), Some("jsonld"));
+        assert_eq!(rdf_format("json-ld"), Some("jsonld"));
+    }
+
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn resource_put_ingests_jsonld_into_the_named_resource_graph() {
+        // [GPT-5.6] The root ACL grants Alice write access inherited by the new
+        // resource, so this exercises resource_put's parse-first path rather than
+        // calling Graph::load_str in isolation.
+        let fixture = r#"
+<https://pod.ex/> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/ldp#Container> <https://pod.ex/> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/.acl> .
+"#;
+        let store = PodStore::new(Graph::load_dataset(fixture, "nquads").expect("fixture parses"));
+        let config = SolidServerConfig {
+            agent: Some("https://alice.ex/card#me".to_string()),
+            allow_update: true,
+            ..SolidServerConfig::default()
+        };
+        let mut server = SolidMcpServer::with_config(store, config).expect("materializes");
+        let result = server
+            .tool_resource_put(&json!({
+                "url": "https://pod.ex/profile",
+                "content_type": "application/ld+json",
+                "content": r#"{
+                    "@id": "https://pod.ex/profile#me",
+                    "https://schema.org/name": "Alice"
+                }"#
+            }))
+            .expect("JSON-LD resource_put succeeds");
+
+        assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["triples"], 1);
+        let graph = server
+            .store()
+            .graph
+            .named
+            .iter()
+            .find(|(name, _)| name.to_string() == "<https://pod.ex/profile>")
+            .map(|(_, graph)| graph)
+            .expect("resource graph was stored");
+        assert!(
+            sparq_engine::ask(
+                graph,
+                "ASK { <https://pod.ex/profile#me> <https://schema.org/name> \"Alice\" }"
+            )
+            .expect("ASK evaluates")
+        );
     }
 
     #[test]
