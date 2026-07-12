@@ -182,9 +182,20 @@ testing):
   query endpoint surface; smaller wasm object; a protocol-conformance test target
   with no query-engine confound.
 
+**Reality check (verified 2026-07-12 against `origin/main`):** `sparq-lws-core`
+today exposes **only LDP + WAC** — `build_router` has **no `/sparql` route**, and
+`Store` exposes LDP operations, not arbitrary SPARQL query/update. So the current
+server **already IS the `core` tier**; the `full` tier is **net-new work** — a
+SPARQL query endpoint must be *built* behind the flag, not merely gated off
+existing code. Design for that endpoint (its own bead `sq-r1ei8`): a WAC-scoped,
+**query-only-v1** `GET/POST /sparql` (SPARQL 1.1 Protocol) that evaluates SELECT/
+ASK/CONSTRUCT via the embedded `sparq-engine` over **only** the pod resources the
+authenticated agent has `acl:Read` on (WAC-scoped dataset assembly is the hard,
+authz-soundness-sensitive part → Opus review). SPARQL UPDATE = a later follow-up.
+
 **Mechanism — one shared cargo feature on `sparq-lws-core`:**
-`sparql-endpoint` (**default-on**), gating **only** the SPARQL endpoint route
-registration in `build_router` + its handler module (query/update HTTP surface).
+`sparql-endpoint` (**default-on** once the endpoint exists), gating the (net-new)
+SPARQL endpoint route registration in `build_router` + its handler module.
 It is **orthogonal** to the `wasm` feature (§5.1): the two compose into four
 build points, of which we ship the useful three —
 
