@@ -103,7 +103,12 @@ pub fn materialise_closure(
     let asserted_triples = triples.len();
     let entailed_triples = sparq_reason::materialize(profile, &mut dict, &mut triples);
     let graph = Graph::from_parts(dict, triples);
-    ClosedGraph { graph, asserted_triples, entailed_triples, profile }
+    ClosedGraph {
+        graph,
+        asserted_triples,
+        entailed_triples,
+        profile,
+    }
 }
 
 /// Parse RDF `text` of the given `format`, then [`materialise_closure`] under `profile`
@@ -188,7 +193,9 @@ impl TypeConstraints {
         let mut predicate_range: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
 
         for pred in &introspection.predicates {
-            let Some(pred_id) = class_id(&pred.predicate) else { continue };
+            let Some(pred_id) = class_id(&pred.predicate) else {
+                continue;
+            };
 
             let domain = predicate_domain.entry(pred_id).or_default();
             for c in &pred.declared_domains {
@@ -215,7 +222,11 @@ impl TypeConstraints {
             }
         }
 
-        TypeConstraints { entity_types, predicate_domain, predicate_range }
+        TypeConstraints {
+            entity_types,
+            predicate_domain,
+            predicate_range,
+        }
     }
 
     /// The interned `rdf:type` class ids of `entity` (empty if it has none).
@@ -235,12 +246,7 @@ impl TypeConstraints {
         self.admissible(&self.predicate_range, predicate, entity)
     }
 
-    fn admissible(
-        &self,
-        side: &FxHashMap<Id, FxHashSet<Id>>,
-        predicate: Id,
-        entity: Id,
-    ) -> bool {
+    fn admissible(&self, side: &FxHashMap<Id, FxHashSet<Id>>, predicate: Id, entity: Id) -> bool {
         match side.get(&predicate) {
             // Unconstrained side (no declared/observed classes) → every entity is admissible.
             None => true,
@@ -512,7 +518,9 @@ fn type_term() -> oxrdf::Term {
 
 /// Resolve an IRI string to its interned dictionary id, or `None` if absent.
 fn dict_iri_id(dict: &sparq_core::dict::Dict, iri: &str) -> Option<Id> {
-    let id = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(iri)));
+    let id = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+        iri,
+    )));
     (id != sparq_core::dict::NO_ID).then_some(id)
 }
 
@@ -520,8 +528,12 @@ fn dict_iri_id(dict: &sparq_core::dict::Dict, iri: &str) -> Option<Id> {
 /// sampler is otherwise deterministic for a fixed seed).
 fn mix_triple([s, p, o]: [Id; 3]) -> u64 {
     let mut v = (s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    v ^= (p as u64).rotate_left(21).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    v ^= (o as u64).rotate_left(42).wrapping_mul(0x94D0_49BB_1331_11EB);
+    v ^= (p as u64)
+        .rotate_left(21)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    v ^= (o as u64)
+        .rotate_left(42)
+        .wrapping_mul(0x94D0_49BB_1331_11EB);
     v
 }
 
@@ -582,15 +594,25 @@ ex:bob   ex:owns ex:tom .
         let c = closed();
         // RDFS must add at least: rex a Animal, tom a Animal, alice a Person, bob a Person (rdfs9
         // via subClassOf), and the domain/range entailments (rdfs2/rdfs3).
-        assert!(c.entailed_triples > 0, "closure added nothing: {}", c.entailed_triples);
+        assert!(
+            c.entailed_triples > 0,
+            "closure added nothing: {}",
+            c.entailed_triples
+        );
         assert_eq!(c.closed_triples(), c.asserted_triples + c.entailed_triples);
 
         // The entailed `ex:rex a ex:Animal` must now be a real triple visible to the encoder.
         let rex = c.graph.id_of(&iri("http://ex/rex")).unwrap();
         let animal = c.graph.id_of(&iri("http://ex/Animal")).unwrap();
         let type_p = c.graph.id_of(&type_term()).unwrap();
-        let has = c.graph.iter_ids().any(|[s, p, o]| s == rex && p == type_p && o == animal);
-        assert!(has, "closure-before-vectorise did not materialise ex:rex a ex:Animal");
+        let has = c
+            .graph
+            .iter_ids()
+            .any(|[s, p, o]| s == rex && p == type_p && o == animal);
+        assert!(
+            has,
+            "closure-before-vectorise did not materialise ex:rex a ex:Animal"
+        );
     }
 
     #[test]
@@ -604,13 +626,28 @@ ex:bob   ex:owns ex:tom .
         let car = c.graph.id_of(&iri("http://ex/car")).unwrap(); // Vehicle — neither
 
         // Subject (domain = Person): a Person is admissible; an Animal/Vehicle is not.
-        assert!(tc.admissible_subject(owns, alice), "Owner⊑Person must satisfy domain Person");
-        assert!(!tc.admissible_subject(owns, car), "Vehicle must not satisfy domain Person");
+        assert!(
+            tc.admissible_subject(owns, alice),
+            "Owner⊑Person must satisfy domain Person"
+        );
+        assert!(
+            !tc.admissible_subject(owns, car),
+            "Vehicle must not satisfy domain Person"
+        );
 
         // Object (range = Animal): an Animal is admissible; a Person/Vehicle is not.
-        assert!(tc.admissible_object(owns, rex), "Dog⊑Animal must satisfy range Animal");
-        assert!(!tc.admissible_object(owns, car), "Vehicle must not satisfy range Animal");
-        assert!(!tc.admissible_object(owns, alice), "Person must not satisfy range Animal");
+        assert!(
+            tc.admissible_object(owns, rex),
+            "Dog⊑Animal must satisfy range Animal"
+        );
+        assert!(
+            !tc.admissible_object(owns, car),
+            "Vehicle must not satisfy range Animal"
+        );
+        assert!(
+            !tc.admissible_object(owns, alice),
+            "Person must not satisfy range Animal"
+        );
     }
 
     #[test]
@@ -622,18 +659,23 @@ ex:bob   ex:owns ex:tom .
         let rex = c.graph.id_of(&iri("http://ex/rex")).unwrap();
         let car = c.graph.id_of(&iri("http://ex/car")).unwrap();
 
-        let sampler =
-            NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
+        let sampler = NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
 
         // Corrupt the TAIL of (alice owns rex): every emitted object must be range-admissible
         // (an Animal), so `ex:car` (Vehicle) can NEVER appear.
         let negs = sampler.sample([alice, owns, rex], Corrupt::Tail, 16, 42);
-        assert!(!negs.is_empty(), "expected some type-valid tail corruptions");
+        assert!(
+            !negs.is_empty(),
+            "expected some type-valid tail corruptions"
+        );
         for [h, r, t] in &negs {
             assert_eq!(*h, alice);
             assert_eq!(*r, owns);
             assert!(tc.admissible_object(owns, *t), "emitted non-range tail {t}");
-            assert_ne!(*t, car, "Vehicle must never be a type-constrained range corruption");
+            assert_ne!(
+                *t, car,
+                "Vehicle must never be a type-constrained range corruption"
+            );
             assert_ne!(*t, rex, "must not reproduce the original tail");
         }
     }
@@ -659,7 +701,10 @@ ex:bob   ex:owns ex:tom .
                 break;
             }
         }
-        assert!(saw_car, "Unconstrained ablation arm must be able to emit the wrong-typed entity");
+        assert!(
+            saw_car,
+            "Unconstrained ablation arm must be able to emit the wrong-typed entity"
+        );
         let _ = rex;
     }
 
@@ -673,7 +718,10 @@ ex:bob   ex:owns ex:tom .
         let s = NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
         let a = s.sample([alice, owns, rex], Corrupt::Tail, 4, 7);
         let b = s.sample([alice, owns, rex], Corrupt::Tail, 4, 7);
-        assert_eq!(a, b, "fixed (seed, mode, triple) must reproduce identical negatives");
+        assert_eq!(
+            a, b,
+            "fixed (seed, mode, triple) must reproduce identical negatives"
+        );
     }
 
     #[test]
@@ -716,7 +764,10 @@ ex:c ex:rel ex:a .
         let b = c.graph.id_of(&iri("http://ex/b")).unwrap();
         let s = NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
         let negs = s.sample([a, rel, b], Corrupt::Tail, 4, 1);
-        assert!(!negs.is_empty(), "unconstrained predicate must still produce negatives");
+        assert!(
+            !negs.is_empty(),
+            "unconstrained predicate must still produce negatives"
+        );
     }
 
     fn iri(s: &str) -> oxrdf::Term {
