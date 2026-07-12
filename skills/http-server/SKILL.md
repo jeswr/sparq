@@ -735,6 +735,14 @@ watermark (a HARD safety bound: any unacked record keeps its segment), `max_age`
 A `poll` from a trimmed-away offset **fails closed** (never a silent skip) — consumers resume from
 `ChangeLog::first_seq`. A `ChangeSink` trait for an external broker (Kafka/NATS) is
 tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+**Recording seam (`sq-bdaw5`):** install `ChangeLog::into_commit_hook(on_error)` via
+`Writer::spawn_with_commit_hook` and every commit-publish is recorded **on the writer thread** —
+one append+fsync per PUBLISHED GENERATION, gapless by construction (the writer is the sole
+publisher), with **no caller-side lock and no serialisation of submitters**; acks happen-after the
+record is durable. Restore publishes never fire the hook (not same-lineage — re-baseline
+explicitly). A recording failure is dropped + reported to `on_error`, never failing the
+already-published write; the log's discontinuity check then fail-closes later records rather than
+silently gapping.
 
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
 `sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams
