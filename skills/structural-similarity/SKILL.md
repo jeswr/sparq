@@ -1,6 +1,6 @@
 ---
 name: structural-similarity
-description: "Training-free structural entity similarity over a sparq RDF graph with the opt-in sparq-sim crate: build an entity's (direction, predicate, neighbor) signature straight from the store's permutation indexes, score predicate-IDF-weighted Jaccard similarity between two entities, and retrieve the top-k most-similar entities (most_similar) via index-driven candidate generation — no embeddings, no model, no training, correct under incremental updates. Use when adding co-citation / shared-context similarity, predicate-profile (role) similarity, entity/relation linking, or the structural half of a hybrid (structural + text-vector) retrieval over a sparq Graph."
+description: "Training-free structural entity similarity over a sparq RDF graph with the opt-in sparq-sim crate: build an entity's (direction, predicate, neighbor) signature straight from the store's permutation indexes, score weighted Jaccard, Dice, or overlap similarity between two entities, and retrieve the top-k most-similar entities (most_similar) via index-driven candidate generation — no embeddings, no model, no training, correct under incremental updates. Use when adding co-citation / shared-context similarity, predicate-profile (role) similarity, entity/relation linking, or the structural half of a hybrid (structural + text-vector) retrieval over a sparq Graph."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -36,7 +36,7 @@ Score similarity and retrieve nearest entities:
 
 ```rust
 use sparq_core::Graph;
-use sparq_sim::{Sim, SimConfig, SignatureMode, weighted_jaccard};
+use sparq_sim::{dice_coefficient, overlap_coefficient, Sim};
 use oxrdf::{NamedNode, Term};
 
 # fn main() -> Result<(), String> {
@@ -52,7 +52,10 @@ let top10 = sim.most_similar(&a, 10);        // Vec<(Term, f64)>, best first, se
 // Build a signature once and reuse it (probe with an arbitrary signature):
 let sig = sim.signature(&a).unwrap();        // Option<Signature>
 let by_sig = sim.similar_by_signature(&sig, 10);
-let _ = (score, top10, by_sig);
+let other_sig = sim.signature(&b).unwrap();
+let dice = dice_coefficient(&sig, &other_sig);
+let overlap = overlap_coefficient(&sig, &other_sig);
+let _ = (score, top10, by_sig, dice, overlap);
 # Ok(()) }
 ```
 
@@ -69,6 +72,11 @@ let _ = (score, top10, by_sig);
   pre-built signature (cache signatures across many queries).
 - `weighted_jaccard(&sig_a, &sig_b) -> f64` — free function for callers that cache
   signatures themselves.
+- `dice_coefficient(&sig_a, &sig_b) -> f64` — weighted Sorensen-Dice coefficient;
+  returns `0` when both signatures have zero total weight.
+- `overlap_coefficient(&sig_a, &sig_b) -> f64` — weighted
+  Szymkiewicz-Simpson coefficient; returns `0` when either signature has zero total
+  weight.
 
 ### Configuration (`SimConfig`)
 
@@ -148,7 +156,8 @@ reward. See the [`vector-search`](../vector-search/SKILL.md) skill for `fuse_sco
   never reach **across** graphs and there is no union-of-all-graphs mode — choose the graph
   (or the default graph) explicitly; the quads are not merged for you.
 
-_(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests.
+_(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests
+on 2026-07-12 [GPT-5.6] for sq-da2bz.
 Workspace v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
 (`#![forbid(unsafe_code)]`). Measured quality/latency gates (same-class precision@10;
 `Predicates`-mode class-separation AUC; `most_similar(k=10)` latency) are enforced by
