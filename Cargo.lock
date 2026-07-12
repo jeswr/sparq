@@ -5102,6 +5102,7 @@ dependencies = [
  "hex",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
+ "proptest",
  "rand_core 0.6.4",
  "serde_json",
  "sha2 0.10.9",
