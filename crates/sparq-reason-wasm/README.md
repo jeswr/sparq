@@ -51,7 +51,7 @@ const selected = Reasoner.reasonN3Query(dataN3, queryN3);
   newly-derived ground triples (the EYE `--pass-only-new` delta); `Reasoner.reasonN3Query(data,
   query)` materialises the closure of `data` then evaluates the N3 query rule(s) as a SPARQL
   `CONSTRUCT` over it (the EYE `--query` filter), failing closed on query builtins/formulae/
-  lists. These back the `@sparq-org/eyereasoner-compat` npm package (the drop-in eye-js API).
+  lists/quoted-triple terms. These back the `@sparq-org/eyereasoner-compat` npm package (the drop-in eye-js API).
 - **`why()` proof trees — opt-in `explain` feature.** Built with `--features explain`,
   the bundle also exposes the derivation **proof tree** for a single entailed triple
   via `Reasoner.why(...)`, returning `sparq-reason`'s flat,
