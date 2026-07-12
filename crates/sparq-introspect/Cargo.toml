@@ -54,6 +54,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 [dev-dependencies]
 # Round-trips the VoID export to assert it is valid N-Triples (subset of Turtle).
 oxttl.workspace = true
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 
 # [OPUS-4.8] sq-aq5 — headless wasm smoke test (`tests/wasm.rs`), mirroring the shipped
 # wasm bundle crates: exercises the real introspection pipeline (build + to_json +
