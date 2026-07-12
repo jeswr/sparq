@@ -4508,6 +4508,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-geo",
  "sparq-jsonld",
  "sparq-reason",
  "sparq-reason-dl",
