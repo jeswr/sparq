@@ -29,8 +29,11 @@
 //!   filtered by a `FILTER`, left unbound by a `BIND`; never a hard query error);
 //! * `geof:distance`'s third argument is a unit IRI ([`crate::geof::Unit`]),
 //!   result `xsd:double`;
+//! * `geof:metricArea`, `metricLength`, and `metricPerimeter` return
+//!   `xsd:double` in square metres / metres;
 //! * the `geof:sf*` relations return `xsd:boolean`;
-//! * `geof:envelope` / `geof:boundary` / `geof:convexHull` return `geo:wktLiteral`;
+//! * `geof:envelope` / `geof:boundary` / `geof:centroid` /
+//!   `geof:convexHull` return `geo:wktLiteral`;
 //! * every [`crate::GeoError`] (WKT parse failure, CRS mismatch, unknown unit, …)
 //!   is the same expression error.
 //!
@@ -417,8 +420,11 @@ fn num_arg(name: &str, args: &[Term], i: usize) -> Result<f64, String> {
     }
 }
 
-/// A [`crate::geof`] unary geometry function (`envelope` / `boundary` / `convex_hull`).
+/// A [`crate::geof`] unary geometry function (`envelope` / `boundary` / `centroid` /
+/// `convex_hull`).
 type GeomUnary = fn(&GeoGeometry) -> Result<GeoGeometry, GeoError>;
+/// A [`crate::geof`] unary numeric measurement function.
+type NumericUnary = fn(&GeoGeometry) -> Result<f64, GeoError>;
 /// A [`crate::geof`] binary set operation (`intersection` / `union` / …).
 type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>;
 
@@ -429,13 +435,16 @@ type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>
 /// Registered IRIs (all under `http://www.opengis.net/def/function/geosparql/`):
 ///
 /// * `distance(g1, g2, unitIri)` -> `xsd:double`;
+/// * `metricArea(g)` -> square-metre `xsd:double`, and `metricLength(g)` /
+///   `metricPerimeter(g)` -> metre `xsd:double`;
 /// * the relation families, all `(g1, g2)` -> `xsd:boolean`: simple features
 ///   `sfEquals sfDisjoint sfIntersects sfTouches sfCrosses sfWithin sfContains
 ///   sfOverlaps`, Egenhofer `ehEquals ehDisjoint ehMeet ehOverlap ehCovers
 ///   ehCoveredBy ehInside ehContains`, RCC8 `rcc8eq rcc8dc rcc8ec rcc8po
 ///   rcc8tppi rcc8tpp rcc8ntpp rcc8ntppi`, plus the generic
 ///   `relate(g1, g2, de9imPattern)`;
-/// * `envelope` / `boundary` / `convexHull` `(g)` -> `geo:wktLiteral`;
+/// * `envelope` / `boundary` / `centroid` / `convexHull` `(g)` ->
+///   `geo:wktLiteral`;
 /// * `buffer(g, radius, unitIri)` -> `geo:wktLiteral` (a MULTIPOLYGON);
 /// * `intersection` / `union` / `difference` / `symDifference` `(g1, g2)` ->
 ///   `geo:wktLiteral` (point-set ops: polygon overlay plus the well-defined
@@ -468,6 +477,21 @@ pub fn geof_registry() -> FunctionRegistry {
         let d = geof::distance(&a, &b, unit).map_err(|e| e.to_string())?;
         Ok(Term::Literal(Literal::from(d)))
     });
+
+    // Metric measurement functions: unary geometry -> xsd:double. [GPT-5.6]
+    // sq-lsp7k.18
+    let measurements: [(&'static str, NumericUnary); 3] = [
+        ("metricArea", geof::metric_area),
+        ("metricLength", geof::metric_length),
+        ("metricPerimeter", geof::metric_perimeter),
+    ];
+    for (name, f) in measurements {
+        reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
+            arity(name, args, 1)?;
+            let g = geom_arg(name, args, 0)?;
+            Ok(Term::Literal(Literal::from(f(&g).map_err(|e| e.to_string())?)))
+        });
+    }
 
     // The relation families: geof:sf* / geof:eh* / geof:rcc8*(?g1, ?g2) -> xsd:boolean.
     // Registered as (matrix predicate) over the shared prepared-aware
@@ -535,9 +559,10 @@ pub fn geof_registry() -> FunctionRegistry {
     });
 
     // The unary geometry functions: geof:*(?g) -> geo:wktLiteral.
-    let unary: [(&'static str, GeomUnary); 3] = [
+    let unary: [(&'static str, GeomUnary); 4] = [
         ("envelope", geof::envelope),
         ("boundary", geof::boundary),
+        ("centroid", geof::centroid),
         ("convexHull", geof::convex_hull),
     ];
     for (name, f) in unary {
@@ -598,9 +623,10 @@ mod tests {
     #[test]
     fn registry_contents() {
         let reg = geof_registry();
-        assert_eq!(reg.len(), 35);
+        assert_eq!(reg.len(), 39);
         for name in [
             "distance", "relate", "getSRID", "buffer",
+            "metricArea", "metricLength", "metricPerimeter", "centroid",
             "sfEquals", "sfDisjoint", "sfIntersects", "sfTouches", "sfCrosses",
             "sfWithin", "sfContains", "sfOverlaps",
             "ehEquals", "ehDisjoint", "ehMeet", "ehOverlap", "ehCovers", "ehCoveredBy",
@@ -612,6 +638,27 @@ mod tests {
         ] {
             assert!(reg.get(&format!("{GEOF_NS}{name}")).is_some(), "missing geof:{name}");
         }
+    }
+
+    #[test]
+    fn measurement_functions_term_level() {
+        let reg = geof_registry();
+        let square = wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+
+        for name in ["metricArea", "metricLength", "metricPerimeter"] {
+            let f = reg.get(&format!("{GEOF_NS}{name}")).unwrap();
+            let Term::Literal(value) = f(std::slice::from_ref(&square)).unwrap() else {
+                panic!("literal")
+            };
+            assert_eq!(value.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+            assert!(value.value().parse::<f64>().unwrap() > 0.0, "geof:{name} returned {value}");
+            assert!(f(&[]).is_err(), "geof:{name} must enforce unary arity");
+        }
+
+        let centroid = reg.get(&format!("{GEOF_NS}centroid")).unwrap();
+        let Term::Literal(value) = centroid(&[square]).unwrap() else { panic!("literal") };
+        assert_eq!(value.datatype().as_str(), WKT_LITERAL);
+        assert!(value.value().contains("0.5"), "got {value}");
     }
 
     #[test]

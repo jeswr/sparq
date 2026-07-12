@@ -89,6 +89,8 @@ bacl = "bacl"            # test-fixture blob key ("blob acl") in ldp/handler.rs 
 onn = "onn"              # deliberate near-miss garbage value in the tls.rs affirmative-env-parse test vector
 
 [default.extend-words]
+# [GPT-5.6] Deliberate one-edit misspelling in the fuzzy-search documentation example.
+quikly = "quikly"
 ND = "ND"                # [OPUS-4.8] "NDAs" (Non-Disclosure Agreements) — typos splits camelCase NDAs into ND+As
 GES = "GES"              # [FABLE-5] "PathGES" (CCS 2024 graph-encryption scheme, research/e2ee-queryable-options.md) — typos splits the camelCase name into Path+GES
 # --- SPARQL / SQL keyword fragments split across table cells or wrapped lines ---
