@@ -1,0 +1,10 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@vocab": "https://www.w3.org/ns/activitystreams#",
+    "id": "@id",
+    "type": "@type",
+    "name": "https://www.w3.org/ns/activitystreams#name"
+  }
+}
+
