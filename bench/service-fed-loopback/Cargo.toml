@@ -1,0 +1,24 @@
+# [GPT-5.6] sq-139od — SERVICE-federation differential driver.
+#
+# This is deliberately a standalone Cargo project. The root workspace never builds
+# this benchmark, so the async server and SERVICE HTTP client remain opt-in: they are
+# linked only when bench/service-fed-loopback/run.sh is invoked.
+[package]
+name = "service-fed-loopback-driver"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sparq-conformance = { path = "../../crates/sparq-conformance", features = ["service-loopback"] }
+sparq-core = { path = "../../crates/sparq-core", default-features = false }
+sparq-engine = { path = "../../crates/sparq-engine", default-features = false, features = ["service"] }
+
+[[bin]]
+name = "service-fed-loopback-driver"
+path = "src/main.rs"
