@@ -1609,6 +1609,7 @@ name = "sparq-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "oxrdf 0.3.3",
  "sparq-canon",
  "sparq-core",
  "sparq-engine",
@@ -1618,6 +1619,7 @@ dependencies = [
  "sparq-jsonld",
  "sparq-reason",
  "sparq-shacl",
+ "sparq-solid",
  "sparq-terse",
  "tempfile",
 ]
@@ -1678,6 +1680,18 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+]
+
+[[package]]
+name = "sparq-solid"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "rustc-hash",
+ "spargebra",
+ "sparq-core",
+ "sparq-engine",
+ "sparq-reason",
 ]
 
 [[package]]

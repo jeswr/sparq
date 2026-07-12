@@ -57,6 +57,8 @@ sparq-core = { path = "../sparq-core", version = "0.1.0" }
 # DEV-only dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
 # (the native writer emits JSON by hand). serde_json is already in the workspace tree.
 serde_json = "1"
+# [GPT-5.6] (sq-wruhj) Property generators for writer/parser round-trip tests only.
+proptest = "1"
 
 # [FABLE-5] (sq-hmd7l.14) The bench/serialize/ comparative-harness runner. Gated on the
 # writer features it exercises, so the default (feature-off) build never compiles it —

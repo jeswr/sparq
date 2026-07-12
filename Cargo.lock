@@ -303,6 +303,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e79b3f8a79cccc2898f31920fc69f304859b3bd567490f75ebf51ae1c792a9ac"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -735,6 +747,25 @@ dependencies = [
  "bytes",
  "memchr",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "console_log"
@@ -1258,6 +1289,7 @@ dependencies = [
  "crc32fast",
  "libz-ng-sys",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -4394,6 +4426,7 @@ name = "sparq-algos"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rustc-hash 2.1.3",
  "sparq-core",
 ]
@@ -4406,6 +4439,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-schema",
  "oxrdf 0.3.3",
+ "proptest",
  "sparq-core",
  "sparq-engine",
 ]
@@ -4474,6 +4508,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-geo",
  "sparq-jsonld",
  "sparq-reason",
  "sparq-reason-dl",
@@ -4540,6 +4575,7 @@ name = "sparq-engine-serialize"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "serde_json",
  "sparq-core",
  "sparq-jsonld",
@@ -4550,6 +4586,7 @@ name = "sparq-engine-service"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "quick-xml 0.41.0",
  "rustc-hash 2.1.3",
  "serde",
@@ -4565,6 +4602,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "rustc-hash 2.1.3",
+ "serde",
  "serde_json",
  "spargebra",
  "sparq-core",
@@ -4580,6 +4618,7 @@ name = "sparq-fedplan"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "foldhash 0.1.5",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "rustc-hash 2.1.3",
@@ -4599,6 +4638,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "oxrdf 0.3.3",
+ "proptest",
  "serde",
  "serde_json",
  "sparq-core",
@@ -4645,6 +4685,7 @@ dependencies = [
  "crc",
  "flate2",
  "hdt",
+ "proptest",
  "rayon",
  "serde_json",
  "sparq-core",
@@ -4670,6 +4711,13 @@ dependencies = [
 [[package]]
 name = "sparq-jsonld"
 version = "0.1.0"
+
+[[package]]
+name = "sparq-jsonld-registry"
+version = "0.1.0"
+dependencies = [
+ "sparq-jsonld",
+]
 
 [[package]]
 name = "sparq-kb"
@@ -4754,6 +4802,7 @@ dependencies = [
 name = "sparq-metamorph"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "serde",
  "serde_json",
  "sparq-core",
@@ -4814,6 +4863,7 @@ version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
+ "proptest",
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
@@ -4852,9 +4902,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-reason-diff"
+version = "0.1.0"
+dependencies = [
+ "sparq-core",
+ "sparq-reason",
+]
+
+[[package]]
 name = "sparq-reason-dl"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "oxrdf 0.3.3",
  "rustc-hash 2.1.3",
  "sparq-core",
@@ -4880,6 +4939,8 @@ dependencies = [
  "oxttl 0.2.3",
  "rustc-hash 2.1.3",
  "spargebra",
+ "sparq-core",
+ "sparq-engine",
 ]
 
 [[package]]
@@ -4900,6 +4961,7 @@ name = "sparq-rsp"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
@@ -5002,6 +5064,7 @@ name = "sparq-sim"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rustc-hash 2.1.3",
  "serde_json",
  "sparq-core",
@@ -5043,6 +5106,7 @@ name = "sparq-terse"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "spargebra",
  "sparq-core",
  "sparq-nlq",
@@ -5100,6 +5164,7 @@ dependencies = [
  "hex",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
+ "proptest",
  "rand_core 0.6.4",
  "serde_json",
  "sha2 0.10.9",
@@ -5115,6 +5180,7 @@ dependencies = [
  "instant-distance",
  "memmap2",
  "oxrdf 0.3.3",
+ "proptest",
  "rayon",
  "reqwest",
  "rustc-hash 2.1.3",
@@ -5545,8 +5611,10 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
 dependencies = [
+ "async-compression",
  "bitflags",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
@@ -5554,6 +5622,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -6782,6 +6851,12 @@ dependencies = [
  "quote 1.0.45",
  "syn",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
 
 [[package]]
 name = "zmij"

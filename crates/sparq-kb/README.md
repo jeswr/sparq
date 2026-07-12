@@ -18,14 +18,14 @@ sparq_kb::PKG_SHAPES     // shapes/pkg.shapes.ttl     — the SHACL write-time g
 sparq_kb::PKG_EXAMPLE    // examples/pkg-example.ttl  — a tiny instance file
 sparq_kb::PKG_FINDINGS   // ingest/agents-findings.ttl — the write-path-compiled tier
 sparq_kb::PKG_INSTANCES  // ingest/pkg-instances.ttl  — the Phase-1 ingested graph
+sparq_kb::PKG_TRUST_GRAPH_FINDINGS // ingest/trust-graph-findings.ttl — sq-7utko tier
 sparq_kb::vocab::*       // the pkg: IRIs as constants, pinned against the Turtle
 ```
 
 Dogfood the guardrails with sparq's own SHACL engine (opt-in `validate` feature):
-`cargo test -p sparq-kb --features validate` loads the ontology + example instances, runs
-`pkg.shapes.ttl` via `sparq-shacl`, and asserts the valid Findings/Tasks PASS while the
-deliberately invalid ones (missing source/confidence, out-of-enum status, stale edge) are
-REPORTED.
+`cargo test -p sparq-kb --features validate` loads the ontology + example instances,
+runs `pkg.shapes.ttl` via `sparq-shacl`, and asserts the valid Findings/Tasks PASS
+while the deliberately invalid ones (missing source/confidence, stale edge) are REPORTED.
 
 ## 🧪 Phase-1 ingestion PoC (`sq-2m6zm.2`)
 

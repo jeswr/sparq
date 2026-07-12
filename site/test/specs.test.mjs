@@ -7,7 +7,7 @@
 // Run via `npm run test:unit`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +33,34 @@ test("the specs registry round-trips: unique slugs, existing sources, labelled s
 
 test("specBySlug returns undefined for an unknown slug", () => {
   assert.equal(specBySlug("does-not-exist"), undefined);
+});
+
+// [FABLE-5] sq-q4jdu — the trust-graph-authz draft's honesty caveats are LOAD-BEARING
+// (the bead's acceptance gate): the source must (a) resolve from the registry, (b) carry
+// the explicit no-ZK/privacy/unlinkability disclaimer and the sq-qhy4 external-audit-pending
+// caveat, and (c) hard-code no timing/perf figure (the spec factory's perf gate enforces the
+// number class; this pins the unit-level regression for the phrases).
+test("trust-graph-authz: registered, and its honesty caveats are present in the source", () => {
+  const spec = specBySlug("trust-graph-authz");
+  assert.ok(spec, "specBySlug('trust-graph-authz') must resolve");
+  const src = readFileSync(join(SITE, "specs", spec.source), "utf8");
+  assert.match(
+    src,
+    /no ZK, privacy, or unlinkability claim/,
+    "the explicit 'no ZK, privacy, or unlinkability claim' disclaimer must be present",
+  );
+  assert.match(
+    src,
+    /sq-qhy4/,
+    "the sq-qhy4 external-audit-pending caveat must be present",
+  );
+  assert.match(src, /clear-path/i, "the clear-path-only framing must be present");
+  // No hard-coded timing figures (ms/µs/ns latencies or throughput-per-second numbers).
+  assert.doesNotMatch(
+    src,
+    /\d+(?:\.\d+)?\s*(?:ns|µs|us|ms)\b|\d+\s*(?:ops|queries|req|triples)\/s/i,
+    "a spec is a design surface, not a benchmark — no hard-coded timing figures",
+  );
 });
 
 test("injectTocAndIds slugs numbered headings and builds a linked ToC", () => {

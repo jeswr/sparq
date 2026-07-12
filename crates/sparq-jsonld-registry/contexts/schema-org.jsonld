@@ -1,0 +1,11 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@vocab": "https://schema.org/",
+    "id": "@id",
+    "type": "@type",
+    "name": "https://schema.org/name",
+    "Person": "https://schema.org/Person"
+  }
+}
+

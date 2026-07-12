@@ -238,7 +238,7 @@ fn wac_differential_oracle_zero_divergence() {
         DIVERGENCE_FLOOR
     );
 
-    // Guard against a corpus that silently checks nothing: the floor is the same 12
+    // Guard against a corpus that silently checks nothing: the pinned scenario floor
     // scenarios × multiple requests the conformance suite asserts.
     assert_eq!(
         scenarios.len(),
