@@ -7,13 +7,14 @@
 >
 > [GPT-5.6] Bead `sq-lsp7k.16` adds the checked inverse, `from_record_batch`.
 > [GPT-5.6] Bead `sq-lsp7k.21` adds Parquet byte serialization over that same schema.
+> [GPT-5.6] Bead `sq-r3cab` adds Arrow IPC stream byte serialization.
 
 **Opt-in / lean-core by construction.** This is a separate leaf crate, and Arrow
 import/export sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
 closure NEVER enters `sparq-core` / `sparq-engine` / the wasm bundle; nothing in the
-workspace default build depends on it. Parquet byte serialization is a second opt-in
-layer (`parquet`, which implies `arrow`). The default build of *this* crate pulls no
-Arrow or Parquet code at all — only the dependency-free field-name constants and the
+workspace default build depends on it. Parquet and IPC byte serialization are additional
+opt-in layers (`parquet` and `ipc`, each implying `arrow`). The default build of *this* crate
+pulls no Arrow container code — only the dependency-free field-name constants and the
 schema docs.
 
 ## 🚀 Quickstart
@@ -55,6 +56,10 @@ assert_eq!(restored.rows, result.rows);
 Use `cargo add sparq-arrow --features parquet` (or
 `cargo build -p sparq-arrow --features parquet`); `parquet` implies `arrow`.
 
+For an Arrow IPC stream instead, enable the default-OFF `ipc` feature and call
+`to_ipc_bytes(&result)` / `from_ipc_bytes(&bytes)`. The stream uses the same term-struct
+schema and preserves empty-result variables. Use `cargo add sparq-arrow --features ipc`.
+
 ## ✨ The RDF-term → Arrow mapping
 
 Arrow has no native RDF-term type, so the export widens each term into a **struct** —
@@ -79,6 +84,7 @@ metadata return `ArrowError`; they never panic or silently select a fallback ter
 `to_parquet_bytes` writes this exact RecordBatch schema into a Parquet container, and
 `from_parquet_bytes` validates the recovered schema before decoding any row. Empty
 results retain their variable projection, and multiple row groups keep file order.
+`to_ipc_bytes` and `from_ipc_bytes` provide the equivalent checked Arrow IPC stream.
 
 ## 📚 Honest boundary / caveats
 
@@ -92,8 +98,8 @@ results retain their variable projection, and multiple row groups keep file orde
 - **Triple terms are stringified** to N-Triples in `value` (`kind = "triple"`), not
   exploded into nested struct fields.
 - This is a **projection for transport**, not a canonical RDF serialisation: the Arrow
-  batch and its Parquet container are not RDF documents. `from_record_batch` and
-  `from_parquet_bytes` are checked inverses of their corresponding exporters.
+  batch and its Parquet or IPC containers are not RDF documents. Each importer is a
+  checked inverse of its corresponding exporter.
 - **Python binding.** Issue #910 frames a `sparq-py` `Graph.query_arrow() ->
   pyarrow.Table` over this export; that PyO3 binding lives in the opt-in `arrow` feature
   of `sparq-py` (bead `sq-lt1ml`) — it reuses `to_record_batch` here and bridges the

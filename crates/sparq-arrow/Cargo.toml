@@ -40,6 +40,8 @@ arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
 # [GPT-5.6] Parquet is a second opt-in layer over the Arrow term-struct projection.
 # Enabling it necessarily enables `arrow`; without it, the Parquet dependency is absent.
 parquet = ["arrow", "dep:bytes", "dep:parquet"]
+# [GPT-5.6] Arrow IPC streams are another opt-in container over the term projection.
+ipc = ["arrow", "dep:arrow-ipc"]
 
 [dependencies]
 # The SELECT result we project (`QueryResult { vars, rows }`). Always present — the
@@ -59,6 +61,8 @@ arrow-schema = { version = "59", optional = true }
 # `NullBuffer` for the per-row struct validity (unbound cells). It is `arrow-array`'s
 # own dependency; named directly because the code references `arrow_buffer::NullBuffer`.
 arrow-buffer = { version = "59", optional = true }
+# Arrow IPC stream serialization only; the `arrow` feature supplies RecordBatch values.
+arrow-ipc = { version = "59", optional = true }
 # Parquet serialization only; the `arrow` feature provides RecordBatch integration.
 # Compression codecs stay disabled so this opt-in surface pulls the narrowest closure.
 parquet = { version = "59", optional = true, default-features = false, features = ["arrow"] }

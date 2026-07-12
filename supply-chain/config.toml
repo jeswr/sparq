@@ -109,7 +109,7 @@ criteria = "safe-to-deploy"
 [[exemptions.arrow-ipc]]
 version = "59.0.0"
 criteria = "safe-to-deploy"
-notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+notes = "Opt-in sparq-arrow Parquet closure and direct Arrow IPC stream dependency; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.arrow-schema]]
 version = "59.0.0"
