@@ -75,6 +75,11 @@ pub mod compose;
 pub mod fuse;
 pub mod import;
 pub mod labels;
+// [GPT-5.6] sq-lsp7k.25: deterministic `.spqv` v4 metadata-block codec. Private implementation;
+// the public surface is `VectorStore::{put_with_meta,meta}` + `nearest_exact_with_meta`, all behind
+// the default-OFF `metadata-sidecar` feature.
+#[cfg(feature = "metadata-sidecar")]
+mod metadata;
 pub mod quant;
 // [FABLE-5] sq-lhcot.1 (GenAI review gap 1; spec estate sq-rvgr2.4): the `.spqv` v3 EMBEDDING
 // PROVENANCE record (model id / model+content version / metric / normalization / verbalization
@@ -173,6 +178,8 @@ pub mod prov_vocab {
     pub const VERBALIZATION: &str = "http://sparq.dev/spqv-prov#verbalization";
 }
 
+#[cfg(feature = "metadata-sidecar")]
+pub use ann::nearest_exact_with_meta;
 pub use ann::{cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked};
 // [OPUS-4.8] (sq-ip3a) The in-RAM HNSW index is the approximate backend — `approx-ann` only
 // (the only feature pulling `instant-distance`). The default build re-exports just the exact
