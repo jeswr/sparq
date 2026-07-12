@@ -2183,7 +2183,11 @@ jobs:
         # separately, never summed in). `--nocapture` so the ratchet line reaches stdout.
         run: |
           set -uo pipefail
-          cargo test -p sparq-conformance --features el-suite --test el_suite -- --nocapture \
+          # [FABLE-5] sq-wy3i6: `el-suite-par` ADDS the parallel-saturation differential
+          # (classify_graph_par at 1/2/8 threads must reproduce the sequential closure on
+          # every selected W3C EL case). Floor accounting is unchanged — the ratchet still
+          # runs on the sequential engine; a par divergence panics the case, turning the lane red.
+          cargo test -p sparq-conformance --features el-suite,el-suite-par --test el_suite -- --nocapture \
             | tee el-suite-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 EL lane test failed (exit $rc)"; exit "$rc"; }

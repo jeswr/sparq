@@ -9,8 +9,12 @@
 //! `cdomain` feature `cdomain` (CR7–CR9 concrete-domain facet satisfiability on the
 //! shared `sparq_substrate::numeric` value tower), and under the `abox` feature `abox`
 //! (ABox assertion internalization as safe nominals + the realisation readoff — the
-//! `realize` / `realize_graph` entry points, code spans not intra-doc links so this
-//! always-compiled note stays clean under the no-`--all-features` rustdoc check).
+//! `realize` / `realize_graph` entry points). Under the `par` feature (Phase E4) the
+//! `Classifier::classify_par` / `classify_graph_par` entries run the same saturation as
+//! deterministic bulk-synchronous parallel rounds with an identical derived closure at
+//! every thread count (all the feature-gated names here are code spans, not intra-doc
+//! links, so this always-compiled note stays clean under the no-`--all-features`
+//! rustdoc check).
 
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Dict, Id};
@@ -234,6 +238,27 @@ impl Classifier {
         let cls = classify::classify(&sat, &ex.names);
         hierarchy_from(cls, &ex.names, ex.report)
     }
+
+    /// [FABLE-5] sq-wy3i6 (Phase E4, `par`): like [`Classifier::classify`] but the CR
+    /// saturation runs on a bounded pool of up to `threads` scoped workers (deterministic
+    /// bulk-synchronous rounds — see the E4 design note in `classify.rs`). The derived
+    /// subsumption closure — and therefore the returned hierarchy — is IDENTICAL to the
+    /// single-threaded path for every `threads` value; `threads = 1` drives the same rule
+    /// kernel through the round loop with no spawned worker. Native targets only (do not
+    /// enable `par` for wasm, where `std::thread` cannot spawn — the default build stays
+    /// single-threaded, which is exactly why `par` is opt-in).
+    #[cfg(feature = "par")]
+    pub fn classify_par(
+        dict: &Dict,
+        triples: &[[Id; 3]],
+        threads: std::num::NonZeroUsize,
+    ) -> ClassHierarchy {
+        // Same TBox-only extraction contract as `classify` above.
+        let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+        let sat = saturate_extracted_par(&ex, threads);
+        let cls = classify::classify(&sat, &ex.names);
+        hierarchy_from(cls, &ex.names, ex.report)
+    }
 }
 
 /// Runs the CR saturation for an [`extract::Extracted`], branching on the `rbox` feature to build
@@ -249,6 +274,26 @@ pub(crate) fn saturate_extracted(ex: &extract::Extracted) -> classify::Saturatio
     #[cfg(not(feature = "rbox"))]
     {
         classify::saturate(&ex.axioms, &ex.names)
+    }
+}
+
+/// [FABLE-5] sq-wy3i6 (E4): the parallel twin of [`saturate_extracted`] — same `rbox`
+/// branching, but the fixpoint runs on the bounded scoped-worker pool. Kept structurally
+/// parallel to `saturate_extracted` so the two entry families cannot drift on the role-box
+/// wiring.
+#[cfg(feature = "par")]
+pub(crate) fn saturate_extracted_par(
+    ex: &extract::Extracted,
+    threads: std::num::NonZeroUsize,
+) -> classify::Saturation {
+    #[cfg(feature = "rbox")]
+    {
+        let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
+        classify::saturate_par(&ex.axioms, &ex.names, &role_box, threads)
+    }
+    #[cfg(not(feature = "rbox"))]
+    {
+        classify::saturate_par(&ex.axioms, &ex.names, threads)
     }
 }
 
@@ -311,7 +356,37 @@ pub fn classify_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> Report {
     // same `ExtractOpts::default()` — never internalizes ABox assertions).
     let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
     let sat = saturate_extracted(&ex);
-    let cls = classify::classify(&sat, &ex.names);
+    materialize_lattice(dict, triples, &ex, &sat)
+}
+
+/// [FABLE-5] sq-wy3i6 (Phase E4, `par`): like [`classify_graph`] but the CR saturation runs on
+/// a bounded pool of up to `threads` scoped workers. The emitted triples — content AND order —
+/// are IDENTICAL to [`classify_graph`]'s for every `threads` value: the parallel fixpoint
+/// reaches the same closure (see the E4 design note in `classify.rs`) and the shared
+/// materialization sorts before emitting. Native targets only (see `Classifier::classify_par`).
+#[cfg(feature = "par")]
+pub fn classify_graph_par(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    threads: std::num::NonZeroUsize,
+) -> Report {
+    let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+    let sat = saturate_extracted_par(&ex, threads);
+    materialize_lattice(dict, triples, &ex, &sat)
+}
+
+/// The shared `classify_graph` / `classify_graph_par` tail: project the saturation onto named
+/// classes, append the derived `rdfs:subClassOf` triples in deterministic sorted order (+ the
+/// `rbox` role-lattice readoff), and fill the [`Report`] counts. Factored out (sq-wy3i6) so the
+/// sequential and parallel entries cannot drift on emission/dedup/ordering behaviour —
+/// behaviour-identical to the pre-E4 inline tail.
+fn materialize_lattice(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    ex: &extract::Extracted,
+    sat: &classify::Saturation,
+) -> Report {
+    let cls = classify::classify(sat, &ex.names);
     let hierarchy = hierarchy_from(cls, &ex.names, ex.report);
 
     let sub_class_of = dict.intern_iri(RDFS_SUB_CLASS_OF);
@@ -339,7 +414,7 @@ pub fn classify_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> Report {
     // RoleBox a second time (cheap: O(role_count) BFS over a tiny graph) to read off
     // `super_of` without changing `saturate_extracted`'s internal structure.
     #[cfg(feature = "rbox")]
-    let emitted_roles = emit_role_pairs(dict, &ex, &mut present, triples);
+    let emitted_roles = emit_role_pairs(dict, ex, &mut present, triples);
 
     let mut report = hierarchy.report;
     report.emitted_subsumptions = emitted;
