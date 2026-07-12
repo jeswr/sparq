@@ -175,7 +175,11 @@ el-suite-par = ["el-suite", "sparq-reason-el/par"]
 # folded into standards-conformance totals; the dual-tagged tests' RDF-Based runs stay in
 # the owl_suite / el-suite lanes (separate semantics). When OFF the lane compiles to a
 # single self-SKIP `#[test]`. Pure-Rust, no new third-party deps.
-dl-direct = ["dep:sparq-reason-dl", "sparq-reason-dl/dispatch"]
+# [GPT-5.6] sq-zfwzq: the arm also enables the opt-in transitive-roles extension
+# (`sparq-reason-dl/dl_transitive`), graduating the corpus's transitive consistency /
+# entailment / profile cases from fail-closed abstentions to definitive verdicts (floors
+# re-pinned with the per-mechanism evidence in `tests/dl_suite.rs`).
+dl-direct = ["dep:sparq-reason-dl", "sparq-reason-dl/dispatch", "sparq-reason-dl/dl_transitive"]
 
 # [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 # OPT-IN and OFF by default: it stands up a REAL `sparq_server::serve` endpoint on an

@@ -844,3 +844,27 @@ fn ql_accept_property_domain_some_thing() {
          (QL §3.2.5 domain := superCE; ∃S.⊤ is valid per §3.2.3)"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`)
+// -------------------------------------------------------------------------------------------
+
+/// TransitiveObjectProperty per the W3C profile grammars: IN EL (§2), NOT in QL (§3 —
+/// transitivity is excluded), IN RL (§4).
+#[cfg(feature = "dl_transitive")]
+#[test]
+fn transitive_object_property_profile_membership() {
+    let onto = Ontology {
+        axioms: vec![Axiom::TransitiveObjectProperty {
+            property: OPE::ObjectProperty(10),
+        }],
+    };
+    let ps = profiles(&onto);
+    assert!(ps.el.is_in(), "TransitiveObjectProperty is EL (§2)");
+    assert!(
+        matches!(&ps.ql, Membership::NotIn(reason) if reason.contains("Transitive")),
+        "TransitiveObjectProperty is NOT QL (§3), got {:?}",
+        ps.ql
+    );
+    assert!(ps.rl.is_in(), "TransitiveObjectProperty is RL (§4)");
+}

@@ -170,6 +170,12 @@ fn collect_property_ids(axiom: &Axiom, out: &mut FxHashSet<Id>) {
         Axiom::ClassAssertion { class, .. } => {
             collect_property_ids_in_ce(class, out);
         }
+        // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): the transitive property is a named
+        // object property — declare it like every other one.
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { property } => {
+            out.insert(prop_id(property));
+        }
     }
 }
 
@@ -325,6 +331,18 @@ fn emit_axiom(
         Axiom::ObjectPropertyAssertion { property, source, target } => {
             let p = prop_id(property);
             out.push([*source, p, *target]);
+        }
+
+        // `property rdf:type owl:TransitiveProperty` — the exact shape the extractor's
+        // opt-in `dl_transitive` arm reads back (round-trip closed; the property's
+        // `owl:ObjectProperty` declaration is emitted by the pre-pass like every other
+        // property). [GPT-5.6] sq-zfwzq
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { property } => {
+            let s = prop_id(property);
+            let p = rdf(dict, "type");
+            let o = owl(dict, "TransitiveProperty");
+            out.push([s, p, o]);
         }
     }
 }
@@ -1012,4 +1030,27 @@ mod tests {
         let triples = render_to_triples(&onto, &mut dict);
         assert_eq!(triples.len(), 6, "expected 6 triples for SubClassOf(S, A⊓B)");
     }
+
+    /// Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`): a
+    /// `TransitiveObjectProperty` axiom renders as `p rdf:type owl:TransitiveProperty`
+    /// (plus the uniform `owl:ObjectProperty` declaration) and round-trips to an EQUAL
+    /// structural model — including alongside a role assertion over the same property.
+    #[cfg(feature = "dl_transitive")]
+    #[test]
+    fn round_trip_transitive_object_property() {
+        let (onto1, onto2) = round_trip(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             <http://ex/r> a owl:TransitiveProperty .\n\
+             <http://ex/a> <http://ex/r> <http://ex/b> .",
+        );
+        assert_eq!(onto1, onto2, "round-trip: TransitiveObjectProperty + role assertion");
+        assert!(
+            onto1
+                .axioms
+                .iter()
+                .any(|a| matches!(a, Axiom::TransitiveObjectProperty { .. })),
+            "the transitivity axiom must survive the round trip"
+        );
+    }
+
 }

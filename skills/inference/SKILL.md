@@ -367,6 +367,28 @@ ALCH fragment (named classes, ⊤/⊥, ⊓/⊔/¬, ∃/∀ over named properties
 ground ABox) — never beyond it; the implementation is not claimed worst-case optimal (ALC+GCI
 satisfiability is EXPTIME-complete).
 
+**Opt-in transitive roles (`dl_transitive` cargo feature, OFF by default, bead sq-zfwzq
+[GPT-5.6]):** extends the fragment to **ALCH + transitive roles** (Horrocks–Sattler *S with
+role hierarchies* — still NO inverses / cardinality / nominals, which stay fail-closed): L1
+recognises `owl:TransitiveProperty` as the feature-gated `Axiom::TransitiveObjectProperty`
+(instead of refusing it), L2 classifies it per the profile grammars (IN EL §2, NOT-in QL §3,
+IN RL §4), and the L3 tableau adds the **∀₊-propagation rule** (`∀R.C` at `x`, edge `x –S→ y`,
+transitive `T` with `S ⊑* T ⊑* R` ⇒ add `∀T.C` at `y`) with the termination / soundness /
+completeness argument EXTENDED AND WRITTEN OUT in `tableau.rs` module docs **§5a** (subset
+blocking is UNCHANGED — sufficient precisely because there are still no inverses; the model
+construction interprets `R^I = E(R) ∪ ⋃ E(T)⁺`). L4 dispatch routes any transitive ontology
+STRAIGHT to the tableau (the only transitivity-complete branch; the RL/EL guards also
+recognise the axiom kind fail-closed as defence in depth); a transitivity CONCLUSION in
+entailment is decided by the two-step-chain refutation encoding (`O ⊨ Trans(R)` iff
+`O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` unsatisfiable — argued in `check.rs`). With the feature
+enabled, a declaration-free conclusion role assertion may reuse a role kind established by
+a transitivity-bearing premise; the checker adds only semantically inert declarations for
+premise-confirmed roles during conclusion extraction and never guesses an unknown predicate.
+With the feature OFF the crate compiles to exactly the pre-extension code (fail-closed refusal). The
+`sparq-conformance` `dl-direct` arm enables it, graduating the corpus's transitive
+consistency/entailment cases from abstentions to definitive verdicts (floors re-pinned with
+evidence in `tests/dl_suite.rs`).
+
 **L4 — fragment-dispatch checker + entailment-by-refutation (`check`, opt-in `dispatch`
 feature, bead sq-pbz04.4.4):** NOW BUILT. `check::DirectChecker` (constructed with `new()` or
 `with_budget(Budget)`) dispatches an extracted ontology IN ORDER — RL (via `sparq-reason`

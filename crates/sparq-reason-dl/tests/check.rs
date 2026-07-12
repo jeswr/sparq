@@ -524,6 +524,110 @@ fn entailment_empty_conclusion_is_trivially_entailed() {
 }
 
 // -------------------------------------------------------------------------------------------
+// Opt-in transitive roles ([GPT-5.6] sq-zfwzq, features `dispatch` + `dl_transitive`)
+// -------------------------------------------------------------------------------------------
+
+#[cfg(feature = "dl_transitive")]
+mod transitive {
+    use super::*;
+
+    /// Dispatch: a transitive ontology routes to the ALCH+S tableau — the only branch whose
+    /// soundness/completeness argument covers transitivity — even though its axioms are
+    /// syntactically in-RL/in-EL, and gets a DEFINITIVE verdict there.
+    #[test]
+    fn transitive_ontology_routes_to_tableau_with_definitive_verdict() {
+        let (mut d, t) = parse(
+            ":r a owl:TransitiveProperty .\n\
+             :a :r :b . :b :r :c .",
+        );
+        let out = DirectChecker::new().consistency(&mut d, &t);
+        assert_eq!(out.branch, Branch::AlchTableau);
+        assert_eq!(out.verdict, ConsistencyVerdict::Consistent);
+    }
+
+    /// LOAD-BEARING entailment (hand-derived): `{Trans(r), r(a,b), r(b,c)} ⊨ r(a,c)` — the
+    /// classic transitive-chain composition, decided through the fresh-class refutation on
+    /// the ∀₊-extended tableau. The control (same premise minus `Trans(r)`) is definitively
+    /// NotEntailed: the pair is the mutation witness (knocking out the ∀₊-propagation, or
+    /// the transitivity extraction, flips the Entailed verdict).
+    #[test]
+    fn transitive_chain_role_assertion_entailed_and_control_not_entailed() {
+        let premise_trans = ":r a owl:TransitiveProperty .\n:a :r :b . :b :r :c .";
+        let premise_plain = ":r a owl:ObjectProperty .\n:a :r :b . :b :r :c .";
+        // Deliberately omit the semantically-inert declaration from the conclusion, as the
+        // W3C DIRECT transitive-chain cases do. Entailment reuses only the premise-confirmed
+        // role kind for fail-closed conclusion extraction.
+        let conclusion = ":a :r :c .";
+
+        let (mut d, prem, concl) = parse_two(premise_trans, conclusion);
+        let out = DirectChecker::new().entailment(&mut d, &prem, &concl);
+        assert_eq!(out.verdict, EntailmentVerdict::Entailed);
+        assert_eq!(out.branch, Branch::AlchTableau);
+
+        let (mut d, prem, concl) = parse_two(
+            premise_plain,
+            ":r a owl:ObjectProperty .\n:a :r :c .",
+        );
+        let out = DirectChecker::new().entailment(&mut d, &prem, &concl);
+        assert_eq!(
+            out.verdict,
+            EntailmentVerdict::NotEntailed,
+            "without Trans(r) the composed edge is not entailed — the load-bearing control"
+        );
+    }
+
+    /// A TRANSITIVITY conclusion is decided by the two-step-chain refutation encoding
+    /// (`O ⊨ Trans(r)` iff `O ∪ {r(a,b), r(b,c), B(c), (∀r.¬B)(a)}` is unsatisfiable —
+    /// check.rs module docs, sq-zfwzq): a declared `Trans(r)` premise entails it, a plain
+    /// object property does NOT (definitive NotEntailed — the mutation witness for the
+    /// encoding: dropping the ∀₊-rule or the encoding itself flips the Entailed side).
+    #[test]
+    fn transitivity_conclusion_entailed_and_control_not_entailed() {
+        let concl = ":r a owl:TransitiveProperty .";
+        let (mut d, prem, concl_t) = parse_two(":r a owl:TransitiveProperty .", concl);
+        let out = DirectChecker::new().entailment(&mut d, &prem, &concl_t);
+        assert_eq!(out.verdict, EntailmentVerdict::Entailed);
+        assert_eq!(out.branch, Branch::AlchTableau);
+
+        let (mut d, prem, concl_p) = parse_two(":r a owl:ObjectProperty .", concl);
+        let out = DirectChecker::new().entailment(&mut d, &prem, &concl_p);
+        assert_eq!(
+            out.verdict,
+            EntailmentVerdict::NotEntailed,
+            "a plain object property is not entailed transitive — the load-bearing control"
+        );
+    }
+
+    /// The transitivity-conclusion encoding is SEMANTIC, not a syntactic premise match:
+    /// `{⊤ ⊑ ∀r.⊥}` forces `r` empty in every model, so `r` is (vacuously) transitive —
+    /// Entailed even though the premise never mentions `owl:TransitiveProperty`.
+    #[test]
+    fn transitivity_conclusion_entailed_semantically_for_empty_role() {
+        let (mut d, prem, concl) = parse_two(
+            ":r a owl:ObjectProperty .\n\
+             owl:Thing rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; \
+             owl:allValuesFrom owl:Nothing ] .",
+            ":r a owl:TransitiveProperty .",
+        );
+        let out = DirectChecker::new().entailment(&mut d, &prem, &concl);
+        assert_eq!(out.verdict, EntailmentVerdict::Entailed);
+    }
+
+    /// Transitive SUBROLE through the hierarchy, end-to-end: `{Trans(s), s ⊑ r, s(a,b),
+    /// s(b,c)} ⊨ r(a,c)` (the composed s-edge is also an r-edge via the hierarchy).
+    #[test]
+    fn transitive_subrole_composition_entailed_through_hierarchy() {
+        let (mut d, prem, concl) = parse_two(
+            ":s a owl:TransitiveProperty .\n:s rdfs:subPropertyOf :r .\n\
+             :r a owl:ObjectProperty .\n:a :s :b . :b :s :c .",
+            ":r a owl:ObjectProperty .\n:a :r :c .",
+        );
+        let out = DirectChecker::new().entailment(&mut d, &prem, &concl);
+        assert_eq!(out.verdict, EntailmentVerdict::Entailed);
+    }
+}
+
+// -------------------------------------------------------------------------------------------
 // Conclusion anonymous individuals — existential reading + rolling-up ([OPUS-4.8] sq-pbz04.4.13)
 // -------------------------------------------------------------------------------------------
 
