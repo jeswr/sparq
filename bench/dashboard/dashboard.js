@@ -2056,6 +2056,11 @@
       aliases: ['python-bindings-bench', 'python_bindings_bench', 'pythonbindingsbench', 'python'],
       note: 'Correctness-gated binding-overhead card: result counts must agree before timing. '
           + 'Binding latency rows are non-canonical trend signals.' },
+    // [GPT-5.6] sq-l8c05: comparative serialization and FedShop-shaped federation panels.
+    { key: 'serialize-bench', title: 'Serialization throughput',
+      aliases: ['serialize-bench', 'serialize_bench', 'serializebench', 'serialize'] },
+    { key: 'federation-fedshop', title: 'Federation comparison — FedShop-shaped',
+      aliases: ['federation-fedshop', 'federation_fedshop', 'federationfedshop', 'federation'] },
     // [OPUS-4.8] sq-5o5.3: PROMOTE the ZK estate to a featured card (the maintainer treats ZK as a
     // genuine differentiator, unlike the trend-only suites). One card groups the whole estate: the
     // `zk-compose` circuit-gate counts (zk_compose_<member>_gates) + the `zk` commitment-pipeline
