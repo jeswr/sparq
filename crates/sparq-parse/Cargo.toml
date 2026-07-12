@@ -38,3 +38,9 @@ flate2 = "1"
 zstd = "0.13"
 # Parallel chunk compression (CompressedSink Mode::Parallel).
 rayon = { workspace = true }
+
+[dev-dependencies]
+# Property tests for codec/member round-trip and concatenation invariants. This
+# stays test-only and uses the workspace's existing proptest supply-chain
+# exemption.
+proptest = "1"

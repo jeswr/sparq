@@ -52,7 +52,9 @@ use crate::ldp::patch::{
 };
 use crate::ldp::range::{self, RangeOutcome};
 use crate::ldp::target::{parse_target, LdpTarget};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::notifications::ws::link_headers;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::notifications::{ActivityType, NotificationHub};
 use crate::store::{DeleteOutcome, Resource, ResourceMeta, Store};
 
@@ -137,7 +139,7 @@ fn unchecked_const_iri(iri: &str) -> NamedNode {
 /// Shared state for the LDP handlers: the store + the server's public base URL + the notification hub.
 ///
 /// The hub is the SINGLE emit seam: after a successful mutation the handler calls
-/// [`NotificationHub::notify`] (the only notification coupling in the write path — no handler
+/// `NotificationHub::notify` (the only notification coupling in the write path — no handler
 /// refactor). The hub is cheap to clone (an `Arc` inside) and shared with the notification routes.
 pub struct LdpState<S: Store> {
     pub store: S,
@@ -149,9 +151,10 @@ pub struct LdpState<S: Store> {
     /// cache atomically. Internal `self.base_url` reads within this module are fine (the field stays
     /// in scope of the impl).
     base_url: String,
+    #[cfg(not(target_arch = "wasm32"))]
     pub notifications: NotificationHub,
     /// The `WWW-Authenticate` challenge to emit on a 401 for an anonymous request to a resource that
-    /// requires authentication. Populated from the [`AuthContext`](crate::auth::AuthContext) at router
+    /// requires authentication. Populated from the `AuthContext` at router
     /// assembly ([`AppState::new`](crate::app::AppState::new)) so the LDP layer can answer 401 +
     /// challenge WITHOUT a handle to the verifier; a default Bearer/DPoP challenge is used if unset.
     pub www_authenticate: String,
@@ -182,6 +185,7 @@ pub struct LdpState<S: Store> {
 /// `add_discovery_links` formatting EXACTLY (`<{target}>; rel="{rel}"` per `link_headers` pair,
 /// skipping any value that cannot be header-encoded), so the emitted lines are byte-identical — only
 /// computed once per server instead of once per request.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_discovery_link_values(base_url: &str) -> Vec<HeaderValue> {
     link_headers(base_url)
         .into_iter()
@@ -189,6 +193,11 @@ fn build_discovery_link_values(base_url: &str) -> Vec<HeaderValue> {
             HeaderValue::from_str(&format!("<{target}>; rel=\"{rel}\"")).ok()
         })
         .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_discovery_link_values(_base_url: &str) -> Vec<HeaderValue> {
+    Vec::new()
 }
 
 /// The fallback `WWW-Authenticate` challenge used when no verifier-derived one was injected (e.g. a
@@ -199,11 +208,27 @@ const DEFAULT_WWW_AUTHENTICATE: &str = "DPoP error=\"invalid_token\", scope=\"we
 impl<S: Store> LdpState<S> {
     /// Build an LDP state with a fresh, isolated notification hub.
     pub fn new(store: S, base_url: impl Into<String>) -> Self {
-        Self::with_hub(store, base_url, NotificationHub::new())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::with_hub(store, base_url, NotificationHub::new())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let base_url = base_url.into();
+            let discovery_link_values = build_discovery_link_values(&base_url);
+            Self {
+                store,
+                base_url,
+                www_authenticate: DEFAULT_WWW_AUTHENTICATE.to_string(),
+                acl_cache: AclCache::new(crate::acl_cache::DEFAULT_ACL_CACHE_CAPACITY),
+                discovery_link_values,
+            }
+        }
     }
 
     /// Build an LDP state sharing an EXISTING notification hub (so the LDP emit path and the
     /// notification receive routes register against the same registry).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_hub(store: S, base_url: impl Into<String>, notifications: NotificationHub) -> Self {
         let base_url = base_url.into();
         // Precompute the request-invariant discovery `Link` values ONCE from `base_url` (see the
@@ -1081,20 +1106,23 @@ pub async fn put_handler<S: Store>(
     // `write`, with NO `ldp:contains` edge added to the parent above). So even on a CREATE its parent
     // membership did NOT change: pass `None` for the emit parent so the hub does NOT derive a spurious
     // container-membership `Add` for a resource the container does not actually contain.
-    let activity = if existed {
-        ActivityType::Update
-    } else {
-        ActivityType::Create
-    };
-    let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
-        None
-    } else {
-        parent.clone()
-    };
-    state
-        .notifications
-        .notify(&target.iri, activity, emit_parent.as_deref())
-        .await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let activity = if existed {
+            ActivityType::Update
+        } else {
+            ActivityType::Create
+        };
+        let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
+            None
+        } else {
+            parent.clone()
+        };
+        state
+            .notifications
+            .notify(&target.iri, activity, emit_parent.as_deref())
+            .await;
+    }
 
     // A PUT to an `.acl` resource changed the access rules: invalidate the cached parse so the NEXT
     // read resolves against the new ACL immediately (belt-and-braces over the etag gate; see
@@ -1248,6 +1276,7 @@ pub async fn post_handler<S: Store>(
 
     // EMIT: a POST always CREATES the child and GROWS the container's membership — Create on the child
     // + a derived Add on the container (the hub fans both from this one call).
+    #[cfg(not(target_arch = "wasm32"))]
     state
         .notifications
         .notify(&child_iri, ActivityType::Create, Some(&container.iri))
@@ -1365,6 +1394,7 @@ pub async fn delete_handler<S: Store>(
             DeleteOutcome::Deleted => {
                 // EMIT only on an actual delete: Delete on the container + a derived Remove on its
                 // parent (membership shrank). NotEmpty/NotFound deleted nothing ⇒ no notification.
+                #[cfg(not(target_arch = "wasm32"))]
                 state
                     .notifications
                     .notify(&target.iri, ActivityType::Delete, parent.as_deref())
@@ -1384,6 +1414,7 @@ pub async fn delete_handler<S: Store>(
         // now report it absent and the walk inherits — invalidating frees the slot at once).
         state.invalidate_acl_if_acl(&target.iri);
         // EMIT: Delete on the resource + a derived Remove on its parent container.
+        #[cfg(not(target_arch = "wasm32"))]
         state
             .notifications
             .notify(&target.iri, ActivityType::Delete, parent.as_deref())
@@ -1597,20 +1628,23 @@ pub async fn patch_handler<S: Store>(
     // a plain `write`, adding NO `ldp:contains` edge to the parent). So its parent membership did NOT
     // change even on a create: pass `None` for the emit parent so the hub does NOT derive a spurious
     // container-membership `Add` for a resource the container does not actually contain.
-    let activity = if existed {
-        ActivityType::Update
-    } else {
-        ActivityType::Create
-    };
-    let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
-        None
-    } else {
-        parent.clone()
-    };
-    state
-        .notifications
-        .notify(&target.iri, activity, emit_parent.as_deref())
-        .await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let activity = if existed {
+            ActivityType::Update
+        } else {
+            ActivityType::Create
+        };
+        let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
+            None
+        } else {
+            parent.clone()
+        };
+        state
+            .notifications
+            .notify(&target.iri, activity, emit_parent.as_deref())
+            .await;
+    }
 
     // A PATCH to an `.acl` resource edited the access rules: invalidate the cached parse so the NEXT
     // read resolves against the patched ACL immediately.
