@@ -2,7 +2,7 @@
 # (data/abox.ttl) under the COMMITTED bench/shacl workloads. Derivation is
 # BY HAND from the ABox (each line re-derivable by eye; also confirmed by
 # RUNNING both engines AND an independent pySHACL oracle — see the PR):
-#   cardinality      (4 FullProfessor; teacherOf fan-out 2/3/2/4)
+#   cardinality      (4 FullProfessor; teacherOf fan-out 2/3/2/3)
 #                    maxCount 1 fires once per focus => 4; minCount 3 fires for
 #                    the two fan-out-2 profs => 2.  TOTAL 6, conforms=false.
 #   class_nodekind   worksFor is a Department (never University) => sh:class

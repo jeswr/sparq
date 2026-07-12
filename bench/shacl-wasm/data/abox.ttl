@@ -7,7 +7,7 @@
 # no LUBM generator (no Java) in a Node-only environment.
 #
 # Design (every constant below is re-derived in expected.tsv's header):
-#   * 4 ub:FullProfessor  — teacherOf fan-out 2/3/2/4; all worksFor a Department;
+#   * 4 ub:FullProfessor  — teacherOf fan-out 2/3/2/3; all worksFor a Department;
 #     only prof0 is a department head (ub:headOf).
 #   * 5 ub:GraduateStudent — plain-literal names (violate sh:datatype xsd:integer),
 #     well-formed emails (sh:pattern control never fires), all memberOf dept0
@@ -42,7 +42,7 @@ d:gcourse1 a ub:GraduateCourse .
 d:gcourse2 a ub:GraduateCourse .
 
 # --- full professors (cardinality / class_nodekind focus nodes) ----------
-# teacherOf fan-out: prof0=2, prof1=3, prof2=2, prof3=4
+# teacherOf fan-out: prof0=2, prof1=3, prof2=2, prof3=3
 #   => maxCount 1 violated by ALL 4; minCount 3 violated by prof0+prof2 (2).
 # worksFor always a Department (never a University) => sh:class fires 4x;
 # always an IRI => sh:nodeKind never fires.
