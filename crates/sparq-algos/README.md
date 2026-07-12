@@ -3,9 +3,9 @@
 **Graph analytics** for the sparq RDF engine — an **opt-in** crate (vendor-parity,
 epic sq-3183) that runs classic graph algorithms directly over a `sparq_core::Graph`.
 PageRank, degree/in/out centrality, weakly-connected-component and label-propagation
-community detection — computed from sparq-core's permutation indexes with **no extra
-state**, no model, and no network. Nothing in the workspace depends on it; the default
-engine build does not even compile it.
+community detection — plus feature-gated exact betweenness and harmonic closeness —
+computed from sparq-core's permutation indexes with no model and no network. Nothing in
+the workspace depends on it; the default engine build does not even compile it.
 
 ## 🚀 Quickstart
 
@@ -14,6 +14,7 @@ use sparq_algos::{
     NodeGraph, NodeFilter,
     pagerank, PageRankConfig,
     degree_centrality, Direction, top_k,
+    betweenness_centrality, closeness_centrality,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
 };
 
@@ -29,6 +30,10 @@ let term  = g.term(&graph, best_index);                  // node index → oxrdf
 // Degree centrality (In / Out / Total) and the top-k entities.
 let deg = degree_centrality(&g, Direction::In);          // Vec<usize>, per node
 let top = top_k(&deg, 10);                               // Vec<(node_index, score)>
+
+// Exact shortest-path centralities; requires feature `centrality-extended`.
+let between = betweenness_centrality(&g);                 // unnormalised Brandes scores
+let close   = closeness_centrality(&g);                   // harmonic mean in [0, 1]
 
 // Community detection.
 let comp = weakly_connected_components(&g);              // exact, union-find
@@ -48,22 +53,30 @@ let k    = num_communities(&comm);
   redistribution; deterministic (no RNG), converges in L1 to a configurable tolerance.
 - **Degree centrality** — In / Out / Total, raw counts or normalised to `[0, 1]`, plus a
   deterministic `top_k`.
+- **Extended centrality** — with the default-OFF `centrality-extended` feature, exact
+  unweighted Brandes betweenness and normalised harmonic closeness. Both treat each directed
+  edge as an undirected connection; reciprocal edges and self-loops do not multiply paths.
+  Harmonic closeness assigns unreachable nodes a zero contribution, so disconnected graphs
+  have finite scores.
 - **Community detection** — exact weakly-connected components (near-linear union-find) and
   a deterministic label-propagation heuristic; dense, ascending-order community ids.
 - **Opt-in & lean** — consumes only sparq-core's public read API; the only dependencies
-  are `sparq-core`, `oxrdf`, and `rustc-hash`. No cargo features; no engine, no wasm, no
-  network code enters the build.
+  are `sparq-core`, `oxrdf`, and `rustc-hash`. The heavier all-pairs algorithms are behind
+  `centrality-extended`, which is OFF by default; no engine, wasm, or network code enters
+  the build.
 
 ## 📚 Learn more
 
 - The capability skill: [`skills/graph-analytics/SKILL.md`](../../skills/graph-analytics/SKILL.md).
 - Source: `src/graph.rs` (the view), `src/pagerank.rs`, `src/centrality.rs`,
-  `src/community.rs`. Tests live in `src/lib.rs` under a single `#[cfg(test)]` module
-  (there is no `tests/` directory).
+  `src/centrality_extended.rs`, and `src/community.rs`. Tests live in `src/lib.rs` and
+  `tests/`.
 
 These are **topology** algorithms: edges are unweighted and predicate-erased. To analyse a
 sub-graph (e.g. only `foaf:knows` edges), filter the source graph first; predicate-weighted
-and predicate-projected views are tracked as follow-up beads.
+and predicate-projected views are tracked as follow-up beads. Extended centrality is exact,
+not sampled: both algorithms perform an all-pairs traversal and are intended for graphs where
+that cost is acceptable.
 
 ### Mutation-testing note (`bench/mutants-baseline.json`)
 

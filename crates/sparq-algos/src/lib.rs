@@ -2,11 +2,15 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-mqvm: crate has zero `unsafe`
 
 pub mod centrality;
+#[cfg(feature = "centrality-extended")]
+pub mod centrality_extended;
 pub mod community;
 pub mod graph;
 pub mod pagerank;
 
 pub use centrality::{degree_centrality, degree_centrality_normalized, top_k, Direction};
+#[cfg(feature = "centrality-extended")]
+pub use centrality_extended::{betweenness_centrality, closeness_centrality};
 pub use community::{
     label_propagation, num_communities, weakly_connected_components, LabelPropConfig,
 };
