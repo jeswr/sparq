@@ -1,0 +1,9 @@
+@base <http://example.org/basic-shape-with-targets> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <> .
+
+<> a owl:Ontology .
+
+ex:TestShape a sh:NodeShape ;
+  sh:targetClass ex:TestClass .

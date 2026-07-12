@@ -1,0 +1,12 @@
+BASE <http://example.org/class>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape ; 
+	ex:myProperty 1 {
+	ex:property ex:TestClass % 
+		ex:myPropertyEscape 1, [
+			ex:test ex:test2
+		]
+	% .
+} 

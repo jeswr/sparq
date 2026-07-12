@@ -1,0 +1,6 @@
+BASE <#>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape {
+}
