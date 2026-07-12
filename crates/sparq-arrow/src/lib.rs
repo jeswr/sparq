@@ -17,7 +17,7 @@
 //! Each SELECT variable becomes one Arrow column of the struct type produced by
 //! `term_struct_type` (a `Struct` of five nullable `Utf8` fields — the names are the
 //! [`FIELD_*`](FIELD_KIND) constants; the `arrow`-gated `term_struct_type` /
-//! `to_record_batch` / `term_schema` items carry the full rustdoc):
+//! `to_record_batch` / `from_record_batch` / `term_schema` items carry the full rustdoc):
 //!
 //! | field        | meaning                                                                                   |
 //! |--------------|-------------------------------------------------------------------------------------------|
@@ -45,9 +45,9 @@
 //!   N-Triples form in `value` (`kind = "triple"`); its components are not exploded into
 //!   nested struct fields. RDF-1.2 triple terms in result *bindings* are rare; a nested
 //!   encoding is left to the same typed-view follow-up.
-//! * This is a **projection for transport**, not a canonical RDF serialisation: round-tripping
-//!   back to terms is straightforward from the five fields, but the Arrow batch is not itself
-//!   an RDF document.
+//! * This is a **projection for transport**, not a canonical RDF serialisation:
+//!   `from_record_batch` reconstructs terms from the five fields, but the Arrow batch is not
+//!   itself an RDF document.
 
 /// Struct field name: the term kind — `"uri"`, `"bnode"`, `"literal"`, or `"triple"`.
 pub const FIELD_KIND: &str = "kind";
@@ -78,5 +78,12 @@ pub const RDF_TERM_FIELDS: [&str; 5] = [
 mod export;
 
 #[cfg(feature = "arrow")]
+mod import;
+
+#[cfg(feature = "arrow")]
 #[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub use export::{term_schema, term_struct_type, to_record_batch, ArrowExportError};
+
+#[cfg(feature = "arrow")]
+#[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
+pub use import::{from_record_batch, ArrowError};
