@@ -7,6 +7,8 @@ pub mod centrality_extended;
 pub mod community;
 pub mod graph;
 pub mod pagerank;
+#[cfg(feature = "topology")]
+pub mod topology;
 
 pub use centrality::{degree_centrality, degree_centrality_normalized, top_k, Direction};
 #[cfg(feature = "centrality-extended")]
@@ -16,6 +18,8 @@ pub use community::{
 };
 pub use graph::{NodeFilter, NodeGraph};
 pub use pagerank::{pagerank, PageRankConfig};
+#[cfg(feature = "topology")]
+pub use topology::{strongly_connected_components, topological_sort, CycleError};
 
 #[cfg(test)]
 mod tests {
@@ -78,6 +82,18 @@ mod tests {
         let all = NodeGraph::build_with(&g, NodeFilter::All);
         assert_eq!(all.len(), 3);
         assert_eq!(all.edge_count(), 2);
+    }
+
+    /// [GPT-5.6] sq-lsp7k.20: a data-only subject is still an entity node in the default
+    /// projection. This makes a genuinely isolated node representable without a self-loop.
+    #[test]
+    fn data_only_subject_is_an_isolated_entity_node() {
+        let g = Graph::load_str("<http://e/a> <http://p/name> \"Alice\" .\n", "nt").unwrap();
+        let ng = NodeGraph::build(&g);
+        assert_eq!(ng.len(), 1);
+        assert_eq!(ng.edge_count(), 0);
+        assert_eq!(ng.out_degree(0), 0);
+        assert_eq!(ng.in_degree(0), 0);
     }
 
     #[test]

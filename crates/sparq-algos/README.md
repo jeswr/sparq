@@ -3,9 +3,10 @@
 **Graph analytics** for the sparq RDF engine — an **opt-in** crate (vendor-parity,
 epic sq-3183) that runs classic graph algorithms directly over a `sparq_core::Graph`.
 PageRank, degree/in/out centrality, weakly-connected-component and label-propagation
-community detection — plus feature-gated exact betweenness and harmonic closeness —
-computed from sparq-core's permutation indexes with no model and no network. Nothing in
-the workspace depends on it; the default engine build does not even compile it.
+community detection — plus feature-gated exact betweenness, harmonic closeness, strongly
+connected components, and topological sorting — computed from sparq-core's permutation
+indexes with no model and no network. Nothing in the workspace depends on it; the default
+engine build does not even compile it.
 
 ## 🚀 Quickstart
 
@@ -16,6 +17,7 @@ use sparq_algos::{
     degree_centrality, Direction, top_k,
     betweenness_centrality, closeness_centrality,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
+    strongly_connected_components, topological_sort,
 };
 
 // Project the RDF graph onto a directed node graph (subjects + entity objects = nodes,
@@ -39,6 +41,10 @@ let close   = closeness_centrality(&g);                   // harmonic mean in [0
 let comp = weakly_connected_components(&g);              // exact, union-find
 let comm = label_propagation(&g, LabelPropConfig::default()); // heuristic, deterministic
 let k    = num_communities(&comm);
+
+// Directed topology; requires feature `topology`.
+let scc = strongly_connected_components(&g);              // dense component id per node
+let order = topological_sort(&g)?;                         // Err(CycleError) on a cycle
 ```
 
 ## ✨ Features
@@ -60,23 +66,28 @@ let k    = num_communities(&comm);
   have finite scores.
 - **Community detection** — exact weakly-connected components (near-linear union-find) and
   a deterministic label-propagation heuristic; dense, ascending-order community ids.
+- **Directed topology** — with the default-OFF `topology` feature, iterative Tarjan
+  strongly connected components and a canonical topological sort. SCC ids are densified by
+  ascending node index; topological-sort ties choose the smallest ready node and cycles,
+  including self-loops, return `CycleError`.
 - **Opt-in & lean** — consumes only sparq-core's public read API; the only dependencies
   are `sparq-core`, `oxrdf`, and `rustc-hash`. The heavier all-pairs algorithms are behind
-  `centrality-extended`, which is OFF by default; no engine, wasm, or network code enters
-  the build.
+  `centrality-extended`, and directed topology is behind `topology`; both features are OFF
+  by default. No engine, wasm, or network code enters the build.
 
 ## 📚 Learn more
 
 - The capability skill: [`skills/graph-analytics/SKILL.md`](../../skills/graph-analytics/SKILL.md).
 - Source: `src/graph.rs` (the view), `src/pagerank.rs`, `src/centrality.rs`,
-  `src/centrality_extended.rs`, and `src/community.rs`. Tests live in `src/lib.rs` and
-  `tests/`.
+  `src/centrality_extended.rs`, `src/community.rs`, and `src/topology.rs`. Tests live in
+  `src/lib.rs` and `tests/`.
 
 These are **topology** algorithms: edges are unweighted and predicate-erased. To analyse a
 sub-graph (e.g. only `foaf:knows` edges), filter the source graph first; predicate-weighted
 and predicate-projected views are tracked as follow-up beads. Extended centrality is exact,
 not sampled: both algorithms perform an all-pairs traversal and are intended for graphs where
-that cost is acceptable.
+that cost is acceptable. SCC and topological sorting preserve edge direction; the community
+and extended-centrality algorithms intentionally use weak topology.
 
 ### Mutation-testing note (`bench/mutants-baseline.json`)
 

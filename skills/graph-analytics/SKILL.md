@@ -1,6 +1,6 @@
 ---
 name: graph-analytics
-description: "Graph analytics over a sparq RDF graph with the opt-in sparq-algos crate: project the graph onto a directed NodeGraph and run PageRank, degree/in/out centrality, feature-gated exact Brandes betweenness and harmonic closeness, weakly-connected-component and label-propagation community detection — all read directly from sparq-core's permutation indexes, deterministic, no model, no network. Use when ranking entities by importance/centrality, finding clusters/communities, or computing connected components over a sparq Graph; topology-only (edges are predicate-erased and unweighted — filter the source graph for a per-predicate sub-graph)."
+description: "Graph analytics over a sparq RDF graph with the opt-in sparq-algos crate: project the graph onto a directed NodeGraph and run PageRank, centrality, community detection, and feature-gated directed strongly connected components or topological sorting — all read directly from sparq-core's permutation indexes, deterministic, no model, no network. Use when ranking entities, finding communities, classifying directed cycles, or ordering a DAG; topology-only (edges are predicate-erased and unweighted — filter the source graph for a per-predicate sub-graph)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -13,7 +13,8 @@ metadata:
 algorithms over a `sparq_core::Graph`: **PageRank**, **degree centrality** (in / out /
 total), feature-gated exact **Brandes betweenness** and **harmonic closeness**,
 **weakly-connected components**, and a deterministic **label-propagation** community
-heuristic. It consumes only sparq-core's public read API (the borrowing
+heuristic, plus feature-gated directed **strongly connected components** and
+**topological sorting**. It consumes only sparq-core's public read API (the borrowing
 triple-id iterator + dict lookups), holds no graph state of its own, and nothing in the
 workspace depends on it — the default engine build does not even compile it.
 
@@ -24,12 +25,12 @@ first. There is no SPARQL-level integration — call the Rust API directly.
 
 ## Quickstart
 
-`crates/sparq-algos/Cargo.toml` (extended centrality is explicitly enabled here):
+`crates/sparq-algos/Cargo.toml` (optional algorithm groups are explicitly enabled here):
 
 ```toml
 [dependencies]
 sparq-core  = { path = "../sparq-core" }
-sparq-algos = { path = "../sparq-algos", features = ["centrality-extended"] }
+sparq-algos = { path = "../sparq-algos", features = ["centrality-extended", "topology"] }
 oxrdf = "*"   # for oxrdf::{NamedNode, Term} when resolving node indices back to terms
 ```
 
@@ -42,6 +43,7 @@ use sparq_algos::{
     degree_centrality, degree_centrality_normalized, Direction, top_k,
     betweenness_centrality, closeness_centrality,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
+    strongly_connected_components, topological_sort,
 };
 
 // Project the RDF graph onto a directed node graph.
@@ -67,6 +69,10 @@ let close   = closeness_centrality(&g);                    // normalised harmoni
 let comp = weakly_connected_components(&g);                // exact, union-find; Vec<usize> labels
 let comm = label_propagation(&g, LabelPropConfig::default()); // deterministic heuristic
 let k    = num_communities(&comm);                         // distinct community count
+
+// --- Directed topology ---
+let scc   = strongly_connected_components(&g);             // dense component id per node
+let order = topological_sort(&g)?;                         // canonical DAG order; Err on cycle
 ```
 
 ## API surface
@@ -87,13 +93,17 @@ let k    = num_communities(&comm);                         // distinct community
 | `weakly_connected_components(&g)` | exact component labels (`Vec<usize>`) |
 | `label_propagation(&g, LabelPropConfig)` | heuristic community labels (`Vec<usize>`) |
 | `num_communities(&labels)` | distinct community count |
+| `strongly_connected_components(&g)` | directed SCC id per node; requires `topology` |
+| `topological_sort(&g)` | canonical `Result<Vec<usize>, CycleError>`; requires `topology` |
 
 ## Honest scope / caveats
 
 - **Topology only.** Predicates are erased and edges are unweighted; parallel edges
   collapse to one. For a per-predicate or weighted analysis, pre-filter the source graph.
 - **Literals are not nodes by default** (`NodeFilter::EntitiesOnly`) — analytics run over
-  the *entity* graph. Pass `NodeFilter::All` to include literal objects.
+  the *entity* graph. Pass `NodeFilter::All` to include literal objects. Subjects remain
+  nodes even when their only objects are excluded literals, so data-only entities are
+  isolated nodes in the default projection.
 - **Deterministic.** PageRank uses uniform init + fixed iteration order (no RNG); WCC is
   exact; `top_k` and `label_propagation` use ascending-index/label tie-breaks, so repeated
   runs on the same graph give identical results. Label propagation is still a *heuristic*
@@ -108,6 +118,11 @@ let k    = num_communities(&comm);                         // distinct community
 - **Extended centrality is exact and all-pairs.** It is not sampled or approximate. Both
   algorithms take `O(V * (V + E))` time, so callers should use them only where that cost is
   acceptable. Enable the default-OFF `centrality-extended` feature to compile them.
+- **Directed topology preserves direction.** SCC follows out-edges and identifies mutual
+  directed reachability. Topological sorting succeeds only for a DAG; self-loops and larger
+  cycles return `CycleError`. Both are deterministic, with ascending node indices fixing
+  component ids and ready-node ties. Enable the default-OFF `topology` feature to compile
+  them.
 - **PageRank** handles dangling (out-degree-0) nodes by redistributing their mass
   uniformly each iteration, so the result is a proper probability distribution.
 - **In-memory.** The `NodeGraph` is built from one pass over `Graph::iter_ids` and held in
