@@ -2,6 +2,8 @@
 
 // [GPT-5.6] sq-1rg2q M1: a small, opt-in object view over sparq-core's real Graph.
 
+pub mod proposed;
+
 use oxrdf::vocab::{rdf, xsd};
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_core::Graph;
