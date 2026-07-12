@@ -63,7 +63,7 @@
 
 #[cfg(feature = "load-filter")]
 use crate::TriplePattern;
-use crate::{intern_hdt_term, Error};
+use crate::{intern_hdt_term, Error, HdtStats};
 use hdt::containers::{ControlInfo, ControlType, Sequence};
 use hdt::dict_sect_pfc::DictSectPFC;
 use hdt::four_sect_dict::FourSectDict;
@@ -77,6 +77,15 @@ use std::io::{BufRead, Read};
 /// position `i & 63` (LSB-first), so [`bit`](RawBitmap::bit) is a plain shift/mask.
 struct RawBitmap {
     words: Vec<u64>,
+}
+
+/// The four payloads in a standard BitmapTriples section, read and CRC-checked
+/// without constructing the upstream query indexes.
+struct TripleSections {
+    bitmap_y: RawBitmap,
+    bitmap_z: RawBitmap,
+    sequence_y: Sequence,
+    sequence_z: Sequence,
 }
 
 impl RawBitmap {
@@ -191,6 +200,72 @@ fn read_bitmap_words<R: BufRead>(reader: &mut R) -> Result<RawBitmap, Error> {
     }
 
     Ok(RawBitmap { words })
+}
+
+/// Reads and validates a standard SPO BitmapTriples section.
+///
+/// Keeping this block shared makes the graph decoder and the metadata-only path
+/// accept and reject exactly the same triples encodings while reusing the
+/// bounded bitmap reads and sequence CRC verification.
+fn read_triple_sections<R: BufRead>(reader: &mut R) -> Result<TripleSections, Error> {
+    let triples_ci = ControlInfo::read(reader).map_err(hdt::hdt::Error::from)?;
+    if triples_ci.control_type != ControlType::Triples {
+        return Err(Error::Term(format!(
+            "expected triples control info, got {:?}",
+            triples_ci.control_type
+        )));
+    }
+    match triples_ci.format.as_str() {
+        "<http://purl.org/HDT/hdt#triplesBitmap>" => {}
+        "<http://purl.org/HDT/hdt#triplesList>" => {
+            return Err(Error::Term("triples list format is not supported".into()))
+        }
+        f => return Err(Error::Term(format!("unknown triples format {f}"))),
+    }
+    let order = triples_ci.get("order").and_then(|v| v.parse::<u32>().ok());
+    if order != Some(1) {
+        // Order 1 == SPO. Upstream only correctly supports SPO; we mirror that.
+        return Err(Error::Term(format!(
+            "unsupported HDT triples order {order:?} (only SPO is supported)"
+        )));
+    }
+
+    // Same on-disk order as `TriplesBitmap::read`: bitmap_y, bitmap_z, sequence_y,
+    // sequence_z. The bitmaps are read raw (no rank/select); the sequences via the
+    // upstream reader (CRC-validated branchless shift/mask access).
+    let bitmap_y = read_bitmap_words(reader)?;
+    let bitmap_z = read_bitmap_words(reader)?;
+    let sequence_y =
+        Sequence::read(reader).map_err(|e| crc_mismatch(format!("sequence_y: {e}")))?;
+    let sequence_z =
+        Sequence::read(reader).map_err(|e| crc_mismatch(format!("sequence_z: {e}")))?;
+
+    Ok(TripleSections {
+        bitmap_y,
+        bitmap_z,
+        sequence_y,
+        sequence_z,
+    })
+}
+
+/// Reads only the cardinality metadata and exact triple count from an HDT stream.
+pub(crate) fn stats_from_reader<R: BufRead>(mut reader: R) -> Result<HdtStats, Error> {
+    ControlInfo::read(&mut reader).map_err(hdt::hdt::Error::from)?;
+    Header::read(&mut reader).map_err(hdt::hdt::Error::from)?;
+
+    let dict = FourSectDict::read(&mut reader)
+        .map_err(hdt::hdt::Error::from)?
+        .validate()
+        .map_err(hdt::hdt::Error::from)?;
+    let triples = read_triple_sections(&mut reader)?;
+
+    Ok(HdtStats {
+        triples: triples.sequence_z.entries,
+        shared: dict.shared.num_strings,
+        subjects_only: dict.subjects.num_strings,
+        objects_only: dict.objects.num_strings,
+        predicates: dict.predicates.num_strings,
+    })
 }
 
 /// Reads a little-endian HDT VByte from a reader, replicating the upstream's
@@ -758,37 +833,12 @@ where
     };
 
     // --- Triples section (H1+H2): read directly, never build TriplesBitmap. ---
-    let triples_ci = ControlInfo::read(&mut reader).map_err(hdt::hdt::Error::from)?;
-    if triples_ci.control_type != ControlType::Triples {
-        return Err(Error::Term(format!(
-            "expected triples control info, got {:?}",
-            triples_ci.control_type
-        )));
-    }
-    match triples_ci.format.as_str() {
-        "<http://purl.org/HDT/hdt#triplesBitmap>" => {}
-        "<http://purl.org/HDT/hdt#triplesList>" => {
-            return Err(Error::Term("triples list format is not supported".into()))
-        }
-        f => return Err(Error::Term(format!("unknown triples format {f}"))),
-    }
-    let order = triples_ci.get("order").and_then(|v| v.parse::<u32>().ok());
-    if order != Some(1) {
-        // Order 1 == SPO. Upstream only correctly supports SPO; we mirror that.
-        return Err(Error::Term(format!(
-            "unsupported HDT triples order {order:?} (only SPO is supported)"
-        )));
-    }
-
-    // Same on-disk order as `TriplesBitmap::read`: bitmap_y, bitmap_z, sequence_y,
-    // sequence_z. The bitmaps are read raw (no rank/select); the sequences via the
-    // upstream reader (CRC-validated branchless shift/mask access).
-    let bitmap_y = read_bitmap_words(&mut reader)?;
-    let bitmap_z = read_bitmap_words(&mut reader)?;
-    let sequence_y =
-        Sequence::read(&mut reader).map_err(|e| crc_mismatch(format!("sequence_y: {e}")))?;
-    let sequence_z =
-        Sequence::read(&mut reader).map_err(|e| crc_mismatch(format!("sequence_z: {e}")))?;
+    let TripleSections {
+        bitmap_y,
+        bitmap_z,
+        sequence_y,
+        sequence_z,
+    } = read_triple_sections(&mut reader)?;
 
     // [OPUS-4.8] sq-7ge0: split the `scan` stage here — everything above (triples control
     // info + the two raw bitmaps + the two CRC-validated sequences) is the triples-section
