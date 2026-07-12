@@ -1,6 +1,6 @@
 //! Read-only **UFO/gUFO priors reader** — the design's "optional/last" gUFO prior (structure-aware
 //! vectorisation §2 row "gUFO rigidity and roles", §9.5), wired as a **UFO-provable disjointness +
-//! subsumption mask** for the [`DisjointnessOracle`](crate::taxonomy::DisjointnessOracle).
+//! subsumption mask** for the [`DisjointnessOracle`].
 //!
 //! [FABLE-5] kern/ufo-priors (epic sq-0wo9e; deferred remainder noted in `taxonomy.rs`: "the
 //! `gufo:Kind`/`gufo:Role` rigidity split is the design's optional/last prior … deferred"). Like
