@@ -1,0 +1,23 @@
+# The quoted OVERLAY (fixture 2) — quoted/reified triples REFERRING to base.ttl.
+# Adding this overlay to base.ttl must leave the base closure byte-identical:
+# closure(base + overlay) == closure(base) UNION exactly-these-overlay-triples.
+@prefix : <urn:sparq:qto:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Quotes a triple that IS separately asserted in base.ttl.
+:q1 rdf:reifies <<( :alice :worksFor :acme )>> .
+# An inert reifier annotation (no schema on :certainty — derives nothing).
+:q1 :certainty "0.9" .
+
+# Quotes a FALSE triple (asserted nowhere): must not entail
+# :alice :worksFor :globex, nor :globex rdf:type :Company via range.
+:q2 rdf:reifies <<( :alice :worksFor :globex )>> .
+
+# Quotes a triple the OWL RL closure DERIVES but base.ttl does not assert
+# (prp-trp). Quoting an entailed triple must not change the closure either.
+:q3 rdf:reifies <<( :acme :partOf :conglomerate )>> .
+
+# Reified-triple term as subject, explicit reifier — quotes the REVERSED
+# (false) part-of: must not entail :megacorp :partOf :acme, nor (with
+# transitivity) :megacorp :partOf :megacorp.
+<< :megacorp :partOf :acme ~ :q4 >> :statedBy :dan .

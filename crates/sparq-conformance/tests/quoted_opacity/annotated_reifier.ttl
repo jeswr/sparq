@@ -1,0 +1,17 @@
+# Reifier annotations are reasoned over NORMALLY (fixture 3) — without leaking
+# the quoted triple into the base closure.
+@prefix : <urn:sparq:qto:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# Schema over the REIFIER's annotations: :statedBy types its subject a :Claim,
+# and :Claim sits under :Statement — both must fire on :r5 (the reifier).
+:Claim rdfs:subClassOf :Statement .
+:statedBy rdfs:domain :Claim .
+# Schema over the QUOTED content: would type :alice an :Employee IF the quoted
+# triple were asserted — it must not fire.
+:worksFor rdfs:domain :Employee .
+
+:r5 rdf:reifies <<( :alice :worksFor :globex )>> ;
+    :statedBy :carol ;
+    :certainty "0.9" .

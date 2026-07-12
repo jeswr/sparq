@@ -138,6 +138,19 @@ compiled-rules = ["dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"
 # transitive crate. Semi-naive per-stratum eval, SUM/MIN/MAX/AVG and incremental
 # maintenance are LATER PHASES, beaded from the design record.
 datalog = ["sparq-substrate/rows", "sparq-substrate/join"]
+# [Kern] kern/quoted-triple-infer (first increment) — OPT-IN QUOTED-TRIPLE (RDF 1.2
+# reifier) inference for the OWL 2 RL profile: the reif-dtr destructure / reif-ctr
+# construct bridge rules between `rdf:reifies` triple terms and the classic
+# rdf:subject/predicate/object vocabulary, with reif-ctr restricted to EXISTING
+# triples over leaf (non-triple-term) components so the Herbrand base stays FINITE
+# (termination + idempotency argument in src/reify.rs). NON-DEFAULT by design: the
+# bridge is a deliberate, non-normative entailment extension, so plain
+# `Profile::OwlRl` closures (and the committed inference-conformance ratchet) never
+# change unless a consumer opts in — and even when ON the layer is occurrence-guarded
+# (reify-free closures are byte-identical). No new deps, no new Profile variant.
+# `MaterializedOwlGraph` routes any base mentioning the reification vocabulary to its
+# documented Fallback mode (incremental == from-scratch parity preserved).
+quoted-triples = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -199,6 +212,15 @@ required-features = ["substrate-compare"]
 [[test]]
 name = "substrate_join_owl"
 required-features = ["substrate-join"]
+
+# [Kern] quoted-triple RL inference, end-to-end: Turtle 1.2 fixtures (reifiers,
+# annotation blocks, classic-reification data) through `Graph::parse_to_triples`,
+# asserting the destructure/construct closures, the opacity non-entailments, the
+# adversarial-cascade termination pin, idempotency, and `MaterializedOwlGraph`
+# Fallback parity. Compiled only with the feature it exercises.
+[[test]]
+name = "owl_reify"
+required-features = ["quoted-triples"]
 
 # [FABLE-5] sq-zgbso.3: the compiled-vs-text result-equivalence oracle (closure
 # set-equality vs `reason_n3` over the sparq-solid WAC/ACP/ODRL-spike rule corpus, read

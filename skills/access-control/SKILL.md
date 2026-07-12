@@ -428,7 +428,7 @@ table of expected `(agent, client, mode, resource) → Allow | Deny` decisions �
 harness asserts the engine reproduces every expected decision, reporting **all** mismatches
 at once. The module is **always compiled** (no feature gate; it depends only on the
 always-present ACP path). The scenario corpus is a single reusable source in
-`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 12 scenarios / 40 decisions),
+`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 13 scenarios / 45 decisions),
 consumed by `crates/sparq-solid/tests/conformance_acp.rs` (the parity test, plus a negative
 control asserting a wrong expectation is *reported*, not panicked) so a second test target —
 the differential oracle (`sq-t58w.7`) — can run the IDENTICAL scenarios without copy-paste.
@@ -486,7 +486,7 @@ semantics. A scenario is an `.acl`-document corpus (`AclBuilder`) plus a table o
 `(agent, client, mode, resource) → Allow | Deny` decisions; the harness asserts the engine
 reproduces every one, reporting all mismatches at once. Always compiled (no feature gate).
 The corpus is a single reusable source in `crates/sparq-solid/tests/common/`
-(`common::wac_corpus()`, 12 scenarios / 40+ decisions), consumed by
+(`common::wac_corpus()`, 13 scenarios / 51 decisions), consumed by
 `crates/sparq-solid/tests/conformance_wac.rs` (the parity test, a `run_via_podstore` parity
 test over the full `PodStore` method-form path, and a negative control) and reusable by a
 second test target — the differential oracle (`sq-t58w.7`) — without copy-paste. The
