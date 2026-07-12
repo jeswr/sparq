@@ -23,12 +23,12 @@ engine build does not compile it.
 
 ## Quickstart
 
-`crates/sparq-sim/Cargo.toml` (it consumes `sparq-core`; no cargo features of its own):
+`crates/sparq-sim/Cargo.toml` (omit `features` for the original one-hop-only build):
 
 ```toml
 [dependencies]
 sparq-core = { path = "../sparq-core" }
-sparq-sim  = { path = "../sparq-sim" }
+sparq-sim  = { path = "../sparq-sim", features = ["multi-hop"] }
 oxrdf = "*"   # for oxrdf::{NamedNode, Term}
 ```
 
@@ -90,11 +90,17 @@ let _ = (score, top10, by_sig);
   fewer than `k` results (entities whose elements all point at degree-1 neighbors),
   fill the remaining slots with `Predicates`-style role matches, ranked below every
   exactly-scored result. `false` restores strict v1 (neighbor evidence only).
+- `depth` (default `1`, available with the default-off `multi-hop` Cargo feature) — the
+  maximum breadth-first structural-neighborhood depth. First-hop elements retain their
+  original weight; hop `h` is attenuated by `0.5^(h - 1)`. A value of `0` is treated as
+  `1`. Expansion order is deterministic, and the nearest path supplies an element's
+  weight when several paths reach it.
 
 ## How it works (cost)
 
 - **Signature** — one SPO range scan (outgoing) + one OSP/OPS range scan (incoming),
-  cost `O(log n + degree(e))`.
+  cost `O(log n + degree(e))` at the default depth. With `multi-hop`, the same scans run
+  breadth-first for each reachable frontier through `SimConfig::depth`.
 - **`most_similar(a, k)`** — candidate generation *through the indexes, not a full
   scan*: each signature element's co-owners are one contiguous index range (POS for
   outgoing `(p, n)`, SPO for incoming). Candidates accumulate shared-element weight (an
@@ -142,10 +148,8 @@ reward. See the [`vector-search`](../vector-search/SKILL.md) skill for `fuse_sco
   never reach **across** graphs and there is no union-of-all-graphs mode — choose the graph
   (or the default graph) explicitly; the quads are not merged for you.
 
-_(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests
-(13 unit tests in `src/lib.rs`; 1 integration test `tests/olympics.rs` that skips when
-the fixture is absent) on branch `feat-skill-drift-catchup` (2026-06-16). Workspace
-v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
+_(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests.
+Workspace v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
 (`#![forbid(unsafe_code)]`). Measured quality/latency gates (same-class precision@10;
 `Predicates`-mode class-separation AUC; `most_similar(k=10)` latency) are enforced by
 the `olympics_eval` example — run it for the (non-canonical) numbers rather than baking
