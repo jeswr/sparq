@@ -49,9 +49,7 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
 
 ## ✨ Features
 
-- **OGC conformance scoreboard** — `geof:` covers the `sf*`/`eh*`/`rcc8*` DE-9IM
-  relation families, `distance`/`buffer`/`envelope`/`boundary`/`convexHull`, the
-  point-set ops, and `getSRID` (35 registered IRIs). A self-written executable probe
+- **OGC conformance scoreboard** — 39 `geof:` IRIs cover topology, measurements, centroid, geometry/set operations, and `getSRID`. A self-written executable probe
   per OGC requirement ([`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs))
   scores **30 / 30** of the standard's R1–R30 taxonomy — OGC never shipped an executable
   ETS, and the GPL academic compliance benchmark cannot be vendored into this MIT tree,
@@ -98,8 +96,10 @@ iteration** (sq-lk3aw.3): for each vertex of each geometry the haversine distanc
 the nearest point on the other geometry is computed, resolving the prior equirectangular
 projection distortion. Remaining approximation: interior-of-segment↔interior-of-segment
 pairs (bounded by vertex arc spacing; uncommon for typical GeoSPARQL geometries).
-`uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` in metric units
-still uses a local equirectangular frame (no exact sphere-buffer equivalent). Line/polygon
+`uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` and the metric
+area/length/perimeter functions use one local equirectangular frame; undefined
+dimensions are errors, and `geof:centroid` preserves the input CRS. [GPT-5.6]
+sq-lsp7k.18. Line/polygon
 set-subtraction is rolled in-crate over `i_overlay`; a `LineString` difference is proposed
 upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 

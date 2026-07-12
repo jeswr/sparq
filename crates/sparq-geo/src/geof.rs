@@ -17,6 +17,9 @@
 //! - [`envelope`] / [`boundary`] / [`convex_hull`] — `geof:envelope`,
 //!   `geof:boundary`, `geof:convexHull` — and [`buffer`] (`geof:buffer`, geo
 //!   0.33's `Buffer`; metric radii via a local equirectangular frame).
+//! - [`metric_area`] / [`metric_length`] / [`metric_perimeter`] and
+//!   [`centroid`] — metric measurements and the mathematical centroid, using
+//!   the same local equirectangular frame for geographic geometries.
 //! - the set operations [`intersection`] / [`union`] / [`difference`] /
 //!   [`sym_difference`] — point-set operations over `geo`'s `BooleanOps`
 //!   (polygon overlay) plus directly-implemented line/point cases: point-in/on
@@ -40,8 +43,9 @@ use crate::literal::{Crs, GeoGeometry};
 use crate::GeoError;
 use geo::relate::IntersectionMatrix;
 use geo::{
-    BooleanOps, BoundingRect, Buffer, Closest, ConvexHull, CoordsIter, Distance, Euclidean,
-    Haversine, HaversineClosestPoint, Intersects, LineIntersection, MapCoords, Relate,
+    Area, BooleanOps, BoundingRect, Buffer, Centroid, Closest, ConvexHull, CoordsIter, Distance,
+    Euclidean, Haversine, HaversineClosestPoint, Intersects, Length, LineIntersection, MapCoords,
+    Relate,
 };
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
@@ -50,6 +54,43 @@ use geo_types::{
 /// Mean-Earth-radius metres per degree of arc (GRS80 mean radius 6 371 008.8 m,
 /// the same sphere `geo`'s `Haversine` measures on): π·R/180.
 const METERS_PER_DEGREE: f64 = std::f64::consts::PI * 6_371_008.8 / 180.0;
+
+/// The local equirectangular metre frame shared by metric measurement and
+/// buffering. Its latitude is the geometry bounding box's centre, matching
+/// the crate's established `geof:buffer` convention. [GPT-5.6] sq-lsp7k.18
+#[derive(Debug, Clone, Copy)]
+struct LocalMetricFrame {
+    x_scale: f64,
+}
+
+impl LocalMetricFrame {
+    fn for_geometry(g: &GeoGeometry, operation: &str) -> Result<Self, GeoError> {
+        if !g.crs.is_geographic() {
+            return Err(GeoError::NonGeographicCrs(g.crs.iri().to_string()));
+        }
+        let rect = g.geometry.bounding_rect().ok_or_else(|| {
+            GeoError::Unsupported(format!("geof:{operation} of an empty geometry"))
+        })?;
+        let x_scale = METERS_PER_DEGREE * rect.center().y.to_radians().cos();
+        if x_scale <= 0.0 {
+            return Err(GeoError::Unsupported(format!(
+                "geof:{operation} with metric units at the poles"
+            )));
+        }
+        Ok(Self { x_scale })
+    }
+
+    fn project(self, geometry: &Geometry<f64>) -> Geometry<f64> {
+        geometry.map_coords(|c| Coord {
+            x: c.x * self.x_scale,
+            y: c.y * METERS_PER_DEGREE,
+        })
+    }
+
+    fn unproject_point(self, point: Point<f64>) -> Point<f64> {
+        Point::new(point.x() / self.x_scale, point.y() / METERS_PER_DEGREE)
+    }
+}
 
 /// A unit of measure accepted by `geof:distance`, selected by IRI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +269,93 @@ pub fn distance(a: &GeoGeometry, b: &GeoGeometry, unit: Unit) -> Result<f64, Geo
             })
         }
     }
+}
+
+// ---- Metric measurements + centroid ----------------------------------------------
+
+/// `geof:metricArea(geom)` — planar area in square metres after projecting a
+/// geographic geometry into the same local equirectangular frame as
+/// [`buffer`]. Polygon holes are subtracted and multipolygon areas are summed.
+/// Degenerate polygon rings return zero. Non-areal and heterogeneous geometry
+/// types return [`GeoError::Unsupported`] rather than a dimensionally-wrong
+/// number.
+///
+/// This is a local planar approximation. Distortion grows with geographic
+/// extent and towards the poles. The deterministic acceptance oracle pins a
+/// one-degree square near the equator to the analytic area within one percent.
+pub fn metric_area(g: &GeoGeometry) -> Result<f64, GeoError> {
+    match &g.geometry {
+        Geometry::Polygon(_)
+        | Geometry::MultiPolygon(_)
+        | Geometry::Rect(_)
+        | Geometry::Triangle(_) => {
+            let frame = LocalMetricFrame::for_geometry(g, "metricArea")?;
+            Ok(frame.project(&g.geometry).unsigned_area())
+        }
+        other => Err(GeoError::Unsupported(format!(
+            "geof:metricArea is undefined for {}",
+            wkt_type_name(other)
+        ))),
+    }
+}
+
+/// Returns the local-equirectangular length of the geometry's one-dimensional
+/// components. Polygonal inputs include exterior and interior rings.
+fn metric_length_for(g: &GeoGeometry, operation: &str) -> Result<f64, GeoError> {
+    let frame = LocalMetricFrame::for_geometry(g, operation)?;
+    let projected = frame.project(&g.geometry);
+    let ring_length = |polygon: &Polygon<f64>| {
+        Euclidean.length(polygon.exterior())
+            + polygon.interiors().iter().map(|ring| Euclidean.length(ring)).sum::<f64>()
+    };
+    match &projected {
+        Geometry::Line(line) => Ok(Euclidean.length(line)),
+        Geometry::LineString(line) => Ok(Euclidean.length(line)),
+        Geometry::MultiLineString(lines) => Ok(Euclidean.length(lines)),
+        Geometry::Polygon(polygon) => Ok(ring_length(polygon)),
+        Geometry::MultiPolygon(polygons) => Ok(polygons.0.iter().map(ring_length).sum()),
+        Geometry::Rect(rect) => Ok(ring_length(&rect.to_polygon())),
+        Geometry::Triangle(triangle) => Ok(ring_length(&triangle.to_polygon())),
+        other => Err(GeoError::Unsupported(format!(
+            "geof:{operation} is undefined for {}",
+            wkt_type_name(other)
+        ))),
+    }
+}
+
+/// `geof:metricLength(geom)` — length in metres of a curve, or the boundary
+/// length of an areal geometry, in the local equirectangular frame. A
+/// `LineString` is measured as the sum of its segment lengths; the equatorial
+/// two-point acceptance oracle agrees with the haversine distance to floating-
+/// point tolerance.
+pub fn metric_length(g: &GeoGeometry) -> Result<f64, GeoError> {
+    metric_length_for(g, "metricLength")
+}
+
+/// `geof:metricPerimeter(geom)` — perimeter in metres. For areal geometries
+/// this is the sum of the exterior and interior ring lengths; for curve
+/// geometries it is equivalent to [`metric_length`].
+pub fn metric_perimeter(g: &GeoGeometry) -> Result<f64, GeoError> {
+    metric_length_for(g, "metricPerimeter")
+}
+
+/// `geof:centroid(geom)` — the mathematical centroid as a point in the input
+/// geometry's CRS. Geographic geometries are projected to the local metric
+/// frame for the calculation and then unprojected; other CRSs are evaluated in
+/// their coordinate space. Empty geometries return [`GeoError::Unsupported`].
+pub fn centroid(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
+    let point = if g.crs.is_geographic() {
+        let frame = LocalMetricFrame::for_geometry(g, "centroid")?;
+        let projected = frame.project(&g.geometry);
+        frame.unproject_point(projected.centroid().ok_or_else(|| {
+            GeoError::Unsupported("geof:centroid of an empty geometry".to_string())
+        })?)
+    } else {
+        g.geometry.centroid().ok_or_else(|| {
+            GeoError::Unsupported("geof:centroid of an empty geometry".to_string())
+        })?
+    };
+    Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::Point(point) })
 }
 
 // ---- Simple-features relations (DE-9IM via geo's Relate) -------------------------
@@ -1057,33 +1185,19 @@ fn sym_difference_geometry(
 ///
 /// - Metric units require a geographic CRS: the geometry is projected into a
 ///   LOCAL EQUIRECTANGULAR metre frame about its mean latitude, buffered
-///   there, and unprojected — accurate at local scale (the same approximation
-///   as extended-extended [`distance_meters`]), increasingly distorted for
-///   continent-scale geometries or near the poles.
+///   there, and unprojected — accurate at local scale and increasingly
+///   distorted for continent-scale geometries or near the poles.
 /// - [`Unit::Degree`] / [`Unit::Radian`] buffer in euclidean coordinate space
 ///   (degrees for geographic CRSs, raw units for [`Crs::Other`]).
 pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, GeoError> {
     let buffered = match unit.meters_scale() {
         Some(scale) => {
-            if !g.crs.is_geographic() {
-                return Err(GeoError::NonGeographicCrs(g.crs.iri().to_string()));
-            }
-            let rect = g.geometry.bounding_rect().ok_or_else(|| {
-                GeoError::Unsupported("geof:buffer of an empty geometry".to_string())
-            })?;
-            // Local equirectangular frame about the geometry's mean latitude.
-            let kx = METERS_PER_DEGREE * rect.center().y.to_radians().cos();
-            if kx <= 0.0 {
-                return Err(GeoError::Unsupported(
-                    "geof:buffer with metric units at the poles".to_string(),
-                ));
-            }
+            let frame = LocalMetricFrame::for_geometry(g, "buffer")?;
             let meters = radius * scale;
-            let projected =
-                g.geometry.map_coords(|c| Coord { x: c.x * kx, y: c.y * METERS_PER_DEGREE });
-            projected
-                .buffer(meters)
-                .map_coords(|c| Coord { x: c.x / kx, y: c.y / METERS_PER_DEGREE })
+            frame.project(&g.geometry).buffer(meters).map_coords(|c| Coord {
+                x: c.x / frame.x_scale,
+                y: c.y / METERS_PER_DEGREE,
+            })
         }
         None => {
             let d = match unit {
@@ -1112,6 +1226,21 @@ pub mod lex {
     /// `geof:distance(?a, ?b, ?unitIri)`.
     pub fn distance(a: &str, b: &str, unit_iri: &str) -> Result<f64, GeoError> {
         super::distance(&parse_wkt_literal(a)?, &parse_wkt_literal(b)?, Unit::from_iri(unit_iri)?)
+    }
+
+    /// `geof:metricArea(?a)` -> square metres.
+    pub fn metric_area(a: &str) -> Result<f64, GeoError> {
+        super::metric_area(&parse_wkt_literal(a)?)
+    }
+
+    /// `geof:metricLength(?a)` -> metres.
+    pub fn metric_length(a: &str) -> Result<f64, GeoError> {
+        super::metric_length(&parse_wkt_literal(a)?)
+    }
+
+    /// `geof:metricPerimeter(?a)` -> metres.
+    pub fn metric_perimeter(a: &str) -> Result<f64, GeoError> {
+        super::metric_perimeter(&parse_wkt_literal(a)?)
     }
 
     macro_rules! lex_relation {
@@ -1176,6 +1305,10 @@ pub mod lex {
     lex_geometry_fn!(
         /// `geof:boundary(?a)` -> wktLiteral lexical form.
         boundary
+    );
+    lex_geometry_fn!(
+        /// `geof:centroid(?a)` -> wktLiteral point lexical form.
+        centroid
     );
 
     /// `geof:getSRID(?a)` -> the geometry's CRS IRI (an `xsd:anyURI` value).
