@@ -21,7 +21,6 @@ import {
   COMMON_PREFIXES,
   type SparqlBinding,
   type SparqlResults,
-  type SparqlTerm,
   type WasmStore,
   type WasmStoreCtor,
   type WorkspaceInferenceMode,
@@ -56,7 +55,15 @@ import {
 // [OPUS-4.8] sq-tp1m (#757) — the tier-b W-reason wasm bundle loader: the REAL forward-chaining
 // RDFS / OWL 2 RL reasoner (crates/sparq-reason via sparq-reason-wasm), lazy-loaded so the lean
 // query engine pays nothing until a workspace turns inference on.
-import { loadReasoner, modeToProfile } from "@/lib/reason-wasm";
+import { loadReasoner, modeToProfile, type WasmReasoner } from "@/lib/reason-wasm";
+// [FABLE-5] sq-ixc3.20 — canonical triple identity for the inferred-fact affordance (the
+// entailed-key set the results views consult) + the shared N-Triples term writer (moved out
+// of this file so the click-to-explain path and the snapshot writer share ONE writer).
+import {
+  entailedKeysFromClosure,
+  termToNT,
+  tripleKeysOfNTriples,
+} from "@/lib/inferred-facts";
 
 /**
  * Internal sentinel thrown out of the streaming loop when the caller's {@link AbortSignal} fires,
@@ -367,6 +374,25 @@ export interface EngineContextValue {
    */
   setInferenceMode: (mode: WorkspaceInferenceMode) => void;
   /**
+   * [FABLE-5] sq-ixc3.20 — the canonical triple keys (see @/lib/inferred-facts) of every
+   * ENTAILED triple the ACTIVE closure added over the asserted base, or `null` when no
+   * closure is materialised (inference off / still loading / errored). This is what lets the
+   * results views mark an inferred row/edge and offer the why() affordance — membership is
+   * exact set difference (closure − base), never a heuristic, so an asserted fact can never
+   * carry the "inferred" affordance. Recomputed with the closure (same cache discipline).
+   */
+  entailedTripleKeys: () => ReadonlySet<string> | null;
+  /**
+   * [FABLE-5] sq-ixc3.20 — ONE derivation ("why?") of the triple `(s, p, o)` under the
+   * ACTIVE inference regime, as `sparq-reason`'s proof-tree JSON (parse with
+   * @/lib/proof-view `parseProofJson`; the string `"null"` means "not entailed"). `s`/`p`/`o`
+   * are N-Triples term strings (the @/lib/inferred-facts `termToNT` form). Runs the W-reason
+   * bundle's `why` (RDFS / OWL-RL) or `whyN3` (N3 rules) over the asserted base — a witness,
+   * not an enumeration of all derivations. Rejects honestly when inference is off, the
+   * engine is cold, or the synced bundle predates the explain surface.
+   */
+  explainWhy: (s: string, p: string, o: string) => Promise<string>;
+  /**
    * [sq-glo5r] Push the active workspace's N3 rules docs to the engine so the N3 closure is
    * rebuilt when rules change. Called by `N3RulesBridge` (on workspace rule mutations) and
    * directly by workspace lifecycle actions (workspace switch, initial restore) as belt-and-
@@ -456,33 +482,9 @@ function classifyQuery(q: string): "select" | "ask" | "construct" | "describe" |
 const ALL_QUADS_QUERY =
   "SELECT ?s ?p ?o ?g WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
 
-const XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
-
-/** Escape a literal lexical form for an N-Triples/N-Quads double-quoted string. */
-function escapeNTLiteral(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
-}
-
-/**
- * Emit a single canonical N-Triples/N-Quads TERM (IRI / blank node / literal) from a SPARQL-JSON
- * term. Unlike `formatTerm` (a DISPLAY helper that abbreviates the datatype to `xsd:…`, which is
- * NOT valid N-Triples), this writes the FULL datatype IRI and escapes the lexical form, so the
- * re-load of the merged N-Quads parses losslessly.
- */
-function termToNT(t: SparqlTerm): string {
-  if (t.type === "uri") return `<${t.value}>`;
-  if (t.type === "bnode") return `_:${t.value}`;
-  // Literal.
-  const lex = `"${escapeNTLiteral(t.value)}"`;
-  if (t["xml:lang"]) return `${lex}@${t["xml:lang"]}`;
-  if (t.datatype && t.datatype !== XSD_STRING) return `${lex}^^<${t.datatype}>`;
-  return lex;
-}
+// [FABLE-5] sq-ixc3.20 — `termToNT` (the canonical N-Triples/N-Quads TERM writer for
+// SPARQL-JSON terms; full datatype IRI + escaped lexical form, unlike the display-only
+// `formatTerm`) now lives in @/lib/inferred-facts, shared with the click-to-explain path.
 
 /**
  * Serialise the WHOLE dataset of the live store (default graph + every named graph) to N-Quads,
@@ -665,6 +667,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // changes (warm / import / update) so a stale closure is rebuilt automatically.
   const reasonedStoreRef = React.useRef<WasmStore | null>(null);
   const reasonedKeyRef = React.useRef<string | null>(null);
+  // [FABLE-5] sq-ixc3.20 — the canonical keys of the triples the ACTIVE closure ADDED
+  // (closure − base), computed alongside the closure build and cached under the SAME
+  // `mode:epoch[:rulesHash]` key so it can never describe a different store than
+  // `reasonedStoreRef` (the guard in `entailedTripleKeys` checks the key, not just presence).
+  const entailedKeysRef = React.useRef<{ key: string; keys: Set<string> } | null>(null);
   // [OPUS-4.8] sq-tp1m — the SINGLE-FLIGHT slot for an in-flight closure build, keyed by the
   // same `mode:epoch`. Overlapping callers (the applyInferenceMode effect + a run(), or two
   // run()s) that request the same key while the first materialisation is still awaiting share
@@ -734,6 +741,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       reasonedStoreRef.current = null;
       reasonedKeyRef.current = null;
       reasonedBuildRef.current = null;
+      entailedKeysRef.current = null;
       storeEpochRef.current += 1;
       setStoreEpoch(storeEpochRef.current);
       const { size, graphs: gs } = summariseGraphs(store);
@@ -866,6 +874,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           // Closure = base triples + derived (so queries over the closure see both).
           const closure = baseNTriples + (derived.trim() ? "\n" + derived : "");
           const reasoned = Store.load(closure || " ", "ntriples");
+          // [FABLE-5] sq-ixc3.20 — the derived lines ARE the entailed set for N3 mode;
+          // reduce them to canonical keys for the inferred-fact affordance.
+          entailedKeysRef.current = { key, keys: tripleKeysOfNTriples(derived) };
           reasonedStoreRef.current = reasoned;
           reasonedKeyRef.current = key;
           return reasoned;
@@ -898,6 +909,13 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         const snapshot = storeToNQuads(base);
         const closure = reasoner.materialize(snapshot, "nquads", modeToProfile(mode));
         const reasoned = Store.load(closure, "ntriples");
+        // [FABLE-5] sq-ixc3.20 — entailed = closure − base at CANONICAL key level (the two
+        // texts come from different writers — Rust vs the JS termToNT — so identity is the
+        // decoded key, never the raw line; see @/lib/inferred-facts).
+        entailedKeysRef.current = {
+          key,
+          keys: entailedKeysFromClosure(closure, tripleKeysOfNTriples(snapshot)),
+        };
         reasonedStoreRef.current = reasoned;
         reasonedKeyRef.current = key;
         return reasoned;
@@ -924,6 +942,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (mode === "off") {
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
+        entailedKeysRef.current = null;
         setInferenceStatus({ kind: "off" });
         return;
       }
@@ -963,6 +982,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         if (gen !== inferenceGenRef.current) return;
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
+        entailedKeysRef.current = null;
         setInferenceStatus({
           kind: "error",
           message: err instanceof Error ? err.message : String(err),
@@ -986,6 +1006,55 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const setServiceAllowlist = React.useCallback((hosts: string[]) => {
     serviceAllowRef.current = hosts;
   }, []);
+
+  // [FABLE-5] sq-ixc3.20 — the entailed-key set of the ACTIVE materialised closure, or null.
+  // The key guard makes staleness impossible: the set is only handed out while it describes
+  // exactly the closure `run()` queries against (same `mode:epoch[:rulesHash]` key).
+  const entailedTripleKeys = React.useCallback((): ReadonlySet<string> | null => {
+    const cached = entailedKeysRef.current;
+    if (!cached || cached.key !== reasonedKeyRef.current) return null;
+    return cached.keys;
+  }, []);
+
+  // [FABLE-5] sq-ixc3.20 — one witness derivation of a clicked triple under the active
+  // regime, as proof-tree JSON. Runs over the ASSERTED base (the reasoner re-derives — the
+  // proof must bottom out in asserted facts, so the closure is never the input). The wasm
+  // reasoner is a stateless one-shot, so a click pays one materialisation-with-tracing; the
+  // GUI only offers the affordance on entailed facts, so this is on-demand, never per-row.
+  const explainWhy = React.useCallback(
+    async (s: string, p: string, o: string): Promise<string> => {
+      const base = storeRef.current;
+      if (!base) {
+        throw new Error("The engine is not ready yet — wait for the store to warm.");
+      }
+      const mode = inferenceMode;
+      if (mode === "off") {
+        throw new Error("Inference is off — there is no entailment regime to explain under.");
+      }
+      const reasoner = await loadReasoner();
+      // Feature-detect the explain surface (the published bundle has it; an older synced
+      // bundle degrades to this honest message rather than a `not a function` crash).
+      const missing = (name: string) =>
+        new Error(
+          `This reason bundle lacks the ${name} proof surface — rebuild it with the ` +
+            `explain feature (js: npm run build:reason-wasm).`,
+        );
+      if (mode === "n3") {
+        const whyN3 = (reasoner as Partial<WasmReasoner>).whyN3;
+        if (typeof whyN3 !== "function") throw missing("whyN3()");
+        const rulesText = n3RulesRef.current
+          .filter((d) => d.enabled !== false)
+          .map((d) => d.text)
+          .join("\n");
+        // The SAME combined rules + folded-base document the closure build feeds reasonN3.
+        return whyN3(rulesText + "\n" + storeToNTriples(base), s, p, o);
+      }
+      const why = (reasoner as Partial<WasmReasoner>).why;
+      if (typeof why !== "function") throw missing("why()");
+      return why(storeToNQuads(base), "nquads", modeToProfile(mode), s, p, o);
+    },
+    [inferenceMode],
+  );
 
   // [sq-glo5r] — push updated N3 rules to the engine; bumps rulesEpoch so the
   // applyInferenceMode effect fires and rebuilds the N3 closure when rules change.
@@ -1387,6 +1456,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
+      entailedTripleKeys,
+      explainWhy,
       setN3Rules,
       setServiceAllowlist,
       nativeFederationAvailable,
@@ -1412,6 +1483,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
+      entailedTripleKeys,
+      explainWhy,
       setN3Rules,
       setServiceAllowlist,
       nativeFederationAvailable,

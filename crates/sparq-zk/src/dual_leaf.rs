@@ -236,7 +236,7 @@ fn canonical_nonneg_u64(lexical: &str) -> Option<u64> {
 /// Encodes an `xsd:double` literal under the dual-leaf method (sq-2ezsx), with
 /// fail-closed same-leaf co-binding (§6): the value handle is the SPARQL-numeric
 /// CANONICAL IEEE-754 bit pattern of the SAME lexical form the `lexical_component`
-/// hashes, and a lexical form that does not parse as a finite/inf/NaN `xsd:double`
+/// hashes, and a lexical form outside the canonical `xsd:double` lexical space
 /// is REJECTED (so sparq's own ingest cannot self-desync). Returns the three
 /// components; `.leaf()` is the committed `Enc`.
 ///
@@ -245,17 +245,18 @@ fn canonical_nonneg_u64(lexical: &str) -> Option<u64> {
 /// NaN payloads collapse to ONE handle, the many-to-one-on-the-term property the
 /// `lexical_component` disambiguates for identity ops.
 ///
-/// Honest scope: any `xsd:double` Rust's `f64` lexical parser accepts (the same
-/// floating fragment the SPARQL/XPath F&O semantics cover). The general fractional
+/// Honest scope: canonical scientific notation (one non-zero digit before the
+/// point, no redundant trailing fractional zero, canonical integer exponent),
+/// the two signed zero spellings, and `INF`/`-INF`/`NaN`. The general fractional
 /// /scientific in-circuit decimal→IEEE parse the blake3 lane defers is SIDESTEPPED
-/// here: the value handle is the IEEE bits, committed off-circuit.
+/// here: the value handle is the IEEE bits, committed off-circuit. This ZK path
+/// remains research-grade and awaits the external audit tracked by sq-qhy4.
 pub fn encode_double(literal: &Literal) -> Result<DualLeafComponents, DualLeafError> {
     if literal.datatype().as_str() != XSD_DOUBLE {
         return Err(DualLeafError::NotValueLane(literal.to_string()));
     }
-    // Same-leaf co-binding: parse the lexical form once. `f64::from_str` accepts
-    // the xsd:double lexical fragment (incl. "INF"/"-INF"/"NaN" via a small map);
-    // a form it rejects is fail-closed (sparq cannot self-desync).
+    // [GPT-5.6] Same-leaf co-binding: validate the canonical lexical form before
+    // asking Rust for its value. Rust deliberately accepts a wider language.
     let bits = parse_xsd_double_bits(literal.value())
         .ok_or_else(|| DualLeafError::NonCanonicalValue(literal.to_string()))?;
     Ok(DualLeafComponents {
@@ -298,17 +299,49 @@ pub fn encode_decimal(literal: &Literal) -> Result<DualLeafComponents, DualLeafE
     })
 }
 
-/// Parse an `xsd:double` lexical form to its IEEE-754 `u64` bit pattern. Accepts
-/// the lexical fragment Rust's `f64` parser handles plus the xsd-canonical
-/// `INF`/`-INF`/`NaN` spellings; returns `None` for any other form (fail-closed).
+/// Parse a canonical `xsd:double` lexical form to its IEEE-754 `u64` bit pattern.
+/// Returns `None` for any non-canonical or unrepresentable form (fail-closed).
 fn parse_xsd_double_bits(lexical: &str) -> Option<u64> {
-    let v: f64 = match lexical {
-        "INF" | "+INF" => f64::INFINITY,
+    let v = match lexical {
+        "INF" => f64::INFINITY,
         "-INF" => f64::NEG_INFINITY,
         "NaN" => f64::NAN,
-        // Reject the bare integer-less forms Rust accepts but xsd:double does not
-        // need special-casing here; `f64::from_str` covers "1.0E1", "42", "-0.0".
-        other => other.parse::<f64>().ok()?,
+        finite => {
+            let unsigned = finite.strip_prefix('-').unwrap_or(finite);
+            let (mantissa, exponent) = unsigned.split_once('E')?;
+            // A second `E`, lowercase `e`, or a leading `+` fails these checks.
+            let (integer, fraction) = mantissa.split_once('.')?;
+            if integer.len() != 1
+                || fraction.is_empty()
+                || !integer.bytes().all(|b| b.is_ascii_digit())
+                || !fraction.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            let zero = integer == "0" && fraction.bytes().all(|b| b == b'0');
+            if zero {
+                // The canonical signed-zero spellings are `0.0E0` and `-0.0E0`.
+                if fraction != "0" || exponent != "0" {
+                    return None;
+                }
+            } else if integer == "0" || (fraction.len() > 1 && fraction.ends_with('0')) {
+                return None;
+            }
+            let exponent_digits = exponent.strip_prefix('-').unwrap_or(exponent);
+            if exponent_digits.is_empty()
+                || !exponent_digits.bytes().all(|b| b.is_ascii_digit())
+                || (exponent_digits.len() > 1 && exponent_digits.starts_with('0'))
+                || exponent == "-0"
+            {
+                return None;
+            }
+            let parsed = finite.parse::<f64>().ok()?;
+            // Overflow/underflow must use their own canonical value spelling.
+            if !parsed.is_finite() || (parsed == 0.0 && !zero) {
+                return None;
+            }
+            parsed
+        }
     };
     Some(v.to_bits())
 }
@@ -514,6 +547,36 @@ mod tests {
             encode_double(&dbl_lit("not-a-number")),
             Err(DualLeafError::NonCanonicalValue(_))
         ));
+    }
+
+    #[test]
+    fn double_rejects_non_canonical_lexicals() {
+        // [GPT-5.6] Audit regression: Rust's permissive `f64` parser accepts all
+        // of these, but none is in the canonical xsd:double lexical space.
+        for lexical in [
+            "inf", "Infinity", "+INF", "1.", "+.5", "01.5", "1e3", "1.0E+3",
+            "1.0E03", "0.5E0", "1.00E0", "1.0E9999", "1.0E-9999",
+        ] {
+            assert!(
+                matches!(
+                    encode_double(&dbl_lit(lexical)),
+                    Err(DualLeafError::NonCanonicalValue(_))
+                ),
+                "non-canonical xsd:double lexical was accepted: {lexical}"
+            );
+        }
+    }
+
+    #[test]
+    fn double_accepts_canonical_lexicals() {
+        for lexical in [
+            "INF", "-INF", "NaN", "0.0E0", "-0.0E0", "1.0E0", "-2.5E3", "5.0E-1",
+        ] {
+            assert!(
+                encode_double(&dbl_lit(lexical)).is_ok(),
+                "canonical xsd:double lexical was rejected: {lexical}"
+            );
+        }
     }
 
     // ---- xsd:decimal class (sq-2ezsx) ----

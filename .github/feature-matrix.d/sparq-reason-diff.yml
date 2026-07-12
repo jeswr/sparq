@@ -1,0 +1,13 @@
+# Feature-matrix fragment for `sparq-reason-diff`. Same contract as every fragment here
+# (see sparq-cli.yml / scripts/assemble-feature-matrix.py): each leg's check-run name is
+# `opt-in <name>` and GATES via the ci-summary aggregator.
+
+# [FABLE-5] sq-xg6uu: the OWL 2 RL differential-vs-external-oracle harness. The whole
+# crate (deps included) is behind `rl-oracle` — a default build is an empty lib, so this
+# leg is the ONLY place the rl_differential test (sparq-reason RL closure vs the
+# pre-captured owlrl golden vectors + disposition ledger in bench/reason-diff/rl/) runs.
+# Pure re-diff against committed fixtures: no network, no Python, owlrl never runs in CI.
+- name: "sparq-reason-diff (rl-oracle)"
+  crate: "sparq-reason-diff"
+  features: "rl-oracle"
+  test: true

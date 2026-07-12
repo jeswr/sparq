@@ -21,7 +21,8 @@
 //!    (Attaching them to the LDP responses is a one-line wire in the handler; this module owns the
 //!    values so the discovery contract lives in one place.)
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -45,6 +46,45 @@ pub const SUBSCRIPTION_PATH: &str = "/.notifications/WebSocketChannel2023/";
 pub const RECEIVE_PATH: &str = "/.notifications/WebSocketChannel2023/receive";
 /// The storage-description / well-known discovery document path.
 pub const WELL_KNOWN_SOLID_PATH: &str = "/.well-known/solid";
+
+// [GPT-5.6] Keep the hot-path counters private so callers can observe but cannot mutate them.
+struct NotificationMetricCounters {
+    dropped_subscribers_total: AtomicU64,
+    lagged_events_total: AtomicU64,
+}
+
+static NOTIFICATION_METRICS: LazyLock<NotificationMetricCounters> =
+    LazyLock::new(|| NotificationMetricCounters {
+        dropped_subscribers_total: AtomicU64::new(0),
+        lagged_events_total: AtomicU64::new(0),
+    });
+
+/// Process-wide WebSocket notification overflow counters.
+///
+/// Obtain the current values with [`NotificationMetrics::snapshot`]. Counts are monotonic for the
+/// lifetime of the process and use relaxed atomic ordering because they are observability-only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NotificationMetrics {
+    /// Subscribers closed after falling behind the per-topic broadcast buffer.
+    pub dropped_subscribers_total: u64,
+    /// Notification events skipped by lagged subscribers before they were closed.
+    pub lagged_events_total: u64,
+}
+
+impl NotificationMetrics {
+    /// Returns a point-in-time snapshot of the process-wide notification overflow counters.
+    #[must_use]
+    pub fn snapshot() -> Self {
+        Self {
+            dropped_subscribers_total: NOTIFICATION_METRICS
+                .dropped_subscribers_total
+                .load(Ordering::Relaxed),
+            lagged_events_total: NOTIFICATION_METRICS
+                .lagged_events_total
+                .load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// State for the notification routes: the hub + the server's public base URL (for building the
 /// absolute `receiveFrom` / subscription-service URLs in discovery + subscribe responses).
@@ -273,7 +313,13 @@ async fn stream_notifications(mut socket: WebSocket, hub: NotificationHub, topic
                     }
                     // The buffer overran for this slow client: a frame was dropped. Tell the client to
                     // reconcile by closing — it should re-subscribe + re-read (missed-update safety).
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        NOTIFICATION_METRICS
+                            .dropped_subscribers_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        NOTIFICATION_METRICS
+                            .lagged_events_total
+                            .fetch_add(skipped, Ordering::Relaxed);
                         let _ = socket
                             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                                 code: 1011, // "internal error" / server overload — client reconnects

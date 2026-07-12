@@ -50,6 +50,13 @@ assert!(report.passed(), "{report}");
   same decisions as singleton `decide` calls; divergence is a reported failure.
 - **Structured reports, no panics** — `run_vectors` returns an `OracleReport`
   with a field-level expected-vs-got diff per failing row.
+- **POST-`Slug` `.acl` escalation corpus** (`escalation_corpus`, bead `sq-39kps`)
+  — the dotted / percent-encoded (`%2Eacl`) / unicode-full-width / trailing-dot
+  child-name variants that must never let a non-`Control` requester author or
+  shadow a control document, each asserted fail-closed at the decision layer
+  (`decide(…, governed_resource, Control).allow == false`) with an owner-allowed
+  non-vacuity anchor. The adversarial acceptance bar for the future POST
+  chokepoint guard (`sq-gg0qq.5`); includes a genuine-escalation cover witness.
 
 No cargo features; the crate is opt-in by being a leaf `publish = false`
 workspace member that nothing depends on.

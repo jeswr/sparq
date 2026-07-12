@@ -51,13 +51,15 @@ const selected = Reasoner.reasonN3Query(dataN3, queryN3);
   newly-derived ground triples (the EYE `--pass-only-new` delta); `Reasoner.reasonN3Query(data,
   query)` materialises the closure of `data` then evaluates the N3 query rule(s) as a SPARQL
   `CONSTRUCT` over it (the EYE `--query` filter), failing closed on query builtins/formulae/
-  lists. These back the `@sparq-org/eyereasoner-compat` npm package (the drop-in eye-js API).
+  lists/quoted-triple terms. These back the `@sparq-org/eyereasoner-compat` npm package (the drop-in eye-js API).
 - **`why()` proof trees — opt-in `explain` feature.** Built with `--features explain`,
   the bundle also exposes the derivation **proof tree** for a single entailed triple
-  via `Reasoner.why(...)`, returning `sparq-reason`'s flat,
-  premises-before-conclusion `ProofTree::to_json` shape (leaves are `"asserted"`
-  base facts; internal nodes name the rule that fired) — **one** derivation (the
-  first in deterministic search order), or `null` if not entailed. `explain` is OFF
+  via `Reasoner.why(...)` (RDFS / OWL 2 RL) and `Reasoner.whyN3(...)` (N3 rules,
+  over the same combined rules+facts document `reasonN3` consumes), returning
+  `sparq-reason`'s flat, premises-before-conclusion `ProofTree::to_json` shape
+  (leaves are `"asserted"` base facts; internal nodes name the rule that fired —
+  `n3-rule-<i>` for N3) — **one** derivation (the first in deterministic search
+  order), or `null` if not entailed. `explain` is OFF
   by default, so the standard bundle carries zero proof-tree code; CI builds and
   tests the bundle in BOTH feature states.
 - **Single-threaded + pure-Rust.** No `rayon` in the bundle. The reasoner's `regex`

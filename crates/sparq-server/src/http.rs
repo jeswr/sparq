@@ -38,6 +38,8 @@ use axum::{
 };
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+#[cfg(feature = "response-compression")]
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 // [OPUS-4.8] (sq-o5bi, sq-0g6g) `ArcSwap` is the swap mechanism for the ONLINE restore and is
@@ -3113,7 +3115,14 @@ pub fn router(state: AppState) -> Router {
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
     // status the client actually saw.
-    harden(routes, &config).layer(axum::middleware::from_fn_with_state(
+    let routes = harden(routes, &config);
+    // [GPT-5.6] (sq-abhuq) Transport-transparent compression remains entirely opt-in. The
+    // default tower-http predicate deliberately skips `text/event-stream` and responses that
+    // already carry Content-Encoding; its body wrapper compresses frames as they are polled, so
+    // the existing bounded-channel streaming/backpressure path is not buffered or materialised.
+    #[cfg(feature = "response-compression")]
+    let routes = routes.layer(CompressionLayer::new().gzip(true).zstd(true));
+    routes.layer(axum::middleware::from_fn_with_state(
         state,
         crate::metrics::track,
     ))

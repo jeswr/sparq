@@ -1,0 +1,17 @@
+# [FABLE-5] bench/reason-deletion fixtures (bead sq-31fza) — DETERMINISTIC structural
+# counts: fixed generator (gen_reason_deletion.py, pure function of units) + the driver's
+# fixed seeds. Columns (TAB-separated):
+#   tier  units  abox_triples  rdfs_closure  owl_mono_closure  owl_fixpoint_closure
+# abox_triples = units*8 (generator-drift gate). Closure columns are the incremental
+# closure sizes; the driver already asserts each equals the from-scratch closure, so
+# pinning them here pins BOTH maintenance and batch materialization.
+# UNIT COUNTS ARE PINNED (3020, not 3000): the driver's delete-sampler excludes only the
+# six TBox PREDICATES, so on the fixpoint workload it can draw the single
+# [locatedIn, rdf:type, owl:TransitiveProperty] axiom-typing triple, which legitimately
+# triggers the documented rebuild path and fails the "ABox deltas must not rebuild"
+# assert. Tier sizes are chosen so the fixed-seed draw sequence never hits it
+# (deterministic; re-validate with run.sh if the driver or generator changes).
+# Driver-side fix tracked as follow-up bead sq-x58ow — see README.md.
+small	3020	24160	42662	48734	49348
+medium	15000	120000	211792	241824	242438
+large	75000	600000	1058842	1208874	1209488

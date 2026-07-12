@@ -80,8 +80,8 @@ before the first call.
   (`swipl-web.wasm` + `swipl-web.data`, ~3.83 MB combined). Reproduce the exact bytes:
 
   ```sh
-  wasm-pack build ../../crates/sparq-reason-wasm --target web --release
-  f=../../crates/sparq-reason-wasm/pkg/sparq_reason_wasm_bg.wasm
+  wasm-pack build ../../crates/sparq-reason-wasm --target web --release --out-dir pkg-eyereasoner-compat
+  f=../../crates/sparq-reason-wasm/pkg-eyereasoner-compat/sparq_reason_wasm_bg.wasm
   echo "raw: $(stat -c%s "$f")  gzip -9: $(gzip -9 -c "$f" | wc -c)"
   ```
 

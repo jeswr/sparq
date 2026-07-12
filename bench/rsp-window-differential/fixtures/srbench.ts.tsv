@@ -1,0 +1,21 @@
+# [GPT-5.6] sq-no6iy — fixed event-time replay shared with the RSP4J capture.
+# ts<TAB>stream<TAB>subject<TAB>predicate<TAB>object
+0	<http://ex/meta>	<http://ex/stA>	<http://ex/state>	<http://ex/NY>
+0	<http://ex/meta>	<http://ex/stB>	<http://ex/state>	<http://ex/NY>
+0	<http://ex/meta>	<http://ex/stC>	<http://ex/state>	<http://ex/CA>
+1	<http://ex/obs>	<http://ex/stA>	<http://ex/value>	"12"^^<http://www.w3.org/2001/XMLSchema#integer>
+3	<http://ex/obs>	<http://ex/stB>	<http://ex/value>	"15"^^<http://www.w3.org/2001/XMLSchema#integer>
+7	<http://ex/obs>	<http://ex/stC>	<http://ex/value>	"20"^^<http://www.w3.org/2001/XMLSchema#integer>
+10	<http://ex/meta>	<http://ex/stA>	<http://ex/state>	<http://ex/NY>
+10	<http://ex/meta>	<http://ex/stB>	<http://ex/state>	<http://ex/NY>
+10	<http://ex/meta>	<http://ex/stC>	<http://ex/state>	<http://ex/CA>
+12	<http://ex/obs>	<http://ex/stA>	<http://ex/value>	"11"^^<http://www.w3.org/2001/XMLSchema#integer>
+18	<http://ex/obs>	<http://ex/stC>	<http://ex/value>	"25"^^<http://www.w3.org/2001/XMLSchema#integer>
+20	<http://ex/meta>	<http://ex/stA>	<http://ex/state>	<http://ex/NY>
+20	<http://ex/meta>	<http://ex/stB>	<http://ex/state>	<http://ex/NY>
+20	<http://ex/meta>	<http://ex/stC>	<http://ex/state>	<http://ex/CA>
+21	<http://ex/obs>	<http://ex/stA>	<http://ex/value>	"9"^^<http://www.w3.org/2001/XMLSchema#integer>
+22	<http://ex/obs>	<http://ex/stA>	<http://ex/value>	"9"^^<http://www.w3.org/2001/XMLSchema#integer>
+24	<http://ex/obs>	<http://ex/stZ>	<http://ex/value>	"99"^^<http://www.w3.org/2001/XMLSchema#integer>
+28	<http://ex/obs>	<http://ex/stC>	<http://ex/value>	"30"^^<http://www.w3.org/2001/XMLSchema#integer>
+35	<http://ex/obs>	<http://ex/stA>	<http://ex/value>	"1"^^<http://www.w3.org/2001/XMLSchema#integer>

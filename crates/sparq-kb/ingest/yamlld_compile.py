@@ -485,9 +485,11 @@ def _fmt_decimal(v: Any) -> str:
 # =============================================================================
 
 
-def compile_yaml_ld(text: str, echo: bool = True) -> str:
+def compile_yaml_ld(text: str, echo: bool = True, name: str = "agents-findings") -> str:
     """Compile a YAML-LD authoring doc (string) to PKG Turtle (string). Raises
-    CompileError on a malformed doc or an ambiguous/unresolvable concept token."""
+    CompileError on a malformed doc or an ambiguous/unresolvable concept token.
+    `name` is the authoring-doc stem, used only for the generated-file header comment
+    (the default keeps the original agents-findings output byte-identical). [FABLE-5]"""
     doc = parse_yaml_ld(text)
     ctx = doc.get("@context", {})
     if not isinstance(ctx, dict):
@@ -500,7 +502,7 @@ def compile_yaml_ld(text: str, echo: bool = True) -> str:
 
     parts: list[str] = []
     parts.append(
-        "# agents-findings.ttl — GENERATED from agents-findings.yaml.ld by\n"
+        f"# {name}.ttl — GENERATED from {name}.yaml.ld by\n"
         "# crates/sparq-kb/ingest/yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2).\n"
         "# DO NOT HAND-EDIT — edit the .yaml.ld authoring source and recompile.\n"
         "# 🤖 SPARQ agent [OPUS-4.8]. Conforms to pkg.shapes.ttl (0 violations).\n"
@@ -550,8 +552,11 @@ def main() -> int:
 
     with open(args.src, encoding="utf-8") as f:
         text = f.read()
+    # The generated-file header names the authoring doc (stem of src). [FABLE-5]
+    base = args.src.rsplit("/", 1)[-1]
+    name = base[: -len(".yaml.ld")] if base.endswith(".yaml.ld") else base
     try:
-        ttl = compile_yaml_ld(text, echo=not args.quiet)
+        ttl = compile_yaml_ld(text, echo=not args.quiet, name=name)
     except CompileError as e:
         print(f"[yamlld_compile] COMPILE ERROR: {e}", file=sys.stderr)
         return 2
