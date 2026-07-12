@@ -64,6 +64,9 @@ fedclient = [
 # `adaptive-replan` edge into `sparq-fedplan` is not pulled. The dependency arrow still points
 # one-way INTO the engine (never the reverse), so the boundary guard is unaffected.
 fedclient-adaptive = ["fedclient", "sparq-fedplan/adaptive-replan"]
+# [GPT-5.6] sq-fx5id: bounded, per-query pattern-level ASK/cardinality probing. OFF by
+# default and implies the client surface whose SSRF-guarded Fetcher + planner bridge it reuses.
+pattern_probe = ["fedclient"]
 
 [dependencies]
 # REUSE: the cost-based planner + StreamJoin operator (planner-bridge §4.2, physical
