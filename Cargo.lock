@@ -4614,6 +4614,7 @@ dependencies = [
  "i_overlay 7.0.2",
  "oxrdf 0.3.3",
  "proj4rs",
+ "proptest",
  "quick-xml 0.41.0",
  "rand 0.10.1",
  "rstar 0.13.0",
