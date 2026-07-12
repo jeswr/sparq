@@ -324,6 +324,19 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/dl_suite.rs",
         "DL_DIRECT_FLOOR",
     ),
+    // [FABLE-5] the UFO-SN3 finite-world expressibility ratchet. The floor const
+    // (`pub const UFO_SN3_FLOOR`) lives top-level in THIS crate's
+    // `tests/ufo_sn3_suite.rs` (UNGATED — the lane calls plain `reason_n3` and runs
+    // in ordinary `cargo test --workspace`); the guard reads it TEXTUALLY so the
+    // central scoreboard's `ratchet_floor` can never silently drift from what the
+    // runner asserts. It is a sparq EXTENSION-shaped ratchet over the finite-world
+    // UFO-SN3 reference profile, NOT a UFO/gUFO/OntoUML standards-conformance claim
+    // (no normative UFO conformance suite exists).
+    (
+        "UFO-SN3 finite-world expressibility",
+        "crates/sparq-conformance/tests/ufo_sn3_suite.rs",
+        "UFO_SN3_FLOOR",
+    ),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the suite labels whose ratchet floor is sourced at
@@ -555,8 +568,12 @@ fn scoreboard_renders_all_suites() {
     // [FABLE-5] sq-pbz04.6.4 — the sparq D value-space matrix, HONESTLY rendered as a
     // sparq EXTENSION (tallied separately from the W3C D-entailment pass count).
     assert!(md.contains("D value-space matrix (integer/decimal/boolean/binary/temporal)"));
+    // [FABLE-5] — the UFO-SN3 finite-world expressibility ratchet, HONESTLY rendered
+    // as a sparq EXTENSION (no normative UFO/gUFO conformance suite exists; NOT
+    // folded into the conformance total).
+    assert!(md.contains("UFO-SN3 finite-world expressibility"));
     assert!(
-        md.contains("sparq-extension (9 rows, NOT conformance)"),
-        "nine extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (10 rows, NOT conformance)"),
+        "ten extension rows should be tallied separately and pluralised"
     );
 }
