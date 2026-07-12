@@ -1,5 +1,6 @@
 //! Validation reports: the result structs, the report RDF graph (as Turtle, per
-//! the SHACL results vocabulary) and a human-readable text rendering.
+//! the SHACL results vocabulary), deterministic JSON and a human-readable text
+//! rendering.
 
 use crate::model::SH;
 use crate::path::Path;
@@ -237,6 +238,131 @@ impl ValidationReport {
         }
         out
     }
+
+    /// A deterministic JSON rendering of the report for machine consumers.
+    ///
+    /// Object keys have a stable order, validation results retain their report
+    /// order, and absent paths, values, and diagnostics are omitted.
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\n");
+        let _ = write!(out, "  \"conforms\": {},\n  \"results\": [", self.conforms);
+
+        if self.results.is_empty() {
+            out.push(']');
+        } else {
+            out.push('\n');
+            for (index, result) in self.results.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n");
+                }
+                let _ = writeln!(out, "    {{");
+                let _ = writeln!(
+                    out,
+                    "      \"focusNode\": \"{}\",",
+                    escape_json(&term_to_json_string(&result.focus_node))
+                );
+                if let Some(path) = &result.path {
+                    let _ = writeln!(
+                        out,
+                        "      \"resultPath\": \"{}\",",
+                        escape_json(&path.to_turtle())
+                    );
+                }
+                if let Some(value) = &result.value {
+                    let _ = writeln!(
+                        out,
+                        "      \"value\": \"{}\",",
+                        escape_json(&term_to_json_string(value))
+                    );
+                }
+                let _ = writeln!(
+                    out,
+                    "      \"sourceShape\": \"{}\",",
+                    escape_json(&term_to_json_string(&result.source_shape))
+                );
+                let _ = writeln!(
+                    out,
+                    "      \"sourceConstraintComponent\": \"{}\",",
+                    escape_json(&result.source_component)
+                );
+                let _ = writeln!(
+                    out,
+                    "      \"severity\": \"{}\",",
+                    escape_json(&result.severity)
+                );
+                let message = match result.messages.first() {
+                    Some(Term::Literal(literal)) => literal.value(),
+                    _ => &result.default_message,
+                };
+                let _ = write!(
+                    out,
+                    "      \"resultMessage\": \"{}\"\n    }}",
+                    escape_json(message)
+                );
+            }
+            out.push_str("\n  ]");
+        }
+
+        if !self.diagnostics.is_empty() {
+            out.push_str(",\n  \"diagnostics\": [\n");
+            for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n");
+                }
+                let _ = writeln!(out, "    {{");
+                let _ = writeln!(
+                    out,
+                    "      \"sourceShape\": \"{}\",",
+                    escape_json(&term_to_json_string(&diagnostic.source_shape))
+                );
+                let _ = writeln!(
+                    out,
+                    "      \"sourceConstraintComponent\": \"{}\",",
+                    escape_json(&diagnostic.source_component)
+                );
+                let _ = write!(
+                    out,
+                    "      \"message\": \"{}\"\n    }}",
+                    escape_json(&diagnostic.message)
+                );
+            }
+            out.push_str("\n  ]");
+        }
+
+        out.push_str("\n}");
+        out
+    }
+}
+
+/// Returns a JSON-safe string body without surrounding quotes.
+fn escape_json(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0C}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if control.is_control() => {
+                let _ = write!(escaped, "\\u{:04X}", control as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+/// Returns the report string representation for an RDF term.
+fn term_to_json_string(term: &Term) -> String {
+    match term {
+        Term::NamedNode(node) => node.as_str().to_string(),
+        Term::BlankNode(node) => format!("_:{}", node.as_str()),
+        Term::Literal(literal) => literal.to_string(),
+        Term::Triple(_) => term.to_string(),
+    }
 }
 
 /// [OPUS-4.8] (sq-f8gu) Writes one `sh:ValidationResult` as an anonymous
@@ -300,7 +426,7 @@ impl ValidationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{Literal, NamedNode, Term};
+    use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
 
     const EX: &str = "http://example.org/";
 
@@ -354,6 +480,162 @@ mod tests {
         assert!(!ttl.contains("sh:result"));
         parse_report(&ttl);
         assert_eq!(r.to_text(), "Conforms: data graph satisfies all shapes.\n");
+    }
+
+    #[test]
+    fn conforming_report_json_is_pinned() {
+        let report = ValidationReport::new(vec![]);
+
+        assert_eq!(
+            report.to_json(),
+            "{\n  \"conforms\": true,\n  \"results\": []\n}"
+        );
+    }
+
+    #[test]
+    fn json_result_is_pinned_with_fixed_key_order() {
+        let report = ValidationReport::new(vec![result(
+            iri(&format!("{EX}alice")),
+            Some(Path::Predicate(format!("{EX}age"))),
+            Some(lit("thirty")),
+            "MinCountConstraintComponent",
+            "Violation",
+            vec![lit("age is required")],
+        )]);
+
+        assert_eq!(
+            report.to_json(),
+            concat!(
+                "{\n",
+                "  \"conforms\": false,\n",
+                "  \"results\": [\n",
+                "    {\n",
+                "      \"focusNode\": \"http://example.org/alice\",\n",
+                "      \"resultPath\": \"<http://example.org/age>\",\n",
+                "      \"value\": \"\\\"thirty\\\"\",\n",
+                "      \"sourceShape\": \"http://example.org/Shape\",\n",
+                "      \"sourceConstraintComponent\": ",
+                "\"http://www.w3.org/ns/shacl#MinCountConstraintComponent\",\n",
+                "      \"severity\": \"http://www.w3.org/ns/shacl#Violation\",\n",
+                "      \"resultMessage\": \"age is required\"\n",
+                "    }\n",
+                "  ]\n",
+                "}"
+            )
+        );
+    }
+
+    #[test]
+    fn json_omits_absent_path_value_and_diagnostics() {
+        let report = ValidationReport::new(vec![result(
+            iri(&format!("{EX}bob")),
+            None,
+            None,
+            "MinCountConstraintComponent",
+            "Violation",
+            vec![],
+        )]);
+        let json = report.to_json();
+
+        assert!(!json.contains("resultPath"), "{json}");
+        assert!(!json.contains("\"value\""), "{json}");
+        assert!(!json.contains("diagnostics"), "{json}");
+        assert!(json.contains("\"resultMessage\": \"generated default\""));
+    }
+
+    #[test]
+    fn json_escapes_messages_and_term_strings() {
+        let report = ValidationReport::new(vec![result(
+            iri(&format!("{EX}alice")),
+            None,
+            None,
+            "NodeConstraintComponent",
+            "Violation",
+            vec![lit("quoted \"line\"\nnext")],
+        )]);
+        let json = report.to_json();
+
+        assert!(
+            json.contains(r#""resultMessage": "quoted \"line\"\nnext""#),
+            "{json}"
+        );
+        assert!(!json.contains("quoted \"line\"\nnext"));
+        assert_eq!(escape_json("\\\t\u{1}"), "\\\\\\t\\u0001");
+        assert_eq!(
+            term_to_json_string(&Term::NamedNode(NamedNode::new_unchecked(
+                "http://example.org/node"
+            ))),
+            "http://example.org/node"
+        );
+        assert_eq!(
+            term_to_json_string(&Term::BlankNode(BlankNode::new_unchecked("node"))),
+            "_:node"
+        );
+        assert_eq!(term_to_json_string(&lit("literal")), r#""literal""#);
+        assert_eq!(
+            term_to_json_string(&Term::Triple(Box::new(Triple::new(
+                NamedNode::new_unchecked("http://example.org/subject"),
+                NamedNode::new_unchecked("http://example.org/predicate"),
+                Literal::new_simple_literal("object"),
+            )))),
+            r#"<<( <http://example.org/subject> <http://example.org/predicate> "object" )>>"#
+        );
+    }
+
+    #[test]
+    fn json_preserves_result_order() {
+        let first = result(
+            iri(&format!("{EX}first")),
+            None,
+            None,
+            "MinCountConstraintComponent",
+            "Violation",
+            vec![],
+        );
+        let second = result(
+            iri(&format!("{EX}second")),
+            None,
+            None,
+            "MaxCountConstraintComponent",
+            "Violation",
+            vec![],
+        );
+
+        let forward = ValidationReport::new(vec![first.clone(), second.clone()]).to_json();
+        let reversed = ValidationReport::new(vec![second, first]).to_json();
+        assert_ne!(forward, reversed);
+        assert!(forward.find("first").unwrap() < forward.find("second").unwrap());
+    }
+
+    #[test]
+    fn json_emits_diagnostics_in_fixed_shape() {
+        let report = ValidationReport {
+            conforms: true,
+            results: Vec::new(),
+            diagnostics: vec![ShapeDiagnostic {
+                source_shape: iri(&format!("{EX}Shape")),
+                source_component: format!("{SH}PatternConstraintComponent"),
+                message: "pattern did not compile".into(),
+            }],
+        };
+
+        assert_eq!(
+            report.to_json(),
+            concat!(
+                "{\n",
+                "  \"conforms\": true,\n",
+                "  \"results\": [],\n",
+                "  \"diagnostics\": [\n",
+                "    {\n",
+                "      \"sourceShape\": \"http://example.org/Shape\",\n",
+                "      \"sourceConstraintComponent\": ",
+                "\"http://www.w3.org/ns/shacl#PatternConstraintComponent\",\n",
+                "      \"message\": \"pattern did not compile\"\n",
+                "    }\n",
+                "  ]\n",
+                "}"
+            )
+        );
     }
 
     #[test]
