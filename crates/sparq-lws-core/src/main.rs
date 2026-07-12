@@ -25,6 +25,9 @@
 //! for the config-shape decision (PEM paths, both-or-neither validation, ACME noted as a future seam).
 //! Both serve paths share the same `SOLID_SERVER_BIND` resolution (hostname:port accepted, not only a
 //! numeric `SocketAddr`) and the same Ctrl-C graceful-drain behaviour.
+//! With the default-off `http3` feature and TLS configured, the binary additionally binds an HTTP/3
+//! QUIC listener on the same resolved address and port over UDP. The existing TCP ALPN contract stays
+//! exactly `[h2, http/1.1]`; only the cloned QUIC configuration advertises `h3`.
 //!
 //! ## Still seamed (not in this slice)
 //! - The live SPARQ HTTP client + the `object_store`-backed blob store (the binary still boots the
@@ -266,6 +269,22 @@ fn reject_durable_sparq_with_inmem_blob(
 /// Seeding the `memory` backend is ALWAYS allowed (it is the seed target by construction).
 fn reject_seed_on_nonmemory(seed_requested: bool, backend: &str, allow_override: bool) -> bool {
     seed_requested && backend != "memory" && !allow_override
+}
+
+/// [GPT-5.6] Build the opt-in QUIC endpoint from a CLONE of the existing TCP rustls config.
+///
+/// The clone is load-bearing: the TCP endpoint must keep advertising exactly `h2` + `http/1.1`,
+/// while QUIC advertises only the protocol it can actually serve (`h3`). Binding UDP to the TCP
+/// listener's resolved address gives both transports the same host/port without a second config key.
+#[cfg(feature = "http3")]
+fn bind_http3_endpoint(
+    tcp_tls: &axum_server::tls_rustls::RustlsConfig,
+    udp_addr: std::net::SocketAddr,
+) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
+    let mut quic_tls = (*tcp_tls.get_inner()).clone();
+    quic_tls.alpn_protocols = vec![b"h3".to_vec()];
+    let quic = sparq_http3::quic_server_config(quic_tls)?;
+    Ok(quinn::Endpoint::server(quic, udp_addr)?)
 }
 
 #[tokio::main]
@@ -860,6 +879,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // existing `std::net::TcpListener` (so no second, parse-restricted bind).
         Some(config) => {
             let tokio_listener = tokio::net::TcpListener::bind(&bind).await?;
+            #[cfg(feature = "http3")]
+            let http3_addr = tokio_listener.local_addr()?;
+
+            // [GPT-5.6] The h3 listener gets a clone of the ONE already-assembled, hardened router.
+            // `serve_h3` injects the Quinn peer as `ConnectInfo<SocketAddr>` before dispatch, so the
+            // OUTERMOST pre-crypto rate limiter sees the real source instead of failing open to auth.
+            // Endpoint construction happens before the TCP listener is handed off: a UDP bind/config
+            // failure aborts startup rather than silently serving only the unadvertised TCP subset.
+            #[cfg(feature = "http3")]
+            let http3_server = {
+                let endpoint = bind_http3_endpoint(&config, http3_addr)?;
+                let bound_addr = endpoint.local_addr()?;
+                eprintln!(
+                    "  HTTP/3: QUIC listener ACTIVE on udp://{bound_addr} (ALPN h3; shared LDP router; \
+                     WebSocket extended CONNECT is out of scope)."
+                );
+                tokio::spawn(sparq_http3::serve_h3(
+                    endpoint,
+                    app.clone(),
+                    shutdown_signal(),
+                ))
+            };
+
             // axum-server wants a blocking `std::net::TcpListener`; converting the tokio one keeps the
             // resolved address (and avoids re-binding through the numeric-only `SocketAddr` path).
             let std_listener = tokio_listener.into_std()?;
@@ -946,6 +988,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await?;
             }
+
+            // Both listener shutdown futures observe the same process signal. Await the UDP task so
+            // its endpoint closes and drains QUIC connections before the process exits normally.
+            #[cfg(feature = "http3")]
+            http3_server.await??;
         }
         // Plain TCP (dev/test behaviour). Graceful shutdown on Ctrl-C.
         //
@@ -1285,6 +1332,39 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [GPT-5.6] sq-oprna.2: the QUIC endpoint must gain `h3` without mutating the TCP ALPN list.
+    /// A missing `h3` mutation is rejected by `sparq_http3::quic_server_config`; mutating the shared
+    /// config instead of its clone makes the second assertion fail.
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn http3_endpoint_preserves_tcp_alpn() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mode = TlsMode::Tls {
+            cert_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-cert.pem").into(),
+            key_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-key.pem").into(),
+        };
+        let tcp_tls = tls::build_rustls_config(&mode, false)
+            .await
+            .expect("build fixture TLS config")
+            .expect("TLS mode yields a config");
+        let tcp_alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        assert_eq!(tcp_tls.get_inner().alpn_protocols, tcp_alpn);
+
+        let endpoint = bind_http3_endpoint(
+            &tcp_tls,
+            "127.0.0.1:0".parse().expect("loopback socket address"),
+        )
+        .expect("bind HTTP/3 endpoint from cloned TLS config");
+        assert_eq!(
+            tcp_tls.get_inner().alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "building QUIC must not add h3 to the TCP ALPN list"
+        );
+
+        endpoint.close(quinn::VarInt::from_u32(0), b"test complete");
+        endpoint.wait_idle().await;
+    }
 
     /// Set `key` to `val` (or remove it when `None`), run `f`, then restore the prior value. Each
     /// test uses a UNIQUE key so concurrent test threads never read the same process-global env var.

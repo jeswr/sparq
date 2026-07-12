@@ -62,6 +62,26 @@ That extension is load-bearing for request policies keyed by the remote socket a
 Protocol failures are isolated to their connection or stream; resolving the shutdown
 future closes the endpoint and waits for its QUIC connections to drain.
 
+## Solid/LDP server integration
+
+`sparq-lws-core` carries this bridge behind its default-off `http3` feature
+([GPT-5.6] sq-oprna.2):
+
+```sh
+SOLID_SERVER_TLS_CERT=/path/to/cert.pem \
+SOLID_SERVER_TLS_KEY=/path/to/key.pem \
+cargo run -p sparq-lws-core --features http3
+```
+
+When both TLS paths are configured, the binary binds QUIC/UDP to the same resolved
+`SOLID_SERVER_BIND` address and port as TLS/TCP and serves one cloned
+`build_router_with_overload` router. The TCP rustls configuration remains exactly
+`[h2, http/1.1]`; a clone used only by Quinn advertises the exact `h3` token. Every
+QUIC request receives peer `ConnectInfo`, so the pre-crypto per-IP rate limiter does
+not fail open to the ordinary auth stack. With no TLS configuration, enabling the
+Cargo feature does not create a QUIC listener. WebSocket notifications continue over
+HTTP/1.1 or HTTP/2 because RFC 9220 extended CONNECT is outside this integration.
+
 ## Boundaries
 
 - The caller owns rustls policy, certificates, client authentication, Quinn transport

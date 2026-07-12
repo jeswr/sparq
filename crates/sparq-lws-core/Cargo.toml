@@ -234,6 +234,10 @@ subtle = "2.6"
 redis = { version = "1", default-features = false, features = ["r2d2"], optional = true }
 r2d2 = { version = "0.8", optional = true }
 mimalloc = "0.1"
+# [GPT-5.6] sq-oprna.2: HTTP/3 is a separate default-off UDP listener. Keep both
+# Quinn and the shared bridge absent from the ordinary Solid server dependency graph.
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+sparq-http3 = { path = "../sparq-http3", optional = true, features = ["server"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # getrandom 0.2 predates the workspace's getrandom_backend cfg and needs its explicit JS shim.
@@ -285,6 +289,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # adds NO new crate to the build. `bytes` (its body buffer type) is likewise already resolved. Used ONLY
 # in the default-`#[ignore]`d adversarial tests, never the server binary.
 h2 = "0.4"
+# The feature-gated HTTP/3 integration test drives a real h3 client against the
+# production LDP router. These stay test-only; the server implementation contains
+# direct h3 use in the shared `sparq-http3` bridge.
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 
 [features]
 # DEFAULT = the embedded in-process engine (sq-gg0qq.3): now that this crate lives IN the sparq
@@ -313,6 +322,10 @@ embedded-sparq = ["dep:sparq-core", "dep:sparq-engine"]
 # shape, not the default. Pure code gate — its deps (hyper client + hyper-util legacy pool) stay
 # resolved for the server transport either way.
 http-sparq = []
+# [GPT-5.6] sq-oprna.2: opt-in encrypted HTTP/3 transport. When TLS PEM paths are
+# configured, the binary binds UDP on the TCP listener's resolved address/port and
+# dispatches into the same hardened router. The default plain/TLS paths stay unchanged.
+http3 = ["dep:quinn", "dep:sparq-http3"]
 # Opt-in wasm request-handling core. Target cfgs remove native transport, runtime, crypto, OIDC,
 # notifications, and non-memory backends; the native target remains unchanged when this is enabled.
 wasm = []
