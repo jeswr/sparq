@@ -188,6 +188,28 @@ sparq_engine::query(&g,
     "PREFIX ex: <http://ex/> SELECT ?x WHERE { ex:alice ex:knows+ ?x }").unwrap();   // transitive
 ```
 
+**Materialized full paths** (opt-in `paths` feature) — unlike standard SPARQL property paths,
+this programmatic API returns every intermediate node and edge. `Shortest` returns all tied
+minimum-length paths per endpoint pair; `All` requires a finite `max_length` and returns simple
+paths up to that bound. Set `cyclic: true` to request only non-empty paths returning to their start.
+
+```rust
+// Cargo.toml: sparq-engine = { version = "0.1", features = ["paths"] }
+use oxrdf::{NamedNode, Term};
+use sparq_engine::{enumerate_paths, PathMode, PathSpec};
+
+let paths = enumerate_paths(&g, &PathSpec {
+    mode: PathMode::Shortest,
+    cyclic: false,
+    start: Some(Term::NamedNode(NamedNode::new("http://ex/alice")?)),
+    end: Some(Term::NamedNode(NamedNode::new("http://ex/bob")?)),
+    via: NamedNode::new("http://ex/knows")?,
+    max_length: None,
+})?;
+assert!(paths.iter().all(|path| path.nodes.len() == path.edges.len() + 1));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 **RDF 1.2 triple terms** (`<<( s p o )>>`) — stored structurally; patterns with variables
 inside the triple term match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
 this workspace). In Turtle/TriG you can write the reified triple `<< s p o >>` (the
