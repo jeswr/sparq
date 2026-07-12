@@ -4,8 +4,9 @@
 
 This suite measures scalar builtins whose setup cost can accidentally become a per-row cost:
 constant-pattern `REGEX` and `REPLACE`, `RAND`, and query-constant `NOW`. It generates a fixed
-N-Triples corpus outside the checkout, runs the release `sparq-cli` query-suite driver, checks the
-result cardinality of every probe, and prints a Markdown throughput table.
+N-Triples corpus outside the checkout, runs the release `sparq-cli` query-suite driver in
+materialize mode, checks the result cardinality of every probe, and prints a Markdown throughput
+table. Materialization is intentional: it forces every RAND projection to execute.
 
 ```sh
 cargo build --release -p sparq-cli
@@ -18,6 +19,17 @@ path), and `BUILTINS_CACHE` (generated-data directory). For a cheap harness chec
 ```sh
 ROWS=100 ITERS=1 bench/builtins/run.sh
 ```
+
+The lightweight harness self-test mutation-witnesses the cardinality and timing guards with a
+controlled CLI double:
+
+```sh
+bench/builtins/test.sh
+```
+
+`now_query_constant.rq` materializes a NOW projection for every input row. It is a cost workload,
+not a temporal-conformance assertion: the cardinality guard proves the projection was consumed,
+but deliberately avoids inferring query constancy from clock-resolution-sensitive values.
 
 Every elapsed-time and throughput value is a work-box measurement and **NON-CANONICAL**. The
 canonical rerun belongs to sq-98w7z.9; in particular, it reruns the REGEX-heavy FILTER probe here.
