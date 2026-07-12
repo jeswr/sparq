@@ -1,11 +1,11 @@
-//! Exact shortest-path centralities over a [`NodeGraph`].
+//! Exact centrality and cohesion measures over a [`NodeGraph`].
 //!
-//! [GPT-5.6] sq-lsp7k.15: both algorithms use the weak (undirected) topology: an RDF
+//! [GPT-5.6] sq-lsp7k.15: these algorithms use the weak (undirected) topology: an RDF
 //! edge `a → b` connects `a` and `b` in either traversal direction. This matches the
 //! crate's community-analysis topology and makes the result independent of which RDF
 //! direction was chosen to encode a relationship. Parallel edges were already collapsed
 //! by [`NodeGraph`], and reciprocal edges are collapsed again here, so neither changes the
-//! number of shortest paths. Self-loops do not contribute to shortest paths.
+//! topology. Self-loops do not contribute.
 
 use std::collections::VecDeque;
 
@@ -101,6 +101,70 @@ pub fn closeness_centrality(g: &NodeGraph) -> Vec<f64> {
         .collect()
 }
 
+/// The k-core number of every node.
+///
+/// A node's core number is the largest `k` for which it belongs to a subgraph where every
+/// node has undirected degree at least `k`. The implementation uses the
+/// Batagelj–Zaversnik bucket-peeling algorithm over the weak (undirected) topology and runs
+/// in `O(V + E)` time.
+///
+/// The returned vector is indexed by the graph's dense node index. Empty and single-node
+/// graphs return an all-zero vector of the corresponding length. Reciprocal edges are one
+/// connection, and self-loops do not increase a node's degree.
+pub fn core_number(g: &NodeGraph) -> Vec<usize> {
+    let adjacency = undirected_adjacency(g);
+    let mut degree: Vec<_> = adjacency.iter().map(Vec::len).collect();
+    let max_degree = degree.iter().copied().max().unwrap_or(0);
+
+    let mut bin = vec![0; max_degree + 1];
+    for &value in &degree {
+        bin[value] += 1;
+    }
+
+    let mut start = 0;
+    for count in &mut bin {
+        let next = start + *count;
+        *count = start;
+        start = next;
+    }
+
+    let mut next = bin.clone();
+    let mut position = vec![0; degree.len()];
+    let mut vertices = vec![0; degree.len()];
+    for node in 0..degree.len() {
+        let slot = next[degree[node]];
+        position[node] = slot;
+        vertices[slot] = node;
+        next[degree[node]] += 1;
+    }
+
+    let mut core = vec![0; degree.len()];
+    for order in 0..vertices.len() {
+        let node = vertices[order];
+        core[node] = degree[node];
+
+        for &neighbor in &adjacency[node] {
+            if degree[neighbor] <= degree[node] {
+                continue;
+            }
+
+            let neighbor_degree = degree[neighbor];
+            let neighbor_position = position[neighbor];
+            let bucket_position = bin[neighbor_degree];
+            let bucket_node = vertices[bucket_position];
+
+            if neighbor != bucket_node {
+                vertices.swap(neighbor_position, bucket_position);
+                position[neighbor] = bucket_position;
+                position[bucket_node] = neighbor_position;
+            }
+            bin[neighbor_degree] += 1;
+            degree[neighbor] -= 1;
+        }
+    }
+    core
+}
+
 fn breadth_first_distances(adjacency: &[Vec<usize>], source: usize) -> Vec<usize> {
     let mut distances = vec![usize::MAX; adjacency.len()];
     let mut queue = VecDeque::with_capacity(adjacency.len());
@@ -160,4 +224,60 @@ fn undirected_adjacency(g: &NodeGraph) -> Vec<Vec<usize>> {
             neighbors
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::core_number;
+    use crate::NodeGraph;
+    use sparq_core::Graph;
+
+    fn build(nt: &str) -> NodeGraph {
+        NodeGraph::build(&Graph::load_str(nt, "nt").expect("parse N-Triples"))
+    }
+
+    const K4: &str = r#"
+<http://e/a> <http://p/k> <http://e/b> .
+<http://e/a> <http://p/k> <http://e/c> .
+<http://e/a> <http://p/k> <http://e/d> .
+<http://e/b> <http://p/k> <http://e/c> .
+<http://e/b> <http://p/k> <http://e/d> .
+<http://e/c> <http://p/k> <http://e/d> .
+"#;
+
+    #[test]
+    fn empty_and_singleton_graphs_have_zero_core_numbers() {
+        assert_eq!(core_number(&build("")), Vec::<usize>::new());
+        let singleton = build("<http://e/a> <http://p/name> \"Alice\" .\n");
+        assert_eq!(core_number(&singleton), vec![0]);
+    }
+
+    #[test]
+    fn path_nodes_all_have_core_number_one() {
+        let path = build(
+            r#"
+<http://e/a> <http://p/k> <http://e/b> .
+<http://e/b> <http://p/k> <http://e/c> .
+"#,
+        );
+        assert_eq!(core_number(&path), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn four_clique_nodes_all_have_core_number_three() {
+        let cores = core_number(&build(K4));
+        assert_eq!(cores, vec![3, 3, 3, 3]);
+        assert_eq!(cores.iter().copied().max(), Some(3));
+    }
+
+    #[test]
+    fn pendant_peels_without_reducing_four_clique_core() {
+        let mut fixture = K4.to_owned();
+        fixture.push_str("<http://e/a> <http://p/k> <http://e/e> .\n");
+        let cores = core_number(&build(&fixture));
+
+        assert_eq!(cores, vec![3, 3, 3, 3, 1]);
+        assert!(cores[4] < cores[0]);
+        assert_eq!(cores.iter().copied().max(), Some(3));
+    }
 }
