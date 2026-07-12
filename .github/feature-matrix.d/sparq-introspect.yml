@@ -18,3 +18,9 @@
   crate: "sparq-introspect"
   features: "numeric-facets"
   test: true
+
+# [GPT-5.6] sq-yjemp: schema-diff and its exact drift oracle are default-OFF.
+- name: "sparq-introspect (schema-diff — structured schema drift)"
+  crate: "sparq-introspect"
+  features: "schema-diff"
+  test: true
