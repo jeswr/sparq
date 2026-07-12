@@ -66,7 +66,7 @@ pub enum R2S {
 #[derive(Debug, Clone)]
 pub struct WindowResult {
     /// Window bounds, as reported by the window operator: time windows are
-    /// half-open `[start, end)`; count windows carry the inclusive
+    /// half-open `[start, end)`; count and session windows carry the inclusive
     /// `[first.ts, last.ts]` of their content (see `crate::window`).
     pub start: u64,
     /// See `start`.

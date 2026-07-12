@@ -27,6 +27,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 # behaviour is deterministic and unit-testable; wrapping pushes in tokio/threads
 # is the embedder's choice.
 
+[features]
+default = []
+# [GPT-5.6] sq-zckkq: gap-triggered event-time session windows are an explicit
+# opt-in so the established time/count paths remain byte-neutral by default.
+session_windows = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
