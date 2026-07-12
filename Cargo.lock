@@ -5159,6 +5159,7 @@ dependencies = [
  "instant-distance",
  "memmap2",
  "oxrdf 0.3.3",
+ "proptest",
  "rayon",
  "reqwest",
  "rustc-hash 2.1.3",
