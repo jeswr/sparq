@@ -4636,6 +4636,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "oxrdf 0.3.3",
+ "proptest",
  "serde",
  "serde_json",
  "sparq-core",
