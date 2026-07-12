@@ -5,7 +5,11 @@
 //! `@forAll`/`@forSome` quantifiers), first-class lists (`( … )` is a TERM, not
 //! rdf:first/rest structure), quoted formulae (`{ … }`; the empty formula `{}`
 //! IS the literal `true`) and **builtins** (`math:`, `string:`, `log:`, …) on
-//! top of Turtle. The engine: a parser (`parser`, with a STRICT Turtle mode),
+//! top of Turtle. RDF-star / RDF 1.2 **quoted-triple terms** (`<< s p o >>` /
+//! `<<( s p o )>>`, GH #2012) are first-class [`Term::Triple`] values: rule
+//! premises match them structurally (variables inside the quotation bind,
+//! nesting included), rule heads derive them, and ground quoted triples intern
+//! into the dictionary through the content-addressed RDF 1.2 triple-term path. The engine: a parser (`parser`, with a STRICT Turtle mode),
 //! a term model (`model`), and a semi-naive forward chainer that applies rules
 //! to a fixpoint. Premises are reordered so each builtin runs only after the
 //! atoms that can produce its inputs (cwm evaluates builtins "when ready").

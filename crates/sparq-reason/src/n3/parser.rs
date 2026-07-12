@@ -6,6 +6,8 @@
 //! - literals: `"s"`, `"s"^^<dt>`, `"s"@lang`, integers, decimals, doubles, `true`/`false`
 //! - `_:blank`, `?var` (universally-quantified N3 variables)
 //! - `{ … }` formulae (graph terms), `( … )` collections (RDF lists)
+//! - `<< s p o >>` / `<<( s p o )>>` RDF-star quoted-triple TERMS (nested,
+//!   variables anywhere; both spellings are one [`Term::Triple`] value)
 //! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs),
 //!   `is EXPR of` (inverse predicate) and `has EXPR`
 //! - paths (`!`/`^`, also in predicate position), inverted predicates (`<-`),

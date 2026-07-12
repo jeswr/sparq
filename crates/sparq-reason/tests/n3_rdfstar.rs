@@ -473,3 +473,24 @@ fn differential_quoted_triples_vs_naive_reference() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Incremental graph: quoted-triple rules disqualify the counting profile and
+// stay CORRECT through the engine fallback (which round-trips << … >> through
+// the N3 serializer).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn incremental_graph_falls_back_and_stays_correct_with_quoted_rules() {
+    use sparq_reason::{MaterializedN3Graph, N3Mode};
+    let rules = "@prefix : <http://ex/> .\n\
+                 { << ?s :p ?o >> :says ?w } => { ?s :linked ?o } .";
+    let base = vec![[qt(iri("a"), iri("p"), iri("b")), iri("says"), iri("alice")]];
+    let mut g = MaterializedN3Graph::new(rules, &base).expect("graph builds");
+    assert_eq!(g.mode(), N3Mode::Fallback, "quoted-triple rules are outside the counting profile");
+    assert!(g.contains(&[iri("a"), iri("linked"), iri("b")]), "fallback closure is correct");
+    // A mutation re-runs the batch engine — quoted-triple facts round-trip
+    // through the serializer and keep deriving.
+    g.insert(&[[qt(iri("c"), iri("p"), iri("d")), iri("says"), iri("bob")]]);
+    assert!(g.contains(&[iri("c"), iri("linked"), iri("d")]), "post-insert closure is correct");
+}
