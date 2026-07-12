@@ -47,8 +47,12 @@ the explicit raw-graph escape hatch.
 - `proposed-distinct` adds distinct dataset helpers based on rdfjs/wrapper
   issue #25 and draft PR #88. This proposal is not landed upstream.
 - `proposed-cardinality` adds required/optional singular traversal with typed
-  cardinality errors based on rdfjs/wrapper draft PR #89. This proposal is not
-  landed upstream.
+  cardinality errors based on rdfjs/wrapper draft PR #89. It also exposes the
+  `proposed::cardinality::{required, optional, many}` mapped views and
+  `live_mapped` write-through collections based on rdfjs/wrapper issue #8 and
+  draft PR #92. Live collection reads re-query the store, and value-to-term
+  conversion completes before mutation so conversion failures leave the graph
+  unchanged. This proposal is not landed upstream. <!-- [GPT-5.6] sq-1rg2q.3 -->
 - All crate features are off by default, and the dependency on `sparq-core`
   disables its default features to keep this capability isolated.
 
