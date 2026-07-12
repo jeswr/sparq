@@ -87,6 +87,7 @@ hax = "hax"              # [FABLE] Cryspen's `hax` Rust→F*/Coq verification to
 nce = "nce"              # format-string named arg holding the write-marker NONCE (store/sparql.rs)
 bacl = "bacl"            # test-fixture blob key ("blob acl") in ldp/handler.rs unit tests
 onn = "onn"              # deliberate near-miss garbage value in the tls.rs affirmative-env-parse test vector
+quikly = "quikly"        # [GPT-5.6] deliberate fuzzy-search misspelling of "quickly" in the public recipe
 
 [default.extend-words]
 # [GPT-5.6] Deliberate one-edit misspelling in the fuzzy-search documentation example.

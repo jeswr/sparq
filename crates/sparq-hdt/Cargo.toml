@@ -31,6 +31,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 # stays default and sophia-free; only writers pay for it.
 [features]
 write = ["hdt/sophia"]
+# [GPT-5.6] sq-lsp7k.24: opt-in triple-pattern filtering at the one-shot HDT
+# decode seam. `oxrdf` is already present through `sparq-core`; naming it as an
+# optional direct dependency exposes the RDF term types without changing the
+# default dependency graph.
+load-filter = ["dep:oxrdf"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library via flate2) for `.hdt.gz` inflate — a measured 1.5–3×
 # at ~zero code change. SAFE because sparq-hdt is native-only and never in the sparq-wasm
@@ -55,6 +60,7 @@ zlib-ng = ["flate2/zlib-ng"]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+oxrdf = { workspace = true, optional = true }
 # Read path uses NO features (id-level translation, no sophia adapter). The `write`
 # feature (above) turns on `hdt/sophia` to reach `Hdt::read_nt` + `Hdt::write`.
 hdt = { version = "0.4", default-features = false }
