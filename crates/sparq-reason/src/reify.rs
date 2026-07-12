@@ -143,11 +143,19 @@ impl ReifyVocab {
 /// occur can never grow a premise for either rule — this check is complete.
 pub(crate) fn occurs(dict: &Dict, triples: &[[Id; 3]]) -> bool {
     let look = |frag: &str| {
-        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!("{RDF}{frag}"))))
+        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            format!("{RDF}{frag}"),
+        )))
     };
-    let trigger: Vec<Id> =
-        ["reifies", "subject", "predicate", "object"].iter().map(|f| look(f)).filter(|&id| id != NO_ID).collect();
-    !trigger.is_empty() && triples.iter().any(|t| t.iter().any(|id| trigger.contains(id)))
+    let trigger: Vec<Id> = ["reifies", "subject", "predicate", "object"]
+        .iter()
+        .map(|f| look(f))
+        .filter(|&id| id != NO_ID)
+        .collect();
+    !trigger.is_empty()
+        && triples
+            .iter()
+            .any(|t| t.iter().any(|id| trigger.contains(id)))
 }
 
 /// One naive reif-dtr + reif-ctr round over the whole current closure. Appends the
@@ -178,7 +186,12 @@ pub(crate) fn step(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             // (premise failure, not a fallback).
             if !is_inline(o) {
                 if let TermParts::Triple([qs, qp, qo]) = dict.term_parts(o) {
-                    add.extend([[r, v.ty, v.statement], [r, v.subject, qs], [r, v.predicate, qp], [r, v.object, qo]]);
+                    add.extend([
+                        [r, v.ty, v.statement],
+                        [r, v.subject, qs],
+                        [r, v.predicate, qp],
+                        [r, v.object, qo],
+                    ]);
                 }
             }
         } else if p == v.subject {
@@ -199,7 +212,12 @@ pub(crate) fn step(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             continue;
         };
         for &s in ss {
-            if is_inline(s) || !matches!(dict.term_parts(s), TermParts::Iri { .. } | TermParts::Blank(_)) {
+            if is_inline(s)
+                || !matches!(
+                    dict.term_parts(s),
+                    TermParts::Iri { .. } | TermParts::Blank(_)
+                )
+            {
                 continue;
             }
             for &p in ps {
@@ -249,7 +267,11 @@ fn mint(dict: &mut Dict, s: Id, p: Id, o: Id) -> Id {
         // Kind-guarded at the call site (reif-ctr skips non-IRI predicates).
         unreachable!("reif-ctr predicate kind guard")
     };
-    dict.intern(&oxrdf::Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, dict.term(o)))))
+    dict.intern(&oxrdf::Term::Triple(Box::new(oxrdf::Triple::new(
+        subject,
+        predicate,
+        dict.term(o),
+    ))))
 }
 
 #[cfg(test)]
@@ -275,7 +297,10 @@ mod tests {
         let mut d = Dict::default();
         let (a, p, b) = (iri(&mut d, "a"), iri(&mut d, "p"), iri(&mut d, "b"));
         let triples = vec![[a, p, b]];
-        assert!(!occurs(&d, &triples), "no reification vocabulary → layer stays inactive");
+        assert!(
+            !occurs(&d, &triples),
+            "no reification vocabulary → layer stays inactive"
+        );
     }
 
     #[test]
@@ -292,7 +317,12 @@ mod tests {
     #[test]
     fn destructure_recovers_components_and_types_the_reifier() {
         let mut d = Dict::default();
-        let (s, p, o, r) = (iri(&mut d, "s"), iri(&mut d, "p"), iri(&mut d, "o"), iri(&mut d, "r"));
+        let (s, p, o, r) = (
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "o"),
+            iri(&mut d, "r"),
+        );
         let v = ReifyVocab::intern(&mut d);
         let q = tt(&mut d, "s", "p", "o");
         let mut triples = vec![[s, p, o], [r, v.reifies, q]];
@@ -312,8 +342,14 @@ mod tests {
     #[test]
     fn construct_mints_only_existing_triples() {
         let mut d = Dict::default();
-        let (s, p, o, r, r2, x) =
-            (iri(&mut d, "s"), iri(&mut d, "p"), iri(&mut d, "o"), iri(&mut d, "r"), iri(&mut d, "r2"), iri(&mut d, "x"));
+        let (s, p, o, r, r2, x) = (
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "o"),
+            iri(&mut d, "r"),
+            iri(&mut d, "r2"),
+            iri(&mut d, "x"),
+        );
         let v = ReifyVocab::intern(&mut d);
         let mut triples = vec![
             [s, p, o], // the asserted triple r quotes
@@ -335,14 +371,23 @@ mod tests {
             NamedNode::new_unchecked("http://ex/p"),
             Term::NamedNode(NamedNode::new_unchecked("http://ex/o")),
         ))));
-        assert_eq!(bogus, NO_ID, "no triple term is minted for a non-existing combination");
+        assert_eq!(
+            bogus, NO_ID,
+            "no triple term is minted for a non-existing combination"
+        );
     }
 
     #[test]
     fn no_unquoting_leak_and_nested_terms_stay_opaque() {
         let mut d = Dict::default();
-        let (a, q, b, s, p, r) =
-            (iri(&mut d, "a"), iri(&mut d, "q"), iri(&mut d, "b"), iri(&mut d, "s"), iri(&mut d, "p"), iri(&mut d, "r"));
+        let (a, q, b, s, p, r) = (
+            iri(&mut d, "a"),
+            iri(&mut d, "q"),
+            iri(&mut d, "b"),
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "r"),
+        );
         let v = ReifyVocab::intern(&mut d);
         let inner = tt(&mut d, "a", "q", "b");
         let outer = d.intern(&Term::Triple(Box::new(oxrdf::Triple::new(
@@ -354,11 +399,20 @@ mod tests {
         step(&mut d, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         // The quoted triple is NOT asserted (opacity)…
-        assert!(!set.contains(&[s, p, inner]), "quotation must not assert the quoted triple");
-        assert!(!set.contains(&[a, q, b]), "nested quotation must not assert either");
+        assert!(
+            !set.contains(&[s, p, inner]),
+            "quotation must not assert the quoted triple"
+        );
+        assert!(
+            !set.contains(&[a, q, b]),
+            "nested quotation must not assert either"
+        );
         // …but the OUTER components are recovered, the inner term staying one opaque id.
         assert!(set.contains(&[r, v.object, inner]));
-        assert!(!set.iter().any(|t| t[0] == inner), "nothing destructures the nested term (no reifies premise)");
+        assert!(
+            !set.iter().any(|t| t[0] == inner),
+            "nothing destructures the nested term (no reifies premise)"
+        );
     }
 
     #[test]
@@ -367,7 +421,12 @@ mod tests {
         // describes the triple (r reifies q) — which EXISTS — but its object is a
         // triple term, so restriction 2 refuses to mint <<( r reifies q )>>.
         let mut d = Dict::default();
-        let (s, p, o, r) = (iri(&mut d, "s"), iri(&mut d, "p"), iri(&mut d, "o"), iri(&mut d, "r"));
+        let (s, p, o, r) = (
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "o"),
+            iri(&mut d, "r"),
+        );
         let v = ReifyVocab::intern(&mut d);
         let q = tt(&mut d, "s", "p", "o");
         let mut triples = vec![
@@ -384,15 +443,28 @@ mod tests {
             NamedNode::new_unchecked(format!("{RDF}reifies")),
             d.term(q),
         ))));
-        assert_eq!(nested, NO_ID, "a construct-reachable quotation-of-a-quotation must never be minted");
+        assert_eq!(
+            nested, NO_ID,
+            "a construct-reachable quotation-of-a-quotation must never be minted"
+        );
     }
 
     #[test]
     fn construct_then_destructure_close_in_two_rounds() {
         let mut d = Dict::default();
-        let (s, p, o, r) = (iri(&mut d, "s"), iri(&mut d, "p"), iri(&mut d, "o"), iri(&mut d, "r"));
+        let (s, p, o, r) = (
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "o"),
+            iri(&mut d, "r"),
+        );
         let v = ReifyVocab::intern(&mut d);
-        let mut triples = vec![[s, p, o], [r, v.subject, s], [r, v.predicate, p], [r, v.object, o]];
+        let mut triples = vec![
+            [s, p, o],
+            [r, v.subject, s],
+            [r, v.predicate, p],
+            [r, v.object, o],
+        ];
         // Round 1: reif-ctr mints the reifies triple.
         assert_eq!(step(&mut d, &mut triples), 1);
         // Round 2: reif-dtr types the reifier from the new premise; the subject/
@@ -401,7 +473,11 @@ mod tests {
         let q = tt(&mut d, "s", "p", "o");
         assert!(triples.contains(&[r, v.reifies, q]));
         assert!(triples.contains(&[r, v.ty, v.statement]));
-        assert_eq!(step(&mut d, &mut triples), 0, "terminates — the guarded universe is exhausted");
+        assert_eq!(
+            step(&mut d, &mut triples),
+            0,
+            "terminates — the guarded universe is exhausted"
+        );
     }
 
     #[test]
@@ -410,18 +486,27 @@ mod tests {
         // kind guards must skip it (never intern a triple term the dict's open-time
         // component-kind validation would reject) — and must not panic.
         let mut d = Dict::default();
-        let (s, p, o, r) = (iri(&mut d, "s"), iri(&mut d, "p"), iri(&mut d, "o"), iri(&mut d, "r"));
+        let (s, p, o, r) = (
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "o"),
+            iri(&mut d, "r"),
+        );
         let lit = d.intern_lit("x", "http://www.w3.org/2001/XMLSchema#string", None);
         let v = ReifyVocab::intern(&mut d);
         let mut triples = vec![
             [s, p, o],
-            [r, v.subject, lit], // ill-kinded subject value
+            [r, v.subject, lit],   // ill-kinded subject value
             [r, v.predicate, lit], // ill-kinded predicate value
             [r, v.object, o],
             [r, v.subject, s],
             [r, v.predicate, p],
         ];
-        assert_eq!(step(&mut d, &mut triples), 1, "only the well-kinded (s p o) combination fires");
+        assert_eq!(
+            step(&mut d, &mut triples),
+            1,
+            "only the well-kinded (s p o) combination fires"
+        );
         let q = tt(&mut d, "s", "p", "o");
         assert!(triples.contains(&[r, v.reifies, q]));
     }

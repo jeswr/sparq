@@ -51,18 +51,28 @@ fn tt(dict: &Dict, s: &str, p: &str, o: &str) -> Id {
         Some(v) => Term::Literal(Literal::new_typed_literal(v, xsd::INTEGER)),
         None => Term::NamedNode(n(o)),
     };
-    dict.lookup(&Term::Triple(Box::new(oxrdf::Triple::new(n(s), n(p), object))))
+    dict.lookup(&Term::Triple(Box::new(oxrdf::Triple::new(
+        n(s),
+        n(p),
+        object,
+    ))))
 }
 
 fn assert_has(set: &FxHashSet<[Id; 3]>, t: [Id; 3], what: &str) {
-    assert!(t.iter().all(|&x| x != NO_ID), "a term of the expected triple was never interned: {what}");
+    assert!(
+        t.iter().all(|&x| x != NO_ID),
+        "a term of the expected triple was never interned: {what}"
+    );
     assert!(set.contains(&t), "expected ENTAILED but absent: {what}");
 }
 
 fn assert_lacks(set: &FxHashSet<[Id; 3]>, t: [Id; 3], what: &str) {
     // A NO_ID component already proves non-membership (no triple contains id 0).
     if t.iter().all(|&x| x != NO_ID) {
-        assert!(!set.contains(&t), "OVER-entailed — must NOT be in the closure: {what}");
+        assert!(
+            !set.contains(&t),
+            "OVER-entailed — must NOT be in the closure: {what}"
+        );
     }
 }
 
@@ -78,14 +88,41 @@ fn destructure_recovers_components_from_reifier_syntax() {
            :alice :age 30 ~ :r .
         "#,
     );
-    let thirty = dict.lookup(&Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)));
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:subject"), id(&dict, "alice")], "r rdf:subject :alice");
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:predicate"), id(&dict, "age")], "r rdf:predicate :age");
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:object"), thirty], "r rdf:object 30");
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:type"), id(&dict, "rdf:Statement")], "r a rdf:Statement");
+    let thirty = dict.lookup(&Term::Literal(Literal::new_typed_literal(
+        "30",
+        xsd::INTEGER,
+    )));
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:subject"), id(&dict, "alice")],
+        "r rdf:subject :alice",
+    );
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:predicate"), id(&dict, "age")],
+        "r rdf:predicate :age",
+    );
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:object"), thirty],
+        "r rdf:object 30",
+    );
+    assert_has(
+        &set,
+        [
+            id(&dict, "r"),
+            id(&dict, "rdf:type"),
+            id(&dict, "rdf:Statement"),
+        ],
+        "r a rdf:Statement",
+    );
     // The `~` syntax also asserts the annotated triple itself — present, but from the
     // LOADER, not from any unquoting rule (the opacity twin below proves that).
-    assert_has(&set, [id(&dict, "alice"), id(&dict, "age"), thirty], ":alice :age 30");
+    assert_has(
+        &set,
+        [id(&dict, "alice"), id(&dict, "age"), thirty],
+        ":alice :age 30",
+    );
 }
 
 /// Opacity + annotation reasoning: RL rules apply to the reifier's ANNOTATIONS
@@ -104,12 +141,31 @@ fn annotations_reason_without_leaking_the_quoted_triple() {
         "#,
     );
     // Annotation reasoning: the domain rule types the reifier.
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:type"), id(&dict, "Assertion")], "r a :Assertion");
+    assert_has(
+        &set,
+        [
+            id(&dict, "r"),
+            id(&dict, "rdf:type"),
+            id(&dict, "Assertion"),
+        ],
+        "r a :Assertion",
+    );
     // Destructured components are ordinary triples.
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:subject"), id(&dict, "bob")], "r rdf:subject :bob");
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:subject"), id(&dict, "bob")],
+        "r rdf:subject :bob",
+    );
     // THE opacity pin: quotation never asserts the quoted triple.
-    let twentyfive = dict.lookup(&Term::Literal(Literal::new_typed_literal("25", xsd::INTEGER)));
-    assert_lacks(&set, [id(&dict, "bob"), id(&dict, "age"), twentyfive], ":bob :age 25 (quoted only)");
+    let twentyfive = dict.lookup(&Term::Literal(Literal::new_typed_literal(
+        "25",
+        xsd::INTEGER,
+    )));
+    assert_lacks(
+        &set,
+        [id(&dict, "bob"), id(&dict, "age"), twentyfive],
+        ":bob :age 25 (quoted only)",
+    );
 }
 
 /// reif-ctr fires exactly for classic-reification descriptions of EXISTING triples;
@@ -128,11 +184,27 @@ fn construct_only_for_existing_triples() {
     );
     let q = tt(&dict, "alice", "age", "x");
     assert_ne!(q, NO_ID, "the guarded quotation was minted");
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:reifies"), q], "r rdf:reifies <<( :alice :age :x )>>");
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:reifies"), q],
+        "r rdf:reifies <<( :alice :age :x )>>",
+    );
     // r2 describes (alice age y), which does NOT hold: no firing, no term minted.
-    assert_eq!(tt(&dict, "alice", "age", "y"), NO_ID, "no triple term for a non-existing combination");
+    assert_eq!(
+        tt(&dict, "alice", "age", "y"),
+        NO_ID,
+        "no triple term for a non-existing combination"
+    );
     // And constructing never asserts components beyond its conclusion: r2 stays untyped.
-    assert_lacks(&set, [id(&dict, "r2"), id(&dict, "rdf:type"), id(&dict, "rdf:Statement")], "r2 a rdf:Statement");
+    assert_lacks(
+        &set,
+        [
+            id(&dict, "r2"),
+            id(&dict, "rdf:type"),
+            id(&dict, "rdf:Statement"),
+        ],
+        "r2 a rdf:Statement",
+    );
 }
 
 /// DERIVED triples are quotable too (restriction 1 is closure membership, not a
@@ -153,12 +225,24 @@ fn derived_triples_are_reifiable_and_materialization_is_idempotent() {
     materialize_owl_rl(&mut dict, &mut triples);
     let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     // rdfs7 derives (a q b); reif-ctr then quotes the DERIVED triple.
-    assert_has(&set, [id(&dict, "a"), id(&dict, "q"), id(&dict, "b")], ":a :q :b (rdfs7)");
+    assert_has(
+        &set,
+        [id(&dict, "a"), id(&dict, "q"), id(&dict, "b")],
+        ":a :q :b (rdfs7)",
+    );
     let q = tt(&dict, "a", "q", "b");
     assert_ne!(q, NO_ID);
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:reifies"), q], "r rdf:reifies <<( :a :q :b )>>");
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:reifies"), q],
+        "r rdf:reifies <<( :a :q :b )>>",
+    );
     // Idempotency (the `materialize` API contract): a second call adds nothing.
-    assert_eq!(materialize_owl_rl(&mut dict, &mut triples), 0, "materialization must be idempotent");
+    assert_eq!(
+        materialize_owl_rl(&mut dict, &mut triples),
+        0,
+        "materialization must be idempotent"
+    );
 }
 
 /// The opacity BOUNDARY, pinned precisely: no rule rewrites inside a quotation
@@ -180,13 +264,28 @@ fn same_as_variants_arrive_only_via_the_transparent_bridge() {
     // The ORIGINAL quotation is intact (nothing rewrote its inside).
     let original = tt(&dict, "alice", "knows", "bob");
     assert_ne!(original, NO_ID);
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:reifies"), original], "the as-written quotation stays");
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:reifies"), original],
+        "the as-written quotation stays",
+    );
     // The variant arrives ONLY because (al knows bob) itself holds (eq-rep) and the
     // destructured components are transparent — the documented bridge composition.
-    assert_has(&set, [id(&dict, "al"), id(&dict, "knows"), id(&dict, "bob")], ":al :knows :bob (eq-rep)");
+    assert_has(
+        &set,
+        [id(&dict, "al"), id(&dict, "knows"), id(&dict, "bob")],
+        ":al :knows :bob (eq-rep)",
+    );
     let variant = tt(&dict, "al", "knows", "bob");
-    assert_ne!(variant, NO_ID, "bridge composition constructs the variant quotation");
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:reifies"), variant], "r rdf:reifies <<( :al :knows :bob )>>");
+    assert_ne!(
+        variant, NO_ID,
+        "bridge composition constructs the variant quotation"
+    );
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:reifies"), variant],
+        "r rdf:reifies <<( :al :knows :bob )>>",
+    );
 }
 
 /// THE termination pin, end-to-end: the adversarial schema that makes an
@@ -215,15 +314,25 @@ fn adversarial_subproperty_cascade_terminates_at_depth_one() {
         NamedNode::new_unchecked(format!("{RDF}reifies")),
         Term::NamedNode(NamedNode::new_unchecked(format!("{EX}o"))),
     ))));
-    assert_ne!(depth1, NO_ID, "the depth-1 quotation of the asserted triple is minted");
-    assert_has(&set, [id(&dict, "r"), id(&dict, "rdf:reifies"), depth1], "r rdf:reifies <<( :r rdf:reifies :o )>>");
+    assert_ne!(
+        depth1, NO_ID,
+        "the depth-1 quotation of the asserted triple is minted"
+    );
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:reifies"), depth1],
+        "r rdf:reifies <<( :r rdf:reifies :o )>>",
+    );
     // Depth two is REFUSED: <<( :r rdf:reifies <<( … )>> )>> must never exist.
     let depth2 = dict.lookup(&Term::Triple(Box::new(oxrdf::Triple::new(
         NamedNode::new_unchecked(format!("{EX}r")),
         NamedNode::new_unchecked(format!("{RDF}reifies")),
         dict.term(depth1),
     ))));
-    assert_eq!(depth2, NO_ID, "restriction 2 must cut the cascade — no quotation of a quotation");
+    assert_eq!(
+        depth2, NO_ID,
+        "restriction 2 must cut the cascade — no quotation of a quotation"
+    );
 }
 
 /// `MaterializedOwlGraph` on a reify-vocabulary base: routed to the documented
@@ -242,19 +351,35 @@ fn incremental_owl_graph_falls_back_and_stays_parity_identical() {
     let oracle = |dict: &mut Dict, base: &[[Id; 3]]| -> Vec<[Id; 3]> {
         let mut all = base.to_vec();
         materialize_owl_rl(dict, &mut all);
-        let mut v: Vec<[Id; 3]> = all.into_iter().collect::<FxHashSet<_>>().into_iter().collect();
+        let mut v: Vec<[Id; 3]> = all
+            .into_iter()
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect();
         v.sort_unstable();
         v
     };
     let mut g = MaterializedOwlGraph::new(&mut dict, &base);
-    assert_eq!(g.mode(), OwlMode::Fallback, "reify vocabulary must route to Fallback");
-    assert_eq!(g.closure(), oracle(&mut dict, &base), "initial closure == from-scratch");
+    assert_eq!(
+        g.mode(),
+        OwlMode::Fallback,
+        "reify vocabulary must route to Fallback"
+    );
+    assert_eq!(
+        g.closure(),
+        oracle(&mut dict, &base),
+        "initial closure == from-scratch"
+    );
 
     // Mutate: a classic-reification description of an EXISTING triple — the insert
     // must rematerialize (reify trigger ids) and derive the constructed quotation.
     let ex = |dict: &mut Dict, frag: &str| dict.intern_iri(&format!("{EX}{frag}"));
     let rdf = |dict: &mut Dict, frag: &str| dict.intern_iri(&format!("{RDF}{frag}"));
-    let (r2, alice, age) = (ex(&mut dict, "r2"), ex(&mut dict, "alice"), ex(&mut dict, "age"));
+    let (r2, alice, age) = (
+        ex(&mut dict, "r2"),
+        ex(&mut dict, "alice"),
+        ex(&mut dict, "age"),
+    );
     let thirty = dict.intern_lit("30", xsd::INTEGER.as_str(), None);
     let delta = [
         [r2, rdf(&mut dict, "subject"), alice],
@@ -263,8 +388,15 @@ fn incremental_owl_graph_falls_back_and_stays_parity_identical() {
     ];
     g.insert(&mut dict, &delta);
     let base2: Vec<[Id; 3]> = g.base_triples().collect();
-    assert_eq!(g.closure(), oracle(&mut dict, &base2), "post-insert closure == from-scratch");
+    assert_eq!(
+        g.closure(),
+        oracle(&mut dict, &base2),
+        "post-insert closure == from-scratch"
+    );
     let q = tt(&dict, "alice", "age", "#30");
     assert_ne!(q, NO_ID);
-    assert!(g.contains(&[r2, rdf(&mut dict, "reifies"), q]), "the insert completed a construct premise set");
+    assert!(
+        g.contains(&[r2, rdf(&mut dict, "reifies"), q]),
+        "the insert completed a construct premise set"
+    );
 }
