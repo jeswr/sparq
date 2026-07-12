@@ -736,6 +736,28 @@ records_to  = "stdout (per-lane TSV + single-line AC_ODRL_OVERHEAD_JSON envelope
 featured    = false
 status      = "ok"
 
+# [FABLE-5] sq-on7r4 — the certification-edge trust-graph closure (derive_effective_rules,
+# crates/sparq-trust/src/graph.rs, default-OFF `cert-graph` feature): measured overhead +
+# the strict-additivity envelope the 2026-07 record's cost concern (sq-pfae.9) lacked a
+# runnable harness for. Standalone driver (own [workspace]) — the root workspace's default
+# build never sees cert-graph ON. Measurement-only, clear-path: NO ZK proof produced or
+# verified, NO privacy/soundness claim (sq-qhy4 pending).
+[[benchmark]]
+id          = "trust-graph-closure"
+name        = "Certification-edge closure overhead + strict-additivity envelope (cert-graph)"
+category    = "inference"
+measures    = "LOAD-BEARING: strict-additivity envelope — zero (surviving) certifications => derive_effective_rules output byte-EQUAL to the input direct_rules (zero-certs / depth_bound=0 / all-edges-rejected lanes, fail-closed); PLUS min-of-K closure wall time over (anchors x certifications x scope kind: any/narrow/broaden/forged) with a per-edge amortised column, every timed cell correctness-gated (expected admitted count + verbatim anchors prefix) before timing"
+invoke      = "bench/trust-graph/run.sh --smoke   # per-commit smoke tier; bench/trust-graph/run.sh --sf N for a nightly tier"
+source      = "bench/trust-graph/{run.sh,Cargo.toml,Cargo.lock,src/main.rs}; crates/sparq-trust/src/graph.rs (the closure under test)"
+dataset     = "deterministic in-process fixtures (seeded SecretKey::from_seed keys, fixed blank-node labels, fixed evaluation instant); signed trustx:Certification edges minted per lane. No external corpus, no network"
+quiet_box_sensitive = true  # the overhead lanes are wall-clock; the additivity envelope is deterministic pass/fail, load-robust
+pinning     = "fixed key seeds (1+i anchors, 10000+j issuers) + fixed NOW=1700000000; --smoke sizes fixed; --sf N deterministic. No wall-clock affects the envelope verdict"
+records_to  = "stdout (TSV: lane/kind/anchors/certs/derived/expected/min_us/per_edge_ns/status); exit non-zero on any envelope or expected-count mismatch. NO number committed to markdown (work-box timings NON-canonical)"
+# [FABLE-5] sq-on7r4: internal measurement harness for the opt-in cert-graph closure, not a
+# head-to-head competitor card — featured = false is a dashboard DISPOSITION (no perf claim).
+featured    = false
+status      = "ok"
+
 # [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
 [[benchmark]]
 id          = "policy-odrl-eval"
