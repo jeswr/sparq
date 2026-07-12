@@ -15,7 +15,9 @@
 use sparq_difftest::QueryResults;
 use sparq_metamorph::engine::{FilterDropsRow, InProcessSparq, SparqlEngine};
 use sparq_metamorph::verdict::{FailureKind, Verdict};
-use sparq_metamorph::{check_differential, check_norec, check_tlp, generate_case, tlp_queries};
+use sparq_metamorph::{
+    check_differential, check_norec, check_tlp, generate_case, norec_queries, tlp_queries,
+};
 
 /// Ages straddle the predicate `?age < 25` (true for s2, false for s1), s3's age is a
 /// string (type error under `<`), and s4 has an `ex:name` but NO `ex:age` — so the
@@ -44,6 +46,45 @@ fn rows(engine: &dyn SparqlEngine, query: &str) -> usize {
     match engine.select(query).expect("query evaluates") {
         QueryResults::Solutions { solutions, .. } => solutions.len(),
         QueryResults::Boolean(_) => panic!("SELECT returned a boolean"),
+    }
+}
+
+// [GPT-5.6] sq-aglhv: independently guard the row-preserving Extend/Project step on
+// which NoREC's relative optimized-count versus true-flag-count comparison relies.
+fn norec_rewrite_preserves_cardinality(
+    engine: &dyn SparqlEngine,
+    pattern: &str,
+    predicate: &str,
+) -> bool {
+    let base = format!("SELECT * WHERE {{ {pattern} }}");
+    let rewritten = norec_queries(pattern, predicate).rewritten;
+    rows(engine, &rewritten) == rows(engine, &base)
+}
+
+/// A test-only mutant that removes one row only from NoREC's FILTER-free rewrite.
+struct RewriteDropsRow<E> {
+    inner: E,
+}
+
+impl<E> RewriteDropsRow<E> {
+    fn new(inner: E) -> Self {
+        Self { inner }
+    }
+}
+
+impl<E: SparqlEngine> SparqlEngine for RewriteDropsRow<E> {
+    fn name(&self) -> &str {
+        "rewrite-drops-row"
+    }
+
+    fn select(&self, sparql: &str) -> Result<QueryResults, sparq_metamorph::EngineFailure> {
+        let mut results = self.inner.select(sparql)?;
+        if sparql.starts_with("SELECT ( IF(") {
+            if let QueryResults::Solutions { solutions, .. } = &mut results {
+                solutions.pop();
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -232,6 +273,38 @@ fn generated_cases_hold_on_pristine_sparq() {
             norec.is_pass(),
             "seed {seed}: NoREC must hold on sparq (predicate: {}): {norec:?}",
             case.predicate
+        );
+    }
+}
+
+#[test]
+fn norec_rewrite_preserves_absolute_cardinality_across_generated_cases() {
+    for seed in 0..10 {
+        let case = generate_case(seed);
+        let engine = InProcessSparq::from_ntriples("sparq", &case.data_ntriples)
+            .unwrap_or_else(|e| panic!("seed {seed}: generated data must load: {e}"));
+        assert!(
+            norec_rewrite_preserves_cardinality(&engine, &case.pattern, &case.predicate),
+            "seed {seed}: the NoREC rewrite must preserve the base row cardinality"
+        );
+        let verdict = check_norec(&engine, &case.pattern, &case.predicate);
+        assert!(
+            verdict.is_pass(),
+            "seed {seed}: NoREC sanity check must pass: {verdict:?}"
+        );
+    }
+}
+
+#[test]
+fn norec_rewrite_cardinality_check_witnesses_a_dropped_rewrite_row() {
+    for seed in 0..10 {
+        let case = generate_case(seed);
+        let engine = InProcessSparq::from_ntriples("sparq", &case.data_ntriples)
+            .unwrap_or_else(|e| panic!("seed {seed}: generated data must load: {e}"));
+        let mutant = RewriteDropsRow::new(engine);
+        assert!(
+            !norec_rewrite_preserves_cardinality(&mutant, &case.pattern, &case.predicate),
+            "seed {seed}: mutation witness must make the cardinality check fail"
         );
     }
 }
