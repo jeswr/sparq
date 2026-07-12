@@ -4892,6 +4892,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-reason-diff"
+version = "0.1.0"
+dependencies = [
+ "sparq-core",
+ "sparq-reason",
+]
+
+[[package]]
 name = "sparq-reason-dl"
 version = "0.1.0"
 dependencies = [

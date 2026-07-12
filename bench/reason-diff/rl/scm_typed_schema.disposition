@@ -1,0 +1,10 @@
+# [FABLE-5] sq-xg6uu ledger entry (the sq-pbz04.1 disposition precedent).
+disposition: PERMANENT
+reason: sparq deliberately does not fire the scm-cls typing expansion on `C rdf:type owl:Class` (C subClassOf C, C equivalentClass C, C subClassOf owl:Thing — and the downstream `x rdf:type owl:Thing` those Thing-edges feed via cax-sco): the same documented no-axiomatic/no-reflexive-triples posture as its RDFS profile (they add no useful inferences and explode the store). owlrl emits the full scm-cls set. A known, deliberate RL-subset boundary, not a soundness bug.
+oracle-only: <http://ex.org/Animal> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/Animal> .
+oracle-only: <http://ex.org/Animal> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2002/07/owl#Thing> .
+oracle-only: <http://ex.org/Animal> <http://www.w3.org/2002/07/owl#equivalentClass> <http://ex.org/Animal> .
+oracle-only: <http://ex.org/Dog> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/Dog> .
+oracle-only: <http://ex.org/Dog> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2002/07/owl#Thing> .
+oracle-only: <http://ex.org/Dog> <http://www.w3.org/2002/07/owl#equivalentClass> <http://ex.org/Dog> .
+oracle-only: <http://ex.org/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Thing> .
