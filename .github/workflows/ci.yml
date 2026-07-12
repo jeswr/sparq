@@ -1027,6 +1027,18 @@ jobs:
             echo "::warning::W3C SPARQL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before the report was written)."
             attempt=$((attempt + 1))
           done
+      - name: NT/NQ/TriG syntax ratchets + parser differential gate (sq-tonhr.2)
+        # [FABLE-5] sq-tonhr.2 (epic sq-tonhr): the W3C rdf-n-triples / rdf-n-quads /
+        # rdf-trig syntax-suite ratchets (floors recorded in the central scoreboard,
+        # rise-only) + the candidate-vs-incumbent parser differential gate over the
+        # suites' actions and the committed fuzz seed corpus (exact adjudicated
+        # divergence set — bead sq-w64x5 — so a new divergence OR silent drift fails).
+        # EXPLICIT here (not only in the workspace test shards) because these tests
+        # self-skip without the pinned w3c/rdf-tests clone this job just fetched —
+        # this is where they run against the real data.
+        run: |
+          cargo test --release -p sparq-conformance \
+            --test rdf_line_syntax_ratchet --test parser_differential -- --nocapture
       - name: Consolidated conformance scoreboard (all suites + floors)
         # [OPUS-4.8] sq-ncvq.16: surface the ONE central index of every conformance
         # ratchet across crates (SPARQL + inference + SHACL + GeoSPARQL) at the top
@@ -1736,7 +1748,7 @@ jobs:
     # [FABLE-5] sq-oy1f.40: the lib-side single source the runner + scoreboard + the
     # grep gate below all read; the floors in this job's display name are informative,
     # the greps below read the real consts).
-    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 228, frame >= 61)
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 52, compact >= 228, frame >= 92)
     # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (jsonld-suite) — skip only
     # when ENFORCED selection proves sparq-conformance unaffected (fail-closed).
     needs: [changes, select]

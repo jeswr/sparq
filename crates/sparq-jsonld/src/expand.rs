@@ -481,15 +481,57 @@ fn expand_keyword(
             _ => return Err(JsonLdError::new(E::InvalidIdValue)),
         },
         "@type" => {
-            // step 13.4.4: @type expands against the type-scoped context (vocab + relative).
-            let mut expanded_types = Vec::new();
-            for t in type_values(value, frame_expansion)? {
-                if let Some(iri) = type_scoped_context.expand_iri(&t, true, true) {
-                    expanded_types.push(Json::Str(iri));
+            // [FABLE-5] sq-oy1f.29 — frameExpansion keeps the framing @type PATTERN
+            // shapes: the wildcard `{}`, the match-none `[]`, and the default map
+            // `{"@default": …}` (json-ld11-framing §2.1/§2.3). Dropping them turned a
+            // constrained frame into the match-everything frame.
+            match value {
+                Json::Obj(m) if frame_expansion && m.is_empty() => {
+                    set_obj(result, "@type", Json::Arr(vec![Json::obj()]));
                 }
-            }
-            for t in expanded_types {
-                add_value(result, "@type", t);
+                Json::Obj(m)
+                    if frame_expansion && m.len() == 1 && m[0].0 == "@default" =>
+                {
+                    let defaults: Vec<Json> = as_array(m[0].1.clone())
+                        .iter()
+                        .filter_map(|t| {
+                            t.as_str()
+                                .and_then(|s| type_scoped_context.expand_iri(s, true, true))
+                                .map(Json::Str)
+                        })
+                        .collect();
+                    set_obj(
+                        result,
+                        "@type",
+                        Json::Arr(vec![Json::Obj(vec![(
+                            "@default".to_string(),
+                            Json::Arr(defaults),
+                        )])]),
+                    );
+                }
+                Json::Arr(items) if frame_expansion && items.is_empty() => {
+                    set_obj(result, "@type", Json::Arr(Vec::new()));
+                }
+                Json::Arr(items)
+                    if frame_expansion
+                        && items.len() == 1
+                        && matches!(&items[0], Json::Obj(m) if m.is_empty()) =>
+                {
+                    set_obj(result, "@type", Json::Arr(vec![Json::obj()]));
+                }
+                _ => {
+                    // step 13.4.4: @type expands against the type-scoped context
+                    // (vocab + relative).
+                    let mut expanded_types = Vec::new();
+                    for t in type_values(value, frame_expansion)? {
+                        if let Some(iri) = type_scoped_context.expand_iri(&t, true, true) {
+                            expanded_types.push(Json::Str(iri));
+                        }
+                    }
+                    for t in expanded_types {
+                        add_value(result, "@type", t);
+                    }
+                }
             }
         }
         "@graph" => {
@@ -540,8 +582,25 @@ fn expand_keyword(
             }
         }
         "@language" => match value {
-            Json::Str(_) => set_obj(result, "@language", value.clone()),
-            Json::Arr(_) if frame_expansion => set_obj(result, "@language", value.clone()),
+            // [FABLE-5] sq-oy1f.29 — language tags are normalised to lower case
+            // (§5.1.2 step 13.4.6 "Processors MAY normalize language tags to lower
+            // case"; the reference processors and the framing suite do).
+            Json::Str(s) => set_obj(result, "@language", Json::Str(s.to_lowercase())),
+            Json::Arr(items) if frame_expansion => {
+                let lowered: Vec<Json> = items
+                    .iter()
+                    .map(|i| match i {
+                        Json::Str(s) => Json::Str(s.to_lowercase()),
+                        other => other.clone(),
+                    })
+                    .collect();
+                set_obj(result, "@language", Json::Arr(lowered));
+            }
+            // [FABLE-5] sq-oy1f.29 — frameExpansion also admits the wildcard `{}`
+            // language pattern (framing value patterns, json-ld11-framing §2.2).
+            Json::Obj(m) if frame_expansion && m.is_empty() => {
+                set_obj(result, "@language", value.clone());
+            }
             _ => return Err(JsonLdError::new(E::InvalidLanguageTaggedString)),
         },
         "@direction" => match value {
@@ -678,7 +737,8 @@ fn expand_property_value(
                 let drop_lang =
                     lang == "@none" || active_context.expand_iri(&lang, false, true).as_deref() == Some("@none");
                 if !drop_lang {
-                    v.push(("@language".to_string(), Json::Str(lang.clone())));
+                    // [FABLE-5] sq-oy1f.29 — language tags normalise to lower case.
+                    v.push(("@language".to_string(), Json::Str(lang.to_lowercase())));
                 }
                 if let Some(d) = direction {
                     v.push(("@direction".to_string(), Json::Str(d.as_str().to_string())));
@@ -852,7 +912,8 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
                     _ => active_context.default_base_direction(),
                 };
                 if let Some(l) = language {
-                    result.push(("@language".to_string(), Json::Str(l)));
+                    // [FABLE-5] sq-oy1f.29 — language tags normalise to lower case.
+                    result.push(("@language".to_string(), Json::Str(l.to_lowercase())));
                 }
                 if let Some(d) = direction {
                     result.push(("@direction".to_string(), Json::Str(d.as_str().to_string())));
@@ -912,26 +973,44 @@ fn cleanup(
                 }
             }
         }
-        let is_json = matches!(obj_get(&members, "@type"), Some(Json::Str(s)) if s == "@json");
+        // [FABLE-5] sq-oy1f.29 — `@type: "@json"` may arrive as a kept single-element
+        // array under frameExpansion; recognise both shapes.
+        let is_json = match obj_get(&members, "@type") {
+            Some(Json::Str(s)) => s == "@json",
+            Some(Json::Arr(a)) if frame_expansion => {
+                matches!(a.as_slice(), [Json::Str(s)] if s == "@json")
+            }
+            _ => false,
+        };
         let v = obj_get(&members, "@value").unwrap();
         if !is_json {
-            if is_null(v) || matches!(v, Json::Arr(a) if a.is_empty()) {
+            // An empty-array `@value` is a match-none value PATTERN under
+            // frameExpansion (kept); outside framing the value object is dropped.
+            if is_null(v) || (!frame_expansion && matches!(v, Json::Arr(a) if a.is_empty())) {
                 return Ok(None);
             }
             if has(&members, "@language")
                 && !matches!(v, Json::Str(_))
-                && !(frame_expansion && matches!(v, Json::Arr(_)))
+                // [FABLE-5] sq-oy1f.29 — frameExpansion also admits the wildcard `{}`
+                // and alternative-array `@value` patterns alongside `@language`.
+                && !(frame_expansion && matches!(v, Json::Arr(_) | Json::Obj(_)))
             {
                 return Err(JsonLdError::new(E::InvalidLanguageTaggedValue));
             }
             if let Some(t) = obj_get(&members, "@type") {
-                let ok = match t {
-                    Json::Str(s) => is_absolute_iri(s) || is_blank_node(s),
-                    // Frame-expansion permits an array of types on a value object.
-                    Json::Arr(a) if frame_expansion => a
-                        .iter()
-                        .all(|e| matches!(e, Json::Str(s) if is_absolute_iri(s) || is_blank_node(s))),
+                // [FABLE-5] sq-oy1f.29 — a frame value pattern's @type alternative may
+                // also be the wildcard `{}` or `@json`.
+                let type_ok = |e: &Json| match e {
+                    Json::Str(s) => {
+                        is_absolute_iri(s) || is_blank_node(s) || (frame_expansion && s == "@json")
+                    }
+                    Json::Obj(m) => frame_expansion && m.is_empty(),
                     _ => false,
+                };
+                let ok = match t {
+                    // Frame-expansion permits an array of types on a value object.
+                    Json::Arr(a) if frame_expansion => a.iter().all(type_ok),
+                    other => type_ok(other),
                 };
                 if !ok {
                     return Err(JsonLdError::new(E::InvalidTypedValue));

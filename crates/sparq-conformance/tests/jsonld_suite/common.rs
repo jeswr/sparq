@@ -132,10 +132,10 @@ pub struct Entry {
     /// the input against. `None` for the toRdf/fromRdf/compact manifests.
     pub frame: Option<String>,
     /// [OPUS-4.8] sq-oy1f.19 — a NegativeEvaluationTest's expected JSON-LD
-    /// error code (`invalid frame`, `invalid @embed value`, …). Recorded so the
-    /// frame runner can SKIP the error-raising negatives sparq's TOTAL framer
-    /// does not model (it never raises the spec's frame-validation errors), the
-    /// same honesty posture the compact lane takes toward its negatives.
+    /// error code (`invalid frame`, `invalid @embed value`, …).
+    /// [FABLE-5] sq-oy1f.29: the native framer now RAISES the spec's
+    /// frame-validation errors, so the frame runner RUNS these negatives (pass
+    /// iff the raised code equals this expected code) instead of skipping them.
     pub expect_error_code: Option<String>,
     /// [SONNET-4.6] sq-kk1mq — `option.expandContext`: a path (relative to the
     /// suite root) to a context file. Forwarded to the native expand() oracle as
@@ -148,6 +148,12 @@ pub struct Entry {
     /// `true`) when the manifest entry does not set them.
     pub compact_arrays: Option<bool>,
     pub compact_to_relative: Option<bool>,
+    /// [FABLE-5] sq-oy1f.29 — `option.omitGraph` / `option.ordered` (frame-manifest
+    /// options). Forwarded to the native frame() oracle as
+    /// `FrameOptions.omit_graph` / `JsonLdOptions.ordered`; `None` when the manifest
+    /// entry does not set them (mode-dependent spec default / `false`).
+    pub omit_graph: Option<bool>,
+    pub ordered: Option<bool>,
 }
 
 /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -219,6 +225,9 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
         let compact_to_relative = opt
             .and_then(|o| o.get("compactToRelative"))
             .and_then(Value::as_bool);
+        // [FABLE-5] sq-oy1f.29 — frame-manifest options (None elsewhere).
+        let omit_graph = opt.and_then(|o| o.get("omitGraph")).and_then(Value::as_bool);
+        let ordered = opt.and_then(|o| o.get("ordered")).and_then(Value::as_bool);
         out.push(Entry {
             id,
             is_negative,
@@ -234,6 +243,8 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             expand_context_path,
             compact_arrays,
             compact_to_relative,
+            omit_graph,
+            ordered,
         });
     }
     Ok(out)
@@ -270,23 +281,9 @@ pub fn parse_jsonld_dataset(text: &str, base: &str) -> Result<Dataset, String> {
     jsonld_to_canonical_dataset(text, base)
 }
 
-/// [OPUS-4.8] sq-3uos5 — serialise an oxrdf [`Dataset`] to N-Quads text. The
-/// `compact` input documents are JSON-LD; to drive sparq's RDF→compacted-JSON-LD
-/// writer (which takes a [`Graph`]) the input is first parsed to RDF (via the
-/// REAL oxjsonld path) and re-emitted as N-Quads, then loaded into a `Graph`
-/// preserving named graphs — exactly the bridge `from_rdf::run_fromrdf` uses, but
-/// with the input coming from a JSON-LD document rather than an `.nq` fixture.
-/// `oxrdf`'s `Quad` Display is canonical N-Quads, so this is loss-free.
-pub fn dataset_to_nquads(ds: &Dataset) -> String {
-    let mut out = String::new();
-    for q in ds.iter() {
-        let owned: Quad = q.into_owned();
-        // [OPUS-4.8] positional format arg (avoids the CodeQL rust/unused-variable
-        // false positive on inline-captured identifiers).
-        out.push_str(&format!("{} .\n", owned));
-    }
-    out
-}
+// [FABLE-5] sq-oy1f.29 — `dataset_to_nquads` (the RDF bridge for the retired
+// RDF-oracle frame lane) was removed with the lane's move to the native
+// document-level framer; the remaining lanes never re-serialise datasets.
 
 
 // ── JSON-LD document-level equality comparator ──────────────────────────────

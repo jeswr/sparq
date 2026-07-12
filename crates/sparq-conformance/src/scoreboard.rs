@@ -155,10 +155,11 @@ pub struct Suite {
 ///   `FLOOR = 228` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
 ///   sq-oy1f.27's oracle correction to the native document-level Compaction
 ///   Algorithm vs the W3C EXPECTED document; opt-in `jsonld-suite` feature).
-/// * JSON-LD frame 61 — `sparq-conformance` `src/floors/frame.rs`
-///   `FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
-///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
-///   suite, compared by re-parse RDF-equivalence to the normative expected output).
+/// * JSON-LD frame 92 — `sparq-conformance` `src/floors/frame.rs`
+///   `FLOOR = 92` (sq-oy1f.19; RE-PINNED 61→92 by sq-oy1f.29 flipping the lane from
+///   the RDF-first framer to the NATIVE document-level Framing Algorithm compared to
+///   the W3C EXPECTED document with `json_ld_equal` (negatives RUN, not skipped);
+///   opt-in `jsonld-suite` feature; over the SEPARATE w3c/json-ld-framing suite).
 /// * JSON-LD expand 259 — `sparq-conformance` `src/floors/expand.rs`
 ///   `FLOOR = 259` (sq-oy1f.37 expand() correctness raise from 240; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
@@ -1168,6 +1169,54 @@ pub const SUITES: &[Suite] = &[
                with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
                M2 FIXED sq-pbz04.4.13; M7 FIXED sq-pbz04.4.16 — those rows now pass/abstain; \
                remaining: M3/M5/M6)",
+    },
+    // [FABLE-5] sq-tonhr.2 (epic sq-tonhr) — the W3C rdf-n-triples / rdf-n-quads /
+    // rdf-trig SYNTAX-suite ratchets, wired BEFORE any rdf-shuttle generated candidate
+    // parser lands so the incumbent bar is pinned (only rdf-turtle was ratcheted until
+    // now). The runner is crate-local (`tests/rdf_line_syntax_ratchet.rs`), default-on
+    // (no new deps — it drives the REAL default-feature ingest paths: the native
+    // chunk-parallel `nt.rs` N-Triples parser, the chunk-parallel N-Quads dataset
+    // loader, the with-base TriG dataset loader) and self-skips when the pinned
+    // w3c/rdf-tests clone is not fetched; the `conformance` CI job fetches it
+    // explicitly and runs the ratchet. Floors are the MEASURED pass counts at the
+    // pinned revision — NT 60/70 and NQ 76/87 honestly record the native byte-level
+    // parser's audited divergences (bead sq-w64x5: no IRI/blank-node-label/lang-tag
+    // validation = 9+1 lenient accepts of negative cases, plus one over-strict reject
+    // of `minimal_whitespace`; the companion differential gate
+    // `tests/parser_differential.rs` pins the SAME cases as an exact adjudicated set),
+    // TriG passes all 356. Floors may only RISE (fixing sq-w64x5 raises NT/NQ).
+    Suite {
+        label: "W3C N-Triples syntax (rdf11 rdf-n-triples)",
+        family: "W3C RDF",
+        runner: Runner::CrateTest { krate: "sparq-conformance", target: "rdf_line_syntax_ratchet" },
+        ci_job: "conformance",
+        ratchet_floor: 60,
+        floor_basis: "pass",
+        note: "positive+negative syntax through the REAL native chunk-parallel nt.rs \
+               path; the 10 recorded FAILs are the audited sq-w64x5 validation \
+               divergences, never summed in",
+    },
+    Suite {
+        label: "W3C N-Quads syntax (rdf11 rdf-n-quads)",
+        family: "W3C RDF",
+        runner: Runner::CrateTest { krate: "sparq-conformance", target: "rdf_line_syntax_ratchet" },
+        ci_job: "conformance",
+        ratchet_floor: 76,
+        floor_basis: "pass",
+        note: "positive+negative syntax through the REAL chunk-parallel N-Quads dataset \
+               loader (named graphs preserved); the 11 recorded FAILs are the shared \
+               nt.rs sq-w64x5 divergences plus the graph-position IRI case",
+    },
+    Suite {
+        label: "W3C TriG syntax + eval (rdf11 rdf-trig)",
+        family: "W3C RDF",
+        runner: Runner::CrateTest { krate: "sparq-conformance", target: "rdf_line_syntax_ratchet" },
+        ci_job: "conformance",
+        ratchet_floor: 356,
+        floor_basis: "pass",
+        note: "positive+negative syntax AND eval (quad-SET blank-node-bijection identity \
+               to the N-Quads expectation, graph names included) through the with-base \
+               TriG dataset loader — all 356 manifest entries pass",
     },
 ];
 
