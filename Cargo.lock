@@ -4602,6 +4602,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sparq-core",
+ "sparq-engine",
  "sparq-shacl",
 ]
 
