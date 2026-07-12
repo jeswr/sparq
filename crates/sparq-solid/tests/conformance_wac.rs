@@ -58,7 +58,7 @@ fn wac_conformance_corpus_decision_parity() {
     let pass = reports.len() - fail;
     println!("WAC scenarios pass {pass} / fail {fail} (floor {WAC_SCENARIO_FLOOR})");
     // Guard against a corpus that silently checks nothing.
-    assert_eq!(reports.len(), WAC_SCENARIO_FLOOR, "expected 12 scenarios");
+    assert_eq!(reports.len(), WAC_SCENARIO_FLOOR, "expected 13 scenarios");
     assert!(
         pass >= WAC_SCENARIO_FLOOR,
         "WAC conformance scenario count regressed: {pass} < floor {WAC_SCENARIO_FLOOR}"

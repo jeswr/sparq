@@ -1,0 +1,7 @@
+# EL variant (feature `el-suite`) — the BASE TBox: a two-hop subclass chain the
+# classifier completes to :A rdfs:subClassOf :C.
+@prefix : <urn:sparq:qto:> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:A rdfs:subClassOf :B .
+:B rdfs:subClassOf :C .

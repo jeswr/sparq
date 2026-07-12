@@ -49,7 +49,7 @@ fn acp_conformance_corpus_decision_parity() {
     let pass = reports.len() - fail;
     println!("ACP scenarios pass {pass} / fail {fail} (floor {ACP_SCENARIO_FLOOR})");
     // Guard against a corpus that silently checks nothing.
-    assert_eq!(reports.len(), ACP_SCENARIO_FLOOR, "expected 12 scenarios");
+    assert_eq!(reports.len(), ACP_SCENARIO_FLOOR, "expected 13 scenarios");
     assert!(
         pass >= ACP_SCENARIO_FLOOR,
         "ACP conformance scenario count regressed: {pass} < floor {ACP_SCENARIO_FLOOR}"

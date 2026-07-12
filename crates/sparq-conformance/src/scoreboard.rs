@@ -133,10 +133,12 @@ pub struct Suite {
 ///   [SONNET-4.6] strengthened semantics-preserving comparison + extended coverage;
 ///   opt-in `geosparql_rewrite` feature; topology PROPERTY forms answered via the
 ///   rewrite, MEASURED pass count).
-/// * Solid WAC 12 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 12`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
-/// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
+/// * Solid WAC 13 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 13`
+///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
+///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
+/// * Solid ACP 13 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 13`
+///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
+///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
 ///
 /// [FABLE-5] sq-oy1f.40 — the SIX JSON-LD floors below now live LIB-SIDE in
 /// `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are IMPORTED directly into
@@ -365,7 +367,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid WAC",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_wac" },
         ci_job: "solid-conformance",
-        ratchet_floor: 12,
+        ratchet_floor: 13,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct WAC .acl scenarios",
     },
@@ -374,7 +376,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid ACP",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_acp" },
         ci_job: "solid-conformance",
-        ratchet_floor: 12,
+        ratchet_floor: 13,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct ACP ACR scenarios",
     },
@@ -1211,6 +1213,49 @@ pub const SUITES: &[Suite] = &[
                + fixture cases, with per-case negative-entailment guards; the \
                reification-node projection stands in for RDF 1.2 triple-term \
                matching (a tracked sparq-reason gap), never faked as native support",
+    },
+    // [KERN] the RDF 1.2 quoted-triple OPACITY ratchet (runner lives crate-local
+    // in `sparq-conformance/tests/quoted_triple_opacity.rs`, UNGATED — it calls
+    // plain `sparq_reason::materialize` on committed Turtle 1.2 fixtures, links
+    // no opt-in code, fetches no data, and runs in ordinary
+    // `cargo test --workspace`; only its EL arm is behind the existing
+    // `el-suite` feature and does NOT count toward the floor). HONESTLY tallied
+    // as a sparq EXTENSION ratchet, NOT folded into the conformance total: the
+    // fixtures are self-authored (the W3C rdf-tests 1.2 entailment corpus does
+    // not yet cover reasoner-side opacity), but the property they pin is the
+    // NORMATIVE RDF 1.2 semantics of triple terms — quoting never asserts: a
+    // reified triple `<< s p o >>` (any surface form) entails neither `s p o`
+    // nor any consequence of it; the RL closure of a base graph is
+    // BYTE-IDENTICAL with or without quoted triples referring to it (pinned
+    // against committed expected-answer files); and a reifier's own annotations
+    // are reasoned over normally without leaking the quoted content. The
+    // annotation form `s p o {| … |}` — which RDF 1.2 DOES assert — is the
+    // in-fixture positive control proving the negative guards are meaningful.
+    // The floor is the MEASURED assertion count (the `quoted-triple opacity
+    // assertions N` line) — it may only RISE; `QUOTED_OPACITY_FLOOR` is
+    // mirrored here and kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "RDF 1.2 quoted-triple opacity (reasoning)",
+        family: "sparq extension",
+        runner: Runner::CrateTest {
+            krate: "sparq-conformance",
+            target: "quoted_triple_opacity",
+        },
+        ci_job: "test",
+        ratchet_floor: 84,
+        floor_basis: "opacity assertions — quoting-never-asserts negative-entailment guards, \
+                      byte-identical closure non-interference vs committed expected-answer \
+                      files, and normal reifier-annotation reasoning, per profile (RDFS + \
+                      OWL 2 RL); self-authored fixtures pinning the normative RDF 1.2 \
+                      triple-term semantics, NOT a W3C-suite pass count",
+        note: "EXTENSION ratchet — RDF 1.2 quoted/reified triples are TERMS: the lane pins \
+               that the REAL reasoning profiles never assert quoted triples (no entailment \
+               of the quoted triple nor its domain/range/subproperty/subclass consequences), \
+               that RL closures are byte-identical with or without quoted triples referring \
+               to them, and that reifier annotations reason normally; the asserting \
+               annotation form is the fixture's positive control; the feature-gated \
+               EL arm re-checks non-interference through the sparq-reason-el classifier \
+               without counting toward the floor",
     },
     // [FABLE-5] sq-tonhr.2 (epic sq-tonhr) — the W3C rdf-n-triples / rdf-n-quads /
     // rdf-trig SYNTAX-suite ratchets, wired BEFORE any rdf-shuttle generated candidate
