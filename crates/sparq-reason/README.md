@@ -72,7 +72,7 @@ let g = Graph::from_parts(dict, triples);
   annotations and the recovered components), and **reif-ctr** constructs the reifies
   triple from classic-reification data — restricted to EXISTING triples over leaf
   components so the Herbrand base stays **finite** (termination argument in the `reify`
-  module docs). Quoted triples stay **opaque**: quotation never asserts the quoted triple,
+  module docs). Triple terms stay **opaque**: reification never asserts the referent triple,
   and nothing rewrites inside a triple term. Off by default — the bridge is a deliberate,
   non-normative entailment extension; plain `Profile::OwlRl` closures are unchanged.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which

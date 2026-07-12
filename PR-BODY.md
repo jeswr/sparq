@@ -23,7 +23,7 @@ obviously terminating: unrestricted, `rdf:reifies rdfs:subPropertyOf rdf:object`
 constructor quote its own conclusions forever. reif-ctr therefore carries two
 restrictions (full argument in the `reify` module docs, adversarial cascade pinned by
 `construct_never_quotes_a_triple_term`): (1) **only EXISTING triples are reified** — the
-quoted triple must already be in the closure; (2) **no quoting of triple terms** — every
+referent triple must already be in the closure; (2) **no quoting of triple terms** — every
 constructed term has leaf components (subject IRI/blank + predicate IRI kind guards;
 object checked explicitly). Together: no rule invents nodes, the mintable term set is
 bounded by triples over a fixed finite leaf universe, so the Herbrand base is finite,
