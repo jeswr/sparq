@@ -417,6 +417,43 @@ fn continuous_query_over_count_window() {
     assert_eq!(sums, vec![sum(1), sum(3), sum(6)]);
 }
 
+/// [GPT-5.6] sq-f0v71: count-window R2S diffs compare consecutive
+/// *reported* windows when the slide skips arrivals. The transient window
+/// after `v3` would be `{v2, v3}`; incorrectly using it as the diff base would
+/// emit only `v4` for ISTREAM and `v2` for DSTREAM, which these assertions
+/// reject.
+#[test]
+fn continuous_query_count_window_slide_diffs_consecutive_reports() {
+    let run = |r2s| {
+        let mut q = ContinuousQuery::register(
+            "SELECT ?v WHERE { ?s <http://ex/value> ?v } ORDER BY ?v",
+            WindowSpec::count(2).with_slide(2),
+        )
+        .unwrap()
+        .with_r2s(r2s);
+        let mut reports = Vec::new();
+        let mut sink = |r: sparq_rsp::WindowResult| reports.push(r.rows);
+
+        for i in 1..=4 {
+            q.push(t(&format!("s{i}"), "value", &format!("v{i}")), i, &mut sink)
+                .unwrap();
+        }
+        reports
+    };
+    let rows = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| vec![Some(iri(value))])
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        run(R2S::IStream),
+        vec![rows(&["v1", "v2"]), rows(&["v3", "v4"])]
+    );
+    assert_eq!(run(R2S::DStream), vec![rows(&[]), rows(&["v1", "v2"])]);
+}
+
 /// Lateness propagates through ContinuousQuery: late triples never reach a
 /// result; the counter is observable.
 #[test]
