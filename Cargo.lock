@@ -4904,6 +4904,7 @@ name = "sparq-rsp"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
+ "proptest",
  "rustc-hash 2.1.3",
  "serde_json",
  "spargebra",
