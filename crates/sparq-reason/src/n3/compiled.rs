@@ -351,7 +351,7 @@ impl Compiler {
             Term::Iri(_) | Term::Lit(..) | Term::Blank(_) => {}
             other => {
                 return Err(format!(
-                    "compiled-rules: term {other:?} has no dictionary representation (quoted formulae / lists / variables are not compilable constants)"
+                    "compiled-rules: term {other:?} is not a compilable constant (quoted formulae / lists / RDF-star quoted triples / variables are outside the compiled subset — the text engine handles them)"
                 ))
             }
         }
@@ -453,7 +453,7 @@ impl Compiler {
                 Term::Iri(_) | Term::Lit(..) | Term::Blank(_) => consts[i] = Some(self.sym(t)?),
                 other => {
                     return Err(format!(
-                        "compiled-rules: {other:?} in a triple pattern is not in the compiled subset (quoted formulae / lists match nothing at the id level)"
+                        "compiled-rules: {other:?} in a triple pattern is not in the compiled subset (quoted formulae / lists / RDF-star quoted triples are matched by the text engine only)"
                     ))
                 }
             }
