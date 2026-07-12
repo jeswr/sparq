@@ -56,6 +56,9 @@ const ShaclTool = lazyPanel(() =>
 const InferenceTool = lazyPanel(() =>
   import("@/components/workbench/inference-tool").then((m) => ({ default: m.InferenceTool })),
 );
+const FormsTool = lazyPanel(() =>
+  import("@/components/workbench/forms-tool").then((m) => ({ default: m.FormsTool })),
+);
 const GraphViewTool = lazyPanel(() =>
   import("@/components/workbench/graph-view-tool").then((m) => ({ default: m.GraphViewTool })),
 );
@@ -92,6 +95,8 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // STATIC import: the default tab paints on first render, never behind a chunk fetch.
   query: { Component: QueryWorkbench, override: QUERY_TOOL_OVERRIDE },
   shacl: { Component: ShaclTool },
+  // [GPT-5.6] sq-lsp7k.1.2 — invocation-only chunk shared by desktop and hosted web.
+  forms: { Component: FormsTool },
   // [OPUS-4.8] sq-tp1m — the Inference tool is a real, working panel (per-workspace RDFS /
   // OWL 2 RL entailment wired to the engine's forward-chaining reasoner), not an honest stub.
   inference: { Component: InferenceTool },
