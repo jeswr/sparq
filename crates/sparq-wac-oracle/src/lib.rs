@@ -40,6 +40,11 @@
 
 #![forbid(unsafe_code)]
 
+// [FABLE-5] sq-39kps — POST-`Slug` `.acl` escalation corpus (a self-contained
+// decision-layer adversarial acceptance bar for the future POST chokepoint guard,
+// bead sq-gg0qq.5). Disjoint from the B1 vectors above.
+pub mod escalation_corpus;
+
 use sparq_core::Graph;
 pub use sparq_solid::{AclScope, AclStatus, Mode, PodStore, Session, WacDecision};
 use std::fmt;
