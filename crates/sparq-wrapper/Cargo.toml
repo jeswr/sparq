@@ -1,0 +1,26 @@
+[package]
+name = "sparq-wrapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in Rust-native object traversal and typed RDF value access over sparq-core graphs"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# [GPT-5.6] sq-1rg2q: proposed rdfjs/wrapper parity remains explicitly opt-in.
+default = []
+proposed-distinct = []
+proposed-cardinality = []
+
+[dependencies]
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+oxrdf.workspace = true

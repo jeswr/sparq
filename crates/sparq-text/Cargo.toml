@@ -68,6 +68,8 @@ rayon = { workspace = true, optional = true }
 unicode-segmentation = "1"
 
 [dev-dependencies]
+# [GPT-5.6] sq-wxxkk: generated incremental-completion delta histories.
+proptest = "1"
 # Deterministic random literals/deltas for the differential test + the benchmark example.
 # [OPUS-4.8] sq-8xug: rand-ecosystem 0.10. `random_range`/`random` moved from the
 # `Rng` trait to `RngExt` in 0.10, so the test/example imports use the prelude.

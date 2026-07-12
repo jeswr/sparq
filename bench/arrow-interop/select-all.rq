@@ -1,0 +1,4 @@
+PREFIX ex: <http://example.test/>
+SELECT ?member ?label ?score WHERE {
+  ?member ex:label ?label ; ex:score ?score .
+}

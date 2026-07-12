@@ -1,0 +1,5 @@
+{
+  "pr": 2135,
+  "date": "2026-07-12",
+  "reason": "[FABLE-5] landing Kern PR #2135 (issue #2149): opt-in default-OFF `quoted-triples` feature on sparq-reason (destructure/construct reifier bridge rules). sparq-reason is not part of the lean `sparq-wasm` dependency graph and the feature is OFF by default, so no quoted-triple inference is enabled in the feature-OFF bundle; any deterministic artifact movement from the additive manifest/cfg surface is intentional and remains governed by the wasm size ratchet."
+}
