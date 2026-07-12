@@ -102,9 +102,9 @@ sparq-text = { path = "../sparq-text", features = ["fuzzy"] }
 ```
 
 ```rust
-let hits = index.fuzzy("wold", 1)?; // matches the indexed token "world"
+let hits = index.fuzzy("quixkly", 1)?; // matches the indexed token "quickly"
 // In SPARQL:
-//   ?title text:fuzzy "wold" .
+//   ?title text:fuzzy "quixkly" .
 //   ?title text:maxDistance 1 .
 //   ?title text:score ?s .
 ```

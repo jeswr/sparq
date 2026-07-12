@@ -17,7 +17,7 @@ pub struct ArrowError {
 }
 
 impl ArrowError {
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }

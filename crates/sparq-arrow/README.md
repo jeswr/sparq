@@ -6,12 +6,15 @@
 > (Polars, DuckDB, pandas) without a CSV round-trip. Issue #910, bead `sq-v78l4`.
 >
 > [GPT-5.6] Bead `sq-lsp7k.16` adds the checked inverse, `from_record_batch`.
+> [GPT-5.6] Bead `sq-lsp7k.21` adds Parquet byte serialization over that same schema.
 
 **Opt-in / lean-core by construction.** This is a separate leaf crate, and Arrow
 import/export sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
 closure NEVER enters `sparq-core` / `sparq-engine` / the wasm bundle; nothing in the
-workspace default build depends on it. The default build of *this* crate pulls no Arrow
-code at all — only the dependency-free field-name constants and the schema docs.
+workspace default build depends on it. Parquet byte serialization is a second opt-in
+layer (`parquet`, which implies `arrow`). The default build of *this* crate pulls no
+Arrow or Parquet code at all — only the dependency-free field-name constants and the
+schema docs.
 
 ## 🚀 Quickstart
 
@@ -36,6 +39,22 @@ assert_eq!(restored.rows, result.rows);
 `cargo add sparq-arrow --features arrow` (or, in this workspace,
 `cargo build -p sparq-arrow --features arrow`).
 
+To serialize the same term-struct batch as an in-memory Parquet file, enable the
+default-OFF `parquet` feature:
+
+```rust,ignore
+use sparq_arrow::{from_parquet_bytes, to_parquet_bytes};
+
+let bytes = to_parquet_bytes(&result)?;
+let restored = from_parquet_bytes(&bytes)?;
+assert_eq!(restored.vars, result.vars);
+assert_eq!(restored.rows, result.rows);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Use `cargo add sparq-arrow --features parquet` (or
+`cargo build -p sparq-arrow --features parquet`); `parquet` implies `arrow`.
+
 ## ✨ The RDF-term → Arrow mapping
 
 Arrow has no native RDF-term type, so the export widens each term into a **struct** —
@@ -57,6 +76,9 @@ literal. `term_schema(&vars)` builds the schema without materialising rows.
 row order, unbound cells, and RDF terms. Invalid variable names, schemas, kinds, IRIs,
 blank-node labels, language tags, directions, triple terms, or incompatible literal
 metadata return `ArrowError`; they never panic or silently select a fallback term kind.
+`to_parquet_bytes` writes this exact RecordBatch schema into a Parquet container, and
+`from_parquet_bytes` validates the recovered schema before decoding any row. Empty
+results retain their variable projection, and multiple row groups keep file order.
 
 ## 📚 Honest boundary / caveats
 
@@ -70,7 +92,8 @@ metadata return `ArrowError`; they never panic or silently select a fallback ter
 - **Triple terms are stringified** to N-Triples in `value` (`kind = "triple"`), not
   exploded into nested struct fields.
 - This is a **projection for transport**, not a canonical RDF serialisation: the Arrow
-  batch is not itself an RDF document. `from_record_batch` is its checked inverse.
+  batch and its Parquet container are not RDF documents. `from_record_batch` and
+  `from_parquet_bytes` are checked inverses of their corresponding exporters.
 - **Python binding.** Issue #910 frames a `sparq-py` `Graph.query_arrow() ->
   pyarrow.Table` over this export; that PyO3 binding lives in the opt-in `arrow` feature
   of `sparq-py` (bead `sq-lt1ml`) — it reuses `to_record_batch` here and bridges the

@@ -22,9 +22,10 @@ yanked = "deny"
 # Advisory IDs to tolerate — each MUST carry a justification. The policy here is
 # strict on what matters: a YANKED crate ALWAYS fails the gate, and every
 # vulnerability fails UNLESS it is one of the explicitly justified `ignore` ids
-# listed below. Exactly TWO advisories are tolerated (below), BOTH the same root
-# cause — a quick-xml < 0.41 DoS still present ONLY in a transitive copy; the gate
-# re-flags anything else (any new advisory, or a yanked crate).
+# listed below. Four advisories are tolerated: two maintenance-status notices
+# (`paste`, `rustls-pemfile`) with no reported vulnerability, plus two quick-xml
+# < 0.41 DoS advisories still present ONLY in a transitive copy. The gate re-flags
+# anything else (any new advisory, or a yanked crate).
 #
 # RUSTSEC-2026-0194 (quick-xml < 0.41: quadratic run time checking a start tag for
 # duplicate attribute names — a CPU/availability DoS, NOT memory-unsafety) and
@@ -42,12 +43,11 @@ yanked = "deny"
 # Announcements: https://github.com/tafia/quick-xml/issues/969 (0194) and
 #                https://github.com/tafia/quick-xml/issues/970 (0195)
 #
-# --- history: advisories that WERE ignored, removed once the crate left the tree ---
-# RUSTSEC-2024-0436 (unmaintained `paste` proc-macro, bead sq-l8bv) was dropped:
-# the GPU stack (wgpu et al.) no longer pulls `paste` transitively, so the crate
-# is absent from Cargo.lock and the advisory no longer matches any crate. The
-# ignore is therefore removed so the gate re-flags any regression that
-# reintroduces `paste`.
+# [GPT-5.6] RUSTSEC-2024-0436 (unmaintained `paste` proc-macro) was removed with
+# the old GPU closure (sq-l8bv), then reintroduced transitively by parquet 59 for
+# sparq-arrow's default-OFF `parquet` feature. This is a maintenance notice, not a
+# vulnerability, and parquet currently offers no paste-free release. Track removal
+# in sq-cx4w2 and delete this ignore once parquet drops `paste`.
 #
 # RUSTSEC-2025-0134 (unmaintained `rustls-pemfile`, bead sq-g2xs) was dropped:
 # the federation HTTP client was migrated from ureq 2 → ureq 3, whose
@@ -64,6 +64,7 @@ yanked = "deny"
 # `PemObject`; there is no vulnerability. Follow-up bead sq-5ah3p (migration to
 # rustls-pki-types' PemObject during the import) removes this ignore again.
 ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "paste is archived/unmaintained, an informational maintenance advisory with no reported vulnerability. It is reintroduced only through parquet 59 for sparq-arrow's default-OFF parquet feature, and parquet currently offers no paste-free release. Remove when parquet drops paste (follow-up bead sq-cx4w2)." },
   { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is archived/unmaintained (functionality moved into rustls-pki-types PemObject) — an informational advisory, not a vulnerability. Re-added for the solid-server-rs import pre-flight (sq-gg0qq.1): the imported mTLS serve path parses PEM cert-chain/key via rustls-pemfile 2, exactly as upstream jeswr/solid-server-rs ships. Remove by migrating the imported code to rustls-pki-types PemObject (follow-up bead sq-5ah3p)." },
   # quick-xml 0.37.5 (oxigraph 0.5.x transitive) — see the justification above.
   { id = "RUSTSEC-2026-0194", reason = "quick-xml <0.41 quadratic-time duplicate-attribute DoS. Our own crates are on the patched 0.41; this tolerates ONLY the transitive quick-xml 0.37.5 pinned by the oxigraph 0.5.x stack (oxrdfxml/sparesults/spareval), for which no fixed upstream release exists yet. Availability-only, not memory-unsafety. Remove when oxigraph bumps quick-xml >=0.41. https://github.com/tafia/quick-xml/issues/969" },

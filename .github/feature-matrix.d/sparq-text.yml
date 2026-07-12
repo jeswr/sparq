@@ -1,6 +1,7 @@
-# [GPT-5.6] Execute the default-OFF fuzzy lookup and SPARQL rewrite paths,
-# including the feature-gated acceptance tests.
-- name: "sparq-text (fuzzy — typo-tolerant text lookup)"
+# [GPT-5.6] Feature-matrix executor for the default-OFF fuzzy text index and
+# SPARQL magic predicate. The fuzzy integration suite is cfg-gated on this
+# feature and therefore is not exercised by the workspace default lane.
+- name: "sparq-text (fuzzy)"
   crate: "sparq-text"
   features: "fuzzy"
   test: true
