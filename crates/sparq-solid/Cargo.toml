@@ -79,6 +79,16 @@ trust-graph = ["dep:sparq-trust"]
 # only as strong as host/TLS control; no privacy).
 trust-graph-did = ["trust-graph", "sparq-trust/did"]
 
+# [FABLE-5] sq-lrtc3.3 (epic sq-lrtc3): pattern-scoped (sub-named-graph) result masking —
+# an ODRL target as a set of allow/deny TRIPLE PATTERNS over a source graph, enforced by
+# MATERIALIZING the masked sub-graph replica so masked triples are physically absent from
+# the evaluated dataset (oracle-equivalent under OPTIONAL/EXISTS/MINUS/aggregates/COUNT by
+# construction — no per-scan filtering, no engine change). OFF by default; adds NO
+# dependency (public sparq-core/sparq-engine APIs only), so the default build carries zero
+# pattern-scope code and stays byte-identical. Design + measured-envelope pointers:
+# research/odrl-pattern-scoped-targets-2026-07.md; overhead JSONs in bench/pattern-scope/.
+pattern-scope = []
+
 # [OPUS-4.8] sq-gq28y (issue #1546, maintainer decision "spec compliant - empty by default"):
 # a LEGACY escape hatch that restores the pre-flip union-always default-graph semantics.
 #
@@ -108,6 +118,24 @@ legacy-union-default-graph = []
 # runtime or published graph (the default sparq-solid build stays dependency-light).
 [dev-dependencies]
 serde_json = "1"
+
+# [OPUS-4.8] sq-zgbso.1 MEASURED SPIKE (issue #1582, design record
+# research/odrl-n3-compiled-rules.md): ODRL permission evaluation as N3 rules
+# (rules/odrl-spike.n3) differentially tested against the hand-written Rust path. Gated on
+# `odrl-bridge` (it drives the real `sparq_policy::evaluate` + `odrl_bridge::materialize_policy`),
+# so it is NOT built in the default (feature-OFF) state and adds zero default-build cost.
+# Measurement-only: no production wiring, no new public API.
+[[example]]
+name = "odrl_n3_spike"
+required-features = ["odrl-bridge"]
+
+# [FABLE-5] sq-lrtc3.3: the pattern-scope measured-overhead driver (design record
+# research/odrl-pattern-scoped-targets-2026-07.md §4; committed JSONs in
+# bench/pattern-scope/, work-box numbers NON-canonical). Gated on `pattern-scope`,
+# so it is NOT built in the default (feature-OFF) state. Measurement-only.
+[[example]]
+name = "pattern_scope_bench"
+required-features = ["pattern-scope"]
 
 # [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
 # `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real

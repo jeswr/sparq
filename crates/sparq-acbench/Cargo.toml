@@ -1,0 +1,34 @@
+# [FABLE-5] sq-i6du2.1 — AC-query benchmark scaffold.
+#
+# DEV-ONLY crate: `publish = false`. Nothing in the shipping graph depends on it —
+# `sparq-core`, `sparq-engine`, and every crate in the `sparq-*` runtime tree are
+# EXCLUDED from the dependency set by design (opt-in crate architecture; load-bearing
+# constraint matches `sparq-difftest`/`sparq-metamorph`). The crate is a parameterised,
+# seeded, deterministic generator of access-controlled RDF datasets + per-model WAC/ACP/
+# ODRL policy graphs + built-in by-construction decision oracles for WAC/ACP/ODRL; see
+# `research/ac-query-benchmark.md` (§2–§3) for the full design.
+#
+# DETERMINISM INVARIANT (tested — `tests/determinism.rs`): identical `GenParams` →
+# byte-identical N-Quads output, decisions, and intent tables on every run, platform, and
+# rustc version. This is the benchmark's central credibility guarantee.
+[package]
+name = "sparq-acbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Parameterised deterministic generator + by-construction oracle for the WAC/ACP/ODRL access-controlled-query benchmark (sq-i6du2)."
+
+[dependencies]
+# Deterministic seeded PRNG — SplitMix64 (repo convention, matches sparq-metamorph).
+# No dependency on thread_rng / rand::Rng so the output is deterministic across all
+# call-sites (no per-call entropy injection possible by accident).
+rand = { version = "0.8", default-features = false, features = ["small_rng"] }
+# RDF term model for N-Quads output — same family used across the workspace.
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+oxttl = { version = "0.2", features = ["rdf-12"] }
+
+[dev-dependencies]
+# Hex hashing for the golden-hash determinism tests.
+sha2 = "0.10"
+hex = "0.4"

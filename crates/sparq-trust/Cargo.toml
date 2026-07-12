@@ -15,6 +15,10 @@ readme = "README.md"
 # signature but does NOT deliver unlinkable/anonymous presentation. NOT published.
 publish = false
 
+[[example]]
+name = "admission_cost"
+required-features = ["cert-graph"]
+
 # [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg.
 [package.metadata.docs.rs]
 all-features = true
@@ -49,6 +53,24 @@ store = []
 # is `const &str` data + a TTL drift test, strictly additive (no new dep, no new edge
 # onto the lean default build).
 secprop-vocab = []
+# [FABLE-5] sq-6syab.2 — the `trustx:` certification-scope vocabulary (`framework_vocab`
+# module + `trust-framework.ttl`): the trust-expression program's layer for expressing
+# framework-certified-issuer trust and issuer certification scope (issue #1592; design
+# `research/trust-expression-spec.md` §3.4). It EXTENDS the `trust:` vocabulary and
+# REFERENCES the vendored `sec-req:` eIDAS/UK-DVS individuals — it does not fork or
+# duplicate them. Dependency-free — `const &str` data + a TTL drift test, strictly
+# additive (no new dep, no new edge onto the lean default build).
+framework-vocab = []
+# [OPUS-4.8] sq-pfae.15 — the depth-bounded certification-edge trust-graph closure
+# (`graph` module): a pure, FAIL-CLOSED, ATTENUATION-ONLY pre-processing step that derives
+# additional TrustRules from signed `trustx:Certification` edges AHEAD of — and consumed
+# verbatim by — the UNCHANGED admission gate. Every derived rule ⊆ (anchor ∩ cert scope ∩
+# validity window); any unverifiable/expired/cyclic/over-depth/broadening edge contributes
+# NOTHING; zero certifications ⇒ output is the direct rules byte-identical. Enables
+# `framework-vocab` (it evaluates that vocabulary's `trustx:Certification` term). Pure Rust
+# over the RDFC-1.0 signature primitive this crate already carries — NO new dependency,
+# strictly additive (the lean default build is byte-identical with it OFF).
+cert-graph = ["framework-vocab"]
 # [OPUS-4.8] sq-ufsi9 — the N3 proof-admissibility ruleset over `sparq-reason` (the
 # §4.3 ODRL → admissible-proof-set reduction: strongerThan-closure / atLeast /
 # overDimension / satisfies, plus the Rust default-deny universal). Pure N3-text data
@@ -119,3 +141,11 @@ flate2 = { version = "1", optional = true }
 # Turtle (sq-pfae.2). Not a runtime dependency — the lean default build is unaffected.
 [dev-dependencies]
 oxttl.workspace = true
+
+# [FABLE-5] sq-d9lzx: the runnable certification-edge closure DEMO an integrator/WG
+# reviewer can execute end-to-end (framework certifies issuer → attenuated effective
+# rule → fail-closed Broadening + NoAnchor rejects). Gated on `cert-graph`, so it is
+# NOT built in the default (feature-OFF) state — mirrors the sparq-solid example gating.
+[[example]]
+name = "trust_graph_closure"
+required-features = ["cert-graph"]

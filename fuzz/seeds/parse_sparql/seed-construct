@@ -1,0 +1,2 @@
+PREFIX ex: <http://ex/>
+CONSTRUCT { ?s ex:knows ?o } WHERE { ?s ex:p+ ?o . FILTER NOT EXISTS { ?o ex:hidden true } }

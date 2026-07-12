@@ -145,6 +145,9 @@ _LANE_SEEDS: dict[str, list[str]] = {
         "sparq-shacl-wasm",
         "sparq-introspect",
         "sparq-solid",
+        # [FABLE-5] sq-98c: not a bundle crate — the wasm job build+clippy-gates that
+        # sparq-vectors keeps compiling on wasm32 with memmap2 target-gated out.
+        "sparq-vectors",
     ],
     # [SONNET-4.6] sq-mel85: perf-gate bench closure (see the `bench` bullet above).
     "bench": [
@@ -153,6 +156,12 @@ _LANE_SEEDS: dict[str, list[str]] = {
         "sparq-bench",
         "sparq-wasm",
     ],
+    # [FABLE-5] sq-0iqzw: fuzz.yml `differential-smoke` — the PR-level BLOCKING
+    # sparq-vs-Oxigraph differential regression windows (the sparq-bench in-process
+    # oracle). Seeds: the engine under test (sparq-core/sparq-engine) plus the
+    # harness/oracle crate itself, so a generator or comparator change re-runs its
+    # own gate.
+    "differential-smoke": ["sparq-core", "sparq-engine", "sparq-bench"],
 }
 
 
@@ -322,10 +331,13 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 def apply_ownership_map(path: str, map_entries: list[dict]) -> tuple[str, list[str]] | None:
-    """First matching map entry wins.
+    """First matching OWNERSHIP-VERDICT entry wins.
 
     Returns ("safe", []) for a SAFE-listed path, ("crates", [names]) for an
-    attributed path, or None if no entry matches (=> caller treats as unowned).
+    attributed path, or None if no verdict entry matches (=> caller treats as
+    unowned). A `readers`-only entry (the additional-readers mechanism, sq-m4bxc)
+    is NOT an ownership verdict — it is applied separately by `additional_readers`
+    — so it is transparent here (skipped, never a verdict and never a raise).
     """
     for entry in map_entries:
         pattern = entry.get("pattern")
@@ -336,9 +348,38 @@ def apply_ownership_map(path: str, map_entries: list[dict]) -> tuple[str, list[s
         crates = entry.get("crates")
         if isinstance(crates, list) and all(isinstance(c, str) for c in crates):
             return ("crates", list(crates))
-        # Malformed entry (matched but neither safe nor a crate list) => fail-safe.
-        raise SelectorError(f"ownership-map entry for {pattern!r} is neither safe nor a crate list")
+        readers = entry.get("readers")
+        if isinstance(readers, list) and all(isinstance(c, str) for c in readers):
+            # additional-readers entry: not an ownership verdict; keep looking so
+            # a later `crates`/`safe` entry can still resolve the path.
+            continue
+        # Matched but neither safe, a crate list, nor readers => fail-safe.
+        raise SelectorError(f"ownership-map entry for {pattern!r} is neither safe, a crate list, nor readers")
     return None
+
+
+def additional_readers(path: str, map_entries: list[dict]) -> list[str]:
+    """[FABLE-5] sq-m4bxc: extra reader crates declared for `path` by `[[map]]`
+    entries carrying a `readers` list — the additional-readers mechanism.
+
+    These crates are UNIONED into the changed-crate set IN ADDITION to `path`'s
+    normal crate-prefix owner (or its `crates` attribution), so a crate that
+    #[cfg(test)] reads a SIBLING crate's committed input — where a real cargo dep
+    edge would be a forbidden cycle (design §4.2) — still has its tests run when
+    that input changes. The union across ALL matching `readers` entries is
+    returned (sorted, deduped). This can only ENLARGE the affected set: it never
+    changes a path's ownership verdict, so the selection is a strict superset of
+    the selection computed WITHOUT these entries (monotone / fail-safe, §2).
+    """
+    out: set[str] = set()
+    for entry in map_entries:
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not _glob_match(path, pattern):
+            continue
+        readers = entry.get("readers")
+        if isinstance(readers, list) and all(isinstance(c, str) for c in readers):
+            out.update(readers)
+    return sorted(out)
 
 
 # --- the selection ----------------------------------------------------------
@@ -374,18 +415,31 @@ def select(
         if trig is not None:
             file_owners.append((path, "FULL-TRIGGER"))
             return full(trig)
+
+        # [FABLE-5] sq-m4bxc: additional-readers (monotone union). Extra reader
+        # crates declared for this path are added REGARDLESS of ownership — the
+        # union can only ENLARGE the affected set (design §4.2, fail-safe §2). It
+        # never rescues an unowned/unmapped path (that still forces full below),
+        # so the result stays a strict superset of the no-readers selection.
+        extra = additional_readers(path, map_entries)
+        for c in extra:
+            if c not in ws.members:
+                return full(f"ownership map declares unknown additional-reader crate {c!r} for {path}")
+        changed_crates.update(extra)
+        reader_tag = ("+readers:" + "+".join(extra)) if extra else ""
+
         owner = owning_package(path, ws.owners)
         if owner is not None:
             changed_crates.add(owner)
-            file_owners.append((path, owner))
+            file_owners.append((path, owner + reader_tag))
             continue
         verdict = apply_ownership_map(path, map_entries)
         if verdict is None:
-            file_owners.append((path, "UNOWNED"))
+            file_owners.append((path, "UNOWNED" + reader_tag))
             return full(f"unowned, unmapped path forces full run: {path}")
         kind, crates = verdict
         if kind == "safe":
-            file_owners.append((path, "SAFE"))
+            file_owners.append((path, "SAFE" + reader_tag))
             continue
         # kind == "crates": every mapped crate must be a real workspace member,
         # else the map is stale/invalid => fail-safe (design §4.2 validity rule).
@@ -393,7 +447,7 @@ def select(
             if c not in ws.members:
                 return full(f"ownership map attributes {path} to unknown crate {c!r}")
         changed_crates.update(crates)
-        file_owners.append((path, "+".join(crates)))
+        file_owners.append((path, "+".join(crates) + reader_tag))
 
     affected: set[str] = set()
     for c in changed_crates:
@@ -445,15 +499,18 @@ def validate_map(
             continue
         is_safe = entry.get("safe") is True
         crates = entry.get("crates")
-        if not is_safe and crates is None:
-            problems.append(f"{pattern!r}: neither `safe` nor `crates` set")
-        if crates is not None:
-            if not isinstance(crates, list):
-                problems.append(f"{pattern!r}: `crates` must be a list")
+        readers = entry.get("readers")  # sq-m4bxc additional-readers (monotone union)
+        if not is_safe and crates is None and readers is None:
+            problems.append(f"{pattern!r}: none of `safe`, `crates`, `readers` set")
+        for key, val, label in (("crates", crates, "crate"), ("readers", readers, "readers crate")):
+            if val is None:
+                continue
+            if not isinstance(val, list):
+                problems.append(f"{pattern!r}: `{key}` must be a list")
             else:
-                for c in crates:
+                for c in val:
                     if c not in members:
-                        problems.append(f"{pattern!r}: unknown crate {c!r} (not a workspace member)")
+                        problems.append(f"{pattern!r}: unknown {label} {c!r} (not a workspace member)")
         # Pattern-root existence, tolerant of fetched/generated dirs.
         root = pattern[:-3] if pattern.endswith("/**") else pattern
         root = root.split("*", 1)[0].rstrip("/")

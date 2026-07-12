@@ -44,6 +44,16 @@ const nextConfig: NextConfig = {
   trailingSlash: true,
   // Static export cannot run the Next.js image optimiser.
   images: { unoptimized: true },
+  // [FABLE-5] sq-qgkwy.1 — tree-shake the MONOLITHIC `radix-ui` barrel. The site imports a
+  // handful of primitives (Slot, Dialog, Tooltip, …) via `import { X } from "radix-ui"`, but
+  // webpack does not shake the package's namespace re-export barrel: the ENTIRE primitive set
+  // (Select, Menu, NavigationMenu, ScrollArea, Toast, Slider, Form, Menubar, …) was bundled
+  // into a ~170 KB raw commons chunk shipped on almost every route's first load (measured via
+  // source-map attribution — see PR). `optimizePackageImports` rewrites the barrel imports to
+  // direct per-primitive imports at compile time, so only primitives actually used are bundled.
+  // Purely mechanical (same symbols, same behaviour); lucide-react is already on Next's
+  // built-in default list, radix-ui (the monolith) is not.
+  experimental: { optimizePackageImports: ["radix-ui"] },
   // [FABLE-5] sq-ymr2e.10 — the visual-regression suite (SPARQ_VR=1, set only by scripts/vr.sh
   // inside the pinned Playwright container) screenshots pages served by `next dev`, and the dev
   // indicator badge would otherwise appear in — and destabilise — every baseline. Scoped to the

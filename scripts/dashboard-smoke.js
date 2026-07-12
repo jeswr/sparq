@@ -164,6 +164,25 @@ eq(D.featuredSuiteOf('vectors_hnsw_recall_at10') && D.featuredSuiteOf('vectors_h
    'vector ANN recall metric is featured under Vector / ANN');
 eq(D.featuredSuiteOf('vectors_diskann_query_us') && D.featuredSuiteOf('vectors_diskann_query_us').key, 'Vector / ANN',
    'vector ANN advisory-latency metric is featured under Vector / ANN');
+// [GPT-5.6] sq-g3n7h: every newly implemented comparative suite must resolve from both its
+// registry spelling and the underscore-prefixed metric spelling emitted into benchmark feeds.
+[
+  ['wasm-compare/bundle', 'Browser / WASM'],
+  ['wasm_compare_bundle_bytes', 'Browser / WASM'],
+  ['canon-bench', 'RDFC-1.0 canonicalization'],
+  ['canon_poison_guard_count', 'RDFC-1.0 canonicalization'],
+  ['kge-quality-comparison', 'KGE quality'],
+  ['kge_filtered_mrr', 'KGE quality'],
+  ['gsp-bench', 'Graph Store Protocol'],
+  ['gsp_put_p50_ms', 'Graph Store Protocol'],
+  ['python-bindings-bench', 'Python bindings'],
+  ['python_query_floor_us', 'Python bindings']
+].forEach(function (c) {
+  const suite = D.featuredSuiteOf(c[0]);
+  eq(suite && suite.key, c[1], c[0] + ' is routed to its featured comparative suite');
+  ok(suite && typeof suite.note === 'string' && suite.note.length > 0,
+     c[1] + ' carries an honesty note');
+});
 
 // buildFeatured: groups by suite, latest value per metric, competitor SEAM present.
 const featEntries = [{
@@ -173,13 +192,22 @@ const featEntries = [{
     { name: 'op_q01_bgp_count_us', value: 5, unit: 'us' },      // NOT featured
     { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },
     { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },
-    { name: 'sp2b_q1_count_us', value: 50, unit: 'µs' }
+    { name: 'sp2b_q1_count_us', value: 50, unit: 'µs' },
+    { name: 'wasm_compare_bundle_bytes', value: 1, unit: 'bytes' },
+    { name: 'canon_poison_guard_count', value: 1, unit: 'count' },
+    { name: 'kge_filtered_mrr', value: 1, unit: 'ratio' },
+    { name: 'gsp_put_p50_ms', value: 1, unit: 'ms' },
+    { name: 'python_query_floor_us', value: 1, unit: 'µs' }
   ]
 }];
 const feat = D.buildFeatured(featEntries, null);
 const featSuites = feat.groups.map(function (g) { return g.suite; });
 ok(featSuites.indexOf('WatDiv') !== -1 && featSuites.indexOf('LUBM') !== -1 &&
    featSuites.indexOf('SP2Bench') !== -1, 'buildFeatured surfaces WatDiv/LUBM/SP2Bench');
+['Browser / WASM', 'RDFC-1.0 canonicalization', 'KGE quality',
+ 'Graph Store Protocol', 'Python bindings'].forEach(function (suite) {
+  ok(featSuites.indexOf(suite) !== -1, 'buildFeatured surfaces ' + suite);
+});
 ok(featSuites.indexOf('Operators') === -1 && featSuites.indexOf('Pipeline') === -1,
    'buildFeatured excludes non-featured (engine) suites');
 // the SEAM: no competitor file -> empty engine list, every row has a competitors:{} object.

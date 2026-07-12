@@ -1,0 +1,5 @@
+{
+  "pr": 1747,
+  "date": "2026-07-07",
+  "reason": "exec.rs adds always-compiled DISTINCT-projection skip-scan pushdown (mod distinct_pushdown, try_distinct_pushdown, branch_distinct_values, has_intra_triple_repeated_var) + store.rs skip-scan helpers — moves feature-OFF wasm bytes"
+}

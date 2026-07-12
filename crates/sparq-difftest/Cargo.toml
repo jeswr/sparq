@@ -25,7 +25,7 @@ publish = false
 [dependencies]
 # Arbitrary-precision integers: xsd:integer (and derived) value equality BEYOND i128, where
 # an f64 (or sparq's own i128 exact tier) would collapse distinct integers.
-num-bigint = "0.4"
+num-bigint = "0.5"
 # Arbitrary-precision decimals: xsd:decimal value equality for high-precision literals that
 # share an f64 (0.123456789012345678 vs ...679).
 bigdecimal = "0.4"

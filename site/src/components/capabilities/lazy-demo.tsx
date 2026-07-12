@@ -16,7 +16,8 @@
 // preserves exactly the route-scoping `sidebar-nav.tsx` enforced for the ZK prover: the
 // bb.js / noir_js chunks stay out of the /capabilities first-load bundle and arrive only if
 // a visitor opens the ZK row. The e2e test (e2e/capabilities-lazy.spec.ts) and a build-time
-// bundle check both assert no demo chunk loads on route entry.
+// bundle check (scripts/check-bundle.mjs, run as `npm run check:bundle` / the build's `postbuild`;
+// [FABLE-5] sq-vw3ax.9) both assert no demo chunk loads on route entry.
 
 import * as React from "react";
 import dynamic from "next/dynamic";
@@ -75,6 +76,11 @@ const DEMOS = {
   "streaming-rsp": dynamic(
     () => import("@/components/rsp-playground").then((m) => m.RspPlayground),
     { ssr: false, loading: () => <DemoSkeleton label="streaming RSP" /> },
+  ),
+  federation: dynamic(
+    () =>
+      import("@/components/federation-walkthrough").then((m) => m.FederationWalkthrough),
+    { ssr: false, loading: () => <DemoSkeleton label="federation" /> },
   ),
   zk: dynamic(
     () => import("@/components/zk-car-hire").then((m) => m.ZkCarHire),

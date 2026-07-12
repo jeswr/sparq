@@ -1,0 +1,386 @@
+{
+  "focus": {
+    "kind": "iri",
+    "value": "http://example.org/order42"
+  },
+  "mode": "edit",
+  "shapes": [
+    {
+      "shape": {
+        "kind": "iri",
+        "value": "http://example.org/OrderShape"
+      },
+      "via": "target-class"
+    }
+  ],
+  "shape": {
+    "kind": "iri",
+    "value": "http://example.org/OrderShape"
+  },
+  "groups": [
+    {
+      "kind": "default",
+      "fields": [
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b0"
+          },
+          "path": "<http://example.org/status>",
+          "label": "Status",
+          "order": 1.0,
+          "required": true,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#EnumSelectEditor",
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 10,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextFieldEditor",
+              "http://datashapes.org/dash#TextAreaEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#HyperlinkViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "submitted"
+              }
+            }
+          ],
+          "constraints": {
+            "min_count": 1,
+            "max_count": 1,
+            "in_values": [
+              {
+                "kind": "literal",
+                "value": "draft"
+              },
+              {
+                "kind": "literal",
+                "value": "submitted"
+              },
+              {
+                "kind": "literal",
+                "value": "shipped"
+              }
+            ]
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b1"
+          },
+          "path": "<http://example.org/customer>",
+          "label": "Customer",
+          "order": 2.0,
+          "required": true,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#InstancesSelectEditor",
+            "viewer": "http://datashapes.org/dash#LabelViewer",
+            "score": 12,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#AutoCompleteEditor",
+              "http://datashapes.org/dash#DetailsEditor",
+              "http://datashapes.org/dash#SubClassEditor",
+              "http://datashapes.org/dash#URIEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/acme"
+              }
+            }
+          ],
+          "constraints": {
+            "min_count": 1,
+            "max_count": 1,
+            "class": [
+              {
+                "kind": "iri",
+                "value": "http://example.org/Customer"
+              }
+            ],
+            "node_kind": [
+              "http://www.w3.org/ns/shacl#IRI"
+            ]
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b2"
+          },
+          "path": "<http://example.org/shippingAddress>",
+          "label": "Shipping address",
+          "order": 3.0,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#DetailsEditor",
+            "viewer": "http://datashapes.org/dash#DetailsViewer",
+            "score": 15,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#AutoCompleteEditor",
+              "http://datashapes.org/dash#SubClassEditor",
+              "http://datashapes.org/dash#URIEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#LabelViewer",
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/acmeHq"
+              },
+              "nested": {
+                "focus": {
+                  "kind": "iri",
+                  "value": "http://example.org/acmeHq"
+                },
+                "mode": "edit",
+                "shapes": [
+                  {
+                    "shape": {
+                      "kind": "iri",
+                      "value": "http://example.org/AddressShape"
+                    },
+                    "label": "Address",
+                    "via": "explicit"
+                  }
+                ],
+                "shape": {
+                  "kind": "iri",
+                  "value": "http://example.org/AddressShape"
+                },
+                "groups": [
+                  {
+                    "kind": "default",
+                    "fields": [
+                      {
+                        "property_shape": {
+                          "kind": "bnode",
+                          "value": "b3"
+                        },
+                        "path": "<http://example.org/street>",
+                        "label": "Street",
+                        "order": 1.0,
+                        "required": true,
+                        "multi": false,
+                        "editable": true,
+                        "widget": {
+                          "editor": "http://datashapes.org/dash#TextFieldEditor",
+                          "viewer": "http://datashapes.org/dash#LiteralViewer",
+                          "score": 10,
+                          "editor_alternatives": [
+                            "http://datashapes.org/dash#TextAreaEditor"
+                          ],
+                          "viewer_alternatives": [
+                            "http://datashapes.org/dash#HyperlinkViewer",
+                            "http://datashapes.org/dash#ValueTableViewer"
+                          ]
+                        },
+                        "values": [
+                          {
+                            "term": {
+                              "kind": "literal",
+                              "value": "1 Coyote Way"
+                            }
+                          }
+                        ],
+                        "constraints": {
+                          "min_count": 1,
+                          "max_count": 1,
+                          "datatype": [
+                            "http://www.w3.org/2001/XMLSchema#string"
+                          ]
+                        }
+                      },
+                      {
+                        "property_shape": {
+                          "kind": "bnode",
+                          "value": "b4"
+                        },
+                        "path": "<http://example.org/city>",
+                        "label": "City",
+                        "order": 2.0,
+                        "required": true,
+                        "multi": false,
+                        "editable": true,
+                        "widget": {
+                          "editor": "http://datashapes.org/dash#TextFieldEditor",
+                          "viewer": "http://datashapes.org/dash#LiteralViewer",
+                          "score": 10,
+                          "editor_alternatives": [
+                            "http://datashapes.org/dash#TextAreaEditor"
+                          ],
+                          "viewer_alternatives": [
+                            "http://datashapes.org/dash#HyperlinkViewer",
+                            "http://datashapes.org/dash#ValueTableViewer"
+                          ]
+                        },
+                        "values": [
+                          {
+                            "term": {
+                              "kind": "literal",
+                              "value": "Tumbleweed"
+                            }
+                          }
+                        ],
+                        "constraints": {
+                          "min_count": 1,
+                          "max_count": 1,
+                          "datatype": [
+                            "http://www.w3.org/2001/XMLSchema#string"
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "constraints": {
+            "max_count": 1,
+            "node_shape": {
+              "kind": "iri",
+              "value": "http://example.org/AddressShape"
+            }
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b5"
+          },
+          "path": "<http://example.org/category>",
+          "label": "Category",
+          "order": 4.0,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#SubClassEditor",
+            "viewer": "http://datashapes.org/dash#LabelViewer",
+            "score": 15,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#URIEditor",
+              "http://datashapes.org/dash#AutoCompleteEditor",
+              "http://datashapes.org/dash#DetailsEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/Hardware"
+              }
+            }
+          ],
+          "constraints": {
+            "max_count": 1,
+            "node_kind": [
+              "http://www.w3.org/ns/shacl#IRI"
+            ],
+            "root_class": {
+              "kind": "iri",
+              "value": "http://example.org/ProductCategory"
+            }
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b6"
+          },
+          "path": "<http://example.org/invoice>",
+          "label": "Invoice",
+          "order": 5.0,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#RichTextEditor",
+            "viewer": "http://datashapes.org/dash#HTMLViewer",
+            "explicit": true,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextFieldEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#LiteralViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "<p>Total: 42</p>",
+                "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#HTML"
+              }
+            }
+          ],
+          "constraints": {
+            "max_count": 1,
+            "datatype": [
+              "http://www.w3.org/1999/02/22-rdf-syntax-ns#HTML"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "other",
+      "label": "Other properties",
+      "fields": [
+        {
+          "path": "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>",
+          "label": "Type",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#LabelViewer",
+            "score": 5,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/Order"
+              }
+            }
+          ],
+          "constraints": {}
+        }
+      ]
+    }
+  ]
+}

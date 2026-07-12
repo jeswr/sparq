@@ -19,7 +19,9 @@ extend-exclude = [
   "node_modules",
   "**/node_modules",
   "Cargo.lock",
-  "zk/xpath/vendor",
+  # [OPUS-4.8] sq-5reoy: the "zk/xpath/vendor" exclude was dropped — the zk/xpath tree
+  # moved to the sparq-org/noir_XPath face repo (#1599); "**/vendor" above still covers
+  # any remaining vendored subtree.
   "*.svg",
   # Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025; MIT-licensed
   # as of 2026-06-21): reproduced verbatim with British spelling + many author
@@ -64,6 +66,14 @@ extend-exclude = [
 extend-ignore-re = [
   "\\bsq-[0-9a-z]{3,}\\b",
   "\\b(?:SELECT|CONSTRUCT|DESCRIBE|ASK|INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD|UNION|OPTIONAL|MINUS|GRAPH|SERVICE|BIND|FILTER|VALUES|GROUP|ORDER|HAVING|MATCH|JOIN|PROJECT|AND|OR|XOR|UPDATE|WHERE)[a-z]{1,3}\\b",
+  # [FABLE-5] sq-gg0qq.2 (sparq-lws-core import): base64/JWT literal segments in test
+  # fixtures (32+ char unbroken base64url runs are never prose — typos flags random
+  # 3-grams inside them, e.g. "Jod").
+  "[A-Za-z0-9+/_=-]{32,}",
+  # [FABLE-5] sq-gg0qq.2: blank-node labels (`_:b0`, and the percent-style `_x20_`
+  # escape-encoded fixtures like `_:ba_x20_b_x3E_`) — typos splits on `_` and flags
+  # the 2-char fragments ("ba"). Label tokens, not prose.
+  "_:[A-Za-z0-9_]+",
 ]
 
 [default.extend-identifiers]
@@ -71,10 +81,16 @@ iy3p = "iy3p"            # [OPUS-4.8] bead id `sq-iy3p` — typos splits on `-`,
 "1gir" = "1gir"           # [OPUS-4.8] bead id `sq-1gir` — typos splits on `-`, flags "gir"->"git"
 # Author surnames + tool/library identifiers flagged as typos.
 Hendler = "Hendler"      # Jim Hendler (BitMat paper author)
+metrix = "metrix"        # [FABLE] "graph metrix" — the maintainer's verbatim #1613 directive spelling of Graphmetrix (research/ac-query-benchmark.md quotes it verbatim)
 hax = "hax"              # [FABLE] Cryspen's `hax` Rust→F*/Coq verification toolchain (research/mechanized-proof-program.md §4.1) — a real tool name, not "hex"
+# [FABLE-5] sq-gg0qq.2 (sparq-lws-core import) — short code tokens, not prose:
+nce = "nce"              # format-string named arg holding the write-marker NONCE (store/sparql.rs)
+bacl = "bacl"            # test-fixture blob key ("blob acl") in ldp/handler.rs unit tests
+onn = "onn"              # deliberate near-miss garbage value in the tls.rs affirmative-env-parse test vector
 
 [default.extend-words]
 ND = "ND"                # [OPUS-4.8] "NDAs" (Non-Disclosure Agreements) — typos splits camelCase NDAs into ND+As
+GES = "GES"              # [FABLE-5] "PathGES" (CCS 2024 graph-encryption scheme, research/e2ee-queryable-options.md) — typos splits the camelCase name into Path+GES
 # --- SPARQL / SQL keyword fragments split across table cells or wrapped lines ---
 flate = "flate"          # flate2 crate name fragment (typos splits on the digit)
 SELEC = "SELEC"          # "SELECT" wrapped mid-token in prose
@@ -99,6 +115,7 @@ Thm = "Thm"             # "Theorem" abbreviation
 IST = "IST"             # acronym in a table
 Rotat = "Rotat"         # "RotatE" KG-embedding model name (wraps to "Rotat")
 struc = "struc"         # [OPUS-4.8] "struc2vec" structural-role embedding method name (typos splits on the digit, flags "struc"->"struct")
+Networ = "Networ"       # [SONNET-4.6 sq-hmd7l.1] "NetworKit" graph-analytics library (typos splits at case boundary → "Networ"/"Kit"; NetworKit is the official project name)
 criticals = "criticals"  # audit jargon: "the audit's criticals"
 unparseable = "unparseable" # accepted variant spelling used in skills docs
 unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional
@@ -110,4 +127,5 @@ FPR = "FPR"              # false-positive rate
 LOV = "LOV"              # Linked Open Vocabularies (dataset)
 lov = "lov"              # lowercase var name in a SIMD code block
 LOD = "LOD"              # Linked Open Data
+WQS = "WQS"              # [OPUS-4.8] Wikidata Query Service — RDFox's own term, quoted in research/rdfox-claims-inventory.md (typos splits/flags WQS->WAS)
 Groth = "Groth"          # Groth16 zk-SNARK proving system

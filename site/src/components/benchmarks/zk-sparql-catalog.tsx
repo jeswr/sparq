@@ -119,18 +119,25 @@ function gates(n: number | null): string {
 function CatalogRow({ entry }: { entry: CatalogEntry }) {
   const isGap = entry.status === "gap";
   return (
+    // [FABLE-5] sq-mcsbp — WCAG 2.1 AA color-contrast: a row-wide `opacity-60` on gap
+    // rows composited EVERY descendant down below the AA 4.5:1 threshold (axe measured
+    // ~#5a686d / #687073 on #081116 for the code, the "not yet ZK-provable" italics and
+    // the status badge). Opacity affects contrast for all children, so it cannot coexist
+    // with AA text. Signal the gap row with a subtle tinted background + left rail instead
+    // of dimming the text — the text keeps its AA-compliant colours (set on each element).
     <tr
       className={`border-b align-top last:border-0 hover:bg-muted/30 ${
-        isGap ? "opacity-60" : ""
+        isGap ? "bg-muted/20 border-l-2 border-l-foreground/25" : ""
       }`}
     >
       <td className="px-3 py-2.5">
         <span className="block text-[13px] font-medium">{entry.feature}</span>
-        <code className="mt-0.5 block whitespace-pre-wrap break-words font-mono text-[11.5px] text-muted-foreground">
+        {/* [FABLE-5] text-foreground/70 (not muted-foreground) clears WCAG AA 4.5:1 on the dark card bg; muted-foreground was 3.29:1 here (color-contrast, sq-0rbfn) */}
+        <code className="mt-0.5 block whitespace-pre-wrap break-words font-mono text-[11.5px] text-foreground/70">
           {entry.sparql}
         </code>
         {isGap && (
-          <span className="mt-1 inline-block text-[11px] italic text-muted-foreground">
+          <span className="mt-1 inline-block text-[11px] italic text-foreground/70">
             not yet ZK-provable
           </span>
         )}

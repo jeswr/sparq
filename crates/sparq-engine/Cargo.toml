@@ -39,6 +39,27 @@ digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 # OFF by default (the wasm bundle and the default native build carry zero CS code);
 # results are identical either way — only join order is affected.
 cs-planner = []
+# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` (SPQCPRM2 frame-of-reference
+# on-disk format). OFF by default so the default engine build is unchanged; enabling it lets
+# the storage cross-version differentials (`v2_saved_store_is_query_equivalent_to_v1`,
+# `cross_version_resave_round_trips_losslessly`) drive `save_compressed` in V2 emit mode
+# through the real open/query path. Implies `sparq-core/spqcprm2` (which implies mmap).
+spqcprm2 = ["sparq-core/spqcprm2"]
+# [FABLE-5] (sq-jnb1e) Characteristic-set ANCHOR-INCIDENCE metadata for the DISTINCT
+# predicate-projection semijoin (SP2Bench q09). The default-on anchor+probe block scan
+# (sq-7d3dj.30.10) proves each candidate predicate P relates NO anchor member by clipping
+# and galloping P's join-value block against the anchor set — for q09's value-typed
+# predicates (dc:title, foaf:homepage, rdfs:seeAlso …) that is a large no-hit scan
+# (~250k rows/query touched to answer 4 predicates). This feature precomputes, per anchor
+# join position, the SET of predicates that DO relate an anchor member (one range-restricted
+# scan over the anchor's id window), so a candidate P absent from that set is pruned by an
+# O(1) membership test instead of the block scan. RESULT-IDENTICAL: the set is exact, so it
+# only ever prunes a PROVABLY-EMPTY existence check; a P in the set still takes the exact
+# scan. Conservatively DECLINES on a graph with a pending update overlay (the derived set is
+# built against the base index only — incremental maintenance is out of scope). OPT-IN and
+# OFF by default: the default native build and the wasm bundle carry zero incidence code and
+# pull in ZERO new dependencies. [FABLE-5]
+cs-anchor-incidence = []
 # zk-trace seam (research/zkp-query-proofs-plan.md §4.E): records per-obligation
 # witness input sets (matched triples per BGP pattern, executed join order,
 # FILTER operand bindings) for the sparq-zk derived-credential prover. OPT-IN
@@ -132,6 +153,42 @@ vectorized = []
 # the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies
 # (rustc-hash is already a direct dep) and contains no `unsafe`.
 dp-planner = []
+# [FABLE-5] (sq-7d3dj.30.14) Membership-cluster PRE-MATERIALISATION for the greedy BGP
+# planner (SP2Bench q07, research/sp2bench-complex-shape-deficit.md §5). When a BGP has the
+# q07 shape — one UNBOUND-predicate container-membership pattern (`?bag ?member ?doc`, the
+# `rdf:_n` bag idiom) plus a small BOUND-predicate anchor (`?doc2 dcterms:references ?bag`)
+# sharing exactly ONE variable with it — `cluster::detect` returns a partition and the
+# executor evaluates that {anchor, membership} pair STANDALONE (bounding the shared variable
+# from the small anchor → a few-thousand-row relation) and NATURAL-JOINS it to the rest,
+# instead of letting greedy GOO bind-join the ~250k-row unbound-predicate relation per driver
+# binding through the widest permutation. A BGP is a commutative/associative natural join, so
+# partitioning into two connected sub-BGPs and joining yields the SAME row bag as any greedy
+# order — this is a pure JOIN-ORDER choice, RESULT-IDENTICAL to the feature-off plan
+# (differentially tested in BOTH feature states, tests/cluster_materialize_differential.rs; the
+# thresholds never affect results). `detect` DECLINES (unchanged greedy plan) on any
+# non-matching shape: not exactly one membership pattern, an anchor variable that leaks into
+# the rest, a pushed-down scan filter on a cluster pattern, or the cost gate unmet. OPT-IN and
+# OFF by default: when off, zero of this code compiles and the default native + wasm builds are
+# byte-identical. Pulls in ZERO new dependencies and contains no `unsafe`. The end-to-end q07
+# win is a measured HYPOTHESIS for the canonical perf host (sq-7d3dj.30.6), NOT a baked-in number.
+cluster-materialize = []
+# [OPUS-4.8] (sq-7d3dj.30.20) Anti-join STATIC decline: eliminate a redundant re-evaluation
+# of the mandatory LEFT side when the correlated (theta) anti-join recogniser (`try_theta_antijoin`)
+# must fall back to the cold `Filter{LeftJoin}` plan. Profiling SP2Bench q07 showed its dominant
+# outer 5-pattern BGP evaluated TWICE: q07 rewrites to `Filter(!bound ?doc3, LeftJoin(A, B,
+# Some(!bound ?doc4)))`; the recogniser passes its shape gate, eagerly evaluates `A` (the ~30ms
+# outer BGP), partitions the OPTIONAL condition, finds NO seedable var-to-var correlation (a bare
+# `!bound` negation), and DECLINES — discarding the computed `A`, so the cold fallback recomputes
+# it. This feature adds a PURELY STATIC pre-check (`in_scope_vars(left)` + `certain_vars(right)`,
+# no graph access) that decides "no seedable correlation" BEFORE the left side is evaluated, so the
+# recogniser declines EARLY and the single cold evaluation is the only one. It is a pure evaluation-
+# ORDERING change: when a correlation DOES exist the path is byte-identical, and every decline
+# produces the identical cold-plan result — so it is BAG-RESULT-EQUIVALENT to the feature-off build
+# (differentially tested in BOTH states, tests/antijoin_static_decline_differential.rs; the W3C
+# ratchet runs with it ON). OPT-IN and OFF by default: when off, zero of this code compiles and the
+# default native + wasm builds are byte-identical. Pulls in ZERO new dependencies and contains no
+# `unsafe`. The end-to-end q07 win is a measured HYPOTHESIS for the canonical perf host, NOT baked in.
+antijoin-static-decline = []
 # [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
 # LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
 # query algebra, caller graph-version)`. Vendor-parity operational-perf feature for
@@ -181,6 +238,17 @@ query-solution = []
 # ZERO new dependencies (oxrdf + spargebra are already direct deps) and contains no
 # `unsafe`.
 params = []
+# [FABLE-5] (sq-lsp7k.10) Named parameterized SPARQL templates — the shared
+# definition + typed-JSON-binding layer under the server's REST template store and the
+# MCP `template_invoke` tool (GraphDB "SPARQL templates" / Stardog "stored queries"
+# parity). Builds ON `params` (#901): a template is parsed once, its declared parameters
+# are validated as free bindable placeholders at registration, and an invocation binds
+# typed JSON arguments through the injection-safe algebra rewrite — fail-closed on
+# unknown/missing/mistyped parameters. OPT-IN and OFF by default: when off, zero of this
+# code compiles and the default native + wasm builds are byte-identical. The only
+# dependency delta is the workspace-ubiquitous `serde_json` (already this crate's
+# dev-dependency), pulled in behind the feature.
+templates = ["params", "dep:serde_json"]
 # [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: a typed `PlanNode` plan tree
 # (`explain_json` module) with a hand-written JSON projection, per-operator q-error
 # = max(est/actual, actual/est) attached from the existing ANALYZE trace, and a
@@ -228,6 +296,84 @@ semijoin-bitmap = []
 # snowflake workloads) is a measurable HYPOTHESIS for the canonical perf host (sq-0g6g), NOT a
 # baked-in number.
 yannakakis = ["semijoin-bitmap"]
+# [OPUS-4.8] (sq-7d3dj.30.1) Pre-execution SPARQL ALGEBRA REWRITE pass (`rewrite` module):
+# a result-equivalent transform applied to the parsed `spargebra` algebra by
+# `PreparedQuery::parse` (and the EXPLAIN parse sites) BEFORE evaluation. Two rewrites:
+#   (a) EQUALITY SUBSTITUTION — `FILTER(?v = <iri>)` (or `<iri> = ?v` / `sameTerm`) folds the
+#       IRI constant into the group's triple patterns (`?v` re-bound via Extend when it stays
+#       in scope), turning a post-join FILTER over all enumerated rows into an indexed
+#       constant-seeded scan (SP2Bench q03b/q03c). RESTRICTED TO IRI (NamedNode) CONSTANTS:
+#       `=` on IRIs is term-identity so the substitution is EXACT; literal `=` is value
+#       equality (`"1"^^xsd:int = "01"^^xsd:integer`, and the open sq-lr2ii high-precision
+#       xsd:decimal class) and is NEVER rewritten — this restriction is the stated sq-lr2ii
+#       avoidance contract (research/sp2bench-complex-shape-deficit.md §4).
+#   (b) ANTI-JOIN — `FILTER(!bound(?v), LeftJoin(A, B))` where `?v` is certain in `B`, absent
+#       from `A`, and `A`/`B` share a certain variable, becomes `Minus(A, B)` (SP2Bench q07).
+# Every rewrite is BAG-result-equivalent (validated by the W3C conformance suite run with the
+# feature ON + tests/rewrite_pass.rs); a shape that does not exactly meet the conditions is
+# left VERBATIM (conservative — unrewritten == current behaviour). OPT-IN and OFF by default:
+# when off, zero rewrite code compiles, `PreparedQuery::parse` takes the algebra verbatim, and
+# the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies (oxrdf +
+# spargebra are already direct deps) and contains no `unsafe`.
+algebra-rewrite = []
+
+# [FABLE-5] (sq-7d3dj.30.7) EQUALITY-FILTER → VALUE-JOIN unification (`exec::eqjoin`):
+# a conjunctive group whose triple patterns form variable-DISJOINT connected components glued
+# only by `FILTER(?a = ?b)` (SP2Bench q05a/q12a's star-intersection shape) evaluates each
+# component separately and joins them with a hash join keyed on the equality, instead of
+# materialising the cross product and evaluating `=` per row. SPARQL `=` is VALUE equality
+# (numeric promotion across datatypes, type errors eliminate, high-precision xsd:decimal must
+# not collapse through f64 — sq-lr2ii), so the key is NOT the dictionary id in general: the
+# per-term-class keys mirror the evaluator's own dispatch (id for IRI/bnode/unknown classes,
+# the `numeric_value` cache's f64 for numerics, value for strings/lang-tagged/booleans),
+# value-comparable temporals and triple terms pair through the EXACT evaluator, and the
+# original FILTER is re-applied verbatim over the joined rows as the exact recheck (key
+# collisions eliminated by the same sq-lr2ii machinery that runs today). Anything not
+# provably eligible — non-total filter expressions (function calls), quoted-triple patterns,
+# an armed budget or zk trace, no cross-component equality conjunct — DECLINES to the
+# verbatim path. OPT-IN and OFF by default: when off, zero of this code compiles and the
+# conjunctive path is byte-identical. No new dependencies, no `unsafe`.
+value-join = []
+# [GPT-5.6] (sq-lsp7k.3.1) Programmatic full-path enumeration over one predicate.
+# OFF by default and dependency-free; surface parsing is handled by a later bead.
+paths = []
+
+# [FABLE-5] (sq-7d3dj.30.11) ID-LEVEL TERM-IDENTITY FAST PATH for `=` / `!=` in the COMPILED
+# FILTER evaluator (`exec::equal_compiled`). Two id-level short-circuits that skip the per-row
+# term MATERIALIZATION #1718's `eval_compiled` left in place, without changing any result:
+#   (a) STATIC non-literal operands — a variable that a `nonliteral_filter_cols` analysis proves
+#       is bound ONLY in subject/predicate positions (never object / BIND / VALUES / SERVICE) can
+#       never be a literal, and neither can a constant IRI operand; for two such operands SPARQL
+#       `=` is exactly dictionary-id equality and `!=` id inequality (the canonicalising dict gives
+#       each IRI/bnode one id, and `values_equal` already decides IRI/bnode pairs by identity).
+#   (b) EQUAL ids of ANY kind — equal ids are the SAME term (canonicalising dict), so `=` is `true`
+#       and `!=` `false`, exactly mirroring the `p == q` sameTerm short-circuit `values_equal` takes
+#       today (safe even for ill-typed literals: sameTerm returns a boolean, never a type error).
+# CAUTION mirrored in code: UNEQUAL ids of possible LITERALS do NOT imply value-inequality (numeric
+# promotion `"1"^^integer` vs `"1.0"^^decimal`, whitespace-padded lexicals — the sq-lr2ii class) and
+# `=` on two ill-typed literals can be a TYPE ERROR, not `false`; both DECLINE to the existing exact
+# path unchanged. OPT-IN and OFF by default: when off, zero of this code compiles and the FILTER path
+# is byte-identical. No new dependencies, no `unsafe`.
+id-filter-fastpath = []
+
+# [FABLE-5] (sq-7d3dj.30.21) LAZY STRING-LITERAL COLLATION KEY for the top-k ORDER BY
+# selection path (`exec::order_bindings`). Profiling SP2Bench q11
+# (`ORDER BY ?ee LIMIT 10 OFFSET 50` over 17663 `rdfs:seeAlso` objects — which are
+# `xsd:string` LITERALS, not IRIs) attributes ~1/3 of the query to building the sort key: the
+# default path calls `Dict::term`->`reconstruct_ref` (a `Literal` allocation) THEN `value_str`
+# (a second `Box<str>` allocation of the collation key) for EVERY input row, when only 60
+# survive. With this feature ON, a PLAIN `xsd:string` literal ORDER BY key becomes a
+# zero-allocation `SortCell::StrId(Id)` carrying only the dictionary id; the heap comparator
+# reads the literal's `value` slice via ZERO-COPY `Dict::term_parts` and byte-compares. Plain
+# strings are ordered by their `value()` lexical bytes both in `compare_terms` and in the
+# eager `SortCell::Val` key (proven byte-identical by the sq-7d3dj.30.12 differential test),
+# so the top-k output is UNCHANGED — a q11 full-output witness + tie/LIMIT-boundary cases +
+# the W3C ORDER BY conformance suite pin it. Only `xsd:string` literals take the lazy path;
+# every other term kind (IRI, lang-tagged, numeric, temporal, blank, triple) keeps the exact
+# existing key, so the total order is untouched. Trades N key allocations for ~O(N)
+# cache-friendly dict reads in the quickselect. OPT-IN and OFF by default: when off, zero of
+# this code compiles and the ORDER BY path is byte-identical. No new dependencies, no `unsafe`.
+topk-lazy-strkey = []
 
 # [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
 # numeric column — the perf baseline every later vectorized (M4) phase measures against.
@@ -264,6 +410,11 @@ oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
+# [FABLE-5] (sq-lsp7k.10) The `templates` module's JSON wire + typed-argument format.
+# OPTIONAL — pulled in ONLY by the `templates` feature (default off), so the default +
+# wasm builds never compile it into the library (it is already this crate's
+# dev-dependency and ubiquitous across the workspace tree — no supply-chain delta).
+serde_json = { version = "1", optional = true }
 # [OPUS-4.8] (sq-6vshe.4) Seam 1 of the facade split: the RDF `serialize` module (Turtle /
 # TriG / N-Quads / JSON-LD writers) moved to this internal sub-crate, re-exported verbatim as
 # `sparq_engine::serialize` (see src/lib.rs). OPTIONAL + pulled in ONLY by `serialize-rdf`
@@ -298,9 +449,22 @@ uuid = { version = "1", features = ["v4"] }
 # byte-identity differential (tests/dict_spill_differential.rs).
 sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap", "parallel", "dict-spill"] }
 rayon.workspace = true
+# [OPUS-4.8] (sq-7d3dj.30.1) DEV-only re-listing of the ALREADY-present `spargebra` dep so
+# tests/rewrite_pass.rs can parse a query to RAW `spargebra` algebra (the un-rewritten
+# baseline) and feed it through `PreparedQuery::from` — the on-vs-off oracle for the
+# `algebra-rewrite` pass. `spargebra` is already a normal dependency (above), so this adds
+# ZERO new crate to the lock/graph; it only makes the type visible to the integration-test
+# crate. Normal library code never uses this entry.
+spargebra.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
+# [FABLE-5] sq-3dyje.3: property-based eval tests (tests/proptest_eval.rs — engine ≡
+# naive reference / join-order invariance / ORDER BY laws). DEV/TEST ONLY, exactly like
+# the sparq-core + sparq-substrate proptest dev-deps: it never appears in [dependencies]
+# or any feature, so the shipped crate and the wasm bundle are unchanged. Same version
+# req as those crates (resolves to the already-attested proptest in supply-chain/).
+proptest = "1"
 # [OPUS-4.8] (sq-e3pj, sq-6vshe.4) DEV-only serde_json: the `explain_json` structured-EXPLAIN
 # tests parse the hand-emitted JSON DOM back to assert every field round-trips (and `chunk`'s
 # `impl PartialEq<serde_json::Value>` test helper), so the opt-in `explain-json` feature itself

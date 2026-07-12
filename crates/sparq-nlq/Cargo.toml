@@ -45,6 +45,9 @@ nlq-endpoint = ["dep:reqwest"]
 # `sparq-core`. Citations are emitted from in-graph `prov:wasDerivedFrom`/`dcterms:source`
 # provenance ONLY — never guessed; absent provenance yields "no source recorded".
 citations = []
+# [GPT-5.6] sq-9zs3g: generated-query policy inspection is opt-in so the
+# default NLQ surface remains unchanged.
+query-policy = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -72,3 +75,7 @@ serde_json = "1"
 # The live Anthropic client (non-default `live` feature only). Blocking: the loop is
 # synchronous by design and this crate must not drag an async runtime into the tree.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+
+[dev-dependencies]
+# [GPT-5.6] sq-lxw27: metric-law coverage for deterministic dictionary ranking.
+proptest = "1"

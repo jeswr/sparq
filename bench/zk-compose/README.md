@@ -10,7 +10,8 @@ returns). Numbers below were measured by Opus 4.8.
 
 1. **Gate counts** (`bb gates -s ultra_honk`, ground truth per the
    noir-optimisation skill) for every compiled circuit-family member, in the
-   `zk/ieee754` JSON convention (`circuit_size`).
+   `sparq_ieee754` JSON convention (`circuit_size`) — the shape that originated
+   in the ieee754 lineage, now the `sparq-org/noir_IEEE754` face repo.
 2. **Wall-clock prove/verify** for the small credential-scale e2e cases.
 3. **SPARQL feature → ZK gate-cost catalog** (`sparql_feature_catalog.json`) — a
    coverage map AND an optimisation-target list spanning SPARQL 1.1, joining each
@@ -95,7 +96,7 @@ snapshot) and then re-run the catalog generator to re-join the new numbers.
 pattern as `bench/zk`) that drives the `sparq-zk-compose` prover (nargo + bb
 subprocesses) once per circuit-family member and emits the full **(k, n, r, d)
 cost curve** — prove time, verify time, proof size, vk size. CI **builds** the
-harness (a `--locked` compile-only schema-drift guard, see the blockquote below)
+harness (a compile-only schema-drift guard, see the blockquote below)
 but never **runs** it: each row is a real `bb prove` (~1-2 s) so the curve is
 generated manually, not in CI. It is a plain timing harness, not criterion
 (criterion's repeated sampling over ~1-2 s proofs would take hours).
@@ -120,6 +121,15 @@ raw `Prover.toml`. ([OPUS-4.8] sq-kep2 ported the harness to that schema.)
 > triggers on `crates/sparq-zk-compose/**`), so such drift is a visible red check.
 > **When you change a `CircuitId`/`ProofInputs` variant or `prover_toml_for`,
 > update this harness too.**
+>
+> The CI build is deliberately **not** `--locked` ([FABLE-5] sq-q134e): the
+> harness path-deps on in-repo crates whose manifests bump dependencies on lanes
+> that never run this guard, so the committed `family_curve/Cargo.lock` drifts
+> silently on main and `--locked` then spuriously failed the *next* zk-touching
+> PR (#1962, a main-side `hashbrown` bump). A plain `cargo build` keeps every
+> still-compatible pin from the committed lock (cargo re-resolves minimally) and
+> only absorbs the in-repo manifest bumps; if the lock did drift, CI emits an
+> advisory notice + lock diff asking for a refresh commit instead of failing.
 
 ### Run
 

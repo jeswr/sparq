@@ -1,0 +1,1 @@
+SELECT ?s WHERE { ?s a <http://exhhhhhhhhhhhhhhhample.org/Type> }

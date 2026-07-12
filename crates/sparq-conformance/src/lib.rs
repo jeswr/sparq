@@ -24,6 +24,13 @@ pub mod run;
 // `sparq-conformance-scoreboard` binary renders it; a guard test keeps the
 // crate-local SHACL/geo floors in sync.
 pub mod scoreboard;
+// [FABLE-5] sq-oy1f.40 — the LIB-SIDE single source of truth for the six W3C
+// JSON-LD 1.1 conformance-lane ratchet floors. The `jsonld_suite` test binary's
+// `assert!(pass >= FLOOR)` AND `scoreboard::SUITES`' `ratchet_floor` both read the
+// SAME `const` at compile time, so they cannot drift (kills the #1463 floor-drift
+// class structurally). `ci.yml`'s `jsonld-conformance` job greps each floor from
+// `src/floors/<lane>.rs`, binding the CI grep gate to the same single source.
+pub mod floors;
 // [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 // A reusable fixture that stands up a REAL `sparq_server::serve` endpoint on an ephemeral
 // `127.0.0.1:0` loopback port and drives a federated SERVICE query through the engine's
@@ -68,3 +75,18 @@ pub mod sd_gsp;
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.
 pub mod turtle_suite;
+// [FABLE-5] (sq-tonhr.2, epic sq-tonhr) The W3C rdf-n-triples / rdf-n-quads / rdf-trig
+// syntax suites run THROUGH the real sparq parse paths (native nt.rs N-Triples, the
+// chunk-parallel N-Quads dataset loader, the with-base TriG dataset loader) — pins the
+// bar every rdf-shuttle generated candidate parser is differential-gated against.
+// Gating runner: `tests/rdf_line_syntax_ratchet.rs`.
+pub mod line_syntax;
+// [FABLE-5] (sq-tonhr.2) Shared quad-set rendering + blank-node-bijection set comparison
+// for the line-syntax suites and the differential harness (never line-by-line identity).
+pub mod quadset;
+// [FABLE-5] (sq-tonhr.2) The reusable candidate-vs-incumbent parser DIFFERENTIAL harness
+// (identical input -> identical accept/reject verdict + quad set) over any W3C suite's
+// actions or any corpus directory (e.g. the committed fuzz seeds), with minimal-repro
+// line shrinking — the epic's zero-regression gate for generated parsers. Non-vacuity is
+// proven by seeded mutants in `tests/parser_differential.rs`.
+pub mod differential;

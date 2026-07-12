@@ -7,13 +7,17 @@
 //      sample), Parse → the engine's triple count + a sample of the parsed triples. Quad
 //      formats route through `loadDataset` so the named graph survives and shows as a ?g
 //      column; the TriG / N-Quads samples include a named-graph example.
-//   2. GZIP INGEST — gzip the current document in-tab via the native `CompressionStream`,
-//      show the size + ratio, then gunzip it back with `DecompressionStream` and parse the
-//      decoded text → triple count. gzip is the one codec the browser decodes natively;
-//      zstd / bzip2 ingest is native-only (see the page's honest caveat).
+//   2. COMPRESSED INGEST — gzip the current document in-tab via the native
+//      `CompressionStream`, show the size + ratio, then gunzip it back with
+//      `DecompressionStream` and parse the decoded text → triple count. Plus
+//      ([FABLE-5] sq-4ssz1 / #1046) a real compressed-file upload: pick a `.gz` /
+//      `.zip` / `.zst` archive and it is decompressed in-tab (gzip/zip natively; zstd
+//      through the LAZY-loaded `fzstd` chunk `lib/dataset-archive.ts#loadCodec`
+//      fetches only when a zstd payload is actually decoded) and parsed by the engine.
+//      bzip2 remains native-only (no small JS decoder — see the page's honest caveat).
 
 import * as React from "react";
-import { Loader2, Play, FileArchive, Database, CheckCircle2 } from "lucide-react";
+import { Loader2, Play, FileArchive, FolderOpen, Database, CheckCircle2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -41,6 +45,14 @@ import {
   formatBytes,
   type DataFormat,
 } from "@/lib/data-formats";
+// [FABLE-5] sq-4ssz1 — the shared archive decompressor (gzip/zip native; zstd lazy).
+import {
+  sniffArchive,
+  archiveCodecFromName,
+  decompressArchive,
+  type ArchiveCodec,
+} from "@/lib/dataset-archive";
+import { guessFormat } from "@/lib/repl-dataset";
 // [OPUS-4.8] sq-8uew — Turtle/TriG/N-Triples/N-Quads syntax-highlighting input editor.
 import { RdfEditor } from "@/components/rdf-editor";
 // [OPUS-4.8] sq-ixc3.1 — JSON-LD syntax-highlighting input editor (the remaining picker format).
@@ -71,12 +83,33 @@ type GzipState =
     }
   | { kind: "error"; message: string };
 
+// [FABLE-5] sq-4ssz1 — the compressed-file upload decode (gzip / zip / zstd).
+type ArchiveState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | {
+      kind: "ok";
+      codec: ArchiveCodec;
+      fileName: string;
+      fileBytes: number;
+      decodedBytes: number;
+      format: string;
+      count: number;
+      ms: number;
+    }
+  | { kind: "error"; message: string };
+
+// The archive extensions the upload decode accepts (mirrors lib/dataset-archive.ts).
+const ARCHIVE_ACCEPT = ".gz,.gzip,.zip,.zst,.zstd";
+
 export function DataFormatsDemo() {
   const [format, setFormat] = React.useState<DataFormat>("turtle");
   const [text, setText] = React.useState(sampleFor("turtle")?.sample ?? "");
   const [engine, setEngine] = React.useState<EngineState>("cold");
   const [parse, setParse] = React.useState<ParseState>({ kind: "idle" });
   const [gzip, setGzip] = React.useState<GzipState>({ kind: "idle" });
+  const [archive, setArchive] = React.useState<ArchiveState>({ kind: "idle" });
+  const archiveInputRef = React.useRef<HTMLInputElement>(null);
 
   // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the wasm engine on the next browser-IDLE slot
   // (not synchronously during mount) so the ~300 kB+ engine never blocks the initial page
@@ -106,6 +139,7 @@ export function DataFormatsDemo() {
     setText(sampleFor(f)?.sample ?? "");
     setParse({ kind: "idle" });
     setGzip({ kind: "idle" });
+    setArchive({ kind: "idle" });
   }, []);
 
   // Parse the current text in the chosen format and read back the engine's triple count +
@@ -154,7 +188,65 @@ export function DataFormatsDemo() {
     }
   }, [text, format]);
 
-  const busy = parse.kind === "running" || gzip.kind === "running";
+  // [FABLE-5] sq-4ssz1 (#1046) — decode a REAL compressed archive picked from disk:
+  // sniff the codec (magic number first, filename as fallback), decompress in-tab via
+  // the shared `decompressArchive` (gzip/zip natively; picking a `.zst` triggers the
+  // FIRST fetch of the lazy fzstd chunk — the decoder is not in this page's bundle),
+  // guess the RDF format from the inner name, and parse with the wasm engine.
+  const runArchive = React.useCallback(async (file: File) => {
+    setArchive({ kind: "running" });
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const codec = sniffArchive(bytes) ?? archiveCodecFromName(file.name);
+      if (!codec) {
+        throw new Error(
+          `"${file.name}" is not a recognised compressed archive — expected gzip (.gz), zip (.zip), or zstd (.zst).`,
+        );
+      }
+      const t0 = performance.now();
+      const { text: decoded, innerName } = await decompressArchive(
+        bytes,
+        file.name,
+        codec,
+      );
+      const fmt = guessFormat(innerName ?? file.name);
+      const Store = await loadSparq();
+      setEngine("ready");
+      const store = loadIntoStore(Store, decoded, fmt);
+      const count = datasetSize(store);
+      const ms = performance.now() - t0;
+      setArchive({
+        kind: "ok",
+        codec,
+        fileName: file.name,
+        fileBytes: file.size,
+        decodedBytes: new TextEncoder().encode(decoded).byteLength,
+        format: fmt,
+        count,
+        ms,
+      });
+    } catch (e) {
+      setArchive({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, []);
+
+  const onArchivePicked = React.useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset so the same file can be re-picked after an edit/error.
+      e.target.value = "";
+      if (file) void runArchive(file);
+    },
+    [runArchive],
+  );
+
+  const busy =
+    parse.kind === "running" ||
+    gzip.kind === "running" ||
+    archive.kind === "running";
   const disabled = engine === "cold" || engine === "warming";
 
   return (
@@ -187,7 +279,8 @@ export function DataFormatsDemo() {
                 onClick={() => pickFormat(f.format)}
               >
                 {f.label}
-                <span className="ml-1 font-mono text-[11px] opacity-70">
+                {/* [FABLE-5] opacity-90 (was 70): the extension text on the selected teal button was 4.34:1, below WCAG AA 4.5:1 (color-contrast, sq-0rbfn) */}
+                <span className="ml-1 font-mono text-[11px] opacity-90">
                   {f.ext}
                 </span>
               </Button>
@@ -249,7 +342,7 @@ export function DataFormatsDemo() {
         <CardHeader className="flex-row items-center gap-2 space-y-0">
           <CardTitle className="flex items-center gap-2 text-base">
             <FileArchive className="size-4 text-primary" aria-hidden="true" />
-            Compressed (gzip) ingest
+            Compressed ingest (gzip / zip / zstd)
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -282,6 +375,50 @@ export function DataFormatsDemo() {
           </div>
 
           <GzipResult state={gzip} />
+
+          {/* [FABLE-5] sq-4ssz1 (#1046) — decode a real compressed archive from disk.
+              gzip/zip decode natively; a .zst fetches the small zstd decoder on demand
+              (a lazy chunk — it is deliberately NOT in this page's first-load bundle). */}
+          <div className="space-y-3 border-t pt-3">
+            <p className="text-sm text-muted-foreground">
+              …or decode a compressed RDF file from your computer —{" "}
+              <code className="font-mono text-foreground">.gz</code> /{" "}
+              <code className="font-mono text-foreground">.zip</code> /{" "}
+              <code className="font-mono text-foreground">.zst</code>. gzip and zip
+              decode with the browser&apos;s built-ins; picking a{" "}
+              <code className="font-mono text-foreground">.zst</code> lazy-loads a
+              small zstd decoder the first time (it is not part of the page bundle).
+            </p>
+
+            <input
+              ref={archiveInputRef}
+              type="file"
+              accept={ARCHIVE_ACCEPT}
+              aria-label="Compressed RDF archive to decode (.gz, .zip, or .zst)"
+              className="sr-only"
+              disabled={busy || disabled}
+              onChange={onArchivePicked}
+            />
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                onClick={() => archiveInputRef.current?.click()}
+                disabled={busy || disabled}
+              >
+                {archive.kind === "running" ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <FolderOpen className="size-4" aria-hidden="true" />
+                )}
+                Decode a compressed file…
+              </Button>
+              <p aria-live="polite" className="text-xs text-muted-foreground">
+                {archive.kind === "running" && "Decoding & parsing in your tab…"}
+              </p>
+            </div>
+
+            <ArchiveResult state={archive} />
+          </div>
         </CardContent>
       </Card>
     </section>
@@ -396,6 +533,34 @@ function GzipResult({ state }: { state: GzipState }) {
       <Stat label="gzipped" value={formatBytes(state.gzBytes)} />
       <Stat label="Ratio" value={`${ratio.toFixed(1)}×`} />
       <Stat label="Decoded → parsed" value={`${state.count} triples`} />
+    </div>
+  );
+}
+
+// [FABLE-5] sq-4ssz1 — result panel for the compressed-file upload decode.
+function ArchiveResult({ state }: { state: ArchiveState }) {
+  if (state.kind === "error") {
+    return (
+      <pre className="overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+        {state.message}
+      </pre>
+    );
+  }
+  if (state.kind !== "ok") return null;
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Stat label="Compressed" value={formatBytes(state.fileBytes)} />
+        <Stat label="Decoded" value={formatBytes(state.decodedBytes)} />
+        <Stat label="Codec" value={state.codec} />
+        <Stat label="Parsed" value={`${state.count} triples`} />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        <span className="font-mono">{state.fileName}</span> → parsed as{" "}
+        <span className="font-mono">{state.format}</span> in {state.ms.toFixed(1)} ms,
+        entirely in your tab.
+      </p>
     </div>
   );
 }

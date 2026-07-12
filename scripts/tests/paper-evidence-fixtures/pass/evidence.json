@@ -1,0 +1,60 @@
+{
+  "_comment": "PASS fixture: one canonical record per binding tier (all resolve + match), one allowlisted-unbound canonical record, one indicative record (ignored by the gate).",
+  "schemaVersion": 2,
+  "records": {
+    "demo.sparql_floor": {
+      "value": 1229,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "bench/results.json::conformance.sparql_floor",
+      "binding": { "kind": "json-pointer", "file": "bench/results.json", "pointer": "/conformance/sparql_floor" },
+      "note": "json-pointer tier: recorded value equals the pointed scalar."
+    },
+    "demo.prefilter_invariant": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "source": "bench/results.json::flags.prefilter_equals_postfilter",
+      "binding": { "kind": "json-pointer", "file": "bench/results.json", "pointer": "/flags/prefilter_equals_postfilter" },
+      "note": "json-pointer tier with a boolean value."
+    },
+    "demo.shacl_floor": {
+      "value": 98,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "crates/demo/tests/floors.rs::DEMO_SHACL_FLOOR",
+      "binding": { "kind": "rust-anchor", "file": "crates/demo/tests/floors.rs", "anchor": "DEMO_SHACL_FLOOR" },
+      "note": "rust-anchor tier: const name exists + literal within window (literal-adjacency)."
+    },
+    "demo.recall_floor": {
+      "value": 0.90,
+      "unit": "recall@10",
+      "environment": "canonical",
+      "source": "crates/demo/tests/floors.rs::demo_recall_floor_holds",
+      "binding": { "kind": "rust-anchor", "file": "crates/demo/tests/floors.rs", "anchor": "demo_recall_floor_holds" },
+      "note": "rust-anchor tier: test-fn anchor + float literal 0.90 in window."
+    },
+    "demo.grading_accuracy": {
+      "value": 0.84,
+      "unit": "accuracy",
+      "environment": "canonical",
+      "source": "research/notes.md",
+      "binding": { "kind": "doc-anchor", "file": "research/notes.md", "quote": "The demo arm passed the fixture oracle set exactly as designed." },
+      "note": "doc-anchor tier: exact quote present (existence-strength only)."
+    },
+    "demo.unmigrated_floor": {
+      "value": 42,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "crates/demo/tests/floors.rs (not yet bound)",
+      "note": "Canonical but not yet bound — tolerated ONLY via the shrink-only allowlist."
+    },
+    "demo.indicative_timing": {
+      "value": 1234,
+      "unit": "microseconds",
+      "environment": "indicative",
+      "source": "work-box timing; non-canonical",
+      "note": "Indicative records are never headline-cited and are not gated."
+    }
+  }
+}

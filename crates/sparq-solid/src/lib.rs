@@ -29,7 +29,16 @@ pub mod odrl_bridge;
 // zero trust-graph/sparq-trust code and is byte-identical to WAC/ACP today (G6).
 #[cfg(feature = "trust-graph")]
 pub mod trust_wire;
+// [FABLE-5] sq-lrtc3.3: pattern-scoped (sub-named-graph) result masking — opt-in
+// (`pattern-scope` feature), OFF by default, zero code/deps/cost in the default build.
+// Design record: research/odrl-pattern-scoped-targets-2026-07.md.
+#[cfg(feature = "pattern-scope")]
+pub mod pattern_scope;
 mod rewrite;
+// [FABLE-5] sq-cnuqd (issue #1569): the BOUNDED, SHARDED, `&self`-readable session cache
+// that lets all read-side entry points take `&self` (concurrent `&PodStore` readers). No
+// feature gate + no new dependency (std `RwLock` + the existing `rustc-hash`).
+mod session_cache;
 mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
 // [OPUS-4.8] issue #992 FR-3 (sq-snopa.5): the AUTHORITATIVE ACL write-through —
 // `PodStore::put_acl`/`delete_acl` replace (or remove) a `.acl`/`.acr` graph AND
@@ -66,6 +75,9 @@ pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
 // `TrustStaticOutcome` is the materialise-time (static/dynamic split, sq-xc4y) result.
 #[cfg(feature = "trust-graph")]
 pub use trust_wire::{TrustAdmissionOutcome, TrustStaticOutcome};
+// [FABLE-5] sq-lrtc3.3: the pattern-scoped masking types (feature-gated).
+#[cfg(feature = "pattern-scope")]
+pub use pattern_scope::{masked_dataset, masked_graph, GraphScope, ScopePattern, ScopedDataset};
 pub use rewrite::{rewrite_for, wrap_for_view};
 // [OPUS-4.8] sq-gq28y (issue #1546): the spec-conformant empty-default + explicit-union
 // read-path rewrite + the spec-minted reserved IRI, per the *Access-Controlled SPARQL Query
@@ -222,10 +234,15 @@ pub struct PodStore {
     // a cached graph set.
     // [OPUS-4.8] sq-b7k7u (issue #1571): each entry holds the session's accessible set
     // BUCKETED by origin plus the assembled full memo, so a scoped ACL write invalidates
-    // only the affected origin's slice ([`PodStore::invalidate_cache_origin`]) — a session
+    // only the affected origin's slice (`SessionCache::invalidate_origin`) — a session
     // untouched by the written pod keeps its warm slices and re-derives at most the one
     // changed origin, instead of every session cold-starting on every ACL write.
-    cache: FxHashMap<SessionKey, SessionEntry>,
+    // [FABLE-5] sq-cnuqd (issue #1569): the map is now BOUNDED + SHARDED behind interior
+    // mutability (`session_cache::SessionCache`), so every read-side entry point takes
+    // `&self` and N concurrent `&PodStore` readers hit distinct lock stripes instead of
+    // serialising on one exclusive borrow. Same transient-index D3 semantics: `reindex`
+    // clears/invalidates it; eviction only drops re-derivable memoized sets.
+    cache: session_cache::SessionCache,
     /// [OPUS-4.8] sq-dpk4 — the bridged-ODRL-grant ledger: what was bridged from which
     /// `(policy, request)`, plus the static-baseline auth view to rebuild from on a
     /// refresh. Only present when the `odrl-bridge` feature is enabled (the core build
@@ -240,13 +257,19 @@ pub struct PodStore {
 /// grant re-checked at two different instants never returns a stale cached graph set
 /// (two requests differing only by `now` — one inside a window, one after it — must not
 /// collide).
-type SessionKey = (Option<String>, Option<String>, Option<String>, Option<String>, Mode);
+pub(crate) type SessionKey =
+    (Option<String>, Option<String>, Option<String>, Option<String>, Mode);
 
 /// One session-cache entry: the same authorized graph set in the two shapes its two
 /// consumers need — sorted (the v1 `FROM NAMED` rewrite, [`PodStore::accessible`])
 /// and hashed (the engine [`DatasetView`], [`PodStore::accessible_set`]). Both are
 /// `Arc`-shared per call; neither is ever copied after construction.
-struct SessionSets {
+///
+/// `Clone` is a cheap two-`Arc`-bump: [FABLE-5] sq-cnuqd, the sharded cache returns an
+/// OWNED clone (it cannot hand out a borrow past its shard lock), and the caller re-shares
+/// the same underlying `Vec`/`FxHashSet` — nothing is deep-copied.
+#[derive(Clone)]
+pub(crate) struct SessionSets {
     sorted: Arc<Vec<NamedNode>>,
     set: Arc<FxHashSet<Term>>,
 }
@@ -275,7 +298,7 @@ struct SessionSets {
 /// index buckets changed. A FULL re-materialization drops the whole entry (the entry is
 /// transient index state, never storage), so no stale grant can outlive a revocation.
 #[derive(Default)]
-struct SessionEntry {
+pub(crate) struct SessionEntry {
     per_origin: FxHashMap<String, Vec<NamedNode>>,
     dirty: FxHashSet<String>,
     memo: Option<SessionSets>,
@@ -287,6 +310,55 @@ impl SessionEntry {
     fn sets_from(sorted_full: Vec<NamedNode>) -> SessionSets {
         let set = sorted_full.iter().map(|n| Term::NamedNode(n.clone())).collect();
         SessionSets { sorted: Arc::new(sorted_full), set: Arc::new(set) }
+    }
+
+    /// [FABLE-5] sq-cnuqd — (re-)derive this entry's memoized [`SessionSets`] against the
+    /// pinned `auth` snapshot, returning an owned clone of the memo. This is the exact
+    /// compute logic the pre-sharded `session_sets` ran inline; it now lives here so the
+    /// sharded cache can invoke it under its shard write-lock via `get_or_compute`.
+    ///
+    /// - A COLD entry (`!computed`) does ONE whole-store [`AuthIndex::accessible`] and
+    ///   splits the result into per-origin buckets to seed the entry.
+    /// - A SCOPED-INVALIDATED entry (`computed`, some `dirty` origins) re-derives ONLY its
+    ///   dirty origins via [`AuthIndex::accessible_in_origin`] and reuses every warm slice.
+    ///
+    /// The assembled set is byte-for-byte `auth.accessible(s, mode)` for the pinned auth
+    /// view — sound by construction: `reindex_with` marks dirty exactly the origins whose
+    /// index buckets changed. Generation pinning (#1584): `auth` is a single `Arc` snapshot,
+    /// so a re-materialization racing this fill cannot yield a half-old/half-new set.
+    fn fill(&mut self, auth: &AuthIndex, s: &Session, mode: Mode) -> SessionSets {
+        if !self.computed {
+            // Cold: one whole-store walk, split into origin buckets to seed the entry.
+            let full = auth.accessible(s, mode);
+            self.per_origin.clear();
+            for g in &full {
+                self.per_origin
+                    .entry(loader::iri_origin(g.as_str()).to_owned())
+                    .or_default()
+                    .push(g.clone());
+            }
+            self.dirty.clear();
+            self.computed = true;
+            let sets = SessionEntry::sets_from(full);
+            self.memo = Some(sets.clone());
+            sets
+        } else {
+            // Scoped-invalidated: re-derive only the dirty origins, reuse the rest.
+            let dirty: Vec<String> = self.dirty.drain().collect();
+            for origin in dirty {
+                let slice = auth.accessible_in_origin(s, mode, &origin);
+                if slice.is_empty() {
+                    self.per_origin.remove(&origin);
+                } else {
+                    self.per_origin.insert(origin, slice);
+                }
+            }
+            let mut full: Vec<NamedNode> = self.per_origin.values().flatten().cloned().collect();
+            full.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+            let sets = SessionEntry::sets_from(full);
+            self.memo = Some(sets.clone());
+            sets
+        }
     }
 }
 
@@ -335,7 +407,7 @@ impl PodStore {
             auth: Arc::new(AuthIndex::default()),
             epoch: 0,
             acl_index: OnceLock::new(), // [OPUS-4.8] sq-j8qtt: built lazily on first decide
-            cache: FxHashMap::default(),
+            cache: session_cache::SessionCache::new(), // [FABLE-5] sq-cnuqd: bounded + sharded
             #[cfg(feature = "odrl-bridge")]
             bridge_ledger: odrl_bridge::BridgeLedger::new(),
         }
@@ -477,7 +549,7 @@ impl PodStore {
     /// - [`ReindexScope::Origin`] (an atomic `put_acl`/`delete_acl` to one `.acl`/`.acr`)
     ///   uses **diff-based** invalidation ([SONNET-4.6] sq-b7k7u fix): the old and new
     ///   `AuthIndex` are compared per-origin, and exactly the origins whose (allow, deny,
-    ///   cond) buckets changed are invalidated via [`PodStore::invalidate_cache_origin`]. If
+    ///   cond) buckets changed are invalidated via `session_cache::SessionCache::invalidate_origin`. If
     ///   the matcher maps (`matcher_agents`/`matcher_clients`/`matcher_issuers`) differ — they
     ///   are not origin-bucketed and feed conditional-grant outcomes in any origin — the
     ///   fallback is a full cache clear. Correctness follows from index equality: if a
@@ -515,7 +587,9 @@ impl PodStore {
                         .filter(|o| !old_auth.bucket_eq(&new_auth, o))
                         .collect();
                     for origin in changed {
-                        self.invalidate_cache_origin(&origin);
+                        // [FABLE-5] sq-cnuqd: `&self`-callable now (interior mutability), but
+                        // `reindex_with` holds `&mut self` so this is uncontended.
+                        self.cache.invalidate_origin(&origin);
                     }
                 }
             }
@@ -524,20 +598,6 @@ impl PodStore {
         // the auth rebuild. `take` empties the cell; the next `decide`/`resolve_acl` rebuilds
         // from the just-re-materialized graph.
         self.acl_index.take();
-    }
-
-    /// [OPUS-4.8] sq-b7k7u (issue #1571) — per-origin session-cache invalidation: drop the
-    /// `origin` slice of every cached session and force its full memo to be re-assembled,
-    /// leaving all OTHER origins' slices warm. Called by `reindex_with`'s diff-based
-    /// approach for EACH origin whose index buckets actually changed — so a session that
-    /// previously had NO grant on `origin` still re-checks it (the origin is marked `dirty`
-    /// on every entry), picking up newly-granted access. [SONNET-4.6] sq-b7k7u fix.
-    fn invalidate_cache_origin(&mut self, origin: &str) {
-        for entry in self.cache.values_mut() {
-            entry.per_origin.remove(origin);
-            entry.dirty.insert(origin.to_owned());
-            entry.memo = None;
-        }
     }
 
     /// The persistent structural ACL index for the current generation, built lazily on the
@@ -560,8 +620,8 @@ impl PodStore {
     /// Measured: ~0.3 ms cold, ~0.6 µs cached on the ~1.1k-graph fixture. The same
     /// cache entry also holds this set in the hash-set shape the engine dataset view
     /// takes — [`PodStore::accessible_set`].
-    pub fn accessible(&mut self, s: &Session, mode: Mode) -> Arc<Vec<NamedNode>> {
-        Arc::clone(&self.session_sets(s, mode).sorted)
+    pub fn accessible(&self, s: &Session, mode: Mode) -> Arc<Vec<NamedNode>> {
+        self.session_sets(s, mode).sorted
     }
 
     /// [`PodStore::accessible`] as the hash-set shape the engine [`DatasetView`]
@@ -573,8 +633,8 @@ impl PodStore {
     /// [`PodStore::query_json_as`] / [`PodStore::ask_as`] doesn't cover (e.g.
     /// `construct`) needs to run under the session's view — or just take
     /// [`PodStore::view_for`].
-    pub fn accessible_set(&mut self, s: &Session, mode: Mode) -> Arc<FxHashSet<Term>> {
-        Arc::clone(&self.session_sets(s, mode).set)
+    pub fn accessible_set(&self, s: &Session, mode: Mode) -> Arc<FxHashSet<Term>> {
+        self.session_sets(s, mode).set
     }
 
     /// Build the value of a [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow)
@@ -632,7 +692,7 @@ impl PodStore {
     /// assert_eq!(store.wac_allow(&Session::default(), &resource), r#"user="read",public="read""#);
     /// # Ok::<(), String>(())
     /// ```
-    pub fn wac_allow(&mut self, session: &Session, resource: &NamedNode) -> String {
+    pub fn wac_allow(&self, session: &Session, resource: &NamedNode) -> String {
         let user = self.modes_held(session, resource);
         // The `public` field is what an anonymous caller (no WebID) holds — `acl:Read`
         // granted to `foaf:Agent` etc. — independent of the authenticated session.
@@ -643,7 +703,7 @@ impl PodStore {
     /// The space-separated WAC mode names `session` holds on `resource`'s graph, in the
     /// fixed `read write append control` order — the per-field body of [`Self::wac_allow`].
     /// Empty string when no mode is held (fail-closed). [OPUS-4.8] sq-i7k08.
-    fn modes_held(&mut self, session: &Session, resource: &NamedNode) -> String {
+    fn modes_held(&self, session: &Session, resource: &NamedNode) -> String {
         const MODES: [(Mode, &str); 4] = [
             (Mode::Read, "read"),
             (Mode::Write, "write"),
@@ -787,7 +847,16 @@ impl PodStore {
     /// every untouched origin's slice. The assembled set is byte-for-byte
     /// `AuthIndex::accessible(s, mode)` for the current auth view — sound by construction
     /// because `reindex_with` marks dirty exactly the origins whose index buckets changed.
-    fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
+    ///
+    /// [FABLE-5] sq-cnuqd (issue #1569): `&self`, not `&mut self` — the cache is now behind
+    /// the bounded, sharded interior-mutable `session_cache::SessionCache`, so N concurrent
+    /// `&PodStore` readers share this path without an exclusive borrow. A warm hit takes only
+    /// a shard READ lock (+ two `Arc` clones); only a miss/re-derive takes that one shard's
+    /// write lock. The returned [`SessionSets`] is OWNED (two `Arc` bumps) — nothing borrows
+    /// the shard past the call, so the (potentially long) query runs with the lock released.
+    /// Generation pinning (#1584): the `auth` snapshot is pinned ONCE per call, so a racing
+    /// re-materialization never yields a half-old/half-new set.
+    fn session_sets(&self, s: &Session, mode: Mode) -> SessionSets {
         let key = (
             s.agent.map(str::to_owned),
             s.client.map(str::to_owned),
@@ -796,40 +865,7 @@ impl PodStore {
             mode,
         );
         let auth = Arc::clone(&self.auth);
-        let entry = self.cache.entry(key).or_default();
-        if entry.memo.is_none() {
-            if !entry.computed {
-                // Cold: one whole-store walk, split into origin buckets to seed the entry.
-                let full = auth.accessible(s, mode);
-                entry.per_origin.clear();
-                for g in &full {
-                    entry
-                        .per_origin
-                        .entry(loader::iri_origin(g.as_str()).to_owned())
-                        .or_default()
-                        .push(g.clone());
-                }
-                entry.dirty.clear();
-                entry.computed = true;
-                entry.memo = Some(SessionEntry::sets_from(full));
-            } else {
-                // Scoped-invalidated: re-derive only the dirty origins, reuse the rest.
-                let dirty: Vec<String> = entry.dirty.drain().collect();
-                for origin in dirty {
-                    let slice = auth.accessible_in_origin(s, mode, &origin);
-                    if slice.is_empty() {
-                        entry.per_origin.remove(&origin);
-                    } else {
-                        entry.per_origin.insert(origin, slice);
-                    }
-                }
-                let mut full: Vec<NamedNode> =
-                    entry.per_origin.values().flatten().cloned().collect();
-                full.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
-                entry.memo = Some(SessionEntry::sets_from(full));
-            }
-        }
-        entry.memo.as_ref().expect("memo populated above")
+        self.cache.get_or_compute(&key, |entry| entry.fill(&auth, s, mode))
     }
 
     /// The session's zero-copy [`DatasetView`] over this store (mode-checked graph
@@ -840,7 +876,7 @@ impl PodStore {
     /// Fail-closed like [`PodStore::accessible`]: an un-materialized store or a
     /// grant-less session yields a view over the empty graph set, under which every
     /// graph is indistinguishable from absent.
-    pub fn view_for(&mut self, s: &Session, mode: Mode) -> DatasetView<'_> {
+    pub fn view_for(&self, s: &Session, mode: Mode) -> DatasetView<'_> {
         let named = self.accessible_set(s, mode);
         DatasetView { base: &self.graph, named, default: DefaultGraphMode::Empty }
     }
@@ -902,7 +938,7 @@ impl PodStore {
     /// assert_eq!(store.query_as(&Session::default(), Mode::Read, q)?.rows.len(), 0);
     /// # Ok::<(), String>(())
     /// ```
-    pub fn query_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
+    pub fn query_as(&self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
         let wrapped = wrap_read(sparql)?;
         sparq_engine::query_view(&self.view_for(s, mode), &wrapped)
     }
@@ -911,7 +947,7 @@ impl PodStore {
     /// (via [`sparq_engine::query_json_view`]) instead of a materialized
     /// [`QueryResult`]. Same view path, same fail-closed semantics (incl. the
     /// `solid-sparql-query` union-default opt-in — see [`PodStore::query_as`]).
-    pub fn query_json_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<String, String> {
+    pub fn query_json_as(&self, s: &Session, mode: Mode, sparql: &str) -> Result<String, String> {
         let wrapped = wrap_read(sparql)?;
         sparq_engine::query_json_view(&self.view_for(s, mode), &wrapped)
     }
@@ -920,7 +956,7 @@ impl PodStore {
     /// iff the pattern is satisfiable inside the session's authorized graph set.
     /// Fail-closed: a grant-less session always gets `false` (empty view). Honours the
     /// `solid-sparql-query` union-default opt-in like [`PodStore::query_as`].
-    pub fn ask_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<bool, String> {
+    pub fn ask_as(&self, s: &Session, mode: Mode, sparql: &str) -> Result<bool, String> {
         let wrapped = wrap_read(sparql)?;
         sparq_engine::ask_view(&self.view_for(s, mode), &wrapped)
     }
@@ -945,7 +981,7 @@ impl PodStore {
     /// # Errors
     ///
     /// As [`PodStore::query_as`].
-    pub fn query_as_rewrite(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
+    pub fn query_as_rewrite(&self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
         let allowed = self.accessible(s, mode);
         let rewritten = rewrite_for(sparql, &allowed)?;
         sparq_engine::query(&self.graph, &rewritten)
@@ -1378,9 +1414,15 @@ mod scoped_cache_tests {
         store
     }
 
-    fn entry_for<'a>(store: &'a PodStore, s: &Session) -> &'a SessionEntry {
-        let key = (s.agent.map(str::to_owned), s.client.map(str::to_owned), s.issuer.map(str::to_owned), s.now.map(str::to_owned), Mode::Read);
-        store.cache.get(&key).expect("entry warmed")
+    fn key_for(s: &Session) -> SessionKey {
+        (s.agent.map(str::to_owned), s.client.map(str::to_owned), s.issuer.map(str::to_owned), s.now.map(str::to_owned), Mode::Read)
+    }
+
+    /// White-box inspection of one cached [`SessionEntry`] through the sharded cache
+    /// ([FABLE-5] sq-cnuqd): reads the shard under its read lock and projects the fields the
+    /// pre-sharded tests asserted on the plain map.
+    fn with_entry<R>(store: &PodStore, s: &Session, f: impl FnOnce(&SessionEntry) -> R) -> R {
+        store.cache.with_entry(&key_for(s), |e| f(e.expect("entry warmed")))
     }
 
     #[test]
@@ -1390,24 +1432,23 @@ mod scoped_cache_tests {
 
         // Warm alice's cache: she reads one graph in each pod.
         assert_eq!(store.accessible(&alice, Mode::Read).len(), 2);
-        {
-            let e = entry_for(&store, &alice);
+        with_entry(&store, &alice, |e| {
             assert!(e.memo.is_some(), "warm memo present");
             assert!(e.per_origin.contains_key("https://a.ex"));
             assert!(e.per_origin.contains_key("https://b.ex"));
             assert!(e.dirty.is_empty());
-        }
-        // Capture the exact Arc identity of the b.ex slice contribution by snapshotting it.
-        let b_before: Vec<String> =
-            entry_for(&store, &alice).per_origin["https://b.ex"].iter().map(|n| n.as_str().to_owned()).collect();
+        });
+        // Capture the exact contents of the b.ex slice contribution by snapshotting it.
+        let b_before: Vec<String> = with_entry(&store, &alice, |e| {
+            e.per_origin["https://b.ex"].iter().map(|n| n.as_str().to_owned()).collect()
+        });
 
         // Scoped write to pod a: REVOKE alice on pod a (empty .acl body).
         store.put_acl("https://a.ex/.acl", "", "ntriples").expect("put");
 
         // Immediately after the write (before any read): a.ex slice dropped + marked dirty,
         // b.ex slice UNTOUCHED (kept warm), memo dropped (must reassemble).
-        {
-            let e = entry_for(&store, &alice);
+        with_entry(&store, &alice, |e| {
             assert!(!e.per_origin.contains_key("https://a.ex"), "a.ex slice evicted");
             assert!(e.per_origin.contains_key("https://b.ex"), "b.ex slice kept warm");
             assert!(e.dirty.contains("https://a.ex"), "a.ex marked dirty");
@@ -1415,7 +1456,7 @@ mod scoped_cache_tests {
             assert!(e.memo.is_none(), "memo invalidated");
             let b_now: Vec<String> = e.per_origin["https://b.ex"].iter().map(|n| n.as_str().to_owned()).collect();
             assert_eq!(b_now, b_before, "b.ex slice byte-identical (never recomputed)");
-        }
+        });
 
         // Next read: alice lost pod a, still reads pod b — equals a from-scratch rebuild.
         let got: Vec<String> = store.accessible(&alice, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
@@ -1432,7 +1473,7 @@ mod scoped_cache_tests {
         let bob = sess("https://bob.ex/card#me");
         // bob has nothing yet; warm his (empty) cache.
         assert_eq!(store.accessible(&bob, Mode::Read).len(), 0);
-        assert!(entry_for(&store, &bob).memo.is_some());
+        assert!(with_entry(&store, &bob, |e| e.memo.is_some()));
         // Scoped write to pod a granting bob Read.
         let acl = "<https://a.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .\n\
                    <https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://a.ex/> .\n\

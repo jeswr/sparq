@@ -1,0 +1,50 @@
+% [FABLE-5] sq-hmd7l.31 — Nemo RDFS Datalog encoding that REPRODUCES sparq's RDFS
+% closure of LUBM(1) EXACTLY (126732 triples, set-for-set — validated, no delta).
+%
+% 🤖 SPARQ agent. Nemo (github.com/knowsys/nemo, Apache-2.0) is a Rust-native Datalog
+% engine — the Rust-native peer column for the materialization comparison. This file
+% is the validated RDFS rule program whose materialization reproduces
+% `sparq-cli reason … rdfs` on LUBM (crates/sparq-reason/src/rdfs.rs).
+%
+% IMPORT: the input N-Triples (LUBM ABox + Univ-Bench TBox) is imported into the
+% ternary predicate triple(?s,?p,?o). scripts/bench-adapters/nemo_adapter.py sed-
+% substitutes @@DATA@@ for the corpus path, runs `nmo`, and counts the exported
+% closed(...) facts. The @export writes the FULL materialized graph so the exported
+% fact count equals sparq's closure size (Nemo de-duplicates, matching sparq's dedup).
+%
+% ── RULE SET (exactly the 6 RDFS rules sparq applies; NO reflexivity/axiomatic) ──
+% sparq's `rdfs` profile OMITS rdfs4/6/8/10/13 (they would blanket every term with
+% rdfs:Resource / add reflexive subClassOf-self). To reproduce the count set-for-set
+% we include ONLY rdfs2/3/5/7/9/11 and add NO reflexive or axiomatic triple.
+% VALIDATED set-identical to sparq (0 diff both directions) — cross-check in
+% scripts/bench/materialize-same-box.sh.
+
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+@import triple :- ntriples { resource = "@@DATA@@" } .
+
+% base graph flows into the closure predicate.
+closed(?s, ?p, ?o) :- triple(?s, ?p, ?o) .
+
+% rdfs5 — subPropertyOf transitivity
+closed(?p, rdfs:subPropertyOf, ?r) :-
+    closed(?p, rdfs:subPropertyOf, ?q), closed(?q, rdfs:subPropertyOf, ?r) .
+
+% rdfs11 — subClassOf transitivity
+closed(?c, rdfs:subClassOf, ?e) :-
+    closed(?c, rdfs:subClassOf, ?d), closed(?d, rdfs:subClassOf, ?e) .
+
+% rdfs7 — subPropertyOf rewrite:  (p sp q),(s p o) => (s q o)
+closed(?s, ?q, ?o) :- closed(?p, rdfs:subPropertyOf, ?q), closed(?s, ?p, ?o) .
+
+% rdfs2 — domain typing:  (p domain c),(s p o) => (s type c)
+closed(?s, rdf:type, ?c) :- closed(?p, rdfs:domain, ?c), closed(?s, ?p, ?o) .
+
+% rdfs3 — range typing:  (p range c),(s p o) => (o type c)
+closed(?o, rdf:type, ?c) :- closed(?p, rdfs:range, ?c), closed(?s, ?p, ?o) .
+
+% rdfs9 — subClassOf type inheritance:  (s type c),(c sc d) => (s type d)
+closed(?s, rdf:type, ?d) :- closed(?s, rdf:type, ?c), closed(?c, rdfs:subClassOf, ?d) .
+
+@export closed :- csv { resource = "@@OUT@@" } .

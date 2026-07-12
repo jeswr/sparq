@@ -11,6 +11,25 @@
 # query pack we rely on, switch this matrix entry to `build-mode: manual` + a
 # `cargo build --workspace` step (see the CodeQL Rust docs).
 #
+# [FABLE-5] sq-6vshe.6 heavy-lane placement — CodeQL PLACEMENT DECISION (measured):
+# KEEP per-push (per-PR) analysis; do NOT demote to merge_group + nightly.
+# The bead's decision rule is CONDITIONAL: demote CodeQL to the merge queue + nightly
+# ONLY IF it is a post-piapk wall-time POLE. It is NOT. MEASURED per-PR / merge_group
+# wall time over 20+ recent runs is ~3.8–4.8 min (this workflow uses `build-mode: none`
+# BUILDLESS extraction — the Rust extractor reads the workspace directly with no
+# instrumented `cargo build`), comparable to the bench lane (~4 min) and FASTER than the
+# fuzz lane (~6–8.5 min per-PR before its sq-6vshe.6 replay demotion). So per-push CodeQL
+# is not on the critical path and demoting it would trade the earlier per-PR security
+# signal (Copilot/CodeQL PR review + alerts-at-zero pre-merge) for essentially no wall-
+# clock win — a net LOSS of security posture. The historical "CodeQL-rust ~20–40 min pole"
+# concern predates the buildless migration (a trace-based `build-mode: manual` full-compile
+# analysis); this config already fixed that. If a future query pack forces a return to
+# trace-based build (see the `build-mode: manual` note below) and wall time regresses past
+# the pole threshold, revisit the demotion — merge_group CodeQL still gates every merge, so
+# alerts-at-zero would be preserved even then. This is the maintainer security-posture
+# sign-off item (design §10.2); proceeding on the MEASURED "keep it" default per the
+# proceed-and-document rule (steer issue filed).
+#
 # Third-party actions pinned by full commit SHA (supply-chain hardening); the trailing
 # `# vX.Y.Z` comment is what Dependabot follows to bump the pin.
 name: codeql
@@ -64,7 +83,7 @@ jobs:
 
       # Initialise the CodeQL tooling + database for the matrix language.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -85,6 +104,6 @@ jobs:
       # add the `cargo build --workspace` here.
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
         with:
           category: "/language:${{ matrix.language }}"

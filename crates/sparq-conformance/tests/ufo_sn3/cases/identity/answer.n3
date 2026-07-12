@@ -1,0 +1,5 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:identity:> .
+
+ex:Employee ufo:identityKey ex:employeeNumber.
+ex:alice ufo:sameContinuant ex:aliceRecord.

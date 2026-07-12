@@ -1,0 +1,11 @@
+BASE <http://example.org/rdf12>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:ReifierShape {
+	ex:confidence xsd:decimal [1..1] .
+}
+
+shape ex:TestShape {
+	ex:spouse reifierShape=ex:ReifierShape reificationRequired=true .
+}

@@ -1,14 +1,15 @@
-// [OPUS-4.8] sq-spita — client-side decompression of zipped / gzipped RDF datasets so
-// the live SPARQL REPL (and, when it reuses these controls, the GUI) can load a
-// compressed resource by file upload OR by URL — e.g. a 10M-triple UMBC `.nt.gz`
-// redirect or a TIB watdiv `.zip` — entirely in the browser tab, no server.
+// [OPUS-4.8] sq-spita — client-side decompression of compressed RDF datasets so a
+// browser surface (today the /surface/data-formats compressed-ingest demo; the web
+// GUI's import drawer is the follow-up consumer) can load a compressed resource by
+// file upload OR by URL — e.g. a 10M-triple UMBC `.nt.gz` redirect or a TIB watdiv
+// `.zip` — entirely in the browser tab, no server.
 //
 // These helpers are pure + framework-free (no React, no DOM beyond the standard
 // `DecompressionStream` Web API, no wasm), so they unit-test directly under
 // `node --test` (Node ≥18 ships `DecompressionStream`). The actual RDF parse still
 // happens in the wasm Store — this layer only turns archive BYTES into RDF TEXT.
 //
-// Codec choice (deliberately dependency-free):
+// Codec choice (native-first; anything else is LAZY-loaded — see `loadCodec`):
 //   • gzip (`.gz`, magic 1f 8b) — decoded by the native `DecompressionStream("gzip")`.
 //     Single-member only: browsers silently truncate multi-member gzip to the first
 //     member (measured in research/custom-parsers-D4 §3). Real-world RDF `.gz` dumps
@@ -20,12 +21,19 @@
 //     dependency (would add ~95 kB / ~45 kB to the bundle for a feature served by a
 //     browser-native API). Encrypted, ZIP64, and other compression methods are
 //     rejected with a clear message rather than silently mis-decoding.
+//   • zstd (`.zst`, magic 28 b5 2f fd) — [FABLE-5] sq-4ssz1 (#1046): no native browser
+//     codec, so it decodes through `fzstd` (pure JS, small), which `loadCodec` fetches
+//     via a dynamic `import()` ONLY when a zstd payload is actually being decoded —
+//     the decoder lives in its own lazy chunk, never in any route's first-load bundle.
+//     Same decoder the `@jeswr/sparq` package's `decompress.ts` uses; handles the
+//     multi-frame concatenated streams RFC 8878 allows, but NOT dictionary frames.
 //
-// zstd/bzip2 are intentionally out of scope for this surface (the bead names gzip/zip);
-// the JS package's `decompress.ts` covers zstd for the engine ingest path.
+// bzip2 stays out: there is no native browser codec and no small pure-JS decoder — a
+// wasm-blob decoder would be a heavy add for a rarely-shipped format (deferred in
+// sq-4ssz1 until someone actually asks).
 
 /** A recognised dataset-archive container codec. */
-export type ArchiveCodec = "gzip" | "zip";
+export type ArchiveCodec = "gzip" | "zip" | "zstd";
 
 /** The result of decompressing an archive: the decoded RDF text plus the inner
  *  member name (used to guess the RDF format — `data.nt.gz` → `data.nt`). */
@@ -41,6 +49,12 @@ export interface DecompressedArchive {
 // Detection
 // ---------------------------------------------------------------------------
 
+// zstd frame magics (RFC 8878 §3.1): a data frame is 28 b5 2f fd little-endian
+// (0xFD2FB528); a skippable frame is 0x184D2A50..0x184D2A5F (low nibble free).
+const ZSTD_MAGIC = 0xfd2fb528;
+const ZSTD_SKIPPABLE_MAGIC = 0x184d2a50;
+const ZSTD_SKIPPABLE_MASK = 0xfffffff0;
+
 /** The container codec a payload's magic number announces, or `undefined`. */
 export function sniffArchive(bytes: Uint8Array): ArchiveCodec | undefined {
   // gzip: 1f 8b (RFC 1952 §2.3.1).
@@ -55,18 +69,32 @@ export function sniffArchive(bytes: Uint8Array): ArchiveCodec | undefined {
   ) {
     return "zip";
   }
+  // zstd: a data frame or a leading skippable frame (RFC 8878 §3.1).
+  if (bytes.length >= 4) {
+    const magic =
+      (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+    if (
+      magic === ZSTD_MAGIC ||
+      (magic & ZSTD_SKIPPABLE_MASK) >>> 0 === ZSTD_SKIPPABLE_MAGIC
+    ) {
+      return "zstd";
+    }
+  }
   return undefined;
 }
 
 // Extensions / media types that name an archive container (vs. the inner RDF format).
 const GZIP_EXTS = new Set(["gz", "gzip", "tgz"]);
 const ZIP_EXTS = new Set(["zip"]);
+const ZSTD_EXTS = new Set(["zst", "zstd"]);
 
 const ARCHIVE_CONTENT_TYPES: Record<string, ArchiveCodec> = {
   "application/gzip": "gzip",
   "application/x-gzip": "gzip",
   "application/zip": "zip",
   "application/x-zip-compressed": "zip",
+  "application/zstd": "zstd",
+  "application/x-zstd": "zstd",
 };
 
 /** The container codec a filename/URL extension names, or `undefined`. */
@@ -74,6 +102,7 @@ export function archiveCodecFromName(name: string): ArchiveCodec | undefined {
   const ext = name.split(/[?#]/)[0].split(".").pop()?.toLowerCase() ?? "";
   if (GZIP_EXTS.has(ext)) return "gzip";
   if (ZIP_EXTS.has(ext)) return "zip";
+  if (ZSTD_EXTS.has(ext)) return "zstd";
   return undefined;
 }
 
@@ -87,16 +116,17 @@ export function archiveCodecFromContentType(
 }
 
 /**
- * The inner file name for an archive name: strips a trailing `.gz`/`.gzip`/`.zip`
- * so `dataset.nt.gz` → `dataset.nt` (a name the format guesser understands). `.tgz`
- * maps to `.tar`, which is not an RDF format, so it returns `null` to force a fallback.
- * Returns the input unchanged when it has no recognised archive suffix.
+ * The inner file name for an archive name: strips a trailing
+ * `.gz`/`.gzip`/`.zip`/`.zst`/`.zstd` so `dataset.nt.gz` → `dataset.nt` (a name the
+ * format guesser understands). `.tgz` maps to `.tar`, which is not an RDF format, so
+ * it returns `null` to force a fallback. Returns the input unchanged when it has no
+ * recognised archive suffix.
  */
 export function innerNameForArchive(name: string): string | null {
   const base = name.split(/[?#]/)[0];
   const lower = base.toLowerCase();
   if (lower.endsWith(".tgz")) return null; // tar inside — no single inner RDF name
-  for (const suffix of [".gz", ".gzip", ".zip"]) {
+  for (const suffix of [".gz", ".gzip", ".zip", ".zst", ".zstd"]) {
     if (lower.endsWith(suffix)) {
       const inner = base.slice(0, base.length - suffix.length);
       return inner.length > 0 ? inner : null;
@@ -149,12 +179,48 @@ async function inflate(
 
 const utf8 = new TextDecoder();
 
+// ---------------------------------------------------------------------------
+// Lazy codec loading — the bundle-size rule (maintainer, #1046)
+// ---------------------------------------------------------------------------
+// gzip + zip decode through browser-native APIs, so they cost zero bundle bytes.
+// Any codec the platform does NOT provide natively (zstd today; every future
+// rarely-used format) MUST come through this dynamic-`import()` switch, so the
+// decoder is code-split into its own lazy chunk and fetched the FIRST time a user
+// actually decodes a payload of that type — never in a route's first-load bundle.
+// `scripts/check-bundle.mjs` pins `fzstd` as a dynamic split point (PRESENCE), so
+// regressing this to a static import fails the build.
+
+/** Codecs with no native browser API, decoded by a lazily-imported JS decoder. */
+export type LazyCodec = Extract<ArchiveCodec, "zstd">;
+
 /**
- * Decompresses a recognised dataset archive (`gzip` or `zip`) to RDF text plus the
- * inner member name. `codec` defaults to sniffing the magic number; `name` (the
- * file/URL name) is used to break gzip's "no inner name" ambiguity (a zip carries its
- * own member name). Throws a clear, actionable error for an unrecognised / unsupported
- * payload rather than mis-decoding.
+ * Dynamically imports the decoder for a non-native codec and returns its
+ * bytes → bytes decode function. The `import()` here is the load-bearing part:
+ * webpack splits each decoder into a separate chunk that only ever loads on demand.
+ */
+export async function loadCodec(
+  codec: LazyCodec,
+): Promise<(bytes: Uint8Array) => Uint8Array> {
+  switch (codec) {
+    case "zstd": {
+      // fzstd: the small pure-JS zstd decoder the `@jeswr/sparq` package already
+      // uses (already a site dependency via the wasm-ESM bundler). Decodes RFC 8878
+      // multi-frame concatenated streams; dictionary frames are not supported.
+      const { decompress } = await import(
+        /* webpackChunkName: "codec-zstd" */ "fzstd"
+      );
+      return decompress;
+    }
+  }
+}
+
+/**
+ * Decompresses a recognised dataset archive (`gzip`, `zip`, or `zstd`) to RDF text
+ * plus the inner member name. `codec` defaults to sniffing the magic number; `name`
+ * (the file/URL name) is used to break the single-stream codecs' "no inner name"
+ * ambiguity (a zip carries its own member name). Throws a clear, actionable error for
+ * an unrecognised / unsupported payload rather than mis-decoding. The zstd decoder is
+ * lazy-loaded on first use (see {@link loadCodec}).
  */
 export async function decompressArchive(
   bytes: Uint8Array,
@@ -169,9 +235,14 @@ export async function decompressArchive(
     }
     case "zip":
       return unzipFirstRdfMember(bytes);
+    case "zstd": {
+      const decode = await loadCodec("zstd");
+      const out = decode(bytes);
+      return { text: utf8.decode(out), innerName: innerNameForArchive(name) };
+    }
     default:
       throw new Error(
-        "Unrecognised compressed payload: expected a gzip (.gz) or zip (.zip) magic number.",
+        "Unrecognised compressed payload: expected a gzip (.gz), zip (.zip), or zstd (.zst) magic number.",
       );
   }
 }

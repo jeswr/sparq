@@ -63,8 +63,8 @@
 
 Logic bugs — a query silently returning a wrong result — are the worst class of database
 engine defect: nothing crashes, and the user has no oracle. Metamorphic testing closed
-this oracle gap for SQL (SQLancer's TLP and NoREC found 77 and 51 previously unknown bugs
-respectively @tlp @norec), and the approach has since been re-derived for Datalog
+this oracle gap for SQL (SQLancer's TLP and NoREC found 77 logic bugs and 51 optimization
+bugs respectively @tlp @norec), and the approach has since been re-derived for Datalog
 @queryfuzz @dlsmith and for property-graph query languages @gremlin-diff @gdsmith @gamera
 @gdbmeter. SPARQL — a W3C-standardised query language with multiple independent production
 engines — has no dedicated logic-bug testing work at all; the closest published evidence
@@ -73,8 +73,8 @@ is a translation-pipeline study that reported wrong results in one engine _incid
 Logic Partitioning splits on a third truth _value_ (`NULL`, testable in-language with
 `IS NULL`), whereas SPARQL's third truth state is a third evaluation _outcome_ — a type
 error — that is not a value, cannot be bound, and has no `IS ERROR` test. We re-derive TLP
-for SPARQL by reifying the error outcome with the language's only two error-absorbing
-forms: the partition
+for SPARQL by reifying the error outcome with `COALESCE`, the language's only
+error-to-value form, wrapped around an EBV-normalising `IF`: the partition
 `FILTER(c)` ⊎ `FILTER(!c)` ⊎ `FILTER(COALESCE(IF(c, false, false), true))` provably
 recomposes the unpartitioned query under the SPARQL 1.1 specification's own clauses (§17.2,
 §17.3, §17.4.1.2–3, §18.5), including the type-error, unbound-variable-under-`OPTIONAL`,
@@ -100,8 +100,10 @@ the correct result as the engine is to miscompute it. The breakthrough for relat
 systems was to replace the missing oracle with _metamorphic relations_ @mt-survey: derive from one
 query a set of related queries whose results must recompose the original, and flag any
 engine where they do not. SQLancer's Pivoted Query Synthesis, NoREC, and Ternary Logic
-Partitioning (TLP) found, per their papers, 121, 51, and 77 previously unknown bugs in
-mature production DBMSs @pqs @norec @tlp. The recipe has since been transplanted to
+Partitioning (TLP) found, per their papers, 121 total, 51 optimization-class, and 77
+logic-class previously unknown bugs in mature production DBMSs @pqs @norec @tlp — distinct
+counting bases the field separates (§6.3): PQS reports total unique bugs, while NoREC and
+TLP report the bug class their oracle targets. The recipe has since been transplanted to
 Datalog engines — queryFuzz (13 bugs @queryfuzz) and DLSmith (16 bugs @dlsmith) — and to
 graph database systems: randomized differential testing of Gremlin engines
 @gremlin-diff, GDsmith for Cypher (28 reported bugs @gdsmith), graph-aware metamorphic
@@ -218,8 +220,10 @@ level of the group.
   ),
   caption: [
     The SPARQL TLP partition. The error branch is the re-derivation: SPARQL has no
-    `IS ERROR`, so the error outcome is _reified_ into a total boolean using the
-    language's only two error-absorbing expression forms, `IF` and `COALESCE`.
+    `IS ERROR`, so the error outcome is _reified_ into a total boolean by
+    wrapping an EBV-normalising `IF` in `COALESCE`, the language's only error-to-value
+    form (`&&`/`||` also absorb errors, but only when the other operand already fixes the
+    result, so they cannot isolate the error case).
   ],
 ) <tlp-table>
 
@@ -242,8 +246,8 @@ A reviewer can check each branch against the recommendation text directly:
 - *Error branch.* `IF(c, false, false)` evaluates `c`, takes its EBV, and returns `false`
   on both true and false; "if evaluating the first argument raises an error, then an
   error is raised for the evaluation of the IF expression" (§17.4.1.2). Wrapping in
-  `COALESCE(x, true)` — which "returns the value of the first expression that evaluates
-  without error" (§17.4.1.3) — yields `false` whenever `c` evaluated either way and
+  `COALESCE(x, true)` — which returns the RDF-term value of the first expression that
+  evaluates without error (§17.4.1.3) — yields `false` whenever `c` evaluated either way and
   `true` exactly when `c` errored. The composite is a _total_ boolean expression that is
   true precisely on the error rows: the error outcome, reified as a value.
 
@@ -278,9 +282,10 @@ Two properties make this oracle unusually deployable. First, it requires *no cro
 agreement and no reference implementation*: only one engine's internal consistency across
 four queries. Implementation-defined extensions (e.g. extra comparable datatypes,
 §17.3.1) do not break the relation so long as $"ebv"(c, mu)$ is deterministic within the
-engine. Second, the base query is unconstrained in its pattern: `P` may contain
-`OPTIONAL`, `UNION`, and subqueries — the preconditions below constrain only the
-partition level.
+engine. Second, the base query is unconstrained in its pattern _shape_: `P` may contain
+`OPTIONAL`, `UNION`, and subqueries — the preconditions below constrain the partition
+level and additionally require the whole base query (`P` as well as `c`) to be
+_deterministic_ (precondition 1).
 
 === Attribution caveat (what a violation does and does not localise)
 
@@ -294,9 +299,15 @@ is wrong; campaign triage reduces the failing case before it enters the found-bu
 
 The generator (§6.1) enforces all four by construction:
 
-+ *Deterministic `c`, a function of $mu$ alone*: no `RAND()`, `NOW()`, `UUID()`,
-  `STRUUID()`, `BNODE(…)`. A nondeterministic `c` can land the same solution in
-  different branches across the four evaluations.
++ *Deterministic base query — both `P` and `c`*: no `RAND()`, `NOW()`, `UUID()`,
+  `STRUUID()`, `BNODE(…)` anywhere in the base query, and no `eval(P)`-destabilising
+  construct inside `P` itself (a subquery with `LIMIT` and no `ORDER BY`, or `REDUCED`
+  in a subquery, can return a different multiset on each evaluation). The relation
+  compares four separate query executions, so `eval(P)` must be a fixed multiset and `c`
+  a function of $mu$ alone; a nondeterministic base can land the same solution in
+  different branches across the four evaluations — a false positive independent of any
+  engine bug. The generator's fixed pattern (§6.1) contains no subquery, `LIMIT`, or
+  nondeterministic function, and so satisfies this by construction.
 + *No `EXISTS` / `NOT EXISTS` in `c`*: the substitution semantics of `EXISTS` is a known
   specification-level defect of SPARQL 1.1 — acknowledged in the errata and under
   revision for SPARQL 1.2 @sparql12-query — so a "violation" involving `EXISTS` would
@@ -304,7 +315,8 @@ The generator (§6.1) enforces all four by construction:
   the oracle must not manufacture bugs out of a defect in the standard itself.
 + *Plain `SELECT *` at the partition level*: no `DISTINCT`/`REDUCED` (breaks multiset
   additivity), no `ORDER BY`/`LIMIT`/`OFFSET` (partitioning does not commute with
-  slicing), no aggregates. The pattern `P` underneath is unrestricted.
+  slicing), no aggregates. The pattern `P` underneath is unrestricted in shape (but must
+  be deterministic — precondition 1).
 + *Top-level filter placement*: a constraint applies to the whole group regardless of
   position (§17.2), so the branch filter is appended at the top level of the group and
   never pushed into `OPTIONAL`/subquery scope, where filter scoping rules differ.
@@ -327,12 +339,17 @@ $"ebv"(c, mu) = "true"$ solutions (§17.2); `IF(c, true, false)` returns `true` 
 the same EBV (§17.4.1.2); and when `c` _errors_, the projection-expression semantics
 differs observably from the filter semantics in precisely the way that makes the rewrite
 faithful — an error in a `SELECT` expression leaves the variable _unbound while keeping
-the row_ (algebra `Extend`, §18.5: "if evaluating exp raises an error … the variable
-remains unbound"; a `SELECT` expression is `Extend` + `Project`, §18.2.4.1). The rewrite
+the row_ (algebra `Extend`, §18.5: when the expression evaluates to an error, `Extend`
+returns the solution mapping unchanged, so the variable stays unbound; a `SELECT`
+expression is `Extend` + `Project`, §18.2.4.4). The rewrite
 therefore preserves the full trichotomy observably as `true` / `false` / unbound, and
 since `Project` without `DISTINCT` preserves bag cardinality, the rewrite returns exactly
 $|"eval"(P)|$ rows, of which the boolean-true-flagged ones must number exactly
-$|"eval"("optimized")|$. The harness counts the true-flagged rows _on the client side_
+$|"eval"("optimized")|$ — which presupposes, as in §3.4 precondition 1, a _deterministic_
+base query: the optimized and rewrite forms are two separate executions of `P`, so a
+nondeterministic `P` (e.g. a `LIMIT` subquery without `ORDER BY`) would break the
+cardinality identity independently of any engine bug. The harness counts the true-flagged
+rows _on the client side_
 (accepting both valid `xsd:boolean` lexical forms, `true` and `1`) rather than wrapping
 the rewrite in a `COUNT` aggregate — a nested aggregate would hand the expression straight
 back to the optimization machinery the oracle is trying to bypass.
@@ -383,15 +400,19 @@ ledger. Design decisions with methodological weight:
 
 Cases are generated by a self-contained SplitMix64 PRNG @splitmix — no wall clock, OS
 randomness, or external RNG dependency — so a ledger entry's seed reproduces its exact
-test case bit-for-bit on any machine, indefinitely (the PRNG is a fixed published mixing
-function, pinned by a unit test against its reference output, so the reproducibility
-contract survives dependency upgrades). One case is (data, pattern, predicate): N-Triples
+test case bit-for-bit on any machine, for the generator version that produced it (the
+PRNG is a fixed published mixing function, pinned by a unit test against its reference
+output, so the reproducibility contract survives dependency upgrades; a grammar
+extension shifts the seed-to-case mapping, which is why ledger entries also carry the
+reduced query and data inline). One case is (data, pattern, predicate): N-Triples
 data mixing integers, decimals, doubles, plain and language-tagged strings, booleans, and
 IRIs under one predicate — so comparisons hit both comparable values and type errors —
 plus a pattern with an `OPTIONAL` clause whose object is present on only some subjects
 (the unbound-error fuel), plus a filter predicate drawn from a grammar spanning
-comparisons, arithmetic, `BOUND`/`COALESCE`, `STR`/`LANG`/`DATATYPE`/`isIRI`/`isLiteral`,
-and the error-absorbing connectives `&&`/`||`/`!` at bounded nesting depth.
+comparisons, arithmetic, `BOUND`/`COALESCE`, the accessors
+`STR`/`LANG`/`DATATYPE`/`isIRI`/`isLiteral` (the `LANG` atom is itself three-outcome:
+tag / empty string / a type error on an IRI), and the error-absorbing connectives
+`&&`/`||`/`!` at bounded nesting depth.
 
 The grammar _excludes by construction_ everything §3.4 forbids: no
 `RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE` (nondeterminism), no `EXISTS`/`NOT EXISTS` (the
@@ -539,9 +560,10 @@ reported/confirmed/rejected split keeps that dependency visible instead of hidin
 == Related work <related>
 
 *SQL.* SQLancer established practical logic-bug oracles for relational engines: PQS
-synthesises a query guaranteed to contain a pivot row (121 bugs across SQLite, MySQL,
-PostgreSQL @pqs); NoREC compares optimized against non-optimizing evaluation forms (51
-bugs @norec); TLP partitions on a predicate over SQL's ternary logic (77 bugs @tlp). Our
+synthesises a query guaranteed to contain a pivot row (121 total bugs across SQLite,
+MySQL, PostgreSQL @pqs); NoREC compares optimized against non-optimizing evaluation forms
+(51 optimization bugs @norec); TLP partitions on a predicate over SQL's ternary logic (77
+logic bugs @tlp). Our
 §3 is a re-derivation of TLP for a language whose third truth state is not a value, and
 our §4 adapts NoREC's rewrite through SPARQL's projection-error semantics.
 
@@ -581,7 +603,7 @@ methodology (§6.4).
 == Limitations and honest status <limitations>
 
 *This is a draft without campaign results.* The field's publishability bar for a testing
-paper is previously-unknown, developer-confirmed bugs in third-party systems (13–196
+paper is previously-unknown, developer-confirmed bugs in third-party systems (13–121
 across the cited papers); this draft claims _zero_ such bugs, because the campaign has
 not run. If the campaign yields too few substantive confirmations, the honest disposition
 — decided in advance — is to re-frame this work as an experience/negative-result note

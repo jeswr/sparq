@@ -1,6 +1,8 @@
 <!-- [OPUS-4.8] Design-for-review authored by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns. -->
 # Signed typed-value representations: removing in-circuit literal parsing from SPARQL-over-credentials proofs
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` library was externalized to the `sparq-org/noir_IEEE754` (v0.10.0) face repo and REMOVED from this repo; `zk/compose` now consumes the released `sparq_ieee754` as a pinned Nargo git dependency. Any `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the face repo. -->
+
 Design-for-maintainer-review record. NO production code lands here. This proposes
 a change to **what the issuer signs / what the commitment binds** so that the
 numeric-FILTER, relational-comparison, equality, and join relations in

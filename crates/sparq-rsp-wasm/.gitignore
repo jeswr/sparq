@@ -1,0 +1,6 @@
+# [FABLE-5] sq-qgkwy.2: wasm-pack build artifacts — generated, never committed (mirrors
+# crates/sparq-wasm/.gitignore, crates/sparq-reason-wasm/.gitignore and
+# crates/sparq-text-wasm/.gitignore, which sparq-rsp-wasm was missing). The bundle is
+# rebuilt from source by CI / the site deploy.
+/pkg
+/pkg-node

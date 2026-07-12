@@ -74,6 +74,38 @@ def test_http():
     except ValueError:
         check("http.non-bool-boolean-raises", True, True)
 
+    # [FABLE-5] sq-7d3dj.34: --profile helpers (the offline-testable half).
+    check(
+        "http.split_endpoint.plain",
+        http.split_endpoint("http://localhost:3030/ds/query"),
+        ("localhost", 3030, "/ds/query"),
+    )
+    check(
+        "http.split_endpoint.default-port+query",
+        http.split_endpoint("http://h/sparql?default-graph-uri=g"),
+        ("h", 80, "/sparql?default-graph-uri=g"),
+    )
+    check(
+        "http.split_endpoint.https-default",
+        http.split_endpoint("https://h/q"),
+        ("h", 443, "/q"),
+    )
+    try:
+        http.split_endpoint("ftp://h/x")
+        check("http.split_endpoint.non-http-raises", False, True)
+    except ValueError:
+        check("http.split_endpoint.non-http-raises", True, True)
+    check(
+        "http.format_profile_tsv",
+        http.format_profile_tsv(
+            "fuseki",
+            452,
+            {"best_us": 1200, "ttfb_us": 800, "reconnects": 0},
+            {"best_us": 1500, "ttfb_us": 1100},
+        ),
+        "fuseki\t452\t1200\t800\t1500\t1100",
+    )
+
 
 # --- vector recall scoring ---------------------------------------------------
 def test_vector():
@@ -249,12 +281,102 @@ def test_shacl():
     check("shacl.report.conforming.conforms", rc["conforms"], True)
 
 
+# --- vlog / nemo self-reported-materialization parsers ([FABLE-5] sq-hmd7l.32) ----
+# The materialize timing basis: both adapters prefer the engine's OWN loaded-graph
+# materialization figure over whole-process wall (which would include the .nt load
+# + closure export — an overstatement at LUBM(100) scale). These tests pin the parse
+# of the exact upstream formats (VLog src/launcher/main.cpp, nemo-cli v0.9.1
+# print_finished_message).
+def test_reason_parsers():
+    import nemo_adapter as nemo
+    import vlog_adapter as vlog
+
+    # VLog: ostream double — plain, fractional, and 6-sig-fig scientific forms.
+    check(
+        "vlog.parse.plain",
+        vlog.parse_materialize_us("... Runtime materialization = 227 milliseconds ..."),
+        227000.0,
+    )
+    check(
+        "vlog.parse.fractional",
+        vlog.parse_materialize_us("Runtime materialization = 226.885 milliseconds"),
+        226885.0,
+    )
+    check(
+        "vlog.parse.scientific",
+        vlog.parse_materialize_us("Runtime materialization = 1.23457e+06 milliseconds"),
+        1.23457e9,
+    )
+    # last occurrence wins; unrelated runtimes (total / pre-mat / store) never match.
+    multi = (
+        "Runtime pre-materialization = 5 milliseconds\n"
+        "Runtime materialization = 100 milliseconds\n"
+        "Runtime materialization = 90 milliseconds\n"
+        "Time to index and store the materialization on disk = 3 seconds\n"
+        "Runtime = 5000 milliseconds\n"
+    )
+    check("vlog.parse.last_of_multi", vlog.parse_materialize_us(multi), 90000.0)
+    check("vlog.parse.absent", vlog.parse_materialize_us("Runtime = 5000 milliseconds"), None)
+    check("vlog.parse.empty", vlog.parse_materialize_us(""), None)
+
+    # Nemo: the `Reasoning:` breakdown row (right-aligned ms), NOT the coloured
+    # "Reasoning completed in <total>ms" summary (that total includes import/export).
+    report = (
+        "Reasoning completed in \x1b[1;32m2650\x1b[0mms. Derived 47179 facts.\n"
+        "   Data import:      450ms\n"
+        "   Reasoning:       2100ms\n"
+        "   Data export:      100ms\n"
+    )
+    check("nemo.parse.breakdown", nemo.parse_reasoning_us(report), 2100000.0)
+    check(
+        "nemo.parse.no_export_row",
+        nemo.parse_reasoning_us("Reasoning completed in 10ms. Derived 1 facts.\n   Data import:   4ms\n   Reasoning:   6ms\n"),
+        6000.0,
+    )
+    check(
+        "nemo.parse.summary_only_is_absent",
+        nemo.parse_reasoning_us("Reasoning completed in 2650ms. Derived 47179 facts.\n"),
+        None,
+    )
+    check("nemo.parse.empty", nemo.parse_reasoning_us(""), None)
+
+
+def test_python_bindings():
+    # [FABLE-5] sq-hmd7l.18: the cross-engine row-count agreement gate + the
+    # binding-overhead column (python whole-call minus sparq-cli engine-internal).
+    # Stdlib-only: check_agreement takes parsed docs, no engine imports needed.
+    import python_rdf_adapter as pyb
+
+    def wdoc(engine, rows_q1, us_q1):
+        return {
+            "engine": engine,
+            "results": {"queries": [{"name": "q01", "rows": rows_q1, "min_us": us_q1}]},
+        }
+
+    cli = {"queries": [{"name": "q01", "rows": 5, "min_micros": 10.0}]}
+    ok, table = pyb.check_agreement([wdoc("sparq", 5, 17.5), wdoc("rdflib", 5, 900.0)], cli)
+    check("pyb.agree.ok", ok, True)
+    check("pyb.agree.rows", table[0]["rows"], 5)
+    approx("pyb.agree.overhead", table[0]["sparq_binding_overhead_us"], 7.5)
+
+    ok, table = pyb.check_agreement([wdoc("sparq", 5, 17.5), wdoc("rdflib", 4, 900.0)])
+    check("pyb.disagree.flagged", ok, False)
+    check("pyb.disagree.no_timing_row", table, [])  # invariant: no timing on disagreement
+
+    ok, _ = pyb.check_agreement(
+        [wdoc("sparq", 5, 17.5)], {"queries": [{"name": "q01", "error": "boom"}]}
+    )
+    check("pyb.cli_error.flagged", ok, False)
+
+
 def main():
     test_http()
     test_vector()
     test_pareto()
     test_beir()
     test_shacl()
+    test_reason_parsers()
+    test_python_bindings()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 

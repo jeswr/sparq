@@ -1,5 +1,7 @@
 # Trust-expression specification: the verifier-to-holder contract for framework-anchored attestation queries
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the `zk/xpath` tree was externalized to the `sparq-org/noir_XPath` (v0.2.0) face repo; its `KNOWN_FAILING` discipline (referenced below) now lives in that repo's CI. Any `zk/xpath/…` path below is a HISTORICAL in-tree reference. -->
+
 Status: **design-for-review decomposition record** (epic `sq-6syab`, issue
 [#1592](https://github.com/jeswr/sparq/issues/1592)). This record frames the
 maintainer's trust-expression directive against the built estate, makes the
@@ -74,7 +76,7 @@ over these verified surfaces, not a re-derivation:
 | RDF 1.2 triple terms | **Parsing merged; SPARQL surface NOT built** | `crates/sparq-core/src/nt.rs` (`triple_term`, object-position, depth-bounded); no `<<( … )>>` support in `crates/sparq-parse` (grep-verified 2026-07-05); design records `research/rdf12-parser.md`, `research/rdf12-indexing.md` |
 
 **What is genuinely missing** (the program's real delta): (i) a
-verifier-to-holder *contract* — today the trust envelope is implicit in
+verifier-to-holder *contract* — today the trust requirements are implicit in
 verifier-side Rust configuration (`RevocationPolicy`, trusted key sets), not an
 interchangeable RDF artifact; (ii) the **framework / certification-scope
 vocabulary layer** ("certified issuers within eIDAS/DIATF", "issued only what
@@ -133,23 +135,23 @@ mechanics rather than a caricature.
 
 ## 3. The contract — design decisions
 
-### 3.1 D1: the contract is ONE SPARQL query + ONE RDF trust envelope [FABLE-5]
+### 3.1 D1: the contract is ONE SPARQL query + ONE RDF trust-requirements document [FABLE-5]
 
 The verifier sends the holder exactly three things: a **SPARQL query** `Q`
 (ASK or SELECT; SPARQL 1.1-evaluable, SPARQL 1.2 surface where triple terms
-are matched), a **trust envelope** `E` (a small RDF graph in the
+are matched), a **trust-requirements document** `TR` (a small RDF graph in the
 trust-expression vocabulary), and a **nonce** (reusing the zkSPARQL
 challenge-response verbatim — no new freshness mechanism). The holder returns
 a **response dataset** `R`: the query answer plus, for every statement that
 contributed to it, machine-readable provenance (§4) sufficient for the
-verifier to re-check admissibility under `E` — and, on the ZK path, a
-zkSPARQL proof manifest whose trust anchors are *derived from* `E`.
+verifier to re-check admissibility under `TR` — and, on the ZK path, a
+zkSPARQL proof manifest whose trust anchors are *derived from* `TR`.
 
-There is **no new query syntax**. The trust conditions live in `E`, not in
-`Q`. The normative semantics of "evaluate `Q` under `E`" is defined by a
+There is **no new query syntax**. The trust conditions live in `TR`, not in
+`Q`. The normative semantics of "evaluate `Q` under `TR`" is defined by a
 **reference rewrite**: `Q` over the trust-scoped dataset ≜ a plain SPARQL
 query `Q'` over the provenance-encoded response form, where `Q'` conjoins
-`Q`'s patterns with the admissibility patterns generated from `E` (issuer
+`Q`'s patterns with the admissibility patterns generated from `TR` (issuer
 membership, status-attestation validity at time *t*, scope conformance). This
 is what makes the spec "pure SPARQL": the contract's meaning is *checkable by
 any conformant SPARQL engine* running `Q'` over `R` — which is also the
@@ -158,28 +160,28 @@ literally, an ASK.
 
 Rejected alternatives: new SPARQL keywords / magic `SERVICE` IRIs (not pure
 SPARQL; every engine forks); embedding trust conditions inside `Q` by hand
-(pushes the hard part onto every verifier and makes envelopes non-reusable);
+(pushes the hard part onto every verifier and makes trust-requirements documents non-reusable);
 a bespoke JSON request object (duplicates what RDF already does — the
-envelope should itself be data the estate's reasoners can consume).
+trust-requirements document should itself be data the estate's reasoners can consume).
 
-### 3.2 D2: two trust modes, one envelope shape [FABLE-5]
+### 3.2 D2: two trust modes, one trust-requirements shape [FABLE-5]
 
-Mode 1 — **enumerated parties**: `E` lists issuer identities (DID/key
+Mode 1 — **enumerated parties**: `TR` lists issuer identities (DID/key
 binding reuses `sq-pfae.3`'s did:key/did:web work):
 
 ```turtle
-[] a trustx:TrustEnvelope ;
-   trustx:question   <urn:q1> ;             # binds E to Q
+[] a trustx:TrustRequirements ;
+   trustx:question   <urn:q1> ;             # binds TR to Q
    trustx:trustsIssuer <did:web:x.example>, <did:web:y.example>, <did:web:z.example> ;
    trustx:requiresValidStatusAt "2026-07-05T00:00:00Z"^^xsd:dateTime .
 ```
 
-Mode 2 — **framework-certified issuers**: `E` names a framework and requires
-scope conformance; the two modes compose with plain OR (two envelopes, or one
-envelope with both, per the maintainer's "OR" phrasing):
+Mode 2 — **framework-certified issuers**: `TR` names a framework and requires
+scope conformance; the two modes compose with plain OR (two trust-requirements documents, or one
+document with both, per the maintainer's "OR" phrasing):
 
 ```turtle
-[] a trustx:TrustEnvelope ;
+[] a trustx:TrustRequirements ;
    trustx:question <urn:q1> ;
    trustx:trustsFramework trustx:eIDAS2 ;    # rdfs:seeAlso the sec-req: individual
    trustx:requiresScopeConformance true ;
@@ -237,20 +239,20 @@ constants like `trust.ttl`/`vocab.rs` and `secprop-ext.ttl`/`secprop.rs`):
 
 - **ODRL / secprop** (`sq-0dksu`): orthogonal axes — the secprop/ODRL
   admissibility pre-check decides which *proof methods* are acceptable; the
-  trust envelope decides which *sources* are. `E` may carry an optional
+  trust requirements decide which *sources* are. `TR` may carry an optional
   `trustx:methodPolicy` pointing at an ODRL policy consumed by the existing
   `admissible()` path; the spec normatively references, and does not restate,
   that machinery.
 - **PROV**: the response encoding (§4) uses PROV-O qualification terms on
   reifiers; citation chains reuse the vendored `prov-ext:` pattern.
-- **MPC** (attested-source derivation): in the federated case the trust
-  envelope is precisely the generator of the trusted key set `K` that
+- **MPC** (attested-source derivation): in the federated case the
+  trust-requirements document is precisely the generator of the trusted key set `K` that
   `bind_issuer_attestations` / the M4-v1 verifier-side attestation gate
   (`sq-f7bu`, gated `sq-34ml`) consume — mode 1 enumerates `K`; mode 2
   derives `K` from framework certifications. No new MPC surface is designed
   here; MPC remains semi-honest, stated wherever mentioned.
 - **zkSPARQL**: the ZK realization of the contract is a zkSPARQL manifest
-  whose trust anchors are derived from `E`. Already-merged pieces map
+  whose trust anchors are derived from `TR`. Already-merged pieces map
   directly: issuer binding (mode 1), hidden-issuer set membership over `K`
   (mode 2 with issuer privacy), committed-index non-revocation (§3.3). The
   genuinely NEW zk work is **certification-scope binding** (proving the
@@ -318,7 +320,7 @@ classes, all derived from §3's semantics, every negative case fail-closed:
 2. Revoked: status bit set at the authoritative snapshot → no admissible
    binding (answer absent, never "false because revoked").
 3. Stale window: status attestation exists but does not cover *t* → reject.
-4. Untrusted issuer: signature valid, issuer not in `E` → reject.
+4. Untrusted issuer: signature valid, issuer not in `TR` → reject.
 5. Mode 2 pass: issuer certified under the framework, scope-conformant.
 6. Scope violation: certified issuer, contributing statement outside
    `trustx:scope` → reject (the "only issued what certified to issue" case).
@@ -348,7 +350,7 @@ conformance-honesty discipline).
 4. **Freshness/caching trade-off.** Status attestations have validity
    windows (the ARF itself advises fetch-once distribution); a revocation
    inside the window is invisible until the next status attestation. The
-   window is a verifier-chosen parameter in `E`, not a spec constant.
+   window is a verifier-chosen parameter in `TR`, not a spec constant.
 5. **SPARQL 1.2 engine gap.** The normative encoding leans on RDF 1.2
    reifiers; sparq parses triple terms but cannot query them yet. Named in
    §4; the (b)-mapping keeps every conformance case runnable today.
@@ -370,8 +372,8 @@ directive; spec/vocabulary/fixture authoring proceeds now.
 | `sq-6syab.1` | Spec document: `site/specs/trust-expression.typ` + `specs.ts` entry — contract, two modes, positive non-revocation, scope layer, normative (a) + informative (b) encodings, Security Considerations §7 | `site/specs/trust-expression.typ`, `site/src/data/specs.ts` | opus | privacy-claims gate passes; every estate reference cites the crate item; no unqualified soundness claim | `cd site && npm run build` (build-specs.mjs honesty gates) + `node --test scripts/specs.test.mjs` |
 | `sq-6syab.2` | Vocabulary layer: `trust-framework.ttl` (`trustx:` terms §3.4) + Rust constants module + ttl↔Rust sync test | `crates/sparq-trust/ontologies/trust/trust-framework.ttl`, `crates/sparq-trust/src/framework_vocab.rs`, `src/lib.rs` (mod line) | sonnet | extends `trust:`/`sec-req:` (no fork, no duplicate IRIs); every term carries the NON-STANDARD banner; ttl byte-pinned to constants | `cargo test -p sparq-trust framework_vocab` |
 | `sq-6syab.3` | Conformance suite data: manifest + fixtures + expected outcomes (§6 cases 1–8) + fixture well-formedness test | `crates/sparq-trust/tests/trust-expression/**`, `crates/sparq-trust/tests/trust_expression_fixtures.rs` | sonnet | every negative case encodes fail-closed rejection; zero unbeaded KNOWN_FAILING | `cargo test -p sparq-trust --test trust_expression_fixtures` |
-| `sq-6syab.4` | Holder-side contract evaluation (clear path): envelope parsing, §3.1 reference rewrite, scoped evaluation via sparq-engine, provenance-encoded response assembly | `crates/sparq-trust/src/expression.rs` (new module only) | opus | fail-closed: no admissible derivation ⇒ no binding; response provenance sufficient for independent verifier re-check (`Q'` over `R`) | `cargo test -p sparq-trust expression` |
-| `sq-6syab.5` | ZK composition: derive zkSPARQL trust anchors from `E`; certification-scope binding design+impl on the manifest/verifier path (mode 2 in zero knowledge) | `crates/sparq-zk-compose/src/**` (single-crate bead) | opus (**maintainer-arm — ZK-soundness-sensitive**) | fail-closed verifier obligations; spec-conformance phrasing only — NO soundness/privacy claim while `sq-qhy4` open | `cargo test -p sparq-zk-compose` (incl. new forge gates for scope binding) |
+| `sq-6syab.4` | Holder-side contract evaluation (clear path): trust-requirements parsing, §3.1 reference rewrite, scoped evaluation via sparq-engine, provenance-encoded response assembly | `crates/sparq-trust/src/expression.rs` (new module only) | opus | fail-closed: no admissible derivation ⇒ no binding; response provenance sufficient for independent verifier re-check (`Q'` over `R`) | `cargo test -p sparq-trust expression` |
+| `sq-6syab.5` | ZK composition: derive zkSPARQL trust anchors from `TR`; certification-scope binding design+impl on the manifest/verifier path (mode 2 in zero knowledge) | `crates/sparq-zk-compose/src/**` (single-crate bead) | opus (**maintainer-arm — ZK-soundness-sensitive**) | fail-closed verifier obligations; spec-conformance phrasing only — NO soundness/privacy claim while `sq-qhy4` open | `cargo test -p sparq-zk-compose` (incl. new forge gates for scope binding) |
 | `sq-6syab.6` | Conformance runner (semantics): drive `sq-6syab.4`'s API over the `sq-6syab.3` manifest; wire as the suite sparq must fully pass (maintainer-namespace rule) | `crates/sparq-trust/tests/trust_expression_conformance.rs` (single file) | sonnet | ALL manifest cases pass; zero unbeaded KNOWN_FAILING | `cargo test -p sparq-trust --test trust_expression_conformance` |
 | `sq-6syab.7` | Integration paper: how the spec composes with ODRL + PROV + MPC + zkSPARQL, perf analysis (canonical evidence only) + security analysis under `sq-qhy4` discipline | `site/papers/trust-expression-integration.typ`, `site/src/data/papers.ts` | opus | paper-factory honesty gates pass; no non-canonical number; audit-pending caveat prominent | `cd site && npm run build` (build-papers.mjs honesty gate) |
 

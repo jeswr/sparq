@@ -8,6 +8,9 @@ use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+
+mod facets;
+pub use facets::{facets, FacetRequest, FacetResponse, PredicateValues};
 use sparq_core::dict::{self, Id, TermParts, INLINE_BASE};
 use sparq_core::Graph;
 

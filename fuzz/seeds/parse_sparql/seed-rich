@@ -1,0 +1,5 @@
+PREFIX ex: <http://ex/>
+SELECT ?g (COUNT(?s) AS ?c) (GROUP_CONCAT(?n; SEPARATOR=",") AS ?ns) WHERE {
+  GRAPH ?g { ?s ex:name ?n . BIND(STRLEN(?n) AS ?l) VALUES ?n { "a" "b" } }
+  { SELECT ?s WHERE { ?s (ex:p|ex:q)/ex:r? ?t } LIMIT 5 }
+} GROUP BY ?g HAVING (COUNT(?s) > 1)

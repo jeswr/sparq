@@ -531,27 +531,50 @@ impl AuthIndex {
         if am_triples(&self.deny, origin) != am_triples(&other.deny, origin) {
             return false;
         }
-        // Compare conditional grants: canonical string per grant (sorted except list),
-        // collected as a set to be order-independent.
-        fn cond_key(g: &ConditionalGrant) -> String {
+        // Compare conditional grants: canonical STRUCTURED key per grant (sorted except
+        // list), collected as a set to be order-independent.
+        //
+        // [FABLE-5] sq-vhhl0 (PR #1585 re-review follow-up): the key was previously a
+        // `|`/`,`-joined `format!` string, which is NOT injective — a comma is a legal
+        // IRI character, so two distinct except-vectors could canonicalize identically
+        // (`["a,b"]` vs `["a", "b"]`), letting `bucket_eq` report two genuinely different
+        // conditional-grant sets as equal (an under-invalidation of the session cache;
+        // not privilege-escalating — only the ACL author's own write could trigger it,
+        // and only towards a state that author previously wrote). A structured tuple is
+        // injective BY CONSTRUCTION: there is no separator to smuggle, and it also
+        // distinguishes `graph: None` from an empty-IRI target the old string folded
+        // into the same `""`. Strictly finer than (or equal to) the old key — equal
+        // tuples imply equal fields imply the old strings were equal too — so the change
+        // can only ADD cache invalidation, never lose any.
+        type CondKey = (
+            bool,           // allow
+            Option<Mode>,   // mode
+            String,         // agent
+            String,         // client
+            String,         // issuer
+            Option<String>, // target graph IRI
+            Option<String>, // not_before
+            Option<String>, // not_after
+            Vec<String>,    // except matcher IRIs, sorted
+        );
+        fn cond_key(g: &ConditionalGrant) -> CondKey {
             let mut ex = g.except.clone();
             ex.sort_unstable();
-            format!(
-                "{}|{:?}|{}|{}|{}|{}|{:?}|{:?}|{}",
-                g.allow as u8,
+            (
+                g.allow,
                 g.mode,
-                g.agent,
-                g.client,
-                g.issuer,
-                g.graph.as_ref().map_or("", |n| n.as_str()),
-                g.not_before,
-                g.not_after,
-                ex.join(",")
+                g.agent.clone(),
+                g.client.clone(),
+                g.issuer.clone(),
+                g.graph.as_ref().map(|n| n.as_str().to_owned()),
+                g.not_before.clone(),
+                g.not_after.clone(),
+                ex,
             )
         }
-        let self_conds: FxHashSet<String> =
+        let self_conds: FxHashSet<CondKey> =
             self.cond.get(origin).into_iter().flatten().map(cond_key).collect();
-        let other_conds: FxHashSet<String> =
+        let other_conds: FxHashSet<CondKey> =
             other.cond.get(origin).into_iter().flatten().map(cond_key).collect();
         self_conds == other_conds
     }
@@ -1053,5 +1076,89 @@ mod origin_partition_tests {
         assert!(!ix.accessible_in_origin(&alice, Mode::Read, "https://a.ex").is_empty());
         assert!(ix.accessible_in_origin(&alice, Mode::Read, "https://b.ex").is_empty());
         assert!(ix.accessible_in_origin(&alice, Mode::Read, "https://never.ex").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bucket_eq_tests {
+    //! [FABLE-5] sq-vhhl0 — injectivity of the conditional-grant canonical key used by
+    //! `bucket_eq` (the diff-based session-cache invalidation seam, sq-b7k7u). The old
+    //! key joined the sorted except-matcher IRIs with `,` inside a formatted string; a
+    //! comma is a legal IRI character, so `except: ["urn:m:a,urn:m:b"]` (ONE matcher
+    //! whose IRI contains a comma) and `except: ["urn:m:a", "urn:m:b"]` (TWO matchers)
+    //! canonicalized to the SAME key — `bucket_eq` then reported two genuinely different
+    //! grant sets as equal and `reindex_with` skipped the re-derivation for that origin
+    //! (under-invalidation; not privilege-escalating, see the `cond_key` comment). The
+    //! structured tuple key must keep them distinct.
+    use super::*;
+
+    const ORIGIN: &str = "https://pod.ex";
+
+    /// A fixed conditional grant whose `except` list is the only varying dimension.
+    fn grant(except: &[&str]) -> ConditionalGrant {
+        ConditionalGrant {
+            allow: true,
+            agent: "https://alice.ex/card#me".to_owned(),
+            client: "auth:AnyClient".to_owned(),
+            issuer: "auth:AnyIssuer".to_owned(),
+            mode: Some(Mode::Read),
+            graph: Some(NamedNode::new("https://pod.ex/notes/n1").expect("valid IRI")),
+            except: except.iter().map(|s| (*s).to_owned()).collect(),
+            not_before: None,
+            not_after: None,
+        }
+    }
+
+    /// An index whose only content is `grants` in `ORIGIN`'s conditional bucket.
+    fn index_with(grants: Vec<ConditionalGrant>) -> AuthIndex {
+        let mut cond: FxHashMap<String, Vec<ConditionalGrant>> = FxHashMap::default();
+        cond.insert(ORIGIN.to_owned(), grants);
+        AuthIndex {
+            allow: FxHashMap::default(),
+            deny: FxHashMap::default(),
+            cond,
+            matcher_agents: FxHashMap::default(),
+            matcher_clients: FxHashMap::default(),
+            matcher_issuers: FxHashMap::default(),
+        }
+    }
+
+    /// REGRESSION (sq-vhhl0): except bracketing must be distinguished — ONE matcher IRI
+    /// containing a comma is NOT the same grant as TWO matchers joined by that comma.
+    /// Under the old `ex.join(",")` string key both sides canonicalized identically and
+    /// this assertion failed (mutation witness: revert `cond_key` to the string form and
+    /// this test goes red).
+    #[test]
+    fn except_bracketing_is_distinguished() {
+        let one_matcher = index_with(vec![grant(&["urn:m:a,urn:m:b"])]);
+        let two_matchers = index_with(vec![grant(&["urn:m:a", "urn:m:b"])]);
+        assert!(
+            !one_matcher.bucket_eq(&two_matchers, ORIGIN),
+            "distinct except-vectors (bracketing differs) must compare UNEQUAL — a false \
+             equal here means reindex_with under-invalidates the session cache"
+        );
+    }
+
+    /// Control: the collision fixture compares EQUAL when the grants really are equal —
+    /// so `except_bracketing_is_distinguished` fails for the right reason (the key), not
+    /// because the fixture differs elsewhere.
+    #[test]
+    fn identical_grants_compare_equal() {
+        let a = index_with(vec![grant(&["urn:m:a", "urn:m:b"])]);
+        let b = index_with(vec![grant(&["urn:m:a", "urn:m:b"])]);
+        assert!(a.bucket_eq(&b, ORIGIN), "identical conditional grants must compare equal");
+    }
+
+    /// Control: canonicalization properties the tuple key must PRESERVE from the old key —
+    /// except-list order-independence (the list is sorted before keying) and grant
+    /// order-independence (the keys are collected into a set).
+    #[test]
+    fn except_order_and_grant_order_stay_canonical() {
+        let forward = index_with(vec![grant(&["urn:m:a", "urn:m:b"]), grant(&["urn:m:c"])]);
+        let reversed = index_with(vec![grant(&["urn:m:c"]), grant(&["urn:m:b", "urn:m:a"])]);
+        assert!(
+            forward.bucket_eq(&reversed, ORIGIN),
+            "except order + grant order must stay canonical"
+        );
     }
 }

@@ -31,8 +31,12 @@ const added = Reasoner.entailed(turtle, "turtle", "owl-rl");
 // Base vs entailed counts, without serialising the closure:
 const { baseTriples, closureTriples, entailed } =
   JSON.parse(Reasoner.materializeStats(turtle, "turtle", "rdfs"));
-// Notation3 rule reasoning ({ … } => { … }):
+// Notation3 rule reasoning ({ … } => { … }) — the full ground closure:
 const derived = Reasoner.reasonN3(n3);
+// eye-js-compat: the newly-derived triples only (EYE --pass-only-new), and the
+// query filter (EYE --query, a CONSTRUCT over the closure). See @sparq-org/eyereasoner-compat.
+const onlyNew = Reasoner.reasonN3New(n3);
+const selected = Reasoner.reasonN3Query(dataN3, queryN3);
 ```
 
 ## ✨ Features
@@ -43,12 +47,19 @@ const derived = Reasoner.reasonN3(n3);
   default graph). Output is canonical N-Triples (a valid Turtle subset), serialised
   through the engine's tested CONSTRUCT path — this bundle owns no
   term-serialisation code of its own.
+- **eye-js migration entry points.** `Reasoner.reasonN3New(n3)` returns only the
+  newly-derived ground triples (the EYE `--pass-only-new` delta); `Reasoner.reasonN3Query(data,
+  query)` materialises the closure of `data` then evaluates the N3 query rule(s) as a SPARQL
+  `CONSTRUCT` over it (the EYE `--query` filter), failing closed on query builtins/formulae/
+  lists/quoted-triple terms. These back the `@sparq-org/eyereasoner-compat` npm package (the drop-in eye-js API).
 - **`why()` proof trees — opt-in `explain` feature.** Built with `--features explain`,
   the bundle also exposes the derivation **proof tree** for a single entailed triple
-  via `Reasoner.why(...)`, returning `sparq-reason`'s flat,
-  premises-before-conclusion `ProofTree::to_json` shape (leaves are `"asserted"`
-  base facts; internal nodes name the rule that fired) — **one** derivation (the
-  first in deterministic search order), or `null` if not entailed. `explain` is OFF
+  via `Reasoner.why(...)` (RDFS / OWL 2 RL) and `Reasoner.whyN3(...)` (N3 rules,
+  over the same combined rules+facts document `reasonN3` consumes), returning
+  `sparq-reason`'s flat, premises-before-conclusion `ProofTree::to_json` shape
+  (leaves are `"asserted"` base facts; internal nodes name the rule that fired —
+  `n3-rule-<i>` for N3) — **one** derivation (the first in deterministic search
+  order), or `null` if not entailed. `explain` is OFF
   by default, so the standard bundle carries zero proof-tree code; CI builds and
   tests the bundle in BOTH feature states.
 - **Single-threaded + pure-Rust.** No `rayon` in the bundle. The reasoner's `regex`

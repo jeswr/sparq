@@ -112,3 +112,14 @@ required-features = ["query"]
 name = "validate-pkg"
 path = "src/bin/validate_pkg.rs"
 required-features = ["validate"]
+
+# The `literature-pilot` binary (sq-tzars.9): the hard-capped, DRY-RUN-FIRST literature
+# ingestion pilot loop — networked/subprocess wiring only; the iteration protocol
+# (prereg bar → fail-stop caps → append-only sidecar → audit → verdict → maintainer-armed
+# live-emit gate) is enforced in `literature::pilot` and tested with ZERO network and
+# ZERO live-model calls. `required-features` keeps it out of every default build; build
+# additionally with `validate` so the run's SHACL leg is real. [FABLE-5] sq-tzars.9
+[[bin]]
+name = "literature-pilot"
+path = "src/bin/literature_pilot.rs"
+required-features = ["literature-live"]

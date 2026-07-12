@@ -164,8 +164,10 @@ pub fn detect_conflicts(policy: &Policy) -> Vec<Conflict> {
 /// no `odrl:conflict` at all (the bridge's operative default is deny-overrides — the one
 /// strategy it implements). An unset default is treated as `prohibit`, **not** the ODRL
 /// spec default of `invalid`: fully honouring `invalid` for every conflicting-yet-
-/// undeclared policy would refuse the bridge's core deny-overrides use case, a larger
-/// breaking change tracked as a follow-up. See the crate README for the honest boundary.
+/// undeclared policy would refuse the bridge's core deny-overrides use case. This
+/// divergence is deliberate and documented (issue #1375, decided: keep deny-overrides —
+/// fail-closed, never authorises what a prohibition forbids). See the crate README's
+/// ODRL conformance note for the honest boundary.
 ///
 /// # Examples
 ///
@@ -467,7 +469,18 @@ fn outer_admits_value(v: &Value, oc: &Constraint) -> bool {
     match oc.operator {
         Operator::Eq | Operator::IsA => value_eq(v, &oc.right),
         Operator::Neq => !value_eq(v, &oc.right),
-        Operator::IsPartOf => is_part_of(v, &oc.right),
+        // `isAnyOf` is the same set-membership relation as `isPartOf` in the flat
+        // single-value case ([FABLE-5] sq-uaz85).
+        Operator::IsPartOf | Operator::IsAnyOf => is_part_of(v, &oc.right),
+        // An outer `isNoneOf S` provably admits `v` only when `v` is a string/IRI
+        // value demonstrably NOT in the set — a numeric/dateTime `v` (no faithful
+        // lexical set form) is never *claimed* admitted (sound: `false` here only
+        // means "not proven", degrading the verdict, never over-claiming).
+        Operator::IsNoneOf => {
+            matches!(v, Value::Iri(_) | Value::Str(_))
+                && matches!(&oc.right, Value::Iri(_) | Value::Str(_))
+                && !is_part_of(v, &oc.right)
+        }
         Operator::Lt => order_lt(v, &oc.right),
         Operator::Lteq => order_le(v, &oc.right),
         Operator::Gt => order_lt(&oc.right, v),

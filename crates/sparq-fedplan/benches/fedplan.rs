@@ -13,11 +13,20 @@
 //!   3-pattern BGP with varying numbers of descriptors.
 //! - `plan_bgp` — bind-vs-hash join planning over the selected sources.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+// [OPUS-4.8] criterion 0.8 deprecated its own black_box in favour of std::hint::black_box.
 use sparq_fedplan::{
     plan_bgp, select_sources, Bgp, PlanOptions, PredPartition, SourceDescriptor, SourceId, Term,
     TriplePattern, Var,
 };
+use std::hint::black_box;
+
+// [GPT-5.6] sq-ioeih: distinct Criterion paths let the two feature-state runs
+// retain separate baselines while exercising the identical fixed corpus.
+#[cfg(feature = "foldhash-maps")]
+const HASHER: &str = "foldhash";
+#[cfg(not(feature = "foldhash-maps"))]
+const HASHER: &str = "fxhash";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,11 +35,9 @@ use sparq_fedplan::{
 /// Build a `SourceDescriptor` with `n_predicates` predicates, each with `triples`
 /// triples. The source id is derived from the index so each is distinct.
 fn make_source(idx: usize, n_predicates: usize, triples_per_pred: u64) -> SourceDescriptor {
-    let mut b = SourceDescriptor::builder(SourceId::new(format!(
-        "https://s{}.example/sparql",
-        idx
-    )))
-    .total_triples(n_predicates as u64 * triples_per_pred);
+    let mut b =
+        SourceDescriptor::builder(SourceId::new(format!("https://s{}.example/sparql", idx)))
+            .total_triples(n_predicates as u64 * triples_per_pred);
     for p in 0..n_predicates {
         b = b.predicate(PredPartition {
             predicate: format!("https://ex.example/p{}", p),
@@ -71,12 +78,11 @@ fn chain_bgp() -> Bgp {
 fn bench_select_sources(c: &mut Criterion) {
     let mut group = c.benchmark_group("select_sources");
     for n_sources in [1usize, 3, 10] {
-        let sources: Vec<SourceDescriptor> = (0..n_sources)
-            .map(|i| make_source(i, 5, 10_000))
-            .collect();
+        let sources: Vec<SourceDescriptor> =
+            (0..n_sources).map(|i| make_source(i, 5, 10_000)).collect();
         let bgp = chain_bgp();
         group.bench_with_input(
-            BenchmarkId::new("n_sources", n_sources),
+            BenchmarkId::new(format!("{HASHER}/n_sources"), n_sources),
             &n_sources,
             |b, _| {
                 b.iter(|| {
@@ -97,14 +103,13 @@ fn bench_select_sources(c: &mut Criterion) {
 fn bench_plan_bgp(c: &mut Criterion) {
     let mut group = c.benchmark_group("plan_bgp");
     for n_sources in [1usize, 3, 10] {
-        let sources: Vec<SourceDescriptor> = (0..n_sources)
-            .map(|i| make_source(i, 5, 10_000))
-            .collect();
+        let sources: Vec<SourceDescriptor> =
+            (0..n_sources).map(|i| make_source(i, 5, 10_000)).collect();
         let bgp = chain_bgp();
         let selection = select_sources(&bgp, &sources);
         let opts = PlanOptions::default();
         group.bench_with_input(
-            BenchmarkId::new("n_sources", n_sources),
+            BenchmarkId::new(format!("{HASHER}/n_sources"), n_sources),
             &n_sources,
             |b, _| {
                 b.iter(|| {

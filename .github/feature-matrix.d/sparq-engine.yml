@@ -28,6 +28,15 @@
   features: "zk"
   test: true
 
+# [FABLE-5] sq-7d3dj.32.2.7: runs the SPQCPRM2 format-migration cross-version storage
+# differentials (v2_saved_store_is_query_equivalent_to_v1 / cross_version_resave_round_trips_
+# losslessly) through the real save_compressed → open → query path in V2 emit mode. `spqcprm2`
+# forwards to sparq-core/spqcprm2 (which implies mmap), so the store/open paths compile.
+- name: "sparq-engine (spqcprm2)"
+  crate: "sparq-engine"
+  features: "spqcprm2"
+  test: true
+
 # [OPUS-4.8] (sq-6vshe.4) Seam A2: the `service` MODULE + its in-src unit tests moved to the
 # internal sparq-engine-service sub-crate (see .github/feature-matrix.d/sparq-engine-service.yml).
 # This engine leg STAYS (unlike the serialize legs, which fully moved) because it still runs the
@@ -203,6 +212,36 @@
   features: "yannakakis"
   test: true
 
+# [FABLE-5] sq-7d3dj.30.14 (#1787): the `cluster-materialize` opt-in planner path gates ALL
+# of its code (`src/cluster.rs`, the `eval_bgp_binary` hook + `eval_bgp_cluster` in exec.rs)
+# and its tests — 6 in-src `cluster::tests` unit tests + the whole-file result-equivalence
+# suite `tests/cluster_materialize_differential.rs` (which drives the REAL `eval_bgp_cluster`
+# via the doc-hidden `with_test_thresholds` hook) — behind `#[cfg(feature = "cluster-materialize")]`.
+# Without this leg the feature-ON tests (the ONLY CI executions of the cluster path) run ZERO
+# times. No new dep (`cluster-materialize = []`, only the already-direct sparq-core + rustc-hash;
+# no `unsafe`); the off path compiles the module away and is byte-identical, so a single isolated
+# leg covers it. Verified `cargo test -p sparq-engine --features cluster-materialize` runs the
+# suite and `cargo clippy -p sparq-engine --all-targets --features cluster-materialize -- -D warnings`
+# is clean.
+- name: "sparq-engine (cluster-materialize)"
+  crate: "sparq-engine"
+  features: "cluster-materialize"
+  test: true
+
+# sq-7d3dj.30.1 (#1735): the `algebra-rewrite` opt-in pass gates ALL of its unit tests
+# (11 in `src/rewrite.rs`, incl. the soundness revert-witnesses
+# `certain_vars_group_excludes_aggregate_output` + the anti-join decline tests) and the
+# whole-file e2e result-equivalence suite `tests/rewrite_pass.rs` behind
+# `#[cfg(feature = "algebra-rewrite")]` — without this leg they run ZERO times in CI
+# (ci.yml's --all-features lanes are clippy/rustdoc only). Reviewer-required leg (Fable
+# verdict on #1735): the regression witness for a previously-caught unsoundness must sit
+# in a gate, not a one-time local run. No new dep (`algebra-rewrite = []`), feature-OFF
+# path byte-identical (cfg-split PreparedQuery::parse).
+- name: "sparq-engine (algebra-rewrite)"
+  crate: "sparq-engine"
+  features: "algebra-rewrite"
+  test: true
+
 # [OPUS-4.8] sq-iywur: opt-in DPccp dynamic-programming join-order enumerator. The whole
 # `dp` module (`src/dp.rs`, `pub mod dp` in lib.rs — the DPccp csg-cmp-pair enumerator, the
 # `with_dp_planner`/`with_dp_planner_budget` per-thread install, `QueryGraph`/`JoinTree`)
@@ -221,4 +260,90 @@
 - name: "sparq-engine (dp-planner)"
   crate: "sparq-engine"
   features: "dp-planner"
+  test: true
+
+# [FABLE-5] sq-7d3dj.30.7: the `value-join` opt-in equality-FILTER → value-join
+# pass gates ALL of its tests behind `#[cfg(feature = "value-join")]` — the in-src
+# differential suite (`exec::eqjoin::tests`: per-term-class kill-switch
+# differentials incl. the sq-lr2ii high-precision-decimal witness, decline witnesses
+# with a FIRED anti-vacuity counter, direct unit tests for `key_of`/`expr_total`/
+# `pattern_components`) and the e2e acceptance suite `tests/eqjoin_value_join.rs`
+# (q05a-shape row-identity vs an independent `!(?a != ?b)` oracle + the q12a ASK twin).
+# Without this leg they run ZERO times in CI (ci.yml's --all-features lanes are
+# clippy/rustdoc only). No new dep (`value-join = []`); feature-OFF path byte-identical
+# (the module does not compile, the conjunctive arm is the verbatim pre-pass body).
+- name: "sparq-engine (value-join)"
+  crate: "sparq-engine"
+  features: "value-join"
+  test: true
+
+# [FABLE-5] sq-7d3dj.30.11 (#1785): the `id-filter-fastpath` opt-in id-level `=`/`!=`
+# FILTER fast path gates ALL 19 of its tests behind
+# `#[cfg(all(test, feature = "id-filter-fastpath"))]` — the `idfast_unit` module in
+# exec.rs (the load-bearing differential suite that pairs EVERY id kind — IRIs, bnodes,
+# numeric-promotion pairs, language-tagged, ill-typed literals — and asserts the fast
+# verdict equals the exact `term_of` + `values_equal` oracle row-for-row, plus the static
+# non-literal analysis witnesses, the `equal_idfast` edge cases, the q08-shape e2e query,
+# the EXISTS-re-entry column-set-leak regression test, and the non-vacuity mutation check).
+# Without this leg they run ZERO times in CI (ci.yml's `--workspace --all-targets` archive
+# passes NO `--features`, and its `--all-features` lanes are clippy/rustdoc only) — the
+# silent "compiled EMPTY ... tests never ran" gap this lane closes. No new dep
+# (`id-filter-fastpath = []`, only the already-direct sparq-core + rustc-hash; no `unsafe`).
+# Verified `cargo nextest list -p sparq-engine --features id-filter-fastpath` shows the 19
+# `idfast_unit` tests and `cargo test -p sparq-engine --features id-filter-fastpath` runs
+# them green. (The feature-OFF path is NOT byte-identical to base — an always-compiled
+# EXISTS-re-entry refactor moved bytes, declared in bench/feature-off-declarations/1785.json —
+# but is behaviour-identical.)
+- name: "sparq-engine (id-filter-fastpath)"
+  crate: "sparq-engine"
+  features: "id-filter-fastpath"
+  test: true
+
+# [OPUS-4.8] sq-7d3dj.30.20: the `antijoin-static-decline` opt-in fix gates ALL of its code
+# (the static early-decline gate + `cond_has_seedable_correlation` in exec.rs and the
+# `EARLY_DECLINED`/`record_early_decline`/`early_declined` test-stat surface) behind
+# `#[cfg(feature = "antijoin-static-decline")]`, so the default build (and ci.yml's
+# `--workspace --all-targets` archive, which passes NO `--features`) compiled them EMPTY.
+# The whole-file result-equivalence + non-vacuity suite
+# `tests/antijoin_static_decline_differential.rs` runs its equivalence + mutation tests in
+# BOTH states (to prove on==off), but its non-vacuity test
+# (`early_decline_fires_on_q07_not_on_q06`, asserting the gate FIRES on the bare-`!bound` q07
+# shape and NOT on the correlated q06 shape) is `#[cfg(feature = "antijoin-static-decline")]`
+# and runs ZERO times without this leg — the silent gap this lane closes. No new dep
+# (`antijoin-static-decline = []`, only the already-direct oxrdf/spargebra + rustc-hash; no
+# `unsafe`) and no `not(feature=…)` divergence (the off path is byte-identical), so a single
+# isolated leg covers it; verified `cargo test -p sparq-engine --features antijoin-static-decline`
+# runs the suite green and `cargo clippy -p sparq-engine --all-targets --features
+# antijoin-static-decline -- -D warnings` is clean.
+- name: "sparq-engine (antijoin-static-decline)"
+  crate: "sparq-engine"
+  features: "antijoin-static-decline"
+  test: true
+
+# [FABLE-5] sq-lsp7k.10: named parameterized SPARQL templates — the shared definition +
+# typed-JSON-binding layer (`templates` module: `Template::new/from_json/to_json/bind_json`,
+# `ParamType`, `Bound::{is_update,is_graph_form,render}`) behind the server's `/templates`
+# REST surface and the MCP `template_invoke` tool. `templates = ["params", "dep:serde_json"]`
+# — everything is `#[cfg(feature = "templates")]`, so the default build compiles it EMPTY and
+# runs ZERO of the 12 `templates::tests::*` unit tests (incl. the fail-closed
+# unknown/missing/mistyped-parameter contracts and the #901 injection-through-the-template
+# scenario); this leg closes that gap. serde_json is already the crate's dev-dependency
+# (workspace-ubiquitous), so the leg pulls no new crate.
+- name: "sparq-engine (templates — named parameterized templates over params)"
+  crate: "sparq-engine"
+  features: "templates"
+  test: true
+
+# [FABLE-5] (sq-lsp7k.3.1, PR #2007): programmatic full-path enumeration over one
+# predicate (`paths` module: `enumerate_paths`, `PathSpec`, `PathMode`, `PathSolution`).
+# `paths = []` — dependency-free, OFF by default; the whole module (`pub mod paths` in
+# lib.rs) and the whole-file suite `tests/paths_core.rs` (`#![cfg(feature = "paths")]`)
+# are `#[cfg(feature = "paths")]`, so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiles them EMPTY and runs
+# ZERO of the tests — the silent "compiled EMPTY ... tests never ran" gap this lane
+# exists to close (tripped the C1 structural guard on #2007). No new dep and no
+# `not(feature=…)` divergence, so a single isolated leg covers it.
+- name: "sparq-engine (paths)"
+  crate: "sparq-engine"
+  features: "paths"
   test: true

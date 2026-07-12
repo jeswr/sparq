@@ -1,0 +1,191 @@
+# [FABLE-5] Formal-verification manifest — proof suites -> the source paths they verify.
+# Bead sq-63ups. 🤖 SPARQ agent.
+#
+# WHO CONSUMES THIS (three scripts, one contract):
+#   * scripts/fv_select.py        — the change-coupled proof selector (formal-verification.yml
+#     `fv-select` job): a PR whose diff touches a suite's `proves` paths RUNS that suite's
+#     Kani harnesses ON THE PR as a GATING check (name carries no advisory/informational
+#     token, so the ci-summary aggregator waits on it). Unrelated PRs skip it entirely.
+#   * scripts/check-fv-manifest.py — the completeness + drift gate (formal-verification.yml
+#     `fv-manifest` job): fails when a `#[cfg(kani)]` module exists in the workspace that no
+#     suite's `proves` covers, when a `#[kani::proof]` harness in source is missing from (or
+#     stale in) this manifest, or when kani.yml's hard-coded matrix drifts from the
+#     `nightly = true` suites here. This is what makes a silently-unwired proof impossible.
+#   * scripts/formal_lane_alarm.py — the no-verdict alarm (formal-alarm.yml, scheduled):
+#     a `[[lane]]` workflow that has produced no successful verdict on main for longer than
+#     `max_verdict_age_hours` becomes a LOUD red run + a deduped GitHub issue. Silence must
+#     not look like green (miri.yml was cancelled at its ceiling 22 nights running with no
+#     verdict and nothing noticed — that class of failure is what this alarm exists for).
+#
+# EDITING RULES:
+#   * Add/move/remove a `#[kani::proof]` harness in source  => update the matching [[suite]]
+#     here AND (for nightly suites) the kani.yml matrix — the fv-manifest gate reds until all
+#     three agree.
+#   * `proves` lists the source files whose correctness the suite's harnesses establish —
+#     the harness file itself plus every file its proof cone imports (e.g. the sparq-engine
+#     reducer harnesses re-derive inline-id constants from sparq-core's dict.rs, so dict.rs
+#     is in their `proves`). Exact repo-relative paths or `dir/**` globs.
+#   * `pr_gate = false` REQUIRES `pr_gate_blocked_by` (an owner bead): an unwired-on-PR suite
+#     must have a reason and an owner, never a silent default. Deliberately NOT triggered on
+#     Cargo.lock/toolchain bumps: every proof cone here is intra-crate pure code (std-only or
+#     sparq-core dict constants), and the nightly kani.yml lane re-proves everything daily as
+#     the full-matrix backstop (same §6.1 posture as change-based test selection).
+#
+# Local reproduction of any suite:
+#   cargo kani -p <crate> [<features>] --harness <name>     (cargo install --locked kani-verifier)
+
+schema = 1
+
+# ---------------------------------------------------------------------------
+# Kani bounded-proof suites. `name` must equal the kani.yml matrix entry name
+# (drift-checked). `harnesses` must equal the `#[kani::proof]` fn names in the
+# `proves` files (drift-checked, comment-aware).
+# ---------------------------------------------------------------------------
+
+[[suite]]
+id = "vectors-spqv-validator"
+name = "sparq-vectors (.spqv validator)"
+crate = "sparq-vectors"
+features = ""
+harnesses = [
+  "open_from_bytes_never_panics",
+  "open_validated_v2_tail_never_panics",
+]
+proves = ["crates/sparq-vectors/src/store.rs"]
+nightly = true
+# Both totality harnesses exceed the 20m per-harness CBMC budget on a standard
+# GitHub runner (TIMEOUT every nightly run — see the kani.yml step summaries).
+# Gating a PR on a proof that has never completed in CI would hard-block every
+# store.rs PR on a pre-existing solver-budget problem, not on the PR's content.
+pr_gate = false
+pr_gate_blocked_by = "sq-og8u8"
+
+[[suite]]
+id = "core-dict-id-partition"
+name = "sparq-core (dict id partition + domain self-checks)"
+crate = "sparq-core"
+features = "--features mmap" # domain_dict_validator_accepts_the_empty_dict is #[cfg(feature = "mmap")]
+harnesses = [
+  "inline_id_round_trip",
+  "inline_id_out_of_domain_is_none",
+  "id_partition_disjoint",
+  "domain_id_partition_regions_are_all_nonempty",
+  "domain_dict_validator_accepts_the_empty_dict",
+]
+proves = ["crates/sparq-core/src/dict.rs"]
+nightly = true
+pr_gate = true
+
+[[suite]]
+id = "core-dict-validator-totality"
+name = "sparq-core (dict mmap validator totality)"
+crate = "sparq-core"
+features = "--features mmap"
+harnesses = [
+  "validate_dict_bytes_never_panics",
+  "validate_dict_bytes_sized_tail_never_panics",
+]
+proves = ["crates/sparq-core/src/dict.rs"]
+nightly = true
+# Same 20m-per-harness CBMC budget overrun as the .spqv validator suite (TIMEOUT
+# every nightly run). dict.rs PRs still get a gating proof leg from the
+# core-dict-id-partition suite above; the totality pair stays nightly-only until
+# the harnesses are bounded.
+pr_gate = false
+pr_gate_blocked_by = "sq-og8u8"
+
+[[suite]]
+id = "engine-vectorized-reducers"
+name = "sparq-engine (vectorized reducer kernels)"
+crate = "sparq-engine"
+features = "--features vectorized"
+harnesses = [
+  "reduce_sum_equals_reference_fold",
+  "reduce_count_equals_reference",
+  "reduce_min_id_equals_reference",
+  "reduce_max_id_equals_reference",
+  "narrow_sum_to_i64_iff_in_range",
+  "domain_reducer_slice_is_adversarial_and_survives_the_bound",
+]
+# The reducer proofs re-derive the inline-id encoding from sparq-core's dict
+# constants (`use sparq_core::dict::{is_inline, Id, INLINE_BASE, NO_ID}`), so a
+# dict.rs change re-obligates them too.
+proves = [
+  "crates/sparq-engine/src/reduce.rs",
+  "crates/sparq-core/src/dict.rs",
+]
+nightly = true
+pr_gate = true
+
+[[suite]]
+id = "substrate-compare-order-laws"
+name = "sparq-substrate (compare ORDER laws)"
+crate = "sparq-substrate"
+features = "--features compare"
+harnesses = [
+  "domain_exhibits_the_2p53_collapse",
+  "reflexivity_numeric_literals_incl_nan",
+  "reflexivity_nonnumeric_scalars",
+  "reflexivity_triple_terms",
+  "antisymmetry_numeric_pairs_incl_nan",
+  "antisymmetry_numeric_vs_nonnumeric_incl_nan",
+  "antisymmetry_nonnumeric_scalar_pairs",
+  "antisymmetry_triple_vs_scalar",
+  "antisymmetry_triple_pairs",
+  "within_class_totality_literals_incl_nan",
+  "within_class_totality_nonliterals",
+  "transitivity_exact_int_literals_incl_2p53_collapse",
+  "transitivity_nonliteral_scalars",
+  "transitivity_int_with_nonliteral_scalars",
+  "transitivity_double_literals",
+  "transitivity_mixed_numeric_collapse_free_range",
+  "domain_cf_numeric_is_collapse_free_with_signed_zero_pair",
+  "transitivity_string_literals",
+  "transitivity_strict_typed_literals",
+  "transitivity_mixed_literal_kinds_incl_nan",
+  "transitivity_triple_terms_recursive",
+  "exact_int_order_agreement_incl_2p53_collapse",
+  "domain_x2_doubles_are_exact",
+  "witness_mixed_tier_collapse_now_exact",
+  "witness_numeric_vs_string_now_ranked_by_kind",
+  "witness_nan_now_totalised_first",
+]
+# compare.rs is std-only self-contained (no crate-internal imports), so the
+# proof cone is exactly this file.
+proves = ["crates/sparq-substrate/src/compare.rs"]
+nightly = true
+pr_gate = true
+
+[[suite]]
+id = "wac-oracle-escalation-corpus"
+name = "sparq-wac-oracle (.acl escalation corpus domain coverage)"
+crate = "sparq-wac-oracle"
+features = ""
+harnesses = ["domain_corpus_exhibits_a_surviving_escalation"]
+# The harness's proof cone is the static CORPUS plus the pure classifier fns
+# (naive_acl_guard + the proof-only allocation-free is_acl_shaped_ascii_noalloc,
+# equivalent to is_acl_shaped on the ASCII inputs the proof asserts) in the same
+# file — it never calls into sparq-solid's decision surface, so the cone is
+# exactly this file.
+proves = ["crates/sparq-wac-oracle/src/escalation_corpus.rs"]
+nightly = true
+pr_gate = true
+
+# ---------------------------------------------------------------------------
+# Scheduled formal lanes watched by the no-verdict alarm (formal-alarm.yml /
+# scripts/formal_lane_alarm.py). `max_verdict_age_hours` — the longest a lane may
+# go without a SUCCESSFUL completed run on main before the alarm goes red and
+# files an issue. Both lanes are nightly, so 48h == two missed verdicts.
+# ---------------------------------------------------------------------------
+
+[[lane]]
+workflow = "kani.yml"
+description = "nightly Kani bounded-proof lane (all [[suite]] entries above with nightly = true)"
+owner_bead = "sq-hkud"
+max_verdict_age_hours = 48
+
+[[lane]]
+workflow = "miri.yml"
+description = "nightly Miri UB lane over sparq-core's pure-Rust unsafe surface (sharded nextest partitions + the doctest leg)"
+owner_bead = "sq-fo28"
+max_verdict_age_hours = 48

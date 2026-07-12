@@ -157,3 +157,53 @@
   crate: "sparq-trust"
   features: "secprop-precheck"
   test: true
+
+# [OPUS-4.8] sq-pfae.15: the depth-bounded certification-edge trust-graph closure. The whole
+# `graph` module (`derive_effective_rules` + `certification_message` + the target-set-
+# contravariant / conformance-covariant shape-containment matcher) + its `graph::tests` unit
+# suite + the `tests/certification_graph_e2e.rs` adversarial matrix
+# (`#![cfg(feature = "cert-graph")]`) are behind the default-OFF `cert-graph` feature (which
+# enables `framework-vocab`), so ci.yml's default-feature `nextest archive --workspace
+# --all-targets` (which passes NO `--features`) compiles them EMPTY and runs ZERO of the
+# graph unit tests + the 27-case e2e forgery/broadening matrix — the silent-skip gap (#1171)
+# this leg closes. `cert-graph` is dependency-free (pure Rust over the RDFC-1.0 signature
+# primitive the crate already carries — NO new dep, strictly additive), so this is a fast
+# leg. The leg runs `clippy --all-targets -D warnings` with the feature ON (the real gate) +
+# `cargo test`, which drives the REAL closure and the load-bearing SAFETY invariant
+# (attenuation-only: a certification can only NARROW; an additive-target / partial / disjoint
+# / forged / expired / cyclic / over-depth edge contributes NOTHING) — including the
+# `sq-pfae.15` review-fix contravariance case: a cert = anchor shape + an extra
+# `sh:targetSubjectsOf` is denied `Broadening`, and every derived rule's target-predicate set
+# is asserted ⊆ its anchor's. Verified: `cargo test -p sparq-trust --features cert-graph`
+# runs the graph unit tests + the 27 certification_graph_e2e cases; clippy clean in every state.
+- name: "sparq-trust (cert-graph — certification-edge trust-graph closure)"
+  crate: "sparq-trust"
+  features: "cert-graph"
+  test: true
+
+# [SONNET-4.6] sq-pfae.16 — TrustStore x certification-graph composition: the
+# `TrustDocument::with_certifications` constructor + `TrustStore::effective_rules_at`
+# that pipes direct rules through `derive_effective_rules` + the cert-set-aware
+# `policy_version` that folds certifier IRI / certified-issuer IRI / valid_from /
+# valid_until of every edge so revoking OR re-authoring a certification's window
+# changes the `AdmissionCacheKey`; wall-clock expiry of an UNCHANGED cert propagates
+# by re-materialise/epoch-bump (bounded by epoch cadence, sq-l5og), NOT by the cache
+# key alone (cache-safety fail-closed invariant). The whole surface is
+# behind BOTH `store` (the storage/authoring model) and `cert-graph` (the closure
+# from sq-pfae.15), so neither feature alone exercises it — this combined leg is the
+# only place the full composition is compiled and tested. The leg runs `clippy
+# --all-targets -D warnings` with both features ON (the real gate) + `cargo test`,
+# which drives the REAL `TrustStore::effective_rules_at` + `policy_version` path and
+# the load-bearing SAFETY invariants: (a) revoking (or re-authoring) a cert changes
+# `policy_version` (no stale verdict survives that document edit); (b) an expired cert
+# contributes NOTHING when `effective_rules_at` is re-derived at the current instant
+# (wall-clock expiry itself is enforced at re-materialise, not via the cache key);
+# (c) zero-cert path is byte-identical to `TrustDocument::new`;
+# (d) cert-derived rules are narrowed by per-`.acr` documents identically to direct
+# rules. Verified: `cargo test -p sparq-trust --features store,cert-graph --test
+# trust_store_cert_rules` runs the 5 new tests; `clippy --all-targets -D warnings`
+# is clean in every feature state.
+- name: "sparq-trust (store,cert-graph — TrustStore x certification-graph composition)"
+  crate: "sparq-trust"
+  features: "store,cert-graph"
+  test: true

@@ -19,10 +19,23 @@
 //! brute-force searchers ([`nearest_exact`], [`nearest_term_exact`]) and NO heavy ANN
 //! dependency. Approximate search is APPROXIMATE: its recall is `< 1.0` (measured against
 //! [`nearest_exact`], the ground truth) — only the exact path is answer-exact.
+//!
+//! [SONNET-4.6] (sq-jo6ty) **Per-query `ef_search` (`nearest_with_ef`)**: `instant-distance`
+//! encodes `ef_search` into `HnswMap` at build time and does not expose a per-search
+//! override. `VectorIndex` therefore caches the L2-normalised `NPoint` vectors and builds
+//! a secondary map on first use of each new `ef_search` value (same graph topology;
+//! `ef_construction` and `seed` are unchanged). The secondary map is stored in a
+//! `Mutex<HashMap<usize, HnswMap<…>>>` so sweeps amortise the rebuild cost: 100 queries
+//! at `ef=16`, then 100 at `ef=32`, pay one extra build per ef level, not one per query.
+//! `nearest_with_ef(q, k, ef)` where `ef == build_ef_search` is free (uses the primary map).
 
 use crate::store::VectorStore;
 #[cfg(feature = "approx-ann")]
 use instant_distance::{Builder, HnswMap, Point, Search};
+#[cfg(feature = "approx-ann")]
+use std::collections::HashMap;
+#[cfg(feature = "approx-ann")]
+use std::sync::{Arc, Mutex};
 use oxrdf::Term;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
@@ -115,12 +128,23 @@ pub fn nearest_term_exact_checked(
 
 /// HNSW construction/search parameters (passed through to `instant-distance`).
 /// [OPUS-4.8] (sq-ip3a) `approx-ann` only.
+///
+/// [OPUS-4.8] (sq-ose80) **`ef_construction` is the dominant BUILD-time knob.** The
+/// `instant-distance` graph build is already `rayon`-parallel (per-layer
+/// `into_par_iter`); its cost is dominated by the greedy distance search each insert runs,
+/// and that search's beam width IS `ef_construction`. Roughly halving `ef_construction`
+/// roughly halves build time. Lowering it also lowers the graph quality (fewer
+/// back-links), so recall drops slightly — but on the measured corpora the drop stays well
+/// inside the recall floor. Use [`fast_build`](Self::fast_build) when build latency
+/// matters more than the last fraction of recall, [`high_recall`](Self::high_recall) for
+/// the opposite. Both are **opt-in** presets; the [`Default`] is unchanged, so existing
+/// callers keep exactly the same graph and recall.
 #[cfg(feature = "approx-ann")]
 #[derive(Clone, Copy, Debug)]
 pub struct HnswConfig {
     /// Beam width during search (the recall knob; must be ≥ the `k` you will query).
     pub ef_search: usize,
-    /// Beam width during construction.
+    /// Beam width during construction — the dominant build-time knob (see the type docs).
     pub ef_construction: usize,
     /// Level-assignment RNG seed — fixed by default so builds are reproducible.
     pub seed: u64,
@@ -133,37 +157,77 @@ impl Default for HnswConfig {
     }
 }
 
+#[cfg(feature = "approx-ann")]
+impl HnswConfig {
+    /// [OPUS-4.8] (sq-ose80) A **faster-build** preset: same `ef_search` and `seed` as the
+    /// [`Default`], but a lower `ef_construction` (40 vs 100) so the graph build runs
+    /// markedly faster at scale.
+    ///
+    /// **Why it exists.** The `instant-distance` build is already `rayon`-parallel, so the
+    /// build-time gap vs a C++ HNSW is not a missing-parallelism bug — it is the per-insert
+    /// greedy distance search, whose beam width is `ef_construction`. A narrower construction
+    /// beam does less work per insert. On a 200k×128d cosine SIFT slice on the aarch64 work
+    /// box (**NON-CANONICAL** timings — the ranking, not the absolute seconds, is what
+    /// transfers) `ef_construction = 40` built in roughly a third of the `ef_construction =
+    /// 100` time and still measured recall@10 = 0.9944 (vs 0.9990 at the default) — comfortably
+    /// above the 0.95 floor the [`VectorIndex`] recall gate asserts. Prefer this when you rebuild
+    /// the index often (e.g. per store generation) and a fraction of a percent of recall is an
+    /// acceptable trade.
+    ///
+    /// This is a **pure config** preset: it adds no dependency, changes no default, and keeps
+    /// the build deterministic for a fixed seed (the same seed yields the same graph). The
+    /// `nearest` / `nearest_with_ef` query path and its monotone-recall contract are unchanged.
+    pub fn fast_build() -> Self {
+        HnswConfig { ef_construction: 40, ..HnswConfig::default() }
+    }
+
+    /// [OPUS-4.8] (sq-ose80) A **higher-recall** preset: same `ef_search` and `seed` as the
+    /// [`Default`], but a wider `ef_construction` (200 vs 100) for a denser graph. This is the
+    /// opposite trade to [`fast_build`](Self::fast_build): a wider construction beam links more
+    /// back-neighbours, so recall rises, at a proportionally longer build. Prefer it for a
+    /// build-once, query-forever index where the extra build time amortises. (Also a pure config
+    /// preset — no dependency, no default change, deterministic for a fixed seed.)
+    pub fn high_recall() -> Self {
+        HnswConfig { ef_construction: 200, ..HnswConfig::default() }
+    }
+}
+
 /// A normalized point in the HNSW graph. Euclidean distance over unit vectors is
 /// rank-equivalent to cosine; see the module docs.
+///
+/// [FABLE-5] (sq-jk7w7) The vector data is behind an `Arc<[f32]>` so that `Clone` — which
+/// `instant_distance::Point` requires, and which [`VectorIndex::build_with`] relies on to
+/// retain the point set for lazy per-`ef_search` secondary maps — is a refcount bump, not a
+/// deep copy. Before this, `build_with` deep-cloned the whole normalised point set into the
+/// primary map (~512 MB extra peak at 1M×128d, doubling build peak memory; `instant-distance`
+/// clones each point once more internally while shuffling, so the transient peak was 3×). The
+/// distance kernel still sees a plain `&[f32]` (one indirection, same as `Vec`), so query and
+/// build speed and determinism are unchanged.
 #[cfg(feature = "approx-ann")]
 #[derive(Clone)]
-struct NPoint(Vec<f32>);
+struct NPoint(Arc<[f32]>);
 
 #[cfg(feature = "approx-ann")]
 impl Point for NPoint {
     fn distance(&self, other: &Self) -> f32 {
-        const LANES: usize = 8;
-        let (a, b) = (&self.0, &other.0);
-        let mut acc = [0f32; LANES];
-        let chunks = a.len() / LANES;
-        for c in 0..chunks {
-            for l in 0..LANES {
-                let d = a[c * LANES + l] - b[c * LANES + l];
-                acc[l] += d * d;
-            }
-        }
-        for i in chunks * LANES..a.len() {
-            let d = a[i] - b[i];
-            acc[0] += d * d;
-        }
-        acc.iter().sum::<f32>().sqrt()
+        // [OPUS-4.8] (sq-lfo84) The HNSW build + search call this millions of times — it is the
+        // dominant cost of both. Dispatch to the explicit NEON/AVX2 kernel (scalar fallback where
+        // the vector ISA is absent), which measurably cuts build time and lifts QPS vs the previous
+        // scalar-only loop. `instant-distance` wants the true Euclidean distance, so we `sqrt` the
+        // squared kernel (sqrt is monotone, so `sqrt` itself introduces no reorder vs the squared
+        // value). The SIMD kernel uses FMA (one rounding) vs the scalar `d*d`+`+=` (two roundings),
+        // so a distance differs by <=1 ULP: rankings are stable up to exact near-ties, which the
+        // HNSW recall FLOOR gate (tests/recall.rs, recall@10 >= 0.95) absorbs — NOT a bit-identity
+        // claim. The reported cosine score is derived from `item.distance` exactly as before.
+        crate::simd::l2_sq_dist(&self.0, &other.0).sqrt()
     }
 }
 
 /// L2-normalizes `v`; `None` for an all-zero vector (no direction). Stored vectors are
 /// never zero ([`VectorStore::put`] rejects them), so `None` only arises for queries.
+/// [FABLE-5] (sq-jk7w7) Returns the shared-ownership `Arc<[f32]>` form [`NPoint`] wraps.
 #[cfg(feature = "approx-ann")]
-fn normalized(v: &[f32]) -> Option<Vec<f32>> {
+fn normalized(v: &[f32]) -> Option<Arc<[f32]>> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     (norm > 0.0).then(|| v.iter().map(|x| x / norm).collect())
 }
@@ -175,9 +239,32 @@ fn normalized(v: &[f32]) -> Option<Vec<f32>> {
 /// [OPUS-4.8] (sq-ip3a) **APPROXIMATE** — recall `< 1.0`, gated behind the opt-in
 /// `approx-ann` feature (the only thing that pulls `instant-distance`). For answer-exact
 /// search use [`nearest_exact`]; this trades recall for speed at scale.
+///
+/// [SONNET-4.6] (sq-jo6ty) Exposes `nearest_with_ef` for per-query `ef_search` sweeps
+/// (e.g. to build a recall–QPS Pareto curve at multiple ef levels without rebuilding the
+/// whole store). The primary map (built at `HnswConfig::ef_search`) is used for
+/// `nearest` and for `nearest_with_ef` when `ef == build_ef_search`. A secondary per-ef
+/// map is built lazily and cached in `ef_cache` on first use of each new ef value.
 #[cfg(feature = "approx-ann")]
 pub struct VectorIndex {
+    /// Primary HNSW map — built with the `HnswConfig::ef_search` value.
     map: HnswMap<NPoint, Id>,
+    /// The `ef_search` the primary map was built with (needed for the cache short-circuit).
+    ef_search_default: usize,
+    /// The `ef_construction` / `seed` used to build the primary map (reused for secondary maps
+    /// so that all ef levels share the same graph topology and seed).
+    ef_construction: usize,
+    seed: u64,
+    /// L2-normalised points and their dict ids — retained so that secondary maps for different
+    /// `ef_search` values can be built from the same normalised vectors (no store re-scan).
+    /// [FABLE-5] (sq-jk7w7) Each [`NPoint`] is `Arc`-backed, so this retention (and every
+    /// secondary-map build) SHARES the primary map's vector allocations — the per-index cost is
+    /// one pointer-sized `Vec` per map, not a second copy of the float data.
+    points: Vec<NPoint>,
+    values: Vec<Id>,
+    /// Lazily-built secondary maps keyed by `ef_search`. Populated on the first
+    /// `nearest_with_ef` call at a new ef level; thereafter the cached map is reused.
+    ef_cache: Mutex<HashMap<usize, HnswMap<NPoint, Id>>>,
     dim: usize,
 }
 
@@ -189,6 +276,13 @@ impl VectorIndex {
         VectorIndex::build_with(store, HnswConfig::default())
     }
 
+    /// Builds the index with the given [`HnswConfig`].
+    ///
+    /// [FABLE-5] (sq-jk7w7) Peak memory is ONE copy of the L2-normalised point set plus
+    /// pointer-sized bookkeeping: the internal `NPoint` is `Arc`-backed, so the `points.clone()` handed to
+    /// the primary map shares the float allocations with the retained `self.points` (used for
+    /// lazy per-`ef_search` secondary maps) instead of deep-copying them. Previously that clone
+    /// duplicated the whole point set (~512 MB extra at 1M×128d), doubling build peak memory.
     pub fn build_with(store: &VectorStore, cfg: HnswConfig) -> VectorIndex {
         let mut points = Vec::with_capacity(store.len());
         let mut values = Vec::with_capacity(store.len());
@@ -197,16 +291,26 @@ impl VectorIndex {
             points.push(NPoint(n));
             values.push(id);
         }
+        // [FABLE-5] (sq-jk7w7) Cheap: clones Vecs of `Arc` handles + ids, NOT the vector data.
         let map = Builder::default()
             .ef_search(cfg.ef_search)
             .ef_construction(cfg.ef_construction)
             .seed(cfg.seed)
-            .build(points, values);
-        VectorIndex { map, dim: store.dim() }
+            .build(points.clone(), values.clone());
+        VectorIndex {
+            map,
+            ef_search_default: cfg.ef_search,
+            ef_construction: cfg.ef_construction,
+            seed: cfg.seed,
+            points,
+            values,
+            ef_cache: Mutex::new(HashMap::new()),
+            dim: store.dim(),
+        }
     }
 
     /// Approximate top-`k` ids by cosine similarity to `query`, best first.
-    /// `k` is clamped by the index's `ef_search`. An all-zero `query` returns no
+    /// Uses the build-time `ef_search`. An all-zero `query` returns no
     /// results (same contract as [`nearest_exact`]).
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
         assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
@@ -214,6 +318,65 @@ impl VectorIndex {
         let q = NPoint(q);
         let mut search = Search::default();
         self.map
+            .search(&q, &mut search)
+            .take(k)
+            .map(|item| (*item.value, 1.0 - item.distance * item.distance / 2.0))
+            .collect()
+    }
+
+    /// Approximate top-`k` ids with a **per-query** `ef_search` beam width.
+    ///
+    /// [SONNET-4.6] (sq-jo6ty) This is the recall–QPS sweep entry point: the caller can
+    /// vary `ef_search` across queries to trace the recall–throughput Pareto frontier
+    /// without rebuilding the index. The `ef_search` value controls the candidate beam at
+    /// query time — a larger beam visits more neighbours and improves recall at the cost of
+    /// throughput; a smaller beam is faster but may miss true top-`k` candidates.
+    ///
+    /// **Monotone-recall property**: for any fixed query and `k`, recall@k vs the exact
+    /// oracle is non-decreasing as `ef_search` increases (sweeping upward can never lower
+    /// recall). This follows from the HNSW algorithm: a wider beam subsumes the candidate
+    /// set explored by any narrower beam over the same graph.
+    ///
+    /// When `ef_search == build_ef_search` (the value passed to [`HnswConfig`] at build
+    /// time), the primary map is used directly — zero extra overhead. For any other value,
+    /// a secondary map is built once and cached; subsequent calls at the same ef level
+    /// reuse the cached map. All secondary maps share the same `ef_construction`, `seed`,
+    /// and normalised point set as the primary map, so the graph topology is identical.
+    ///
+    /// **APPROXIMATE** — recall `< 1.0` at any finite `ef_search`; use [`nearest_exact`]
+    /// for answer-exact results.
+    pub fn nearest_with_ef(&self, query: &[f32], k: usize, ef_search: usize) -> Vec<(Id, f32)> {
+        assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
+        let Some(q) = normalized(query) else { return Vec::new() };
+        let q = NPoint(q);
+        let mut search = Search::default();
+        // [SONNET-4.6] (sq-jo6ty) Short-circuit: the build-time ef → primary map (zero overhead).
+        if ef_search == self.ef_search_default {
+            return self
+                .map
+                .search(&q, &mut search)
+                .take(k)
+                .map(|item| (*item.value, 1.0 - item.distance * item.distance / 2.0))
+                .collect();
+        }
+        // [SONNET-4.6] (sq-jo6ty) Non-default ef: check the cache, build and insert if absent,
+        // then search with the lock held. The search is read-only on the map and only mutates
+        // `search` (a local variable), so there is no correctness issue with holding the lock
+        // here — throughput of the secondary path is a benchmarking sweep concern, not a
+        // production hot path.
+        let mut cache = self.ef_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let ef_construction = self.ef_construction;
+        let seed = self.seed;
+        let points = &self.points;
+        let values = &self.values;
+        cache.entry(ef_search).or_insert_with(|| {
+            Builder::default()
+                .ef_search(ef_search)
+                .ef_construction(ef_construction)
+                .seed(seed)
+                .build(points.clone(), values.clone())
+        });
+        cache[&ef_search]
             .search(&q, &mut search)
             .take(k)
             .map(|item| (*item.value, 1.0 - item.distance * item.distance / 2.0))
@@ -325,5 +488,59 @@ mod tests {
     fn cosine_panics_on_mismatched_dims() {
         // A dim mismatch is a programming error, not a silently-truncated comparison.
         cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0]);
+    }
+
+    // [FABLE-5] (sq-jk7w7) Peak-memory contract of `build_with`: the point set handed to the
+    // HNSW map must SHARE allocations with the retained `points` (for lazy per-ef secondary
+    // maps), never deep-copy them — the deep copy doubled build peak memory (~512 MB extra at
+    // 1M×128d). `Arc::strong_count` observes the sharing directly, so reintroducing a deep
+    // copy (fresh buffers for the map, or for a secondary map) flips these asserts red
+    // (mutation-checked: a deep-copying build fails with strong_count 1 vs 2).
+    #[cfg(feature = "approx-ann")]
+    mod point_set_sharing {
+        use super::super::{HnswConfig, VectorIndex, VectorStore};
+        use std::sync::Arc;
+
+        #[test]
+        fn build_shares_point_allocations_with_the_map_instead_of_deep_copying() {
+            let path = std::env::temp_dir()
+                .join(format!("sparq-vectors-arcshare-{}.spqv", std::process::id()));
+            let mut store = VectorStore::create(&path, 8).unwrap();
+            for i in 0..64u32 {
+                // Deterministic non-zero vectors; sparse ids exercise the id→slot index.
+                let v: Vec<f32> = (0..8).map(|d| ((i + d + 1) as f32).sin() + 2.0).collect();
+                store.put(i * 3 + 1, &v).unwrap();
+            }
+            store.finalize().unwrap();
+
+            let index = VectorIndex::build_with(&store, HnswConfig::default());
+            assert_eq!(index.points.len(), 64);
+            for p in &index.points {
+                assert_eq!(
+                    Arc::strong_count(&p.0),
+                    2,
+                    "primary map must share each point's allocation with the retained set \
+                     (strong_count 2 = retained + map); a deep copy leaves it at 1"
+                );
+            }
+
+            // The lazily-built secondary map (non-default ef) must share too, not deep-copy.
+            let q: Vec<f32> = (0..8).map(|d| ((d + 1) as f32).cos() + 2.0).collect();
+            let default_ef = HnswConfig::default().ef_search;
+            let via_default = index.nearest_with_ef(&q, 5, default_ef);
+            let via_secondary = index.nearest_with_ef(&q, 5, default_ef + 7);
+            for p in &index.points {
+                assert_eq!(
+                    Arc::strong_count(&p.0),
+                    3,
+                    "a secondary per-ef map must share the point allocations too"
+                );
+            }
+            // Behavioural sanity: both ef levels answer over the same shared point set.
+            assert_eq!(via_default.len(), 5);
+            assert_eq!(via_secondary.len(), 5);
+
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

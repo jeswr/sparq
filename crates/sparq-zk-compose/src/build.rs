@@ -188,6 +188,61 @@ pub fn derive_join_eq_id(n_a: u32, n_b: u32) -> Option<CircuitId> {
     Some(CircuitId::JoinEq { n_a, n_b })
 }
 
+/// The compiled `(d, k, n)` members of the bounded-depth `path_reach_d{d}_k{k}_n{n}`
+/// family (sq-3kd2g.6 / the sq-3kd2g.2 circuits): depth bound `d`, committed-graph
+/// count `k`, per-graph slot bucket `n`. This is the SINGLE source of the family
+/// list — [`derive_path_reach_id`] validates an `(d, k, n)` triple against it
+/// EXACTLY (no wrong-bucket fallback), mirroring the filter families' EXACT-match
+/// discipline (sq-wto). The four members `zk/compose/` compiles today:
+/// `(2,1,16)`, `(4,1,16)`, `(4,2,16)`, `(8,1,16)`.
+// [OPUS-4.8] sq-3kd2g.6: compiled path_reach members. Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+pub const PATH_REACH_MEMBERS: &[(u32, u32, u32)] =
+    &[(2, 1, 16), (4, 1, 16), (4, 2, 16), (8, 1, 16)];
+
+/// Compiled slot buckets (`n`) of the path family, ascending (only `16` today).
+// [OPUS-4.8] sq-3kd2g.6.
+#[cfg(feature = "extended-fragment")]
+pub const PATH_REACH_N_BUCKETS: &[u32] = &[16];
+
+/// Derive the `path_reach_d{d}_k{k}_n{n}` member id for depth bound `d`, `k`
+/// committed graphs, `n` slots/graph. EXACT membership against
+/// [`PATH_REACH_MEMBERS`]: `(d, k, n)` must be a compiled member, else `None`
+/// (fail-closed — a claim outside the family derives no id, never a wrong bucket).
+///
+/// `d` is the design record's normative "path depth `k`" (§4 req 1), constant in
+/// the member's VK and re-stated as the public `depth_bound`. `k` = commitments
+/// arity, `n` = slot bucket. Prover and verifier both call this so a proof only
+/// fits the member its public inputs name.
+// [OPUS-4.8] sq-3kd2g.6: derive the bounded-depth path member id (EXACT match).
+#[cfg(feature = "extended-fragment")]
+pub fn derive_path_reach_id(d: u32, k: u32, n: u32) -> Option<CircuitId> {
+    if PATH_REACH_MEMBERS.contains(&(d, k, n)) {
+        Some(CircuitId::PathReach { d, k, n })
+    } else {
+        None
+    }
+}
+
+/// Pick the compiled path member for `k` graphs (largest holding `max_graph`
+/// triples) that admits a chain of at least `min_depth` steps: the SMALLEST
+/// compiled `d >= min_depth` with a matching `(k, n)`, where `n` is the smallest
+/// slot bucket `>= max_graph`. `None` if no compiled member covers it (e.g. a
+/// chain longer than every member's depth, or a graph larger than every bucket).
+// [OPUS-4.8] sq-3kd2g.6.
+#[cfg(feature = "extended-fragment")]
+pub fn smallest_path_reach_id(k: u32, max_graph: u32, min_depth: u32) -> Option<CircuitId> {
+    let n = smallest_bucket(PATH_REACH_N_BUCKETS, max_graph.max(1))?;
+    PATH_REACH_MEMBERS
+        .iter()
+        .copied()
+        .filter(|&(_, mk, mn)| mk == k && mn == n)
+        .map(|(d, _, _)| d)
+        .filter(|&d| d >= min_depth)
+        .min()
+        .map(|d| CircuitId::PathReach { d, k, n })
+}
+
 /// A constant or variable slot of a BGP triple pattern.
 #[derive(Debug, Clone)]
 pub enum Slot {
@@ -759,6 +814,239 @@ pub fn build_join(
     })
 }
 
+/// The witnesses a bounded-depth `path_reach` proof needs but the manifest never
+/// carries (sq-3kd2g.6): the PRIVATE chain length, the per-step node array, and
+/// the per-graph triple encodings. Mirrors [`ScanWitness`] / [`JoinWitness`]. The
+/// build pads `nodes` to `d` and each graph's `enc` to `n` (the member buckets).
+// [OPUS-4.8] sq-3kd2g.6. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone)]
+pub struct PathReachWitness {
+    /// The actual (hidden) chain length `l` (`<= d`; `0` for a zero-length `p*`/`p?`).
+    pub path_len: u32,
+    /// The chain node after each step, length `d`: `nodes[s] = n_{s+1}` for the
+    /// active steps `s < l`, and the inert pass-through endpoint for `s >= l`.
+    pub nodes: Vec<FieldHex>,
+    /// Per-graph active triple counts (length `k`, in commitment-sorted order).
+    pub counts: Vec<u32>,
+    /// Per-graph per-slot term encodings (active leaves; build pads to `n`).
+    pub enc: Vec<Vec<[FieldHex; 3]>>,
+}
+
+/// A built bounded-depth path proof: the public inputs
+/// ([`ProofInputs::PathReach`]) + the private witness ([`PathReachWitness`]).
+/// Mirrors [`BuiltScan`] / [`BuiltJoin`].
+// [OPUS-4.8] sq-3kd2g.6.
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone)]
+pub struct BuiltPathReach {
+    pub inputs: ProofInputs,
+    pub witness: PathReachWitness,
+}
+
+/// Shortest directed chain `src ->(pred) ... ->(pred) dst` with `1..=max_depth`
+/// edges over the union `edges` (each `(from, to)` a committed `(from, pred, to)`
+/// triple). Visited-set BFS, so the first time a node is reached is via a
+/// shortest path; cycles are permitted by the statement but never needed for a
+/// SHORTEST witness. Returns the node list `[src, n_1, ..., dst]`, or `None` if
+/// `dst` is unreachable within the bound (or `src == dst`, which is the
+/// zero-length case handled by the caller — a `+` cycle back to `src` is not
+/// searched here). [OPUS-4.8] sq-3kd2g.6.
+#[cfg(feature = "extended-fragment")]
+fn bfs_path_chain(edges: &[(Fr, Fr)], src: Fr, dst: Fr, max_depth: usize) -> Option<Vec<Fr>> {
+    if src == dst {
+        return None;
+    }
+    let mut visited: Vec<Fr> = vec![src];
+    // (node, parent) records for path reconstruction.
+    let mut parent: Vec<(Fr, Fr)> = Vec::new();
+    // (node, depth) BFS queue as an index-walked Vec (no external deps).
+    let mut queue: Vec<(Fr, usize)> = vec![(src, 0)];
+    let mut qi = 0;
+    while qi < queue.len() {
+        let (cur, depth) = queue[qi];
+        qi += 1;
+        if depth >= max_depth {
+            continue;
+        }
+        for &(f, t) in edges {
+            if f == cur && !visited.contains(&t) {
+                visited.push(t);
+                parent.push((t, cur));
+                if t == dst {
+                    let mut path = vec![dst];
+                    let mut node = dst;
+                    while node != src {
+                        let p = parent.iter().find(|(n, _)| *n == node)?.1;
+                        path.push(p);
+                        node = p;
+                    }
+                    path.reverse();
+                    return Some(path);
+                }
+                queue.push((t, depth + 1));
+            }
+        }
+    }
+    None
+}
+
+/// Build a bounded-depth property-path (`p+` / `p*` / `p?`) reachability proof's
+/// inputs + witness from the committed graphs, the path predicate, and the
+/// disclosed source/destination endpoints (sq-3kd2g.6, the compose side of the
+/// sq-3kd2g.2 circuits; design record §4).
+///
+/// `allow_zero` selects the operator's zero-length admissibility (`true` for
+/// `p*`/`p?`, `false` for `p+`). The builder re-encodes each graph's canonical
+/// triples under its recorded salt (the SAME re-derivation [`build_scan`] does —
+/// the in-circuit `commit_fold` recomputes `C(G)`, so a wrong encoding fails that
+/// recompute), then searches for the SHORTEST chain of `<= d` committed
+/// `predicate` edges from `source` to `dest` (or the zero-length case when
+/// `allow_zero`, `source == dest`, and the endpoint occurs as a node of the
+/// committed union — req 5). It picks the SMALLEST compiled depth member that
+/// covers the chain ([`smallest_path_reach_id`]) and fills the inert
+/// pass-through padding (`nodes[l..d] = ` the endpoint) so the witness satisfies
+/// the circuit's padding-soundness rule (req 4).
+///
+/// Returns `None` if: `commitments` is empty; a term is not committable; no chain
+/// `<= max compiled d` connects the endpoints (no honest witness — the prover has
+/// none); the zero-length occurrence witness is absent; or no compiled
+/// [`PATH_REACH_MEMBERS`] member fits `(k, max-graph, chain-length)` (fail-closed,
+/// never a wrong-bucket member).
+///
+/// The `commitments` (and every per-graph witness + the public `attribution`) are
+/// emitted sorted ASCENDING by commitment (the strict-ordering guard 1b), exactly
+/// as [`build_scan`] does, so an honest `k >= 2` proof satisfies the gate for any
+/// caller order.
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// A bounded path proof is EXISTENCE-ONLY. This builds a satisfying witness; the
+/// verifier stack is internally re-audited but NOT externally audited (sq-qhy4);
+/// no soundness / privacy property is asserted.
+// [OPUS-4.8] sq-3kd2g.6: bounded-depth path-reachability builder.
+#[cfg(feature = "extended-fragment")]
+pub fn build_path_reach(
+    commitments: &[GraphCommitment],
+    predicate: &NamedNode,
+    source: &Term,
+    dest: &Term,
+    allow_zero: bool,
+) -> Option<BuiltPathReach> {
+    if commitments.is_empty() {
+        return None;
+    }
+    let k = commitments.len() as u32;
+    // 1b strict-ordering: sort graphs ascending by commitment, lockstep with the
+    // witnesses + attribution (the exact order the in-circuit `Field::lt` uses).
+    let mut order: Vec<usize> = (0..commitments.len()).collect();
+    order.sort_by(|&a, &b| {
+        field_to_be_bytes_32(&commitments[a].commitment)
+            .cmp(&field_to_be_bytes_32(&commitments[b].commitment))
+    });
+    let sorted: Vec<&GraphCommitment> = order.iter().map(|&i| &commitments[i]).collect();
+
+    // Constant endpoints/predicate encodings are salt-independent (IRIs/literals);
+    // use graph 0's salt as the reference, exactly as `build_scan` does.
+    let ref_salt = sorted[0].salt;
+    let pred_fr = encode_term(&Term::NamedNode(predicate.clone()), &ref_salt)?;
+    let src_fr = encode_term(source, &ref_salt)?;
+    let dst_fr = encode_term(dest, &ref_salt)?;
+
+    let mut enc_fr: Vec<Vec<[Fr; 3]>> = Vec::with_capacity(sorted.len());
+    let mut enc_hex: Vec<Vec<[FieldHex; 3]>> = Vec::with_capacity(sorted.len());
+    let mut counts: Vec<u32> = Vec::with_capacity(sorted.len());
+    let mut commit_hex: Vec<FieldHex> = Vec::with_capacity(sorted.len());
+    for c in &sorted {
+        let (fr, hex) = encode_join_graph(c)?;
+        counts.push(fr.len() as u32);
+        enc_fr.push(fr);
+        enc_hex.push(hex);
+        commit_hex.push(hexf(&c.commitment));
+    }
+    let max_graph = counts.iter().copied().max().unwrap_or(0);
+    // The deepest compiled member for this `k` bounds the chain search.
+    let max_depth = PATH_REACH_MEMBERS
+        .iter()
+        .filter(|&&(_, mk, _)| mk == k)
+        .map(|&(d, _, _)| d)
+        .max()? as usize;
+
+    // Edge set: every committed `(from, predicate, to)` triple across the union.
+    let mut edges: Vec<(Fr, Fr)> = Vec::new();
+    for g in &enc_fr {
+        for t in g {
+            if t[1] == pred_fr {
+                edges.push((t[0], t[2]));
+            }
+        }
+    }
+
+    // The chain node list [src, ..., dst]; the zero-length case is [src] (l = 0).
+    let occurs = |term: Fr| {
+        enc_fr
+            .iter()
+            .any(|g| g.iter().any(|t| t[0] == term || t[2] == term))
+    };
+    let chain: Vec<Fr> = if allow_zero && src_fr == dst_fr && occurs(src_fr) {
+        vec![src_fr]
+    } else {
+        bfs_path_chain(&edges, src_fr, dst_fr, max_depth)?
+    };
+    let l = chain.len() - 1;
+
+    // Per-graph source attribution — computed EXACTLY as the circuit does
+    // (`path.nr` steps 3/5/6): a chain-relative bit for active steps, or the
+    // endpoint-occurrence bit for the zero-length case.
+    let mut attribution = vec![false; sorted.len()];
+    if l == 0 {
+        for (g, graph) in enc_fr.iter().enumerate() {
+            attribution[g] = graph.iter().any(|t| t[0] == src_fr || t[2] == src_fr);
+        }
+    } else {
+        for s in 0..l {
+            let triple = [chain[s], pred_fr, chain[s + 1]];
+            for (g, graph) in enc_fr.iter().enumerate() {
+                if graph.contains(&triple) {
+                    attribution[g] = true;
+                }
+            }
+        }
+    }
+
+    // Pick the smallest compiled member that covers the chain (depth >= l, >= 1).
+    let id = smallest_path_reach_id(k, max_graph, (l as u32).max(1))?;
+    let CircuitId::PathReach { d, .. } = &id else {
+        return None;
+    };
+    let d = *d as usize;
+
+    // Node array of length d: active nodes then the inert pass-through endpoint.
+    let endpoint = if l == 0 { src_fr } else { dst_fr };
+    let mut nodes_fr = vec![endpoint; d];
+    for (s, slot) in nodes_fr.iter_mut().enumerate().take(l) {
+        *slot = chain[s + 1];
+    }
+
+    Some(BuiltPathReach {
+        inputs: ProofInputs::PathReach {
+            id: id.clone(),
+            commitments: commit_hex,
+            pred_enc: hexf(&pred_fr),
+            src_enc: hexf(&src_fr),
+            dst_enc: hexf(&dst_fr),
+            allow_zero,
+            depth_bound: d as u32,
+            attribution,
+        },
+        witness: PathReachWitness {
+            path_len: l as u32,
+            nodes: nodes_fr.iter().map(hexf).collect(),
+            counts,
+            enc: enc_hex,
+        },
+    })
+}
+
 // [OPUS-4.8] sq-bif.6: GLUE unit tests for the circuit-family id derivation —
 // the (data shape -> compiled member) plumbing the prover AND verifier both call
 // so a proof can only fit its member. These cover the NON-cryptographic
@@ -1004,5 +1292,166 @@ mod derive_id_tests {
             build_filter_int(enc5, 12345, FilterOp::Lt, 0, false).is_none(),
             "5-digit operand: out-of-family build is None, never a wrong-D witness"
         );
+    }
+}
+
+// [OPUS-4.8] sq-3kd2g.6: DIRECT unit tests for the bounded-depth path member
+// derivation + builder (host-level; the bb round-trip is symmetric to build_join
+// and exercised under the nargo-gated e2e when the toolchain is present).
+#[cfg(all(test, feature = "extended-fragment"))]
+mod path_tests {
+    use super::*;
+    use oxrdf::{NamedNode, Triple};
+    use sparq_zk::commit::commit_triples;
+
+    fn iri(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+
+    fn t(s: &str, p: &str, o: &str) -> Triple {
+        Triple::new(iri(s), iri(p), iri(o))
+    }
+
+    #[test]
+    fn derive_path_reach_id_exact_membership_only() {
+        assert_eq!(
+            derive_path_reach_id(2, 1, 16),
+            Some(CircuitId::PathReach { d: 2, k: 1, n: 16 })
+        );
+        assert_eq!(
+            derive_path_reach_id(4, 2, 16),
+            Some(CircuitId::PathReach { d: 4, k: 2, n: 16 })
+        );
+        // (2,2,16) is NOT a compiled member (only (4,2,16) exists for k=2).
+        assert_eq!(derive_path_reach_id(2, 2, 16), None);
+        assert_eq!(derive_path_reach_id(8, 2, 16), None);
+        // A depth with no member, an out-of-family n, and k=3 all fail closed.
+        assert_eq!(derive_path_reach_id(3, 1, 16), None);
+        assert_eq!(derive_path_reach_id(4, 1, 64), None);
+        assert_eq!(derive_path_reach_id(4, 3, 16), None);
+    }
+
+    #[test]
+    fn smallest_path_reach_id_picks_min_depth_covering_the_chain() {
+        // k=1: d in {2,4,8}; smallest >= min_depth.
+        assert_eq!(
+            smallest_path_reach_id(1, 5, 2),
+            Some(CircuitId::PathReach { d: 2, k: 1, n: 16 })
+        );
+        assert_eq!(
+            smallest_path_reach_id(1, 5, 5),
+            Some(CircuitId::PathReach { d: 8, k: 1, n: 16 })
+        );
+        // No k=1 member deeper than 8.
+        assert_eq!(smallest_path_reach_id(1, 5, 9), None);
+        // k=2: only d=4 exists.
+        assert_eq!(
+            smallest_path_reach_id(2, 5, 2),
+            Some(CircuitId::PathReach { d: 4, k: 2, n: 16 })
+        );
+        assert_eq!(smallest_path_reach_id(2, 5, 5), None);
+        // k=3 has no member; a graph larger than the only bucket (16) has none.
+        assert_eq!(smallest_path_reach_id(3, 5, 2), None);
+        assert_eq!(smallest_path_reach_id(1, 20, 2), None);
+    }
+
+    #[test]
+    fn build_path_reach_finds_a_two_step_chain_single_graph() {
+        let salt = Fr::from(7u64);
+        let g = commit_triples(
+            &[
+                t("http://ex/a", "http://ex/p", "http://ex/b"),
+                t("http://ex/b", "http://ex/p", "http://ex/c"),
+            ],
+            salt,
+        )
+        .unwrap();
+        let src = Term::NamedNode(iri("http://ex/a"));
+        let dst = Term::NamedNode(iri("http://ex/c"));
+        let built = build_path_reach(&[g], &iri("http://ex/p"), &src, &dst, false)
+            .expect("chain a -> b -> c exists within depth");
+
+        // Smallest k=1 member covering a 2-step chain is d=2.
+        assert_eq!(built.inputs.circuit_id(), &CircuitId::PathReach { d: 2, k: 1, n: 16 });
+        let ProofInputs::PathReach {
+            commitments,
+            src_enc,
+            dst_enc,
+            allow_zero,
+            depth_bound,
+            attribution,
+            ..
+        } = &built.inputs
+        else {
+            panic!("expected PathReach inputs");
+        };
+        assert_eq!(commitments.len(), 1);
+        assert!(!*allow_zero);
+        assert_eq!(*depth_bound, 2);
+        assert_eq!(attribution, &vec![true]);
+        // Endpoints bind to the disclosed terms.
+        assert_eq!(src_enc, &hexf(&encode_term(&src, &salt).unwrap()));
+        assert_eq!(dst_enc, &hexf(&encode_term(&dst, &salt).unwrap()));
+        // Witness: two active steps, node array = [enc(b), enc(c)], count = 2.
+        assert_eq!(built.witness.path_len, 2);
+        assert_eq!(built.witness.nodes.len(), 2);
+        let enc_b = hexf(&encode_term(&Term::NamedNode(iri("http://ex/b")), &salt).unwrap());
+        assert_eq!(built.witness.nodes[0], enc_b);
+        assert_eq!(built.witness.nodes[1], *dst_enc);
+        assert_eq!(built.witness.counts, vec![2]);
+    }
+
+    #[test]
+    fn build_path_reach_zero_length_needs_occurrence_and_allow_zero() {
+        let salt = Fr::from(3u64);
+        let g = commit_triples(&[t("http://ex/a", "http://ex/p", "http://ex/b")], salt).unwrap();
+        let a = Term::NamedNode(iri("http://ex/a"));
+        // `p*` self-path a->a: zero-length, admitted because a occurs (as subject).
+        let built = build_path_reach(std::slice::from_ref(&g), &iri("http://ex/p"), &a, &a, true)
+            .expect("zero-length path admitted");
+        let ProofInputs::PathReach { allow_zero, attribution, .. } = &built.inputs else {
+            panic!("expected PathReach inputs");
+        };
+        assert!(*allow_zero);
+        assert_eq!(attribution, &vec![true]);
+        assert_eq!(built.witness.path_len, 0);
+        // `p+` (allow_zero = false) has no zero-length witness and no 1-step self
+        // loop, so no chain is found.
+        assert!(build_path_reach(&[g], &iri("http://ex/p"), &a, &a, false).is_none());
+    }
+
+    #[test]
+    fn build_path_reach_unreachable_destination_is_none() {
+        let salt = Fr::from(9u64);
+        let g = commit_triples(&[t("http://ex/a", "http://ex/p", "http://ex/b")], salt).unwrap();
+        let src = Term::NamedNode(iri("http://ex/a"));
+        let unreached = Term::NamedNode(iri("http://ex/z"));
+        assert!(build_path_reach(&[g], &iri("http://ex/p"), &src, &unreached, false).is_none());
+    }
+
+    #[test]
+    fn build_path_reach_two_graph_chain_attributes_both() {
+        // Chain a->b in graph 1, b->c in graph 2: k=2 (only d=4), both attributed.
+        let g1 = commit_triples(&[t("http://ex/a", "http://ex/p", "http://ex/b")], Fr::from(1u64))
+            .unwrap();
+        let g2 = commit_triples(&[t("http://ex/b", "http://ex/p", "http://ex/c")], Fr::from(2u64))
+            .unwrap();
+        let src = Term::NamedNode(iri("http://ex/a"));
+        let dst = Term::NamedNode(iri("http://ex/c"));
+        let built = build_path_reach(&[g1, g2], &iri("http://ex/p"), &src, &dst, false)
+            .expect("cross-graph chain a -> b -> c");
+        assert_eq!(built.inputs.circuit_id(), &CircuitId::PathReach { d: 4, k: 2, n: 16 });
+        let ProofInputs::PathReach { depth_bound, attribution, .. } = &built.inputs else {
+            panic!("expected PathReach inputs");
+        };
+        assert_eq!(*depth_bound, 4);
+        assert_eq!(attribution, &vec![true, true]);
+        // d=4, l=2 => two active nodes + two inert pass-through slots (= dst).
+        assert_eq!(built.witness.path_len, 2);
+        assert_eq!(built.witness.nodes.len(), 4);
+        let dst_enc = hexf(&encode_term(&dst, &Fr::from(1u64)).unwrap());
+        assert_eq!(built.witness.nodes[1], dst_enc);
+        assert_eq!(built.witness.nodes[2], dst_enc);
+        assert_eq!(built.witness.nodes[3], dst_enc);
     }
 }

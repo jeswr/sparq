@@ -33,6 +33,21 @@ export interface WasmReasoner {
   materializeStats(data: string, format: string, profile: string): string;
   /** N3 rule reasoning (`{ … } => { … }` + facts) -> entailed ground triples as N-Triples. */
   reasonN3(n3: string): string;
+  /**
+   * [FABLE-5] sq-ixc3.20 — ONE derivation of the triple `(s, p, o)` from the asserted base
+   * of `data` under `profile` (`"rdfs"` | `"owl-rl"`), as `sparq-reason`'s proof-tree JSON —
+   * or the JSON literal `"null"` when the triple is not entailed. `s`/`p`/`o` are N-Triples
+   * term strings. Present only in a bundle built with the `explain` feature (the published
+   * GUI bundle is — `js`'s `build:reason-wasm`); callers feature-detect at runtime so an
+   * older synced bundle degrades honestly instead of crashing.
+   */
+  why(data: string, format: string, profile: string, s: string, p: string, o: string): string;
+  /**
+   * [FABLE-5] sq-ixc3.20 — as {@link why}, for N3 RULES mode: `n3` is the combined
+   * rules + base-facts document (exactly what {@link reasonN3} consumes). Internal nodes
+   * name the fired rule as `n3-rule-<i>`. `explain`-feature bundles only; feature-detect.
+   */
+  whyN3(n3: string, s: string, p: string, o: string): string;
 }
 
 interface ReasonModule {

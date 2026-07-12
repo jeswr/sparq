@@ -1,7 +1,7 @@
 # Default agent for this repo when no workflow-specific agent is set.
 agent = ''
 # Default model for this repo when no workflow-specific model is set.
-model = ''
+model = 'gpt-5.6-sol'
 # Backup agent for this repo if the primary agent fails.
 backup_agent = ''
 # Backup model for this repo if the primary model fails.

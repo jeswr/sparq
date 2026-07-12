@@ -372,6 +372,26 @@ class TestPhase2LaneScoping(unittest.TestCase):
         self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
         self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
 
+    # ---- differential-smoke lane (fuzz.yml) — [FABLE-5] sq-0iqzw --------------------
+    def test_differential_smoke_job_guarded_by_its_seed_closure(self):
+        job = self.fuzz["jobs"]["differential-smoke"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
+                      "differential-smoke guard must be fail-closed (empty output => RUN)")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs,
+                      "differential-smoke must need the select pre-job")
+        self.assertEqual(
+            self._guard_needles(cond), self.lane_seeds["differential-smoke"],
+            "differential-smoke guard needles must equal "
+            "ci_select.py _LANE_SEEDS['differential-smoke']")
+        # The job is a BLOCKING gate leg: its name must never pick up the
+        # advisory/informational exclusion words (that would silently un-gate it).
+        self.assertNotRegex(
+            str(job.get("name", "")), r"(?i)\b(advisory|informational)\b",
+            "differential-smoke must GATE — no advisory/informational token")
+
     # ---- bench (perf-gate) lane (bench.yml) — [SONNET-4.6] sq-mel85 ----------------
     def test_bench_job_guarded_by_its_seed_closure(self):
         job = self.bench["jobs"]["bench"]
@@ -391,13 +411,25 @@ class TestPhase2LaneScoping(unittest.TestCase):
         self.assertNotIn("if", job, "select must be unconditional (gate needs it green)")
         self.assertNotIn("needs", job)
 
-    def test_bench_runs_on_schedule_backstop(self):
+    def test_bench_runs_on_pr_and_schedule_but_not_merge_group(self):
         # sq-mel85 added a nightly schedule to bench.yml as the full-run backstop: a
         # schedule event carries no PR diff => selector mode=full => the fail-closed
-        # disjunct RUNS the whole suite. merge_group is retained for the perf gate.
+        # disjunct RUNS the whole suite.
+        # [FABLE-5] sq-6vshe.6 (MAINTAINER-DIRECTED): merge_group is REMOVED. On a PR the
+        # bench job runs the FAST DETERMINISTIC byte-count ratchet only (--deterministic-only),
+        # which still gates; the merged-tree deterministic ratchet is a pure function of the code
+        # (already ran on the PR head + re-runs on push-to-main), and the merged-tree wasm-
+        # feature-OFF invariant is independently guarded on merge_group by vectorized-feature-off.yml,
+        # so re-running bench on the merge_group ref only dragged the queue. The full NOISY timing
+        # suite moved to the nightly EC2 lane (bench-ec2.yml nightly-full-bench).
         on = _on_block(self.bench)
         self.assertIn("schedule", on, "bench.yml must have the nightly schedule backstop")
-        self.assertIn("merge_group", on, "bench.yml must run on merge_group for the gate")
+        self.assertIn("pull_request", on,
+                      "bench.yml must run on pull_request (the deterministic byte-count ratchet still gates)")
+        self.assertNotIn("merge_group", on,
+                         "bench.yml must NOT run on merge_group (sq-6vshe.6: the deterministic ratchet "
+                         "already gated the PR head + re-runs on push-to-main; the noisy timing suite "
+                         "moved to the nightly EC2 lane — keeping it on merge_group only dragged the queue)")
 
     def test_bench_main_history_and_ratchet_exclude_schedule(self):
         # CRITICAL (design §6.1 continuity, criterion (d)): the auto-ratchet + history +
@@ -598,6 +630,7 @@ class TestBenchMetricTierInvariant(unittest.TestCase):
         _EXPECTED_PR_TIER = frozenset({
             # ci-bench.sh measures these on EVERY tier (no GITHUB_REF guard); bench seeds cover:
             "store_bytes_per_triple",       # sparq-core (via sparq-cli + sparq-bench seeds)
+            "comp_store_bytes_per_triple",  # sparq-core compressed profile (via sparq-cli + sparq-bench seeds; sq-7d3dj.32.2.5)
             "store_bytes_per_triple_small", # sparq-core (via sparq-cli + sparq-bench seeds)
             "dict_bytes_per_term",          # sparq-core (via sparq-cli + sparq-bench seeds)
             "wasm_bundle_bytes",            # sparq-wasm (direct bench seed)

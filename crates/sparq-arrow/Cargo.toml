@@ -50,11 +50,11 @@ oxrdf.workspace = true
 # which additionally pulls IPC / Flight / CSV / JSON / cast machinery we do not use. This
 # keeps the dependency (and cargo-vet exemption) closure as small as a RecordBatch export
 # can be. Only behind the `arrow` feature. [OPUS-4.8]
-arrow-array = { version = "55", optional = true }
-arrow-schema = { version = "55", optional = true }
+arrow-array = { version = "59", optional = true }
+arrow-schema = { version = "59", optional = true }
 # `NullBuffer` for the per-row struct validity (unbound cells). It is `arrow-array`'s
 # own dependency; named directly because the code references `arrow_buffer::NullBuffer`.
-arrow-buffer = { version = "55", optional = true }
+arrow-buffer = { version = "59", optional = true }
 
 [dev-dependencies]
 # The integration tests (tests/record_batch.rs, `#![cfg(feature = "arrow")]`) drive the
@@ -64,3 +64,9 @@ arrow-buffer = { version = "55", optional = true }
 # (default-features=false) edge.
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine" }
+# [GPT-5.6] Property generators for schema/shape/null-mask invariants.
+proptest = "1"
+
+[[example]]
+name = "arrow_interop"
+required-features = ["arrow"]

@@ -1,0 +1,5 @@
+{
+  "pr": 1844,
+  "date": "2026-07-10",
+  "reason": "[SONNET-4.6] sq-7d3dj.30.21: the new always-compiled pub fn Dict::plain_string_value (crates/sparq-core/src/dict.rs) + its direct unit test add code to always-compiled sparq-core, so the feature-OFF wasm bundle bytes move from base by design. The accessor is only CALLED under the engine's topk-lazy-strkey feature, so feature-OFF behaviour is unchanged; SIZE stays governed by the wasm_bundle_bytes +/-2% floor ratchet."
+}

@@ -12,8 +12,9 @@
 // property P or its inverse P⁻. NEGATIVE inclusions (B1 ⊑ ¬B2, disjointness, R1 ⊑ ¬R2) and
 // functionality do NOT contribute to the certain-answer REWRITING of a positive CQ — they only
 // affect consistency — so they are extracted but recorded as ignored-for-rewriting, never
-// silently treated as positive (which would be unsound). This crate rewrites; it does not check
-// consistency (a documented boundary — see the crate README / the deferred-path note).
+// silently treated as positive (which would be unsound). The REWRITER never applies them; the
+// opt-in `ql-consistency` check (sq-p6yb7, src/consistency.rs) consumes the structurally
+// captured ones (`neg_incl`) to decide KB satisfiability by violation-query composition.
 //
 // Extraction reads OWL axioms out of an RDF graph given as oxrdf triples. Only the QL fragment
 // is recognised; an axiom using a non-QL construct is COUNTED in `TBox::skipped` (the honest
@@ -137,6 +138,51 @@ pub struct ConceptInclusion {
     pub sup: String,
 }
 
+/// A DL-Lite_R NEGATIVE inclusion, STRUCTURALLY captured (not just tallied) so the opt-in
+/// `ql-consistency` violation-query check can compose a violation CQ per axiom. [FABLE-5]
+/// sq-p6yb7.
+///
+/// - `Concept(B1, B2)` is `B1 ⊑ ¬B2` — from `owl:disjointWith` where BOTH operands resolve to
+///   QL basic concepts (a named class, or an unqualified `∃R` restriction node).
+/// - `Role(R1, R2)` is `R1 ⊑ ¬R2` — from `owl:propertyDisjointWith` between named properties.
+///
+/// A negative axiom whose operands do NOT resolve (a complex class expression, a poisoned /
+/// qualified restriction, or any `owl:complementOf` triple — `A owl:complementOf B` asserts the
+/// EQUIVALENCE `A ≡ ¬B`, strictly stronger than the negative inclusion `A ⊑ ¬B`, and its
+/// `¬B ⊑ A` half is not a DL-Lite_R negative inclusion) is counted in
+/// `TBox::consistency_uncaptured` instead, which keeps every consistency verdict fail-closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NegativeInclusion {
+    /// `B1 ⊑ ¬B2` (concept disjointness).
+    Concept(Basic, Basic),
+    /// `R1 ⊑ ¬R2` (role disjointness).
+    Role(Role, Role),
+}
+
+impl std::fmt::Display for NegativeInclusion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn basic(b: &Basic) -> String {
+            match b {
+                Basic::Class(c) => format!("<{c}>"),
+                Basic::Exists(r) => format!("∃{}", role(r)),
+            }
+        }
+        fn role(r: &Role) -> String {
+            if r.inverse {
+                format!("<{}>⁻", r.iri)
+            } else {
+                format!("<{}>", r.iri)
+            }
+        }
+        match self {
+            NegativeInclusion::Concept(b1, b2) => {
+                write!(f, "{} ⊑ ¬{}", basic(b1), basic(b2))
+            }
+            NegativeInclusion::Role(r1, r2) => write!(f, "{} ⊑ ¬{}", role(r1), role(r2)),
+        }
+    }
+}
+
 /// The extracted DL-Lite_R TBox: positive inclusions PerfectRef needs, plus an honest tally of
 /// what was outside the QL fragment, what was consistency-relevant, and what was unrecognised.
 ///
@@ -165,12 +211,29 @@ pub struct TBox {
     pub skipped: usize,
     /// Count of triples whose predicate is `owl:disjointWith`, `owl:propertyDisjointWith`, or
     /// `owl:complementOf` — QL-legal negative axioms that do NOT contribute to the
-    /// certain-answer rewriting but ARE consistency-relevant. This crate does not check
-    /// consistency (a documented boundary); a non-zero count signals that the UCQ answers may
-    /// under-approximate the certain answers when the KB is inconsistent (an inconsistent KB
-    /// certain-answers everything). Surfaced SEPARATELY from `skipped` so callers can reason
-    /// about the consistency gap independently of the "axiom outside QL" gap. [SONNET-4.6]
+    /// certain-answer rewriting but ARE consistency-relevant. The REWRITER never applies them;
+    /// a non-zero count signals that the UCQ answers may under-approximate the certain answers
+    /// when the KB is inconsistent (an inconsistent KB certain-answers everything) — unless the
+    /// opt-in `ql-consistency` check (`check_consistency`, sq-p6yb7) proves the KB consistent.
+    /// Surfaced SEPARATELY from `skipped` so callers can reason about the consistency gap
+    /// independently of the "axiom outside QL" gap. [SONNET-4.6]
+    ///
+    /// INVARIANT (sq-p6yb7): `consistency_relevant == neg_incl.len() + consistency_uncaptured`
+    /// — every tallied negative axiom is either structurally captured or counted uncaptured.
     pub consistency_relevant: usize,
+    /// The negative inclusions STRUCTURALLY captured from `owl:disjointWith` (both operands
+    /// resolved to basic concepts) and `owl:propertyDisjointWith` (both operands named
+    /// properties). Input to the opt-in `ql-consistency` violation-query composition; never
+    /// applied by the rewriter. [FABLE-5] sq-p6yb7
+    pub neg_incl: Vec<NegativeInclusion>,
+    /// Count of consistency-relevant axioms that could NOT be structurally captured into
+    /// `neg_incl`: every `owl:complementOf` triple (an equivalence-with-complement, strictly
+    /// stronger than a negative inclusion — see [`NegativeInclusion`]), and any
+    /// `owl:disjointWith` / `owl:propertyDisjointWith` whose operand is not a resolvable basic
+    /// concept / named property. Non-zero means a consistency check can still soundly report
+    /// INCONSISTENT (logic is monotonic) but must never report CONSISTENT (fail-closed).
+    /// [FABLE-5] sq-p6yb7
+    pub consistency_uncaptured: usize,
     /// Count of OWL/RDFS constructs this extractor does not recognise, tallied through two
     /// distinct paths: (1) triples whose *predicate* is in the `rdfs:`/`owl:` namespace and is
     /// not captured, skipped, consistency-relevant, or annotation-classified; and (2) `rdf:type`
@@ -235,9 +298,10 @@ impl TBox {
                     }
                 }
                 _ if p == domain() => {
-                    if let (Some(r), Some(NodeKind::Iri(a))) =
-                        (role_of_subject(&t.subject), NodeKind::from_object(&t.object))
-                    {
+                    if let (Some(r), Some(NodeKind::Iri(a))) = (
+                        role_of_subject(&t.subject),
+                        NodeKind::from_object(&t.object),
+                    ) {
                         // ∃R ⊑ A
                         tbox.concept_incl.push(ConceptInclusion {
                             sub: Basic::Exists(r),
@@ -248,9 +312,10 @@ impl TBox {
                     }
                 }
                 _ if p == range() => {
-                    if let (Some(r), Some(NodeKind::Iri(a))) =
-                        (role_of_subject(&t.subject), NodeKind::from_object(&t.object))
-                    {
+                    if let (Some(r), Some(NodeKind::Iri(a))) = (
+                        role_of_subject(&t.subject),
+                        NodeKind::from_object(&t.object),
+                    ) {
                         // ∃R⁻ ⊑ A
                         tbox.concept_incl.push(ConceptInclusion {
                             sub: Basic::Exists(r.inv()),
@@ -275,7 +340,10 @@ impl TBox {
                 // B ⊑ A (both directions). QL-legal with named-class operands only; a blank-node
                 // complex expression on either side → skipped (outside QL rewriting scope).
                 _ if p == equivalent_class() => {
-                    match (NodeKind::from_subject(&t.subject), NodeKind::from_object(&t.object)) {
+                    match (
+                        NodeKind::from_subject(&t.subject),
+                        NodeKind::from_object(&t.object),
+                    ) {
                         (NodeKind::Iri(a), Some(NodeKind::Iri(b))) => {
                             tbox.concept_incl.push(ConceptInclusion {
                                 sub: Basic::Class(a.clone()),
@@ -302,9 +370,39 @@ impl TBox {
                 }
                 // [SONNET-4.6] sq-pbz04.3.3 — negative/disjointness axioms: QL-legal but
                 // consistency-relevant. Counted separately (never applied to the rewrite).
-                _ if p == disjoint_with() => tbox.consistency_relevant += 1,
-                _ if p == property_disjoint_with() => tbox.consistency_relevant += 1,
-                _ if p == complement_of() => tbox.consistency_relevant += 1,
+                // [FABLE-5] sq-p6yb7 — additionally STRUCTURALLY captured where both operands
+                // resolve to QL basic shapes, so the opt-in `ql-consistency` check can compose
+                // a violation query per axiom; unresolvable shapes go to
+                // `consistency_uncaptured` (fail-closed for CONSISTENT verdicts).
+                _ if p == disjoint_with() => {
+                    tbox.consistency_relevant += 1;
+                    let b1 = basic_of(&NodeKind::from_subject(&t.subject), &restrictions);
+                    let b2 =
+                        NodeKind::from_object(&t.object).and_then(|n| basic_of(&n, &restrictions));
+                    match (b1, b2) {
+                        (Some(b1), Some(b2)) => {
+                            tbox.neg_incl.push(NegativeInclusion::Concept(b1, b2));
+                        }
+                        _ => tbox.consistency_uncaptured += 1,
+                    }
+                }
+                _ if p == property_disjoint_with() => {
+                    tbox.consistency_relevant += 1;
+                    match (role_of_subject(&t.subject), role_of_object(&t.object)) {
+                        (Some(r1), Some(r2)) => {
+                            tbox.neg_incl.push(NegativeInclusion::Role(r1, r2));
+                        }
+                        _ => tbox.consistency_uncaptured += 1,
+                    }
+                }
+                // `A owl:complementOf B` asserts A ≡ ¬B — STRICTLY stronger than the negative
+                // inclusion A ⊑ ¬B (its ¬B ⊑ A half is not a DL-Lite_R negative inclusion, and
+                // treating only the negative half as captured would make a CONSISTENT verdict
+                // incomplete). Always uncaptured for consistency purposes. [FABLE-5] sq-p6yb7
+                _ if p == complement_of() => {
+                    tbox.consistency_relevant += 1;
+                    tbox.consistency_uncaptured += 1;
+                }
                 // [SONNET-4.6] sq-pbz04.3.3 — `rdf:type` triples encode OWL characteristic-
                 // property axioms via the OBJECT position (e.g. `:p rdf:type
                 // owl:FunctionalProperty`). The predicate `rdf:type` is in the `rdf:` namespace,
@@ -679,6 +777,94 @@ mod tests {
         assert!(
             tbox.fully_captured(),
             "consistency_relevant alone does NOT block fully_captured"
+        );
+    }
+
+    // [FABLE-5] sq-p6yb7 — structural negative-inclusion capture: disjointWith /
+    // propertyDisjointWith resolve into `neg_incl`; complementOf and unresolvable operands go
+    // to `consistency_uncaptured`; the tally invariant
+    // `consistency_relevant == neg_incl.len() + consistency_uncaptured` holds.
+    #[test]
+    fn negative_inclusions_structurally_captured_with_tally_invariant() {
+        use oxrdf::NamedNode;
+        let iri = |s: &str| NamedNode::new(s).unwrap();
+        let triples = vec![
+            // Captured: named-class disjointness → Concept NI.
+            Triple::new(
+                iri("http://ex/A"),
+                iri(&format!("{OWL}disjointWith")),
+                iri("http://ex/B"),
+            ),
+            // Captured: property disjointness → Role NI.
+            Triple::new(
+                iri("http://ex/p"),
+                iri(&format!("{OWL}propertyDisjointWith")),
+                iri("http://ex/q"),
+            ),
+            // Uncaptured: complementOf is an equivalence-with-complement, never a mere NI.
+            Triple::new(
+                iri("http://ex/C"),
+                iri(&format!("{OWL}complementOf")),
+                iri("http://ex/D"),
+            ),
+            // Uncaptured: disjointWith whose object is a literal-free blank node that is NOT a
+            // resolvable restriction.
+            Triple::new(
+                iri("http://ex/E"),
+                iri(&format!("{OWL}disjointWith")),
+                oxrdf::BlankNode::new("nores").unwrap(),
+            ),
+        ];
+        let tbox = TBox::extract(&triples);
+        assert_eq!(tbox.consistency_relevant, 4);
+        assert_eq!(tbox.consistency_uncaptured, 2);
+        assert_eq!(
+            tbox.neg_incl,
+            vec![
+                NegativeInclusion::Concept(
+                    Basic::Class("http://ex/A".into()),
+                    Basic::Class("http://ex/B".into())
+                ),
+                NegativeInclusion::Role(Role::named("http://ex/p"), Role::named("http://ex/q")),
+            ]
+        );
+        assert_eq!(
+            tbox.consistency_relevant,
+            tbox.neg_incl.len() + tbox.consistency_uncaptured,
+            "tally invariant (sq-p6yb7)"
+        );
+        // Negative axioms are QL-legal: they never block fully_captured (unchanged semantics).
+        assert!(tbox.fully_captured());
+    }
+
+    // [FABLE-5] sq-p6yb7 — a disjointness against an UNQUALIFIED ∃R restriction node resolves
+    // through the restriction index into `Basic::Exists` (the QL-legal ∃R ⊑ ¬B shape).
+    #[test]
+    fn disjointness_with_unqualified_restriction_resolves_to_exists() {
+        use oxrdf::{BlankNode, NamedNode};
+        let iri = |s: &str| NamedNode::new(s).unwrap();
+        let bn = BlankNode::new("r0").unwrap();
+        let triples = vec![
+            Triple::new(
+                bn.clone(),
+                iri(&format!("{OWL}onProperty")),
+                iri("http://ex/r"),
+            ),
+            Triple::new(
+                bn.clone(),
+                iri(&format!("{OWL}someValuesFrom")),
+                iri(&format!("{OWL}Thing")),
+            ),
+            Triple::new(bn, iri(&format!("{OWL}disjointWith")), iri("http://ex/B")),
+        ];
+        let tbox = TBox::extract(&triples);
+        assert_eq!(tbox.consistency_uncaptured, 0);
+        assert_eq!(
+            tbox.neg_incl,
+            vec![NegativeInclusion::Concept(
+                Basic::Exists(Role::named("http://ex/r")),
+                Basic::Class("http://ex/B".into())
+            )]
         );
     }
 }

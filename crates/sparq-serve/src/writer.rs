@@ -12,6 +12,22 @@
 //! [`GenerationRing::current`] lock-free; the only writer/reader interaction is
 //! the ring's arc-swap at publish.
 //!
+//! ## Adaptive group-commit ([`WriterConfig::adaptive_commit`])
+//!
+//! The fixed window is a batching heuristic, not a correctness requirement, and it
+//! is pure latency for a **serial / low-concurrency** client that blocks on its own
+//! ack (the interactive LDP-CRUD shape): nothing else can arrive to fill the window,
+//! so each update pays ~`window` even though the engine's `update_in_place` is ~15 µs
+//! (the sq-p7kk5 update-path gap — the 3 ms default window dominated a serial
+//! client's ~99% of commit latency). Opt-in [`adaptive_commit`](WriterConfig::adaptive_commit)
+//! drops the timed wait: after the first update the writer drains only the ALREADY-
+//! queued backlog (`try_recv`) and commits the instant it empties. Serial clients
+//! commit in engine-time; a genuinely concurrent stream still batches whatever piled
+//! up between iterations, so group-commit amortisation under load is preserved. FIFO
+//! order, per-update atomicity, and every ACID property below are unchanged — only
+//! epoch-tick granularity may be finer (a Wave-B cache-key concern, never
+//! correctness). sparq-server enables it for its write path.
+//!
 //! ## Sequencing and ACID (§6.5)
 //!
 //! Updates inside a batch are applied in **submission order** (strict FIFO — the
@@ -70,6 +86,19 @@
 //! acceptable because failures are the rare path (parse errors and constraint
 //! violations, not steady state).
 //!
+//! ## Commit hook (per-publish observation seam)
+//!
+//! [FABLE-5] (sq-bdaw5) [`Writer::spawn_with_commit_hook`] installs a hook that runs on
+//! the writer thread once per **commit-publish** with the `(predecessor, published)`
+//! generation pair — the seam a durable change-data-capture recorder
+//! (`ChangeLog::into_commit_hook`, feature `change-stream`) plugs into. Because the
+//! writer thread is the sole publisher, the pairs chain gapless without any locking:
+//! recording costs one append per PUBLISHED GENERATION on the writer thread (amortised
+//! across the batch) instead of one append per update under a caller-side mutex held
+//! across `submit` — group-commit concurrency is preserved with the stream on. Acks
+//! happen-after the hook returns; restore publishes never fire it (not same-lineage).
+//! No hook installed = zero cost.
+//!
 //! ## Snapshot production (the §6.4 "working copy")
 //!
 //! §6.4 imagines a persistent writer-private working copy folded periodically.
@@ -94,7 +123,7 @@ use rustc_hash::FxHashSet;
 
 use crate::epoch::PodId;
 use crate::footprint::{Footprint, TargetGraph};
-use crate::ring::GenerationRing;
+use crate::ring::{Generation, GenerationRing};
 
 /// Default group-commit window. §6.5 prescribes 2–5 ms; the middle of the band
 /// adds ≤3 ms p50 write latency (far inside the 45 s contract) while absorbing
@@ -135,6 +164,33 @@ pub struct WriterConfig {
     /// Whether a window commits as one generation or as one generation per
     /// commuting run (module docs).
     pub granularity: CommitGranularity,
+    /// [OPUS-4.8] (sq-p7kk5) ADAPTIVE group-commit. When `false` (the default,
+    /// unchanged behaviour) the writer always waits the full [`window`](Self::window)
+    /// after the first update, absorbing any concurrent traffic that arrives within
+    /// it into one generation. That fixed wait is pure latency for a **serial /
+    /// low-concurrency** client (one in-flight update at a time — the interactive
+    /// LDP-CRUD shape): the client is blocked on its own ack, so nothing else can
+    /// arrive to fill the window, and it pays ~`window` per update no matter how fast
+    /// the engine is (the engine's `update_in_place` is ~15 µs; the 3 ms default
+    /// window is ~200× that — the measured update-path gap in sq-p7kk5).
+    ///
+    /// When `true` the writer instead DRAINS whatever is already queued
+    /// non-blocking (`try_recv`) after the first update and commits as soon as the
+    /// backlog is empty — **no timed wait**. A serial client commits in
+    /// engine-time (µs), not window-time (ms); a genuinely concurrent stream still
+    /// batches every update that had already piled up between the writer's
+    /// iterations, so group-commit amortisation under real load is preserved. It is
+    /// a strict LATENCY improvement with NO change to the mutation/durability
+    /// contract: application stays strict FIFO, per-update atomicity is unchanged,
+    /// every accepted update is still committed, and each committed generation is
+    /// still the serial order. Two clients whose requests genuinely overlap MAY land
+    /// in separate generations rather than one — that only affects epoch-tick
+    /// granularity (a Wave-B cache-key concern), never correctness or visibility.
+    ///
+    /// [`max_batch`](Self::max_batch) still bounds a drained backlog. Off by default
+    /// so the documented windowed contract is preserved for callers that rely on it;
+    /// sparq-server opts in for its interactive write path.
+    pub adaptive_commit: bool,
 }
 
 impl Default for WriterConfig {
@@ -143,6 +199,7 @@ impl Default for WriterConfig {
             window: DEFAULT_WINDOW,
             max_batch: DEFAULT_MAX_BATCH,
             granularity: CommitGranularity::Window,
+            adaptive_commit: false,
         }
     }
 }
@@ -339,10 +396,75 @@ impl<U: Send + 'static, S: Send + Sync + 'static> Writer<U, S> {
     where
         A: ApplyUpdates<Update = U, Snapshot = S>,
     {
+        // A never-installed hook: the `fn` pointer type only names `H` for the
+        // hook-less spawn (zero runtime cost — the Option is `None` forever).
+        Self::spawn_inner(
+            ring,
+            applier,
+            config,
+            None::<fn(&Generation<S>, &Generation<S>)>,
+        )
+    }
+
+    /// [FABLE-5] (sq-bdaw5) [`spawn`](Self::spawn) with a **commit hook**: `hook` runs ON
+    /// THE WRITER THREAD immediately after every commit-publish, receiving the
+    /// `(predecessor, published)` generation pair of that commit. Because the writer
+    /// thread is the ring's ONLY publisher, consecutive pairs CHAIN (each call's
+    /// `predecessor` is the previous call's `published`) — exactly the gapless,
+    /// monotonic same-lineage stream a change-data-capture recorder needs, with **no
+    /// caller-side locking and no serialisation of submitters**: recording happens once
+    /// per PUBLISHED GENERATION (amortised over the whole group-commit batch), not once
+    /// per update under a global mutex held across `submit`.
+    ///
+    /// Contract:
+    /// - **One call per commit-publish.** Under [`CommitGranularity::Window`] that is
+    ///   one call per committed window; under [`CommitGranularity::CommuteGroup`], one
+    ///   per published commuting run. A batch whose every update failed publishes
+    ///   nothing and the hook is NOT called (there is no new generation to report).
+    /// - **Acks happen-after the hook returns.** A submitter's [`submit`](Self::submit)
+    ///   does not get its generation number until the hook has run for the generation
+    ///   containing its update — so a durable side effect the hook performs (e.g. a
+    ///   `ChangeLog` record append + fsync, via `ChangeLog::into_commit_hook`, feature
+    ///   `change-stream`) is complete by the time the write is acknowledged. The hook's
+    ///   runtime therefore adds to write ack latency, once per generation; keep it
+    ///   O(commit), not O(graph).
+    /// - **Restore publishes do NOT fire the hook.** [`restore`](Self::restore) replaces
+    ///   the whole store with a freshly-built snapshot that does NOT share the writer
+    ///   lineage of its predecessor, so a lineage-diffing consumer (the change stream's
+    ///   same-lineage quad diff) must not be handed the pair. A change stream spanning a
+    ///   restore needs an explicit re-baseline — the fail-closed discontinuity is
+    ///   surfaced by the recorder, never silently diffed through.
+    /// - The hook runs on the writer thread: a panic in it kills the writer (submitters
+    ///   see [`WriteError::Shutdown`]). Return, don't panic, on recoverable errors.
+    pub fn spawn_with_commit_hook<A, H>(
+        ring: Arc<GenerationRing<A::Snapshot>>,
+        applier: A,
+        config: WriterConfig,
+        hook: H,
+    ) -> Self
+    where
+        A: ApplyUpdates<Update = U, Snapshot = S>,
+        H: FnMut(&Generation<S>, &Generation<S>) + Send + 'static,
+    {
+        Self::spawn_inner(ring, applier, config, Some(hook))
+    }
+
+    /// The one true spawn: `hook`, when present, is moved onto the writer thread and
+    /// fired once per commit-publish (see [`spawn_with_commit_hook`](Self::spawn_with_commit_hook)).
+    fn spawn_inner<A, H>(
+        ring: Arc<GenerationRing<A::Snapshot>>,
+        applier: A,
+        config: WriterConfig,
+        hook: Option<H>,
+    ) -> Self
+    where
+        A: ApplyUpdates<Update = U, Snapshot = S>,
+        H: FnMut(&Generation<S>, &Generation<S>) + Send + 'static,
+    {
         let (tx, rx) = mpsc::channel::<Cmd<U, S>>();
         let thread = thread::Builder::new()
             .name("sparq-serve-writer".into())
-            .spawn(move || run(ring, applier, config, rx))
+            .spawn(move || run(ring, applier, config, rx, hook))
             .expect("spawn writer thread");
         Writer {
             tx: Some(tx),
@@ -470,12 +592,17 @@ type PendingRestore<A> = (
 );
 
 /// The writer thread: collect a batch per group-commit window, commit, repeat.
-fn run<A: ApplyUpdates>(
+/// [FABLE-5] (sq-bdaw5) `hook`, when present, fires once per commit-publish
+/// (never for a restore publish — see `Writer::spawn_with_commit_hook`).
+fn run<A: ApplyUpdates, H>(
     ring: Arc<GenerationRing<A::Snapshot>>,
     mut applier: A,
     config: WriterConfig,
     rx: Receiver<Cmd<A::Update, A::Snapshot>>,
-) {
+    mut hook: Option<H>,
+) where
+    H: FnMut(&Generation<A::Snapshot>, &Generation<A::Snapshot>),
+{
     let max_batch = config.max_batch.max(1);
     loop {
         // Block until the first command arrives. An update opens a group-commit window; a
@@ -512,11 +639,28 @@ fn run<A: ApplyUpdates>(
         // replaced — so a restore never races, or is reordered against, a concurrent update.
         let mut pending_restore: Option<PendingRestore<A>> = None;
         while batch.len() < max_batch {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match rx.recv_timeout(deadline - now) {
+            // [OPUS-4.8] (sq-p7kk5) In ADAPTIVE mode we never wait the window: after the
+            // first update we drain only what is ALREADY queued (`try_recv`) and commit the
+            // moment the backlog empties. A serial client (blocked on its own ack) has an
+            // empty queue here, so it commits in engine-time instead of paying ~window per
+            // update; a concurrent stream still batches everything that piled up between
+            // iterations. In windowed mode we block up to the remaining window as before.
+            let next = if config.adaptive_commit {
+                match rx.try_recv() {
+                    Ok(cmd) => Ok(cmd),
+                    // Nothing more queued: close the batch NOW (semantically the window's
+                    // Timeout — commit what we have).
+                    Err(mpsc::TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
+                    Err(mpsc::TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+                }
+            } else {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                rx.recv_timeout(deadline - now)
+            };
+            match next {
                 Ok(Cmd::Update(m)) => batch.push(m),
                 Ok(Cmd::Maintain(done)) => {
                     pending_maintain = Some(done);
@@ -534,10 +678,10 @@ fn run<A: ApplyUpdates>(
             }
         }
         match config.granularity {
-            CommitGranularity::Window => commit(&ring, &mut applier, batch),
+            CommitGranularity::Window => commit(&ring, &mut applier, batch, &mut hook),
             CommitGranularity::CommuteGroup => {
                 for group in split_commute_groups(&applier, batch) {
-                    commit(&ring, &mut applier, group);
+                    commit(&ring, &mut applier, group, &mut hook);
                 }
             }
         }
@@ -567,6 +711,10 @@ fn run<A: ApplyUpdates>(
 /// returns the snapshot to publish; on its `Err` nothing is published and the OLD store is intact
 /// (the swap is fail-closed). The publish uses an empty epoch-touched set: a full-store restore
 /// invalidates everything, and the generation bump alone re-evaluates active subscriptions.
+///
+/// [FABLE-5] (sq-bdaw5) A restore publish deliberately does NOT fire the commit hook: the
+/// restored snapshot does not share the predecessor's writer lineage, so a lineage-diffing
+/// consumer (the change stream) must never be handed the pair (`Writer::spawn_with_commit_hook`).
 fn run_restore<A: ApplyUpdates>(
     ring: &GenerationRing<A::Snapshot>,
     applier: &mut A,
@@ -629,11 +777,17 @@ fn split_commute_groups<A: ApplyUpdates>(
 /// Applies one batch to a fresh working copy and publishes ONE generation
 /// (module docs: FIFO order, failed updates skipped + re-fork recovery, epochs =
 /// union of successful updates' pods, no publish if nothing succeeded).
-fn commit<A: ApplyUpdates>(
+/// [FABLE-5] (sq-bdaw5) On publish, `hook` fires with `(base, published)` BEFORE
+/// the batch's acks are sent — so a hook-side durable effect (a change-stream
+/// record) is complete by the time any submitter's `submit` returns.
+fn commit<A: ApplyUpdates, H>(
     ring: &GenerationRing<A::Snapshot>,
     applier: &mut A,
     batch: Vec<Msg<A::Update>>,
-) {
+    hook: &mut Option<H>,
+) where
+    H: FnMut(&Generation<A::Snapshot>, &Generation<A::Snapshot>),
+{
     let base = ring.current();
     let mut errs: Vec<Option<String>> = (0..batch.len()).map(|_| None).collect();
 
@@ -691,7 +845,16 @@ fn commit<A: ApplyUpdates>(
     let touched = applied
         .iter()
         .flat_map(|&i| batch[i].touched.iter().cloned());
-    let number = ring.publish(snapshot, touched).number();
+    let published = ring.publish(snapshot, touched);
+    // [FABLE-5] (sq-bdaw5) Fire the commit hook (once per published generation, on this
+    // — the only publishing — thread) BEFORE acking, so a hook-side durable record is
+    // complete when submitters unblock. `base` is the generation this commit forked
+    // from; since only this thread publishes, `(base, published)` pairs chain gapless
+    // across commits — the same-lineage contract a change-stream recorder relies on.
+    if let Some(h) = hook.as_mut() {
+        h(base.as_ref(), published.as_ref());
+    }
+    let number = published.number();
     for (i, msg) in batch.into_iter().enumerate() {
         if let Some(ack) = msg.ack {
             let _ = ack.send(match errs[i].take() {

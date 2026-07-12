@@ -1,0 +1,5 @@
+{
+  "pr": 1836,
+  "date": "2026-07-10",
+  "reason": "sq-jnb1e: exec.rs threads an OPT-IN (cs-anchor-incidence, OFF by default) incidence_cache parameter through the always-compiled DISTINCT-projection semijoin functions (branch_distinct_values, two_pattern_distinct, probe_anchor_distinct) via #[cfg(feature = \"cs-anchor-incidence\")] parameter attributes. When the feature is OFF the parameter and all incidence code are compiled out, but recompiling those default-path functions shifts codegen — a +0 byte / +0.000% no-op move of the feature-OFF sparq-wasm bundle. Feature-OFF behaviour invariant is preserved (default build byte-behaviour-identical; the new prune only runs when the feature is ON)."
+}

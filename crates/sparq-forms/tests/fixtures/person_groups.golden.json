@@ -1,0 +1,318 @@
+{
+  "focus": {
+    "kind": "iri",
+    "value": "http://example.org/eve"
+  },
+  "mode": "edit",
+  "shapes": [
+    {
+      "shape": {
+        "kind": "iri",
+        "value": "http://example.org/EmployeeShape"
+      },
+      "label": "Employee",
+      "via": "target-class"
+    }
+  ],
+  "shape": {
+    "kind": "iri",
+    "value": "http://example.org/EmployeeShape"
+  },
+  "groups": [
+    {
+      "kind": "declared",
+      "group": {
+        "kind": "iri",
+        "value": "http://example.org/IdentityGroup"
+      },
+      "label": "Identity",
+      "order": 0.0,
+      "fields": [
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b0"
+          },
+          "path": "<http://example.org/fullName>",
+          "label": "Full name",
+          "description": "Legal name.",
+          "order": 1.0,
+          "required": true,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#TextFieldEditor",
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 10,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextAreaEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#HyperlinkViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "Eve Example"
+              }
+            }
+          ],
+          "constraints": {
+            "min_count": 1,
+            "max_count": 1,
+            "datatype": [
+              "http://www.w3.org/2001/XMLSchema#string"
+            ]
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b1"
+          },
+          "path": "<http://example.org/bio>",
+          "label": "Biography",
+          "order": 1.5,
+          "multi": true,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#TextAreaEditor",
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 20,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextFieldEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#HyperlinkViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "Line one.\nLine two."
+              }
+            }
+          ],
+          "constraints": {
+            "datatype": [
+              "http://www.w3.org/2001/XMLSchema#string"
+            ],
+            "single_line": false
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b2"
+          },
+          "path": "<http://example.org/motto>",
+          "label": "Motto",
+          "order": 2.0,
+          "multi": true,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#TextFieldWithLangEditor",
+            "viewer": "http://datashapes.org/dash#LangStringViewer",
+            "score": 11,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextAreaWithLangEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#LiteralViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "carpe diem",
+                "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+                "language": "en"
+              }
+            },
+            {
+              "term": {
+                "kind": "literal",
+                "value": "grip dagen",
+                "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+                "language": "no"
+              }
+            }
+          ],
+          "constraints": {
+            "datatype": [
+              "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+            ],
+            "unique_lang": true
+          }
+        }
+      ]
+    },
+    {
+      "kind": "declared",
+      "group": {
+        "kind": "iri",
+        "value": "http://example.org/WorkGroup"
+      },
+      "label": "Employment",
+      "order": 1.0,
+      "fields": [
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b3"
+          },
+          "path": "<http://example.org/active>",
+          "label": "Active",
+          "order": 1.0,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#BooleanSelectEditor",
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 10,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "true",
+                "datatype": "http://www.w3.org/2001/XMLSchema#boolean"
+              }
+            }
+          ],
+          "constraints": {
+            "max_count": 1,
+            "datatype": [
+              "http://www.w3.org/2001/XMLSchema#boolean"
+            ]
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b4"
+          },
+          "path": "<http://example.org/hireDate>",
+          "label": "Hire date",
+          "order": 2.0,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#DatePickerEditor",
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 10,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextFieldEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "2024-02-29",
+                "datatype": "http://www.w3.org/2001/XMLSchema#date"
+              }
+            }
+          ],
+          "constraints": {
+            "max_count": 1,
+            "datatype": [
+              "http://www.w3.org/2001/XMLSchema#date"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "other",
+      "label": "Other properties",
+      "fields": [
+        {
+          "path": "<http://example.org/badge>",
+          "label": "badge",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#ImageViewer",
+            "score": 50,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#LabelViewer",
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/badges/eve.png"
+              }
+            }
+          ],
+          "constraints": {}
+        },
+        {
+          "path": "<http://example.org/internalCode>",
+          "label": "internalCode",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 1,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#HyperlinkViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "X-13"
+              }
+            }
+          ],
+          "constraints": {}
+        },
+        {
+          "path": "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>",
+          "label": "Type",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#LabelViewer",
+            "score": 5,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/Employee"
+              }
+            }
+          ],
+          "constraints": {}
+        }
+      ]
+    }
+  ]
+}

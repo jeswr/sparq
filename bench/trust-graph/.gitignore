@@ -1,0 +1,6 @@
+# [FABLE-5] sq-on7r4 — the standalone trust-graph-bench driver's own build/scratch dirs
+# are never committed (mirrors bench/ac/.gitignore + bench/parse/.gitignore). Cargo.lock
+# IS tracked (reproducible --locked builds), like the sibling standalone bench projects.
+target/
+# runtime results scratch (git-ignored, regenerable; work-box numbers are NON-canonical).
+results/

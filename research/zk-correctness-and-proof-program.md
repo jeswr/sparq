@@ -1,5 +1,7 @@
 # Design — ZK correctness + optimization + proof-of-correctness program (`sparq_ieee754` & `noir_XPath`)
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` and `zk/xpath` Noir trees were externalized to the `sparq-org/noir_IEEE754` (v0.10.0) and `sparq-org/noir_XPath` (v0.2.0) face repos and REMOVED from this repo; `zk/compose` now consumes the released `sparq_ieee754` as a pinned Nargo git dependency, and §3's `nargo test` CI wiring (`sq-3x7dl.13`) now lives in each face repo's own CI. Any `zk/xpath/…` / `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the corresponding face repo. -->
+
 <!-- [FABLE-5] Fable-tier synthesis of three upstream audits (ieee754 correctness/opt/CI,
 xpath correctness/opt/CI, sparql_noir/Lean prior-art). DESIGN + decomposition only — NO
 production code in this PR. 🤖 SPARQ agent. -->

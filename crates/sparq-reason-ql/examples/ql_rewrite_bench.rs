@@ -35,6 +35,18 @@ use sparq_reason_ql::{rewrite, rewrite_production};
 use std::str::FromStr;
 use std::time::Instant;
 
+// [OPUS-4.8] sq-pbz04.3.5: the SPARQL/Turtle prefixes the corpus-profile section uses (the
+// realistic QL corpus is written with prefixed names for readability). Kept separate from the
+// chain benchmark, which builds bare N-triples.
+const SPARQL_PREFIXES: &str = "PREFIX : <http://ex/> \
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+    PREFIX owl: <http://www.w3.org/2002/07/owl#> \
+    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> ";
+const TURTLE_PREFIXES: &str = "@prefix : <http://ex/> . \
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+    @prefix owl: <http://www.w3.org/2002/07/owl#> . \
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> . ";
+
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -142,6 +154,156 @@ fn run_production(depth: usize) {
     );
 }
 
+// ===========================================================================================
+// [OPUS-4.8] sq-pbz04.3.5 — the combined-approach / H-complete-ABox EVALUATE-FIRST measurement.
+//
+// The combined approach (Kontchakov, Lutz, Toman, Wolter, Zakharyaschev — "The Combined Approach
+// to Query Answering in DL-Lite") trades a large query REWRITING for a hierarchy-completed
+// (H-complete) ABox plus a small filtering step: it wins ONLY WHEN pure PerfectRef rewriting
+// blows the UCQ up while ABox saturation stays cheap. Whether to adopt it here is therefore an
+// EMPIRICAL question about the UCQ-size DISTRIBUTION on the REAL corpus, not a literature claim.
+//
+// This section profiles `rewrite_production`'s minimised-UCQ size on (1) the REALISTIC corpus —
+// the graduated DL-Lite_R oracle shapes (mirrored from `sparq-conformance`'s `QL_DLLITE_ORACLE`)
+// plus the answered W3C `pr:QL` extensional-CQ shapes — versus (2) deliberately-adversarial
+// CEILING probes that force the product blow-up. UCQ sizes are a PURE, DETERMINISTIC function of
+// the (TBox, query), so every count is a CLOSED-FORM assertion — the reproducible evidence behind
+// the reasoned NON-ADOPTION recorded in `research/owl2-ql-cq-gate-broadening.md` §10. No
+// wall-clock here: the UCQ COUNTS are the canonical, load-robust metric (work-box seconds are not).
+// ===========================================================================================
+
+/// Parse a Turtle TBox (prefixes prepended) into triples for the rewriter.
+fn tbox_ttl(ttl: &str) -> Vec<Triple> {
+    let full = format!("{}{}", TURTLE_PREFIXES, ttl);
+    oxttl::TurtleParser::new()
+        .for_reader(full.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tbox turtle parse")
+}
+
+/// Parse a prefixed SPARQL `SELECT` query.
+fn cq(body: &str) -> Query {
+    parse(&format!("{}{}", SPARQL_PREFIXES, body))
+}
+
+/// The minimised UCQ size (`rewrite_production`) for a (TBox, query), asserting the raw-vs-minimised
+/// invariant. The realistic-corpus / ceiling helpers call this and assert the closed form.
+fn min_ucq(ttl: &str, body: &str) -> usize {
+    let tbox = tbox_ttl(ttl);
+    let query = cq(body);
+    let p = rewrite_production(&query, &tbox).expect("corpus case is in QL scope");
+    assert!(
+        p.report.disjuncts <= p.report.disjuncts_before_minimisation,
+        "minimisation must only REMOVE disjuncts: {} > {}",
+        p.report.disjuncts,
+        p.report.disjuncts_before_minimisation
+    );
+    p.report.disjuncts
+}
+
+/// The REALISTIC QL corpus: `(id, tbox_ttl, query, expected_minimised_ucq)`. Covers every
+/// DL-Lite_R rewriting axis the oracle proves (class subsumption incl. a transitive chain, the
+/// existential domain/range inclusions, role inclusion, `owl:inverseOf`, the unqualified `∃R`
+/// generator with its applicability condition, a two-distinguished-variable product, and the
+/// conjunction that minimises) PLUS the answered W3C `pr:QL` extensional-CQ shapes (a single/double
+/// class atom over a shallow RDFS hierarchy, a literal-object role atom). Each `expected` is the
+/// hand-verified closed form. [OPUS-4.8] sq-pbz04.3.5
+fn realistic_corpus() -> Vec<(&'static str, &'static str, &'static str, usize)> {
+    vec![
+        // --- graduated DL-Lite_R oracle shapes (mirror of QL_DLLITE_ORACLE C1..C11) ---
+        ("class-subsumption", ":Manager rdfs:subClassOf :Employee .", "SELECT ?x WHERE { ?x a :Employee }", 2),
+        ("transitive-subclass", ":A rdfs:subClassOf :B . :B rdfs:subClassOf :C .", "SELECT ?x WHERE { ?x a :C }", 3),
+        ("domain-introduces-role", ":worksFor rdfs:domain :Employee .", "SELECT ?x WHERE { ?x a :Employee }", 2),
+        ("range-introduces-inverse", ":worksFor rdfs:range :Company .", "SELECT ?y WHERE { ?y a :Company }", 2),
+        ("role-inclusion", ":manages rdfs:subPropertyOf :worksFor .", "SELECT ?x ?y WHERE { ?x :worksFor ?y }", 2),
+        ("inverse-of-role-chain", ":employs owl:inverseOf :worksFor . :manages rdfs:subPropertyOf :employs .", "SELECT ?x ?y WHERE { ?x :worksFor ?y }", 3),
+        ("exists-super-fires-unbound", ":Employee rdfs:subClassOf [ owl:onProperty :worksFor ; owl:someValuesFrom owl:Thing ] .", "SELECT ?x WHERE { ?x :worksFor ?y }", 2),
+        ("exists-super-blocked-bound", ":Employee rdfs:subClassOf [ owl:onProperty :worksFor ; owl:someValuesFrom owl:Thing ] .", "SELECT ?x ?y WHERE { ?x :worksFor ?y }", 1),
+        ("two-var-product", ":A rdfs:subClassOf :B .", "SELECT ?x ?y WHERE { ?x a :B . ?y a :B }", 4),
+        ("conjunction-minimises", ":A rdfs:subClassOf :B . :B rdfs:subClassOf :C .", "SELECT ?x WHERE { ?x a :A . ?x a :C }", 1),
+        ("empty-tbox-identity", "", "SELECT ?x WHERE { ?x a :Employee }", 1),
+        // --- answered W3C pr:QL extensional-CQ shapes ---
+        ("w3c-simple-typed", ":a rdfs:subClassOf :c .", "SELECT ?x WHERE { ?x rdf:type :c }", 2),
+        ("w3c-rdfs-subclass", ":aType rdfs:subClassOf :bType .", "SELECT ?x WHERE { ?x rdf:type :bType }", 2),
+        ("w3c-literal-object", "", "SELECT ?x WHERE { ?x <http://xmlns.com/foaf/0.1/name> \"name\"@en }", 1),
+    ]
+}
+
+/// Profile the realistic corpus + the adversarial ceiling probes and assert the closed forms. The
+/// realistic distribution is the load-bearing datum for the sq-pbz04.3.5 non-adoption verdict.
+fn run_corpus_profile() {
+    println!("\n[sq-pbz04.3.5] combined-approach evaluate-first — minimised-UCQ profile (deterministic)");
+
+    // (1) Realistic corpus: every case is asserted to its hand-verified closed form, and the
+    //     whole distribution is bucketed. The load-bearing claim: NOTHING blows up.
+    let corpus = realistic_corpus();
+    let mut sizes: Vec<usize> = Vec::new();
+    for (id, ttl, body, expected) in &corpus {
+        let m = min_ucq(ttl, body);
+        assert_eq!(
+            m, *expected,
+            "realistic case {} minimised UCQ {} != closed form {}",
+            id, m, expected
+        );
+        sizes.push(m);
+    }
+    sizes.sort_unstable();
+    let n = sizes.len();
+    let max = *sizes.last().unwrap();
+    let (mut b1, mut b2_4, mut b5_16, mut b17) = (0usize, 0usize, 0usize, 0usize);
+    for &s in &sizes {
+        match s {
+            1 => b1 += 1,
+            2..=4 => b2_4 += 1,
+            5..=16 => b5_16 += 1,
+            _ => b17 += 1,
+        }
+    }
+    // The DECISION rests on this: on the REAL corpus the minimised UCQ never exceeds a tiny bound,
+    // so there is no rewriting blow-up for the combined approach to remove. Assert it explicitly.
+    assert!(
+        max <= 4 && b5_16 == 0 && b17 == 0,
+        "REALISTIC corpus produced a large UCQ (max {}) — the non-adoption premise would need re-checking",
+        max
+    );
+    println!(
+        "  realistic corpus: {} answered cases  min {}  median {}  max {}  (dist [1]={} [2-4]={} [5-16]={} [17+]={})",
+        n, sizes[0], sizes[n / 2], max, b1, b2_4, b5_16, b17
+    );
+
+    // (2) Adversarial CEILING probes: the ONLY shape that blows up is a multi-atom CQ over
+    //     INDEPENDENT class hierarchies (the product), which minimisation cannot collapse (the
+    //     disjuncts are mutually incomparable). Closed forms: (k+1)^atoms. This is exactly the
+    //     combined approach's target — and exactly the shape ABSENT from the realistic corpus.
+    for k in [2usize, 3, 5, 8] {
+        // Two independent depth-k subclass chains, both class atoms on the SAME answer variable.
+        let ttl = format!("{} {}", chain_ttl("C", k), chain_ttl("D", k));
+        let body = format!("SELECT ?x WHERE {{ ?x a :C{} . ?x a :D{} }}", k, k);
+        let m = min_ucq(&ttl, &body);
+        assert_eq!(m, (k + 1) * (k + 1), "product-2 k={} UCQ {} != (k+1)^2", k, m);
+        println!("  ceiling product(2 atoms, depth {}): UCQ {} = (k+1)^2 (incomparable — minimisation cannot help)", k, m);
+    }
+    for k in [2usize, 3] {
+        let ttl = format!("{} {} {}", chain_ttl("C", k), chain_ttl("D", k), chain_ttl("E", k));
+        let body = format!("SELECT ?x WHERE {{ ?x a :C{} . ?x a :D{} . ?x a :E{} }}", k, k, k);
+        let m = min_ucq(&ttl, &body);
+        assert_eq!(m, (k + 1) * (k + 1) * (k + 1), "product-3 k={} UCQ {} != (k+1)^3", k, m);
+        println!("  ceiling product(3 atoms, depth {}): UCQ {} = (k+1)^3", k, m);
+    }
+    println!(
+        "  VERDICT: realistic UCQ <= 4; blow-up needs multi-atom CQs over independent deep \
+         hierarchies (absent from the corpus) => combined approach NOT adopted (see design record)."
+    );
+}
+
+/// A depth-`n` `rdfs:subClassOf` chain `:P0 ⊑ :P1 ⊑ … ⊑ :Pn` in Turtle (prefixed names).
+fn chain_ttl(prefix: &str, n: usize) -> String {
+    (0..n)
+        .map(|i| format!(":{}{} rdfs:subClassOf :{}{}.", prefix, i, prefix, i + 1))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn main() {
     let depth: usize = std::env::args()
         .nth(1)
@@ -151,5 +313,6 @@ fn main() {
     run_subclass(depth);
     run_subproperty(depth);
     run_production(depth);
+    run_corpus_profile();
     println!("OK: closed-form UCQ-size assertions held (UCQ scales linearly; wall-clock above is trend-only).");
 }

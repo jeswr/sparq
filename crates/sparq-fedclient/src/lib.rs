@@ -13,8 +13,8 @@
     feature = "fedclient",
     doc = r#"sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
 sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**,
-Phase 0 bead **sq-s1uy**). See `research/federation-client-design.md` for the full
-design (§4 architecture, §6 phased build plan, §7 honest risks).
+Phase 0 bead **sq-s1uy**). See `research/federation-client-design.md` — the crate's
+architecture-of-record (§4 architecture, §7 honest risks).
 
 Given one SPARQL query and a set of heterogeneous remote sources — full SPARQL
 endpoints, bindings-restricted (brTPF) servers, plain TPF servers, and the *local*
@@ -29,12 +29,15 @@ The crate began as the **Phase-0 compiling skeleton** (design §6) — the publi
 layout the design §4 names ([`source`], [`discovery`], [`planner`], [`pushdown`],
 [`operators`], [`stream`]), the **opt-in feature** ([`fedclient`](#opt-in-hard-constraint),
 OFF by default), and the **dependency-boundary proof** (below). Landed since, each behind
-the same default-OFF `fedclient` feature:
+the same default-OFF `fedclient` feature (with live pattern probing behind the additional
+default-OFF `pattern_probe` feature):
 
 * **Phase 1 — capability discovery** ([`discovery`], bead `sq-nfxl`): GET the source's
   Service Description + `/.well-known/void`, parse them to a `Capability` +
   `SourceDescriptor`, with a FedX-style ASK-probe fallback, all behind a default-deny
-  SSRF-guarded fetch seam.
+  SSRF-guarded fetch seam. The extra default-OFF `pattern_probe` feature (bead `sq-fx5id`)
+  adds bounded, per-query pattern ASK/capped-SELECT observations through that same fetch seam;
+  only definitive ASK `false` prunes, while every failure keeps the source.
 * **Phase 2 — source-type abstraction + Endpoint adapter** ([`source`], bead `sq-rsxf`):
   [`SourceType`] (`Endpoint | BrTpf | Tpf | Local`), the [`FederatedSource`] trait, the
   fine-grained [`Capability`](source::Capability) descriptor, and the real [`Endpoint`] SRJ
@@ -71,7 +74,10 @@ the same default-OFF `fedclient` feature:
   bounded to at most once per operator boundary — re-planning changes the plan, never the
   answer. Behind the extra default-OFF `fedclient-adaptive` feature (it pulls
   `sparq-fedplan/adaptive-replan`); when that feature is off the `adaptive` module and its
-  `execute_adaptive_single_source` entry point are `#[cfg]`-compiled out.
+  `execute_adaptive_single_source` / `execute_adaptive_multi_source` entry points are
+  `#[cfg]`-compiled out. The multi-source loop ([FABLE-5] sq-xw8zz) lifts the
+  `MultiSource` guard — union-arm leaves with LIVE per-arm latency observations feeding
+  the planner's per-source EWMA.
 
 With Phase 7 the **8-phase streaming federation client is feature-complete** (Phases 0–7
 all landed; epic sq-dnko closed). The public surface and the dependency boundary were made
@@ -110,7 +116,7 @@ Both must FAIL if a future edit introduces such an edge.
     not(feature = "fedclient"),
     doc = r#"sparq-fedclient: a **streaming federation CLIENT** over heterogeneous remote RDF
 sources — the query *consumer* half of federation (epic **sq-dnko** / **sq-3183**). See
-`research/federation-client-design.md` for the full design.
+`research/federation-client-design.md` — the crate's architecture-of-record.
 
 **This is the default build with the `fedclient` feature OFF, so the crate is empty** — the
 whole client (the `source` / `discovery` / `planner` / `pushdown` / `operators` / `stream` /
@@ -204,6 +210,12 @@ pub use wire::{
 /// SSRF-guarded [`Fetcher`](discovery::Fetcher) seam (default-deny private/internal IPs).
 #[cfg(feature = "fedclient")]
 pub mod discovery;
+// [GPT-5.6] sq-fx5id: the live pattern-probe surface is separately default-OFF even though it
+// reuses the always-fedclient discovery module and Fetcher policy seam.
+#[cfg(feature = "pattern_probe")]
+pub use discovery::{
+    PatternProbeConfig, PatternProbeOutcome, PatternProbeSession, PatternProbeStats,
+};
 
 /// §4.2 — **planner bridge**: lower the parsed query's BGP into `sparq-fedplan`'s light
 /// `Bgp`/`TriplePattern`/`Term`/`Var`, build one `SourceDescriptor` per discovered source,
@@ -217,6 +229,8 @@ pub mod planner;
 // source (the fragment-source twin of `lower_leaf`'s SPARQL `SubQuery`).
 #[cfg(feature = "fedclient")]
 pub use planner::{lower_leaf, lower_leaf_fragment, pattern_vars, ResolveError, SourceResolver};
+#[cfg(feature = "pattern_probe")]
+pub use planner::{select_sources_with_pattern_probes, ProbeSource};
 
 /// §4.3 — **capability-aware pushdown**: per leaf / FedX exclusive group, build the
 /// MOST PRECISE sub-query a source can answer (projection + common-variable-checked
@@ -271,10 +285,17 @@ pub use stream::{Solution, SolutionSink, SolutionStream, StreamItem};
 /// pick a cheaper suffix order — bounded to at most ONCE per operator boundary (no thrashing).
 /// Re-planning changes the plan, never the answer (result-multiset-preserving). Behind the
 /// extra default-OFF `fedclient-adaptive` feature (which pulls `sparq-fedplan/adaptive-replan`).
+/// Two entry points: single-source (the `MultiSource`-guarded loop) and multi-source
+/// ([FABLE-5] sq-xw8zz) — the latter answers a leaf as the bag-union of its retained arms
+/// and feeds LIVE per-arm fetch latencies into the planner's per-source EWMA, making the
+/// latency-aware cost bias (incl. the opt-in `LatencyAggregation::CardinalityWeighted`,
+/// sq-s5kd) consumable from a real execution.
 #[cfg(feature = "fedclient-adaptive")]
 pub mod adaptive;
 // [OPUS-4.8] sq-ij5x: re-export the Phase-7 adaptive surface at the crate root.
+// [FABLE-5] sq-xw8zz: + the multi-source (union-arm) entry point.
 #[cfg(feature = "fedclient-adaptive")]
 pub use adaptive::{
-    execute_adaptive_single_source, static_plan, AdaptiveOutcome, ReplanEvent,
+    execute_adaptive_multi_source, execute_adaptive_single_source, static_plan, AdaptiveOutcome,
+    ReplanEvent,
 };

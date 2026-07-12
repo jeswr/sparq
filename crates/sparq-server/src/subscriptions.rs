@@ -966,6 +966,36 @@ mod tests {
         assert_eq!(v["value"]["object"], json!({"type": "literal", "value": "o"}));
     }
 
+    // [OPUS-4.8] sq-qcnn.37: cover the two term_json branches left uncovered by the existing
+    // tests — the top-level BlankNode arm and the Triple-subject BlankNode arm.
+
+    #[test]
+    fn term_json_encodes_a_blank_node() {
+        // The `Term::BlankNode` arm is the only top-level shape the existing tests miss.
+        // A blank node must serialise to `{"type":"bnode","value":"<identifier>"}`.
+        use oxrdf::{BlankNode, Term};
+        let b = BlankNode::new("b0").unwrap();
+        let v = term_json(&Term::BlankNode(b));
+        assert_eq!(v["type"], "bnode");
+        assert_eq!(v["value"], "b0");
+    }
+
+    #[test]
+    fn term_json_triple_term_with_blank_node_subject() {
+        // The `NamedOrBlankNode::BlankNode` arm inside the Triple path is missed by the
+        // existing `term_json_encodes_an_rdf12_triple_term` test (which uses a NamedNode
+        // subject). A Triple with a BlankNode subject must embed a `bnode` sub-object.
+        use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
+        let inner = Triple::new(
+            BlankNode::new("b1").unwrap(),
+            NamedNode::new("http://ex/p").unwrap(),
+            Literal::new_simple_literal("val"),
+        );
+        let v = term_json(&Term::Triple(Box::new(inner)));
+        assert_eq!(v["type"], "triple");
+        assert_eq!(v["value"]["subject"], json!({"type": "bnode", "value": "b1"}));
+    }
+
     #[test]
     fn budget_error_classifies_engine_strings_into_sse_statuses() {
         let cfg = ServerConfig {

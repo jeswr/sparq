@@ -1,0 +1,7 @@
+BASE <http://example.org/rdf12>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape {
+	ex:statement TripleTerm [1..1] .
+}

@@ -261,6 +261,13 @@ jobs:
         working-directory: gui/app
         run: npm run typecheck
 
+      # (sq-w3dmj) [FABLE-5] — the gui/app node:test unit suite (pure helpers: editor keys +
+      # the global-first Tauri fs plugin resolution). Build-free (on-the-fly TS loader); was
+      # previously never exercised in CI.
+      - name: GUI frontend unit tests
+        working-directory: gui/app
+        run: npm run test:unit
+
       # The hosted "Try the GUI live" web target (sub-path basePath).
       - name: GUI frontend static export (web target)
         working-directory: gui/app
@@ -278,11 +285,19 @@ jobs:
   # with window.__TAURI__ + window.__TAURI_INTERNALS__ stubbed via page.addInitScript.  No Tauri
   # binary, no display server, no real IPC — fully deterministic.
   #
-  # GATING (no `advisory` keyword): unlike the tauri-driver e2e (which needs webkit2gtk + a
+  # GATING TODAY (no `advisory` keyword): unlike the tauri-driver e2e (which needs webkit2gtk + a
   # headless webview and keeps `advisory` for runner-image reliability), this lane is pure
-  # Playwright + Chromium on ubuntu-latest — reproducible on every Linux CI runner.  It is the
-  # deterministic, promotable gate for the GUI frontend and is intended to become a required
-  # branch-protection context (bead sq-ymr2e.5 → sq-var9 promotion sequence).
+  # Playwright + Chromium on ubuntu-latest — reproducible on every Linux CI runner. It was made
+  # gating at creation (sq-ymr2e.5) on the deterministic-lane rationale (retries=0, mocked IPC).
+  #
+  # [OPUS-4.8] sq-ymr2e.12 — GOVERNANCE NOTE: the checked-in gating/probation policy
+  # `.github/E2E-GATING-POLICY.md` (design research/web-gui-test-program.md §6.3) classifies this
+  # lane as a member of the deterministic PROMOTION SET, which is meant to EARN gating on a
+  # probation bar (§3 there) rather than gate from day one. This early promotion pre-dates that
+  # governance and is FLAGGED for the maintainer to ratify (keep gating) or reset to advisory —
+  # see §6 of the policy + tracking issue #1656. This bead does NOT unilaterally demote a green,
+  # deterministic gate; the
+  # lane keeps its current gating status until the maintainer decides. Do not silently flip it.
   #
   # PATH SCOPE: gui/** + packages/** (changes to the shared @sparq/client can affect the frontend).
   # The job is NOT in the `merge_group` event (ci-summary.yml cannot cross-workflow `needs:`); it
@@ -439,6 +454,28 @@ jobs:
       - name: Test (engine command layer)
         run: cargo test
 
+      # [FABLE-5] sq-ixc3.14 — the OPT-IN federation feature state: clippy + the native-lane
+      # federated-SERVICE tests (federation.rs), which join the live workspace snapshot with a
+      # LIVE loopback SPARQL endpoint through the real engine SERVICE client and prove the
+      # strict egress allowlist refuses an un-allowlisted endpoint pre-HTTP (fail-closed).
+      # Loopback-only — no external network. Keeps BOTH feature states green.
+      - name: Clippy (federation, -D warnings)
+        run: cargo clippy --all-targets --features federation -- -D warnings
+
+      - name: Test (federated SERVICE, native lane)
+        run: cargo test --features federation
+
+      # [FABLE-5] sq-ixc3.15 — the OPT-IN odrl feature state: clippy + the native-lane ODRL
+      # policy-tool tests (odrl.rs), which drive the REAL sparq-policy evaluator + sparq-solid
+      # PodStore/odrl-bridge gating: a prohibition flips a previously visible named graph to
+      # hidden, a malformed policy denies everything with a visible reason, and a grant-less
+      # requester sees zero rows (fail-closed). Keeps BOTH feature states green.
+      - name: Clippy (odrl, -D warnings)
+        run: cargo clippy --all-targets --features odrl -- -D warnings
+
+      - name: Test (ODRL policy tool, native lane)
+        run: cargo test --features odrl
+
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #
   # Shrunk from the multi-step sq-pnnl harness to exactly 3 meaningful assertions:
@@ -490,16 +527,17 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
+            dbus-x11 \
             xvfb
 
-      # Log the installed WebKitWebDriver version. The apt package is matched to the runner
-      # image's webkit2gtk — not independently pinned, but logged here so any drift across
-      # runner image updates is immediately visible in the CI log.
-      - name: Log WebKitWebDriver version
-        run: |
-          WKVER=$(WebKitWebDriver --version 2>&1 || echo "unknown")
-          echo "WebKitWebDriver: $WKVER"
-          echo "webkit2gtk-driver apt: $(dpkg -l webkit2gtk-driver 2>/dev/null | tail -1)"
+      # Drift tripwire + regression guard (bead sq-t6492 / issue #1740). The lane's persistent red
+      # was WebKitGTK 2.5x rejecting the client's `browserName: "wry"` capability ("Failed to match
+      # capabilities", 0-byte driver log); the fix is client-side — gui/e2e/run-e2e.mjs now OMITS
+      # browserName. This step FAILS if that regression is re-introduced, and logs the webkit2gtk +
+      # tauri-driver versions so the next runner-image drift is a one-line diagnosis. The version
+      # tripwire is diagnostic; this lane is advisory (continue-on-error) so the actual smoke decides.
+      - name: Drift tripwire — browserName regression guard + version log
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
 
       # wasm32 target is needed to build the lean WASM bundle the in-tab REPL runs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -541,11 +579,14 @@ jobs:
           npm install
           (cd gui/app && npm run build:tauri)
 
-      # Build the desktop shell binary (debug). With gui/app/out present, tauri_build embeds
-      # the frontend into the `sparq-gui` binary tauri-driver will launch.
-      - name: Build the GUI shell (debug, embeds the frontend)
+      # Build the desktop shell binary (debug). --features custom-protocol (bead sq-t6492) embeds
+      # + serves the frontendDist static export (gui/app/out, built above) instead of Tauri's
+      # cfg(dev) devUrl (http://localhost:3001) — a plain `cargo build` would make the webview
+      # show "Could not connect to localhost: Connection refused" with no dev server. See
+      # gui/src-tauri/Cargo.toml. `cargo tauri build` sets this automatically; plain cargo must pass it.
+      - name: Build the GUI shell (debug, embeds the frontend via custom-protocol)
         working-directory: gui/src-tauri
-        run: cargo build
+        run: cargo build --features custom-protocol
 
       # Pin tauri-driver to 2.0.6 — the version published for Tauri 2.x (workspace uses 2.11.x).
       # Pinning prevents a crates.io update from silently changing driver behaviour mid-run.
@@ -567,19 +608,23 @@ jobs:
       # first-attempt failures; a single retry keeps the job honest (a pass-on-retry is still
       # logged as a defect to investigate, per §6.3 quarantine policy) without masking real bugs.
       # Failure artifacts are written by the harness on both attempts (artifacts/ dir).
-      - name: Run the tauri-driver smoke (headless under xvfb; retry once on failure)
+      # Run under dbus-run-session + NO_AT_BRIDGE=1 (bead sq-t6492): WebKitGTK under xvfb reaches
+      # for an AT-SPI accessibility bus that does not exist and can stall webview/session startup
+      # ("org.a11y.Bus was not provided"). A private session bus + disabled AT-SPI bridge clears it.
+      - name: Run the tauri-driver smoke (headless under xvfb + dbus; retry once on failure)
         id: tauri-smoke
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+          NO_AT_BRIDGE: "1"
         run: |
           # [SONNET-4.6] Give each attempt its own artifacts subdir so a second failure does
           # not overwrite the first attempt's screenshot/driver-log evidence.
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
-            xvfb-run --auto-servernum npm run test:e2e && exit 0
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e && exit 0
           echo "[tauri-e2e-ci] first attempt failed; retrying once (xvfb startup flake check)…"
           ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
-            xvfb-run --auto-servernum npm run test:e2e
+            xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e
 
       # Upload failure artifacts (screenshot + driver log) even if the step above succeeded on
       # the retry — the artifacts are only written by the harness when an assertion fails, so
@@ -621,11 +666,13 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
+            dbus-x11 \
             xvfb
 
-      - name: Log WebKitWebDriver version
-        run: |
-          echo "WebKitWebDriver: $(WebKitWebDriver --version 2>&1 || echo 'unknown')"
+      # Drift tripwire + regression guard (bead sq-t6492 / issue #1740): same as tauri-e2e — guards
+      # against the `browserName: "wry"` regression and logs the webkit2gtk + tauri-driver versions.
+      - name: Drift tripwire — browserName regression guard + version log
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -658,9 +705,11 @@ jobs:
           npm install
           (cd gui/app && npm run build:tauri)
 
-      - name: Build the GUI shell (debug)
+      # --features custom-protocol (bead sq-t6492): embed + serve frontendDist instead of cfg(dev)
+      # devUrl, so the launched binary shows the real UI (not "Connection refused"). See Cargo.toml.
+      - name: Build the GUI shell (debug, embeds the frontend via custom-protocol)
         working-directory: gui/src-tauri
-        run: cargo build
+        run: cargo build --features custom-protocol
 
       - name: Install tauri-driver@2.0.6 (pinned)
         run: cargo install tauri-driver@2.0.6 --locked
@@ -676,6 +725,7 @@ jobs:
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+          NO_AT_BRIDGE: "1"
         run: |
           RUNS=${{ inputs.probe_runs }}
           GREENS=0
@@ -683,7 +733,7 @@ jobs:
           for i in $(seq 1 "$RUNS"); do
             echo "--- probe run $i / $RUNS ---"
             if ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/probe-run-$i" \
-                xvfb-run --auto-servernum npm run test:e2e; then
+                xvfb-run --auto-servernum dbus-run-session -- npm run test:e2e; then
               GREENS=$((GREENS + 1))
             else
               FAILS=$((FAILS + 1))

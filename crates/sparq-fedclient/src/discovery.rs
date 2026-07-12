@@ -35,10 +35,14 @@
 //! no advertised stats" capability is assumed. This is the recall-safe default — it never
 //! *claims* a feature the SD would have to confirm beyond core SELECT/ASK evaluation, and it
 //! never invents statistics (the returned [`SourceDescriptor`](sparq_fedplan::SourceDescriptor)
-//! is `None`, so the planner uses
-//! its uniform fallback). Pattern-level ASK probes for cardinality live in a later phase
-//! (§4.1 "to per-fragment count metadata (TPF)"); this slice ships the SD/VoID parse + the
-//! capability-level ASK reachability probe.
+//! is `None`, so the planner uses its uniform fallback).
+//!
+//! The separately default-OFF `pattern_probe` feature adds `PatternProbeSession`: bounded,
+//! per-query ASK + capped-SELECT observations for source-pattern pairs whose VoID cardinality is
+//! missing. It reuses the same [`Fetcher`](crate::discovery::Fetcher) policy seam, caches every
+//! outcome, and fails open on
+//! timeout/error/budget exhaustion. Only a well-formed ASK `false` prunes; successful row counts
+//! replace fallback estimates and otherwise affect ranking/join order only. [GPT-5.6] sq-fx5id.
 //!
 //! ## SSRF caution on every fetch
 //!
@@ -516,6 +520,181 @@ fn iri_eq(t: &oxrdf::Term, iri: &str) -> bool {
 pub trait Fetcher {
     /// GET `url` with the given `Accept`, returning the response body or an error string.
     fn get(&self, url: &str, accept: &str) -> Result<String, String>;
+}
+
+/// Per-query limits and fallback used by opt-in pattern-level probing.
+///
+/// `max_probes` counts actual HTTP requests, including failed ASK/SELECT requests; cache hits
+/// are free. `cardinality_cap` bounds the number of solution rows requested from an endpoint.
+/// [GPT-5.6] sq-fx5id.
+#[cfg(feature = "pattern_probe")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PatternProbeConfig {
+    /// Maximum ASK/SELECT HTTP requests issued during one query. Zero disables probing.
+    pub max_probes: usize,
+    /// Maximum solution rows requested by a cardinality observation (clamped to at least one).
+    pub cardinality_cap: usize,
+    /// Uniform estimate retained when probing is unavailable or inconclusive.
+    pub fallback_cardinality: f64,
+}
+
+#[cfg(feature = "pattern_probe")]
+impl Default for PatternProbeConfig {
+    fn default() -> Self {
+        Self {
+            max_probes: 64,
+            cardinality_cap: 100,
+            fallback_cardinality: 1_000.0,
+        }
+    }
+}
+
+/// Recall-safe result of probing one `(endpoint, triple-pattern)` pair.
+/// [GPT-5.6] sq-fx5id.
+#[cfg(feature = "pattern_probe")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternProbeOutcome {
+    /// The endpoint returned a well-formed ASK `false`; this is the only prune signal.
+    Empty,
+    /// A successful capped SELECT observed this many rows.
+    Cardinality {
+        /// Rows present in the returned result sequence.
+        observed: usize,
+        /// Whether the configured cap was reached (the real cardinality may be higher).
+        capped: bool,
+    },
+    /// Timeout/error/malformed response/inconsistency/budget exhaustion: keep the source.
+    Unknown,
+}
+
+/// Deterministic counters for one [`PatternProbeSession`].
+/// [GPT-5.6] sq-fx5id.
+#[cfg(feature = "pattern_probe")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PatternProbeStats {
+    /// Actual HTTP requests issued; never exceeds `PatternProbeConfig::max_probes`.
+    pub requests_issued: usize,
+    /// Repeated source-pattern lookups answered from the per-query cache.
+    pub cache_hits: usize,
+    /// Whether at least one needed request was skipped because the budget was exhausted.
+    pub budget_exhausted: bool,
+}
+
+/// Bounded, per-query pattern probe cache over the existing SSRF-policy-controlled [`Fetcher`].
+///
+/// Construct one session per federated query and pass it to
+/// `crate::planner::select_sources_with_pattern_probes`. Failures are cached as `Unknown`, so a
+/// repeated pattern (or a bind-join with many bindings) never reissues the probe. [GPT-5.6]
+/// sq-fx5id.
+#[cfg(feature = "pattern_probe")]
+pub struct PatternProbeSession<'a> {
+    fetcher: &'a dyn Fetcher,
+    config: PatternProbeConfig,
+    cache: rustc_hash::FxHashMap<String, PatternProbeOutcome>,
+    stats: PatternProbeStats,
+}
+
+#[cfg(feature = "pattern_probe")]
+impl<'a> PatternProbeSession<'a> {
+    /// Start an empty per-query session. Invalid/non-positive fallback estimates normalize to
+    /// one, and a zero cardinality cap normalizes to one; a zero request budget remains valid.
+    pub fn new(fetcher: &'a dyn Fetcher, mut config: PatternProbeConfig) -> Self {
+        config.cardinality_cap = config.cardinality_cap.max(1);
+        if !config.fallback_cardinality.is_finite() || config.fallback_cardinality <= 0.0 {
+            config.fallback_cardinality = 1.0;
+        }
+        Self {
+            fetcher,
+            config,
+            cache: rustc_hash::FxHashMap::default(),
+            stats: PatternProbeStats::default(),
+        }
+    }
+
+    /// The normalized configuration used by this session.
+    pub fn config(&self) -> PatternProbeConfig {
+        self.config
+    }
+
+    /// Current deterministic request/cache counters.
+    pub fn stats(&self) -> PatternProbeStats {
+        self.stats
+    }
+
+    /// Probe one source-pattern pair, returning a cached outcome on repeats.
+    ///
+    /// ASK is authoritative only when its exact result is `false`. After `true`, a capped
+    /// SELECT supplies a cardinality observation. Any failure or an inconsistent empty SELECT
+    /// after ASK `true` degrades to [`PatternProbeOutcome::Unknown`] and keeps the source.
+    pub fn probe(
+        &mut self,
+        endpoint: &str,
+        pattern: &sparq_fedplan::TriplePattern,
+    ) -> PatternProbeOutcome {
+        let clause = crate::planner::render_pattern_clause(pattern);
+        let key = format!("{}\0{}", endpoint, clause);
+        if let Some(outcome) = self.cache.get(&key).copied() {
+            self.stats.cache_hits += 1;
+            return outcome;
+        }
+
+        let ask = format!("ASK {{ {clause} }}");
+        let outcome = match self.fetch_query(endpoint, &ask, "application/sparql-results+json") {
+            Ok(body) => match parse_ask_boolean(&body) {
+                Ok(false) => PatternProbeOutcome::Empty,
+                Ok(true) => self.observe_cardinality(endpoint, &clause),
+                Err(_) => PatternProbeOutcome::Unknown,
+            },
+            Err(()) => PatternProbeOutcome::Unknown,
+        };
+        self.cache.insert(key, outcome);
+        outcome
+    }
+
+    fn observe_cardinality(&mut self, endpoint: &str, clause: &str) -> PatternProbeOutcome {
+        let query = format!(
+            "SELECT * WHERE {{ {clause} }} LIMIT {}",
+            self.config.cardinality_cap
+        );
+        let Ok(body) = self.fetch_query(endpoint, &query, "application/sparql-results+json") else {
+            return PatternProbeOutcome::Unknown;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return PatternProbeOutcome::Unknown;
+        };
+        let Some(bindings) = json
+            .get("results")
+            .and_then(|results| results.get("bindings"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return PatternProbeOutcome::Unknown;
+        };
+        if bindings.is_empty() {
+            // ASK true + zero SELECT rows is internally inconsistent. Fail open.
+            return PatternProbeOutcome::Unknown;
+        }
+        PatternProbeOutcome::Cardinality {
+            observed: bindings.len(),
+            capped: bindings.len() >= self.config.cardinality_cap,
+        }
+    }
+
+    fn fetch_query(&mut self, endpoint: &str, query: &str, accept: &str) -> Result<String, ()> {
+        if self.stats.requests_issued >= self.config.max_probes {
+            self.stats.budget_exhausted = true;
+            return Err(());
+        }
+        self.stats.requests_issued += 1;
+        self.fetcher
+            .get(&probe_url(endpoint, query), accept)
+            .map_err(|_| ())
+    }
+}
+
+#[cfg(feature = "pattern_probe")]
+fn probe_url(endpoint: &str, query: &str) -> String {
+    let separator = if endpoint.contains('?') { '&' } else { '?' };
+    format!("{endpoint}{separator}query={}", urlencode(query))
 }
 
 /// An in-memory fetcher mapping exact URLs → response bodies. Any URL not in the map yields a

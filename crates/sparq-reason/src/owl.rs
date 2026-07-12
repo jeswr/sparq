@@ -38,7 +38,7 @@ use sparq_core::dict::{Dict, Id};
 const PAR_THRESHOLD: usize = 4096;
 
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
-const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+pub(crate) const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 struct Owl {
     same_as: Id,
@@ -516,7 +516,7 @@ impl ClassFeatureIdx {
         }
         self.lists_dirty = false;
         self.lists.clear();
-        for (&head, _) in self.first.iter() {
+        for &head in self.first.keys() {
             let mut members = Vec::new();
             let mut cur = head;
             for _ in 0..self.first.len() + 1 {
@@ -732,12 +732,35 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
     //   edges for the numeric tower of every datatype IRI that occurs), so the
     //   in-closure rules (rdfs9/11, scm-rng1/scm-dom1) see them;
     // - post: scm-eqc2 / scm-eqp2 (mutual subClassOf/subPropertyOf ⊢ equivalence) —
-    //   sound to run once because equivalence edges over already-mutual pairs feed
-    //   no further rule anything new (both subsumptions already hold).
+    //   sound to run once per closure pass because equivalence edges over
+    //   already-mutual pairs feed no OWL/RDFS rule anything new (both subsumptions
+    //   already hold). (They CAN feed reif-ctr — a reifier can name an equivalence
+    //   triple — which is why the reify loop below re-runs it after each round.)
     let pre = pre_monotone(dict, triples);
-    let main = owl_rl_closure(dict, triples);
-    let post = post_equivalences(dict, triples);
-    pre + main + post
+    let mut added = owl_rl_closure(dict, triples);
+    added += post_equivalences(dict, triples);
+    // [Kern] Quoted-triple (RDF 1.2 reifier) rules — see the `reify` module for the
+    // rule table, the finite-Herbrand-base restrictions, and the termination argument.
+    // Behind the opt-in `quoted-triples` feature (the reif-dtr/reif-ctr bridge is a
+    // deliberate, NON-normative entailment extension — off by default so plain
+    // `Profile::OwlRl` closures never change for data that happens to use the classic
+    // reification vocabulary). When ON, still occurrence-guarded (zero cost +
+    // byte-identical closure for reify-free data) and checked AFTER the main closure
+    // because RL rules can derive the trigger vocabulary. The loop ALTERNATES reify
+    // steps with the RL closure: destructured components feed the RL rules, and
+    // RL-derived triples can enable reif-ctr. Each round adds at least one triple over
+    // a finite Herbrand base, so the alternation terminates.
+    #[cfg(feature = "quoted-triples")]
+    if crate::reify::occurs(dict, triples) {
+        loop {
+            let n = crate::reify::step(dict, triples);
+            if n == 0 {
+                break;
+            }
+            added += n + owl_rl_closure(dict, triples) + post_equivalences(dict, triples);
+        }
+    }
+    pre + added
 }
 
 /// The XSD numeric-tower subsumptions (direct edges; rdfs11 closes them).
@@ -944,6 +967,13 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let mut out: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     let mut inc: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     build_adjacency(&all, &need, &mut out, &mut inc);
+    // [SONNET-4.6] sq-qonbz.2 — under `substrate-join`, the `out`/`inc` FxHashMap adjacency
+    // probes are replaced by the persistent `DeltaTable`-backed `DeltaAdj`. The FxHashMaps
+    // above are still updated by `commit_serial`/`commit_candidates` (they are maintained but
+    // never read — the probes below go through `adj` instead). `adj` is built here from the
+    // same seed triple set and kept in sync via `extend_one` from `new_delta` after each commit.
+    #[cfg(feature = "substrate-join")]
+    let mut adj = crate::owl_delta_adj::DeltaAdj::build(&all, &need);
     // prp-trp generator edges (linear transitive-closure evaluation — see [`TrpGen`]).
     let mut gen = TrpGen::default();
     gen.rebuild(&all, &ax.transitive);
@@ -1029,14 +1059,32 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
             // --- prp-fp / prp-ifp (delta-driven; see the block comment above) --------
             if ax.functional.contains(&p) {
+                // [SONNET-4.6] sq-qonbz.2: under `substrate-join` probe through DeltaAdj
+                // (persistent build-side table, keyed on [p, s]); default: plain FxHashMap.
+                #[cfg(not(feature = "substrate-join"))]
                 if let Some(ys) = out.get(&p).and_then(|m| m.get(&s)) {
                     cand.extend(ys.iter().filter(|&&y| y != obj).map(|&y| [obj, o.same_as, y]));
                 }
+                #[cfg(feature = "substrate-join")]
+                adj.probe_out(p, s, |y| {
+                    if y != obj {
+                        cand.push([obj, o.same_as, y]);
+                    }
+                });
             }
             if ax.inv_functional.contains(&p) {
+                // [SONNET-4.6] sq-qonbz.2: under `substrate-join` probe through DeltaAdj
+                // (persistent build-side table, keyed on [p, o]); default: plain FxHashMap.
+                #[cfg(not(feature = "substrate-join"))]
                 if let Some(xs) = inc.get(&p).and_then(|m| m.get(&obj)) {
                     cand.extend(xs.iter().filter(|&&x| x != s).map(|&x| [s, o.same_as, x]));
                 }
+                #[cfg(feature = "substrate-join")]
+                adj.probe_inc(p, obj, |x| {
+                    if x != s {
+                        cand.push([s, o.same_as, x]);
+                    }
+                });
             }
             // --- prp-trp, linearized against the generator edges ---------------------
             if ax.transitive.contains(&p) {
@@ -1047,9 +1095,14 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 // backward: full ⋈ Δgen — a new generator edge extends every existing path
                 // ending at its start (incl. same-round delta paths, already in `inc`).
                 if gen.set.contains(&[s, p, obj]) {
+                    // [SONNET-4.6] sq-qonbz.2: probe DeltaAdj backward table under
+                    // `substrate-join`; plain FxHashMap under default.
+                    #[cfg(not(feature = "substrate-join"))]
                     if let Some(ws) = inc.get(&p).and_then(|m| m.get(&s)) {
                         trp.extend(ws.iter().map(|&w| [w, p, obj]));
                     }
+                    #[cfg(feature = "substrate-join")]
+                    adj.probe_inc(p, s, |w| trp.push([w, p, obj]));
                 }
             }
         };
@@ -1482,6 +1535,16 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             m
         };
         t_commit += __t.elapsed().as_secs_f64();
+        // [SONNET-4.6] sq-qonbz.2 — extend DeltaAdj with the newly-committed facts whose
+        // predicate is in `need`. This mirrors the `or_default().push()` updates that
+        // `commit_serial`/`commit_candidates` apply to `out`/`inc` above. Per-round cost is
+        // O(|new_delta|) — the same asymptotic cost as the FxHashMap path.
+        #[cfg(feature = "substrate-join")]
+        for &[s, p, obj] in &new_delta {
+            if need.contains(&p) {
+                adj.extend_one(s, p, obj);
+            }
+        }
         let __t = now();
         if merged {
             // A merge rewrites representatives across `all`; recanonicalize, rebuild the
@@ -1492,6 +1555,11 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             need =
                 ax.transitive.iter().chain(ax.functional.iter()).chain(ax.inv_functional.iter()).copied().collect();
             build_adjacency(&all, &need, &mut out, &mut inc);
+            // [SONNET-4.6] sq-qonbz.2 — rebuild DeltaAdj from the recanonicalised triple set
+            // (mirrors the `build_adjacency` call above; union-find merge rewrites ids, so the
+            // whole index must be rebuilt from scratch — same epoch as the FxHashMap path).
+            #[cfg(feature = "substrate-join")]
+            adj.rebuild(&all, &need);
             gen.rebuild(&all, &ax.transitive);
             schema_stale = true;
             rdfs_idx = RdfsIndex::default();
@@ -1536,6 +1604,10 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                     .copied()
                     .collect();
                 build_adjacency(&all, &need, &mut out, &mut inc);
+                // [SONNET-4.6] sq-qonbz.2 — rebuild DeltaAdj when a new property axiom arrives
+                // (mirrors the `build_adjacency` call above; same epoch as the FxHashMap path).
+                #[cfg(feature = "substrate-join")]
+                adj.rebuild(&all, &need);
                 gen.rebuild(&all, &ax.transitive);
                 cf = ClassFeatureIdx::default();
                 schema_stale = true;

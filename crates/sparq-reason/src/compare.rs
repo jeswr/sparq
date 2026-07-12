@@ -225,19 +225,13 @@ fn num_of_parts(value: &str, datatype: &str) -> Option<Num> {
     None
 }
 
-/// The engine's `num_compare`: exact via the `Dec` fixed-point tower when both operands
-/// have an exact tier (int/decimal), else by `f64` value (float/double, whose value IS
-/// its f64). (The value-space relational-compare hoist into the substrate is the parked
-/// seam-2 remainder, sq-v5evr; until then this six-line mirror is pinned by the
-/// engine-parity test.)
+/// The numeric relational comparison for `strict_cmp` — delegates to
+/// `Num::cmp_relational` (the shared substrate function, sq-v5evr): exact via the
+/// `Dec` fixed-point tower when both operands have an exact tier (int/decimal), else
+/// by `f64` value (float/double). NaN → `None` (SPARQL type error). [OPUS-4.8] sq-v5evr
 #[inline]
 fn num_compare(a: Num, b: Num) -> Option<Ordering> {
-    if let (Some(x), Some(y)) = (a.to_dec(), b.to_dec()) {
-        if let Some(o) = x.cmp(y) {
-            return Some(o);
-        }
-    }
-    a.f64().partial_cmp(&b.f64())
+    a.cmp_relational(b)
 }
 
 impl CompareTerm for IdTerm<'_> {
@@ -283,20 +277,30 @@ impl CompareTerm for IdTerm<'_> {
             return None;
         }
         match self.dict.term_parts(self.id) {
-            // The engine's lenient `as_num` arm: numeric-datatype literals through
-            // `parse_xsd_f64` (the XSD acceptance set — INF/-INF/NaN, not inf/infinity).
-            TermParts::Lit { value, datatype, lang: None } if is_numeric_dt(datatype) => parse_xsd_f64(value),
+            // [FABLE-5] sq-74oy4 / sq-6b1lj: the engine's lenient `as_num` arm, now
+            // DATATYPE-AWARE and TRIMMED to match `Num::of_literal`: accept iff the lexical is
+            // well-formed FOR its datatype (`num_of_parts` — the borrowed-parts twin of
+            // `of_literal`), imaged by `parse_xsd_f64` on the trimmed value. A padded
+            // `" 1"^^xsd:integer` is value-1; a per-datatype-ill-formed `"1.5"^^xsd:integer`
+            // is `None` (type error), mirroring the engine seam and the graph cache. The XSD
+            // f64 spellings (INF/-INF/NaN, not inf/infinity) are enforced by `parse_xsd_f64`.
+            TermParts::Lit { value, datatype, lang: None }
+                if is_numeric_dt(datatype) && num_of_parts(value, datatype).is_some() =>
+            {
+                parse_xsd_f64(value.trim())
+            }
             _ => None,
         }
     }
 
     #[inline]
     fn literal_kind(&self) -> LiteralKind {
-        // [FABLE-5] sq-wjl8i: the kind-first rank — mirrors the engine's
-        // `Value::literal_kind` exactly: Numeric tracks the LENIENT `as_f64` membership
-        // (so a lexical the exact classifier rejects but `parse_xsd_f64` accepts still
-        // sorts numerically); ill-formed numeric/temporal lexicals classify as Other
-        // (a kind mixing value-ordered and lexical-fallback pairs is intransitive).
+        // [FABLE-5] sq-wjl8i / sq-74oy4: the kind-first rank — mirrors the engine's
+        // `Value::literal_kind` exactly: Numeric tracks the `as_f64` membership, now
+        // DATATYPE-AWARE (a lexical ill-formed FOR its datatype like "1.5"^^xsd:integer is
+        // NOT numeric and sorts as Other/lexical, matching `of_literal`); ill-formed
+        // numeric/temporal lexicals classify as Other (a kind mixing value-ordered and
+        // lexical-fallback pairs is intransitive).
         if is_inline(self.id) {
             return LiteralKind::Numeric; // an inline id IS a well-formed xsd:integer
         }
@@ -647,5 +651,26 @@ mod tests {
                 dt
             );
         }
+    }
+
+    /// Direct pin of `num_compare` → `Num::cmp_relational` (sq-v5evr): verifies the
+    /// delegation produces the expected relational semantics — exact for int/dec pairs,
+    /// f64 promotion for mixed/inexact, and `None` for NaN (SPARQL type error).
+    /// [OPUS-4.8] sq-v5evr
+    #[test]
+    fn num_compare_delegates_to_substrate_cmp_relational() {
+        use std::cmp::Ordering::*;
+        // Exact same-tier: integer vs integer
+        assert_eq!(num_compare(Num::Int(1), Num::Int(2)), Some(Less));
+        assert_eq!(num_compare(Num::Int(3), Num::Int(3)), Some(Equal));
+        assert_eq!(num_compare(Num::Int(5), Num::Int(4)), Some(Greater));
+        // Exact cross-tier: int vs decimal
+        let dec = Num::Dec(Dec { mant: 10, scale: 1 }); // 1.0
+        assert_eq!(num_compare(Num::Int(1), dec), Some(Equal));
+        // Double: normal
+        assert_eq!(num_compare(Num::Double(1.5), Num::Double(2.5)), Some(Less));
+        // NaN → None (SPARQL type error — the relational semantics, not cmp_total)
+        assert_eq!(num_compare(Num::Double(f64::NAN), Num::Int(0)), None);
+        assert_eq!(num_compare(Num::Int(0), Num::Double(f64::NAN)), None);
     }
 }

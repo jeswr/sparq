@@ -1,0 +1,10 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:disposition:> .
+
+ex:fragility ufo:existentiallyDependsOn ex:glass;
+    ufo:activatedIn ex:w.
+
+ex:glass ufo:existsIn ex:w.
+
+ex:breaking ufo:manifestationOf ex:fragility;
+    ufo:occursIn ex:w.

@@ -2,7 +2,8 @@
 // cited competitor numbers at their OWN scale/machine (e.g. QLever on a 2020 M1, EYE
 // DeepTaxonomy on an M1) — shown SEPARATELY and CLEARLY LABELLED, never divided into a
 // same-box speedup. A null value renders "n/a (not gathered)".
-import { fmtNum, type ReferenceBaseline } from "@/data/benchmarks";
+import { fmtNum } from "@/lib/fmt-num";
+import type { ReferenceBaseline } from "@/data/benchmarks";
 
 export function ReferencesNote({ references }: { references: ReferenceBaseline[] }) {
   if (references.length === 0) return null;

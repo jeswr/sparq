@@ -52,8 +52,20 @@ sparq-jsonld = { path = "../sparq-jsonld", version = "0.1.0", optional = true, d
 [dev-dependencies]
 # The round-trip / isomorphism tests parse the emitted document back to RDF, so they need
 # sparq-core's parser (`Graph::load_str` / `load_dataset`) with default features on.
-sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# [GPT-5.6] (sq-lzaw6) JSON-LD is needed only by the round-trip integration tests:
+# the production dependency above remains default-feature-free and lean.
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["jsonld"] }
 # The JSON-LD writer's round-trip tests parse the emitted JSON DOM with serde_json — a
 # DEV-only dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
 # (the native writer emits JSON by hand). serde_json is already in the workspace tree.
 serde_json = "1"
+# [GPT-5.6] (sq-wruhj) Property generators for writer/parser round-trip tests only.
+proptest = "1"
+
+# [FABLE-5] (sq-hmd7l.14) The bench/serialize/ comparative-harness runner. Gated on the
+# writer features it exercises, so the default (feature-off) build never compiles it —
+# `cargo build --release -p sparq-engine-serialize --features
+# serialize-rdf,streaming-serialization --example serialize_bench`.
+[[example]]
+name = "serialize_bench"
+required-features = ["serialize-rdf", "streaming-serialization"]

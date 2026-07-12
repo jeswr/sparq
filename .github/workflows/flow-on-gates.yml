@@ -2,6 +2,17 @@
 # sq-ncvq.5 + sq-ncvq.6 + sq-ncvq.9, epic sq-ncvq). Authored by Opus 4.8 (Fable
 # unavailable; flag for re-review when Fable returns).
 #
+# [FABLE-5] sq-6vshe.20 (design: research/ci-runner-consolidation-2026-07.md §4.2):
+# CONSOLIDATED from 4 jobs to 2. G1 + G2 + G6 (all GATING) fold into ONE fail-fast
+# job (`flow-on-gates quick-gates (G1 + G2 + G6)`) sharing a single checkout +
+# setup-python, and the previously per-job merge_group-safe PR-label resolution now
+# runs ONCE for both G2 and G6. G3 stays VERBATIM as its own tiny advisory job: its
+# name is a pinned entry in .github/advisory-registry.json — keeping it untouched
+# means zero registry churn (folding advisory work into a gating-named check-run
+# was rejected). Gate-contract safety: the consolidated gating job's name carries
+# no advisory/informational token, so the required ci-summary `gate` still reds if
+# any of G1/G2/G6 fails.
+#
 # This is the PROACTIVE / merge-time half of the maintenance flow-on system
 # (research/maintenance-flow-on-automation-design.md §2.1). It is the COMPLEMENT of
 # the REACTIVE engine in flow-on.yml + scripts/flow-on*.{py,toml} (PR #220): that
@@ -50,8 +61,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  new-crate-completeness:
-    name: new-crate-completeness (G1)
+  # [FABLE-5] sq-6vshe.20: G1 + G2 + G6 as sequential step-groups on ONE runner.
+  # Fail-fast: NO continue-on-error — any red step reds this job's check-run,
+  # which reds the required ci-summary `gate`. Former job names survive as step
+  # names for log greppability. The PR-label resolution (formerly duplicated in
+  # the G2 and G6 jobs) runs ONCE and both gates consume its pr-labels.txt.
+  quick-gates:
+    name: flow-on-gates quick-gates (G1 + G2 + G6)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history for the merge-base diff)
@@ -62,33 +78,15 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - name: G1 — new crate ships bench + README (+ SKILL if public)
-        env:
-          # On pull_request github.base_ref is the bare target branch ('main'); on
-          # merge_group it is empty, so fall back to merge_group.base_ref (a full
-          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
-          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
-        run: python3 scripts/gate-new-crate.py --base "$GATE_BASE_REF"
 
-  public-api-skill:
-    name: public-api-skill (G2)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (full history for the merge-base diff)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-      - name: Read PR labels (for the skill-not-needed escape hatch)
+      # ---- shared: read PR labels ONCE (consumed by G2 + G6) ----
+      - name: Read PR labels (for the G2 skill-not-needed + G6 config-internal escape hatches)
         id: labels
         # [OPUS-4.8] Run on BOTH pull_request AND merge_group so the escape-hatch
-        # label is honoured in the merge queue too (otherwise a PR that legitimately
-        # carried `skill-not-needed` would pass the PR gate but fail the identical
-        # merge_group gate, blocking the queue). On merge_group the PR number is not
-        # in the event payload.
+        # labels are honoured in the merge queue too (otherwise a PR that legitimately
+        # carried `skill-not-needed`/`config-internal` would pass the PR gate but fail
+        # the identical merge_group gate, blocking the queue). On merge_group the PR
+        # number is not in the event payload.
         #
         # [SONNET-4.6] (sq-5owmc) FIX — the merge_group PR resolution was SILENTLY
         # failing: it resolved the PR via `commits/<merge_group.head_sha>/pulls`, but
@@ -100,7 +98,7 @@ jobs:
         # merge-queue head ref (refs/heads/gh-readonly-queue/<base>/pr-<N>-<sha>) via
         # scripts/resolve-merge-group-pr.py; the commits/<sha>/pulls API is only a
         # secondary fallback; and if BOTH fail the step warns LOUDLY (never silently)
-        # while the gate still runs UNSUPPRESSED (fail-closed is correct, silence is
+        # while the gates still run UNSUPPRESSED (fail-closed is correct, silence is
         # not).
         env:
           GH_TOKEN: ${{ github.token }}
@@ -122,17 +120,17 @@ jobs:
                        --jq '.[0].number' 2>/dev/null || true)"
             fi
             if [ -z "$num" ]; then
-              # LOUD fail-closed: do NOT silently skip the label lookup. The gate
-              # below still runs UNSUPPRESSED, but make the unresolved association
+              # LOUD fail-closed: do NOT silently skip the label lookup. The gates
+              # below still run UNSUPPRESSED, but make the unresolved association
               # visible in the annotations + job summary so it is never invisible
               # the way it was for #1542.
-              echo "::warning title=flow-on-gates G2::merge_group PR could not be resolved (head_ref='${MERGE_HEAD_REF:-}' head_sha='${MERGE_HEAD_SHA:-}'); the skill-not-needed escape-hatch label will NOT suppress G2 here — gate runs unsuppressed (fail-closed)."
+              echo "::warning title=flow-on-gates G2/G6::merge_group PR could not be resolved (head_ref='${MERGE_HEAD_REF:-}' head_sha='${MERGE_HEAD_SHA:-}'); the skill-not-needed / config-internal escape-hatch labels will NOT suppress G2/G6 here — gates run unsuppressed (fail-closed)."
               {
-                echo "### ⚠️ flow-on-gates G2: merge_group PR unresolved"
+                echo "### ⚠️ flow-on-gates G2/G6: merge_group PR unresolved"
                 echo ""
                 echo "Could not resolve the PR number for this merge-queue commit, so the"
-                echo "\`skill-not-needed\` escape-hatch label cannot be honoured here."
-                echo "The gate runs **unsuppressed** (fail-closed)."
+                echo "\`skill-not-needed\` (G2) and \`config-internal\` (G6) escape-hatch labels"
+                echo "cannot be honoured here. The gates run **unsuppressed** (fail-closed)."
                 echo ""
                 echo "- head_ref: \`${MERGE_HEAD_REF:-<empty>}\`"
                 echo "- head_sha: \`${MERGE_HEAD_SHA:-<empty>}\`"
@@ -145,7 +143,18 @@ jobs:
               --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt
           fi
           echo "have_labels=1" >> "$GITHUB_OUTPUT"
-      - name: G2 — public-surface change requires a SKILL.md edit
+
+      # ---- former job: new-crate-completeness (G1) ----
+      - name: new-crate-completeness (G1) — new crate ships bench + README (+ SKILL if public)
+        env:
+          # On pull_request github.base_ref is the bare target branch ('main'); on
+          # merge_group it is empty, so fall back to merge_group.base_ref (a full
+          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
+          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
+        run: python3 scripts/gate-new-crate.py --base "$GATE_BASE_REF"
+
+      # ---- former job: public-api-skill (G2) ----
+      - name: public-api-skill (G2) — public-surface change requires a SKILL.md edit
         env:
           # On pull_request github.base_ref is the bare target branch ('main'); on
           # merge_group it is empty, so fall back to merge_group.base_ref (a full
@@ -159,11 +168,53 @@ jobs:
             python3 scripts/gate-api-skill.py --base "$GATE_BASE_REF"
           fi
 
+      # ---- former job: config-documented (G6) ----
+      # [OPUS-4.8] sq-ncvq.9 — G6 new-config/flag→docs, runs HARD. Like G2 it reads
+      # the PR labels (for the `config-internal` escape hatch) from the shared
+      # resolution step above. Its three hermetic self-test suites lead the group.
+      - name: Self-test the proactive merge-gates (G1/G2/G3/G6)
+        # Runs the hermetic gate unit tests so a regression in any gate script is
+        # caught at PR time (the suite is stdlib-only; no git/network).
+        run: python3 scripts/tests/test_gates.py
+      # [SONNET-4.6] sq-1cb6l: hermetic self-test of the G3 gate's pure logic —
+      # evaluate() + parse_status_lines() + registry_blocks() + dashboard_featured_text()
+      # + added_bench_suites() + suite_family(). Placed in this HARD job so a
+      # regression in the gate's detection logic actually blocks the merge,
+      # mirroring the test_gates.py pattern. Stdlib-only, no git/network. [SONNET-4.6]
+      - name: Self-test the new-bench-registered gate (G3, sq-1cb6l)
+        run: python3 scripts/tests/test_check_new_bench_registered.py
+      # [SONNET-4.6] sq-8hfhi: wire the reactive flow-on engine tests into CI so a
+      # rule/engine regression (like the #1655 false-positive fnmatch/{suite} defect
+      # fixed in #1664) is caught pre-merge, not post-merge. 31 tests covering: rule
+      # loading + well-formedness, evaluate() rule firing (new-crate / changed-surface /
+      # pub-API diff plumbing / competitor-label / new-bench / ZK circuit gate-count),
+      # idempotency-key stability, dry-run output correctness, and the CI guard that
+      # refuses to mint issues outside CI. Stdlib-only, no network, no git. Gating: the
+      # job name carries no advisory/informational token, so ci-summary gates on it.
+      - name: Self-test the flow-on reactive engine (rule loading + evaluate + dry-run — sq-8hfhi)
+        run: python3 scripts/tests/test_flow_on.py
+      - name: config-documented (G6) — new CLI flag / SPARQ_* env var must be documented
+        env:
+          # On pull_request github.base_ref is the bare target branch ('main'); on
+          # merge_group it is empty, so fall back to merge_group.base_ref (a full
+          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
+          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          if [ -f pr-labels.txt ]; then
+            python3 scripts/check-config-documented.py --base "$GATE_BASE_REF" --labels-file pr-labels.txt
+          else
+            python3 scripts/check-config-documented.py --base "$GATE_BASE_REF"
+          fi
+
   new-bench-registry-dashboard:
     # [OPUS-4.8] sq-ncvq.6 — soft-launch ADVISORY (see the GATING vs ADVISORY note
     # above): the "(advisory)" token keeps ci-summary from treating it as a
     # required gate, and --advisory makes the script always exit 0. The verdict is
     # still visible in the check's logs so authors see the nag before it goes hard.
+    # [FABLE-5] sq-6vshe.20: kept VERBATIM as its own job — its name is a pinned
+    # advisory-registry entry (zero registry churn), and advisory work must not
+    # share a gating-named check-run.
     name: new-bench-registry-dashboard (G3, advisory)
     runs-on: ubuntu-latest
     steps:
@@ -182,92 +233,3 @@ jobs:
           # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
           GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
         run: python3 scripts/check-new-bench-registered.py --base "$GATE_BASE_REF" --advisory
-
-  config-documented:
-    # [OPUS-4.8] sq-ncvq.9 — G6 new-config/flag→docs, runs HARD. Like G2 it reads
-    # the PR labels (for the `config-internal` escape hatch), so it mirrors G2's
-    # label-resolution (incl. the merge_group path where the PR number is resolved
-    # from the head commit's associated PR).
-    name: config-documented (G6)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (full history for the merge-base diff)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-      - name: Self-test the proactive merge-gates (G1/G2/G3/G6)
-        # Runs the hermetic gate unit tests so a regression in any gate script is
-        # caught at PR time (the suite is stdlib-only; no git/network).
-        run: python3 scripts/tests/test_gates.py
-      - name: Read PR labels (for the config-internal escape hatch)
-        id: labels
-        # [OPUS-4.8] Mirror G2: run on BOTH pull_request AND merge_group so the
-        # escape-hatch label is honoured in the merge queue too. On merge_group the
-        # PR number is not in the event payload.
-        #
-        # [SONNET-4.6] (sq-5owmc) FIX — mirrors the G2 fix: the merge_group PR
-        # resolution silently failed via `commits/<head_sha>/pulls` (synthetic merge
-        # commit / empty head_sha), so the `config-internal` label never suppressed
-        # G6 in the queue. Now parse the PR number DETERMINISTICALLY from the
-        # gh-readonly-queue head ref via scripts/resolve-merge-group-pr.py, keep the
-        # API only as a secondary fallback, and warn LOUDLY (never silently) if both
-        # fail — the gate then runs UNSUPPRESSED (fail-closed).
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          MERGE_HEAD_REF: ${{ github.event.merge_group.head_ref }}
-          MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          : > pr-labels.txt
-          num="${PR_NUMBER:-}"
-          if [ -z "$num" ] && [ "${EVENT_NAME:-}" = "merge_group" ]; then
-            # Primary (deterministic, no network): parse the PR number from the
-            # gh-readonly-queue head ref.
-            num="$(python3 scripts/resolve-merge-group-pr.py "${MERGE_HEAD_REF:-}" || true)"
-            # Secondary fallback: the head commit's associated PR (best-effort).
-            if [ -z "$num" ] && [ -n "${MERGE_HEAD_SHA:-}" ]; then
-              num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_HEAD_SHA}/pulls" \
-                       --jq '.[0].number' 2>/dev/null || true)"
-            fi
-            if [ -z "$num" ]; then
-              # LOUD fail-closed (see the G2 step): make the unresolved association
-              # visible instead of silently dropping the escape-hatch label. The
-              # gate below still runs UNSUPPRESSED.
-              echo "::warning title=flow-on-gates G6::merge_group PR could not be resolved (head_ref='${MERGE_HEAD_REF:-}' head_sha='${MERGE_HEAD_SHA:-}'); the config-internal escape-hatch label will NOT suppress G6 here — gate runs unsuppressed (fail-closed)."
-              {
-                echo "### ⚠️ flow-on-gates G6: merge_group PR unresolved"
-                echo ""
-                echo "Could not resolve the PR number for this merge-queue commit, so the"
-                echo "\`config-internal\` escape-hatch label cannot be honoured here."
-                echo "The gate runs **unsuppressed** (fail-closed)."
-                echo ""
-                echo "- head_ref: \`${MERGE_HEAD_REF:-<empty>}\`"
-                echo "- head_sha: \`${MERGE_HEAD_SHA:-<empty>}\`"
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-          if [ -n "$num" ]; then
-            gh pr view "$num" \
-              --repo "${{ github.repository }}" \
-              --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt
-          fi
-          echo "have_labels=1" >> "$GITHUB_OUTPUT"
-      - name: G6 — new CLI flag / SPARQ_* env var must be documented
-        env:
-          # On pull_request github.base_ref is the bare target branch ('main'); on
-          # merge_group it is empty, so fall back to merge_group.base_ref (a full
-          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
-          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
-        run: |
-          set -euo pipefail
-          if [ -f pr-labels.txt ]; then
-            python3 scripts/check-config-documented.py --base "$GATE_BASE_REF" --labels-file pr-labels.txt
-          else
-            python3 scripts/check-config-documented.py --base "$GATE_BASE_REF"
-          fi

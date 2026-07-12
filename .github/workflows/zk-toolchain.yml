@@ -12,12 +12,20 @@
 # installs the PINNED Noir toolchain and runs those `#[ignore]`d tests, so a forge that
 # verifies (or a serialization drift that breaks an empirical bb anchor) fails visibly.
 #
+# [OPUS-4.8] sq-5reoy (#1599): the zk/ieee754 and zk/xpath in-tree Noir trees were
+# externalized to the sparq-org/noir_IEEE754 (v0.10.0) and sparq-org/noir_XPath (v0.2.0)
+# face repos, which now own their own CI (nargo unit tests + the ieee754 differential
+# oracle). The two jobs that ran those suites here (`nargo-unit-tests`, `differential-ieee754`)
+# were RETIRED with the trees — the face-repo CI is the single source now. This lane keeps
+# ONLY the sparq-specific `forge-suite` (the verifier-soundness estate over crates/sparq-zk*,
+# which compiles zk/compose — and now transitively fetches the released sparq_ieee754 git dep).
+#
 # TRIGGER (deliberately OFF the fast per-PR critical path — the toolchain install +
 # real proving is slow):
 #   • schedule (nightly 04:23 UTC)  — the standing safety net.
 #   • workflow_dispatch             — on demand.
 #   • pull_request / push to main RESTRICTED by a path filter to ZK-touching paths
-#     (crates/sparq-zk*/**, zk/**, this workflow) — so a ZK change DOES get the forge
+#     (crates/sparq-zk*/**, zk/compose/**, this workflow) — so a ZK change DOES get the forge
 #     suite run (and gates that PR via ci-summary, which is correct), while a non-ZK PR
 #     never triggers this workflow at all (no check-run created => ci-summary doesn't
 #     wait on it; it stays a nightly safety net, not a per-PR tax).
@@ -32,6 +40,12 @@
 # — matching the box that captured the empirical bb anchors in verifier.rs. A toolchain
 # bump is therefore an explicit edit here (and re-captures the anchors), never a silent
 # floating "latest".
+#
+# [OPUS-4.8] sq-5reoy toolchain-drift note: sparq's pins (NARGO/BB below) and the two face
+# repos' pins (nargo 1.0.0-beta.21) agree today but are now maintained independently — a face
+# bump that sparq does not follow (or vice versa) recompiles the released circuits differently.
+# When bumping NARGO_VERSION here, check the released sparq_ieee754 tag was cut on a compatible
+# nargo, and re-run the forge suite (which now compiles the git dep).
 name: zk-toolchain
 
 on:
@@ -44,7 +58,11 @@ on:
     paths:
       - "crates/sparq-zk/**"
       - "crates/sparq-zk-compose/**"
-      - "zk/**"
+      # [OPUS-4.8] sq-5reoy: narrowed from zk/** to zk/compose/** — the zk/ieee754 and
+      # zk/xpath trees were externalized to the sparq-org/noir_IEEE754 and
+      # sparq-org/noir_XPath face repos (#1599), whose own CI covers their nargo tests
+      # and the ieee754 differential oracle. zk/compose is the only in-tree Noir tree left.
+      - "zk/compose/**"
       - ".github/workflows/zk-toolchain.yml"
   # [OPUS-4.8] Merge queue: zk-toolchain surfaces a check on zk-touching PRs, so it
   # must also run on the queue's merge_group ref or the required ci-summary would wait
@@ -72,7 +90,9 @@ on:
     paths:
       - "crates/sparq-zk/**"
       - "crates/sparq-zk-compose/**"
-      - "zk/**"
+      # [OPUS-4.8] sq-5reoy: narrowed from zk/** to zk/compose/** (see the pull_request
+      # paths note above — the ieee754/xpath trees moved to their face repos, #1599).
+      - "zk/compose/**"
       - ".github/workflows/zk-toolchain.yml"
 
 # Least-privilege: this lane only reads the repo + runs tests.
@@ -130,7 +150,7 @@ jobs:
       # any ZK-relevant path; the heavy steps below are gated on its `zk` output.
       #
       # The path set MUST stay in lock-step with the `pull_request`/`push` paths filter
-      # above (crates/sparq-zk/**, crates/sparq-zk-compose/**, zk/**, this workflow file).
+      # above (crates/sparq-zk/**, crates/sparq-zk-compose/**, zk/compose/**, this workflow).
       #
       # SAFE-BY-DEFAULT: zk defaults to "true". Only the `merge_group` branch can flip it
       # to "false", and only after a SUCCESSFUL diff that found no ZK paths. So:
@@ -173,8 +193,9 @@ jobs:
               echo "Changed files in queued batch (${MG_BASE_SHA}..${MG_HEAD_SHA}):"
               printf '%s\n' "${changed}"
               # ZK-relevant paths — SAME set as the pull_request/push paths filter.
+              # [OPUS-4.8] sq-5reoy: zk/ narrowed to zk/compose/ (ieee754/xpath externalized, #1599).
               if printf '%s\n' "${changed}" | grep -Eq \
-                '^(crates/sparq-zk/|crates/sparq-zk-compose/|zk/|\.github/workflows/zk-toolchain\.yml$)'; then
+                '^(crates/sparq-zk/|crates/sparq-zk-compose/|zk/compose/|\.github/workflows/zk-toolchain\.yml$)'; then
                 zk=true
               else
                 zk=false
@@ -267,13 +288,33 @@ jobs:
       # compiled above, so a plain `cargo build` of the harness here is near-free and
       # makes that schema drift a visible RED check on the PR that introduces it. (Build
       # only — no `cargo run`: catching the compile/API break needs no real bb proving.)
-      # `--locked` so the build honours family_curve's OWN committed Cargo.lock and
-      # FAILS if it has drifted from Cargo.toml (rather than silently rewriting it),
-      # keeping the schema-drift guard reproducible. [OPUS-4.8] sq-kep2
+      #
+      # [FABLE-5] sq-q134e — deliberately NOT `--locked`. The harness path-deps on
+      # in-repo crates (sparq-zk → … → sparq-substrate) whose manifests bump
+      # dependencies on lanes that do NOT trigger this zk lane, so the committed
+      # harness Cargo.lock drifts SILENTLY on main and `--locked` then spuriously
+      # failed the NEXT zk-touching PR (bit #1962 via a main-side hashbrown bump the
+      # ZK PR never made). A plain `cargo build` keeps every still-compatible pin
+      # from the committed lock (cargo re-resolves MINIMALLY) and only absorbs the
+      # in-repo manifest bumps — so the guard still goes RED on a real schema/API
+      # break in the harness, while pure lock drift becomes an advisory notice (with
+      # the lock diff in the step summary) asking for a refresh commit instead of a
+      # spurious failure on an innocent PR. [FABLE-5] sq-q134e
       - name: Build the standalone family_curve harness (schema-drift guard)
         if: steps.changes.outputs.zk == 'true'
         working-directory: bench/zk-compose/family_curve
-        run: cargo build --locked
+        run: |
+          set -euo pipefail
+          cargo build
+          if ! git diff --quiet -- Cargo.lock; then
+            echo "::notice file=bench/zk-compose/family_curve/Cargo.lock::family_curve Cargo.lock drifted from an in-repo dep bump that landed on a lane which does not run this guard. The build used the minimally refreshed lock; commit the refreshed Cargo.lock to re-pin (sq-q134e)."
+            {
+              echo '### family_curve Cargo.lock drift (sq-q134e) — commit this refresh to re-pin'
+              echo '```diff'
+              git diff -- Cargo.lock
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
       # toolchain on PATH the forge tests do a REAL bb prove and assert every forgery is
@@ -282,359 +323,13 @@ jobs:
       # from contending for the runner; nextest is NOT used here because these are slow,
       # serialized, toolchain-bound cases (the retry/process-isolation nextest buys us on
       # the fast lane is not what this lane needs).
+      #
+      # [OPUS-4.8] sq-5reoy: compiling zk/compose here now transitively fetches the
+      # released sparq_ieee754 git dependency (sparq-org/noir_IEEE754 @ v0.10.0) from
+      # GitHub, exactly as it already fetches the poseidon v0.3.0 git dep — so this lane
+      # needs network access to github.com on a cold ~/.nargo cache (the rust-cache above
+      # does not cache ~/.nargo; nargo's own per-machine cache warms after the first fetch).
       - name: Run the ignored ZK forge + anchor + e2e suite (real bb)
         if: steps.changes.outputs.zk == 'true'
         run: |
           cargo test -p sparq-zk-compose -p sparq-zk -- --ignored --test-threads=1
-
-
-  # [SONNET-4.6] sq-3x7dl.14.1 -- IEEE 754 differential oracle harness (PROOF M1).
-  #
-  # Runs the Rust differential harness which:
-  #   1. Builds the standalone Rust binary (zk/ieee754/differential/).
-  #   2. Generates a Noir test file with bit-exact expected values from the TRUSTED
-  #      INDEPENDENT oracle (native Rust f32/f64 + half::f16 for f16; f128 deferred).
-  #   3. Runs `nargo test` on the generated file (24 test functions, ~4500 assertions).
-  #      Any divergence between the Noir circuit and the oracle fails the gate.
-  #   4. SELF-TEST (inject-fault): re-generates with one expected bit flipped and asserts
-  #      `nargo test` FAILS -- proving the harness is non-vacuous and wired to the circuit.
-  #
-  # This job gates on the same zk-path filter as forge-suite (path-scoped pull_request
-  # and the merge_group changed-files guard share the same SAFE-BY-DEFAULT logic).
-  #
-  # TCB: oracle is INDEPENDENT of sparq_ieee754 -- no shared code path with the circuit.
-  # This is VERIFICATION, not proof (ACIR->Barretenberg lowering is NOT covered here).
-  differential-ieee754:
-    name: ieee754 differential oracle (PROOF M1)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      # Changed-files gate (same logic as forge-suite -- see that job's comment for the
-      # full rationale on why this is needed for merge_group).
-      - name: Detect zk changes (merge_group changed-files gate)
-        id: changes
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-        run: |
-          set -euo pipefail
-          zk=true
-          if [ "${EVENT_NAME}" = "merge_group" ]; then
-            zk=false
-            ok=true
-            git fetch --no-tags --quiet origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
-              || git fetch --no-tags --quiet origin "${MG_BASE_SHA}" 2>/dev/null \
-              || ok=false
-            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
-            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
-            if [ "${ok}" = "true" ]; then
-              changed="$(git diff --name-only "${MG_BASE_SHA}" "${MG_HEAD_SHA}")"
-              if printf '%s\n' "${changed}" | grep -Eq \
-                '^(crates/sparq-zk/|crates/sparq-zk-compose/|zk/|\.github/workflows/zk-toolchain\.yml$)'; then
-                zk=true
-              else
-                zk=false
-              fi
-            else
-              echo "::warning::could not resolve merge_group SHAs -- running differential oracle (fail-safe)."
-              zk=true
-            fi
-          fi
-          echo "zk=${zk}" >> "$GITHUB_OUTPUT"
-          if [ "${zk}" = "false" ]; then
-            echo "No ZK paths in batch -- fast-passing differential oracle." | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Install Rust (stable)
-        if: steps.changes.outputs.zk == 'true'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Cache cargo + target (differential harness)
-        if: steps.changes.outputs.zk == 'true'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: zk-differential-ieee754
-          workspaces: zk/ieee754/differential -> target
-
-      - name: Install nargo (Noir) -- pinned
-        if: steps.changes.outputs.zk == 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.nargo/bin"
-          curl -fsSL --proto '=https' --tlsv1.2 \
-            "${NOIRUP_BIN_URL}" \
-            -o "$HOME/.nargo/bin/noirup"
-          chmod +x "$HOME/.nargo/bin/noirup"
-          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.nargo/bin:$PATH"
-          noirup --version "${NARGO_VERSION}"
-          nargo --version
-
-      # Drift guard: the generator (main.rs) must match the committed oracle file.
-      # Regenerate: cd zk/ieee754 && bash scripts/run_differential_harness.sh --update-committed
-      - name: Drift guard -- committed oracle matches generator
-        if: steps.changes.outputs.zk == 'true'
-        run: |
-          set -euo pipefail
-          cargo build --manifest-path zk/ieee754/differential/Cargo.toml --release --locked
-          HARNESS_BIN="zk/ieee754/differential/target/release/sparq-ieee754-differential"
-          COMMITTED="zk/ieee754/tests/differential_oracle/src/lib.nr"
-          TMPF="$(mktemp)"
-          trap 'rm -f "${TMPF}"' EXIT
-          "${HARNESS_BIN}" --output "${TMPF}"
-          diff "${TMPF}" "${COMMITTED}" || {
-            echo "ERROR: committed oracle is stale; regenerate with:" >&2
-            echo "  cd zk/ieee754 && bash scripts/run_differential_harness.sh --update-committed" >&2
-            exit 1
-          }
-          echo "[drift-guard] committed oracle is current."
-
-      # Run the full differential harness including the inject-fault self-test.
-      # The script exits non-zero if:
-      #   a) the oracle nargo test fails (circuit diverges from oracle), or
-      #   b) the fault-injected nargo test PASSES (harness is vacuous/broken).
-      - name: Run ieee754 differential oracle + self-test
-        if: steps.changes.outputs.zk == 'true'
-        run: |
-          bash zk/ieee754/scripts/run_differential_harness.sh
-
-  # [SONNET-4.6] sq-3x7dl.13 — nargo unit-test lane for the two in-tree Noir libraries.
-  #
-  # WHY: neither zk/ieee754 nor zk/xpath/xpath had any CI nargo-test coverage until this
-  # lane. The forge-suite above runs the Rust-side `#[ignore]`d forge/anchor suite but
-  # never invokes `nargo test` for the Noir source — so a correctness/soundness regression
-  # in kernels.nr or string.nr that still compiles was always merging green.
-  #
-  # SCOPE: three targeted `nargo test` invocations in the library packages only —
-  #   • zk/ieee754/               — sparq_ieee754 inline #[test] functions in src/lib.nr
-  #                                 and src/ops/*.nr (the ~17 width/round-trip/arithmetic
-  #                                 tests; the tests/ sub-dirs have no Nargo.toml so nargo
-  #                                 does not pick them up as separate packages)
-  #   • zk/xpath/xpath/           — noir_XPath library inline #[test] functions
-  #                                 (comparison, duration, hash, json, regex, …)
-  #   • zk/xpath/xpath_unit_tests/ — the dedicated unit-test bin (date, gregorian,
-  #                                  sequence, numeric, string, … test modules)
-  #
-  # TEST_PACKAGES: the zk/xpath workspace includes 360 generated test_packages.  Of these,
-  # 110 have REAL #[test] assertions against implemented library functions (e.g.
-  # xpath_test_fnminutes_from_time asserts minutes_from_time() values;
-  # xpath_test_opdaytimeduration_greater_than asserts duration_greater_than() booleans).
-  # These are gated below via DYNAMIC DETECTION.  The remaining ~250 are stub-wired: each
-  # has a `stub_`-prefixed import (e.g. `stub_prodaxisstep_preceding`) whose body is
-  # `assert(false, "not available in ZK")`, so running them on valid code would produce a permanently-RED lane — a
-  # gate-discipline violation.  Detection greps for the "stub_" import marker in each
-  # package's src/*.nr files.  As sq-3x7dl.15 retires stubs (converts them to real
-  # implementations), the grep detects the change automatically and the newly-real package
-  # auto-joins the gated set — no workflow edit required.  We do NOT run
-  # `nargo test --workspace` from the workspace root (that would include all 360 packages);
-  # the three library steps above cover inline library tests, and the dynamic step below
-  # gates the real test_packages subset honestly.
-  #
-  # TOOLCHAIN: reuses NARGO_VERSION / NOIRUP_RELEASE / NOIRUP_BIN_URL from the top-level
-  # env: block — the same two-level pinned install as forge-suite, no bb needed (unit tests
-  # don't prove/verify).
-  #
-  # UNTIL SPLIT: this lane is the standing nargo-test gate for zk/ieee754 and zk/xpath until
-  # they graduate into their own repos with their own CI.  When they do, remove these steps
-  # and rely on the upstream CI; bead sq-3x7dl tracks that split.
-  #
-  # CHANGE DETECTION: mirrors the forge-suite merge_group pattern.  For pull_request/push
-  # the workflow-level paths filter already ensures only zk-touching PRs trigger this
-  # workflow, so the non-merge_group default (both ieee754+xpath=true) is never a false
-  # positive.  On merge_group the changed-files diff gates each library independently so
-  # an ieee754-only change does not re-run the xpath suite and vice versa.
-  nargo-unit-tests:
-    name: zk nargo unit tests (ieee754 + xpath)
-    runs-on: ubuntu-latest
-    # nargo unit tests are faster than bb proving; 30 min covers the 3 library steps plus
-    # the dynamically-detected real test_packages (~110 packages, ~10-15 min after cache
-    # warm-up on the xpath dependency tree).
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      # Per-library changed-files gate.  Mirrors the forge-suite `detect zk changes` step
-      # but produces TWO outputs — `ieee754` and `xpath`.  On merge_group, the changed-files
-      # diff decides which library was touched: an ieee754-only queued batch skips the xpath
-      # tests and vice versa.  On pull_request / push / schedule / dispatch, both outputs
-      # default to "true" so both libraries' tests run (the workflow-level paths: filter
-      # already scopes those events to ZK-touching changes — no false-positive runs).
-      #
-      # SAFE-BY-DEFAULT: both outputs default to "true".  Only the merge_group branch can
-      # flip one to "false", and only after a SUCCESSFUL diff that found no relevant paths.
-      # On any diff failure both fall back to "true" so the gate fails safe.
-      - name: Detect per-library changes (merge_group changed-files gate)
-        id: lib-changes
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-        run: |
-          set -euo pipefail
-          # Fail-safe defaults: run all library test targets.
-          ieee754=true
-          xpath=true
-          if [ "${EVENT_NAME}" = "merge_group" ]; then
-            ieee754=false
-            xpath=false
-            ok=true
-            git fetch --no-tags --quiet origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
-              || git fetch --no-tags --quiet origin "${MG_BASE_SHA}" 2>/dev/null \
-              || ok=false
-            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
-            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
-            if [ "${ok}" = "true" ]; then
-              changed="$(git diff --name-only "${MG_BASE_SHA}" "${MG_HEAD_SHA}")"
-              echo "Changed files in queued batch (${MG_BASE_SHA}..${MG_HEAD_SHA}):"
-              printf '%s\n' "${changed}"
-              # ieee754-relevant: zk/ieee754/** or this workflow file.
-              if printf '%s\n' "${changed}" | grep -Eq \
-                '^(zk/ieee754/|\.github/workflows/zk-toolchain\.yml$)'; then
-                ieee754=true
-              fi
-              # xpath-relevant: zk/xpath/** or this workflow file.
-              if printf '%s\n' "${changed}" | grep -Eq \
-                '^(zk/xpath/|\.github/workflows/zk-toolchain\.yml$)'; then
-                xpath=true
-              fi
-            else
-              echo "::warning::could not resolve merge_group base/head SHAs for the diff — running all nargo unit tests (fail-safe)."
-              ieee754=true
-              xpath=true
-            fi
-          fi
-          echo "ieee754=${ieee754}" >> "$GITHUB_OUTPUT"
-          echo "xpath=${xpath}"    >> "$GITHUB_OUTPUT"
-          echo "ieee754=${ieee754}, xpath=${xpath}"
-          if [ "${ieee754}" = "false" ] && [ "${xpath}" = "false" ]; then
-            echo "No ieee754 or xpath paths in this merge_group batch — fast-passing." \
-              | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # Install only nargo — bb is NOT needed for `nargo test` (no proof generation).
-      # Two-level pin: the noirup binary is fetched from NOIRUP_BIN_URL (a tagged release),
-      # then noirup installs the EXACT NARGO_VERSION.  Same discipline as forge-suite.
-      - name: Install nargo (Noir) — pinned
-        if: steps.lib-changes.outputs.ieee754 == 'true' || steps.lib-changes.outputs.xpath == 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.nargo/bin"
-          curl -fsSL --proto '=https' --tlsv1.2 \
-            "${NOIRUP_BIN_URL}" \
-            -o "$HOME/.nargo/bin/noirup"
-          chmod +x "$HOME/.nargo/bin/noirup"
-          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.nargo/bin:$PATH"
-          noirup --version "${NARGO_VERSION}"
-          nargo --version
-
-      # sparq_ieee754 — runs the inline #[test] functions in src/lib.nr + src/ops/*.nr.
-      # Invoked at the package root (not --workspace; ieee754 is a single-package repo).
-      # Fail on any test failure: no `|| true` masking.
-      - name: nargo test — zk/ieee754 (sparq_ieee754 inline tests)
-        if: steps.lib-changes.outputs.ieee754 == 'true'
-        working-directory: zk/ieee754
-        run: nargo test
-
-      # noir_XPath library — inline #[test] functions in xpath/src/*.nr
-      # (comparison, duration, hash, json, regex, …).
-      # Scoped to the `xpath` package, NOT the workspace root — the workspace root would
-      # trigger all 360 test_packages; the real subset is gated separately below.
-      - name: nargo test — zk/xpath/xpath (noir_XPath library inline tests)
-        if: steps.lib-changes.outputs.xpath == 'true'
-        working-directory: zk/xpath/xpath
-        run: nargo test
-
-      # xpath_unit_tests — the dedicated unit-test binary
-      # (date, gregorian, sequence, numeric, string, hash, regex, … test modules).
-      # Type "bin" in Nargo.toml; nargo test still discovers #[test] functions here.
-      - name: nargo test — zk/xpath/xpath_unit_tests
-        if: steps.lib-changes.outputs.xpath == 'true'
-        working-directory: zk/xpath/xpath_unit_tests
-        run: nargo test
-
-      # real test_packages — dynamically detected subset of the 360 generated packages.
-      #
-      # [SONNET-4.6] DETECTION: a test_package is a STUB if any .nr file in its src/
-      # directory contains the string "stub_", indicating it has a `stub_`-prefixed import
-      # (e.g. `stub_prodaxisstep_preceding`) whose body is `assert(false, "not available in
-      # ZK")`.  All other packages have genuine #[test] assertions against implemented
-      # library functions and are gated here.  Current partition (verified by local grep):
-      # 110 real | 250 stub-wired.
-      #
-      # As sq-3x7dl.15 retires stub functions (converts them to real implementations), the
-      # detection grep automatically pulls each newly-real package into this gated set —
-      # no workflow edit required.  That is the design goal: the gate grows honestly with
-      # real coverage.
-      #
-      # RUNTIME: first invocation compiles the xpath dependency tree and warms nargo's
-      # global artifact cache (~/.nargo/); subsequent packages reuse that cache (~3-5s
-      # each after warm-up).  Estimated wall time: ~10-15 min for ~110 packages cold;
-      # the 30-min job timeout accommodates this.  No `|| true` masking — any test
-      # failure exits the step immediately (fail-fast via set -e).
-      - name: nargo test — real test_packages (dynamically detected, ~110 packages)
-        if: steps.lib-changes.outputs.xpath == 'true'
-        working-directory: zk/xpath
-        run: |
-          set -euo pipefail
-          # nullglob: a missing/empty test_packages/ must not iterate the literal
-          # glob string; the count guard below turns that case into a loud failure.
-          shopt -s nullglob
-          # KNOWN_FAILING: packages that are in the real (non-stub) set but have a
-          # known latent failure beaded for resolution.  Each entry is a bare package
-          # name (matching the directory name under test_packages/).  These are SKIPPED
-          # with a ::warning annotation rather than masking them silently.  Remove an
-          # entry here once the corresponding bead is closed and the tests pass.
-          #
-          KNOWN_FAILING=()
-          # Partition pass: count real vs stub-wired packages.
-          # A package is a stub if any .nr file in its src/ contains 'stub_' (stub-prefixed
-          # imports, assert(false) bodies) OR the generated-placeholder marker
-          # 'No qt3tests cases could be converted' (unconditional assert(false), no stub_).
-          real_count=0
-          stub_count=0
-          known_failing_count=0
-          for pkg_dir in test_packages/*/; do
-            if grep -rE "stub_|No qt3tests cases could be converted" "${pkg_dir}src/" --include="*.nr" -q 2>/dev/null; then
-              stub_count=$((stub_count + 1))
-            else
-              real_count=$((real_count + 1))
-            fi
-          done
-          if [ $((real_count + stub_count)) -eq 0 ]; then
-            echo "::error::no test_packages/*/ directories found — broken checkout or layout change; failing closed."
-            exit 1
-          fi
-          echo "Partition: ${real_count} real test_packages | ${stub_count} stub-wired (excluded)"
-          echo "Gates on ${real_count} implemented-function test_packages;" \
-            "${stub_count} stub-wired/placeholder packages (stub_* imports or unconvertible-qt3tests placeholders)" \
-            "excluded, tracked by sq-3x7dl.15 for retirement."
-          printf 'Partition: **%d real** (gated) | %d stub-wired (excluded)\n' \
-            "${real_count}" "${stub_count}" >> "$GITHUB_STEP_SUMMARY"
-          # Test pass: run nargo test in each real package directory.
-          # set -e causes fail-fast exit on the first test failure.
-          for pkg_dir in test_packages/*/; do
-            if grep -rE "stub_|No qt3tests cases could be converted" "${pkg_dir}src/" --include="*.nr" -q 2>/dev/null; then
-              continue  # stub-wired or generated placeholder, excluded
-            fi
-            pkg_name=$(basename "${pkg_dir}")
-            # Check KNOWN_FAILING list — skip with ::warning, never silently.
-            is_known_failing=0
-            for kf in "${KNOWN_FAILING[@]}"; do
-              if [[ "${pkg_name}" == "${kf}" ]]; then
-                is_known_failing=1
-                break
-              fi
-            done
-            if [[ ${is_known_failing} -eq 1 ]]; then
-              echo "::warning::Skipping known-failing package ${pkg_name} (see KNOWN_FAILING list in workflow for bead reference)"
-              known_failing_count=$((known_failing_count + 1))
-              continue
-            fi
-            echo "--- nargo test: ${pkg_name} ---"
-            (cd "${pkg_dir}" && nargo test)
-          done
-          echo "All $((real_count - known_failing_count)) real test_packages passed (${known_failing_count} known-failing skipped)."

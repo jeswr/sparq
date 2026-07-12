@@ -3,6 +3,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod ann;
+// [OPUS-4.8] (sq-lfo84) Explicit-SIMD (NEON/AVX2) squared-Euclidean distance kernel for the HNSW
+// ANN hot loop. `approx-ann` only (the HNSW backend it serves); no new dependency — pure
+// `core::arch` intrinsics with a scalar fallback bit-identical to the previous auto-vectorised loop.
+#[cfg(feature = "approx-ann")]
+mod simd;
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend seam (exact default vs approximate) + the iterative
 // over-fetch FILTERED path — `filtered-ann` only (the approximate impl is additionally `approx-ann`).
 #[cfg(feature = "filtered-ann")]
@@ -71,8 +76,17 @@ pub mod fuse;
 pub mod import;
 pub mod labels;
 pub mod quant;
+// [FABLE-5] sq-lhcot.1 (GenAI review gap 1; spec estate sq-rvgr2.4): the `.spqv` v3 EMBEDDING
+// PROVENANCE record (model id / model+content version / metric / normalization / verbalization
+// regime) + the mandatory compatibility rejection. This module is ALWAYS compiled — a v3 store
+// written by a feature-on build must still OPEN on a feature-off build (mirroring how v1/v2 both
+// open regardless of features); only the v3 WRITE path (`VectorStore::with_provenance` → finalize)
+// and the demanding query check are gated behind the opt-in `spqv-provenance` feature. Lean: a
+// hand-rolled fixed-width LE codec, no new dependency. The extension point stays a reserved, opaque,
+// versioned area with NO fields defined (pending the #1746 profile freeze — the KERN boundary).
 #[cfg(feature = "vec-predicate")]
 pub mod rewrite;
+pub mod spqv_provenance;
 pub mod store;
 // [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the P0 structure-aware-vectorisation preprocessing +
 // sampling-logic layer — closure-before-vectorise + type-constrained negative sampling. `structure`
@@ -105,6 +119,15 @@ pub mod train;
 // materialised closure via the P0 `close_for_vectorise` path and adds no new dependency.
 #[cfg(feature = "structure")]
 pub mod taxonomy;
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO PRIORS READER — mines gUFO
+// meta-types (Kind/Role/Phase/Category/…), rigidity, identity providers, ontological natures, and
+// mediation/inherence witnesses from the graph, and derives a UFO-PROVABLE disjointness +
+// subsumption mask fed into the P3 `DisjointnessOracle` (answer-safe: only proven pairs, fail
+// closed on ill-formed models). Same `structure` feature (off by default); no new dependency —
+// the default build carries zero UFO-prior code. The eval harness's `gufo_prior` axis (default
+// OFF) is the only consumer that changes behaviour, and only when explicitly enabled.
+#[cfg(feature = "structure")]
+pub mod ufo_priors;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -120,6 +143,34 @@ pub mod vocab {
     /// `( ?node ?score ) vec:search ( <query> <k> )` — like [`NEAREST`] but also
     /// binds `?score` to each neighbour's cosine similarity (`xsd:double`).
     pub const SEARCH: &str = "http://sparq.dev/vec#search";
+}
+
+/// [FABLE-5] (sq-lhcot.1) The `spqvp:` **embedding-provenance vocabulary** — the RDF terms a caller
+/// uses to ASSERT (in the graph or a sidecar dataset) the embedding pipeline a `.spqv` v3 store was
+/// built with: model identifier, model/content version, similarity metric, normalization, dimension,
+/// and verbalization regime. These IRIs describe the compatibility axes the v3 header records so the
+/// provenance is expressible in RDF as well as in the binary header; the crate does NOT define or
+/// privilege any encoder — the values are caller-supplied.
+///
+/// The namespace is `http://sparq.dev/spqv-prov#`. The reserved extension terms are deliberately
+/// NOT defined here — extension fields are reserved pending the cross-implementation profile (#1746).
+pub mod prov_vocab {
+    /// `spqvp:` — the sparq embedding-provenance namespace.
+    pub const SPQVP_NS: &str = "http://sparq.dev/spqv-prov#";
+    /// `spqvp:model` — the model identifier the store's vectors were produced by (a literal token).
+    pub const MODEL: &str = "http://sparq.dev/spqv-prov#model";
+    /// `spqvp:modelVersion` — the model revision (a literal token).
+    pub const MODEL_VERSION: &str = "http://sparq.dev/spqv-prov#modelVersion";
+    /// `spqvp:contentVersion` — the graph→text (verbaliser) content revision (a literal token).
+    pub const CONTENT_VERSION: &str = "http://sparq.dev/spqv-prov#contentVersion";
+    /// `spqvp:metric` — the similarity metric (`cosine` / `dot` / `euclidean`, a literal token).
+    pub const METRIC: &str = "http://sparq.dev/spqv-prov#metric";
+    /// `spqvp:normalization` — the vector normalization (`none` / `l2`, a literal token).
+    pub const NORMALIZATION: &str = "http://sparq.dev/spqv-prov#normalization";
+    /// `spqvp:dimension` — the vector dimension (an `xsd:integer` literal; also the store header dim).
+    pub const DIMENSION: &str = "http://sparq.dev/spqv-prov#dimension";
+    /// `spqvp:verbalization` — the verbalization regime name (a literal token).
+    pub const VERBALIZATION: &str = "http://sparq.dev/spqv-prov#verbalization";
 }
 
 pub use ann::{cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked};
@@ -173,14 +224,23 @@ pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 // (`save_delta`/`open_with_delta`/`sibling_delta_path`) live on `VectorStore` (also `delta`-gated).
 #[cfg(feature = "delta")]
 pub use delta::{VectorDelta, SPQD_MAGIC, SPQD_VERSION};
-pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
+pub use store::{
+    LegacyMode, StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION, SPQV_VERSION_V3,
+};
+// [FABLE-5] sq-lhcot.1: the `.spqv` v3 embedding-provenance surface — the record, its typed metric /
+// normalization axes, and the RDF vocabulary IRIs. Always compiled (the v3 read path); the vocab
+// namespace lets a caller assert provenance in RDF (see `skills/vector-search/SKILL.md`).
+pub use spqv_provenance::{
+    EmbeddingProvenance, Metric as EmbeddingMetric, Normalization, MAX_PROVENANCE_BLOCK_LEN,
+    PROVENANCE_BLOCK_VERSION,
+};
 // [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the structure-aware-vectorisation P0 surface — the
 // closure-before-vectorise step, the type-constraint extractor, and the type-constrained negative
 // sampler with its on/off ablation switch. `structure` feature only.
 #[cfg(feature = "structure")]
 pub use structure::{
     close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
-    TypeConstraints,
+    TermScope, TypeConstraints,
 };
 // [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4): the provenance-weight surface — the
 // PKG→`w(t)` reader, its on/off ablation switch, and the tunable factors. `structure` feature only.
@@ -190,10 +250,11 @@ pub use provenance::{ProvenanceWeights, WeightConfig, WeightMode};
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_weight_ablation,
-    synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
-    synthetic_relational_ttl, AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics,
-    MultiSeedCell, PairedAblation, PairedDelta, Splits, WeightAblation, SCHEMA_PREDICATES,
+    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_quoted_ablation,
+    run_weight_ablation, synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
+    synthetic_rdf12_parts, synthetic_rdf12_ttl, synthetic_relational_ttl, AblationCell, CellStats,
+    EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation, PairedDelta,
+    QuotedAblation, Rdf12Parts, Splits, WeightAblation, SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
@@ -228,6 +289,10 @@ pub use taxonomy::{
     DisjointnessOracle, DistortionReport, EuclideanTaxonomyEncoder, Geometry, GeometryGate,
     HyperbolicTaxonomyEncoder, TaxonomyDag,
 };
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO priors surface — the reader,
+// its meta-type/rigidity/nature vocabulary, and the canonical gUFO namespace. `structure` only.
+#[cfg(feature = "structure")]
+pub use ufo_priors::{MetaType, Nature, Rigidity, UfoPriors, GUFO_NS};
 // [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the structure-aware-vectorisation P4 surface — the
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]

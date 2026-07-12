@@ -525,6 +525,27 @@ is recorded in that PR's body (issue #1111 comment by @jeswr).
      C passes a pre-registered bar should any "calibrated confidence" claim be shipped; until
      then, the honest framing is "asserted epistemic weight, unvalidated".
 
+5. **Foundational-ontology choice for the PKG — DECIDED: schema.org-as-top RATIFIED
+   (bead sq-mztg8.5, 2026-07-06).** The Fable-subject Metric-1 re-run (PR #1603,
+   `bench/fo-km/RESULTS.md` Fable section) shifts but does not flip the incumbent
+   verdict. Per-tier evidence:
+
+   | Tier | schema.org | DOLCE-DUL | gUFO | no-FO | Signal |
+   |---|---|---|---|---|---|
+   | **Haiku/cheap fleet** (original run, PRs #1107/#1108) | **0.84** | 0.64 | 0.54 | 0.58 | Clear schema.org win across TH/ER/CC |
+   | **Fable tier** (PR #1603) | **0.56** (tie) | **0.56** (tie) | 0.31 | 0.25 | Tie on full task set; schema.org retains expressibility-subset edge (0.67 vs 0.53 over tasks each arm can express) |
+
+   **Decision:** schema.org-as-top remains the PKG's top FO. The Fable-tier tie does
+   not auto-flip the default because (a) the cheap fleet's PKG-query traffic still
+   shows the original clear win — the PKG is predominantly queried by Haiku/Sonnet
+   agents; (b) on tasks each arm can actually express, schema.org retains the lead even
+   at Fable tier; (c) gUFO is a clear loser at both tiers and no-FO is worst at Fable
+   tier. No ontology data changes: `pkg.ttl` bridge axioms and the existing schema.org
+   FO typing are unchanged. **Revisit trigger:** if the fleet's KM-query tier moves
+   predominantly to Fable-class models, re-run bench/fo-km Metric-1 (the 16-task
+   frozen set, `bench/fo-km/tasks.jsonl`) before re-opening this decision. Source:
+   `bench/fo-km/RESULTS.md` (both sections); bead sq-mztg8.5; epic sq-mztg8.
+
 ---
 
 ## 7. Verified source files (all absolute)

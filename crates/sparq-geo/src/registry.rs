@@ -21,7 +21,8 @@
 //! assert_eq!(r.len(), 1); // London–Paris ≈ 343.6 km
 //! ```
 //!
-//! Argument/result conventions (each function mirrors [`crate::geof::lex`]):
+//! Argument/result conventions (each function has the same semantics as its
+//! [`crate::geof::lex`] mirror):
 //!
 //! * geometry arguments must be `geo:wktLiteral` literals (anything else — wrong
 //!   datatype, an IRI, a plain string — is a SPARQL *expression* error: the row is
@@ -32,13 +33,128 @@
 //! * `geof:envelope` / `geof:boundary` / `geof:convexHull` return `geo:wktLiteral`;
 //! * every [`crate::GeoError`] (WKT parse failure, CRS mismatch, unknown unit, …)
 //!   is the same expression error.
+//!
+//! # Parsed-geometry caching (sq-lkrgi) [FABLE-5]
+//!
+//! The registry evaluates through the TYPED [`crate::geof`] API over a small
+//! per-thread cache of parsed geometries keyed by (datatype, full lexical form)
+//! — see `geom_cache` — instead of the string-level `geof::lex` mirrors, which
+//! re-parse every argument on every row. A CONSTANT geometry in a `FILTER`
+//! (Geographica's large-constant selections pass a ~100 KB polygon literal per
+//! row) is therefore parsed once per thread, not once per row. This is a pure
+//! evaluation-strategy change: a lexical form parses to the same geometry every
+//! time (no graph state is involved), so results are identical to fresh parses;
+//! the differential unit tests below pin that. Parse FAILURES are not cached —
+//! an erroneous literal re-errors per row, exactly as before.
+//!
+//! # Prepared-relate caching (sq-hq8t5) [FABLE-5]
+//!
+//! The DE-9IM relation families (`geof:sf*` / `geof:eh*` / `geof:rcc8*` /
+//! `geof:relate`) additionally cache a PREPARED form of each REUSED operand —
+//! [`geo::PreparedGeometry`]'s indexed topology graph — in the same
+//! `geom_cache` entry, built lazily on the entry's first warm relate lookup.
+//! With the parse cache alone, relating a stream of rows against a large
+//! constant polygon still rebuilt the constant's edge index and self-nodes on
+//! every row (the dominant remaining per-row term on that shape); with the
+//! prepared side cached, that work happens once per thread. See
+//! `de9im_matrix` (code span: a private item — a link would break the
+//! public-module rustdoc) for why the prepared path is result-identical —
+//! the differential tests below pin it across all 24 relations and
+//! `geof:relate`.
 
-use crate::geof::lex;
+use crate::geof::{self, Unit};
+use crate::literal::GeoGeometry;
 use crate::vocab::{GEOF_NS, GML_LITERAL, WKT_LITERAL};
 use crate::GeoError;
+use geo::relate::IntersectionMatrix;
+use geo::{PreparedGeometry, Relate};
+use geo_types::Geometry;
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_engine::FunctionRegistry;
-use std::borrow::Cow;
+use std::rc::Rc;
+
+/// An OWNING prepared form of a parsed geometry for repeated DE-9IM relates
+/// (sq-hq8t5). [FABLE-5]
+///
+/// `geo`'s `Relate` rebuilds a noded topology graph (edge R*-tree +
+/// self-intersection nodes) for BOTH operands on EVERY call; against a large
+/// constant polygon that rebuild dominates the per-row cost (the Geographica
+/// q09/q13/q16/q17 shape — Jena caches prepared geometries for exactly this
+/// reason). [`geo::PreparedGeometry`] hoists that per-operand work out of the
+/// relate: it is built ONCE here and its graph is reused by every subsequent
+/// relate via `Relate::geometry_graph`. Owning (`Geometry<f64>`, not a
+/// borrow) so it can live in the per-thread `geom_cache` alongside the parsed
+/// geometry with no self-reference.
+///
+/// The CRS lives on the parsed [`GeoGeometry`] the cache entry pairs this
+/// with ([`RelateArg`] always carries both), so compatibility checking is
+/// unchanged.
+struct PreparedGeoGeometry {
+    prepared: PreparedGeometry<'static, Geometry<f64>, f64>,
+}
+
+impl PreparedGeoGeometry {
+    /// Indexes `g` once (edge R*-tree build + self-noding) for repeated
+    /// relates. Infallible: preparation is a pure restructuring of the
+    /// geometry, deferring nothing to the later relates.
+    fn new(g: &GeoGeometry) -> Self {
+        Self { prepared: PreparedGeometry::from(g.geometry.clone()) }
+    }
+}
+
+/// One relate operand: the parsed geometry plus, when it came from a WARM
+/// cache entry, its prepared form (sq-hq8t5). [FABLE-5]
+struct RelateArg {
+    geom: Rc<GeoGeometry>,
+    prepared: Option<Rc<PreparedGeoGeometry>>,
+}
+
+/// The DE-9IM intersection matrix of `a` vs `b`, reusing a prepared side
+/// when available (sq-hq8t5). [FABLE-5]
+///
+/// # Why the prepared path is result-identical (the load-bearing property)
+///
+/// All four arms run the same `geo` `RelateOperation` over the same robust
+/// predicates; a prepared operand only substitutes a PRECOMPUTED
+/// `GeometryGraph` (edge index + self-nodes) for the one a plain relate
+/// would build fresh from the identical geometry — `geo`'s own tests pin
+/// graph equality (`swap_arg_index`) and matrix equality
+/// (`prepared_with_unprepared`), and this crate's differential tests below
+/// re-pin matrix equality across all 24 relation functions and `geof:relate`
+/// patterns. CRS compatibility is checked FIRST via the same
+/// `geof::ensure_compatible` rule as the unprepared functions, so error
+/// behaviour is unchanged too.
+fn de9im_matrix(a: &RelateArg, b: &RelateArg) -> Result<IntersectionMatrix, String> {
+    geof::ensure_compatible(&a.geom, &b.geom).map_err(|e| e.to_string())?;
+    Ok(match (&a.prepared, &b.prepared) {
+        (Some(pa), Some(pb)) => pa.prepared.relate(&pb.prepared),
+        (Some(pa), None) => pa.prepared.relate(&b.geom.geometry),
+        (None, Some(pb)) => a.geom.geometry.relate(&pb.prepared),
+        (None, None) => a.geom.geometry.relate(&b.geom.geometry),
+    })
+}
+
+/// How a relation family decides `true`/`false` from the DE-9IM matrix.
+/// Splitting the relation table on this (instead of the whole-relation
+/// `fn(&GeoGeometry, &GeoGeometry)` mirrors it used before sq-hq8t5) lets
+/// every family share [`de9im_matrix`]'s prepared-side reuse. [FABLE-5]
+#[derive(Clone, Copy)]
+enum MatrixPred {
+    /// A simple-features predicate method of [`IntersectionMatrix`].
+    Sf(fn(&IntersectionMatrix) -> bool),
+    /// ANY-of a GeoSPARQL matrix-pattern disjunction (Egenhofer / RCC8) —
+    /// the same `geof` pattern consts the plain functions evaluate.
+    Any(&'static [&'static str]),
+}
+
+impl MatrixPred {
+    fn eval(self, m: &IntersectionMatrix) -> bool {
+        match self {
+            MatrixPred::Sf(p) => p(m),
+            MatrixPred::Any(patterns) => geof::matrix_matches_any(m, patterns),
+        }
+    }
+}
 
 /// `Err` unless exactly `n` arguments were passed.
 fn arity(name: &str, args: &[Term], n: usize) -> Result<(), String> {
@@ -49,23 +165,229 @@ fn arity(name: &str, args: &[Term], n: usize) -> Result<(), String> {
     }
 }
 
-/// The geometry of argument `i` as a WKT lexical form. A `geo:wktLiteral` is
-/// returned borrowed; a `geo:gmlLiteral` (GeoSPARQL accepts BOTH serializations
-/// as geometry arguments, §8.5) is parsed and re-serialised to the equivalent
-/// WKT lexical form so the WKT-keyed `geof::lex` functions handle it unchanged.
-/// Any other term is a per-row expression error. [OPUS-4.8]
-fn wkt_lex<'a>(name: &str, args: &'a [Term], i: usize) -> Result<Cow<'a, str>, String> {
+/// Bounded per-thread cache of parsed geometry literals (sq-lkrgi). [FABLE-5]
+///
+/// # Why serving a cached parse is SOUND (the load-bearing property)
+///
+/// The cached value is `parse_wkt_literal(lex)` / `parse_gml_literal(lex)` for
+/// the EXACT lexical form `lex` — a deterministic pure function of the string
+/// alone (no graph, dictionary, or session state feeds the parse), so an entry
+/// can never go stale and no invalidation is needed. The two parsers are keyed
+/// separately ([`LexKind`]) so a lexical form cached under one datatype can
+/// never satisfy a lookup for the other, and parse FAILURES are never cached
+/// (each erroneous row re-errors, preserving per-row expression-error
+/// semantics). The cache is per-thread (`thread_local!`, matching the
+/// `sparq-vectors` mask-cache idiom) so the registry closures stay
+/// `Send + Sync` with no locking, and it is bounded both by entry count and by
+/// total key bytes so a long-lived process cannot grow it without bound.
+mod geom_cache {
+    use super::{GeoError, GeoGeometry, PreparedGeoGeometry};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Which parser a cache entry belongs to. WKT and GML lexical spaces are
+    /// keyed separately: the same string means different things to the two
+    /// parsers, so a hit must never cross datatypes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum LexKind {
+        /// `geo:wktLiteral` — `crate::literal::parse_wkt_literal`.
+        Wkt,
+        /// `geo:gmlLiteral` — `crate::gml::parse_gml_literal`.
+        Gml,
+    }
+
+    /// One cached parse: the key (parser + full lexical form), the shared
+    /// parsed geometry, and — once the entry has been RE-used by a relate —
+    /// its prepared form (sq-hq8t5).
+    struct CachedGeom {
+        kind: LexKind,
+        lex: String,
+        geom: Rc<GeoGeometry>,
+        /// Lazily-built prepared form for the DE-9IM relate families, shared
+        /// by every subsequent relate against this entry. `None` until the
+        /// entry's first WARM relate lookup ([`parse_prepared`] hit):
+        /// preparing costs about one relate's worth of per-operand graph
+        /// work, so preparing EAGERLY on insert would tax the per-row
+        /// streaming side (each distinct row geometry is inserted, related
+        /// once, and evicted) for zero reuse. A hit is the proof of reuse —
+        /// the constant side of a Geographica-style filter is prepared on
+        /// its second row and reused for every row after. Evicted together
+        /// with the entry, so the byte bound below caps prepared structures
+        /// too (their size is proportional to the same lexical form).
+        prepared: Option<Rc<PreparedGeoGeometry>>,
+    }
+
+    /// Entry cap. The hot shape is ONE constant + a stream of per-row
+    /// geometries; a handful of slots keeps every constant of a realistic
+    /// expression resident while per-row strings churn through the tail.
+    pub(super) const MAX_ENTRIES: usize = 16;
+    /// Total-key-bytes cap (the parsed geometry's size is roughly proportional
+    /// to its lexical form, so key bytes are the memory proxy). Bounds the
+    /// per-thread footprint even when every entry is a large polygon.
+    pub(super) const MAX_KEY_BYTES: usize = 1 << 20;
+
+    thread_local! {
+        /// MRU-ordered (front = most recently used) cache. A `Vec` scanned
+        /// linearly: at ≤ `MAX_ENTRIES` entries a scan is a few length checks
+        /// plus one confirming memcmp on the hit, far below hash-map noise —
+        /// and orders of magnitude below re-parsing a large WKT body.
+        static CACHE: RefCell<Vec<CachedGeom>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Test-only count of parse ATTEMPTS (misses), successful or not.
+        /// Lets tests assert a constant really was parsed once, not per row.
+        static PARSE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Test-only count of PREPARED builds (sq-hq8t5). Lets tests assert a
+        /// reused constant is prepared exactly once — not never (the cache
+        /// would be inert) and not per row (the pathology it removes).
+        static PREPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The parsed geometry for `lex` under `kind`: a cache hit when this exact
+    /// (kind, lexical form) was parsed on this thread recently, a fresh parse
+    /// otherwise. Errors pass through uncached.
+    pub(super) fn parse(kind: LexKind, lex: &str) -> Result<Rc<GeoGeometry>, GeoError> {
+        Ok(lookup(kind, lex, false)?.0)
+    }
+
+    /// [`parse`] for a DE-9IM RELATE operand (sq-hq8t5): additionally returns
+    /// the entry's prepared form, building it on the entry's first WARM relate
+    /// lookup. A hit is the proof of reuse that pays for preparation; a miss
+    /// (e.g. every distinct per-row geometry of a scan) never builds one, so
+    /// the streaming side of a filter costs exactly what it did before.
+    /// [FABLE-5]
+    pub(super) fn parse_prepared(
+        kind: LexKind,
+        lex: &str,
+    ) -> Result<(Rc<GeoGeometry>, Option<Rc<PreparedGeoGeometry>>), GeoError> {
+        lookup(kind, lex, true)
+    }
+
+    /// Shared lookup: MRU-move on a hit (building the prepared form first if
+    /// `prepare_on_hit` and the entry has none), parse-and-insert on a miss.
+    fn lookup(
+        kind: LexKind,
+        lex: &str,
+        prepare_on_hit: bool,
+    ) -> Result<(Rc<GeoGeometry>, Option<Rc<PreparedGeoGeometry>>), GeoError> {
+        // Lookup phase (borrow released before any parsing runs; the prepared
+        // build is pure CPU over the entry's own geometry — no re-entry).
+        let hit = CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            cache.iter().position(|e| e.kind == kind && e.lex == lex).map(|i| {
+                if i > 0 {
+                    let entry = cache.remove(i);
+                    cache.insert(0, entry);
+                }
+                let entry = &mut cache[0];
+                if prepare_on_hit && entry.prepared.is_none() {
+                    #[cfg(test)]
+                    PREPARE_COUNT.with(|c| c.set(c.get() + 1));
+                    entry.prepared = Some(Rc::new(PreparedGeoGeometry::new(&entry.geom)));
+                }
+                (entry.geom.clone(), entry.prepared.clone())
+            })
+        });
+        if let Some(hit) = hit {
+            return Ok(hit);
+        }
+        #[cfg(test)]
+        PARSE_ATTEMPTS.with(|c| c.set(c.get() + 1));
+        let geom = Rc::new(match kind {
+            LexKind::Wkt => crate::literal::parse_wkt_literal(lex)?,
+            LexKind::Gml => crate::gml::parse_gml_literal(lex)?,
+        });
+        CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            cache.insert(
+                0,
+                CachedGeom { kind, lex: lex.to_string(), geom: geom.clone(), prepared: None },
+            );
+            // Evict from the LRU tail past either cap — but never the
+            // just-inserted MRU entry, so even a single over-budget constant
+            // stays cached (evicting it would re-parse it every row, the exact
+            // pathology this cache removes).
+            while cache.len() > 1
+                && (cache.len() > MAX_ENTRIES
+                    || cache.iter().map(|e| e.lex.len()).sum::<usize>() > MAX_KEY_BYTES)
+            {
+                cache.pop();
+            }
+        });
+        Ok((geom, None))
+    }
+
+    /// Test-only: drop all entries and zero the counters so a test starts
+    /// from a known-cold cache.
+    #[cfg(test)]
+    pub(super) fn reset() {
+        CACHE.with(|c| c.borrow_mut().clear());
+        PARSE_ATTEMPTS.with(|c| c.set(0));
+        PREPARE_COUNT.with(|c| c.set(0));
+    }
+
+    /// Test-only: number of live entries.
+    #[cfg(test)]
+    pub(super) fn len() -> usize {
+        CACHE.with(|c| c.borrow().len())
+    }
+
+    /// Test-only: parse attempts since the last [`reset`].
+    #[cfg(test)]
+    pub(super) fn parse_attempts() -> usize {
+        PARSE_ATTEMPTS.with(|c| c.get())
+    }
+
+    /// Test-only: prepared-geometry builds since the last [`reset`] (sq-hq8t5).
+    #[cfg(test)]
+    pub(super) fn prepare_count() -> usize {
+        PREPARE_COUNT.with(|c| c.get())
+    }
+}
+
+/// The PARSED geometry of argument `i`, through the per-thread `geom_cache`
+/// (so a constant geometry repeated across rows is parsed once per thread,
+/// not once per row — sq-lkrgi). Both GeoSPARQL serializations are accepted
+/// (§8.5): a `geo:wktLiteral` or a `geo:gmlLiteral`, each keyed under its own
+/// parser. Any other term is a per-row expression error. [FABLE-5]
+fn geom_arg(name: &str, args: &[Term], i: usize) -> Result<Rc<GeoGeometry>, String> {
     match &args[i] {
-        Term::Literal(l) if l.datatype().as_str() == WKT_LITERAL => Ok(Cow::Borrowed(l.value())),
+        Term::Literal(l) if l.datatype().as_str() == WKT_LITERAL => {
+            geom_cache::parse(geom_cache::LexKind::Wkt, l.value()).map_err(|e| e.to_string())
+        }
         Term::Literal(l) if l.datatype().as_str() == GML_LITERAL => {
-            let g = crate::gml::parse_gml_literal(l.value()).map_err(|e| e.to_string())?;
-            Ok(Cow::Owned(g.to_wkt_literal()))
+            geom_cache::parse(geom_cache::LexKind::Gml, l.value()).map_err(|e| e.to_string())
         }
         other => Err(format!(
             "geof:{name}: argument {} must be a geo:wktLiteral or geo:gmlLiteral literal, got {other}",
             i + 1
         )),
     }
+}
+
+/// [`geom_arg`] for a DE-9IM RELATE operand (sq-hq8t5): same accepted terms
+/// and error wording, but resolved through `geom_cache::parse_prepared` so a
+/// REUSED operand (a constant geometry filtered against every row) also
+/// carries its cached prepared form for [`de9im_matrix`]. [FABLE-5]
+fn relate_arg(name: &str, args: &[Term], i: usize) -> Result<RelateArg, String> {
+    let parsed = match &args[i] {
+        Term::Literal(l) if l.datatype().as_str() == WKT_LITERAL => {
+            geom_cache::parse_prepared(geom_cache::LexKind::Wkt, l.value())
+        }
+        Term::Literal(l) if l.datatype().as_str() == GML_LITERAL => {
+            geom_cache::parse_prepared(geom_cache::LexKind::Gml, l.value())
+        }
+        other => {
+            return Err(format!(
+                "geof:{name}: argument {} must be a geo:wktLiteral or geo:gmlLiteral literal, got {other}",
+                i + 1
+            ))
+        }
+    };
+    let (geom, prepared) = parsed.map_err(|e| e.to_string())?;
+    Ok(RelateArg { geom, prepared })
 }
 
 /// A `geo:wktLiteral` term from a lexical form produced by [`crate::geof::lex`].
@@ -95,12 +417,10 @@ fn num_arg(name: &str, args: &[Term], i: usize) -> Result<f64, String> {
     }
 }
 
-/// A [`crate::geof::lex`] binary relation (`sf_*` / `eh_*` / `rcc8_*`).
-type LexRelation = fn(&str, &str) -> Result<bool, GeoError>;
-/// A [`crate::geof::lex`] unary geometry function (`envelope` / `boundary` / `convex_hull`).
-type LexUnary = fn(&str) -> Result<String, GeoError>;
-/// A [`crate::geof::lex`] binary set operation (`intersection` / `union` / …).
-type LexSetOp = fn(&str, &str) -> Result<String, GeoError>;
+/// A [`crate::geof`] unary geometry function (`envelope` / `boundary` / `convex_hull`).
+type GeomUnary = fn(&GeoGeometry) -> Result<GeoGeometry, GeoError>;
+/// A [`crate::geof`] binary set operation (`intersection` / `union` / …).
+type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>;
 
 /// The `geof:` extension functions as a sparq-engine [`FunctionRegistry`] — pass it
 /// to [`sparq_engine::query_with_functions`] (or scope any other entry point with
@@ -124,54 +444,72 @@ type LexSetOp = fn(&str, &str) -> Result<String, GeoError>;
 ///
 /// Build it once and reuse it: the registry is cheaply cloneable and `Send + Sync`,
 /// so one instance can serve every query on every thread for the process lifetime.
+///
+/// Geometry arguments are parsed through a small bounded PER-THREAD cache keyed
+/// by the literal's exact lexical form (sq-lkrgi), so a constant geometry in a
+/// `FILTER` — even a ~100 KB polygon — is parsed once per thread rather than
+/// once per row. Results are identical to fresh parses (the parse is a pure
+/// function of the lexical form); parse failures are never cached. [FABLE-5]
+///
+/// The DE-9IM relation families additionally reuse a cached PREPARED form
+/// (indexed topology graph) of any reused operand (sq-hq8t5), so relating
+/// per-row geometries against a constant does not rebuild the constant's
+/// relate structures per row. Results are byte-identical to the unprepared
+/// functions (see the module docs). [FABLE-5]
 pub fn geof_registry() -> FunctionRegistry {
     let mut reg = FunctionRegistry::new();
 
     // geof:distance(?g1, ?g2, ?unitIri) -> xsd:double.
     reg.register(format!("{GEOF_NS}distance"), |args: &[Term]| {
         arity("distance", args, 3)?;
-        let a = wkt_lex("distance", args, 0)?;
-        let b = wkt_lex("distance", args, 1)?;
-        let unit = unit_iri("distance", args, 2)?;
-        let d = lex::distance(&a, &b, unit).map_err(|e| e.to_string())?;
+        let a = geom_arg("distance", args, 0)?;
+        let b = geom_arg("distance", args, 1)?;
+        let unit = Unit::from_iri(unit_iri("distance", args, 2)?).map_err(|e| e.to_string())?;
+        let d = geof::distance(&a, &b, unit).map_err(|e| e.to_string())?;
         Ok(Term::Literal(Literal::from(d)))
     });
 
     // The relation families: geof:sf* / geof:eh* / geof:rcc8*(?g1, ?g2) -> xsd:boolean.
-    let relations: [(&'static str, LexRelation); 24] = [
+    // Registered as (matrix predicate) over the shared prepared-aware
+    // `de9im_matrix` (sq-hq8t5); each predicate is the SAME decision the
+    // matching `geof` function makes (its `IntersectionMatrix` method for
+    // simple features, its `geof` pattern const for Egenhofer/RCC8 — the
+    // differential tests below pin the correspondence per name). [FABLE-5]
+    let relations: [(&'static str, MatrixPred); 24] = [
         // Simple features (GeoSPARQL Req 22-24).
-        ("sfEquals", lex::sf_equals),
-        ("sfDisjoint", lex::sf_disjoint),
-        ("sfIntersects", lex::sf_intersects),
-        ("sfTouches", lex::sf_touches),
-        ("sfCrosses", lex::sf_crosses),
-        ("sfWithin", lex::sf_within),
-        ("sfContains", lex::sf_contains),
-        ("sfOverlaps", lex::sf_overlaps),
+        ("sfEquals", MatrixPred::Sf(IntersectionMatrix::is_equal_topo)),
+        ("sfDisjoint", MatrixPred::Sf(IntersectionMatrix::is_disjoint)),
+        ("sfIntersects", MatrixPred::Sf(IntersectionMatrix::is_intersects)),
+        ("sfTouches", MatrixPred::Sf(IntersectionMatrix::is_touches)),
+        ("sfCrosses", MatrixPred::Sf(IntersectionMatrix::is_crosses)),
+        ("sfWithin", MatrixPred::Sf(IntersectionMatrix::is_within)),
+        ("sfContains", MatrixPred::Sf(IntersectionMatrix::is_contains)),
+        ("sfOverlaps", MatrixPred::Sf(IntersectionMatrix::is_overlaps)),
         // Egenhofer (Req 25).
-        ("ehEquals", lex::eh_equals),
-        ("ehDisjoint", lex::eh_disjoint),
-        ("ehMeet", lex::eh_meet),
-        ("ehOverlap", lex::eh_overlap),
-        ("ehCovers", lex::eh_covers),
-        ("ehCoveredBy", lex::eh_covered_by),
-        ("ehInside", lex::eh_inside),
-        ("ehContains", lex::eh_contains),
+        ("ehEquals", MatrixPred::Any(geof::EH_EQUALS_PATTERNS)),
+        ("ehDisjoint", MatrixPred::Any(geof::EH_DISJOINT_PATTERNS)),
+        ("ehMeet", MatrixPred::Any(geof::EH_MEET_PATTERNS)),
+        ("ehOverlap", MatrixPred::Any(geof::EH_OVERLAP_PATTERNS)),
+        ("ehCovers", MatrixPred::Any(geof::EH_COVERS_PATTERNS)),
+        ("ehCoveredBy", MatrixPred::Any(geof::EH_COVERED_BY_PATTERNS)),
+        ("ehInside", MatrixPred::Any(geof::EH_INSIDE_PATTERNS)),
+        ("ehContains", MatrixPred::Any(geof::EH_CONTAINS_PATTERNS)),
         // RCC8 (Req 26).
-        ("rcc8eq", lex::rcc8_eq),
-        ("rcc8dc", lex::rcc8_dc),
-        ("rcc8ec", lex::rcc8_ec),
-        ("rcc8po", lex::rcc8_po),
-        ("rcc8tppi", lex::rcc8_tppi),
-        ("rcc8tpp", lex::rcc8_tpp),
-        ("rcc8ntpp", lex::rcc8_ntpp),
-        ("rcc8ntppi", lex::rcc8_ntppi),
+        ("rcc8eq", MatrixPred::Any(geof::RCC8_EQ_PATTERNS)),
+        ("rcc8dc", MatrixPred::Any(geof::RCC8_DC_PATTERNS)),
+        ("rcc8ec", MatrixPred::Any(geof::RCC8_EC_PATTERNS)),
+        ("rcc8po", MatrixPred::Any(geof::RCC8_PO_PATTERNS)),
+        ("rcc8tppi", MatrixPred::Any(geof::RCC8_TPPI_PATTERNS)),
+        ("rcc8tpp", MatrixPred::Any(geof::RCC8_TPP_PATTERNS)),
+        ("rcc8ntpp", MatrixPred::Any(geof::RCC8_NTPP_PATTERNS)),
+        ("rcc8ntppi", MatrixPred::Any(geof::RCC8_NTPPI_PATTERNS)),
     ];
-    for (name, f) in relations {
+    for (name, pred) in relations {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 2)?;
-            let v = f(&wkt_lex(name, args, 0)?, &wkt_lex(name, args, 1)?)
-                .map_err(|e| e.to_string())?;
+            let a = relate_arg(name, args, 0)?;
+            let b = relate_arg(name, args, 1)?;
+            let v = pred.eval(&de9im_matrix(&a, &b)?);
             Ok(Term::Literal(Literal::from(v)))
         });
     }
@@ -179,8 +517,8 @@ pub fn geof_registry() -> FunctionRegistry {
     // geof:relate(?g1, ?g2, ?de9imPattern) -> xsd:boolean (generic DE-9IM test).
     reg.register(format!("{GEOF_NS}relate"), |args: &[Term]| {
         arity("relate", args, 3)?;
-        let a = wkt_lex("relate", args, 0)?;
-        let b = wkt_lex("relate", args, 1)?;
+        let a = relate_arg("relate", args, 0)?;
+        let b = relate_arg("relate", args, 1)?;
         let pattern = match &args[2] {
             Term::Literal(l) => l.value(),
             other => {
@@ -189,54 +527,57 @@ pub fn geof_registry() -> FunctionRegistry {
                 ))
             }
         };
-        let v = lex::relate(&a, &b, pattern).map_err(|e| e.to_string())?;
+        // The same error `geof::relate` produces for a malformed pattern.
+        let v = de9im_matrix(&a, &b)?.matches(pattern).map_err(|e| {
+            GeoError::Parse(format!("invalid DE-9IM pattern {pattern:?}: {e}")).to_string()
+        })?;
         Ok(Term::Literal(Literal::from(v)))
     });
 
     // The unary geometry functions: geof:*(?g) -> geo:wktLiteral.
-    let unary: [(&'static str, LexUnary); 3] = [
-        ("envelope", lex::envelope),
-        ("boundary", lex::boundary),
-        ("convexHull", lex::convex_hull),
+    let unary: [(&'static str, GeomUnary); 3] = [
+        ("envelope", geof::envelope),
+        ("boundary", geof::boundary),
+        ("convexHull", geof::convex_hull),
     ];
     for (name, f) in unary {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 1)?;
-            Ok(wkt_term(f(&wkt_lex(name, args, 0)?).map_err(|e| e.to_string())?))
+            let g = geom_arg(name, args, 0)?;
+            Ok(wkt_term(f(&g).map_err(|e| e.to_string())?.to_wkt_literal()))
         });
     }
 
     // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (point-set ops over
     // polygon/line/point operands; see geof for the supported matrix).
-    let set_ops: [(&'static str, LexSetOp); 4] = [
-        ("intersection", lex::intersection),
-        ("union", lex::union),
-        ("difference", lex::difference),
-        ("symDifference", lex::sym_difference),
+    let set_ops: [(&'static str, GeomSetOp); 4] = [
+        ("intersection", geof::intersection),
+        ("union", geof::union),
+        ("difference", geof::difference),
+        ("symDifference", geof::sym_difference),
     ];
     for (name, f) in set_ops {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 2)?;
-            Ok(wkt_term(
-                f(&wkt_lex(name, args, 0)?, &wkt_lex(name, args, 1)?)
-                    .map_err(|e| e.to_string())?,
-            ))
+            let a = geom_arg(name, args, 0)?;
+            let b = geom_arg(name, args, 1)?;
+            Ok(wkt_term(f(&a, &b).map_err(|e| e.to_string())?.to_wkt_literal()))
         });
     }
 
     // geof:buffer(?g, ?radius, ?unitIri) -> geo:wktLiteral (a MULTIPOLYGON).
     reg.register(format!("{GEOF_NS}buffer"), |args: &[Term]| {
         arity("buffer", args, 3)?;
-        let g = wkt_lex("buffer", args, 0)?;
+        let g = geom_arg("buffer", args, 0)?;
         let radius = num_arg("buffer", args, 1)?;
-        let unit = unit_iri("buffer", args, 2)?;
-        Ok(wkt_term(lex::buffer(&g, radius, unit).map_err(|e| e.to_string())?))
+        let unit = Unit::from_iri(unit_iri("buffer", args, 2)?).map_err(|e| e.to_string())?;
+        Ok(wkt_term(geof::buffer(&g, radius, unit).map_err(|e| e.to_string())?.to_wkt_literal()))
     });
 
     // geof:getSRID(?g) -> xsd:anyURI (the geometry's CRS IRI).
     reg.register(format!("{GEOF_NS}getSRID"), |args: &[Term]| {
         arity("getSRID", args, 1)?;
-        let iri = lex::get_srid(&wkt_lex("getSRID", args, 0)?).map_err(|e| e.to_string())?;
+        let iri = geom_arg("getSRID", args, 0)?.crs.iri().to_string();
         Ok(Term::Literal(Literal::new_typed_literal(
             iri,
             NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#anyURI"),
@@ -402,5 +743,363 @@ mod tests {
         assert!(distance(&[wkt("POINT(0 0)"), wkt("POINT(1 1)"), wkt("POINT(0 0)")]).is_err());
         let bogus = Term::NamedNode(NamedNode::new_unchecked("http://ex/furlong"));
         assert!(distance(&[wkt("POINT(0 0)"), wkt("POINT(1 1)"), bogus]).is_err());
+    }
+
+    // ---- the parsed-geometry cache (sq-lkrgi) [FABLE-5] -----------------------------
+    //
+    // Each test runs on its own thread (the default test harness), so the
+    // thread-local cache and attempt counter are naturally isolated; `reset()`
+    // makes the cold start explicit.
+
+    /// A syntactically valid ring POLYGON with `vertices` distinct vertices
+    /// (radius-2 circle about the origin) — a scaled-down stand-in for the
+    /// Geographica large-constant polygon.
+    fn ring_polygon(vertices: usize) -> String {
+        let mut s = String::from("POLYGON((");
+        for i in 0..=vertices {
+            let theta = (i % vertices) as f64 / vertices as f64 * std::f64::consts::TAU;
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&format!("{} {}", 2.0 * theta.cos(), 2.0 * theta.sin()));
+        }
+        s.push_str("))");
+        s
+    }
+
+    /// A syntactically valid LINESTRING whose lexical form exceeds `min_len` bytes.
+    fn big_linestring(min_len: usize) -> String {
+        let mut s = String::with_capacity(min_len + 32);
+        s.push_str("LINESTRING(0 0");
+        let mut i = 1usize;
+        while s.len() < min_len {
+            s.push_str(&format!(", {} {}", i, i % 7));
+            i += 1;
+        }
+        s.push(')');
+        s
+    }
+
+    #[test]
+    fn constant_geometry_is_parsed_once_across_rows() {
+        geom_cache::reset();
+        let reg = geof_registry();
+        let within = reg.get(&format!("{GEOF_NS}sfWithin")).unwrap();
+        // One constant polygon FILTERed against a stream of distinct per-row
+        // points — the Geographica q09/q13/q16/q17 shape.
+        let constant = wkt(&ring_polygon(512));
+        let rows = 50;
+        for i in 0..rows {
+            let p = wkt(&format!("POINT({} 0.0)", i as f64 * 0.001));
+            assert_eq!(
+                within(&[p, constant.clone()]).unwrap().to_string(),
+                "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+            );
+        }
+        // `rows` distinct per-row points + ONE parse of the constant. Without
+        // the cache this is `2 * rows` (the constant re-parsed every row).
+        assert_eq!(geom_cache::parse_attempts(), rows + 1);
+    }
+
+    #[test]
+    fn cached_parse_equals_fresh_parse() {
+        // The load-bearing equivalence: a cache HIT returns exactly what a
+        // fresh parse returns (incl. CRS handling and EPSG:4326 axis swap).
+        geom_cache::reset();
+        for lex in [
+            "POINT(-0.1278 51.5074)",
+            "<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(51.5074 -0.1278)",
+            "<http://www.opengis.net/def/crs/EPSG/0/27700> LINESTRING(530000 180000, 531000 181000)",
+            "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))",
+        ] {
+            let cold = geom_cache::parse(geom_cache::LexKind::Wkt, lex).unwrap();
+            let warm = geom_cache::parse(geom_cache::LexKind::Wkt, lex).unwrap();
+            let fresh = crate::literal::parse_wkt_literal(lex).unwrap();
+            assert_eq!(*cold, fresh, "cold parse must equal a fresh parse for {}", lex);
+            assert!(Rc::ptr_eq(&cold, &warm), "second lookup must be a cache hit for {}", lex);
+            assert_eq!(*warm, fresh, "cached parse must equal a fresh parse for {}", lex);
+        }
+        // Same equivalence for the GML parser under its own key space.
+        let gml = "<gml:Point><gml:pos>-83.38 33.95</gml:pos></gml:Point>";
+        let cold = geom_cache::parse(geom_cache::LexKind::Gml, gml).unwrap();
+        let warm = geom_cache::parse(geom_cache::LexKind::Gml, gml).unwrap();
+        let fresh = crate::gml::parse_gml_literal(gml).unwrap();
+        assert_eq!(*cold, fresh);
+        assert!(Rc::ptr_eq(&cold, &warm));
+    }
+
+    #[test]
+    fn wkt_and_gml_cache_keys_do_not_collide() {
+        geom_cache::reset();
+        // Cache a string under the WKT parser…
+        let kept = geom_cache::parse(geom_cache::LexKind::Wkt, "POINT(1 2)").unwrap();
+        // …then look the SAME string up under the GML kind: it must NOT serve
+        // the WKT entry — it must attempt (and fail) a GML parse of non-XML.
+        assert!(geom_cache::parse(geom_cache::LexKind::Gml, "POINT(1 2)").is_err());
+        assert_eq!(geom_cache::parse_attempts(), 2);
+        drop(kept);
+    }
+
+    #[test]
+    fn cache_entry_count_is_bounded_and_mru_survives() {
+        geom_cache::reset();
+        for i in 0..(geom_cache::MAX_ENTRIES + 8) {
+            geom_cache::parse(geom_cache::LexKind::Wkt, &format!("POINT({} 0)", i)).unwrap();
+        }
+        assert!(geom_cache::len() <= geom_cache::MAX_ENTRIES);
+        // The most recently used entry is still resident (no new attempt)…
+        let attempts = geom_cache::parse_attempts();
+        let last = format!("POINT({} 0)", geom_cache::MAX_ENTRIES + 7);
+        geom_cache::parse(geom_cache::LexKind::Wkt, &last).unwrap();
+        assert_eq!(geom_cache::parse_attempts(), attempts);
+        // …while the oldest was evicted (a lookup re-parses it).
+        geom_cache::parse(geom_cache::LexKind::Wkt, "POINT(0 0)").unwrap();
+        assert_eq!(geom_cache::parse_attempts(), attempts + 1);
+    }
+
+    #[test]
+    fn byte_cap_evicts_tail_but_never_the_mru_entry() {
+        geom_cache::reset();
+        // A single constant LARGER than the whole byte budget still caches —
+        // the MRU entry is never evicted (evicting it would re-parse it every
+        // row, the exact pathology the cache removes).
+        let big = big_linestring(geom_cache::MAX_KEY_BYTES + 1024);
+        geom_cache::parse(geom_cache::LexKind::Wkt, &big).unwrap();
+        assert_eq!(geom_cache::len(), 1);
+        geom_cache::parse(geom_cache::LexKind::Wkt, &big).unwrap();
+        assert_eq!(geom_cache::parse_attempts(), 1, "over-budget constant must still cache");
+        // A subsequent small insert pushes the over-budget giant out of the tail…
+        geom_cache::parse(geom_cache::LexKind::Wkt, "POINT(3 4)").unwrap();
+        assert_eq!(geom_cache::len(), 1, "byte cap must evict the giant tail entry");
+        // …and the small MRU entry is the survivor.
+        geom_cache::parse(geom_cache::LexKind::Wkt, "POINT(3 4)").unwrap();
+        assert_eq!(geom_cache::parse_attempts(), 2);
+    }
+
+    #[test]
+    fn parse_failures_are_not_cached() {
+        geom_cache::reset();
+        assert!(geom_cache::parse(geom_cache::LexKind::Wkt, "PONT(1 1)").is_err());
+        assert!(geom_cache::parse(geom_cache::LexKind::Wkt, "PONT(1 1)").is_err());
+        // Each erroneous row re-attempts (and re-errors); nothing is stored.
+        assert_eq!(geom_cache::parse_attempts(), 2);
+        assert_eq!(geom_cache::len(), 0);
+    }
+
+    // ---- the prepared-relate cache (sq-hq8t5) [FABLE-5] -----------------------------
+
+    /// Parses a WKT lexical form directly (no cache — the differential
+    /// baseline the prepared path must match).
+    fn parse(lex: &str) -> GeoGeometry {
+        crate::literal::parse_wkt_literal(lex).unwrap()
+    }
+
+    /// The lexical `Term` form of an `xsd:boolean` result.
+    fn bool_term(v: bool) -> String {
+        format!("\"{v}\"^^<http://www.w3.org/2001/XMLSchema#boolean>")
+    }
+
+    /// A small corpus covering the DE-9IM decision space: containment,
+    /// touching, overlap, disjoint, crossing, a hole, 0/1/2-dimensional and
+    /// multi-part operands. Self-pairs and both orders are exercised by the
+    /// differential tests' full pair loop.
+    const RELATE_CORPUS: [&str; 9] = [
+        "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))",
+        "POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))",
+        "POLYGON((4 0, 8 0, 8 4, 4 4, 4 0))",
+        "POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))",
+        "POLYGON((2 2, 6 2, 6 6, 2 6, 2 2))",
+        "POLYGON((0 0, 8 0, 8 8, 0 8, 0 0), (2 2, 6 2, 6 6, 2 6, 2 2))",
+        "LINESTRING(-1 -1, 5 5)",
+        "POINT(1 1)",
+        "MULTIPOINT((1 1), (9 9))",
+    ];
+
+    #[test]
+    fn constant_relate_operand_is_prepared_once_across_rows() {
+        geom_cache::reset();
+        let reg = geof_registry();
+        let within = reg.get(&format!("{GEOF_NS}sfWithin")).unwrap();
+        // One constant polygon FILTERed against a stream of distinct per-row
+        // points — the Geographica q09/q13/q16/q17 shape the bead targets.
+        let constant = wkt(&ring_polygon(512));
+        let rows = 50;
+        for i in 0..rows {
+            let p = wkt(&format!("POINT({} 0.0)", i as f64 * 0.001));
+            assert_eq!(within(&[p, constant.clone()]).unwrap().to_string(), bool_term(true));
+        }
+        // The constant is prepared exactly ONCE (on its first warm row):
+        // 0 would mean the prepared cache is inert; `rows - 1` (or anything
+        // per-row) is the rebuild-per-row pathology this bead removes. The
+        // distinct per-row points are never prepared (each is seen once).
+        assert_eq!(geom_cache::prepare_count(), 1);
+        // Parse-cache behaviour is unchanged by the prepared layer.
+        assert_eq!(geom_cache::parse_attempts(), rows + 1);
+    }
+
+    #[test]
+    fn single_use_relate_operands_are_never_prepared() {
+        geom_cache::reset();
+        let reg = geof_registry();
+        let intersects = reg.get(&format!("{GEOF_NS}sfIntersects")).unwrap();
+        // Every operand distinct (the pure streaming shape): preparation
+        // would be pay-once-use-once overhead, so none may happen.
+        for i in 0..20 {
+            let a = wkt(&format!("POINT({i} 0)"));
+            let b = wkt(&format!("POLYGON(({i} -1, {} -1, {} 1, {i} 1, {i} -1))", i + 2, i + 2));
+            assert_eq!(intersects(&[a, b]).unwrap().to_string(), bool_term(true));
+        }
+        assert_eq!(geom_cache::prepare_count(), 0);
+    }
+
+    #[test]
+    fn de9im_matrix_arms_all_equal_plain_relate() {
+        use geo::Relate as _;
+        // Every (prepared?, prepared?) dispatch arm must produce the exact
+        // matrix of a plain relate — for every ordered corpus pair.
+        for la in RELATE_CORPUS {
+            for lb in RELATE_CORPUS {
+                let (a, b) = (parse(la), parse(lb));
+                let plain = format!("{:?}", a.geometry.relate(&b.geometry));
+                let arg = |g: &GeoGeometry, prepared: bool| RelateArg {
+                    geom: Rc::new(g.clone()),
+                    prepared: prepared.then(|| Rc::new(PreparedGeoGeometry::new(g))),
+                };
+                for (pa, pb) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let m = de9im_matrix(&arg(&a, pa), &arg(&b, pb)).unwrap();
+                    assert_eq!(
+                        format!("{m:?}"),
+                        plain,
+                        "matrix mismatch for {la} vs {lb} (prepared: {pa}/{pb})"
+                    );
+                }
+            }
+        }
+        // CRS compatibility errors identically regardless of preparation.
+        let a = parse("<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(1 2)");
+        let b = parse("POINT(1 2)");
+        let expected = geof::sf_equals(&a, &b).unwrap_err().to_string();
+        let pa = RelateArg {
+            geom: Rc::new(a.clone()),
+            prepared: Some(Rc::new(PreparedGeoGeometry::new(&a))),
+        };
+        let pb = RelateArg { geom: Rc::new(b), prepared: None };
+        assert_eq!(de9im_matrix(&pa, &pb).unwrap_err(), expected);
+    }
+
+    #[test]
+    fn prepared_relation_results_equal_unprepared_for_all_24_relations() {
+        // The registry's (name -> matrix predicate) table must decide exactly
+        // like the plain `geof` function of the same name — including via the
+        // prepared path. A scrambled table entry (e.g. ehMeet <-> ehOverlap)
+        // or a prepared-side divergence turns this red.
+        type PlainRelation = fn(&GeoGeometry, &GeoGeometry) -> Result<bool, GeoError>;
+        let plain: [(&str, PlainRelation); 24] = [
+            ("sfEquals", geof::sf_equals),
+            ("sfDisjoint", geof::sf_disjoint),
+            ("sfIntersects", geof::sf_intersects),
+            ("sfTouches", geof::sf_touches),
+            ("sfCrosses", geof::sf_crosses),
+            ("sfWithin", geof::sf_within),
+            ("sfContains", geof::sf_contains),
+            ("sfOverlaps", geof::sf_overlaps),
+            ("ehEquals", geof::eh_equals),
+            ("ehDisjoint", geof::eh_disjoint),
+            ("ehMeet", geof::eh_meet),
+            ("ehOverlap", geof::eh_overlap),
+            ("ehCovers", geof::eh_covers),
+            ("ehCoveredBy", geof::eh_covered_by),
+            ("ehInside", geof::eh_inside),
+            ("ehContains", geof::eh_contains),
+            ("rcc8eq", geof::rcc8_eq),
+            ("rcc8dc", geof::rcc8_dc),
+            ("rcc8ec", geof::rcc8_ec),
+            ("rcc8po", geof::rcc8_po),
+            ("rcc8tppi", geof::rcc8_tppi),
+            ("rcc8tpp", geof::rcc8_tpp),
+            ("rcc8ntpp", geof::rcc8_ntpp),
+            ("rcc8ntppi", geof::rcc8_ntppi),
+        ];
+        geom_cache::reset();
+        let reg = geof_registry();
+        for la in RELATE_CORPUS {
+            for lb in RELATE_CORPUS {
+                let (a, b) = (parse(la), parse(lb));
+                for (name, f) in plain {
+                    let expected = f(&a, &b).unwrap();
+                    let func = reg.get(&format!("{GEOF_NS}{name}")).unwrap();
+                    // Twice: the first call may parse cold (plain relate),
+                    // the repeat relates through cached PREPARED sides.
+                    for call in ["cold", "warm"] {
+                        assert_eq!(
+                            func(&[wkt(la), wkt(lb)]).unwrap().to_string(),
+                            bool_term(expected),
+                            "geof:{name} diverged on {la} vs {lb} ({call} call)"
+                        );
+                    }
+                }
+            }
+        }
+        // Sanity: the prepared path really ran (corpus entries were reused).
+        assert!(geom_cache::prepare_count() > 0, "differential never exercised a prepared side");
+    }
+
+    #[test]
+    fn prepared_relate_patterns_and_errors_equal_unprepared() {
+        geom_cache::reset();
+        let reg = geof_registry();
+        let f = reg.get(&format!("{GEOF_NS}relate")).unwrap();
+        let pat = |p: &str| Term::Literal(Literal::new_simple_literal(p));
+        let patterns = ["T*****FF*", "FF*FF****", "TFFFTFFFT", "0F2FF1FF2", "T*T***T**"];
+        for la in ["POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", "LINESTRING(-1 -1, 5 5)", "POINT(1 1)"]
+        {
+            for lb in RELATE_CORPUS {
+                let (a, b) = (parse(la), parse(lb));
+                for p in patterns {
+                    let expected = geof::relate(&a, &b, p).unwrap();
+                    for call in ["cold", "warm"] {
+                        assert_eq!(
+                            f(&[wkt(la), wkt(lb), pat(p)]).unwrap().to_string(),
+                            bool_term(expected),
+                            "geof:relate({p:?}) diverged on {la} vs {lb} ({call} call)"
+                        );
+                    }
+                }
+                // A malformed pattern errors with the plain path's message —
+                // on the prepared path too (operands are warm by now).
+                let expected_err = geof::relate(&a, &b, "TTT").unwrap_err().to_string();
+                assert_eq!(f(&[wkt(la), wkt(lb), pat("TTT")]).unwrap_err(), expected_err);
+            }
+        }
+        assert!(geom_cache::prepare_count() > 0, "relate never exercised a prepared side");
+    }
+
+    #[test]
+    fn gml_relate_operands_are_prepared_and_result_identical() {
+        geom_cache::reset();
+        let reg = geof_registry();
+        let within = reg.get(&format!("{GEOF_NS}sfWithin")).unwrap();
+        let gml_lex = "<gml:Point><gml:pos>-83.38 33.95</gml:pos></gml:Point>";
+        let gml = Term::Literal(Literal::new_typed_literal(
+            gml_lex,
+            NamedNode::new_unchecked(GML_LITERAL),
+        ));
+        let poly_lex = "POLYGON((-84 33, -83 33, -83 34, -84 34, -84 33))";
+        let poly = wkt(poly_lex);
+        let expected = geof::sf_within(
+            &crate::gml::parse_gml_literal(gml_lex).unwrap(),
+            &parse(poly_lex),
+        )
+        .unwrap();
+        assert!(expected, "fixture: the GML point lies inside the polygon");
+        for _ in 0..3 {
+            assert_eq!(
+                within(&[gml.clone(), poly.clone()]).unwrap().to_string(),
+                bool_term(expected)
+            );
+        }
+        // Both operands prepared exactly once (on their first warm row) —
+        // GML entries participate in the prepared cache like WKT ones.
+        assert_eq!(geom_cache::prepare_count(), 2);
     }
 }

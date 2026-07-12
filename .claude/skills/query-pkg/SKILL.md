@@ -25,8 +25,10 @@ an empty result is the honest "I don't know / none outstanding" answer.
 > measurement record) — this file only points at the headline. The win is scoped to
 > **PKG-answerable** questions by construction. The PKG is a Phase-1 *head slice* (the
 > AGENTS.md finding set + a mechanical bd→Task projection + the heaviest skills'
-> front-matter), not the whole corpus — a miss means "not in the head slice yet", so fall
-> back to Read/Grep.
+> front-matter + the trust-graph admission-program provenance tier of `sq-7utko` —
+> sourced, caveat-carrying findings from `research/trust-graph-authorisation-2026-07.md`,
+> e.g. "unlinkability is NOT a v1 guarantee, gated on `sq-qhy4`"), not the whole corpus —
+> a miss means "not in the head slice yet", so fall back to Read/Grep.
 
 ## The helper
 
@@ -37,7 +39,8 @@ default build a pure data crate):
 cargo run -p sparq-kb --features query --bin pkg-query -- <args>
 ```
 
-It loads `pkg.ttl` (the ontology) + `pkg-instances.ttl` (the ingested data) into a sparq
+It loads `pkg.ttl` (the ontology) + `pkg-instances.ttl` (the ingested data) +
+`trust-graph-findings.ttl` (the `sq-7utko` provenance tier) into a sparq
 store, runs a **named canned query** or a **raw SPARQL string**, prints the executed
 SPARQL (always — for verification) and the result rows. Add `--features close` and
 `--close owl-rl` to materialise the RDFS/OWL-RL closure first (entails the `pkg:dependsOn
@@ -386,3 +389,8 @@ Run: `cargo test -p sparq-kb --features literature,literature-live --test core_c
   `crates/sparq-kb/src/literature/connector_core.rs`, fixture
   `crates/sparq-kb/fixtures/literature/core-batch.json`, gate
   `crates/sparq-kb/tests/core_connector.rs`.
+- **Citation renderer** (`query` feature, `sq-2489d.11`):
+  `crates/sparq-kb/src/query/citations.rs` — `render_citations(&graph, &rows)` renders
+  `prov:wasDerivedFrom` sources from `FINDING_PROVENANCE` rows as `[source: label]`
+  citations; returns `CitationReport` with `CitationMetrics` (resolution-rate + fabricated-count).
+  Gate: `crates/sparq-kb/tests/citations.rs`.

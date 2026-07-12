@@ -108,13 +108,32 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Result<Ontology, ExtractErro
     // [OPUS-4.8] Fix 1 + Fix 3: Index::build now returns Err on a branching list,
     // duplicate backbone value, or cross-type punned declaration.
     let idx = Index::build(triples, &v)?;
+
+    // [OPUS-4.8] sq-pbz04.4.12 — M4 fail-closed validation:
+    // Orphan/cyclic list cells and unconsumed class-expression backbones are NOT inert.
+    // The original comment was WRONG: a bare `rdf:first`/`rdf:rest` cell that is never
+    // consumed by an axiom, or a backbone node (`owl:unionOf` etc.) that is never
+    // referenced as a class-expression argument, represents a MALFORMED or ILL-FORMED
+    // graph structure that violates the "understood in full or refused" contract.
+    //   - `rdf:nil rdf:rest _:b` or `rdf:nil rdf:first _:b`: `rdf:nil` cannot be a list
+    //     cell (OWL I5.5-003/004 — Direct Semantics inconsistency).
+    //   - An orphan list cell with no reachable path from any axiom-consumed backbone head
+    //     (I5.5-006 cyclic orphan list).
+    //   - A composite-backbone node never referenced by any non-backbone axiom triple
+    //     (I5.5-007 unconsumed union backbone).
+    // In every case: extracting an empty/partial ontology and calling it consistent would
+    // be UNSOUND — the downstream reasoner must never reason over a partial picture of the
+    // graph. Refuse (fail-closed) with a typed ExtractError.
+    validate_no_orphan_structural_nodes(dict, triples, &v, &idx)?;
+
     let mut onto = Ontology::new();
 
     for &[s, p, o] in triples {
         // Class-expression backbone predicates are consumed WHEN the enclosing class node is
-        // decoded (via `Index`), and are inert on their own — skip them here. A dangling
-        // backbone triple (a restriction/list cell never referenced by an axiom) carries no
-        // logical import, so ignoring it is sound.
+        // decoded (via `Index`), and are inert on their own — skip them here. After the
+        // `validate_no_orphan_structural_nodes` pass above, every backbone node in the
+        // index is guaranteed to be reachable from a non-backbone axiom triple, so the
+        // skip here is safe: they were accounted for.
         if v.backbone.contains(&p) {
             continue;
         }
@@ -122,7 +141,349 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Result<Ontology, ExtractErro
         classify_triple(dict, &v, &idx, s, p, o, &mut onto)?;
     }
 
+    // [SONNET-4.6] sq-pbz04.4.11 — named-composite EquivalentClasses pass.
+    //
+    // CORRECTNESS GAP (M1, discovered by the conformance arm):
+    // When a NAMED class IRI carries an inline backbone definition — `:A owl:intersectionOf
+    // (…)`, `:A owl:unionOf (…)`, `:A owl:complementOf :B`, or `:A a owl:Restriction ;
+    // owl:onProperty :r ; owl:someValuesFrom :C` — the main triple loop inlines the decoded
+    // expression at every use site of `:A` (in subClassOf / equivalentClass / domain / range
+    // / classAssertion / restriction objects etc.) but NEVER emits the name↔expression
+    // binding `EquivalentClasses(A, expr)`.
+    //
+    // This violates L1's own "understood in full or refused" contract: a conclusion
+    // `:A rdfs:subClassOf :x` (where x is an operand of `:A`'s intersection) is
+    // underivable from the inlined representation alone — the entailment requires the axiom
+    // `EquivalentClasses(A, x⊓y)` to exist in the structural model so that the downstream
+    // tableau can reason `A ≡ x⊓y ⊨ A ⊑ x`.
+    //
+    // FIX: after the main loop, collect every NAMED class IRI (not blank, not inline, not
+    // a triple-term) that has exactly one composite backbone predicate in the Index, decode
+    // its expression, and prepend `EquivalentClasses(Class(A), expr)` to the axiom list.
+    // Prepend (not append) so the name-binding axioms come before any axioms that use the
+    // name — consistent with a "declare, then use" reading the downstream tableau expects.
+    //
+    // BLANK nodes are excluded: an anonymous blank node `:_x owl:intersectionOf (…)`
+    // denotes an anonymous (unnamed) expression, not a named class binding, and has no
+    // meaningful class IRI to equate.
+    //
+    // No new `is_inline` / `TermParts::Iri` check is needed: the index already records
+    // exactly the backbone-carrying nodes; we just filter to IRI nodes among them.
+    //
+    // Deduplication: `EquivalentClasses(A, expr)` is emitted once per named class, even if
+    // the backbone predicate appears multiple times (the Index de-duplicates backbone
+    // values; a contradicting second value is already an error from `Index::build`).
+    emit_named_composite_equiv(dict, &v, &idx, &mut onto)?;
+
     Ok(onto)
+}
+
+/// Emits one `EquivalentClasses(Class(A), expr)` axiom for every NAMED class IRI that
+/// carries an inline composite backbone definition in the Index (sq-pbz04.4.11, M1 fix).
+///
+/// See the inline comment in [`extract`] for the full correctness rationale. This function
+/// is a pure second-pass over the Index — it never looks at the raw triple slice again.
+fn emit_named_composite_equiv(
+    dict: &Dict,
+    v: &Vocab,
+    idx: &Index,
+    onto: &mut Ontology,
+) -> Result<(), ExtractError> {
+    // Collect the set of named-class candidates: every node that carries at least one
+    // composite backbone predicate and is an IRI (not blank, not inline, not triple-term).
+    // Use a BTreeSet for sorted, deterministic iteration (no hash-map ordering
+    // nondeterminism in the structural model).
+    use std::collections::BTreeSet;
+
+    let mut named_composite_ids: BTreeSet<Id> = BTreeSet::new();
+
+    // Only IRI nodes. `is_named_iri` = not inline, TermParts::Iri.
+    let is_named_iri = |id: Id| -> bool {
+        !is_inline(id) && matches!(dict.term_parts(id), TermParts::Iri { .. })
+    };
+
+    for &id in idx.intersection_of.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.union_of.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.complement_of.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    // Restrictions: any node in is_restriction, some_values_from, or all_values_from
+    // that is also a named IRI.
+    for &id in &idx.is_restriction {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.some_values_from.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.all_values_from.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+
+    if named_composite_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Prepend the EquivalentClasses axioms so they precede all use-site axioms.
+    let mut prepend: Vec<Axiom> = Vec::with_capacity(named_composite_ids.len());
+    for id in named_composite_ids {
+        // Decode the composite expression for this named class. We use a fresh call
+        // through decode_class (which creates a fresh `visiting` set), so the cycle guard
+        // works correctly for each named class independently.
+        let expr = decode_class(dict, v, idx, id)?;
+        let name = ClassExpression::Class(id);
+        // Emit only if the expression is not the named class itself (a trivially cyclic
+        // case is caught by the visiting guard already; this guard just avoids emitting
+        // EquivalentClasses(A, A) for any degenerate case that slips through).
+        if expr != name {
+            prepend.push(Axiom::EquivalentClasses(name, expr));
+        }
+    }
+
+    // Prepend: insert the name-binding axioms before the use-site axioms so that
+    // the structural model reads "declare name, then use name" — the downstream
+    // tableau iterates axioms in order and sees the binding before any GCI/assertion
+    // that mentions the named class.
+    if !prepend.is_empty() {
+        let tail = std::mem::replace(&mut onto.axioms, prepend);
+        onto.axioms.extend(tail);
+    }
+    Ok(())
+}
+
+/// Validates that no structural (backbone) node is orphaned — i.e., every ANONYMOUS
+/// blank-node carrying class-expression or list backbone predicates is reachable from
+/// at least one non-backbone axiom triple. [OPUS-4.8] sq-pbz04.4.12 — the M4 fix.
+///
+/// # Soundness rationale
+///
+/// The "understood in full or refused" contract requires that the extractor cannot silently
+/// produce an empty or lossy ontology from a graph that carries meaningful (but unconsumed)
+/// structure. Four W3C Direct-Semantics corpus cases (M4) demonstrated the original gap:
+///
+/// - **I5.5-003/004**: `rdf:nil rdf:rest _:b` or `rdf:nil rdf:first _:b` — `rdf:nil` is
+///   the list terminator and cannot legally be a list cell. The triple is malformed; the
+///   inconsistency it encodes must be refused rather than producing an empty/consistent model.
+/// - **I5.5-006**: A self-referential list `_:l rdf:first :a; rdf:rest _:l` that is never
+///   connected to any axiom. Extracting to an empty ontology would wrongly certify consistency.
+/// - **I5.5-007**: An anonymous `_:x owl:unionOf _:list` whose cyclic list is never consumed
+///   by any axiom predicate. Same soundness trap.
+///
+/// # Named IRIs are excluded from this check
+///
+/// A named class IRI (e.g. `:A owl:intersectionOf (…)`) may appear in the backbone index
+/// with no direct non-backbone triple referencing it in the SAME graph — that is the normal
+/// pattern for a standalone named-composite class definition. The `emit_named_composite_equiv`
+/// post-pass (M1 fix) synthesises `EquivalentClasses(A, expr)` for every such named IRI,
+/// consuming it. Only **anonymous blank nodes** can be truly unconsumable (they have no
+/// name to bind, so `emit_named_composite_equiv` produces nothing for them).
+///
+/// # Algorithm
+///
+/// Seed the reachable set from BOTH the subjects and objects of every non-backbone triple
+/// that actually PLACES the node in an axiom or class-expression position (see
+/// `is_consuming_triple`), then BFS through the backbone index (intersectionOf → list head →
+/// list cells → members, etc.). Any anonymous blank structural node NOT reachable is an
+/// orphan → refused.
+///
+/// **Ignorable declaration/annotation triples do NOT seed reachability** ([OPUS-4.8]
+/// sq-pbz04.4.12): a triple whose only relationship to a structural node is a declaration
+/// typing (`rdf:type` → an ignorable `DECLARATION_TYPE_LOCALS` meta-class such as `rdf:List`)
+/// or an annotation predicate produces NO axiom in `classify_type`/`classify_triple`, so it
+/// is not a consumer. Seeding from it wrongly rescued cyclic/orphan list cells carrying the
+/// standard `_:list a rdf:List` typing (WebOnt-I5.5-006/-007), letting them slip past the
+/// refusal into an empty (wrongly-consistent) ontology.
+///
+/// **rdf:nil special case**: `rdf:nil` is the list terminator. If it appears as a SUBJECT
+/// of `rdf:first` or `rdf:rest`, the graph is unconditionally malformed — refused before
+/// the reachability pass.
+fn validate_no_orphan_structural_nodes(
+    dict: &Dict,
+    triples: &[[Id; 3]],
+    v: &Vocab,
+    idx: &Index,
+) -> Result<(), ExtractError> {
+    // --- rdf:nil cannot be a list cell (I5.5-003, I5.5-004) ----------------------------
+    // `v.rdf_nil == NO_ID` when the IRI is absent from the dict (no triple about nil → no
+    // check needed). When present, refuse if nil itself has a list-backbone predicate.
+    if v.rdf_nil != sparq_core::dict::NO_ID {
+        if idx.first.contains_key(&v.rdf_nil) {
+            return Err(ExtractError::MalformedList(
+                "rdf:nil cannot have an rdf:first property (ill-formed list cell on nil)"
+                    .to_string(),
+            ));
+        }
+        if idx.rest.contains_key(&v.rdf_nil) {
+            return Err(ExtractError::MalformedList(
+                "rdf:nil cannot have an rdf:rest property (ill-formed list cell on nil)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // If there are no structural nodes at all, there is nothing further to validate.
+    if idx.structural_nodes.is_empty() {
+        return Ok(());
+    }
+
+    // --- Reachability pass (I5.5-006, I5.5-007) -----------------------------------------
+    //
+    // Helper: `is_anonymous_blank` — true iff `id` is a blank node (not an inline literal,
+    // not a triple term, not a named IRI). Named IRIs are excluded from the orphan check
+    // because `emit_named_composite_equiv` will synthesise axioms for them; only anonymous
+    // blank structural nodes can be genuinely unconsumed.
+    let is_anonymous_blank = |id: Id| -> bool {
+        !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_))
+    };
+
+    // Seed: structural nodes that are considered "already consumed":
+    //
+    // 1. Named IRI structural nodes — they carry inline composite backbone definitions
+    //    (e.g. `:A owl:intersectionOf (…)`) and the `emit_named_composite_equiv` post-pass
+    //    synthesises `EquivalentClasses(A, expr)` for each one. Their list cells / filler
+    //    nodes must therefore be treated as reachable too (they will be visited through the
+    //    BFS expansion below). Named IRIs are always seeded to avoid falsely flagging list
+    //    cells or fillers that are only reachable through them.
+    //
+    // 2. Every structural node that appears as the SUBJECT OR OBJECT of a non-backbone
+    //    triple that actually PLACES the node in an axiom or class-expression position:
+    //   - Subject: e.g. `[ owl:intersectionOf (…) ] rdfs:subClassOf :C` — the blank node
+    //     is the SUBJECT of the axiom triple `rdfs:subClassOf`.
+    //   - Object: e.g. `:C rdfs:subClassOf _:x` — `_:x` is an OBJECT.
+    //
+    // [OPUS-4.8] sq-pbz04.4.12 — SOUNDNESS FIX: an IGNORABLE declaration or annotation
+    // triple is NOT a consumer and must NOT seed reachability. Crucially `_:list a rdf:List`
+    // (rdf:type whose object is an ignorable DECLARATION_TYPE_LOCALS meta-class, exactly the
+    // WebOnt-I5.5-006/-007 encoding) produces NO axiom in `classify_type` — treating it as a
+    // consumer wrongly seeded the cyclic/orphan list cell reachable, letting it slip past the
+    // refusal and extract to an empty ontology (a WRONG definitive verdict, not abstention).
+    // Reachability is seeded ONLY from triples that route into an actual axiom / class-
+    // expression position; `is_consuming_triple` mirrors `classify_triple`'s ignorable arms.
+    let mut reachable: FxHashSet<Id> = FxHashSet::default();
+    let mut worklist: Vec<Id> = Vec::new();
+
+    // Pre-seed all NAMED IRI structural nodes as reachable (emit_named_composite_equiv
+    // will synthesise axioms for them; their list cells and fillers are transitively OK).
+    for &node in &idx.structural_nodes {
+        if !is_anonymous_blank(node) && reachable.insert(node) {
+            worklist.push(node);
+        }
+    }
+
+    // Seed from subjects and objects of CONSUMING (axiom-placing) non-backbone triples only.
+    for &[s, p, o] in triples {
+        if v.backbone.contains(&p) {
+            continue;
+        }
+        if !is_consuming_triple(v, idx, p, o) {
+            continue;
+        }
+        for &id in &[s, o] {
+            if idx.structural_nodes.contains(&id) && reachable.insert(id) {
+                worklist.push(id);
+            }
+        }
+    }
+
+    // BFS: from every reachable structural node, follow backbone index edges to discover
+    // which nested structural nodes are transitively reachable.
+    while let Some(node) = worklist.pop() {
+        // Expand each backbone index: the VALUE of these maps is a child node (either a
+        // list head, list cell, or filler) that is reachable once the parent is reachable.
+        macro_rules! follow_value {
+            ($map:expr) => {
+                if let Some(&target) = $map.get(&node) {
+                    if idx.structural_nodes.contains(&target) && reachable.insert(target) {
+                        worklist.push(target);
+                    }
+                }
+            };
+        }
+        follow_value!(idx.intersection_of); // intersection head → list head
+        follow_value!(idx.union_of);        // union head → list head
+        follow_value!(idx.complement_of);   // complement node → operand
+        follow_value!(idx.some_values_from); // restriction → filler
+        follow_value!(idx.all_values_from);  // restriction → filler
+        // List cell traversal (the chain of rdf:first/rdf:rest cells).
+        if let Some(&first_val) = idx.first.get(&node) {
+            if idx.structural_nodes.contains(&first_val) && reachable.insert(first_val) {
+                worklist.push(first_val);
+            }
+        }
+        if let Some(&rest_val) = idx.rest.get(&node) {
+            if idx.structural_nodes.contains(&rest_val) && reachable.insert(rest_val) {
+                worklist.push(rest_val);
+            }
+        }
+    }
+
+    // Refuse any ANONYMOUS BLANK structural node that is NOT reachable. Named IRIs are
+    // excluded (handled by emit_named_composite_equiv). Non-blank structural nodes (e.g.
+    // an IRI used as an owl:Restriction subject) are similarly excluded — they would have
+    // been rejected by the bare-blank guard if they appeared in a class position, or by
+    // the axiom-dispatch arms if they were not a known class shape.
+    for &node in &idx.structural_nodes {
+        if reachable.contains(&node) || !is_anonymous_blank(node) {
+            continue;
+        }
+        let is_list_cell = idx.first.contains_key(&node) || idx.rest.contains_key(&node);
+        if is_list_cell {
+            return Err(ExtractError::MalformedList(format!(
+                "orphan list cell {} is not reachable from any axiom \
+                 (ill-formed or cyclic list structure not connected to any axiom)",
+                term_iri(dict, node)
+            )));
+        } else {
+            return Err(ExtractError::MalformedClassExpression(format!(
+                "unconsumed anonymous class-expression backbone on {} — backbone \
+                 predicates present but the node is never referenced by any axiom triple",
+                term_iri(dict, node)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a non-backbone triple `_ p o` actually CONSUMES a structural node — i.e. places it
+/// in an axiom or class-expression position — for the orphan-reachability seeding in
+/// [`validate_no_orphan_structural_nodes`]. [OPUS-4.8] sq-pbz04.4.12.
+///
+/// It is `false` for exactly the triples `classify_triple`/`classify_type` treat as IGNORABLE
+/// (produce no axiom):
+/// - a declaration typing `_ rdf:type o` where `o` is an ignorable `DECLARATION_TYPE_LOCALS`
+///   meta-class (`rdf:List`, `owl:Class`, `owl:Restriction`, …) — notably `_:list a rdf:List`,
+///   the WebOnt-I5.5-006/-007 encoding whose presence must NOT rescue a cyclic/orphan list;
+/// - an annotation triple (a built-in annotation predicate or a declared annotation property).
+///
+/// Every other non-backbone triple routes into a real axiom (subClassOf / equivalentClass /
+/// disjointWith / domain / range / a ClassAssertion via a non-declaration `rdf:type` object /
+/// a role assertion / an out-of-fragment refusal), so it genuinely references the node. The
+/// caller (the backbone predicates are already skipped) passes only non-backbone triples.
+fn is_consuming_triple(v: &Vocab, idx: &Index, p: Id, o: Id) -> bool {
+    // Declaration typing (`rdf:type` → ignorable meta-class) — no axiom emitted.
+    if p == v.ty && v.declaration_types.contains(&o) {
+        return false;
+    }
+    // Built-in or declared annotation predicate — no axiom emitted.
+    if v.annotation.contains(&p) || idx.annotation_props.contains(&p) {
+        return false;
+    }
+    true
 }
 
 /// Routes one non-backbone triple: into an [`Axiom`] on `onto`, silently past an ignorable
@@ -367,6 +728,20 @@ fn decode_class_inner(
             "RDF 1.2 triple term in a class-expression position".to_string(),
         ));
     }
+    // [FABLE-5] sq-pbz04.4.9: a bare OWL 2 datatype-map IRI (`xsd:integer`, `rdfs:Literal`, …)
+    // in a class-expression position — including an `rdfs:range` / `rdfs:domain` object — carries
+    // concrete-domain meaning the datatype-free ALCH fragment cannot model. Reading it as an
+    // opaque object class would silently drop that meaning (e.g. `p rdfs:range xsd:integer` +
+    // `p rdfs:range xsd:string` are only jointly unsatisfiable because the value spaces are
+    // DISJOINT — invisible under an opaque-class reading, WebOnt-I5.3-015). Refuse fail-closed,
+    // the same discipline as the literal / `owl:onDatatype` / declared-datatype-property
+    // refusals; datatypes are the design-record §5 deferral pending a concrete-domain oracle.
+    if let Some(dt) = datatype_iri_name(dict, id) {
+        return Err(ExtractError::DataConstruct(format!(
+            "datatype IRI {} in a class-expression position (no concrete domain in L1)",
+            dt
+        )));
+    }
     if id == v.thing {
         return Ok(ClassExpression::Thing);
     }
@@ -393,9 +768,20 @@ fn decode_class_inner(
     // Boolean / quantifier shapes, detected by the presence of their defining predicate. This
     // fires for BLANK anonymous nodes AND for a NAMED class that carries an inline definition
     // (`:A owl:intersectionOf (…)`): `owl:intersectionOf`/`unionOf`/`complementOf`/a
-    // `owl:Restriction` on a class node denotes a COMPLETE equivalence, so inlining the decoded
-    // expression at every occurrence of the node is model-preserving (sound). Decoding is
-    // deterministic, so a named node inlines to the same expression consistently everywhere.
+    // `owl:Restriction` on a class node denotes a COMPLETE equivalence.
+    //
+    // ANONYMOUS blank nodes: inlining the decoded expression at every use site is
+    // model-preserving and sufficient — there is no class NAME to bind.
+    //
+    // NAMED class IRIs: inlining alone is NOT sufficient (sq-pbz04.4.11, M1 gap). A
+    // conclusion that mentions the NAME as a class constant is underivable from inlined
+    // expressions alone — the entailment `:A subClassOf :x` (where :x is an operand of
+    // `:A owl:intersectionOf (…)`) requires the axiom `EquivalentClasses(A, x⊓y)` in
+    // the structural model. `extract()` emits that axiom in the post-loop pass
+    // `emit_named_composite_equiv`; this function still inlines so that use-site axioms
+    // (where `:A` appears as a class argument) already hold the full decoded expression.
+    // Decoding is deterministic, so the inlined form and the EquivalentClasses expression
+    // are always the same expression structurally.
     let is_inter = idx.intersection_of.contains_key(&id);
     let is_union = idx.union_of.contains_key(&id);
     let is_compl = idx.complement_of.contains_key(&id);
@@ -438,8 +824,20 @@ fn decode_class_inner(
     }
     let result = if is_inter {
         let head = idx.intersection_of[&id];
-        decode_class_list(dict, v, idx, head, visiting, depth)
-            .map(ClassExpression::ObjectIntersectionOf)
+        // [FABLE-5] sq-pbz04.4.16 — singleton `owl:intersectionOf` normalization (M7).
+        // The OWL-1-era RDF encoding `_:B owl:intersectionOf ( :A )` — a one-member operand
+        // list — denotes the class `⊓{A}`, whose Direct-Semantics interpretation is EXACTLY
+        // that of its sole member `A` (OWL 2 Structural Specification §8.1: the extension of a
+        // 1-ary ObjectIntersectionOf is the intersection of the single conjunct's extension,
+        // i.e. the conjunct itself). The official test-suite tagging normalizes this singleton
+        // to its member before profile-checking, so `_:B owl:intersectionOf ( :A )` is tagged
+        // in EL/QL/RL. L2's structural-spec arity rule (≥ 2 members) would otherwise reject it
+        // as `NotIn`. Normalizing HERE — at L1 extraction, model-preservingly — makes the
+        // downstream profile checker AND the tableau see the equivalent atomic member, so the
+        // 27 pinned M7 profile divergences resolve without weakening the arity rule for genuine
+        // ≥ 2-member intersections. `decode_class_list` guarantees a non-empty list (an empty
+        // one is `MalformedList`), so a 1-element result is the only singleton case.
+        decode_class_list(dict, v, idx, head, visiting, depth).map(normalize_intersection)
     } else if is_union {
         let head = idx.union_of[&id];
         decode_class_list(dict, v, idx, head, visiting, depth).map(ClassExpression::ObjectUnionOf)
@@ -489,6 +887,28 @@ fn decode_restriction(
             "restriction {} missing its someValuesFrom/allValuesFrom filler",
             term_iri(dict, id)
         ))),
+    }
+}
+
+/// Normalize a decoded `owl:intersectionOf` operand list into a class expression, collapsing
+/// the OWL-1-era SINGLETON encoding `⊓{A}` to its sole member `A` (M7, sq-pbz04.4.16).
+///
+/// A one-member `ObjectIntersectionOf` has, under OWL 2 Direct Semantics, exactly the
+/// interpretation of its single conjunct (OWL 2 Structural Specification §8.1), so returning
+/// the member directly is MODEL-PRESERVING. The official OWL WG profile tagging performs this
+/// same normalization before deciding EL/QL/RL membership; without it, L2's structural-spec
+/// arity rule (≥ 2 members) would spuriously reject these positively-tagged cases as `NotIn`.
+///
+/// `members` is always non-empty ([`decode_class_list`] refuses an empty operand list with
+/// `MalformedList`), so the only singleton case is `len == 1`. A ≥ 2-member list is wrapped
+/// unchanged in `ObjectIntersectionOf`, preserving the arity rule for genuine intersections.
+fn normalize_intersection(members: Vec<ClassExpression>) -> ClassExpression {
+    let mut members = members;
+    if members.len() == 1 {
+        // `swap_remove(0)` moves the sole member out without a clone; the vec is discarded.
+        members.swap_remove(0)
+    } else {
+        ClassExpression::ObjectIntersectionOf(members)
     }
 }
 
@@ -1053,6 +1473,40 @@ fn term_iri(dict: &Dict, id: Id) -> String {
     }
 }
 
+/// The XSD namespace: every IRI under it is an OWL 2 datatype-map datatype ([FABLE-5]
+/// sq-pbz04.4.9, per the escalated soundness verdict).
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// The non-XSD members of the OWL 2 datatype map recognised by name (design record §5): the
+/// datatypes whose IRIs live outside the XSD namespace.
+const NON_XSD_DATATYPE_IRIS: &[&str] = &[
+    "http://www.w3.org/2000/01/rdf-schema#Literal",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
+    "http://www.w3.org/2002/07/owl#real",
+    "http://www.w3.org/2002/07/owl#rational",
+];
+
+/// `Some(display)` when `id` names a well-known OWL 2 datatype-map datatype (an `xsd:*` IRI or
+/// one of the [`NON_XSD_DATATYPE_IRIS`]). A bare datatype IRI carries CONCRETE-DOMAIN meaning
+/// (a fixed value space) that the datatype-free ALCH fragment cannot model; reading it as an
+/// opaque object class would SILENTLY DROP that meaning (design record §5 defers datatypes
+/// pending a concrete-domain oracle). Detected by IRI identity, so a datatype reaching ANY
+/// class-expression position fails closed uniformly — the same discipline as the literal /
+/// `owl:onDatatype` / declared-datatype-property refusals. [FABLE-5] sq-pbz04.4.9
+fn datatype_iri_name(dict: &Dict, id: Id) -> Option<String> {
+    if is_inline(id) {
+        return None;
+    }
+    if let TermParts::Iri { prefix, suffix } = dict.term_parts(id) {
+        let iri = format!("{}{}", prefix, suffix);
+        if iri.starts_with(XSD) || NON_XSD_DATATYPE_IRIS.contains(&iri.as_str()) {
+            return Some(iri);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1121,5 +1575,141 @@ mod tests {
         assert!(!is_triple_term(&dict, s));
         assert!(term_iri(&dict, s).contains("ex/s"));
         assert!(term_iri(&dict, lit).contains("lit"));
+    }
+
+    /// Direct unit test of `datatype_iri_name` ([FABLE-5] sq-pbz04.4.9): `xsd:*` IRIs and the
+    /// named non-XSD datatype-map members are recognised; an ordinary class IRI, a literal, and
+    /// `owl:Thing` are NOT.
+    #[test]
+    fn datatype_iri_name_recognises_the_datatype_map() {
+        let (dict, _t) = Graph::parse_to_triples(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             <http://ex/s> <http://ex/p> xsd:integer , xsd:string , rdfs:Literal , owl:real .\n\
+             <http://ex/s> <http://ex/q> <http://ex/A> , owl:Thing , \"lit\" .",
+            "turtle",
+        )
+        .expect("parse");
+        use oxrdf::{Literal, NamedNode, Term as OTerm};
+        let look = |iri: &str| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
+        // Recognised datatype-map members.
+        for iri in [
+            "http://www.w3.org/2001/XMLSchema#integer",
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/2000/01/rdf-schema#Literal",
+            "http://www.w3.org/2002/07/owl#real",
+        ] {
+            assert_eq!(datatype_iri_name(&dict, look(iri)).as_deref(), Some(iri));
+        }
+        // NOT datatypes: an ordinary class IRI, owl:Thing, a literal.
+        assert_eq!(datatype_iri_name(&dict, look("http://ex/A")), None);
+        assert_eq!(
+            datatype_iri_name(&dict, look("http://www.w3.org/2002/07/owl#Thing")),
+            None
+        );
+        let lit = dict.lookup(&OTerm::Literal(Literal::new_simple_literal("lit")));
+        assert_eq!(datatype_iri_name(&dict, lit), None);
+    }
+
+    /// End-to-end fail-closed refusal ([FABLE-5] sq-pbz04.4.9): a datatype IRI reaching a
+    /// class-expression position (an `rdfs:range` object here, but the check is position-uniform)
+    /// refuses extraction as a `DataConstruct` — it is NOT read as an opaque object class. This
+    /// is the WebOnt-I5.3-015 mechanism (two disjoint datatype ranges must not silently extract
+    /// to two unrelated opaque classes).
+    #[test]
+    fn datatype_range_object_refuses_extraction() {
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://ex/p> rdfs:range xsd:integer .",
+            "turtle",
+        )
+        .expect("parse");
+        assert!(
+            matches!(extract(&dict, &triples), Err(ExtractError::DataConstruct(_))),
+            "a datatype range object must refuse extraction (DataConstruct)"
+        );
+        // A datatype as a subClassOf super-CE refuses just the same (position-uniform).
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://ex/A> rdfs:subClassOf xsd:string .",
+            "turtle",
+        )
+        .expect("parse");
+        assert!(matches!(
+            extract(&dict, &triples),
+            Err(ExtractError::DataConstruct(_))
+        ));
+    }
+
+    /// Direct unit test of `normalize_intersection` (sq-pbz04.4.16 / M7): a one-member
+    /// operand list collapses to its sole member; a ≥ 2-member list is preserved as an
+    /// `ObjectIntersectionOf`, keeping the profile-grammar arity rule intact.
+    #[test]
+    fn normalize_intersection_collapses_singleton_only() {
+        // Singleton → the member itself (using dict-free synthetic ids for the members).
+        let a = ClassExpression::Class(7);
+        assert_eq!(normalize_intersection(vec![a.clone()]), a);
+        // Two members → preserved as an intersection (arity rule unaffected).
+        let b = ClassExpression::Class(9);
+        let two = normalize_intersection(vec![a.clone(), b.clone()]);
+        assert_eq!(two, ClassExpression::ObjectIntersectionOf(vec![a, b]));
+    }
+
+    /// End-to-end M7: the OWL-1-era singleton encoding `_:B owl:intersectionOf ( :A )` used
+    /// as a subClassOf super-CE extracts to the atomic member `Class(A)` — NOT a 1-ary
+    /// `ObjectIntersectionOf` the profile-grammar arity rule would reject (sq-pbz04.4.16).
+    /// A genuine 2-member intersection still extracts as an `ObjectIntersectionOf`.
+    #[test]
+    fn extract_singleton_intersection_normalizes_to_member() {
+        // `:S rdfs:subClassOf [ owl:intersectionOf ( :A ) ]`.
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             <http://ex/S> rdfs:subClassOf [ owl:intersectionOf ( <http://ex/A> ) ] .",
+            "turtle",
+        )
+        .expect("parse");
+        let onto = extract(&dict, &triples).expect("accept");
+        let sup = onto
+            .axioms
+            .iter()
+            .find_map(|ax| match ax {
+                Axiom::SubClassOf { sup, .. } => Some(sup),
+                _ => None,
+            })
+            .expect("a SubClassOf axiom");
+        // The singleton intersection collapsed to the atomic member (never a 1-ary
+        // ObjectIntersectionOf).
+        assert!(
+            matches!(sup, ClassExpression::Class(_)),
+            "singleton intersection should normalize to its member, got {:?}",
+            sup
+        );
+
+        // A genuine 2-member intersection is preserved.
+        let (dict, triples) = Graph::parse_to_triples(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             <http://ex/S> rdfs:subClassOf [ owl:intersectionOf ( <http://ex/A> <http://ex/B> ) ] .",
+            "turtle",
+        )
+        .expect("parse");
+        let onto = extract(&dict, &triples).expect("accept");
+        let sup = onto
+            .axioms
+            .iter()
+            .find_map(|ax| match ax {
+                Axiom::SubClassOf { sup, .. } => Some(sup),
+                _ => None,
+            })
+            .expect("a SubClassOf axiom");
+        assert!(
+            matches!(sup, ClassExpression::ObjectIntersectionOf(m) if m.len() == 2),
+            "2-member intersection should be preserved, got {:?}",
+            sup
+        );
     }
 }

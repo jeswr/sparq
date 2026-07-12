@@ -1143,3 +1143,538 @@ fn canonicalize_graph_content_rdf12_with_sha384_relabels_bnode() {
         "single-bnode graph must canonicalize identically under any hash"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 7) Constrained ground-triple-term variant ([FABLE-5] sq-iaxd): the thin
+//    error-on-nested-bnode wrappers. Contract under test:
+//    (a) on ground-triple-term input each wrapper is byte-identical to the
+//        full profile it delegates to (SHA-256 and SHA-384);
+//    (b) any blank node INSIDE a triple term — inner subject, inner object,
+//        or deeper — fails closed with `CanonError::NestedBlankNode`;
+//    (c) TOP-LEVEL blank nodes stay ordinary RDFC-1.0 bnodes (accepted and
+//        relabelled), so the guard's nested/top-level distinction is pinned.
+// ---------------------------------------------------------------------------
+
+/// A ground triple term `<<( <s> <p> <o> )>>`.
+fn ground_tt() -> Term {
+    tt(
+        NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+        iri("http://ex/p"),
+        Term::NamedNode(iri("http://ex/o")),
+    )
+}
+
+/// A triple term with a blank node in its OBJECT position.
+fn tt_inner_obj_bnode(label: &str) -> Term {
+    tt(
+        NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+        iri("http://ex/p"),
+        Term::BlankNode(bn(label)),
+    )
+}
+
+/// A quad asserting `who says <tt>` in the default graph.
+fn says_quad(who: &str, object: Term) -> Quad {
+    Quad::new(
+        NamedOrBlankNode::NamedNode(iri(who)),
+        iri("http://ex/says"),
+        object,
+        GraphName::DefaultGraph,
+    )
+}
+
+/// Direct test for `canonicalize_rdf12_ground_terms`: a ground-triple-term
+/// dataset with a TOP-LEVEL bnode subject is accepted, relabels the top-level
+/// bnode, and is byte-identical to the full profile (delegation).
+#[test]
+fn ground_terms_accepts_and_matches_full_profile() {
+    let dataset = vec![
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("holder")),
+            iri("http://ex/says"),
+            ground_tt(),
+            GraphName::DefaultGraph,
+        ),
+        says_quad("http://ex/issuer", Term::Literal(Literal::new_simple_literal("v"))),
+    ];
+    let constrained = sparq_canon::canonicalize_rdf12_ground_terms(&dataset).unwrap();
+    let full = sparq_canon::canonicalize_rdf12(&dataset).unwrap();
+    assert_eq!(
+        constrained, full,
+        "constrained variant must be byte-identical to the full profile on accepted input"
+    );
+    assert!(
+        constrained.contains("_:c14n0"),
+        "top-level bnode must be relabelled: {constrained:?}"
+    );
+    assert!(
+        constrained.contains("<<("),
+        "ground triple-term token form must be preserved: {constrained:?}"
+    );
+}
+
+/// Direct test for `canonicalize_rdf12_ground_terms_with::<Sha384>`: delegation
+/// equivalence must hold under a non-default hash profile too.
+#[test]
+fn ground_terms_with_sha384_matches_full_profile() {
+    let dataset = vec![
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("x")),
+            iri("http://ex/says"),
+            ground_tt(),
+            GraphName::DefaultGraph,
+        ),
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("y")),
+            iri("http://ex/q"),
+            Term::BlankNode(bn("x")),
+            GraphName::DefaultGraph,
+        ),
+    ];
+    let constrained = sparq_canon::canonicalize_rdf12_ground_terms_with::<Sha384>(&dataset).unwrap();
+    let full = sparq_canon::canonicalize_rdf12_with::<Sha384>(&dataset).unwrap();
+    assert_eq!(constrained, full, "SHA-384 delegation must be byte-identical");
+    // And the SHA-256 default is reachable through the non-generic entry point.
+    let c256 = sparq_canon::canonicalize_rdf12_ground_terms(&dataset).unwrap();
+    assert_eq!(
+        c256,
+        sparq_canon::canonicalize_rdf12_ground_terms_with::<Sha256>(&dataset).unwrap(),
+        "non-generic entry point must be the SHA-256 profile"
+    );
+}
+
+/// Direct test for `issue_dataset_rdf12_ground_terms` (+ `_with`): the issuer
+/// map on accepted input equals the full profile's, and top-level bnodes are
+/// issued canonical labels.
+#[test]
+fn ground_terms_issuer_map_matches_full_profile() {
+    let dataset = vec![
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("only")),
+            iri("http://ex/says"),
+            ground_tt(),
+            GraphName::DefaultGraph,
+        ),
+    ];
+    let m = sparq_canon::issue_dataset_rdf12_ground_terms(&dataset).unwrap();
+    assert_eq!(
+        m.get("only").map(String::as_str),
+        Some("c14n0"),
+        "single top-level bnode must issue as c14n0: {m:?}"
+    );
+    assert_eq!(
+        m,
+        sparq_canon::issue_dataset_rdf12(&dataset).unwrap(),
+        "issuer map must equal the full profile's on accepted input"
+    );
+    let m384 = sparq_canon::issue_dataset_rdf12_ground_terms_with::<Sha384>(&dataset).unwrap();
+    assert_eq!(
+        m384,
+        sparq_canon::issue_dataset_rdf12_with::<Sha384>(&dataset).unwrap(),
+        "SHA-384 issuer map must equal the full profile's"
+    );
+}
+
+/// Direct test for `canonicalize_triples_rdf12_ground_terms` (+ `_with`): the
+/// single-graph wrapper delegates on ground input and keeps the
+/// `CanonicalGraph` lines/triples contract.
+#[test]
+fn ground_terms_triples_matches_full_profile() {
+    let t1 = Triple::new(
+        NamedOrBlankNode::BlankNode(bn("top")),
+        iri("http://ex/says"),
+        ground_tt(),
+    );
+    let t2 = Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/q"),
+        Term::Literal(Literal::new_simple_literal("leaf")),
+    );
+    let c = sparq_canon::canonicalize_triples_rdf12_ground_terms(&[t1.clone(), t2.clone()]).unwrap();
+    let full = sparq_canon::canonicalize_triples_rdf12(&[t1.clone(), t2.clone()]).unwrap();
+    assert_eq!(c.lines, full.lines, "lines must equal the full profile's");
+    assert_eq!(c.triples, full.triples, "triples must equal the full profile's");
+    assert_eq!(c.lines.len(), 2, "two triples -> two canonical lines");
+    let c384 =
+        sparq_canon::canonicalize_triples_rdf12_ground_terms_with::<Sha384>(&[t1.clone(), t2.clone()])
+            .unwrap();
+    let full384 = sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(&[t1, t2]).unwrap();
+    assert_eq!(c384.lines, full384.lines, "SHA-384 delegation must agree");
+}
+
+/// On triple-term-FREE input the constrained variant agrees byte-for-byte with
+/// the STANDARD `rdf-canon`-backed path (inherited from the full profile's
+/// standard-path agreement, asserted directly here for the wrapper).
+#[test]
+fn ground_terms_agrees_with_standard_path_on_triple_term_free_input() {
+    let dataset = vec![
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("b0")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("b1")),
+            GraphName::DefaultGraph,
+        ),
+        Quad::new(
+            NamedOrBlankNode::BlankNode(bn("b1")),
+            iri("http://ex/q"),
+            Term::Literal(Literal::new_simple_literal("v")),
+            GraphName::DefaultGraph,
+        ),
+    ];
+    assert_eq!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&dataset).unwrap(),
+        sparq_canon::canonicalize(&dataset).unwrap(),
+        "constrained variant must equal the standard path on RDF-1.1 input"
+    );
+}
+
+/// (b) Error contract: a bnode in the triple term's OBJECT position fails
+/// closed with `NestedBlankNode` on every wrapper — canonicalize, issuer map,
+/// and the `_with` siblings.
+#[test]
+fn nested_bnode_in_object_position_fails_closed() {
+    let dataset = vec![says_quad("http://ex/a", tt_inner_obj_bnode("inner"))];
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&dataset),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms_with::<Sha384>(&dataset),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    assert!(matches!(
+        sparq_canon::issue_dataset_rdf12_ground_terms(&dataset),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    assert!(matches!(
+        sparq_canon::issue_dataset_rdf12_ground_terms_with::<Sha384>(&dataset),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    // Contrast (non-vacuity): the FULL profile canonicalizes the same input.
+    assert!(
+        sparq_canon::canonicalize_rdf12(&dataset).is_ok(),
+        "the full descent must still accept what the constrained variant rejects"
+    );
+}
+
+/// (b) Error contract: a bnode in the triple term's SUBJECT position (a
+/// `NamedOrBlankNode`, so it can be blank) also fails closed.
+#[test]
+fn nested_bnode_in_subject_position_fails_closed() {
+    let inner_subj = tt(
+        NamedOrBlankNode::BlankNode(bn("inner")),
+        iri("http://ex/p"),
+        Term::Literal(Literal::new_simple_literal("v")),
+    );
+    let triples = vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        inner_subj,
+    )];
+    assert!(matches!(
+        sparq_canon::canonicalize_triples_rdf12_ground_terms(&triples),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    assert!(matches!(
+        sparq_canon::canonicalize_triples_rdf12_ground_terms_with::<Sha384>(&triples),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+}
+
+/// (b) Error contract: a bnode at nesting depth 2 (a triple term inside a
+/// triple term) is found by the recursive guard.
+#[test]
+fn nested_bnode_at_depth_two_fails_closed() {
+    let deepest = tt(
+        NamedOrBlankNode::NamedNode(iri("http://ex/x")),
+        iri("http://ex/p"),
+        Term::BlankNode(bn("deep")),
+    );
+    let mid = tt(
+        NamedOrBlankNode::NamedNode(iri("http://ex/y")),
+        iri("http://ex/q"),
+        deepest,
+    );
+    let dataset = vec![says_quad("http://ex/a", mid)];
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&dataset),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+}
+
+/// (c) The guard must NOT be tripped by top-level bnodes anywhere a bnode can
+/// legally sit in RDF-1.1 (subject, object, graph name) — only by bnodes
+/// inside triple terms. A dataset mixing all three top-level positions with a
+/// ground triple term is accepted and isomorphism-stable (relabel + reorder).
+#[test]
+fn top_level_bnodes_everywhere_are_accepted_and_isomorphism_stable() {
+    let make = |s: &str, o: &str, g: &str, swap: bool| -> String {
+        let q1 = Quad::new(
+            NamedOrBlankNode::BlankNode(bn(s)),
+            iri("http://ex/says"),
+            ground_tt(),
+            GraphName::BlankNode(bn(g)),
+        );
+        let q2 = Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+            iri("http://ex/knows"),
+            Term::BlankNode(bn(o)),
+            GraphName::DefaultGraph,
+        );
+        let dataset = if swap { vec![q2, q1] } else { vec![q1, q2] };
+        sparq_canon::canonicalize_rdf12_ground_terms(&dataset).unwrap()
+    };
+    let a = make("s1", "o1", "g1", false);
+    let b = make("other1", "other2", "other3", true);
+    assert_eq!(
+        a, b,
+        "isomorphic ground-TT datasets must canonicalize identically"
+    );
+    assert!(a.contains("<<("), "triple-term token preserved: {a:?}");
+}
+
+/// The new error variant's `Display` must self-describe (used in fail-closed
+/// logs); check the message names the nested-bnode condition and the full
+/// profile's escape hatch.
+#[test]
+fn nested_blank_node_error_display() {
+    let msg = sparq_canon::CanonError::NestedBlankNode.to_string();
+    assert!(
+        msg.contains("nested") && msg.contains("triple term"),
+        "Display must name the condition: {msg:?}"
+    );
+    assert!(
+        msg.contains("canonicalize_rdf12"),
+        "Display must point at the full-descent escape hatch: {msg:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8) Graph-level constrained wrappers ([FABLE-5] sq-l3pk7):
+//    `canonicalize_graph_content_rdf12_ground_terms` (+ `_with`) — the
+//    `sparq_core::Graph` parity siblings of the sq-iaxd wrapper family.
+//    Contract: (a) equivalent to composing `graph_triples` with
+//    `canonicalize_triples_rdf12_ground_terms` and byte-identical to the full
+//    graph_content profile on ground input; (b) fail closed with
+//    `NestedBlankNode` on any bnode inside a stored triple term (which the
+//    FULL graph_content profile accepts — kills a "delegate without guard"
+//    mutant); (c) the `_with` hash generic is honoured.
+// ---------------------------------------------------------------------------
+
+/// Direct test for `canonicalize_graph_content_rdf12_ground_terms`: a stored
+/// ground triple term plus a top-level bnode is accepted, byte-identical to
+/// the full profile, and identical to the documented composition it replaces.
+#[test]
+fn graph_content_ground_terms_matches_full_profile_and_composition() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "<http://ex/a> <http://ex/says> <<( <http://ex/s> <http://ex/p> <http://ex/o> )>> .\n\
+         _:top <http://ex/knows> <http://ex/a> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    let c = sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g).unwrap();
+    // Non-vacuity: the triple term survives and the top-level bnode relabels.
+    assert_eq!(c.lines.len(), 2, "two stored triples -> two canonical lines");
+    assert!(
+        c.lines.iter().any(|l| l.contains("<<(")),
+        "triple-term token preserved: {:?}",
+        c.lines
+    );
+    assert!(
+        c.lines.iter().any(|l| l.contains("_:c14n0")),
+        "top-level bnode must relabel to c14n0: {:?}",
+        c.lines
+    );
+    // (a) Byte-identical to the FULL graph_content profile on ground input
+    // (thin guard + delegate) …
+    let full = sparq_canon::canonicalize_graph_content_rdf12(&g).unwrap();
+    assert_eq!(c.lines, full.lines);
+    assert_eq!(c.triples, full.triples);
+    // … and to the composition the wrapper is a parity sibling of.
+    let triples = sparq_canon::graph_triples(&g).unwrap();
+    let composed = sparq_canon::canonicalize_triples_rdf12_ground_terms(&triples).unwrap();
+    assert_eq!(c.lines, composed.lines);
+    assert_eq!(c.triples, composed.triples);
+}
+
+/// (b) Error contract for the Graph-level wrapper: a blank node INSIDE a
+/// stored triple term fails closed with `NestedBlankNode`, while the FULL
+/// graph_content profile still accepts the same graph. Kills a mutant that
+/// drops the guard and delegates straight to `canonicalize_graph_content_rdf12`.
+#[test]
+fn graph_content_ground_terms_rejects_nested_bnode() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "<http://ex/a> <http://ex/says> <<( <http://ex/s> <http://ex/p> _:inner )>> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    assert!(matches!(
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    assert!(matches!(
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms_with::<Sha384>(&g),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+    // Contrast (non-vacuity): the full descent accepts what the constrained
+    // Graph-level variant rejects.
+    assert!(
+        sparq_canon::canonicalize_graph_content_rdf12(&g).is_ok(),
+        "the full graph_content descent must still accept nested bnodes"
+    );
+}
+
+/// Direct test for `canonicalize_graph_content_rdf12_ground_terms_with::<D>`:
+/// the hash generic delegates faithfully — SHA-384 output equals the full
+/// profile's SHA-384 output on a ground graph, and the default entry point is
+/// exactly the `Sha256` instantiation.
+#[test]
+fn graph_content_ground_terms_with_sha384_matches_full_profile() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "_:x <http://ex/says> <<( <http://ex/s> <http://ex/p> \"v\" )>> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    let c384 =
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms_with::<Sha384>(&g).unwrap();
+    let full384 = sparq_canon::canonicalize_graph_content_rdf12_with::<Sha384>(&g).unwrap();
+    assert_eq!(c384.lines, full384.lines);
+    assert!(
+        c384.lines[0].contains("_:c14n0"),
+        "top-level bnode must relabel under SHA-384: {:?}",
+        c384.lines
+    );
+    // Default = Sha256 instantiation, exactly.
+    let c = sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g).unwrap();
+    let c256 =
+        sparq_canon::canonicalize_graph_content_rdf12_ground_terms_with::<Sha256>(&g).unwrap();
+    assert_eq!(c.lines, c256.lines);
+    assert_eq!(c.triples, c256.triples);
+}
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-x3oj2: crate-wide triple-term nesting-depth bound.
+// Every profile entry point must fail closed with `TripleTermDepthExceeded`
+// on a chain one past `MAX_TRIPLE_TERM_DEPTH`, and still accept a chain
+// exactly AT the bound (so the guard is a bound, not a blanket reject).
+// Knocking out the iterative pre-check turns each Err assert into Ok — red.
+// ---------------------------------------------------------------------------
+
+/// Ground triple-term chain of exactly `depth` nesting levels, built with a
+/// loop (the test helper must not itself recurse).
+fn ground_chain(depth: usize) -> Term {
+    let mut obj = Term::NamedNode(iri("http://ex/leaf"));
+    for _ in 0..depth {
+        obj = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            obj,
+        );
+    }
+    obj
+}
+
+fn quad_with_object(o: Term) -> Quad {
+    Quad::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        o,
+        GraphName::DefaultGraph,
+    )
+}
+
+/// Full-profile dataset entry points: at the bound canonicalizes (and the
+/// issuer map is empty — the chain is ground); one past it fails closed.
+#[test]
+fn depth_bound_full_profile_dataset() {
+    let at = [quad_with_object(ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH))];
+    let over = [quad_with_object(ground_chain(
+        sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1,
+    ))];
+    let canon = sparq_canon::canonicalize_rdf12(&at).expect("depth == MAX must canonicalize");
+    assert!(canon.contains("<<("), "triple-term token preserved: truncated");
+    assert!(sparq_canon::issue_dataset_rdf12(&at)
+        .expect("depth == MAX must issue")
+        .is_empty());
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    assert!(matches!(
+        sparq_canon::issue_dataset_rdf12(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+}
+
+/// Single-graph (triples) entry points, full + constrained.
+#[test]
+fn depth_bound_triples_entry_points() {
+    let at = [Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH),
+    )];
+    let over = [Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+        iri("http://ex/says"),
+        ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1),
+    )];
+    assert_eq!(
+        sparq_canon::canonicalize_triples_rdf12(&at)
+            .expect("depth == MAX must canonicalize")
+            .lines
+            .len(),
+        1
+    );
+    assert!(matches!(
+        sparq_canon::canonicalize_triples_rdf12(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    assert!(matches!(
+        sparq_canon::canonicalize_triples_rdf12_ground_terms(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+}
+
+/// Constrained (ground-terms) dataset entry points: the depth guard runs
+/// BEFORE the nested-bnode guard, so an over-deep chain that ALSO carries a
+/// nested blank node reports `TripleTermDepthExceeded`, not `NestedBlankNode`
+/// (the ground guard would otherwise walk the over-deep chain to find it).
+#[test]
+fn depth_bound_precedes_ground_guard() {
+    let mut obj = Term::BlankNode(bn("innermost"));
+    for _ in 0..(sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1) {
+        obj = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            obj,
+        );
+    }
+    let over = [quad_with_object(obj)];
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    assert!(matches!(
+        sparq_canon::issue_dataset_rdf12_ground_terms(&over),
+        Err(sparq_canon::CanonError::TripleTermDepthExceeded)
+    ));
+    // At the bound, the SAME shape (nested bnode, depth == MAX) is the ground
+    // guard's territory again: `NestedBlankNode`, proving the precedence
+    // flip happens exactly at the bound.
+    let mut obj = Term::BlankNode(bn("innermost"));
+    for _ in 0..sparq_canon::MAX_TRIPLE_TERM_DEPTH {
+        obj = tt(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            obj,
+        );
+    }
+    assert!(matches!(
+        sparq_canon::canonicalize_rdf12_ground_terms(&[quad_with_object(obj)]),
+        Err(sparq_canon::CanonError::NestedBlankNode)
+    ));
+}

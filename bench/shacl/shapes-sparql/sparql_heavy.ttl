@@ -1,0 +1,65 @@
+# [FABLE-5] (sq-7d3dj.33) SPARQL-constraint-HEAVY shape set for the same-box
+# SHACL competitor harness (scripts/bench/shacl-same-box.sh). THREE sh:sparql
+# (W3C SHACL §5.2) constraints across the three biggest LUBM target classes, so
+# the workload is dominated by the SHACL-SPARQL evaluation path (a SELECT with
+# $this pre-bound, run per focus node) — the path bead sq-7d3dj.33 profiles.
+#
+# Kept in shapes-sparql/ (NOT shapes/) deliberately: bench/shacl/run.sh asserts
+# expected.tsv covers EXACTLY the shapes/ dir, so a new committed workload there
+# would break the per-commit gate. This set's correctness check is CROSS-ENGINE
+# count agreement inside the harness envelope (count_crosscheck), not a pinned
+# constant — all three patterns match raw-ABox typing (no entailment needed).
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <http://example.org/shacl-bench/> .
+
+# ~1874 focus nodes per LUBM(1) universe: grad students taking grad courses.
+ex:GradCourseShape a sh:NodeShape ;
+    sh:targetClass ub:GraduateStudent ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:prefixes ex:heavyPrefixes ;
+        sh:message "GraduateStudent takes a GraduateCourse" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this ub:takesCourse ?value .
+                ?value a ub:GraduateCourse .
+            }
+        """ ;
+    ] .
+
+# ~125 focus nodes per universe: full professors teaching graduate courses.
+ex:ProfessorLoadShape a sh:NodeShape ;
+    sh:targetClass ub:FullProfessor ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:prefixes ex:heavyPrefixes ;
+        sh:message "FullProfessor teaches a GraduateCourse" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this ub:teacherOf ?value .
+                ?value a ub:GraduateCourse .
+            }
+        """ ;
+    ] .
+
+# The BIG one, ~5900 focus nodes per universe: undergrads with an advisor.
+ex:UndergradAdvisorShape a sh:NodeShape ;
+    sh:targetClass ub:UndergraduateStudent ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:prefixes ex:heavyPrefixes ;
+        sh:message "UndergraduateStudent has a FullProfessor advisor" ;
+        sh:select """
+            SELECT $this ?value WHERE {
+                $this ub:advisor ?value .
+                ?value a ub:FullProfessor .
+            }
+        """ ;
+    ] .
+
+ex:heavyPrefixes sh:declare [
+    sh:prefix "ub" ;
+    sh:namespace "http://swat.cse.lehigh.edu/onto/univ-bench.owl#"^^xsd:anyURI ;
+] .

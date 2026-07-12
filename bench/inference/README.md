@@ -1,5 +1,24 @@
 # Inference benchmarks
 
+## N3 competitor columns — `eye-comparison.sh` (EYE / cwm / jen3)
+
+`bench/inference/eye-comparison.sh` compares sparq's N3 forward closure against
+**EYE** (the pinned reference — required; the run fails early without it) and two
+optional columns added by sq-hmd7l.11: **cwm** (W3C SWAP, Python — the honest
+*slow* column) and **jen3** (`java -jar jen3.jar`, a Java/Apache-Jena fork with N3
+support — *not* an npm library). An absent optional tool prints `absent` in its
+column and the run stays green (graceful skip). Knobs: `CWM=`, `JEN3_JAR=`,
+`JAVA=`, plus heavy-cell opt-ins `CWM_HEAVY=1` and `EYE_DT100K=1` /
+`JEN3_DT100K=1` / `CWM_DT100K=1`.
+
+**Correctness gate before timing** (mirrors `bench/deep-taxonomy/run.sh`): each
+workload's sparq closure count is asserted against its deterministic structural
+expected size, and each present competitor's closure is cross-checked against the
+same count *before* its cell is timed — counting is done by sparq's N3 parser
+over a rule-free document (asserted; re-derivation over rules could mask an
+under-deriving competitor). A mismatch fails the run loudly. See
+`research/gap-n3-2026-07.md` for the method + fidelity caveats.
+
 ## DeepTaxonomy (DT) — the rule-heavy stress test
 `gen_deeptaxonomy.py N` → 1 instance fact + an N-deep subClassOf chain + a transitivity rule.
 The instance must be re-typed up the whole chain; NAIVE forward chaining re-derives the entire

@@ -321,7 +321,7 @@ fn decide_verdict_matches_accessible_oracle() {
     let mut acl = AclBuilder::new();
     acl.document("https://pod.ex/notes/n1.ttl");
     acl.default_for("https://pod.ex/", |a| a.agent(ALICE).mode(Mode::Read).mode(Mode::Write));
-    let mut s = store(acl);
+    let s = store(acl);
 
     let resource = "https://pod.ex/notes/n1.ttl";
     let res_node = NamedNode::new_unchecked(resource);

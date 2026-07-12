@@ -106,6 +106,18 @@ export const SPECS: Spec[] = [
     blurb:
       "The minimal verifier-holder contract for trust-framework-anchored questions — one SPARQL query, one RDF trust-requirements document, one nonce — with two trust modes (enumerated issuers; framework-certified issuers with certification-scope conformance, e.g. eIDAS 2.0 / UK DIATF), non-revocation and certification as positive time-windowed attestations (OWA-monotone, fail-closed), a normative RDF 1.2 reifier response encoding with a fixed named-graph mapping, and a reference rewrite into plain SPARQL that doubles as the conformance oracle. Framework trust bottoms out in a trust anchor, not cryptography; the ZK realisation is research-grade and NOT externally audited (sq-qhy4).",
   },
+  {
+    slug: "trust-graph-authz",
+    source: "trust-graph-authz.typ",
+    title:
+      "Trust-Graph Authorisation for Solid/LWS: Pod-Side Admission of Certified Issuers",
+    shortName: "trust-graph-authz",
+    status: "unofficial",
+    date: "2026-07-12",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "Pod-side admission of certified issuers for Solid/LWS: a normative, fail-closed derivation from Control-gated anchor rules over signed, time-windowed, scope-attenuating certification edges to an effective trust-rule set, its five safety invariants (attenuation-only, no ambient edges, meta-scope non-escalation, deny-by-absence, strict additivity), and a stateless trust block on a WAC/ACP decision endpoint. Clear-path only — no ZK, privacy, or unlinkability claim; the signature estate is not externally audited (open gate sq-qhy4).",
+  },
 ];
 
 export function specBySlug(slug: string): Spec | undefined {

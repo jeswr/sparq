@@ -1,5 +1,10 @@
 //! [OPUS-4.8] (sq-xsq9) Bulk import of **externally-computed** embeddings into a `.spqv`
 //! [`VectorStore`].
+// [FABLE-5] (sq-98c) The public entry points (`import_npy` / `import_numeric_dump`) are
+// `#[cfg(not(target_arch = "wasm32"))]` (they need a real filesystem), which leaves the private
+// npy-header/streaming machinery intentionally unused on wasm32 — silence dead_code there ONLY;
+// the native build keeps full dead-code detection.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 //!
 //! The in-process embed path ([`crate::embed_labels`] / [`crate::embed_entities`]) runs an
 //! [`Embedder`](crate::Embedder) over the graph. This module is the *bring-your-own-embeddings*
