@@ -10,7 +10,7 @@
     "compare": "node compare.mjs",
     "compare:browser": "node compare.mjs --runtime chromium",
     "browsers": "playwright install chromium firefox webkit",
-    "lint": "node --check run.mjs && node --check node-baseline.mjs && node --check workload.mjs && node --check page/page.mjs && node --check server.mjs && node --check compare.mjs && node --check compare-workload.mjs && node --check adapters.mjs && node --check page/compare.mjs"
+    "lint": "node --check run.mjs && node --check node-baseline.mjs && node --check workload.mjs && node --check page/page.mjs && node --check server.mjs && node --check compare.mjs && node --check compare-workload.mjs && node --check adapters.mjs && node --check page/compare.mjs && node --check corpus.mjs"
   },
   "devDependencies": {
     "playwright": "^1.61.0"

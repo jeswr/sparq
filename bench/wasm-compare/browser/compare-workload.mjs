@@ -138,3 +138,70 @@ export async function runCompareWorkload({ adapter, quick = false, tier, log = (
   adapter.free?.(queryStore);
   return { rows, skipped };
 }
+
+/**
+ * [sq-hmd7l.40] OPT-IN corpus mode: runs a well-known-suite corpus (SP2Bench /
+ * WatDiv at the native suite's FIXED per-commit tier) against ONE library
+ * adapter. Strictly additive — the default workload above is untouched.
+ *
+ * `corpus` is the descriptor from corpus.mjs `loadCorpusSpec` (node) or the
+ * served `/corpus/<name>.json` (browser page): `{ name, format, text,
+ * queries: [{ name, sparql, expected, ask }] }`, where every `expected` comes
+ * verbatim from the suite's native expected-rows.tsv — the SAME file the
+ * native ci-bench equality check gates on.
+ *
+ * INVARIANT (unchanged from the default workload): no latency row without
+ * row-count agreement — every query row is checked against the native
+ * expected count BEFORE its timing rows are emitted (ASK reports 1/0 in
+ * count mode, per the tsv header). The corpus STORE SIZE has no per-library
+ * absolute oracle (the native source pins query counts, not the deduplicated
+ * triple count), so it is emitted in `rows` for the orchestrator's
+ * cross-library agreement check instead.
+ *
+ * @returns {{ rows: object[], skipped: object[] }}
+ */
+export async function runCorpusWorkload({ adapter, corpus, quick = false, log = () => {} }) {
+  const rows = [];
+  const skipped = [];
+  const loadIters = quick ? 1 : 2;
+  const qOpts = quick ? { warmup: 0, iters: 2 } : { warmup: 1, iters: 5 };
+  const label = `${corpus.name}/${corpus.format}`;
+
+  // ---- Phase: corpus load (text → queryable store), fresh store per iter. ----
+  log(`load corpus ${label} (${(corpus.text.length / 1e6).toFixed(1)} MB source)…`);
+  let store;
+  const m = await measureAsync(
+    async () => {
+      if (store) adapter.free?.(store); // superseded build — only the LAST store survives
+      store = await adapter.newStore();
+      await adapter.load(store, corpus.text, corpus.format);
+      return store;
+    },
+    { warmup: 0, iters: loadIters, minSampleMs: 0 },
+  );
+  const size = await adapter.size(store);
+  check(size > 0, `${adapter.library} ${label}: store is empty after load`);
+  rows.push({ phase: "corpus_load", format: label, rows: size, source_bytes: corpus.text.length, kind: "first", ms: m.first, iters: 1 });
+  rows.push({ phase: "corpus_load", format: label, rows: size, source_bytes: corpus.text.length, kind: "warm", ms: m.warm, iters: loadIters });
+  log(`corpus store: ${size} triples`);
+
+  // ---- Phase: the suite's queries — native-tsv-checked BEFORE any timing row. ----
+  for (const q of corpus.queries) {
+    if (q.ask && !adapter.queryAsk) {
+      skipped.push({ phase: "corpus_query", query: `${corpus.name}/${q.name}`, reason: `${adapter.library}: no ASK support wired` });
+      continue;
+    }
+    let got = -1;
+    const mq = await measureAsync(async () => {
+      got = q.ask ? ((await adapter.queryAsk(store, q.sparql)) ? 1 : 0) : await adapter.queryCount(store, q.sparql);
+      return got;
+    }, qOpts);
+    check(got === q.expected, `${adapter.library} ${corpus.name}/${q.name}: rows=${got}, expected ${q.expected} (native expected-rows.tsv)`);
+    rows.push({ phase: "corpus_query", query: `${corpus.name}/${q.name}`, rows: got, kind: "first", ms: mq.first, iters: 1 });
+    rows.push({ phase: "corpus_query", query: `${corpus.name}/${q.name}`, rows: got, kind: "warm", ms: mq.warm, iters: mq.iters, batch: mq.batch });
+    log(`query ${q.name}: ${got} rows, first ${mq.first.toFixed(2)}ms, warm ${mq.warm.toFixed(3)}ms`);
+  }
+
+  adapter.free?.(store);
+  return { rows, skipped };
+}

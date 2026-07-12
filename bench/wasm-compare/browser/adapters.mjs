@@ -61,6 +61,7 @@ async function sparqAdapter() {
     },
     size: (handle) => handle.store.size,
     queryCount: (handle, sparql) => JSON.parse(handle.store.query(sparql)).results.bindings.length,
+    queryAsk: (handle, sparql) => handle.store.ask(sparql), // corpus mode only (sq-hmd7l.40)
     free: (handle) => handle.store?.free?.(),
   };
 }
@@ -81,6 +82,7 @@ async function oxigraphAdapter() {
     load: (store, text, format) => store.load(text, { format: FORMATS[format] }),
     size: (store) => store.size,
     queryCount: (store, sparql) => store.query(sparql).length,
+    queryAsk: (store, sparql) => store.query(sparql) === true, // corpus mode only (sq-hmd7l.40)
   };
 }
 
@@ -127,6 +129,7 @@ async function n3QuadstoreAdapter() {
         stream.on("error", reject);
       });
     },
+    queryAsk: async ({ engine }, sparql) => (await engine.queryBoolean(sparql)) === true, // corpus mode only (sq-hmd7l.40)
     free: ({ store }) => store?.close?.(),
   };
 }

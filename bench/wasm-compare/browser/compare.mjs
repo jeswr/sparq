@@ -14,6 +14,11 @@
 //   node compare.mjs --runtime chromium               # in-browser (headless Chrome)
 //   node compare.mjs --runtime all --quick            # smoke tier
 //   node compare.mjs --lib sparq,oxigraph
+//   node compare.mjs --corpus watdiv --quick          # OPT-IN corpus mode (sq-hmd7l.40):
+//   node compare.mjs --corpus sp2b                    #   well-known suite at its native
+//                                                     #   per-commit tier, gated on the
+//                                                     #   suite's own expected-rows.tsv
+//                                                     #   (env: WASM_COMPARE_CORPUS)
 //
 // Competitor packages are GATHER-ONLY installs (never committed):
 // run the INSTALL_HINT from compare-workload.mjs in this directory first;
@@ -34,8 +39,9 @@ import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { startServer } from "./server.mjs";
-import { runCompareWorkload, INSTALL_HINT } from "./compare-workload.mjs";
+import { runCompareWorkload, runCorpusWorkload, INSTALL_HINT } from "./compare-workload.mjs";
 import { makeAdapter, pkgVersion, LIBRARIES } from "./adapters.mjs";
+import { CORPORA, CORPUS_NAMES, ensureCorpusFile, loadCorpusSpec } from "./corpus.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..", "..");
@@ -59,6 +65,9 @@ function parseArgs(argv) {
     timeoutMs: 900_000,
     child: false,
     childOut: undefined,
+    // OPT-IN corpus mode (sq-hmd7l.40) — unset ⇒ the default workload, unchanged.
+    corpus: process.env.WASM_COMPARE_CORPUS || undefined,
+    corpusFile: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -75,12 +84,16 @@ function parseArgs(argv) {
         else usage(`unknown runtime '${r}' (expected ${RUNTIMES.join("/")}/all)`);
       }
     } else if (a === "--quick") opts.quick = true;
+    else if (a === "--corpus") opts.corpus = argv[++i] ?? usage("--corpus requires a value");
+    else if (a === "--corpus-file") opts.corpusFile = argv[++i] ?? usage("--corpus-file requires a value");
     else if (a === "--out") opts.out = path.resolve(argv[++i] ?? usage("--out requires a value"));
     else if (a === "--timeout-ms") opts.timeoutMs = Number(argv[++i]) || opts.timeoutMs;
     else if (a === "--child") opts.child = true;
     else if (a === "--child-out") opts.childOut = argv[++i];
     else usage(`unknown argument '${a}'`);
   }
+  if (opts.corpus !== undefined && !CORPUS_NAMES.includes(opts.corpus))
+    usage(`unknown corpus '${opts.corpus}' (expected ${CORPUS_NAMES.join("/")})`);
   if (opts.libs.length === 0) opts.libs = [...LIBRARIES];
   if (opts.runtimes.length === 0) opts.runtimes = ["node"];
   opts.libs = [...new Set(opts.libs)];
@@ -91,7 +104,7 @@ function usage(msg) {
   if (msg) console.error(`error: ${msg}`);
   console.error(
     "usage: node compare.mjs [--lib sparq|oxigraph|n3js-quadstore|all]... " +
-      "[--runtime node|chromium|all]... [--quick] [--out <dir>] [--timeout-ms <n>]",
+      "[--runtime node|chromium|all]... [--quick] [--corpus sp2b|watdiv] [--out <dir>] [--timeout-ms <n>]",
   );
   process.exit(2);
 }
@@ -105,11 +118,15 @@ async function childMain(opts) {
     result = { ok: true, skipped: true, reason: adapter.reason, library };
   } else {
     try {
-      const wl = await runCompareWorkload({
-        adapter,
-        quick: opts.quick,
-        log: (m) => console.error(`[${library}] ${m}`),
-      });
+      const log = (m) => console.error(`[${library}] ${m}`);
+      const wl = opts.corpus
+        ? await runCorpusWorkload({
+            adapter,
+            corpus: await loadCorpusSpec(opts.corpus, opts.corpusFile ?? ensureCorpusFile(opts.corpus)),
+            quick: opts.quick,
+            log,
+          })
+        : await runCompareWorkload({ adapter, quick: opts.quick, log });
       result = { ok: true, library, version: adapter.version, rows: wl.rows, skipped_phases: wl.skipped };
     } catch (err) {
       result = { ok: false, library, error: String(err?.stack ?? err) };
@@ -124,6 +141,7 @@ async function runNodeLibrary(library, opts) {
   const outFile = path.join(os.tmpdir(), `wasm-compare-child-${process.pid}-${library}.json`);
   const args = [fileURLToPath(import.meta.url), "--child", "--lib", library, "--child-out", outFile];
   if (opts.quick) args.push("--quick");
+  if (opts.corpus) args.push("--corpus", opts.corpus, "--corpus-file", opts.corpusFile);
   const r = spawnSync(process.execPath, args, { stdio: ["ignore", "inherit", "inherit"], timeout: opts.timeoutMs });
   let parsed;
   try {
@@ -174,7 +192,7 @@ async function runChromiumLibrary(library, opts, port, playwright) {
       if (text.startsWith("[compare]") || m.type() === "error") console.error(`[chromium/${library}] ${text}`);
     });
     page.on("pageerror", (e) => console.error(`[chromium/${library}] pageerror: ${e}`));
-    const q = opts.quick ? "&quick=1" : "";
+    const q = (opts.quick ? "&quick=1" : "") + (opts.corpus ? `&corpus=${opts.corpus}` : "");
     await page.goto(`http://127.0.0.1:${port}/harness/page/compare.html?lib=${library}${q}`);
     await page.waitForFunction("window.__WASM_COMPARE_DONE__ === true", null, { timeout: opts.timeoutMs });
     const result = await page.evaluate("window.__WASM_COMPARE_RESULT__");
@@ -193,7 +211,7 @@ async function runChromiumLibrary(library, opts, port, playwright) {
 const rowKey = (r) => [r.phase, r.format ?? "", r.triples ?? "", r.query ?? "", r.kind ?? ""].join("|");
 const rowLabel = (r) => {
   let l = r.phase;
-  if (r.format) l += ` ${r.format}@${r.triples}`;
+  if (r.format) l += r.triples !== undefined ? ` ${r.format}@${r.triples}` : ` ${r.format}`;
   if (r.query) l += ` ${r.query}`;
   if (r.kind && r.kind !== "total") l += ` [${r.kind}]`;
   return l;
@@ -287,8 +305,43 @@ if (wantsChromium) {
 const require = createRequire(import.meta.url);
 const playwrightVersion = wantsChromium ? require("playwright/package.json").version : undefined;
 
+// OPT-IN corpus mode (sq-hmd7l.40): resolve + generate ONCE in the parent
+// (build-once-and-cache via the native suite's gen.sh) so measurement
+// children/pages never pay generation; children get --corpus-file, chromium
+// pages fetch the resolved spec from the harness server (/corpus/<name>.json).
+let corpusMeta;
+let corpusServeDir;
+if (opts.corpus) {
+  opts.corpusFile ??= ensureCorpusFile(opts.corpus);
+  const corpusBytes = await readFile(opts.corpusFile);
+  corpusMeta = {
+    name: opts.corpus,
+    tier: CORPORA[opts.corpus].tier,
+    file: opts.corpusFile,
+    source_bytes: corpusBytes.length,
+    sha256: createHash("sha256").update(corpusBytes).digest("hex"),
+    expected_source: CORPORA[opts.corpus].expectedTsv,
+  };
+  console.error(
+    `[compare] corpus ${opts.corpus}: ${corpusMeta.source_bytes} bytes, sha256 ${corpusMeta.sha256.slice(0, 12)}… — ${corpusMeta.tier}`,
+  );
+  if (wantsChromium) {
+    corpusServeDir = path.join(os.tmpdir(), `wasm-compare-corpus-${process.pid}`);
+    await mkdir(corpusServeDir, { recursive: true });
+    await writeFile(
+      path.join(corpusServeDir, `${opts.corpus}.json`),
+      JSON.stringify(await loadCorpusSpec(opts.corpus, opts.corpusFile)),
+    );
+  }
+}
+
 const { server, port } = wantsChromium
-  ? await startServer({ "/js/": path.join(REPO, "js"), "/harness/": HERE, "/nm/": path.join(HERE, "node_modules") })
+  ? await startServer({
+      "/js/": path.join(REPO, "js"),
+      "/harness/": HERE,
+      "/nm/": path.join(HERE, "node_modules"),
+      ...(corpusServeDir ? { "/corpus/": corpusServeDir } : {}),
+    })
   : { server: undefined, port: 0 };
 
 const utc = new Date().toISOString().replace(/[:.]/g, "-");
@@ -317,6 +370,7 @@ try {
         git_commit: git.status === 0 ? git.stdout.trim() : null,
         host,
         bundle: library === "sparq" ? bundle : undefined,
+        corpus: corpusMeta,
         quick: opts.quick,
         harness_wall_ms: performance.now() - t0,
         ...(result.skipped === true
@@ -327,7 +381,7 @@ try {
       };
       if (result.ok === false) failed = true;
       envelopes.push(envelope);
-      const file = path.join(opts.out, `compare-${runtime}-${library}-${utc}.json`);
+      const file = path.join(opts.out, `compare-${opts.corpus ? `${opts.corpus}-` : ""}${runtime}-${library}-${utc}.json`);
       await writeFile(file, JSON.stringify(envelope, null, 2));
       console.error(
         `[compare] wrote ${path.relative(process.cwd(), file)}` +

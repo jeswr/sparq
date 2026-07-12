@@ -13,7 +13,7 @@
 // Results land on `window.__WASM_COMPARE_RESULT__` (+ `__WASM_COMPARE_DONE__`)
 // for compare.mjs to collect. All timings ADVISORY / NON-CANONICAL.
 
-import { runCompareWorkload } from "../compare-workload.mjs";
+import { runCompareWorkload, runCorpusWorkload } from "../compare-workload.mjs";
 
 const logEl = document.getElementById("log");
 const log = (msg) => {
@@ -33,6 +33,7 @@ async function makeBrowserAdapter(library) {
       },
       size: (handle) => handle.store.size,
       queryCount: (handle, sparql) => JSON.parse(handle.store.query(sparql)).results.bindings.length,
+      queryAsk: (handle, sparql) => handle.store.ask(sparql), // corpus mode only (sq-hmd7l.40)
       free: (handle) => handle.store?.free?.(),
     };
   }
@@ -46,6 +47,7 @@ async function makeBrowserAdapter(library) {
       load: (store, text, format) => store.load(text, { format: FORMATS[format] }),
       size: (store) => store.size,
       queryCount: (store, sparql) => store.query(sparql).length,
+      queryAsk: (store, sparql) => store.query(sparql) === true, // corpus mode only (sq-hmd7l.40)
     };
   }
   throw new Error(`unsupported browser library '${library}'`);
@@ -55,10 +57,21 @@ async function main() {
   const params = new URLSearchParams(location.search);
   const library = params.get("lib") ?? "sparq";
   const quick = params.get("quick") === "1";
+  const corpusName = params.get("corpus"); // OPT-IN corpus mode (sq-hmd7l.40)
   const adapter = await makeBrowserAdapter(library);
+  adapter.library ??= library;
   log(`library ${library} instantiated`);
-  const { rows, skipped } = await runCompareWorkload({ adapter, quick, log });
-  return { rows, skipped, library };
+  let wl;
+  if (corpusName) {
+    const res = await fetch(`/corpus/${corpusName}.json`);
+    if (!res.ok) throw new Error(`corpus fetch /corpus/${corpusName}.json failed: HTTP ${res.status}`);
+    const corpus = await res.json();
+    log(`corpus ${corpus.name} fetched (${(corpus.text.length / 1e6).toFixed(1)} MB source, ${corpus.queries.length} queries)`);
+    wl = await runCorpusWorkload({ adapter, corpus, quick, log });
+  } else {
+    wl = await runCompareWorkload({ adapter, quick, log });
+  }
+  return { rows: wl.rows, skipped: wl.skipped, library };
 }
 
 main()
