@@ -75,3 +75,7 @@ serde_json = "1"
 # The live Anthropic client (non-default `live` feature only). Blocking: the loop is
 # synchronous by design and this crate must not drag an async runtime into the tree.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+
+[dev-dependencies]
+# [GPT-5.6] sq-lxw27: metric-law coverage for deterministic dictionary ranking.
+proptest = "1"
