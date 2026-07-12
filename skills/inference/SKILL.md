@@ -206,10 +206,12 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 ## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
 
 RDFox-parity track (`research/stratified-datalog-rules.md`): a small native
-rule dialect with `NOT` (negation as failure), `AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
-atoms and a minimal
-exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
-through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), a
+rule dialect with single/grouped `NOT` (negation as failure),
+`AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG` atoms (including
+`COUNT(DISTINCT ?v)`), variable predicates, and numeric `FILTER` over exact,
+float, and double values. Its **stratification checker** rejects programs with a
+recursion cycle through NOT/AGGREGATE; dependencies are class-granular for
+`rdf:type`, while variable predicates conservatively couple to every relation. It has a
 semi-naive per-stratum evaluator on the shared substrate join kernels, and
 **incrementally maintained materialization** (`MaterializedProgram`: DRed for positive
 strata, stratum-boundary rederivation for `NOT`/`AGGREGATE` strata).
@@ -239,25 +241,31 @@ impl MaterializedProgram {
 ```rust
 let mut dict = Dict::new();
 let rules = parse_program(&mut dict, r#"@prefix ex: <http://ex/> .
-[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .
+[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y], [?y, ex:tag, ?t]
+                               ON ?x BIND COUNT(DISTINCT ?y) AS ?c) .
 [?x, a, ex:Hub]  :- [?x, ex:deg, ?c], FILTER(?c >= 3) .
-[?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."#)?;
+[?x, a, ex:Leaf] :- [?x, a, ex:Node],
+                     NOT { [?x, a, ex:Hub], [?x, ex:disabled, "yes"] } ."#)?;
 let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
 ```
 
-Fragment honesty (all loud parse errors, never silent): constant predicates only;
-aggregate numeric inputs use the shared XSD numeric tower and non-numeric rows fail
-closed; `FILTER` is exact `xsd:integer`/`decimal`
-comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
+Grouped absence accepts `NOT { atom, atom }` or `NOT EXISTS { atom, atom }`; atoms
+may be comma- or period-separated. The whole conjunction is tested jointly, with
+free variables existential and group-local. Legacy `NOT atom` is unchanged. Variable
+predicate atoms scan all relations; a variable head predicate emits only when its
+binding is an IRI. Aggregate numeric inputs use the shared XSD numeric tower and
+non-numeric rows fail closed; `FILTER` uses relational numeric comparison, so NaN
+also fails the row (including `!=`). Head/FILTER vars must be bound positively;
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
-counts DISTINCT body matches per group; counts mint `xsd:integer` literals. `SUM`
+counts distinct full-body matches per group; `COUNT(DISTINCT ?v)` de-duplicates the
+projected value within each group. Counts mint `xsd:integer` literals. `SUM`
 and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
 `MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum.
 Incremental maintenance is differential-pinned (closure == from-scratch `eval` after
 every randomized insert/delete step) and skips strata whose input predicates did not
 change; its per-update set/index bookkeeping is O(affected visible input) — the
 incrementality win is delta-driven RULE-FIRING work (deterministic counters), not set
-ops. <!-- [GPT-5.6] sq-citho --> <!-- [FABLE-5] sq-4foq0 -->
+ops. <!-- [GPT-5.6] sq-citho / sq-a7bmo --> <!-- [FABLE-5] sq-4foq0 -->
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 

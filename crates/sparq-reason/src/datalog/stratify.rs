@@ -22,6 +22,17 @@
 //! `[?y, a, ex:Leaf]` head. An `rdf:type` atom with a VARIABLE class is conservative:
 //! reading one depends on EVERY class; deriving one feeds every class reader.
 //!
+//! **[GPT-5.6] Variable-predicate soundness invariant (sq-a7bmo).** A variable
+//! predicate maps to `Top`, coupled to every concrete predicate, class, and
+//! `TypeAny` node. A `Top` read therefore cannot run below a relation it may inspect;
+//! if `Top` occurs in a head, every relation is also constrained not to run below
+//! facts that head may derive. Every atom of a grouped `NOT` contributes its own
+//! negative edge. Consequently any dynamic predicate choice that could close a
+//! cycle through negation/aggregation is rejected, while a stratified program reads
+//! only completed lower relations. The incremental maintainer mirrors this graph
+//! conservatism with all-predicate relevance flags, so it recomputes the same
+//! stratum boundary whenever any predicate selected through `Top` changes.
+//!
 //! A stratum exceeding the node count proves a positive/negative cycle with
 //! at least one negative edge — reported with the offending predicate/class IRI.
 
@@ -70,17 +81,22 @@ enum Key {
     Pred(Id),
     Class(Id),
     TypeAny,
+    /// Conservative node for any predicate selected by a variable.
+    Top,
 }
 
 /// The dependency node an atom reads from / derives into.
 fn atom_key(atom: &super::Atom, ty: Option<Id>) -> Key {
-    if ty == Some(atom.pred) {
+    let Some(pred) = atom.pred else {
+        return Key::Top;
+    };
+    if ty == Some(pred) {
         match atom.t[2] {
             super::DTerm::Const(c) => Key::Class(c),
             super::DTerm::Var(_) => Key::TypeAny,
         }
     } else {
-        Key::Pred(atom.pred)
+        Key::Pred(pred)
     }
 }
 
@@ -90,8 +106,10 @@ fn rule_edges(rule: &Rule, ty: Option<Id>) -> Vec<(Key, bool)> {
     for a in &rule.positive {
         edges.push((atom_key(a, ty), false));
     }
-    for a in &rule.negated {
-        edges.push((atom_key(a, ty), true));
+    for group in &rule.negated {
+        for a in group {
+            edges.push((atom_key(a, ty), true));
+        }
     }
     for agg in &rule.aggregates {
         for a in &agg.body {
@@ -185,6 +203,25 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
             }
         }
     }
+    // [GPT-5.6] Predicate-level analogue of TypeAny. Top reads the union of every
+    // relation; a Top head may derive into any relation, so couple it back when
+    // such a head exists. Include class-granular and TypeAny nodes: rdf:type is an
+    // RDF predicate too, and omitting those nodes would make negative class cycles
+    // appear stratifiable.
+    if let Some(&top) = node_ix.get(&Key::Top) {
+        let concrete: Vec<usize> = (0..nodes.len()).filter(|&i| i != top).collect();
+        let top_is_head = program
+            .rules
+            .iter()
+            .flat_map(|r| &r.head)
+            .any(|a| atom_key(a, ty) == Key::Top);
+        for c in concrete {
+            edges.push((top, c, false));
+            if top_is_head {
+                edges.push((c, top, false));
+            }
+        }
+    }
     let n = nodes.len();
     let mut stratum = vec![0usize; n];
     loop {
@@ -229,5 +266,6 @@ fn node_name(dict: &Dict, k: Key) -> String {
         Key::Pred(p) => format!("predicate `{}`", iri(p)),
         Key::Class(c) => format!("class `{}` (rdf:type atoms)", iri(c)),
         Key::TypeAny => "the variable-class `rdf:type` relation".to_string(),
+        Key::Top => "the variable-predicate top relation".to_string(),
     }
 }

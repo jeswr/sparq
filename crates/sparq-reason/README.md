@@ -60,12 +60,12 @@ let g = Graph::from_parts(dict, triples);
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Stratified Datalog** (opt-in `datalog`) — a small native rule dialect (RDFox-parity
-  track): `NOT` (negation as failure) + `AGGREGATE … BIND COUNT(?v) AS ?c` atoms and a
-  minimal exact-numeric `FILTER`, with a **stratification checker** (cycles through
-  NOT/AGGREGATE rejected loudly, class-granular for `rdf:type`) and a non-incremental
-  per-stratum evaluator on the shared substrate join kernels. Phase 1 of
-  `research/stratified-datalog-rules.md`; COUNT only, semi-naive + incremental
-  maintenance are beaded follow-ups.
+  track): single or grouped `NOT { atom, atom }` (negation as failure),
+  `AGGREGATE … BIND COUNT(DISTINCT ?v)/SUM/MIN/MAX/AVG(?v) AS ?c`, variable
+  predicates, and numeric `FILTER` over the shared exact/float/double tower. The
+  **stratification checker** rejects cycles through NOT/AGGREGATE and conservatively
+  couples variable predicates to every relation; the semi-naive evaluator and
+  incremental maintainer share that invariant. <!-- [GPT-5.6] sq-a7bmo -->
 - **Quoted-triple inference** (opt-in `quoted-triples`) — RDF 1.2 reifier rules for the
   OWL-RL profile: **reif-dtr** destructures `R rdf:reifies <<( s p o )>>` into the classic
   `rdf:subject`/`rdf:predicate`/`rdf:object` view of `R` (so RL rules reason over reifier

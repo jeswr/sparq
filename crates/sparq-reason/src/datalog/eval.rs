@@ -222,11 +222,10 @@ fn plan_atom(atom: &Atom, bound: &mut FxHashSet<u32>) -> AtomPlan {
 /// Does the fact pass the atom's constant pre-filters (predicate + any constant
 /// subject/object positions)?
 fn atom_admits(atom: &Atom, f: &[Id; 3]) -> bool {
-    f[1] == atom.pred
-        && atom.t.iter().zip(f).all(|(t, id)| match t {
-            DTerm::Const(c) => c == id,
-            DTerm::Var(_) => true,
-        })
+    atom.t.iter().zip(f).all(|(t, id)| match t {
+        DTerm::Const(c) => c == id,
+        DTerm::Var(_) => true,
+    })
 }
 
 /// Candidate facts for one atom, as substrate probe rows `[s, p, o]`: drawn from
@@ -235,10 +234,10 @@ fn atom_admits(atom: &Atom, f: &[Id; 3]) -> bool {
 fn candidates(atom: &Atom, store: &FactStore, delta: Option<&[[Id; 3]]>) -> Vec<Row> {
     let source: &[[Id; 3]] = match delta {
         Some(d) => d,
-        None => store
-            .by_pred
-            .get(&atom.pred)
-            .map_or(&[][..], |v| v.as_slice()),
+        None => match atom.pred {
+            Some(pred) => store.by_pred.get(&pred).map_or(&[][..], |v| v.as_slice()),
+            None => store.list.as_slice(),
+        },
     };
     source
         .iter()
@@ -312,10 +311,16 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
     let distinct: FxHashSet<Row> = rows.into_iter().collect();
     let mut groups: FxHashMap<Vec<Id>, Vec<(Id, Num)>> = FxHashMap::default();
     let mut counts: FxHashMap<Vec<Id>, u64> = FxHashMap::default();
+    let mut distinct_counts: FxHashMap<Vec<Id>, FxHashSet<Id>> = FxHashMap::default();
     for r in &distinct {
         let key: Vec<Id> = agg.on.iter().map(|&(l, _)| r[l as usize]).collect();
         if agg.func == AggFunc::Count {
-            *counts.entry(key).or_insert(0) += 1;
+            if agg.distinct {
+                let value = r[agg.value.expect("COUNT DISTINCT has a value slot") as usize];
+                distinct_counts.entry(key).or_default().insert(value);
+            } else {
+                *counts.entry(key).or_insert(0) += 1;
+            }
         } else {
             let id = r[agg.value.expect("numeric aggregate has a value slot") as usize];
             let oxrdf::Term::Literal(lit) = dict.term(id) else {
@@ -326,6 +331,9 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
             };
             groups.entry(key).or_default().push((id, num));
         }
+    }
+    for (key, values) in distinct_counts {
+        counts.insert(key, values.len() as u64);
     }
     let mut out = Vec::with_capacity(groups.len() + counts.len());
     for (key, cnt) in counts {
@@ -453,15 +461,16 @@ pub(super) fn run_rule(
             return;
         }
     }
-    // NOT: per-row absence check against the (stratum-complete) predicate index.
-    for atom in &rule.negated {
-        rows.retain(|r| !naf_matches(atom, r, &bound, store));
+    // NOT: each group is one existential conjunction over the stratum-complete
+    // store. Group-local wildcard bindings join its atoms and never escape.
+    for group in &rule.negated {
+        rows.retain(|r| !naf_matches(group, r, &bound, store));
         if rows.is_empty() {
             return;
         }
     }
-    // FILTER: exact numeric comparison via the shared substrate tower; a
-    // non-numeric operand fails the row (fail-closed).
+    // FILTER: relational numeric comparison via the shared substrate tower;
+    // non-numeric and NaN operands fail the row (fail-closed).
     for f in &rule.filters {
         rows.retain(|r| {
             let val = |t: &DTerm| match t {
@@ -471,7 +480,9 @@ pub(super) fn run_rule(
             let (Some(a), Some(b)) = (val(&f.a), val(&f.b)) else {
                 return false;
             };
-            let Some(ord) = a.cmp(b) else { return false };
+            let Some(ord) = a.cmp_relational(b) else {
+                return false;
+            };
             match f.op {
                 CmpOp::Eq => ord.is_eq(),
                 CmpOp::Ne => ord.is_ne(),
@@ -492,6 +503,9 @@ pub(super) fn run_rule(
                 resolve(&head.t[1], r),
                 resolve(&head.t[2], r),
             ];
+            if head.pred.is_none() && !matches!(dict.term(g[1]), oxrdf::Term::NamedNode(_)) {
+                continue;
+            }
             if emit_known || !store.all.contains(&g) {
                 out.push(g);
             }
@@ -506,20 +520,34 @@ fn resolve(t: &DTerm, row: &Row) -> Id {
     }
 }
 
-/// Does the `NOT` atom match at least one stored fact under `row`? Bound
-/// variables are correlated values; unbound ones are existential wildcards (a
-/// repeated wildcard within the atom must match equal terms).
-fn naf_matches(atom: &Atom, row: &Row, bound: &FxHashSet<u32>, store: &FactStore) -> bool {
-    let facts = store
-        .by_pred
-        .get(&atom.pred)
-        .map_or(&[][..], |v| v.as_slice());
-    facts.iter().any(|f| {
-        let mut wild: FxHashMap<u32, Id> = FxHashMap::default();
-        atom.t.iter().enumerate().all(|(i, t)| match t {
-            DTerm::Const(id) => f[i] == *id,
-            DTerm::Var(v) if bound.contains(v) => f[i] == row[*v as usize],
-            DTerm::Var(v) => *wild.entry(*v).or_insert(f[i]) == f[i],
+/// Does a negated conjunction have at least one joint match under `row`?
+fn naf_matches(group: &[Atom], row: &Row, bound: &FxHashSet<u32>, store: &FactStore) -> bool {
+    fn search(
+        group: &[Atom],
+        index: usize,
+        row: &Row,
+        bound: &FxHashSet<u32>,
+        wild: &FxHashMap<u32, Id>,
+        store: &FactStore,
+    ) -> bool {
+        if index == group.len() {
+            return true;
+        }
+        let atom = &group[index];
+        let facts: &[[Id; 3]] = match atom.pred {
+            Some(pred) => store.by_pred.get(&pred).map_or(&[][..], |v| v.as_slice()),
+            None => store.list.as_slice(),
+        };
+        facts.iter().any(|fact| {
+            let mut next = wild.clone();
+            let matches = atom.t.iter().enumerate().all(|(i, term)| match term {
+                DTerm::Const(id) => fact[i] == *id,
+                DTerm::Var(v) if bound.contains(v) => fact[i] == row[*v as usize],
+                DTerm::Var(v) => *next.entry(*v).or_insert(fact[i]) == fact[i],
+            });
+            matches && search(group, index + 1, row, bound, &next, store)
         })
-    })
+    }
+
+    search(group, 0, row, bound, &FxHashMap::default(), store)
 }

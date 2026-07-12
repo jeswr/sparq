@@ -1,4 +1,4 @@
-//! [FABLE-5] sq-6tykl.3 — hand-rolled recursive-descent parser for the Phase-1
+//! [FABLE-5] sq-6tykl.3 — hand-rolled recursive-descent parser for the native
 //! stratified-Datalog fragment (see the module docs in [`super`] for the grammar and
 //! the design record `research/stratified-datalog-rules.md` §2 for the dialect
 //! decision). Constants are interned into the caller's [`Dict`] as they are parsed;
@@ -198,7 +198,11 @@ impl Parser<'_> {
         loop {
             self.skip_ws();
             if self.eat_word("NOT") {
-                negated.push(self.atom(&mut scope, "NOT")?);
+                self.skip_ws();
+                // [GPT-5.6] `NOT EXISTS { ... }` is an accepted spelling of the
+                // same grouped existential absence test as `NOT { ... }`.
+                self.eat_word("EXISTS");
+                negated.push(self.negated_group(&mut scope)?);
             } else if self.eat_word("AGGREGATE") {
                 aggregates.push(self.aggregate(&mut scope)?);
             } else if self.eat_word("FILTER") {
@@ -224,6 +228,33 @@ impl Parser<'_> {
         self.validate(&rule, &scope, &aggregates)?;
         self.rules.push(rule);
         Ok(())
+    }
+
+    /// `NOT atom`, `NOT { atom (,|.) atom }`, or `NOT EXISTS { ... }` after
+    /// the caller has consumed the leading keyword(s).
+    fn negated_group(&mut self, scope: &mut Scope) -> Result<Vec<Atom>, String> {
+        self.skip_ws();
+        if !self.eat(b'{') {
+            return Ok(vec![self.atom(scope, "NOT")?]);
+        }
+        let mut atoms = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.eat(b'}') {
+                if atoms.is_empty() {
+                    return Err(self.err("NOT group requires at least one atom"));
+                }
+                return Ok(atoms);
+            }
+            atoms.push(self.atom(scope, "NOT group")?);
+            self.skip_ws();
+            if self.eat(b',') || self.eat(b'.') {
+                continue;
+            }
+            if self.peek() != Some(b'}') {
+                return Err(self.err("expected `,`, `.`, or `}` in NOT group"));
+            }
+        }
     }
 
     /// `AGGREGATE( atom (, atom)* [ON ?g (,? ?g)*] BIND FUNC(?v) AS ?out )`
@@ -280,6 +311,11 @@ impl Parser<'_> {
         self.skip_ws();
         self.expect(b'(')?;
         self.skip_ws();
+        let distinct = self.eat_word("DISTINCT");
+        if distinct && func != AggFunc::Count {
+            return Err(self.err("DISTINCT is currently supported only by COUNT"));
+        }
+        self.skip_ws();
         if !self.eat(b'?') {
             return Err(self.err("expected a `?variable` as the AGGREGATE function argument"));
         }
@@ -289,7 +325,7 @@ impl Parser<'_> {
                 "AGGREGATE `{func_name}(?{cname})`: the variable does not occur in the aggregate body"
             )));
         };
-        let value = (func != AggFunc::Count).then_some(value_slot);
+        let value = (func != AggFunc::Count || distinct).then_some(value_slot);
         self.skip_ws();
         self.expect(b')')?;
         self.skip_ws();
@@ -319,6 +355,7 @@ impl Parser<'_> {
         Ok((
             AggAtom {
                 func,
+                distinct,
                 value,
                 body,
                 on,
@@ -388,7 +425,7 @@ impl Parser<'_> {
         }
     }
 
-    /// `[ term , term , term ]` — the predicate must be a constant.
+    /// `[ term , term , term ]`.
     fn atom(&mut self, scope: &mut Scope, ctx: &str) -> Result<Atom, String> {
         self.skip_ws();
         self.expect(b'[')?;
@@ -401,11 +438,9 @@ impl Parser<'_> {
         let o = self.term(scope, ctx)?;
         self.skip_ws();
         self.expect(b']')?;
-        let DTerm::Const(pred) = p else {
-            return Err(self.err(&format!(
-                "variable predicates are outside the Phase-1 fragment ({ctx} atom) — \
-                 see research/stratified-datalog-rules.md §5"
-            )));
+        let pred = match p {
+            DTerm::Const(id) => Some(id),
+            DTerm::Var(_) => None,
         };
         Ok(Atom { t: [s, p, o], pred })
     }
