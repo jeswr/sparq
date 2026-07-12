@@ -71,7 +71,8 @@ fn trig_inverse_reverse_modes() {
     let fired = |builtin: &str, val: &str| -> bool {
         let src = format!("{PRE}{{ ?t math:{builtin} {val} }} => {{ :r :{builtin} :fired }} .");
         let c = reason_n3_terms(&src, None).expect("reasoning ok").facts;
-        c.iter().any(|f| f[0] == ex("r") && f[1] == ex(builtin) && f[2] == ex("fired"))
+        c.iter()
+            .any(|f| f[0] == ex("r") && f[1] == ex(builtin) && f[2] == ex("fired"))
     };
 
     assert!(fired("cos", "0.5"), "math:cos reverse (acos) — line 2022");
@@ -79,12 +80,30 @@ fn trig_inverse_reverse_modes() {
     assert!(fired("asin", "0.5"), "math:asin reverse (sin) — line 2024");
     assert!(fired("acos", "0.5"), "math:acos reverse (cos) — line 2025");
     assert!(fired("atan", "0.5"), "math:atan reverse (tan) — line 2026");
-    assert!(fired("sinh", "1.0"), "math:sinh reverse (asinh) — line 2027");
-    assert!(fired("cosh", "1.5"), "math:cosh reverse (acosh) — line 2028");
-    assert!(fired("tanh", "0.5"), "math:tanh reverse (atanh) — line 2029");
-    assert!(fired("asinh", "1.0"), "math:asinh reverse (sinh) — line 2030");
-    assert!(fired("acosh", "1.0"), "math:acosh reverse (cosh) — line 2031");
-    assert!(fired("atanh", "0.5"), "math:atanh reverse (tanh) — line 2032");
+    assert!(
+        fired("sinh", "1.0"),
+        "math:sinh reverse (asinh) — line 2027"
+    );
+    assert!(
+        fired("cosh", "1.5"),
+        "math:cosh reverse (acosh) — line 2028"
+    );
+    assert!(
+        fired("tanh", "0.5"),
+        "math:tanh reverse (atanh) — line 2029"
+    );
+    assert!(
+        fired("asinh", "1.0"),
+        "math:asinh reverse (sinh) — line 2030"
+    );
+    assert!(
+        fired("acosh", "1.0"),
+        "math:acosh reverse (cosh) — line 2031"
+    );
+    assert!(
+        fired("atanh", "0.5"),
+        "math:atanh reverse (tanh) — line 2032"
+    );
     assert!(fired("degrees", "1.0"), "math:degrees reverse — line 2033");
     assert!(fired("radians", "1.0"), "math:radians reverse — line 2034");
 }
@@ -95,7 +114,11 @@ fn trig_inverse_reverse_modes() {
 fn trig_inverse_nan_and_non_numeric_fail() {
     // asin(2.0) = NaN: premise must fail (line 2047)
     let c = run("{ ?t math:sin 2.0 } => { :r :asin2 :fired } .");
-    assert!(!r_fired(&c, "asin2"), "asin(2) is NaN — premise must fail; got {:?}", c);
+    assert!(
+        !r_fired(&c, "asin2"),
+        "asin(2) is NaN — premise must fail; got {:?}",
+        c
+    );
 
     // non-numeric object: numval returns None, falls through to return None (lines 2051-2053)
     let c = run("{ ?t math:cos :notANumber } => { :r :cosnop :fired } .");
@@ -119,7 +142,11 @@ fn trig_inverse_nan_and_non_numeric_fail() {
 fn negation_f64_reverse_and_forward_paths() {
     // F64 reverse: `NumVal::F64(x) => NumVal::F64(-x)` — line 2005
     let c = run("{ ?x math:negation 1.5e0 } => { :r :f64rev :fired } .");
-    assert!(r_fired(&c, "f64rev"), "negation F64 reverse must fire; got {:?}", c);
+    assert!(
+        r_fired(&c, "f64rev"),
+        "negation F64 reverse must fire; got {:?}",
+        c
+    );
 
     // non-numeric object: `numval` fails → `return None` — line 2010
     let c = run("{ ?x math:negation :notnum } => { :r :nonnumobj :fired } .");
@@ -148,7 +175,11 @@ fn negation_f64_reverse_and_forward_paths() {
     // forward F64: eval_exact declines (`NumVal::F64(_) => return None`, line 2595),
     // falls to f64 path (`Func::Negation => -nums[0]`, line 2416)
     let c = run("{ 1.5e0 math:negation ?y } => { :r :fwdf64 :fired } .");
-    assert!(r_fired(&c, "fwdf64"), "forward F64 negation must fire; got {:?}", c);
+    assert!(
+        r_fired(&c, "fwdf64"),
+        "forward F64 negation must fire; got {:?}",
+        c
+    );
 
     // bound-subject forward via a data fact: exercises line 2011 (closing brace
     // of `if !s_applied.is_ground()`) when `?n` is already bound.
@@ -174,7 +205,11 @@ fn abs_decimal_and_f64_paths() {
     );
 
     let c = run("{ -1.5e0 math:absoluteValue ?y } => { :r :absf64 :fired } .");
-    assert!(r_fired(&c, "absf64"), "absoluteValue F64 must fire; got {:?}", c);
+    assert!(
+        r_fired(&c, "absf64"),
+        "absoluteValue F64 must fire; got {:?}",
+        c
+    );
 }
 
 // ---- string builtins: containsRoughly, equalIgnoringCase, notEqualIgnoringCase -
@@ -187,13 +222,16 @@ fn string_predicates_roughly_and_case() {
 
     // string:containsRoughly (lines 1368-1369) — case-insensitive substring
     let c = reason_n3_terms(
-        &format!("{sp}{{ \"Hello World\" string:containsRoughly \"hello\" }} => {{ :r :cr :fired }} ."),
+        &format!(
+            "{sp}{{ \"Hello World\" string:containsRoughly \"hello\" }} => {{ :r :cr :fired }} ."
+        ),
         None,
     )
     .expect("ok")
     .facts;
     assert!(
-        c.iter().any(|f| f[0] == ex("r") && f[1] == ex("cr") && f[2] == ex("fired")),
+        c.iter()
+            .any(|f| f[0] == ex("r") && f[1] == ex("cr") && f[2] == ex("fired")),
         "containsRoughly must fire; got {:?}",
         c
     );
@@ -246,10 +284,12 @@ fn string_predicates_roughly_and_case() {
 #[test]
 fn string_format_percent_f_and_excess_args() {
     // %f: C-style fixed-point 6 decimal places — line 2147-2149
-    let c = run(
-        "{ ( \"%f\" 3.14 ) string:format ?s } => { :r :fmt ?s } .",
+    let c = run("{ ( \"%f\" 3.14 ) string:format ?s } => { :r :fmt ?s } .");
+    assert!(
+        r_pred(&c, "fmt"),
+        "format %%f must bind a string; got {:?}",
+        c
     );
-    assert!(r_pred(&c, "fmt"), "format %%f must bind a string; got {:?}", c);
     // verify the result contains the decimal separator
     let v = c
         .iter()
@@ -276,26 +316,47 @@ fn string_concat_numeric_coercions() {
     // integer coercion (line 2178): `5` as "5"
     let c = run("{ ( \"x\" 5 ) string:concatenation ?s } => { :r :cint ?s } .");
     assert!(
-        has(&c, &ex("r"), &ex("cint"), &typed_lit("x5", "http://www.w3.org/2001/XMLSchema#string")),
+        has(
+            &c,
+            &ex("r"),
+            &ex("cint"),
+            &typed_lit("x5", "http://www.w3.org/2001/XMLSchema#string")
+        ),
         "concat integer must give 'x5'; got {:?}",
         c
     );
 
     // decimal integer-valued: `3.0` → scale=0 path (line 2182)
     let c = run("{ ( \"y\" 3.0 ) string:concatenation ?s } => { :r :cdec0 ?s } .");
-    assert!(r_pred(&c, "cdec0"), "concat decimal 3.0 must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "cdec0"),
+        "concat decimal 3.0 must fire; got {:?}",
+        c
+    );
 
     // decimal non-integer: `2.5` → lex path (line 2183-2185)
     let c = run("{ ( \"z\" 2.5 ) string:concatenation ?s } => { :r :cdec ?s } .");
-    assert!(r_pred(&c, "cdec"), "concat decimal 2.5 must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "cdec"),
+        "concat decimal 2.5 must fire; got {:?}",
+        c
+    );
 
     // F64 integer-valued: `2.0e0` → integer format (line 2189-2190)
     let c = run("{ ( \"a\" 2.0e0 ) string:concatenation ?s } => { :r :cf64i ?s } .");
-    assert!(r_pred(&c, "cf64i"), "concat F64 2.0e0 must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "cf64i"),
+        "concat F64 2.0e0 must fire; got {:?}",
+        c
+    );
 
     // F64 non-integer: `1.5e0` → non-integer format (lines 2191-2192)
     let c = run("{ ( \"b\" 1.5e0 ) string:concatenation ?s } => { :r :cf64f ?s } .");
-    assert!(r_pred(&c, "cf64f"), "concat F64 1.5e0 must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "cf64f"),
+        "concat F64 1.5e0 must fire; got {:?}",
+        c
+    );
 }
 
 // ---- f64 arithmetic path with double inputs ---------------------------------
@@ -321,11 +382,19 @@ fn f64_path_with_double_inputs() {
 
     // Difference — lines 2378-2379
     let c = run("{ ( 5.0e0 2.0e0 ) math:difference ?y } => { :r :diff ?y } .");
-    assert!(r_pred(&c, "diff"), "double difference must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "diff"),
+        "double difference must fire; got {:?}",
+        c
+    );
 
     // Exponentiation — lines 2389-2390
     let c = run("{ ( 2.0e0 3.0e0 ) math:exponentiation ?y } => { :r :exp ?y } .");
-    assert!(r_pred(&c, "exp"), "double exponentiation must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "exp"),
+        "double exponentiation must fire; got {:?}",
+        c
+    );
 
     // Remainder on doubles returns None (integer-only) — line 2408
     let c = run("{ ( 2.0e0 3.0e0 ) math:remainder ?y } => { :r :remf :fired } .");
@@ -337,15 +406,27 @@ fn f64_path_with_double_inputs() {
 
     // Remainder with 3 args (wrong count) → eval_exact line 2575, f64 line 2408
     let c = run("{ ( 1 2 3 ) math:remainder ?y } => { :r :remn :fired } .");
-    assert!(!r_fired(&c, "remn"), "3-arg remainder must fail; got {:?}", c);
+    assert!(
+        !r_fired(&c, "remn"),
+        "3-arg remainder must fail; got {:?}",
+        c
+    );
 
     // IntegerQuotient zero-divisor: eval_exact line 2588, f64 lines 2410-2412
     let c = run("{ ( 5 0 ) math:integerQuotient ?y } => { :r :iqz :fired } .");
-    assert!(!r_fired(&c, "iqz"), "integerQuotient /0 must fail; got {:?}", c);
+    assert!(
+        !r_fired(&c, "iqz"),
+        "integerQuotient /0 must fail; got {:?}",
+        c
+    );
 
     // IntegerQuotient non-zero double inputs: f64 lines 2413-2414
     let c = run("{ ( 10.0e0 3.0e0 ) math:integerQuotient ?y } => { :r :iqdbl ?y } .");
-    assert!(r_pred(&c, "iqdbl"), "double integerQuotient must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "iqdbl"),
+        "double integerQuotient must fire; got {:?}",
+        c
+    );
 
     // Negation, AbsoluteValue, Rounded, Floor, Ceiling on doubles — lines 2416-2420;
     // eval_exact declines F64 first
@@ -359,7 +440,11 @@ fn f64_path_with_double_inputs() {
         let c = run(&format!(
             "{{ 1.5e0 math:{builtin} ?y }} => {{ :r :{label} :fired }} ."
         ));
-        assert!(r_fired(&c, label), "double {builtin} must fire; got {:?}", c);
+        assert!(
+            r_fired(&c, label),
+            "double {builtin} must fire; got {:?}",
+            c
+        );
     }
 
     // Atan forward (trig-family double) — line 2426
@@ -377,11 +462,19 @@ fn f64_path_with_double_inputs() {
     // Non-exact integer quotient: eval_exact non-exact loop + number_term non-integer
     // f64 result — lines 2555-2562, 2447, 2771
     let c = run("{ ( 10 3 ) math:quotient ?y } => { :r :inxq :fired } .");
-    assert!(r_fired(&c, "inxq"), "non-exact quotient (10/3) must fire; got {:?}", c);
+    assert!(
+        r_fired(&c, "inxq"),
+        "non-exact quotient (10/3) must fire; got {:?}",
+        c
+    );
 
     // Atan2 with y=0 returns None — line 2404
     let c = run("{ ( 1.0 0.0 ) math:atan2 ?y } => { :r :at2z :fired } .");
-    assert!(!r_fired(&c, "at2z"), "atan2 with y=0 must fail; got {:?}", c);
+    assert!(
+        !r_fired(&c, "at2z"),
+        "atan2 with y=0 must fail; got {:?}",
+        c
+    );
 }
 
 // ---- eval_exact decimal arithmetic ------------------------------------------
@@ -401,7 +494,11 @@ fn eval_exact_decimal_arithmetic() {
 
     // Decimal product (Dec arm for v, line 2527)
     let c = run("{ ( 3.0 2.5 ) math:product ?y } => { :r :dprod ?y } .");
-    assert!(r_pred(&c, "dprod"), "decimal product 3.0*2.5 must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "dprod"),
+        "decimal product 3.0*2.5 must fire; got {:?}",
+        c
+    );
 
     // Decimal product with F64 first arg: eval_exact F64 arm (line 2528) → falls
     // to f64 path (line 2374)
@@ -450,7 +547,11 @@ fn eval_exact_decimal_arithmetic() {
 
     // eval_exact AbsoluteValue decimal (line 2599)
     let c = run("{ -4.5 math:absoluteValue ?y } => { :r :absdec2 ?y } .");
-    assert!(r_pred(&c, "absdec2"), "decimal absoluteValue must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "absdec2"),
+        "decimal absoluteValue must fire; got {:?}",
+        c
+    );
 
     // eval_exact Floor/Ceiling on integer — lines 2607-2608, 2611-2612
     let c = run("{ 3.7 math:floor ?y } => { :r :flr ?y } .");
@@ -493,11 +594,19 @@ fn eval_exact_decimal_arithmetic() {
     // eval_exact Exponentiation: exponent out of range (>64) — eval_exact returns None
     // (line 2622), falls to f64 path which still succeeds
     let c = run("{ ( 2 65 ) math:exponentiation ?y } => { :r :expoor :fired } .");
-    assert!(r_fired(&c, "expoor"), "2^65 falls to f64 path and fires; got {:?}", c);
+    assert!(
+        r_fired(&c, "expoor"),
+        "2^65 falls to f64 path and fires; got {:?}",
+        c
+    );
 
     // wrong arg count (3 args) → eval_exact line 2619, f64 two() fails → rule absent
     let c = run("{ ( 2 3 4 ) math:exponentiation ?y } => { :r :expwrong :fired } .");
-    assert!(!r_fired(&c, "expwrong"), "3-arg exponentiation must fail; got {:?}", c);
+    assert!(
+        !r_fired(&c, "expwrong"),
+        "3-arg exponentiation must fail; got {:?}",
+        c
+    );
 }
 
 // ---- datetime InSeconds with timezone offset --------------------------------
@@ -511,14 +620,22 @@ fn datetime_inseconds_with_negative_utc_offset() {
         "{ \"2024-01-01T15:00:00-05:00\"^^xsd:dateTime time:inSeconds ?s } ",
         "=> { :r :tz ?s } ."
     ));
-    assert!(r_pred(&c, "tz"), "inSeconds with negative offset must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "tz"),
+        "inSeconds with negative offset must fire; got {:?}",
+        c
+    );
 
     // positive offset also exercises the timezone path
     let c = run(concat!(
         "{ \"2024-01-01T07:30:00+05:30\"^^xsd:dateTime time:inSeconds ?s } ",
         "=> { :r :tzp ?s } ."
     ));
-    assert!(r_pred(&c, "tzp"), "inSeconds with positive offset must fire; got {:?}", c);
+    assert!(
+        r_pred(&c, "tzp"),
+        "inSeconds with positive offset must fire; got {:?}",
+        c
+    );
 }
 
 // ---- reason_n3_terms_with_resolver with explicit base -----------------------
@@ -561,7 +678,10 @@ fn fallback_lang_tag_and_special_chars() {
     ]];
     let g = MaterializedN3Graph::new(rules, &base_lang).expect("rules parse");
     assert_eq!(g.mode(), N3Mode::Fallback, "backward rule forces fallback");
-    assert!(!g.is_empty(), "non-empty fallback closure; is_empty() = false (lines 2724-2726)");
+    assert!(
+        !g.is_empty(),
+        "non-empty fallback closure; is_empty() = false (lines 2724-2726)"
+    );
 
     // Special chars in literal lexical form — n3_quote_into lines 2265-2269
     let base_esc = vec![[
@@ -606,10 +726,13 @@ fn fallback_blank_var_and_list_in_base() {
     // List subject: `n3_write_term(List)` → `( elem … )` — lines 2307-2313;
     // N3 list-in-subject position is valid syntax (expands to rdf:first/rest).
     let base_list = vec![[
-        Term::List(vec![Term::Iri("http://ex/a".into()), Term::Iri("http://ex/b".into())]),
+        Term::List(vec![
+            Term::Iri("http://ex/a".into()),
+            Term::Iri("http://ex/b".into()),
+        ]),
         Term::Iri("http://ex/p".into()),
         Term::Iri("http://ex/o".into()),
     ]];
-    let _gl = MaterializedN3Graph::new(rules, &base_list)
-        .expect("rules parse with list subject in base");
+    let _gl =
+        MaterializedN3Graph::new(rules, &base_list).expect("rules parse with list subject in base");
 }

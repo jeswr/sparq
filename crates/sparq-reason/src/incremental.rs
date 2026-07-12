@@ -178,10 +178,12 @@ impl MaterializedGraph {
         // 4. TBox-closure facts (rdfs11 / rdfs5), maintained as a set of their own.
         self.schema_facts.clear();
         for (&c, ds) in &self.sc_closure {
-            self.schema_facts.extend(ds.iter().map(|&d| [c, v.sub_class, d]));
+            self.schema_facts
+                .extend(ds.iter().map(|&d| [c, v.sub_class, d]));
         }
         for (&p, qs) in &self.sp_closure {
-            self.schema_facts.extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
+            self.schema_facts
+                .extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
         }
         #[cfg(feature = "explain")]
         self.explain.rebuild(&self.base, sc, sp, dom, rng);
@@ -295,7 +297,12 @@ impl MaterializedGraph {
         self.base
             .iter()
             .copied()
-            .chain(self.counts.keys().copied().filter(|t| !self.base.contains(t)))
+            .chain(
+                self.counts
+                    .keys()
+                    .copied()
+                    .filter(|t| !self.base.contains(t)),
+            )
             .chain(
                 self.schema_facts
                     .iter()
@@ -457,7 +464,10 @@ impl OwlIds {
         let xsd: Vec<(Id, Id)> = XSD_HIERARCHY
             .iter()
             .map(|&(a, b)| {
-                (dict.intern_iri(&format!("{XSD_NS}{a}")), dict.intern_iri(&format!("{XSD_NS}{b}")))
+                (
+                    dict.intern_iri(&format!("{XSD_NS}{a}")),
+                    dict.intern_iri(&format!("{XSD_NS}{b}")),
+                )
             })
             .collect();
         let mut special: FxHashSet<Id> = xsd.iter().flat_map(|&(a, b)| [a, b]).collect();
@@ -593,8 +603,14 @@ impl MaterializedOwlGraph {
         ]
         .into_iter()
         .collect();
-        let axiom_types: FxHashSet<Id> =
-            [ow.symmetric, ow.transitive, ow.functional, ow.inv_functional].into_iter().collect();
+        let axiom_types: FxHashSet<Id> = [
+            ow.symmetric,
+            ow.transitive,
+            ow.functional,
+            ow.inv_functional,
+        ]
+        .into_iter()
+        .collect();
         let mut g = MaterializedOwlGraph {
             v,
             ow,
@@ -737,7 +753,12 @@ impl MaterializedOwlGraph {
             if reserved.iter().any(|&id| in_prop_graph(id)) {
                 fallback = true;
             }
-            let axioms = [ow.symmetric, ow.transitive, ow.functional, ow.inv_functional];
+            let axioms = [
+                ow.symmetric,
+                ow.transitive,
+                ow.functional,
+                ow.inv_functional,
+            ];
             let in_class_graph = |id: Id| {
                 sc.contains_key(&id)
                     || sc.values().any(|ds| ds.contains(&id))
@@ -788,7 +809,11 @@ impl MaterializedOwlGraph {
         self.transitive = transitive;
 
         let fixpoint_mode = !self.transitive.is_empty();
-        self.mode = if fixpoint_mode { OwlMode::CountingFixpoint } else { OwlMode::CountingMono };
+        self.mode = if fixpoint_mode {
+            OwlMode::CountingFixpoint
+        } else {
+            OwlMode::CountingMono
+        };
 
         // ---- 5. Domain/range closure ----
         if fixpoint_mode {
@@ -800,16 +825,15 @@ impl MaterializedOwlGraph {
                 let df = close_dr(&d, &self.sp_closure, &self.sc_closure);
                 let rf = close_dr(&r, &self.sp_closure, &self.sc_closure);
                 let mut changed = false;
-                let add =
-                    |m: &mut FxHashMap<Id, Vec<Id>>, q: Id, cs: &[Id], changed: &mut bool| {
-                        let e = m.entry(q).or_default();
-                        for &c in cs {
-                            if !e.contains(&c) {
-                                e.push(c);
-                                *changed = true;
-                            }
+                let add = |m: &mut FxHashMap<Id, Vec<Id>>, q: Id, cs: &[Id], changed: &mut bool| {
+                    let e = m.entry(q).or_default();
+                    for &c in cs {
+                        if !e.contains(&c) {
+                            e.push(c);
+                            *changed = true;
                         }
-                    };
+                    }
+                };
                 for (&p, qs) in &inverse {
                     for &q in qs {
                         if let Some(cs) = df.get(&p) {
@@ -903,19 +927,26 @@ impl MaterializedOwlGraph {
 
         // ---- 9. Schema facts (rebuilt wholesale; never touched by ABox deltas) ----
         for (&c, ds) in &self.sc_closure {
-            self.schema_facts.extend(ds.iter().map(|&d| [c, v.sub_class, d]));
+            self.schema_facts
+                .extend(ds.iter().map(|&d| [c, v.sub_class, d]));
         }
         for (&p, qs) in &self.sp_closure {
-            self.schema_facts.extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
+            self.schema_facts
+                .extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
         }
         for (&p, cs) in &self.dom_used {
-            self.schema_facts.extend(cs.iter().map(|&c| [p, v.domain, c]));
+            self.schema_facts
+                .extend(cs.iter().map(|&c| [p, v.domain, c]));
         }
         for (&p, cs) in &self.rng_used {
-            self.schema_facts.extend(cs.iter().map(|&c| [p, v.range, c]));
+            self.schema_facts
+                .extend(cs.iter().map(|&c| [p, v.range, c]));
         }
         // post_equivalences (scm-eqc2/eqp2): mutual subsumption ⊢ equivalence, both ways.
-        for (rel, eq) in [(&self.sc_closure, ow.equiv_class), (&self.sp_closure, ow.equiv_prop)] {
+        for (rel, eq) in [
+            (&self.sc_closure, ow.equiv_class),
+            (&self.sp_closure, ow.equiv_prop),
+        ] {
             for (&a, bs) in rel {
                 for &b in bs {
                     if a != b && rel.get(&b).is_some_and(|r| r.contains(&a)) {
@@ -964,7 +995,11 @@ impl MaterializedOwlGraph {
             // `prop_expand_keeps_domain_range_only_properties`).
             let entries: &[(Id, bool)] = self.px.get(&p).map_or(&[], |e| e);
             let identity = [(p, false)];
-            let entries = if entries.is_empty() { &identity[..] } else { entries };
+            let entries = if entries.is_empty() {
+                &identity[..]
+            } else {
+                entries
+            };
             for &(r, swap) in entries {
                 let (rs, ro) = if swap { (o, s) } else { (s, o) };
                 if r != p || swap {
@@ -1030,7 +1065,13 @@ impl MaterializedOwlGraph {
         order.sort_unstable();
         let mut edges: FxHashMap<Id, FxHashSet<(Id, Id)>> = FxHashMap::default();
         for &r in &order {
-            edges.insert(r, self.e0.get(&r).map(|m| m.keys().copied().collect()).unwrap_or_default());
+            edges.insert(
+                r,
+                self.e0
+                    .get(&r)
+                    .map(|m| m.keys().copied().collect())
+                    .unwrap_or_default(),
+            );
         }
         loop {
             let mut changed = false;
@@ -1069,8 +1110,15 @@ impl MaterializedOwlGraph {
     /// entering/leaving layer fact adjusts its own +1 support and its emission multiset.
     fn refresh_virtual(&mut self) {
         let new_virtual = self.compute_virtual();
-        let added: Vec<[Id; 3]> = new_virtual.difference(&self.virtual_facts).copied().collect();
-        let removed: Vec<[Id; 3]> = self.virtual_facts.difference(&new_virtual).copied().collect();
+        let added: Vec<[Id; 3]> = new_virtual
+            .difference(&self.virtual_facts)
+            .copied()
+            .collect();
+        let removed: Vec<[Id; 3]> = self
+            .virtual_facts
+            .difference(&new_virtual)
+            .copied()
+            .collect();
         if added.is_empty() && removed.is_empty() {
             return;
         }
@@ -1108,7 +1156,9 @@ impl MaterializedOwlGraph {
             if p == self.v.ty {
                 continue;
             }
-            let Some(feeds) = self.inflow.get(&p) else { continue };
+            let Some(feeds) = self.inflow.get(&p) else {
+                continue;
+            };
             for &(r, swap) in feeds {
                 let e = if swap { (o, s) } else { (s, o) };
                 let m = self.e0.entry(r).or_default();
@@ -1225,7 +1275,11 @@ impl MaterializedOwlGraph {
             return self.fallback_closure.len();
         }
         let mut n = self.base.len();
-        n += self.counts.keys().filter(|t| !self.base.contains(*t)).count();
+        n += self
+            .counts
+            .keys()
+            .filter(|t| !self.base.contains(*t))
+            .count();
         n += self
             .schema_facts
             .iter()
@@ -1432,8 +1486,14 @@ impl N3Index {
             return false;
         }
         let [s, p, o] = f;
-        self.pred.entry(p.clone()).or_default().push([s.clone(), p.clone(), o.clone()]);
-        self.ps.entry((p.clone(), s.clone())).or_default().push(o.clone());
+        self.pred
+            .entry(p.clone())
+            .or_default()
+            .push([s.clone(), p.clone(), o.clone()]);
+        self.ps
+            .entry((p.clone(), s.clone()))
+            .or_default()
+            .push(o.clone());
         self.po.entry((p, o)).or_default().push(s);
         true
     }
@@ -1478,7 +1538,10 @@ impl N3Index {
         }
         if o_ground {
             return match self.po.get(&(p.clone(), o.clone())) {
-                Some(subs) => subs.iter().map(|sub| [sub.clone(), p.clone(), o.clone()]).collect(),
+                Some(subs) => subs
+                    .iter()
+                    .map(|sub| [sub.clone(), p.clone(), o.clone()])
+                    .collect(),
                 None => Vec::new(),
             };
         }
@@ -1501,11 +1564,20 @@ enum N3Builtin {
 enum N3Atom {
     /// A store join; `plain_ix` is its position among the rule's plain atoms (the
     /// delta-rewriting partitions by it).
-    Plain { pat: [N3Term; 3], plain_ix: usize },
-    Builtin { op: N3Builtin, s: N3Term, o: N3Term },
+    Plain {
+        pat: [N3Term; 3],
+        plain_ix: usize,
+    },
+    Builtin {
+        op: N3Builtin,
+        s: N3Term,
+        o: N3Term,
+    },
     /// `?UNSCOPED log:notIncludes { inner… }`: passes a binding iff the inner conjunction has
     /// NO match in the (input-only) guard predicates' extents.
-    Guard { inner: Vec<[N3Term; 3]> },
+    Guard {
+        inner: Vec<[N3Term; 3]>,
+    },
 }
 
 #[derive(Clone)]
@@ -1709,8 +1781,11 @@ fn eval_n3_builtin(
                 match m {
                     N3Term::Lit(v, dt, _) => {
                         match dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") {
-                            Some("boolean") => out
-                                .push_str(if v == "0" || v == "false" { "false" } else { "true" }),
+                            Some("boolean") => out.push_str(if v == "0" || v == "false" {
+                                "false"
+                            } else {
+                                "true"
+                            }),
                             Some("integer") => match v.trim().parse::<i128>() {
                                 Ok(i) => out.push_str(&i.to_string()),
                                 Err(_) => out.push_str(v),
@@ -1757,7 +1832,9 @@ fn eval_n3_builtin(
                 unsupported.set(true);
                 return None;
             }
-            let N3Term::Lit(v, _, _) = &sv else { return None };
+            let N3Term::Lit(v, _, _) = &sv else {
+                return None;
+            };
             let lit = N3Term::Lit(crate::n3::encode_for_uri(v), N3_XSD_STRING.into(), None);
             let mut nb = b.clone();
             n3_unify(o, &lit, &mut nb).then_some(nb)
@@ -1831,8 +1908,8 @@ fn n3_fire(rule: &N3CompiledRule, cx: &N3Cx, seed: Option<(usize, &[N3Term; 3])>
                     }
                 }
                 N3Atom::Plain { pat, .. } => {
-                    let score = i32::from(anchored(&pat[0], &bound))
-                        + i32::from(anchored(&pat[2], &bound));
+                    let score =
+                        i32::from(anchored(&pat[0], &bound)) + i32::from(anchored(&pat[2], &bound));
                     if score > best_score {
                         best_score = score;
                         pick = Some(i);
@@ -1932,9 +2009,9 @@ fn n3_term_vars(t: &N3Term, out: &mut FxHashSet<String>) {
             out.insert(v.clone());
         }
         N3Term::List(ms) => ms.iter().for_each(|m| n3_term_vars(m, out)),
-        N3Term::Formula(ts) => {
-            ts.iter().for_each(|r| r.iter().for_each(|m| n3_term_vars(m, out)))
-        }
+        N3Term::Formula(ts) => ts
+            .iter()
+            .for_each(|r| r.iter().for_each(|m| n3_term_vars(m, out))),
         _ => {}
     }
 }
@@ -1951,7 +2028,10 @@ fn n3_order_premise(premise: &[[N3Term; 3]]) -> Vec<[N3Term; 3]> {
     };
     let is_scope = |p: &N3Term| {
         n3_pred_iri(p).is_some_and(|i| {
-            matches!(i.strip_prefix(N3_LOG), Some("includes" | "notIncludes" | "supports"))
+            matches!(
+                i.strip_prefix(N3_LOG),
+                Some("includes" | "notIncludes" | "supports")
+            )
         })
     };
     let mut remaining: Vec<usize> = (0..premise.len()).collect();
@@ -2022,7 +2102,11 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
                         return Err(format!("rule {rix}: formula argument to builtin {p}"));
                     }
                 }
-                atoms.push(N3Atom::Builtin { op, s: pat[0].clone(), o: pat[2].clone() });
+                atoms.push(N3Atom::Builtin {
+                    op,
+                    s: pat[0].clone(),
+                    o: pat[2].clone(),
+                });
                 continue;
             }
             if p == not_includes {
@@ -2033,7 +2117,9 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
                     ));
                 };
                 let N3Term::Formula(inner) = &pat[2] else {
-                    return Err(format!("rule {rix}: log:notIncludes object is not a formula"));
+                    return Err(format!(
+                        "rule {rix}: log:notIncludes object is not a formula"
+                    ));
                 };
                 if inner.is_empty() {
                     return Err(format!("rule {rix}: empty log:notIncludes pattern"));
@@ -2051,7 +2137,9 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
                     guard_preds.insert(ip.to_string());
                 }
                 guard_subject_vars.push(sv.clone());
-                atoms.push(N3Atom::Guard { inner: inner.clone() });
+                atoms.push(N3Atom::Guard {
+                    inner: inner.clone(),
+                });
                 continue;
             }
             if p.starts_with(SWAP_NS) || p == N3_RDF_FIRST || p == N3_RDF_REST {
@@ -2064,7 +2152,10 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
                 ));
             }
             premise_preds.insert(p.to_string());
-            atoms.push(N3Atom::Plain { pat: pat.clone(), plain_ix: n_plain });
+            atoms.push(N3Atom::Plain {
+                pat: pat.clone(),
+                plain_ix: n_plain,
+            });
             n_plain += 1;
         }
         // [OPUS-4.8] Counting propagation seeds emissions ONLY from N3Atom::Plain premise atoms
@@ -2092,17 +2183,23 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
                 })
                 .sum();
             if occurrences > 1 {
-                return Err(format!("rule {rix}: notIncludes subject ?{sv} is used elsewhere"));
+                return Err(format!(
+                    "rule {rix}: notIncludes subject ?{sv} is used elsewhere"
+                ));
             }
         }
         // Conclusions: simple ground-predicate atoms, no blanks (existentials).
         let mut conclusion_preds = FxHashSet::default();
         for c in &rule.conclusion {
             let Some(cp) = n3_pred_iri(&c[1]) else {
-                return Err(format!("rule {rix}: variable/non-IRI predicate in conclusion"));
+                return Err(format!(
+                    "rule {rix}: variable/non-IRI predicate in conclusion"
+                ));
             };
             if cp.starts_with(SWAP_NS) {
-                return Err(format!("rule {rix}: SWAP-vocabulary conclusion predicate {cp}"));
+                return Err(format!(
+                    "rule {rix}: SWAP-vocabulary conclusion predicate {cp}"
+                ));
             }
             if !n3_simple_term(&c[0]) || !n3_simple_term(&c[2]) {
                 return Err(format!(
@@ -2127,7 +2224,9 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
     }
     for r in &raws {
         if let Some(p) = r.conclusion_preds.iter().find(|p| guard_preds.contains(*p)) {
-            return Err(format!("negation over derived predicate {p} (not input-stratified)"));
+            return Err(format!(
+                "negation over derived predicate {p} (not input-stratified)"
+            ));
         }
     }
     // Predicate dependency graph → SCCs → recursive layers.
@@ -2155,9 +2254,7 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
     let sccs = n3_sccs(nodes.len(), &edges);
     let recursive: Vec<&Vec<usize>> = sccs
         .iter()
-        .filter(|scc| {
-            scc.len() > 1 || edges.get(&scc[0]).is_some_and(|e| e.contains(&scc[0]))
-        })
+        .filter(|scc| scc.len() > 1 || edges.get(&scc[0]).is_some_and(|e| e.contains(&scc[0])))
         .collect();
     let scc_of: FxHashMap<usize, usize> = recursive
         .iter()
@@ -2168,8 +2265,10 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
     let mut layer_in: Vec<FxHashSet<String>> = vec![FxHashSet::default(); recursive.len()];
     let mut counted = Vec::new();
     for r in &raws {
-        let compiled =
-            N3CompiledRule { atoms: r.atoms.clone(), conclusions: r.conclusions.clone() };
+        let compiled = N3CompiledRule {
+            atoms: r.atoms.clone(),
+            conclusions: r.conclusions.clone(),
+        };
         let in_sccs: FxHashSet<usize> = r
             .conclusion_preds
             .iter()
@@ -2179,9 +2278,13 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
             0 => counted.push(compiled),
             1 => {
                 let k = *in_sccs.iter().next().unwrap();
-                if !r.conclusion_preds.iter().all(|p| scc_of.get(&node_ix[p]) == Some(&k)) {
+                if !r
+                    .conclusion_preds
+                    .iter()
+                    .all(|p| scc_of.get(&node_ix[p]) == Some(&k))
+                {
                     return Err(
-                        "rule concludes both inside and outside a recursive component".into()
+                        "rule concludes both inside and outside a recursive component".into(),
                     );
                 }
                 layer_in[k].extend(r.premise_preds.iter().cloned());
@@ -2196,16 +2299,28 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
         .map(|(k, scc)| {
             let mut relevant = std::mem::take(&mut layer_in[k]);
             relevant.extend(scc.iter().map(|&n| nodes[n].clone()));
-            N3LayerDef { rules: std::mem::take(&mut layer_rules[k]), relevant }
+            N3LayerDef {
+                rules: std::mem::take(&mut layer_rules[k]),
+                relevant,
+            }
         })
         .collect();
-    Ok(N3Compiled { counted, layers, guard_preds })
+    Ok(N3Compiled {
+        counted,
+        layers,
+        guard_preds,
+    })
 }
 
 /// Iterative Tarjan SCC; emitted in DEPENDENCY-FIRST (topological) order of the condensation.
 fn n3_sccs(n: usize, edges: &FxHashMap<usize, FxHashSet<usize>>) -> Vec<Vec<usize>> {
     let succ: Vec<Vec<usize>> = (0..n)
-        .map(|i| edges.get(&i).map(|s| s.iter().copied().collect()).unwrap_or_default())
+        .map(|i| {
+            edges
+                .get(&i)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default()
+        })
         .collect();
     let mut index = vec![usize::MAX; n];
     let mut low = vec![0usize; n];
@@ -2386,14 +2501,18 @@ impl MaterializedN3Graph {
     /// into every count — and `log:implies`-family predicates, which the batch engine would
     /// parse as RULES.)
     fn triggers_rebuild(&self, t: &[N3Term; 3]) -> bool {
-        let Some(p) = n3_pred_iri(&t[1]) else { return true };
+        let Some(p) = n3_pred_iri(&t[1]) else {
+            return true;
+        };
         if p == n3_iri(N3_LOG, "implies")
             || p == n3_iri(N3_LOG, "isImpliedBy")
             || p == n3_iri(N3_LOG, "impliedBy")
         {
             return true;
         }
-        self.compiled.as_ref().is_some_and(|c| c.guard_preds.contains(p))
+        self.compiled
+            .as_ref()
+            .is_some_and(|c| c.guard_preds.contains(p))
     }
 
     fn rematerialize(&mut self) {
@@ -2447,7 +2566,9 @@ impl MaterializedN3Graph {
     /// Round-based delta propagation (sign-homogeneous; see the module notes). Returns false
     /// if evaluation met unsupported data — the caller re-materializes via the engine.
     fn propagate(&mut self, mut pending: Vec<[N3Term; 3]>, inserting: bool) -> bool {
-        let Some(compiled) = self.compiled.clone() else { return false };
+        let Some(compiled) = self.compiled.clone() else {
+            return false;
+        };
         let unsupported = Cell::new(false);
         while !pending.is_empty() {
             let pend_set: FxHashSet<[N3Term; 3]> = pending.iter().cloned().collect();
@@ -2469,7 +2590,9 @@ impl MaterializedN3Graph {
                 };
                 for rule in &compiled.counted {
                     for atom in &rule.atoms {
-                        let N3Atom::Plain { pat, plain_ix } = atom else { continue };
+                        let N3Atom::Plain { pat, plain_ix } = atom else {
+                            continue;
+                        };
                         for f in &pending {
                             if f[1] != pat[1] {
                                 continue;
@@ -2521,9 +2644,8 @@ impl MaterializedN3Graph {
             // 2. Recursive layers (dependency order), recomputed when touched.
             for li in 0..compiled.layers.len() {
                 let def = &compiled.layers[li];
-                let relevant = |f: &[N3Term; 3]| {
-                    n3_pred_iri(&f[1]).is_some_and(|p| def.relevant.contains(p))
-                };
+                let relevant =
+                    |f: &[N3Term; 3]| n3_pred_iri(&f[1]).is_some_and(|p| def.relevant.contains(p));
                 if !pending.iter().any(relevant) && !next.iter().any(relevant) {
                     continue;
                 }
@@ -2599,11 +2721,17 @@ impl MaterializedN3Graph {
         while !pending.is_empty() {
             let mut emissions = Vec::new();
             {
-                let cx =
-                    N3Cx { facts: &local, guards: &self.index, delta: None, unsupported };
+                let cx = N3Cx {
+                    facts: &local,
+                    guards: &self.index,
+                    delta: None,
+                    unsupported,
+                };
                 for rule in &def.rules {
                     for atom in &rule.atoms {
-                        let N3Atom::Plain { pat, plain_ix } = atom else { continue };
+                        let N3Atom::Plain { pat, plain_ix } = atom else {
+                            continue;
+                        };
                         for f in &pending {
                             if f[1] != pat[1] {
                                 continue;
@@ -2626,12 +2754,19 @@ impl MaterializedN3Graph {
             }
             pending = fresh;
         }
-        let new_derived: FxHashSet<[N3Term; 3]> =
-            local.all.into_iter().filter(|f| !seed_set.contains(f)).collect();
-        let added: Vec<[N3Term; 3]> =
-            new_derived.difference(&self.layer_derived[li]).cloned().collect();
-        let removed: Vec<[N3Term; 3]> =
-            self.layer_derived[li].difference(&new_derived).cloned().collect();
+        let new_derived: FxHashSet<[N3Term; 3]> = local
+            .all
+            .into_iter()
+            .filter(|f| !seed_set.contains(f))
+            .collect();
+        let added: Vec<[N3Term; 3]> = new_derived
+            .difference(&self.layer_derived[li])
+            .cloned()
+            .collect();
+        let removed: Vec<[N3Term; 3]> = self.layer_derived[li]
+            .difference(&new_derived)
+            .cloned()
+            .collect();
         self.layer_derived[li] = new_derived;
         (added, removed)
     }
@@ -2658,8 +2793,11 @@ impl MaterializedN3Graph {
             self.rematerialize();
             return added.len();
         }
-        let pending: Vec<[N3Term; 3]> =
-            added.iter().filter(|f| !self.index.contains(f)).cloned().collect();
+        let pending: Vec<[N3Term; 3]> = added
+            .iter()
+            .filter(|f| !self.index.contains(f))
+            .cloned()
+            .collect();
         if !self.propagate(pending, true) {
             self.rematerialize();
         }
@@ -2801,7 +2939,11 @@ mod tests {
     fn fixture(dict: &mut Dict) -> (V, Vec<[Id; 3]>) {
         let v = vocab(dict);
         let (dog, mammal, animal) = (ex(dict, "Dog"), ex(dict, "Mammal"), ex(dict, "Animal"));
-        let (hp, rel, person) = (ex(dict, "hasParent"), ex(dict, "relatedTo"), ex(dict, "Person"));
+        let (hp, rel, person) = (
+            ex(dict, "hasParent"),
+            ex(dict, "relatedTo"),
+            ex(dict, "Person"),
+        );
         let (rex, a, b) = (ex(dict, "rex"), ex(dict, "a"), ex(dict, "b"));
         let base = vec![
             [dog, v.sc, mammal],
@@ -2826,7 +2968,10 @@ mod tests {
         assert_eq!(g.base_len(), base.len());
         // [OPUS-4.8] sq-qcnn.16: exercise base_triples() iterator (previously uncovered).
         let base_via_iter: FxHashSet<[Id; 3]> = g.base_triples().collect();
-        assert_eq!(base_via_iter, set, "base_triples() iterator yields the exact asserted set");
+        assert_eq!(
+            base_via_iter, set,
+            "base_triples() iterator yields the exact asserted set"
+        );
     }
 
     #[test]
@@ -2834,7 +2979,11 @@ mod tests {
         let mut dict = Dict::new();
         let (v, base) = fixture(&mut dict);
         let (dog, hp) = (ex(&mut dict, "Dog"), ex(&mut dict, "hasParent"));
-        let (fido, c, d) = (ex(&mut dict, "fido"), ex(&mut dict, "c"), ex(&mut dict, "d"));
+        let (fido, c, d) = (
+            ex(&mut dict, "fido"),
+            ex(&mut dict, "c"),
+            ex(&mut dict, "d"),
+        );
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
@@ -2853,7 +3002,11 @@ mod tests {
     fn abox_delete_is_incremental_and_correct() {
         let mut dict = Dict::new();
         let (v, base) = fixture(&mut dict);
-        let (rex, dog, animal) = (ex(&mut dict, "rex"), ex(&mut dict, "Dog"), ex(&mut dict, "Animal"));
+        let (rex, dog, animal) = (
+            ex(&mut dict, "rex"),
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Animal"),
+        );
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
@@ -2861,7 +3014,10 @@ mod tests {
         assert_eq!(g.delete(&[[rex, v.ty, dog]]), 1);
         set.remove(&[rex, v.ty, dog]);
         assert_eq!(g.full_rebuilds(), 0, "ABox delete must not rebuild");
-        assert!(!g.contains(&[rex, v.ty, animal]), "derived types retract with their support");
+        assert!(
+            !g.contains(&[rex, v.ty, animal]),
+            "derived types retract with their support"
+        );
         assert_matches_oracle(&g, &mut dict, &set);
     }
 
@@ -2872,15 +3028,22 @@ mod tests {
         // This is exactly the case DRed needs its rederivation pass for.
         let mut dict = Dict::new();
         let (v, mut base) = fixture(&mut dict);
-        let (a, b, hp, rel) =
-            (ex(&mut dict, "a"), ex(&mut dict, "b"), ex(&mut dict, "hasParent"), ex(&mut dict, "relatedTo"));
+        let (a, b, hp, rel) = (
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "hasParent"),
+            ex(&mut dict, "relatedTo"),
+        );
         base.push([a, rel, b]); // assert what rdfs7 also derives
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
         g.delete(&[[a, rel, b]]);
         set.remove(&[a, rel, b]);
-        assert!(g.contains(&[a, rel, b]), "still derived from (a hasParent b)");
+        assert!(
+            g.contains(&[a, rel, b]),
+            "still derived from (a hasParent b)"
+        );
         assert_matches_oracle(&g, &mut dict, &set);
 
         g.delete(&[[a, hp, b]]);
@@ -2913,7 +3076,10 @@ mod tests {
 
         g.delete(&[[s, hp, o1]]);
         set.remove(&[s, hp, o1]);
-        assert!(g.contains(&[s, v.ty, person]), "second derivation still supports it");
+        assert!(
+            g.contains(&[s, v.ty, person]),
+            "second derivation still supports it"
+        );
         assert_matches_oracle(&g, &mut dict, &set);
 
         g.delete(&[[s, hp, o2]]);
@@ -2928,7 +3094,11 @@ mod tests {
         // deriving support (rex type Dog) goes, and only vanish when deleted itself.
         let mut dict = Dict::new();
         let (v, base) = fixture(&mut dict);
-        let (rex, dog, mammal) = (ex(&mut dict, "rex"), ex(&mut dict, "Dog"), ex(&mut dict, "Mammal"));
+        let (rex, dog, mammal) = (
+            ex(&mut dict, "rex"),
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Mammal"),
+        );
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
@@ -2938,7 +3108,10 @@ mod tests {
 
         g.delete(&[[rex, v.ty, dog]]);
         set.remove(&[rex, v.ty, dog]);
-        assert!(g.contains(&[rex, v.ty, mammal]), "asserted, even though no longer derived");
+        assert!(
+            g.contains(&[rex, v.ty, mammal]),
+            "asserted, even though no longer derived"
+        );
         assert_matches_oracle(&g, &mut dict, &set);
 
         g.delete(&[[rex, v.ty, mammal]]);
@@ -2951,14 +3124,30 @@ mod tests {
     fn noop_mutations() {
         let mut dict = Dict::new();
         let (v, base) = fixture(&mut dict);
-        let (rex, dog, animal, ghost) =
-            (ex(&mut dict, "rex"), ex(&mut dict, "Dog"), ex(&mut dict, "Animal"), ex(&mut dict, "ghost"));
+        let (rex, dog, animal, ghost) = (
+            ex(&mut dict, "rex"),
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "ghost"),
+        );
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
-        assert_eq!(g.insert(&[[rex, v.ty, dog]]), 0, "duplicate insert is a no-op");
-        assert_eq!(g.delete(&[[ghost, v.ty, dog]]), 0, "deleting absent triple is a no-op");
-        assert_eq!(g.delete(&[[rex, v.ty, animal]]), 0, "derived-only facts cannot be deleted");
+        assert_eq!(
+            g.insert(&[[rex, v.ty, dog]]),
+            0,
+            "duplicate insert is a no-op"
+        );
+        assert_eq!(
+            g.delete(&[[ghost, v.ty, dog]]),
+            0,
+            "deleting absent triple is a no-op"
+        );
+        assert_eq!(
+            g.delete(&[[rex, v.ty, animal]]),
+            0,
+            "derived-only facts cannot be deleted"
+        );
         assert!(g.contains(&[rex, v.ty, animal]));
         assert_matches_oracle(&g, &mut dict, &set);
         assert_eq!(g.full_rebuilds(), 0);
@@ -2968,14 +3157,25 @@ mod tests {
     fn tbox_insert_triggers_rebuild_and_is_correct() {
         let mut dict = Dict::new();
         let (v, base) = fixture(&mut dict);
-        let (animal, thing, rex) = (ex(&mut dict, "Animal"), ex(&mut dict, "Thing"), ex(&mut dict, "rex"));
+        let (animal, thing, rex) = (
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "Thing"),
+            ex(&mut dict, "rex"),
+        );
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
         g.insert(&[[animal, v.sc, thing]]);
         set.insert([animal, v.sc, thing]);
-        assert_eq!(g.full_rebuilds(), 1, "TBox insert must fall back to full rematerialization");
-        assert!(g.contains(&[rex, v.ty, thing]), "existing ABox re-swept against new TBox");
+        assert_eq!(
+            g.full_rebuilds(),
+            1,
+            "TBox insert must fall back to full rematerialization"
+        );
+        assert!(
+            g.contains(&[rex, v.ty, thing]),
+            "existing ABox re-swept against new TBox"
+        );
         assert_matches_oracle(&g, &mut dict, &set);
     }
 
@@ -2983,18 +3183,33 @@ mod tests {
     fn tbox_delete_triggers_rebuild_and_is_correct() {
         let mut dict = Dict::new();
         let (v, base) = fixture(&mut dict);
-        let (mammal, animal, rex) = (ex(&mut dict, "Mammal"), ex(&mut dict, "Animal"), ex(&mut dict, "rex"));
+        let (mammal, animal, rex) = (
+            ex(&mut dict, "Mammal"),
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "rex"),
+        );
         let mut g = MaterializedGraph::new(&mut dict, &base);
         let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
 
         g.delete(&[[mammal, v.sc, animal]]);
         set.remove(&[mammal, v.sc, animal]);
-        assert_eq!(g.full_rebuilds(), 1, "TBox delete must fall back to full rematerialization");
-        assert!(!g.contains(&[rex, v.ty, animal]), "entailments through the removed edge gone");
+        assert_eq!(
+            g.full_rebuilds(),
+            1,
+            "TBox delete must fall back to full rematerialization"
+        );
+        assert!(
+            !g.contains(&[rex, v.ty, animal]),
+            "entailments through the removed edge gone"
+        );
         assert_matches_oracle(&g, &mut dict, &set);
 
         // Mixed batch (ABox + TBox) also rebuilds, once.
-        let (dog, mammal2, fido) = (ex(&mut dict, "Dog"), ex(&mut dict, "Mammal"), ex(&mut dict, "fido"));
+        let (dog, mammal2, fido) = (
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Mammal"),
+            ex(&mut dict, "fido"),
+        );
         g.insert(&[[fido, v.ty, dog], [mammal2, v.sc, animal]]);
         set.extend([[fido, v.ty, dog], [mammal2, v.sc, animal]]);
         assert_eq!(g.full_rebuilds(), 2);
@@ -3039,8 +3254,12 @@ mod tests {
         let v = vocab(&mut dict);
         let transitive = owl_id(&mut dict, "TransitiveProperty");
         let (anc, par) = (ex(&mut dict, "ancestorOf"), ex(&mut dict, "parentOf"));
-        let (a, b, c, d) =
-            (ex(&mut dict, "a"), ex(&mut dict, "b"), ex(&mut dict, "c"), ex(&mut dict, "d"));
+        let (a, b, c, d) = (
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "c"),
+            ex(&mut dict, "d"),
+        );
         let base = vec![[anc, v.ty, transitive], [par, v.sp, anc]];
         let mut g = MaterializedOwlGraph::new(&mut dict, &base);
         assert_eq!(g.mode(), crate::OwlMode::CountingFixpoint);
@@ -3058,7 +3277,10 @@ mod tests {
         set.remove(&[b, par, c]);
         assert_eq!(g.full_rebuilds(), 0, "ABox delete must stay incremental");
         assert!(!g.contains(&[a, anc, d]), "the chain is severed");
-        assert!(g.contains(&[a, anc, b]) && g.contains(&[c, anc, d]), "the stubs remain");
+        assert!(
+            g.contains(&[a, anc, b]) && g.contains(&[c, anc, d]),
+            "the stubs remain"
+        );
         assert_owl_oracle(&g, &mut dict, &set);
     }
 
@@ -3069,8 +3291,11 @@ mod tests {
         let mut dict = Dict::new();
         let v = vocab(&mut dict);
         let inv = owl_id(&mut dict, "inverseOf");
-        let (hp, po, whole) =
-            (ex(&mut dict, "hasPart"), ex(&mut dict, "partOf"), ex(&mut dict, "Whole"));
+        let (hp, po, whole) = (
+            ex(&mut dict, "hasPart"),
+            ex(&mut dict, "partOf"),
+            ex(&mut dict, "Whole"),
+        );
         let (x, y) = (ex(&mut dict, "x"), ex(&mut dict, "y"));
         let base = vec![[hp, inv, po], [hp, v.dom, whole]];
         let mut g = MaterializedOwlGraph::new(&mut dict, &base);
@@ -3090,7 +3315,10 @@ mod tests {
         g.delete(&mut dict, &[[x, hp, y]]);
         set.remove(&[x, hp, y]);
         assert!(g.contains(&[y, po, x]), "still asserted");
-        assert!(g.contains(&[x, hp, y]), "re-derived from the inverse assertion");
+        assert!(
+            g.contains(&[x, hp, y]),
+            "re-derived from the inverse assertion"
+        );
         assert_owl_oracle(&g, &mut dict, &set);
         g.delete(&mut dict, &[[y, po, x]]);
         set.remove(&[y, po, x]);
@@ -3110,8 +3338,12 @@ mod tests {
         let v = vocab(&mut dict);
         let inv = owl_id(&mut dict, "inverseOf");
         let (q, r, p) = (ex(&mut dict, "q"), ex(&mut dict, "r"), ex(&mut dict, "p"));
-        let (c, d, a, b) =
-            (ex(&mut dict, "C"), ex(&mut dict, "D"), ex(&mut dict, "a"), ex(&mut dict, "b"));
+        let (c, d, a, b) = (
+            ex(&mut dict, "C"),
+            ex(&mut dict, "D"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+        );
         let base = vec![[q, inv, r], [p, v.dom, c], [p, v.rng, d]];
         let mut g = MaterializedOwlGraph::new(&mut dict, &base);
         assert_eq!(g.mode(), crate::OwlMode::CountingMono);
@@ -3120,13 +3352,22 @@ mod tests {
         g.insert(&mut dict, &[[a, p, b]]);
         set.insert([a, p, b]);
         assert_eq!(g.full_rebuilds(), 0, "ABox insert must stay incremental");
-        assert!(g.contains(&[a, v.ty, c]), "rdfs2 domain typing under active px");
-        assert!(g.contains(&[b, v.ty, d]), "rdfs3 range typing under active px");
+        assert!(
+            g.contains(&[a, v.ty, c]),
+            "rdfs2 domain typing under active px"
+        );
+        assert!(
+            g.contains(&[b, v.ty, d]),
+            "rdfs3 range typing under active px"
+        );
         assert_owl_oracle(&g, &mut dict, &set);
 
         g.delete(&mut dict, &[[a, p, b]]);
         set.remove(&[a, p, b]);
-        assert!(!g.contains(&[a, v.ty, c]), "domain typing retracts with its support");
+        assert!(
+            !g.contains(&[a, v.ty, c]),
+            "domain typing retracts with its support"
+        );
         assert_owl_oracle(&g, &mut dict, &set);
     }
 
@@ -3146,7 +3387,10 @@ mod tests {
         g.insert(&mut dict, &[[near, v.ty, symmetric]]);
         set.insert([near, v.ty, symmetric]);
         assert_eq!(g.full_rebuilds(), 1);
-        assert!(g.contains(&[y, near, x]), "existing ABox re-swept under the new axiom");
+        assert!(
+            g.contains(&[y, near, x]),
+            "existing ABox re-swept under the new axiom"
+        );
         assert_owl_oracle(&g, &mut dict, &set);
     }
 

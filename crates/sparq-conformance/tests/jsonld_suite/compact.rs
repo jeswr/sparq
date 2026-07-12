@@ -132,14 +132,14 @@ pub fn run_compact(root: &Path) -> Score {
         }
 
         // 4. The native document-level Compaction Algorithm.
-        let compacted =
-            match sparq_jsonld::compact::compact(&input_json, &ctx_json, &opts, &loader) {
-                Ok(j) => j,
-                Err(why) => {
-                    s.fail(&e.id, format!("compact() error: {}", why));
-                    continue;
-                }
-            };
+        let compacted = match sparq_jsonld::compact::compact(&input_json, &ctx_json, &opts, &loader)
+        {
+            Ok(j) => j,
+            Err(why) => {
+                s.fail(&e.id, format!("compact() error: {}", why));
+                continue;
+            }
+        };
 
         // 5. Compare against the suite's NORMATIVE expected document.
         let got: Value = match sparq_json_to_serde(&compacted) {

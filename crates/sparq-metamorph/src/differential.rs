@@ -75,10 +75,9 @@ pub fn check_differential(engines: &[&dyn SparqlEngine], query: &str) -> Verdict
                 multiset_equal(a, b),
                 format!("{reference_name}={} rows, {name}={} rows", a.len(), b.len()),
             ),
-            (QueryResults::Boolean(a), QueryResults::Boolean(b)) => (
-                a == b,
-                format!("{reference_name}={a}, {name}={b}"),
-            ),
+            (QueryResults::Boolean(a), QueryResults::Boolean(b)) => {
+                (a == b, format!("{reference_name}={a}, {name}={b}"))
+            }
             _ => {
                 return Verdict::EngineFailure(EngineFailure {
                     engine: (*name).to_string(),

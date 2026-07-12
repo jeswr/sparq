@@ -195,10 +195,7 @@ impl ApplyUpdates for MockApplier {
     fn restore_durable(&mut self, fresh: Log) -> Result<Log, String> {
         if !self.restore_durable_supported {
             // Exercise the trait's default no-op-error impl explicitly.
-            return ApplyUpdates::restore_durable(
-                &mut DefaultRestoreApplier,
-                Vec::new(),
-            );
+            return ApplyUpdates::restore_durable(&mut DefaultRestoreApplier, Vec::new());
         }
         self.restores.lock().unwrap().push(self.committed);
         if self.restore_fails.load(Ordering::SeqCst) > 0 {
@@ -565,7 +562,11 @@ fn adaptive_commit_still_batches_a_queued_backlog() {
     // sync's generation is the current one.
     assert_eq!(current.number(), generation);
     let expected: Log = (0..6).map(|i| format!("u{i}")).collect();
-    assert_eq!(*current.snapshot(), expected, "strict FIFO, nothing dropped");
+    assert_eq!(
+        *current.snapshot(),
+        expected,
+        "strict FIFO, nothing dropped"
+    );
     for i in 0..6 {
         assert_eq!(current.epochs().epoch(&PodId::from(format!("pod:{i}"))), 1);
     }
@@ -1084,7 +1085,10 @@ fn restore_publishes_new_generation_after_preceding_updates() {
 
     // Restore: the durable swap succeeds, publishing the restored snapshot as a new generation.
     let restored = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
-    let published = writer.restore(restored.clone()).unwrap().expect("restore ok");
+    let published = writer
+        .restore(restored.clone())
+        .unwrap()
+        .expect("restore ok");
     assert!(
         published > gen_before,
         "restore must publish a NEW generation ({published} > {gen_before})"
@@ -1131,7 +1135,10 @@ fn restore_failure_keeps_writer_alive_and_store_intact() {
 
     // First restore fails (inner Err): nothing published, the OLD store is intact.
     let r = writer.restore(vec!["discarded".to_string()]).unwrap();
-    assert!(r.is_err(), "armed restore failure must surface as Err, got {r:?}");
+    assert!(
+        r.is_err(),
+        "armed restore failure must surface as Err, got {r:?}"
+    );
     assert_eq!(
         ring.current().number(),
         gen_before,
@@ -1145,14 +1152,22 @@ fn restore_failure_keeps_writer_alive_and_store_intact() {
 
     // The writer survives — a later update commits…
     writer.submit("more".to_string(), pods(&["pod:a"])).unwrap();
-    assert_eq!(ring.current().snapshot().len(), 2, "writes work after a failed restore");
+    assert_eq!(
+        ring.current().snapshot().len(),
+        2,
+        "writes work after a failed restore"
+    );
 
     // …and a later restore now succeeds, replacing the store.
     let ok = writer
         .restore(vec!["final".to_string()])
         .unwrap()
         .expect("second restore ok");
-    assert_eq!(ring.current().number(), ok, "the successful restore is now served");
+    assert_eq!(
+        ring.current().number(),
+        ok,
+        "the successful restore is now served"
+    );
     assert_eq!(
         ring.current().snapshot(),
         &vec!["final".to_string()],

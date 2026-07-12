@@ -14,8 +14,24 @@ fn store() -> PodStore {
     s
 }
 
-fn can(s: &mut PodStore, agent: Option<&str>, client: Option<&str>, mode: Mode, graph: &str) -> bool {
-    s.accessible(&Session { agent, client, issuer: None, now: None }, mode).iter().any(|g| g.as_str() == graph)
+fn can(
+    s: &mut PodStore,
+    agent: Option<&str>,
+    client: Option<&str>,
+    mode: Mode,
+    graph: &str,
+) -> bool {
+    s.accessible(
+        &Session {
+            agent,
+            client,
+            issuer: None,
+            now: None,
+        },
+        mode,
+    )
+    .iter()
+    .any(|g| g.as_str() == graph)
 }
 
 /// [OPUS-4.8] sq-3jtd.6: as [`can`] but with the issuer dimension supplied.
@@ -27,7 +43,17 @@ fn can_iss(
     mode: Mode,
     graph: &str,
 ) -> bool {
-    s.accessible(&Session { agent, client, issuer, now: None }, mode).iter().any(|g| g.as_str() == graph)
+    s.accessible(
+        &Session {
+            agent,
+            client,
+            issuer,
+            now: None,
+        },
+        mode,
+    )
+    .iter()
+    .any(|g| g.as_str() == graph)
 }
 
 #[test]
@@ -37,45 +63,182 @@ fn acp_expected_access_matrix() {
 
     // 1. owner: root memberAccessControl reaches depth 4 (and the root itself via
     //    accessControl)
-    assert!(can(&mut s, Some(ALICE), None, r, "https://pod.ex/priv0/c4/g0/d0.ttl"));
-    assert!(can(&mut s, Some(ALICE), None, Mode::Write, "https://pod.ex/priv0/c4/g0/d0.ttl"));
+    assert!(can(
+        &mut s,
+        Some(ALICE),
+        None,
+        r,
+        "https://pod.ex/priv0/c4/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(ALICE),
+        None,
+        Mode::Write,
+        "https://pod.ex/priv0/c4/g0/d0.ttl"
+    ));
     assert!(can(&mut s, Some(ALICE), None, r, "https://pod.ex/"));
-    assert!(!can(&mut s, Some(BOB), None, r, "https://pod.ex/priv0/c4/g0/d0.ttl"));
+    assert!(!can(
+        &mut s,
+        Some(BOB),
+        None,
+        r,
+        "https://pod.ex/priv0/c4/g0/d0.ttl"
+    ));
     // 2. CUMULATIVE inheritance (the key WAC difference): pub1's own ACR does NOT
     //    shadow the root owner policy — alice keeps access; and the public matcher
     //    grants everyone incl. anonymous
-    assert!(can(&mut s, Some(ALICE), None, r, "https://pod.ex/pub1/c2/g3/d1.ttl"));
-    assert!(can(&mut s, None, None, r, "https://pod.ex/pub1/c2/g3/d1.ttl"));
-    assert!(can(&mut s, Some(DAVE), None, r, "https://pod.ex/pub1/c2/g3/d1.ttl"));
+    assert!(can(
+        &mut s,
+        Some(ALICE),
+        None,
+        r,
+        "https://pod.ex/pub1/c2/g3/d1.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        None,
+        None,
+        r,
+        "https://pod.ex/pub1/c2/g3/d1.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(DAVE),
+        None,
+        r,
+        "https://pod.ex/pub1/c2/g3/d1.ttl"
+    ));
     // 3. anyOf over enumerated agents
-    assert!(can(&mut s, Some(BOB), None, Mode::Write, "https://pod.ex/team2/c3/g0/d0.ttl"));
-    assert!(can(&mut s, Some(CAROL), None, r, "https://pod.ex/team2/c3/g0/d0.ttl"));
-    assert!(!can(&mut s, Some(DAVE), None, r, "https://pod.ex/team2/c3/g0/d0.ttl"));
-    assert!(can(&mut s, Some(ALICE), None, r, "https://pod.ex/team2/c3/g0/d0.ttl")); // cumulative root
-    // 4. the NATIVE user/app pair: allOf { agent bob } { client app } — exactly the
-    //    (user, application) pair, nothing else
-    assert!(can(&mut s, Some(BOB), Some(APP), r, "https://pod.ex/friends3/c2/g0/d0.ttl"));
-    assert!(!can(&mut s, Some(BOB), Some("https://evil.ex"), r, "https://pod.ex/friends3/c2/g0/d0.ttl"));
-    assert!(!can(&mut s, Some(BOB), None, r, "https://pod.ex/friends3/c2/g0/d0.ttl"));
-    assert!(!can(&mut s, Some(CAROL), Some(APP), r, "https://pod.ex/friends3/c2/g0/d0.ttl"));
+    assert!(can(
+        &mut s,
+        Some(BOB),
+        None,
+        Mode::Write,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(CAROL),
+        None,
+        r,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    ));
+    assert!(!can(
+        &mut s,
+        Some(DAVE),
+        None,
+        r,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(ALICE),
+        None,
+        r,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    )); // cumulative root
+        // 4. the NATIVE user/app pair: allOf { agent bob } { client app } — exactly the
+        //    (user, application) pair, nothing else
+    assert!(can(
+        &mut s,
+        Some(BOB),
+        Some(APP),
+        r,
+        "https://pod.ex/friends3/c2/g0/d0.ttl"
+    ));
+    assert!(!can(
+        &mut s,
+        Some(BOB),
+        Some("https://evil.ex"),
+        r,
+        "https://pod.ex/friends3/c2/g0/d0.ttl"
+    ));
+    assert!(!can(
+        &mut s,
+        Some(BOB),
+        None,
+        r,
+        "https://pod.ex/friends3/c2/g0/d0.ttl"
+    ));
+    assert!(!can(
+        &mut s,
+        Some(CAROL),
+        Some(APP),
+        r,
+        "https://pod.ex/friends3/c2/g0/d0.ttl"
+    ));
     // 5. DENY-OVERRIDES: dave is denied even though the public policy allows
-    assert!(!can(&mut s, Some(DAVE), None, r, "https://pod.ex/mixed4/c3/g0/d0.ttl"));
-    assert!(can(&mut s, Some(BOB), None, r, "https://pod.ex/mixed4/c3/g0/d0.ttl"));
-    assert!(can(&mut s, None, None, r, "https://pod.ex/mixed4/c3/g0/d0.ttl"));
+    assert!(!can(
+        &mut s,
+        Some(DAVE),
+        None,
+        r,
+        "https://pod.ex/mixed4/c3/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(BOB),
+        None,
+        r,
+        "https://pod.ex/mixed4/c3/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        None,
+        None,
+        r,
+        "https://pod.ex/mixed4/c3/g0/d0.ttl"
+    ));
     // 6. noneOf: public-except-carol (a conditional grant evaluated per session)
-    assert!(!can(&mut s, Some(CAROL), None, r, "https://pod.ex/origin5/c2/g0/d0.ttl"));
-    assert!(can(&mut s, Some(BOB), None, r, "https://pod.ex/origin5/c2/g0/d0.ttl"));
-    assert!(can(&mut s, None, None, r, "https://pod.ex/origin5/c2/g0/d0.ttl"));
-    assert!(can(&mut s, Some(DAVE), None, r, "https://pod.ex/origin5/c2/g0/d0.ttl"));
+    assert!(!can(
+        &mut s,
+        Some(CAROL),
+        None,
+        r,
+        "https://pod.ex/origin5/c2/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(BOB),
+        None,
+        r,
+        "https://pod.ex/origin5/c2/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        None,
+        None,
+        r,
+        "https://pod.ex/origin5/c2/g0/d0.ttl"
+    ));
+    assert!(can(
+        &mut s,
+        Some(DAVE),
+        None,
+        r,
+        "https://pod.ex/origin5/c2/g0/d0.ttl"
+    ));
 }
 
 #[test]
 fn acp_rematerialization_picks_up_policy_change() {
     let mut s = store();
-    assert!(!can(&mut s, Some(DAVE), None, Mode::Read, "https://pod.ex/team2/c3/g0/d0.ttl"));
+    assert!(!can(
+        &mut s,
+        Some(DAVE),
+        None,
+        Mode::Read,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    ));
     // extend team2's anyOf with dave: swap the .acr graph, re-materialize
     let name = oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("https://pod.ex/team2/.acr"));
-    let pos = s.graph.named.iter().position(|(n, _)| *n == name).expect("acr graph");
+    let pos = s
+        .graph
+        .named
+        .iter()
+        .position(|(n, _)| *n == name)
+        .expect("acr graph");
     let acr = "https://pod.ex/team2/.acr";
     let team = format!(
         "<{acr}> <http://www.w3.org/ns/solid/acp#memberAccessControl> <{acr}#ctl-team> .\n\
@@ -86,9 +249,21 @@ fn acp_rematerialization_picks_up_policy_change() {
     );
     s.graph.named[pos].1 = Graph::load_str(&team, "ntriples").unwrap();
     s.materialize_acp().expect("re-materialize");
-    assert!(can(&mut s, Some(DAVE), None, Mode::Read, "https://pod.ex/team2/c3/g0/d0.ttl"));
+    assert!(can(
+        &mut s,
+        Some(DAVE),
+        None,
+        Mode::Read,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    ));
     // …and bob lost the write grant the old policy carried
-    assert!(!can(&mut s, Some(BOB), None, Mode::Write, "https://pod.ex/team2/c3/g0/d0.ttl"));
+    assert!(!can(
+        &mut s,
+        Some(BOB),
+        None,
+        Mode::Write,
+        "https://pod.ex/team2/c3/g0/d0.ttl"
+    ));
 }
 
 /// [OPUS-4.8] sq-xor3: ACP write-path enforcement. `update_as_acp` gates a SPARQL Update
@@ -98,25 +273,61 @@ fn acp_rematerialization_picks_up_policy_change() {
 #[test]
 fn acp_write_enforcement_matches_grants() {
     let mut s = store();
-    let ins = |g: &str| format!("INSERT DATA {{ GRAPH <{g}> {{ <{g}#it> <https://ex.dev/ns#k> \"v\" }} }}");
+    let ins = |g: &str| {
+        format!("INSERT DATA {{ GRAPH <{g}> {{ <{g}#it> <https://ex.dev/ns#k> \"v\" }} }}")
+    };
 
     let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
     assert!(can(&mut s, Some(ALICE), None, Mode::Write, priv0));
-    s.update_as_acp(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, &ins(priv0))
-        .expect("alice (cumulative owner) writes priv0");
+    s.update_as_acp(
+        &Session {
+            agent: Some(ALICE),
+            client: None,
+            issuer: None,
+            now: None,
+        },
+        &ins(priv0),
+    )
+    .expect("alice (cumulative owner) writes priv0");
     assert!(!can(&mut s, Some(BOB), None, Mode::Write, priv0));
     assert!(
-        s.update_as_acp(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(priv0)).is_err(),
+        s.update_as_acp(
+            &Session {
+                agent: Some(BOB),
+                client: None,
+                issuer: None,
+                now: None
+            },
+            &ins(priv0)
+        )
+        .is_err(),
         "bob has no write on priv0"
     );
 
     let team2 = "https://pod.ex/team2/c3/g0/d0.ttl";
     assert!(can(&mut s, Some(BOB), None, Mode::Write, team2));
-    s.update_as_acp(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(team2))
-        .expect("bob (anyOf) writes team2");
+    s.update_as_acp(
+        &Session {
+            agent: Some(BOB),
+            client: None,
+            issuer: None,
+            now: None,
+        },
+        &ins(team2),
+    )
+    .expect("bob (anyOf) writes team2");
     assert!(!can(&mut s, Some(DAVE), None, Mode::Write, team2));
     assert!(
-        s.update_as_acp(&Session { agent: Some(DAVE), client: None, issuer: None, now: None }, &ins(team2)).is_err(),
+        s.update_as_acp(
+            &Session {
+                agent: Some(DAVE),
+                client: None,
+                issuer: None,
+                now: None
+            },
+            &ins(team2)
+        )
+        .is_err(),
         "dave denied write on team2"
     );
 }
@@ -167,13 +378,25 @@ fn acp_issuer_allof_allow_and_deny() {
     let r = Mode::Read;
 
     // ALLOW: bob through the trusted issuer.
-    assert!(can_iss(&mut s, Some(BOB), None, Some(GOOD_IDP), r, ISS_DOC), "bob @ good-idp allowed");
+    assert!(
+        can_iss(&mut s, Some(BOB), None, Some(GOOD_IDP), r, ISS_DOC),
+        "bob @ good-idp allowed"
+    );
     // DENY decided by issuer: same agent, wrong issuer.
-    assert!(!can_iss(&mut s, Some(BOB), None, Some(EVIL_IDP), r, ISS_DOC), "bob @ evil-idp denied");
+    assert!(
+        !can_iss(&mut s, Some(BOB), None, Some(EVIL_IDP), r, ISS_DOC),
+        "bob @ evil-idp denied"
+    );
     // DENY fail-closed: issuer-constrained grant never matches a session with no issuer.
-    assert!(!can_iss(&mut s, Some(BOB), None, None, r, ISS_DOC), "bob w/o issuer denied");
+    assert!(
+        !can_iss(&mut s, Some(BOB), None, None, r, ISS_DOC),
+        "bob w/o issuer denied"
+    );
     // DENY: right issuer, wrong agent (allOf needs both).
-    assert!(!can_iss(&mut s, Some(CAROL), None, Some(GOOD_IDP), r, ISS_DOC), "carol @ good-idp denied");
+    assert!(
+        !can_iss(&mut s, Some(CAROL), None, Some(GOOD_IDP), r, ISS_DOC),
+        "carol @ good-idp denied"
+    );
 }
 
 /// anyOf { acp:issuer GOOD_IDP } (issuer-only, no agent attr): ANY agent vouched for by
@@ -191,16 +414,34 @@ fn acp_issuer_only_matcher_any_agent() {
     let r = Mode::Read;
 
     // ALLOW: any agent from the trusted issuer (the agent dimension is unconstrained).
-    assert!(can_iss(&mut s, Some(BOB), None, Some(GOOD_IDP), r, ISS_DOC), "bob @ good-idp allowed");
-    assert!(can_iss(&mut s, Some(CAROL), None, Some(GOOD_IDP), r, ISS_DOC), "carol @ good-idp allowed");
+    assert!(
+        can_iss(&mut s, Some(BOB), None, Some(GOOD_IDP), r, ISS_DOC),
+        "bob @ good-idp allowed"
+    );
+    assert!(
+        can_iss(&mut s, Some(CAROL), None, Some(GOOD_IDP), r, ISS_DOC),
+        "carol @ good-idp allowed"
+    );
     // DENY decided by issuer: wrong issuer, or no issuer asserted at all.
-    assert!(!can_iss(&mut s, Some(BOB), None, Some(EVIL_IDP), r, ISS_DOC), "bob @ evil-idp denied");
-    assert!(!can_iss(&mut s, Some(CAROL), None, None, r, ISS_DOC), "carol w/o issuer denied");
-    assert!(!can_iss(&mut s, None, None, None, r, ISS_DOC), "anonymous w/o issuer denied");
+    assert!(
+        !can_iss(&mut s, Some(BOB), None, Some(EVIL_IDP), r, ISS_DOC),
+        "bob @ evil-idp denied"
+    );
+    assert!(
+        !can_iss(&mut s, Some(CAROL), None, None, r, ISS_DOC),
+        "carol w/o issuer denied"
+    );
+    assert!(
+        !can_iss(&mut s, None, None, None, r, ISS_DOC),
+        "anonymous w/o issuer denied"
+    );
     // The matcher is agent-unconstrained, so it grants the agent-dimension top
     // (auth:Public): a session presenting only the trusted issuer is accepted even without
     // a WebID — faithful, since the matcher asserts nothing about the agent.
-    assert!(can_iss(&mut s, None, None, Some(GOOD_IDP), r, ISS_DOC), "any context @ good-idp allowed");
+    assert!(
+        can_iss(&mut s, None, None, Some(GOOD_IDP), r, ISS_DOC),
+        "any context @ good-idp allowed"
+    );
 }
 
 /// allOf { acp:agent BOB ; acp:client APP ; acp:issuer GOOD_IDP }: the full three-
@@ -220,14 +461,30 @@ fn acp_issuer_client_triple() {
     let r = Mode::Read;
 
     // ALLOW: the exact triple.
-    assert!(can_iss(&mut s, Some(BOB), Some(APP), Some(GOOD_IDP), r, ISS_DOC), "bob+app@good-idp allowed");
+    assert!(
+        can_iss(&mut s, Some(BOB), Some(APP), Some(GOOD_IDP), r, ISS_DOC),
+        "bob+app@good-idp allowed"
+    );
     // DENY decided by issuer alone (agent + client correct).
-    assert!(!can_iss(&mut s, Some(BOB), Some(APP), Some(EVIL_IDP), r, ISS_DOC), "wrong issuer denied");
+    assert!(
+        !can_iss(&mut s, Some(BOB), Some(APP), Some(EVIL_IDP), r, ISS_DOC),
+        "wrong issuer denied"
+    );
     // DENY: missing the issuer dimension entirely.
-    assert!(!can_iss(&mut s, Some(BOB), Some(APP), None, r, ISS_DOC), "no issuer denied");
+    assert!(
+        !can_iss(&mut s, Some(BOB), Some(APP), None, r, ISS_DOC),
+        "no issuer denied"
+    );
     // DENY: correct agent + issuer, wrong client.
     assert!(
-        !can_iss(&mut s, Some(BOB), Some("https://evil.ex"), Some(GOOD_IDP), r, ISS_DOC),
+        !can_iss(
+            &mut s,
+            Some(BOB),
+            Some("https://evil.ex"),
+            Some(GOOD_IDP),
+            r,
+            ISS_DOC
+        ),
         "wrong client denied"
     );
 }
@@ -251,12 +508,24 @@ fn acp_issuer_noneof_conditional_grant() {
     let r = Mode::Read;
 
     // ALLOW: public — anonymous, and any issuer that is NOT the excluded one.
-    assert!(can_iss(&mut s, None, None, None, r, ISS_DOC), "anonymous reads");
-    assert!(can_iss(&mut s, Some(BOB), None, Some(GOOD_IDP), r, ISS_DOC), "bob @ good-idp reads");
-    assert!(can_iss(&mut s, Some(CAROL), None, None, r, ISS_DOC), "carol w/o issuer reads");
+    assert!(
+        can_iss(&mut s, None, None, None, r, ISS_DOC),
+        "anonymous reads"
+    );
+    assert!(
+        can_iss(&mut s, Some(BOB), None, Some(GOOD_IDP), r, ISS_DOC),
+        "bob @ good-idp reads"
+    );
+    assert!(
+        can_iss(&mut s, Some(CAROL), None, None, r, ISS_DOC),
+        "carol w/o issuer reads"
+    );
     // DENY decided by the issuer exception: a session asserting the excluded issuer is
     // carved out (the noneOf exception matcher accepts it, suppressing the grant).
-    assert!(!can_iss(&mut s, Some(BOB), None, Some(EVIL_IDP), r, ISS_DOC), "bob @ evil-idp carved out");
+    assert!(
+        !can_iss(&mut s, Some(BOB), None, Some(EVIL_IDP), r, ISS_DOC),
+        "bob @ evil-idp carved out"
+    );
 }
 
 /// Fail-closed: a malicious `acp:issuer` value inside the reserved `urn:sparq:` space (or
@@ -281,7 +550,10 @@ fn acp_issuer_reserved_encoding_rejected() {
     );
     let g = Graph::load_dataset(&acr, "nquads").expect("loads");
     let mut s = PodStore::new(g);
-    assert!(s.materialize_acp().is_err(), "reserved-space issuer IRI rejected at materialization");
+    assert!(
+        s.materialize_acp().is_err(),
+        "reserved-space issuer IRI rejected at materialization"
+    );
 }
 
 // ── [OPUS-4.8] sq-3jtd.5: acp:CreatorAgent / acp:OwnerAgent support ───────────────────
@@ -314,7 +586,8 @@ fn cre_store(policy_body: &str, provenance: &AccessProvenance) -> PodStore {
     );
     let g = Graph::load_dataset(&acr, "nquads").expect("inline acp pod loads");
     let mut s = PodStore::new(g);
-    s.materialize_acp_with(provenance).expect("acp materializes with provenance");
+    s.materialize_acp_with(provenance)
+        .expect("acp materializes with provenance");
     s
 }
 
@@ -336,13 +609,22 @@ fn acp_creator_agent_allow_and_deny() {
     let r = Mode::Read;
 
     // ALLOW: bob is the trusted creator of d0.
-    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) reads d0");
+    assert!(
+        can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob (creator) reads d0"
+    );
     // DENY decided by the creator fact: carol is not the creator of d0.
-    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol (non-creator) denied d0");
+    assert!(
+        !can(&mut s, Some(CAROL), None, r, CRE_DOC),
+        "carol (non-creator) denied d0"
+    );
     // DENY: anonymous has no WebID, so cannot be a creator.
     assert!(!can(&mut s, None, None, r, CRE_DOC), "anonymous denied d0");
     // DENY fail-closed: NO creator fact for d1, so even bob is denied there.
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC2), "no creator fact for d1 -> bob denied d1");
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC2),
+        "no creator fact for d1 -> bob denied d1"
+    );
 }
 
 /// Resource-scoping: a CreatorAgent grant is per-resource. bob is the creator of d0 and
@@ -363,11 +645,23 @@ fn acp_creator_agent_is_resource_scoped() {
     let mut s = cre_store(&body, &prov);
     let r = Mode::Read;
 
-    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC), "bob reads d0 (his)");
-    assert!(can(&mut s, Some(CAROL), None, r, CRE_DOC2), "carol reads d1 (hers)");
+    assert!(
+        can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob reads d0 (his)"
+    );
+    assert!(
+        can(&mut s, Some(CAROL), None, r, CRE_DOC2),
+        "carol reads d1 (hers)"
+    );
     // the load-bearing soundness check: creator of d0 is NOT granted d1, and vice-versa.
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC2), "bob NOT granted d1 (carol's)");
-    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol NOT granted d0 (bob's)");
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC2),
+        "bob NOT granted d1 (carol's)"
+    );
+    assert!(
+        !can(&mut s, Some(CAROL), None, r, CRE_DOC),
+        "carol NOT granted d0 (bob's)"
+    );
 }
 
 /// acp:OwnerAgent is the twin of acp:CreatorAgent over the trusted owner fact.
@@ -385,13 +679,22 @@ fn acp_owner_agent_allow_and_deny() {
     let mut s = cre_store(&body, &prov);
     let w = Mode::Write;
 
-    assert!(can(&mut s, Some(ALICE), None, w, CRE_DOC), "alice (owner) writes d0");
-    assert!(!can(&mut s, Some(BOB), None, w, CRE_DOC), "bob (non-owner) denied write on d0");
+    assert!(
+        can(&mut s, Some(ALICE), None, w, CRE_DOC),
+        "alice (owner) writes d0"
+    );
+    assert!(
+        !can(&mut s, Some(BOB), None, w, CRE_DOC),
+        "bob (non-owner) denied write on d0"
+    );
     // a creator fact does NOT satisfy an OwnerAgent matcher (distinct dimensions).
     let mut prov2 = AccessProvenance::default();
     prov2.set_creator(CRE_DOC, BOB);
     let mut s2 = cre_store(&body, &prov2);
-    assert!(!can(&mut s2, Some(BOB), None, w, CRE_DOC), "creator is not owner -> denied");
+    assert!(
+        !can(&mut s2, Some(BOB), None, w, CRE_DOC),
+        "creator is not owner -> denied"
+    );
 }
 
 /// Deny-overrides with a CreatorAgent matcher: a public-Read policy plus a
@@ -419,12 +722,24 @@ fn acp_creator_agent_deny_overrides() {
     let r = Mode::Read;
 
     // public reads both docs…
-    assert!(can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol reads d0 (public, not its creator)");
-    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC2), "bob reads d1 (public, not its creator)");
+    assert!(
+        can(&mut s, Some(CAROL), None, r, CRE_DOC),
+        "carol reads d0 (public, not its creator)"
+    );
+    assert!(
+        can(&mut s, Some(BOB), None, r, CRE_DOC2),
+        "bob reads d1 (public, not its creator)"
+    );
     assert!(can(&mut s, None, None, r, CRE_DOC), "anonymous reads d0");
     // …EXCEPT each doc's own creator is denied on THAT doc (deny-overrides, resource-scoped).
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator of d0) denied on d0");
-    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC2), "carol (creator of d1) denied on d1");
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob (creator of d0) denied on d0"
+    );
+    assert!(
+        !can(&mut s, Some(CAROL), None, r, CRE_DOC2),
+        "carol (creator of d1) denied on d1"
+    );
 }
 
 /// TRUST BOUNDARY (design doc §2.4): a `solidx:creator` triple embedded in the RESOURCE
@@ -483,8 +798,14 @@ fn acp_creator_fact_without_creator_matcher_is_inert() {
     prov.set_creator(CRE_DOC, BOB); // bob is the creator, but the policy never asks
     let mut s = cre_store(&body, &prov);
     let r = Mode::Read;
-    assert!(can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol granted by explicit WebID");
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) NOT granted — no CreatorAgent matcher");
+    assert!(
+        can(&mut s, Some(CAROL), None, r, CRE_DOC),
+        "carol granted by explicit WebID"
+    );
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob (creator) NOT granted — no CreatorAgent matcher"
+    );
 }
 
 /// anyOf { acp:agent acp:CreatorAgent }: the creator alone satisfies the policy. Same
@@ -501,8 +822,14 @@ fn acp_creator_agent_anyof() {
     let mut prov = AccessProvenance::default();
     prov.set_creator(CRE_DOC, BOB);
     let mut s = cre_store(&body, &prov);
-    assert!(can(&mut s, Some(BOB), None, Mode::Read, CRE_DOC), "bob (creator) reads d0 via anyOf");
-    assert!(!can(&mut s, Some(CAROL), None, Mode::Read, CRE_DOC), "carol denied");
+    assert!(
+        can(&mut s, Some(BOB), None, Mode::Read, CRE_DOC),
+        "bob (creator) reads d0 via anyOf"
+    );
+    assert!(
+        !can(&mut s, Some(CAROL), None, Mode::Read, CRE_DOC),
+        "carol denied"
+    );
 }
 
 /// allOf { acp:agent acp:CreatorAgent ; acp:client APP }: the creator-AND-client pair on
@@ -525,18 +852,37 @@ fn acp_creator_agent_with_client_constraint() {
 
     // ALLOW: bob (creator) through the named app.
     assert!(
-        s.accessible(&Session { agent: Some(BOB), client: Some(APP), issuer: None, now: None }, r)
-            .iter()
-            .any(|g| g.as_str() == CRE_DOC),
+        s.accessible(
+            &Session {
+                agent: Some(BOB),
+                client: Some(APP),
+                issuer: None,
+                now: None
+            },
+            r
+        )
+        .iter()
+        .any(|g| g.as_str() == CRE_DOC),
         "bob (creator) + app reads d0"
     );
     // DENY: creator without the named client (the client dimension is constrained).
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator) w/o app denied");
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob (creator) w/o app denied"
+    );
     // DENY: named client but not the creator.
     assert!(
-        !s.accessible(&Session { agent: Some(CAROL), client: Some(APP), issuer: None, now: None }, r)
-            .iter()
-            .any(|g| g.as_str() == CRE_DOC),
+        !s.accessible(
+            &Session {
+                agent: Some(CAROL),
+                client: Some(APP),
+                issuer: None,
+                now: None
+            },
+            r
+        )
+        .iter()
+        .any(|g| g.as_str() == CRE_DOC),
         "carol (non-creator) + app denied"
     );
 }
@@ -568,13 +914,22 @@ fn acp_creator_agent_allof_with_matching_concrete_agent_is_supported() {
     let r = Mode::Read;
 
     // ALLOW: bob is BOTH the creator of d0 AND the WebID the second matcher names.
-    assert!(can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator == named WebID) reads d0");
+    assert!(
+        can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob (creator == named WebID) reads d0"
+    );
     // DENY: carol is neither the creator nor the named WebID.
-    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol denied d0");
+    assert!(
+        !can(&mut s, Some(CAROL), None, r, CRE_DOC),
+        "carol denied d0"
+    );
     // SOUNDNESS — still resource-scoped: bob is NOT the creator of d1, so even though the
     // second matcher names bob, the contradictory CreatorAgent half blocks d1. The concrete
     // matcher must not widen the provenance candidate's resource binding to every resource.
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC2), "bob (named, but not creator of d1) denied d1");
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC2),
+        "bob (named, but not creator of d1) denied d1"
+    );
 }
 
 /// [OPUS-4.8] sq-az1b — the genuinely contradictory shape: allOf { CreatorAgent } { concrete
@@ -601,9 +956,15 @@ fn acp_creator_agent_allof_with_contradictory_concrete_agent_grants_nobody() {
     let r = Mode::Read;
 
     // The creator (bob) is rejected by the concrete CAROL matcher…
-    assert!(!can(&mut s, Some(BOB), None, r, CRE_DOC), "bob (creator, not CAROL) denied d0");
+    assert!(
+        !can(&mut s, Some(BOB), None, r, CRE_DOC),
+        "bob (creator, not CAROL) denied d0"
+    );
     // …and the fixed WebID (carol) is rejected by the CreatorAgent matcher (she is not the creator).
-    assert!(!can(&mut s, Some(CAROL), None, r, CRE_DOC), "carol (named, not creator) denied d0");
+    assert!(
+        !can(&mut s, Some(CAROL), None, r, CRE_DOC),
+        "carol (named, not creator) denied d0"
+    );
 }
 
 /// Fail-closed: a malicious creator/owner WebID inside the reserved `urn:sparq:` space is
@@ -668,7 +1029,8 @@ fn forged_prov_store(prov_pol_body: &str, alt_pol_body: &str, forged_fact: &str)
     let g = Graph::load_dataset(&acr, "nquads").expect("forged inline acp pod loads");
     let mut s = PodStore::new(g);
     // NO provenance — the ONLY creator/owner facts are the forged ones inside the .acr.
-    s.materialize_acp().expect("acp materializes (forged facts must be filtered, not error)");
+    s.materialize_acp()
+        .expect("acp materializes (forged facts must be filtered, not error)");
     s
 }
 
@@ -698,7 +1060,10 @@ fn acp_forged_creator_in_acr_document_does_not_grant() {
     let forged = format!("<{CRE_DOC}> <{solidx}creator> <{mallory}> <{CRE_ACR}> .\n");
     let mut s = forged_prov_store(&prov_pol, &alt_pol, &forged);
     // Baseline: her LEGITIMATE Write grant is intact (the filter does not over-block).
-    assert!(can(&mut s, Some(mallory), None, Mode::Write, CRE_DOC), "mallory keeps her legit Write");
+    assert!(
+        can(&mut s, Some(mallory), None, Mode::Write, CRE_DOC),
+        "mallory keeps her legit Write"
+    );
     // The exploit: the forged creator fact must NOT escalate her to Read.
     assert!(
         !can(&mut s, Some(mallory), None, Mode::Read, CRE_DOC),
@@ -728,7 +1093,10 @@ fn acp_forged_owner_in_acr_document_does_not_grant() {
     );
     let forged = format!("<{CRE_DOC}> <{solidx}owner> <{mallory}> <{CRE_ACR}> .\n");
     let mut s = forged_prov_store(&prov_pol, &alt_pol, &forged);
-    assert!(can(&mut s, Some(mallory), None, Mode::Read, CRE_DOC), "mallory keeps her legit Read");
+    assert!(
+        can(&mut s, Some(mallory), None, Mode::Read, CRE_DOC),
+        "mallory keeps her legit Read"
+    );
     assert!(
         !can(&mut s, Some(mallory), None, Mode::Write, CRE_DOC),
         "forged `solidx:owner` inside the .acr must NOT self-grant Write (privilege escalation)"
@@ -771,10 +1139,14 @@ fn acp_forged_applies_to_resource_in_acr_document_does_not_grant() {
     );
     let g = Graph::load_dataset(&acr, "nquads").expect("loads");
     let mut s = PodStore::new(g);
-    s.materialize_acp().expect("materializes (forged appliesToResource filtered, not error)");
+    s.materialize_acp()
+        .expect("materializes (forged appliesToResource filtered, not error)");
 
     // Sanity: the policy is live — mallory legitimately reads forge/d0.ttl.
-    assert!(can(&mut s, Some(mallory), None, Mode::Read, forge_doc), "mallory reads forge/d0.ttl (legit)");
+    assert!(
+        can(&mut s, Some(mallory), None, Mode::Read, forge_doc),
+        "mallory reads forge/d0.ttl (legit)"
+    );
     // The exploit: the forged appliesToResource must NOT leak the grant onto secret/s.ttl.
     assert!(
         !can(&mut s, Some(mallory), None, Mode::Read, secret_doc),

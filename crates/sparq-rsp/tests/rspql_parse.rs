@@ -2,7 +2,7 @@
 //! streaming-SPARQL extension (`REGISTER`, `FROM NAMED WINDOW … ON … RANGE/STEP`,
 //! `WINDOW <w> { … }`) into the crate's window/stream representation.
 
-use sparq_rsp::{R2S, RspqlQuery, WindowSpec};
+use sparq_rsp::{RspqlQuery, WindowSpec, R2S};
 
 use oxrdf::NamedNode;
 
@@ -26,7 +26,10 @@ FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 30";
     let parsed = RspqlQuery::parse(q).unwrap();
 
     // REGISTER header.
-    assert_eq!(parsed.output_stream.as_ref().unwrap().as_str(), "http://ex/out");
+    assert_eq!(
+        parsed.output_stream.as_ref().unwrap().as_str(),
+        "http://ex/out"
+    );
     assert_eq!(parsed.r2s, R2S::IStream);
 
     // Two window declarations, in source order.
@@ -43,7 +46,10 @@ FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 30";
     // The rewritten SPARQL: WINDOW → GRAPH, FROM NAMED WINDOW clauses stripped,
     // and it parses + binds the join (the windows share ?s).
     assert!(parsed.sparql.contains("GRAPH"), "WINDOW rewritten to GRAPH");
-    assert!(!parsed.sparql.contains("WINDOW"), "no WINDOW keyword survives");
+    assert!(
+        !parsed.sparql.contains("WINDOW"),
+        "no WINDOW keyword survives"
+    );
     assert!(!parsed.sparql.to_uppercase().contains("FROM NAMED WINDOW"));
     assert!(!parsed.sparql.contains("REGISTER"));
     // Parseable as a SELECT (a ContinuousMultiQuery would accept it).
@@ -117,7 +123,10 @@ fn keywords_inside_iris_are_not_rewritten() {
              FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> RANGE 10\n\
              FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 10";
     let parsed = RspqlQuery::parse(q).unwrap();
-    assert!(parsed.sparql.contains("http://ex/hasWINDOW"), "predicate IRI untouched");
+    assert!(
+        parsed.sparql.contains("http://ex/hasWINDOW"),
+        "predicate IRI untouched"
+    );
     // Exactly the two leading WINDOW keywords became GRAPH.
     assert_eq!(parsed.sparql.matches("GRAPH").count(), 2);
 }
@@ -136,7 +145,10 @@ fn parses_prefixed_window_and_stream_names() {
              FROM NAMED WINDOW ex:w1 ON ex:temp RANGE 10\n\
              FROM NAMED WINDOW :w2 ON :meta [RANGE PT10S STEP PT5S]";
     let parsed = RspqlQuery::parse(q).unwrap();
-    assert_eq!(parsed.output_stream.as_ref().unwrap().as_str(), "http://ex/out");
+    assert_eq!(
+        parsed.output_stream.as_ref().unwrap().as_str(),
+        "http://ex/out"
+    );
     assert_eq!(parsed.windows[0].window.as_str(), "http://ex/w1");
     assert_eq!(parsed.windows[0].stream.as_str(), "http://ex/temp");
     assert_eq!(parsed.windows[1].window.as_str(), "http://ex/default/w2");
@@ -158,7 +170,10 @@ fn unicode_in_body_survives_rewrite() {
              FROM NAMED WINDOW ex:w1 ON ex:s1 RANGE 10\n\
              FROM NAMED WINDOW ex:w2 ON ex:s2 RANGE 10";
     let parsed = RspqlQuery::parse(q).unwrap(); // must not panic on multi-byte chars
-    assert!(parsed.sparql.contains("naïve café ☕"), "string literal preserved");
+    assert!(
+        parsed.sparql.contains("naïve café ☕"),
+        "string literal preserved"
+    );
     assert_eq!(parsed.sparql.matches("GRAPH").count(), 2);
 }
 
@@ -235,7 +250,10 @@ FROM NAMED WINDOW <http://ex/sw> ON <http://ex/meta> [SLIDING RANGE PT20S STEP P
     assert_eq!(parsed.windows[1].spec, WindowSpec::time(20, 10));
     // Both WINDOW keywords became GRAPH in the rewritten SPARQL.
     assert!(parsed.sparql.contains("GRAPH"), "WINDOW rewritten to GRAPH");
-    assert!(!parsed.sparql.contains("WINDOW"), "no WINDOW keyword survives");
+    assert!(
+        !parsed.sparql.contains("WINDOW"),
+        "no WINDOW keyword survives"
+    );
     sparq_engine::PreparedQuery::parse(&parsed.sparql).expect("rewritten SPARQL parses");
 }
 

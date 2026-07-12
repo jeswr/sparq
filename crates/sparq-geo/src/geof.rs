@@ -72,10 +72,12 @@ impl Unit {
             "http://www.opengis.net/def/uom/OGC/1.0/kilometre"
             | "http://qudt.org/vocab/unit/KiloM" => Ok(Unit::Kilometre),
             "http://qudt.org/vocab/unit/MI" => Ok(Unit::Mile),
-            "http://www.opengis.net/def/uom/OGC/1.0/degree"
-            | "http://qudt.org/vocab/unit/DEG" => Ok(Unit::Degree),
-            "http://www.opengis.net/def/uom/OGC/1.0/radian"
-            | "http://qudt.org/vocab/unit/RAD" => Ok(Unit::Radian),
+            "http://www.opengis.net/def/uom/OGC/1.0/degree" | "http://qudt.org/vocab/unit/DEG" => {
+                Ok(Unit::Degree)
+            }
+            "http://www.opengis.net/def/uom/OGC/1.0/radian" | "http://qudt.org/vocab/unit/RAD" => {
+                Ok(Unit::Radian)
+            }
             other => Err(GeoError::UnknownUnit(other.to_string())),
         }
     }
@@ -108,7 +110,10 @@ pub(crate) fn ensure_compatible(a: &GeoGeometry, b: &GeoGeometry) -> Result<(), 
     if compatible {
         Ok(())
     } else {
-        Err(GeoError::CrsMismatch(a.crs.iri().to_string(), b.crs.iri().to_string()))
+        Err(GeoError::CrsMismatch(
+            a.crs.iri().to_string(),
+            b.crs.iri().to_string(),
+        ))
     }
 }
 
@@ -195,7 +200,9 @@ pub fn distance_meters(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<f64, GeoE
                 }
             }
             if min_dist.is_infinite() {
-                Err(GeoError::Unsupported("distance between empty geometries".to_string()))
+                Err(GeoError::Unsupported(
+                    "distance between empty geometries".to_string(),
+                ))
             } else {
                 Ok(min_dist)
             }
@@ -296,14 +303,19 @@ pub fn relate(a: &GeoGeometry, b: &GeoGeometry, pattern: &str) -> Result<bool, G
 /// over a matrix it computed from a cached prepared side. [FABLE-5]
 pub(crate) fn matrix_matches_any(matrix: &IntersectionMatrix, patterns: &[&str]) -> bool {
     // Patterns are compile-time constants below — a failure is a crate bug.
-    patterns.iter().any(|p| matrix.matches(p).expect("valid built-in DE-9IM pattern"))
+    patterns
+        .iter()
+        .any(|p| matrix.matches(p).expect("valid built-in DE-9IM pattern"))
 }
 
 /// `true` iff the DE-9IM matrix of `a` vs `b` matches ANY of `patterns`
 /// (the spec defines some relations as a disjunction of matrices).
 fn relate_any(a: &GeoGeometry, b: &GeoGeometry, patterns: &[&str]) -> Result<bool, GeoError> {
     ensure_compatible(a, b)?;
-    Ok(matrix_matches_any(&a.geometry.relate(&b.geometry), patterns))
+    Ok(matrix_matches_any(
+        &a.geometry.relate(&b.geometry),
+        patterns,
+    ))
 }
 
 macro_rules! de9im_relation {
@@ -400,16 +412,24 @@ pub fn envelope(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
         .geometry
         .bounding_rect()
         .ok_or_else(|| GeoError::Unsupported("empty geometry has no envelope".to_string()))?;
-    Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::Polygon(rect.to_polygon()) })
+    Ok(GeoGeometry {
+        crs: g.crs.clone(),
+        geometry: Geometry::Polygon(rect.to_polygon()),
+    })
 }
 
 /// `geof:convexHull` — the convex hull of the geometry's coordinates.
 pub fn convex_hull(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     if g.geometry.coords_count() == 0 {
-        return Err(GeoError::Unsupported("empty geometry has no convex hull".to_string()));
+        return Err(GeoError::Unsupported(
+            "empty geometry has no convex hull".to_string(),
+        ));
     }
     let points: MultiPoint<f64> = g.geometry.coords_iter().map(Point::from).collect();
-    Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::Polygon(points.convex_hull()) })
+    Ok(GeoGeometry {
+        crs: g.crs.clone(),
+        geometry: Geometry::Polygon(points.convex_hull()),
+    })
 }
 
 /// `geof:boundary` — the simple-features boundary:
@@ -421,7 +441,10 @@ pub fn convex_hull(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
 /// - geometry collections: unsupported in v1 (heterogeneous boundary).
 pub fn boundary(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     let geometry = boundary_geometry(&g.geometry)?;
-    Ok(GeoGeometry { crs: g.crs.clone(), geometry })
+    Ok(GeoGeometry {
+        crs: g.crs.clone(),
+        geometry,
+    })
 }
 
 fn boundary_geometry(g: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
@@ -439,8 +462,11 @@ fn boundary_geometry(g: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
             bump(ls.0[0]);
             bump(*ls.0.last().unwrap());
         }
-        let pts: Vec<Point<f64>> =
-            counts.into_iter().filter(|(_, n)| n % 2 == 1).map(|(c, _)| Point::from(c)).collect();
+        let pts: Vec<Point<f64>> = counts
+            .into_iter()
+            .filter(|(_, n)| n % 2 == 1)
+            .map(|(c, _)| Point::from(c))
+            .collect();
         Geometry::MultiPoint(MultiPoint(pts))
     }
 
@@ -450,9 +476,7 @@ fn boundary_geometry(g: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
 
     Ok(match g {
         Geometry::Point(_) | Geometry::MultiPoint(_) => Geometry::MultiPoint(MultiPoint(vec![])),
-        Geometry::Line(l) => {
-            Geometry::MultiPoint(MultiPoint(vec![l.start_point(), l.end_point()]))
-        }
+        Geometry::Line(l) => Geometry::MultiPoint(MultiPoint(vec![l.start_point(), l.end_point()])),
         Geometry::LineString(ls) => curve_boundary(std::iter::once(ls)),
         Geometry::MultiLineString(mls) => curve_boundary(mls.0.iter()),
         Geometry::Polygon(p) => Geometry::MultiLineString(MultiLineString(rings(p).collect())),
@@ -627,7 +651,10 @@ fn collect_lines(lines: Vec<LineString<f64>>) -> Geometry<f64> {
 pub fn intersection(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     ensure_compatible(a, b)?;
     let geometry = intersection_geometry(&a.geometry, &b.geometry)?;
-    Ok(GeoGeometry { crs: a.crs.clone(), geometry })
+    Ok(GeoGeometry {
+        crs: a.crs.clone(),
+        geometry,
+    })
 }
 
 fn intersection_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
@@ -703,7 +730,8 @@ fn line_line_intersection(a: &Geometry<f64>, b: &Geometry<f64>) -> Geometry<f64>
 
 /// Whether `c` lies on the linestring `ls` (any segment), within epsilon.
 fn point_on_linestring(c: Coord<f64>, ls: &LineString<f64>) -> bool {
-    ls.lines().any(|seg| seg.coordinate_position(&c) != CoordPos::Outside)
+    ls.lines()
+        .any(|seg| seg.coordinate_position(&c) != CoordPos::Outside)
 }
 
 /// Clip a 1-D operand to a polygon (line ∩ polygon): the portions of the line
@@ -827,7 +855,10 @@ fn clip_line_by_polygon(
     // Even-odd fill is winding-direction-insensitive and resolves holes
     // correctly regardless of how the WKT oriented the rings (verified by
     // spike); the positive/negative rules are NOT — do not use them.
-    let rule = ClipRule { invert, boundary_included };
+    let rule = ClipRule {
+        invert,
+        boundary_included,
+    };
     let mut out: Vec<LineString<f64>> = Vec::new();
     for ls in line_strings(line) {
         if ls.0.len() < 2 {
@@ -838,7 +869,12 @@ fn clip_line_by_polygon(
             if piece.len() < 2 {
                 continue;
             }
-            out.push(LineString(piece.into_iter().map(|p| Coord { x: p[0], y: p[1] }).collect()));
+            out.push(LineString(
+                piece
+                    .into_iter()
+                    .map(|p| Coord { x: p[0], y: p[1] })
+                    .collect(),
+            ));
         }
     }
     out
@@ -852,8 +888,10 @@ fn clip_line_by_polygon(
 /// `b` overlaps it.
 fn line_minus_lines(a: &Geometry<f64>, b: &Geometry<f64>) -> Vec<LineString<f64>> {
     let mut pieces: Vec<LineString<f64>> = Vec::new();
-    let b_segs: Vec<Line<f64>> =
-        line_strings(b).iter().flat_map(|ls| ls.lines().collect::<Vec<_>>()).collect();
+    let b_segs: Vec<Line<f64>> = line_strings(b)
+        .iter()
+        .flat_map(|ls| ls.lines().collect::<Vec<_>>())
+        .collect();
     for la in line_strings(a) {
         for seg in la.lines() {
             if coord_eq(seg.start, seg.end) {
@@ -908,7 +946,10 @@ fn line_minus_lines(a: &Geometry<f64>, b: &Geometry<f64>) -> Vec<LineString<f64>
 pub fn union(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     ensure_compatible(a, b)?;
     let geometry = union_geometry(&a.geometry, &b.geometry)?;
-    Ok(GeoGeometry { crs: a.crs.clone(), geometry })
+    Ok(GeoGeometry {
+        crs: a.crs.clone(),
+        geometry,
+    })
 }
 
 fn union_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
@@ -930,10 +971,9 @@ fn union_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>,
             Ok(collect_lines(lines))
         }
         // Mixed dimension: a heterogeneous union is exactly a GEOMETRYCOLLECTION.
-        _ => Ok(Geometry::GeometryCollection(geo_types::GeometryCollection(vec![
-            a.clone(),
-            b.clone(),
-        ]))),
+        _ => Ok(Geometry::GeometryCollection(geo_types::GeometryCollection(
+            vec![a.clone(), b.clone()],
+        ))),
     }
 }
 
@@ -953,7 +993,10 @@ fn union_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>,
 pub fn difference(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     ensure_compatible(a, b)?;
     let geometry = difference_geometry(&a.geometry, &b.geometry)?;
-    Ok(GeoGeometry { crs: a.crs.clone(), geometry })
+    Ok(GeoGeometry {
+        crs: a.crs.clone(),
+        geometry,
+    })
 }
 
 fn difference_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
@@ -1014,7 +1057,10 @@ fn difference_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<
 pub fn sym_difference(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     ensure_compatible(a, b)?;
     let geometry = sym_difference_geometry(&a.geometry, &b.geometry)?;
-    Ok(GeoGeometry { crs: a.crs.clone(), geometry })
+    Ok(GeoGeometry {
+        crs: a.crs.clone(),
+        geometry,
+    })
 }
 
 fn sym_difference_geometry(
@@ -1032,9 +1078,16 @@ fn sym_difference_geometry(
         (Some(0), Some(0)) => {
             let ca = point_coords(a);
             let cb = point_coords(b);
-            let mut out: Vec<Coord<f64>> =
-                ca.iter().filter(|c| !cb.iter().any(|d| coord_eq(**c, *d))).copied().collect();
-            out.extend(cb.iter().filter(|c| !ca.iter().any(|d| coord_eq(**c, *d))).copied());
+            let mut out: Vec<Coord<f64>> = ca
+                .iter()
+                .filter(|c| !cb.iter().any(|d| coord_eq(**c, *d)))
+                .copied()
+                .collect();
+            out.extend(
+                cb.iter()
+                    .filter(|c| !ca.iter().any(|d| coord_eq(**c, *d)))
+                    .copied(),
+            );
             Ok(collect_points(out))
         }
         // Every remaining combination is the generic symmetric difference
@@ -1079,11 +1132,14 @@ pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, G
                 ));
             }
             let meters = radius * scale;
-            let projected =
-                g.geometry.map_coords(|c| Coord { x: c.x * kx, y: c.y * METERS_PER_DEGREE });
-            projected
-                .buffer(meters)
-                .map_coords(|c| Coord { x: c.x / kx, y: c.y / METERS_PER_DEGREE })
+            let projected = g.geometry.map_coords(|c| Coord {
+                x: c.x * kx,
+                y: c.y * METERS_PER_DEGREE,
+            });
+            projected.buffer(meters).map_coords(|c| Coord {
+                x: c.x / kx,
+                y: c.y / METERS_PER_DEGREE,
+            })
         }
         None => {
             let d = match unit {
@@ -1093,7 +1149,10 @@ pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, G
             g.geometry.buffer(d)
         }
     };
-    Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::MultiPolygon(buffered) })
+    Ok(GeoGeometry {
+        crs: g.crs.clone(),
+        geometry: Geometry::MultiPolygon(buffered),
+    })
 }
 
 // ---- Lexical-level mirrors (the engine-builtin shape) ------------------------------
@@ -1111,7 +1170,11 @@ pub mod lex {
 
     /// `geof:distance(?a, ?b, ?unitIri)`.
     pub fn distance(a: &str, b: &str, unit_iri: &str) -> Result<f64, GeoError> {
-        super::distance(&parse_wkt_literal(a)?, &parse_wkt_literal(b)?, Unit::from_iri(unit_iri)?)
+        super::distance(
+            &parse_wkt_literal(a)?,
+            &parse_wkt_literal(b)?,
+            Unit::from_iri(unit_iri)?,
+        )
     }
 
     macro_rules! lex_relation {
@@ -1285,7 +1348,9 @@ pub mod lex {
 
     /// `geof:buffer(?a, ?radius, ?unitIri)` -> wktLiteral lexical form.
     pub fn buffer(a: &str, radius: f64, unit_iri: &str) -> Result<String, GeoError> {
-        Ok(super::buffer(&parse_wkt_literal(a)?, radius, Unit::from_iri(unit_iri)?)?
-            .to_wkt_literal())
+        Ok(
+            super::buffer(&parse_wkt_literal(a)?, radius, Unit::from_iri(unit_iri)?)?
+                .to_wkt_literal(),
+        )
     }
 }

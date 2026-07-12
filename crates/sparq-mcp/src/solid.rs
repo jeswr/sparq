@@ -312,7 +312,12 @@ pub const CONTAINER_CREATE: ToolSpec = ToolSpec {
 };
 
 /// The tool names only reachable when [`SolidServerConfig::allow_update`] is on.
-const MUTATING: [&str; 4] = ["update", "resource_put", "resource_delete", "container_create"];
+const MUTATING: [&str; 4] = [
+    "update",
+    "resource_put",
+    "resource_delete",
+    "container_create",
+];
 
 /// The existence-non-disclosure error (draft §9.3): used **byte-identically** for a
 /// resource that does not exist and for one this session may not read, so no
@@ -331,7 +336,12 @@ fn write_denied_error(url: &str) -> String {
 /// parameters (`; charset=…`) are ignored; only the RDF text formats a pod document
 /// can round-trip are accepted.
 fn rdf_format(content_type: &str) -> Option<&'static str> {
-    let base = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let base = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     match base.as_str() {
         "text/turtle" | "turtle" | "ttl" => Some("turtle"),
         "application/n-triples" | "ntriples" | "n-triples" | "nt" => Some("ntriples"),
@@ -363,7 +373,9 @@ fn parent_iri(iri: &str) -> Option<String> {
 /// `urn:sparq:` space.
 fn valid_target(url: &str) -> Result<NamedNode, String> {
     if url.starts_with(RESERVED_PREFIX) {
-        return Err(format!("invalid target <{url}>: the `{RESERVED_PREFIX}` graph space is reserved"));
+        return Err(format!(
+            "invalid target <{url}>: the `{RESERVED_PREFIX}` graph space is reserved"
+        ));
     }
     NamedNode::new(url).map_err(|e| format!("invalid resource IRI <{url}>: {e}"))
 }
@@ -479,7 +491,12 @@ impl SolidMcpServer {
     pub fn advertised(&self) -> Vec<&'static ToolSpec> {
         let mut tools: Vec<&'static ToolSpec> = vec![&POD_QUERY, &RESOURCE_GET, &CONTAINER_LIST];
         if self.allow_update() {
-            tools.extend([&POD_UPDATE, &RESOURCE_PUT, &RESOURCE_DELETE, &CONTAINER_CREATE]);
+            tools.extend([
+                &POD_UPDATE,
+                &RESOURCE_PUT,
+                &RESOURCE_DELETE,
+                &CONTAINER_CREATE,
+            ]);
         }
         tools
     }
@@ -503,9 +520,10 @@ impl SolidMcpServer {
                 Ok(json!({ "tools": tools }))
             }
             "tools/call" => self.tools_call(&req.params),
-            other => {
-                Err(RpcError::new(METHOD_NOT_FOUND, format!("method not found: {other}")))
-            }
+            other => Err(RpcError::new(
+                METHOD_NOT_FOUND,
+                format!("method not found: {other}"),
+            )),
         }
     }
 
@@ -538,7 +556,10 @@ impl SolidMcpServer {
             "resource_delete" => self.tool_resource_delete(&args),
             "container_create" => self.tool_container_create(&args),
             other => {
-                return Err(RpcError::new(METHOD_NOT_FOUND, format!("unknown tool: {other}")))
+                return Err(RpcError::new(
+                    METHOD_NOT_FOUND,
+                    format!("unknown tool: {other}"),
+                ))
             }
         };
 
@@ -562,7 +583,12 @@ impl SolidMcpServer {
     fn find_doc(&self, url: &str) -> Option<&Graph> {
         let name = NamedNode::new(url).ok()?;
         let term = Term::NamedNode(name);
-        self.store.graph.named.iter().find(|(n, _)| *n == term).map(|(_, g)| g)
+        self.store
+            .graph
+            .named
+            .iter()
+            .find(|(n, _)| *n == term)
+            .map(|(_, g)| g)
     }
 
     /// The index of the named-graph slot for `term`, if present.
@@ -751,7 +777,11 @@ impl SolidMcpServer {
         self.store.graph.named.push((term.clone(), new_graph));
 
         // A CREATED document becomes a member of its parent containers (draft §7.3).
-        let links = if existed { Ok((Vec::new(), Vec::new())) } else { self.link_containment(&url) };
+        let links = if existed {
+            Ok((Vec::new(), Vec::new()))
+        } else {
+            self.link_containment(&url)
+        };
         let (created_graphs, added_links) = match links {
             Ok(x) => x,
             Err(e) => {
@@ -768,7 +798,9 @@ impl SolidMcpServer {
             let _ = self.rematerialize(); // restore the prior (already-valid) view
             return Err(format!("resource_put rolled back for <{url}>: {e}"));
         }
-        Ok(pretty(&json!({ "url": url, "created": !existed, "triples": triples })))
+        Ok(pretty(
+            &json!({ "url": url, "created": !existed, "triples": triples }),
+        ))
     }
 
     /// `resource_delete`: delete one document (LDP DELETE). Rejects non-empty
@@ -806,7 +838,9 @@ impl SolidMcpServer {
             let doc = self.find_doc(&url).expect("slot checked above");
             let q = format!("ASK {{ <{url}> <{LDP_CONTAINS}> ?m }}");
             if sparq_engine::ask(doc, &q)? {
-                return Err(format!("container <{url}> is not empty — delete its members first"));
+                return Err(format!(
+                    "container <{url}> is not empty — delete its members first"
+                ));
             }
         }
 
@@ -893,7 +927,10 @@ impl SolidMcpServer {
             let pos = match self.slot_index(&pterm) {
                 Some(i) => i,
                 None => {
-                    self.store.graph.named.push((pterm.clone(), container_graph(&parent)?));
+                    self.store
+                        .graph
+                        .named
+                        .push((pterm.clone(), container_graph(&parent)?));
                     created.push(pterm.clone());
                     self.store.graph.named.len() - 1
                 }
@@ -924,8 +961,11 @@ impl SolidMcpServer {
     fn unlink_containment(&mut self, created: &[Term], added: &[AddedLink]) {
         for (pterm, t) in added.iter().rev() {
             if let Some(i) = self.slot_index(pterm) {
-                let _ =
-                    self.store.graph.named[i].1.remove_triple(t[0].clone(), t[1].clone(), t[2].clone());
+                let _ = self.store.graph.named[i].1.remove_triple(
+                    t[0].clone(),
+                    t[1].clone(),
+                    t[2].clone(),
+                );
             }
         }
         for term in created.iter().rev() {
@@ -974,10 +1014,22 @@ mod unit {
 
     #[test]
     fn parent_iri_walks_slash_semantics_to_the_origin_root() {
-        assert_eq!(parent_iri("https://h.ex/a/b/doc.ttl").as_deref(), Some("https://h.ex/a/b/"));
-        assert_eq!(parent_iri("https://h.ex/a/b/").as_deref(), Some("https://h.ex/a/"));
-        assert_eq!(parent_iri("https://h.ex/a/").as_deref(), Some("https://h.ex/"));
-        assert_eq!(parent_iri("https://h.ex/doc"), Some("https://h.ex/".to_string()));
+        assert_eq!(
+            parent_iri("https://h.ex/a/b/doc.ttl").as_deref(),
+            Some("https://h.ex/a/b/")
+        );
+        assert_eq!(
+            parent_iri("https://h.ex/a/b/").as_deref(),
+            Some("https://h.ex/a/")
+        );
+        assert_eq!(
+            parent_iri("https://h.ex/a/").as_deref(),
+            Some("https://h.ex/")
+        );
+        assert_eq!(
+            parent_iri("https://h.ex/doc"),
+            Some("https://h.ex/".to_string())
+        );
         assert_eq!(parent_iri("https://h.ex/"), None);
         assert_eq!(parent_iri("urn:sparq:auth"), None); // no slash hierarchy
     }
@@ -995,7 +1047,10 @@ mod unit {
     fn not_found_error_is_a_pure_function_of_the_url() {
         // Load-bearing for §9.3: the SAME template must serve both the nonexistent
         // and the unauthorized case, so it may depend on nothing but the URL.
-        assert_eq!(not_found_error("https://p.ex/x"), "resource not found: <https://p.ex/x>");
+        assert_eq!(
+            not_found_error("https://p.ex/x"),
+            "resource not found: <https://p.ex/x>"
+        );
     }
 
     #[test]

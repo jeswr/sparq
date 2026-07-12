@@ -63,8 +63,12 @@ impl CsTable {
                 if s.predicates.windows(2).all(|w| w[0] < w[1]) {
                     return s;
                 }
-                let mut paired: Vec<(Id, u64)> =
-                    s.predicates.iter().copied().zip(s.predicate_triples.iter().copied()).collect();
+                let mut paired: Vec<(Id, u64)> = s
+                    .predicates
+                    .iter()
+                    .copied()
+                    .zip(s.predicate_triples.iter().copied())
+                    .collect();
                 paired.sort_unstable();
                 CsSet {
                     predicates: paired.iter().map(|&(p, _)| p).collect(),
@@ -88,7 +92,11 @@ impl CsTable {
     /// `Σ_{C ⊇ Q} count(C)`: distinct subjects carrying EVERY predicate of `q`
     /// (the star's subject-variable ndv). `q` must be sorted ascending.
     pub fn star_subjects(&self, q: &[Id]) -> u64 {
-        self.sets.iter().filter(|c| is_subset(q, &c.predicates)).map(|c| c.subjects).sum()
+        self.sets
+            .iter()
+            .filter(|c| is_subset(q, &c.predicates))
+            .map(|c| c.subjects)
+            .sum()
     }
 
     /// Neumann & Moerkotte's star estimate `Σ_{C ⊇ Q} count(C) · Π_{p∈Q} avg_mult(C, p)`:
@@ -199,7 +207,11 @@ impl StarCtx {
         table: Arc<CsTable>,
         pats: impl Iterator<Item = Option<(Variable, Id)>>,
     ) -> StarCtx {
-        StarCtx { table, pat_star: pats.collect(), joined: FxHashMap::default() }
+        StarCtx {
+            table,
+            pat_star: pats.collect(),
+            joined: FxHashMap::default(),
+        }
     }
 
     /// Marks pattern `i` joined: its predicate now conditions later star estimates.
@@ -254,7 +266,11 @@ mod tests {
     use super::*;
 
     fn set(preds: &[Id], subjects: u64, triples: &[u64]) -> CsSet {
-        CsSet { predicates: preds.into(), subjects, predicate_triples: triples.into() }
+        CsSet {
+            predicates: preds.into(),
+            subjects,
+            predicate_triples: triples.into(),
+        }
     }
 
     #[test]
@@ -278,8 +294,16 @@ mod tests {
             set(&[5, 6], 4, &[1]),       // length mismatch: dropped
         ]);
         assert_eq!(t.len(), 1);
-        assert_eq!(t.star_cardinality(&[1]), 10.0, "p1 avg_mult is 1 after re-alignment");
-        assert_eq!(t.star_cardinality(&[3]), 30.0, "p3 avg_mult is 3 after re-alignment");
+        assert_eq!(
+            t.star_cardinality(&[1]),
+            10.0,
+            "p1 avg_mult is 1 after re-alignment"
+        );
+        assert_eq!(
+            t.star_cardinality(&[3]),
+            30.0,
+            "p3 avg_mult is 3 after re-alignment"
+        );
     }
 
     #[test]

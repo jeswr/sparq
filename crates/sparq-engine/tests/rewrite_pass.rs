@@ -23,11 +23,11 @@
 //! changed, not merely the row count.
 #![cfg(feature = "algebra-rewrite")]
 
+use spargebra::algebra::GraphPattern;
+use spargebra::{Query, SparqlParser};
 use sparq_core::Graph;
 use sparq_engine::rewrite::rewrite_query;
 use sparq_engine::{explain, query, query_prepared, PreparedQuery};
-use spargebra::algebra::GraphPattern;
-use spargebra::{Query, SparqlParser};
 
 const PFX: &str = concat!(
     "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> ",
@@ -61,7 +61,9 @@ fn bag_of(r: &sparq_engine::QueryResult) -> Vec<Vec<(String, String)>> {
                 .map(|(v, cell)| {
                     (
                         v.clone(),
-                        cell.as_ref().map(|t| t.to_string()).unwrap_or_else(|| UNBOUND.to_string()),
+                        cell.as_ref()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| UNBOUND.to_string()),
                     )
                 })
                 .collect();
@@ -129,9 +131,20 @@ fn q03b_equality_substitution_result_equivalent() {
     let rows_oracle = result_bag(&g, &inline);
 
     // {a1→"3", a2→"7"} — a3 (no month) and x1 (not an Article) excluded.
-    assert_eq!(rows_on.len(), 2, "expected exactly the two months: {:?}", rows_on);
-    assert_eq!(rows_on, rows_off, "rewritten (on) must equal un-rewritten (off)");
-    assert_eq!(rows_on, rows_oracle, "rewritten must equal the inlined-constant oracle");
+    assert_eq!(
+        rows_on.len(),
+        2,
+        "expected exactly the two months: {:?}",
+        rows_on
+    );
+    assert_eq!(
+        rows_on, rows_off,
+        "rewritten (on) must equal un-rewritten (off)"
+    );
+    assert_eq!(
+        rows_on, rows_oracle,
+        "rewritten must equal the inlined-constant oracle"
+    );
 }
 
 #[test]
@@ -142,17 +155,28 @@ fn q03b_plan_actually_changed() {
     // Anti-vacuity: the un-rewritten algebra HAD a Filter on ?property.
     let raw = SparqlParser::new().parse_query(&q).unwrap();
     let raw_dbg = pattern_dbg(&raw);
-    assert!(raw_dbg.contains("Filter"), "baseline must have a post-join Filter: {}", raw_dbg);
+    assert!(
+        raw_dbg.contains("Filter"),
+        "baseline must have a post-join Filter: {}",
+        raw_dbg
+    );
 
     // The rewrite changed the algebra and consumed that Filter.
     let rw = rewrite_query(raw.clone());
     assert_ne!(rw, raw, "rewrite must change the algebra");
-    assert!(!pattern_dbg(&rw).contains("Filter"), "the equality Filter must be gone");
+    assert!(
+        !pattern_dbg(&rw).contains("Filter"),
+        "the equality Filter must be gone"
+    );
 
     // explain() reflects the executed (rewritten) plan: no Filter line, and the
     // month IRI is now folded into a triple pattern (a constant-seeded scan).
     let ex = explain(&g, &q).unwrap();
-    assert!(!ex.contains("Filter"), "EXPLAIN must no longer show the post-join Filter:\n{}", ex);
+    assert!(
+        !ex.contains("Filter"),
+        "EXPLAIN must no longer show the post-join Filter:\n{}",
+        ex
+    );
     assert!(
         ex.contains("http://swrc.ontoware.org/ontology#month"),
         "EXPLAIN must show the folded IRI in a pattern:\n{}",
@@ -171,7 +195,11 @@ fn literal_equality_is_not_rewritten() {
         "<http://ex/s2> <http://ex/num> \"2\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
     ));
 
-    for filter in ["?value = 1", "?value = \"1\"^^xsd:decimal", "?value = \"1\"^^xsd:integer"] {
+    for filter in [
+        "?value = 1",
+        "?value = \"1\"^^xsd:decimal",
+        "?value = \"1\"^^xsd:integer",
+    ] {
         let q = format!("{PFX} SELECT ?s ?value WHERE {{ ?s ex:num ?value . FILTER({filter}) }}");
         let raw = SparqlParser::new().parse_query(&q).unwrap();
         // Structural: the pass leaves a literal-equality FILTER completely alone.
@@ -196,10 +224,19 @@ fn literal_equality_is_not_rewritten() {
         "<http://ex/s1> <http://ex/ref> <http://ex/target> .\n",
         "<http://ex/s2> <http://ex/ref> <http://ex/other> .\n",
     ));
-    let q = format!("{PFX} SELECT ?s ?value WHERE {{ ?s ex:ref ?value . FILTER(?value = ex:target) }}");
+    let q =
+        format!("{PFX} SELECT ?s ?value WHERE {{ ?s ex:ref ?value . FILTER(?value = ex:target) }}");
     let raw = SparqlParser::new().parse_query(&q).unwrap();
-    assert_ne!(rewrite_query(raw.clone()), raw, "an IRI-constant FILTER on the same slot IS rewritten");
-    assert_eq!(result_bag(&gi, &q), result_bag_raw(&gi, &q), "IRI rewrite stays result-equivalent");
+    assert_ne!(
+        rewrite_query(raw.clone()),
+        raw,
+        "an IRI-constant FILTER on the same slot IS rewritten"
+    );
+    assert_eq!(
+        result_bag(&gi, &q),
+        result_bag_raw(&gi, &q),
+        "IRI rewrite stays result-equivalent"
+    );
     assert_eq!(result_bag(&gi, &q).len(), 1, "only s1 references ex:target");
 }
 
@@ -237,8 +274,14 @@ fn q07_antijoin_result_equivalent() {
     let rows_oracle = result_bag(&g, &minus);
 
     assert_eq!(rows_on.len(), 1, "only d3 has no ref: {:?}", rows_on);
-    assert_eq!(rows_on, rows_off, "rewritten (on) must equal un-rewritten (off)");
-    assert_eq!(rows_on, rows_oracle, "rewritten must equal the explicit-MINUS oracle");
+    assert_eq!(
+        rows_on, rows_off,
+        "rewritten (on) must equal un-rewritten (off)"
+    );
+    assert_eq!(
+        rows_on, rows_oracle,
+        "rewritten must equal the explicit-MINUS oracle"
+    );
 }
 
 #[test]
@@ -248,17 +291,37 @@ fn q07_plan_actually_changed() {
 
     let raw = SparqlParser::new().parse_query(&q).unwrap();
     let raw_dbg = pattern_dbg(&raw);
-    assert!(raw_dbg.contains("LeftJoin"), "baseline must have a LeftJoin: {}", raw_dbg);
+    assert!(
+        raw_dbg.contains("LeftJoin"),
+        "baseline must have a LeftJoin: {}",
+        raw_dbg
+    );
 
     let rw = rewrite_query(raw.clone());
     assert_ne!(rw, raw, "rewrite must change the algebra");
     let rw_dbg = pattern_dbg(&rw);
-    assert!(rw_dbg.contains("Minus"), "OPTIONAL+!bound must become Minus: {}", rw_dbg);
-    assert!(!rw_dbg.contains("LeftJoin"), "the LeftJoin must be gone: {}", rw_dbg);
+    assert!(
+        rw_dbg.contains("Minus"),
+        "OPTIONAL+!bound must become Minus: {}",
+        rw_dbg
+    );
+    assert!(
+        !rw_dbg.contains("LeftJoin"),
+        "the LeftJoin must be gone: {}",
+        rw_dbg
+    );
 
     let ex = explain(&g, &q).unwrap();
-    assert!(ex.contains("Minus"), "EXPLAIN must show the anti-join (Minus):\n{}", ex);
-    assert!(!ex.contains("LeftJoin"), "EXPLAIN must no longer show the LeftJoin:\n{}", ex);
+    assert!(
+        ex.contains("Minus"),
+        "EXPLAIN must show the anti-join (Minus):\n{}",
+        ex
+    );
+    assert!(
+        !ex.contains("LeftJoin"),
+        "EXPLAIN must no longer show the LeftJoin:\n{}",
+        ex
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +338,14 @@ fn antijoin_declines_without_shared_variable() {
          OPTIONAL {{ <http://ex/other> bench:ref ?bag }} FILTER(!bound(?bag)) }}"
     );
     let raw = SparqlParser::new().parse_query(&q).unwrap();
-    assert_eq!(rewrite_query(raw.clone()), raw, "must decline: A and B share no variable");
-    assert_eq!(result_bag(&g, &q), result_bag_raw(&g, &q), "on == off when the pass declines");
+    assert_eq!(
+        rewrite_query(raw.clone()),
+        raw,
+        "must decline: A and B share no variable"
+    );
+    assert_eq!(
+        result_bag(&g, &q),
+        result_bag_raw(&g, &q),
+        "on == off when the pass declines"
+    );
 }

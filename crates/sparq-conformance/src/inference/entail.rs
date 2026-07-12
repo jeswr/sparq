@@ -67,10 +67,26 @@ impl Recognized {
     /// mapping for) — what an OWL 2 datatype map always includes.
     pub fn standard() -> Recognized {
         let mut iris: FxHashSet<String> = [
-            "string", "normalizedString", "token", "boolean", "integer", "long", "int",
-            "short", "byte", "nonNegativeInteger", "positiveInteger", "nonPositiveInteger",
-            "negativeInteger", "unsignedLong", "unsignedInt", "unsignedShort", "unsignedByte",
-            "decimal", "float", "double",
+            "string",
+            "normalizedString",
+            "token",
+            "boolean",
+            "integer",
+            "long",
+            "int",
+            "short",
+            "byte",
+            "nonNegativeInteger",
+            "positiveInteger",
+            "nonPositiveInteger",
+            "negativeInteger",
+            "unsignedLong",
+            "unsignedInt",
+            "unsignedShort",
+            "unsignedByte",
+            "decimal",
+            "float",
+            "double",
         ]
         .iter()
         .map(|l| format!("{XSD}{l}"))
@@ -160,11 +176,23 @@ pub fn close(premise: &[Row], conclusion: &[Row], regime: Regime, d: &Recognized
             [sp(), rng(), property()],
             [sc(), dom(), class()],
             [sc(), rng(), class()],
-            [iri(rdf::SUBJECT.as_str()), dom(), iri(rdf::STATEMENT.as_str())],
+            [
+                iri(rdf::SUBJECT.as_str()),
+                dom(),
+                iri(rdf::STATEMENT.as_str()),
+            ],
             [iri(rdf::SUBJECT.as_str()), rng(), resource()],
-            [iri(rdf::PREDICATE.as_str()), dom(), iri(rdf::STATEMENT.as_str())],
+            [
+                iri(rdf::PREDICATE.as_str()),
+                dom(),
+                iri(rdf::STATEMENT.as_str()),
+            ],
             [iri(rdf::PREDICATE.as_str()), rng(), resource()],
-            [iri(rdf::OBJECT.as_str()), dom(), iri(rdf::STATEMENT.as_str())],
+            [
+                iri(rdf::OBJECT.as_str()),
+                dom(),
+                iri(rdf::STATEMENT.as_str()),
+            ],
             [iri(rdf::OBJECT.as_str()), rng(), resource()],
             [iri(rdfs::MEMBER.as_str()), dom(), resource()],
             [iri(rdfs::MEMBER.as_str()), rng(), resource()],
@@ -176,7 +204,11 @@ pub fn close(premise: &[Row], conclusion: &[Row], regime: Regime, d: &Recognized
             [iri(rdfs::SEE_ALSO.as_str()), rng(), resource()],
             [iri(rdfs::IS_DEFINED_BY.as_str()), dom(), resource()],
             [iri(rdfs::IS_DEFINED_BY.as_str()), rng(), resource()],
-            [iri(rdfs::IS_DEFINED_BY.as_str()), sp(), iri(rdfs::SEE_ALSO.as_str())],
+            [
+                iri(rdfs::IS_DEFINED_BY.as_str()),
+                sp(),
+                iri(rdfs::SEE_ALSO.as_str()),
+            ],
             [iri(rdfs::COMMENT.as_str()), dom(), resource()],
             [iri(rdfs::COMMENT.as_str()), rng(), literal()],
             [iri(rdfs::LABEL.as_str()), dom(), resource()],
@@ -191,7 +223,11 @@ pub fn close(premise: &[Row], conclusion: &[Row], regime: Regime, d: &Recognized
                 sc(),
                 property(),
             ],
-            [iri(rdf::XML_LITERAL.as_str()), ty(), iri(rdfs::DATATYPE.as_str())],
+            [
+                iri(rdf::XML_LITERAL.as_str()),
+                ty(),
+                iri(rdfs::DATATYPE.as_str()),
+            ],
             [iri(rdf::XML_LITERAL.as_str()), sc(), literal()],
             [iri(rdfs::DATATYPE.as_str()), sc(), class()],
         ];
@@ -266,7 +302,11 @@ fn harness_rules(set: &mut FxHashSet<Row>, regime: Regime, d: &Recognized) {
     let mut add: Vec<Row> = Vec::new();
     for [s, p, o] in set.iter() {
         // rdfD2: every predicate is an rdf:Property.
-        add.push([p.clone(), iri(ty), iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#Property")]);
+        add.push([
+            p.clone(),
+            iri(ty),
+            iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#Property"),
+        ]);
         // rdfD1: a well-formed literal of a recognized datatype is an instance
         // of it (the literal itself stands in for the allocated blank node).
         for t in [s, o] {
@@ -289,14 +329,26 @@ fn harness_rules(set: &mut FxHashSet<Row>, regime: Regime, d: &Recognized) {
                             add.push([s.clone(), iri(rdfs::SUB_PROPERTY_OF.as_str()), s.clone()]);
                         }
                         "http://www.w3.org/2000/01/rdf-schema#Class" => {
-                            add.push([s.clone(), iri(rdfs::SUB_CLASS_OF.as_str()), iri(rdfs::RESOURCE.as_str())]);
+                            add.push([
+                                s.clone(),
+                                iri(rdfs::SUB_CLASS_OF.as_str()),
+                                iri(rdfs::RESOURCE.as_str()),
+                            ]);
                             add.push([s.clone(), iri(rdfs::SUB_CLASS_OF.as_str()), s.clone()]);
                         }
                         "http://www.w3.org/2000/01/rdf-schema#ContainerMembershipProperty" => {
-                            add.push([s.clone(), iri(rdfs::SUB_PROPERTY_OF.as_str()), iri(rdfs::MEMBER.as_str())]);
+                            add.push([
+                                s.clone(),
+                                iri(rdfs::SUB_PROPERTY_OF.as_str()),
+                                iri(rdfs::MEMBER.as_str()),
+                            ]);
                         }
                         "http://www.w3.org/2000/01/rdf-schema#Datatype" => {
-                            add.push([s.clone(), iri(rdfs::SUB_CLASS_OF.as_str()), iri(rdfs::LITERAL.as_str())]);
+                            add.push([
+                                s.clone(),
+                                iri(rdfs::SUB_CLASS_OF.as_str()),
+                                iri(rdfs::LITERAL.as_str()),
+                            ]);
                         }
                         _ => {}
                     }
@@ -318,7 +370,11 @@ fn harness_rules(set: &mut FxHashSet<Row>, regime: Regime, d: &Recognized) {
             })
             .collect();
         for dt in occurring {
-            add.push([iri(&dt), iri(rdf::TYPE.as_str()), iri(rdfs::DATATYPE.as_str())]);
+            add.push([
+                iri(&dt),
+                iri(rdf::TYPE.as_str()),
+                iri(rdfs::DATATYPE.as_str()),
+            ]);
         }
     }
     set.extend(add);
@@ -352,7 +408,10 @@ const RDF_XML_LITERAL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLit
 /// The value of a literal term (handles language-tagged strings).
 fn lit_value(l: &oxrdf::LiteralRef<'_>) -> Option<XsdVal> {
     match l.language() {
-        Some(lang) => Some(XsdVal::LangStr(l.value().to_string(), lang.to_ascii_lowercase())),
+        Some(lang) => Some(XsdVal::LangStr(
+            l.value().to_string(),
+            lang.to_ascii_lowercase(),
+        )),
         None => xsd_value(l.value(), l.datatype().as_str()),
     }
 }
@@ -380,13 +439,17 @@ pub fn xsd_value(lex: &str, dt: &str) -> Option<XsdVal> {
             "false" | "0" => Some(XsdVal::Bool(false)),
             _ => None,
         },
-        "integer" | "long" | "int" | "short" | "byte" | "nonNegativeInteger" | "positiveInteger"
-        | "nonPositiveInteger" | "negativeInteger" | "unsignedLong" | "unsignedInt"
-        | "unsignedShort" | "unsignedByte" => {
+        "integer" | "long" | "int" | "short" | "byte" | "nonNegativeInteger"
+        | "positiveInteger" | "nonPositiveInteger" | "negativeInteger" | "unsignedLong"
+        | "unsignedInt" | "unsignedShort" | "unsignedByte" => {
             let v: i128 = lex.parse().ok()?;
             match local {
                 "nonNegativeInteger" | "unsignedLong" | "unsignedInt" | "unsignedShort"
-                | "unsignedByte" if v < 0 => None,
+                | "unsignedByte"
+                    if v < 0 =>
+                {
+                    None
+                }
                 "positiveInteger" if v <= 0 => None,
                 "nonPositiveInteger" if v > 0 => None,
                 "negativeInteger" if v >= 0 => None,
@@ -397,11 +460,19 @@ pub fn xsd_value(lex: &str, dt: &str) -> Option<XsdVal> {
         "float" => {
             let f = parse_xsd_float(lex)?;
             let f = f as f32;
-            Some(XsdVal::F32(if f.is_nan() { f32::NAN.to_bits() } else { f.to_bits() }))
+            Some(XsdVal::F32(if f.is_nan() {
+                f32::NAN.to_bits()
+            } else {
+                f.to_bits()
+            }))
         }
         "double" => {
             let f = parse_xsd_float(lex)?;
-            Some(XsdVal::F64(if f.is_nan() { f64::NAN.to_bits() } else { f.to_bits() }))
+            Some(XsdVal::F64(if f.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                f.to_bits()
+            }))
         }
         _ => None,
     }
@@ -441,7 +512,8 @@ fn xml_content_well_formed(lex: &str) -> bool {
                     let closing = b[i + 1] == b'/';
                     let mut j = i + 1 + closing as usize;
                     let start = j;
-                    while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' && b[j] != b'/' {
+                    while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' && b[j] != b'/'
+                    {
                         j += 1;
                     }
                     if start == j || !name_start(b[start]) {
@@ -489,7 +561,10 @@ fn parse_xsd_float(lex: &str) -> Option<f64> {
         _ => {
             // xsd float/double syntax is a subset of Rust's; reject the forms
             // Rust accepts but XSD does not.
-            if lex.contains(['x', 'X']) || lex.ends_with(['f', 'F', 'd', 'D']) || lex.contains("inf") {
+            if lex.contains(['x', 'X'])
+                || lex.ends_with(['f', 'F', 'd', 'D'])
+                || lex.contains("inf")
+            {
                 return None;
             }
             lex.parse::<f64>().ok()
@@ -590,10 +665,9 @@ fn solve(
         }
         let mut bound: Vec<String> = Vec::new();
         let ok = (0..3).all(|k| pat_match(&pat[k], &row[k], map, &mut bound, d));
-        if ok
-            && solve(i + 1, conclusion, closure, map, d, steps) {
-                return true;
-            }
+        if ok && solve(i + 1, conclusion, closure, map, d, steps) {
+            return true;
+        }
         for b in bound {
             map.remove(&b);
         }
@@ -647,9 +721,9 @@ fn value_in_space(v: &XsdVal, dt: &str) -> Option<bool> {
         (XsdVal::Num(c), "integer") => !c.contains('.'),
         (
             XsdVal::Num(c),
-            "long" | "int" | "short" | "byte" | "unsignedLong" | "unsignedInt"
-            | "unsignedShort" | "unsignedByte" | "nonNegativeInteger" | "positiveInteger"
-            | "nonPositiveInteger" | "negativeInteger",
+            "long" | "int" | "short" | "byte" | "unsignedLong" | "unsignedInt" | "unsignedShort"
+            | "unsignedByte" | "nonNegativeInteger" | "positiveInteger" | "nonPositiveInteger"
+            | "negativeInteger",
         ) => !c.contains('.') && xsd_value(c, &format!("{XSD}{local}")).is_some(),
         (XsdVal::Num(_), _) => false,
         (XsdVal::Str(_), "string" | "normalizedString" | "token") => true,
@@ -725,14 +799,16 @@ pub fn inconsistency(closure: &[Row], d: &Recognized) -> Option<String> {
                 }
             } else if pn.as_str() == rdfs::SUB_CLASS_OF.as_str() {
                 if let (Term::NamedNode(sub), Term::NamedNode(sup)) = (s, o) {
-                    if d.contains(sub.as_str()) && d.contains(sup.as_str())
-                        && dt_subset(sub.as_str(), sup.as_str()) == Some(false) {
-                            return Some(format!(
-                                "datatype subclass clash: <{}> ⊄ <{}> (value spaces)",
-                                sub.as_str(),
-                                sup.as_str()
-                            ));
-                        }
+                    if d.contains(sub.as_str())
+                        && d.contains(sup.as_str())
+                        && dt_subset(sub.as_str(), sup.as_str()) == Some(false)
+                    {
+                        return Some(format!(
+                            "datatype subclass clash: <{}> ⊄ <{}> (value spaces)",
+                            sub.as_str(),
+                            sup.as_str()
+                        ));
+                    }
                 }
             }
         }
@@ -746,10 +822,26 @@ fn has_value_mapping(dt: &str) -> bool {
         || matches!(
             dt.strip_prefix(XSD),
             Some(
-                "string" | "normalizedString" | "token" | "boolean" | "integer" | "long" | "int"
-                    | "short" | "byte" | "nonNegativeInteger" | "positiveInteger"
-                    | "nonPositiveInteger" | "negativeInteger" | "unsignedLong" | "unsignedInt"
-                    | "unsignedShort" | "unsignedByte" | "decimal" | "float" | "double"
+                "string"
+                    | "normalizedString"
+                    | "token"
+                    | "boolean"
+                    | "integer"
+                    | "long"
+                    | "int"
+                    | "short"
+                    | "byte"
+                    | "nonNegativeInteger"
+                    | "positiveInteger"
+                    | "nonPositiveInteger"
+                    | "negativeInteger"
+                    | "unsignedLong"
+                    | "unsignedInt"
+                    | "unsignedShort"
+                    | "unsignedByte"
+                    | "decimal"
+                    | "float"
+                    | "double"
             )
         )
 }
@@ -768,14 +860,15 @@ mod tests {
 
     #[test]
     fn value_equality_across_lexical_forms() {
-        let d = Recognized::with_defaults(
-            [format!("{XSD}integer")].into_iter().collect(),
-        );
+        let d = Recognized::with_defaults([format!("{XSD}integer")].into_iter().collect());
         let closure = vec![[iri("http://e/a"), iri("http://e/p"), lit_int("0010")]];
         let conclusion = vec![[iri("http://e/a"), iri("http://e/p"), lit_int("10")]];
         assert!(entails(&closure, &conclusion, &d), "D value equality");
         let d0 = Recognized::default();
-        assert!(!entails(&closure, &conclusion, &d0), "unrecognized: lexical only");
+        assert!(
+            !entails(&closure, &conclusion, &d0),
+            "unrecognized: lexical only"
+        );
     }
 
     #[test]
@@ -794,12 +887,20 @@ mod tests {
     fn rdfs_closure_through_materializer() {
         // p domain C; s p o ⊢ s type C, plus the axiomatic/reflexive layer.
         let rows = vec![
-            [iri("http://e/p"), iri(rdfs::DOMAIN.as_str()), iri("http://e/C")],
+            [
+                iri("http://e/p"),
+                iri(rdfs::DOMAIN.as_str()),
+                iri("http://e/C"),
+            ],
             [iri("http://e/s"), iri("http://e/p"), iri("http://e/o")],
         ];
         let d = Recognized::default();
         let closure = close(&rows, &[], Regime::Rdfs, &d);
-        let want = [iri("http://e/s"), iri(rdf::TYPE.as_str()), iri("http://e/C")];
+        let want = [
+            iri("http://e/s"),
+            iri(rdf::TYPE.as_str()),
+            iri("http://e/C"),
+        ];
         assert!(closure.contains(&want), "rdfs2");
         let res = [
             iri("http://e/s"),

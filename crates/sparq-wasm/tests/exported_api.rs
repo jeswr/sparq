@@ -69,7 +69,11 @@ fn select_binding_values(batch: &str, var: &str) -> Vec<String> {
 /// set of triples — while leaving the chunk-count / chunk-size assertions to enforce the
 /// partitioning. (Addresses Copilot review on PR #1239.)
 fn sorted_nt_lines(nt: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> = nt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut lines: Vec<&str> = nt
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     lines.sort_unstable();
     lines
 }

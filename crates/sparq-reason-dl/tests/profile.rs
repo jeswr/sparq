@@ -9,8 +9,10 @@
 // productions were corrected from the initial implementation; tests 9, 12, 13, 17,
 // and assertions within 19/20/28 were rewritten to spec-correct verdicts.
 
-use sparq_reason_dl::{Axiom, ClassExpression as CE, ExtractError, ObjectPropertyExpression as OPE, Ontology};
 use sparq_reason_dl::profile::{profiles, profiles_from_extraction, Membership, ProfileSet};
+use sparq_reason_dl::{
+    Axiom, ClassExpression as CE, ExtractError, ObjectPropertyExpression as OPE, Ontology,
+};
 
 // -------------------------------------------------------------------------------------------
 // Tiny helper constructors for building structural axioms in tests.
@@ -54,9 +56,16 @@ fn empty_ontology_in_all_profiles() {
 #[test]
 fn el_accept_subclassof_named_classes() {
     let mut onto = Ontology::new();
-    onto.axioms.push(Axiom::SubClassOf { sub: named(A), sup: named(B) });
+    onto.axioms.push(Axiom::SubClassOf {
+        sub: named(A),
+        sup: named(B),
+    });
     let ps = profiles(&onto);
-    assert_eq!(ps.el, Membership::In, "SubClassOf(A, B) with named classes must be In EL (§2)");
+    assert_eq!(
+        ps.el,
+        Membership::In,
+        "SubClassOf(A, B) with named classes must be In EL (§2)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -87,7 +96,10 @@ fn el_reject_allvaluesfrom_not_el_ce() {
         sup: CE::ObjectAllValuesFrom(prop(R), Box::new(named(B))),
     });
     let ps = profiles(&onto);
-    assert!(ps.el.is_not_in(), "ObjectAllValuesFrom is not an EL-CE (EL §2)");
+    assert!(
+        ps.el.is_not_in(),
+        "ObjectAllValuesFrom is not an EL-CE (EL §2)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -117,7 +129,10 @@ fn el_reject_complementof_not_el_ce() {
         sup: CE::ObjectComplementOf(Box::new(named(B))),
     });
     let ps = profiles(&onto);
-    assert!(ps.el.is_not_in(), "ObjectComplementOf is not an EL-CE (EL §2)");
+    assert!(
+        ps.el.is_not_in(),
+        "ObjectComplementOf is not an EL-CE (EL §2)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -127,9 +142,16 @@ fn el_reject_complementof_not_el_ce() {
 #[test]
 fn ql_accept_subclassof_named_classes() {
     let mut onto = Ontology::new();
-    onto.axioms.push(Axiom::SubClassOf { sub: named(A), sup: named(B) });
+    onto.axioms.push(Axiom::SubClassOf {
+        sub: named(A),
+        sup: named(B),
+    });
     let ps = profiles(&onto);
-    assert_eq!(ps.ql, Membership::In, "SubClassOf(A, B) with named classes must be In QL (§3)");
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "SubClassOf(A, B) with named classes must be In QL (§3)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -145,7 +167,11 @@ fn ql_accept_some_thing_as_sub_ce() {
         sup: named(A),
     });
     let ps = profiles(&onto);
-    assert_eq!(ps.ql, Membership::In, "∃R.⊤ ⊑ A is a valid QL axiom (QL §3 sub-CE)");
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "∃R.⊤ ⊑ A is a valid QL axiom (QL §3 sub-CE)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -257,7 +283,11 @@ fn rl_accept_allvaluesfrom_as_super_ce() {
         sup: CE::ObjectAllValuesFrom(prop(R), Box::new(named(B))),
     });
     let ps = profiles(&onto);
-    assert_eq!(ps.rl, Membership::In, "∀R.B as RL super-CE is valid (RL §4)");
+    assert_eq!(
+        ps.rl,
+        Membership::In,
+        "∀R.B as RL super-CE is valid (RL §4)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -273,7 +303,11 @@ fn rl_accept_some_in_sub_position() {
         sup: named(B),
     });
     let ps = profiles(&onto);
-    assert_eq!(ps.rl, Membership::In, "∃R.A in RL sub position is valid (RL §4)");
+    assert_eq!(
+        ps.rl,
+        Membership::In,
+        "∃R.A in RL sub position is valid (RL §4)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -289,7 +323,10 @@ fn rl_reject_some_in_super_position() {
         sup: CE::ObjectSomeValuesFrom(prop(R), Box::new(named(B))),
     });
     let ps = profiles(&onto);
-    assert!(ps.rl.is_not_in(), "∃R.B as RL super-CE is not valid (RL §4)");
+    assert!(
+        ps.rl.is_not_in(),
+        "∃R.B as RL super-CE is not valid (RL §4)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -348,13 +385,20 @@ fn cross_some_in_el_in_ql_not_rl() {
         sup: CE::ObjectSomeValuesFrom(prop(R), Box::new(named(B))),
     });
     let ps = profiles(&onto);
-    assert_eq!(ps.el, Membership::In, "∃R.B as super is a valid EL-CE (EL §2)");
+    assert_eq!(
+        ps.el,
+        Membership::In,
+        "∃R.B as super is a valid EL-CE (EL §2)"
+    );
     assert_eq!(
         ps.ql,
         Membership::In,
         "∃R.B as QL super-CE is valid (QL §3 superObjectSomeValuesFrom)"
     );
-    assert!(ps.rl.is_not_in(), "∃R.B as RL super-CE is not valid (RL §4)");
+    assert!(
+        ps.rl.is_not_in(),
+        "∃R.B as RL super-CE is not valid (RL §4)"
+    );
     assert!(!ps.in_all());
     assert!(ps.in_any());
 }
@@ -376,7 +420,10 @@ fn cross_union_not_el_not_ql_not_rl() {
     });
     let ps = profiles(&onto);
     assert!(ps.el.is_not_in(), "ObjectUnionOf is not EL (EL §2)");
-    assert!(ps.ql.is_not_in(), "ObjectUnionOf is not a valid QL super-CE (QL §3)");
+    assert!(
+        ps.ql.is_not_in(),
+        "ObjectUnionOf is not a valid QL super-CE (QL §3)"
+    );
     assert!(
         ps.rl.is_not_in(),
         "ObjectUnionOf in super position is not valid RL (RL §4 — union is sub-only)"
@@ -392,7 +439,10 @@ fn cross_union_not_el_not_ql_not_rl() {
 #[test]
 fn profiles_from_extraction_ok_delegates() {
     let mut onto = Ontology::new();
-    onto.axioms.push(Axiom::SubClassOf { sub: named(A), sup: named(B) });
+    onto.axioms.push(Axiom::SubClassOf {
+        sub: named(A),
+        sup: named(B),
+    });
     let result: Result<Ontology, ExtractError> = Ok(onto.clone());
     let ps_direct = profiles(&onto);
     let ps_via = profiles_from_extraction(&result);
@@ -410,9 +460,18 @@ fn profiles_from_extraction_err_all_unknown() {
     let result: Result<Ontology, ExtractError> =
         Err(ExtractError::OutOfFragment("test-fragment".into()));
     let ps = profiles_from_extraction(&result);
-    assert!(ps.el.is_unknown(), "extraction failure must yield Unknown EL");
-    assert!(ps.ql.is_unknown(), "extraction failure must yield Unknown QL");
-    assert!(ps.rl.is_unknown(), "extraction failure must yield Unknown RL");
+    assert!(
+        ps.el.is_unknown(),
+        "extraction failure must yield Unknown EL"
+    );
+    assert!(
+        ps.ql.is_unknown(),
+        "extraction failure must yield Unknown QL"
+    );
+    assert!(
+        ps.rl.is_unknown(),
+        "extraction failure must yield Unknown RL"
+    );
     // Unknown is not In, so in_all and in_any should both be false.
     assert!(!ps.in_all());
     assert!(!ps.in_any());
@@ -426,9 +485,14 @@ fn profiles_from_extraction_err_all_unknown() {
 fn rl_accept_equivalentclasses_named() {
     // Named classes are BOTH RL sub-CE AND RL super-CE, so EquivalentClasses(A, B) is RL.
     let mut onto = Ontology::new();
-    onto.axioms.push(Axiom::EquivalentClasses(named(A), named(B)));
+    onto.axioms
+        .push(Axiom::EquivalentClasses(named(A), named(B)));
     let ps = profiles(&onto);
-    assert_eq!(ps.rl, Membership::In, "EquivalentClasses(A, B) must be In RL (RL §4)");
+    assert_eq!(
+        ps.rl,
+        Membership::In,
+        "EquivalentClasses(A, B) must be In RL (RL §4)"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -512,9 +576,21 @@ fn disjoint_classes_named_in_all_profiles() {
     let mut onto = Ontology::new();
     onto.axioms.push(Axiom::DisjointClasses(named(A), named(B)));
     let ps = profiles(&onto);
-    assert_eq!(ps.el, Membership::In, "DisjointClasses(A, B) must be In EL (§2)");
-    assert_eq!(ps.ql, Membership::In, "DisjointClasses(A, B) must be In QL (§3)");
-    assert_eq!(ps.rl, Membership::In, "DisjointClasses(A, B) must be In RL (§4)");
+    assert_eq!(
+        ps.el,
+        Membership::In,
+        "DisjointClasses(A, B) must be In EL (§2)"
+    );
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "DisjointClasses(A, B) must be In QL (§3)"
+    );
+    assert_eq!(
+        ps.rl,
+        Membership::In,
+        "DisjointClasses(A, B) must be In RL (§4)"
+    );
     assert!(ps.in_all());
 }
 
@@ -535,9 +611,21 @@ fn property_domain_range_named_in_all_profiles() {
         range: named(A),
     });
     let ps = profiles(&onto);
-    assert_eq!(ps.el, Membership::In, "PropertyDomain/Range(R, A) must be In EL (§2)");
-    assert_eq!(ps.ql, Membership::In, "PropertyDomain/Range(R, A) must be In QL (§3)");
-    assert_eq!(ps.rl, Membership::In, "PropertyDomain/Range(R, A) must be In RL (§4)");
+    assert_eq!(
+        ps.el,
+        Membership::In,
+        "PropertyDomain/Range(R, A) must be In EL (§2)"
+    );
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "PropertyDomain/Range(R, A) must be In QL (§3)"
+    );
+    assert_eq!(
+        ps.rl,
+        Membership::In,
+        "PropertyDomain/Range(R, A) must be In RL (§4)"
+    );
     assert!(ps.in_all());
 }
 

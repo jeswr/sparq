@@ -21,8 +21,8 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(rel_from_workspace);
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     for line in src.lines() {
         let line = line.trim();
         // [OPUS-4.8] sq-t58w.6 — tolerate an optional `pub ` visibility prefix. The
@@ -40,8 +40,11 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
                     continue;
                 }
                 if let Some(eq) = after_name.split('=').nth(1) {
-                    let digits: String =
-                        eq.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                    let digits: String = eq
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
                     if !digits.is_empty() {
                         return digits.parse().expect("floor parses");
                     }
@@ -49,7 +52,10 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
             }
         }
     }
-    panic!("did not find `const {const_name}: usize = N;` in {}", path.display());
+    panic!(
+        "did not find `const {const_name}: usize = N;` in {}",
+        path.display()
+    );
 }
 
 /// (suite label, source file, const name) for each crate-local ratchet the
@@ -304,6 +310,19 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/dl_suite.rs",
         "DL_DIRECT_FLOOR",
     ),
+    // [FABLE-5] the UFO-SN3 finite-world expressibility ratchet. The floor const
+    // (`pub const UFO_SN3_FLOOR`) lives top-level in THIS crate's
+    // `tests/ufo_sn3_suite.rs` (UNGATED — the lane calls plain `reason_n3` and runs
+    // in ordinary `cargo test --workspace`); the guard reads it TEXTUALLY so the
+    // central scoreboard's `ratchet_floor` can never silently drift from what the
+    // runner asserts. It is a sparq EXTENSION-shaped ratchet over the finite-world
+    // UFO-SN3 reference profile, NOT a UFO/gUFO/OntoUML standards-conformance claim
+    // (no normative UFO conformance suite exists).
+    (
+        "UFO-SN3 finite-world expressibility",
+        "crates/sparq-conformance/tests/ufo_sn3_suite.rs",
+        "UFO_SN3_FLOOR",
+    ),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the suite labels whose ratchet floor is sourced at
@@ -434,8 +453,9 @@ fn all_crate_test_suites_are_guarded() {
             suite.runner,
             Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
         ) {
-            let textually_guarded =
-                CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label);
+            let textually_guarded = CRATE_LOCAL_FLOORS
+                .iter()
+                .any(|(label, _, _)| *label == suite.label);
             let lib_sourced = LIB_SOURCED_FLOORS.contains(&suite.label);
             assert!(
                 textually_guarded || lib_sourced,
@@ -535,8 +555,12 @@ fn scoreboard_renders_all_suites() {
     // [FABLE-5] sq-pbz04.6.4 — the sparq D value-space matrix, HONESTLY rendered as a
     // sparq EXTENSION (tallied separately from the W3C D-entailment pass count).
     assert!(md.contains("D value-space matrix (integer/decimal/boolean/binary/temporal)"));
+    // [FABLE-5] — the UFO-SN3 finite-world expressibility ratchet, HONESTLY rendered
+    // as a sparq EXTENSION (no normative UFO/gUFO conformance suite exists; NOT
+    // folded into the conformance total).
+    assert!(md.contains("UFO-SN3 finite-world expressibility"));
     assert!(
-        md.contains("sparq-extension (9 rows, NOT conformance)"),
-        "nine extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (10 rows, NOT conformance)"),
+        "ten extension rows should be tallied separately and pluralised"
     );
 }

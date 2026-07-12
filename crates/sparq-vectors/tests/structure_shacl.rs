@@ -6,11 +6,11 @@
 
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
+use sparq_shacl::model::ShapesModel;
 use sparq_vectors::{
     normalise, route, Cardinality, Codebook, Encoder, NumericEncoder, QuantityKind, ShaclPriors,
     INVALID_SLOT,
 };
-use sparq_shacl::model::ShapesModel;
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new_unchecked(s))
@@ -38,13 +38,18 @@ fn shacl_enum_prior_drives_slot_match_codebook() {
     let model = ShapesModel::parse(&shapes_graph);
     let priors = ShaclPriors::from_model(&model);
 
-    let status = priors.get("http://ex/status").expect("status prior mined from sh:in");
+    let status = priors
+        .get("http://ex/status")
+        .expect("status prior mined from sh:in");
     let cb: &Codebook = status.enum_codebook.as_ref().expect("sh:in → codebook");
     assert_eq!(cb.member_count(), 3);
 
     // A declared member encodes to its own slot (exact, not a cosine threshold).
     let active_block = cb.encode(&iri("http://ex/Active"));
-    assert_eq!(cb.decode(&active_block).as_ref(), Some(&iri("http://ex/Active")));
+    assert_eq!(
+        cb.decode(&active_block).as_ref(),
+        Some(&iri("http://ex/Active"))
+    );
 
     // A value NOT in the enum lands on the reserved invalid slot — the code a SHACL `sh:in` shape
     // rejects (out-of-enum, never silently a member). This is the design's answer-safety property.
@@ -64,7 +69,10 @@ fn shacl_cardinality_and_datatype_confirm() {
     let priors = ShaclPriors::from_model(&model);
 
     // status: maxCount 1 → functional (single deterministic slot).
-    assert_eq!(priors.get("http://ex/status").unwrap().cardinality, Cardinality::Functional);
+    assert_eq!(
+        priors.get("http://ex/status").unwrap().cardinality,
+        Cardinality::Functional
+    );
     // reading: xsd:decimal, no maxCount → Multi, and the datatype confirms the numeric lane.
     let reading = priors.get("http://ex/reading").unwrap();
     assert_eq!(reading.cardinality, Cardinality::Multi);
@@ -75,7 +83,10 @@ fn shacl_cardinality_and_datatype_confirm() {
         Some(route("http://www.w3.org/2001/XMLSchema#decimal"))
     );
     // tag: xsd:string → the text (Other) lane.
-    assert_eq!(priors.get("http://ex/tag").unwrap().datatype_encoder, Some(Encoder::Other));
+    assert_eq!(
+        priors.get("http://ex/tag").unwrap().datatype_encoder,
+        Some(Encoder::Other)
+    );
 }
 
 /// The load-bearing P2 numeric invariant: unit-normalise BEFORE the order-preserving numeric encoder
@@ -86,9 +97,9 @@ fn shacl_cardinality_and_datatype_confirm() {
 fn unit_normalised_magnitudes_share_a_code() {
     // Observed canonical (metre) values for the predicate — fit the P1 numeric encoder over them.
     let observed_m = [
-        normalise(500.0, "M").unwrap().canonical_value,    // 500 m
-        normalise(1000.0, "M").unwrap().canonical_value,   // 1000 m == 1 km
-        normalise(2.0, "KiloM").unwrap().canonical_value,  // 2 km == 2000 m
+        normalise(500.0, "M").unwrap().canonical_value, // 500 m
+        normalise(1000.0, "M").unwrap().canonical_value, // 1000 m == 1 km
+        normalise(2.0, "KiloM").unwrap().canonical_value, // 2 km == 2000 m
     ];
     for n in &observed_m {
         assert!(n.is_finite());
@@ -100,7 +111,10 @@ fn unit_normalised_magnitudes_share_a_code() {
     let km1 = normalise(1.0, "KiloM").unwrap();
     assert_eq!(m1000.kind, QuantityKind::Length);
     assert_eq!(km1.kind, QuantityKind::Length);
-    assert_eq!(m1000.canonical_value, km1.canonical_value, "1000 m == 1 km canonically");
+    assert_eq!(
+        m1000.canonical_value, km1.canonical_value,
+        "1000 m == 1 km canonically"
+    );
     assert_eq!(
         enc.encode(m1000.canonical_value),
         enc.encode(km1.canonical_value),
@@ -119,5 +133,8 @@ fn unit_normalised_magnitudes_share_a_code() {
     // A mass annotated where a length is expected is a SHACL-detectable mismatch: its kind differs,
     // so a caller must not feed it into THIS (length) numeric block.
     let mass = normalise(1000.0, "KiloGM").unwrap();
-    assert_ne!(mass.kind, m1000.kind, "a mass must not silently share the length block");
+    assert_ne!(
+        mass.kind, m1000.kind,
+        "a mass must not silently share the length block"
+    );
 }

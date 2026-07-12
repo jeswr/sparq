@@ -145,7 +145,11 @@ impl std::fmt::Display for DualLeafError {
                 write!(f, "not the expected value-lane datatype: {}", t)
             }
             DualLeafError::NonCanonicalValue(t) => {
-                write!(f, "non-canonical value-lane literal (fail-closed co-binding): {}", t)
+                write!(
+                    f,
+                    "non-canonical value-lane literal (fail-closed co-binding): {}",
+                    t
+                )
             }
         }
     }
@@ -414,7 +418,10 @@ mod tests {
             "1.5",
             NamedNode::new("http://www.w3.org/2001/XMLSchema#double").unwrap(),
         );
-        assert!(matches!(encode_literal(&dbl), Err(DualLeafError::NotValueLane(_))));
+        assert!(matches!(
+            encode_literal(&dbl),
+            Err(DualLeafError::NotValueLane(_))
+        ));
     }
 
     #[test]
@@ -499,8 +506,11 @@ mod tests {
         assert_eq!(canonical_f64_bits(0x8000_0000_0000_0000), 0); // -0.0 -> +0.0
         assert_eq!(canonical_f64_bits(0x7ff0_0000_0000_0001), F64_CANONICAL_NAN); // sNaN
         assert_eq!(canonical_f64_bits(0x7ff8_0000_0000_0000), F64_CANONICAL_NAN); // qNaN
-        // +inf and a finite value are unchanged.
-        assert_eq!(canonical_f64_bits(0x7ff0_0000_0000_0000), 0x7ff0_0000_0000_0000);
+                                                                                  // +inf and a finite value are unchanged.
+        assert_eq!(
+            canonical_f64_bits(0x7ff0_0000_0000_0000),
+            0x7ff0_0000_0000_0000
+        );
         assert_eq!(canonical_f64_bits(2.5f64.to_bits()), 2.5f64.to_bits());
     }
 
@@ -587,6 +597,9 @@ mod tests {
             Err(DualLeafError::NonCanonicalValue(_))
         ));
         // Lone "0.0" is canonical (non-negative zero).
-        assert_eq!(encode_decimal(&dec_lit("0.0")).unwrap().value_hook, Fr::from(0u64));
+        assert_eq!(
+            encode_decimal(&dec_lit("0.0")).unwrap().value_hook,
+            Fr::from(0u64)
+        );
     }
 }

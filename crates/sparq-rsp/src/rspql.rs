@@ -188,11 +188,19 @@ impl RspqlQuery {
         // would make `WINDOW <w>` ambiguous (and clash as a named-graph key).
         for (i, w) in windows.iter().enumerate() {
             if windows[..i].iter().any(|p| p.window == w.window) {
-                return Err(format!("window <{}> declared more than once", w.window.as_str()));
+                return Err(format!(
+                    "window <{}> declared more than once",
+                    w.window.as_str()
+                ));
             }
         }
         let sparql = rewrite_window_to_graph(&body)?;
-        Ok(RspqlQuery { output_stream, r2s, windows, sparql })
+        Ok(RspqlQuery {
+            output_stream,
+            r2s,
+            windows,
+            sparql,
+        })
     }
 }
 
@@ -238,7 +246,10 @@ fn parse_register<'a>(
 /// declarations and the residual SPARQL (header + WHERE) with those clauses
 /// removed. Window declarations may appear in their SPARQL-standard position
 /// (between the projection and the `WHERE`).
-fn parse_window_decls(body: &str, prefixes: &Prefixes) -> Result<(Vec<WindowDecl>, String), String> {
+fn parse_window_decls(
+    body: &str,
+    prefixes: &Prefixes,
+) -> Result<(Vec<WindowDecl>, String), String> {
     let mut windows = Vec::new();
     let mut out = String::with_capacity(body.len());
     let mut rest = body;
@@ -286,9 +297,11 @@ fn parse_one_window_decl<'a>(
 ) -> Result<(WindowDecl, &'a str), String> {
     let clause = clause.trim_start();
     if clause.starts_with('?') || clause.starts_with('$') {
-        return Err("window VARIABLES (FROM NAMED WINDOW ?w …) are not supported; \
+        return Err(
+            "window VARIABLES (FROM NAMED WINDOW ?w …) are not supported; \
                     name a concrete window IRI"
-            .into());
+                .into(),
+        );
     }
     let (window, rest) =
         take_iri(clause, prefixes).ok_or("FROM NAMED WINDOW must be followed by a window IRI")?;
@@ -297,7 +310,14 @@ fn parse_one_window_decl<'a>(
     let (stream, rest) = take_iri(rest.trim_start(), prefixes)
         .ok_or("FROM NAMED WINDOW <w> ON must be followed by a stream IRI")?;
     let (spec, rest) = parse_window_spec(rest.trim_start())?;
-    Ok((WindowDecl { window, stream, spec }, rest))
+    Ok((
+        WindowDecl {
+            window,
+            stream,
+            spec,
+        },
+        rest,
+    ))
 }
 
 /// Parses the window operator. Accepted forms (brackets optional in all cases):
@@ -347,16 +367,17 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
     // TUMBLING RANGE r — explicit tumbling keyword (step == range).
     // SLIDING RANGE r STEP s — explicit sliding keyword (STEP required).
     // [SONNET-4.6] Track both flags: explicit_tumbling lets us reject TUMBLING + STEP.
-    let (explicit_tumbling, explicit_sliding, text) = if let Some(after) = keyword_prefix(text, "TUMBLING") {
-        // TUMBLING: semantically identical to plain RANGE r (step = range).
-        // An explicit STEP is contradictory and must be rejected (see below).
-        (true, false, after.trim_start())
-    } else if let Some(after) = keyword_prefix(text, "SLIDING") {
-        // SLIDING: a STEP is mandatory — reject without it (see below).
-        (false, true, after.trim_start())
-    } else {
-        (false, false, text)
-    };
+    let (explicit_tumbling, explicit_sliding, text) =
+        if let Some(after) = keyword_prefix(text, "TUMBLING") {
+            // TUMBLING: semantically identical to plain RANGE r (step = range).
+            // An explicit STEP is contradictory and must be rejected (see below).
+            (true, false, after.trim_start())
+        } else if let Some(after) = keyword_prefix(text, "SLIDING") {
+            // SLIDING: a STEP is mandatory — reject without it (see below).
+            (false, true, after.trim_start())
+        } else {
+            (false, false, text)
+        };
 
     let rest = keyword_prefix(text, "RANGE").ok_or(
         "window declaration needs a `[RANGE <dur> [STEP <dur>]]`, \
@@ -369,22 +390,18 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
         // means step == range by definition. Reject rather than silently accepting
         // an inconsistent spec.
         if explicit_tumbling {
-            return Err(
-                "TUMBLING windows have step == range implicitly; \
+            return Err("TUMBLING windows have step == range implicitly; \
                  a STEP clause is not allowed with TUMBLING — \
                  use SLIDING RANGE <dur> STEP <dur> for an explicit step"
-                    .into(),
-            );
+                .into());
         }
         let (step, rest) = take_duration(after_step.trim_start())?;
         (WindowSpec::time(range, step), rest)
     } else if explicit_sliding {
         // SLIDING without STEP is a user error — STEP defines the slide interval.
-        return Err(
-            "SLIDING window declaration requires a STEP duration: \
+        return Err("SLIDING window declaration requires a STEP duration: \
              `SLIDING RANGE <dur> STEP <dur>`"
-                .into(),
-        );
+            .into());
     } else {
         // No STEP and not a SLIDING keyword: tumbling (step == range).
         (WindowSpec::time(range, range), rest_ws)
@@ -414,7 +431,10 @@ fn rewrite_window_to_graph(body: &str) -> Result<String, String> {
         // Copy IRIs (<…>) and quoted strings verbatim — a `WINDOW` substring
         // inside one is data, not a keyword.
         if b == b'<' {
-            let end = body[i..].find('>').map(|j| i + j + 1).unwrap_or(bytes.len());
+            let end = body[i..]
+                .find('>')
+                .map(|j| i + j + 1)
+                .unwrap_or(bytes.len());
             out.push_str(&body[i..end]);
             i = end;
             continue;
@@ -551,7 +571,10 @@ fn take_iri<'a>(s: &'a str, prefixes: &Prefixes) -> Option<(NamedNode, &'a str)>
     // Guard: a `:` only counts as a prefix separator if what precedes it is a
     // valid (possibly empty) prefix label, not e.g. part of a keyword.
     let prefix = &s[..colon];
-    if !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
     let after = &s[colon + 1..];
@@ -601,9 +624,9 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
         return Ok(n);
     }
     let upper = tok.to_ascii_uppercase();
-    let body = upper
-        .strip_prefix('P')
-        .ok_or_else(|| format!("not a duration: `{tok}` (want ISO-8601 like PT10S or an integer)"))?;
+    let body = upper.strip_prefix('P').ok_or_else(|| {
+        format!("not a duration: `{tok}` (want ISO-8601 like PT10S or an integer)")
+    })?;
     // Split into the date part (before 'T') and the time part (after).
     let (date_part, time_part) = match body.split_once('T') {
         Some((d, t)) => (d, t),
@@ -617,7 +640,9 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
         if c.is_ascii_digit() {
             num.push(c);
         } else {
-            let n: u64 = num.parse().map_err(|_| format!("bad duration component in `{tok}`"))?;
+            let n: u64 = num
+                .parse()
+                .map_err(|_| format!("bad duration component in `{tok}`"))?;
             num.clear();
             match c {
                 'D' => total += n * 86_400,
@@ -639,7 +664,9 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
         if c.is_ascii_digit() {
             num.push(c);
         } else {
-            let n: u64 = num.parse().map_err(|_| format!("bad duration component in `{tok}`"))?;
+            let n: u64 = num
+                .parse()
+                .map_err(|_| format!("bad duration component in `{tok}`"))?;
             num.clear();
             match c {
                 'H' => total += n * 3_600,
@@ -654,4 +681,3 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
     }
     Ok(total)
 }
-

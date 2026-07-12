@@ -35,7 +35,11 @@ pub(super) fn eval_naive(
                 }
                 for env in rule_matches(dict, rule, &store) {
                     for h in &rule.head {
-                        let g = [subst(&h.t[0], &env), subst(&h.t[1], &env), subst(&h.t[2], &env)];
+                        let g = [
+                            subst(&h.t[0], &env),
+                            subst(&h.t[1], &env),
+                            subst(&h.t[2], &env),
+                        ];
                         if !store.contains(&g) {
                             fresh.push(g);
                         }
@@ -162,11 +166,7 @@ fn unifies(atom: &Atom, f: &[Id; 3], env: &Env) -> bool {
 
 /// The aggregate's grouped COUNT table: `(group key, count-literal id)` rows over
 /// the distinct full matches of the aggregate body.
-fn agg_table(
-    dict: &mut Dict,
-    agg: &AggAtom,
-    store: &FxHashSet<[Id; 3]>,
-) -> Vec<(Vec<Id>, Id)> {
+fn agg_table(dict: &mut Dict, agg: &AggAtom, store: &FxHashSet<[Id; 3]>) -> Vec<(Vec<Id>, Id)> {
     let mut envs = vec![Env::default()];
     for atom in &agg.body {
         envs = envs

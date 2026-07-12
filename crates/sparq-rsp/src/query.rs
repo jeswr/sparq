@@ -43,8 +43,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use oxrdf::{Term, Triple, Variable};
-use sparq_engine::PreparedQuery;
 use spargebra::Query;
+use sparq_engine::PreparedQuery;
 
 use crate::eval::{EvalMode, WindowEval};
 use crate::window::WindowSpec;
@@ -232,7 +232,11 @@ impl ContinuousQuery {
         self.eval.late_dropped()
     }
 
-    fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(WindowResult)) -> Result<(), String> {
+    fn emit(
+        &mut self,
+        flush: bool,
+        on_result: &mut impl FnMut(WindowResult),
+    ) -> Result<(), String> {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev_rows = &mut self.prev_rows;
@@ -241,11 +245,14 @@ impl ContinuousQuery {
             let result = sparq_engine::query_prepared(graph, prepared)?;
             let rows = match r2s {
                 R2S::RStream => result.rows,
-                R2S::IStream | R2S::DStream => {
-                    diff_rows(r2s, result.rows, prev_rows, prev_hashes)
-                }
+                R2S::IStream | R2S::DStream => diff_rows(r2s, result.rows, prev_rows, prev_hashes),
             };
-            on_result(WindowResult { start, end, vars: result.vars, rows });
+            on_result(WindowResult {
+                start,
+                end,
+                vars: result.vars,
+                rows,
+            });
             Ok(())
         })
     }
@@ -362,7 +369,11 @@ impl ContinuousConstruct {
                 R2S::DStream => set_minus(prev, &cur),
             };
             *prev = cur;
-            on_result(GraphResult { start, end, triples });
+            on_result(GraphResult {
+                start,
+                end,
+                triples,
+            });
             Ok(())
         })
     }
@@ -495,7 +506,10 @@ fn multiset_minus(
 /// engine-deduplicated sets, so no multiset counting is needed).
 fn set_minus(keep: &[Triple], minus: &[Triple]) -> Vec<Triple> {
     let minus: rustc_hash::FxHashSet<&Triple> = minus.iter().collect();
-    keep.iter().filter(|t| !minus.contains(*t)).cloned().collect()
+    keep.iter()
+        .filter(|t| !minus.contains(*t))
+        .cloned()
+        .collect()
 }
 
 /// 64-bit hash of one result row (bound terms + unbound positions).

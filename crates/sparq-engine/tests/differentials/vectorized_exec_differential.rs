@@ -146,7 +146,10 @@ fn non_numeric_column_cells_are_rejected_like_scalar() {
 
     // Scalar reference: a numeric comparison over the string objects returns nothing.
     let scalar = object_ids(&g, "SELECT ?o WHERE { ?s ex:name ?o FILTER(?o > -1) }");
-    assert!(scalar.is_empty(), "scalar FILTER also excludes string objects");
+    assert!(
+        scalar.is_empty(),
+        "scalar FILTER also excludes string objects"
+    );
 }
 
 /// A two-column chunk (subject id + age id) gathered by a numeric selection on the
@@ -211,5 +214,8 @@ fn gather_keeps_columns_row_aligned_vs_scalar_pairs() {
         vec_pairs, scalar_pairs,
         "gathered (subject, age) pairs must match the scalar FILTER's pairs exactly"
     );
-    assert!(!vec_pairs.is_empty(), "the FILTER must keep some rows (non-vacuous)");
+    assert!(
+        !vec_pairs.is_empty(),
+        "the FILTER must keep some rows (non-vacuous)"
+    );
 }

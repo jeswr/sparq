@@ -78,8 +78,8 @@ fn client() -> reqwest::Client {
 #[cfg(feature = "jsonld")]
 fn triple_set(text: &str, format: &str) -> std::collections::BTreeSet<String> {
     let g = Graph::load_str(text, format).expect("parse RDF document");
-    let nt =
-        sparq_engine::construct_or_describe(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").unwrap();
+    let nt = sparq_engine::construct_or_describe(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+        .unwrap();
     nt.iter()
         .map(|t| format!("{} {} {} .", t.subject, t.predicate, t.object))
         .collect()
@@ -103,10 +103,16 @@ async fn construct_accept_jsonld_roundtrips() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.headers()["content-type"], "application/ld+json; charset=utf-8");
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/ld+json; charset=utf-8"
+    );
     let jsonld = resp.text().await.unwrap();
     // Flattened form: a `@graph` envelope of node objects.
-    assert!(jsonld.contains("@graph"), "flattened JSON-LD carries an @graph envelope: {jsonld}");
+    assert!(
+        jsonld.contains("@graph"),
+        "flattened JSON-LD carries an @graph envelope: {jsonld}"
+    );
 
     // N-Triples emission of the same CONSTRUCT, as the reference triple set.
     let resp = client()
@@ -168,7 +174,10 @@ async fn gsp_put_jsonld_then_get_roundtrips() {
     let back = get.text().await.unwrap();
     let got = triple_set(&back, "ntriples");
     let expected = triple_set(jsonld_body, "jsonld");
-    assert_eq!(got, expected, "GSP PUT(JSON-LD) -> GET must return the same triples");
+    assert_eq!(
+        got, expected,
+        "GSP PUT(JSON-LD) -> GET must return the same triples"
+    );
     assert_eq!(expected.len(), 2, "the body carries exactly two triples");
 }
 
@@ -198,7 +207,10 @@ async fn gsp_put_jsonld_then_get_jsonld_roundtrips() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200);
-    assert_eq!(get.headers()["content-type"], "application/ld+json; charset=utf-8");
+    assert_eq!(
+        get.headers()["content-type"],
+        "application/ld+json; charset=utf-8"
+    );
     let back = get.text().await.unwrap();
     assert_eq!(
         triple_set(&back, "jsonld"),
@@ -222,7 +234,10 @@ async fn construct_jsonld_qvalue_contract() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.headers()["content-type"], "application/ld+json; charset=utf-8");
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/ld+json; charset=utf-8"
+    );
 
     // q=0 rejects JSON-LD, so Turtle is served.
     let resp = client()

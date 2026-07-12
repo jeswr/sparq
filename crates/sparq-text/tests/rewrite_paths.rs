@@ -69,9 +69,15 @@ fn with_budget_max_rows_is_enforced_through_the_rewrite() {
         "{PREFIX}
          SELECT ?post WHERE {{ ?post <http://ex/title> ?t . ?t text:matches \"fox\" }}"
     );
-    let budget = QueryBudget { max_rows: Some(1), ..QueryBudget::unlimited() };
+    let budget = QueryBudget {
+        max_rows: Some(1),
+        ..QueryBudget::unlimited()
+    };
     let err = query_text_with_budget(&g, &q, &idx, &budget).unwrap_err();
-    assert!(err.to_lowercase().contains("budget"), "error {err:?} should mention the budget");
+    assert!(
+        err.to_lowercase().contains("budget"),
+        "error {err:?} should mention the budget"
+    );
 }
 
 /// CONSTRUCT carrying a `text:` pattern: the non-SELECT arm of `rewrite_query`
@@ -94,13 +100,14 @@ fn construct_query_with_text_pattern() {
     )
     .unwrap();
     let triples = construct_prepared(&g, &prepared).unwrap();
-    let mut subjects: Vec<String> =
-        triples.iter().map(|tr| tr.subject.to_string()).collect();
+    let mut subjects: Vec<String> = triples.iter().map(|tr| tr.subject.to_string()).collect();
     subjects.sort();
     // Only post1 (quick brown fox) and post2 (fox hunting) match "fox".
     assert_eq!(subjects, ["<http://ex/post1>", "<http://ex/post2>"]);
     // Every constructed triple uses the CONSTRUCT-template predicate.
-    assert!(triples.iter().all(|tr| tr.predicate.as_str() == "http://ex/hit"));
+    assert!(triples
+        .iter()
+        .all(|tr| tr.predicate.as_str() == "http://ex/hit"));
 }
 
 /// DESCRIBE carrying a `text:` pattern: the Describe arm of `rewrite_query`
@@ -123,9 +130,14 @@ fn describe_query_with_text_pattern() {
     let triples = describe_prepared(&g, &prepared).unwrap();
     // post3 ("Lazy dog sleeping") is the only match; DESCRIBE returns its
     // outgoing triples (title + author), all subject = post3.
-    assert!(!triples.is_empty(), "DESCRIBE of a matched resource yields its triples");
     assert!(
-        triples.iter().all(|tr| tr.subject.to_string() == "<http://ex/post3>"),
+        !triples.is_empty(),
+        "DESCRIBE of a matched resource yields its triples"
+    );
+    assert!(
+        triples
+            .iter()
+            .all(|tr| tr.subject.to_string() == "<http://ex/post3>"),
         "every described triple is about the single matched post: {triples:?}"
     );
 }
@@ -230,7 +242,11 @@ fn property_path_passes_through_while_bgp_is_rewritten() {
     // another title), so the join with the path yields no rows; the query is
     // accepted and rewritten regardless. The point is the rewrite traverses the
     // Path node without error.
-    assert!(r.rows.is_empty(), "title/title path has no solutions: {:?}", r.rows);
+    assert!(
+        r.rows.is_empty(),
+        "title/title path has no solutions: {:?}",
+        r.rows
+    );
 }
 
 /// A triple with a VARIABLE predicate in the SAME BGP as a magic pattern is
@@ -277,7 +293,10 @@ fn ambiguous_text_score_over_two_matches_errors() {
         &idx,
     )
     .unwrap_err();
-    assert!(err.contains("ambiguous"), "error {err:?} should flag the ambiguity");
+    assert!(
+        err.contains("ambiguous"),
+        "error {err:?} should flag the ambiguity"
+    );
 }
 
 /// A `text:score` declared TWICE for one match is a duplicate. [OPUS-4.8]
@@ -318,5 +337,8 @@ fn ambiguous_text_slop_over_two_matches_errors() {
         &idx,
     )
     .unwrap_err();
-    assert!(err.contains("ambiguous"), "error {err:?} should flag the ambiguity");
+    assert!(
+        err.contains("ambiguous"),
+        "error {err:?} should flag the ambiguity"
+    );
 }

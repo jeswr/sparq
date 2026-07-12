@@ -60,7 +60,11 @@ impl QueryResult {
     /// }
     /// ```
     pub fn solutions(&self) -> QuerySolutionIter<'_> {
-        QuerySolutionIter { vars: &self.vars, rows: &self.rows, pos: 0 }
+        QuerySolutionIter {
+            vars: &self.vars,
+            rows: &self.rows,
+            pos: 0,
+        }
     }
 }
 
@@ -89,14 +93,19 @@ impl<'a> QuerySolution<'a> {
     /// positional `usize`. Returns `None` if the variable is not projected **or** is
     /// unbound in this solution — the Oxigraph `QuerySolution::get` contract.
     pub fn get<V: VarIndex>(&self, var: V) -> Option<&'a Term> {
-        var.position(self.vars).and_then(|i| self.row.get(i).and_then(Option::as_ref))
+        var.position(self.vars)
+            .and_then(|i| self.row.get(i).and_then(Option::as_ref))
     }
 
     /// Iterates the **bound** `(VariableRef, &Term)` pairs of this solution, skipping
     /// unbound cells — the Oxigraph `QuerySolution::iter` semantics. Pairs are yielded
     /// in projection (variable header) order.
     pub fn iter(&self) -> QuerySolutionBindings<'a> {
-        QuerySolutionBindings { vars: self.vars, row: self.row, pos: 0 }
+        QuerySolutionBindings {
+            vars: self.vars,
+            row: self.row,
+            pos: 0,
+        }
     }
 
     /// The bound `Term`s of this solution in projection order, skipping unbound cells.
@@ -142,7 +151,8 @@ impl<V: VarIndex> core::ops::Index<V> for QuerySolution<'_> {
     type Output = Term;
 
     fn index(&self, var: V) -> &Term {
-        self.get(var).expect("the variable is not bound in this query solution")
+        self.get(var)
+            .expect("the variable is not bound in this query solution")
     }
 }
 
@@ -161,7 +171,10 @@ impl<'a> Iterator for QuerySolutionIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let row = self.rows.get(self.pos)?;
         self.pos += 1;
-        Some(QuerySolution { vars: self.vars, row })
+        Some(QuerySolution {
+            vars: self.vars,
+            row,
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -254,7 +267,11 @@ mod tests {
     /// resolves by name / ref / position to the SAME term the columnar `rows` hold.
     #[test]
     fn solutions_match_columnar_rows() {
-        let r = super::super::query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE { ?s ex:p ?o } ORDER BY ?s").unwrap();
+        let r = super::super::query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE { ?s ex:p ?o } ORDER BY ?s",
+        )
+        .unwrap();
         let sols: Vec<_> = r.solutions().collect();
         assert_eq!(sols.len(), r.rows.len());
         assert_eq!(r.solutions().len(), r.rows.len(), "ExactSizeIterator len");
@@ -318,7 +335,11 @@ mod tests {
     /// The panicking `Index` accessor returns the bound term and matches `get`.
     #[test]
     fn index_returns_bound_term() {
-        let r = super::super::query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE { ?s ex:p ?o } ORDER BY ?s").unwrap();
+        let r = super::super::query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE { ?s ex:p ?o } ORDER BY ?s",
+        )
+        .unwrap();
         let sol = r.solutions().next().unwrap();
         assert_eq!(&sol["s"], sol.get("s").unwrap());
         assert_eq!(&sol[0usize], sol.get(0usize).unwrap());
@@ -329,7 +350,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "not bound")]
     fn index_panics_on_missing() {
-        let r = super::super::query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o }").unwrap();
+        let r = super::super::query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o }",
+        )
+        .unwrap();
         let sol = r.solutions().next().unwrap();
         let _ = &sol["does_not_exist"];
     }
@@ -337,7 +362,11 @@ mod tests {
     /// An empty result yields no solutions.
     #[test]
     fn empty_result_no_solutions() {
-        let r = super::super::query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:never ?o }").unwrap();
+        let r = super::super::query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:never ?o }",
+        )
+        .unwrap();
         assert_eq!(r.solutions().count(), 0);
     }
 }

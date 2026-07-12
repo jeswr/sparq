@@ -10,14 +10,13 @@
 
 use std::time::Duration;
 
+use serde_json::{json, Value};
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_introspect::Introspection;
-use serde_json::{json, Value};
 
 use crate::jsonrpc::{
-    Request, Response, RpcError, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
-    METHOD_NOT_FOUND,
+    Request, Response, RpcError, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
 };
 use crate::tools;
 
@@ -200,7 +199,10 @@ impl McpServer {
     /// The `tools/list` result: every advertised tool's `name`/`description`/
     /// `inputSchema`. `update` appears here only when update is enabled.
     fn tools_list_result(&self) -> Value {
-        let tools: Vec<Value> = tools::advertised(self).iter().map(|t| t.to_json()).collect();
+        let tools: Vec<Value> = tools::advertised(self)
+            .iter()
+            .map(|t| t.to_json())
+            .collect();
         json!({ "tools": tools })
     }
 
@@ -283,7 +285,10 @@ impl McpServer {
                     .unwrap_or(4000);
                 Ok(ix.to_text_summary(budget))
             }
-            other => Err(format!("unknown format `{}` (expected \"json\" or \"text\")", other)),
+            other => Err(format!(
+                "unknown format `{}` (expected \"json\" or \"text\")",
+                other
+            )),
         }
     }
 

@@ -198,7 +198,10 @@ fn results_json(
 fn main() {
     let (args, json_path) = take_json_flag(std::env::args().collect());
     let n: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N);
-    let seed: u64 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_SEED);
+    let seed: u64 = args
+        .get(2)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(CORPUS_SEED);
     let iters: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(3);
     let iters = iters.max(1);
 
@@ -226,7 +229,10 @@ fn main() {
         build_us = build_us.min(t.elapsed().as_secs_f64() * 1e6);
     }
     let docs = index.len();
-    assert!(docs > 0, "empty index — corpus generation produced no literals");
+    assert!(
+        docs > 0,
+        "empty index — corpus generation produced no literals"
+    );
     // Integer bytes-per-doc (truncating div) — runner-noise-immune, like store_bytes_per_triple.
     let bytes_per_doc = index.heap_bytes() / docs;
 
@@ -350,7 +356,10 @@ mod tests {
         assert_eq!(positional, vec!["bench_text", "100", "0", "3"]);
         assert_eq!(path.as_deref(), Some("/tmp/o.json"));
         // Absent flag -> argv unchanged, no path.
-        let plain: Vec<String> = ["bench_text", "100"].iter().map(|s| s.to_string()).collect();
+        let plain: Vec<String> = ["bench_text", "100"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let (p2, none) = take_json_flag(plain.clone());
         assert_eq!(p2, plain);
         assert!(none.is_none());

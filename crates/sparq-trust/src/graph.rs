@@ -574,7 +574,7 @@ fn node_contains(
     let sup_id = term_id(sup_node);
     match mapping.get(&sub_id) {
         Some(existing) if *existing == sup_id => return true, // already matched, consistent
-        Some(_) => return false,                              // sub_node maps elsewhere — inconsistent
+        Some(_) => return false, // sub_node maps elsewhere — inconsistent
         None => {}
     }
     if mapping.values().any(|v| *v == sup_id) {
@@ -597,11 +597,14 @@ fn node_contains(
     // Injective edge match: assign each sub edge to a DISTINCT sup edge (by index).
     let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let ok = sub_edge_list.iter().all(|(sub_pred, sub_obj)| {
-        let hit = sup_edges.iter().enumerate().find(|(i, (sup_pred, sup_obj))| {
-            !used.contains(i)
-                && sup_pred == sub_pred
-                && obj_matches(sup_obj, sup, sub_obj, sub, mapping)
-        });
+        let hit = sup_edges
+            .iter()
+            .enumerate()
+            .find(|(i, (sup_pred, sup_obj))| {
+                !used.contains(i)
+                    && sup_pred == sub_pred
+                    && obj_matches(sup_obj, sup, sub_obj, sub, mapping)
+            });
         if let Some((i, _)) = hit {
             used.insert(i);
             true
@@ -720,7 +723,8 @@ pub fn certification_message(cert: &Certification) -> Fr {
                 // A triple that fails to encode (only an RDF-1.2 triple-term subject/object
                 // can) folds a fixed sentinel instead of silently dropping — the shape still
                 // signs deterministically and the structural narrowing gate stays the arbiter.
-                let f = encode_triple(t, &salt).unwrap_or_else(|| Fr::from(UNENCODABLE_TRIPLE_SENTINEL));
+                let f = encode_triple(t, &salt)
+                    .unwrap_or_else(|| Fr::from(UNENCODABLE_TRIPLE_SENTINEL));
                 inputs.push(f);
             }
         }
@@ -790,11 +794,7 @@ mod tests {
                 Triple::new(root.clone(), sh_target_subjects_of, pred.clone()),
                 Triple::new(root.clone(), sh_property, prop.clone()),
                 Triple::new(prop.clone(), sh_path, pred),
-                Triple::new(
-                    prop,
-                    sh_mincount,
-                    Literal::new_simple_literal("1"),
-                ),
+                Triple::new(prop, sh_mincount, Literal::new_simple_literal("1")),
             ],
         }
     }
@@ -858,8 +858,12 @@ mod tests {
             0,
             i64::MAX / 2,
         );
-        let effective =
-            derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert), 1_000, 1);
+        let effective = derive_effective_rules(
+            std::slice::from_ref(&anchor_rule),
+            std::slice::from_ref(&cert),
+            1_000,
+            1,
+        );
         assert_eq!(effective.len(), 2, "anchor + one derived rule");
         // The anchor is first, verbatim.
         assert_eq!(effective[0].source.as_str(), anchor_rule.source.as_str());
@@ -898,8 +902,8 @@ mod tests {
             0,
             i64::MAX / 2,
         );
-        let derived = explain_edge(&[anchor_rule], &cert, 1_000, 1)
-            .expect("a well-formed edge is admitted");
+        let derived =
+            explain_edge(&[anchor_rule], &cert, 1_000, 1).expect("a well-formed edge is admitted");
         assert_eq!(derived.source.as_str(), "https://issuer.example/dvs");
     }
 
@@ -941,8 +945,20 @@ mod tests {
     fn zero_certifications_is_direct_rules_verbatim() {
         let (_sk, pk) = keypair(1);
         let rules = vec![
-            anchor("https://a.ex", pk, predicate_shape("https://schema.org/age"), "https://pod.ex/", 100),
-            anchor("https://b.ex", pk, predicate_shape("https://schema.org/name"), "https://pod.ex/x", 200),
+            anchor(
+                "https://a.ex",
+                pk,
+                predicate_shape("https://schema.org/age"),
+                "https://pod.ex/",
+                100,
+            ),
+            anchor(
+                "https://b.ex",
+                pk,
+                predicate_shape("https://schema.org/name"),
+                "https://pod.ex/x",
+                200,
+            ),
         ];
         let out = derive_effective_rules(&rules, &[], 1_000, 1);
         assert_eq!(out.len(), rules.len());
@@ -950,7 +966,10 @@ mod tests {
             assert_eq!(a.source.as_str(), b.source.as_str());
             assert_eq!(a.scope.as_str(), b.scope.as_str());
             assert_eq!(a.fresh_within_secs, b.fresh_within_secs);
-            assert_eq!(public_key_to_hex(&a.issuer_key), public_key_to_hex(&b.issuer_key));
+            assert_eq!(
+                public_key_to_hex(&a.issuer_key),
+                public_key_to_hex(&b.issuer_key)
+            );
         }
     }
 
@@ -958,14 +977,34 @@ mod tests {
     fn depth_zero_short_circuits_to_direct_rules() {
         let (gov_sk, gov_pk) = keypair(1);
         let (_iss_sk, iss_pk) = keypair(2);
-        let anchor_rule = anchor("https://gov.ex", gov_pk, predicate_shape("https://schema.org/age"), "https://pod.ex/", 100);
-        let cert = signed_cert("https://gov.ex", &gov_sk, "https://iss.ex", iss_pk, CertScope::AnyService, 0, i64::MAX / 2);
+        let anchor_rule = anchor(
+            "https://gov.ex",
+            gov_pk,
+            predicate_shape("https://schema.org/age"),
+            "https://pod.ex/",
+            100,
+        );
+        let cert = signed_cert(
+            "https://gov.ex",
+            &gov_sk,
+            "https://iss.ex",
+            iss_pk,
+            CertScope::AnyService,
+            0,
+            i64::MAX / 2,
+        );
         let out = derive_effective_rules(&[anchor_rule], std::slice::from_ref(&cert), 1_000, 0);
         assert_eq!(out.len(), 1, "depth 0 ⇒ no derivation");
         // And explain_edge reports OverDepth at depth 0. (`TrustRule` has no `PartialEq`,
         // so match on the Err variant rather than assert_eq! on the whole Result.)
         let (_g, gov_pk2) = keypair(1);
-        let anchor2 = anchor("https://gov.ex", gov_pk2, predicate_shape("https://schema.org/age"), "https://pod.ex/", 100);
+        let anchor2 = anchor(
+            "https://gov.ex",
+            gov_pk2,
+            predicate_shape("https://schema.org/age"),
+            "https://pod.ex/",
+            100,
+        );
         assert!(matches!(
             explain_edge(&[anchor2], &cert, 1_000, 0),
             Err(EdgeRejection::OverDepth)
@@ -998,7 +1037,11 @@ mod tests {
             "http://www.w3.org/ns/shacl#targetWhere",
             "http://www.w3.org/ns/shacl#targetFooBar", // un-modelled `sh:target*` ⇒ still selection
         ] {
-            assert!(is_selection_predicate(p), "{} must be a selection predicate", p);
+            assert!(
+                is_selection_predicate(p),
+                "{} must be a selection predicate",
+                p
+            );
         }
         // Conformance predicates are NOT selection.
         for p in [
@@ -1007,7 +1050,11 @@ mod tests {
             "http://www.w3.org/ns/shacl#minCount",
             "http://www.w3.org/ns/shacl#datatype",
         ] {
-            assert!(!is_selection_predicate(p), "{} must NOT be a selection predicate", p);
+            assert!(
+                !is_selection_predicate(p),
+                "{} must NOT be a selection predicate",
+                p
+            );
         }
     }
 
@@ -1029,8 +1076,10 @@ mod tests {
         // its `sh:property` / `sh:path` / `sh:minCount` are conformance, not selection.
         let sel = selection_edges(&predicate_shape("https://schema.org/age"));
         assert_eq!(sel.len(), 1, "exactly one root selection edge");
-        assert!(sel.iter().any(|(p, o)| p == "http://www.w3.org/ns/shacl#targetSubjectsOf"
-            && o == "Ihttps://schema.org/age"));
+        assert!(sel
+            .iter()
+            .any(|(p, o)| p == "http://www.w3.org/ns/shacl#targetSubjectsOf"
+                && o == "Ihttps://schema.org/age"));
     }
 
     #[test]
@@ -1046,7 +1095,10 @@ mod tests {
                 iri("http://www.w3.org/2001/XMLSchema#integer"),
             ));
         }
-        assert!(selection_only_shrinks(&narrowing, &anchor), "same target set ⇒ selection shrinks (=)");
+        assert!(
+            selection_only_shrinks(&narrowing, &anchor),
+            "same target set ⇒ selection shrinks (=)"
+        );
         // An additive target (age + email) ⇒ selection GROWS ⇒ rejected.
         let broadening = additive_target("https://schema.org/age", "https://schema.org/email");
         assert!(
@@ -1067,7 +1119,10 @@ mod tests {
                 iri("http://www.w3.org/2001/XMLSchema#integer"),
             ));
         }
-        assert!(shape_narrows(&narrower, &anchor), "extra conformance constraint ⇒ narrows");
+        assert!(
+            shape_narrows(&narrower, &anchor),
+            "extra conformance constraint ⇒ narrows"
+        );
         // Additive target ⇒ does NOT narrow (the escalation the review found).
         let broadening = additive_target("https://schema.org/age", "https://schema.org/email");
         assert!(

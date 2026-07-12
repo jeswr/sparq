@@ -130,11 +130,15 @@ fn empty_and_geo_free_graphs_yield_empty_indexes() {
     let index = GeoIndex::build(&graph);
     assert!(index.is_empty());
     assert!(index.nearest(Point::new(0.0, 0.0), 3).is_empty());
-    assert!(index.within_distance(Point::new(0.0, 0.0), 1000.0, None).is_empty());
+    assert!(index
+        .within_distance(Point::new(0.0, 0.0), 1000.0, None)
+        .is_empty());
 
-    let graph =
-        Graph::load_str("<http://e.org/a> <http://e.org/p> <http://e.org/b> .", "ntriples")
-            .unwrap();
+    let graph = Graph::load_str(
+        "<http://e.org/a> <http://e.org/p> <http://e.org/b> .",
+        "ntriples",
+    )
+    .unwrap();
     assert!(GeoIndex::build(&graph).is_empty());
 }
 
@@ -184,7 +188,11 @@ fn antimeridian_results_match_brute_force_near_the_seam() {
     for i in 0..800 {
         let x: f64 = rng.random_range(-180.0..180.0);
         // Keep half the points near the seam so the wrap actually triggers.
-        let x = if i % 2 == 0 { x } else { (x / 60.0) + if x < 0.0 { -177.0 } else { 177.0 } };
+        let x = if i % 2 == 0 {
+            x
+        } else {
+            (x / 60.0) + if x < 0.0 { -177.0 } else { 177.0 }
+        };
         let x: f64 = x.clamp(-180.0, 180.0);
         let y: f64 = rng.random_range(-10.0..10.0);
         nt.push_str(&format!(
@@ -234,7 +242,10 @@ fn named_graphs_are_indexed_with_their_origin() {
     let mut origins: Vec<(String, String)> = index
         .entries()
         .map(|e| {
-            (e.entity.to_string(), e.graph.as_ref().map_or("default".into(), |g| g.to_string()))
+            (
+                e.entity.to_string(),
+                e.graph.as_ref().map_or("default".into(), |g| g.to_string()),
+            )
         })
         .collect();
     origins.sort();
@@ -275,9 +286,16 @@ fn assert_matches_fresh_build(index: &GeoIndex, graph: &Graph) {
     // fast path). Both are keyed on the SAME graph's dict, so the freshness token
     // matches for both.
     let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
-    let delta_ids = index.indexed_ids_for(dict_ptr).expect("same-dict freshness holds");
-    let fresh_ids = fresh.indexed_ids_for(dict_ptr).expect("fresh build over same dict");
-    assert_eq!(delta_ids, fresh_ids, "apply_delta must keep the id-level universe consistent");
+    let delta_ids = index
+        .indexed_ids_for(dict_ptr)
+        .expect("same-dict freshness holds");
+    let fresh_ids = fresh
+        .indexed_ids_for(dict_ptr)
+        .expect("fresh build over same dict");
+    assert_eq!(
+        delta_ids, fresh_ids,
+        "apply_delta must keep the id-level universe consistent"
+    );
     // And the R-tree answers identically.
     for center in [Point::new(0.0, 50.0), Point::new(2.0, 50.0)] {
         let a: Vec<String> = index
@@ -342,7 +360,11 @@ fn apply_delta_inserts_deletes_and_ownership_changes() {
 
     // 4. Ownership change: a feature claims c's geometry node via hasGeometry —
     //    the entry must be re-keyed from the node to the owning feature.
-    let ins = [[iri("http://e.org/feature"), iri(has_geom), iri("http://e.org/c")]];
+    let ins = [[
+        iri("http://e.org/feature"),
+        iri(has_geom),
+        iri("http://e.org/c"),
+    ]];
     graph.apply_delta(&ins, &[]).unwrap();
     index.apply_delta(&graph, &ins, &[]);
     assert_matches_fresh_build(&index, &graph);
@@ -351,7 +373,11 @@ fn apply_delta_inserts_deletes_and_ownership_changes() {
     assert_eq!(hits[0].0.to_string(), "<http://e.org/feature>");
 
     // 5. …and dropping the ownership re-keys it back to the node.
-    let del = [[iri("http://e.org/feature"), iri(has_geom), iri("http://e.org/c")]];
+    let del = [[
+        iri("http://e.org/feature"),
+        iri(has_geom),
+        iri("http://e.org/c"),
+    ]];
     graph.apply_delta(&[], &del).unwrap();
     index.apply_delta(&graph, &[], &del);
     assert_matches_fresh_build(&index, &graph);
@@ -361,7 +387,11 @@ fn apply_delta_inserts_deletes_and_ownership_changes() {
     // 6. Non-geo triples are a no-op; a skipped (unparseable) insert counts.
     let before_skipped = index.skipped();
     let ins = [
-        [iri("http://e.org/x"), iri("http://e.org/p"), iri("http://e.org/y")],
+        [
+            iri("http://e.org/x"),
+            iri("http://e.org/p"),
+            iri("http://e.org/y"),
+        ],
         [iri("http://e.org/bad"), iri(as_wkt), lit("POINT(broken")],
     ];
     graph.apply_delta(&ins, &[]).unwrap();
@@ -376,7 +406,10 @@ fn apply_delta_random_churn_matches_fresh_build() {
     let as_wkt_iri = "http://www.opengis.net/ont/geosparql#asWKT";
     let iri = |s: String| Term::NamedNode(oxrdf::NamedNode::new_unchecked(s));
     let lit = |s: String| {
-        Term::Literal(oxrdf::Literal::new_typed_literal(s, oxrdf::NamedNode::new_unchecked(wkt)))
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            s,
+            oxrdf::NamedNode::new_unchecked(wkt),
+        ))
     };
 
     let mut graph = random_point_graph(300, 5, (-1.0, 1.0), (50.0, 52.0));
@@ -393,7 +426,11 @@ fn apply_delta_random_churn_matches_fresh_build() {
             let y: f64 = rng.random_range(50.0..52.0);
             let entity = format!("http://example.org/new{round}_{j}");
             let geom = format!("POINT({x} {y})");
-            inserts.push([iri(entity.clone()), iri(as_wkt_iri.to_string()), lit(geom.clone())]);
+            inserts.push([
+                iri(entity.clone()),
+                iri(as_wkt_iri.to_string()),
+                lit(geom.clone()),
+            ]);
             live.push((entity, geom));
         }
         for _ in 0..rng.random_range(0..3) {

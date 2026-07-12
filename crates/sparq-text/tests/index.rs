@@ -39,7 +39,10 @@ fn and_semantics() {
     ]);
     let idx = TextIndex::build(&g);
     assert_eq!(idx.len(), 3);
-    assert_eq!(values(&g, &idx.search("quick fox")), ["The quick brown fox"]);
+    assert_eq!(
+        values(&g, &idx.search("quick fox")),
+        ["The quick brown fox"]
+    );
     // Every token must be present.
     assert!(idx.search("quick cat").is_empty());
     // Token order and duplication don't matter.
@@ -78,14 +81,21 @@ fn case_folding_and_unicode() {
 
 #[test]
 fn prefix_tokens() {
-    let g = graph_of(&[r#""automatic transmission""#, r#""autonomous driving""#, r#""matic""#]);
+    let g = graph_of(&[
+        r#""automatic transmission""#,
+        r#""autonomous driving""#,
+        r#""matic""#,
+    ]);
     let idx = TextIndex::build(&g);
     assert_eq!(
         sorted(values(&g, &idx.search("auto*"))),
         ["automatic transmission", "autonomous driving"]
     );
     // Prefix + AND.
-    assert_eq!(values(&g, &idx.search("auto* driving")), ["autonomous driving"]);
+    assert_eq!(
+        values(&g, &idx.search("auto* driving")),
+        ["autonomous driving"]
+    );
     // The empty prefix never panics (matches everything).
     assert_eq!(idx.search_any("a*").len(), 2);
 }
@@ -108,7 +118,10 @@ fn only_string_literals_are_indexed() {
     assert_eq!(idx.len(), 2);
     assert!(idx.search("42").is_empty());
     assert!(idx.search("true").is_empty());
-    assert_eq!(sorted(values(&g, &idx.search("text"))), ["plain text", "tagged text"]);
+    assert_eq!(
+        sorted(values(&g, &idx.search("text"))),
+        ["plain text", "tagged text"]
+    );
 }
 
 #[test]
@@ -130,8 +143,8 @@ fn empty_inputs() {
 #[test]
 fn bm25_ordering() {
     let g = graph_of(&[
-        r#""fox""#,                                        // short doc, tf 1
-        r#""fox fox fox""#,                                // higher tf
+        r#""fox""#,                                                            // short doc, tf 1
+        r#""fox fox fox""#,                                                    // higher tf
         r#""fox and a very long sentence about many other animals entirely""#, // long doc
         r#""unrelated""#,
     ]);
@@ -141,7 +154,10 @@ fn bm25_ordering() {
     // Higher term frequency outranks tf=1; the long document ranks last
     // (length normalisation).
     assert_eq!(hits[0], "fox fox fox");
-    assert_eq!(hits[2], "fox and a very long sentence about many other animals entirely");
+    assert_eq!(
+        hits[2],
+        "fox and a very long sentence about many other animals entirely"
+    );
     // Scores are positive and descending.
     let scores: Vec<f32> = idx.search("fox").iter().map(|h| h.score).collect();
     assert!(scores.windows(2).all(|w| w[0] >= w[1]));
@@ -149,7 +165,12 @@ fn bm25_ordering() {
 
     // A rare term contributes more than a ubiquitous one: the doc matching
     // the rare term outranks docs matching only the common term under OR.
-    let g2 = graph_of(&[r#""common rare""#, r#""common""#, r#""common""#, r#""common""#]);
+    let g2 = graph_of(&[
+        r#""common rare""#,
+        r#""common""#,
+        r#""common""#,
+        r#""common""#,
+    ]);
     let idx2 = TextIndex::build(&g2);
     let hits2 = values(&g2, &idx2.search_any("common rare"));
     assert_eq!(hits2[0], "common rare");

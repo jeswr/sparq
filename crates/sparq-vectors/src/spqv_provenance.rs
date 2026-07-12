@@ -481,7 +481,10 @@ mod tests {
         let a = full();
         let mut b = full();
         b.reserved = vec![1, 2, 3];
-        assert!(a.compatible_with(&b).is_ok(), "reserved area must not gate compatibility");
+        assert!(
+            a.compatible_with(&b).is_ok(),
+            "reserved area must not gate compatibility"
+        );
         assert!(b.compatible_with(&a).is_ok());
     }
 
@@ -497,7 +500,10 @@ mod tests {
         assert!(bare.compatible_with(&bare).is_ok());
         let mut versioned = bare.clone();
         versioned.model_version = "v1".into();
-        assert!(bare.compatible_with(&versioned).is_err(), "value vs absent must mismatch");
+        assert!(
+            bare.compatible_with(&versioned).is_err(),
+            "value vs absent must mismatch"
+        );
     }
 
     #[test]
@@ -522,7 +528,11 @@ mod tests {
     fn from_bytes_rejects_truncation() {
         let bytes = full().to_bytes();
         let err = EmbeddingProvenance::from_bytes(&bytes[..bytes.len() - 3]).unwrap_err();
-        assert!(err.contains("trunc") || err.contains("trailing"), "got: {}", err);
+        assert!(
+            err.contains("trunc") || err.contains("trailing"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]

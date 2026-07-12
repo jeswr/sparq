@@ -15,7 +15,11 @@ fn iri(d: &mut Dict, local: &str) -> Id {
 }
 
 fn int(d: &mut Dict, n: u64) -> Id {
-    d.intern_lit(&n.to_string(), "http://www.w3.org/2001/XMLSchema#integer", None)
+    d.intern_lit(
+        &n.to_string(),
+        "http://www.w3.org/2001/XMLSchema#integer",
+        None,
+    )
 }
 
 fn s(d: &mut Dict, v: &str) -> Id {
@@ -27,7 +31,10 @@ fn derived(d: &mut Dict, facts: &[[Id; 3]], src: &str) -> FxHashSet<[Id; 3]> {
     let p = parse_program(d, src).expect("parse");
     let closure = eval(d, facts, &p).expect("stratifiable");
     let inputs: FxHashSet<[Id; 3]> = facts.iter().copied().collect();
-    closure.into_iter().filter(|f| !inputs.contains(f)).collect()
+    closure
+        .into_iter()
+        .filter(|f| !inputs.contains(f))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -52,8 +59,7 @@ fn parse_basics_and_a_sugar() {
 #[test]
 fn parse_rejects_variable_predicate() {
     let mut d = Dict::new();
-    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?y] :- [?x, ?p, ?y] ."))
-        .unwrap_err();
+    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?y] :- [?x, ?p, ?y] .")).unwrap_err();
     assert!(e.contains("variable predicates"), "{e}");
 }
 
@@ -71,8 +77,7 @@ fn parse_rejects_unimplemented_aggregate_functions_loudly() {
 #[test]
 fn parse_rejects_unsafe_head_variable() {
     let mut d = Dict::new();
-    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?z] :- [?x, ex:p, ?y] ."))
-        .unwrap_err();
+    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?z] :- [?x, ex:p, ?y] .")).unwrap_err();
     assert!(e.contains("unsafe rule") && e.contains("?z"), "{e}");
 }
 
@@ -193,7 +198,10 @@ fn stratify_rejects_negation_cycle_naming_the_predicate() {
     )
     .unwrap();
     let e = stratify(&d, &p).unwrap_err();
-    assert!(e.contains("NOT stratifiable") && e.contains("http://ex/win"), "{e}");
+    assert!(
+        e.contains("NOT stratifiable") && e.contains("http://ex/win"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -283,9 +291,7 @@ fn stratify_variable_class_reads_sit_above_every_class() {
     // And a variable-class HEAD feeding a negated class is rejected.
     let p2 = parse_program(
         &mut d,
-        &format!(
-            "{P}[?x, a, ?c] :- [?x, ex:says, ?c], NOT [?x, a, ex:Banned] ."
-        ),
+        &format!("{P}[?x, a, ?c] :- [?x, ex:says, ?c], NOT [?x, a, ex:Banned] ."),
     )
     .unwrap();
     assert!(stratify(&d, &p2).is_err());
@@ -314,8 +320,9 @@ fn eval_transitive_closure() {
              [?x, ex:reach, ?z] :- [?x, ex:reach, ?y], [?y, ex:edge, ?z] ."
         ),
     );
-    let want: FxHashSet<[Id; 3]> =
-        [[a, reach, b], [b, reach, c], [a, reach, c]].into_iter().collect();
+    let want: FxHashSet<[Id; 3]> = [[a, reach, b], [b, reach, c], [a, reach, c]]
+        .into_iter()
+        .collect();
     assert_eq!(got, want);
 }
 
@@ -351,8 +358,9 @@ fn eval_naf_absence_check_across_strata() {
              [?x, ex:unreach, \"y\"] :- [?x, a, ex:Node], NOT [?x, ex:reach, \"y\"] ."
         ),
     );
-    let want: FxHashSet<[Id; 3]> =
-        [[a, reach, y], [b, reach, y], [c, unreach, y]].into_iter().collect();
+    let want: FxHashSet<[Id; 3]> = [[a, reach, y], [b, reach, y], [c, unreach, y]]
+        .into_iter()
+        .collect();
     assert_eq!(got, want);
 }
 
@@ -370,7 +378,12 @@ fn eval_count_per_group_and_threshold_filter() {
         d.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
         iri(&mut d, "Hub"),
     );
-    let facts = vec![[g1, member, m1], [g1, member, m2], [g1, member, m3], [g2, member, m1]];
+    let facts = vec![
+        [g1, member, m1],
+        [g1, member, m2],
+        [g1, member, m3],
+        [g2, member, m1],
+    ];
     let got = derived(
         &mut d,
         &facts,
@@ -381,8 +394,9 @@ fn eval_count_per_group_and_threshold_filter() {
     );
     let three = int(&mut d, 3);
     let one = int(&mut d, 1);
-    let want: FxHashSet<[Id; 3]> =
-        [[g1, deg, three], [g2, deg, one], [g1, ty, hub]].into_iter().collect();
+    let want: FxHashSet<[Id; 3]> = [[g1, deg, three], [g2, deg, one], [g1, ty, hub]]
+        .into_iter()
+        .collect();
     assert_eq!(got, want);
 }
 
@@ -401,7 +415,9 @@ fn eval_global_count_without_on() {
     let got = derived(
         &mut d,
         &facts,
-        &format!("{P}[ex:world, ex:total, ?c] :- AGGREGATE([?x, a, ex:Node] BIND COUNT(?x) AS ?c) ."),
+        &format!(
+            "{P}[ex:world, ex:total, ?c] :- AGGREGATE([?x, a, ex:Node] BIND COUNT(?x) AS ?c) ."
+        ),
     );
     let two = int(&mut d, 2);
     let want: FxHashSet<[Id; 3]> = [[w, total, two]].into_iter().collect();
@@ -432,7 +448,10 @@ fn eval_count_over_derived_predicate() {
     );
     // reach = {(a,b),(b,c),(a,c)} → 3 distinct matches.
     let three = int(&mut d, 3);
-    assert!(got.contains(&[w, nreach, three]), "count over DERIVED reach");
+    assert!(
+        got.contains(&[w, nreach, three]),
+        "count over DERIVED reach"
+    );
     assert_eq!(got.len(), 4); // 3 reach facts + the count fact
 }
 
@@ -520,7 +539,10 @@ fn eval_filter_is_fail_closed_on_non_numeric_operands() {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self, bound: u64) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) % bound
     }
 }
@@ -551,8 +573,10 @@ fn assert_differential(src: &str, seeds: std::ops::Range<u64>) {
         let program = parse_program(&mut d, src).expect("parse");
         let strat = stratify(&d, &program).expect("stratifiable");
         let facts = random_graph(&mut d, seed, 6, 9);
-        let engine: FxHashSet<[Id; 3]> =
-            eval(&mut d, &facts, &program).unwrap().into_iter().collect();
+        let engine: FxHashSet<[Id; 3]> = eval(&mut d, &facts, &program)
+            .unwrap()
+            .into_iter()
+            .collect();
         let reference = oracle::eval_naive(&mut d, &facts, &program, &strat);
         assert_eq!(
             engine, reference,

@@ -44,14 +44,20 @@ use sparq_substrate::rows::Row;
 /// No `right_only` — the seam returns the full build row; callers extract the value column.
 #[inline]
 fn out_keys() -> JoinKeys {
-    JoinKeys { key_cols: vec![(0, 0), (1, 1)], right_only: vec![] }
+    JoinKeys {
+        key_cols: vec![(0, 0), (1, 1)],
+        right_only: vec![],
+    }
 }
 
 /// The `JoinKeys` for the `inc` table: build key columns `[p, o]` = cols 0 and 1.
 /// No `right_only` — same convention as `out_keys`.
 #[inline]
 fn inc_keys() -> JoinKeys {
-    JoinKeys { key_cols: vec![(0, 0), (1, 1)], right_only: vec![] }
+    JoinKeys {
+        key_cols: vec![(0, 0), (1, 1)],
+        right_only: vec![],
+    }
 }
 
 /// Persistent delta-aware adjacency for the OWL-RL `prp-fp` / `prp-ifp` / `prp-trp` rules.
@@ -130,9 +136,10 @@ impl DeltaAdj {
         // Build a 2-column probe row; out_keys maps build col 0 -> probe col 0, build col 1 ->
         // probe col 1, so the key is `[p, s]` matching build rows `[p, s, o]`.
         let keys = out_keys();
-        self.out_tbl.probe_emit(&[probe_row], &keys, &NoBudget, &mut |build, _probe| {
-            emit(build[2]); // col 2 of the build row is `o`
-        });
+        self.out_tbl
+            .probe_emit(&[probe_row], &keys, &NoBudget, &mut |build, _probe| {
+                emit(build[2]); // col 2 of the build row is `o`
+            });
     }
 
     /// Probe the backward table (`inc`): for the predicate `p` and object `obj`, invoke
@@ -142,9 +149,10 @@ impl DeltaAdj {
     pub fn probe_inc(&self, p: Id, obj: Id, mut emit: impl FnMut(Id)) {
         let probe_row = Row::from_slice(&[p, obj]);
         let keys = inc_keys();
-        self.inc_tbl.probe_emit(&[probe_row], &keys, &NoBudget, &mut |build, _probe| {
-            emit(build[2]); // col 2 of the inc build row is `s`
-        });
+        self.inc_tbl
+            .probe_emit(&[probe_row], &keys, &NoBudget, &mut |build, _probe| {
+                emit(build[2]); // col 2 of the inc build row is `s`
+            });
     }
 }
 
@@ -178,7 +186,11 @@ mod tests {
         let mut fwd: Vec<Id> = Vec::new();
         adj.probe_out(10, 1, |o| fwd.push(o));
         fwd.sort_unstable();
-        assert_eq!(fwd, vec![100u32, 101u32], "out[p=10][s=1] must contain both objects");
+        assert_eq!(
+            fwd,
+            vec![100u32, 101u32],
+            "out[p=10][s=1] must contain both objects"
+        );
 
         // Forward probe out[10][2] -> {200}
         let mut fwd2: Vec<Id> = Vec::new();
@@ -224,7 +236,11 @@ mod tests {
         // After extend: out[7][10] -> {70, 71} (insertion order)
         let mut after: Vec<Id> = Vec::new();
         adj.probe_out(7, 10, |o| after.push(o));
-        assert_eq!(after, vec![70u32, 71u32], "extend_one must append in insertion order");
+        assert_eq!(
+            after,
+            vec![70u32, 71u32],
+            "extend_one must append in insertion order"
+        );
 
         // Backward: inc[7][71] -> {10}
         let mut bwd: Vec<Id> = Vec::new();
@@ -236,7 +252,10 @@ mod tests {
     #[test]
     fn rebuild_replaces_all_content() {
         let need: FxHashSet<Id> = [5u32].iter().copied().collect();
-        let all: FxHashSet<[Id; 3]> = [triple(1, 5, 50), triple(2, 5, 60)].iter().copied().collect();
+        let all: FxHashSet<[Id; 3]> = [triple(1, 5, 50), triple(2, 5, 60)]
+            .iter()
+            .copied()
+            .collect();
         let mut adj = DeltaAdj::build(&all, &need);
 
         // Sanity: old content present.
@@ -287,8 +306,18 @@ mod tests {
         let mut plain_inc: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
         for &[s, p, obj] in &all {
             if need.contains(&p) {
-                plain_out.entry(p).or_default().entry(s).or_default().push(obj);
-                plain_inc.entry(p).or_default().entry(obj).or_default().push(s);
+                plain_out
+                    .entry(p)
+                    .or_default()
+                    .entry(s)
+                    .or_default()
+                    .push(obj);
+                plain_inc
+                    .entry(p)
+                    .or_default()
+                    .entry(obj)
+                    .or_default()
+                    .push(s);
             }
         }
 
@@ -335,15 +364,33 @@ mod tests {
         let new_p = 3u32;
         let new_o = 300u32;
         adj.extend_one(new_s, new_p, new_o);
-        plain_out.entry(new_p).or_default().entry(new_s).or_default().push(new_o);
-        plain_inc.entry(new_p).or_default().entry(new_o).or_default().push(new_s);
+        plain_out
+            .entry(new_p)
+            .or_default()
+            .entry(new_s)
+            .or_default()
+            .push(new_o);
+        plain_inc
+            .entry(new_p)
+            .or_default()
+            .entry(new_o)
+            .or_default()
+            .push(new_s);
 
         let mut delta_os: Vec<Id> = Vec::new();
         adj.probe_out(new_p, new_s, |o| delta_os.push(o));
-        assert_eq!(delta_os, vec![new_o], "extended triple must be probed in forward direction");
+        assert_eq!(
+            delta_os,
+            vec![new_o],
+            "extended triple must be probed in forward direction"
+        );
 
         let mut delta_ss: Vec<Id> = Vec::new();
         adj.probe_inc(new_p, new_o, |s| delta_ss.push(s));
-        assert_eq!(delta_ss, vec![new_s], "extended triple must be probed in backward direction");
+        assert_eq!(
+            delta_ss,
+            vec![new_s],
+            "extended triple must be probed in backward direction"
+        );
     }
 }

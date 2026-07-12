@@ -110,7 +110,10 @@ pub(crate) fn derive(
 
 // ---- deterministic blank-node renaming over the emitted description ---------
 
-fn normalize_form(form: &mut FormDescription, names: &mut std::collections::HashMap<String, String>) {
+fn normalize_form(
+    form: &mut FormDescription,
+    names: &mut std::collections::HashMap<String, String>,
+) {
     normalize_ref(&mut form.focus, names);
     for c in &mut form.shapes {
         normalize_ref(&mut c.shape, names);
@@ -332,7 +335,11 @@ fn build_field(
         editor,
         viewer,
         explicit,
-        score: if explicit { None } else { editor_res.score.or(viewer_res.score) },
+        score: if explicit {
+            None
+        } else {
+            editor_res.score.or(viewer_res.score)
+        },
         editor_alternatives: match &opts.mode {
             Mode::View => Vec::new(),
             Mode::Edit => alternatives(&editor_res, &explicit_editor),
@@ -512,8 +519,12 @@ fn constraints_of(
             }
             Component::Or(branches) if or_depth > 0 => {
                 for &b in branches {
-                    c.or
-                        .push(constraints_of(shapes, model, &model.shapes[b], or_depth - 1));
+                    c.or.push(constraints_of(
+                        shapes,
+                        model,
+                        &model.shapes[b],
+                        or_depth - 1,
+                    ));
                 }
             }
             _ => {} // validation-only components carry no form semantics (F3)

@@ -70,8 +70,14 @@ fn context_document_is_unwrapped_one_layer() {
 
 #[test]
 fn empty_context_is_not_embedded() {
-    assert_eq!(run_default(r#"[{"http://ex/p":[{"@value":1}]}]"#, r#"{}"#), r#"{"http://ex/p":1}"#);
-    assert_eq!(run_default(r#"[{"http://ex/p":[{"@value":1}]}]"#, r#"null"#), r#"{"http://ex/p":1}"#);
+    assert_eq!(
+        run_default(r#"[{"http://ex/p":[{"@value":1}]}]"#, r#"{}"#),
+        r#"{"http://ex/p":1}"#
+    );
+    assert_eq!(
+        run_default(r#"[{"http://ex/p":[{"@value":1}]}]"#, r#"null"#),
+        r#"{"http://ex/p":1}"#
+    );
 }
 
 #[test]
@@ -288,7 +294,10 @@ fn direction_must_match_the_term_direction() {
     let ctx = r#"{"p":{"@id":"http://ex/p","@direction":"rtl"}}"#;
     // Matching direction → bare string.
     assert_eq!(
-        run_default(r#"[{"http://ex/p":[{"@value":"x","@direction":"rtl"}]}]"#, ctx),
+        run_default(
+            r#"[{"http://ex/p":[{"@value":"x","@direction":"rtl"}]}]"#,
+            ctx
+        ),
         r#"{"@context":{"p":{"@id":"http://ex/p","@direction":"rtl"}},"p":"x"}"#
     );
     // Missing direction: the rtl term cannot be selected at all, so the property
@@ -449,10 +458,7 @@ fn list_term_selection_uses_the_common_language_of_the_items() {
         r#"[{"http://ex/p":[{"@list":[{"@value":"a","@language":"en"},{"@value":"b","@language":"en"}]}]}]"#,
         ctx,
     );
-    assert_eq!(
-        got,
-        format!(r#"{{"@context":{},"ten":["a","b"]}}"#, ctx)
-    );
+    assert_eq!(got, format!(r#"{{"@context":{},"ten":["a","b"]}}"#, ctx));
     let got = run_default(
         r#"[{"http://ex/p":[{"@list":[{"@value":"a","@language":"en"},{"@value":"b","@language":"fr"}]}]}]"#,
         ctx,
@@ -615,10 +621,8 @@ fn unmatched_reverse_entries_stay_under_the_reverse_alias() {
 fn preserve_payload_is_compacted_in_place() {
     // @preserve is a framing-pipeline construct; compact_expanded must compact its
     // payload and keep the keyword (no expansion round-trip, so drive it directly).
-    let expanded = Json::parse(
-        r#"[{"@preserve":[{"http://ex/p":[{"@value":"x"}]}]}]"#,
-    )
-    .expect("expanded");
+    let expanded =
+        Json::parse(r#"[{"@preserve":[{"http://ex/p":[{"@value":"x"}]}]}]"#).expect("expanded");
     let ctx = Json::parse(r#"{"p":"http://ex/p"}"#).expect("ctx");
     let out = compact_expanded(&expanded, &ctx, &JsonLdOptions::default(), &NoopLoader)
         .expect("compaction succeeds");
@@ -687,7 +691,10 @@ fn vocab_relative_suffix_is_used_when_unambiguous() {
         r#"[{"http://vocab/other":[{"@value":"x"}]}]"#,
         r#"{"@vocab":"http://vocab/"}"#,
     );
-    assert_eq!(got, r#"{"@context":{"@vocab":"http://vocab/"},"other":"x"}"#);
+    assert_eq!(
+        got,
+        r#"{"@context":{"@vocab":"http://vocab/"},"other":"x"}"#
+    );
 }
 
 #[test]
@@ -704,7 +711,10 @@ fn property_scoped_context_applies_inside_the_property() {
     );
     assert_eq!(
         got,
-        format!(r#"{{"@context":{},"@type":"Foo","bar":{{"baz":"buzz"}}}}"#, ctx)
+        format!(
+            r#"{{"@context":{},"@type":"Foo","bar":{{"baz":"buzz"}}}}"#,
+            ctx
+        )
     );
 }
 

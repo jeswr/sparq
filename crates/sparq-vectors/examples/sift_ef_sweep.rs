@@ -140,18 +140,22 @@ fn main() {
         eprintln!("[sift-sweep] ef={ef}: building VectorStore...");
 
         // Build VectorStore with normalised vectors
-        let store_path = std::env::temp_dir()
-            .join(format!("sift-ef{ef}-{}.spqv", std::process::id()));
+        let store_path =
+            std::env::temp_dir().join(format!("sift-ef{ef}-{}.spqv", std::process::id()));
         {
             let mut store = VectorStore::create(&store_path, dim)
                 .unwrap_or_else(|e| panic!("create store ef={ef}: {e}"));
             for (i, v) in base_norm.iter().enumerate() {
-                store.put(i as u32, v).unwrap_or_else(|e| panic!("put {i}: {e}"));
+                store
+                    .put(i as u32, v)
+                    .unwrap_or_else(|e| panic!("put {i}: {e}"));
             }
-            store.finalize().unwrap_or_else(|e| panic!("finalize ef={ef}: {e}"));
+            store
+                .finalize()
+                .unwrap_or_else(|e| panic!("finalize ef={ef}: {e}"));
         }
-        let store = VectorStore::open(&store_path)
-            .unwrap_or_else(|e| panic!("open store ef={ef}: {e}"));
+        let store =
+            VectorStore::open(&store_path).unwrap_or_else(|e| panic!("open store ef={ef}: {e}"));
 
         // Build HNSW index with ef_search = ef
         let cfg = HnswConfig {
@@ -202,13 +206,19 @@ fn main() {
         let deficit_milli = ((1.0 - recall) * 1000.0).round() as i64;
         let mean_us = all_latencies.iter().sum::<f64>() / all_latencies.len() as f64;
         let p99_us = p99(all_latencies);
-        let qps = if mean_us > 0.0 { 1_000_000.0 / mean_us } else { 0.0 };
+        let qps = if mean_us > 0.0 {
+            1_000_000.0 / mean_us
+        } else {
+            0.0
+        };
 
         eprintln!(
             "[sift-sweep] ef={ef}: recall@{k}={recall:.4} deficit={deficit_milli} \
              mean_us={mean_us:.1} p99_us={p99_us:.1} qps={qps:.1} build_s={build_s:.1}"
         );
-        println!("{ef}\t{recall:.4}\t{deficit_milli}\t{mean_us:.1}\t{p99_us:.1}\t{qps:.1}\t{build_s:.1}");
+        println!(
+            "{ef}\t{recall:.4}\t{deficit_milli}\t{mean_us:.1}\t{p99_us:.1}\t{qps:.1}\t{build_s:.1}"
+        );
 
         // Cleanup store
         drop(index);

@@ -276,7 +276,9 @@ impl ActiveContext {
     /// True iff the context contains any protected term definition (used by the null-context
     /// nullification guard, §4.1.2 step 5.1.1).
     pub(crate) fn has_protected_terms(&self) -> bool {
-        self.term_definitions.values().any(TermDefinition::is_protected)
+        self.term_definitions
+            .values()
+            .any(TermDefinition::is_protected)
     }
 
     /// Mutable access to the term-definition map, copy-on-write ([FABLE-5] sq-hmd7l.42).
@@ -456,7 +458,10 @@ mod tests {
 
         let mut cloned = original.clone();
         // The clone shares the map (O(1) clone), it does not deep-copy it.
-        assert!(Arc::ptr_eq(&original.term_definitions, &cloned.term_definitions));
+        assert!(Arc::ptr_eq(
+            &original.term_definitions,
+            &cloned.term_definitions
+        ));
 
         // Mutating the clone copies-on-write: the original keeps its view.
         cloned.term_definitions_mut().insert(
@@ -466,9 +471,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(!Arc::ptr_eq(&original.term_definitions, &cloned.term_definitions));
+        assert!(!Arc::ptr_eq(
+            &original.term_definitions,
+            &cloned.term_definitions
+        ));
         assert!(cloned.has_term("b"));
-        assert!(!original.has_term("b"), "mutating a clone must not alias into the original");
+        assert!(
+            !original.has_term("b"),
+            "mutating a clone must not alias into the original"
+        );
         assert!(original.has_term("a") && cloned.has_term("a"));
 
         // Removal through the mutable accessor is COW-isolated too.

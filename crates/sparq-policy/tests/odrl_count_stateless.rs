@@ -53,8 +53,14 @@ fn req_with_count(n: f64) -> Request {
 #[test]
 fn stateless_lteq_allows_up_to_and_including_bound() {
     let p = parse_policy_str(&count_policy_ttl("lteq", 5), "turtle").unwrap();
-    assert!(evaluate(&p, &req_with_count(0.0)).allow, "0 lteq 5 must ALLOW");
-    assert!(evaluate(&p, &req_with_count(5.0)).allow, "5 lteq 5 must ALLOW");
+    assert!(
+        evaluate(&p, &req_with_count(0.0)).allow,
+        "0 lteq 5 must ALLOW"
+    );
+    assert!(
+        evaluate(&p, &req_with_count(5.0)).allow,
+        "5 lteq 5 must ALLOW"
+    );
     let d = evaluate(&p, &req_with_count(6.0));
     assert!(!d.allow, "6 lteq 5 must DENY");
     assert!(
@@ -67,35 +73,68 @@ fn stateless_lteq_allows_up_to_and_including_bound() {
 #[test]
 fn stateless_lt_excludes_the_bound() {
     let p = parse_policy_str(&count_policy_ttl("lt", 5), "turtle").unwrap();
-    assert!(evaluate(&p, &req_with_count(4.0)).allow, "4 lt 5 must ALLOW");
-    assert!(!evaluate(&p, &req_with_count(5.0)).allow, "5 lt 5 must DENY");
-    assert!(!evaluate(&p, &req_with_count(6.0)).allow, "6 lt 5 must DENY");
+    assert!(
+        evaluate(&p, &req_with_count(4.0)).allow,
+        "4 lt 5 must ALLOW"
+    );
+    assert!(
+        !evaluate(&p, &req_with_count(5.0)).allow,
+        "5 lt 5 must DENY"
+    );
+    assert!(
+        !evaluate(&p, &req_with_count(6.0)).allow,
+        "6 lt 5 must DENY"
+    );
 }
 
 /// `odrl:count eq 3`: only exactly 3 ALLOWs; 2 and 4 DENY.
 #[test]
 fn stateless_eq_matches_only_the_bound() {
     let p = parse_policy_str(&count_policy_ttl("eq", 3), "turtle").unwrap();
-    assert!(!evaluate(&p, &req_with_count(2.0)).allow, "2 eq 3 must DENY");
-    assert!(evaluate(&p, &req_with_count(3.0)).allow, "3 eq 3 must ALLOW");
-    assert!(!evaluate(&p, &req_with_count(4.0)).allow, "4 eq 3 must DENY");
+    assert!(
+        !evaluate(&p, &req_with_count(2.0)).allow,
+        "2 eq 3 must DENY"
+    );
+    assert!(
+        evaluate(&p, &req_with_count(3.0)).allow,
+        "3 eq 3 must ALLOW"
+    );
+    assert!(
+        !evaluate(&p, &req_with_count(4.0)).allow,
+        "4 eq 3 must DENY"
+    );
 }
 
 /// `odrl:count gt 2`: 2 DENY (strict), 3 ALLOW.
 #[test]
 fn stateless_gt_excludes_the_bound() {
     let p = parse_policy_str(&count_policy_ttl("gt", 2), "turtle").unwrap();
-    assert!(!evaluate(&p, &req_with_count(2.0)).allow, "2 gt 2 must DENY");
-    assert!(evaluate(&p, &req_with_count(3.0)).allow, "3 gt 2 must ALLOW");
+    assert!(
+        !evaluate(&p, &req_with_count(2.0)).allow,
+        "2 gt 2 must DENY"
+    );
+    assert!(
+        evaluate(&p, &req_with_count(3.0)).allow,
+        "3 gt 2 must ALLOW"
+    );
 }
 
 /// `odrl:count gteq 2`: 1 DENY, 2 ALLOW (bound included), 3 ALLOW.
 #[test]
 fn stateless_gteq_includes_the_bound() {
     let p = parse_policy_str(&count_policy_ttl("gteq", 2), "turtle").unwrap();
-    assert!(!evaluate(&p, &req_with_count(1.0)).allow, "1 gteq 2 must DENY");
-    assert!(evaluate(&p, &req_with_count(2.0)).allow, "2 gteq 2 must ALLOW");
-    assert!(evaluate(&p, &req_with_count(3.0)).allow, "3 gteq 2 must ALLOW");
+    assert!(
+        !evaluate(&p, &req_with_count(1.0)).allow,
+        "1 gteq 2 must DENY"
+    );
+    assert!(
+        evaluate(&p, &req_with_count(2.0)).allow,
+        "2 gteq 2 must ALLOW"
+    );
+    assert!(
+        evaluate(&p, &req_with_count(3.0)).allow,
+        "3 gteq 2 must ALLOW"
+    );
 }
 
 /// FAIL-CLOSED: a `odrl:count` constraint with NO count value in the request context is

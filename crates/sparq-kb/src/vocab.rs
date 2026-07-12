@@ -195,8 +195,7 @@ pub const TIER_MACHINE_GRAPH: &str = "https://sparq.dev/ns/pkg/graph#machine";
 /// Tier graph IRI: the LICENSE-RESTRICTED tier — machine findings whose source licence is
 /// unknown/absent/non-redistributable (**fail-closed**). The full findings stay in this
 /// PRIVATE artifact; only a metadata-only projection (no abstract-derived text) is public.
-pub const TIER_LICENSE_RESTRICTED_GRAPH: &str =
-    "https://sparq.dev/ns/pkg/graph#license-restricted";
+pub const TIER_LICENSE_RESTRICTED_GRAPH: &str = "https://sparq.dev/ns/pkg/graph#license-restricted";
 
 /// Every tier named-graph IRI, in a stable order. Byte-pinned by
 /// `tier_graph_iris_are_pinned`; deliberately disjoint from [`ALL`].
@@ -349,7 +348,11 @@ mod tests {
         }
         // The three tier graph IRIs are distinct.
         let set: std::collections::HashSet<&str> = TIER_GRAPHS.iter().copied().collect();
-        assert_eq!(set.len(), TIER_GRAPHS.len(), "tier graph IRIs must be distinct");
+        assert_eq!(
+            set.len(),
+            TIER_GRAPHS.len(),
+            "tier graph IRIs must be distinct"
+        );
         // Exactly one tier per emitted statement starts here: the tier graph IRIs are NOT
         // `pkg:` vocabulary terms, so none may leak into the pkg.ttl-pinned ALL set.
         for &g in TIER_GRAPHS {

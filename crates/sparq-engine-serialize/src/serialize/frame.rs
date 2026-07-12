@@ -1222,8 +1222,7 @@ mod tests {
             r#"{"@id":"http://ex/1","http://ex/p":{"@embed":false}}"#,
         );
         assert_eq!(
-            out_false,
-            r#"{"@id":"http://ex/1","http://ex/p":{"@id":"http://ex/2"}}"#,
+            out_false, r#"{"@id":"http://ex/1","http://ex/p":{"@id":"http://ex/2"}}"#,
             "embed=false is @never: {}",
             out_false
         );
@@ -1260,8 +1259,7 @@ mod tests {
         );
         // The absence of "m" in the output confirms the top-level @omitDefault was applied.
         assert_eq!(
-            out,
-            r#"{"@id":"http://ex/1","@type":"http://ex/T"}"#,
+            out, r#"{"@id":"http://ex/1","@type":"http://ex/T"}"#,
             "top-level @omitDefault suppresses fill: {}",
             out
         );
@@ -1279,8 +1277,7 @@ mod tests {
         );
         // ex:1 has a type and matches; ex:2 has no type and is excluded.
         assert_eq!(
-            out,
-            r#"{"@id":"http://ex/1","@type":"http://ex/T"}"#,
+            out, r#"{"@id":"http://ex/1","@type":"http://ex/T"}"#,
             "wildcard @type selects typed node only: {}",
             out
         );
@@ -1298,8 +1295,7 @@ mod tests {
         );
         // ex:2 has no type and matches; ex:1 is excluded.
         assert_eq!(
-            out,
-            r#"{"@id":"http://ex/2","http://ex/p":"X"}"#,
+            out, r#"{"@id":"http://ex/2","http://ex/p":"X"}"#,
             "match-none @type selects untyped node only: {}",
             out
         );

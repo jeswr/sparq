@@ -116,7 +116,8 @@ adaptive re-planning (`AdaptiveExecutor`) is behind the further `adaptive-replan
 
 [OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z / sq-gxx7 — flagged for Fable re-review."#
 )]
-#![forbid(unsafe_code)] // [OPUS-4.8] sq-a35t: crate has zero `unsafe`.
+#![forbid(unsafe_code)]
+// [OPUS-4.8] sq-a35t: crate has zero `unsafe`.
 // [OPUS-4.8] sq-gxx7: lock the crate-doc fix in. `rustdoc::broken_intra_doc_links` is a
 // rustdoc-only lint — it fires under `cargo doc`, NOT under `cargo build`/`clippy`/`test` — so
 // denying it keeps the existing build/clippy/test gates untouched while making a future broken

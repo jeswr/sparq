@@ -13,8 +13,8 @@
 #![cfg(feature = "secprop-annotations")]
 
 use sparq_zk::secprop::{
-    audit_overclaim_violations, completeness_violations, parse_annotations,
-    production_method_iris, source_layer_transfer_violations, Assurance,
+    audit_overclaim_violations, completeness_violations, parse_annotations, production_method_iris,
+    source_layer_transfer_violations, Assurance,
 };
 
 const SOUNDNESS: &str = "https://w3id.org/zkp-sparql/sec-prop#Soundness";
@@ -39,7 +39,10 @@ fn shipped_graph_satisfies_all_three_guards() {
 
     // Guard 3: every production-selectable scheme is annotated.
     let prod = production_method_iris();
-    assert!(!prod.is_empty(), "there must be production-selectable schemes");
+    assert!(
+        !prod.is_empty(),
+        "there must be production-selectable schemes"
+    );
     let missing = completeness_violations(&ann, &prod);
     assert!(
         missing.is_empty(),
@@ -48,15 +51,20 @@ fn shipped_graph_satisfies_all_three_guards() {
     );
 
     // Guard 2: a query-proof-layer property transfers; a source-layer-only one does not.
-    let ok = source_layer_transfer_violations(
-        &ann,
-        &[(prod[0], SOUNDNESS, Some(KNOWLEDGE_SOUND))],
+    let ok = source_layer_transfer_violations(&ann, &[(prod[0], SOUNDNESS, Some(KNOWLEDGE_SOUND))]);
+    assert!(
+        ok.is_empty(),
+        "query-proof-layer property wrongly blocked: {:?}",
+        ok
     );
-    assert!(ok.is_empty(), "query-proof-layer property wrongly blocked: {:?}", ok);
 
     let blocked = source_layer_transfer_violations(
         &ann,
-        &[(ILLUSTRATIVE_SOURCE, UNLINKABILITY_SCOPE, Some(CROSS_PRESENTATION))],
+        &[(
+            ILLUSTRATIVE_SOURCE,
+            UNLINKABILITY_SCOPE,
+            Some(CROSS_PRESENTATION),
+        )],
     );
     assert_eq!(
         blocked.len(),

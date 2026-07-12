@@ -190,9 +190,11 @@ pub struct TextIndex {
 /// language-tagged), `None` for every other term kind.
 fn text_value<'a>(parts: &TermParts<'a>) -> Option<&'a str> {
     match parts {
-        TermParts::Lit { value, datatype, lang } => {
-            (lang.is_some() || *datatype == XSD_STRING).then_some(*value)
-        }
+        TermParts::Lit {
+            value,
+            datatype,
+            lang,
+        } => (lang.is_some() || *datatype == XSD_STRING).then_some(*value),
         _ => None,
     }
 }
@@ -237,14 +239,21 @@ impl TextIndex {
     /// incremental/delta-fed case (the [`with_positions`](Self::with_positions)
     /// counterpart with an explicit analyzer). [OPUS-4.8] sq-m3ln
     pub fn with_positions_analyzer(analyzer: Analyzer) -> TextIndex {
-        TextIndex { positions: Some(BTreeMap::new()), analyzer, ..Default::default() }
+        TextIndex {
+            positions: Some(BTreeMap::new()),
+            analyzer,
+            ..Default::default()
+        }
     }
 
     /// An empty index that uses `analyzer` (the `TextIndex::default()`
     /// counterpart with an explicit analyzer), for the delta-fed case without
     /// positions. [OPUS-4.8] sq-m3ln
     pub fn with_analyzer(analyzer: Analyzer) -> TextIndex {
-        TextIndex { analyzer, ..Default::default() }
+        TextIndex {
+            analyzer,
+            ..Default::default()
+        }
     }
 
     /// The [`Analyzer`] this index was built/seeded with. [OPUS-4.8] sq-m3ln
@@ -266,7 +275,10 @@ impl TextIndex {
     /// counterpart of `TextIndex::default()`, for the incremental/delta-fed
     /// case. [OPUS-4.8]
     pub fn with_positions() -> TextIndex {
-        TextIndex { positions: Some(BTreeMap::new()), ..Default::default() }
+        TextIndex {
+            positions: Some(BTreeMap::new()),
+            ..Default::default()
+        }
     }
 
     // Note: `Analyzer::default()` is `Unicode`, so `TextIndex::default()` and
@@ -364,7 +376,9 @@ impl TextIndex {
             .iter()
             .flat_map(|m| m.iter())
             .map(|(k, docs)| {
-                k.len() + std::mem::size_of::<Box<str>>() + 24
+                k.len()
+                    + std::mem::size_of::<Box<str>>()
+                    + 24
                     + docs.values().map(|p| 16 + p.capacity() * 4).sum::<usize>()
             })
             .sum();
@@ -558,7 +572,11 @@ impl TextIndex {
     /// (tf summed, df = union size) — one pseudo-term for scoring.
     fn resolve(&self, t: &QueryToken) -> Vec<(Id, u32)> {
         if !t.prefix {
-            return self.postings.get(t.token.as_str()).cloned().unwrap_or_default();
+            return self
+                .postings
+                .get(t.token.as_str())
+                .cloned()
+                .unwrap_or_default();
         }
         let mut merged: FxHashMap<Id, u32> = FxHashMap::default();
         for (token, rows) in self.postings.range(t.token.clone().into_boxed_str()..) {
@@ -607,10 +625,9 @@ impl TextIndex {
     /// [`with_positions`](Self::with_positions)). Guard with
     /// [`has_positions`](Self::has_positions) if unsure.
     pub fn phrase(&self, query: &str) -> Vec<Id> {
-        let positions = self
-            .positions
-            .as_ref()
-            .expect("phrase() requires a positional index: build with TextIndex::build_with_positions");
+        let positions = self.positions.as_ref().expect(
+            "phrase() requires a positional index: build with TextIndex::build_with_positions",
+        );
         let tokens = tokenize_with(query, self.analyzer);
         if tokens.is_empty() {
             return Vec::new();
@@ -729,7 +746,10 @@ impl TextIndex {
             .filter_map(|id| {
                 Self::min_phrase_gap(&lists, driver_i, id)
                     .filter(|&g| g <= slop)
-                    .map(|g| Hit { id, score: 1.0 / (1.0 + g as f32) })
+                    .map(|g| Hit {
+                        id,
+                        score: 1.0 / (1.0 + g as f32),
+                    })
             })
             .collect();
         // Best-first (tighter proximity = higher score), ties by ascending id —
@@ -761,15 +781,18 @@ impl TextIndex {
         // over all starts is the document's minimum. Positions are ascending, so
         // `partition_point` is a binary search for "strictly greater than prev".
         let first = &lists[0][&id];
-        first.iter().filter_map(|&start| {
-            let mut prev = start;
-            for docs in &lists[1..] {
-                let ps = &docs[&id];
-                let i = ps.partition_point(|&p| p <= prev);
-                prev = *ps.get(i)?; // no in-order position for this token after prev
-            }
-            Some((prev - start) - (n - 1))
-        }).min()
+        first
+            .iter()
+            .filter_map(|&start| {
+                let mut prev = start;
+                for docs in &lists[1..] {
+                    let ps = &docs[&id];
+                    let i = ps.partition_point(|&p| p <= prev);
+                    prev = *ps.get(i)?; // no in-order position for this token after prev
+                }
+                Some((prev - start) - (n - 1))
+            })
+            .min()
     }
 
     fn run(&self, query: &str, all: bool) -> Vec<Hit> {

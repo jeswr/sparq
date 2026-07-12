@@ -173,7 +173,10 @@ fn sd_with_service_but_no_language_is_recall_safe_unknown_version() {
         .expect("well-formed N-Triples")
         .expect("an sd:Service is present");
     assert_eq!(cap.interface, Interface::Endpoint);
-    assert_eq!(cap.sparql_version, None, "no supportedLanguage ⇒ unknown version");
+    assert_eq!(
+        cap.sparql_version, None,
+        "no supportedLanguage ⇒ unknown version"
+    );
     assert_eq!(cap.pushable_filters, FilterClass::Full);
     assert!(
         !cap.aggregates && !cap.property_paths && !cap.order_limit,
@@ -266,7 +269,10 @@ fn ask_fallback_capability_is_conservative() {
     assert_eq!(c.interface, Interface::Endpoint);
     assert_eq!(c.sparql_version, Some(SparqlVersion::Sparql11));
     assert_eq!(c.pushable_filters, FilterClass::Full);
-    assert!(c.returns_sparql_results_json(), "SRJ is the mandatory format");
+    assert!(
+        c.returns_sparql_results_json(),
+        "SRJ is the mandatory format"
+    );
     assert!(
         !c.aggregates && !c.property_paths && !c.order_limit,
         "the ASK fallback makes NO push claim beyond core evaluation"
@@ -277,7 +283,10 @@ fn ask_fallback_capability_is_conservative() {
 #[test]
 fn media_type_recognises_sparql_results_json_only() {
     let srj = MediaType("http://www.w3.org/ns/formats/SPARQL_Results_JSON".to_string());
-    assert_eq!(srj.iri(), "http://www.w3.org/ns/formats/SPARQL_Results_JSON");
+    assert_eq!(
+        srj.iri(),
+        "http://www.w3.org/ns/formats/SPARQL_Results_JSON"
+    );
     assert!(srj.is_sparql_results_json());
     let turtle = MediaType("http://www.w3.org/ns/formats/Turtle".to_string());
     assert!(

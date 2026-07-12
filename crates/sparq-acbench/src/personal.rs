@@ -187,7 +187,11 @@ pub fn generate(params: &GenParams) -> PersonalDataset {
 
             let container_uri = &containers[container_idx];
             let uri = format!("{container_uri}resource{i}");
-            PodResource { uri, category, container_idx }
+            PodResource {
+                uri,
+                category,
+                container_idx,
+            }
         })
         .collect();
 
@@ -195,10 +199,9 @@ pub fn generate(params: &GenParams) -> PersonalDataset {
     let app_uri = format!("https://app.example/solidapp-{}", params.seed % 100);
 
     // Pick one "friend group" for shared resources (the first group's URI).
-    let friend_group_uri = groups.first().map_or_else(
-        || format!("{pod_base}groups/friends"),
-        |g| g.uri.clone(),
-    );
+    let friend_group_uri = groups
+        .first()
+        .map_or_else(|| format!("{pod_base}groups/friends"), |g| g.uri.clone());
 
     // ── Intent table ─────────────────────────────────────────────────────────────
     // Invariant: the FIRST intent for each resource is an owner-full-control entry
@@ -453,7 +456,10 @@ fn build_groups(
         let members: Vec<String> = (0..mpg)
             .map(|j| {
                 if agents.is_empty() {
-                    format!("https://pod.example/member{}/profile/card#me", level * mpg + j)
+                    format!(
+                        "https://pod.example/member{}/profile/card#me",
+                        level * mpg + j
+                    )
                 } else {
                     let agent_idx = (level * mpg + j) % agents.len();
                     agents[agent_idx].clone()
@@ -467,7 +473,11 @@ fn build_groups(
             None
         };
 
-        groups.push(Group { uri: group_uri, members, parent });
+        groups.push(Group {
+            uri: group_uri,
+            members,
+            parent,
+        });
     }
 
     groups

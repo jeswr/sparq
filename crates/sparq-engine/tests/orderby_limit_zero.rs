@@ -24,23 +24,32 @@ fn g() -> Graph {
 
 #[test]
 fn order_by_limit_zero_is_empty_not_panic() {
-    let r = query(&g(), &format!("{PFX}SELECT ?v WHERE {{ [] :num ?v }} ORDER BY ?v LIMIT 0"))
-        .expect("LIMIT 0 must evaluate, not panic");
+    let r = query(
+        &g(),
+        &format!("{PFX}SELECT ?v WHERE {{ [] :num ?v }} ORDER BY ?v LIMIT 0"),
+    )
+    .expect("LIMIT 0 must evaluate, not panic");
     assert!(r.rows.is_empty(), "LIMIT 0 must return zero rows");
 }
 
 #[test]
 fn order_by_offset_limit_zero_is_empty() {
     // OFFSET 2 LIMIT 0 → k = 2 (> 0, no panic), then the [2..2] slice is empty.
-    let r = query(&g(), &format!("{PFX}SELECT ?v WHERE {{ [] :num ?v }} ORDER BY ?v OFFSET 2 LIMIT 0"))
-        .expect("OFFSET 2 LIMIT 0 must evaluate");
+    let r = query(
+        &g(),
+        &format!("{PFX}SELECT ?v WHERE {{ [] :num ?v }} ORDER BY ?v OFFSET 2 LIMIT 0"),
+    )
+    .expect("OFFSET 2 LIMIT 0 must evaluate");
     assert!(r.rows.is_empty());
 }
 
 #[test]
 fn order_by_limit_one_still_works() {
     // The smallest non-degenerate top-k budget (k = 1) still returns the min row.
-    let r = query(&g(), &format!("{PFX}SELECT ?v WHERE {{ [] :num ?v }} ORDER BY ?v LIMIT 1"))
-        .expect("LIMIT 1 must evaluate");
+    let r = query(
+        &g(),
+        &format!("{PFX}SELECT ?v WHERE {{ [] :num ?v }} ORDER BY ?v LIMIT 1"),
+    )
+    .expect("LIMIT 1 must evaluate");
     assert_eq!(r.rows.len(), 1, "LIMIT 1 returns exactly one row");
 }

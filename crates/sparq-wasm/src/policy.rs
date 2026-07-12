@@ -172,8 +172,14 @@ pub fn policy_evaluate(
     target: Option<String>,
     party: Option<String>,
 ) -> Result<String, JsError> {
-    evaluate_policy_json(policy_rdf, format, action, target.as_deref(), party.as_deref())
-        .map_err(|e| JsError::new(&e))
+    evaluate_policy_json(
+        policy_rdf,
+        format,
+        action,
+        target.as_deref(),
+        party.as_deref(),
+    )
+    .map_err(|e| JsError::new(&e))
 }
 
 /// EXPERIMENTAL (sq-586sh probe — see the module docs): request-free conflict +
@@ -278,7 +284,10 @@ mod tests {
               odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] .
         "#;
         let json = policy_conflicts_json(policy, "turtle").unwrap();
-        assert!(json.starts_with("{\"admissible\":false,\"reason\":\""), "got: {json}");
+        assert!(
+            json.starts_with("{\"admissible\":false,\"reason\":\""),
+            "got: {json}"
+        );
         assert!(json.contains("\"overlap\":\"certain\""), "got: {json}");
     }
 

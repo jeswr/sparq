@@ -532,11 +532,7 @@ mod tests {
     /// actually tiny, so a re-plan should flip the suffix to [:c, :b]. The answers are chosen
     /// so the join is non-trivial (subjects drop / fan out), so a wrong order would change the
     /// MULTISET if the executor were unsound. [OPUS-4.8] sq-ij5x.
-    fn star_fixture() -> (
-        Bgp,
-        [SourceDescriptor; 1],
-        StdHashMap<String, String>,
-    ) {
+    fn star_fixture() -> (Bgp, [SourceDescriptor; 1], StdHashMap<String, String>) {
         let bgp = Bgp::new(vec![
             TriplePattern::new(var("s"), iri("http://ex/a"), var("x")),
             TriplePattern::new(var("s"), iri("http://ex/b"), var("y")),
@@ -598,7 +594,11 @@ mod tests {
         let sel = select_sources(&bgp, &descriptors);
         let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
         // The static suffix after the :a seed is [:b, :c] (by descriptor estimate).
-        assert_eq!(tree.join_order(), vec![0, 1, 2], "static order is [:a,:b,:c]");
+        assert_eq!(
+            tree.join_order(),
+            vec![0, 1, 2],
+            "static order is [:a,:b,:c]"
+        );
 
         // --- Static reference result.
         let ep_static = Endpoint::new(
@@ -607,8 +607,7 @@ mod tests {
         );
         let adapters_s: Vec<&dyn FederatedSource> = vec![&ep_static];
         let resolver_s = SourceResolver::new(&bgp, &adapters_s);
-        let static_rel =
-            materialize_single_source(&resolver_s, &sel, &ep_static, &tree).unwrap();
+        let static_rel = materialize_single_source(&resolver_s, &sel, &ep_static, &tree).unwrap();
         assert!(!static_rel.rows.is_empty(), "fixture must produce rows");
 
         // --- Adaptive execution over the SAME answers.
@@ -769,10 +768,12 @@ mod tests {
         );
         let adapters_s: Vec<&dyn FederatedSource> = vec![&ep_static];
         let resolver_s = SourceResolver::new(&bgp, &adapters_s);
-        let static_rel =
-            materialize_single_source(&resolver_s, &sel, &ep_static, &tree).unwrap();
+        let static_rel = materialize_single_source(&resolver_s, &sel, &ep_static, &tree).unwrap();
 
-        let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(answers)));
+        let ep = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(answers)),
+        );
         let adapters: Vec<&dyn FederatedSource> = vec![&ep];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let out = execute_adaptive_single_source(
@@ -838,7 +839,13 @@ mod tests {
             ReplanPolicy::default(),
         )
         .unwrap_err();
-        assert_eq!(err, InterpError::MultiSource { pattern: 0, sources: 2 });
+        assert_eq!(
+            err,
+            InterpError::MultiSource {
+                pattern: 0,
+                sources: 2
+            }
+        );
     }
 
     /// The `static_plan` convenience and `SubQuery`/`FedError` imports are honest surface —
@@ -945,7 +952,10 @@ mod tests {
         let mut a1 = StdHashMap::new();
         a1.insert(
             "SELECT ?s ?y WHERE { ?s <http://ex/b> ?y }".to_string(),
-            srj(&["s", "y"], &[&[("s", "http://ex/s1"), ("y", "http://ex/y7")]]),
+            srj(
+                &["s", "y"],
+                &[&[("s", "http://ex/s1"), ("y", "http://ex/y7")]],
+            ),
         );
         (bgp, [s0, s1], a0, a1)
     }
@@ -959,11 +969,19 @@ mod tests {
     fn multi_source_adaptive_replans_and_equals_materialize_multi_source() {
         let (bgp, descriptors, a0, a1) = union_star_fixture();
         let sel = select_sources(&bgp, &descriptors);
-        assert_eq!(sel[1].candidates.len(), 2, "pattern 1 must be a 2-arm union leaf");
+        assert_eq!(
+            sel[1].candidates.len(),
+            2,
+            "pattern 1 must be a 2-arm union leaf"
+        );
         assert_eq!(sel[0].candidates.len(), 1);
         assert_eq!(sel[2].candidates.len(), 1);
         let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
-        assert_eq!(tree.join_order(), vec![0, 1, 2], "static order is [:a,:b,:c]");
+        assert_eq!(
+            tree.join_order(),
+            vec![0, 1, 2],
+            "static order is [:a,:b,:c]"
+        );
 
         let ep0 = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(a0)));
         let ep1 = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(a1)));
@@ -986,7 +1004,11 @@ mod tests {
         .unwrap();
 
         // The divergence really re-plans (same shape as the single-source star fixture).
-        assert_eq!(out.switch_count(), 1, "the divergent fixture must switch exactly once");
+        assert_eq!(
+            out.switch_count(),
+            1,
+            "the divergent fixture must switch exactly once"
+        );
         assert_eq!(
             out.executed_order,
             vec![0, 2, 1],
@@ -1070,7 +1092,10 @@ mod tests {
         );
 
         // The weighted policy was consulted at the operator boundaries WITH those stats…
-        assert!(!out.replans.is_empty(), "re-plan considered at >=1 boundary");
+        assert!(
+            !out.replans.is_empty(),
+            "re-plan considered at >=1 boundary"
+        );
         // …and latency aggregation biases cost/ordering only, never the answer.
         assert!(solutions_equal(
             &out.relation.vars,
@@ -1110,7 +1135,10 @@ mod tests {
         )
         .unwrap();
 
-        let ep_m = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(answers)));
+        let ep_m = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(answers)),
+        );
         let adapters_m: Vec<&dyn FederatedSource> = vec![&ep_m];
         let resolver_m = SourceResolver::new(&bgp, &adapters_m);
         let multi = execute_adaptive_multi_source(
@@ -1157,8 +1185,7 @@ mod tests {
         let adapters: Vec<&dyn FederatedSource> = vec![&ep];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let mut observed: Vec<(usize, f64)> = Vec::new();
-        let rel =
-            fetch_leaf_union(&resolver, &[], 0, &mut |i, l| observed.push((i, l))).unwrap();
+        let rel = fetch_leaf_union(&resolver, &[], 0, &mut |i, l| observed.push((i, l))).unwrap();
         assert_eq!(rel.vars, vec!["s".to_string(), "o".to_string()]);
         assert!(rel.rows.is_empty());
         assert!(observed.is_empty(), "no arm, no observation");
@@ -1190,8 +1217,8 @@ mod tests {
         let adapters: Vec<&dyn FederatedSource> = vec![&ep_broken, &ep_never];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let mut observed: Vec<(usize, f64)> = Vec::new();
-        let err = fetch_leaf_union(&resolver, &sel, 0, &mut |i, l| observed.push((i, l)))
-            .unwrap_err();
+        let err =
+            fetch_leaf_union(&resolver, &sel, 0, &mut |i, l| observed.push((i, l))).unwrap_err();
         assert!(
             matches!(err, InterpError::Source(_)),
             "transport error propagates: {err:?}"

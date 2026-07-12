@@ -21,7 +21,10 @@ use sparq_vectors::{
 };
 
 fn tmp(name: &str, ext: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("sparq_vec_approx_{}_{name}.{ext}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "sparq_vec_approx_{}_{name}.{ext}",
+        std::process::id()
+    ))
 }
 
 /// Five well-separated entities on the unit circle (same shape as tests/vec_predicate.rs), with a
@@ -38,7 +41,10 @@ fn fixture(name: &str) -> (Graph, VectorStore, DiskAnnIndex) {
         "ntriples",
     )
     .unwrap();
-    let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+    let id = |s: &str| {
+        g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+            .unwrap()
+    };
     // Bind the store to the graph so the index's checked-open guard (which verifies the store too)
     // passes — both index and store must carry the same fingerprint.
     let mut store = VectorStore::create(tmp(name, "spqv"), 2)

@@ -73,7 +73,10 @@ pub fn spill_run(buf: &mut Vec<[Id; 3]>, runs: &mut Vec<PathBuf>, tmp: &Path) ->
 /// and merged through a min-heap with drop-behind, so peak RAM is the heap (one triple per
 /// run) — independent of the dataset size. [OPUS-4.8] sq-vkz7: extracted from `kway_merge`
 /// so the raw writer and the streaming COMPRESSED writer share one merge body.
-fn kway_merge_to<S: FnMut([Id; 3]) -> io::Result<()>>(runs: &[PathBuf], mut sink: S) -> io::Result<()> {
+fn kway_merge_to<S: FnMut([Id; 3]) -> io::Result<()>>(
+    runs: &[PathBuf],
+    mut sink: S,
+) -> io::Result<()> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 

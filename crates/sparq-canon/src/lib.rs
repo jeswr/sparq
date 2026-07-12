@@ -138,9 +138,8 @@ pub mod rdf12;
 pub use rdf12::{
     canonicalize_graph_content_rdf12, canonicalize_graph_content_rdf12_ground_terms,
     canonicalize_graph_content_rdf12_ground_terms_with, canonicalize_graph_content_rdf12_with,
-    canonicalize_rdf12,
-    canonicalize_rdf12_ground_terms, canonicalize_rdf12_ground_terms_with, canonicalize_rdf12_with,
-    canonicalize_triples_rdf12, canonicalize_triples_rdf12_ground_terms,
+    canonicalize_rdf12, canonicalize_rdf12_ground_terms, canonicalize_rdf12_ground_terms_with,
+    canonicalize_rdf12_with, canonicalize_triples_rdf12, canonicalize_triples_rdf12_ground_terms,
     canonicalize_triples_rdf12_ground_terms_with, canonicalize_triples_rdf12_with,
     issue_dataset_rdf12, issue_dataset_rdf12_ground_terms, issue_dataset_rdf12_ground_terms_with,
     issue_dataset_rdf12_with,
@@ -501,7 +500,11 @@ mod tests {
         // Multiple quads: ensure each is returned.
         let two = "<http://ex/s> <http://ex/p> <http://ex/a> .\n\
                    <http://ex/s> <http://ex/q> <http://ex/b> .\n";
-        assert_eq!(parse_nquads(two).unwrap().len(), 2, "two lines -> two quads");
+        assert_eq!(
+            parse_nquads(two).unwrap().len(),
+            2,
+            "two lines -> two quads"
+        );
     }
 
     /// `parse_nquads` error path: malformed N-Quads must return `CanonError::Bridge`,
@@ -620,16 +623,21 @@ mod tests {
     #[test]
     fn graph_triples_materializes_exact_terms() {
         use sparq_core::Graph;
-        let g = Graph::load_str(
-            "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
-            "ntriples",
-        )
-        .expect("load_str");
+        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .\n", "ntriples")
+            .expect("load_str");
         let triples = graph_triples(&g).unwrap();
-        assert_eq!(triples.len(), 1, "one stored triple -> one materialized triple");
+        assert_eq!(
+            triples.len(),
+            1,
+            "one stored triple -> one materialized triple"
+        );
         let t = &triples[0];
         assert_eq!(t.subject.to_string(), "<http://ex/s>", "subject preserved");
-        assert_eq!(t.predicate.to_string(), "<http://ex/p>", "predicate preserved");
+        assert_eq!(
+            t.predicate.to_string(),
+            "<http://ex/p>",
+            "predicate preserved"
+        );
         assert_eq!(t.object.to_string(), "<http://ex/o>", "object preserved");
     }
 
@@ -639,11 +647,8 @@ mod tests {
     #[test]
     fn canonicalize_graph_content_relabels_bnode() {
         use sparq_core::Graph;
-        let g = Graph::load_str(
-            "_:b0 <http://ex/p> <http://ex/o> .\n",
-            "ntriples",
-        )
-        .expect("load_str");
+        let g =
+            Graph::load_str("_:b0 <http://ex/p> <http://ex/o> .\n", "ntriples").expect("load_str");
         let c = canonicalize_graph_content(&g).unwrap();
         assert_eq!(c.lines.len(), 1, "one stored triple -> one canonical line");
         assert!(

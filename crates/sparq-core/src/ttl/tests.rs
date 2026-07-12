@@ -18,7 +18,13 @@ fn native_triples(src: &str, base: Option<&str>) -> Result<Vec<[String; 3]>, Str
     let ids = parse(src.as_bytes(), base, &mut d)?;
     Ok(ids
         .iter()
-        .map(|&[s, p, o]| [d.term(s).to_string(), d.term(p).to_string(), d.term(o).to_string()])
+        .map(|&[s, p, o]| {
+            [
+                d.term(s).to_string(),
+                d.term(p).to_string(),
+                d.term(o).to_string(),
+            ]
+        })
         .collect())
 }
 
@@ -137,8 +143,10 @@ fn assert_same(src: &str) {
 
 #[track_caller]
 fn assert_same_base(src: &str, base: Option<&str>) {
-    let n = native_triples(src, base).unwrap_or_else(|e| panic!("native parse failed on {src:?}: {e}"));
-    let o = oxttl_triples(src, base).unwrap_or_else(|e| panic!("oxttl parse failed on {src:?}: {e}"));
+    let n =
+        native_triples(src, base).unwrap_or_else(|e| panic!("native parse failed on {src:?}: {e}"));
+    let o =
+        oxttl_triples(src, base).unwrap_or_else(|e| panic!("oxttl parse failed on {src:?}: {e}"));
     assert!(
         iso(&n, &o),
         "native != oxttl for {src:?}\n  native ({}): {:#?}\n  oxttl  ({}): {:#?}",
@@ -186,7 +194,9 @@ fn predicate_and_object_lists() {
 
 #[test]
 fn numeric_literals_keep_lexical_form_and_datatype() {
-    for lit in ["1", "-0", "+1", "007", "1.0", ".5", "1.0e0", "1E0", "1.e0", "-3.14", "6.022e23"] {
+    for lit in [
+        "1", "-0", "+1", "007", "1.0", ".5", "1.0e0", "1E0", "1.e0", "-3.14", "6.022e23",
+    ] {
         assert_same(&format!("{PFX}ex:s ex:p {lit} ."));
     }
 }
@@ -202,7 +212,9 @@ fn string_literals_all_quote_forms_and_escapes() {
     assert_same(&format!("{PFX}ex:s ex:p \"hello\" ."));
     assert_same(&format!("{PFX}ex:s ex:p 'single' ."));
     assert_same(&format!("{PFX}ex:s ex:p \"a\\tb\\nc\\\"d\\\\e\" ."));
-    assert_same(&format!("{PFX}ex:s ex:p \"\"\"triple\nquoted \"inside\" ok\"\"\" ."));
+    assert_same(&format!(
+        "{PFX}ex:s ex:p \"\"\"triple\nquoted \"inside\" ok\"\"\" ."
+    ));
     assert_same(&format!("{PFX}ex:s ex:p '''single triple''' ."));
     assert_same(&format!("{PFX}ex:s ex:p \"\\u00e9\\U0001F600\" ."));
 }
@@ -210,7 +222,9 @@ fn string_literals_all_quote_forms_and_escapes() {
 #[test]
 fn typed_and_lang_literals() {
     assert_same(&format!("{PFX}ex:s ex:p \"5\"^^ex:myType ."));
-    assert_same(&format!("{PFX}ex:s ex:p \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> ."));
+    assert_same(&format!(
+        "{PFX}ex:s ex:p \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+    ));
     assert_same(&format!("{PFX}ex:s ex:p \"hi\"@en ."));
     assert_same(&format!("{PFX}ex:s ex:p \"hi\"@EN-US ."));
     assert_same(&format!("{PFX}ex:s ex:p \"hi\"@en-Latn-US ."));
@@ -249,7 +263,10 @@ fn pn_local_escapes_and_percent_encoding() {
 fn base_and_relative_iri_resolution() {
     assert_same("@base <http://a/b/c> . <../d> <#p> <e> .");
     assert_same("@base <http://a/b/c> . <> <#p> <//other/x> .");
-    assert_same_base(&format!("{PFX}<rel> ex:p <also/rel> ."), Some("http://root/dir/"));
+    assert_same_base(
+        &format!("{PFX}<rel> ex:p <also/rel> ."),
+        Some("http://root/dir/"),
+    );
     assert_same_base("<s> <p> <o> .", Some("http://base.example/x/"));
     // SPARQL-style BASE + PREFIX (no dot terminator).
     assert_same("BASE <http://a/> PREFIX p: <http://p/> <s> p:o p:v .");
@@ -329,11 +346,15 @@ fn rdf12_reifiers_triple_terms_and_annotations() {
     assert_same(&format!("{PFX}ex:s ex:reifies <<( ex:a ex:b ex:c )>> ."));
     assert_same(&format!("{PFX}ex:s ex:p ex:o ~ex:r ."));
     assert_same(&format!("{PFX}ex:s ex:p ex:o ~ ."));
-    assert_same(&format!("{PFX}ex:s ex:p ex:o {{| ex:c 0.9 ; ex:d ex:e |}} ."));
+    assert_same(&format!(
+        "{PFX}ex:s ex:p ex:o {{| ex:c 0.9 ; ex:d ex:e |}} ."
+    ));
     assert_same(&format!("{PFX}ex:s ex:p ex:o ~ ex:r1 {{| ex:c 1 |}} ."));
     assert_same(&format!("{PFX}<< ex:s ex:p ex:o ~ ex:rid >> ex:x ex:y ."));
     // nested triple term in a triple term's object
-    assert_same(&format!("{PFX}ex:s ex:r <<( ex:a ex:b <<( ex:c ex:d ex:e )>> )>> ."));
+    assert_same(&format!(
+        "{PFX}ex:s ex:r <<( ex:a ex:b <<( ex:c ex:d ex:e )>> )>> ."
+    ));
 }
 
 #[test]
@@ -346,12 +367,26 @@ fn bad_escape_rejected() {
 
 #[test]
 fn iso_is_not_vacuous() {
-    let a = vec![["<http://a>".into(), "<http://p>".into(), "<http://x>".into()]];
-    let b = vec![["<http://a>".into(), "<http://p>".into(), "<http://y>".into()]];
-    assert!(!iso(&a, &b), "iso must distinguish different ground objects");
+    let a = vec![[
+        "<http://a>".into(),
+        "<http://p>".into(),
+        "<http://x>".into(),
+    ]];
+    let b = vec![[
+        "<http://a>".into(),
+        "<http://p>".into(),
+        "<http://y>".into(),
+    ]];
+    assert!(
+        !iso(&a, &b),
+        "iso must distinguish different ground objects"
+    );
     let c = vec![["_:x".into(), "<http://p>".into(), "_:y".into()]];
     let d = vec![["_:m".into(), "<http://p>".into(), "_:n".into()]];
-    assert!(iso(&c, &d), "iso must accept a consistent blank-node renaming");
+    assert!(
+        iso(&c, &d),
+        "iso must accept a consistent blank-node renaming"
+    );
 }
 
 // ---- anonymous blank labels are unique across independent parses (parallel-merge safety) ----
@@ -367,5 +402,8 @@ fn fresh_anon_labels_unique_across_parses() {
     let l1 = d1.term(ids1[0][2]).to_string();
     let l2 = d2.term(ids2[0][2]).to_string();
     assert!(l1.starts_with("_:"), "anon object is a blank node: {l1}");
-    assert_ne!(l1, l2, "two independent parses must mint DISTINCT anon labels");
+    assert_ne!(
+        l1, l2,
+        "two independent parses must mint DISTINCT anon labels"
+    );
 }

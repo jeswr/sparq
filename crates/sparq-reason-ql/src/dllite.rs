@@ -235,9 +235,10 @@ impl TBox {
                     }
                 }
                 _ if p == domain() => {
-                    if let (Some(r), Some(NodeKind::Iri(a))) =
-                        (role_of_subject(&t.subject), NodeKind::from_object(&t.object))
-                    {
+                    if let (Some(r), Some(NodeKind::Iri(a))) = (
+                        role_of_subject(&t.subject),
+                        NodeKind::from_object(&t.object),
+                    ) {
                         // ∃R ⊑ A
                         tbox.concept_incl.push(ConceptInclusion {
                             sub: Basic::Exists(r),
@@ -248,9 +249,10 @@ impl TBox {
                     }
                 }
                 _ if p == range() => {
-                    if let (Some(r), Some(NodeKind::Iri(a))) =
-                        (role_of_subject(&t.subject), NodeKind::from_object(&t.object))
-                    {
+                    if let (Some(r), Some(NodeKind::Iri(a))) = (
+                        role_of_subject(&t.subject),
+                        NodeKind::from_object(&t.object),
+                    ) {
                         // ∃R⁻ ⊑ A
                         tbox.concept_incl.push(ConceptInclusion {
                             sub: Basic::Exists(r.inv()),
@@ -275,7 +277,10 @@ impl TBox {
                 // B ⊑ A (both directions). QL-legal with named-class operands only; a blank-node
                 // complex expression on either side → skipped (outside QL rewriting scope).
                 _ if p == equivalent_class() => {
-                    match (NodeKind::from_subject(&t.subject), NodeKind::from_object(&t.object)) {
+                    match (
+                        NodeKind::from_subject(&t.subject),
+                        NodeKind::from_object(&t.object),
+                    ) {
                         (NodeKind::Iri(a), Some(NodeKind::Iri(b))) => {
                             tbox.concept_incl.push(ConceptInclusion {
                                 sub: Basic::Class(a.clone()),

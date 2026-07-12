@@ -48,7 +48,11 @@ fn table(g: &Graph, q: &str) -> Table {
     let mut rows: Table = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
         .collect();
     rows.sort();
     rows
@@ -123,13 +127,20 @@ fn q09_shape_equivalence() {
     let g = q09_dataset(30, 90);
     let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
     let (off, on) = on_off(&g, &q);
-    assert_eq!(off, on, "q09 DISTINCT result differs with pushdown on vs off");
+    assert_eq!(
+        off, on,
+        "q09 DISTINCT result differs with pushdown on vs off"
+    );
 
     // The exact expected set — and that the NOISE predicate (ex:Doc rdf:type has a class,
     // not a person, as object; it only qualifies via the person-subject rdf:type triple)
     // resolves to the same set on either path.
     let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
-    assert_eq!(got, expected_q09_predicates(), "unexpected DISTINCT predicate set");
+    assert_eq!(
+        got,
+        expected_q09_predicates(),
+        "unexpected DISTINCT predicate set"
+    );
 }
 
 #[test]
@@ -142,7 +153,10 @@ fn q09_shape_anti_vacuity() {
 
     // The full (non-distinct) join size — how many rows the blind path materialises.
     distinct_pushdown_testing::set_enabled(false);
-    let full_bag = query(&g, &format!("{PFX}{bag_q}")).expect("bag query").rows.len();
+    let full_bag = query(&g, &format!("{PFX}{bag_q}"))
+        .expect("bag query")
+        .rows
+        .len();
 
     // The pushdown path: assert it FIRED and the permutation rows it TOUCHED collapsed.
     distinct_pushdown_testing::set_enabled(true);
@@ -151,8 +165,16 @@ fn q09_shape_anti_vacuity() {
     let (fired, emitted, scanned) = distinct_pushdown_testing::stats();
 
     // Correctness holds regardless of which permutations are built (pushdown or fallback).
-    assert_eq!(res.rows.len(), 5, "q09 fixture should answer 5 distinct predicates");
-    assert!(full_bag > 4000, "fixture too small for a meaningful collapse: {}", full_bag);
+    assert_eq!(
+        res.rows.len(),
+        5,
+        "q09 fixture should answer 5 distinct predicates"
+    );
+    assert!(
+        full_bag > 4000,
+        "fixture too small for a meaningful collapse: {}",
+        full_bag
+    );
 
     // The second UNION branch (`?person ?predicate ?object`) needs the `[P, J]` = PSO
     // permutation for its loose scan; it exists in the full native index but NOT in the
@@ -160,7 +182,10 @@ fn q09_shape_anti_vacuity() {
     let full_index = sparq_core::store::BUILT.contains(&sparq_core::store::Perm::Pso);
     if full_index {
         assert!(fired, "the DISTINCT pushdown did not fire on the q09 shape");
-        assert_eq!(emitted, 5, "pushdown should emit exactly the distinct predicates");
+        assert_eq!(
+            emitted, 5,
+            "pushdown should emit exactly the distinct predicates"
+        );
         // Anti-vacuity: the loose scan touched an order of magnitude fewer rows than the
         // full join it replaces (the q09 essence — a handful of predicates, not the join).
         assert!(
@@ -170,7 +195,10 @@ fn q09_shape_anti_vacuity() {
             full_bag
         );
     } else {
-        assert!(!fired, "compact index lacks PSO → the 2-branch q09 pushdown must decline");
+        assert!(
+            !fired,
+            "compact index lacks PSO → the 2-branch q09 pushdown must decline"
+        );
     }
 }
 
@@ -178,9 +206,7 @@ fn q09_shape_anti_vacuity() {
 fn single_pattern_distinct() {
     // `DISTINCT ?p WHERE { ?s ?p ?o }` — the single-pattern skip scan enumerates the
     // distinct predicates of the whole graph.
-    let g = load(
-        "ex:a ex:p1 ex:b . ex:a ex:p1 ex:c . ex:a ex:p2 ex:b . ex:d ex:p3 ex:e .",
-    );
+    let g = load("ex:a ex:p1 ex:b . ex:a ex:p1 ex:c . ex:a ex:p2 ex:b . ex:d ex:p3 ex:e .");
     let (off, on) = on_off(&g, "SELECT DISTINCT ?p WHERE { ?s ?p ?o }");
     assert_eq!(off, on);
     assert_eq!(on.len(), 3, "three distinct predicates");
@@ -204,7 +230,10 @@ fn multi_var_projection_fallback() {
     distinct_pushdown_testing::set_enabled(true);
     let on = table(&g, &q);
     let (fired, _, _) = distinct_pushdown_testing::stats();
-    assert!(!fired, "pushdown must not fire on a multi-variable projection");
+    assert!(
+        !fired,
+        "pushdown must not fire on a multi-variable projection"
+    );
 
     let prev = distinct_pushdown_testing::set_enabled(false);
     let off = table(&g, &q);
@@ -216,9 +245,7 @@ fn multi_var_projection_fallback() {
 #[test]
 fn non_conjunctive_fallback() {
     // An OPTIONAL under the DISTINCT is not a plain BGP/UNION → fall back, correctly.
-    let g = load(
-        "ex:a ex:p ex:x . ex:a ex:q ex:y . ex:x ex:extra ex:z .",
-    );
+    let g = load("ex:a ex:p ex:x . ex:a ex:q ex:y . ex:x ex:extra ex:z .");
     let q = "SELECT DISTINCT ?p WHERE { ex:a ?p ?o OPTIONAL { ?o ex:extra ?e } }";
     let (off, on) = on_off(&g, q);
     assert_eq!(off, on, "OPTIONAL fallback answer differs");
@@ -253,9 +280,7 @@ fn three_pattern_branch_fallback() {
 fn shared_projected_var_fallback() {
     // `?p` is BOTH the join variable and the projected variable (appears in both
     // patterns) — the clean anchor/probe shape does not hold, so fall back.
-    let g = load(
-        "ex:a ex:knows ex:b . ex:b ex:knows ex:c . ex:c ex:knows ex:a .",
-    );
+    let g = load("ex:a ex:knows ex:b . ex:b ex:knows ex:c . ex:c ex:knows ex:a .");
     let q = "SELECT DISTINCT ?p WHERE { ?x ex:knows ?p . ?p ex:knows ?y }";
     let (off, on) = on_off(&g, q);
     assert_eq!(off, on, "shared-var fallback answer differs");
@@ -290,7 +315,10 @@ fn intra_triple_repeated_var_fallback() {
 
     // pushdown OFF gives the oracle (enforces ?x==?x via build_row)
     let (off, on) = on_off(&g, q);
-    assert_eq!(off, on, "repeated-var query must give the same answer on vs off");
+    assert_eq!(
+        off, on,
+        "repeated-var query must give the same answer on vs off"
+    );
 
     // The correct answer contains only ex:knows (ex:b ex:likes ex:c has subject != object)
     let expected: Vec<Vec<Option<String>>> =
@@ -302,7 +330,10 @@ fn intra_triple_repeated_var_fallback() {
     distinct_pushdown_testing::set_enabled(true);
     let _ = query(&g, &format!("{PFX}{q}")).expect("query failed");
     let (fired, _, _) = distinct_pushdown_testing::stats();
-    assert!(!fired, "pushdown must not fire on a pattern with a repeated variable (?x ?p ?x)");
+    assert!(
+        !fired,
+        "pushdown must not fire on a pattern with a repeated variable (?x ?p ?x)"
+    );
 }
 
 /// Regression (W3C sparql12 eval-triple-terms/pattern-10): a DISTINCT projection over a
@@ -341,8 +372,16 @@ fn quoted_triple_term_pattern_fallback() {
     for q in [single, unioned] {
         // Pushdown ON must not error (it did pre-fix); ON == OFF; and the answer is exact.
         let (off, on) = on_off(&g, q);
-        assert_eq!(off, on, "quoted-triple DISTINCT result differs with pushdown on vs off: {}", q);
-        assert_eq!(on, expected, "unexpected DISTINCT ?s over a quoted-triple pattern: {}", q);
+        assert_eq!(
+            off, on,
+            "quoted-triple DISTINCT result differs with pushdown on vs off: {}",
+            q
+        );
+        assert_eq!(
+            on, expected,
+            "unexpected DISTINCT ?s over a quoted-triple pattern: {}",
+            q
+        );
 
         // The pushdown must DECLINE (never fire) on a quoted-triple-term branch — the fallback
         // answered above. This asserts the fix's plan decision, not just the result.
@@ -350,7 +389,11 @@ fn quoted_triple_term_pattern_fallback() {
         distinct_pushdown_testing::set_enabled(true);
         let _ = query(&g, &format!("{PFX}{q}")).expect("quoted-triple query must not error");
         let (fired, _, _) = distinct_pushdown_testing::stats();
-        assert!(!fired, "pushdown must decline a quoted-triple-term pattern: {}", q);
+        assert!(
+            !fired,
+            "pushdown must decline a quoted-triple-term pattern: {}",
+            q
+        );
     }
 }
 
@@ -358,12 +401,18 @@ fn quoted_triple_term_pattern_fallback() {
 fn public_toggle_and_stats() {
     // Direct unit coverage of the public `distinct_pushdown_testing` surface.
     let prev = distinct_pushdown_testing::set_enabled(false);
-    assert!(!distinct_pushdown_testing::set_enabled(true), "set_enabled returns prior value");
+    assert!(
+        !distinct_pushdown_testing::set_enabled(true),
+        "set_enabled returns prior value"
+    );
     assert!(distinct_pushdown_testing::set_enabled(prev));
 
     distinct_pushdown_testing::reset_stats();
     let (fired, emitted, scanned) = distinct_pushdown_testing::stats();
-    assert!(!fired && emitted == 0 && scanned == 0, "stats not cleared by reset");
+    assert!(
+        !fired && emitted == 0 && scanned == 0,
+        "stats not cleared by reset"
+    );
 }
 
 // ── [FABLE-5] (sq-7d3dj.30.10) permutation-metadata / pattern-trick strategy tests ──────
@@ -390,10 +439,17 @@ fn large_anchor_q09_block_scan_equivalence_and_collapse() {
 
     // Result-set equivalence (the load-bearing invariant) on the large-anchor path.
     let (off, on) = on_off(&g, &distinct_q);
-    assert_eq!(off, on, "large-anchor q09 DISTINCT differs pushdown on vs off");
+    assert_eq!(
+        off, on,
+        "large-anchor q09 DISTINCT differs pushdown on vs off"
+    );
     // Exact set (mutation guard: any wrong/extra/missing predicate fails).
     let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
-    assert_eq!(got, expected_q09_predicates(), "large-anchor DISTINCT predicate set wrong");
+    assert_eq!(
+        got,
+        expected_q09_predicates(),
+        "large-anchor DISTINCT predicate set wrong"
+    );
 
     // Anti-vacuity on the block-scan path: the loose scan touched far fewer rows than the
     // full (non-distinct) join it replaces (only when the required PSO perm is built).
@@ -407,7 +463,12 @@ fn large_anchor_q09_block_scan_equivalence_and_collapse() {
     if sparq_core::store::BUILT.contains(&sparq_core::store::Perm::Pso) {
         assert!(fired, "large-anchor q09 pushdown must fire");
         assert_eq!(emitted, 5);
-        assert!(scanned * 4 < full_bag, "block scan did not collapse: scanned={} full_bag={}", scanned, full_bag);
+        assert!(
+            scanned * 4 < full_bag,
+            "block scan did not collapse: scanned={} full_bag={}",
+            scanned,
+            full_bag
+        );
     }
 }
 
@@ -433,7 +494,10 @@ fn small_anchor_pattern_trick_equivalence() {
     let q = "SELECT DISTINCT ?p WHERE { \
         { ?x rdf:type ex:Book . ?x ?p ?o } UNION { ?x rdf:type ex:Book . ?s ?p ?x } }";
     let (off, on) = on_off(&g, q);
-    assert_eq!(off, on, "small-anchor pattern-trick differs pushdown on vs off");
+    assert_eq!(
+        off, on,
+        "small-anchor pattern-trick differs pushdown on vs off"
+    );
     let mut got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
     got.sort();
     // rdf:type + ex:title + ex:creator (book as subject); ex:creator's object is auth, not a
@@ -449,7 +513,10 @@ fn small_anchor_pattern_trick_equivalence() {
         distinct_pushdown_testing::reset_stats();
         distinct_pushdown_testing::set_enabled(true);
         let _ = query(&g, &format!("{PFX}{q}")).unwrap();
-        assert!(distinct_pushdown_testing::stats().0, "small-anchor pushdown must fire");
+        assert!(
+            distinct_pushdown_testing::stats().0,
+            "small-anchor pushdown must fire"
+        );
     }
 }
 
@@ -477,14 +544,20 @@ fn randomized_differential_both_strategies() {
                 ttl.push_str(&format!("ex:p{p} foaf:age {} .\n", 20 + (rng() % 40)));
             }
             if rng() % 3 == 0 {
-                ttl.push_str(&format!("ex:p{p} foaf:knows ex:p{} .\n", rng() as usize % n));
+                ttl.push_str(&format!(
+                    "ex:p{p} foaf:knows ex:p{} .\n",
+                    rng() as usize % n
+                ));
             }
         }
         for d in 0..docs {
             ttl.push_str(&format!("ex:d{d} rdf:type ex:Doc .\n"));
             ttl.push_str(&format!("ex:d{d} ex:title \"T{d}\" .\n"));
             if rng() % 2 == 0 {
-                ttl.push_str(&format!("ex:d{d} foaf:maker ex:p{} .\n", rng() as usize % n));
+                ttl.push_str(&format!(
+                    "ex:d{d} foaf:maker ex:p{} .\n",
+                    rng() as usize % n
+                ));
             }
             if rng() % 4 == 0 {
                 ttl.push_str(&format!("ex:d{d} ex:cites ex:p{} .\n", rng() as usize % n));
@@ -493,7 +566,10 @@ fn randomized_differential_both_strategies() {
         let g = load(&ttl);
         let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
         let (off, on) = on_off(&g, &q);
-        assert_eq!(off, on, "trial {trial} (n={n}, docs={docs}): pushdown on != off");
+        assert_eq!(
+            off, on,
+            "trial {trial} (n={n}, docs={docs}): pushdown on != off"
+        );
     }
 }
 
@@ -505,7 +581,9 @@ fn randomized_differential_both_strategies() {
 fn slice_over_distinct_preserved() {
     let g = q09_dataset(20, 60); // small anchor → pattern-trick path
     for (off_n, lim) in [(0usize, 2usize), (1, 2), (2, 10), (0, 100)] {
-        let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}} LIMIT {lim} OFFSET {off_n}");
+        let q = format!(
+            "SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}} LIMIT {lim} OFFSET {off_n}"
+        );
         let prev = distinct_pushdown_testing::set_enabled(false);
         let off_rows = query(&g, &format!("{PFX}{q}")).expect("off").rows.len();
         distinct_pushdown_testing::set_enabled(true);
@@ -514,8 +592,14 @@ fn slice_over_distinct_preserved() {
         // 5 distinct predicates total; the slice retains max(0, min(lim, 5-off)).
         let full = 5usize;
         let want = lim.min(full.saturating_sub(off_n));
-        assert_eq!(off_rows, want, "naive slice count wrong for off={off_n} lim={lim}");
-        assert_eq!(on_rows, want, "pushdown slice count differs from naive for off={off_n} lim={lim}");
+        assert_eq!(
+            off_rows, want,
+            "naive slice count wrong for off={off_n} lim={lim}"
+        );
+        assert_eq!(
+            on_rows, want,
+            "pushdown slice count differs from naive for off={off_n} lim={lim}"
+        );
     }
 }
 
@@ -555,7 +639,10 @@ fn block_scan_anchor_driven_side_equivalence() {
         "<http://example.org/cites>".to_string(),
     ];
     want.sort();
-    assert_eq!(got, want, "block-scan anchor-driven side predicate set wrong (ex:bulk leaked?)");
+    assert_eq!(
+        got, want,
+        "block-scan anchor-driven side predicate set wrong (ex:bulk leaked?)"
+    );
 }
 
 // ── characteristic-set anchor-incidence prune (sq-jnb1e, opt-in) ─────────────────
@@ -593,9 +680,16 @@ mod incidence {
         let g = q09_dataset(300, 900);
         let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
         let (off, on) = incidence_on_off(&g, &q);
-        assert_eq!(off, on, "incidence-pruned q09 differs from the exact block scan");
+        assert_eq!(
+            off, on,
+            "incidence-pruned q09 differs from the exact block scan"
+        );
         let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
-        assert_eq!(got, expected_q09_predicates(), "incidence path predicate set wrong");
+        assert_eq!(
+            got,
+            expected_q09_predicates(),
+            "incidence path predicate set wrong"
+        );
 
         // The prune FIRED: the incidence set was built and pruned at least one candidate
         // (the fixture's ex:Doc rdf:type block relates a class, not a person, at the object
@@ -604,8 +698,14 @@ mod incidence {
         anchor_incidence_testing::reset_stats();
         let _ = table(&g, &q);
         let (built, pruned) = anchor_incidence_testing::stats();
-        assert!(built, "the incidence set should have been built for the q09 shape");
-        assert!(pruned > 0, "the incidence prune should have eliminated a candidate predicate");
+        assert!(
+            built,
+            "the incidence set should have been built for the q09 shape"
+        );
+        assert!(
+            pruned > 0,
+            "the incidence prune should have eliminated a candidate predicate"
+        );
     }
 
     /// A LARGE value-typed no-hit block (the exact q09 residual): documents carry a
@@ -632,7 +732,10 @@ mod incidence {
         let g = load(&ttl);
         let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
         let (off, on) = incidence_on_off(&g, &q);
-        assert_eq!(off, on, "incidence path differs on a large no-hit-block fixture");
+        assert_eq!(
+            off, on,
+            "incidence path differs on a large no-hit-block fixture"
+        );
         let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
         // Only knows (person subject AND object) and rdf:type (person subject) qualify;
         // dc:title / rdfs:seeAlso relate documents/literals, never a person.
@@ -643,7 +746,10 @@ mod incidence {
         want.sort();
         let mut got_sorted = got.clone();
         got_sorted.sort();
-        assert_eq!(got_sorted, want, "no-hit value-typed predicate leaked into the answer");
+        assert_eq!(
+            got_sorted, want,
+            "no-hit value-typed predicate leaked into the answer"
+        );
 
         // The prune fired and eliminated the two large no-hit predicates (dc:title,
         // rdfs:seeAlso) on BOTH branches → at least 2 predicates pruned.
@@ -652,7 +758,11 @@ mod incidence {
         let _ = table(&g, &q);
         let (built, pruned) = anchor_incidence_testing::stats();
         assert!(built, "incidence set not built");
-        assert!(pruned >= 2, "expected the two no-hit value-typed predicates pruned, got {}", pruned);
+        assert!(
+            pruned >= 2,
+            "expected the two no-hit value-typed predicates pruned, got {}",
+            pruned
+        );
     }
 
     /// Randomised differential across many graphs straddling the small/large anchor threshold
@@ -663,7 +773,9 @@ mod incidence {
         // A deterministic LCG so the corpus is reproducible per-commit (no rand dep here).
         let mut state: u64 = 0x9e3779b97f4a7c15;
         let mut next = |m: u64| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) % m
         };
         let q = format!("SELECT DISTINCT ?predicate WHERE {{\n{Q09_BODY}\n}}");
@@ -690,7 +802,11 @@ mod incidence {
             }
             let g = load(&ttl);
             let (off, on) = incidence_on_off(&g, &q);
-            assert_eq!(off, on, "incidence differential mismatch at n={} docs={}", n, docs);
+            assert_eq!(
+                off, on,
+                "incidence differential mismatch at n={} docs={}",
+                n, docs
+            );
         }
     }
 
@@ -710,7 +826,10 @@ mod incidence {
         anchor_incidence_testing::reset_stats();
         let _ = table(&base, &q);
         let (base_built, _) = anchor_incidence_testing::stats();
-        assert!(base_built, "control: the incidence set must build on the base graph (no overlay)");
+        assert!(
+            base_built,
+            "control: the incidence set must build on the base graph (no overlay)"
+        );
 
         // Apply a SPARQL INSERT: a NEW predicate (ex:befriends) relating one person to another —
         // a predicate the base-index incidence set never saw, so a stale base prune would
@@ -722,10 +841,16 @@ mod incidence {
              INSERT DATA { ex:p0 ex:befriends ex:p1 . }",
         )
         .expect("insert");
-        assert!(g.store.has_overlay(), "the INSERT must produce a delta overlay");
+        assert!(
+            g.store.has_overlay(),
+            "the INSERT must produce a delta overlay"
+        );
 
         let (off, on) = incidence_on_off(&g, &q);
-        assert_eq!(off, on, "incidence path differs from exact under an update overlay");
+        assert_eq!(
+            off, on,
+            "incidence path differs from exact under an update overlay"
+        );
         let got: Vec<String> = on.iter().map(|r| r[0].clone().unwrap()).collect();
         assert!(
             got.contains(&"<http://example.org/befriends>".to_string()),
@@ -737,7 +862,10 @@ mod incidence {
         anchor_incidence_testing::reset_stats();
         let _ = table(&g, &q);
         let (built, _) = anchor_incidence_testing::stats();
-        assert!(!built, "incidence must decline (not build a set) on a graph with an overlay");
+        assert!(
+            !built,
+            "incidence must decline (not build a set) on a graph with an overlay"
+        );
     }
 
     /// A probe with an EXTRA bound position (`?person ex:knows ?x` joined to the anchor via
@@ -764,6 +892,9 @@ mod incidence {
                    ?person ?predicate ex:target\n\
                  }";
         let (off, on) = incidence_on_off(&g, q);
-        assert_eq!(off, on, "extra-bound-position probe differs on vs off (unsound prune?)");
+        assert_eq!(
+            off, on,
+            "extra-bound-position probe differs on vs off (unsound prune?)"
+        );
     }
 }

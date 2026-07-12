@@ -45,7 +45,11 @@ fn multiset(g: &Graph, q: &str) -> Table {
     let mut rows: Vec<Vec<Option<String>>> = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
         .collect();
     rows.sort();
     rows
@@ -116,21 +120,32 @@ const Q08_BODY: &str = "\
 fn q08_shape_equivalence() {
     let g = q08_dataset();
     // The real q08 (SELECT DISTINCT ?name).
-    let (off, on) = on_off(&g, &format!("SELECT DISTINCT ?name WHERE {{\n{Q08_BODY}\n}}"));
+    let (off, on) = on_off(
+        &g,
+        &format!("SELECT DISTINCT ?name WHERE {{\n{Q08_BODY}\n}}"),
+    );
     assert_eq!(off, on, "q08 DISTINCT result differs with SIP on vs off");
-    assert!(!on.is_empty(), "q08 fixture should return co-authors of Erdoes");
+    assert!(
+        !on.is_empty(),
+        "q08 fixture should return co-authors of Erdoes"
+    );
 
     // Same pattern WITHOUT distinct — the strict bag-semantics multiplicity check
     // (every ?name/?author/?document combination, duplicates and all).
-    let sel = format!("SELECT ?name ?author ?document ?document2 ?author2 WHERE {{\n{Q08_BODY}\n}}");
+    let sel =
+        format!("SELECT ?name ?author ?document ?document2 ?author2 WHERE {{\n{Q08_BODY}\n}}");
     let (off_bag, on_bag) = on_off(&g, &sel);
-    assert_eq!(off_bag, on_bag, "q08 bag multiplicity differs with SIP on vs off");
+    assert_eq!(
+        off_bag, on_bag,
+        "q08 bag multiplicity differs with SIP on vs off"
+    );
 }
 
 #[test]
 fn q08_shape_anti_vacuity() {
     let g = q08_dataset();
-    let sel = format!("SELECT ?name ?author ?document ?document2 ?author2 WHERE {{\n{Q08_BODY}\n}}");
+    let sel =
+        format!("SELECT ?name ?author ?document ?document2 ?author2 WHERE {{\n{Q08_BODY}\n}}");
 
     // Cold (SIP off): read the largest Union node row count from the ANALYZE trace.
     sip_testing::set_enabled(false);
@@ -146,8 +161,14 @@ fn q08_shape_anti_vacuity() {
     sip_testing::set_enabled(true);
 
     assert!(fired, "SIP did not fire on the q08-shaped join");
-    assert!(bindings >= 1, "SIP recorded no distinct correlated bindings");
-    assert!(cold_union > 0, "could not read cold Union row count from the trace");
+    assert!(
+        bindings >= 1,
+        "SIP recorded no distinct correlated bindings"
+    );
+    assert!(
+        cold_union > 0,
+        "could not read cold Union row count from the trace"
+    );
     // Anti-vacuity: the correlated child collapsed to a small fraction of the blind
     // self-join. (Cold is the whole-corpus creator self-join; correlated seeds from
     // Erdoes's documents only.)
@@ -239,7 +260,10 @@ fn optional_inside_union_fallback() {
              ex:a ex:q ?m . \
              { { ?a ex:p ?x } UNION { ?a ex:p ?x . OPTIONAL { ?x ex:r ?opt } } } }";
     let (off, on) = on_off(&g, q);
-    assert_eq!(off, on, "OPTIONAL-inside-UNION fallback not equivalence-preserving");
+    assert_eq!(
+        off, on,
+        "OPTIONAL-inside-UNION fallback not equivalence-preserving"
+    );
 }
 
 #[test]
@@ -273,10 +297,16 @@ fn cross_product_no_shared_var_unchanged() {
 fn public_toggle_and_stats() {
     // Direct unit coverage of the public `sip_testing` surface.
     let prev = sip_testing::set_enabled(false);
-    assert!(!sip_testing::set_enabled(true), "set_enabled should return the prior value");
+    assert!(
+        !sip_testing::set_enabled(true),
+        "set_enabled should return the prior value"
+    );
     assert!(sip_testing::set_enabled(prev));
 
     sip_testing::reset_stats();
     let (fired, rows, bindings) = sip_testing::stats();
-    assert!(!fired && rows == 0 && bindings == 0, "stats not cleared by reset");
+    assert!(
+        !fired && rows == 0 && bindings == 0,
+        "stats not cleared by reset"
+    );
 }

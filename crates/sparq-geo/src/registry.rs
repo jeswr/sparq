@@ -98,7 +98,9 @@ impl PreparedGeoGeometry {
     /// relates. Infallible: preparation is a pure restructuring of the
     /// geometry, deferring nothing to the later relates.
     fn new(g: &GeoGeometry) -> Self {
-        Self { prepared: PreparedGeometry::from(g.geometry.clone()) }
+        Self {
+            prepared: PreparedGeometry::from(g.geometry.clone()),
+        }
     }
 }
 
@@ -161,7 +163,10 @@ fn arity(name: &str, args: &[Term], n: usize) -> Result<(), String> {
     if args.len() == n {
         Ok(())
     } else {
-        Err(format!("geof:{name} expects {n} argument(s), got {}", args.len()))
+        Err(format!(
+            "geof:{name} expects {n} argument(s), got {}",
+            args.len()
+        ))
     }
 }
 
@@ -276,19 +281,22 @@ mod geom_cache {
         // build is pure CPU over the entry's own geometry — no re-entry).
         let hit = CACHE.with(|cell| {
             let mut cache = cell.borrow_mut();
-            cache.iter().position(|e| e.kind == kind && e.lex == lex).map(|i| {
-                if i > 0 {
-                    let entry = cache.remove(i);
-                    cache.insert(0, entry);
-                }
-                let entry = &mut cache[0];
-                if prepare_on_hit && entry.prepared.is_none() {
-                    #[cfg(test)]
-                    PREPARE_COUNT.with(|c| c.set(c.get() + 1));
-                    entry.prepared = Some(Rc::new(PreparedGeoGeometry::new(&entry.geom)));
-                }
-                (entry.geom.clone(), entry.prepared.clone())
-            })
+            cache
+                .iter()
+                .position(|e| e.kind == kind && e.lex == lex)
+                .map(|i| {
+                    if i > 0 {
+                        let entry = cache.remove(i);
+                        cache.insert(0, entry);
+                    }
+                    let entry = &mut cache[0];
+                    if prepare_on_hit && entry.prepared.is_none() {
+                        #[cfg(test)]
+                        PREPARE_COUNT.with(|c| c.set(c.get() + 1));
+                        entry.prepared = Some(Rc::new(PreparedGeoGeometry::new(&entry.geom)));
+                    }
+                    (entry.geom.clone(), entry.prepared.clone())
+                })
         });
         if let Some(hit) = hit {
             return Ok(hit);
@@ -303,7 +311,12 @@ mod geom_cache {
             let mut cache = cell.borrow_mut();
             cache.insert(
                 0,
-                CachedGeom { kind, lex: lex.to_string(), geom: geom.clone(), prepared: None },
+                CachedGeom {
+                    kind,
+                    lex: lex.to_string(),
+                    geom: geom.clone(),
+                    prepared: None,
+                },
             );
             // Evict from the LRU tail past either cap — but never the
             // just-inserted MRU entry, so even a single over-budget constant
@@ -392,7 +405,10 @@ fn relate_arg(name: &str, args: &[Term], i: usize) -> Result<RelateArg, String> 
 
 /// A `geo:wktLiteral` term from a lexical form produced by [`crate::geof::lex`].
 fn wkt_term(lex: String) -> Term {
-    Term::Literal(Literal::new_typed_literal(lex, NamedNode::new_unchecked(WKT_LITERAL)))
+    Term::Literal(Literal::new_typed_literal(
+        lex,
+        NamedNode::new_unchecked(WKT_LITERAL),
+    ))
 }
 
 /// The unit-of-measure IRI in argument `i` (must be a named node).
@@ -410,10 +426,14 @@ fn unit_iri<'a>(name: &str, args: &'a [Term], i: usize) -> Result<&'a str, Strin
 /// the engine hands numerics over as their typed literals).
 fn num_arg(name: &str, args: &[Term], i: usize) -> Result<f64, String> {
     match &args[i] {
-        Term::Literal(l) => l.value().parse::<f64>().map_err(|_| {
-            format!("geof:{name}: argument {} must be numeric, got {l}", i + 1)
-        }),
-        other => Err(format!("geof:{name}: argument {} must be numeric, got {other}", i + 1)),
+        Term::Literal(l) => l
+            .value()
+            .parse::<f64>()
+            .map_err(|_| format!("geof:{name}: argument {} must be numeric, got {l}", i + 1)),
+        other => Err(format!(
+            "geof:{name}: argument {} must be numeric, got {other}",
+            i + 1
+        )),
     }
 }
 
@@ -477,14 +497,29 @@ pub fn geof_registry() -> FunctionRegistry {
     // differential tests below pin the correspondence per name). [FABLE-5]
     let relations: [(&'static str, MatrixPred); 24] = [
         // Simple features (GeoSPARQL Req 22-24).
-        ("sfEquals", MatrixPred::Sf(IntersectionMatrix::is_equal_topo)),
-        ("sfDisjoint", MatrixPred::Sf(IntersectionMatrix::is_disjoint)),
-        ("sfIntersects", MatrixPred::Sf(IntersectionMatrix::is_intersects)),
+        (
+            "sfEquals",
+            MatrixPred::Sf(IntersectionMatrix::is_equal_topo),
+        ),
+        (
+            "sfDisjoint",
+            MatrixPred::Sf(IntersectionMatrix::is_disjoint),
+        ),
+        (
+            "sfIntersects",
+            MatrixPred::Sf(IntersectionMatrix::is_intersects),
+        ),
         ("sfTouches", MatrixPred::Sf(IntersectionMatrix::is_touches)),
         ("sfCrosses", MatrixPred::Sf(IntersectionMatrix::is_crosses)),
         ("sfWithin", MatrixPred::Sf(IntersectionMatrix::is_within)),
-        ("sfContains", MatrixPred::Sf(IntersectionMatrix::is_contains)),
-        ("sfOverlaps", MatrixPred::Sf(IntersectionMatrix::is_overlaps)),
+        (
+            "sfContains",
+            MatrixPred::Sf(IntersectionMatrix::is_contains),
+        ),
+        (
+            "sfOverlaps",
+            MatrixPred::Sf(IntersectionMatrix::is_overlaps),
+        ),
         // Egenhofer (Req 25).
         ("ehEquals", MatrixPred::Any(geof::EH_EQUALS_PATTERNS)),
         ("ehDisjoint", MatrixPred::Any(geof::EH_DISJOINT_PATTERNS)),
@@ -561,7 +596,9 @@ pub fn geof_registry() -> FunctionRegistry {
             arity(name, args, 2)?;
             let a = geom_arg(name, args, 0)?;
             let b = geom_arg(name, args, 1)?;
-            Ok(wkt_term(f(&a, &b).map_err(|e| e.to_string())?.to_wkt_literal()))
+            Ok(wkt_term(
+                f(&a, &b).map_err(|e| e.to_string())?.to_wkt_literal(),
+            ))
         });
     }
 
@@ -571,7 +608,11 @@ pub fn geof_registry() -> FunctionRegistry {
         let g = geom_arg("buffer", args, 0)?;
         let radius = num_arg("buffer", args, 1)?;
         let unit = Unit::from_iri(unit_iri("buffer", args, 2)?).map_err(|e| e.to_string())?;
-        Ok(wkt_term(geof::buffer(&g, radius, unit).map_err(|e| e.to_string())?.to_wkt_literal()))
+        Ok(wkt_term(
+            geof::buffer(&g, radius, unit)
+                .map_err(|e| e.to_string())?
+                .to_wkt_literal(),
+        ))
     });
 
     // geof:getSRID(?g) -> xsd:anyURI (the geometry's CRS IRI).
@@ -600,17 +641,46 @@ mod tests {
         let reg = geof_registry();
         assert_eq!(reg.len(), 35);
         for name in [
-            "distance", "relate", "getSRID", "buffer",
-            "sfEquals", "sfDisjoint", "sfIntersects", "sfTouches", "sfCrosses",
-            "sfWithin", "sfContains", "sfOverlaps",
-            "ehEquals", "ehDisjoint", "ehMeet", "ehOverlap", "ehCovers", "ehCoveredBy",
-            "ehInside", "ehContains",
-            "rcc8eq", "rcc8dc", "rcc8ec", "rcc8po", "rcc8tppi", "rcc8tpp", "rcc8ntpp",
+            "distance",
+            "relate",
+            "getSRID",
+            "buffer",
+            "sfEquals",
+            "sfDisjoint",
+            "sfIntersects",
+            "sfTouches",
+            "sfCrosses",
+            "sfWithin",
+            "sfContains",
+            "sfOverlaps",
+            "ehEquals",
+            "ehDisjoint",
+            "ehMeet",
+            "ehOverlap",
+            "ehCovers",
+            "ehCoveredBy",
+            "ehInside",
+            "ehContains",
+            "rcc8eq",
+            "rcc8dc",
+            "rcc8ec",
+            "rcc8po",
+            "rcc8tppi",
+            "rcc8tpp",
+            "rcc8ntpp",
             "rcc8ntppi",
-            "envelope", "boundary", "convexHull",
-            "intersection", "union", "difference", "symDifference",
+            "envelope",
+            "boundary",
+            "convexHull",
+            "intersection",
+            "union",
+            "difference",
+            "symDifference",
         ] {
-            assert!(reg.get(&format!("{GEOF_NS}{name}")).is_some(), "missing geof:{name}");
+            assert!(
+                reg.get(&format!("{GEOF_NS}{name}")).is_some(),
+                "missing geof:{name}"
+            );
         }
     }
 
@@ -618,12 +688,18 @@ mod tests {
     fn get_srid_term_level() {
         let reg = geof_registry();
         let f = reg.get(&format!("{GEOF_NS}getSRID")).unwrap();
-        let Term::Literal(l) = f(&[wkt("POINT(1 2)")]).unwrap() else { panic!("literal") };
+        let Term::Literal(l) = f(&[wkt("POINT(1 2)")]).unwrap() else {
+            panic!("literal")
+        };
         assert_eq!(l.value(), crate::vocab::CRS84);
-        assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#anyURI");
-        let Term::Literal(l) =
-            f(&[wkt("<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(1 2)")]).unwrap()
-        else {
+        assert_eq!(
+            l.datatype().as_str(),
+            "http://www.w3.org/2001/XMLSchema#anyURI"
+        );
+        let Term::Literal(l) = f(&[wkt(
+            "<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(1 2)",
+        )])
+        .unwrap() else {
             panic!("literal")
         };
         assert_eq!(l.value(), "http://www.opengis.net/def/crs/EPSG/0/27700");
@@ -638,17 +714,26 @@ mod tests {
         let pat = |p: &str| Term::Literal(Literal::new_simple_literal(p));
         // "contains" pattern.
         assert_eq!(
-            f(&[a.clone(), b.clone(), pat("T*****FF*")]).unwrap().to_string(),
+            f(&[a.clone(), b.clone(), pat("T*****FF*")])
+                .unwrap()
+                .to_string(),
             "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
         );
         // "disjoint" pattern is false for a contained point.
         assert_eq!(
-            f(&[a.clone(), b.clone(), pat("FF*FF****")]).unwrap().to_string(),
+            f(&[a.clone(), b.clone(), pat("FF*FF****")])
+                .unwrap()
+                .to_string(),
             "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
         );
         // Malformed pattern / non-string pattern are expression errors.
         assert!(f(&[a.clone(), b.clone(), pat("TTT")]).is_err());
-        assert!(f(&[a.clone(), b.clone(), Term::NamedNode(NamedNode::new_unchecked("http://x/"))]).is_err());
+        assert!(f(&[
+            a.clone(),
+            b.clone(),
+            Term::NamedNode(NamedNode::new_unchecked("http://x/"))
+        ])
+        .is_err());
     }
 
     #[test]
@@ -657,7 +742,9 @@ mod tests {
         let a = wkt("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))");
         let b = wkt("POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))");
         let inter = reg.get(&format!("{GEOF_NS}intersection")).unwrap();
-        let Term::Literal(l) = inter(&[a.clone(), b.clone()]).unwrap() else { panic!("literal") };
+        let Term::Literal(l) = inter(&[a.clone(), b.clone()]).unwrap() else {
+            panic!("literal")
+        };
         assert_eq!(l.datatype().as_str(), WKT_LITERAL);
         assert!(l.value().contains("MULTIPOLYGON"), "got {}", l.value());
         // Line/point operands are now supported (sq-gn3): a point inside the
@@ -683,30 +770,59 @@ mod tests {
             panic!("literal")
         };
         assert_eq!(d.datatype().as_str(), WKT_LITERAL);
-        assert!(d.value().contains("LINESTRING") && d.value().contains('1'), "got {}", d.value());
+        assert!(
+            d.value().contains("LINESTRING") && d.value().contains('1'),
+            "got {}",
+            d.value()
+        );
         // buffer: polygon out, radius must be numeric, unit must be known.
         let buffer = reg.get(&format!("{GEOF_NS}buffer")).unwrap();
-        let metre = Term::NamedNode(NamedNode::new_unchecked(format!("{}metre", crate::vocab::UOM_NS)));
+        let metre = Term::NamedNode(NamedNode::new_unchecked(format!(
+            "{}metre",
+            crate::vocab::UOM_NS
+        )));
         let radius = Term::Literal(Literal::from(100.0));
-        let Term::Literal(l) = buffer(&[wkt("POINT(0 51)"), radius.clone(), metre.clone()]).unwrap()
+        let Term::Literal(l) =
+            buffer(&[wkt("POINT(0 51)"), radius.clone(), metre.clone()]).unwrap()
         else {
             panic!("literal")
         };
         assert!(l.value().contains("MULTIPOLYGON"), "got {}", l.value());
         assert!(buffer(&[wkt("POINT(0 51)"), wkt("POINT(0 0)"), metre]).is_err());
-        assert!(buffer(&[wkt("POINT(0 51)"), radius, Term::NamedNode(NamedNode::new_unchecked("http://ex/furlong"))]).is_err());
+        assert!(buffer(&[
+            wkt("POINT(0 51)"),
+            radius,
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/furlong"))
+        ])
+        .is_err());
     }
 
     #[test]
     fn distance_term_level() {
         let reg = geof_registry();
         let f = reg.get(&format!("{GEOF_NS}distance")).unwrap();
-        let unit = Term::NamedNode(NamedNode::new_unchecked(format!("{}kilometre", crate::vocab::UOM_NS)));
-        let out = f(&[wkt("POINT(-0.1278 51.5074)"), wkt("POINT(2.3522 48.8566)"), unit]).unwrap();
-        let Term::Literal(l) = out else { panic!("expected a literal") };
-        assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+        let unit = Term::NamedNode(NamedNode::new_unchecked(format!(
+            "{}kilometre",
+            crate::vocab::UOM_NS
+        )));
+        let out = f(&[
+            wkt("POINT(-0.1278 51.5074)"),
+            wkt("POINT(2.3522 48.8566)"),
+            unit,
+        ])
+        .unwrap();
+        let Term::Literal(l) = out else {
+            panic!("expected a literal")
+        };
+        assert_eq!(
+            l.datatype().as_str(),
+            "http://www.w3.org/2001/XMLSchema#double"
+        );
         let km: f64 = l.value().parse().unwrap();
-        assert!((km - 343.6).abs() < 1.0, "London–Paris ≈ 343.6 km, got {km}");
+        assert!(
+            (km - 343.6).abs() < 1.0,
+            "London–Paris ≈ 343.6 km, got {km}"
+        );
     }
 
     #[test]
@@ -715,15 +831,21 @@ mod tests {
         let within = reg.get(&format!("{GEOF_NS}sfWithin")).unwrap();
         let poly = wkt("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))");
         assert_eq!(
-            within(&[wkt("POINT(1 1)"), poly.clone()]).unwrap().to_string(),
+            within(&[wkt("POINT(1 1)"), poly.clone()])
+                .unwrap()
+                .to_string(),
             "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
         );
         assert_eq!(
-            within(&[wkt("POINT(9 9)"), poly.clone()]).unwrap().to_string(),
+            within(&[wkt("POINT(9 9)"), poly.clone()])
+                .unwrap()
+                .to_string(),
             "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
         );
         let envelope = reg.get(&format!("{GEOF_NS}envelope")).unwrap();
-        let Term::Literal(l) = envelope(&[poly]).unwrap() else { panic!("expected a literal") };
+        let Term::Literal(l) = envelope(&[poly]).unwrap() else {
+            panic!("expected a literal")
+        };
         assert_eq!(l.datatype().as_str(), WKT_LITERAL);
         assert!(l.value().contains("POLYGON"), "got {}", l.value());
     }
@@ -735,7 +857,11 @@ mod tests {
         // Wrong arity.
         assert!(within(&[wkt("POINT(1 1)")]).is_err());
         // Not a wktLiteral (plain xsd:string).
-        assert!(within(&[Term::Literal(Literal::new_simple_literal("POINT(1 1)")), wkt("POINT(1 1)")]).is_err());
+        assert!(within(&[
+            Term::Literal(Literal::new_simple_literal("POINT(1 1)")),
+            wkt("POINT(1 1)")
+        ])
+        .is_err());
         // Unparsable WKT.
         assert!(within(&[wkt("PONT(1 1)"), wkt("POINT(1 1)")]).is_err());
         // distance: unit must be an IRI, and a known one.
@@ -867,10 +993,18 @@ mod tests {
         geom_cache::parse(geom_cache::LexKind::Wkt, &big).unwrap();
         assert_eq!(geom_cache::len(), 1);
         geom_cache::parse(geom_cache::LexKind::Wkt, &big).unwrap();
-        assert_eq!(geom_cache::parse_attempts(), 1, "over-budget constant must still cache");
+        assert_eq!(
+            geom_cache::parse_attempts(),
+            1,
+            "over-budget constant must still cache"
+        );
         // A subsequent small insert pushes the over-budget giant out of the tail…
         geom_cache::parse(geom_cache::LexKind::Wkt, "POINT(3 4)").unwrap();
-        assert_eq!(geom_cache::len(), 1, "byte cap must evict the giant tail entry");
+        assert_eq!(
+            geom_cache::len(),
+            1,
+            "byte cap must evict the giant tail entry"
+        );
         // …and the small MRU entry is the survivor.
         geom_cache::parse(geom_cache::LexKind::Wkt, "POINT(3 4)").unwrap();
         assert_eq!(geom_cache::parse_attempts(), 2);
@@ -926,7 +1060,10 @@ mod tests {
         let rows = 50;
         for i in 0..rows {
             let p = wkt(&format!("POINT({} 0.0)", i as f64 * 0.001));
-            assert_eq!(within(&[p, constant.clone()]).unwrap().to_string(), bool_term(true));
+            assert_eq!(
+                within(&[p, constant.clone()]).unwrap().to_string(),
+                bool_term(true)
+            );
         }
         // The constant is prepared exactly ONCE (on its first warm row):
         // 0 would mean the prepared cache is inert; `rows - 1` (or anything
@@ -946,7 +1083,11 @@ mod tests {
         // would be pay-once-use-once overhead, so none may happen.
         for i in 0..20 {
             let a = wkt(&format!("POINT({i} 0)"));
-            let b = wkt(&format!("POLYGON(({i} -1, {} -1, {} 1, {i} 1, {i} -1))", i + 2, i + 2));
+            let b = wkt(&format!(
+                "POLYGON(({i} -1, {} -1, {} 1, {i} 1, {i} -1))",
+                i + 2,
+                i + 2
+            ));
             assert_eq!(intersects(&[a, b]).unwrap().to_string(), bool_term(true));
         }
         assert_eq!(geom_cache::prepare_count(), 0);
@@ -983,7 +1124,10 @@ mod tests {
             geom: Rc::new(a.clone()),
             prepared: Some(Rc::new(PreparedGeoGeometry::new(&a))),
         };
-        let pb = RelateArg { geom: Rc::new(b), prepared: None };
+        let pb = RelateArg {
+            geom: Rc::new(b),
+            prepared: None,
+        };
         assert_eq!(de9im_matrix(&pa, &pb).unwrap_err(), expected);
     }
 
@@ -1041,7 +1185,10 @@ mod tests {
             }
         }
         // Sanity: the prepared path really ran (corpus entries were reused).
-        assert!(geom_cache::prepare_count() > 0, "differential never exercised a prepared side");
+        assert!(
+            geom_cache::prepare_count() > 0,
+            "differential never exercised a prepared side"
+        );
     }
 
     #[test]
@@ -1050,9 +1197,18 @@ mod tests {
         let reg = geof_registry();
         let f = reg.get(&format!("{GEOF_NS}relate")).unwrap();
         let pat = |p: &str| Term::Literal(Literal::new_simple_literal(p));
-        let patterns = ["T*****FF*", "FF*FF****", "TFFFTFFFT", "0F2FF1FF2", "T*T***T**"];
-        for la in ["POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", "LINESTRING(-1 -1, 5 5)", "POINT(1 1)"]
-        {
+        let patterns = [
+            "T*****FF*",
+            "FF*FF****",
+            "TFFFTFFFT",
+            "0F2FF1FF2",
+            "T*T***T**",
+        ];
+        for la in [
+            "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))",
+            "LINESTRING(-1 -1, 5 5)",
+            "POINT(1 1)",
+        ] {
             for lb in RELATE_CORPUS {
                 let (a, b) = (parse(la), parse(lb));
                 for p in patterns {
@@ -1068,10 +1224,16 @@ mod tests {
                 // A malformed pattern errors with the plain path's message —
                 // on the prepared path too (operands are warm by now).
                 let expected_err = geof::relate(&a, &b, "TTT").unwrap_err().to_string();
-                assert_eq!(f(&[wkt(la), wkt(lb), pat("TTT")]).unwrap_err(), expected_err);
+                assert_eq!(
+                    f(&[wkt(la), wkt(lb), pat("TTT")]).unwrap_err(),
+                    expected_err
+                );
             }
         }
-        assert!(geom_cache::prepare_count() > 0, "relate never exercised a prepared side");
+        assert!(
+            geom_cache::prepare_count() > 0,
+            "relate never exercised a prepared side"
+        );
     }
 
     #[test]

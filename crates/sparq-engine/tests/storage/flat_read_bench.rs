@@ -16,8 +16,12 @@ use std::time::Instant;
 fn build_graph(n: usize) -> Graph {
     let nsubj = (n / 10).max(1);
     let mut dict = Dict::new();
-    let preds: Vec<Id> = (0..10).map(|p| dict.intern_iri(&format!("http://ex/p{p}"))).collect();
-    let subjs: Vec<Id> = (0..nsubj).map(|s| dict.intern_iri(&format!("http://ex/s{s}"))).collect();
+    let preds: Vec<Id> = (0..10)
+        .map(|p| dict.intern_iri(&format!("http://ex/p{p}")))
+        .collect();
+    let subjs: Vec<Id> = (0..nsubj)
+        .map(|s| dict.intern_iri(&format!("http://ex/s{s}")))
+        .collect();
     let mix = |i: usize| -> usize {
         let mut h = i as u64;
         h ^= h >> 33;
@@ -25,16 +29,19 @@ fn build_graph(n: usize) -> Graph {
         h ^= h >> 33;
         (h % nsubj as u64) as usize
     };
-    let triples: Vec<[Id; 3]> =
-        (0..n).map(|i| [subjs[i % nsubj], preds[i % 10], subjs[mix(i)]]).collect();
+    let triples: Vec<[Id; 3]> = (0..n)
+        .map(|i| [subjs[i % nsubj], preds[i % 10], subjs[mix(i)]])
+        .collect();
     Graph::from_parts(dict, triples)
 }
 
 #[test]
 #[ignore = "benchmark — run explicitly in --release with --nocapture"]
 fn flat_read_hot_paths() {
-    let n: usize =
-        std::env::var("SPARQ_BENCH_TRIPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = std::env::var("SPARQ_BENCH_TRIPLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000_000);
     let t0 = Instant::now();
     let g = build_graph(n);
     eprintln!("graph: {} triples, built in {:.2?}", g.len(), t0.elapsed());
@@ -61,9 +68,9 @@ fn flat_read_hot_paths() {
     let probes = 200_000usize;
     let subj_ids: Vec<Id> = (0..nsubj.min(probes))
         .map(|i| {
-            g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
-                "http://ex/s{i}"
-            ))))
+            g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                format!("http://ex/s{i}"),
+            )))
             .expect("benchmark subject must be present")
         })
         .collect();
@@ -77,7 +84,11 @@ fn flat_read_hot_paths() {
         found += scan.rows.len();
     }
     let probe = t.elapsed();
-    eprintln!("probe storm:  {:?} total / {probes} probes = {:.0} ns/probe (acc {found})", probe, probe.as_nanos() as f64 / probes as f64);
+    eprintln!(
+        "probe storm:  {:?} total / {probes} probes = {:.0} ns/probe (acc {found})",
+        probe,
+        probe.as_nanos() as f64 / probes as f64
+    );
 
     // 3. Full-scan aggregate + dict resolution sample.
     let t = Instant::now();

@@ -174,8 +174,7 @@ fn point_to_point_haversine_path_unchanged() {
     let london = Geometry::Point(Point::new(-0.1278, 51.5074));
     let paris = Geometry::Point(Point::new(2.3522, 48.8566));
 
-    let d = geof::distance_meters(&london, &paris)
-        .expect("point-to-point haversine must succeed");
+    let d = geof::distance_meters(&london, &paris).expect("point-to-point haversine must succeed");
 
     // Haversine oracle for the same pair.
     let oracle = haversine_m(-0.1278, 51.5074, 2.3522, 48.8566);

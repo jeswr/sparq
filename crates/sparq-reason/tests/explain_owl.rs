@@ -63,7 +63,11 @@ fn ex(dict: &mut Dict, l: &str) -> Id {
 }
 
 fn render(dict: &Dict, t: [Id; 3]) -> [String; 3] {
-    [dict.term(t[0]).to_string(), dict.term(t[1]).to_string(), dict.term(t[2]).to_string()]
+    [
+        dict.term(t[0]).to_string(),
+        dict.term(t[1]).to_string(),
+        dict.term(t[2]).to_string(),
+    ]
 }
 
 fn rendered_base(dict: &Dict, g: &MaterializedOwlGraph) -> FxHashSet<[String; 3]> {
@@ -73,15 +77,26 @@ fn rendered_base(dict: &Dict, g: &MaterializedOwlGraph) -> FxHashSet<[String; 3]
 /// Strong validity oracle: the proof's asserted leaves (plus any axiom-leaf conclusions —
 /// they are tautologies) must alone re-entail the conclusion under `materialize_owl_rl`.
 fn leaves_entail(dict: &mut Dict, g: &MaterializedOwlGraph, tree: &ProofTree, t: [Id; 3]) {
-    let rendered: FxHashMap<[String; 3], [Id; 3]> =
-        g.closure().into_iter().map(|b| (render(dict, b), b)).collect();
+    let rendered: FxHashMap<[String; 3], [Id; 3]> = g
+        .closure()
+        .into_iter()
+        .map(|b| (render(dict, b), b))
+        .collect();
     let mut input: Vec<[Id; 3]> = proof_leaves(tree)
         .iter()
-        .map(|l| *rendered.get(l).expect("leaf not renderable from the closure"))
+        .map(|l| {
+            *rendered
+                .get(l)
+                .expect("leaf not renderable from the closure")
+        })
         .collect();
     for n in tree.nodes() {
         if n.rule.starts_with("axiom-") {
-            input.push(*rendered.get(&n.conclusion).expect("axiom conclusion not in closure"));
+            input.push(
+                *rendered
+                    .get(&n.conclusion)
+                    .expect("axiom conclusion not in closure"),
+            );
         }
     }
     if g.mode() == OwlMode::CountingFixpoint {
@@ -149,7 +164,9 @@ fn transitive_property_hand_checked() {
     assert_eq!(g.mode(), OwlMode::CountingFixpoint);
     let t = [a, anc, d];
     assert!(g.contains(&t));
-    let tree = g.why(&dict, t).expect("transitive closure fact must have a proof");
+    let tree = g
+        .why(&dict, t)
+        .expect("transitive closure fact must have a proof");
     check_proof(&tree, &rendered_base(&dict, &g), Some(&render(&dict, t)));
     leaves_entail(&mut dict, &g, &tree, t);
     let root = &tree.nodes()[tree.root() as usize];
@@ -160,10 +177,10 @@ fn transitive_property_hand_checked() {
         tree.nodes()[root.premises[0] as usize].conclusion,
         render(&dict, [anc, v.ty, v.transitive])
     );
-    assert!(tree
-        .nodes()
-        .iter()
-        .any(|n| n.rule == "prp-spo1"), "lifted edges must appear as prp-spo1 steps");
+    assert!(
+        tree.nodes().iter().any(|n| n.rule == "prp-spo1"),
+        "lifted edges must appear as prp-spo1 steps"
+    );
 
     // Each one-hop lift is also explained.
     let t1 = [a, anc, b];
@@ -255,13 +272,18 @@ fn inverse_symmetric_equivalence_hand_checked() {
 // vocab + base triples + the three id pools the assertions index into; a named struct
 // would add ceremony for a test-only helper, so the lint is allowed locally.
 #[allow(clippy::type_complexity)]
-fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (V, Vec<[Id; 3]>, Vec<Id>, Vec<Id>, Vec<Id>) {
+fn build(
+    dict: &mut Dict,
+    rng: &mut Rng,
+    with_transitive: bool,
+) -> (V, Vec<[Id; 3]>, Vec<Id>, Vec<Id>, Vec<Id>) {
     let v = vocab(dict);
     let mut base: Vec<[Id; 3]> = Vec::new();
     let mut classes = Vec::new();
     for i in 0..4 {
-        let chain: Vec<Id> =
-            (0..5).map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..5)
+            .map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], v.sc, w[1]]);
         }
@@ -270,8 +292,9 @@ fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (V, Vec<[Id; 
     base.push([classes[2], v.eqc, classes[7]]);
     let mut props = Vec::new();
     for i in 0..3 {
-        let chain: Vec<Id> =
-            (0..3).map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..3)
+            .map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], v.sp, w[1]]);
         }
@@ -305,8 +328,9 @@ fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (V, Vec<[Id; 
         props.push(parent);
         props.push(connected);
     }
-    let individuals: Vec<Id> =
-        (0..60).map(|i| dict.intern_iri(&format!("http://ex/ind{i}"))).collect();
+    let individuals: Vec<Id> = (0..60)
+        .map(|i| dict.intern_iri(&format!("http://ex/ind{i}")))
+        .collect();
     for &s in &individuals {
         base.push([s, v.ty, classes[rng.below(classes.len())]]);
         for _ in 0..2 {
@@ -344,7 +368,10 @@ fn differential_counting_fixpoint() {
     assert!(derived > 300, "fixpoint sweep too small: {derived}");
     // Determinism spot-check.
     for t in g.closure().into_iter().take(40) {
-        assert_eq!(g.why(&dict, t).unwrap().to_json(), g.why(&dict, t).unwrap().to_json());
+        assert_eq!(
+            g.why(&dict, t).unwrap().to_json(),
+            g.why(&dict, t).unwrap().to_json()
+        );
     }
 }
 
@@ -363,11 +390,20 @@ fn retraction_transitive_chain() {
     );
     let mut g = MaterializedOwlGraph::new(
         &mut dict,
-        &[[anc, v.ty, v.transitive], [a, anc, b], [b, anc, c], [c, anc, d]],
+        &[
+            [anc, v.ty, v.transitive],
+            [a, anc, b],
+            [b, anc, c],
+            [c, anc, d],
+        ],
     );
     let t = [a, anc, d];
     assert!(g.contains(&t));
-    check_proof(&g.why(&dict, t).unwrap(), &rendered_base(&dict, &g), Some(&render(&dict, t)));
+    check_proof(
+        &g.why(&dict, t).unwrap(),
+        &rendered_base(&dict, &g),
+        Some(&render(&dict, t)),
+    );
 
     g.delete(&mut dict, &[[b, anc, c]]);
     assert!(!g.contains(&t), "chain broken");
@@ -387,7 +423,10 @@ fn retraction_transitive_chain() {
     let tree = g.why(&dict, t).expect("alternative support");
     check_proof(&tree, &rendered_base(&dict, &g), Some(&render(&dict, t)));
     let dead = render(&dict, [b, anc, c]);
-    assert!(tree.nodes().iter().all(|n| n.conclusion != dead), "proof cites retracted edge");
+    assert!(
+        tree.nodes().iter().all(|n| n.conclusion != dead),
+        "proof cites retracted edge"
+    );
 }
 
 #[test]
@@ -424,7 +463,10 @@ fn retraction_differential_random_edits() {
         }
         for dtr in &dels {
             if !g.contains(dtr) {
-                assert!(g.why(&dict, *dtr).is_none(), "round {round}: proof for absent triple");
+                assert!(
+                    g.why(&dict, *dtr).is_none(),
+                    "round {round}: proof for absent triple"
+                );
             }
         }
         g.insert(&mut dict, &dels);
@@ -453,7 +495,12 @@ fn fallback_mode_returns_none_for_derived() {
     );
     assert_eq!(g.mode(), OwlMode::Fallback);
     assert!(g.contains(&[x, v.ty, r]), "cls-svf1 fires in fallback mode");
-    assert!(g.why(&dict, [x, v.ty, r]).is_none(), "fallback derivations are unexplained");
-    let tree = g.why(&dict, [x, p, y]).expect("asserted triples still explain");
+    assert!(
+        g.why(&dict, [x, v.ty, r]).is_none(),
+        "fallback derivations are unexplained"
+    );
+    let tree = g
+        .why(&dict, [x, p, y])
+        .expect("asserted triples still explain");
     assert_eq!(tree.nodes()[0].rule, "asserted");
 }

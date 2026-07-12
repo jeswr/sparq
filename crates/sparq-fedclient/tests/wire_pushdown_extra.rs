@@ -82,7 +82,11 @@ fn decode_rejects_term_length_past_end() {
     bytes.push(0); // term kind = IRI
     bytes.push(50); // varint length = 50 (but no bytes follow)
     let err = decode_bindings(&bytes).unwrap_err();
-    assert_eq!(err, WireError::Truncated, "a length past the end is Truncated");
+    assert_eq!(
+        err,
+        WireError::Truncated,
+        "a length past the end is Truncated"
+    );
 }
 
 #[test]
@@ -113,7 +117,9 @@ fn decode_version_and_magic_contract() {
     future[4] = BINARY_VERSION.wrapping_add(7);
     assert_eq!(
         decode_bindings(&future),
-        Err(WireError::UnsupportedVersion(BINARY_VERSION.wrapping_add(7)))
+        Err(WireError::UnsupportedVersion(
+            BINARY_VERSION.wrapping_add(7)
+        ))
     );
 }
 
@@ -234,9 +240,17 @@ fn push_group_empty_group_fails_closed() {
 fn bind_block_size_clamps_and_disables_correctly() {
     // brTPF maxMpR(0) is clamped to 1 (never a zero-sized block ⇒ no infinite loop), maxMpR(n)
     // is n, plain TPF (no bind-join) is 0, and a full endpoint is the default block.
-    assert_eq!(bind_block_size(&Capability::brtpf(0)), 1, "maxMpR 0 clamps to 1");
+    assert_eq!(
+        bind_block_size(&Capability::brtpf(0)),
+        1,
+        "maxMpR 0 clamps to 1"
+    );
     assert_eq!(bind_block_size(&Capability::brtpf(7)), 7);
-    assert_eq!(bind_block_size(&Capability::tpf()), 0, "plain TPF has no bind-join");
+    assert_eq!(
+        bind_block_size(&Capability::tpf()),
+        0,
+        "plain TPF has no bind-join"
+    );
     assert!(
         bind_block_size(&Capability::endpoint()) >= 1,
         "a full endpoint accepts a non-empty VALUES block"

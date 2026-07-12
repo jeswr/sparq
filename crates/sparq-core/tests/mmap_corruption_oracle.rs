@@ -53,7 +53,9 @@ fn sample_graph() -> Graph {
         // `StoredRef` record variant the blob can hold.
         nt.push_str(&format!("<http://example.org/subject/{i}> <http://example.org/p> <http://example.org/object/{i}> .\n"));
         nt.push_str(&format!("<http://example.org/subject/{i}> <http://example.org/label> \"literal value number {i}\" .\n"));
-        nt.push_str(&format!("<http://example.org/subject/{i}> <http://example.org/lang> \"value {i}\"@en .\n"));
+        nt.push_str(&format!(
+            "<http://example.org/subject/{i}> <http://example.org/lang> \"value {i}\"@en .\n"
+        ));
         nt.push_str(&format!("<http://example.org/subject/{i}> <http://example.org/n> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n"));
     }
     Graph::load_str(&nt, "nt").expect("valid N-Triples")
@@ -65,7 +67,13 @@ fn sample_graph() -> Graph {
 fn exercise(g: &Graph) -> Vec<[String; 3]> {
     let mut dump: Vec<[String; 3]> = g
         .iter_ids()
-        .map(|t| [g.dict.term(t[0]).to_string(), g.dict.term(t[1]).to_string(), g.dict.term(t[2]).to_string()])
+        .map(|t| {
+            [
+                g.dict.term(t[0]).to_string(),
+                g.dict.term(t[1]).to_string(),
+                g.dict.term(t[2]).to_string(),
+            ]
+        })
         .collect();
     dump.sort();
     // Also drive the mmap LOOKUP path (binary search over dict-hash/dict-hid → stored()).
@@ -99,10 +107,11 @@ fn build_store(dir: &Path, mode: SaveMode) -> Vec<[String; 3]> {
         // [FABLE-5] sq-7d3dj.32.2.7 — force V2 emission on THIS thread only (no env mutation),
         // so the saved perms carry the SPQCPRM2 magic and decode through `decode_block_v2_at`.
         #[cfg(feature = "spqcprm2")]
-        SaveMode::CompressedV2 => sparq_core::compress::with_emit_format(
-            sparq_core::compress::EmitFormat::V2,
-            || g.save_compressed(dir).expect("save_compressed V2"),
-        ),
+        SaveMode::CompressedV2 => {
+            sparq_core::compress::with_emit_format(sparq_core::compress::EmitFormat::V2, || {
+                g.save_compressed(dir).expect("save_compressed V2")
+            })
+        }
     }
     // Reference dump comes from a clean reopen (so it reflects the on-disk decode, not the
     // in-RAM graph) — proves the pristine round-trip works before we corrupt anything.
@@ -116,7 +125,10 @@ fn build_store(dir: &Path, mode: SaveMode) -> Vec<[String; 3]> {
                 .map(|b| b.starts_with(b"SPQCPRM2"))
                 .unwrap_or(false)
         });
-        assert!(saw_v2, "V2 save produced no SPQCPRM2 perm — the V2 oracle arm is vacuous");
+        assert!(
+            saw_v2,
+            "V2 save produced no SPQCPRM2 perm — the V2 oracle arm is vacuous"
+        );
     }
     exercise(&clean)
 }
@@ -161,7 +173,7 @@ fn store_files(dir: &Path) -> Vec<std::path::PathBuf> {
 fn assert_safe(dir: &Path, _reference: &[[String; 3]], what: &str) {
     let dir = dir.to_path_buf();
     let outcome = catch_unwind(AssertUnwindSafe(|| match Graph::open(&dir) {
-        Err(_) => {}              // clean rejection — the desired response to a bad file
+        Err(_) => {} // clean rejection — the desired response to a bad file
         Ok(g) => {
             let _ = exercise(&g); // opened: every term must materialise without UB / panic
         }
@@ -175,7 +187,10 @@ fn assert_safe(dir: &Path, _reference: &[[String; 3]], what: &str) {
 fn corrupt_truncate(src_dir: &Path, dst_dir: &Path, file: &Path, new_len: u64) {
     copy_dir(src_dir, dst_dir);
     let target = dst_dir.join(file.file_name().unwrap());
-    let f = std::fs::OpenOptions::new().write(true).open(&target).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap();
     f.set_len(new_len).unwrap();
 }
 
@@ -215,7 +230,10 @@ fn corruption_sweep(mode: SaveMode) {
     };
 
     let files = store_files(&pristine);
-    assert!(files.iter().any(|p| p.ends_with("dict-terms.bin")), "the term blob must exist");
+    assert!(
+        files.iter().any(|p| p.ends_with("dict-terms.bin")),
+        "the term blob must exist"
+    );
 
     for file in &files {
         let len = std::fs::metadata(file).unwrap().len();
@@ -241,7 +259,11 @@ fn corruption_sweep(mode: SaveMode) {
         };
         for &cut in &cuts {
             corrupt_truncate(&pristine, &scratch, file, cut);
-            assert_safe(&scratch, &reference, &format!("truncate {name} -> {cut}/{len} (mode={mode_tag})"));
+            assert_safe(
+                &scratch,
+                &reference,
+                &format!("truncate {name} -> {cut}/{len} (mode={mode_tag})"),
+            );
         }
 
         // ---- BYTE-FLIP sweep: every position for small files; a stride for large ones,
@@ -251,7 +273,11 @@ fn corruption_sweep(mode: SaveMode) {
         while pos < len as usize {
             for xor in [0x80u8, 0xFF, 0x01] {
                 corrupt_flip(&pristine, &scratch, file, pos, xor);
-                assert_safe(&scratch, &reference, &format!("flip {name}@{pos}^{xor:#x} (mode={mode_tag})"));
+                assert_safe(
+                    &scratch,
+                    &reference,
+                    &format!("flip {name}@{pos}^{xor:#x} (mode={mode_tag})"),
+                );
             }
             pos += stride;
         }
@@ -320,7 +346,10 @@ fn dict_blob_non_utf8_is_rejected_not_ub() {
         }
         pos += 7; // stride so the test stays fast but still hits string payloads
     }
-    assert!(saw_rejection, "no blob corruption was rejected — the oracle is vacuous");
+    assert!(
+        saw_rejection,
+        "no blob corruption was rejected — the oracle is vacuous"
+    );
 }
 
 /// [OPUS-4.8] sq-cvug — a graph containing RDF 1.2 quoted/triple terms `<<( s p o )>>` so
@@ -356,7 +385,10 @@ fn quoted_triple_wrong_kind_component_is_safe_not_panic() {
     // Pristine store with triple terms must open and materialise cleanly.
     let clean = Graph::open(&pristine).expect("pristine star store must open");
     let reference = exercise(&clean);
-    assert!(reference.iter().any(|r| r[2].contains("<<")), "the reference dump must contain triple terms");
+    assert!(
+        reference.iter().any(|r| r[2].contains("<<")),
+        "the reference dump must contain triple terms"
+    );
 
     let blob = pristine.join("dict-terms.bin");
     let len = std::fs::metadata(&blob).unwrap().len() as usize;
@@ -368,7 +400,11 @@ fn quoted_triple_wrong_kind_component_is_safe_not_panic() {
     while pos < len {
         for xor in [0x01u8, 0x02, 0x03, 0x80, 0xFF] {
             corrupt_flip(&pristine, &scratch, &blob, pos, xor);
-            assert_safe(&scratch, &reference, &format!("star-blob flip @{pos}^{xor:#x}"));
+            assert_safe(
+                &scratch,
+                &reference,
+                &format!("star-blob flip @{pos}^{xor:#x}"),
+            );
         }
         pos += 1;
     }
@@ -384,7 +420,10 @@ fn tempdir() -> std::path::PathBuf {
         "sparq-mmap-oracle-{}-{}-{}",
         std::process::id(),
         n,
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&p).unwrap();
     p

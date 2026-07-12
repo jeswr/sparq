@@ -271,7 +271,11 @@ fn node_filter_all_promotes_literal_to_a_pagerank_sink() {
         .find(|&i| i != a && i != b)
         .expect("literal node present under NodeFilter::All");
     assert_eq!(all.in_degree(lit), 1, "literal has one in-edge from a");
-    assert_eq!(all.out_degree(lit), 0, "literal is a sink (never a subject)");
+    assert_eq!(
+        all.out_degree(lit),
+        0,
+        "literal is a sink (never a subject)"
+    );
 
     // Degree centrality sees the literal as an in-degree-1 node.
     let inc = degree_centrality(&all, Direction::In);

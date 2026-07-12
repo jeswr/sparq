@@ -456,9 +456,7 @@ impl ChangeLog {
                             // anomalous — keep it (fail-safe) rather than guess its age.
                             None => false,
                             Some(newest) => {
-                                newest
-                                    .timestamp_unix_nanos
-                                    .saturating_add(age.as_nanos())
+                                newest.timestamp_unix_nanos.saturating_add(age.as_nanos())
                                     <= now_unix_nanos
                             }
                         }
@@ -1601,7 +1599,11 @@ mod tests {
     fn one_record_segments(
         tmp: &Path,
         n: u64,
-    ) -> (ChangeLog, GenerationRing<Graph>, std::sync::Arc<Generation<Graph>>) {
+    ) -> (
+        ChangeLog,
+        GenerationRing<Graph>,
+        std::sync::Arc<Generation<Graph>>,
+    ) {
         let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
         let mut prev = ring.current();
         let config = ChangeLogConfig {
@@ -1756,7 +1758,10 @@ mod tests {
                 ..Default::default()
             })
             .expect("partial ack");
-        assert_eq!(report.segments_dropped, 0, "half-acked segment must survive");
+        assert_eq!(
+            report.segments_dropped, 0,
+            "half-acked segment must survive"
+        );
         assert_eq!(log.first_seq(), 0);
 
         // Ack through seq 1: segment 0 is now fully acked -> dropped; seq 2 is not acked.

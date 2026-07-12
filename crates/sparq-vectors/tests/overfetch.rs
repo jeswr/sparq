@@ -39,7 +39,10 @@ fn rand_vec(state: &mut u64, dim: usize) -> Vec<f32> {
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("sparq-vectors-overfetch-{name}-{}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "sparq-vectors-overfetch-{name}-{}",
+        std::process::id()
+    ))
 }
 
 /// N×DIM store with sparse ids `i*7+3`; returns (store, all_ids).
@@ -152,8 +155,15 @@ fn overfetch_fills_k_and_exact_is_reference() {
         // Exact backend over the over-fetch path == the brute-force filtered ground truth (exact).
         let exact_got = nearest_filtered_overfetch_default(&exact, &q, &mask, K);
         let truth = nearest_exact_filtered(&store, &q, &mask, K);
-        assert_eq!(exact_got, truth, "exact backend over-fetch must equal the ground truth");
-        assert_eq!(exact_got.len(), K, "exact backend must fill k (mask admits ≫ k)");
+        assert_eq!(
+            exact_got, truth,
+            "exact backend over-fetch must equal the ground truth"
+        );
+        assert_eq!(
+            exact_got.len(),
+            K,
+            "exact backend must fill k (mask admits ≫ k)"
+        );
 
         // Approximate backend fills k as well (over-fetch grows the fetch until k survive).
         let approx_got = nearest_filtered_overfetch_default(&approx, &q, &mask, K);
@@ -163,7 +173,10 @@ fn overfetch_fills_k_and_exact_is_reference() {
             "iterative over-fetch must fill k from the approximate backend too"
         );
         for &(id, _) in &approx_got {
-            assert!(mask.contains(id), "approx over-fetch leaked an unmasked id {id}");
+            assert!(
+                mask.contains(id),
+                "approx over-fetch leaked an unmasked id {id}"
+            );
         }
     }
 

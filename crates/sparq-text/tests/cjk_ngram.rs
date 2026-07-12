@@ -43,7 +43,10 @@ fn analyzer_is_recorded_and_defaults_to_unicode() {
         TextIndex::build_with_analyzer(&g, Analyzer::CjkNgram).analyzer(),
         Analyzer::CjkNgram
     );
-    assert_eq!(TextIndex::with_analyzer(Analyzer::CjkNgram).analyzer(), Analyzer::CjkNgram);
+    assert_eq!(
+        TextIndex::with_analyzer(Analyzer::CjkNgram).analyzer(),
+        Analyzer::CjkNgram
+    );
     assert_eq!(
         TextIndex::with_positions_analyzer(Analyzer::CjkNgram).analyzer(),
         Analyzer::CjkNgram
@@ -148,7 +151,11 @@ fn ngram_phrase_over_bigrams_keeps_adjacency() {
 fn ngram_agrees_with_default_on_latin_corpus() {
     // A Latin corpus indexes and searches identically under both analyzers
     // (the opt-in must not perturb non-CJK text).
-    let g = graph_of(&[r#""The quick brown fox""#, r#""Fox hunting""#, r#""quick start""#]);
+    let g = graph_of(&[
+        r#""The quick brown fox""#,
+        r#""Fox hunting""#,
+        r#""quick start""#,
+    ]);
     let uni = TextIndex::build(&g);
     let ng = TextIndex::build_with_analyzer(&g, Analyzer::CjkNgram);
     for q in ["quick", "fox", "quick fox", "qui*"] {
@@ -159,7 +166,10 @@ fn ngram_agrees_with_default_on_latin_corpus() {
         );
     }
     // Prefix search still works under the n-gram analyzer for Latin tokens.
-    assert_eq!(values(&g, &ng.search("qui*")), ["The quick brown fox", "quick start"]);
+    assert_eq!(
+        values(&g, &ng.search("qui*")),
+        ["The quick brown fox", "quick start"]
+    );
 }
 
 #[test]

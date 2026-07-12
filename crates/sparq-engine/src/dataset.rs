@@ -12,10 +12,10 @@
 
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashSet;
+use spargebra::algebra::QueryDataset;
 use sparq_core::dict::Dict;
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::Graph;
-use spargebra::algebra::QueryDataset;
 
 pub(crate) type TripleTerms = [Term; 3];
 pub(crate) type TripleSet = FxHashSet<TripleTerms>;
@@ -110,7 +110,10 @@ mod tests {
 
     fn ds(default: &[&str], named: &[&str]) -> QueryDataset {
         QueryDataset {
-            default: default.iter().map(|i| NamedNode::new(*i).unwrap()).collect(),
+            default: default
+                .iter()
+                .map(|i| NamedNode::new(*i).unwrap())
+                .collect(),
             named: Some(named.iter().map(|i| NamedNode::new(*i).unwrap()).collect()),
         }
     }
@@ -135,8 +138,13 @@ mod tests {
     #[test]
     fn absent_graph_is_empty_and_repeats_dedup() {
         let g = store();
-        let active =
-            build_active(&g, &ds(&["http://ex/nope"], &["http://ex/g1", "http://ex/g1", "http://ex/nope"]));
+        let active = build_active(
+            &g,
+            &ds(
+                &["http://ex/nope"],
+                &["http://ex/g1", "http://ex/g1", "http://ex/nope"],
+            ),
+        );
         assert_eq!(active.len(), 0); // FROM of an absent graph contributes nothing
         assert_eq!(active.named.len(), 2); // g1 once, plus the absent one as EMPTY
         assert_eq!(active.named[0].1.len(), 2);

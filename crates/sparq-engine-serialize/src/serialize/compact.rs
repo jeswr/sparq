@@ -60,9 +60,7 @@
 //! - **A literal under a `@type: @id` term stays a literal** — type coercion to `@id` applies
 //!   only to node references, never to a value that is already a literal.
 
-use super::{
-    coerce_native, detect_lists, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD,
-};
+use super::{coerce_native, detect_lists, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD};
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -514,7 +512,10 @@ impl ActiveContext {
         if type_mapping == Some("@json") {
             let mut o = Json::obj();
             o.set(&self.compact_keyword("@value"), val.clone());
-            o.set(&self.compact_keyword("@type"), Json::Str("@json".to_string()));
+            o.set(
+                &self.compact_keyword("@type"),
+                Json::Str("@json".to_string()),
+            );
             return o;
         }
 
@@ -556,7 +557,10 @@ impl ActiveContext {
         if let Some(vl) = v_lang {
             let effective = lang_mapping.or(default_lang);
             if effective != Some(vl) {
-                o.set(&self.compact_keyword("@language"), Json::Str(vl.to_string()));
+                o.set(
+                    &self.compact_keyword("@language"),
+                    Json::Str(vl.to_string()),
+                );
             }
         }
         o
@@ -1192,7 +1196,10 @@ pub(super) fn graph_to_expanded(triples: &[Triple]) -> Vec<Json> {
             obj.set("@type", Json::Arr(arr));
         }
         for p in &node.pred_order {
-            let arr: Vec<Json> = node.preds[p].iter().map(|o| term_to_json(o, &lists)).collect();
+            let arr: Vec<Json> = node.preds[p]
+                .iter()
+                .map(|o| term_to_json(o, &lists))
+                .collect();
             obj.set(p, Json::Arr(arr));
         }
         result.push(obj);
@@ -1368,7 +1375,8 @@ impl JsonParser<'_> {
                         b'u' => {
                             let hex = self.bytes.get(self.pos..self.pos + 4)?;
                             self.pos += 4;
-                            let cp = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                            let cp =
+                                u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
                             s.push(char::from_u32(cp)?);
                         }
                         _ => return None,

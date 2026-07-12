@@ -569,7 +569,9 @@ impl<'a> Validator<'a> {
         let shape = &self.shapes.shapes[sid];
         let (severity, messages) = match &self.active_meta {
             Some(meta) => (
-                meta.severity.clone().unwrap_or_else(|| shape.severity.clone()),
+                meta.severity
+                    .clone()
+                    .unwrap_or_else(|| shape.severity.clone()),
                 if meta.messages.is_empty() {
                     shape.messages.clone()
                 } else {
@@ -1691,12 +1693,10 @@ impl<'a> Validator<'a> {
             if !prepared.is_batchable() {
                 continue; // non-batchable shape → per-focus fallback (documented)
             }
-            let map = prepared.evaluate_batch(
-                self.data.graph(),
-                foci,
-                constraint,
-                |focus, fields| self.stamp_sparql(sid, idx, focus, fields),
-            );
+            let map =
+                prepared.evaluate_batch(self.data.graph(), foci, constraint, |focus, fields| {
+                    self.stamp_sparql(sid, idx, focus, fields)
+                });
             self.sparql_batch.insert((sid, idx), map);
         }
     }
@@ -2150,7 +2150,10 @@ fn datatype_ok_id(g: &GraphView, id: Id, dts: &[String]) -> bool {
             value,
             datatype,
             lang,
-        } => dts.iter().any(|dt| dt == datatype) && well_formed_parts(value, datatype, lang.is_some()),
+        } => {
+            dts.iter().any(|dt| dt == datatype)
+                && well_formed_parts(value, datatype, lang.is_some())
+        }
         _ => false,
     }
 }

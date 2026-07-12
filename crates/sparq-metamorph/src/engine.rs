@@ -52,12 +52,13 @@ impl InProcessSparq {
     ///
     /// A load failure is an [`EngineFailure`] of kind [`FailureKind::Load`].
     pub fn from_ntriples(name: &str, ntriples: &str) -> Result<Self, EngineFailure> {
-        let graph = sparq_core::Graph::load_str(ntriples, "ntriples").map_err(|e| EngineFailure {
-            engine: name.to_string(),
-            query: String::new(),
-            kind: FailureKind::Load,
-            message: e,
-        })?;
+        let graph =
+            sparq_core::Graph::load_str(ntriples, "ntriples").map_err(|e| EngineFailure {
+                engine: name.to_string(),
+                query: String::new(),
+                kind: FailureKind::Load,
+                message: e,
+            })?;
         Ok(InProcessSparq {
             name: name.to_string(),
             graph,

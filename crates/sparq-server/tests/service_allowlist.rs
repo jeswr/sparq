@@ -43,7 +43,9 @@ fn serve(body: String, n: usize) -> (String, mpsc::Receiver<()>) {
     thread::spawn(move || {
         ready_tx.send(()).ok();
         for _ in 0..n {
-            let Ok((mut stream, _)) = listener.accept() else { return };
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             accept_tx.send(()).ok(); // a connection was accepted
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
@@ -94,7 +96,10 @@ async fn empty_allowlist_refuses_service_before_any_network_call() {
     // regresses and the server actually dials the (live) endpoint, the request must not
     // hang on the 30s default and slow CI — the timeout bounds the failure.
     // empty allowlist => deny ALL SERVICE
-    let config = ServerConfig { query_timeout: Some(std::time::Duration::from_secs(2)), ..ServerConfig::default() };
+    let config = ServerConfig {
+        query_timeout: Some(std::time::Duration::from_secs(2)),
+        ..ServerConfig::default()
+    };
     let base = spawn_with(config).await;
     let q = format!(
         "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <http://{host}/> {{ ?s ex:name ?name }} }}"
@@ -133,7 +138,9 @@ async fn empty_allowlist_refuses_service_before_any_network_call() {
     // the live listener accepted NOTHING — i.e. the refusal happened before any socket
     // was opened to the endpoint.
     assert!(
-        accepts.recv_timeout(std::time::Duration::from_millis(250)).is_err(),
+        accepts
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .is_err(),
         "strict deny posture must refuse BEFORE dialling — the listener must accept no connection",
     );
 }
@@ -143,7 +150,7 @@ async fn allowlisted_loopback_host_reaches_the_endpoint() {
     let (remote, _accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/');
     let bare_host = host.split(':').next().unwrap().to_string(); // "127.0.0.1"
-    // Allowlist the loopback host => SERVICE to it is permitted.
+                                                                 // Allowlist the loopback host => SERVICE to it is permitted.
     let mut config = ServerConfig::default();
     let mut allow = ServiceAllowlist::default();
     allow.add(&bare_host).unwrap();
@@ -160,8 +167,14 @@ async fn allowlisted_loopback_host_reaches_the_endpoint() {
         .unwrap();
     assert_eq!(resp.status(), 200, "allowlisted SERVICE must succeed");
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Alice"), "expected the remote name joined in: {body}");
-    assert!(body.contains("Bob"), "expected the remote name joined in: {body}");
+    assert!(
+        body.contains("Alice"),
+        "expected the remote name joined in: {body}"
+    );
+    assert!(
+        body.contains("Bob"),
+        "expected the remote name joined in: {body}"
+    );
 }
 
 #[tokio::test]
@@ -170,7 +183,7 @@ async fn port_scoped_allowlist_permits_exact_endpoint() {
     // EXACTLY `127.0.0.1:<ephemeral>` (the mock endpoint's bound port), and it is reached.
     let (remote, _accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/'); // 127.0.0.1:<port>
-    // Allowlist the FULL host:port (port-scoped) — exactly the mock endpoint, nothing wider.
+                                                                           // Allowlist the FULL host:port (port-scoped) — exactly the mock endpoint, nothing wider.
     let mut config = ServerConfig::default();
     let mut allow = ServiceAllowlist::default();
     allow.add(host).unwrap(); // e.g. "127.0.0.1:54321"
@@ -187,7 +200,10 @@ async fn port_scoped_allowlist_permits_exact_endpoint() {
         .unwrap();
     assert_eq!(resp.status(), 200, "exact port-scoped SERVICE must succeed");
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Alice") && body.contains("Bob"), "expected the remote joined in: {body}");
+    assert!(
+        body.contains("Alice") && body.contains("Bob"),
+        "expected the remote joined in: {body}"
+    );
 }
 
 #[tokio::test]
@@ -202,10 +218,17 @@ async fn port_scoped_allowlist_rejects_same_host_other_port() {
 
     // A SECOND live endpoint on a DIFFERENT port — the off-allowlist target.
     let (other_remote, other_accepts) = serve(remote_body(), 1);
-    let other_host = other_remote.trim_start_matches("http://").trim_end_matches('/');
+    let other_host = other_remote
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
     assert_ne!(
         allowed_addr.port(),
-        other_host.rsplit(':').next().unwrap().parse::<u16>().unwrap(),
+        other_host
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse::<u16>()
+            .unwrap(),
         "the two endpoints must be on different ports for this test to be meaningful",
     );
 
@@ -234,7 +257,9 @@ async fn port_scoped_allowlist_rejects_same_host_other_port() {
     );
     // And the off-allowlist endpoint must never have been dialled.
     assert!(
-        other_accepts.recv_timeout(std::time::Duration::from_millis(250)).is_err(),
+        other_accepts
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .is_err(),
         "a port off the scoped allowlist must be refused BEFORE any socket is opened",
     );
 }
@@ -247,7 +272,10 @@ async fn silent_service_under_deny_yields_identity() {
     let (remote, _accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/');
     // empty allowlist => deny ALL SERVICE
-    let config = ServerConfig { query_timeout: Some(std::time::Duration::from_secs(2)), ..ServerConfig::default() };
+    let config = ServerConfig {
+        query_timeout: Some(std::time::Duration::from_secs(2)),
+        ..ServerConfig::default()
+    };
     let base = spawn_with(config).await;
     let q = format!(
         "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <http://{host}/> {{ ?s ex:name ?name }} }}"
@@ -261,5 +289,8 @@ async fn silent_service_under_deny_yields_identity() {
     // SILENT swallows the egress refusal -> identity -> both local persons survive, 200.
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("alice") && body.contains("bob"), "SILENT must keep local bindings: {body}");
+    assert!(
+        body.contains("alice") && body.contains("bob"),
+        "SILENT must keep local bindings: {body}"
+    );
 }

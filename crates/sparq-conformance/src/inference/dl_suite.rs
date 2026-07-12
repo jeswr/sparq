@@ -281,7 +281,10 @@ impl DlReport {
             }
         }
         if !abstained.is_empty() {
-            let _ = writeln!(md, "  abstention kinds (fail-closed, NEVER counted as pass):");
+            let _ = writeln!(
+                md,
+                "  abstention kinds (fail-closed, NEVER counted as pass):"
+            );
             for (k, n) in &abstained {
                 let _ = writeln!(md, "    - {} × {}", n, k);
             }
@@ -313,9 +316,7 @@ pub fn consistency_tri(verdict: &ConsistencyVerdict) -> TriState {
 pub fn inconsistency_tri(verdict: &ConsistencyVerdict) -> TriState {
     match verdict {
         ConsistencyVerdict::Inconsistent => TriState::Pass,
-        ConsistencyVerdict::Consistent => {
-            TriState::Fail("wrongly judged consistent".to_string())
-        }
+        ConsistencyVerdict::Consistent => TriState::Fail("wrongly judged consistent".to_string()),
         ConsistencyVerdict::Unknown(reason) => TriState::OutOfFragment(reason_kind(reason)),
     }
 }
@@ -450,7 +451,10 @@ fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
         };
         // The DIRECT arm: only tests sanctioned under the Direct semantics. The
         // RDF-Based runs of dual-tagged tests stay in the owl_suite / el_suite lanes.
-        if !iri_objs("semantics").iter().any(|s| s == &format!("{}DIRECT", T)) {
+        if !iri_objs("semantics")
+            .iter()
+            .any(|s| s == &format!("{}DIRECT", T))
+        {
             continue;
         }
         let status = g
@@ -493,12 +497,15 @@ fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
             NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
             NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
         };
-        let known = |p: &String| ["EL", "QL", "RL"].iter().any(|k| p == &format!("{}{}", T, k));
+        let known = |p: &String| {
+            ["EL", "QL", "RL"]
+                .iter()
+                .any(|k| p == &format!("{}{}", T, k))
+        };
         let profile_name = |p: &str| p.strip_prefix(T).unwrap_or(p).to_string();
         let case = Case {
-            ident: lit("identifier").unwrap_or_else(|| {
-                case_iri.rsplit('/').next().unwrap_or(&case_iri).to_string()
-            }),
+            ident: lit("identifier")
+                .unwrap_or_else(|| case_iri.rsplit('/').next().unwrap_or(&case_iri).to_string()),
             checks,
             profile_test,
             positive_profiles: iri_objs("profile")
@@ -511,8 +518,11 @@ fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
             input: lit("rdfXmlInputOntology"),
             conclusion: lit("rdfXmlConclusionOntology"),
             nonconclusion: lit("rdfXmlNonConclusionOntology"),
-            imports: g.object(&case_node, &format!("{}importedOntology", T)).is_some()
-                || g.object(&case_node, &format!("{}importedOntologyIRI", T)).is_some(),
+            imports: g
+                .object(&case_node, &format!("{}importedOntology", T))
+                .is_some()
+                || g.object(&case_node, &format!("{}importedOntologyIRI", T))
+                    .is_some(),
         };
         cases.push(case);
     }
@@ -527,7 +537,10 @@ fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
 pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
     let g = parse_export(export_text)?;
     let (cases, rejected) = collect_cases(&g);
-    let mut report = DlReport { rejected_cases: rejected, ..DlReport::default() };
+    let mut report = DlReport {
+        rejected_cases: rejected,
+        ..DlReport::default()
+    };
     for case in &cases {
         run_case(case, &mut report);
     }
@@ -663,7 +676,9 @@ pub fn run_render_roundtrip_arm(export_text: &str) -> Result<RenderRoundTripRepo
                 Ok(Some(Ok(()))) => report.round_tripped += 1,
                 Ok(Some(Err(diag))) => report.violations.push((key, diag)),
                 Err(_) => {
-                    report.violations.push((key, "render round-trip panicked".to_string()));
+                    report
+                        .violations
+                        .push((key, "render round-trip panicked".to_string()));
                 }
             }
         }
@@ -755,10 +770,7 @@ fn run_case(case: &Case, report: &mut DlReport) {
 }
 
 /// Pick the membership verdict for a named profile from a computed [`ProfileSet`].
-fn membership_of<'a>(
-    ps: &'a sparq_reason_dl::profile::ProfileSet,
-    name: &str,
-) -> &'a Membership {
+fn membership_of<'a>(ps: &'a sparq_reason_dl::profile::ProfileSet, name: &str) -> &'a Membership {
     match name {
         "EL" => &ps.el,
         "QL" => &ps.ql,
@@ -784,9 +796,9 @@ fn run_profile_lane(case: &Case, report: &mut DlReport) {
         // A ProfileIdentificationTest with no positive tag AND no explicit negation: either a
         // species-only case (test:species DL/FULL — the deferred species check) or otherwise
         // untagged — nothing to check in either direction.
-        report
-            .profile
-            .record_out_of_scope("no positive EL/QL/RL tag and no explicit negation (species check deferred)");
+        report.profile.record_out_of_scope(
+            "no positive EL/QL/RL tag and no explicit negation (species check deferred)",
+        );
         return;
     }
     if case.imports {
@@ -820,7 +832,9 @@ fn run_profile_lane(case: &Case, report: &mut DlReport) {
         || -> Result<sparq_reason_dl::profile::ProfileSet, String> {
             let rows = parse_ontology(&input_xml, &base)?;
             let (dict, ids) = intern_rows(&rows);
-            Ok(profiles_from_extraction(&sparq_reason_dl::extract(&dict, &ids)))
+            Ok(profiles_from_extraction(&sparq_reason_dl::extract(
+                &dict, &ids,
+            )))
         },
     ));
     let profile_set = match profile_set {
@@ -829,11 +843,15 @@ fn run_profile_lane(case: &Case, report: &mut DlReport) {
             let observed = format!("input RDF/XML parse error: {}", e);
             for name in pos {
                 let key = format!("owl2-dl/profile-{}: {}", name, case.ident);
-                report.profile.record(&key, TriState::Fail(observed.clone()));
+                report
+                    .profile
+                    .record(&key, TriState::Fail(observed.clone()));
             }
             for name in neg {
                 let key = format!("owl2-dl/profile-neg-{}: {}", name, case.ident);
-                report.profile_negative.record(&key, TriState::Fail(observed.clone()));
+                report
+                    .profile_negative
+                    .record(&key, TriState::Fail(observed.clone()));
             }
             return;
         }
@@ -841,11 +859,15 @@ fn run_profile_lane(case: &Case, report: &mut DlReport) {
             let observed = "profile pipeline panicked".to_string();
             for name in pos {
                 let key = format!("owl2-dl/profile-{}: {}", name, case.ident);
-                report.profile.record(&key, TriState::Fail(observed.clone()));
+                report
+                    .profile
+                    .record(&key, TriState::Fail(observed.clone()));
             }
             for name in neg {
                 let key = format!("owl2-dl/profile-neg-{}: {}", name, case.ident);
-                report.profile_negative.record(&key, TriState::Fail(observed.clone()));
+                report
+                    .profile_negative
+                    .record(&key, TriState::Fail(observed.clone()));
             }
             return;
         }
@@ -853,16 +875,18 @@ fn run_profile_lane(case: &Case, report: &mut DlReport) {
     // Positive tags (expect In).
     for name in pos {
         let key = format!("owl2-dl/profile-{}: {}", name, case.ident);
-        report
-            .profile
-            .record(&key, membership_tri(membership_of(&profile_set, name), true));
+        report.profile.record(
+            &key,
+            membership_tri(membership_of(&profile_set, name), true),
+        );
     }
     // Explicit negations (expect NotIn). An `In` here is the honest measured gap.
     for name in neg {
         let key = format!("owl2-dl/profile-neg-{}: {}", name, case.ident);
-        report
-            .profile_negative
-            .record(&key, membership_tri(membership_of(&profile_set, name), false));
+        report.profile_negative.record(
+            &key,
+            membership_tri(membership_of(&profile_set, name), false),
+        );
     }
 }
 
@@ -915,7 +939,11 @@ fn run_reasoning_lane(case: &Case, report: &mut DlReport) {
                     (&case.nonconclusion, false)
                 };
                 let Some(xml) = doc else {
-                    let side = if expect_positive { "conclusion" } else { "non-conclusion" };
+                    let side = if expect_positive {
+                        "conclusion"
+                    } else {
+                        "non-conclusion"
+                    };
                     record_kind_oos(
                         report,
                         kind,
@@ -930,9 +958,7 @@ fn run_reasoning_lane(case: &Case, report: &mut DlReport) {
                             let (mut dict, prem_ids) = intern_rows(&premise);
                             let concl_ids: Vec<[Id; 3]> = conclusion_rows
                                 .iter()
-                                .map(|[s, p, o]| {
-                                    [dict.intern(s), dict.intern(p), dict.intern(o)]
-                                })
+                                .map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)])
                                 .collect();
                             checker.entailment(&mut dict, &prem_ids, &concl_ids).verdict
                         }));
@@ -1028,29 +1054,56 @@ mod tests {
     #[test]
     fn abstention_is_never_a_pass() {
         let unknown = ConsistencyVerdict::Unknown(UnknownReason::QlConsistencyPending);
-        assert!(matches!(consistency_tri(&unknown), TriState::OutOfFragment(_)));
-        assert!(matches!(inconsistency_tri(&unknown), TriState::OutOfFragment(_)));
+        assert!(matches!(
+            consistency_tri(&unknown),
+            TriState::OutOfFragment(_)
+        ));
+        assert!(matches!(
+            inconsistency_tri(&unknown),
+            TriState::OutOfFragment(_)
+        ));
         let eu = EntailmentVerdict::Unknown(UnknownReason::UnencodedConclusion("x".into()));
-        assert!(matches!(positive_entailment_tri(&eu), TriState::OutOfFragment(_)));
-        assert!(matches!(negative_entailment_tri(&eu), TriState::OutOfFragment(_)));
+        assert!(matches!(
+            positive_entailment_tri(&eu),
+            TriState::OutOfFragment(_)
+        ));
+        assert!(matches!(
+            negative_entailment_tri(&eu),
+            TriState::OutOfFragment(_)
+        ));
         let mu = Membership::Unknown("refused".into());
-        assert!(matches!(membership_tri(&mu, true), TriState::OutOfFragment(_)));
-        assert!(matches!(membership_tri(&mu, false), TriState::OutOfFragment(_)));
+        assert!(matches!(
+            membership_tri(&mu, true),
+            TriState::OutOfFragment(_)
+        ));
+        assert!(matches!(
+            membership_tri(&mu, false),
+            TriState::OutOfFragment(_)
+        ));
     }
 
     #[test]
     fn definitive_verdicts_map_both_ways() {
-        assert_eq!(consistency_tri(&ConsistencyVerdict::Consistent), TriState::Pass);
+        assert_eq!(
+            consistency_tri(&ConsistencyVerdict::Consistent),
+            TriState::Pass
+        );
         assert!(matches!(
             consistency_tri(&ConsistencyVerdict::Inconsistent),
             TriState::Fail(_)
         ));
-        assert_eq!(inconsistency_tri(&ConsistencyVerdict::Inconsistent), TriState::Pass);
+        assert_eq!(
+            inconsistency_tri(&ConsistencyVerdict::Inconsistent),
+            TriState::Pass
+        );
         assert!(matches!(
             inconsistency_tri(&ConsistencyVerdict::Consistent),
             TriState::Fail(_)
         ));
-        assert_eq!(positive_entailment_tri(&EntailmentVerdict::Entailed), TriState::Pass);
+        assert_eq!(
+            positive_entailment_tri(&EntailmentVerdict::Entailed),
+            TriState::Pass
+        );
         assert!(matches!(
             positive_entailment_tri(&EntailmentVerdict::NotEntailed),
             TriState::Fail(_)
@@ -1064,8 +1117,14 @@ mod tests {
             TriState::Fail(_)
         ));
         assert_eq!(membership_tri(&Membership::In, true), TriState::Pass);
-        assert!(matches!(membership_tri(&Membership::In, false), TriState::Fail(_)));
-        assert_eq!(membership_tri(&Membership::NotIn("r".into()), false), TriState::Pass);
+        assert!(matches!(
+            membership_tri(&Membership::In, false),
+            TriState::Fail(_)
+        ));
+        assert_eq!(
+            membership_tri(&Membership::NotIn("r".into()), false),
+            TriState::Pass
+        );
         assert!(matches!(
             membership_tri(&Membership::NotIn("r".into()), true),
             TriState::Fail(_)
@@ -1188,7 +1247,8 @@ mod tests {
     #[test]
     fn fs_only_and_imports_are_out_of_scope_not_passes() {
         // Strip the premise literal from the consistent case → fs-only OutOfScope.
-        let fs_only = MINI_EXPORT.replacen("test:rdfXmlPremiseOntology", "test:fsPremiseOntology", 2);
+        let fs_only =
+            MINI_EXPORT.replacen("test:rdfXmlPremiseOntology", "test:fsPremiseOntology", 2);
         let report = run_direct_arm(&fs_only).expect("mini export parses");
         assert_eq!(report.consistency.out_of_scope_total(), 1);
         assert_eq!(report.consistency.pass, 0);

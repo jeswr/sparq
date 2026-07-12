@@ -99,7 +99,10 @@ async fn keyword_expands_to_canonical_sparql_and_is_echoed() {
         "{body}"
     );
     // The frozen legend version is published with the response.
-    assert!(body.contains("\"legendVersion\":\"pkg-keywords/v1\""), "{body}");
+    assert!(
+        body.contains("\"legendVersion\":\"pkg-keywords/v1\""),
+        "{body}"
+    );
     // Lean server build: no V() resolution path, so resolutions is always empty.
     assert!(body.contains("\"resolutions\":[]"), "{body}");
 }

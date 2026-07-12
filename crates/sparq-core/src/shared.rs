@@ -84,7 +84,9 @@ impl SharedGraph {
     /// Wraps an owned [`Graph`] in a shareable handle.
     #[inline]
     pub fn new(graph: Graph) -> Self {
-        Self { inner: Arc::new(RwLock::new(graph)) }
+        Self {
+            inner: Arc::new(RwLock::new(graph)),
+        }
     }
 
     /// A cheap, immutable, point-in-time [`GraphSnapshot`] of the current state — the
@@ -97,7 +99,10 @@ impl SharedGraph {
     /// interior cache the first time a flat graph is frozen; subsequent snapshots are O(overlay).
     #[inline]
     pub fn snapshot(&self) -> GraphSnapshot {
-        self.inner.write().unwrap_or_else(PoisonError::into_inner).snapshot()
+        self.inner
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot()
     }
 
     /// A shared (many-reader) RAII guard for ad-hoc read access. Prefer

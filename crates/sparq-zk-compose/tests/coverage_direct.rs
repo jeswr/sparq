@@ -112,7 +112,11 @@ fn join_prover_toml_renders_multiple_rows_comma_separated() {
         "two active rows must render as a comma-separated array:\n{}",
         got
     );
-    assert!(got.contains("counts_a = \"2\"\n"), "counts_a follows enc_a: {}", got);
+    assert!(
+        got.contains("counts_a = \"2\"\n"),
+        "counts_a follows enc_a: {}",
+        got
+    );
     assert!(got.contains("slot_a = \"2\"\n") && got.contains("slot_b = \"0\"\n"));
 }
 
@@ -139,12 +143,23 @@ fn revoke_prover_toml_renders_exact_body_for_active_index() {
     let index = 0u64;
     let witness = merkle_witness(&snapshot, depth, index).expect("witness");
     assert_eq!(witness.bit, Fr::from(0u64), "index 0 is active (bit unset)");
-    assert_eq!(witness.siblings.len(), depth as usize, "one sibling per level");
+    assert_eq!(
+        witness.siblings.len(),
+        depth as usize,
+        "one sibling per level"
+    );
 
     let challenge = Fr::from(11u64);
     let index_commitment = Fr::from(22u64);
     let blinding = Fr::from(33u64);
-    let got = revoke_prover_toml(&challenge, &root, &index_commitment, index, &blinding, &witness);
+    let got = revoke_prover_toml(
+        &challenge,
+        &root,
+        &index_commitment,
+        index,
+        &blinding,
+        &witness,
+    );
 
     let sibs: Vec<String> = witness
         .siblings
@@ -240,8 +255,15 @@ fn encode_int_literal_is_stable_and_nondegenerate() {
     // `fh("0x0")` would be vacuous (a real encoding never equals the non-canonical
     // `"0x0"`). Compare against the true canonical zero so the check actually bites.
     let canonical_zero = FieldHex(field_to_hex(&Fr::from(0u64)));
-    assert_ne!(canonical_zero, fh("0x0"), "sanity: canonical zero is not the bare \"0x0\"");
-    assert_ne!(a, canonical_zero, "a real encoding is not the zero field element");
+    assert_ne!(
+        canonical_zero,
+        fh("0x0"),
+        "sanity: canonical zero is not the bare \"0x0\""
+    );
+    assert_ne!(
+        a, canonical_zero,
+        "a real encoding is not the zero field element"
+    );
     assert_ne!(a, encode_int_literal(43));
 }
 
@@ -308,7 +330,11 @@ fn prove_without_workspace_is_spawn_error() {
     let prover = CircuitProver::new(nonexistent_dir("prove"));
     let out = nonexistent_dir("prove-out");
     let err = prover
-        .prove(&CircuitId::FilterInt { d: 1 }, "challenge = \"0x1\"\n", &out)
+        .prove(
+            &CircuitId::FilterInt { d: 1 },
+            "challenge = \"0x1\"\n",
+            &out,
+        )
         .expect_err("prove must fail closed without a toolchain");
     assert!(matches!(err, DriverError::Spawn { .. }), "got {:?}", err);
 }
@@ -367,9 +393,14 @@ fn verify_with_uncreatable_workdir_is_io_error() {
 #[test]
 fn binding_mode_challenge_and_holder_key_derivation() {
     let challenge = fh("0x9");
-    let bare = BindingMode::Challenge { challenge: challenge.clone() };
+    let bare = BindingMode::Challenge {
+        challenge: challenge.clone(),
+    };
     assert_eq!(bare.challenge(), &challenge);
-    assert!(bare.holder_key().is_none(), "a bare challenge has no holder key");
+    assert!(
+        bare.holder_key().is_none(),
+        "a bare challenge has no holder key"
+    );
     assert!(bare.holder_key_digest().is_none());
 
     let holder_sk = SecretKey::from_seed(42);
@@ -381,7 +412,11 @@ fn binding_mode_challenge_and_holder_key_derivation() {
         pop: "00".to_string(),
         cryptosuite: "https://sparq.dev/ns/zk#poseidon2-schnorr-v1".to_string(),
     };
-    assert_eq!(pop.challenge(), &challenge, "HolderPop exposes the same challenge");
+    assert_eq!(
+        pop.challenge(),
+        &challenge,
+        "HolderPop exposes the same challenge"
+    );
     let derived = pop.holder_key().expect("valid holder key parses");
     assert_eq!(
         public_key_to_hex(&derived),

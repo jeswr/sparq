@@ -521,9 +521,12 @@ fn all_eval_modes_satisfy_the_oracle() {
         script.push((val(&format!("s{}", ts % 2), (ts % 4) as i32), ts));
     }
     script.push((t("x", "p", "gap"), 90)); // force empty windows between data
-    for mode in
-        [EvalMode::Rebuild, EvalMode::PersistentDict, EvalMode::Delta, EvalMode::Snapshot]
-    {
+    for mode in [
+        EvalMode::Rebuild,
+        EvalMode::PersistentDict,
+        EvalMode::Delta,
+        EvalMode::Snapshot,
+    ] {
         assert_streamed_equals_batch(sparql, spec, mode, 0, &script);
     }
 }

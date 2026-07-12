@@ -45,7 +45,11 @@ fn result_bag_opt(graph: &Graph, q: &str, force_cluster: bool) -> Vec<Row> {
     let full = format!("{}{}", PFX, q);
     let run = || query(graph, &full).unwrap();
     #[cfg(feature = "cluster-materialize")]
-    let r = if force_cluster { sparq_engine::with_test_thresholds(run) } else { run() };
+    let r = if force_cluster {
+        sparq_engine::with_test_thresholds(run)
+    } else {
+        run()
+    };
     #[cfg(not(feature = "cluster-materialize"))]
     let r = {
         let _ = force_cluster;
@@ -62,7 +66,9 @@ fn result_bag_opt(graph: &Graph, q: &str, force_cluster: bool) -> Vec<Row> {
                 .map(|(v, cell)| {
                     (
                         v.clone(),
-                        cell.as_ref().map(|t| format!("{}", t)).unwrap_or_else(|| UNBOUND.to_string()),
+                        cell.as_ref()
+                            .map(|t| format!("{}", t))
+                            .unwrap_or_else(|| UNBOUND.to_string()),
                     )
                 })
                 .collect();
@@ -89,7 +95,10 @@ fn result_bag_clustered(graph: &Graph, q: &str) -> Vec<Row> {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self, n: usize) -> usize {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as usize) % n.max(1)
     }
 }
@@ -117,7 +126,10 @@ fn build_graph(n_classes: usize, n_docs: usize, n_bags: usize, seed: u64) -> Gra
         ));
         // ~80% of docs get a title.
         if rng.next(10) < 8 {
-            nt.push_str(&format!("<http://ex/d{}> <http://purl.org/dc/elements/1.1/title> \"T{}\" .\n", d, d));
+            nt.push_str(&format!(
+                "<http://ex/d{}> <http://purl.org/dc/elements/1.1/title> \"T{}\" .\n",
+                d, d
+            ));
         }
     }
     for b in 0..n_bags {
@@ -125,13 +137,19 @@ fn build_graph(n_classes: usize, n_docs: usize, n_bags: usize, seed: u64) -> Gra
         let refs = rng.next(3);
         for _ in 0..refs {
             let rd = rng.next(n_docs.max(1));
-            nt.push_str(&format!("<http://ex/d{}> <http://purl.org/dc/terms/references> <http://ex/bag{}> .\n", rd, b));
+            nt.push_str(&format!(
+                "<http://ex/d{}> <http://purl.org/dc/terms/references> <http://ex/bag{}> .\n",
+                rd, b
+            ));
         }
         // Each bag has 0..3 members; some docs appear in several bags.
         let members = rng.next(4);
         for _ in 0..members {
             let md = rng.next(n_docs.max(1));
-            nt.push_str(&format!("<http://ex/bag{}> <http://ex/member> <http://ex/d{}> .\n", b, md));
+            nt.push_str(&format!(
+                "<http://ex/bag{}> <http://ex/member> <http://ex/d{}> .\n",
+                b, md
+            ));
         }
     }
     Graph::load_reader(nt.as_bytes(), "ntriples").unwrap()
@@ -165,7 +183,12 @@ fn cluster_path_matches_unclustered_across_random_shapes() {
         let n_classes = 1 + (seed as usize % 4);
         let n_docs = 8 + (seed as usize % 40);
         let n_bags = 4 + (seed as usize % 30);
-        let g = build_graph(n_classes, n_docs, n_bags, seed.wrapping_mul(2654435761).wrapping_add(1));
+        let g = build_graph(
+            n_classes,
+            n_docs,
+            n_bags,
+            seed.wrapping_mul(2654435761).wrapping_add(1),
+        );
         let unbound = result_bag_clustered(&g, q_unbound());
         let bound = result_bag(&g, q_bound());
         assert_eq!(
@@ -207,7 +230,10 @@ fn cluster_path_matches_in_nested_optional_shape() {
              ?doc3 dct:references ?bag3 . ?bag3 ex:member ?doc \
            } FILTER (!bound(?doc3)) }",
     );
-    assert_eq!(unbound, bound, "nested-OPTIONAL q07 shape diverged between cluster and un-clustered plans");
+    assert_eq!(
+        unbound, bound,
+        "nested-OPTIONAL q07 shape diverged between cluster and un-clustered plans"
+    );
 }
 
 /// Multiplicity: a NON-distinct query over a graph with fan-out (a doc in several bags,
@@ -229,8 +255,16 @@ fn cluster_path_preserves_multiplicity() {
     let unbound = result_bag_clustered(&g, q_unbound());
     let bound = result_bag(&g, q_bound());
     // Expect 3 rows (bag1 referenced twice → 2, bag2 once → 1) all binding ?doc=a.
-    assert_eq!(unbound.len(), 3, "multiplicity: expected 3 rows, got {}", unbound.len());
-    assert_eq!(unbound, bound, "multiplicity differed between cluster and un-clustered plans");
+    assert_eq!(
+        unbound.len(),
+        3,
+        "multiplicity: expected 3 rows, got {}",
+        unbound.len()
+    );
+    assert_eq!(
+        unbound, bound,
+        "multiplicity differed between cluster and un-clustered plans"
+    );
 }
 
 /// Mutation check: the differential assertion is NON-vacuous. If we compare against a
@@ -252,7 +286,16 @@ fn differential_is_non_vacuous() {
            ?class rdfs:subClassOf foaf:Document . ?doc rdf:type ?class . ?doc dc:title ?title . \
            ?bag ex:other ?doc . ?doc2 dct:references ?bag }",
     ); // uses ex:other — 0 rows (predicate absent)
-    assert!(!with_member.is_empty(), "sanity: ex:member query should return rows");
-    assert!(with_other.is_empty(), "sanity: ex:other query should return no rows");
-    assert_ne!(with_member, with_other, "mutation check: differential must be able to detect a difference");
+    assert!(
+        !with_member.is_empty(),
+        "sanity: ex:member query should return rows"
+    );
+    assert!(
+        with_other.is_empty(),
+        "sanity: ex:other query should return no rows"
+    );
+    assert_ne!(
+        with_member, with_other,
+        "mutation check: differential must be able to detect a difference"
+    );
 }

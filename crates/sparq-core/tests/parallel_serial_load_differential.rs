@@ -75,18 +75,39 @@ fn assert_loaded_matches_reference(loaded: &Graph, reference: &[[Term; 3]], ctx:
     let reference_g = reference_graph(reference);
 
     // (1) Counts + full dump.
-    assert_eq!(loaded.len(), expected.len(), "{ctx}: triple count != deduped reference");
-    assert_eq!(loaded.dict.len(), reference_g.dict.len(), "{ctx}: distinct-term count diverges");
-    assert_eq!(dump(loaded), expected, "{ctx}: loaded dump != expected triple set");
-    assert_eq!(dump(loaded), dump(&reference_g), "{ctx}: loaded dump != reference-graph dump");
+    assert_eq!(
+        loaded.len(),
+        expected.len(),
+        "{ctx}: triple count != deduped reference"
+    );
+    assert_eq!(
+        loaded.dict.len(),
+        reference_g.dict.len(),
+        "{ctx}: distinct-term count diverges"
+    );
+    assert_eq!(
+        dump(loaded),
+        expected,
+        "{ctx}: loaded dump != expected triple set"
+    );
+    assert_eq!(
+        dump(loaded),
+        dump(&reference_g),
+        "{ctx}: loaded dump != reference-graph dump"
+    );
 
     // (2) Every loaded triple is `contains`-resolvable through the loaded dict (the ids the
     // parse path actually assigned). For IRI/blank subjects we also cross-check that the
     // reference resolves the same term (literal probes are exercised via the dump set above).
     for [s, p, o] in &expected {
         let resolve = |g: &Graph, t: &str| probe_term(t).and_then(|term| g.id_of(&term));
-        if let (Some(ls), Some(lp), Some(lo)) = (resolve(loaded, s), resolve(loaded, p), resolve(loaded, o)) {
-            assert!(loaded.store.contains([ls, lp, lo]), "{ctx}: loaded missing triple {s} {p} {o}");
+        if let (Some(ls), Some(lp), Some(lo)) =
+            (resolve(loaded, s), resolve(loaded, p), resolve(loaded, o))
+        {
+            assert!(
+                loaded.store.contains([ls, lp, lo]),
+                "{ctx}: loaded missing triple {s} {p} {o}"
+            );
         }
         if let Some(term) = probe_term(s) {
             assert_eq!(
@@ -106,7 +127,9 @@ fn assert_loaded_matches_reference(loaded: &Graph, reference: &[[Term; 3]], ctx:
         probe.push(o.clone());
     }
     probe.push(iri("http://nowhere.invalid/absent"));
-    let opts: Vec<Option<&Term>> = std::iter::once(None).chain(probe.iter().map(Some)).collect();
+    let opts: Vec<Option<&Term>> = std::iter::once(None)
+        .chain(probe.iter().map(Some))
+        .collect();
 
     let resolve_opt = |g: &Graph, t: Option<&Term>| -> Option<Option<Id>> {
         match t {
@@ -114,21 +137,22 @@ fn assert_loaded_matches_reference(loaded: &Graph, reference: &[[Term; 3]], ctx:
             Some(t) => g.id_of(t).map(Some),
         }
     };
-    let term_rows = |g: &Graph, sc: &sparq_core::store::Scan, rows: &[[Id; 3]]| -> Vec<[String; 3]> {
-        let mut v: Vec<[String; 3]> = rows
-            .iter()
-            .map(|r| {
-                let t = sc.to_spo(r);
-                [
-                    g.dict.term(t[0]).to_string(),
-                    g.dict.term(t[1]).to_string(),
-                    g.dict.term(t[2]).to_string(),
-                ]
-            })
-            .collect();
-        v.sort();
-        v
-    };
+    let term_rows =
+        |g: &Graph, sc: &sparq_core::store::Scan, rows: &[[Id; 3]]| -> Vec<[String; 3]> {
+            let mut v: Vec<[String; 3]> = rows
+                .iter()
+                .map(|r| {
+                    let t = sc.to_spo(r);
+                    [
+                        g.dict.term(t[0]).to_string(),
+                        g.dict.term(t[1]).to_string(),
+                        g.dict.term(t[2]).to_string(),
+                    ]
+                })
+                .collect();
+            v.sort();
+            v
+        };
     for &s in &opts {
         for &p in &opts {
             for &o in &opts {
@@ -188,10 +212,16 @@ fn probe_term(s: &str) -> Option<Term> {
 fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
     let lit = |v: &str| Term::Literal(oxrdf::Literal::new_simple_literal(v.to_string()));
     let typed = |v: &str, dt: &str| {
-        Term::Literal(oxrdf::Literal::new_typed_literal(v.to_string(), NamedNode::new_unchecked(dt.to_string())))
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            v.to_string(),
+            NamedNode::new_unchecked(dt.to_string()),
+        ))
     };
     let lang = |v: &str, l: &str| {
-        Term::Literal(oxrdf::Literal::new_language_tagged_literal_unchecked(v.to_string(), l.to_string()))
+        Term::Literal(oxrdf::Literal::new_language_tagged_literal_unchecked(
+            v.to_string(),
+            l.to_string(),
+        ))
     };
     let blank = |b: &str| Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string()));
 
@@ -205,24 +235,49 @@ fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
         nt.push_str(&format!("<{s}> <{p}> \"{}\"^^<{xsd_int}> .\n", i % 97));
         reference.push([iri(&s), iri(&p), typed(&(i % 97).to_string(), xsd_int)]);
 
-        nt.push_str(&format!("<{s}> <http://ex/follows> <http://ex/s{}> .\n", (i * 7 + 3) % 211));
-        reference.push([iri(&s), iri("http://ex/follows"), iri(&format!("http://ex/s{}", (i * 7 + 3) % 211))]);
+        nt.push_str(&format!(
+            "<{s}> <http://ex/follows> <http://ex/s{}> .\n",
+            (i * 7 + 3) % 211
+        ));
+        reference.push([
+            iri(&s),
+            iri("http://ex/follows"),
+            iri(&format!("http://ex/s{}", (i * 7 + 3) % 211)),
+        ]);
     }
     // Every remaining record shape, plus an exact-duplicate line and a shared-term crosser.
     nt.push_str("<http://ex/s0> <http://ex/label> \"caf\\u00e9 \\\"q\\\"\"@fr .\n");
-    reference.push([iri("http://ex/s0"), iri("http://ex/label"), lang("café \"q\"", "fr")]);
+    reference.push([
+        iri("http://ex/s0"),
+        iri("http://ex/label"),
+        lang("café \"q\"", "fr"),
+    ]);
     // [OPUS-4.8] (sq-langcase / #1119) A MIXED-CASE language tag: the byte parser must lowercase
     // it (`en-US` -> `en-us`) to agree with the oxttl streaming/serial paths AND this reference
     // (whose tag is the canonical lowercase form). Pins the casing-normalisation parity here too.
     nt.push_str("<http://ex/s0> <http://ex/label> \"hello\"@en-US .\n");
-    reference.push([iri("http://ex/s0"), iri("http://ex/label"), lang("hello", "en-us")]);
+    reference.push([
+        iri("http://ex/s0"),
+        iri("http://ex/label"),
+        lang("hello", "en-us"),
+    ]);
     nt.push_str("<http://ex/s1> <http://ex/note> \"a plain string\" .\n");
-    reference.push([iri("http://ex/s1"), iri("http://ex/note"), lit("a plain string")]);
+    reference.push([
+        iri("http://ex/s1"),
+        iri("http://ex/note"),
+        lit("a plain string"),
+    ]);
     nt.push_str("_:b0 <http://ex/about> <http://ex/s2> .\n");
     reference.push([blank("b0"), iri("http://ex/about"), iri("http://ex/s2")]);
     nt.push_str("<http://ex/s1> <http://ex/note> \"a plain string\" .\n"); // exact duplicate
-    nt.push_str("<http://ex/s0> <http://ex/p0> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n"); // crosser
-    reference.push([iri("http://ex/s0"), iri("http://ex/p0"), typed("0", xsd_int)]);
+    nt.push_str(
+        "<http://ex/s0> <http://ex/p0> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+    ); // crosser
+    reference.push([
+        iri("http://ex/s0"),
+        iri("http://ex/p0"),
+        typed("0", xsd_int),
+    ]);
     (nt, reference)
 }
 
@@ -232,7 +287,9 @@ fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
 /// parallel pre-scan), across many statements so the parallel path actually splits.
 fn synthetic_turtle() -> (String, Vec<[Term; 3]>) {
     let lit = |v: &str| Term::Literal(oxrdf::Literal::new_simple_literal(v.to_string()));
-    let mut ttl = String::from("@prefix ex: <http://ex/> .\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n");
+    let mut ttl = String::from(
+        "@prefix ex: <http://ex/> .\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n",
+    );
     let mut reference: Vec<[Term; 3]> = Vec::new();
     for i in 0..1500u32 {
         let s = format!("http://ex/s{}", i % 97);
@@ -243,16 +300,32 @@ fn synthetic_turtle() -> (String, Vec<[Term; 3]>) {
             i,
             (i * 3 + 1) % 97
         ));
-        reference.push([iri(&s), iri("http://www.w3.org/2000/01/rdf-schema#label"), lit(&format!("item {i}. v1; v2"))]);
-        reference.push([iri(&s), iri("http://ex/follows"), iri(&format!("http://ex/s{}", (i * 3 + 1) % 97))]);
+        reference.push([
+            iri(&s),
+            iri("http://www.w3.org/2000/01/rdf-schema#label"),
+            lit(&format!("item {i}. v1; v2")),
+        ]);
+        reference.push([
+            iri(&s),
+            iri("http://ex/follows"),
+            iri(&format!("http://ex/s{}", (i * 3 + 1) % 97)),
+        ]);
     }
     // An object list (`,`) and a final dotted-literal terminator trap.
     ttl.push_str("ex:hub ex:links ex:a, ex:b, ex:c .\n");
     for o in ["a", "b", "c"] {
-        reference.push([iri("http://ex/hub"), iri("http://ex/links"), iri(&format!("http://ex/{o}"))]);
+        reference.push([
+            iri("http://ex/hub"),
+            iri("http://ex/links"),
+            iri(&format!("http://ex/{o}")),
+        ]);
     }
     ttl.push_str("ex:end rdfs:comment \"trailing dot inside. literal\" .\n");
-    reference.push([iri("http://ex/end"), iri("http://www.w3.org/2000/01/rdf-schema#comment"), lit("trailing dot inside. literal")]);
+    reference.push([
+        iri("http://ex/end"),
+        iri("http://www.w3.org/2000/01/rdf-schema#comment"),
+        lit("trailing dot inside. literal"),
+    ]);
     (ttl, reference)
 }
 
@@ -276,7 +349,8 @@ fn turtle_load_matches_reference() {
 #[test]
 fn ntriples_load_reader_matches_reference() {
     let (nt, reference) = synthetic_nt();
-    let g = Graph::load_reader(std::io::Cursor::new(nt.clone().into_bytes()), "ntriples").expect("reader loads");
+    let g = Graph::load_reader(std::io::Cursor::new(nt.clone().into_bytes()), "ntriples")
+        .expect("reader loads");
     assert_loaded_matches_reference(&g, &reference, "load_reader ntriples");
 
     #[cfg(feature = "parallel")]
@@ -285,7 +359,11 @@ fn ntriples_load_reader_matches_reference() {
             .expect("parallel reader loads");
         assert_loaded_matches_reference(&gp, &reference, "load_reader_parallel ntriples");
         // And the two reader entry points agree with each other at the term level.
-        assert_eq!(dump(&g), dump(&gp), "load_reader vs load_reader_parallel diverge");
+        assert_eq!(
+            dump(&g),
+            dump(&gp),
+            "load_reader vs load_reader_parallel diverge"
+        );
     }
 }
 
@@ -299,7 +377,8 @@ fn ntriples_edge_documents_match_reference() {
     assert_eq!(g.dict.len(), 0, "empty document interns no terms");
 
     // No trailing newline on the final statement.
-    let doc = "<http://ex/a> <http://ex/p> <http://ex/b> .\n<http://ex/c> <http://ex/p> <http://ex/d> .";
+    let doc =
+        "<http://ex/a> <http://ex/p> <http://ex/b> .\n<http://ex/c> <http://ex/p> <http://ex/d> .";
     let g = Graph::load_str(doc, "ntriples").expect("no-trailing-newline loads");
     let reference = vec![
         [iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b")],

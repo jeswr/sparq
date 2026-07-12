@@ -984,10 +984,7 @@ fn datatype_rejects_out_of_range_bounded_integer() {
         ex:S a sh:NodeShape ; sh:targetNode ex:n ;
           sh:property [ sh:path ex:v ; sh:datatype xsd:byte ] .
     "#;
-    let r = run(
-        r#"ex:n ex:v "300"^^xsd:byte , "100"^^xsd:byte ."#,
-        shapes,
-    );
+    let r = run(r#"ex:n ex:v "300"^^xsd:byte , "100"^^xsd:byte ."#, shapes);
     assert!(!r.conforms, "{}", r.to_text());
     // "300" is out of the byte range; "100" is in range.
     assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
@@ -1168,7 +1165,11 @@ fn per_statement_deactivate_leaves_sibling_constraints_live() {
           sh:minLength 5 .
     "#;
     let r = run("ex:x ex:p ex:o .", shapes);
-    assert!(!r.conforms, "the live sh:minLength must still fire: {}", r.to_text());
+    assert!(
+        !r.conforms,
+        "the live sh:minLength must still fire: {}",
+        r.to_text()
+    );
     assert_eq!(
         count_component(&r, "DatatypeConstraintComponent"),
         0,
@@ -1208,7 +1209,11 @@ fn per_statement_deactivate_on_property_constraint() {
         ex:P a sh:PropertyShape ; sh:path ex:q ; sh:minCount 1 .
     "#;
     let r2 = run("ex:n ex:other ex:o .", live);
-    assert!(!r2.conforms, "control must violate minCount: {}", r2.to_text());
+    assert!(
+        !r2.conforms,
+        "control must violate minCount: {}",
+        r2.to_text()
+    );
 }
 
 /// `{| sh:message "…"@en |}` on a single constraint statement sets the result
@@ -1247,7 +1252,8 @@ fn per_statement_severity_override_applies_to_that_constraint() {
     assert!(!r.conforms, "{}", r.to_text());
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     assert_eq!(
-        r.results[0].severity, SH_WARNING,
+        r.results[0].severity,
+        SH_WARNING,
         "the per-statement severity override must apply: {}",
         r.to_text()
     );
@@ -1308,14 +1314,20 @@ fn per_statement_severity_override_survives_sh_node_recursion() {
     "#;
     let r = run("ex:x ex:p ex:o .", shapes);
     assert!(!r.conforms, "{}", r.to_text());
-    assert_eq!(count_component(&r, "NodeConstraintComponent"), 1, "{}", r.to_text());
+    assert_eq!(
+        count_component(&r, "NodeConstraintComponent"),
+        1,
+        "{}",
+        r.to_text()
+    );
     let node_res = r
         .results
         .iter()
         .find(|x| x.source_component.ends_with("NodeConstraintComponent"))
         .expect("node result");
     assert_eq!(
-        node_res.severity, SH_WARNING,
+        node_res.severity,
+        SH_WARNING,
         "the sh:node occurrence's severity override must survive the nested \
          shape evaluation: {}",
         r.to_text()
@@ -1336,14 +1348,20 @@ fn per_statement_severity_override_survives_sh_node_recursion_idfast() {
     // ex:v is an IRI in the data graph (id-resolvable), not an xsd:integer.
     let r = run("ex:n ex:q ex:v .", shapes);
     assert!(!r.conforms, "{}", r.to_text());
-    assert_eq!(count_component(&r, "NodeConstraintComponent"), 1, "{}", r.to_text());
+    assert_eq!(
+        count_component(&r, "NodeConstraintComponent"),
+        1,
+        "{}",
+        r.to_text()
+    );
     let node_res = r
         .results
         .iter()
         .find(|x| x.source_component.ends_with("NodeConstraintComponent"))
         .expect("node result");
     assert_eq!(
-        node_res.severity, SH_WARNING,
+        node_res.severity,
+        SH_WARNING,
         "the id-level sh:node arm must also see the surviving override: {}",
         r.to_text()
     );
@@ -1389,14 +1407,20 @@ fn per_statement_severity_override_survives_sh_not_recursion() {
     // ex:n IS an IRI, so it conforms to the negated shape → sh:not fires.
     let r = run("ex:n ex:p ex:o .", shapes);
     assert!(!r.conforms, "{}", r.to_text());
-    assert_eq!(count_component(&r, "NotConstraintComponent"), 1, "{}", r.to_text());
+    assert_eq!(
+        count_component(&r, "NotConstraintComponent"),
+        1,
+        "{}",
+        r.to_text()
+    );
     let not_res = r
         .results
         .iter()
         .find(|x| x.source_component.ends_with("NotConstraintComponent"))
         .expect("not result");
     assert_eq!(
-        not_res.severity, SH_WARNING,
+        not_res.severity,
+        SH_WARNING,
         "the sh:not occurrence's severity override must survive the nested \
          shape evaluation: {}",
         r.to_text()
@@ -1430,7 +1454,8 @@ fn per_statement_override_on_sh_node_is_occurrence_scoped() {
         .expect("minLength result");
     assert_eq!(node_res.severity, SH_WARNING, "annotated sh:node → Warning");
     assert_eq!(
-        ml.severity, SH_VIOLATION,
+        ml.severity,
+        SH_VIOLATION,
         "un-annotated sibling keeps the default Violation: {}",
         r.to_text()
     );
@@ -1451,9 +1476,15 @@ fn per_statement_override_on_sh_property_does_not_govern_nested_results() {
     "#;
     let r = run("ex:n ex:other ex:o .", shapes);
     assert!(!r.conforms, "{}", r.to_text());
-    assert_eq!(count_component(&r, "MinCountConstraintComponent"), 1, "{}", r.to_text());
     assert_eq!(
-        r.results[0].severity, SH_VIOLATION,
+        count_component(&r, "MinCountConstraintComponent"),
+        1,
+        "{}",
+        r.to_text()
+    );
+    assert_eq!(
+        r.results[0].severity,
+        SH_VIOLATION,
         "the nested shape's result keeps the nested shape's own severity — the \
          outer sh:property annotation must not leak in: {}",
         r.to_text()

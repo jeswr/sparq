@@ -44,7 +44,10 @@ fn lookup3(dict: &Dict, s: &str, p: &str, o: &str) -> Option<[Id; 3]> {
 fn assert_present(dict: &Dict, set: &[[Id; 3]], s: &str, p: &str, o: &str) {
     let want = lookup3(dict, s, p, o)
         .unwrap_or_else(|| panic!("expected-present triple has an unknown term: ({s} {p} {o})"));
-    assert!(set.contains(&want), "expected {s} {p} {o} to be ENTAILED, but it is absent");
+    assert!(
+        set.contains(&want),
+        "expected {s} {p} {o} to be ENTAILED, but it is absent"
+    );
 }
 
 /// Assert `(s,p,o)` is ABSENT from the closure. If any term is unknown the triple
@@ -52,7 +55,10 @@ fn assert_present(dict: &Dict, set: &[[Id; 3]], s: &str, p: &str, o: &str) {
 /// reference up front, so this normally checks genuine set non-membership.
 fn assert_absent(dict: &Dict, set: &[[Id; 3]], s: &str, p: &str, o: &str) {
     if let Some(t) = lookup3(dict, s, p, o) {
-        assert!(!set.contains(&t), "reasoner OVER-ENTAILED: ({s} {p} {o}) must NOT be in the closure");
+        assert!(
+            !set.contains(&t),
+            "reasoner OVER-ENTAILED: ({s} {p} {o}) must NOT be in the closure"
+        );
     }
 }
 
@@ -74,7 +80,10 @@ fn rdfs_does_not_over_entail() {
     // Terms referenced only in NEGATIVE checks must exist so the lookup is a real
     // set-membership test (not a trivially-unknown miss).
     let (plant, reptile) = (ex(&mut dict, "Plant"), ex(&mut dict, "Reptile"));
-    let (sc, ty) = (iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()), iri(&mut dict, rdf::TYPE.as_str()));
+    let (sc, ty) = (
+        iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()),
+        iri(&mut dict, rdf::TYPE.as_str()),
+    );
 
     let mut triples = vec![
         [dog, sc, mammal],
@@ -87,24 +96,84 @@ fn rdfs_does_not_over_entail() {
     materialize_rdfs(&mut dict, &mut triples);
 
     // Sanity: the regime fired (transitive type + subclass).
-    assert_present(&dict, &triples, "http://ex/rex", rdf::TYPE.as_str(), "http://ex/Animal");
-    assert_present(&dict, &triples, "http://ex/Dog", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Animal");
+    assert_present(
+        &dict,
+        &triples,
+        "http://ex/rex",
+        rdf::TYPE.as_str(),
+        "http://ex/Animal",
+    );
+    assert_present(
+        &dict,
+        &triples,
+        "http://ex/Dog",
+        rdfs::SUB_CLASS_OF.as_str(),
+        "http://ex/Animal",
+    );
 
     // NON-entailment:
     // (1) subClassOf is NOT symmetric — Animal ⊑ Dog is never inferred.
-    assert_absent(&dict, &triples, "http://ex/Animal", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Dog");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/Animal",
+        rdfs::SUB_CLASS_OF.as_str(),
+        "http://ex/Dog",
+    );
     // (2) siblings are unrelated — Dog ⊑ Cat (and vice versa) must NOT appear.
-    assert_absent(&dict, &triples, "http://ex/Dog", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Cat");
-    assert_absent(&dict, &triples, "http://ex/Cat", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Dog");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/Dog",
+        rdfs::SUB_CLASS_OF.as_str(),
+        "http://ex/Cat",
+    );
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/Cat",
+        rdfs::SUB_CLASS_OF.as_str(),
+        "http://ex/Dog",
+    );
     // (3) no spurious cross-type: rex (a Dog) is NOT a Cat.
-    assert_absent(&dict, &triples, "http://ex/rex", rdf::TYPE.as_str(), "http://ex/Cat");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/rex",
+        rdf::TYPE.as_str(),
+        "http://ex/Cat",
+    );
     // (4) classes never mentioned in the hierarchy gain no relationships.
-    assert_absent(&dict, &triples, "http://ex/Dog", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Plant");
-    assert_absent(&dict, &triples, "http://ex/rex", rdf::TYPE.as_str(), "http://ex/Reptile");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/Dog",
+        rdfs::SUB_CLASS_OF.as_str(),
+        "http://ex/Plant",
+    );
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/rex",
+        rdf::TYPE.as_str(),
+        "http://ex/Reptile",
+    );
     // (5) RDFS materializes the NON-axiomatic subset: no reflexive subClassOf, no
     //     blanket rdfs:Resource typing (this is the documented design choice).
-    assert_absent(&dict, &triples, "http://ex/Dog", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Dog");
-    assert_absent(&dict, &triples, "http://ex/rex", rdf::TYPE.as_str(), rdfs::RESOURCE.as_str());
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/Dog",
+        rdfs::SUB_CLASS_OF.as_str(),
+        "http://ex/Dog",
+    );
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/rex",
+        rdf::TYPE.as_str(),
+        rdfs::RESOURCE.as_str(),
+    );
 }
 
 /// RDFS domain/range type a subject/object — but ONLY for the asserted property,
@@ -120,19 +189,49 @@ fn rdfs_domain_range_do_not_cross() {
         ex(&mut dict, "alice"),
         ex(&mut dict, "b1"),
     );
-    let (dom, rng) =
-        (iri(&mut dict, rdfs::DOMAIN.as_str()), iri(&mut dict, rdfs::RANGE.as_str()));
-    let mut triples = vec![[authored, dom, author], [authored, rng, book], [alice, authored, b1]];
+    let (dom, rng) = (
+        iri(&mut dict, rdfs::DOMAIN.as_str()),
+        iri(&mut dict, rdfs::RANGE.as_str()),
+    );
+    let mut triples = vec![
+        [authored, dom, author],
+        [authored, rng, book],
+        [alice, authored, b1],
+    ];
     materialize_rdfs(&mut dict, &mut triples);
 
     // Sanity: domain types the subject, range the object.
-    assert_present(&dict, &triples, "http://ex/alice", rdf::TYPE.as_str(), "http://ex/Author");
-    assert_present(&dict, &triples, "http://ex/b1", rdf::TYPE.as_str(), "http://ex/Book");
+    assert_present(
+        &dict,
+        &triples,
+        "http://ex/alice",
+        rdf::TYPE.as_str(),
+        "http://ex/Author",
+    );
+    assert_present(
+        &dict,
+        &triples,
+        "http://ex/b1",
+        rdf::TYPE.as_str(),
+        "http://ex/Book",
+    );
 
     // NON-entailment: domain/range do NOT swap — the subject is not a Book, the
     // object is not an Author.
-    assert_absent(&dict, &triples, "http://ex/alice", rdf::TYPE.as_str(), "http://ex/Book");
-    assert_absent(&dict, &triples, "http://ex/b1", rdf::TYPE.as_str(), "http://ex/Author");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/alice",
+        rdf::TYPE.as_str(),
+        "http://ex/Book",
+    );
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/b1",
+        rdf::TYPE.as_str(),
+        "http://ex/Author",
+    );
 }
 
 // ============================== OWL-RL ==================================================
@@ -156,8 +255,19 @@ fn owl_rl_does_not_fabricate_same_as() {
 
     // No equality anywhere: no individual is sameAs another (or itself — OWL-RL
     // does not emit reflexive sameAs here).
-    for (a, b) in [("alice", "bob"), ("alice", "carol"), ("bob", "carol"), ("alice", "alice")] {
-        assert_absent(&dict, &triples, &format!("http://ex/{a}"), &format!("{OWL}sameAs"), &format!("http://ex/{b}"));
+    for (a, b) in [
+        ("alice", "bob"),
+        ("alice", "carol"),
+        ("bob", "carol"),
+        ("alice", "alice"),
+    ] {
+        assert_absent(
+            &dict,
+            &triples,
+            &format!("http://ex/{a}"),
+            &format!("{OWL}sameAs"),
+            &format!("http://ex/{b}"),
+        );
     }
     let _ = same_as;
 }
@@ -188,8 +298,18 @@ fn owl_rl_functional_property_is_scoped() {
 
     // Sanity (prp-fp): alice's two fathers are merged — sameAs in SOME direction
     // (entity rewriting canonicalizes, so check both orientations).
-    let jim_james = lookup3(&dict, "http://ex/jim", &format!("{OWL}sameAs"), "http://ex/james");
-    let james_jim = lookup3(&dict, "http://ex/james", &format!("{OWL}sameAs"), "http://ex/jim");
+    let jim_james = lookup3(
+        &dict,
+        "http://ex/jim",
+        &format!("{OWL}sameAs"),
+        "http://ex/james",
+    );
+    let james_jim = lookup3(
+        &dict,
+        "http://ex/james",
+        &format!("{OWL}sameAs"),
+        "http://ex/jim",
+    );
     assert!(
         jim_james.is_some_and(|t| triples.contains(&t))
             || james_jim.is_some_and(|t| triples.contains(&t)),
@@ -198,8 +318,20 @@ fn owl_rl_functional_property_is_scoped() {
 
     // NON-entailment: sharing a (functional) father does NOT make the children
     // equal — alice sameAs bob must never be derived.
-    assert_absent(&dict, &triples, "http://ex/alice", &format!("{OWL}sameAs"), "http://ex/bob");
-    assert_absent(&dict, &triples, "http://ex/bob", &format!("{OWL}sameAs"), "http://ex/alice");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/alice",
+        &format!("{OWL}sameAs"),
+        "http://ex/bob",
+    );
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/bob",
+        &format!("{OWL}sameAs"),
+        "http://ex/alice",
+    );
 }
 
 /// OWL-RL must not type individuals into classes they were never (directly or via
@@ -217,21 +349,58 @@ fn owl_rl_no_spurious_type_or_symmetry() {
         ex(&mut dict, "alice"),
         ex(&mut dict, "bob"),
     );
-    let (sc, ty) = (iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()), iri(&mut dict, rdf::TYPE.as_str()));
-    let mut triples = vec![[person, sc, agent], [alice, ty, person], [alice, likes, bob]];
+    let (sc, ty) = (
+        iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()),
+        iri(&mut dict, rdf::TYPE.as_str()),
+    );
+    let mut triples = vec![
+        [person, sc, agent],
+        [alice, ty, person],
+        [alice, likes, bob],
+    ];
     materialize_owl_rl(&mut dict, &mut triples);
 
     // Sanity: subclass typing still fires under OWL-RL (it subsumes RDFS).
-    assert_present(&dict, &triples, "http://ex/alice", rdf::TYPE.as_str(), "http://ex/Agent");
+    assert_present(
+        &dict,
+        &triples,
+        "http://ex/alice",
+        rdf::TYPE.as_str(),
+        "http://ex/Agent",
+    );
 
     // NON-entailment:
     // (1) `likes` is not symmetric — (bob likes alice) is NOT derived.
-    assert_absent(&dict, &triples, "http://ex/bob", "http://ex/likes", "http://ex/alice");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/bob",
+        "http://ex/likes",
+        "http://ex/alice",
+    );
     // (2) bob gets no type from being liked (no domain/range on `likes`).
-    assert_absent(&dict, &triples, "http://ex/bob", rdf::TYPE.as_str(), "http://ex/Person");
-    assert_absent(&dict, &triples, "http://ex/bob", rdf::TYPE.as_str(), "http://ex/Agent");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/bob",
+        rdf::TYPE.as_str(),
+        "http://ex/Person",
+    );
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/bob",
+        rdf::TYPE.as_str(),
+        "http://ex/Agent",
+    );
     // (3) no membership in an unrelated class.
-    assert_absent(&dict, &triples, "http://ex/alice", rdf::TYPE.as_str(), "http://ex/Vehicle");
+    assert_absent(
+        &dict,
+        &triples,
+        "http://ex/alice",
+        rdf::TYPE.as_str(),
+        "http://ex/Vehicle",
+    );
     let _ = vehicle;
 }
 
@@ -243,7 +412,13 @@ fn n3_closure_strings(src: &str) -> std::collections::HashSet<(String, String, S
     let triples = reason_n3(&mut d, src).expect("N3 reasoning failed");
     triples
         .iter()
-        .map(|[s, p, o]| (d.term(*s).to_string(), d.term(*p).to_string(), d.term(*o).to_string()))
+        .map(|[s, p, o]| {
+            (
+                d.term(*s).to_string(),
+                d.term(*p).to_string(),
+                d.term(*o).to_string(),
+            )
+        })
         .collect()
 }
 
@@ -271,8 +446,14 @@ fn n3_rule_does_not_fire_in_reverse() {
     // (1) the rule is NOT bidirectional — having an ancestor does not derive a
     //     parent edge in reverse, and no ancestor edge appears for the reverse
     //     pair.
-    assert!(!c.contains(&t(&ex("b"), &ex("parent"), &ex("a"))), "rule must not run in reverse");
-    assert!(!c.contains(&t(&ex("b"), &ex("ancestor"), &ex("a"))), "no reverse ancestor edge");
+    assert!(
+        !c.contains(&t(&ex("b"), &ex("parent"), &ex("a"))),
+        "rule must not run in reverse"
+    );
+    assert!(
+        !c.contains(&t(&ex("b"), &ex("ancestor"), &ex("a"))),
+        "no reverse ancestor edge"
+    );
     // (2) :ancestor is NOT (silently) transitive — no rule states it, so a single
     //     parent edge yields no chained ancestor.
     assert!(
@@ -301,9 +482,15 @@ fn n3_unmet_premise_yields_no_conclusion() {
             .any(|(s, p, _)| s == &format!("<http://ex/{subj}>") && p == "<http://ex/flag>")
     };
     // Sanity: the satisfied guard fires for :large.
-    assert!(big("large"), "math:greaterThan 10 holds for 42 — :large :flag should fire");
+    assert!(
+        big("large"),
+        "math:greaterThan 10 holds for 42 — :large :flag should fire"
+    );
     // NON-entailment: the FAILED guard (3 > 10 is false) fires nothing for :small.
-    assert!(!big("small"), "math:greaterThan 10 is false for 3 — :small must get no :flag");
+    assert!(
+        !big("small"),
+        "math:greaterThan 10 is false for 3 — :small must get no :flag"
+    );
 }
 
 /// N3 over-firing guard: a rule with two premise atoms must require BOTH; a
@@ -323,6 +510,12 @@ fn n3_conjunctive_premise_requires_all_atoms() {
         c.iter()
             .any(|(s, p, _)| s == &format!("<http://ex/{subj}>") && p == "<http://ex/ok>")
     };
-    assert!(ok("node2"), "node2 satisfies both premise atoms — should derive :ok");
-    assert!(!ok("node1"), "node1 satisfies only one atom — must NOT derive :ok");
+    assert!(
+        ok("node2"),
+        "node2 satisfies both premise atoms — should derive :ok"
+    );
+    assert!(
+        !ok("node1"),
+        "node1 satisfies only one atom — must NOT derive :ok"
+    );
 }

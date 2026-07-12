@@ -52,7 +52,10 @@ fn render_default(quads: &[RdfQuad]) -> String {
 
 #[test]
 fn rdf_term_iri_constructor() {
-    assert_eq!(RdfTerm::iri("http://e/x"), RdfTerm::Iri("http://e/x".to_string()));
+    assert_eq!(
+        RdfTerm::iri("http://e/x"),
+        RdfTerm::Iri("http://e/x".to_string())
+    );
 }
 
 #[test]
@@ -171,7 +174,10 @@ fn use_rdf_type_keeps_rdf_type_as_a_property() {
     opts.use_rdf_type = true;
     assert_eq!(
         render(&quads, &opts),
-        format!(r#"[{{"@id":"http://e/s","{}type":[{{"@id":"http://e/T"}}]}}]"#, RDF_NS)
+        format!(
+            r#"[{{"@id":"http://e/s","{}type":[{{"@id":"http://e/T"}}]}}]"#,
+            RDF_NS
+        )
     );
 }
 
@@ -179,8 +185,16 @@ fn use_rdf_type_keeps_rdf_type_as_a_property() {
 fn literal_forms_under_default_options() {
     let s = RdfTerm::iri("http://e/s");
     let quads = [
-        q(s.clone(), RdfTerm::iri("http://e/a"), RdfTerm::literal("plain")),
-        q(s.clone(), RdfTerm::iri("http://e/b"), RdfTerm::lang_literal("English", "en")),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/a"),
+            RdfTerm::literal("plain"),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/b"),
+            RdfTerm::lang_literal("English", "en"),
+        ),
         q(
             s.clone(),
             RdfTerm::iri("http://e/c"),
@@ -229,26 +243,74 @@ fn native_types_cover_the_full_xsd_lexical_edge_set() {
     let quads = [
         // Booleans: the xsd lexical space is {true, false, 1, 0} (fromRdf/0027);
         // "true" and "1" convert to the SAME native value, so they deduplicate.
-        q(s.clone(), RdfTerm::iri("http://e/b1"), RdfTerm::typed_literal("true", xsd("boolean"))),
-        q(s.clone(), RdfTerm::iri("http://e/b1"), RdfTerm::typed_literal("1", xsd("boolean"))),
-        q(s.clone(), RdfTerm::iri("http://e/b2"), RdfTerm::typed_literal("0", xsd("boolean"))),
-        q(s.clone(), RdfTerm::iri("http://e/b3"), RdfTerm::typed_literal("True", xsd("boolean"))),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/b1"),
+            RdfTerm::typed_literal("true", xsd("boolean")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/b1"),
+            RdfTerm::typed_literal("1", xsd("boolean")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/b2"),
+            RdfTerm::typed_literal("0", xsd("boolean")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/b3"),
+            RdfTerm::typed_literal("True", xsd("boolean")),
+        ),
         // Integers canonicalize (sign/leading zeros); invalid forms stay typed.
-        q(s.clone(), RdfTerm::iri("http://e/i1"), RdfTerm::typed_literal("+007", xsd("integer"))),
-        q(s.clone(), RdfTerm::iri("http://e/i2"), RdfTerm::typed_literal("-0", xsd("integer"))),
-        q(s.clone(), RdfTerm::iri("http://e/i3"), RdfTerm::typed_literal("notnative", xsd("integer"))),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/i1"),
+            RdfTerm::typed_literal("+007", xsd("integer")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/i2"),
+            RdfTerm::typed_literal("-0", xsd("integer")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/i3"),
+            RdfTerm::typed_literal("notnative", xsd("integer")),
+        ),
         // Doubles: valid finite forms convert; INF/NaN/overflow stay typed strings.
-        q(s.clone(), RdfTerm::iri("http://e/d1"), RdfTerm::typed_literal("1.1E-1", xsd("double"))),
-        q(s.clone(), RdfTerm::iri("http://e/d2"), RdfTerm::typed_literal("+INF", xsd("double"))),
-        q(s.clone(), RdfTerm::iri("http://e/d3"), RdfTerm::typed_literal("NaN", xsd("double"))),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/d1"),
+            RdfTerm::typed_literal("1.1E-1", xsd("double")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/d2"),
+            RdfTerm::typed_literal("+INF", xsd("double")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/d3"),
+            RdfTerm::typed_literal("NaN", xsd("double")),
+        ),
         q(
             s.clone(),
             RdfTerm::iri("http://e/d4"),
             RdfTerm::typed_literal("0.1e999999999999999", xsd("double")),
         ),
         // Non-native numeric datatypes (xsd:decimal) always stay typed strings.
-        q(s.clone(), RdfTerm::iri("http://e/n1"), RdfTerm::typed_literal("1.1", xsd("decimal"))),
-        q(s.clone(), RdfTerm::iri("http://e/s1"), RdfTerm::typed_literal("str", xsd("string"))),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/n1"),
+            RdfTerm::typed_literal("1.1", xsd("decimal")),
+        ),
+        q(
+            s.clone(),
+            RdfTerm::iri("http://e/s1"),
+            RdfTerm::typed_literal("str", xsd("string")),
+        ),
     ];
     assert_eq!(
         render(&quads, &opts),
@@ -392,7 +454,11 @@ fn i18n_datatype_is_not_special_in_compound_literal_mode() {
 fn compound_literal_quads(language: Option<&str>) -> Vec<RdfQuad> {
     let cl = RdfTerm::blank("cl1");
     let mut quads = vec![
-        q(RdfTerm::iri("http://e/a"), RdfTerm::iri("http://e/label"), cl.clone()),
+        q(
+            RdfTerm::iri("http://e/a"),
+            RdfTerm::iri("http://e/label"),
+            cl.clone(),
+        ),
         q(cl.clone(), rdf("value"), RdfTerm::literal("en-US")),
     ];
     if let Some(lang) = language {
@@ -456,8 +522,16 @@ fn shared_compound_literal_is_not_converted() {
         RdfTerm::blank("cl1"),
     ));
     let out = render(&quads, &opts);
-    assert!(out.contains(r#"{"@id":"_:cl1","#), "cl node must stay: {}", out);
-    assert!(!out.contains("@direction\":"), "no @direction value object: {}", out);
+    assert!(
+        out.contains(r#"{"@id":"_:cl1","#),
+        "cl node must stay: {}",
+        out
+    );
+    assert!(
+        !out.contains("@direction\":"),
+        "no @direction value object: {}",
+        out
+    );
 }
 
 // ── rdf:List reconstruction ─────────────────────────────────────────────────────
@@ -508,7 +582,11 @@ fn direct_nil_references_become_empty_lists() {
     // fromRdf/0026 + li01: EVERY rdf:nil reference converts, whatever the property.
     let quads = [
         q(RdfTerm::iri("http://e/s"), rdf("first"), rdf("nil")),
-        q(RdfTerm::iri("http://e/s"), RdfTerm::iri("http://e/p"), rdf("nil")),
+        q(
+            RdfTerm::iri("http://e/s"),
+            RdfTerm::iri("http://e/p"),
+            rdf("nil"),
+        ),
     ];
     assert_eq!(
         render_default(&quads),
@@ -572,19 +650,35 @@ fn cell_with_extra_property_stays_a_plain_node() {
         "nil rest still becomes the empty list: {}",
         out
     );
-    assert!(!out.contains(r#""@list":[{"@value":"a"}]"#), "must NOT collapse: {}", out);
+    assert!(
+        !out.contains(r#""@list":[{"@value":"a"}]"#),
+        "must NOT collapse: {}",
+        out
+    );
 }
 
 #[test]
 fn doubly_referenced_cell_breaks_the_chain() {
     let mut quads = vec![
-        q(RdfTerm::iri("http://e/s"), RdfTerm::iri("http://e/p"), RdfTerm::blank("l0")),
+        q(
+            RdfTerm::iri("http://e/s"),
+            RdfTerm::iri("http://e/p"),
+            RdfTerm::blank("l0"),
+        ),
         // A second reference to l0 → referenced twice → chain not convertible.
-        q(RdfTerm::iri("http://e/t"), RdfTerm::iri("http://e/q"), RdfTerm::blank("l0")),
+        q(
+            RdfTerm::iri("http://e/t"),
+            RdfTerm::iri("http://e/q"),
+            RdfTerm::blank("l0"),
+        ),
     ];
     quads.extend(cell("l0", RdfTerm::literal("a"), rdf("nil")));
     let out = render_default(&quads);
-    assert!(out.contains(r#""@id":"_:l0""#), "shared cell must stay: {}", out);
+    assert!(
+        out.contains(r#""@id":"_:l0""#),
+        "shared cell must stay: {}",
+        out
+    );
 }
 
 #[test]
@@ -600,11 +694,31 @@ fn cross_graph_shared_cell_stays_plain() {
         RdfTerm::blank("z0"),
         g.clone(),
     )];
-    quads.push(qg(RdfTerm::blank("z0"), rdf("first"), RdfTerm::literal("cell-A"), g.clone()));
-    quads.push(qg(RdfTerm::blank("z0"), rdf("rest"), RdfTerm::blank("z1"), g.clone()));
-    quads.push(qg(RdfTerm::blank("z1"), rdf("first"), RdfTerm::literal("cell-B"), g.clone()));
+    quads.push(qg(
+        RdfTerm::blank("z0"),
+        rdf("first"),
+        RdfTerm::literal("cell-A"),
+        g.clone(),
+    ));
+    quads.push(qg(
+        RdfTerm::blank("z0"),
+        rdf("rest"),
+        RdfTerm::blank("z1"),
+        g.clone(),
+    ));
+    quads.push(qg(
+        RdfTerm::blank("z1"),
+        rdf("first"),
+        RdfTerm::literal("cell-B"),
+        g.clone(),
+    ));
     quads.push(qg(RdfTerm::blank("z1"), rdf("rest"), rdf("nil"), g.clone()));
-    quads.push(qg(RdfTerm::iri("http://e/x"), RdfTerm::iri("http://e/p"), RdfTerm::blank("z1"), g1));
+    quads.push(qg(
+        RdfTerm::iri("http://e/x"),
+        RdfTerm::iri("http://e/p"),
+        RdfTerm::blank("z1"),
+        g1,
+    ));
     assert_eq!(
         render_default(&quads),
         concat!(
@@ -623,10 +737,25 @@ fn same_graph_duplicate_reference_still_collapses() {
     // cell is still referenced exactly once and the list collapses.
     let g = RdfTerm::iri("http://e/G");
     let mut quads = vec![
-        qg(RdfTerm::iri("http://e/z"), RdfTerm::iri("http://e/q"), RdfTerm::blank("z0"), g.clone()),
-        qg(RdfTerm::iri("http://e/z"), RdfTerm::iri("http://e/q"), RdfTerm::blank("z0"), g.clone()),
+        qg(
+            RdfTerm::iri("http://e/z"),
+            RdfTerm::iri("http://e/q"),
+            RdfTerm::blank("z0"),
+            g.clone(),
+        ),
+        qg(
+            RdfTerm::iri("http://e/z"),
+            RdfTerm::iri("http://e/q"),
+            RdfTerm::blank("z0"),
+            g.clone(),
+        ),
     ];
-    quads.push(qg(RdfTerm::blank("z0"), rdf("first"), RdfTerm::literal("cell-A"), g.clone()));
+    quads.push(qg(
+        RdfTerm::blank("z0"),
+        rdf("first"),
+        RdfTerm::literal("cell-A"),
+        g.clone(),
+    ));
     quads.push(qg(RdfTerm::blank("z0"), rdf("rest"), rdf("nil"), g));
     assert_eq!(
         render_default(&quads),
@@ -672,10 +801,17 @@ fn named_graphs_nest_under_graph_name_nodes() {
 #[test]
 fn rdf_nil_as_a_subject_is_emitted() {
     // fromRdf/0023: rdf:nil with its own properties is an ordinary node.
-    let quads = [q(rdf("nil"), RdfTerm::iri("http://e/foo"), RdfTerm::iri("http://e/bar"))];
+    let quads = [q(
+        rdf("nil"),
+        RdfTerm::iri("http://e/foo"),
+        RdfTerm::iri("http://e/bar"),
+    )];
     assert_eq!(
         render_default(&quads),
-        format!(r#"[{{"@id":"{}nil","http://e/foo":[{{"@id":"http://e/bar"}}]}}]"#, RDF_NS)
+        format!(
+            r#"[{{"@id":"{}nil","http://e/foo":[{{"@id":"http://e/bar"}}]}}]"#,
+            RDF_NS
+        )
     );
 }
 
@@ -683,8 +819,16 @@ fn rdf_nil_as_a_subject_is_emitted() {
 fn non_rdf_quads_are_ignored_and_generalized_predicates_accepted() {
     let quads = [
         // Literal subject / predicate / graph name: not RDF — ignored.
-        q(RdfTerm::literal("s"), RdfTerm::iri("http://e/p"), RdfTerm::literal("o")),
-        q(RdfTerm::iri("http://e/s"), RdfTerm::literal("p"), RdfTerm::literal("o")),
+        q(
+            RdfTerm::literal("s"),
+            RdfTerm::iri("http://e/p"),
+            RdfTerm::literal("o"),
+        ),
+        q(
+            RdfTerm::iri("http://e/s"),
+            RdfTerm::literal("p"),
+            RdfTerm::literal("o"),
+        ),
         qg(
             RdfTerm::iri("http://e/s"),
             RdfTerm::iri("http://e/p"),
@@ -709,8 +853,16 @@ fn non_rdf_quads_are_ignored_and_generalized_predicates_accepted() {
 #[test]
 fn ordered_flag_does_not_change_the_always_sorted_output() {
     let quads = [
-        q(RdfTerm::iri("http://e/b"), RdfTerm::iri("http://e/p"), RdfTerm::literal("2")),
-        q(RdfTerm::iri("http://e/a"), RdfTerm::iri("http://e/p"), RdfTerm::literal("1")),
+        q(
+            RdfTerm::iri("http://e/b"),
+            RdfTerm::iri("http://e/p"),
+            RdfTerm::literal("2"),
+        ),
+        q(
+            RdfTerm::iri("http://e/a"),
+            RdfTerm::iri("http://e/p"),
+            RdfTerm::literal("1"),
+        ),
     ];
     let mut ordered = FromRdfOptions::default();
     ordered.ordered = true;

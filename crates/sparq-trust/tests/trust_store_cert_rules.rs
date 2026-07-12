@@ -30,10 +30,10 @@
 #![cfg(all(feature = "store", feature = "cert-graph"))]
 
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
-use sparq_trust::graph::{CertScope, Certification, certification_message};
-use sparq_trust::policy::{ControlGate, TrustRule, parse_policy};
+use sparq_trust::graph::{certification_message, CertScope, Certification};
+use sparq_trust::policy::{parse_policy, ControlGate, TrustRule};
 use sparq_trust::store::{TrustDocument, TrustLayer, TrustStore};
-use sparq_zk::sig::{SecretKey, public_key_to_hex};
+use sparq_zk::sig::{public_key_to_hex, SecretKey};
 
 // ── Shared constants ────────────────────────────────────────────────────────
 
@@ -277,7 +277,7 @@ fn reauthored_window_changes_policy_version_and_rederive_fails_closed_on_time() 
     // Verify fail-closed on time: at now > cert_short.valid_until, the short cert
     // contributes nothing to effective_rules_at.
     let now_past_expiry = 600_000i64; // > 500_000 valid_until of cert_short
-    let now_valid = 400_000i64;       // < 500_000 valid_until of cert_short
+    let now_valid = 400_000i64; // < 500_000 valid_until of cert_short
 
     let eff_expired = store_short.effective_rules_at(&target, now_past_expiry);
     let eff_valid = store_short.effective_rules_at(&target, now_valid);
@@ -323,7 +323,12 @@ fn zero_cert_byte_identity() {
     // Store built with TrustDocument::new (no cert-graph awareness).
     let mut store_new = TrustStore::new();
     store_new
-        .put(TrustDocument::new(TrustLayer::ServerWide, 1, rules.clone(), gate()))
+        .put(TrustDocument::new(
+            TrustLayer::ServerWide,
+            1,
+            rules.clone(),
+            gate(),
+        ))
         .unwrap();
 
     // Store built with TrustDocument::with_certifications + empty cert slice.
@@ -424,11 +429,17 @@ fn cert_derived_rule_is_narrowed_by_per_acr() {
 
     // We expect: 1 direct rule (gov, P30D, narrowed to /docs/ scope) + 1 derived (dvs, narrowed).
     // The per-`.acr` can only NARROW — it cannot broaden the ceiling.
-    assert!(eff.len() >= 2, "at least: direct gov rule + cert-derived dvs rule");
+    assert!(
+        eff.len() >= 2,
+        "at least: direct gov rule + cert-derived dvs rule"
+    );
 
     // Find the cert-derived rule (source == CERTIFIED).
     let derived = eff.iter().find(|r| r.source.as_str() == CERTIFIED);
-    assert!(derived.is_some(), "the cert-derived rule must appear in effective_rules");
+    assert!(
+        derived.is_some(),
+        "the cert-derived rule must appear in effective_rules"
+    );
     let derived = derived.unwrap();
 
     // The derived rule must be NARROWED by the per-.acr: no fresher than P7D.

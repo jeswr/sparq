@@ -416,8 +416,7 @@ mod tests {
     /// The committed recorded sub-agent transcript (a FABRICATED example of a cheap model's
     /// raw stdout for the `openalex-batch.json` papers). Replayed so tests make ZERO model
     /// calls; deliberately adversarial to exercise the defensive caps.
-    const TRANSCRIPT: &str =
-        include_str!("../../fixtures/literature/extract-live-transcript.txt");
+    const TRANSCRIPT: &str = include_str!("../../fixtures/literature/extract-live-transcript.txt");
 
     fn stubs() -> Vec<SourceStub> {
         let (stubs, _) = parse_openalex_batch(crate::literature::FIXTURE_OPENALEX_BATCH).unwrap();
@@ -444,10 +443,17 @@ mod tests {
             p.contains("may NEVER assert \"Proven\""),
             "instructs the closed no-Proven vocabulary"
         );
-        assert!(p.contains("VERBATIM span"), "instructs verbatim justification");
+        assert!(
+            p.contains("VERBATIM span"),
+            "instructs verbatim justification"
+        );
         // Every source stub appears (its content-addressed IRI + abstract).
         for s in &stubs {
-            assert!(p.contains(&s.source_iri()), "prompt lists {}", s.source_iri());
+            assert!(
+                p.contains(&s.source_iri()),
+                "prompt lists {}",
+                s.source_iri()
+            );
             assert!(p.contains(&s.abstract_text), "prompt carries the abstract");
         }
     }
@@ -482,7 +488,9 @@ mod tests {
         assert_eq!(cands.len(), 3, "the fabricated over-claim is rejected");
         // INVARIANT: no survivor asserts Proven, whatever the model claimed.
         assert!(
-            cands.iter().all(|c| !c.assurance.eq_ignore_ascii_case("Proven")),
+            cands
+                .iter()
+                .all(|c| !c.assurance.eq_ignore_ascii_case("Proven")),
             "no survivor is Proven"
         );
         // INVARIANT: every survivor's confidence is clamped to the machine ceiling.
@@ -505,9 +513,9 @@ mod tests {
         );
         // The fabricated over-claim is gone.
         assert!(
-            !cands
-                .iter()
-                .any(|c| c.justification.contains("machine-checked soundness theorem")),
+            !cands.iter().any(|c| c
+                .justification
+                .contains("machine-checked soundness theorem")),
             "the fabricated justification was rejected"
         );
     }
@@ -571,8 +579,14 @@ mod tests {
         let stubs = stubs();
         let ex = LiveExtractor::new(FakeRunner(Ok(TRANSCRIPT.to_string())));
         let cands = ex.extract(&stubs).unwrap();
-        assert_eq!(cands.len(), 3, "same 3 capped survivors as parse_transcript");
-        assert!(cands.iter().all(|c| c.confidence <= MACHINE_CONFIDENCE_CEILING));
+        assert_eq!(
+            cands.len(),
+            3,
+            "same 3 capped survivors as parse_transcript"
+        );
+        assert!(cands
+            .iter()
+            .all(|c| c.confidence <= MACHINE_CONFIDENCE_CEILING));
     }
 
     #[test]
@@ -589,7 +603,10 @@ mod tests {
         let stubs = stubs();
         // The runner "succeeds" but returns junk with no JSON -> Err, not Ok(vec![]).
         let ex = LiveExtractor::new(FakeRunner(Ok("I could not comply".to_string())));
-        assert!(ex.extract(&stubs).is_err(), "no-JSON transcript is an error");
+        assert!(
+            ex.extract(&stubs).is_err(),
+            "no-JSON transcript is an error"
+        );
     }
 
     #[test]
@@ -609,7 +626,11 @@ mod tests {
         let replay = RecordedExtractor::from_tape(json).expect("transcript JSON is a valid tape");
         let stubs = stubs();
         let raw = replay.extract(&stubs).unwrap();
-        assert_eq!(raw.len(), 4, "the raw tape keeps every candidate (no caps applied)");
+        assert_eq!(
+            raw.len(),
+            4,
+            "the raw tape keeps every candidate (no caps applied)"
+        );
         assert!(
             raw.iter().any(|c| c.assurance == "Proven"),
             "the raw tape preserves the model's Proven over-claim (caps live in LiveExtractor)"
@@ -662,7 +683,11 @@ mod tests {
 
             std::env::set_var(EXTRACT_CMD_ENV, "cat");
             let r = CommandRunner::from_env().expect("a set command constructs the runner");
-            assert_eq!(r.run("ping").unwrap(), "ping", "the configured command runs");
+            assert_eq!(
+                r.run("ping").unwrap(),
+                "ping",
+                "the configured command runs"
+            );
 
             match saved {
                 Some(v) => std::env::set_var(EXTRACT_CMD_ENV, v),

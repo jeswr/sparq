@@ -121,7 +121,12 @@ fn persist_store(state: &AppState, store: &Store) -> Result<(), String> {
 
 /// A JSON `200` (the list/get/invoke success shape).
 fn json_ok(body: String) -> Response {
-    text_response(StatusCode::OK, "application/json; charset=utf-8", body, false)
+    text_response(
+        StatusCode::OK,
+        "application/json; charset=utf-8",
+        body,
+        false,
+    )
 }
 
 /// The shared "surface off" refusal: the same structured 404 the other double-opt-in
@@ -357,7 +362,9 @@ mod tests {
         assert_eq!(store["t1"].kind(), "query");
         // Fail-closed: not-JSON, not-an-array, an invalid definition, duplicate names.
         std::fs::write(&path, "not json").unwrap();
-        assert!(load_store(Some(&path)).unwrap_err().contains("not valid JSON"));
+        assert!(load_store(Some(&path))
+            .unwrap_err()
+            .contains("not valid JSON"));
         std::fs::write(&path, r#"{"name":"t1"}"#).unwrap();
         assert!(load_store(Some(&path)).unwrap_err().contains("array"));
         std::fs::write(&path, r#"[{"name":"t1","text":"NOT SPARQL"}]"#).unwrap();

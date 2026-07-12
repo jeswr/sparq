@@ -14,8 +14,8 @@
 
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_rsp::{
-    ContinuousAsk, ContinuousConstruct, ContinuousMultiQuery, ContinuousQuery, EvalMode, R2S,
-    RspqlQuery, TimestampedTriple, TripleStream, Window, WindowSpec, WindowedStream,
+    ContinuousAsk, ContinuousConstruct, ContinuousMultiQuery, ContinuousQuery, EvalMode,
+    RspqlQuery, TimestampedTriple, TripleStream, Window, WindowSpec, WindowedStream, R2S,
 };
 
 // ───────────────────────────────────────────────────── helpers
@@ -55,7 +55,10 @@ fn triple_stream_len_is_empty_items_push_item() {
     assert_eq!(s.len(), 1);
     assert!(!s.is_empty());
 
-    let item = TimestampedTriple { triple: t("s", "p", "b"), ts: 2 };
+    let item = TimestampedTriple {
+        triple: t("s", "p", "b"),
+        ts: 2,
+    };
     s.push_item(item.clone());
     assert_eq!(s.len(), 2);
 
@@ -146,14 +149,21 @@ fn advance_closes_empty_window_without_inserting() {
     let mut ws: WindowedStream = WindowedStream::empty(WindowSpec::time(10, 10));
     // push one triple into [0,10)
     ws.push(t("s", "p", "a"), 3);
-    assert!(ws.take_closed().is_empty(), "watermark 3 < 10, no close yet");
+    assert!(
+        ws.take_closed().is_empty(),
+        "watermark 3 < 10, no close yet"
+    );
     // advance to ts=10 (watermark 10 >= 10): closes [0,10) even though advance
     // inserts no triple
     ws.advance(10);
     let closed = ws.take_closed();
     assert_eq!(closed.len(), 1, "advance to 10 closes [0,10)");
     assert_eq!((closed[0].start, closed[0].end), (0, 10));
-    assert_eq!(objs(&closed[0]), ["a"], "content is the earlier push, not advance");
+    assert_eq!(
+        objs(&closed[0]),
+        ["a"],
+        "content is the earlier push, not advance"
+    );
 
     // Now push into [10,20) — advance did not insert into the buffer
     ws.push(t("s", "p", "b"), 15);
@@ -172,7 +182,11 @@ fn advance_is_noop_on_count_window() {
     ws.advance(9999); // must not panic
     assert!(ws.take_closed().is_empty(), "count window ignores advance");
     ws.push(t("s", "p", "a"), 1);
-    assert_eq!(ws.take_closed().len(), 1, "count window still fires on push");
+    assert_eq!(
+        ws.take_closed().len(),
+        1,
+        "count window still fires on push"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -191,7 +205,10 @@ fn close_fires_exactly_at_watermark_equal_to_end_not_before() {
     let mut ws: WindowedStream = WindowedStream::empty(WindowSpec::time(10, 10));
     ws.push(t("s", "p", "a"), 0); // window starts
     ws.push(t("s", "p", "b"), 9); // watermark = 9, end = 10: NOT YET closed
-    assert!(ws.take_closed().is_empty(), "watermark 9 < end 10, window still open");
+    assert!(
+        ws.take_closed().is_empty(),
+        "watermark 9 < end 10, window still open"
+    );
     // watermark = 10 == end: NOW closes
     ws.push(t("s", "p", "c"), 10); // belongs to [10,20); closes [0,10)
     let closed = ws.take_closed();
@@ -211,11 +228,13 @@ fn close_fires_exactly_at_watermark_equal_to_end_not_before() {
 // i.e. max_ts >= 13. At max_ts=12 (watermark=9): NOT closed. At max_ts=13: closed.
 #[test]
 fn close_with_max_delay_fires_at_exact_boundary() {
-    let mut ws: WindowedStream =
-        WindowedStream::empty(WindowSpec::time(10, 10).with_max_delay(3));
+    let mut ws: WindowedStream = WindowedStream::empty(WindowSpec::time(10, 10).with_max_delay(3));
     ws.push(t("s", "p", "a"), 5);
     ws.push(t("s", "p", "b"), 12); // watermark = 12 - 3 = 9 < 10: still open
-    assert!(ws.take_closed().is_empty(), "watermark 9 < end 10, not closed");
+    assert!(
+        ws.take_closed().is_empty(),
+        "watermark 9 < end 10, not closed"
+    );
     ws.push(t("s", "p", "c"), 13); // watermark = 13 - 3 = 10 >= 10: now closes
     let closed = ws.take_closed();
     assert_eq!(closed.len(), 1);
@@ -224,8 +243,14 @@ fn close_with_max_delay_fires_at_exact_boundary() {
     let obj_set: Vec<String> = objs(&closed[0]);
     assert_eq!(obj_set, vec!["a".to_string()], "only a is in [0,10)");
     // Neither b nor c bled into the closed window
-    assert!(!obj_set.contains(&"b".to_string()), "b (ts=12) is in [10,20)");
-    assert!(!obj_set.contains(&"c".to_string()), "c (ts=13) is in [10,20)");
+    assert!(
+        !obj_set.contains(&"b".to_string()),
+        "b (ts=12) is in [10,20)"
+    );
+    assert!(
+        !obj_set.contains(&"c".to_string()),
+        "c (ts=13) is in [10,20)"
+    );
 }
 
 // [OPUS-4.8] sq-qcnn.18: gap-detection boundary (step > range).
@@ -243,7 +268,11 @@ fn gap_boundary_ts_equal_to_range_is_not_in_window() {
     let closed = ws.take_closed();
     assert_eq!(closed.len(), 1);
     assert_eq!((closed[0].start, closed[0].end), (0, 5));
-    assert_eq!(objs(&closed[0]), ["last_in"], "ts=5 is outside [0,5): it is a gap");
+    assert_eq!(
+        objs(&closed[0]),
+        ["last_in"],
+        "ts=5 is outside [0,5): it is a gap"
+    );
     // Gap triple was not counted as late (no window ever covered ts=5)
     assert_eq!(ws.late_dropped(), 0, "gap timestamps are NOT counted late");
 }
@@ -263,10 +292,17 @@ fn triple_at_open_window_boundary_is_not_late() {
     // Now push a triple into [10,20): k_max = 10/10 = 1 == next_close = 1.
     // Must NOT be dropped as late.
     ws.push(t("s", "p", "c"), 10); // ts 10 → k_max = 1 = next_close (open window)
-    assert_eq!(ws.late_dropped(), 0, "ts=10 is in the open window, not late");
+    assert_eq!(
+        ws.late_dropped(),
+        0,
+        "ts=10 is in the open window, not late"
+    );
     let rest = ws.flush();
     let window_10 = rest.iter().find(|w| w.start == 10).expect("[10,20) exists");
-    assert!(objs(window_10).contains(&"c".to_string()), "c entered [10,20)");
+    assert!(
+        objs(window_10).contains(&"c".to_string()),
+        "c entered [10,20)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -282,7 +318,9 @@ fn triple_at_open_window_boundary_is_not_late() {
 fn continuous_query_accessors() {
     let sparql = "SELECT ?o WHERE { ?s ?p ?o }";
     let spec = WindowSpec::time(10, 5);
-    let q = ContinuousQuery::register(sparql, spec).unwrap().with_r2s(R2S::IStream);
+    let q = ContinuousQuery::register(sparql, spec)
+        .unwrap()
+        .with_r2s(R2S::IStream);
     assert_eq!(q.sparql(), sparql);
     assert_eq!(q.spec(), spec);
     assert_eq!(q.mode(), EvalMode::PersistentDict); // the default
@@ -320,7 +358,11 @@ fn continuous_construct_with_mode_roundtrip() {
     let mut out = Vec::new();
     let mut q2 = q;
     q2.flush(|r| out.push(r)).unwrap(); // no-op (nothing pushed), must not panic
-    assert!(out.is_empty(), "flush() with no pushes must emit nothing, got {:?} windows", out.len()); // [OPUS-4.8]
+    assert!(
+        out.is_empty(),
+        "flush() with no pushes must emit nothing, got {:?} windows",
+        out.len()
+    ); // [OPUS-4.8]
 }
 
 #[test]
@@ -350,11 +392,8 @@ fn continuous_ask_late_dropped_increments() {
 #[test]
 fn continuous_construct_late_dropped_increments() {
     let spec = WindowSpec::time(10, 10);
-    let mut q = ContinuousConstruct::register(
-        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
-        spec,
-    )
-    .unwrap();
+    let mut q =
+        ContinuousConstruct::register("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", spec).unwrap();
     let mut out = Vec::new();
     q.push(t("s", "p", "a"), 5, |r| out.push(r)).unwrap();
     q.push(t("s", "p", "b"), 15, |r| out.push(r)).unwrap(); // closes [0,10)
@@ -382,8 +421,15 @@ fn continuous_multi_query_accessors() {
     let q = ContinuousMultiQuery::register(Q2).unwrap();
     assert!(q.rspql().contains("DSTREAM"));
     // sparql() is the rewritten form: WINDOW → GRAPH
-    assert!(q.sparql().contains("GRAPH <http://ex/w1>"), "got: {}", q.sparql());
-    assert!(!q.sparql().contains("WINDOW"), "WINDOW not in rewritten sparql");
+    assert!(
+        q.sparql().contains("GRAPH <http://ex/w1>"),
+        "got: {}",
+        q.sparql()
+    );
+    assert!(
+        !q.sparql().contains("WINDOW"),
+        "WINDOW not in rewritten sparql"
+    );
     let iris = q.window_iris();
     assert_eq!(iris.len(), 2);
     assert_eq!(iris[0].as_str(), "http://ex/w1");
@@ -415,7 +461,11 @@ SELECT * WHERE { WINDOW <http://ex/w1> { ?s ?p ?o } }
 FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> RANGE 10";
     match ContinuousMultiQuery::register(one) {
         Ok(_) => panic!("single window should be rejected"),
-        Err(e) => assert!(e.contains("ContinuousQuery") || e.contains("2"), "got: {}", e),
+        Err(e) => assert!(
+            e.contains("ContinuousQuery") || e.contains("2"),
+            "got: {}",
+            e
+        ),
     }
 }
 
@@ -453,7 +503,10 @@ fn rspql_rejects_year_and_month_durations() {
     let month_q = "SELECT * WHERE { WINDOW <http://ex/w1> { ?s ?p ?o } WINDOW <http://ex/w2> { ?s ?q ?r } }\n\
                    FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> RANGE P2M\n\
                    FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 5";
-    assert!(RspqlQuery::parse(month_q).is_err(), "P2M (months) should be rejected");
+    assert!(
+        RspqlQuery::parse(month_q).is_err(),
+        "P2M (months) should be rejected"
+    );
 }
 
 // [OPUS-4.8] sq-qcnn.18: parse_duration_token rejects bad time-unit chars.
@@ -462,7 +515,10 @@ fn rspql_rejects_bad_time_unit_in_duration() {
     let bad_unit = "SELECT * WHERE { WINDOW <http://ex/w1> { ?s ?p ?o } WINDOW <http://ex/w2> { ?s ?q ?r } }\n\
                     FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> RANGE PT10X\n\
                     FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 5";
-    assert!(RspqlQuery::parse(bad_unit).is_err(), "PT10X has unknown unit X");
+    assert!(
+        RspqlQuery::parse(bad_unit).is_err(),
+        "PT10X has unknown unit X"
+    );
 }
 
 // [OPUS-4.8] sq-qcnn.18: take_duration rejects an empty string after RANGE/STEP.
@@ -472,7 +528,10 @@ fn rspql_rejects_empty_duration() {
     let empty_dur = "SELECT * WHERE { WINDOW <http://ex/w1> { ?s ?p ?o } WINDOW <http://ex/w2> { ?s ?q ?r } }\n\
                      FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> RANGE {\n\
                      FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 5";
-    assert!(RspqlQuery::parse(empty_dur).is_err(), "empty duration should be rejected");
+    assert!(
+        RspqlQuery::parse(empty_dur).is_err(),
+        "empty duration should be rejected"
+    );
 }
 
 // [OPUS-4.8] sq-qcnn.18: parse_window_spec rejects an unterminated bracket.
@@ -481,7 +540,10 @@ fn rspql_rejects_unterminated_bracket() {
     let unclosed = "SELECT * WHERE { WINDOW <http://ex/w1> { ?s ?p ?o } WINDOW <http://ex/w2> { ?s ?q ?r } }\n\
                     FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> [RANGE 10 STEP 5\n\
                     FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 5";
-    assert!(RspqlQuery::parse(unclosed).is_err(), "unclosed [ should be rejected");
+    assert!(
+        RspqlQuery::parse(unclosed).is_err(),
+        "unclosed [ should be rejected"
+    );
 }
 
 // [OPUS-4.8] sq-qcnn.18: REGISTER header with no AS keyword is rejected.
@@ -574,7 +636,12 @@ fn rspql_window_inside_string_literal_is_not_rewritten() {
     // The string literal is preserved verbatim
     assert!(parsed.sparql.contains("\"this is a WINDOW label\""));
     // Exactly 2 WINDOW → GRAPH rewrites (the keywords in WINDOW clauses)
-    assert_eq!(parsed.sparql.matches("GRAPH").count(), 2, "got: {}", parsed.sparql);
+    assert_eq!(
+        parsed.sparql.matches("GRAPH").count(),
+        2,
+        "got: {}",
+        parsed.sparql
+    );
 }
 
 // [OPUS-4.8] sq-qcnn.18: single-quote string literals are also scanned correctly.
@@ -588,7 +655,10 @@ fn rspql_window_inside_single_quote_string_not_rewritten() {
              FROM NAMED WINDOW ex:w1 ON ex:s1 RANGE 5\n\
              FROM NAMED WINDOW ex:w2 ON ex:s2 RANGE 5";
     let parsed = RspqlQuery::parse(q).unwrap();
-    assert!(parsed.sparql.contains("'WINDOW'"), "single-quote string preserved");
+    assert!(
+        parsed.sparql.contains("'WINDOW'"),
+        "single-quote string preserved"
+    );
     assert_eq!(parsed.sparql.matches("GRAPH").count(), 2);
 }
 
@@ -621,15 +691,13 @@ fn istream_dstream_multiset_exact_counts() {
     // DSTREAM diff: prev={7,7}, cur={7}. DStream = prev \ cur = {7,7} \ {7} = {7} (one copy lost)
 
     let run = |r2s: R2S| -> Vec<usize> {
-        let mut q = ContinuousQuery::register(sparql, spec).unwrap().with_r2s(r2s);
+        let mut q = ContinuousQuery::register(sparql, spec)
+            .unwrap()
+            .with_r2s(r2s);
         let mut counts = Vec::new();
         let mut sink = |r: sparq_rsp::WindowResult| counts.push(r.rows.len());
-        let val = |v: i32| -> [Term; 3] {
-            [iri("s1"), iri("value"), Literal::from(v).into()]
-        };
-        let val2 = |v: i32| -> [Term; 3] {
-            [iri("s2"), iri("value"), Literal::from(v).into()]
-        };
+        let val = |v: i32| -> [Term; 3] { [iri("s1"), iri("value"), Literal::from(v).into()] };
+        let val2 = |v: i32| -> [Term; 3] { [iri("s2"), iri("value"), Literal::from(v).into()] };
         q.push(val(7), 1, &mut sink).unwrap();
         q.push(val2(7), 2, &mut sink).unwrap(); // [0,10): (7) twice
         q.push(val(7), 11, &mut sink).unwrap(); // closes [0,10); [10,20): (7) once
@@ -652,7 +720,9 @@ fn istream_dstream_multiset_exact_counts() {
 fn construct_dstream_set_minus_exact() {
     let sparql = "CONSTRUCT { ?s <http://ex/seen> ?o } WHERE { ?s <http://ex/p> ?o }";
     let spec = WindowSpec::time(10, 10);
-    let mut q = ContinuousConstruct::register(sparql, spec).unwrap().with_r2s(R2S::DStream);
+    let mut q = ContinuousConstruct::register(sparql, spec)
+        .unwrap()
+        .with_r2s(R2S::DStream);
     let mut out: Vec<sparq_rsp::GraphResult> = Vec::new();
     // Window [0,10): a, b → DSTREAM first window emits nothing (no prev)
     q.push(t("s", "p", "a"), 1, |r| out.push(r)).unwrap();

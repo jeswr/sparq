@@ -16,7 +16,7 @@
 
 mod common;
 
-use common::{acp_corpus, ALICE, BOB, ACP_SCENARIO_FLOOR};
+use common::{acp_corpus, ACP_SCENARIO_FLOOR, ALICE, BOB};
 use sparq_solid::conformance::{run_corpus, AcpScenario, AcrBuilder, Decision, Expect};
 use sparq_solid::Mode;
 

@@ -118,8 +118,15 @@ fn forked_generations_match_rebuild() {
         "PREFIX : <http://ex/> INSERT DATA { :post :p :compact }",
     )
     .unwrap();
-    flat = sparq_engine::update(&flat, "PREFIX : <http://ex/> INSERT DATA { :post :p :compact }")
-        .unwrap();
+    flat = sparq_engine::update(
+        &flat,
+        "PREFIX : <http://ex/> INSERT DATA { :post :p :compact }",
+    )
+    .unwrap();
     assert_battery(&next, &flat, "post-compact generation");
-    assert_eq!(count(&head, BATTERY[1]), count(&flat, BATTERY[1]) - 1, "compacted base isolated");
+    assert_eq!(
+        count(&head, BATTERY[1]),
+        count(&flat, BATTERY[1]) - 1,
+        "compacted base isolated"
+    );
 }

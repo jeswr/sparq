@@ -60,17 +60,27 @@ fn inline_ages_graph(n: usize) -> sparq_core::Graph {
 fn mixed_column_graph() -> sparq_core::Graph {
     let mut nt = String::new();
     // Rows 0-1: inline integers
-    nt.push_str(&format!("<http://ex/r0> <http://ex/val> \"1\"^^<{XSD_INT}> .\n"));
-    nt.push_str(&format!("<http://ex/r1> <http://ex/val> \"2\"^^<{XSD_INT}> .\n"));
+    nt.push_str(&format!(
+        "<http://ex/r0> <http://ex/val> \"1\"^^<{XSD_INT}> .\n"
+    ));
+    nt.push_str(&format!(
+        "<http://ex/r1> <http://ex/val> \"2\"^^<{XSD_INT}> .\n"
+    ));
     // Row 2: non-inline large integer (2^53 = 9007199254740992)
-    nt.push_str(&format!("<http://ex/r2> <http://ex/val> \"9007199254740992\"^^<{XSD_INT}> .\n"));
+    nt.push_str(&format!(
+        "<http://ex/r2> <http://ex/val> \"9007199254740992\"^^<{XSD_INT}> .\n"
+    ));
     // Row 3: decimal 0.1 (not exactly representable as f64; non-inline)
-    nt.push_str(&format!("<http://ex/r3> <http://ex/val> \"0.1\"^^<{XSD_DEC}> .\n"));
+    nt.push_str(&format!(
+        "<http://ex/r3> <http://ex/val> \"0.1\"^^<{XSD_DEC}> .\n"
+    ));
     // Row 4: string literal → NaN sentinel → delegated (non-numeric)
     nt.push_str("<http://ex/r4> <http://ex/val> \"hello\" .\n");
     // Rows 5+: enough inline integers to exceed VEC_MIN_BATCH (256)
     for i in 5..270 {
-        nt.push_str(&format!("<http://ex/r{i}> <http://ex/val> \"{i}\"^^<{XSD_INT}> .\n"));
+        nt.push_str(&format!(
+            "<http://ex/r{i}> <http://ex/val> \"{i}\"^^<{XSD_INT}> .\n"
+        ));
     }
     sparq_core::Graph::load_str(&nt, "ntriples").unwrap()
 }
@@ -121,11 +131,17 @@ fn t1_mixed_column_both_populations_probe() {
     let json_scalar = query_json_with_budget(
         &g,
         &q,
-        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
+        &QueryBudget {
+            max_rows: Some(1_000_000),
+            ..Default::default()
+        },
     )
     .expect("T1 scalar (budget-armed) query must succeed");
     let snap_sc = stats_snapshot();
-    assert_eq!(snap_sc.chunks_built, 0, "T1: budget-armed must use scalar only");
+    assert_eq!(
+        snap_sc.chunks_built, 0,
+        "T1: budget-armed must use scalar only"
+    );
 
     // Byte-identity: the hybrid must produce the same SPARQL-JSON as the scalar path.
     assert_eq!(
@@ -206,8 +222,7 @@ fn t2_tie_exactness_decimal_witness() {
         .parse()
         .expect("T2 TIE-PRECONDITION: witness decimal must parse to f64");
     assert_eq!(
-        witness_f64,
-        1.0_f64,
+        witness_f64, 1.0_f64,
         "T2 TIE-PRECONDITION: '0.99999999999999995' must decode to f64 1.0 (tie with constant 1); \
          got {:?} — witness is a confident lane, not a tie; test logic is invalid",
         witness_f64
@@ -222,7 +237,10 @@ fn t2_tie_exactness_decimal_witness() {
     let json_scalar = query_json_with_budget(
         &g,
         &q,
-        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
+        &QueryBudget {
+            max_rows: Some(1_000_000),
+            ..Default::default()
+        },
     )
     .expect("T2 scalar query must succeed");
 
@@ -291,15 +309,18 @@ fn t3_operator_sweep_mixed_column() {
 
         // Columnar run.
         reset_stats();
-        let json_col =
-            query_json(&g, &q).unwrap_or_else(|e| panic!("T3 columnar query failed for {desc}: {e}"));
+        let json_col = query_json(&g, &q)
+            .unwrap_or_else(|e| panic!("T3 columnar query failed for {desc}: {e}"));
 
         // Scalar reference: budget-armed.
         reset_stats();
         let json_scalar = query_json_with_budget(
             &g,
             &q,
-            &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
+            &QueryBudget {
+                max_rows: Some(1_000_000),
+                ..Default::default()
+            },
         )
         .unwrap_or_else(|e| panic!("T3 scalar query failed for {desc}: {e}"));
 
@@ -345,7 +366,10 @@ fn t4a_zk_armed_forces_scalar_path() {
     let json_scalar = query_json_with_budget(
         &g,
         &q,
-        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
+        &QueryBudget {
+            max_rows: Some(1_000_000),
+            ..Default::default()
+        },
     )
     .expect("T4a scalar reference must succeed");
 
@@ -439,7 +463,10 @@ fn t5_integration_smoke_vectorized_on() {
         "T5: columnar path must engage (chunks_built={})",
         snap.chunks_built
     );
-    assert!(json.contains("\"results\""), "T5: result must be valid SPARQL JSON");
+    assert!(
+        json.contains("\"results\""),
+        "T5: result must be valid SPARQL JSON"
+    );
     // Basic sanity: fages 101–399 are > 100, so we expect 299 rows.
     assert!(
         json.contains("\"fage\""),

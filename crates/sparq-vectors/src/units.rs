@@ -104,7 +104,11 @@ fn lookup(unit_iri: &str) -> Option<UnitConv> {
     let local = unit_iri.strip_prefix(QUDT_UNIT_NS).unwrap_or(unit_iri);
     // The bundled table: (local-name, kind, factor-to-canonical, offset-to-canonical).
     // Curated, deliberately small subset of QUDT. Extending it is purely additive.
-    let conv = |kind, factor, offset| UnitConv { kind, factor, offset };
+    let conv = |kind, factor, offset| UnitConv {
+        kind,
+        factor,
+        offset,
+    };
     use QuantityKind::*;
     Some(match local {
         // ---- length (canonical: metre) ----
@@ -115,9 +119,9 @@ fn lookup(unit_iri: &str) -> Option<UnitConv> {
         "MicroM" => conv(Length, 1e-6, 0.0),
         "NanoM" => conv(Length, 1e-9, 0.0),
         "MI" | "MI_International" => conv(Length, 1_609.344, 0.0), // statute mile
-        "YD" => conv(Length, 0.9144, 0.0),                        // yard
-        "FT" => conv(Length, 0.3048, 0.0),                        // foot
-        "IN" => conv(Length, 0.0254, 0.0),                        // inch
+        "YD" => conv(Length, 0.9144, 0.0),                         // yard
+        "FT" => conv(Length, 0.3048, 0.0),                         // foot
+        "IN" => conv(Length, 0.0254, 0.0),                         // inch
         // ---- mass (canonical: kilogram) ----
         "KiloGM" => conv(Mass, 1.0, 0.0),
         "GM" => conv(Mass, 0.001, 0.0),
@@ -194,9 +198,10 @@ pub fn normalise(value: f64, unit_iri: &str) -> Option<Normalised> {
     }
     let conv = lookup(unit_iri)?;
     let canonical = value * conv.factor + conv.offset;
-    canonical
-        .is_finite()
-        .then_some(Normalised { canonical_value: canonical, kind: conv.kind })
+    canonical.is_finite().then_some(Normalised {
+        canonical_value: canonical,
+        kind: conv.kind,
+    })
 }
 
 /// Parse a numeric `lexical` (via [`crate::encode::numeric_value`]) **and** normalise it by
@@ -220,7 +225,10 @@ mod tests {
         let km = normalise(1.0, "http://qudt.org/vocab/unit/KiloM").unwrap();
         assert_eq!(m.kind, QuantityKind::Length);
         assert_eq!(km.kind, QuantityKind::Length);
-        assert!((m.canonical_value - km.canonical_value).abs() < 1e-9, "1000 m == 1 km");
+        assert!(
+            (m.canonical_value - km.canonical_value).abs() < 1e-9,
+            "1000 m == 1 km"
+        );
         assert_eq!(m.canonical_value, 1000.0);
 
         // 1 cm == 10 mm; 2.54 cm == 1 inch (within f64 rounding).
@@ -229,7 +237,10 @@ mod tests {
         assert!((cm.canonical_value - mm.canonical_value).abs() < 1e-12);
         let inch = normalise(1.0, "IN").unwrap();
         let cm254 = normalise(2.54, "CentiM").unwrap();
-        assert!((inch.canonical_value - cm254.canonical_value).abs() < 1e-12, "1 in == 2.54 cm");
+        assert!(
+            (inch.canonical_value - cm254.canonical_value).abs() < 1e-12,
+            "1 in == 2.54 cm"
+        );
 
         // 1 kg == 1000 g; 1 hour == 3600 s.
         let kg = normalise(1.0, "KiloGM").unwrap();
@@ -250,10 +261,16 @@ mod tests {
         assert!((c100.canonical_value - 373.15).abs() < 1e-9);
         // 32 °F == 273.15 K == 0 °C (the freezing point) — affine slope 5/9.
         let f32deg = normalise(32.0, "DEG_F").unwrap();
-        assert!((f32deg.canonical_value - 273.15).abs() < 1e-6, "32 F == 273.15 K: {f32deg:?}");
+        assert!(
+            (f32deg.canonical_value - 273.15).abs() < 1e-6,
+            "32 F == 273.15 K: {f32deg:?}"
+        );
         // 212 °F == 373.15 K == 100 °C (the boiling point).
         let f212 = normalise(212.0, "DEG_F").unwrap();
-        assert!((f212.canonical_value - 373.15).abs() < 1e-6, "212 F == 373.15 K: {f212:?}");
+        assert!(
+            (f212.canonical_value - 373.15).abs() < 1e-6,
+            "212 F == 373.15 K: {f212:?}"
+        );
     }
 
     #[test]
@@ -266,7 +283,10 @@ mod tests {
         assert_eq!(kib.canonical_value, 1024.0);
         let kb = normalise(1.0, "KiloBYTE").unwrap();
         assert_eq!(kb.canonical_value, 1000.0);
-        assert_ne!(kib.canonical_value, kb.canonical_value, "KiB != KB by design");
+        assert_ne!(
+            kib.canonical_value, kb.canonical_value,
+            "KiB != KB by design"
+        );
     }
 
     // ---- fail-closed: unknown unit, non-finite, and the SHACL-detectable mismatch ----
@@ -294,8 +314,14 @@ mod tests {
         // A length and a mass are NOT the same quantity — the caller treats this as the
         // unit-mismatch error design §2 calls "SHACL-detectable" (a length is never compared to a
         // mass in one numeric block).
-        assert!(!same_quantity("M", "KiloGM"), "length vs mass must be a detectable mismatch");
-        assert!(!same_quantity("M", "SEC"), "length vs time must be a detectable mismatch");
+        assert!(
+            !same_quantity("M", "KiloGM"),
+            "length vs mass must be a detectable mismatch"
+        );
+        assert!(
+            !same_quantity("M", "SEC"),
+            "length vs time must be a detectable mismatch"
+        );
         // Same kind, different scale → comparable (the legitimate case).
         assert!(same_quantity("M", "KiloM"));
         assert!(same_quantity("KiloGM", "GM"));
@@ -307,7 +333,10 @@ mod tests {
     fn full_iri_and_bare_local_both_resolve() {
         let full = normalise(1.0, "http://qudt.org/vocab/unit/KiloM").unwrap();
         let bare = normalise(1.0, "KiloM").unwrap();
-        assert_eq!(full, bare, "full IRI and bare local name must resolve identically");
+        assert_eq!(
+            full, bare,
+            "full IRI and bare local name must resolve identically"
+        );
     }
 
     #[test]
@@ -322,7 +351,10 @@ mod tests {
         ] {
             let n = normalise(7.0, kind.canonical_unit()).unwrap();
             assert_eq!(n.kind, kind);
-            assert_eq!(n.canonical_value, 7.0, "canonical unit of {kind:?} must be identity");
+            assert_eq!(
+                n.canonical_value, 7.0,
+                "canonical unit of {kind:?} must be identity"
+            );
         }
     }
 }

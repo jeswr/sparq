@@ -225,7 +225,12 @@ const MAX_TRIPLE_DEPTH: u32 = 64;
 /// mirror the discipline of `sparq_core::dict`'s own content hashing: a length-prefixed, tagged write
 /// per variant, so distinct terms cannot alias by concatenation. We do not depend on the core's hash
 /// VALUE (it is private); we only need a self-consistent fold that distinguishes terms here.
-fn fold_parts_lexical(h: &mut rustc_hash::FxHasher, dict: &Dict, parts: &TermParts<'_>, depth: u32) {
+fn fold_parts_lexical(
+    h: &mut rustc_hash::FxHasher,
+    dict: &Dict,
+    parts: &TermParts<'_>,
+    depth: u32,
+) {
     // [OPUS-4.8] (sq-32i5) All length prefixes are hashed as fixed-width `u64`, NOT `usize`:
     // `usize` is 32-bit on wasm32 and 64-bit on native, so `write_usize` would fold a different
     // byte sequence on each and the on-disk fingerprint would mismatch between a store built on

@@ -168,11 +168,20 @@ fn weight_ablation_is_exact_noop_on_provenance_free_graph() {
     let cfg = EvalConfig::small(13);
     let ab = run_weight_ablation(&ttl, "turtle", cfg, &[1, 2, 3]).unwrap();
     // Every per-seed arm is identical → the paired delta is bit-for-bit zero.
-    assert_eq!(ab.mrr.mean, 0.0, "provenance-free MRR delta must be exactly 0");
+    assert_eq!(
+        ab.mrr.mean, 0.0,
+        "provenance-free MRR delta must be exactly 0"
+    );
     assert_eq!(ab.mrr.std, 0.0, "no spread when both arms are identical");
-    assert_eq!(ab.hits10.mean, 0.0, "provenance-free Hits@10 delta must be exactly 0");
+    assert_eq!(
+        ab.hits10.mean, 0.0,
+        "provenance-free Hits@10 delta must be exactly 0"
+    );
     // And the aggregated arm metrics agree exactly.
-    assert_eq!(ab.off.mrr.mean, ab.on.mrr.mean, "arms must coincide on a plain graph");
+    assert_eq!(
+        ab.off.mrr.mean, ab.on.mrr.mean,
+        "arms must coincide on a plain graph"
+    );
 }
 
 /// The weight ablation runs END-TO-END on the provenance-annotated slice (parse → close → split →
@@ -189,7 +198,10 @@ fn weight_ablation_runs_on_provenance_slice() {
     // Both arms scored real held-out queries.
     assert!(ab.off.mrr.n == seeds.len(), "one OFF sample per seed");
     assert!(ab.on.mrr.n == seeds.len(), "one ON sample per seed");
-    assert!(ab.off.queries.mean > 0.0, "must score some held-out queries");
+    assert!(
+        ab.off.queries.mean > 0.0,
+        "must score some held-out queries"
+    );
     // The paired delta is finite and the firm-up gate is callable (its verdict — adopt/abandon — is
     // the caller's policy; we only assert the instrument is well-formed, never a direction).
     assert!(ab.mrr.mean.is_finite() && ab.mrr.se.is_finite());
@@ -220,7 +232,11 @@ fn provenance_weight_changes_the_trained_model() {
     // The two models must not be identical — the provenance weight reached the SGD step.
     let mut max_abs_diff = 0.0f32;
     for row in 0..m_off.num_entities() {
-        for (a, b) in m_off.entity_vec(row).iter().zip(m_on.entity_vec(row).iter()) {
+        for (a, b) in m_off
+            .entity_vec(row)
+            .iter()
+            .zip(m_on.entity_vec(row).iter())
+        {
             max_abs_diff = max_abs_diff.max((a - b).abs());
         }
     }

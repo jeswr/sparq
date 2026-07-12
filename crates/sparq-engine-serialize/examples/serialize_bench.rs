@@ -281,8 +281,14 @@ fn load_corpus(path: &str) -> Graph {
 /// well-known defaults, so Turtle / TriG output exercises real prefix compaction.
 fn bench_prefixes() -> Prefixes {
     let mut p = default_prefixes();
-    p.insert("sb".to_string(), "http://sparq.dev/bench/serialize/".to_string());
-    p.insert("sbv".to_string(), "http://sparq.dev/bench/serialize/vocab#".to_string());
+    p.insert(
+        "sb".to_string(),
+        "http://sparq.dev/bench/serialize/".to_string(),
+    );
+    p.insert(
+        "sbv".to_string(),
+        "http://sparq.dev/bench/serialize/vocab#".to_string(),
+    );
     p
 }
 
@@ -369,7 +375,10 @@ fn run_gen(args: &[String]) -> ! {
         // Escape-heavy literal: quotes, backslash, newline, tab (as NT escapes).
         emit(
             "note",
-            format!("\"say \\\"{}\\\" \\\\ line\\nbreak\\ttab\"", rng.next() % 997),
+            format!(
+                "\"say \\\"{}\\\" \\\\ line\\nbreak\\ttab\"",
+                rng.next() % 997
+            ),
         );
         emit("knows", format!("<{}s/{}>", E, rng.next() % n.max(1))); // IRI link
     }
@@ -433,7 +442,10 @@ fn run_bench(args: &[String]) -> ! {
         load_us
     );
 
-    println!("| format | regime | round-trip | out MB | min wall (us) x{} | MB/s |", iters);
+    println!(
+        "| format | regime | round-trip | out MB | min wall (us) x{} | MB/s |",
+        iters
+    );
     println!("|---|---|---|---|---|---|");
     let mut rows: Vec<String> = Vec::new();
     for &fmt in &formats {
@@ -441,7 +453,11 @@ fn run_bench(args: &[String]) -> ! {
         let emitted = serialize_full(&g, fmt, &prefixes);
         let text = String::from_utf8(emitted).expect("writers emit UTF-8");
         if let Err(e) = round_trip_gate(&original, &text, fmt) {
-            eprintln!("serialize_bench: ROUND-TRIP GATE RED for {}: {}", fmt.label(), e);
+            eprintln!(
+                "serialize_bench: ROUND-TRIP GATE RED for {}: {}",
+                fmt.label(),
+                e
+            );
             std::process::exit(4);
         }
         let bytes = text.len() as u64;
@@ -456,7 +472,11 @@ fn run_bench(args: &[String]) -> ! {
             min_us = min_us.min(us);
         }
         let mb = bytes as f64 / 1e6;
-        let mbps = if min_us > 0 { mb / (min_us as f64 / 1e6) } else { f64::INFINITY };
+        let mbps = if min_us > 0 {
+            mb / (min_us as f64 / 1e6)
+        } else {
+            f64::INFINITY
+        };
         println!(
             "| {} | {} | green | {:.2} | {} | {:.1} |",
             fmt.label(),

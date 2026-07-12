@@ -20,9 +20,7 @@
 
 use rustc_hash::FxHashSet;
 use sparq_core::dict::{Dict, Id};
-use sparq_reason::{
-    materialize, materialize_owl_rl, materialize_rdfs, MaterializedGraph, Profile,
-};
+use sparq_reason::{materialize, materialize_owl_rl, materialize_rdfs, MaterializedGraph, Profile};
 
 fn ex(dict: &mut Dict, l: &str) -> Id {
     dict.intern_iri(&format!("http://ex/{l}"))
@@ -59,7 +57,11 @@ fn rdfs_forward_chaining_correct_default_off() {
     let before = triples.len();
     let added = materialize_rdfs(&mut dict, &mut triples);
     assert!(added > 0, "RDFS closure must add entailed triples");
-    assert_eq!(triples.len(), before + added, "added count must match growth");
+    assert_eq!(
+        triples.len(),
+        before + added,
+        "added count must match growth"
+    );
 
     let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     // rdfs11: (Dog sc Animal) is the transitive-closure schema fact.
@@ -136,7 +138,10 @@ fn owl_rl_fragment_correct_default_off() {
     assert!(added > 0, "OWL-RL closure must add entailed triples");
     let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     let direct_set: FxHashSet<[Id; 3]> = direct.iter().copied().collect();
-    assert_eq!(set, direct_set, "materialize(OwlRl) must match materialize_owl_rl");
+    assert_eq!(
+        set, direct_set,
+        "materialize(OwlRl) must match materialize_owl_rl"
+    );
 
     assert!(has(&set, b, child, a), "prp-inv: b childOf a");
     assert!(has(&set, a, anc, c), "prp-trp: a ancestorOf c");
@@ -166,17 +171,29 @@ fn materialized_graph_incremental_correct_default_off() {
         &mut dict,
         &[[dog, sc, mammal], [mammal, sc, animal], [rex, ty, dog]],
     );
-    assert!(g.contains(&[rex, ty, animal]), "initial closure types rex up");
+    assert!(
+        g.contains(&[rex, ty, animal]),
+        "initial closure types rex up"
+    );
 
     // Insert a second individual: its typing must close up the same chain.
     g.insert(&[[fido, ty, dog]]);
-    assert!(g.contains(&[fido, ty, animal]), "insert maintains the closure");
+    assert!(
+        g.contains(&[fido, ty, animal]),
+        "insert maintains the closure"
+    );
 
     // Delete the only support of (rex a animal): it must leave the closure.
     g.delete(&[[rex, ty, dog]]);
-    assert!(!g.contains(&[rex, ty, animal]), "delete retracts the entailment");
+    assert!(
+        !g.contains(&[rex, ty, animal]),
+        "delete retracts the entailment"
+    );
     // fido's typing is independent and must survive.
-    assert!(g.contains(&[fido, ty, animal]), "unrelated entailment survives the delete");
+    assert!(
+        g.contains(&[fido, ty, animal]),
+        "unrelated entailment survives the delete"
+    );
     // The schema chain is untouched by an ABox delete.
     assert!(g.contains(&[dog, sc, animal]), "schema closure intact");
 }
@@ -195,7 +212,10 @@ mod explain_off {
         let a = dict.intern_iri("http://ex/a");
         let ty = dict.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
         let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
-        let (cc, dd) = (dict.intern_iri("http://ex/C"), dict.intern_iri("http://ex/D"));
+        let (cc, dd) = (
+            dict.intern_iri("http://ex/C"),
+            dict.intern_iri("http://ex/D"),
+        );
         let g = MaterializedGraph::new(&mut dict, &[[cc, sc, dd], [a, ty, cc]]);
         assert!(g.contains(&[a, ty, dd]));
         // Sanity: the closure is non-trivial (base 2 + the derived typing).
@@ -218,9 +238,14 @@ mod explain_on {
         let a = dict.intern_iri("http://ex/a");
         let ty = dict.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
         let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
-        let (cc, dd) = (dict.intern_iri("http://ex/C"), dict.intern_iri("http://ex/D"));
+        let (cc, dd) = (
+            dict.intern_iri("http://ex/C"),
+            dict.intern_iri("http://ex/D"),
+        );
         let g = MaterializedGraph::new(&mut dict, &[[cc, sc, dd], [a, ty, cc]]);
-        let tree = g.why(&dict, [a, ty, dd]).expect("derived triple must explain");
+        let tree = g
+            .why(&dict, [a, ty, dd])
+            .expect("derived triple must explain");
         assert!(!tree.nodes().is_empty());
         assert_eq!(tree.conclusion()[1], dict.term(ty).to_string());
     }

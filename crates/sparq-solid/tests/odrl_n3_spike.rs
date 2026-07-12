@@ -39,9 +39,17 @@ const POLICY_C: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
   odrl:permission [ odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ;
   odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#;
 
-fn rust_set(policy_ttl: &str, action_local: &str, target: &str, party: &str, at: Option<&str>) -> AuthSet {
+fn rust_set(
+    policy_ttl: &str,
+    action_local: &str,
+    target: &str,
+    party: &str,
+    at: Option<&str>,
+) -> AuthSet {
     let policy = parse_policy_str(policy_ttl, "turtle").expect("policy parses");
-    let mut req = Request::new(format!("{}{}", ODRL, action_local)).on(target).by(party);
+    let mut req = Request::new(format!("{}{}", ODRL, action_local))
+        .on(target)
+        .by(party);
     if let Some(t) = at {
         req = req.at(t);
     }
@@ -58,7 +66,13 @@ fn rust_set(policy_ttl: &str, action_local: &str, target: &str, party: &str, at:
     set
 }
 
-fn n3_set(policy_ttl: &str, action_local: &str, target: &str, party: &str, at: Option<&str>) -> AuthSet {
+fn n3_set(
+    policy_ttl: &str,
+    action_local: &str,
+    target: &str,
+    party: &str,
+    at: Option<&str>,
+) -> AuthSet {
     let at_clause = match at {
         Some(t) => format!(" ; spike:atTime \"{}\"^^xsd:dateTime", t),
         None => String::new(),
@@ -81,10 +95,15 @@ fn n3_set(policy_ttl: &str, action_local: &str, target: &str, party: &str, at: O
         if !pred.as_str().starts_with(AUTH_NS) {
             continue;
         }
-        let (Term::NamedNode(subj), Term::NamedNode(obj)) = (dict.term(t[0]), dict.term(t[2])) else {
+        let (Term::NamedNode(subj), Term::NamedNode(obj)) = (dict.term(t[0]), dict.term(t[2]))
+        else {
             continue;
         };
-        set.push((subj.as_str().to_owned(), pred.as_str().to_owned(), obj.as_str().to_owned()));
+        set.push((
+            subj.as_str().to_owned(),
+            pred.as_str().to_owned(),
+            obj.as_str().to_owned(),
+        ));
     }
     set.sort();
     set
@@ -93,7 +112,13 @@ fn n3_set(policy_ttl: &str, action_local: &str, target: &str, party: &str, at: O
 fn expect(pairs: &[(&str, &str, &str)]) -> AuthSet {
     let mut s: AuthSet = pairs
         .iter()
-        .map(|(a, m, t)| ((*a).to_owned(), format!("{}{}", AUTH_NS, m), (*t).to_owned()))
+        .map(|(a, m, t)| {
+            (
+                (*a).to_owned(),
+                format!("{}{}", AUTH_NS, m),
+                (*t).to_owned(),
+            )
+        })
         .collect();
     s.sort();
     s
@@ -119,12 +144,26 @@ fn assert_case(
 
 #[test]
 fn a1_allow_within_datetime_window() {
-    assert_case("A1", POLICY_A, "read", "urn:alice", Some("2026-07-05T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "A1",
+        POLICY_A,
+        "read",
+        "urn:alice",
+        Some("2026-07-05T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn a2_deny_after_window_fail_closed() {
-    assert_case("A2", POLICY_A, "read", "urn:alice", Some("2027-01-01T00:00:00Z"), &[]);
+    assert_case(
+        "A2",
+        POLICY_A,
+        "read",
+        "urn:alice",
+        Some("2027-01-01T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
@@ -134,20 +173,48 @@ fn a3_deny_no_time_unprovable_fail_closed() {
 
 #[test]
 fn a4_deny_wrong_assignee_fail_closed() {
-    assert_case("A4", POLICY_A, "read", "urn:bob", Some("2026-07-05T00:00:00Z"), &[]);
+    assert_case(
+        "A4",
+        POLICY_A,
+        "read",
+        "urn:bob",
+        Some("2026-07-05T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
 fn a5_deny_action_mismatch_fail_closed() {
-    assert_case("A5", POLICY_A, "write", "urn:alice", Some("2026-07-05T00:00:00Z"), &[]);
+    assert_case(
+        "A5",
+        POLICY_A,
+        "write",
+        "urn:alice",
+        Some("2026-07-05T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
 fn b1_allow_unconstrained_permission() {
-    assert_case("B1", POLICY_B, "read", "urn:alice", None, &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "B1",
+        POLICY_B,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn c1_deny_overrides_prohibition_wins() {
-    assert_case("C1", POLICY_C, "read", "urn:alice", None, &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "C1",
+        POLICY_C,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }

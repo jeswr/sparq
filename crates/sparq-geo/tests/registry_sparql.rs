@@ -32,7 +32,10 @@ fn cities() -> Graph {
 }
 
 fn names(r: &sparq_engine::QueryResult, col: usize) -> Vec<String> {
-    r.rows.iter().map(|row| row[col].as_ref().unwrap().to_string()).collect()
+    r.rows
+        .iter()
+        .map(|row| row[col].as_ref().unwrap().to_string())
+        .collect()
 }
 
 #[test]
@@ -66,15 +69,24 @@ fn bind_distance_value() {
     )
     .unwrap();
     assert_eq!(r.len(), 1);
-    let term = r.rows[0][0].as_ref().expect("?km must be bound").to_string();
+    let term = r.rows[0][0]
+        .as_ref()
+        .expect("?km must be bound")
+        .to_string();
     let km: f64 = term
         .strip_prefix('"')
         .and_then(|s| s.split('"').next())
         .unwrap()
         .parse()
         .unwrap();
-    assert!((km - 343.6).abs() < 1.0, "London–Paris ≈ 343.6 km, got {km}");
-    assert!(term.ends_with("^^<http://www.w3.org/2001/XMLSchema#double>"), "got {term}");
+    assert!(
+        (km - 343.6).abs() < 1.0,
+        "London–Paris ≈ 343.6 km, got {km}"
+    );
+    assert!(
+        term.ends_with("^^<http://www.w3.org/2001/XMLSchema#double>"),
+        "got {term}"
+    );
 }
 
 #[test]
@@ -95,12 +107,24 @@ fn spatial_join_sf_within() {
     assert_eq!(
         r.rows
             .iter()
-            .map(|row| (row[0].as_ref().unwrap().to_string(), row[1].as_ref().unwrap().to_string()))
+            .map(|row| (
+                row[0].as_ref().unwrap().to_string(),
+                row[1].as_ref().unwrap().to_string()
+            ))
             .collect::<Vec<_>>(),
         vec![
-            ("<http://ex/london>".to_string(), "<http://ex/uk>".to_string()),
-            ("<http://ex/lyon>".to_string(), "<http://ex/france>".to_string()),
-            ("<http://ex/paris>".to_string(), "<http://ex/france>".to_string()),
+            (
+                "<http://ex/london>".to_string(),
+                "<http://ex/uk>".to_string()
+            ),
+            (
+                "<http://ex/lyon>".to_string(),
+                "<http://ex/france>".to_string()
+            ),
+            (
+                "<http://ex/paris>".to_string(),
+                "<http://ex/france>".to_string()
+            ),
         ]
     );
 }
@@ -165,7 +189,7 @@ fn geo_errors_are_expression_errors_not_query_errors() {
     assert_eq!(r.len(), 3);
     let bound: Vec<bool> = r.rows.iter().map(|row| row[1].is_some()).collect();
     assert_eq!(bound, vec![false, true, false]); // ex:bad, ex:good, ex:str
-    // In a FILTER the same error just drops the row.
+                                                 // In a FILTER the same error just drops the row.
     let r = query_with_functions(
         &g,
         &format!(
@@ -199,7 +223,12 @@ fn eval_relation(name: &str, a: &str, b: &str) -> bool {
     )
     .unwrap();
     assert_eq!(r.len(), 1);
-    match r.rows[0][0].as_ref().expect("?r must be bound").to_string().as_str() {
+    match r.rows[0][0]
+        .as_ref()
+        .expect("?r must be bound")
+        .to_string()
+        .as_str()
+    {
         "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>" => true,
         "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>" => false,
         other => panic!("geof:{name} returned {other}"),
@@ -348,10 +377,22 @@ fn set_operations_through_sparql() {
     };
     // London is in uk minus france, in the union, not in the overlap strip, and
     // in the symmetric difference.
-    assert_eq!(names(&q("geof:difference(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
-    assert_eq!(names(&q("geof:union(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
-    assert_eq!(names(&q("geof:intersection(?a, ?b)"), 0)[0], "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
-    assert_eq!(names(&q("geof:symDifference(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+    assert_eq!(
+        names(&q("geof:difference(?a, ?b)"), 0)[0],
+        "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+    );
+    assert_eq!(
+        names(&q("geof:union(?a, ?b)"), 0)[0],
+        "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+    );
+    assert_eq!(
+        names(&q("geof:intersection(?a, ?b)"), 0)[0],
+        "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+    );
+    assert_eq!(
+        names(&q("geof:symDifference(?a, ?b)"), 0)[0],
+        "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+    );
 
     // Mixed-dimension union (point ∪ polygon) now yields a GEOMETRYCOLLECTION
     // that CONTAINS the point — so every city's loc is contained in its union
@@ -436,7 +477,14 @@ fn constant_polygon_filter_cold_and_warm_runs_agree() {
     let reg = geof_registry();
     let cold = query_with_functions(&g, &q, &reg).unwrap();
     let warm = query_with_functions(&g, &q, &reg).unwrap();
-    let expected = vec!["<http://ex/lyon>".to_string(), "<http://ex/paris>".to_string()];
+    let expected = vec![
+        "<http://ex/lyon>".to_string(),
+        "<http://ex/paris>".to_string(),
+    ];
     assert_eq!(names(&cold, 0), expected);
-    assert_eq!(names(&warm, 0), expected, "warm (cached) run must equal the cold run");
+    assert_eq!(
+        names(&warm, 0),
+        expected,
+        "warm (cached) run must equal the cold run"
+    );
 }

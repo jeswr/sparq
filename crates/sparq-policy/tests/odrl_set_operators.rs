@@ -109,7 +109,10 @@ fn recipient_is_any_of_list_gates_on_requester() {
 fn is_any_of_empty_set_never_satisfied() {
     let p = purpose_policy("isAnyOf", r#""""#);
     let req = read_x().for_purpose(Value::Iri("urn:purpose/research".into()));
-    assert!(!evaluate(&p, &req).allow, "isAnyOf over the empty set is unsatisfiable");
+    assert!(
+        !evaluate(&p, &req).allow,
+        "isAnyOf over the empty set is unsatisfiable"
+    );
 }
 
 // ===========================================================================
@@ -157,7 +160,10 @@ fn missing_evidence_fails_closed_for_both() {
     let any = purpose_policy("isAnyOf", r#""urn:purpose/research""#);
     let none = purpose_policy("isNoneOf", r#""urn:purpose/marketing""#);
     let no_evidence = read_x(); // no purpose stated
-    assert!(!evaluate(&any, &no_evidence).allow, "isAnyOf: unprovable ⇒ deny");
+    assert!(
+        !evaluate(&any, &no_evidence).allow,
+        "isAnyOf: unprovable ⇒ deny"
+    );
     assert!(
         !evaluate(&none, &no_evidence).allow,
         "isNoneOf: unprovable ⇒ deny (never vacuously satisfied)"
@@ -193,7 +199,10 @@ fn is_none_of_prohibition_carves_out_non_members() {
 fn is_none_of_numeric_and_datetime_operands_fail_closed() {
     // Numeric right-operand: the "set" has no faithful lexical form → never satisfied,
     // even though the actual value (3) is genuinely different from the bound (5).
-    let num_bound = purpose_policy("isNoneOf", r#""5"^^<http://www.w3.org/2001/XMLSchema#integer>"#);
+    let num_bound = purpose_policy(
+        "isNoneOf",
+        r#""5"^^<http://www.w3.org/2001/XMLSchema#integer>"#,
+    );
     let num_req = read_x().for_purpose(Value::Num(3.0));
     assert!(
         !evaluate(&num_bound, &num_req).allow,

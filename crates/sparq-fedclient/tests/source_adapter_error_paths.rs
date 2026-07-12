@@ -47,7 +47,9 @@ fn endpoint_forwards_transport_error_verbatim() {
         "http://8.8.8.8/sparql",
         Box::new(FailingTransport("upstream timed out")),
     );
-    let err = ep.execute(&SubQuery::new("SELECT * WHERE { ?s ?p ?o }")).unwrap_err();
+    let err = ep
+        .execute(&SubQuery::new("SELECT * WHERE { ?s ?p ?o }"))
+        .unwrap_err();
     match err {
         FedError::Transport(m) => assert_eq!(m, "upstream timed out"),
         other => panic!("expected FedError::Transport, got {:?}", other),
@@ -61,7 +63,9 @@ fn guard_refuses_localhost_dns_name() {
     // `localhost` resolves only to loopback (127.0.0.1 / ::1); the default-deny guard must
     // refuse it on the resolved IP (DNS-rebinding-safe), with EgressRefused.
     let g = EgressGuard::deny_private();
-    let err = g.check_endpoint("http://localhost:7000/sparql").unwrap_err();
+    let err = g
+        .check_endpoint("http://localhost:7000/sparql")
+        .unwrap_err();
     assert!(
         matches!(err, FedError::EgressRefused(_)),
         "localhost resolves only to loopback ⇒ refused, got {:?}",
@@ -122,7 +126,10 @@ fn knows_pattern() -> FragPattern {
 
 #[test]
 fn tpf_solutions_surfaces_fragment_transport_error() {
-    let tpf = TpfSource::new("http://frag/tpf", Box::new(FailingFragments("502 bad gateway")));
+    let tpf = TpfSource::new(
+        "http://frag/tpf",
+        Box::new(FailingFragments("502 bad gateway")),
+    );
     let err = tpf.solutions(&knows_pattern()).unwrap_err();
     match err {
         FedError::Transport(m) => assert!(m.contains("502"), "got {}", m),
@@ -132,7 +139,11 @@ fn tpf_solutions_surfaces_fragment_transport_error() {
 
 #[test]
 fn brtpf_solutions_surfaces_fragment_transport_error() {
-    let brtpf = BrTpfSource::new("http://frag/brtpf", 10, Box::new(FailingFragments("dns failure")));
+    let brtpf = BrTpfSource::new(
+        "http://frag/brtpf",
+        10,
+        Box::new(FailingFragments("dns failure")),
+    );
     // Even with an upstream binding block, the first fetch fails and is surfaced.
     let bindings = vec![vec![("s".to_string(), FragTerm::iri("http://ex/alice"))]];
     let err = brtpf.solutions(&knows_pattern(), &bindings).unwrap_err();
@@ -144,7 +155,9 @@ fn fragment_execute_routes_to_solutions_not_srj() {
     // A fragment source's SRJ `execute` is intentionally Unsupported (it speaks triples), and
     // points the caller at the typed `solutions` method.
     let tpf = TpfSource::new("http://frag/tpf", Box::new(FailingFragments("x")));
-    let err = tpf.execute(&SubQuery::new("SELECT * WHERE { ?s ?p ?o }")).unwrap_err();
+    let err = tpf
+        .execute(&SubQuery::new("SELECT * WHERE { ?s ?p ?o }"))
+        .unwrap_err();
     assert!(matches!(err, FedError::Unsupported(_)), "got {:?}", err);
 }
 
@@ -218,7 +231,11 @@ fn capability_defaults_match_interface() {
 
     let l = Capability::local();
     assert_eq!(l.interface, Interface::LocalEngine);
-    assert_eq!(l.bind_join, BindJoin::Values, "local engine inherits endpoint caps");
+    assert_eq!(
+        l.bind_join,
+        BindJoin::Values,
+        "local engine inherits endpoint caps"
+    );
 
     let b = Capability::brtpf(42);
     assert_eq!(b.interface, Interface::BrTpf);
@@ -261,5 +278,8 @@ fn frag_pattern_vars_dedups_repeated_variable() {
 #[test]
 fn pattern_term_as_var_distinguishes_var_from_bound() {
     assert_eq!(PatternTerm::Var("s".into()).as_var(), Some("s"));
-    assert_eq!(PatternTerm::Bound(FragTerm::iri("http://ex/a")).as_var(), None);
+    assert_eq!(
+        PatternTerm::Bound(FragTerm::iri("http://ex/a")).as_var(),
+        None
+    );
 }

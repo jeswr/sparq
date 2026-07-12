@@ -33,9 +33,26 @@ use sparq_text::TextIndex;
 /// have something to expand), repeats, plus a few Unicode/CJK tokens so the
 /// oracle exercises the same casefolding/segmentation the index uses.
 const VOCAB: &[&str] = &[
-    "auto", "automatic", "autonomous", "autobahn", // shared "auto" prefix
-    "brown", "fox", "quick", "lazy", "dog", "jumps", "over", "the", "data", "graph",
-    "café", "straße", "ΣΟΦΊΑ", "Большой", "東京", "北京市", // unicode + CJK
+    "auto",
+    "automatic",
+    "autonomous",
+    "autobahn", // shared "auto" prefix
+    "brown",
+    "fox",
+    "quick",
+    "lazy",
+    "dog",
+    "jumps",
+    "over",
+    "the",
+    "data",
+    "graph",
+    "café",
+    "straße",
+    "ΣΟΦΊΑ",
+    "Большой",
+    "東京",
+    "北京市", // unicode + CJK
 ];
 
 /// A random document: 0..=10 vocab tokens joined by spaces/punctuation (so the
@@ -168,7 +185,14 @@ fn brute_min_gap(tokens: &[String], needle: &[String]) -> Option<u32> {
     // Positions of each needle token within the document, in document order.
     let pos: Vec<Vec<usize>> = needle
         .iter()
-        .map(|t| tokens.iter().enumerate().filter(|(_, w)| *w == t).map(|(i, _)| i).collect())
+        .map(|t| {
+            tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| *w == t)
+                .map(|(i, _)| i)
+                .collect()
+        })
         .collect();
     let mut best: Option<u32> = None;
     for &start in &pos[0] {
@@ -201,7 +225,11 @@ fn brute_phrase_near(corpus: &[(Id, Vec<String>)], query: &str, slop: u32) -> Ve
     }
     let mut out: Vec<(Id, u32)> = corpus
         .iter()
-        .filter_map(|(id, toks)| brute_min_gap(toks, &needle).filter(|&g| g <= slop).map(|g| (*id, g)))
+        .filter_map(|(id, toks)| {
+            brute_min_gap(toks, &needle)
+                .filter(|&g| g <= slop)
+                .map(|g| (*id, g))
+        })
         .collect();
     out.sort_unstable();
     out
@@ -224,10 +252,10 @@ const RANKED_QUERIES: &[&str] = &[
     "the quick brown fox",
     "auto*",
     "auto* dog",
-    "AUTO*",       // casefold
+    "AUTO*", // casefold
     "café",
     "straße",
-    "σοφία",       // matches ΣΟΦΊΑ after casefold
+    "σοφία", // matches ΣΟΦΊΑ after casefold
     "большой",
     "東京",
     "北京市",
@@ -286,13 +314,20 @@ fn brute_force_oracle_over_random_documents() {
             );
             // Positions are a pure add-on: the ranked paths must be identical.
             assert_eq!(hit_ids(&positional.search(q)), hit_ids(&plain.search(q)));
-            assert_eq!(hit_ids(&positional.search_any(q)), hit_ids(&plain.search_any(q)));
+            assert_eq!(
+                hit_ids(&positional.search_any(q)),
+                hit_ids(&plain.search_any(q))
+            );
         }
 
         for &q in PHRASE_QUERIES {
             let mut got = positional.phrase(q);
             got.sort_unstable();
-            assert_eq!(got, brute_phrase(&corp, q), "phrase({q:?}) != brute force at n={n}");
+            assert_eq!(
+                got,
+                brute_phrase(&corp, q),
+                "phrase({q:?}) != brute force at n={n}"
+            );
 
             // Proximity/slop: at every slop level the index must agree with the
             // brute-force min-gap oracle on BOTH the id set AND the per-doc gap
@@ -374,6 +409,9 @@ fn bm25_ordering_is_deterministic_and_tie_breaks_by_id() {
     let idx2 = TextIndex::build(&g2);
     let hits2 = idx2.search("alpha");
     assert_eq!(hits2.len(), 2);
-    assert_eq!(hits2[0].score, hits2[1].score, "equal-strength docs tie on score");
+    assert_eq!(
+        hits2[0].score, hits2[1].score,
+        "equal-strength docs tie on score"
+    );
     assert!(hits2[0].id < hits2[1].id, "ties break by ascending id");
 }

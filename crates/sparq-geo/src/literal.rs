@@ -95,7 +95,11 @@ pub fn parse_wkt_literal(lex: &str) -> Result<GeoGeometry, GeoError> {
     };
     let geom = Geometry::<f64>::try_from_wkt_str(body.trim())
         .map_err(|e| GeoError::Parse(e.to_string()))?;
-    let geometry = if crs == Crs::Epsg4326 { swap_xy(geom) } else { geom };
+    let geometry = if crs == Crs::Epsg4326 {
+        swap_xy(geom)
+    } else {
+        geom
+    };
     Ok(GeoGeometry { crs, geometry })
 }
 
@@ -124,7 +128,10 @@ pub fn is_geometry_datatype(datatype: &str) -> bool {
 impl GeoGeometry {
     /// A geometry in the default CRS84.
     pub fn new(geometry: Geometry<f64>) -> GeoGeometry {
-        GeoGeometry { crs: Crs::Crs84, geometry }
+        GeoGeometry {
+            crs: Crs::Crs84,
+            geometry,
+        }
     }
 
     /// Serialises back to the wktLiteral lexical form. CRS84 (the default) is

@@ -518,8 +518,14 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
         // [OPUS-4.8] sq-pbz04.2.8: E4 — extract `owl:hasKey` / negative property assertions /
         // asserted `owl:differentFrom`, minting every referenced concept/role/nominal into the SAME
         // name table BEFORE saturation so the readoff's S-set / R-link lookups are well-sized.
-        let extras =
-            decode_abox_e4(dict, triples, &idx, &v, norm.names, &mut report.skipped_assertions);
+        let extras = decode_abox_e4(
+            dict,
+            triples,
+            &idx,
+            &v,
+            norm.names,
+            &mut report.skipped_assertions,
+        );
         (bottom, extras)
     } else {
         (None, AboxExtras::default())
@@ -606,7 +612,7 @@ fn resolve_cdomain(
         .filter_map(|(&n, &dt)| idx.cd_with_restrictions.get(&n).map(|&h| (n, dt, h)))
         .collect();
     ranges.sort_unstable(); // deterministic mint order (concept ids per run)
-    // Singleton-literal enumerations (DataOneOf): a PURE enumeration node only.
+                            // Singleton-literal enumerations (DataOneOf): a PURE enumeration node only.
     let mut points: Vec<(Id, Id)> = idx
         .cd_one_of_lit
         .iter()
@@ -637,9 +643,15 @@ fn resolve_cdomain(
         .map(|(&n, &l)| (n, l))
         .collect();
     exists_points.sort_unstable();
-    let out = crate::cdomain::resolve(dict, triples, names, &ranges, &points, &exists_points, |h| {
-        decode_list(h, idx, v)
-    });
+    let out = crate::cdomain::resolve(
+        dict,
+        triples,
+        names,
+        &ranges,
+        &points,
+        &exists_points,
+        |h| decode_list(h, idx, v),
+    );
     idx.cd_range = out.node_range;
     idx.cd_exists = out.node_exists;
     out.axioms
@@ -820,7 +832,10 @@ fn decode(
             // marked the node non-EL during extraction), so minting the nominal is safe here.
             (Some(&p), None, Some(&value)) => {
                 let role = names.role(p);
-                Some(Expr::Exists(role, Box::new(Expr::Atom(names.nominal(value)))))
+                Some(Expr::Exists(
+                    role,
+                    Box::new(Expr::Atom(names.nominal(value))),
+                ))
             }
             // A restriction node with onProperty but a body outside the fragment
             // (allValuesFrom, cardinality, …), with BOTH someValuesFrom and hasValue
@@ -977,7 +992,13 @@ fn is_literal(dict: &Dict, id: Id) -> bool {
 /// `(a^I,b^I) ∈ p^I` with `b^I ∈ {b}^I`. Structural bnodes (restriction / intersection / list
 /// nodes) are never minted as individuals — realising one would be noise, not an entailment.
 #[cfg(feature = "abox")]
-fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mut Normalizer) -> usize {
+fn decode_abox(
+    dict: &Dict,
+    triples: &[[Id; 3]],
+    idx: &Idx,
+    v: &Vocab,
+    norm: &mut Normalizer,
+) -> usize {
     use oxrdf::{NamedNode, Term as OTerm};
     let look = |iri: String| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
     let named_individual = look(format!("{}NamedIndividual", OWL));

@@ -33,13 +33,21 @@ fn iri(d: &mut Dict, s: &str) -> Id {
 /// Assert that `triples` (after materialisation) contains the expected triple.
 fn assert_contains(triples: &[[Id; 3]], t: [Id; 3], msg: &str) {
     let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-    assert!(set.contains(&t), "{msg}: triple not found; closure = {:?}", triples);
+    assert!(
+        set.contains(&t),
+        "{msg}: triple not found; closure = {:?}",
+        triples
+    );
 }
 
 /// Assert that `triples` does NOT contain the given triple.
 fn assert_absent(triples: &[[Id; 3]], t: [Id; 3], msg: &str) {
     let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-    assert!(!set.contains(&t), "{msg}: triple unexpectedly present; closure = {:?}", triples);
+    assert!(
+        !set.contains(&t),
+        "{msg}: triple unexpectedly present; closure = {:?}",
+        triples
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +65,11 @@ fn prp_fp_derives_same_as_for_distinct_values() {
         iri(&mut d, "http://ex/Mary"),
         iri(&mut d, "http://ex/Marie"),
     );
-    let (ty, fp, same) = (iri(&mut d, RDF_TYPE), iri(&mut d, OWL_FP), iri(&mut d, OWL_SAME_AS));
+    let (ty, fp, same) = (
+        iri(&mut d, RDF_TYPE),
+        iri(&mut d, OWL_FP),
+        iri(&mut d, OWL_SAME_AS),
+    );
 
     // Alice hasMother Mary AND Alice hasMother Marie, and hasMother is Functional.
     let mut triples = vec![[p, ty, fp], [a, p, v1], [a, p, v2]];
@@ -81,13 +93,21 @@ fn prp_fp_no_same_as_with_single_value() {
         iri(&mut d, "http://ex/Alice"),
         iri(&mut d, "http://ex/Mary"),
     );
-    let (ty, fp, same) = (iri(&mut d, RDF_TYPE), iri(&mut d, OWL_FP), iri(&mut d, OWL_SAME_AS));
+    let (ty, fp, same) = (
+        iri(&mut d, RDF_TYPE),
+        iri(&mut d, OWL_FP),
+        iri(&mut d, OWL_SAME_AS),
+    );
 
     let mut triples = vec![[p, ty, fp], [a, p, v1]];
     materialize_owl_rl(&mut d, &mut triples);
 
     // Only one value: no sameAs should be derived involving v1 from fp
-    assert_absent(&triples, [v1, same, v1], "reflexive sameAs from prp-fp is not expected");
+    assert_absent(
+        &triples,
+        [v1, same, v1],
+        "reflexive sameAs from prp-fp is not expected",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +124,11 @@ fn prp_ifp_derives_same_as_for_distinct_subjects() {
         iri(&mut d, "http://ex/Alicia"),
         iri(&mut d, "http://ex/ssn-123"),
     );
-    let (ty, ifp, same) = (iri(&mut d, RDF_TYPE), iri(&mut d, OWL_IFP), iri(&mut d, OWL_SAME_AS));
+    let (ty, ifp, same) = (
+        iri(&mut d, RDF_TYPE),
+        iri(&mut d, OWL_IFP),
+        iri(&mut d, OWL_SAME_AS),
+    );
 
     let mut triples = vec![[p, ty, ifp], [s1, p, obj], [s2, p, obj]];
     materialize_owl_rl(&mut d, &mut triples);
@@ -258,7 +282,12 @@ fn fp_and_trp_combined_closure() {
     // sameAs pair among Alice's values must be derived.
     let values = [b, c, v1, v2];
     let has_same_as = values.iter().enumerate().any(|(i, &x)| {
-        values[i + 1..].iter().any(|&y| set.contains(&[x, same, y]) || set.contains(&[y, same, x]))
+        values[i + 1..]
+            .iter()
+            .any(|&y| set.contains(&[x, same, y]) || set.contains(&[y, same, x]))
     });
-    assert!(has_same_as, "prp-fp must derive at least one sameAs pair among Alice's parent values");
+    assert!(
+        has_same_as,
+        "prp-fp must derive at least one sameAs pair among Alice's parent values"
+    );
 }

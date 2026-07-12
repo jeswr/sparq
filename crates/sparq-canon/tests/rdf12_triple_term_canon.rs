@@ -1077,11 +1077,7 @@ fn sha384_relabels_differently_from_sha256_on_symmetric_cycle() {
 #[test]
 fn canonicalize_graph_content_rdf12_relabels_bnode() {
     use sparq_core::Graph;
-    let g = Graph::load_str(
-        "_:b0 <http://ex/p> <http://ex/o> .\n",
-        "ntriples",
-    )
-    .expect("load_str");
+    let g = Graph::load_str("_:b0 <http://ex/p> <http://ex/o> .\n", "ntriples").expect("load_str");
     let c = sparq_canon::canonicalize_graph_content_rdf12(&g).unwrap();
     assert_eq!(c.lines.len(), 1, "one stored triple -> one canonical line");
     assert!(
@@ -1118,11 +1114,7 @@ fn canonicalize_graph_content_rdf12_empty_graph() {
 #[test]
 fn canonicalize_graph_content_rdf12_with_sha384_relabels_bnode() {
     use sparq_core::Graph;
-    let g = Graph::load_str(
-        "_:x <http://ex/q> <http://ex/r> .\n",
-        "ntriples",
-    )
-    .expect("load_str");
+    let g = Graph::load_str("_:x <http://ex/q> <http://ex/r> .\n", "ntriples").expect("load_str");
     let c = sparq_canon::canonicalize_graph_content_rdf12_with::<Sha384>(&g).unwrap();
     assert_eq!(c.lines.len(), 1, "one stored triple -> one canonical line");
     assert!(
@@ -1195,7 +1187,10 @@ fn ground_terms_accepts_and_matches_full_profile() {
             ground_tt(),
             GraphName::DefaultGraph,
         ),
-        says_quad("http://ex/issuer", Term::Literal(Literal::new_simple_literal("v"))),
+        says_quad(
+            "http://ex/issuer",
+            Term::Literal(Literal::new_simple_literal("v")),
+        ),
     ];
     let constrained = sparq_canon::canonicalize_rdf12_ground_terms(&dataset).unwrap();
     let full = sparq_canon::canonicalize_rdf12(&dataset).unwrap();
@@ -1231,9 +1226,13 @@ fn ground_terms_with_sha384_matches_full_profile() {
             GraphName::DefaultGraph,
         ),
     ];
-    let constrained = sparq_canon::canonicalize_rdf12_ground_terms_with::<Sha384>(&dataset).unwrap();
+    let constrained =
+        sparq_canon::canonicalize_rdf12_ground_terms_with::<Sha384>(&dataset).unwrap();
     let full = sparq_canon::canonicalize_rdf12_with::<Sha384>(&dataset).unwrap();
-    assert_eq!(constrained, full, "SHA-384 delegation must be byte-identical");
+    assert_eq!(
+        constrained, full,
+        "SHA-384 delegation must be byte-identical"
+    );
     // And the SHA-256 default is reachable through the non-generic entry point.
     let c256 = sparq_canon::canonicalize_rdf12_ground_terms(&dataset).unwrap();
     assert_eq!(
@@ -1248,14 +1247,12 @@ fn ground_terms_with_sha384_matches_full_profile() {
 /// issued canonical labels.
 #[test]
 fn ground_terms_issuer_map_matches_full_profile() {
-    let dataset = vec![
-        Quad::new(
-            NamedOrBlankNode::BlankNode(bn("only")),
-            iri("http://ex/says"),
-            ground_tt(),
-            GraphName::DefaultGraph,
-        ),
-    ];
+    let dataset = vec![Quad::new(
+        NamedOrBlankNode::BlankNode(bn("only")),
+        iri("http://ex/says"),
+        ground_tt(),
+        GraphName::DefaultGraph,
+    )];
     let m = sparq_canon::issue_dataset_rdf12_ground_terms(&dataset).unwrap();
     assert_eq!(
         m.get("only").map(String::as_str),
@@ -1290,14 +1287,20 @@ fn ground_terms_triples_matches_full_profile() {
         iri("http://ex/q"),
         Term::Literal(Literal::new_simple_literal("leaf")),
     );
-    let c = sparq_canon::canonicalize_triples_rdf12_ground_terms(&[t1.clone(), t2.clone()]).unwrap();
+    let c =
+        sparq_canon::canonicalize_triples_rdf12_ground_terms(&[t1.clone(), t2.clone()]).unwrap();
     let full = sparq_canon::canonicalize_triples_rdf12(&[t1.clone(), t2.clone()]).unwrap();
     assert_eq!(c.lines, full.lines, "lines must equal the full profile's");
-    assert_eq!(c.triples, full.triples, "triples must equal the full profile's");
+    assert_eq!(
+        c.triples, full.triples,
+        "triples must equal the full profile's"
+    );
     assert_eq!(c.lines.len(), 2, "two triples -> two canonical lines");
-    let c384 =
-        sparq_canon::canonicalize_triples_rdf12_ground_terms_with::<Sha384>(&[t1.clone(), t2.clone()])
-            .unwrap();
+    let c384 = sparq_canon::canonicalize_triples_rdf12_ground_terms_with::<Sha384>(&[
+        t1.clone(),
+        t2.clone(),
+    ])
+    .unwrap();
     let full384 = sparq_canon::canonicalize_triples_rdf12_with::<Sha384>(&[t1, t2]).unwrap();
     assert_eq!(c384.lines, full384.lines, "SHA-384 delegation must agree");
 }
@@ -1475,7 +1478,11 @@ fn graph_content_ground_terms_matches_full_profile_and_composition() {
     .expect("load_str");
     let c = sparq_canon::canonicalize_graph_content_rdf12_ground_terms(&g).unwrap();
     // Non-vacuity: the triple term survives and the top-level bnode relabels.
-    assert_eq!(c.lines.len(), 2, "two stored triples -> two canonical lines");
+    assert_eq!(
+        c.lines.len(),
+        2,
+        "two stored triples -> two canonical lines"
+    );
     assert!(
         c.lines.iter().any(|l| l.contains("<<(")),
         "triple-term token preserved: {:?}",
@@ -1590,12 +1597,17 @@ fn quad_with_object(o: Term) -> Quad {
 /// issuer map is empty — the chain is ground); one past it fails closed.
 #[test]
 fn depth_bound_full_profile_dataset() {
-    let at = [quad_with_object(ground_chain(sparq_canon::MAX_TRIPLE_TERM_DEPTH))];
+    let at = [quad_with_object(ground_chain(
+        sparq_canon::MAX_TRIPLE_TERM_DEPTH,
+    ))];
     let over = [quad_with_object(ground_chain(
         sparq_canon::MAX_TRIPLE_TERM_DEPTH + 1,
     ))];
     let canon = sparq_canon::canonicalize_rdf12(&at).expect("depth == MAX must canonicalize");
-    assert!(canon.contains("<<("), "triple-term token preserved: truncated");
+    assert!(
+        canon.contains("<<("),
+        "triple-term token preserved: truncated"
+    );
     assert!(sparq_canon::issue_dataset_rdf12(&at)
         .expect("depth == MAX must issue")
         .is_empty());

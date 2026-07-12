@@ -65,7 +65,9 @@ use spargebra::{Query, SparqlParser};
 /// # Ok::<(), String>(())
 /// ```
 pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String> {
-    let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let mut q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     let dataset = match &mut q {
         Query::Select { dataset, .. }
         | Query::Construct { dataset, .. }
@@ -74,7 +76,10 @@ pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String
     };
     // restrict the dataset: FROM NAMED = allowed (∩ pre-existing), FROM = nothing
     let mut named: Vec<NamedNode> = match dataset.as_ref().and_then(|d| d.named.clone()) {
-        Some(existing) => existing.into_iter().filter(|g| allowed.contains(g)).collect(),
+        Some(existing) => existing
+            .into_iter()
+            .filter(|g| allowed.contains(g))
+            .collect(),
         None => allowed.to_vec(),
     };
     if named.is_empty() {
@@ -83,7 +88,10 @@ pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String
         // dataset clause present (build_active: absent graph = empty graph)
         named.push(NamedNode::new_unchecked("urn:sparq:nothing"));
     }
-    *dataset = Some(QueryDataset { default: Vec::new(), named: Some(named) });
+    *dataset = Some(QueryDataset {
+        default: Vec::new(),
+        named: Some(named),
+    });
     wrap_query(&mut q, sparql);
     Ok(q.to_string())
 }
@@ -112,7 +120,9 @@ pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String
 /// # Ok::<(), String>(())
 /// ```
 pub fn wrap_for_view(sparql: &str) -> Result<String, String> {
-    let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let mut q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     wrap_query(&mut q, sparql);
     Ok(q.to_string())
 }
@@ -156,7 +166,9 @@ fn take_union_default_opt_in(q: &mut Query) -> bool {
         | Query::Describe { dataset, .. }
         | Query::Ask { dataset, .. } => dataset,
     };
-    let Some(d) = dataset.as_mut() else { return false };
+    let Some(d) = dataset.as_mut() else {
+        return false;
+    };
     let reserved = NamedNode::new_unchecked(UNION_DEFAULT_GRAPH_IRI);
     let opt_in = d.default.contains(&reserved);
     d.default.retain(|g| *g != reserved);
@@ -212,7 +224,9 @@ fn take_union_default_opt_in(q: &mut Query) -> bool {
 /// assert!(!opted.contains(UNION_DEFAULT_GRAPH_IRI));
 /// ```
 pub fn wrap_for_view_opt_in(sparql: &str) -> Result<String, String> {
-    let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let mut q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     if take_union_default_opt_in(&mut q) {
         wrap_query(&mut q, sparql);
     }
@@ -267,9 +281,10 @@ fn wrap_in_graph(p: &mut GraphPattern, fresh: &mut Fresh, in_graph: bool) {
                 };
                 acc = Some(match acc {
                     None => wrapped,
-                    Some(left) => {
-                        GraphPattern::Join { left: Box::new(left), right: Box::new(wrapped) }
-                    }
+                    Some(left) => GraphPattern::Join {
+                        left: Box::new(left),
+                        right: Box::new(wrapped),
+                    },
                 });
             }
             *p = acc.expect("non-empty");
@@ -278,8 +293,16 @@ fn wrap_in_graph(p: &mut GraphPattern, fresh: &mut Fresh, in_graph: bool) {
             if in_graph {
                 return;
             }
-            let inner = std::mem::replace(p, GraphPattern::Bgp { patterns: Vec::new() });
-            *p = GraphPattern::Graph { name: fresh_graph_var(fresh), inner: Box::new(inner) };
+            let inner = std::mem::replace(
+                p,
+                GraphPattern::Bgp {
+                    patterns: Vec::new(),
+                },
+            );
+            *p = GraphPattern::Graph {
+                name: fresh_graph_var(fresh),
+                inner: Box::new(inner),
+            };
         }
         GraphPattern::Graph { inner, .. } => wrap_in_graph(inner, fresh, true),
         GraphPattern::Join { left, right }
@@ -292,7 +315,11 @@ fn wrap_in_graph(p: &mut GraphPattern, fresh: &mut Fresh, in_graph: bool) {
             wrap_in_graph(left, fresh, in_graph);
             wrap_in_graph(right, fresh, in_graph);
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             wrap_in_graph(left, fresh, in_graph);
             wrap_in_graph(right, fresh, in_graph);
             if let Some(e) = expression {
@@ -353,7 +380,10 @@ fn wrap_expr(e: &mut Expression, fresh: &mut Fresh, in_graph: bool) {
                 wrap_expr(x, fresh, in_graph);
             }
         }
-        Expression::Bound(_) | Expression::NamedNode(_) | Expression::Literal(_) | Expression::Variable(_) => {}
+        Expression::Bound(_)
+        | Expression::NamedNode(_)
+        | Expression::Literal(_)
+        | Expression::Variable(_) => {}
     }
 }
 
@@ -365,7 +395,10 @@ mod opt_in_tests {
     use super::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
 
     fn from_reserved(body: &str) -> String {
-        format!("SELECT ?t FROM <{}> WHERE {{ {} }}", UNION_DEFAULT_GRAPH_IRI, body)
+        format!(
+            "SELECT ?t FROM <{}> WHERE {{ {} }}",
+            UNION_DEFAULT_GRAPH_IRI, body
+        )
     }
 
     #[test]
@@ -380,9 +413,15 @@ mod opt_in_tests {
     #[test]
     fn opt_in_in_default_position_wraps_and_strips_reserved_iri() {
         let out = wrap_for_view_opt_in(&from_reserved("?s <urn:p> ?t")).unwrap();
-        assert!(out.contains("GRAPH ?__sg0"), "opt-in must wrap default-graph pattern: {out}");
+        assert!(
+            out.contains("GRAPH ?__sg0"),
+            "opt-in must wrap default-graph pattern: {out}"
+        );
         // the reserved IRI is a signal, never a real graph name: it must not survive.
-        assert!(!out.contains(UNION_DEFAULT_GRAPH_IRI), "reserved IRI must be stripped: {out}");
+        assert!(
+            !out.contains(UNION_DEFAULT_GRAPH_IRI),
+            "reserved IRI must be stripped: {out}"
+        );
     }
 
     #[test]
@@ -394,8 +433,14 @@ mod opt_in_tests {
             UNION_DEFAULT_GRAPH_IRI
         );
         let out = wrap_for_view_opt_in(&q).unwrap();
-        assert!(!out.contains(UNION_DEFAULT_GRAPH_IRI), "reserved IRI must be stripped: {out}");
-        assert!(!out.contains("GRAPH"), "FROM NAMED position is not the opt-in: {out}");
+        assert!(
+            !out.contains(UNION_DEFAULT_GRAPH_IRI),
+            "reserved IRI must be stripped: {out}"
+        );
+        assert!(
+            !out.contains("GRAPH"),
+            "FROM NAMED position is not the opt-in: {out}"
+        );
     }
 
     #[test]
@@ -405,7 +450,10 @@ mod opt_in_tests {
         let q = "SELECT ?t FROM <http://www.w3.org/ns/solid/sparql#union-default-graphX> \
                  WHERE { ?s <urn:p> ?t }";
         let out = wrap_for_view_opt_in(q).unwrap();
-        assert!(!out.contains("GRAPH"), "near-miss IRI must not enable union: {out}");
+        assert!(
+            !out.contains("GRAPH"),
+            "near-miss IRI must not enable union: {out}"
+        );
     }
 
     #[test]

@@ -51,8 +51,8 @@ use crate::update::UpdateEffect;
 use crate::QueryBudget;
 use oxrdf::Term;
 use rustc_hash::FxHashSet;
-use sparq_core::{Graph, GraphSnapshot};
 use spargebra::algebra::GraphTarget;
+use sparq_core::{Graph, GraphSnapshot};
 use std::sync::{Arc, Mutex};
 
 /// A coarse, sound write-set key: the graph slot a write touched plus, for triple-level
@@ -119,7 +119,11 @@ impl WriteSet {
     fn record(&mut self, effects: &[UpdateEffect]) {
         for e in effects {
             match e {
-                UpdateEffect::Delta { slot, inserts, deletes } => {
+                UpdateEffect::Delta {
+                    slot,
+                    inserts,
+                    deletes,
+                } => {
                     for t in inserts.iter().chain(deletes.iter()) {
                         self.triples.insert((slot.clone(), t.clone()));
                     }
@@ -149,7 +153,11 @@ impl WriteSet {
         // Slot-level keys conflict against the OTHER side's triples and slots (and vice versa).
         for s in self.slots.iter().chain(other.slots.iter()) {
             // Slot vs the opposite side's triples.
-            let side_triples = if self.slots.contains(s) { &other.triples } else { &self.triples };
+            let side_triples = if self.slots.contains(s) {
+                &other.triples
+            } else {
+                &self.triples
+            };
             if side_triples
                 .iter()
                 .any(|(slot, t)| s.conflicts(&WriteKey::Triple(slot.clone(), t.clone())))
@@ -158,7 +166,9 @@ impl WriteSet {
             }
         }
         // Slot vs slot (both directions).
-        self.slots.iter().any(|a| other.slots.iter().any(|b| a.conflicts(b)))
+        self.slots
+            .iter()
+            .any(|a| other.slots.iter().any(|b| a.conflicts(b)))
     }
 }
 
@@ -239,7 +249,10 @@ impl TransactionManager {
     /// Its view is fixed at begin time and unaffected by any later commit.
     pub fn begin_read(&self) -> ReadTxn {
         let st = self.lock();
-        ReadTxn { snapshot: st.graph.snapshot(), version: st.version }
+        ReadTxn {
+            snapshot: st.graph.snapshot(),
+            version: st.version,
+        }
     }
 
     /// Begins a **write** transaction: forks the current committed generation into a private
@@ -398,7 +411,10 @@ impl WriteTxn<'_> {
             if conflict {
                 let current = st.version;
                 TransactionManager::writer_closed(&mut st);
-                return Err(CommitError::Conflict { base: self.base_version, current });
+                return Err(CommitError::Conflict {
+                    base: self.base_version,
+                    current,
+                });
             }
         }
 
@@ -418,8 +434,12 @@ impl WriteTxn<'_> {
         // so the result is the merge of both writers' deltas.
         let published = if stale {
             let mut merged = st.graph.fork();
-            crate::update::apply_effects(&mut merged, &self.effects)
-                .map_err(|_| CommitError::Conflict { base: self.base_version, current: st.version })?;
+            crate::update::apply_effects(&mut merged, &self.effects).map_err(|_| {
+                CommitError::Conflict {
+                    base: self.base_version,
+                    current: st.version,
+                }
+            })?;
             merged
         } else {
             working
@@ -428,7 +448,10 @@ impl WriteTxn<'_> {
         let new_version = st.version + 1;
         st.graph = Arc::new(published);
         st.version = new_version;
-        st.log.push(Committed { version: new_version, write_set: std::mem::take(&mut self.write_set) });
+        st.log.push(Committed {
+            version: new_version,
+            write_set: std::mem::take(&mut self.write_set),
+        });
         TransactionManager::writer_closed(&mut st);
         // Prune commit history below the oldest still-open writer's base — those entries can no
         // longer be needed by any open transaction's conflict check.
@@ -495,7 +518,10 @@ mod tests {
         let t = [nn("http://x/s"), nn("http://x/p"), nn("http://x/o")];
         let def = WriteKey::Triple(None, t.clone());
         let named = WriteKey::Triple(Some(nn("http://x/g")), t.clone());
-        assert!(!def.conflicts(&named), "default-graph and named-graph triples must be disjoint");
+        assert!(
+            !def.conflicts(&named),
+            "default-graph and named-graph triples must be disjoint"
+        );
         assert!(def.conflicts(&WriteKey::Default));
         assert!(named.conflicts(&WriteKey::Slot(nn("http://x/g"))));
         assert!(!named.conflicts(&WriteKey::Slot(nn("http://x/other"))));
@@ -506,7 +532,8 @@ mod tests {
     fn empty_writeset_never_conflicts() {
         let nn = |s: &str| Term::NamedNode(oxrdf::NamedNode::new(s).unwrap());
         let mut a = WriteSet::default();
-        a.triples.insert((None, [nn("http://x/s"), nn("http://x/p"), nn("http://x/o")]));
+        a.triples
+            .insert((None, [nn("http://x/s"), nn("http://x/p"), nn("http://x/o")]));
         assert!(!a.conflicts(&WriteSet::default()));
         assert!(!WriteSet::default().conflicts(&a));
     }
@@ -516,7 +543,8 @@ mod tests {
         let m = TransactionManager::new(g("@prefix : <http://ex/> . :a :p :b ."));
         assert_eq!(m.committed_version(), 0);
         let mut w = m.begin_write();
-        w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+        w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+            .unwrap();
         let v = w.commit().unwrap();
         assert_eq!(v, 1);
         let r = m.begin_read();

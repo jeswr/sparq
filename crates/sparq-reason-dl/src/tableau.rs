@@ -628,8 +628,7 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
             }
             Axiom::DisjointClasses(left, right) => {
                 // left ⊓ right ⊑ ⊥ (design record §3 desugaring).
-                let both =
-                    ClassExpression::ObjectIntersectionOf(vec![left.clone(), right.clone()]);
+                let both = ClassExpression::ObjectIntersectionOf(vec![left.clone(), right.clone()]);
                 push_universal(
                     &mut sys,
                     &mut seeds,
@@ -694,7 +693,10 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
 
     // §3 step 1, enforced structurally: the interner now holds EXACTLY the (NNF)
     // subexpression closure of the seeds, and expansion below moves only indices.
-    debug_assert!(seeds.iter().all(is_nnf), "preprocessing must emit NNF seeds");
+    debug_assert!(
+        seeds.iter().all(is_nnf),
+        "preprocessing must emit NNF seeds"
+    );
     debug_assert_eq!(
         subexpression_closure(&seeds).len(),
         sys.shapes.len(),
@@ -740,7 +742,10 @@ enum Step {
     /// A clash: this branch is dead (module docs §4).
     Clash,
     /// A ⊔-rule needs a choice: branch over `disjuncts` at `node`.
-    Choice { node: usize, disjuncts: Vec<ConceptId> },
+    Choice {
+        node: usize,
+        disjuncts: Vec<ConceptId>,
+    },
 }
 
 /// Apply deterministic rules (GCI, ⊓, ∀) to fixpoint, then surface the first ⊔-choice,

@@ -18,7 +18,10 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn tmp(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("sparq_dpersist_{tag}_{}_{n}.spqv", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "sparq_dpersist_{tag}_{}_{n}.spqv",
+        std::process::id()
+    ))
 }
 
 fn graph(ttl: &str) -> Graph {
@@ -27,7 +30,8 @@ fn graph(ttl: &str) -> Graph {
 
 fn id_of(g: &Graph, s: &str) -> u32 {
     use oxrdf::{NamedNode, Term};
-    g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap()
+    g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+        .unwrap()
 }
 
 const A: &str = r#"
@@ -45,9 +49,12 @@ const B: &str = r#"
 /// Builds a finalized 4-d store over graph A with a few base vectors.
 fn build_finalized(g: &Graph, path: &Path) -> VectorStore {
     let mut s = VectorStore::create(path, 4).unwrap().with_fingerprint(g);
-    s.put(id_of(g, "http://example.org/alice"), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-    s.put(id_of(g, "http://example.org/bob"), &[0.9, 0.1, 0.0, 0.0]).unwrap();
-    s.put(id_of(g, "http://example.org/carol"), &[0.0, 0.0, 0.0, 1.0]).unwrap();
+    s.put(id_of(g, "http://example.org/alice"), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    s.put(id_of(g, "http://example.org/bob"), &[0.9, 0.1, 0.0, 0.0])
+        .unwrap();
+    s.put(id_of(g, "http://example.org/carol"), &[0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     s.finalize().unwrap();
     s
 }
@@ -105,25 +112,40 @@ fn open_with_persisted_delta_equals_in_ram_view_and_compact() {
     // The persisted header must be a well-formed .spqd.
     let raw = std::fs::read(&delta_path).unwrap();
     assert_eq!(&raw[0..4], &SPQD_MAGIC);
-    assert_eq!(u32::from_le_bytes(raw[4..8].try_into().unwrap()), SPQD_VERSION);
+    assert_eq!(
+        u32::from_le_bytes(raw[4..8].try_into().unwrap()),
+        SPQD_VERSION
+    );
 
     // DROP the live handle — the in-RAM delta is gone; only the .spqv base + .spqd sidecar remain.
     drop(store);
 
     // (2) Reopen base + persisted delta from disk (simulating a process restart).
     let reopened = VectorStore::open_with_delta(&base_path).unwrap();
-    assert!(reopened.has_delta(), "the persisted delta was replayed onto the reopened base");
+    assert!(
+        reopened.has_delta(),
+        "the persisted delta was replayed onto the reopened base"
+    );
     let persisted = effective(&reopened);
 
     // (3) compact() over the reopened (base + persisted delta) → a fresh from-scratch-equivalent base.
     let compact_path = tmp("eq-compact");
     let compacted = reopened.compact(&compact_path, &g).unwrap();
-    assert!(!compacted.has_delta(), "the compacted base carries no delta");
+    assert!(
+        !compacted.has_delta(),
+        "the compacted base carries no delta"
+    );
     let compacted_view = effective(&compacted);
 
     // THE EQUIVALENCE: open(base + persisted-delta) == in-RAM(base + delta) == compact().
-    assert_eq!(persisted, in_ram, "persisted view must equal the in-RAM view");
-    assert_eq!(compacted_view, in_ram, "compacted view must equal the in-RAM view");
+    assert_eq!(
+        persisted, in_ram,
+        "persisted view must equal the in-RAM view"
+    );
+    assert_eq!(
+        compacted_view, in_ram,
+        "compacted view must equal the in-RAM view"
+    );
 
     // len and every get agree across all three; the tombstone really took.
     assert_eq!(reopened.len(), in_ram.len());
@@ -133,7 +155,10 @@ fn open_with_persisted_delta_equals_in_ram_view_and_compact() {
 
     // A search agrees byte-for-byte between the persisted-reopen and the compacted base.
     let q = [0.1f32, 0.9, 0.0, 0.0];
-    assert_eq!(nearest_exact(&reopened, &q, 3), nearest_exact(&compacted, &q, 3));
+    assert_eq!(
+        nearest_exact(&reopened, &q, 3),
+        nearest_exact(&compacted, &q, 3)
+    );
 
     std::fs::remove_file(&base_path).ok();
     std::fs::remove_file(&delta_path).ok();
@@ -169,11 +194,23 @@ fn empty_delta_round_trips_and_still_records_the_generation() {
 
     // The sidecar exists and is header-only (no appends, no tombstones).
     let raw = std::fs::read(&delta_path).unwrap();
-    assert_eq!(u64::from_le_bytes(raw[12..20].try_into().unwrap()), 0, "no appends");
-    assert_eq!(u64::from_le_bytes(raw[20..28].try_into().unwrap()), 0, "no tombstones");
+    assert_eq!(
+        u64::from_le_bytes(raw[12..20].try_into().unwrap()),
+        0,
+        "no appends"
+    );
+    assert_eq!(
+        u64::from_le_bytes(raw[20..28].try_into().unwrap()),
+        0,
+        "no tombstones"
+    );
 
     let reopened = VectorStore::open_with_delta(&base_path).unwrap();
-    assert_eq!(effective(&reopened), base_view, "an empty delta replays to the bare base view");
+    assert_eq!(
+        effective(&reopened),
+        base_view,
+        "an empty delta replays to the bare base view"
+    );
     std::fs::remove_file(&base_path).ok();
     std::fs::remove_file(&delta_path).ok();
 }
@@ -196,13 +233,22 @@ fn a_truncated_sidecar_is_rejected_not_ub() {
     // (a) Truncate mid-body (a torn write of the append section): the header still claims an append
     // whose bytes are now missing → the exact-length check rejects it (no out-of-bounds read).
     std::fs::write(&delta_path, &full[..full.len() - 4]).unwrap();
-    let err = err_of(VectorStore::open_with_delta(&base_path), "truncated mid-body");
-    assert!(err.contains("truncated") || err.contains("length mismatch"), "err was: {err}");
+    let err = err_of(
+        VectorStore::open_with_delta(&base_path),
+        "truncated mid-body",
+    );
+    assert!(
+        err.contains("truncated") || err.contains("length mismatch"),
+        "err was: {err}"
+    );
 
     // (b) Truncate inside the header itself: also rejected with a clear message.
     std::fs::write(&delta_path, &full[..40]).unwrap();
     let err = err_of(VectorStore::open_with_delta(&base_path), "torn header");
-    assert!(err.contains("truncated") || err.contains("length mismatch"), "err was: {err}");
+    assert!(
+        err.contains("truncated") || err.contains("length mismatch"),
+        "err was: {err}"
+    );
 
     // (c) Trailing garbage (a long file) is also rejected — the length must match EXACTLY.
     let mut longer = full.clone();
@@ -231,19 +277,29 @@ fn a_persisted_delta_is_rejected_against_a_mismatched_base() {
     // through apply_delta, whose sq-32i5 generation tie rejects the mismatch.
     let ga = graph(A);
     let gb = graph(B);
-    assert_ne!(Fingerprint::of(&ga), Fingerprint::of(&gb), "A and B must be distinct generations");
+    assert_ne!(
+        Fingerprint::of(&ga),
+        Fingerprint::of(&gb),
+        "A and B must be distinct generations"
+    );
 
     // A store + persisted delta built against generation A.
     let a_path = tmp("mismatch-a");
     let mut store_a = build_finalized(&ga, &a_path);
-    store_a.add(id_of(&ga, "http://example.org/dave"), &[0.3, 0.7, 0.0, 0.0]).unwrap();
+    store_a
+        .add(id_of(&ga, "http://example.org/dave"), &[0.3, 0.7, 0.0, 0.0])
+        .unwrap();
     let delta_a_path = store_a.save_delta().unwrap();
     drop(store_a);
 
     // A SEPARATE base built against generation B, at a different path.
     let b_path = tmp("mismatch-b");
-    let mut store_b = VectorStore::create(&b_path, 4).unwrap().with_fingerprint(&gb);
-    store_b.put(id_of(&gb, "http://example.org/eve"), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    let mut store_b = VectorStore::create(&b_path, 4)
+        .unwrap()
+        .with_fingerprint(&gb);
+    store_b
+        .put(id_of(&gb, "http://example.org/eve"), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
     store_b.finalize().unwrap();
     drop(store_b);
 
@@ -273,18 +329,25 @@ fn a_dimension_mismatch_between_base_and_sidecar_is_rejected() {
     let g = graph(A);
     let base4 = tmp("dim4");
     let mut store4 = build_finalized(&g, &base4);
-    store4.add(id_of(&g, "http://example.org/dave"), &[0.3, 0.7, 0.0, 0.0]).unwrap();
+    store4
+        .add(id_of(&g, "http://example.org/dave"), &[0.3, 0.7, 0.0, 0.0])
+        .unwrap();
     let delta4 = store4.save_delta().unwrap();
     drop(store4);
 
     // A 2-d base bound to the SAME generation (so only the dimension differs).
     let base2 = tmp("dim2");
     let mut store2 = VectorStore::create(&base2, 2).unwrap().with_fingerprint(&g);
-    store2.put(id_of(&g, "http://example.org/alice"), &[1.0, 0.0]).unwrap();
+    store2
+        .put(id_of(&g, "http://example.org/alice"), &[1.0, 0.0])
+        .unwrap();
     store2.finalize().unwrap();
     drop(store2);
 
-    let err = err_of(VectorStore::open_with_delta_at(&base2, &delta4), "dim mismatch");
+    let err = err_of(
+        VectorStore::open_with_delta_at(&base2, &delta4),
+        "dim mismatch",
+    );
     assert!(err.contains("dimension"), "err was: {err}");
 
     std::fs::remove_file(&base4).ok();
@@ -311,17 +374,28 @@ fn save_is_atomic_a_preexisting_sidecar_survives_and_is_replaced_whole() {
     store.remove(carol);
     store.save_delta().unwrap();
     let second = std::fs::read(&delta_path).unwrap();
-    assert_ne!(second.len(), first_len, "the re-saved sidecar reflects the new mutation");
+    assert_ne!(
+        second.len(),
+        first_len,
+        "the re-saved sidecar reflects the new mutation"
+    );
 
     // No stray tmp file is left behind.
     let mut tmp_path = delta_path.as_os_str().to_os_string();
     tmp_path.push("-tmp");
-    assert!(!Path::new(&tmp_path).exists(), "the tmp file is renamed away, not left behind");
+    assert!(
+        !Path::new(&tmp_path).exists(),
+        "the tmp file is renamed away, not left behind"
+    );
 
     drop(store);
     let reopened = VectorStore::open_with_delta(&base_path).unwrap();
     assert_eq!(reopened.get(dave), Some(&[0.3f32, 0.7, 0.0, 0.0][..]));
-    assert_eq!(reopened.get(carol), None, "the second delta's tombstone is in effect");
+    assert_eq!(
+        reopened.get(carol),
+        None,
+        "the second delta's tombstone is in effect"
+    );
 
     std::fs::remove_file(&base_path).ok();
     std::fs::remove_file(&delta_path).ok();

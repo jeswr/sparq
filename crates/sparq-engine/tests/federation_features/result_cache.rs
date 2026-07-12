@@ -294,7 +294,11 @@ fn insert_invalidates_via_version_bump() {
     let version = 1u64;
 
     let after = cache.get_or_eval(&graph, &q, version, &budget).unwrap();
-    assert_eq!(cache.stats().misses, 2, "the new version misses (invalidated)");
+    assert_eq!(
+        cache.stats().misses,
+        2,
+        "the new version misses (invalidated)"
+    );
     assert_eq!(cache.stats().hits, 0, "no stale hit was served");
     // The served result is the FRESH post-insert count, and it grew.
     assert_eq!(cached_count(&after), count_of(&graph));
@@ -355,7 +359,10 @@ fn sparql_update_invalidates_and_serves_new_binding() {
 
     let before = cache.get_or_eval(&graph0, &q, 0, &budget).unwrap();
     let o_before = before.rows[0][0].as_ref().unwrap().to_string();
-    assert!(o_before.contains('1'), "ex:a starts bound to 1, got {o_before}");
+    assert!(
+        o_before.contains('1'),
+        "ex:a starts bound to 1, got {o_before}"
+    );
 
     // SPARQL UPDATE: rebind ex:a from 1 to 99. `update` rebuilds a fresh graph.
     let graph1 = sparq_engine::update(
@@ -366,12 +373,26 @@ fn sparql_update_invalidates_and_serves_new_binding() {
 
     // Writer routes the read at the bumped version against the UPDATED graph.
     let after = cache.get_or_eval(&graph1, &q, 1, &budget).unwrap();
-    assert_eq!(cache.stats().hits, 0, "no stale binding served after UPDATE");
+    assert_eq!(
+        cache.stats().hits,
+        0,
+        "no stale binding served after UPDATE"
+    );
     let o_after = after.rows[0][0].as_ref().unwrap().to_string();
-    assert!(o_after.contains("99"), "ex:a must now bind to 99, got {o_after}");
-    assert_ne!(o_before, o_after, "the served binding changed after the UPDATE");
+    assert!(
+        o_after.contains("99"),
+        "ex:a must now bind to 99, got {o_after}"
+    );
+    assert_ne!(
+        o_before, o_after,
+        "the served binding changed after the UPDATE"
+    );
     // It matches a fresh, uncached evaluation of the updated graph.
-    let fresh = query(&graph1, "PREFIX ex: <http://ex/> SELECT ?o WHERE { ex:a ex:p ?o }").unwrap();
+    let fresh = query(
+        &graph1,
+        "PREFIX ex: <http://ex/> SELECT ?o WHERE { ex:a ex:p ?o }",
+    )
+    .unwrap();
     assert_eq!(o_after, fresh.rows[0][0].as_ref().unwrap().to_string());
 }
 
@@ -400,10 +421,27 @@ fn clear_invalidates_to_empty_result() {
         .unwrap();
 
     let after = cache.get_or_eval(&graph, &rows_q, 1, &budget).unwrap();
-    assert_eq!(cache.stats().hits, 0, "the non-empty result was not re-served");
-    assert!(after.rows.is_empty(), "CLEARed graph yields an empty result");
-    assert_eq!(after.rows.len(), query(&graph, "SELECT ?s WHERE { ?s ?p ?o }").unwrap().rows.len());
-    assert_eq!(cache.stats().entries, 1, "the stale v0 entry was reclaimed, not kept");
+    assert_eq!(
+        cache.stats().hits,
+        0,
+        "the non-empty result was not re-served"
+    );
+    assert!(
+        after.rows.is_empty(),
+        "CLEARed graph yields an empty result"
+    );
+    assert_eq!(
+        after.rows.len(),
+        query(&graph, "SELECT ?s WHERE { ?s ?p ?o }")
+            .unwrap()
+            .rows
+            .len()
+    );
+    assert_eq!(
+        cache.stats().entries,
+        1,
+        "the stale v0 entry was reclaimed, not kept"
+    );
 }
 
 /// Reusing the OLD version after a mutation is the documented caller bug — and the
@@ -429,8 +467,16 @@ fn stale_version_after_mutation_is_a_hit_contract_boundary() {
 
     // Caller forgot to bump: SAME version => stale hit (the documented hazard).
     let stale = cache.get_or_eval(&graph, &q, 0, &budget).unwrap();
-    assert_eq!(cache.stats().hits, 1, "same-version read is a hit (no auto-detection)");
-    assert_eq!(cached_count(&stale), 3, "the stale (pre-insert) count is served");
+    assert_eq!(
+        cache.stats().hits,
+        1,
+        "same-version read is a hit (no auto-detection)"
+    );
+    assert_eq!(
+        cached_count(&stale),
+        3,
+        "the stale (pre-insert) count is served"
+    );
     // Bumping recovers correctness immediately.
     let fresh = cache.get_or_eval(&graph, &q, 1, &budget).unwrap();
     assert_eq!(cached_count(&fresh), 4);

@@ -138,7 +138,11 @@ mod tests {
     fn uri_host_port_scheme_default_ports() {
         assert_eq!(
             uri_host_port(&uri("https://example.org/q")),
-            Some(("example.org:443".to_string(), "example.org".to_string(), 443)),
+            Some((
+                "example.org:443".to_string(),
+                "example.org".to_string(),
+                443
+            )),
             "https defaults to 443"
         );
         assert_eq!(

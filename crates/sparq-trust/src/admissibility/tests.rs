@@ -16,7 +16,13 @@ fn closure_iris(body: &str) -> Vec<(String, String, String)> {
     let cl = sparq_reason::reason_n3_terms(&doc, None).expect("reasoning failed");
     cl.facts
         .iter()
-        .filter_map(|[s, p, o]| Some((iri(s)?.to_string(), iri(p)?.to_string(), iri(o)?.to_string())))
+        .filter_map(|[s, p, o]| {
+            Some((
+                iri(s)?.to_string(),
+                iri(p)?.to_string(),
+                iri(o)?.to_string(),
+            ))
+        })
         .collect()
 }
 
@@ -42,14 +48,29 @@ fn stronger_than_is_transitively_closed() {
 fn at_least_is_reflexive_and_down_closed() {
     let c = closure_iris("");
     // reflexive: every level on an order chain is atLeast itself.
-    assert!(has(&c, PER, SECX_AT_LEAST, PER), "reflexive atLeast on PerPresentation");
-    assert!(has(&c, CROSS, SECX_AT_LEAST, CROSS), "reflexive atLeast on CrossPresentation");
+    assert!(
+        has(&c, PER, SECX_AT_LEAST, PER),
+        "reflexive atLeast on PerPresentation"
+    );
+    assert!(
+        has(&c, CROSS, SECX_AT_LEAST, CROSS),
+        "reflexive atLeast on CrossPresentation"
+    );
     // down-closed: a stronger level is atLeast a weaker one (incl. transitively).
     assert!(has(&c, CROSS, SECX_AT_LEAST, PER), "Cross atLeast Per");
-    assert!(has(&c, CROSS, SECX_AT_LEAST, LINKABLE), "Cross atLeast Linkable (transitive)");
+    assert!(
+        has(&c, CROSS, SECX_AT_LEAST, LINKABLE),
+        "Cross atLeast Linkable (transitive)"
+    );
     // NOT up: a weaker level is never atLeast a stronger one.
-    assert!(!has(&c, LINKABLE, SECX_AT_LEAST, CROSS), "Linkable is NOT atLeast Cross");
-    assert!(!has(&c, PER, SECX_AT_LEAST, CROSS), "Per is NOT atLeast Cross");
+    assert!(
+        !has(&c, LINKABLE, SECX_AT_LEAST, CROSS),
+        "Linkable is NOT atLeast Cross"
+    );
+    assert!(
+        !has(&c, PER, SECX_AT_LEAST, CROSS),
+        "Per is NOT atLeast Cross"
+    );
 }
 
 /// The discharge rule fires exactly when the held level is `atLeast` the
@@ -72,12 +93,24 @@ zk:cReqCross odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator od
     let creq_per = "https://sparq.dev/ns/zk#cReqPer";
     let creq_cross = "https://sparq.dev/ns/zk#cReqCross";
     // equal level satisfies (reflexive atLeast):
-    assert!(has(&c, m1, sat, creq_per), "Per satisfies gteq Per (reflexive)");
+    assert!(
+        has(&c, m1, sat, creq_per),
+        "Per satisfies gteq Per (reflexive)"
+    );
     // weaker held level does NOT satisfy a stronger requirement:
-    assert!(!has(&c, m1, sat, creq_cross), "Per does NOT satisfy gteq Cross");
+    assert!(
+        !has(&c, m1, sat, creq_cross),
+        "Per does NOT satisfy gteq Cross"
+    );
     // stronger held level satisfies both:
-    assert!(has(&c, m2, sat, creq_per), "Cross satisfies gteq Per (down-closed)");
-    assert!(has(&c, m2, sat, creq_cross), "Cross satisfies gteq Cross (reflexive)");
+    assert!(
+        has(&c, m2, sat, creq_per),
+        "Cross satisfies gteq Per (down-closed)"
+    );
+    assert!(
+        has(&c, m2, sat, creq_cross),
+        "Cross satisfies gteq Cross (reflexive)"
+    );
 }
 
 /// The Rust default-deny universal: admissible iff EVERY constraint is satisfied;
@@ -96,12 +129,22 @@ zk:cCross odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:
 
     // Both constraints: NOT admissible (the gteq-Cross one fails).
     let a = admissible(m, &[c_per, c_cross], policy, annotations).expect("reason");
-    assert!(!a.admissible, "must be inadmissible: one constraint unsatisfied");
-    assert_eq!(a.unsatisfied, vec![c_cross.to_string()], "the gteq-Cross constraint is named");
+    assert!(
+        !a.admissible,
+        "must be inadmissible: one constraint unsatisfied"
+    );
+    assert_eq!(
+        a.unsatisfied,
+        vec![c_cross.to_string()],
+        "the gteq-Cross constraint is named"
+    );
 
     // Only the satisfiable constraint: admissible.
     let a2 = admissible(m, &[c_per], policy, annotations).expect("reason");
-    assert!(a2.admissible, "must be admissible: the only constraint is satisfied");
+    assert!(
+        a2.admissible,
+        "must be admissible: the only constraint is satisfied"
+    );
     assert!(a2.unsatisfied.is_empty());
 }
 
@@ -119,7 +162,10 @@ fn wrong_dimension_does_not_satisfy() {
         annotations,
     )
     .expect("reason");
-    assert!(!a.admissible, "a ZK annotation must not discharge an unlinkability constraint");
+    assert!(
+        !a.admissible,
+        "a ZK annotation must not discharge an unlinkability constraint"
+    );
 }
 
 /// FAIL-CLOSED on an unreduced operator: only `odrl:gteq` is discharged. A
@@ -138,7 +184,10 @@ fn non_gteq_operator_is_fail_closed() {
         annotations,
     )
     .expect("reason");
-    assert!(!a.admissible, "an unreduced operator (odrl:lt) must fail closed, not admit");
+    assert!(
+        !a.admissible,
+        "an unreduced operator (odrl:lt) must fail closed, not admit"
+    );
 }
 
 /// `ruleset()` is the documented concatenation, and the order/closure/discharge
@@ -146,8 +195,17 @@ fn non_gteq_operator_is_fail_closed() {
 #[test]
 fn ruleset_concatenates_the_three_parts() {
     let rs = ruleset();
-    assert!(rs.contains("secx:strongerThan secx:PerPresentation"), "level orders present");
-    assert!(rs.contains("=> { ?a secx:strongerThan ?c }"), "transitive closure rule present");
+    assert!(
+        rs.contains("secx:strongerThan secx:PerPresentation"),
+        "level orders present"
+    );
+    assert!(
+        rs.contains("=> { ?a secx:strongerThan ?c }"),
+        "transitive closure rule present"
+    );
     assert!(rs.contains("secx:satisfies ?c"), "discharge rule present");
-    assert!(rs.contains("secx:overDimension"), "leftOperand→dimension map present");
+    assert!(
+        rs.contains("secx:overDimension"),
+        "leftOperand→dimension map present"
+    );
 }

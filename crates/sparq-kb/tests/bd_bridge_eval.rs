@@ -63,7 +63,11 @@ fn cell(t: &Option<Term>) -> String {
 }
 
 fn dump(label: &str, q: &str, r: &QueryResult, limit: usize) {
-    eprintln!("\n=== {label} ===\n{}\n--- {} row(s) ---", q.trim(), r.rows.len());
+    eprintln!(
+        "\n=== {label} ===\n{}\n--- {} row(s) ---",
+        q.trim(),
+        r.rows.len()
+    );
     for row in r.rows.iter().take(limit) {
         let cells: Vec<String> = row.iter().map(cell).collect();
         eprintln!("  {}", cells.join("  |  "));
@@ -75,7 +79,12 @@ fn dump(label: &str, q: &str, r: &QueryResult, limit: usize) {
 
 /// Parse the single scalar of a `SELECT (… AS ?x)` count query.
 fn scalar(r: &QueryResult) -> i64 {
-    match r.rows.first().and_then(|row| row.first()).and_then(|c| c.clone()) {
+    match r
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|c| c.clone())
+    {
         Some(Term::Literal(l)) => l.value().parse::<i64>().unwrap_or(0),
         _ => 0,
     }
@@ -104,7 +113,10 @@ fn part0_read_model_loads_and_is_faithful() {
     );
     let r = ask_pkg(&g, &q).expect("status histogram");
     dump("read-model: status partition (faithful to bd)", &q, &r, 10);
-    assert!(r.rows.len() >= 3, "the projection must preserve >=3 distinct statuses");
+    assert!(
+        r.rows.len() >= 3,
+        "the projection must preserve >=3 distinct statuses"
+    );
 }
 
 // =============================================================================
@@ -140,10 +152,15 @@ fn part1a_transitive_blocked_by_chains() {
     );
     // At least one task is transitively blocked by >1 still-open blocker (a chain,
     // not just a single direct edge) — the thing bd cannot return in one call.
-    let max_depth = r.rows.iter().filter_map(|row| match &row[1] {
-        Some(Term::Literal(l)) => l.value().parse::<i64>().ok(),
-        _ => None,
-    }).max().unwrap_or(0);
+    let max_depth = r
+        .rows
+        .iter()
+        .filter_map(|row| match &row[1] {
+            Some(Term::Literal(l)) => l.value().parse::<i64>().ok(),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
     eprintln!("\n[1a] deepest transitive open-blocker set = {max_depth}");
     assert!(
         max_depth >= 2,
@@ -169,7 +186,10 @@ fn part1b_ready_frontier_in_sparql() {
     );
     let n = scalar(&ask_pkg(&g, &q).expect("frontier runs"));
     eprintln!("\n[1b] SPARQL ready-frontier (dependency half) = {n}");
-    assert!(n > 0, "the ready-frontier must be non-empty over the bd backlog; got {n}");
+    assert!(
+        n > 0,
+        "the ready-frontier must be non-empty over the bd backlog; got {n}"
+    );
     // NOTE (honest, criterion b): this differs from `bd ready` precisely because the
     // SPARQL frontier additionally excludes umbrellas + needs:-gated tasks (orchestration
     // policy) while `bd ready` returns the raw unlock-frontier. NEITHER is wrong — they
@@ -196,7 +216,12 @@ fn part1c_knowledge_task_join() {
          }} GROUP BY ?doc ORDER BY DESC(?openBeads) LIMIT 10"
     );
     let r = ask_pkg(&g, &q).expect("knowledge-task join runs");
-    dump("1(c) research designs by OPEN covering beads (a JOIN bd cannot express)", &q, &r, 10);
+    dump(
+        "1(c) research designs by OPEN covering beads (a JOIN bd cannot express)",
+        &q,
+        &r,
+        10,
+    );
     assert!(
         !r.rows.is_empty(),
         "the knowledge↔task JOIN must surface live design fronts"
@@ -340,5 +365,8 @@ fn part2_four_criterion_replacement_gate() {
         met, 0,
         "the read-model meets 0/4 replacement criteria on real data; verdict must be BRIDGE"
     );
-    assert_eq!(verdict, "BRIDGE", "honest verdict over the read-model is BRIDGE, not REPLACE");
+    assert_eq!(
+        verdict, "BRIDGE",
+        "honest verdict over the read-model is BRIDGE, not REPLACE"
+    );
 }

@@ -134,7 +134,13 @@ fn run_single_window_gate(sc: &Scenario, mode: EvalMode, script: &[([Term; 3], u
         .with_mode(mode);
     let mut k = 0u32;
     let mut emit = |r: WindowResult| {
-        println!("rsp_{}_{}_w{}_rows\t{}\trows", sc.label, mode_tag, k, r.rows.len());
+        println!(
+            "rsp_{}_{}_w{}_rows\t{}\trows",
+            sc.label,
+            mode_tag,
+            k,
+            r.rows.len()
+        );
         k += 1;
     };
     for (triple, ts) in script {
@@ -240,11 +246,17 @@ fn run_srbench_oracle(sq: &SrbenchQuery, script: &[(NamedNode, [Term; 3], u64)])
     let mut q = ContinuousMultiQuery::register(sq.rspql).expect("valid RSP-QL");
     let mut k = 0u32;
     let mut emit = |r: WindowResult| {
-        println!("rsp_srbench_{}_w{}_rows\t{}\trows", sq.label, k, r.rows.len());
+        println!(
+            "rsp_srbench_{}_w{}_rows\t{}\trows",
+            sq.label,
+            k,
+            r.rows.len()
+        );
         k += 1;
     };
     for (stream, triple, ts) in script {
-        q.push(stream, triple.clone(), *ts, &mut emit).expect("eval");
+        q.push(stream, triple.clone(), *ts, &mut emit)
+            .expect("eval");
     }
     q.flush(&mut emit).expect("eval");
 }

@@ -57,7 +57,9 @@ async fn connect(addr: &str) -> Ws {
 async fn send_json(ws: &mut Ws, msg: Value) {
     // [OPUS-4.8] (sq-1qkm) tungstenite 0.26+ — `Message::Text` holds a `Utf8Bytes`, not a
     // `String`; `Utf8Bytes: From<String>` so `.into()` bridges it.
-    ws.send(Message::Text(msg.to_string().into())).await.unwrap();
+    ws.send(Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
 }
 
 /// Receives the next text frame as JSON (5 s guard so a missing message fails fast).
@@ -90,7 +92,9 @@ async fn assert_silent(ws: &mut Ws, window: Duration) {
 async fn subscribe(ws: &mut Ws, query: &str) -> (u64, Value) {
     send_json(ws, json!({ "subscribe": { "query": query } })).await;
     let subscribed = recv_json(ws).await;
-    let id = subscribed["subscribed"]["id"].as_u64().expect("subscribed.id");
+    let id = subscribed["subscribed"]["id"]
+        .as_u64()
+        .expect("subscribed.id");
     let initial = recv_json(ws).await;
     assert_eq!(initial["notification"]["id"].as_u64(), Some(id));
     assert_eq!(initial["notification"]["sequence"], 0);
@@ -134,14 +138,20 @@ async fn subscribe_sends_initial_full_result_as_added() {
         json!(["s", "age"])
     );
     // SPARQL JSON term encoding in the bindings.
-    assert!(added.iter().any(|b| b["s"]["value"] == "http://ex/alice" && b["age"]["value"] == "30"));
+    assert!(added
+        .iter()
+        .any(|b| b["s"]["value"] == "http://ex/alice" && b["age"]["value"] == "30"));
 }
 
 #[tokio::test]
 async fn alias_is_echoed_in_subscribed_and_notifications() {
     let addr = spawn().await;
     let mut ws = connect(&addr).await;
-    send_json(&mut ws, json!({ "subscribe": { "query": AGES, "alias": "ages" } })).await;
+    send_json(
+        &mut ws,
+        json!({ "subscribe": { "query": AGES, "alias": "ages" } }),
+    )
+    .await;
     let subscribed = recv_json(&mut ws).await;
     assert_eq!(subscribed["subscribed"]["alias"], "ages");
     let initial = recv_json(&mut ws).await;
@@ -158,7 +168,11 @@ async fn committed_insert_pushes_added_diff() {
     let mut ws = connect(&addr).await;
     let (id, _) = subscribe(&mut ws, AGES).await;
 
-    update(&addr, "INSERT DATA { <http://ex/carol> <http://ex/age> 35 }").await;
+    update(
+        &addr,
+        "INSERT DATA { <http://ex/carol> <http://ex/age> 35 }",
+    )
+    .await;
 
     let n = recv_json(&mut ws).await;
     assert_eq!(n["notification"]["id"].as_u64(), Some(id));
@@ -192,7 +206,11 @@ async fn non_matching_update_produces_no_notification() {
     subscribe(&mut ws, AGES).await;
 
     // Different predicate — re-evaluation runs but the diff is empty.
-    update(&addr, "INSERT DATA { <http://ex/alice> <http://ex/name> \"Alice\" }").await;
+    update(
+        &addr,
+        "INSERT DATA { <http://ex/alice> <http://ex/name> \"Alice\" }",
+    )
+    .await;
     assert_silent(&mut ws, Duration::from_millis(300)).await;
 
     // Liveness proof: the NEXT message is the diff of a matching update (nothing was
@@ -213,7 +231,11 @@ async fn multiple_subscriptions_on_one_socket_are_independent() {
     assert_ne!(ages_id, names_id);
 
     // Touches only the names subscription.
-    update(&addr, "INSERT DATA { <http://ex/alice> <http://ex/name> \"Alice\" }").await;
+    update(
+        &addr,
+        "INSERT DATA { <http://ex/alice> <http://ex/name> \"Alice\" }",
+    )
+    .await;
     let n = recv_json(&mut ws).await;
     assert_eq!(n["notification"]["id"].as_u64(), Some(names_id));
     assert_eq!(bindings(&n, "addedResults")[0]["n"]["value"], "Alice");
@@ -235,7 +257,11 @@ async fn unsubscribe_stops_notifications() {
     let resp = recv_json(&mut ws).await;
     assert_eq!(resp["unsubscribed"]["id"].as_u64(), Some(id));
 
-    update(&addr, "INSERT DATA { <http://ex/carol> <http://ex/age> 35 }").await;
+    update(
+        &addr,
+        "INSERT DATA { <http://ex/carol> <http://ex/age> 35 }",
+    )
+    .await;
     assert_silent(&mut ws, Duration::from_millis(300)).await;
 }
 
@@ -246,7 +272,10 @@ async fn unsubscribe_unknown_id_is_an_error() {
     send_json(&mut ws, json!({ "unsubscribe": { "id": 999 } })).await;
     let resp = recv_json(&mut ws).await;
     assert_eq!(resp["error"]["id"], 999);
-    assert!(resp["error"]["message"].as_str().unwrap().contains("no active subscription"));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no active subscription"));
 }
 
 // ---------------------------------------------------------------------------
@@ -258,22 +287,43 @@ async fn non_select_and_malformed_queries_are_refused() {
     let addr = spawn().await;
     let mut ws = connect(&addr).await;
 
-    send_json(&mut ws, json!({ "subscribe": { "query": "ASK { ?s ?p ?o }" } })).await;
+    send_json(
+        &mut ws,
+        json!({ "subscribe": { "query": "ASK { ?s ?p ?o }" } }),
+    )
+    .await;
     let resp = recv_json(&mut ws).await;
-    assert!(resp["error"]["message"].as_str().unwrap().contains("only SELECT"));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("only SELECT"));
 
-    send_json(&mut ws, json!({ "subscribe": { "query": "SELECT WHERE {" } })).await;
+    send_json(
+        &mut ws,
+        json!({ "subscribe": { "query": "SELECT WHERE {" } }),
+    )
+    .await;
     let resp = recv_json(&mut ws).await;
-    assert!(resp["error"]["message"].as_str().unwrap().contains("malformed query"));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("malformed query"));
 
     send_json(&mut ws, json!({ "not-a-verb": {} })).await;
     let resp = recv_json(&mut ws).await;
-    assert!(resp["error"]["message"].as_str().unwrap().contains("unknown message"));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown message"));
 }
 
 #[tokio::test]
 async fn per_connection_limit_is_enforced() {
-    let addr = spawn_with(ServerConfig { max_subscriptions_per_conn: 2, ..ServerConfig::default() }).await;
+    let addr = spawn_with(ServerConfig {
+        max_subscriptions_per_conn: 2,
+        ..ServerConfig::default()
+    })
+    .await;
     let mut ws = connect(&addr).await;
     subscribe(&mut ws, AGES).await;
     subscribe(&mut ws, AGES).await;
@@ -281,12 +331,19 @@ async fn per_connection_limit_is_enforced() {
     send_json(&mut ws, json!({ "subscribe": { "query": AGES } })).await;
     let resp = recv_json(&mut ws).await;
     let msg = resp["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("limit reached for this connection (2)"), "got: {msg}");
+    assert!(
+        msg.contains("limit reached for this connection (2)"),
+        "got: {msg}"
+    );
 }
 
 #[tokio::test]
 async fn global_limit_is_enforced_across_connections() {
-    let addr = spawn_with(ServerConfig { max_subscriptions: 1, ..ServerConfig::default() }).await;
+    let addr = spawn_with(ServerConfig {
+        max_subscriptions: 1,
+        ..ServerConfig::default()
+    })
+    .await;
     let mut ws1 = connect(&addr).await;
     subscribe(&mut ws1, AGES).await;
 
@@ -294,13 +351,20 @@ async fn global_limit_is_enforced_across_connections() {
     send_json(&mut ws2, json!({ "subscribe": { "query": AGES } })).await;
     let resp = recv_json(&mut ws2).await;
     let msg = resp["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("server-wide subscription limit reached (1)"), "got: {msg}");
+    assert!(
+        msg.contains("server-wide subscription limit reached (1)"),
+        "got: {msg}"
+    );
 }
 
 #[tokio::test]
 async fn oversized_initial_result_refuses_the_subscription() {
     // The data has 2 matching rows; cap results at 1 → honest refusal naming the limit.
-    let addr = spawn_with(ServerConfig { max_results: Some(1), ..ServerConfig::default() }).await;
+    let addr = spawn_with(ServerConfig {
+        max_results: Some(1),
+        ..ServerConfig::default()
+    })
+    .await;
     let mut ws = connect(&addr).await;
     send_json(&mut ws, json!({ "subscribe": { "query": AGES } })).await;
     let resp = recv_json(&mut ws).await;
@@ -309,7 +373,11 @@ async fn oversized_initial_result_refuses_the_subscription() {
 
     // The refused subscription must not consume a slot: with the cap respected, a
     // narrower query still subscribes fine.
-    let (_, initial) = subscribe(&mut ws, "SELECT ?age WHERE { <http://ex/alice> <http://ex/age> ?age }").await;
+    let (_, initial) = subscribe(
+        &mut ws,
+        "SELECT ?age WHERE { <http://ex/alice> <http://ex/age> ?age }",
+    )
+    .await;
     assert_eq!(bindings(&initial, "addedResults").len(), 1);
 }
 
@@ -319,7 +387,11 @@ async fn oversized_initial_result_refuses_the_subscription() {
 
 #[tokio::test]
 async fn dropped_socket_releases_its_global_slots() {
-    let addr = spawn_with(ServerConfig { max_subscriptions: 1, ..ServerConfig::default() }).await;
+    let addr = spawn_with(ServerConfig {
+        max_subscriptions: 1,
+        ..ServerConfig::default()
+    })
+    .await;
 
     {
         let mut ws = connect(&addr).await;
@@ -342,5 +414,8 @@ async fn dropped_socket_releases_its_global_slots() {
         assert!(resp.get("error").is_some());
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(ok, "global slot was never released after the socket dropped");
+    assert!(
+        ok,
+        "global slot was never released after the socket dropped"
+    );
 }

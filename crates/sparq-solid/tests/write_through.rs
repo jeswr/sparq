@@ -21,7 +21,12 @@ use sparq_core::Graph;
 use sparq_solid::{Mode, PodStore, Session};
 
 fn sess(agent: &str) -> Session<'_> {
-    Session { agent: Some(agent), client: None, issuer: None, now: None }
+    Session {
+        agent: Some(agent),
+        client: None,
+        issuer: None,
+        now: None,
+    }
 }
 
 const ALICE: &str = "https://alice.ex/card#me";
@@ -67,14 +72,21 @@ fn graph_len(store: &PodStore, name: &str) -> usize {
 fn put_acl_creates_and_takes_effect_immediately() {
     let mut store = empty_pod();
     let alice = sess(ALICE);
-    assert_eq!(store.accessible(&alice, Mode::Read).len(), 0, "no grant before PUT");
+    assert_eq!(
+        store.accessible(&alice, Mode::Read).len(),
+        0,
+        "no grant before PUT"
+    );
 
     let out = store
         .put_acl("https://pod.ex/.acl", &root_acl_read(ALICE), "ntriples")
         .expect("put_acl succeeds");
     assert!(!out.existed, "a fresh .acl is CREATED, not replaced");
     assert_eq!(out.acl.as_str(), "https://pod.ex/.acl");
-    assert!(out.triples >= 4, "the four authorization triples are stored");
+    assert!(
+        out.triples >= 4,
+        "the four authorization triples are stored"
+    );
 
     // No separate materialize_wac() — the write-through rebuilt the view atomically.
     assert_eq!(
@@ -100,7 +112,11 @@ fn put_acl_replaces_rules_wholesale() {
         .put_acl("https://pod.ex/.acl", &root_acl_read(BOB), "ntriples")
         .expect("replace");
     assert!(out.existed, "the .acl already existed → replaced");
-    assert_eq!(store.accessible(&sess(BOB), Mode::Read).len(), 2, "bob now reads");
+    assert_eq!(
+        store.accessible(&sess(BOB), Mode::Read).len(),
+        2,
+        "bob now reads"
+    );
     assert_eq!(
         store.accessible(&sess(ALICE), Mode::Read).len(),
         0,
@@ -121,7 +137,11 @@ fn delete_acl_revokes_and_rebuilds_atomically() {
     let out = store.delete_acl("https://pod.ex/.acl").expect("delete");
     assert!(out.existed);
     assert_eq!(out.triples, 0);
-    assert_eq!(graph_len(&store, "https://pod.ex/.acl"), 0, "the .acl graph is gone");
+    assert_eq!(
+        graph_len(&store, "https://pod.ex/.acl"),
+        0,
+        "the .acl graph is gone"
+    );
     assert_eq!(
         store.accessible(&sess(ALICE), Mode::Read).len(),
         0,
@@ -144,10 +164,13 @@ fn delete_absent_acl_is_noop_success() {
 fn auth_view_is_pure_function_of_final_acl_state() {
     // Path A: empty pod → PUT alice's ACL → PUT bob's ACL → DELETE → PUT alice again.
     let mut a = empty_pod();
-    a.put_acl("https://pod.ex/.acl", &root_acl_read(ALICE), "ntriples").unwrap();
-    a.put_acl("https://pod.ex/.acl", &root_acl_read(BOB), "ntriples").unwrap();
+    a.put_acl("https://pod.ex/.acl", &root_acl_read(ALICE), "ntriples")
+        .unwrap();
+    a.put_acl("https://pod.ex/.acl", &root_acl_read(BOB), "ntriples")
+        .unwrap();
     a.delete_acl("https://pod.ex/.acl").unwrap();
-    a.put_acl("https://pod.ex/.acl", &root_acl_read(ALICE), "ntriples").unwrap();
+    a.put_acl("https://pod.ex/.acl", &root_acl_read(ALICE), "ntriples")
+        .unwrap();
 
     // Path B: load the SAME final dataset (n1 content + alice's .acl) from scratch.
     let final_nq = format!(
@@ -187,11 +210,15 @@ fn put_acl_rolls_back_on_reserved_principal() {
     let prior_acl_len = graph_len(&store, "https://pod.ex/.acl");
 
     // Now PUT a body naming a RESERVED-encoding agent — materialization REJECTS it.
-    let bad = "<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <urn:sparq:evil> .\n";
+    let bad =
+        "<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <urn:sparq:evil> .\n";
     let err = store
         .put_acl("https://pod.ex/.acl", bad, "ntriples")
         .expect_err("reserved-encoding principal must be rejected");
-    assert!(err.contains("urn:sparq:") || err.to_lowercase().contains("reserved"), "{err}");
+    assert!(
+        err.contains("urn:sparq:") || err.to_lowercase().contains("reserved"),
+        "{err}"
+    );
 
     // Atomic: the PRIOR content and the PRIOR auth view are both intact.
     assert_eq!(
@@ -226,7 +253,11 @@ fn delete_acl_rejects_non_control_iri() {
         .delete_acl("https://pod.ex/notes/n1")
         .expect_err("a content graph IRI is not an ACL target");
     assert!(err.contains("access-control document"), "{err}");
-    assert_eq!(graph_len(&store, "https://pod.ex/notes/n1"), 1, "content graph untouched");
+    assert_eq!(
+        graph_len(&store, "https://pod.ex/notes/n1"),
+        1,
+        "content graph untouched"
+    );
 }
 
 #[test]
@@ -249,7 +280,11 @@ fn put_acl_acp_creates_and_takes_effect() {
     let mut store = PodStore::new(Graph::load_dataset(nq, "nquads").unwrap());
     store.materialize_acp().unwrap();
     let alice = sess(ALICE);
-    assert_eq!(store.accessible(&alice, Mode::Read).len(), 0, "no grant yet");
+    assert_eq!(
+        store.accessible(&alice, Mode::Read).len(),
+        0,
+        "no grant yet"
+    );
 
     // A root .acr granting alice Read on all member resources (memberAccessControl).
     let acp = "http://www.w3.org/ns/solid/acp#";
@@ -270,7 +305,9 @@ fn put_acl_acp_creates_and_takes_effect() {
     );
 
     // DELETE the .acr → grant gone, atomically.
-    let out = store.delete_acl_acp("https://pod.ex/.acr").expect("delete_acl_acp");
+    let out = store
+        .delete_acl_acp("https://pod.ex/.acr")
+        .expect("delete_acl_acp");
     assert!(out.existed);
     assert_eq!(
         store.accessible(&alice, Mode::Read).len(),

@@ -421,7 +421,8 @@ fn entailment_subproperty_direct_and_converse() {
     // definitive verdict via {R(a,b), B(b), (∀S.¬B)(a)} with fresh a/b/B — previously an
     // UnencodedConclusion abstention. r ⊑ s entails r ⊑ s...
     let premise = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
-    let conclusion = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
+    let conclusion =
+        ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
     let (v, b) = entail(premise, conclusion);
     assert_eq!(v, EntailmentVerdict::Entailed);
     assert_eq!(b, Branch::AlchTableau);
@@ -501,7 +502,10 @@ fn entailment_out_of_fragment_inputs_fail_closed() {
     // Premise outside the fragment.
     let (v, b) = entail(":p owl:inverseOf :q .", ":A rdfs:subClassOf :B .");
     assert!(
-        matches!(v, EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))),
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))
+        ),
         "premise: expected OutOfFragment, got {:?}",
         v
     );
@@ -509,7 +513,10 @@ fn entailment_out_of_fragment_inputs_fail_closed() {
     // Conclusion outside the fragment.
     let (v, b) = entail(":A rdfs:subClassOf :B .", ":p owl:inverseOf :q .");
     assert!(
-        matches!(v, EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))),
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))
+        ),
         "conclusion: expected OutOfFragment, got {:?}",
         v
     );
@@ -539,7 +546,11 @@ fn entailment_conclusion_bnode_somevaluesfrom2bnode() {
                    :a rdf:type [ owl:onProperty :p ; owl:someValuesFrom owl:Thing ] .";
     let conclusion = ":p a owl:ObjectProperty . :a :p _:x .";
     let (v, b) = entail(premise, conclusion);
-    assert_eq!(v, EntailmentVerdict::Entailed, "somevaluesfrom2bnode must be Entailed");
+    assert_eq!(
+        v,
+        EntailmentVerdict::Entailed,
+        "somevaluesfrom2bnode must be Entailed"
+    );
     assert_eq!(b, Branch::AlchTableau);
 }
 
@@ -558,7 +569,11 @@ fn entailment_conclusion_bnode_webont_somevaluesfrom_003() {
                       :fred :parent _:b1 . _:b1 a owl:Thing . \
                       _:b1 :parent _:b2 . _:b2 a owl:Thing .";
     let (v, b) = entail(premise, conclusion);
-    assert_eq!(v, EntailmentVerdict::Entailed, "WebOnt-someValuesFrom-003 must be Entailed");
+    assert_eq!(
+        v,
+        EntailmentVerdict::Entailed,
+        "WebOnt-someValuesFrom-003 must be Entailed"
+    );
     assert_eq!(b, Branch::AlchTableau);
 }
 

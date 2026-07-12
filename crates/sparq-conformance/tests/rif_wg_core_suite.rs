@@ -394,11 +394,9 @@ mod gated {
     fn atom_to_triple_terms(a: &Atom) -> Option<[Term; 3]> {
         match a {
             Atom::Frame { obj, pred, val } => Some([obj.clone(), pred.clone(), val.clone()]),
-            Atom::Member { obj, class } => Some([
-                obj.clone(),
-                Term::Iri(RDF_TYPE.to_string()),
-                class.clone(),
-            ]),
+            Atom::Member { obj, class } => {
+                Some([obj.clone(), Term::Iri(RDF_TYPE.to_string()), class.clone()])
+            }
             Atom::Subclass { sub, sup } => Some([
                 sub.clone(),
                 Term::Iri(RDFS_SUBCLASS_OF.to_string()),
@@ -412,12 +410,14 @@ mod gated {
     fn term_to_id(dict: &mut Dict, t: &Term) -> Option<Id> {
         use oxrdf::{Literal, NamedNode, Term as OxTerm};
         match t {
-            Term::Iri(iri) => Some(dict.intern(&OxTerm::NamedNode(NamedNode::new_unchecked(
-                iri.clone(),
-            )))),
+            Term::Iri(iri) => {
+                Some(dict.intern(&OxTerm::NamedNode(NamedNode::new_unchecked(iri.clone()))))
+            }
             Term::Lit { lex, datatype } => {
-                let lit =
-                    Literal::new_typed_literal(lex.clone(), NamedNode::new_unchecked(datatype.clone()));
+                let lit = Literal::new_typed_literal(
+                    lex.clone(),
+                    NamedNode::new_unchecked(datatype.clone()),
+                );
                 Some(dict.intern(&OxTerm::Literal(lit)))
             }
             // Lists / vars are outside the ground-triple conclusion shape.
@@ -472,9 +472,12 @@ mod gated {
             // over-match a conclusion that is not genuinely entailed; those require the
             // exact-identity match above. (sq-pbz04.5.5 review NIT 4.)
             if let Some(want) = want_num {
-                if let (Some(want_dec), oxrdf::Term::Literal(l)) = (want.to_dec(), dict.term(row[2]))
+                if let (Some(want_dec), oxrdf::Term::Literal(l)) =
+                    (want.to_dec(), dict.term(row[2]))
                 {
-                    if let Some(got_dec) = sparq_substrate::numeric::as_numeric(&l).and_then(|n| n.to_dec()) {
+                    if let Some(got_dec) =
+                        sparq_substrate::numeric::as_numeric(&l).and_then(|n| n.to_dec())
+                    {
                         if got_dec.cmp(want_dec) == Some(std::cmp::Ordering::Equal) {
                             return true;
                         }
@@ -761,7 +764,10 @@ mod gated {
         // in field $3), mirroring the D-entailment lane's `TOTAL <cat>` shape. Positional
         // `println!` args (not inline `{pass}`) per the CodeQL `rust/unused-variable`
         // false-positive guard in the shared agent contract.
-        println!("\nW3C RIF WG Core conformance (pinned {} archive)", CORE_VERSION);
+        println!(
+            "\nW3C RIF WG Core conformance (pinned {} archive)",
+            CORE_VERSION
+        );
         let skip_total: usize = skips.values().sum();
         println!(
             "TOTAL rif-wg-core {} {} {} (floor {})",
@@ -770,7 +776,10 @@ mod gated {
             skip_total,
             RIF_WG_CORE_FLOOR
         );
-        println!("skip taxonomy (the honest denominator, {} of {} tests):", skip_total, total);
+        println!(
+            "skip taxonomy (the honest denominator, {} of {} tests):",
+            skip_total, total
+        );
         for (bucket, n) in &skips {
             println!("  {} {}", n, bucket);
         }
@@ -951,7 +960,9 @@ mod gated {
     fn skip_taxonomy_buckets_are_named() {
         use sparq_reason::rif::RifError;
         assert_eq!(
-            skip_bucket(&ImportError::ImportDirective { location: String::new() }),
+            skip_bucket(&ImportError::ImportDirective {
+                location: String::new()
+            }),
             "skip:imports"
         );
         // [SONNET-4.6] sq-wbql1: InconsistentImport lands in "skip:imports" when it
@@ -1103,7 +1114,11 @@ mod gated {
              (never a vacuous 'not entailed' pass), got {:?}",
             outcome
         );
-        assert_ne!(outcome, Outcome::Pass, "un-encodable NET must NEVER pass vacuously");
+        assert_ne!(
+            outcome,
+            Outcome::Pass,
+            "un-encodable NET must NEVER pass vacuously"
+        );
     }
 
     /// [sq-pbz04.5.5 review Finding 2] `is_genuine_core_violation` accepts only the
@@ -1114,8 +1129,12 @@ mod gated {
     fn genuine_core_violation_excludes_unsupported_capability_failclose() {
         use sparq_reason::rif::RifError;
         // Genuine detections → true.
-        assert!(is_genuine_core_violation(&RifError::UnboundHeadVar { var: "x".into() }));
-        assert!(is_genuine_core_violation(&RifError::UnboundBuiltinInput { var: "y".into() }));
+        assert!(is_genuine_core_violation(&RifError::UnboundHeadVar {
+            var: "x".into()
+        }));
+        assert!(is_genuine_core_violation(&RifError::UnboundBuiltinInput {
+            var: "y".into()
+        }));
         assert!(is_genuine_core_violation(&RifError::EqualInConclusion));
         // Unsupported-capability fail-closes → false (must NOT count as a genuine reject).
         assert!(!is_genuine_core_violation(&RifError::DistinctGroundEqual {
@@ -1171,7 +1190,11 @@ mod gated {
         );
         // The returned Document contains both the importing and imported rules.
         let doc = result.unwrap();
-        assert_eq!(doc.rules.len(), 2, "combined document must contain both rules (importing + imported)");
+        assert_eq!(
+            doc.rules.len(),
+            2,
+            "combined document must contain both rules (importing + imported)"
+        );
     }
 
     /// NEGATIVE: an import declaring a NON-CORE profile IRI is REJECTED with
@@ -1204,10 +1227,8 @@ mod gated {
 
         // End-to-end: confirm `run_negative_syntax` over a synthetic fixture dir records
         // this as Outcome::Pass (genuine detection, not a vacuous skip).
-        let tmp = std::env::temp_dir().join(format!(
-            "rif_wg_import_rejection_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("rif_wg_import_rejection_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join(rif_name("ir", "input")), importing).unwrap();
@@ -1511,7 +1532,10 @@ mod gated {
             Some(valid_imported.to_vec())
         });
         assert!(
-            matches!(result_with_check, Err(sparq_reason::rif_xml::ImportError::InconsistentImport { .. })),
+            matches!(
+                result_with_check,
+                Err(sparq_reason::rif_xml::ImportError::InconsistentImport { .. })
+            ),
             "WITH the profile check, a BLD-profile import MUST be InconsistentImport \
              (mutation: the check is load-bearing). Got: {:?}",
             result_with_check

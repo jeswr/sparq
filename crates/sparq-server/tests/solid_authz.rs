@@ -160,7 +160,11 @@ async fn decide_denies_on_unparseable_dataset() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "an unparseable dataset must fail closed, not allow");
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unparseable dataset must fail closed, not allow"
+    );
 }
 
 /// FAIL-CLOSED: an unknown mode is a `403` deny — the HTTP layer never grants an unrecognised mode.
@@ -284,7 +288,11 @@ async fn query_is_access_controlled_per_session() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let rows = body["results"]["bindings"].as_array().unwrap();
-    assert_eq!(rows.len(), 0, "an anonymous session sees ZERO rows (fail-closed view)");
+    assert_eq!(
+        rows.len(),
+        0,
+        "an anonymous session sees ZERO rows (fail-closed view)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -319,8 +327,7 @@ async fn decide_emits_link_header_when_governing_acl_known() {
         .to_str()
         .unwrap();
     assert_eq!(
-        link,
-        r#"<https://pod.ex/.acl>; rel="acl""#,
+        link, r#"<https://pod.ex/.acl>; rel="acl""#,
         "Link header must be the RFC-8288 link-value for the governing ACL"
     );
 }
@@ -372,8 +379,7 @@ async fn wac_allow_emits_link_header_when_governing_acl_known() {
         .to_str()
         .unwrap();
     assert_eq!(
-        link,
-        r#"<https://pod.ex/.acl>; rel="acl""#,
+        link, r#"<https://pod.ex/.acl>; rel="acl""#,
         "Link header must be the RFC-8288 link-value for the governing ACL"
     );
 }

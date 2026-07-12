@@ -177,7 +177,9 @@ pub(crate) struct WindowEval {
 impl WindowEval {
     pub fn new(spec: WindowSpec, mode: EvalMode) -> Self {
         let m = match mode {
-            EvalMode::Rebuild => Materializer::Rebuild { window: WindowedStream::empty(spec) },
+            EvalMode::Rebuild => Materializer::Rebuild {
+                window: WindowedStream::empty(spec),
+            },
             EvalMode::PersistentDict => Materializer::PersistentDict {
                 dict: Some(Dict::new()),
                 window: WindowedStream::empty(spec),
@@ -230,9 +232,11 @@ impl WindowEval {
     /// instead of growing with the all-time vocabulary.
     pub fn dict_len(&self) -> Option<usize> {
         match &self.m {
-            Materializer::PersistentDict { dict, .. } => {
-                Some(dict.as_ref().expect("dict restored between evaluations").len())
-            }
+            Materializer::PersistentDict { dict, .. } => Some(
+                dict.as_ref()
+                    .expect("dict restored between evaluations")
+                    .len(),
+            ),
             _ => None,
         }
     }
@@ -243,8 +247,14 @@ impl WindowEval {
             | Materializer::Delta { window, .. }
             | Materializer::Snapshot { window, .. } => window.push(triple, ts),
             Materializer::PersistentDict { dict, window, .. } => {
-                let d = dict.as_mut().expect("dict is always restored after evaluation");
-                let ids = [d.intern(&triple[0]), d.intern(&triple[1]), d.intern(&triple[2])];
+                let d = dict
+                    .as_mut()
+                    .expect("dict is always restored after evaluation");
+                let ids = [
+                    d.intern(&triple[0]),
+                    d.intern(&triple[1]),
+                    d.intern(&triple[2]),
+                ];
                 window.push(ids, ts);
             }
         }
@@ -265,14 +275,20 @@ impl WindowEval {
                     f(w.start, w.end, &graph)?;
                 }
             }
-            Materializer::PersistentDict { dict, window, dict_len_at_compact } => {
+            Materializer::PersistentDict {
+                dict,
+                window,
+                dict_len_at_compact,
+            } => {
                 for w in take(window, flush) {
                     let ids: Vec<[Id; 3]> = w.triples.iter().map(|t| t.triple).collect();
                     // Lend the persistent dictionary to the per-window graph;
                     // `Graph::from_parts` dedups (RDF set semantics) and builds
                     // the indexes from the already-interned ids — no term
                     // hashing or allocation here.
-                    let d = dict.take().expect("dict is always restored after evaluation");
+                    let d = dict
+                        .take()
+                        .expect("dict is always restored after evaluation");
                     let graph = Graph::from_parts(d, ids);
                     let r = f(w.start, w.end, &graph);
                     *dict = Some(graph.dict);
@@ -289,7 +305,12 @@ impl WindowEval {
                     Self::compact_dict(dict, window, dict_len_at_compact);
                 }
             }
-            Materializer::Delta { window, graph, diff, churn } => {
+            Materializer::Delta {
+                window,
+                graph,
+                diff,
+                churn,
+            } => {
                 for w in take(window, flush) {
                     apply_window_delta(&w, graph, diff, churn)?;
                     // Delta hands the engine a direct borrow into the live graph:
@@ -297,7 +318,12 @@ impl WindowEval {
                     f(w.start, w.end, graph)?;
                 }
             }
-            Materializer::Snapshot { window, graph, diff, churn } => {
+            Materializer::Snapshot {
+                window,
+                graph,
+                diff,
+                churn,
+            } => {
                 for w in take(window, flush) {
                     apply_window_delta(&w, graph, diff, churn)?;
                     // [OPUS-4.8] (sq-j39) The true overlay-snapshot step: evaluate
@@ -364,8 +390,8 @@ impl WindowEval {
         // number of dictionary entries no live window references any more.
         let total = old.len();
         let dead = total.saturating_sub(live.len());
-        let worth_it = dead >= MIN_DEAD_TERMS
-            && dead * DEAD_RATIO_DEN >= live.len().max(1) * DEAD_RATIO_NUM;
+        let worth_it =
+            dead >= MIN_DEAD_TERMS && dead * DEAD_RATIO_DEN >= live.len().max(1) * DEAD_RATIO_NUM;
         if !worth_it {
             // Defer: record the current size so the next scan is MIN_DEAD_TERMS
             // interns away (otherwise a once-large-but-now-mostly-live dict
@@ -378,7 +404,8 @@ impl WindowEval {
         // old→new id remap. Re-intern via the reconstructed term so the new
         // dict's prefix/datatype tables and value caches are rebuilt correctly.
         let mut fresh = Dict::with_capacity(live.len());
-        let mut remap: FxHashMap<Id, Id> = FxHashMap::with_capacity_and_hasher(live.len(), Default::default());
+        let mut remap: FxHashMap<Id, Id> =
+            FxHashMap::with_capacity_and_hasher(live.len(), Default::default());
         for &id in &live {
             let new_id = fresh.intern(&old.term(id));
             remap.insert(id, new_id);
@@ -408,7 +435,9 @@ fn remap_id(id: Id, remap: &FxHashMap<Id, Id>) -> Id {
     if is_inline(id) {
         id
     } else {
-        *remap.get(&id).expect("every live non-inline id is in the compaction remap")
+        *remap
+            .get(&id)
+            .expect("every live non-inline id is in the compaction remap")
     }
 }
 
@@ -480,7 +509,10 @@ impl WindowDiff {
             prev_rows: Vec::new(),
             prev_terms: Vec::new(),
             prev_table: DeltaTable::new(),
-            keys: JoinKeys { key_cols: vec![(0, 0), (1, 1), (2, 2)], right_only: Vec::new() },
+            keys: JoinKeys {
+                key_cols: vec![(0, 0), (1, 1), (2, 2)],
+                right_only: Vec::new(),
+            },
         }
     }
 
@@ -490,9 +522,14 @@ impl WindowDiff {
     #[inline]
     fn contains(&self, table: &DeltaTable, row: &Row) -> bool {
         let mut hit = false;
-        table.probe_emit(std::slice::from_ref(row), &self.keys, &NoBudget, &mut |_, _| {
-            hit = true;
-        });
+        table.probe_emit(
+            std::slice::from_ref(row),
+            &self.keys,
+            &NoBudget,
+            &mut |_, _| {
+                hit = true;
+            },
+        );
         hit
     }
 }
@@ -579,7 +616,13 @@ fn materialize(w: &Window<[Term; 3]>) -> Graph {
     let ids: Vec<[Id; 3]> = w
         .triples
         .iter()
-        .map(|t| [dict.intern(&t.triple[0]), dict.intern(&t.triple[1]), dict.intern(&t.triple[2])])
+        .map(|t| {
+            [
+                dict.intern(&t.triple[0]),
+                dict.intern(&t.triple[1]),
+                dict.intern(&t.triple[2]),
+            ]
+        })
         .collect();
     Graph::from_parts(dict, ids)
 }
@@ -645,26 +688,39 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(captured.len(), expected.len(), "one snapshot per closed window");
+        assert_eq!(
+            captured.len(),
+            expected.len(),
+            "one snapshot per closed window"
+        );
         let counts: Vec<usize> = captured.iter().map(|s| s.len()).collect();
-        assert_eq!(counts, expected, "a captured snapshot drifted from its window's content");
+        assert_eq!(
+            counts, expected,
+            "a captured snapshot drifted from its window's content"
+        );
         // The windows genuinely differ in size, so a stale/aliasing view would
         // be caught (every capture would read the last window's count).
-        assert!(counts.windows(2).all(|w| w[0] < w[1]), "windows strictly grow, so views must differ");
+        assert!(
+            counts.windows(2).all(|w| w[0] < w[1]),
+            "windows strictly grow, so views must differ"
+        );
     }
 
     /// [FABLE-5] (sq-2n1q3.4) Per-window solutions for one mode, sorted
     /// order-insensitively (ties between value-equal literals may order
     /// differently across materialisation strategies).
-    fn windows_of(mode: EvalMode, spec: WindowSpec, pushes: &[([Term; 3], u64)]) -> Vec<Vec<String>> {
+    fn windows_of(
+        mode: EvalMode,
+        spec: WindowSpec,
+        pushes: &[([Term; 3], u64)],
+    ) -> Vec<Vec<String>> {
         let mut ev = WindowEval::new(spec, mode);
         for (t, ts) in pushes {
             ev.push(t.clone(), *ts);
         }
         let mut out = Vec::new();
         ev.eval_closed(true, &mut |_s, _e, g: &Graph| {
-            let rows =
-                sparq_engine::query(g, "SELECT ?o WHERE { ?s ?p ?o }").expect("window eval");
+            let rows = sparq_engine::query(g, "SELECT ?o WHERE { ?s ?p ?o }").expect("window eval");
             let mut objs: Vec<String> = rows.rows.iter().map(|r| format!("{:?}", r)).collect();
             objs.sort();
             out.push(objs);
@@ -693,14 +749,18 @@ mod tests {
         };
         let spec = WindowSpec::time(10, 10); // tumbling
         let pushes = vec![
-            (lit("42"), 0),   // w0: the canonical form only
-            (lit("42"), 12),  // w1: BOTH lexical forms of the value 42
+            (lit("42"), 0),  // w0: the canonical form only
+            (lit("42"), 12), // w1: BOTH lexical forms of the value 42
             (lit("042"), 13),
             (lit("042"), 25), // w2: non-canonical only — "42" must be deleted
         ];
         let rebuild = windows_of(EvalMode::Rebuild, spec, &pushes);
         assert_eq!(rebuild.len(), 3, "three tumbling windows");
-        assert_eq!(rebuild[1].len(), 2, "w1 holds TWO lexically-distinct objects");
+        assert_eq!(
+            rebuild[1].len(),
+            2,
+            "w1 holds TWO lexically-distinct objects"
+        );
         assert_eq!(rebuild[2].len(), 1, "w2 holds only the non-canonical form");
         assert_eq!(
             windows_of(EvalMode::Delta, spec, &pushes),
@@ -737,7 +797,11 @@ mod tests {
         ];
         let rebuild = windows_of(EvalMode::Rebuild, spec, &pushes);
         assert_eq!(rebuild.len(), 4, "w0..w3 including the empty w2");
-        assert_eq!(rebuild[0].len(), 2, "duplicate timestamps dedup to {{a, b}}");
+        assert_eq!(
+            rebuild[0].len(),
+            2,
+            "duplicate timestamps dedup to {{a, b}}"
+        );
         assert!(rebuild[2].is_empty(), "w2 is the empty window");
         assert_eq!(rebuild[3].len(), 1, "w3 refills after the empty window");
         assert_eq!(

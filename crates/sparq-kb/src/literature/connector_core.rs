@@ -68,7 +68,10 @@ fn stubs_from_results(results: &[Value]) -> (Vec<SourceStub>, usize) {
     let mut stubs = Vec::new();
     let mut skipped = 0usize;
     for rec in results {
-        let doi = rec.get("doi").and_then(Value::as_str).and_then(normalise_doi);
+        let doi = rec
+            .get("doi")
+            .and_then(Value::as_str)
+            .and_then(normalise_doi);
         let title = rec.get("title").and_then(Value::as_str).map(str::to_string);
         let (Some(doi), Some(title)) = (doi, title) else {
             skipped += 1;
@@ -270,7 +273,10 @@ pub fn fetch_paginated<T: Transport>(
         out.skipped += page_skipped;
         out.pages_fetched += 1;
 
-        let total = root.get("totalHits").and_then(Value::as_u64).map(|n| n as usize);
+        let total = root
+            .get("totalHits")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
         offset += policy.page_size;
         if got == 0 {
             break;
@@ -578,8 +584,7 @@ mod tests {
             page_size: 2,
             ..RetryPolicy::default()
         };
-        let res =
-            fetch_paginated(&fake, "https://x.test/works/", "q", &p, &mut |_| {}).unwrap();
+        let res = fetch_paginated(&fake, "https://x.test/works/", "q", &p, &mut |_| {}).unwrap();
         assert_eq!(res.stubs.len(), 4);
         assert_eq!(res.pages_fetched, 2);
         assert_eq!(*fake.calls.borrow(), 2);
@@ -593,7 +598,14 @@ mod tests {
         let good = r#"{ "totalHits": 1, "results": [ { "doi": "10.1/a", "title": "A" } ] }"#;
         let fake = FakeTransport::new(vec![throttled, ok(good)]);
         let mut slept: Vec<Duration> = Vec::new();
-        let res = fetch_paginated(&fake, "https://x.test/works/", "q", &RetryPolicy::default(), &mut |d| slept.push(d)).unwrap();
+        let res = fetch_paginated(
+            &fake,
+            "https://x.test/works/",
+            "q",
+            &RetryPolicy::default(),
+            &mut |d| slept.push(d),
+        )
+        .unwrap();
         assert_eq!(res.stubs.len(), 1);
         assert_eq!(res.requests_made, 2, "one 429 + one success");
         assert_eq!(slept, vec![Duration::from_secs(1)], "slept the Retry-After");
@@ -644,16 +656,30 @@ mod tests {
         forbidden.status = 403;
         let fake = FakeTransport::new(vec![forbidden]);
         let mut requests = 0usize;
-        let err =
-            fetch_with_retry(&fake, "u", &RetryPolicy::default(), &mut requests, &mut |_| {})
-                .unwrap_err();
-        assert!(err.contains("non-retryable HTTP status 403"), "got: {}", err);
+        let err = fetch_with_retry(
+            &fake,
+            "u",
+            &RetryPolicy::default(),
+            &mut requests,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("non-retryable HTTP status 403"),
+            "got: {}",
+            err
+        );
         assert_eq!(requests, 1);
     }
 
     #[test]
     fn build_search_url_encodes_query_and_never_carries_a_key() {
-        let url = build_search_url("https://api.core.ac.uk/v3/search/works/", "zero knowledge", 10, 20);
+        let url = build_search_url(
+            "https://api.core.ac.uk/v3/search/works/",
+            "zero knowledge",
+            10,
+            20,
+        );
         assert_eq!(
             url,
             "https://api.core.ac.uk/v3/search/works/?q=zero%20knowledge&limit=10&offset=20"

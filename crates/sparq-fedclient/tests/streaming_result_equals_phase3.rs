@@ -77,7 +77,10 @@ impl FederatedSource for EngineSource {
     {
         self.endpoint.discover()
     }
-    fn execute(&self, sub: &sparq_fedclient::SubQuery) -> Result<String, sparq_fedclient::FedError> {
+    fn execute(
+        &self,
+        sub: &sparq_fedclient::SubQuery,
+    ) -> Result<String, sparq_fedclient::FedError> {
         self.endpoint.execute(sub)
     }
 }
@@ -300,7 +303,8 @@ fn empty_result_join_streams_empty() {
         TriplePattern::new(var("s"), iri("http://ex/knows"), iri("http://ex/nobody")),
         TriplePattern::new(var("s"), iri("http://ex/name"), var("n")),
     ]);
-    let q = "SELECT ?s ?n WHERE { ?s <http://ex/knows> <http://ex/nobody> . ?s <http://ex/name> ?n }";
+    let q =
+        "SELECT ?s ?n WHERE { ?s <http://ex/knows> <http://ex/nobody> . ?s <http://ex/name> ?n }";
     assert_stream_equals_phase3_and_local(
         &bgp,
         &descriptor(&["http://ex/knows", "http://ex/name"]),

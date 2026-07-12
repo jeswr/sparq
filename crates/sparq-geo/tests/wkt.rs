@@ -30,10 +30,8 @@ fn parses_each_simple_features_type() {
 
 #[test]
 fn parses_crs84_prefix() {
-    let g = parse_wkt_literal(
-        "<http://www.opengis.net/def/crs/OGC/1.3/CRS84> POINT(-83.38 33.95)",
-    )
-    .unwrap();
+    let g = parse_wkt_literal("<http://www.opengis.net/def/crs/OGC/1.3/CRS84> POINT(-83.38 33.95)")
+        .unwrap();
     assert_eq!(g.crs, Crs::Crs84);
     assert_eq!(g.geometry, Geometry::Point(Point::new(-83.38, 33.95)));
     // CRS84 (the default) round-trips WITHOUT the prefix.
@@ -94,8 +92,14 @@ fn round_trips_reparse_to_equal_geometry() {
 
 #[test]
 fn rejects_garbage_and_unterminated_crs() {
-    assert!(matches!(parse_wkt_literal("POINT(1)"), Err(GeoError::Parse(_))));
-    assert!(matches!(parse_wkt_literal("FOO(1 2)"), Err(GeoError::Parse(_))));
+    assert!(matches!(
+        parse_wkt_literal("POINT(1)"),
+        Err(GeoError::Parse(_))
+    ));
+    assert!(matches!(
+        parse_wkt_literal("FOO(1 2)"),
+        Err(GeoError::Parse(_))
+    ));
     assert!(matches!(parse_wkt_literal(""), Err(GeoError::Parse(_))));
     assert!(matches!(
         parse_wkt_literal("<http://example.org/crs POINT(1 2)"),
@@ -109,7 +113,10 @@ fn empty_geometries_parse_to_empty_representations() {
     // empty MULTIPOINT. Such geometries have no bounding box and are skipped
     // by the GeoIndex (tested in index.rs).
     let g = parse_wkt_literal("POINT EMPTY").unwrap();
-    assert_eq!(g.geometry, Geometry::MultiPoint(geo_types::MultiPoint(vec![])));
+    assert_eq!(
+        g.geometry,
+        Geometry::MultiPoint(geo_types::MultiPoint(vec![]))
+    );
     let g = parse_wkt_literal("GEOMETRYCOLLECTION EMPTY").unwrap();
     assert!(matches!(g.geometry, Geometry::GeometryCollection(c) if c.is_empty()));
 }

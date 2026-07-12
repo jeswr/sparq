@@ -23,9 +23,7 @@
 //! triple (all choice points iterate sorted).
 
 use super::*;
-use crate::explain::{
-    bfs_path, id_triple_strings, sorted, ExplainOpts, ProofBuilder, ProofTree,
-};
+use crate::explain::{bfs_path, id_triple_strings, sorted, ExplainOpts, ProofBuilder, ProofTree};
 
 // ════════════════════════════════════════════════════════════════════════════════════════
 // RDFS — MaterializedGraph
@@ -137,7 +135,9 @@ struct RdfsProver<'a> {
 
 impl RdfsProver<'_> {
     fn push(&mut self, t: [Id; 3], rule: &str, premises: Vec<u32>) -> Option<u32> {
-        let ix = self.b.push(id_triple_strings(self.dict, t), rule, premises)?;
+        let ix = self
+            .b
+            .push(id_triple_strings(self.dict, t), rule, premises)?;
         self.memo.insert(t, ix);
         Some(ix)
     }
@@ -175,13 +175,11 @@ impl RdfsProver<'_> {
         let succ = |n: Id| raw.get(&n).map(|s| sorted(s)).unwrap_or_default();
         let path = if t[0] == t[2] {
             // Self-loop closure fact (c R* c via a cycle): step onto a successor first.
-            sorted(&succ(t[0]))
-                .into_iter()
-                .find_map(|m| {
-                    let mut p = vec![t[0]];
-                    p.extend(bfs_path(m, t[2], succ)?);
-                    Some(p)
-                })?
+            sorted(&succ(t[0])).into_iter().find_map(|m| {
+                let mut p = vec![t[0]];
+                p.extend(bfs_path(m, t[2], succ)?);
+                Some(p)
+            })?
         } else {
             bfs_path(t[0], t[2], succ)?
         };
@@ -351,19 +349,37 @@ impl OwlExplain {
             self.by_obj.entry(t[2]).or_default().insert(t);
             let [s, p, o] = t;
             if p == v.sub_class {
-                self.sc_raw.entry(s).or_default().push((o, EdgeOrigin::Base));
+                self.sc_raw
+                    .entry(s)
+                    .or_default()
+                    .push((o, EdgeOrigin::Base));
             } else if p == v.sub_prop {
-                self.sp_raw.entry(s).or_default().push((o, EdgeOrigin::Base));
+                self.sp_raw
+                    .entry(s)
+                    .or_default()
+                    .push((o, EdgeOrigin::Base));
             } else if p == v.domain {
                 self.dom_raw.entry(s).or_default().push(o);
             } else if p == v.range {
                 self.rng_raw.entry(s).or_default().push(o);
             } else if p == ow.equiv_class {
-                self.sc_raw.entry(s).or_default().push((o, EdgeOrigin::Equiv(t)));
-                self.sc_raw.entry(o).or_default().push((s, EdgeOrigin::Equiv(t)));
+                self.sc_raw
+                    .entry(s)
+                    .or_default()
+                    .push((o, EdgeOrigin::Equiv(t)));
+                self.sc_raw
+                    .entry(o)
+                    .or_default()
+                    .push((s, EdgeOrigin::Equiv(t)));
             } else if p == ow.equiv_prop {
-                self.sp_raw.entry(s).or_default().push((o, EdgeOrigin::Equiv(t)));
-                self.sp_raw.entry(o).or_default().push((s, EdgeOrigin::Equiv(t)));
+                self.sp_raw
+                    .entry(s)
+                    .or_default()
+                    .push((o, EdgeOrigin::Equiv(t)));
+                self.sp_raw
+                    .entry(o)
+                    .or_default()
+                    .push((s, EdgeOrigin::Equiv(t)));
             } else if p == ow.inverse_of {
                 for (a, b) in [(s, o), (o, s)] {
                     self.inv_adj.entry(a).or_default().push(b);
@@ -387,7 +403,10 @@ impl OwlExplain {
             }
         }
         for (sub, sup) in chain {
-            self.sc_raw.entry(sub).or_default().push((sup, EdgeOrigin::Xsd));
+            self.sc_raw
+                .entry(sub)
+                .or_default()
+                .push((sup, EdgeOrigin::Xsd));
         }
     }
 
@@ -453,7 +472,11 @@ enum DrStep {
     Base,
     /// Transposed through `owl:inverseOf` (engine rule `inv-dom`/`inv-rng`): premise
     /// `prem` relates the properties; the class comes from `src`'s closed domain/range.
-    Inv { prem: [Id; 3], src: Id, src_is_rng: bool },
+    Inv {
+        prem: [Id; 3],
+        src: Id,
+        src_is_rng: bool,
+    },
 }
 
 impl MaterializedOwlGraph {
@@ -494,7 +517,9 @@ struct OwlProver<'a> {
 
 impl OwlProver<'_> {
     fn push(&mut self, t: [Id; 3], rule: &str, premises: Vec<u32>) -> Option<u32> {
-        let ix = self.b.push(id_triple_strings(self.dict, t), rule, premises)?;
+        let ix = self
+            .b
+            .push(id_triple_strings(self.dict, t), rule, premises)?;
         self.memo.insert(t, ix);
         Some(ix)
     }
@@ -576,10 +601,17 @@ impl OwlProver<'_> {
     /// `subClassOf`/`subPropertyOf` closure facts: a chain over the raw edges (asserted,
     /// equivalence-folded, or XSD-axiom), folded left-associatively with scm-sco/scm-spo.
     fn prove_chain(&mut self, t: [Id; 3], depth: usize, props: bool) -> Option<u32> {
-        let raw = if props { &self.g.explain.sp_raw } else { &self.g.explain.sc_raw };
+        let raw = if props {
+            &self.g.explain.sp_raw
+        } else {
+            &self.g.explain.sc_raw
+        };
         let rule = if props { "scm-spo" } else { "scm-sco" };
         let succ = |n: Id| -> Vec<Id> {
-            let mut s: Vec<Id> = raw.get(&n).map(|v| v.iter().map(|&(m, _)| m).collect()).unwrap_or_default();
+            let mut s: Vec<Id> = raw
+                .get(&n)
+                .map(|v| v.iter().map(|&(m, _)| m).collect())
+                .unwrap_or_default();
             s.sort_unstable();
             s.dedup();
             s
@@ -662,7 +694,11 @@ impl OwlProver<'_> {
             let entry_t = [q, dr_pred, c0];
             let entry = match step {
                 DrStep::Base => self.prove(entry_t, depth + 1),
-                DrStep::Inv { prem, src, src_is_rng } => {
+                DrStep::Inv {
+                    prem,
+                    src,
+                    src_is_rng,
+                } => {
                     if let Some(&ix) = self.memo.get(&entry_t) {
                         Some(ix)
                     } else {
@@ -684,8 +720,12 @@ impl OwlProver<'_> {
                 cur = match self.memo.get(&conclusion) {
                     Some(&ix) => ix,
                     None => {
-                        let Some(sp_n) = self.prove([p, v.sub_prop, q], depth + 1) else { continue };
-                        let Some(n) = self.push(conclusion, rule, vec![cur, sp_n]) else { continue };
+                        let Some(sp_n) = self.prove([p, v.sub_prop, q], depth + 1) else {
+                            continue;
+                        };
+                        let Some(n) = self.push(conclusion, rule, vec![cur, sp_n]) else {
+                            continue;
+                        };
                         n
                     }
                 };
@@ -697,8 +737,12 @@ impl OwlProver<'_> {
                 cur = match self.memo.get(&conclusion) {
                     Some(&ix) => ix,
                     None => {
-                        let Some(sc_n) = self.prove([c0, v.sub_class, c], depth + 1) else { continue };
-                        let Some(n) = self.push(conclusion, rule, vec![cur, sc_n]) else { continue };
+                        let Some(sc_n) = self.prove([c0, v.sub_class, c], depth + 1) else {
+                            continue;
+                        };
+                        let Some(n) = self.push(conclusion, rule, vec![cur, sc_n]) else {
+                            continue;
+                        };
                         n
                     }
                 };
@@ -753,7 +797,11 @@ impl OwlProver<'_> {
                         for &c in &sorted(cs) {
                             trace.entry((true, q, c)).or_insert_with(|| {
                                 changed = true;
-                                DrStep::Inv { prem, src: p, src_is_rng: false }
+                                DrStep::Inv {
+                                    prem,
+                                    src: p,
+                                    src_is_rng: false,
+                                }
                             });
                         }
                     }
@@ -761,7 +809,11 @@ impl OwlProver<'_> {
                         for &c in &sorted(cs) {
                             trace.entry((false, q, c)).or_insert_with(|| {
                                 changed = true;
-                                DrStep::Inv { prem, src: p, src_is_rng: true }
+                                DrStep::Inv {
+                                    prem,
+                                    src: p,
+                                    src_is_rng: true,
+                                }
                             });
                         }
                     }
@@ -891,7 +943,11 @@ impl OwlProver<'_> {
             let src_n = self.prove(src, depth + 1)?;
             self.prove_oriented(src_n, src, to, depth)?
         };
-        let (dr_pred, rule) = if range { (v.range, "prp-rng") } else { (v.domain, "prp-dom") };
+        let (dr_pred, rule) = if range {
+            (v.range, "prp-rng")
+        } else {
+            (v.domain, "prp-dom")
+        };
         let dr = self.prove([r, dr_pred, t[2]], depth + 1)?;
         self.push(t, rule, vec![dr, edge])
     }
@@ -899,7 +955,13 @@ impl OwlProver<'_> {
     /// Re-orient an edge along the raw property-orientation graph from `(p, false)` to
     /// `to`, one rule application per step (prp-spo1 / prp-eqp1/2 / prp-inv1/2 /
     /// prp-symp). `src_n` proves `src`; returns the node concluding the re-oriented edge.
-    fn prove_oriented(&mut self, src_n: u32, src: [Id; 3], to: (Id, bool), depth: usize) -> Option<u32> {
+    fn prove_oriented(
+        &mut self,
+        src_n: u32,
+        src: [Id; 3],
+        to: (Id, bool),
+        depth: usize,
+    ) -> Option<u32> {
         let ex = &self.g.explain;
         let succ = |(q, or): (Id, bool)| -> Vec<(Id, bool)> {
             let mut out: Vec<(Id, bool)> = Vec::new();
@@ -921,7 +983,11 @@ impl OwlProver<'_> {
         let mut cur = src;
         for w in path.windows(2) {
             let ((qa, oa), (qb, ob)) = (w[0], w[1]);
-            let new_t = if oa == ob { [cur[0], qb, cur[2]] } else { [cur[2], qb, cur[0]] };
+            let new_t = if oa == ob {
+                [cur[0], qb, cur[2]]
+            } else {
+                [cur[2], qb, cur[0]]
+            };
             if let Some(&ix) = self.memo.get(&new_t) {
                 cur_n = ix;
                 cur = new_t;
@@ -940,13 +1006,18 @@ impl OwlProver<'_> {
                     .min()?;
                 match origin {
                     EdgeOrigin::Base => ("prp-spo1", [qa, self.g.v.sub_prop, qb]),
-                    EdgeOrigin::Equiv(e) => {
-                        (if e[0] == qa { "prp-eqp1" } else { "prp-eqp2" }, e)
-                    }
+                    EdgeOrigin::Equiv(e) => (if e[0] == qa { "prp-eqp1" } else { "prp-eqp2" }, e),
                     EdgeOrigin::Xsd => return None, // XSD edges are classes, never properties
                 }
             } else if let Some(&prem) = self.g.explain.inv_prem.get(&(qa, qb)) {
-                (if prem[0] == qa && prem[2] == qb { "prp-inv1" } else { "prp-inv2" }, prem)
+                (
+                    if prem[0] == qa && prem[2] == qb {
+                        "prp-inv1"
+                    } else {
+                        "prp-inv2"
+                    },
+                    prem,
+                )
             } else if qa == qb && self.g.explain.symmetric.contains(&qa) {
                 ("prp-symp", [qa, self.g.v.ty, self.g.ow.symmetric])
             } else {
@@ -1005,7 +1076,9 @@ impl OwlProver<'_> {
         for &r in &order {
             edges.insert(
                 r,
-                g.e0.get(&r).map(|m| m.keys().copied().collect()).unwrap_or_default(),
+                g.e0.get(&r)
+                    .map(|m| m.keys().copied().collect())
+                    .unwrap_or_default(),
             );
         }
         loop {
@@ -1026,7 +1099,8 @@ impl OwlProver<'_> {
                 for &src in &srcs {
                     // BFS from src; parent edges live in `closed`-so-far or `e`.
                     let mut seen: FxHashSet<Id> = FxHashSet::default();
-                    let mut queue: std::collections::VecDeque<Id> = adj[&src].iter().copied().collect();
+                    let mut queue: std::collections::VecDeque<Id> =
+                        adj[&src].iter().copied().collect();
                     for &m in &adj[&src] {
                         seen.insert(m);
                     }
@@ -1127,14 +1201,20 @@ impl MaterializedN3Graph {
         }
         // Deterministic re-derivation: serialize the base SORTED so rule-firing order (and
         // therefore the chosen witness) is stable across calls.
-        let mut lines: Vec<String> = self.base.iter().map(|f| n3_serialize(std::iter::once(f))).collect();
+        let mut lines: Vec<String> = self
+            .base
+            .iter()
+            .map(|f| n3_serialize(std::iter::once(f)))
+            .collect();
         lines.sort_unstable();
         let src = format!("{}\n{}", self.rules_src, lines.concat());
         let (_facts, steps) = crate::n3::reason_n3_terms_proof(&src).ok()?;
         // One step per derived fact (first derivation wins).
         let mut step_map: FxHashMap<&[N3Term; 3], (usize, &[[N3Term; 3]])> = FxHashMap::default();
         for (conclusion, rule, premises) in &steps {
-            step_map.entry(conclusion).or_insert((*rule, premises.as_slice()));
+            step_map
+                .entry(conclusion)
+                .or_insert((*rule, premises.as_slice()));
         }
         let mut p = N3Prover {
             base: &self.base,
@@ -1181,7 +1261,9 @@ impl N3Prover<'_> {
         for p in premises {
             prem_nodes.push(self.prove(p, depth + 1)?);
         }
-        let ix = self.b.push(rendered, &format!("n3-rule-{rule}"), prem_nodes)?;
+        let ix = self
+            .b
+            .push(rendered, &format!("n3-rule-{rule}"), prem_nodes)?;
         self.memo.insert(f.clone(), ix);
         Some(ix)
     }

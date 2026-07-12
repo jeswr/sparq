@@ -58,7 +58,10 @@ pub struct ExplainOpts {
 
 impl Default for ExplainOpts {
     fn default() -> Self {
-        ExplainOpts { max_depth: 128, max_nodes: 65_536 }
+        ExplainOpts {
+            max_depth: 128,
+            max_nodes: 65_536,
+        }
     }
 }
 
@@ -170,7 +173,10 @@ pub(crate) struct ProofBuilder {
 
 impl ProofBuilder {
     pub(crate) fn new(opts: ExplainOpts) -> ProofBuilder {
-        ProofBuilder { nodes: Vec::new(), opts }
+        ProofBuilder {
+            nodes: Vec::new(),
+            opts,
+        }
     }
 
     /// Append a node; `None` when the node cap is hit. Premise indices must already exist
@@ -186,14 +192,22 @@ impl ProofBuilder {
             return None;
         }
         debug_assert!(premises.iter().all(|&p| (p as usize) < self.nodes.len()));
-        self.nodes.push(ProofNode { conclusion, rule: rule.to_string(), premises });
+        self.nodes.push(ProofNode {
+            conclusion,
+            rule: rule.to_string(),
+            premises,
+        });
         Some((self.nodes.len() - 1) as u32)
     }
 
     /// Finish with `root` as the explained triple. The root must be the LAST node (the
     /// provers' memoized recursion guarantees it; debug-asserted here).
     pub(crate) fn finish(self, root: u32) -> ProofTree {
-        debug_assert_eq!(root as usize, self.nodes.len() - 1, "root must be the last node");
+        debug_assert_eq!(
+            root as usize,
+            self.nodes.len() - 1,
+            "root must be the last node"
+        );
         ProofTree { nodes: self.nodes }
     }
 }
@@ -208,7 +222,11 @@ pub(crate) fn id_triple_strings(
     dict: &sparq_core::dict::Dict,
     t: [sparq_core::dict::Id; 3],
 ) -> [String; 3] {
-    [id_term_string(dict, t[0]), id_term_string(dict, t[1]), id_term_string(dict, t[2])]
+    [
+        id_term_string(dict, t[0]),
+        id_term_string(dict, t[1]),
+        id_term_string(dict, t[2]),
+    ]
 }
 
 /// Sorted copy of a slice (the provers sort every choice point for determinism).
@@ -294,7 +312,9 @@ pub fn n3_proof_tree(
             }
             let r = (|| {
                 let Some(&step) = self.step_map.get(&t) else {
-                    let ix = self.b.push(id_triple_strings(self.dict, t), "asserted", vec![])?;
+                    let ix = self
+                        .b
+                        .push(id_triple_strings(self.dict, t), "asserted", vec![])?;
                     self.memo.insert(t, ix);
                     return Some(ix);
                 };
@@ -339,17 +359,33 @@ mod tests {
         let mut b = ProofBuilder::new(ExplainOpts::default());
         let leaf = b
             .push(
-                ["<http://ex/Dog>".into(), "<sc>".into(), "<http://ex/Animal>".into()],
+                [
+                    "<http://ex/Dog>".into(),
+                    "<sc>".into(),
+                    "<http://ex/Animal>".into(),
+                ],
                 "asserted",
                 vec![],
             )
             .unwrap();
         let leaf2 = b
-            .push(["<http://ex/rex>".into(), "<ty>".into(), "<http://ex/Dog>".into()], "asserted", vec![])
+            .push(
+                [
+                    "<http://ex/rex>".into(),
+                    "<ty>".into(),
+                    "<http://ex/Dog>".into(),
+                ],
+                "asserted",
+                vec![],
+            )
             .unwrap();
         let root = b
             .push(
-                ["<http://ex/rex>".into(), "<ty>".into(), "<http://ex/Animal>".into()],
+                [
+                    "<http://ex/rex>".into(),
+                    "<ty>".into(),
+                    "<http://ex/Animal>".into(),
+                ],
                 "rdfs9",
                 vec![leaf, leaf2],
             )
@@ -373,7 +409,11 @@ mod tests {
     fn json_escapes() {
         let mut b = ProofBuilder::new(ExplainOpts::default());
         let root = b
-            .push(["\"a\\b\"".into(), "<p>".into(), "\"x\ny\"".into()], "asserted", vec![])
+            .push(
+                ["\"a\\b\"".into(), "<p>".into(), "\"x\ny\"".into()],
+                "asserted",
+                vec![],
+            )
             .unwrap();
         let json = b.finish(root).to_json();
         assert!(json.contains("\\\"a\\\\b\\\""));
@@ -382,9 +422,24 @@ mod tests {
 
     #[test]
     fn node_cap_respected() {
-        let mut b = ProofBuilder::new(ExplainOpts { max_depth: 8, max_nodes: 1 });
-        assert!(b.push(["<a>".into(), "<b>".into(), "<c>".into()], "asserted", vec![]).is_some());
-        assert!(b.push(["<d>".into(), "<e>".into(), "<f>".into()], "asserted", vec![]).is_none());
+        let mut b = ProofBuilder::new(ExplainOpts {
+            max_depth: 8,
+            max_nodes: 1,
+        });
+        assert!(b
+            .push(
+                ["<a>".into(), "<b>".into(), "<c>".into()],
+                "asserted",
+                vec![]
+            )
+            .is_some());
+        assert!(b
+            .push(
+                ["<d>".into(), "<e>".into(), "<f>".into()],
+                "asserted",
+                vec![]
+            )
+            .is_none());
     }
 
     #[test]
