@@ -26,3 +26,10 @@
   crate: "sparq-geo"
   features: "geosparql_rewrite"
   test: true
+
+# [GPT-5.6] Exact DE-9IM refinement for topology-index containment scans is
+# default-OFF, and tests/topology_index.rs is compiled only with this feature.
+- name: "sparq-geo (topology_index)"
+  crate: "sparq-geo"
+  features: "topology_index"
+  test: true

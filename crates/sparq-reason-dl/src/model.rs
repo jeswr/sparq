@@ -14,6 +14,11 @@
 // and role assertions). Everything OUTSIDE this fragment is deferred with a named reason in
 // the design record §5 deferral ledger — it is NOT modelled here, and the extractor
 // fail-closes on it rather than dropping it silently.
+//
+// [GPT-5.6] sq-zfwzq: the OPT-IN `dl_transitive` cargo feature (OFF by default) extends the
+// fragment with TRANSITIVE roles (`owl:TransitiveProperty` → `Axiom::TransitiveObjectProperty`)
+// — the design record's "first-in-line" §5 extension. Inverses / cardinality / nominals /
+// datatypes remain fail-closed deferrals in BOTH feature states.
 
 use sparq_core::dict::Id;
 
@@ -158,6 +163,18 @@ pub enum Axiom {
         source: Id,
         /// The dict id of the target individual.
         target: Id,
+    },
+    /// `owl:TransitiveProperty` — the role is transitive (`R ∘ R ⊑ R`). OPT-IN: this variant
+    /// exists only under the `dl_transitive` cargo feature ([GPT-5.6] sq-zfwzq); with the
+    /// feature OFF the extractor keeps refusing `owl:TransitiveProperty` fail-closed, exactly
+    /// as before. The L3 tableau consumes it via the ∀₊-propagation rule, whose extended
+    /// termination/soundness/completeness argument is written in the `tableau` module docs
+    /// (Horrocks & Sattler 1999 — sound with subset blocking precisely because the fragment
+    /// still has NO inverse roles).
+    #[cfg(feature = "dl_transitive")]
+    TransitiveObjectProperty {
+        /// The transitive (named) object property.
+        property: ObjectPropertyExpression,
     },
 }
 

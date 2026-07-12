@@ -41,6 +41,15 @@ default = []
 # workspace feature unification).
 dispatch = ["dep:sparq-reason", "dep:sparq-reason-el"]
 
+# [GPT-5.6] sq-zfwzq: OPT-IN transitive roles (the "S" extension) -- OFF by default. Extends
+# the fragment to ALCH + transitive roles (still NO inverses / cardinality / nominals, which
+# stay fail-closed per the design-record §5 deferral ledger): L1 recognises
+# `owl:TransitiveProperty` (instead of refusing it) and the L3 tableau adds the ∀₊-propagation
+# rule with the termination/soundness/completeness argument EXTENDED and written out in the
+# tableau module docs (Horrocks & Sattler 1999 -- no blocking change is needed absent inverses).
+# Fully cfg-gated: with the feature OFF the crate compiles to exactly the pre-extension code.
+dl_transitive = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
