@@ -33,3 +33,6 @@ default = []
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
 oxrdf.workspace = true
 rustc-hash.workspace = true
+
+[dev-dependencies]
+proptest = "1"

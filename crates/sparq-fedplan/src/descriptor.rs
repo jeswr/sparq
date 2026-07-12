@@ -13,7 +13,12 @@
 //!
 //! [OPUS-4.8] sq-a35t.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+// [GPT-5.6] sq-ioeih: keep the existing FxHash containers as the default and
+// compile the foldhash A/B arm only when explicitly requested.
+#[cfg(feature = "foldhash-maps")]
+use foldhash::{HashMap as DescriptorMap, HashSet as DescriptorSet};
+#[cfg(not(feature = "foldhash-maps"))]
+use rustc_hash::{FxHashMap as DescriptorMap, FxHashSet as DescriptorSet};
 
 /// The VoID vocabulary namespace.
 pub const VOID_NS: &str = "http://rdfs.org/ns/void#";
@@ -156,9 +161,9 @@ pub struct SourceDescriptor {
     /// `void:triples` — total triples this source holds (0 if unknown).
     pub total_triples: u64,
     /// Per-predicate partitions, keyed by predicate IRI.
-    predicates: FxHashMap<String, PredPartition>,
+    predicates: DescriptorMap<String, PredPartition>,
     /// Per-class partitions, keyed by class IRI.
-    classes: FxHashMap<String, ClassPartition>,
+    classes: DescriptorMap<String, ClassPartition>,
     /// Served characteristic sets (for star-join cardinality).
     char_sets: Vec<CharSet>,
     /// The set of IRI **authorities** this source is known to mint terms under
@@ -166,7 +171,7 @@ pub struct SourceDescriptor {
     /// partition (predicates, classes). A pattern's bound-IRI position whose authority
     /// is absent here *cannot* match this source — the HiBISCuS prune. EMPTY means
     /// "unknown authorities" ⇒ never prune on authority (recall-safe).
-    authorities: FxHashSet<String>,
+    authorities: DescriptorSet<String>,
     /// Whether the authority set is *complete* — i.e. the descriptor enumerated every
     /// IRI authority the source can produce. Only a complete authority set may prune a
     /// pattern whose bound IRI's authority is absent. A descriptor parsed from VoID
@@ -186,8 +191,8 @@ pub struct SourceDescriptor {
 pub struct SourceDescriptorBuilder {
     id: SourceId,
     total_triples: u64,
-    predicates: FxHashMap<String, PredPartition>,
-    classes: FxHashMap<String, ClassPartition>,
+    predicates: DescriptorMap<String, PredPartition>,
+    classes: DescriptorMap<String, ClassPartition>,
     char_sets: Vec<CharSet>,
     authorities_complete: bool,
     retrieval: Option<RetrievalCapability>,
@@ -199,8 +204,8 @@ impl SourceDescriptor {
         SourceDescriptorBuilder {
             id,
             total_triples: 0,
-            predicates: FxHashMap::default(),
-            classes: FxHashMap::default(),
+            predicates: DescriptorMap::default(),
+            classes: DescriptorMap::default(),
             char_sets: Vec::new(),
             authorities_complete: false,
             retrieval: None,
@@ -368,7 +373,7 @@ impl SourceDescriptorBuilder {
     /// Finalises the descriptor, deriving the authority set from every predicate/class
     /// IRI (and any explicitly-declared instance authority — none in this slice).
     pub fn build(self) -> SourceDescriptor {
-        let mut authorities = FxHashSet::default();
+        let mut authorities = DescriptorSet::default();
         for p in self.predicates.keys() {
             if let Some(a) = authority_of(p) {
                 authorities.insert(a);
@@ -410,7 +415,8 @@ impl SourceDescriptor {
         let ret = |local: &str| format!("{RETRIEVAL_NS}{local}");
 
         // Collect blank-node partition rows: bnode label -> (predicate -> objects).
-        let mut bn: FxHashMap<String, FxHashMap<String, Vec<OxTerm>>> = FxHashMap::default();
+        let mut bn: DescriptorMap<String, DescriptorMap<String, Vec<OxTerm>>> =
+            DescriptorMap::default();
         let mut total_triples = 0u64;
         // scs ordered-list members: bnode -> Vec<(index, value)> for predicate/mult lists.
         for r in oxttl::NTriplesParser::new().for_slice(nt.as_bytes()) {
@@ -631,6 +637,7 @@ fn is_subset(a: &[String], b: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{plan_bgp, select_sources, Bgp, PlanOptions, Term, TriplePattern, Var};
 
     // [OPUS-4.8] sq-qik4: `SourceDescriptorBuilder` is the return type of the PUBLIC
     // `SourceDescriptor::builder` and the link target of `from_void_nt`'s doc, so it must be a
@@ -644,6 +651,86 @@ mod tests {
         // authorities; the built descriptor must then report `authorities_complete() == true`.
         let d = b.authorities_complete().build();
         assert!(d.authorities_complete());
+    }
+
+    // [GPT-5.6] sq-ioeih: this snapshot runs unchanged in the default FxHash
+    // build and the opt-in foldhash build. Reversing descriptor insertion order
+    // additionally witnesses that map iteration cannot affect selection or planning.
+    #[test]
+    fn planner_result_is_descriptor_hasher_independent() {
+        fn source(id: &str, order: &[usize], scale: u64) -> SourceDescriptor {
+            let mut builder = SourceDescriptor::builder(SourceId::new(id));
+            for &index in order {
+                builder = builder.predicate(PredPartition {
+                    predicate: format!("https://example.test/p{index}"),
+                    triples: scale * (index as u64 + 1),
+                    distinct_subjects: scale,
+                    distinct_objects: scale,
+                });
+            }
+            builder.build()
+        }
+
+        let bgp = Bgp::new(
+            (0..3)
+                .map(|index| {
+                    TriplePattern::new(
+                        Term::Var(Var::new(format!("v{index}"))),
+                        Term::Iri(format!("https://example.test/p{index}")),
+                        Term::Var(Var::new(format!("v{}", index + 1))),
+                    )
+                })
+                .collect(),
+        );
+        let ascending = vec![source("a", &[0, 1, 2], 10), source("b", &[0, 1, 2], 20)];
+        let descending = vec![source("a", &[2, 1, 0], 10), source("b", &[2, 1, 0], 20)];
+
+        let snapshot = |descriptors: &[SourceDescriptor]| {
+            let selection = select_sources(&bgp, descriptors);
+            let selected = selection
+                .iter()
+                .map(|pattern| {
+                    (
+                        pattern.pattern,
+                        pattern
+                            .candidates
+                            .iter()
+                            .map(|candidate| {
+                                (candidate.source, candidate.estimated_cardinality.to_bits())
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let plan = plan_bgp(&bgp, &selection, descriptors, &PlanOptions::default())
+                .expect("non-empty fixture has a plan");
+            (selected, plan.join_order(), format!("{:?}", plan.root))
+        };
+
+        let expected = snapshot(&ascending);
+        assert_eq!(expected, snapshot(&descending));
+        assert_eq!(expected.1, vec![0, 1, 2]);
+        assert_eq!(
+            expected.0,
+            vec![
+                (0, vec![(0, 10.0f64.to_bits()), (1, 20.0f64.to_bits())]),
+                (1, vec![(0, 20.0f64.to_bits()), (1, 40.0f64.to_bits())]),
+                (2, vec![(0, 30.0f64.to_bits()), (1, 60.0f64.to_bits())]),
+            ]
+        );
+    }
+
+    // [GPT-5.6] sq-ioeih: mutation witness for the feature switch itself; the
+    // result snapshot above would intentionally stay green if both aliases
+    // accidentally selected FxHash because planner results must be equivalent.
+    #[cfg(feature = "foldhash-maps")]
+    #[test]
+    fn foldhash_feature_selects_foldhash_state() {
+        let map_type = std::any::type_name::<DescriptorMap<String, String>>();
+        assert!(
+            map_type.contains("foldhash"),
+            "foldhash-maps resolved to unexpected map type: {map_type}"
+        );
     }
 
     #[test]

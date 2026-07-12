@@ -670,6 +670,26 @@ records_to  = "stdout; bench/inference/incremental-bench.md"
 featured    = false
 status      = "ok"
 
+# [FABLE-5] sq-31fza (parent sq-6tykl.4; sq-hmd7l deletion-workload axis) — the SELF-ASSERTING
+# deletion-ratio sibling of inference-incremental: same UNMODIFIED driver example, but on a
+# deterministic committed-generator corpus with HARD closure fixtures, so it runs hermetically
+# (no gitignored olympics.nt fetch) and correctness regressions fail LOUDLY.
+[[benchmark]]
+id          = "reason-deletion"
+name        = "Deletion-workload incremental reasoning (FBF/DRed-style retraction) correctness + timing"
+category    = "inference"
+measures    = "per tier (small+medium per-commit; large nightly/EC2): randomized ABox insert/delete batch times at several deletion ratios (delta {1,100,10000} / ABox size) for RDFS + OWL-RL CountingMono/Fixpoint, vs from-scratch re-materialization. HARD gates: the driver's built-in differential asserts (incremental closure set-equal to from-scratch after the randomized sequence; full_rebuilds()==0 on ABox deltas) panic->red, AND expected.tsv pins every tier's ABox + closure triple-counts (deterministic; catches silent under/over-derivation + generator drift)"
+invoke      = "bash bench/reason-deletion/run.sh   # REASONDEL_TIERS=\"small medium large\" adds the nightly tier"
+source      = "bench/reason-deletion/{run.sh,gen.sh,gen_reason_deletion.py,parse_and_assert.py,expected.tsv,README.md}; crates/sparq-reason/examples/incremental_olympics_bench.rs (driver, UNMODIFIED)"
+dataset     = "deterministic LUBM-class synthetic ABox over the driver's TBox vocabulary (gen_reason_deletion.py, fixed-seed LCG, 8 triples/unit; cached under /tmp/reason-deletion, never committed); tier unit counts pinned in expected.tsv (chosen so the driver's fixed-seed delete-sampler never draws the one axiom-typing triple — see README.md honesty notes)"
+quiet_box_sensitive = true  # delta timings are single-shot wall-clock trend-only, NOT perf-gated; the differential asserts + closure fixtures ARE a hard deterministic correctness gate (load-robust)
+pinning     = "generator is a pure function of the units column; driver delta seeds fixed in-source (0xBEEF_0001/0xBEEF_0002); expected.tsv re-validated whenever driver or generator changes"
+records_to  = "stdout (metric TSV lines) + JSON results envelope (default /tmp/reason-deletion/reason-deletion-<UTC>.json; host block marks work-box timings NON-canonical)"
+# Correctness+measurement half only (bead sq-31fza); the RDFox-FBF/GraphDB-smooth-delete
+# competitor comparison + any incremental.rs optimization are follow-up beads under sq-6tykl.4.
+featured    = false
+status      = "ok"
+
 [[benchmark]]
 id          = "solid-wac-bench"
 name        = "sparq-solid WAC/ACP auth-view materialization"
@@ -733,6 +753,28 @@ records_to  = "stdout (per-lane TSV + single-line AC_ODRL_OVERHEAD_JSON envelope
 # same-box lane composes with sq-lrtc3.1 (server ODRL wiring) — follow-up bead sq-12pmx.
 # featured=false: internal overhead harness (the documented G3 escape hatch), not a
 # capability card; dashboard promotion, if ever, deferred to a maintainer.
+featured    = false
+status      = "ok"
+
+# [FABLE-5] sq-on7r4 — the certification-edge trust-graph closure (derive_effective_rules,
+# crates/sparq-trust/src/graph.rs, default-OFF `cert-graph` feature): measured overhead +
+# the strict-additivity envelope the 2026-07 record's cost concern (sq-pfae.9) lacked a
+# runnable harness for. Standalone driver (own [workspace]) — the root workspace's default
+# build never sees cert-graph ON. Measurement-only, clear-path: NO ZK proof produced or
+# verified, NO privacy/soundness claim (sq-qhy4 pending).
+[[benchmark]]
+id          = "trust-graph-closure"
+name        = "Certification-edge closure overhead + strict-additivity envelope (cert-graph)"
+category    = "inference"
+measures    = "LOAD-BEARING: strict-additivity envelope — zero (surviving) certifications => derive_effective_rules output byte-EQUAL to the input direct_rules (zero-certs / depth_bound=0 / all-edges-rejected lanes, fail-closed); PLUS min-of-K closure wall time over (anchors x certifications x scope kind: any/narrow/broaden/forged) with a per-edge amortised column, every timed cell correctness-gated (expected admitted count + verbatim anchors prefix) before timing"
+invoke      = "bench/trust-graph/run.sh --smoke   # per-commit smoke tier; bench/trust-graph/run.sh --sf N for a nightly tier"
+source      = "bench/trust-graph/{run.sh,Cargo.toml,Cargo.lock,src/main.rs}; crates/sparq-trust/src/graph.rs (the closure under test)"
+dataset     = "deterministic in-process fixtures (seeded SecretKey::from_seed keys, fixed blank-node labels, fixed evaluation instant); signed trustx:Certification edges minted per lane. No external corpus, no network"
+quiet_box_sensitive = true  # the overhead lanes are wall-clock; the additivity envelope is deterministic pass/fail, load-robust
+pinning     = "fixed key seeds (1+i anchors, 10000+j issuers) + fixed NOW=1700000000; --smoke sizes fixed; --sf N deterministic. No wall-clock affects the envelope verdict"
+records_to  = "stdout (TSV: lane/kind/anchors/certs/derived/expected/min_us/per_edge_ns/status); exit non-zero on any envelope or expected-count mismatch. NO number committed to markdown (work-box timings NON-canonical)"
+# [FABLE-5] sq-on7r4: internal measurement harness for the opt-in cert-graph closure, not a
+# head-to-head competitor card — featured = false is a dashboard DISPOSITION (no perf claim).
 featured    = false
 status      = "ok"
 
@@ -1789,4 +1831,19 @@ records_to  = "stdout"
 status      = "ok"
 # Internal throughput smoke for the import path, no head-to-head capability claim yet
 # (competitor CSV-import comparisons belong to the sq-hmd7l comparative program).
+featured    = false
+
+# [GPT-5.6] sq-vwnzh — correctness-gated Arrow/tabular export interop panel.
+[[benchmark]]
+id          = "arrow-interop"
+name        = "Arrow/tabular SELECT result export interop — sparq-arrow vs pyoxigraph"
+category    = "query"
+measures    = "exact serialized solution-multiset equality before advisory export latency"
+invoke      = "python3 bench/arrow-interop/test_arrow_interop.py; python3 bench/arrow-interop/arrow_interop.py --sparq-bin target/release/examples/arrow_interop"
+source      = "bench/arrow-interop/; crates/sparq-arrow/examples/arrow_interop.rs; research/gap-arrow-interop-2026-07.md"
+dataset     = "pinned synthetic Turtle fixture with two fixed SELECT workloads"
+quiet_box_sensitive = true
+pinning     = "fixture.ttl + select-all.rq + select-group.rq + expected.tsv committed oracle"
+records_to  = "stdout JSON or --json-out; loose/in-process scope is machine-labelled"
+status      = "implemented"
 featured    = false

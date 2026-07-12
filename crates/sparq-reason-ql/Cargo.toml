@@ -61,6 +61,8 @@ rustc-hash.workspace = true
 # `Vec<oxrdf::Triple>`. Not a runtime dependency: the rewriter takes triples from the caller,
 # which sparq already parses via sparq-core. Keeps the runtime dep surface to spargebra/oxrdf.
 oxttl.workspace = true
+sparq-core = { path = "../sparq-core" }
+sparq-engine = { path = "../sparq-engine" }
 
 # The DL-Lite-oracle differential tests are `#![cfg(feature = "experimental")]` — they exercise
 # the gated rewriter. Without `experimental` they compile empty (and the default-build archive,
@@ -74,4 +76,9 @@ oxttl.workspace = true
 # benchmark (bench/benchmarks.toml: reason-ql-rewrite).
 [[example]]
 name = "ql_rewrite_bench"
+required-features = ["experimental"]
+
+# [GPT-5.6] sq-mg1wx: hermetic rewrite-then-execute correctness/measurement harness.
+[[example]]
+name = "ql_endtoend_bench"
 required-features = ["experimental"]

@@ -1,0 +1,10 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "id": "@id",
+    "type": "@type",
+    "controller": {"@id": "https://www.w3.org/ns/did#controller", "@type": "@id"},
+    "verificationMethod": {"@id": "https://www.w3.org/ns/did#verificationMethod", "@type": "@id"}
+  }
+}
+

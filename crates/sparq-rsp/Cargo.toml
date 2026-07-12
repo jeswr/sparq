@@ -53,4 +53,5 @@ rustc-hash.workspace = true
 # `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a dev-dependency so it
 # never enters the crate's published graph.
 [dev-dependencies]
+proptest = "1"
 serde_json = "1"

@@ -13,6 +13,16 @@ with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; se
 content negotiation, hardening guards, Prometheus `/metrics`, WebSocket + SSE subscriptions,
 and opt-in time-travel + GeoSPARQL.
 
+Build with the default-off `response-compression` feature to negotiate gzip or zstd for outbound
+result bodies from `Accept-Encoding`. Compression is transport-transparent and streaming; SSE
+subscription responses and bodies that already have a `Content-Encoding` are left uncompressed:
+
+```sh
+cargo run -p sparq-server --features response-compression
+curl --compressed -G http://127.0.0.1:3030/sparql \
+  --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }'
+```
+
 ## Quickstart
 
 Run the binary (server stack is the default-on `server` feature):
@@ -735,6 +745,14 @@ watermark (a HARD safety bound: any unacked record keeps its segment), `max_age`
 A `poll` from a trimmed-away offset **fails closed** (never a silent skip) — consumers resume from
 `ChangeLog::first_seq`. A `ChangeSink` trait for an external broker (Kafka/NATS) is
 tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+**Recording seam (`sq-bdaw5`):** install `ChangeLog::into_commit_hook(on_error)` via
+`Writer::spawn_with_commit_hook` and every commit-publish is recorded **on the writer thread** —
+one append+fsync per PUBLISHED GENERATION, gapless by construction (the writer is the sole
+publisher), with **no caller-side lock and no serialisation of submitters**; acks happen-after the
+record is durable. Restore publishes never fire the hook (not same-lineage — re-baseline
+explicitly). A recording failure is dropped + reported to `on_error`, never failing the
+already-published write; the log's discontinuity check then fail-closes later records rather than
+silently gapping.
 
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
 `sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams
@@ -1011,6 +1029,24 @@ is also set (mirrors `tpf` / `federation-descriptors`). Without the feature, zer
 no SHACL code — `sparq-core`/the wasm bundle are untouched); with the feature but not the flag,
 `/shacl/validate` is `404`. Reads are gated by `--auth-token-read` like any GET.
 
+**SHACL transaction guard (`sq-lsp7k.2.4`, same `shacl` feature; [GPT-5.6]).** Build with
+`--features shacl`, load a shapes graph with `--shacl-shapes FILE` (env
+`SPARQ_SHACL_SHAPES`), and enable `--shacl-guard` (env `SPARQ_SHACL_GUARD=1`) to validate the
+post-state of every SPARQL Update and Graph Store write. A conforming candidate commits normally;
+a non-conforming candidate is rejected with **`422 Unprocessable Entity`** and the same JSON
+validation-report projection as `/shacl/validate`, and the published/durable store is unchanged.
+Validation runs on the writer's private candidate before persistence and publish, so GSP
+`PUT`/`POST`/`DELETE`/`PATCH`, template UPDATEs, and `/sparql` updates share the guard. The guard is
+runtime-OFF by default and independent of the read-only `--shacl` endpoint flag. Enabling it
+without a loaded shapes graph is a startup error. Library embedders set
+`ServerConfig { shacl_guard: true, shacl_shapes: Some(ShaclShapes::new(shapes)),
+..Default::default() }`.
+
+```sh
+cargo run -p sparq-server --features shacl -- data.ttl \
+  --shacl-guard --shacl-shapes shapes.ttl
+```
+
 **5f. Terse transpiler endpoint (OPT-IN, `sq-vczh2`, epic `sq-2m6zm`; feature `terse`).** Transpile
 a **terse** query (the `K:<name>` keyword layer over canonical SPARQL) into the **canonical,
 conformant SPARQL** it expands to, returning the **verifiable expansion** — NOT an answer. This is
@@ -1184,6 +1220,8 @@ env overrides the default.
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
+| `--shacl-guard` | `SPARQ_SHACL_GUARD` | off | (feature `shacl`) reject non-conforming UPDATE/GSP post-states with `422` + JSON validation report; store unchanged |
+| `--shacl-shapes FILE` | `SPARQ_SHACL_SHAPES` | unset | (feature `shacl`) load the guard shapes graph once at startup; required when the guard is on |
 | `--solid-authz` | `SPARQ_SOLID_AUTHZ` | off | (feature `solid-authz`) serve the Solid WAC/ACP authorization endpoints `POST /authz/decide`+`/wac-allow`+`/query` — a fail-closed HTTP shell over `sparq-solid`; POST the pod dataset + an already-resolved session, get the decision / `WAC-Allow` value / access-controlled query result; read-only — see "Solid WAC/ACP authorization endpoints" |
 | `--solid-authz-trust` | `SPARQ_SOLID_AUTHZ_TRUST` | off | (feature `solid-authz-trust`, implies `solid-authz`) opt-in stateless trust-graph extension to `POST /authz/decide` — a request may carry an additional `"trust"` JSON block containing credentials, a trust policy, and signed certification edges; the server runs the cert-graph closure (`derive_effective_rules`) and the `sparq_trust::admit` gate over them, injects any admitted facts into the pod dataset, then runs the unchanged WAC/ACP decision; double-opt-in: the feature must be compiled AND this flag set AND the request must carry a `"trust"` block — see "Stateless trust-graph decision extension (sq-pfae.17)"; honest scope: anchored-not-proven clear-path only (no ZK/unlinkability claim; sq-qhy4 external audit PENDING) |
 | `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
