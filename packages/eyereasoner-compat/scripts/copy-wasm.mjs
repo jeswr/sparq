@@ -6,7 +6,13 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const src = resolve(pkgDir, '..', '..', 'crates', 'sparq-reason-wasm', 'pkg');
+// [FABLE-5] sq-ixc3.20 — a DEDICATED wasm-pack out-dir (`pkg-eyereasoner-compat`, see
+// `build:wasm`), NOT the crate's default `pkg/`: this package builds the reasoner WITHOUT
+// the `explain` feature (lean payload), while the GUI/site build the SAME crate WITH it
+// (js/'s `build:reason-wasm`) and sync from `pkg/`. Sharing one out-dir let this package's
+// `prepare`-hook rebuild (root `npm install` on a fresh checkout) silently clobber the
+// explain-enabled bundle — the GUI's why() proof panel then failed at runtime.
+const src = resolve(pkgDir, '..', '..', 'crates', 'sparq-reason-wasm', 'pkg-eyereasoner-compat');
 const dst = resolve(pkgDir, 'wasm');
 
 const FILES = [

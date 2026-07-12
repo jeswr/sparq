@@ -36,7 +36,7 @@
   },
   "scripts": {
     "_copy:wasm": "node scripts/copy-wasm.mjs",
-    "build:wasm": "wasm-pack build ../../crates/sparq-reason-wasm --target web --release && npm run _copy:wasm",
+    "build:wasm": "wasm-pack build ../../crates/sparq-reason-wasm --target web --release --out-dir pkg-eyereasoner-compat && npm run _copy:wasm",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
     "typecheck": "tsc --noEmit",
