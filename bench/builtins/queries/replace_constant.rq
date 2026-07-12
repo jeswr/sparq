@@ -1,0 +1,5 @@
+# [GPT-5.6] Constant pattern and replacement: regression witness for cached REPLACE setup.
+SELECT ?s WHERE {
+  ?s <urn:value> ?value .
+  FILTER(REPLACE(STR(?value), "-alpha$", "-omega") != STR(?value))
+}
