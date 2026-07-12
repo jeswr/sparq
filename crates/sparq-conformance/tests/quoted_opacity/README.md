@@ -46,5 +46,6 @@ is the positive control proving the harness' negative guards are meaningful.
 The expected-answer files are hand-verified (every line is either a `base.ttl`
 triple or annotated with the rule that derives it — see the comments in
 `base.ttl`). They pin the base closure BYTE-EXACTLY, so the non-interference
-test (`closure(base ∪ overlay) \ overlay == closure(base)`) is anchored to a
-committed artifact, not to a same-run self-comparison.
+test (removing the overlay-only closure delta from `closure(base ∪ overlay)`
+yields `closure(base)`) is anchored to a committed artifact, not to a same-run
+self-comparison.

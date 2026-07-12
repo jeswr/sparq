@@ -1,6 +1,7 @@
 # The quoted OVERLAY (fixture 2) — quoted/reified triples REFERRING to base.ttl.
 # Adding this overlay to base.ttl must leave the base closure byte-identical:
-# closure(base + overlay) == closure(base) UNION exactly-these-overlay-triples.
+# remove the overlay-only closure delta from closure(base + overlay), and the
+# result must equal closure(base).
 @prefix : <urn:sparq:qto:> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
