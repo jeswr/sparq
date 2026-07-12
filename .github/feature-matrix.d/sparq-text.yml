@@ -1,0 +1,6 @@
+# [GPT-5.6] Execute the default-OFF fuzzy lookup and SPARQL rewrite paths,
+# including the feature-gated acceptance tests.
+- name: "sparq-text (fuzzy — typo-tolerant text lookup)"
+  crate: "sparq-text"
+  features: "fuzzy"
+  test: true

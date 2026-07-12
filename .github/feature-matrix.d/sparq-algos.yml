@@ -1,0 +1,6 @@
+# [GPT-5.6] Execute the default-OFF extended centrality implementation and its
+# feature-gated exact-oracle/property tests.
+- name: "sparq-algos (centrality-extended)"
+  crate: "sparq-algos"
+  features: "centrality-extended"
+  test: true
