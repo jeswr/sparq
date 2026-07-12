@@ -1,87 +1,93 @@
-# reason: opt-in quoted-triple (RDF 1.2 reifier) inference for the OWL-RL profile — destructure/construct bridge rules with a finite-Herbrand-base guarantee
+# vectors: RDF 1.2 triple-term visibility as an off-by-default ablation axis; fix empty-string verbalisation of triple terms
 
 ## What
 
-A new **opt-in `quoted-triples` feature** on `sparq-reason` (default OFF, zero new deps,
-no new `Profile` variant, nothing outside the crate changes except the feature-matrix
-leg): two monotone RL-profile rules over the loaders' one canonical quoting shape
-(`R rdf:reifies <<( s p o )>>`, the triple term one structurally-interned dictionary id):
+Three changes to the opt-in `structure`/`kge` measurement stack (default build untouched, zero new
+dependencies; nothing outside `sparq-vectors` changes):
 
-| rule | premise ⊢ conclusion |
-|---|---|
-| **reif-dtr** (destructure) | `(r rdf:reifies tt)`, `tt = <<( s p o )>>` ⊢ `(r rdf:type rdf:Statement)`, `(r rdf:subject s)`, `(r rdf:predicate p)`, `(r rdf:object o)` |
-| **reif-ctr** (construct) | `(r rdf:subject s)`, `(r rdf:predicate p)`, `(r rdf:object o)`, `(s p o)` in the closure, `o` not a triple term ⊢ `(r rdf:reifies <<( s p o )>>)` |
+1. **Bugfix (unflagged):** `grounding::render_object` rendered an RDF 1.2 triple-term object as
+   the **empty string** — silent data loss in every NL-string / subgraph-text grounding over RDF
+   1.2 data. It now renders the reconstructed `<<( s p o )>>` term (nested terms included,
+   depth-capped by the existing dict reconstruction; oxrdf's `Display` provides the RDF 1.2
+   triple-term syntax). Regression-tested: no grounding fact may have an empty object. Happy to
+   split this into its own PR if preferred.
 
-reif-dtr is the "unstar" projection into the classic reification vocabulary, so ordinary
-RL rules (domain/range, subPropertyOf, sameAs, …) reason over reifier **annotations** and
-the recovered components; reif-ctr is its converse, surfacing classic-reification data as
-native RDF 1.2 reifiers. Wired into `materialize_owl_rl` as an alternation — one reify
-round, one RL closure — to the joint fixpoint.
+2. **`TermScope` — the triple-term ablation axis (default OFF, byte-stable):** the trainer, eval,
+   and negative sampler each carried a private `is_entity` that excluded `TermParts::Triple`, so a
+   graph's statement-level structure (`rdf:reifies` edges, content-addressed shared triple-term
+   nodes) was structurally invisible to the KGE embedding — the axis could not even be measured.
+   The reifier node itself (an IRI/blank node) was already embeddable; what was dropped is the
+   `rdf:reifies` edge to the triple term, leaving the reifier a disconnected metadata stub.
+   - One shared `is_embeddable(graph, id, scope)` replaces the three copies.
+     `TermScope::IriBlank` — the default in **every** constructor and preset — reduces to the
+     identical match, so all existing baselines are **byte-identical** (see below).
+   - `TermScope::Embeddable` (opt-in per ablation arm via `TrainConfig::term_scope`) admits triple
+     terms to entity space, with **sort-preserving negative corruption**: a triple-term slot is
+     corrupted only from the triple-term pool and an atomic slot only from the atomic pool (a
+     cross-sort negative is detectable from term class alone and would pollute the training
+     margin). Triple-term candidates bypass the type-constraint class filter — a triple term
+     carries no `rdf:type`, and statements have no class discipline yet.
+   - **Split membership and the ranking pool stay atomic under BOTH scopes** — the eval population
+     is scope-invariant, so paired ON/OFF deltas isolate the training-side visibility effect
+     rather than comparing rankings over different candidate sets.
 
-**Decidability / termination.** Forward chaining with a term *constructor* is not
-obviously terminating: unrestricted, `rdf:reifies rdfs:subPropertyOf rdf:object` lets the
-constructor quote its own conclusions forever. reif-ctr therefore carries two
-restrictions (full argument in the `reify` module docs, adversarial cascade pinned by
-`construct_never_quotes_a_triple_term`): (1) **only EXISTING triples are reified** — the
-referent triple must already be in the closure; (2) **no quoting of triple terms** — every
-constructed term has leaf components (subject IRI/blank + predicate IRI kind guards;
-object checked explicitly). Together: no rule invents nodes, the mintable term set is
-bounded by triples over a fixed finite leaf universe, so the Herbrand base is finite,
-all rules are monotone, and the alternation reaches a least fixpoint. The same
-structural (not history-dependent) form of the guards keeps `materialize` idempotent.
+3. **Measurement plumbing:** a `synthetic_rdf12` eval slice (deterministic in seed, N-Triples,
+   honesty-guarded like the existing gUFO/relational/provenance slices: shared triple-term
+   reifier hubs, noise reifications, and ≥15% overlapping-but-uncorroborated decoy source pairs so
+   claim overlap alone cannot separate the `ex:corroborates` target) and `run_quoted_ablation`
+   (paired per-seed ON−OFF deltas with common random numbers, mirroring `run_weight_ablation`;
+   exact-zero delta on quote-free graphs). `AblationCell` gains a `quoted_terms` field so the 2×2
+   matrix reports the axis explicitly (always `false` under the presets, mirroring the dormant
+   `gufo_prior` axis).
 
-**Opacity** (coordinated with the sibling opacity-semantics PR; no dependency): quotation
-never asserts — `(r rdf:reifies <<( s p o )>>)` does NOT entail `(s p o)` (pinned by
-leak tests); a triple term is one atomic id, so nothing — including `owl:sameAs` entity
-rewriting — ever substitutes inside a quotation; only the outer quotation of a nested
-term is destructured.
+## Baseline safety (the default-off byte-stability guarantee)
 
-**Default-off safety, three layers:** (1) feature OFF ⇒ the module is cfg'd out
-entirely — plain `Profile::OwlRl` closures are byte-identical to before (the bridge is a
-deliberate, NON-normative entailment extension, so the committed inference-conformance
-ratchet and existing consumers cannot shift); (2) feature ON ⇒ an occurrence gate (four
-read-only lookups, no interning) keeps reification-free closures byte-identical and
-~zero-cost; (3) `MaterializedOwlGraph` routes any base mentioning the trigger vocabulary
-to its documented Fallback mode (any-position check, mirroring the gate), preserving the
-incremental == from-scratch parity invariant — with the documented Fallback `why()`
-limitation applying to the new rules.
+Three independent layers:
 
-**Tests:** in-module unit suite (gate, destructure, guarded construct, ill-kinded
-skip, nested-term opacity, the divergence-cascade termination pin, idempotency) +
-`tests/owl_reify.rs` end-to-end fixtures (Turtle 1.2 reifiers / annotation blocks /
-classic-reification data through the real loader, expected-answer closures, opacity
-non-entailments, incremental parity). CI: a `sparq-reason (quoted-triples)` feature-matrix
-leg (build + test + clippy, satisfying the C1 feature-gated-test-execution guard) and the
-golden leg-name line.
+1. **Structural:** `TermScope::IriBlank` reduces `is_embeddable` to the exact former match arms;
+   the sampler's triple-term pool is empty under it, so the draw loop, PRNG stream, and rejection
+   sequence are bit-identical; `Splits` and the ranking pool are untouched. No float path, PRNG
+   constant, or iteration order changes when OFF. (`grep -n "fn is_entity"
+   crates/sparq-vectors/src` now returns nothing; `TermScope::Embeddable` is constructed only in
+   `run_quoted_ablation` and tests.)
+2. **In-tree regression tests, bracketing the change from both directions:**
+   - `invisible_reifications_change_nothing_when_scope_is_off` — adding `rdf:reifies` lines to a
+     graph under the default scope leaves splits, ranking pool, **model bytes (bit-equal
+     `entity_emb`/`rel_emb`)**, loss curve, and filtered metrics identical (the two variants share
+     one parsed dictionary, so the comparison is exact and parser-independent).
+   - `quoted_ablation_is_exactly_zero_on_quote_free_graphs` — the ON arm on a quote-free graph is
+     bit-equal to OFF and the paired delta is exactly `0.0`.
+3. **Cross-commit pin (`examples/kge_pin.rs`):** prints a deterministic digest over
+   `(epoch_loss, entity_emb, rel_emb, ablation metrics)` for the three pre-existing quote-free
+   slices at pinned seeds {1,2,3}. Run on the merge-base and this head (same box/toolchain/thread
+   count): the outputs must be — and are — identical (`diff` empty; verified before opening this
+   PR).
 
-## First increment; follow-ups
+## What this PR deliberately does NOT do
 
-Deliberately small first increment. Named follow-ups (to be beaded on acceptance):
-
-- **Fuse into the semi-naive core** — the alternation re-enters the batch closure; a
-  delta-driven form of both rules inside the fixpoint's fused emitter removes the
-  re-scan (profile first; reify rounds are rare by construction).
-- **Counting-mode incremental support** — teach `MaterializedOwlGraph`'s counting modes
-  the two rules instead of Fallback re-materialization.
-- **`explain` proof-tree coverage** for reif-dtr/reif-ctr derivations.
-- **Annotation-guarded unquoting** (a trust/provenance-gated `(s p o)` assertion rule)
-  — explicitly deferred until the sibling opacity-semantics work lands, so the two
-  don't define divergent opacity postures.
-- **N3/datalog surface** — expose the same bridge to the N3 chainer's quoted-triple
-  terms if a consumer needs it there.
+- **No compositional statement encoder:** the ON arm embeds a triple term as a *node* (its
+  `rdf:reifies` edges and content-addressed hub-sharing become visible structure); access to the
+  term's `(s, p, o)` content itself is a separate, measurement-gated follow-up PR.
+- **No widening of the eval ranking pool** (rejected: incomparable filtered ranks across arms).
+- **`vec:` VALUES rows still drop triple-term neighbours** (`rewrite::term_to_ground`); the
+  vendored spargebra exposes `GroundTerm::Triple`, so this is mappable, but it is query-surface
+  behaviour outside this PR's measurement scope — deferred to a follow-up.
+- **No accuracy claim and no committed numbers.** This PR makes the quoted-terms axis measurable;
+  whether visibility lifts anything is exactly what the paired ablation exists to measure, and
+  adoption of any default stays gated on a measured, multi-seed, paired-delta result on the
+  asymmetric model — the crate's established `SamplingMode`/`WeightMode` discipline.
 
 ## Context: why
 
-This comes out of the **Kern (kernel-of-truth) research programme** — an agent-driven
-effort evaluating whether statements-about-statements held *without assertion* (RDF 1.2
-quotation) earn measurable lift when the reasoner can natively destructure, construct,
-and annotate them. Today sparq's loaders and engine fully support RDF 1.2 quoting, but
-the reasoner treats a reified triple as an inert constant — the gap this PR closes. The
-capability is useful to sparq independently of that programme (any RDF 1.2 + reasoning
-consumer meets it immediately), which is why it is proposed upstream rather than kept on
-a fork. Authored by an AI agent (Fable) under the programme's
-review-everything-before-commit workflow; treat with the usual reviewer skepticism and
-feel free to request splits or renames.
+This comes out of the **Kern (kernel-of-truth) research programme** — an agent-driven effort
+evaluating whether ontological discipline (including statements-about-statements held without
+assertion, i.e. RDF 1.2 reification) earns measurable lift in KGE link prediction on this stack.
+Today `sparq-vectors` structurally cannot see triple terms, so that question cannot be asked.
+The change is useful to the vectoriser independently of that programme (RDF 1.2 data is silently
+truncated today — the grounding bugfix corrects real data loss), which is why it is proposed
+upstream rather than kept on a fork. Authored by an AI agent (Fable) under the programme's
+review-everything-before-commit workflow; treat with the usual reviewer skepticism and feel free
+to request splits or renames.
 
 ---
 
