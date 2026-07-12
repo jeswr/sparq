@@ -1,20 +1,3 @@
-# GOLDEN: the GATE-CRITICAL set of check-run names emitted by feature-matrix.yml's
-# `opt-in-features` job (each leg is `opt-in <name>`). [OPUS-4.8] bead sq-ibrze.
-#
-# The single required `ci-summary / gate` aggregator + branch protection discover every
-# REQUIRED opt-in leg BY THIS NAME. This snapshot is the byte-for-byte set from BEFORE
-# the static `include:` list was split into per-crate fragment files, so the test
-# scripts/tests/test_feature_matrix_assemble.py can prove the dynamic assembler still
-# emits the IDENTICAL set — i.e. the split did not rename, drop, or add any gating leg.
-#
-# When you ADD a legitimate new opt-in leg (edit a `.github/feature-matrix.d/<crate>.yml`
-# fragment), this test will FAIL until you ALSO add the new `opt-in <name>` line here.
-# That failure is the intended tripwire: a new gating check has appeared and the golden
-# must be updated DELIBERATELY (and the new name must stay free of the whole words
-# "advisory"/"informational" or it will not gate). Keep this list sorted (LC_ALL=C).
-# Lines starting with '#' are comments; blank lines are ignored.
-#
-
 opt-in sparq-arrow (arrow — QueryResult -> RecordBatch columnar export)
 opt-in sparq-cli (hdt, hdt-write)
 opt-in sparq-cli (serialize-rdf)
@@ -74,6 +57,7 @@ opt-in sparq-policy (secprop-leftoperands — ODRL security-property profile)
 opt-in sparq-py (arrow — Graph.query_arrow -> pyarrow.Table export)
 opt-in sparq-reason (compiled-rules)
 opt-in sparq-reason (explain)
+opt-in sparq-reason (profile)
 opt-in sparq-reason (rif-xml)
 opt-in sparq-reason (substrate-compare)
 opt-in sparq-reason (substrate-join)
