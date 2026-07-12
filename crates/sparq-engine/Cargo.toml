@@ -334,6 +334,9 @@ algebra-rewrite = []
 # verbatim path. OPT-IN and OFF by default: when off, zero of this code compiles and the
 # conjunctive path is byte-identical. No new dependencies, no `unsafe`.
 value-join = []
+# [GPT-5.6] (sq-lsp7k.3.1) Programmatic full-path enumeration over one predicate.
+# OFF by default and dependency-free; surface parsing is handled by a later bead.
+paths = []
 
 # [FABLE-5] (sq-7d3dj.30.11) ID-LEVEL TERM-IDENTITY FAST PATH for `=` / `!=` in the COMPILED
 # FILTER evaluator (`exec::equal_compiled`). Two id-level short-circuits that skip the per-row

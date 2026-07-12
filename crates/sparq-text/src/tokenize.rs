@@ -40,7 +40,22 @@
 //! and disappears. (A `*` after a CJK run is segmentation punctuation under the
 //! n-gram analyzer too — bigrams are never prefix tokens.)
 
+use std::borrow::Cow;
+
 use unicode_segmentation::UnicodeSegmentation;
+
+/// Lowercases a segmented word, borrowing the overwhelmingly common already-
+/// lowercase ASCII case. Non-ASCII input deliberately takes the existing full
+/// Unicode lowercase path, even when it happens to be lowercase already, so
+/// folding remains exactly equivalent to [`str::to_lowercase`]. [GPT-5.6]
+#[inline]
+fn lowercase_word(word: &str) -> Cow<'_, str> {
+    if word.bytes().all(|byte| byte.is_ascii() && !byte.is_ascii_uppercase()) {
+        Cow::Borrowed(word)
+    } else {
+        Cow::Owned(word.to_lowercase())
+    }
+}
 
 /// The analyzer (tokenization strategy) a [`TextIndex`](crate::TextIndex) is
 /// built and queried with. The default is language-neutral UAX #29 word
@@ -88,7 +103,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
 /// of CJK ideograph tokens into its overlapping lowercase character bigrams
 /// (see the module docs). [OPUS-4.8] sq-m3ln
 pub fn tokenize_with(text: &str, analyzer: Analyzer) -> Vec<String> {
-    let words = text.unicode_words().map(str::to_lowercase);
+    let words = text.unicode_words().map(lowercase_word).map(Cow::into_owned);
     match analyzer {
         Analyzer::Unicode => words.collect(),
         Analyzer::CjkNgram => cjk_ngram_stream(words),
@@ -164,7 +179,7 @@ pub fn tokenize_query_with(query: &str, analyzer: Analyzer) -> Vec<QueryToken> {
         return query
             .unicode_word_indices()
             .map(|(start, word)| QueryToken {
-                token: word.to_lowercase(),
+                token: lowercase_word(word).into_owned(),
                 prefix: query[start + word.len()..].starts_with('*'),
             })
             .collect();
@@ -185,13 +200,13 @@ pub fn tokenize_query_with(query: &str, analyzer: Analyzer) -> Vec<QueryToken> {
         run.clear();
     };
     for (start, word) in query.unicode_word_indices() {
-        let lower = word.to_lowercase();
+        let lower = lowercase_word(word);
         if is_cjk_word(&lower) {
             run.push(lower.chars().next().expect("is_cjk_word => one char"));
         } else {
             flush(&mut run, &mut out);
             out.push(QueryToken {
-                token: lower,
+                token: lower.into_owned(),
                 prefix: query[start + word.len()..].starts_with('*'),
             });
         }
@@ -206,6 +221,33 @@ mod tests {
 
     fn toks(text: &str) -> Vec<String> {
         tokenize(text)
+    }
+
+    #[test]
+    fn tokenize_ascii_fastpath_matches_unicode_fold() {
+        // Differentially pin result-equivalence across the borrowed fast path,
+        // ASCII uppercase, and several Unicode lowercase expansions/scripts.
+        let corpus = [
+            "lowercase ascii identifiers uri42",
+            "Mixed UPPER CamelCase",
+            "Straße ΣΟΦΊΑ МОСКВА İSTANBUL",
+            "café 東京 한국어",
+        ];
+        for text in corpus {
+            let fast: Vec<String> = text
+                .unicode_words()
+                .map(lowercase_word)
+                .map(Cow::into_owned)
+                .collect();
+            let reference: Vec<String> = text.unicode_words().map(str::to_lowercase).collect();
+            assert_eq!(fast, reference, "folding differs for {text:?}");
+        }
+
+        for word in "lowercase ascii identifiers uri42".unicode_words() {
+            assert!(matches!(lowercase_word(word), Cow::Borrowed(value) if value == word));
+        }
+        assert!(matches!(lowercase_word("UPPER"), Cow::Owned(_)));
+        assert!(matches!(lowercase_word("café"), Cow::Owned(_)));
     }
 
     #[test]

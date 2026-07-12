@@ -1,0 +1,35 @@
+# Quoting NEVER asserts (RDF 1.2 opacity, fixture 1).
+#
+# Schema that WOULD fire on any asserted `?x :worksFor ?y`: domain, range,
+# sub-property, and a subclass hop above the domain class. If a quoted triple
+# leaked into the closure, at least one of the guarded typings below would show.
+@prefix : <urn:sparq:qto:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:worksFor rdfs:domain :Employee ;
+          rdfs:range :Company ;
+          rdfs:subPropertyOf :affiliatedWith .
+:Employee rdfs:subClassOf :Person .
+
+# (a) Explicit reification: `:r1 rdf:reifies <<( … )>>` is the ONLY triple this
+#     line asserts. :alice :worksFor :acme is NOT asserted.
+:r1 rdf:reifies <<( :alice :worksFor :acme )>> .
+
+# (b) Reified-triple term as a SUBJECT, explicit reifier: desugars to
+#     `:r2 rdf:reifies <<( :bob :worksFor :acme )>> . :r2 :statedBy :carol .`
+#     :bob :worksFor :acme is NOT asserted.
+<< :bob :worksFor :acme ~ :r2 >> :statedBy :carol .
+
+# (c) Reified-triple term as an OBJECT, fresh (blank) reifier:
+#     `:carol :claims _:r . _:r rdf:reifies <<( :eve :worksFor :acme )>> .`
+#     :eve :worksFor :acme is NOT asserted.
+:carol :claims << :eve :worksFor :acme >> .
+
+# (d) POSITIVE CONTROL — the annotation syntax DOES assert the base triple
+#     (and additionally reifies it): :frank :worksFor :initech IS asserted, so
+#     every schema rule above MUST fire on it. This proves the negative guards
+#     in the runner are meaningful (the rules genuinely fire when a triple is
+#     asserted) — the quoted forms (a)-(c) stay inert for semantic reasons,
+#     not because the reasoner is broken.
+:frank :worksFor :initech {| :certainty "0.5" |} .

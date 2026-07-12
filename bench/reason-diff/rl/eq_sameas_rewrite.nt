@@ -1,0 +1,5 @@
+<http://ex.org/clark> <http://www.w3.org/2002/07/owl#sameAs> <http://ex.org/superman> .
+<http://ex.org/superman> <http://www.w3.org/2002/07/owl#sameAs> <http://ex.org/kalel> .
+<http://ex.org/clark> <http://ex.org/worksAt> <http://ex.org/dailyplanet> .
+<http://ex.org/kalel> <http://ex.org/livesIn> <http://ex.org/metropolis> .
+<http://ex.org/lois> <http://ex.org/loves> <http://ex.org/superman> .

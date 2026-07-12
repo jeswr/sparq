@@ -159,6 +159,18 @@ crates = ["sparq-engine", "sparq-introspect", "sparq-nlq", "sparq-sim", "sparq-v
 pattern = "bench/qlever-synthetic/**"
 crates = ["sparq-engine"]
 
+# [GPT-5.6] GeoSPARQL function golden fixtures read by sparq-conformance's
+# differential integration test.
+[[map]]
+pattern = "bench/geo/function-golden/**"
+crates = ["sparq-conformance"]
+
+# [GPT-5.6] OWL-RL golden-vector fixtures read by sparq-reason-diff's
+# differential integration test.
+[[map]]
+pattern = "bench/reason-diff/rl/**"
+crates = ["sparq-reason-diff"]
+
 # ZK-compose gate-count + SPARQL-feature catalog fixtures (committed JSON),
 # include_str!'d by sparq-zk-compose's gate_count/sparql_catalog tests.
 [[map]]
@@ -173,6 +185,16 @@ crates = ["sparq-zk-compose"]
 [[map]]
 pattern = "bench/differential-divergences.json"
 crates = ["sparq-bench"]
+
+# [FABLE-5] sq-tonhr.2: the COMMITTED cargo-fuzz seed corpus (fuzz/seeds/<target>/),
+# read via an env!("CARGO_MANIFEST_DIR")-relative path by sparq-conformance's parser
+# differential harness (tests/parser_differential.rs) as a known-tricky-input corpus
+# for the sparq-vs-oxttl line-syntax cross-check. The out-of-workspace fuzz/ crate
+# also consumes these seeds, but it is not a workspace member, so this map lists
+# the workspace-crate readers only (the fuzz lane itself is seeded via [lanes]).
+[[map]]
+pattern = "fuzz/seeds/**"
+crates = ["sparq-conformance"]
 
 # ---------------------------------------------------------------------------
 # ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read

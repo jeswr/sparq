@@ -1108,3 +1108,26 @@ mod policy;
 // in the generated JS surface.
 #[cfg(feature = "policy")]
 pub use policy::{policy_conflicts, policy_evaluate};
+
+// [FABLE-5] sq-ixc3.19: the opt-in STRUCTURED-explain bindings —
+// `Store::explainPlanJson` / `Store::explainPlanAnalyzeJson` return the engine's typed
+// plan tree (`sparq_engine::explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
+// for the GUI plan explorer, behind the non-default `explain-json` feature (zero new
+// dependencies). Declared at the END of the file (the `policy` pattern above) so a
+// feature-OFF build's `line!()`/`Location` info for everything in this file is
+// unmoved — the lean wasm bundle stays BYTE-identical, not merely size-identical
+// (the cfg-gated-token line-drift trap).
+#[cfg(feature = "explain-json")]
+mod explain_plan;
+
+// [FABLE-5] sq-3ul2n.3: the opt-in `Store::loadBytes` / `loadBytesWithBase` byte-ingest
+// bindings — a `Uint8Array` (from `response.arrayBuffer()` / `File.arrayBuffer()`) is
+// copied ONCE into linear memory (no UTF-16 JS-string round-trip), validated as UTF-8
+// fail-closed, and fed the SAME parse path as `load`. Behind the non-default
+// `bytes-ingest` feature (zero new dependencies) so the lean bundle carries zero
+// byte-ingest code. Declared at the END of the file (the `policy` / `explain_plan`
+// pattern above) so a feature-OFF build's `line!()`/`Location` info for everything in
+// this file is unmoved — the lean wasm bundle stays BYTE-identical, not merely
+// size-identical (the cfg-gated-token line-drift trap).
+#[cfg(feature = "bytes-ingest")]
+mod bytes;

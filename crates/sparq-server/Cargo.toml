@@ -47,7 +47,19 @@ required-features = ["server"]
 # (#1735 — result-equivalent, zero new deps; see the feature's own comment below). Like
 # `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
 # `--no-default-features --features server,jsonld` drops it for an explicit rewrite-dark build.
-default = ["server", "jsonld", "algebra-rewrite"]
+default = ["server", "jsonld", "algebra-rewrite", "explain-json"]
+# [FABLE-5] (sq-ixc3.19) `explain-json` (default ON): the STRUCTURED explain response —
+# `Accept: application/x-sparq-explain+json` on `/sparql` answers with sparq-engine's typed
+# plan tree (`explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
+# (`operator`/`estimated`/`actual`/`nanos`/`qError`/`children` — the sq-jbqh4 schema
+# contract) instead of the plan TEXT, powering the GUI plan explorer's endpoint mode
+# (per-operator time / cardinality / q-error heat). BINARY-crate default like
+# `algebra-rewrite` above: sparq-engine's LIBRARY default stays OFF, the feature pulls
+# ZERO new dependencies (`explain-json = []` in the engine), and
+# `--no-default-features --features server,jsonld` drops it — a lean build then answers a
+# structured-explain request with 406 (the text explain surface is unaffected either way).
+# The pure serialiser library build (`--no-default-features`) is unaffected.
+explain-json = ["sparq-engine/explain-json"]
 # [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` (default ON, see above): forwards sparq-engine's
 # opt-in pre-execution algebra rewrite pass (#1735 / sq-7d3dj.30.1) — the result-equivalent
 # FILTER `?v = <iri>` constant substitution + `FILTER(!bound) → Minus` anti-join applied by
@@ -99,6 +111,11 @@ access-audit = ["server"]
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
 server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+# [GPT-5.6] (sq-abhuq) Opt-in outbound gzip/zstd negotiation for HTTP result bodies.
+# The default build remains byte-identical: without this feature the response middleware is
+# cfg-stripped and tower-http's compression codecs are not compiled. The middleware preserves
+# streaming bodies and its default predicate excludes SSE and already-encoded responses.
+response-compression = ["server", "tower-http/compression-gzip", "tower-http/compression-zstd"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak

@@ -217,6 +217,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # closures, so the LIBRARY stays decoupled — `sparq-sim` is a test/example dependency
 # only and never enters the published dependency graph.
 [dev-dependencies]
+proptest = "1"
 sparq-sim = { path = "../sparq-sim" }
 # [OPUS-4.8] sq-wlzi: DEV-only. The id-keyed-staleness-contract test (tests/staleness_contract.rs)
 # demonstrates the SOUND serving path — persist the build graph with `Graph::save`, reopen it with
@@ -241,6 +242,12 @@ rayon = { workspace = true }
 # available to the test targets in BOTH feature states, independent of those features.
 serde_json = "1"
 
+# [GPT-5.6] sq-lyf31: the codebook algebra property test exercises the opt-in
+# structure surface, so Cargo must skip that integration target in lean builds.
+[[test]]
+name = "proptest_quant"
+required-features = ["structure"]
+
 # [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
 # approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)
 # green when the heavy ANN crate is out of the build.
@@ -252,6 +259,12 @@ required-features = ["approx-ann"]
 # `approx-ann`. Gating it keeps `cargo build --all-targets` (default features) green.
 [[example]]
 name = "sift_ef_sweep"
+required-features = ["approx-ann"]
+
+# [GPT-5.6] sq-0ut5x: the internal matched-recall build Pareto harness compares HNSW with the
+# always-available DiskANN/PQ implementations, so only the HNSW side needs this opt-in feature.
+[[example]]
+name = "pareto_bench"
 required-features = ["approx-ann"]
 
 # [OPUS-4.8] sq-dwdm: the site /surface/vector capture harness exercises the `vec:`
@@ -269,6 +282,14 @@ required-features = ["vec-predicate"]
 # when the feature is out of the build — the example body is gated behind `#[cfg(feature = "kge")]`.
 [[example]]
 name = "kge_ablation"
+required-features = ["kge"]
+
+# [FABLE-5] Kern PR-1 (quoted-terms visibility): the cross-commit byte-stability pin prints a
+# deterministic digest of the flag-off trainer/eval outputs on the quote-free slices, so a reviewer
+# can diff merge-base vs PR head and confirm the baselines are byte-identical. Needs `kge`; the body
+# is gated behind `#[cfg(feature = "kge")]` so `cargo build --all-targets` (default features) stays green.
+[[example]]
+name = "kge_pin"
 required-features = ["kge"]
 
 # [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 typed-encoder ablation harness uses the

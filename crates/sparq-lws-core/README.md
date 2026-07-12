@@ -17,10 +17,10 @@ proof-of-possession (mTLS cert-bound tokens, DPoP-SK), notifications
 ```bash
 # Build + run the server binary (in-memory store, plain TCP)
 cargo run -p sparq-lws-core
-# Full test suite (default features)
+# Full test suite (default features — includes the in-process engine backend)
 cargo test -p sparq-lws-core
-# With the in-process SPARQ engine backend (opt-in)
-cargo test -p sparq-lws-core --features embedded-sparq
+# Engine-free profile (in-memory double only)
+cargo test -p sparq-lws-core --no-default-features
 ```
 
 The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` environment
@@ -35,23 +35,29 @@ module docs on `src/main.rs`.
   store, with an ACL decision cache; public-read fast path.
 - **Auth** — Solid-OIDC access tokens + mandatory DPoP, verified-token cache,
   tiered PoP: RFC 8705 mTLS cert-bound tokens and HKDF/HMAC DPoP-SK attestation.
-- **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: in-memory
-  double, live SPARQ HTTP client, and `object_store` blob backends.
-- **Transport hardening** — HTTP/2 rapid-reset + slowloris guards, request
-  timeouts, body limits, per-connection max-requests, rate limiting, overload
-  shedding.
-- Cargo features (all **off** by default; the default build carries no
-  sparq-engine or redis dependency):
-  - `embedded-sparq` — the in-process SPARQ engine backend (in-workspace path
-    deps on `sparq-core`/`sparq-engine`; formerly git deps in the source repo).
-  - `redis-replay` — a shared Redis-backed DPoP `jti` replay store for
+- **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the
+  embedded in-process engine (default), in-memory double, opt-in live SPARQ
+  HTTP client, and `object_store` blob backends.
+- **Notification observability** — [GPT-5.6] process-wide backlog-overflow totals
+  are available through `notifications::ws::NotificationMetrics::snapshot()`.
+- **Transport hardening** — HTTP/2 rapid-reset and HTTP/1 slowloris guards,
+  including explicit header-count, aggregate-byte, and slow-header timeout
+  bounds; request timeouts, body limits, per-connection max-requests, rate
+  limiting, and overload shedding.
+- Cargo features:
+  - `embedded-sparq` (**default-on**, sq-gg0qq.3) — the first-class in-process
+    SPARQ engine backend (in-workspace path deps on `sparq-core`/`sparq-engine`);
+    `--no-default-features` builds the engine-free profile.
+  - `http-sparq` (off) — the remote SPARQL-over-HTTP backend
+    (`PSS_SPARQ_BACKEND=http`) for a shared-service deployment.
+  - `redis-replay` (off) — a shared Redis-backed DPoP `jti` replay store for
     horizontally-scaled deployments.
 
 ## 📚 Learn more
 
 - Epic sq-gg0qq tracks the migration: bench/, conformance/, docs/, decisions/
-  remain in the source repo until their own beads land; the EmbeddedSparqClient
-  promotion to a first-class Store backend is sq-gg0qq.3.
+  remain in the source repo until their own beads land; sq-gg0qq.3 (landed)
+  promoted the EmbeddedSparqClient to the first-class default Store backend.
 - Design records: `docs/` + `decisions/` in
   [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs) (e.g.
   `decisions/0001-embed-sparq-in-process.md`, the high-throughput PoP design).

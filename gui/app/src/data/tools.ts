@@ -17,6 +17,7 @@ import {
   Database,
   Network as GraphIcon,
   ShieldCheck,
+  FilePenLine,
   Brain,
   Search,
   Binary,
@@ -26,6 +27,7 @@ import {
   Users,
   Server,
   Scale,
+  Gauge,
 } from "lucide-react";
 
 /**
@@ -102,6 +104,20 @@ export const TOOLS: ToolDef[] = [
     group: "working",
   },
   {
+    id: "plan",
+    label: "Plan",
+    // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer: EXPLAIN / EXPLAIN ANALYZE as a
+    // navigable operator tree (per-operator time / cardinality / q-error heat), over the
+    // in-tab store, the desktop native engine (real wall times), or a server endpoint;
+    // plus the this-workbench live query monitor with endpoint Kill.
+    blurb:
+      "Explore EXPLAIN / EXPLAIN ANALYZE as an operator tree — est vs actual rows, q-error heat, per-operator time — and monitor/kill in-flight queries.",
+    tier: "live",
+    icon: Gauge,
+    built: true,
+    group: "working",
+  },
+  {
     id: "graph-view",
     label: "Graph view",
     blurb: "Node-link visualisation of CONSTRUCT/DESCRIBE results over the live store.",
@@ -116,6 +132,16 @@ export const TOOLS: ToolDef[] = [
     blurb: "Validate the live store against SHACL shapes; W3C report with sh:detail.",
     tier: "live",
     icon: ShieldCheck,
+    built: true,
+    group: "working",
+  },
+  {
+    id: "forms",
+    label: "Forms",
+    // [GPT-5.6] sq-lsp7k.1.2 — shared renderer is live; edits remain drafts until F4.
+    blurb: "View and edit resources through DASH widgets selected from SHACL shapes; consumes FormDescription JSON.",
+    tier: "live",
+    icon: FilePenLine,
     built: true,
     group: "working",
   },

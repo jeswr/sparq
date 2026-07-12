@@ -254,6 +254,16 @@ jobs:
               witness_mixed_tier_collapse_now_exact
               witness_numeric_vs_string_now_ranked_by_kind
               witness_nan_now_totalised_first
+          # [FABLE-5] sq-39kps: domain-coverage self-check for the wac-oracle POST-Slug
+          # `.acl` escalation corpus — pins that the static CORPUS genuinely contains a
+          # surviving escalation (exact-image asserts + a kani::cover! witness), so a
+          # future re-scope cannot empty the interesting inputs vacuously. Proof cone is
+          # the corpus file itself (static data + pure classifier fns); solves in seconds.
+          - name: "sparq-wac-oracle (.acl escalation corpus domain coverage)"
+            crate: sparq-wac-oracle
+            features: ""
+            harnesses: >-
+              domain_corpus_exhibits_a_surviving_escalation
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host

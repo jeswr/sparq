@@ -28,6 +28,24 @@ let form = derive_form(&data, &shapes, &focus, &FormOptions::default()); // edit
 let json = serde_json::to_string_pretty(&form)?;        // ship to any renderer
 ```
 
+After a renderer edits the `values` of editable fields, build the corresponding
+SPARQL 1.1 Update without depending on the query engine:
+
+```rust
+use sparq_forms::{to_sparql_update, FormDiff};
+
+let diff = FormDiff::between(&before, &after);
+let update = to_sparql_update(&before, &after);
+if !update.is_empty() {
+    // Send `update` to a SPARQL endpoint or apply it with sparq-engine.
+}
+```
+
+The descriptions must name the same focus node. Only values on editable bare
+forward-predicate paths (`<p>`) participate; read-only/off-shape, inverse,
+computed, and complex property-path fields are excluded. A no-change or
+mismatched-focus input returns an empty update string.
+
 What the description carries (all serde `Serialize + Deserialize`):
 
 - **`shapes`** — the applicable-shape switcher: `sh:targetNode`,
@@ -58,8 +76,9 @@ Amortise shape parsing across focus nodes with `derive_form_with_model`
 switcher with `applicable_shapes`. Blank-node labels in the output are
 renamed deterministically (`b0`, `b1`, …) — do not treat them as graph handles.
 
-Scope (F1): derivation only. In-form validation + DASH suggestions, edit/commit
-UPDATE building, `dash:propertyRole`, and the GUI renderer are follow-on beads
+Scope: derivation plus pure edit-to-UPDATE building. Applying the request,
+validate-before-commit guards, draft graphs, in-form validation + DASH
+suggestions, `dash:propertyRole`, and the GUI renderer are follow-on beads
 (sq-lsp7k.1.2/.1.3/.1.4/.1.5/.1.6); `sparq-shacl` (see
 [`shacl-validation`](../shacl-validation/SKILL.md)) already validates the same
 graphs.

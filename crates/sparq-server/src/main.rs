@@ -113,6 +113,9 @@
 //!                             endpoint `POST /shacl/validate`: POST a shapes graph, the server validates
 //!                             its loaded data graph against it. Read-only. Off by default
 //!                                                                        [off, env SPARQ_SHACL=1]
+//!   --shacl-guard             [GPT-5.6 sq-lsp7k.2.4] reject violating UPDATE/GSP post-states
+//!                                                                        [off, env SPARQ_SHACL_GUARD=1]
+//!   --shacl-shapes FILE       shapes graph for guard mode [env SPARQ_SHACL_SHAPES]
 //!   --n3-patch                [OPUS-4.8 sq-hj4n] (feature `n3-patch`) enable the OPT-IN Solid N3-Patch
 //!                             (`text/n3`) dialect on the Graph-Store-Protocol `PATCH` method. The
 //!                             always-on `application/sparql-update` PATCH dialect needs no flag.
@@ -205,6 +208,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // surfaces here as a clean config error (the `?` turns the String into the boxed
     // error main returns -> a one-line message to stderr + non-zero exit), not a panic.
     let mut config = ServerConfig::from_env()?;
+    #[cfg(feature = "shacl")]
+    let mut shacl_shapes_path = std::env::var_os("SPARQ_SHACL_SHAPES").map(std::path::PathBuf::from);
     // [OPUS-4.8] sq-4w18: collect SERVICE egress allowlist entries from the CLI; they
     // are UNIONed with the SPARQ_SERVICE_ALLOW env baseline (already in `config`) + an
     // optional --service-allow-file, after the arg loop. An allowlist is additive, so
@@ -435,6 +440,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // loaded data graph against it. Read-only. Off by default (env SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             "--shacl" => config.shacl = true,
+            // [GPT-5.6] sq-lsp7k.2.4: post-state SHACL transaction guard + shapes source.
+            #[cfg(feature = "shacl")]
+            "--shacl-guard" => config.shacl_guard = true,
+            #[cfg(feature = "shacl")]
+            "--shacl-shapes" => {
+                let path = args.next().ok_or("--shacl-shapes requires a file path")?;
+                if path.is_empty() { return Err("--shacl-shapes must not be empty".into()); }
+                shacl_shapes_path = Some(std::path::PathBuf::from(path));
+            }
             // [OPUS-4.8] sq-hj4n (gh-916): OPT-IN Solid N3-Patch (text/n3) PATCH dialect on the
             // Graph-Store-Protocol graph route. The always-on application/sparql-update PATCH
             // dialect needs no flag; this enables the OPTIONAL text/n3 one. Off by default
@@ -522,7 +536,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 // [OPUS-4.8] sq-r868: surface the SHACL validate endpoint flag (feature shacl).
                 let shacl = if cfg!(feature = "shacl") {
-                    " [--shacl]"
+                    " [--shacl] [--shacl-guard --shacl-shapes FILE]"
                 } else {
                     ""
                 };
@@ -618,6 +632,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => data_file = Some(other.to_string()),
         }
+    }
+
+    // [GPT-5.6] sq-lsp7k.2.4: load shapes once at startup, failing closed on bad input.
+    #[cfg(feature = "shacl")]
+    if let Some(path) = shacl_shapes_path {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("--shacl-shapes: cannot read {}: {e}", path.display()))?;
+        let format = match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+            "nt" => "ntriples", "nq" => "nquads", "trig" => "trig", _ => "turtle",
+        };
+        let shapes = Graph::load_str(&text, format)
+            .map_err(|e| format!("--shacl-shapes: failed to load {} as {format}: {e}", path.display()))?;
+        config.shacl_shapes = Some(sparq_server::ShaclShapes::new(shapes));
     }
 
     // [OPUS-4.8] sq-4w18: merge the --service-allow-file + --service-allow CLI entries

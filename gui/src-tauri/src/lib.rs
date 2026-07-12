@@ -13,6 +13,7 @@
 
 mod disk;
 mod engine;
+mod explain;
 mod federation;
 mod odrl;
 
@@ -65,6 +66,15 @@ pub fn run() {
             // capability is gated behind the non-default `federation` cargo feature and a lean
             // build registers a stub that fails loudly with a rebuild hint (federation.rs).
             federation::query_service,
+            // [FABLE-5] sq-ixc3.19 — the plan explorer's ONE native command (the second
+            // reviewed exception, after query_service): structured EXPLAIN / EXPLAIN
+            // ANALYZE over a native snapshot of the live workspace store, because only
+            // the native engine can measure REAL per-operator wall time (the in-tab wasm
+            // engine reads 0 nanos — no monotonic clock on wasm32). Pure local
+            // computation (no FS, no egress); under the `federation` build every call
+            // pins the STRICT EMPTY egress allowlist so an ANALYZE of a SERVICE-bearing
+            // query is refused pre-HTTP, never dialed (explain.rs).
+            explain::explain_native,
             // [FABLE-5] sq-ixc3.15 — the ODRL policy tool's ONE native command: parse/validate
             // a Turtle ODRL policy, evaluate the (party, action, target) request, materialize
             // the policy through the odrl-bridge, and run the SAME query per requester through

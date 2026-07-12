@@ -151,6 +151,26 @@ corpus exercises (32/32 fixtures round-trip graph-isomorphically): directives,
 graph as a Turtle string, behind `sparq-wasm`'s non-default `scs` feature; see the
 `javascript-wasm` skill for the JS API.
 
+**Generated SCS 1.2 + extended parser — the `sparq-shaclc` crate** *(opt-in by
+being a separate crate; epic sq-tonhr)* — rdf-shuttle-generated strict/extended
+parsers from one Shuttle grammar, COEXISTING with (not replacing) the `scs`
+feature above and differential-tested against it:
+
+```rust
+use sparq_shaclc::{parse, parse_strict, parse_extended, Profile, DEFAULT_BASE};
+// -> Result<(Vec<oxrdf::Triple>, Outcome), ShaclcError>; Outcome carries
+//    prefixes (5 predeclared first) + final base. Profile::Strict = W3C CG
+//    surface + RDF 1.2 layer (triple terms, dir-lang tags, TripleTerm
+//    nodeKind, reifierShape/reificationRequired) and PROVABLY rejects the
+//    four shaclc-js extensions; Profile::Extended accepts them.
+// sparq_shaclc::raw::{shaclc12, shaclc12ext} — streaming + chunked push
+// parsing on the generated zero-dependency term model.
+use sparq_shaclc::write; // (triples, base, prefixes, Profile) -> Result<String, ShaclcWriteError>
+// The derived residual-consumption printer (first Rust-side SHACL-CS
+// writer): all-or-nothing — a non-expressible graph returns the typed
+// residual verdict (exact unconsumed triples), never a lossy document.
+```
+
 `ShapesModel` (`sparq_shacl::ShapesModel`):
 
 ```rust
@@ -435,6 +455,12 @@ let inf = sparq_shacl::apply_rules(&data, &shapes);   // -> sparq_shacl::Inferen
 //   inf.triples : Vec<oxrdf::Triple>   inf.iterations : usize   inf.capped : bool
 // Or get a fresh graph of data ∪ inferred, ready to query/validate:
 let expanded: Graph = sparq_shacl::expand(&data, &shapes);
+
+// Or select the validation fact domain directly. These APIs are also gated by
+// `shacl-af`; the existing `validate` function remains asserted-only.
+use sparq_shacl::{validate_with_domain, FactDomain};
+let asserted = validate_with_domain(&data, &shapes, FactDomain::Asserted);
+let closure = validate_with_domain(&data, &shapes, FactDomain::AssertedPlusInferred);
 ```
 
 **Node-expression algebra** (operand of `sh:subject`/`sh:predicate`/`sh:object`,
@@ -479,7 +505,10 @@ IRI expression is the `sh:node` special case; an expression result naming no par
 shape is skipped (lenient).
 
 API: `apply_rules(data, shapes)`, `apply_rules_with_model(data, shapes, &model)`
-(amortise shape parsing), `expand(data, shapes) -> Graph`, the node-expression
+(amortise shape parsing), `expand(data, shapes) -> Graph`,
+`validate_with_domain(data, shapes, FactDomain)` and
+`validate_with_domain_and_model(data, shapes, &model, FactDomain)` (choose asserted
+facts or the data-plus-inferred closure for validation), the node-expression
 seam `eval_node_expression(data, shapes, expr, focus) -> Option<Vec<Term>>`, and
 the conformance primitive `conforms(data, shapes, shape_node) -> ConformanceCheck`
 (call `.holds(node)` per focus). A gated W3C harness (`tests/w3c_node_expr.rs`)
@@ -517,10 +546,11 @@ SHACL-spec-correct conforms/violations).
   unaffected (full engine defaults).
 - **SHACL-AF rules (`sh:rule`) are OPT-IN behind the `shacl-af` cargo feature.**
   With the feature off, the base validation path carries zero rule code/parse cost
-  and the `apply_rules` / `apply_rules_with_model` / `expand` / `Inference` symbols
-  are absent. SHACL-AF rules are an INFERENCE step (they produce triples), not a
-  validation step — they do not affect `validate(..)`'s report; validate the
-  `expand(..)`-ed graph if you want constraints to see inferred triples.
+  and the `apply_rules` / `apply_rules_with_model` / `expand` / `Inference` /
+  `FactDomain` / `validate_with_domain*` symbols are absent. SHACL-AF rules are an
+  INFERENCE step (they produce triples), not part of the existing `validate(..)`
+  path. Use `FactDomain::AssertedPlusInferred` when constraints should see the rule
+  closure without expanding manually.
 - **The SHACL Compact Syntax parser is OPT-IN behind the `scs` cargo feature.**
   With it off the `scs` module and the `parse_scs` / `parse_scs_to_graph` / `ScsError`
   / `DEFAULT_BASE` symbols are absent (zero parser code compiled in). It adds no new

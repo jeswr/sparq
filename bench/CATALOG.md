@@ -63,13 +63,17 @@ conventions first, then a per-category map that points at the registry, then a
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `dict-baseline`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b`, `tabular-import-smoke` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench`, `wasm-compare`, `graphalytics` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle`, `ac-odrl-overhead`, `reason-el-real`, `reason-ql-npd`, `reason-dl-ore`, `materialize-competitors` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle; trust-graph closure | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle`, `ac-odrl-overhead`, `trust-graph-closure`, `reason-el-real`, `reason-ql-npd`, `reason-dl-ore`, `materialize-competitors` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | canonical loopback HTTP throughput harness; concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-throughput`, `serve-spikes`, `memtier-spikes`, `pss-update-parity`, `gsp-bench`, `python-bindings-bench` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance`, `jsonld-bench`, `canon-bench`, `rif-conformance` |
 | **competitors** | versioned external-engine comparison (Oxigraph / QLever / Fuseki+TDB2 / eye + the SHACL/geo/FTS/vector peers) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 
 Notes on a few that need care:
+
+- **`lws-core-readpath` (`bench/lws-core-readpath`)** wraps the in-crate read-response
+  allocation example and emits validated, git-ignored JSON envelopes; see its
+  [`README.md`](./lws-core-readpath/README.md). [GPT-5.6]
 
 - **`bench/serve` + `bench/memtier` are research SPIKES, not maintained
   regression benchmarks.** Their numbers calibrate research docs; re-run on the

@@ -7,14 +7,14 @@
 //! - [`content`] — Turtle / JSON-LD classification, RDF validation, re-serialisation, and `Accept`
 //!   content negotiation.
 //! - [`conditional`] — `If-Match` / `If-None-Match` precondition evaluation over the strong ETag.
-//! - [`range`] — single `Range: bytes=…` request handling (206 / 416).
+//! - [`range`] — single and multipart `Range: bytes=…` request handling (206 / 416). [GPT-5.6]
 //! - [`patch`] — the Solid N3-Patch engine (`text/n3`): insert/delete plus the `solid:where`
 //!   variable solver (basic-graph-pattern matching with the spec's exactly-one-solution rule).
 //! - [`handler`] — the GET / HEAD / PUT / POST / DELETE / PATCH axum handlers over the
 //!   [`crate::store::Store`] seam.
 //!
 //! M2-next (clearly seamed, not implemented): full WAC authorization (needs the SPARQ access-control
-//! design) and multipart Range. `application/sparql-update` PATCH now supports the INSERT/DELETE DATA
+//! design). `application/sparql-update` PATCH now supports the INSERT/DELETE DATA
 //! subset (see [`patch`]).
 
 pub mod conditional;

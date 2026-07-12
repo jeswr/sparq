@@ -140,4 +140,15 @@ impl GeoGeometry {
             crs => format!("<{}> {}", crs.iri(), body),
         }
     }
+
+    /// Serialises to a `geo:gmlLiteral` lexical form in the GML 3 Simple
+    /// Features profile.
+    ///
+    /// The root geometry carries its CRS in `srsName`. EPSG:4326 coordinates
+    /// are axis-swapped back to latitude/longitude, mirroring
+    /// [`parse_gml_literal`](crate::parse_gml_literal); all other CRS coordinate
+    /// orders are preserved. [GPT-5.6] sq-i3wb5
+    pub fn to_gml_literal(&self) -> String {
+        crate::gml::serialize_gml_literal(self)
+    }
 }

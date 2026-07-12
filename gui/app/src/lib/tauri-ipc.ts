@@ -179,6 +179,29 @@ export async function nativeServiceQuery(
 }
 
 /**
+ * [FABLE-5] sq-ixc3.19 — structured EXPLAIN / EXPLAIN ANALYZE over the NATIVE engine
+ * (`explain_native`, gui/src-tauri/src/explain.rs): `dataset` is the live workspace store's
+ * whole-dataset N-Quads snapshot (the same wire as `query_service`), `analyze` executes
+ * (SELECT/ASK only) and measures REAL per-operator wall nanos — the datum the in-tab wasm
+ * engine fundamentally cannot provide (reads 0, no monotonic clock). Returns the typed plan
+ * tree as camelCase JSON (the sq-jbqh4 schema contract, parse with `parsePlanJson`), or
+ * `null` outside the desktop shell (the web target degrades honestly in the plan explorer).
+ * Never dials: under the `federation` build the command pins the STRICT EMPTY egress
+ * allowlist, so an ANALYZE of a SERVICE-bearing query is refused pre-HTTP (a thrown typed
+ * error, surfaced through the panel's error state). Throws the native error string on a
+ * dataset/query failure.
+ */
+export async function nativeExplain(
+  dataset: string,
+  query: string,
+  analyze: boolean,
+): Promise<string | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<string>("explain_native", { dataset, query, analyze });
+}
+
+/**
  * [FABLE-5] sq-ixc3.15 — run the ODRL policy tool's whole native round-trip (`odrl_preview`,
  * gui/src-tauri/src/odrl.rs): parse/validate the Turtle `policy`, evaluate the (action,
  * target, requester) request per requester, materialize the policy through the odrl-bridge,

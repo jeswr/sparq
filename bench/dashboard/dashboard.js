@@ -2012,6 +2012,16 @@
     // [OPUS-4.8] sq-msl6: OWL sameAs equality micro-suite (sameas_size<N>_* — the owl:sameAs
     // closure-correctness analogue of Deep Taxonomy). `sameas` is the metric-name prefix.
     { key: 'OWL sameAs', title: 'OWL sameAs', aliases: ['owl sameas', 'owl-sameas', 'sameas'] },
+    // [GPT-5.6] Comparative OWL 2 QL answer gate: sparq rewrite+execute vs Ontop end-to-end.
+    { key: 'OWL 2 QL end-to-end', title: 'OWL 2 QL end-to-end comparison',
+      aliases: ['reason-ql-e2e', 'reason_ql_e2e', 'reasonqle2e', 'ql-endtoend', 'ql_endtoend'],
+      note: 'Correctness-gated comparison: complete answer counts must agree before timing. '
+          + 'Rewriter-only and end-to-end rows are separate; timings are non-canonical.' },
+    // [GPT-5.6] Browser SHACL comparison: sparq-shacl-wasm vs rdf-validate-shacl in one Node process.
+    { key: 'SHACL WASM', title: 'Browser SHACL same-runtime comparison',
+      aliases: ['shacl-wasm', 'shacl_wasm', 'shaclwasm'],
+      note: 'Correctness-gated same-runtime comparison: violation counts and conforms must agree '
+          + 'before timing. Bundle bytes are deterministic per toolchain; timings are non-canonical.' },
     // [OPUS-4.8] sq-7iai: SHACL validation suite (LUBM ABox x 5 hand-authored shape graphs).
     { key: 'SHACL',         title: 'SHACL validation', aliases: ['shacl', 'shacl validation'] },
     // [OPUS-4.8] sq-ustq: Full-text-search suite (synthetic BM25 corpus; text:matches/phrase/near).
@@ -2024,6 +2034,11 @@
     // SRBench oracle + advisory rsp_persistentdict_triples_per_s) — the `rsp` alias prefix-matches the
     // whole family. Correctness/expressivity card; perf head-to-head OUT OF SCOPE (clock-free vs the
     // wall-clock RSP peers C-SPARQL/CQELS/RSP4J — different time model). No competitor perf column.
+    // [GPT-5.6] Put the narrower differential alias before the broad `rsp` family alias.
+    { key: 'RSP window differential', title: 'RSP window-semantics differential',
+      aliases: ['rsp-window-differential', 'rsp_window_differential', 'rspwindowdifferential'],
+      note: 'Correctness comparison against a pinned RSP4J/YASPER event-time capture. Complete '
+          + 'window multisets are compared; advisory emit latency is not cross-engine throughput.' },
     { key: 'RSP-QL',        title: 'RSP-QL streaming', aliases: ['rsp-ql', 'rsp', 'rspql'] },
     // [OPUS-4.8] sq-lrp9: HDT load-and-decode suite. Metrics are the deterministic snikmeta_*
     // counts (load-and-decode gate) + advisory hdt_load_s / hdt_vs_ntgz_load_s. The `hdt` /
@@ -2031,6 +2046,36 @@
     // like-for-like axis (query-over-HDT is a NON-goal — different data structure); the
     // hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
     { key: 'HDT',           title: 'HDT load-and-decode', aliases: ['hdt', 'snikmeta'] },
+    // [GPT-5.6] sq-g3n7h: comparative suites added in #1887/#1908/#1916/#1926/#1929.
+    // These cards deliberately say what they measure: several are correctness, quality, or size
+    // panels rather than speed claims, and their wall-clock rows remain non-canonical trends.
+    { key: 'Browser / WASM', title: 'Browser / WASM comparison',
+      aliases: ['wasm-compare', 'wasm_compare', 'wasmcompare'],
+      note: 'Bundle-SIZE and compatibility card: bundle bytes are deterministic artifact-size '
+          + 'measurements, not speed. Browser and Node latency rows are correctness-gated, '
+          + 'non-canonical trend signals.' },
+    { key: 'RDFC-1.0 canonicalization', title: 'RDFC-1.0 canonicalization',
+      aliases: ['canon-bench', 'canon_bench', 'canonbench', 'canon'],
+      note: 'Correctness and DoS-resistance card: canonical bytes must match the W3C oracle; '
+          + 'poison-graph rows report guard/cap outcomes, not speed. Sane-set timings are '
+          + 'non-canonical trend signals.' },
+    { key: 'KGE quality', title: 'KGE link-prediction quality',
+      aliases: ['kge-quality-comparison', 'kge_quality_comparison', 'kgequalitycomparison', 'kge'],
+      note: 'QUALITY card: filtered MRR and Hits@k are matched-model link-prediction quality '
+          + 'measurements, not throughput or training-speed claims.' },
+    { key: 'Graph Store Protocol', title: 'Graph Store Protocol',
+      aliases: ['gsp-bench', 'gsp_bench', 'gspbench', 'gsp'],
+      note: 'Correctness-gated protocol card: round-trip RDF content must agree before timing. '
+          + 'Loopback latency rows are non-canonical trend signals.' },
+    { key: 'Python bindings', title: 'Python binding overhead',
+      aliases: ['python-bindings-bench', 'python_bindings_bench', 'pythonbindingsbench', 'python'],
+      note: 'Correctness-gated binding-overhead card: result counts must agree before timing. '
+          + 'Binding latency rows are non-canonical trend signals.' },
+    // [GPT-5.6] sq-l8c05: comparative serialization and FedShop-shaped federation panels.
+    { key: 'serialize-bench', title: 'Serialization throughput',
+      aliases: ['serialize-bench', 'serialize_bench', 'serializebench', 'serialize'] },
+    { key: 'federation-fedshop', title: 'Federation comparison — FedShop-shaped',
+      aliases: ['federation-fedshop', 'federation_fedshop', 'federationfedshop', 'federation'] },
     // [OPUS-4.8] sq-5o5.3: PROMOTE the ZK estate to a featured card (the maintainer treats ZK as a
     // genuine differentiator, unlike the trend-only suites). One card groups the whole estate: the
     // `zk-compose` circuit-gate counts (zk_compose_<member>_gates) + the `zk` commitment-pipeline
@@ -2073,7 +2118,8 @@
         var a = f.aliases[j];
         // label-map suite match (exact, normalised) OR a name-token prefix like `deeptax_…`.
         if (suite === a) return f;
-        if (lowerName.indexOf(a.replace(/[ -]/g, '')) === 0 ||
+        if (lowerName.indexOf(a) === 0 ||
+            lowerName.indexOf(a.replace(/[ -]/g, '')) === 0 ||
             lowerName.indexOf(a.replace(/[ -]/g, '_')) === 0) return f;
       }
     }

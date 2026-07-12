@@ -15,6 +15,10 @@ readme = "README.md"
 # signature but does NOT deliver unlinkable/anonymous presentation. NOT published.
 publish = false
 
+[[example]]
+name = "admission_cost"
+required-features = ["cert-graph"]
+
 # [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg.
 [package.metadata.docs.rs]
 all-features = true
@@ -137,3 +141,11 @@ flate2 = { version = "1", optional = true }
 # Turtle (sq-pfae.2). Not a runtime dependency — the lean default build is unaffected.
 [dev-dependencies]
 oxttl.workspace = true
+
+# [FABLE-5] sq-d9lzx: the runnable certification-edge closure DEMO an integrator/WG
+# reviewer can execute end-to-end (framework certifies issuer → attenuated effective
+# rule → fail-closed Broadening + NoAnchor rejects). Gated on `cert-graph`, so it is
+# NOT built in the default (feature-OFF) state — mirrors the sparq-solid example gating.
+[[example]]
+name = "trust_graph_closure"
+required-features = ["cert-graph"]

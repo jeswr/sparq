@@ -98,9 +98,9 @@ solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", re
 # entry points (`query_json`/`ask`/`update_in_place` with full named-graph `GRAPH <g> { … }`
 # support — the engine preserves named graphs, fixing the HTTP store's DEVIATION-1). Now that this
 # crate lives IN the sparq workspace (imported from jeswr/solid-server-rs, sq-gg0qq.2), these are
-# ordinary in-workspace PATH deps (replacing the former git deps pinned to rev 98259ec). Still OFF
-# by default so the standard build, tests, and conformance carry NO sparq-engine dependency unless
-# an operator opts in (the `embedded-sparq` feature).
+# ordinary in-workspace PATH deps (replacing the former git deps pinned to rev 98259ec) and the
+# `embedded-sparq` feature that names them is ON BY DEFAULT (sq-gg0qq.3 — the embedded binding is
+# the first-class backend). `--no-default-features` builds the engine-free profile.
 # `mmap` enables `Graph::open`/`save` (the directory-backed persistence seam — memory-mapped
 # on-disk indexes); without it only the in-memory path is available. The default `parallel` feature
 # rides along (parallel index build).
@@ -125,10 +125,12 @@ http = "1"
 # NOT a proc-macro). It is ALREADY in the resolved tree (tokio / hyper / tower depend on it), so naming
 # it here adds NO new crate to the build — the same pattern as `bytes` / `tokio-rustls`. MIT-OR-Apache.
 pin-project-lite = "0.2"
-# Live SPARQ HTTP client (M3): a SPARQL 1.1 Protocol client over the SPARQ /sparql endpoint. Built
-# on the hyper 1.x client + hyper-util's legacy pooled Client — both ALREADY in the tree (axum +
-# the verifier pull them in), so this adds NO new crates, only enables already-resolved client
-# features. Plain HTTP to a trusted internal endpoint; TLS is an M3-next adapter behind the same type.
+# Live SPARQ HTTP client (M3, now behind the opt-in `http-sparq` feature — sq-gg0qq.3): a SPARQL
+# 1.1 Protocol client over the SPARQ /sparql endpoint. Built on the hyper 1.x client + hyper-util's
+# legacy pooled Client — both ALREADY in the tree (axum + the verifier pull them in), so this adds
+# NO new crates, only enables already-resolved client features (which therefore stay enabled
+# unconditionally; the `http-sparq` gate is a pure CODE gate). Plain HTTP to a trusted internal
+# endpoint; TLS is an M3-next adapter behind the same type.
 hyper = { version = "1", features = ["client", "http1"] }
 # `server-auto` + `server-graceful` name the `hyper_util::server::conn::auto::Builder` + `TokioTimer`
 # the transport DoS-hardening (`transport.rs`) configures (HTTP/2 max-concurrent-streams + rapid-reset
@@ -254,15 +256,29 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 h2 = "0.4"
 
 [features]
-default = []
+# DEFAULT = the embedded in-process engine (sq-gg0qq.3): now that this crate lives IN the sparq
+# workspace, the in-process `sparq-core`/`sparq-engine` binding is the FIRST-CLASS data-path
+# backend — the whole point of the migration (handover §0) — so it is on by default for
+# in-workspace builds. Build with `--no-default-features` for the engine-free profile (the
+# in-memory double only — the former default), e.g. for an out-of-workspace consumer that wants
+# no engine dependency.
+default = ["embedded-sparq"]
 # Opt-in: compile the distributed Redis-backed DPoP-`jti` replay store (`src/redis_replay.rs`) + its
 # `redis`/`r2d2` deps. OFF by default so the standard build, tests, and conformance are byte-identical
 # and carry no extra dependency. Enable for a horizontally-scaled deployment that shares one replay set
 # across instances (set `SOLID_SERVER_REPLAY_REDIS_URL` at runtime to actually select it).
 redis-replay = ["dep:redis", "dep:r2d2"]
-# Opt-in: compile the IN-PROCESS embedded SPARQ data-path backend (`src/store/embedded.rs`) +
-# its `sparq-core`/`sparq-engine` git deps. OFF by default so the standard build, tests, and
-# conformance are byte-identical and carry NO sparq dependency. Enable to select the engine as a
-# library (PSS_SPARQ_BACKEND=embedded at runtime) instead of the HTTP service or the in-memory
-# double. See [`solid_server_rs::store::embedded`] and decisions/0001-embed-sparq-in-process.md.
+# DEFAULT-ON (sq-gg0qq.3): compile the IN-PROCESS embedded SPARQ data-path backend
+# (`src/store/embedded.rs`) over the in-workspace `sparq-core`/`sparq-engine` path deps. This is
+# the first-class backend: `PSS_SPARQ_BACKEND=embedded` selects it at runtime (boot default stays
+# the in-memory double — explicit runtime selection, fail-safe). Disable with
+# `--no-default-features` to build the engine-free profile.
+# See `sparq_lws_core::store::embedded` and decisions/0001-embed-sparq-in-process.md.
 embedded-sparq = ["dep:sparq-core", "dep:sparq-engine"]
+# Opt-in REMOTE backend (sq-gg0qq.3): the live `HttpSparqClient` (`src/store/http.rs`) — a SPARQL
+# 1.1 Protocol client over a remote SPARQ `/sparql` endpoint, selected at runtime by
+# `PSS_SPARQ_BACKEND=http`. OFF by default: in-workspace builds talk to the engine in-process
+# (`embedded-sparq` above), so the HTTP round-trip path is the opt-in shared-service deployment
+# shape, not the default. Pure code gate — its deps (hyper client + hyper-util legacy pool) stay
+# resolved for the server transport either way.
+http-sparq = []

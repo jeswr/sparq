@@ -1,0 +1,128 @@
+# [FABLE-5] sq-i858h — small VENDORED ABox for the browser-SHACL same-runtime
+# harness (bench/shacl-wasm/). A hand-authored, deterministic LUBM-vocabulary
+# micro-graph over which the COMMITTED bench/shacl shape workloads
+# (bench/shacl/shapes/*.ttl + bench/shacl/shapes-sparql/sparql_heavy.ttl) have
+# small, HAND-COUNTABLE violation constants — so the cross-engine
+# #violations/conforms agreement gate is checkable by eye, and the harness needs
+# no LUBM generator (no Java) in a Node-only environment.
+#
+# Design (every constant below is re-derived in expected.tsv's header):
+#   * 4 ub:FullProfessor  — teacherOf fan-out 2/3/2/3; all worksFor a Department;
+#     only prof0 is a department head (ub:headOf).
+#   * 5 ub:GraduateStudent — plain-literal names (violate sh:datatype xsd:integer),
+#     well-formed emails (sh:pattern control never fires), all memberOf dept0
+#     (dept0 subOrganizationOf univ0 => the sequence-path control never fires),
+#     advisors prof0/prof1/prof2/prof3/prof1 (only prof0 is a head).
+#   * 3 ub:GraduateCourse among the courses (the sh:sparql workloads),
+#     3 ub:UndergraduateStudent with FullProfessor advisors (sparql_heavy).
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix d:   <http://example.org/shacl-wasm-abox#> .
+
+# --- organisation --------------------------------------------------------
+d:univ0 a ub:University ;
+    ub:name "University0" .
+
+d:dept0 a ub:Department ;
+    ub:name "Department0" ;
+    ub:subOrganizationOf d:univ0 .
+
+d:dept1 a ub:Department ;
+    ub:name "Department1" ;
+    ub:subOrganizationOf d:univ0 .
+
+# --- courses -------------------------------------------------------------
+d:course0 a ub:Course .
+d:course1 a ub:Course .
+d:course2 a ub:Course .
+d:course3 a ub:Course .
+d:course4 a ub:Course .
+d:gcourse0 a ub:GraduateCourse .
+d:gcourse1 a ub:GraduateCourse .
+d:gcourse2 a ub:GraduateCourse .
+
+# --- full professors (cardinality / class_nodekind focus nodes) ----------
+# teacherOf fan-out: prof0=2, prof1=3, prof2=2, prof3=3
+#   => maxCount 1 violated by ALL 4; minCount 3 violated by prof0+prof2 (2).
+# worksFor always a Department (never a University) => sh:class fires 4x;
+# always an IRI => sh:nodeKind never fires.
+d:prof0 a ub:FullProfessor ;
+    ub:name "Professor0" ;
+    ub:emailAddress "prof0@example.org" ;
+    ub:worksFor d:dept0 ;
+    ub:headOf d:dept0 ;
+    ub:teacherOf d:course0 , d:course1 .
+
+d:prof1 a ub:FullProfessor ;
+    ub:name "Professor1" ;
+    ub:emailAddress "prof1@example.org" ;
+    ub:worksFor d:dept0 ;
+    ub:teacherOf d:gcourse0 , d:gcourse1 , d:course2 .
+
+d:prof2 a ub:FullProfessor ;
+    ub:name "Professor2" ;
+    ub:emailAddress "prof2@example.org" ;
+    ub:worksFor d:dept1 ;
+    ub:teacherOf d:course3 , d:course4 .
+
+d:prof3 a ub:FullProfessor ;
+    ub:name "Professor3" ;
+    ub:emailAddress "prof3@example.org" ;
+    ub:worksFor d:dept1 ;
+    ub:teacherOf d:gcourse2 , d:course0 , d:course1 .
+
+# --- graduate students (datatype_range / node_paths / sh:sparql) ---------
+# advisors: gs0->prof0 (a head: sh:node control passes), gs1..gs4 -> non-heads
+#   => node_paths advisor violation fires 4x.
+# takesCourse GraduateCourse solutions: gs0=1, gs1=2, gs2=0, gs3=1, gs4=0 => 4.
+d:gs0 a ub:GraduateStudent ;
+    ub:name "GradStudent0" ;
+    ub:emailAddress "gs0@example.org" ;
+    ub:memberOf d:dept0 ;
+    ub:advisor d:prof0 ;
+    ub:takesCourse d:gcourse0 .
+
+d:gs1 a ub:GraduateStudent ;
+    ub:name "GradStudent1" ;
+    ub:emailAddress "gs1@example.org" ;
+    ub:memberOf d:dept0 ;
+    ub:advisor d:prof1 ;
+    ub:takesCourse d:gcourse0 , d:gcourse1 .
+
+d:gs2 a ub:GraduateStudent ;
+    ub:name "GradStudent2" ;
+    ub:emailAddress "gs2@example.org" ;
+    ub:memberOf d:dept0 ;
+    ub:advisor d:prof2 ;
+    ub:takesCourse d:course0 .
+
+d:gs3 a ub:GraduateStudent ;
+    ub:name "GradStudent3" ;
+    ub:emailAddress "gs3@example.org" ;
+    ub:memberOf d:dept0 ;
+    ub:advisor d:prof3 ;
+    ub:takesCourse d:gcourse2 .
+
+d:gs4 a ub:GraduateStudent ;
+    ub:name "GradStudent4" ;
+    ub:emailAddress "gs4@example.org" ;
+    ub:memberOf d:dept0 ;
+    ub:advisor d:prof1 ;
+    ub:takesCourse d:course1 .
+
+# --- undergraduates (sparql_heavy UndergradAdvisorShape) -----------------
+# each has a FullProfessor advisor => 3 solutions.
+d:us0 a ub:UndergraduateStudent ;
+    ub:name "Undergrad0" ;
+    ub:advisor d:prof0 ;
+    ub:takesCourse d:course0 .
+
+d:us1 a ub:UndergraduateStudent ;
+    ub:name "Undergrad1" ;
+    ub:advisor d:prof1 ;
+    ub:takesCourse d:course2 .
+
+d:us2 a ub:UndergraduateStudent ;
+    ub:name "Undergrad2" ;
+    ub:advisor d:prof2 ;
+    ub:takesCourse d:course3 .

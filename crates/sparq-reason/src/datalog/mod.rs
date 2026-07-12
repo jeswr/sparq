@@ -4,10 +4,10 @@
 //! This is Phase 1 of the stratified-Datalog program (design record
 //! `research/stratified-datalog-rules.md`): a small **native rule dialect** modelled on
 //! RDFox's Datalog surface (the maintainer's open question 4 — see the record §2 for the
-//! decision), a **stratification checker**, and a **non-incremental per-stratum
-//! evaluator** supporting `NOT` (store-scoped negation as failure) and
-//! `AGGREGATE … BIND COUNT(?v) AS ?c` atoms plus a minimal numeric `FILTER`. Semi-naive
-//! per-stratum evaluation, the remaining aggregate functions (`SUM`/`MIN`/`MAX`/`AVG`)
+//! decision), a **stratification checker**, and a **semi-naive per-stratum evaluator**
+//! (Phase 2, sq-8sve7 — delta-restricted positive joins; see `eval`) supporting `NOT`
+//! (store-scoped negation as failure) and `AGGREGATE … BIND COUNT(?v) AS ?c` atoms plus
+//! a minimal numeric `FILTER`. The remaining aggregate functions (`SUM`/`MIN`/`MAX`/`AVG`)
 //! and incremental maintenance under insert/delete are **later phases**, beaded from the
 //! design record — this module is honest about being the fixture-scale foundation.
 //!
@@ -101,14 +101,15 @@ pub(crate) struct Atom {
     pub(crate) pred: Id,
 }
 
-/// One `AGGREGATE(body ON ?g… BIND COUNT(?v) AS ?c)` atom. The body has its own
+/// One `AGGREGATE(body ON ?g… BIND FUNC(?v) AS ?out)` atom. The body has its own
 /// variable scope (`n_slots` local slots); `on` maps each grouping variable's
 /// aggregate-local slot to its outer rule slot. Phase 1 carries no function/value
-/// fields: `COUNT(?v)` counts DISTINCT body matches per group (the counted
-/// variable is validated to occur in the body but does not change that count);
-/// the `SUM`/`MIN`/`MAX`/`AVG` phase reintroduces a function + value slot.
+/// fields: every function consumes DISTINCT body matches, while `value` identifies
+/// the input slot for numeric aggregates (`COUNT` has no value slot).
 #[derive(Clone, Debug)]
 pub(crate) struct AggAtom {
+    pub(crate) func: AggFunc,
+    pub(crate) value: Option<u32>,
     pub(crate) body: Vec<Atom>,
     /// `(aggregate-local slot, outer rule slot)` per `ON` variable, in `ON` order.
     pub(crate) on: Vec<(u32, u32)>,
@@ -116,6 +117,16 @@ pub(crate) struct AggAtom {
     pub(crate) out: u32,
     /// Aggregate-local slot count.
     pub(crate) n_slots: usize,
+}
+
+/// [GPT-5.6] Aggregate functions supported by the native Datalog dialect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AggFunc {
+    Count,
+    Sum,
+    Min,
+    Max,
+    Avg,
 }
 
 /// A `FILTER` comparison operator.
@@ -179,13 +190,13 @@ impl Program {
     }
 }
 
-/// Parse a stratified-Datalog rule document (the Phase-1 fragment — see the module
+/// Parse a stratified-Datalog rule document (see the module
 /// docs) and intern its ground terms into `dict`.
 ///
 /// # Errors
 ///
 /// Returns `Err` on a syntax error or on any construct outside the documented
-/// fragment (variable predicates, unimplemented aggregate functions, unbound head
+/// fragment (variable predicates, unknown aggregate functions, unbound head
 /// or `FILTER` variables, aggregate-local variable capture, …) — always a loud
 /// error naming the construct, never a silent divergence.
 ///
@@ -211,9 +222,10 @@ pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String> {
 /// Check stratifiability and evaluate `program` over `facts`: run the per-stratum
 /// forward fixpoint to completion and return the full ground closure — input facts
 /// plus every derivation, de-duplicated. Treat the result as a SET (order is
-/// unspecified). Non-incremental Phase-1 evaluation (naive rounds per stratum);
-/// `dict` is needed mutably because aggregation MINTS `xsd:integer` count literals
-/// into the caller's id space.
+/// unspecified). Non-incremental semi-naive evaluation (delta-restricted rounds per
+/// stratum — identical derived-fact sets to the naive discipline, by differential
+/// test); `dict` is needed mutably because aggregation mints numeric literals into
+/// the caller's id space.
 ///
 /// # Errors
 ///

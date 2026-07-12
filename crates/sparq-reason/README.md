@@ -9,7 +9,8 @@
 **Opt-in RDFS / OWL-RL / Notation3 reasoning** for the [sparq](../../README.md) RDF engine.
 
 It forward-chains the deductive closure (RDFS, the OWL 2 RL property/class axioms, or
-user-supplied N3 rules) over dictionary-encoded triples and **materializes** the entailed
+user-supplied N3 rules — including RDF 1.2 `<< s p o >>` quoted-triple terms in rule
+bodies and heads) over dictionary-encoded triples and **materializes** the entailed
 facts, so querying stays exactly as fast as before. Reasoning runs over integer ids (joins
 on fixed-width keys); the closure can be maintained incrementally under inserts/deletes, and
 the non-default `explain` feature answers `why(triple)` with a proof tree. This crate is
@@ -65,6 +66,15 @@ let g = Graph::from_parts(dict, triples);
   per-stratum evaluator on the shared substrate join kernels. Phase 1 of
   `research/stratified-datalog-rules.md`; COUNT only, semi-naive + incremental
   maintenance are beaded follow-ups.
+- **Quoted-triple inference** (opt-in `quoted-triples`) — RDF 1.2 reifier rules for the
+  OWL-RL profile: **reif-dtr** destructures `R rdf:reifies <<( s p o )>>` into the classic
+  `rdf:subject`/`rdf:predicate`/`rdf:object` view of `R` (so RL rules reason over reifier
+  annotations and the recovered components), and **reif-ctr** constructs the reifies
+  triple from classic-reification data — restricted to EXISTING triples over leaf
+  components so the Herbrand base stays **finite** (termination argument in the `reify`
+  module docs). Triple terms stay **opaque**: reification never asserts the referent triple,
+  and nothing rewrites inside a triple term. Off by default — the bridge is a deliberate,
+  non-normative entailment extension; plain `Profile::OwlRl` closures are unchanged.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
   premises, recursively down to asserted facts (a flat, ZK-witness-friendly shape).
 - **RIF/XML importer** (opt-in `rif-xml`) — parse the W3C RIF-Core XML presentation

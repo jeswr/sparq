@@ -1,0 +1,7 @@
+# [FABLE-5] sq-xg6uu ledger entry (the sq-pbz04.1 disposition precedent).
+disposition: PERMANENT
+reason: sparq's generic rdfs5/rdfs11 transitive closure over the scm-eqc1/scm-eqp1 mutual subClassOf/subPropertyOf pairs (Human==Person, employs==hasEmployee) derives the SOUND reflexive c subClassOf c / p subPropertyOf p edges and does not filter them; owlrl suppresses reflexive subClassOf/subPropertyOf conclusions. Reflexivity is RL-licensed (scm-cls/scm-op), so this is an emission-set difference on information-free triples, not an entailment miss on either side.
+sparq-only: <http://ex.org/Human> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/Human> .
+sparq-only: <http://ex.org/Person> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/Person> .
+sparq-only: <http://ex.org/employs> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex.org/employs> .
+sparq-only: <http://ex.org/hasEmployee> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex.org/hasEmployee> .

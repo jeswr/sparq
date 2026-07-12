@@ -26,6 +26,7 @@ import { FULL_TEXT_TOOL_OVERRIDE } from "@/components/workbench/full-text-tool.m
 import { STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool.meta";
 import { SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool.meta";
 import { ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool.meta";
+import { PLAN_TOOL_OVERRIDE } from "@/components/workbench/plan-explorer.meta";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -55,6 +56,9 @@ const ShaclTool = lazyPanel(() =>
 const InferenceTool = lazyPanel(() =>
   import("@/components/workbench/inference-tool").then((m) => ({ default: m.InferenceTool })),
 );
+const FormsTool = lazyPanel(() =>
+  import("@/components/workbench/forms-tool").then((m) => ({ default: m.FormsTool })),
+);
 const GraphViewTool = lazyPanel(() =>
   import("@/components/workbench/graph-view-tool").then((m) => ({ default: m.GraphViewTool })),
 );
@@ -69,6 +73,9 @@ const ServerTool = lazyPanel(() =>
 );
 const OdrlTool = lazyPanel(() =>
   import("@/components/workbench/odrl-tool").then((m) => ({ default: m.OdrlTool })),
+);
+const PlanExplorer = lazyPanel(() =>
+  import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
 );
 
 interface ToolPanelEntry {
@@ -88,6 +95,8 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // STATIC import: the default tab paints on first render, never behind a chunk fetch.
   query: { Component: QueryWorkbench, override: QUERY_TOOL_OVERRIDE },
   shacl: { Component: ShaclTool },
+  // [GPT-5.6] sq-lsp7k.1.2 — invocation-only chunk shared by desktop and hosted web.
+  forms: { Component: FormsTool },
   // [OPUS-4.8] sq-tp1m — the Inference tool is a real, working panel (per-workspace RDFS /
   // OWL 2 RL entailment wired to the engine's forward-chaining reasoner), not an honest stub.
   inference: { Component: InferenceTool },
@@ -99,6 +108,9 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // engine (evaluate + fail-closed gated preview); the hosted web build degrades honestly
   // inside the panel (the `live-native` tier's framing).
   odrl: { Component: OdrlTool, override: ODRL_TOOL_OVERRIDE },
+  // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer (EXPLAIN/ANALYZE operator tree +
+  // q-error heat + the this-workbench query monitor with endpoint Kill).
+  plan: { Component: PlanExplorer, override: PLAN_TOOL_OVERRIDE },
 };
 
 /**

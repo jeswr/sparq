@@ -53,3 +53,14 @@ rustc-hash.workspace = true
 # crates.io.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
 sparq-reason-el = { path = "../sparq-reason-el", version = "0.1.0", optional = true }
+
+# [GPT-5.6] sq-7ru8y: Criterion is dev-only and drives the self-relative tableau
+# microbenchmark; it does not enter the shipped opt-in reasoner crate.
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+
+# [GPT-5.6] sq-7ru8y: pinned synthetic concept expressions exercise NNF conversion and
+# tableau sat/subsumption checks at increasing nesting depths.
+[[bench]]
+name = "tableau_micro"
+harness = false

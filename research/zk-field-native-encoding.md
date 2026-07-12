@@ -211,7 +211,7 @@ load-bearing.
 | `xsd:integer` (incl. signed) | signed value in the `u64` magnitude + sign domain `filter_signed.nr` uses (NOT raw wrapping `Field`) | yes (`"05"`/`"5"` → same) | no leading zeros, no `-0` (`filter_int.nr:58-64`, `filter_signed.nr:142-158`) |
 | `xsd:decimal` | canonical scaled integer at the member-fixed `FD` scale (matching `filter_decimal_check`) | **yes — `"5.0"`/`"5.00"` collide at a fixed `FD`** | `filter_decimal` digit-canonicality asserts (`filter_signed.nr:215-246`) |
 | `xsd:double` / `xsd:float` | IEEE-754 bit pattern as a field | **yes — `-0.0`/`+0.0` compare EQUAL (`tests.nr:379-380`); NaN payloads** | canonical IEEE bits at ingest (may obsolete sq-mslu's in-circuit RNE parser for the *comparison* — §10 Q3) |
-| `xsd:dateTime` / `xsd:date` | canonical epoch / component encoding | design-dependent | timezone-normalisation rule open (§10 Q2); NOT in the first slice |
+| `xsd:dateTime` / `xsd:date` | signed scaled-epoch scalar at a member-fixed `FS` sub-second scale, timezoned-`Z` canonical lexicals ONLY (§13 — resolves §10 Q2) | not in the slice-1 `Z`-only domain; becomes yes if the §13.6 offset-normalisation widening lands | §13.4 fail-closed canonical predicate (bare / non-`Z` / `24:00:00` / over-`FS`-precision lexicals rejected); NOT in the first slice |
 | `xsd:string`, `rdf:langString`, opaque | `VALUE_NONE` (no handle) | — | the §3.2 fallback; lexical lane only |
 
 `DATATYPE_CONST` / `LANG_CONST` are `blake3(datatype IRI)` / `blake3(lang)` off-circuit
@@ -616,7 +616,10 @@ instantiation) verdicts. Obligation-/negation-framed to pass
 1. **`value_component` degeneracy shape (§3.2):** global `NO_VALUE` vs datatype-folded
    `Poseidon2([VALUE_NONE, DT_CONST, LANG_CONST])`? Recommendation: the latter. Confirm.
 2. **dateTime/date VALUE_HOOK:** canonical epoch vs component tuple; timezone-
-   normalisation rule. Deferred from the first slice.
+   normalisation rule. Deferred from the first slice. **RESOLVED — §13**
+   (proceed-and-document, spike sq-fvztj): signed scaled-epoch scalar, timezoned-`Z`
+   canonical lexicals only, everything else fail-closed; maintainer can steer
+   post-hoc via the sq-fvztj steer-me issue.
 3. **Double bits vs sq-mslu parser:** confirm against `filter_float.nr` /
    `sparq_ieee754` that the IEEE-bit VALUE_HOOK obsoletes the in-circuit RNE parser for
    the *comparison*, AND decide the `-0.0`/`+0.0`/NaN canonicalisation rule at ingest
@@ -723,3 +726,170 @@ enforcement, the many-to-one handle hazard, and the canonical-issuance precondit
 **registered as an explicit external-audit obligation (CR-G8 / sq-qhy4)**; none is
 presented as a settled property, and no soundness or privacy guarantee is claimed pending
 the external sign-off.
+
+## 13. §10 Q2 RESOLVED: the `xsd:dateTime` / `xsd:date` VALUE_HOOK (spike sq-fvztj, proceed-and-document)
+
+Design-only resolution of the one §10 question left open by the first slice. Made under
+the standing proceed-and-document rule (best-judgment call, maintainer steers post-hoc
+via the sq-fvztj steer-me issue); it inherits every honesty caveat of this record — the
+removed INV-VL, the issuer-honesty assumption on the value lane, and the CR-G8 / sq-qhy4
+external-audit obligation. **Nothing below is a soundness claim**; the chosen rule is
+itself registered as an OPEN audit obligation (§13.7).
+
+### 13.1 Decision — a signed scaled-epoch SCALAR, not a component tuple
+
+`VALUE_HOOK` for `xsd:dateTime` (and `xsd:date`, §13.3) is a **single signed scalar**:
+
+```text
+VALUE_HOOK = sign · ( |seconds_from_epoch| · 10^FS + fraction_scaled )
+```
+
+- the XSD proleptic-Gregorian `timeOnTimeline` mapping (NO leap seconds — XSD's
+  timeline has none; `second = 60` is not a valid XSD lexical and is rejected),
+  anchored at epoch `1970-01-01T00:00:00Z`;
+- `FS` is a **member-fixed sub-second scale** (recommendation: `FS = 3`,
+  milliseconds), folded into the lane's `DATATYPE_CONST` exactly like the decimal
+  `FD` bind — `blake3("<xsd:dateTime IRI>@epochscale=<FS>")` — so a hook at one
+  scale can never collide a hook at another (B4);
+- carried **sign-split** `(value_neg, value_mag)` in the same `u64`-magnitude +
+  sign domain `filter_signed.nr` / `filter_value_dl_decimal` already compare
+  (`signed_scaled_verdict` is reused UNCHANGED; no `-0`; B1
+  `assert_max_bit_size::<64>()` on the magnitude).
+
+**Why the scalar beats the component tuple.** XSD ordering on *timezoned* values IS
+timeline order, so one sign-aware scalar comparison decides every FILTER operator —
+the exact machinery `filter_value_dl_decimal` ships today. A `(year, month, day, hour,
+minute, second, tz)` tuple would need a multi-limb lexicographic comparator (a new
+comparator to build AND audit), and still needs every component canonicalised before
+the hook is injective — the tuple buys nothing within the slice-1 domain. The tuple's
+one genuine advantage — representing *un-timezoned* values distinctly — is mooted
+because slice 1 rejects them outright (§13.2); if bare lexicals are ever admitted it
+is via a disjoint sub-lane constant (§13.6), not a tuple.
+
+**Why not epoch-seconds unscaled:** `xsd:dateTime` admits arbitrary fractional-second
+precision; dropping sub-seconds would collide distinct values (non-injective). The
+member-fixed `FS` mirrors the decimal lane's fixed-point pattern
+(`canonical_decimal_scaled`), with one deliberate difference: `FS` is fixed for the
+WHOLE lane (canonical lexicals with 1..=`FS` fraction digits are scaled UP to `FS`,
+exactly, never rounded), instead of decimal's per-lexical `fd`-in-the-const. Fixing
+`FS` keeps every committed `xsd:dateTime` hook in ONE totally-ordered domain, so a
+FILTER can compare operands of differing lexical precision — for decimal the
+per-`fd` split was acceptable; for dateTime cross-precision comparison is the normal
+case (`"…T12:00:00Z" < "…T12:00:00.5Z"` must be decidable in one member). A lexical
+with MORE than `FS` fraction digits is rejected fail-closed (never rounded — rounding
+would break injectivity AND desync the §6 co-binding); a higher-`FS` member is a
+compatible future addition because `FS` is folded into the const.
+
+**Injectivity (the invariant).** Within the slice-1 domain (timezoned-`Z` canonical
+lexicals, §13.2/§13.4): equal XSD values have exactly one canonical lexical, and the
+canonical lexical determines the scaled epoch exactly — so the hook is
+**injective-on-value within the datatype**, and (a strictly stronger property, unique
+to this lane's slice 1) injective on the TERM too: the `Z`-only canonical domain
+admits one lexical per value, so no new row is added to the §3.3 many-to-one hazard
+table until the §13.6 offset widening lands.
+
+### 13.2 The timezone-normalisation rule — hookable domain = timezoned `Z` ONLY, everything else fail-closed
+
+1. **Un-timezoned lexicals are NOT hookable — fail-closed reject** (`DualLeafError`,
+   never a silent string-lane downgrade and never an implicit timezone):
+   - XSD order between an un-timezoned and a timezoned value is PARTIAL
+     (indeterminate inside the ±14:00 window). Both live under the same
+     `xsd:dateTime` `DATATYPE_CONST`; if bare lexicals were mapped into the same
+     scalar domain, the circuit would compare indeterminate pairs determinately —
+     wrong against XSD semantics, and inconsistent with the engine's own residual
+     partial order (sq-2k5py: mixed-timezone indeterminate pairs deliberately fall
+     back to lexical ordering). The engine and the ZK lane must not disagree.
+   - An implicit-timezone rule (SPARQL/XPath evaluation context) is
+     context-dependent — the same lexical would hook differently per context, which
+     is not injective-on-value and makes the §6 co-binding ill-defined.
+2. **Non-`Z` offsets (`+01:00`, `-05:00`, and the `+00:00`/`-00:00` spellings) are
+   rejected in slice 1** — the strict mirror of the boolean lane's canonical-only
+   rule (`{"true","false"}` accepted, XSD-legal `"1"`/`"0"` rejected). XSD 1.1's
+   canonical dateTime form is `Z`-normalised, so slice 1 = "canonical lexicals
+   only". The compatible widening is §13.6, a follow-up decision, NOT slice 1.
+3. **`24:00:00` (XSD-legal next-day-midnight endpoint) is rejected** — it is
+   excluded from the canonical form (canonical spelling is `00:00:00` of the next
+   day); accepting it would admit two lexicals for one value.
+
+Fail-closed here means the §6 co-binding stays well-defined: `encode_datetime`
+either derives BOTH the hook and the lexical hash from one successful strict
+canonical parse of the same bytes, or commits nothing. A rejected lexical is an
+ingest error for the dual-leaf lane, not a desynced leaf. (As everywhere in this
+record, this binds only sparq's OWN ingest — a malicious external issuer is
+unconstrained pending §5.6 canonical-issuance; issuer honesty on the value lane
+remains an unverified assumption under CR-G8.)
+
+### 13.3 `xsd:date`
+
+Same rule, own lane: the hook is the scaled epoch of the date's **starting instant**
+(midnight UTC — XSD orders dates by their starting moment on the timeline), at the
+same `FS`, under its OWN constant `blake3("<xsd:date IRI>@epochscale=<FS>")` so a
+date can never collide a dateTime (§3.3 cross-datatype separation). Slice-1 domain =
+`YYYY-MM-DDZ` canonical lexicals only; bare dates — however common in real data —
+are rejected fail-closed in slice 1 for exactly the §13.2(1) indeterminacy reason.
+(`xsd:date` has no fractional part; sharing `FS` keeps the two lanes' host/circuit
+code identical.)
+
+### 13.4 The fail-closed canonical predicate (the §6 co-binding, exact)
+
+`encode_datetime` / `encode_date` accept a lexical iff ALL of:
+
+- strict XSD 1.1 grammar shape with an explicit `Z` timezone (no offset, no bare);
+- structural component validity: month `01..=12`, day valid for month + proleptic
+  Gregorian leap-year rule, hour `<= 23`, minute/second `<= 59` (no leap second —
+  not an XSD lexical), no `24:00:00`;
+- canonical year: no superfluous leading zeros beyond four digits, `-` sign
+  permitted (proleptic), no `+`;
+- fraction (dateTime only): `1..=FS` digits, no trailing zero (canonical minimal
+  form), absent entirely rather than `.0`;
+- range: the scaled-epoch magnitude fits `u64`, else reject (never wrap — the
+  far-proleptic-year overflow is fail-closed, mirroring the integer lane).
+
+The epoch conversion is pure integer arithmetic (days-from-civil), no floating
+point, derived once from the same bytes that `lexical_component =
+blake3_field(literal.to_string())` hashes verbatim.
+
+### 13.5 The circuit member — `filter_value_dl_datetime` is the decimal member's shape
+
+One new relation with the exact `filter_value_dl_decimal` structure: public
+`(operand_enc, op, bound_neg, bound_scaled_epoch, expected, datatype_const)`,
+private `(value_neg, value_hook_scaled, lexical_component)`; B1 range-decompose,
+no `-0`, sign folded into the handle by field negation, two `h3` bindings, verdict
+via the UNCHANGED `signed_scaled_verdict`, no in-circuit blake3. Because
+`datatype_const` is a PUBLIC input, the SAME relation serves both the dateTime and
+the date lane — the host selects the lane constant; no second Noir function. Gate
+shape is therefore expected to match the decimal member's (to be `bb gates`-measured
+when implemented, per the §7 rule; no number is claimed here).
+
+### 13.6 Documented widenings (recorded, NOT slice 1)
+
+- **Offset normalisation (canonicalise-and-record):** accept non-`Z` offsets by
+  folding the offset into the epoch (UTC normalisation). Compatible: it only widens
+  the accepted domain and maps the new lexicals onto the SAME hook values — no
+  recommit. Cost: the hook becomes many-to-one on the term
+  (`…T12:00:00+01:00` = `…T11:00:00Z`), joining the decimal/double row in the §3.3
+  hazard table under reject-list (v) — which is exactly why it is deferred until the
+  reject-list guard (§11 bead 4) exists to witness it.
+- **Bare (un-timezoned) lexicals as a DISJOINT sub-lane:** bare values among
+  themselves ARE totally ordered, so a separate constant
+  (`…@epochscale=<FS>@tz=none`) gives sound within-sub-lane comparison while making
+  a bare-vs-timezoned comparison structurally inexpressible (no member binds both
+  constants) — the circuit-side analogue of the engine's sq-2k5py residual partial
+  order. A design choice for later, kept out of slice 1.
+
+### 13.7 Follow-on beads + audit registration
+
+Mirrors the boolean-lane pair, inheriting its INV-VL / CR-G8 caveats verbatim:
+
+1. **Host** `encode_datetime` + `encode_date` in `crates/sparq-zk/src/dual_leaf.rs`'s
+   module family (new module, opt-in `dual-leaf` feature, default build unchanged) —
+   the §13.4 predicate, fail-closed, lexical_component byte-identical to today's
+   string-canonical `h_s`.
+2. **Circuit** `filter_value_dl_datetime` member (+ member crate + the compose/verifier
+   wiring the int/decimal/f64 members received), reusing `signed_scaled_verdict`;
+   depends on 1.
+
+The §13 rule set — `Z`-only domain, member-fixed `FS`, epoch mapping, the rejection
+list, and both §13.6 widenings — is registered as an OPEN external-audit obligation
+under CR-G8 / sq-qhy4 alongside the rest of this record. No soundness or privacy
+property is claimed for the dateTime/date lane pending the external sign-off.

@@ -58,11 +58,14 @@ mod gated {
     }
 
     /// The exhaustive hold-taxonomy labels (mirrors `QlHoldReason::label`).
-    const TAXONOMY: [&str; 9] = [
+    /// `inconsistent-kb` added by sq-p6yb7 (a KB the DL-Lite_R consistency check
+    /// proves inconsistent is held fail-closed, never an everything-entailed pass).
+    const TAXONOMY: [&str; 10] = [
         "permanently-outside",
         "pending-gate",
         "pending-capture",
         "pending-consistency",
+        "inconsistent-kb",
         "named-graph-dataset",
         "pending-coincidence",
         "oracle-divergent",

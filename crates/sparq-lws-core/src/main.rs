@@ -62,8 +62,10 @@ use sparq_lws_core::identity::IdentityConfig;
 use sparq_lws_core::ldp::handler::LdpState;
 use sparq_lws_core::overload::{self, AdmissionControl};
 use sparq_lws_core::rate_limit::{self, RateConfig, RateLimiter};
+#[cfg(feature = "http-sparq")]
+use sparq_lws_core::store::HttpSparqClient;
 use sparq_lws_core::store::{
-    BodyCache, CompositeStore, HttpSparqClient, InMemoryBlobStore, InMemorySparqClient, Store,
+    BodyCache, CompositeStore, InMemoryBlobStore, InMemorySparqClient, Store,
     DEFAULT_BODY_CACHE_BYTES,
 };
 use sparq_lws_core::tls::{self, TlsMode};
@@ -171,17 +173,22 @@ const ENV_BODY_CACHE_MAX_ENTRY_BYTES: &str = "SOLID_SERVER_BODY_CACHE_MAX_ENTRY_
 /// Select the SPARQ data-path backend (the authoritative-RDF [`SparqClient`] impl):
 /// - `memory` (DEFAULT) — the in-memory [`InMemorySparqClient`] double: boots without SPARQ/S3 and
 ///   is what conformance + the unit/integration suites run against. UNCHANGED default.
-/// - `http` — the live [`HttpSparqClient`] over a SPARQ `/sparql` endpoint (the shared-service
-///   deployment). Requires `SOLID_SERVER_SPARQ_ENDPOINT`.
+/// - `http` — the live `HttpSparqClient` (a code span — behind the opt-in `http-sparq` build
+///   feature) over a SPARQ `/sparql` endpoint (the shared-service deployment). Requires
+///   `SOLID_SERVER_SPARQ_ENDPOINT`.
 /// - `embedded` — the IN-PROCESS [`sparq_lws_core::store::embedded::EmbeddedSparqClient`]: the SPARQ
-///   query engine consumed as a LIBRARY (no HTTP hop), default-OFF, requires the `embedded-sparq`
-///   build feature. With `SOLID_SERVER_SPARQ_DIR` set it opens a directory-backed graph; otherwise a
-///   fresh in-memory graph. See decisions/0001-embed-sparq-in-process.md.
+///   query engine consumed as a LIBRARY (no HTTP hop). The `embedded-sparq` build feature that
+///   compiles it is ON BY DEFAULT (sq-gg0qq.3 — the first-class in-workspace backend); runtime
+///   selection stays EXPLICIT via this variable (fail-safe: an unconfigured boot serves the
+///   ephemeral in-memory double, never a store an operator did not choose). With
+///   `SOLID_SERVER_SPARQ_DIR` set it opens a directory-backed graph; otherwise a fresh in-memory
+///   graph. See decisions/0001-embed-sparq-in-process.md.
 ///
 /// `CompositeStore<S>` / `AppState<J,R,S>` / the router are all generic over the SparqClient `S`, so
 /// each arm monomorphizes the SAME wiring — no consumer code changes between backends.
 const ENV_SPARQ_BACKEND: &str = "PSS_SPARQ_BACKEND";
-/// The SPARQ `/sparql` endpoint URL for `PSS_SPARQ_BACKEND=http`.
+/// The SPARQ `/sparql` endpoint URL for `PSS_SPARQ_BACKEND=http` (opt-in `http-sparq` feature).
+#[cfg(feature = "http-sparq")]
 const ENV_SPARQ_ENDPOINT: &str = "SOLID_SERVER_SPARQ_ENDPOINT";
 /// Optional on-disk directory for `PSS_SPARQ_BACKEND=embedded` (a previously-saved graph snapshot);
 /// unset ⇒ a fresh in-memory graph.
@@ -587,9 +594,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `CompositeStore<S>` / `AppState<J,R,S>` / the router are generic over the SparqClient `S`, so
     // each arm monomorphizes the SAME downstream wiring (`build_app_for_store`): seed → LdpState →
     // ACL cache → AppState → router. Exactly ONE arm runs, so `auth` + `overload_config` (consumed
-    // once) move into the chosen arm. DEFAULT = `memory` (the in-memory double — boot-without-SPARQ +
-    // conformance byte-identical). `http` wires the live HttpSparqClient; `embedded` (opt-in feature)
-    // wires the in-process engine. See decisions/0001-embed-sparq-in-process.md.
+    // once) move into the chosen arm. RUNTIME DEFAULT = `memory` (the in-memory double —
+    // boot-without-config is fail-safe/ephemeral + conformance byte-identical; sq-gg0qq.3 kept this
+    // EXPLICIT-selection posture when the embedded feature went default-on). `embedded` wires the
+    // in-process engine (`embedded-sparq` feature, default-on — the first-class backend); `http`
+    // wires the live HttpSparqClient (opt-in `http-sparq` feature — the remote shared-service
+    // shape). See decisions/0001-embed-sparq-in-process.md.
     let backend = std::env::var(ENV_SPARQ_BACKEND)
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
@@ -664,6 +674,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        #[cfg(feature = "http-sparq")]
         "http" => {
             let endpoint = std::env::var(ENV_SPARQ_ENDPOINT).map_err(|_| {
                 format!(
@@ -724,19 +735,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        #[cfg(not(feature = "http-sparq"))]
+        "http" => {
+            return Err(
+                "PSS_SPARQ_BACKEND=http requires the opt-in `http-sparq` build feature (the \
+                 remote shared-service backend) — rebuild with `cargo build --release --features \
+                 http-sparq`, or use PSS_SPARQ_BACKEND=memory|embedded (the in-process engine, \
+                 compiled in by default)."
+                    .into(),
+            );
+        }
         #[cfg(not(feature = "embedded-sparq"))]
         "embedded" => {
             return Err(
-                "PSS_SPARQ_BACKEND=embedded requires the `embedded-sparq` build feature — \
-                 rebuild with `cargo build --release --features embedded-sparq`, or use \
-                 PSS_SPARQ_BACKEND=memory|http."
+                "PSS_SPARQ_BACKEND=embedded requires the `embedded-sparq` build feature (ON by \
+                 default; this binary was built with --no-default-features) — rebuild with the \
+                 default feature set, or use PSS_SPARQ_BACKEND=memory."
                     .into(),
             );
         }
         other => {
             return Err(format!(
-                "unknown {ENV_SPARQ_BACKEND}={other:?} — expected `memory` (default), `http`, or \
-                 `embedded` (with the `embedded-sparq` feature)."
+                "unknown {ENV_SPARQ_BACKEND}={other:?} — expected `memory` (default), `embedded` \
+                 (the in-process engine, `embedded-sparq` feature — default-on), or `http` (the \
+                 opt-in `http-sparq` feature)."
             )
             .into());
         }

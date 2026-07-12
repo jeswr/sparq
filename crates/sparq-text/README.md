@@ -9,8 +9,8 @@
 
 Opt-in **full-text search over literals** for the
 [sparq](https://github.com/jeswr/sparq) RDF engine: a small, owned BM25 inverted index
-over a `Graph`'s string literals, plus `text:` **magic predicates** that run text search
-inside plain SPARQL.
+over a `Graph`'s string literals, prefix completion over IRIs and common RDF labels,
+plus `text:` **magic predicates** that run text search inside plain SPARQL.
 
 A **separate crate** by design (the `sparq-geo` shape): no existing sparq crate — and
 in particular not the wasm build — depends on it. The index is in-house (tokenizer +
@@ -84,6 +84,9 @@ let r = query_text(&graph, r#"
   against an independent from-scratch reference scorer, wired into the central
   scoreboard as a `sparq extension` ratchet — **honestly NOT a standards-conformance
   claim** (no normative full-text-over-RDF / BM25 suite exists).
+- **IRI and label completion** — `CompletionIndex::build(&graph)` indexes IRIs, local
+  names, `rdfs:label`, and `skos:prefLabel`. `complete(prefix, k, scores)` does
+  deterministic case-insensitive matching with caller-injected scores; no fuzzy matching.
 - **Opt-in phrase positions** — the cheap default (`TextIndex::build`) stores **no**
   positions (8 B per token/doc pair); `build_with_positions` enables `phrase` /
   `phrase_near`. A phrase query against a positionless index is a **hard query error**

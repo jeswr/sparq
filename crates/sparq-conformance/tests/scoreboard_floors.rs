@@ -136,6 +136,26 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-policy/tests/odrl_test_suite.rs",
         "ODRL_SUITE_FLOOR",
     ),
+    // [FABLE-5] sq-tonhr.2 (epic sq-tonhr) — the W3C rdf-n-triples / rdf-n-quads /
+    // rdf-trig syntax-suite ratchets. The three floor consts live in this crate's
+    // `tests/rdf_line_syntax_ratchet.rs` (default-on, self-skipping without the fetched
+    // w3c/rdf-tests data); the guard reads them textually so the central scoreboard's
+    // `ratchet_floor`s can never drift from what the runner asserts.
+    (
+        "W3C N-Triples syntax (rdf11 rdf-n-triples)",
+        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "NT_SYNTAX_FLOOR",
+    ),
+    (
+        "W3C N-Quads syntax (rdf11 rdf-n-quads)",
+        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "NQ_SYNTAX_FLOOR",
+    ),
+    (
+        "W3C TriG syntax + eval (rdf11 rdf-trig)",
+        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "TRIG_SYNTAX_FLOOR",
+    ),
     // [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the W3C SPARQL 1.1 D-entailment ratchet.
     // `pub const D_ENTAIL_FLOOR` lives in this crate's `tests/d_entail_suite.rs`
     // (behind the opt-in `d-entail` feature, inside the `gated` module — the guard
@@ -304,6 +324,32 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/dl_suite.rs",
         "DL_DIRECT_FLOOR",
     ),
+    // [FABLE-5] the UFO-SN3 finite-world expressibility ratchet. The floor const
+    // (`pub const UFO_SN3_FLOOR`) lives top-level in THIS crate's
+    // `tests/ufo_sn3_suite.rs` (UNGATED — the lane calls plain `reason_n3` and runs
+    // in ordinary `cargo test --workspace`); the guard reads it TEXTUALLY so the
+    // central scoreboard's `ratchet_floor` can never silently drift from what the
+    // runner asserts. It is a sparq EXTENSION-shaped ratchet over the finite-world
+    // UFO-SN3 reference profile, NOT a UFO/gUFO/OntoUML standards-conformance claim
+    // (no normative UFO conformance suite exists).
+    (
+        "UFO-SN3 finite-world expressibility",
+        "crates/sparq-conformance/tests/ufo_sn3_suite.rs",
+        "UFO_SN3_FLOOR",
+    ),
+    // [KERN] the RDF 1.2 quoted-triple opacity ratchet. The floor const
+    // (`pub const QUOTED_OPACITY_FLOOR`) lives top-level in THIS crate's
+    // `tests/quoted_triple_opacity.rs` (UNGATED — the lane calls plain
+    // `sparq_reason::materialize` on committed fixtures and runs in ordinary
+    // `cargo test --workspace`; its feature-gated EL arm does not count toward
+    // the floor). A sparq EXTENSION-shaped ratchet pinning the normative
+    // RDF 1.2 triple-term semantics (quoting never asserts; closure
+    // non-interference), NOT a W3C-suite pass count.
+    (
+        "RDF 1.2 quoted-triple opacity (reasoning)",
+        "crates/sparq-conformance/tests/quoted_triple_opacity.rs",
+        "QUOTED_OPACITY_FLOOR",
+    ),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the suite labels whose ratchet floor is sourced at
@@ -346,7 +392,12 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     // src/floors/compact.rs for the side-by-side). Bumped in the SAME commit as the
     // lib const (rise-only).
     ("W3C JSON-LD 1.1 compact", 228),
-    ("W3C JSON-LD 1.1 frame", 61),
+    // [FABLE-5] sq-oy1f.29 — raised 61 → 92: the frame lane moved from the RDF-first
+    // framer (`graph_to_jsonld_framed`) to the NATIVE Framing pipeline compared against
+    // the W3C EXPECTED document under the stronger normative oracle (see
+    // src/floors/frame.rs for the side-by-side). Bumped in the SAME commit as the lib
+    // const src/floors/frame.rs::FLOOR and the ci.yml grep gate (rise-only).
+    ("W3C JSON-LD 1.1 frame", 92),
     // [SONNET-4.6] sq-oy1f.45 — raised 259 → 276 (expand() correctness: FsLoader
     // wiring + @id-null retention + IRI-colon scheme check + @nest scoped ctx
     // propagation + @reverse @index + 1.0-mode round-trip guard). Bumped in the
@@ -530,8 +581,16 @@ fn scoreboard_renders_all_suites() {
     // [FABLE-5] sq-pbz04.6.4 — the sparq D value-space matrix, HONESTLY rendered as a
     // sparq EXTENSION (tallied separately from the W3C D-entailment pass count).
     assert!(md.contains("D value-space matrix (integer/decimal/boolean/binary/temporal)"));
+    // [FABLE-5] — the UFO-SN3 finite-world expressibility ratchet, HONESTLY rendered
+    // as a sparq EXTENSION (no normative UFO/gUFO conformance suite exists; NOT
+    // folded into the conformance total).
+    assert!(md.contains("UFO-SN3 finite-world expressibility"));
+    // [KERN] — the RDF 1.2 quoted-triple opacity ratchet, HONESTLY rendered as a
+    // sparq EXTENSION (self-authored fixtures pinning the normative RDF 1.2
+    // triple-term semantics; NOT folded into the conformance total).
+    assert!(md.contains("RDF 1.2 quoted-triple opacity (reasoning)"));
     assert!(
-        md.contains("sparq-extension (9 rows, NOT conformance)"),
-        "nine extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (11 rows, NOT conformance)"),
+        "eleven extension rows should be tallied separately and pluralised"
     );
 }

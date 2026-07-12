@@ -779,12 +779,25 @@ outside it) and serves no exact answer.
 ```rust,ignore
 # // cargo build -p sparq-vectors --features structure
 use sparq_reason::Profile;
-use sparq_vectors::{close_for_vectorise, Corrupt, NegativeSampler, SamplingMode, TypeConstraints};
+use sparq_vectors::{
+    close_for_vectorise, Corrupt, NegativeSampler, SamplingMode, TermScope, TypeConstraints,
+};
 
 let closed = close_for_vectorise(turtle_src, "turtle", Profile::Rdfs)?;  // materialise entailed facts
 let constraints = TypeConstraints::mine(&closed.graph);                  // declared+observed domain/range
 let sampler = NegativeSampler::new(&closed.graph, &constraints, SamplingMode::TypeConstrained);
 let negatives = sampler.sample([h, r, t], Corrupt::Tail, 16, /*seed*/ 42);  // type-valid tail corruptions
+
+// [GPT-5.6] RDF 1.2 triple terms remain excluded by default. The explicit ablation arm admits
+// them, with atomic slots drawing only atomic candidates and triple-term slots only triple terms.
+let scoped = NegativeSampler::new_scoped(
+    &closed.graph,
+    &constraints,
+    SamplingMode::TypeConstrained,
+    TermScope::Embeddable,
+);
+let triple_term_pool_size = scoped.triple_term_count();
+# let _ = (negatives, triple_term_pool_size);
 # Ok::<(), String>(())
 ```
 
@@ -795,6 +808,12 @@ emits a corruption that is itself a true triple). **Honesty:** the empirical ben
 **unproven** — both ship behind the ablation precisely because the literal/type-aware KGE literature
 reports inconsistent gains; this slice is the buildable inputs. **The trainer that consumes them now
 exists** behind the `kge` feature (recipe 14).
+
+`TermScope::IriBlank` is the `Default` and preserves the former named-node/blank-node entity space.
+`TermScope::Embeddable` is an explicit RDF 1.2 triple-term measurement arm. It does not make triple
+terms compositional: it exposes each term as a graph node through `rdf:reifies`, while the embedded
+term's internal `(s, p, o)` remains opaque. `NegativeSampler::new` retains the default scope;
+`new_scoped` is the opt-in entry point. The separate corruption pools prevent sort-trivial negatives.
 
 ### 14. KGE measurement foundation — DistMult/ComplEx trainer + filtered link-prediction ablation (opt-in, feature = `kge`)
 
@@ -881,7 +900,49 @@ so the closure axis is not distorted by trivially-derivable entailed types). The
 non-canonical) and are **never** baked into docs. **Adoption gate:** no prior is adopted from these
 synthetic, work-box, single-seed figures — adoption requires a **real dataset** (WN18RR/FB15k-237
 subset), on a **canonical machine**, under the **asymmetric model**, with **multi-seed** reporting.
-The gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
+
+### 14a. UFO/gUFO priors — answer-safe serve-time disjointness mask (opt-in, feature = `kge`)
+
+<!-- [GPT-5.6] PR #2143 / issue #2149: document the public UFO-prior surface. -->
+The gUFO-prior cell is wired as an explicitly selected serve-time ablation. `EvalConfig::small`
+sets `gufo_prior = false`, so the default run does not construct the mask and retains the baseline
+ranking path. Set it to `true` to mine only UFO-provable disjointness from the input graph and remove
+provably incompatible candidates using the predicate's declared `rdfs:domain` or `rdfs:range`.
+Training is unchanged. The reader fails closed when identity or nature evidence is ambiguous, and an
+untyped candidate or predicate without a declared signature is never excluded.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_ablation, EvalConfig, GUFO_NS};
+
+let mut cfg = EvalConfig::small(13);
+assert!(!cfg.gufo_prior); // the behavioural prior is default OFF
+cfg.gufo_prior = true;
+cfg.gufo_ns = GUFO_NS; // or an explicitly declared non-canonical namespace
+let cells = run_ablation(turtle_src, "turtle", cfg)?;
+assert!(cells.iter().all(|cell| cell.gufo_prior));
+# Ok::<(), String>(())
+```
+
+The `structure` feature exposes the read-only `UfoPriors`, `UfoVocabulary`, `Rigidity`,
+`OntologicalNature`, and `GUFO_NS` API without the trainer. Use `UfoPriors::mine(graph)` for the
+canonical namespace or `mine_with_namespace(graph, ns)` when the dataset explicitly uses another
+namespace. `proven_disjoint_pairs()` and `proven_subsumptions()` return dictionary-id facts only;
+`augment_oracle()` feeds the proven pairs into `DisjointnessOracle::absorb_proven_pairs`. These APIs
+do not mint terms or write inferred triples back into the graph.
+
+The load-bearing guards are exact: the feature is absent from `default = []`, `kge` merely implies
+the already opt-in `structure` feature, `EvalConfig::small` keeps the behavioural switch false, and
+tests compare OFF runs deterministically plus ON/OFF output exactly on a gUFO-free graph. The mask
+may improve or preserve a filtered rank, never remove the held-out answer.
+
+**RDF 1.2 triple-term visibility is also default-off.** [GPT-5.6] Every `TrainConfig` preset sets
+`term_scope` to `TermScope::IriBlank`, preserving the existing pipeline. To measure statement-level
+structure, use `synthetic_rdf12_ttl` (or your own N-Triples data with `rdf:reifies`) and the paired
+`run_quoted_ablation` runner. Its `QuotedAblation` reports common-random-number ON−OFF deltas; split
+membership and the ranking pool remain atomic in both arms, so the comparison changes only training
+visibility. `synthetic_rdf12_parts` exposes the generated fixture partitions when a caller needs to
+audit them. This is a measurement surface, not an accuracy claim.
 
 ### 14b. Provenance-weighting `w(t)` — weight training by PROV-O/DQV quality (opt-in, feature = `structure`; measurement under `kge`)
 
@@ -1310,6 +1371,8 @@ NOT frozen, so the reserved area stays opaque here — it is the remaining, deli
   / `TrainedModel` / `ModelKind` (DistMult **or** the asymmetric ComplEx), the filtered
   link-prediction harness (`run_ablation` / `run_ablation_multiseed` / `EvalConfig` / `Splits` /
   `Metrics` / `LongTail` / `AblationCell` / `MultiSeedCell` / `CellStats` / `MeanStd`), the
+  RDF 1.2 triple-term visibility surface (`TermScope`, `TrainConfig::term_scope`,
+  `run_quoted_ablation`, `QuotedAblation`, `synthetic_rdf12_ttl`, `synthetic_rdf12_parts`), the
   synthetic-graph generators, and `SCHEMA_PREDICATES` (recipe 14). It is the *measurement instrument*
   the design requires before any prior is adopted — **no accuracy claim**, indicative numbers only
   (work-box non-canonical). **DistMult is symmetric → near-random on directional relations; read

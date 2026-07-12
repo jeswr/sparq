@@ -874,3 +874,133 @@ mod canon {
         assert!(canonicalize_nquads("_:b0 <http://ex/p>").is_err());
     }
 }
+
+// ---- explain-json (feature-gated): the structured plan tree across the boundary ----
+//
+// [FABLE-5] sq-ixc3.19. The native `tests/exported_api.rs::explain_json` covers the Ok
+// arms for coverage; these drive the genuine wasm32 exports through the JS boundary —
+// including the `Err` (JsError) arms `JsError::new` makes wasm32-only — and pin the
+// wasm32 honesty caveat the GUI renders around: ANALYZE `nanos` reads 0 (no monotonic
+// clock) while `actual` row counts stay exact.
+#[cfg(feature = "explain-json")]
+mod explain_json {
+    use super::*;
+
+    /// `explainPlanJson` returns the camelCase planning-only tree (nothing executed).
+    #[wasm_bindgen_test]
+    fn explain_plan_json_dry_run() {
+        let store = Store::load(DATA, "turtle").expect("load");
+        let json = store
+            .explain_plan_json("PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }")
+            .expect("explainPlanJson");
+        assert!(json.contains("\"operator\":"), "schema keys: {json}");
+        assert!(json.contains("\"actual\":null"), "dry run: {json}");
+    }
+
+    /// `explainPlanAnalyzeJson` executes: exact `actual` rows, and `nanos` present as a
+    /// NUMBER but 0 on wasm32 (the documented no-monotonic-clock caveat).
+    #[wasm_bindgen_test]
+    fn explain_plan_analyze_json_fills_actuals_zero_nanos() {
+        let store = Store::load(DATA, "turtle").expect("load");
+        let json = store
+            .explain_plan_analyze_json("PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }")
+            .expect("explainPlanAnalyzeJson");
+        assert!(json.contains("\"actual\":2"), "exact rows: {json}");
+        assert!(json.contains("\"nanos\":0"), "wasm32 nanos read 0: {json}");
+    }
+
+    /// A malformed query and a graph-valued ANALYZE cross the boundary as the `Err`
+    /// (JsError) arm, not a trap.
+    #[wasm_bindgen_test]
+    fn explain_json_err_arms() {
+        let store = Store::load(DATA, "turtle").expect("load");
+        assert!(store.explain_plan_json("SELECT WHERE {").is_err());
+        assert!(store
+            .explain_plan_analyze_json("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+            .is_err());
+    }
+}
+
+// ---- [FABLE-5] sq-3ul2n.3: the opt-in `Store::loadBytes` byte-ingest binding ----
+//
+// Drives the REAL `#[wasm_bindgen]` byte-ingest exports in a genuine wasm32 runtime: the
+// result-equivalence invariant (`loadBytes(utf8_of(s), fmt)` == `load(s, fmt)`, incl. a
+// multi-byte UTF-8 fixture) and — the surface the native tests can't reach without
+// trapping on `JsError::new` — the fail-closed invalid-UTF-8 `Err` path.
+#[cfg(feature = "bytes-ingest")]
+mod bytes_ingest {
+    use super::*;
+
+    /// `loadBytes(utf8_bytes_of(s), fmt)` yields a store equal to `load(s, fmt)` — equal
+    /// triple count AND byte-identical probe-query JSON. The load-bearing equivalence
+    /// invariant across the JS/wasm boundary.
+    #[wasm_bindgen_test]
+    fn load_bytes_equivalent_to_load() {
+        let via_str = Store::load(DATA, "turtle").expect("load str");
+        let via_bytes = Store::load_bytes(DATA.as_bytes(), "turtle").expect("load bytes");
+        assert_eq!(via_bytes.size(), via_str.size(), "equal triple count");
+        let q =
+            "PREFIX ex: <http://ex/> SELECT ?n ?a WHERE { ?s ex:name ?n ; ex:age ?a } ORDER BY ?a";
+        assert_eq!(
+            via_bytes.query(q).unwrap(),
+            via_str.query(q).unwrap(),
+            "probe-query JSON must be identical across the two ingest paths"
+        );
+    }
+
+    /// A multi-byte UTF-8 fixture (accented, CJK, emoji literals) survives the byte path
+    /// intact and equals the string path — the raw byte copy is not mangling non-ASCII.
+    #[wasm_bindgen_test]
+    fn load_bytes_multibyte_utf8_equivalent() {
+        let data = "@prefix ex: <http://ex/> .\n\
+                    ex:a ex:name \"\u{c1}m\u{e9}lie\" .\n\
+                    ex:b ex:name \"\u{65e5}\u{672c}\u{8a9e}\" .\n\
+                    ex:c ex:name \"crab \u{1f980}\" .\n";
+        let via_str = Store::load(data, "turtle").expect("load str");
+        let via_bytes = Store::load_bytes(data.as_bytes(), "turtle").expect("load bytes");
+        assert_eq!(via_bytes.size(), via_str.size());
+        let q = "SELECT ?n WHERE { ?s <http://ex/name> ?n } ORDER BY ?n";
+        let got = via_bytes.query(q).unwrap();
+        assert_eq!(got, via_str.query(q).unwrap(), "multi-byte JSON equal");
+        // The CJK + emoji literals really crossed the byte boundary intact.
+        assert!(got.contains("\u{65e5}\u{672c}\u{8a9e}"), "CJK literal preserved: {got}");
+        assert!(got.contains("\u{1f980}"), "emoji literal preserved: {got}");
+    }
+
+    /// `loadBytesWithBase` resolves relative IRIs against the base, equal to the string
+    /// `loadWithBase`.
+    #[wasm_bindgen_test]
+    fn load_bytes_with_base_equivalent() {
+        let doc = "<a> <p> <o> .";
+        let via_str = Store::load_with_base(doc, "turtle", "http://ex/dir/").expect("load str");
+        let via_bytes = Store::load_bytes_with_base(doc.as_bytes(), "turtle", "http://ex/dir/")
+            .expect("load bytes");
+        assert_eq!(via_bytes.size(), via_str.size());
+        // `<p>` resolves to `http://ex/dir/p` under the base, so query on the resolved IRI.
+        let q = "SELECT ?s ?o WHERE { ?s <http://ex/dir/p> ?o }";
+        let got = via_bytes.query(q).unwrap();
+        assert_eq!(got, via_str.query(q).unwrap());
+        assert!(got.contains("http://ex/dir/a"), "base resolved the relative subject: {got}");
+    }
+
+    /// Invalid UTF-8 input fails CLOSED: an `Err` (JsError) across the boundary, never a
+    /// panic / abort — the fail-closed surface JS `try { … } catch` relies on. `0xFF` is
+    /// never a valid UTF-8 byte, so these inputs cannot be a real document.
+    #[wasm_bindgen_test]
+    fn load_bytes_invalid_utf8_fails_closed() {
+        // A lone 0xFF, and a valid-then-invalid sequence — both are rejected.
+        assert!(
+            Store::load_bytes(&[0xFF, 0xFE], "turtle").is_err(),
+            "lone 0xFF is not valid UTF-8 -> Err, not a trap"
+        );
+        assert!(
+            Store::load_bytes(b"<http://ex/s> <http://ex/p> \xFF .", "ntriples").is_err(),
+            "an invalid byte mid-document -> Err, not a trap"
+        );
+        // The with-base variant fails closed on invalid UTF-8 too.
+        assert!(
+            Store::load_bytes_with_base(&[0xC0], "turtle", "http://ex/").is_err(),
+            "0xC0 (invalid UTF-8 lead) -> Err via loadBytesWithBase"
+        );
+    }
+}

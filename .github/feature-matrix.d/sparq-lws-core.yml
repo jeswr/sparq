@@ -10,12 +10,23 @@
 # `name` free of the whole words "advisory"/"informational" or the leg stops gating.
 
 # The IN-PROCESS embedded SPARQ backend (src/store/embedded.rs) — in-workspace path
-# deps on sparq-core/sparq-engine. tests/store_embedded.rs and
-# tests/embedded_read_counters.rs are entirely feature-gated on it; without this leg
-# the embedded data path never runs in CI.
+# deps on sparq-core/sparq-engine. DEFAULT-ON since sq-gg0qq.3 (the first-class
+# in-workspace backend), so the default ci.yml lanes now also cover it; this leg keeps
+# the EXPLICIT `--features embedded-sparq` spelling green in the matrix lane
+# (tests/store_embedded.rs + tests/embedded_read_counters.rs + the full ldp_http suite
+# against the embedded backend).
 - name: "sparq-lws-core (embedded-sparq)"
   crate: "sparq-lws-core"
   features: "embedded-sparq"
+  test: true
+
+# The live REMOTE SPARQL-over-HTTP backend (src/store/http.rs), opt-in `http-sparq`
+# since sq-gg0qq.3 (in-workspace builds bind the engine in-process instead).
+# tests/http_sparq_client.rs is entirely feature-gated on it; without this leg the
+# remote HTTP data path never compiles or runs in CI.
+- name: "sparq-lws-core (http-sparq)"
+  crate: "sparq-lws-core"
+  features: "http-sparq"
   test: true
 
 # The distributed Redis-backed DPoP-`jti` replay store (src/redis_replay.rs).

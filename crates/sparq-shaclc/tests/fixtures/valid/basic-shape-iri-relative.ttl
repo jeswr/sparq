@@ -1,0 +1,10 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+
+<http://example.org/test>
+	a owl:Ontology ;
+.
+
+<http://example.org/test#TestShape>
+	a sh:NodeShape ;
+.

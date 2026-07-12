@@ -428,7 +428,7 @@ table of expected `(agent, client, mode, resource) → Allow | Deny` decisions �
 harness asserts the engine reproduces every expected decision, reporting **all** mismatches
 at once. The module is **always compiled** (no feature gate; it depends only on the
 always-present ACP path). The scenario corpus is a single reusable source in
-`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 12 scenarios / 40 decisions),
+`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 13 scenarios / 45 decisions),
 consumed by `crates/sparq-solid/tests/conformance_acp.rs` (the parity test, plus a negative
 control asserting a wrong expectation is *reported*, not panicked) so a second test target —
 the differential oracle (`sq-t58w.7`) — can run the IDENTICAL scenarios without copy-paste.
@@ -486,7 +486,7 @@ semantics. A scenario is an `.acl`-document corpus (`AclBuilder`) plus a table o
 `(agent, client, mode, resource) → Allow | Deny` decisions; the harness asserts the engine
 reproduces every one, reporting all mismatches at once. Always compiled (no feature gate).
 The corpus is a single reusable source in `crates/sparq-solid/tests/common/`
-(`common::wac_corpus()`, 12 scenarios / 40+ decisions), consumed by
+(`common::wac_corpus()`, 13 scenarios / 51 decisions), consumed by
 `crates/sparq-solid/tests/conformance_wac.rs` (the parity test, a `run_via_podstore` parity
 test over the full `PodStore` method-form path, and a negative control) and reusable by a
 second test target — the differential oracle (`sq-t58w.7`) — without copy-paste. The
@@ -836,6 +836,37 @@ wrong-key / unresolvable-issuer list VC, or a verified graph with no `encodedLis
 status-authority `did:key`/`did:web` issuer DID via `VerifyingLiveStatusCheck::with_did_issuer(.., did_resolver,
 authority_did, ..)` (the `did` feature, same binding the admission gate uses). Research-grade, externally
 **UNAUDITED** (`sq-qhy4`): a verified issuer signature, NOT a privacy/unlinkability guarantee.
+
+## Pattern-scoped masking spike — [FABLE-5] sq-lrtc3.3 (opt-in `pattern-scope`)
+
+Sub-named-graph (triple-pattern / row-level) result masking: an ODRL-style target as a
+set of **allow/deny triple patterns** over a source graph, so a session can be granted
+*"the contacts graph except phone numbers"*. Design record (options analysis, ODRL
+vocabulary, production caching path, follow-up beads):
+`research/odrl-pattern-scoped-targets-2026-07.md`. Measured envelope:
+`bench/pattern-scope/` (work-box JSONs, non-canonical).
+
+**Mechanism — masked-subgraph materialization, NOT per-scan filtering.** A scoped graph
+is decoded, filtered, and rebuilt as a physical replica; the engine evaluates a dataset
+in which masked triples are **physically absent**, so equivalence with an oracle store
+(the source with those triples deleted) under SELECT / `OPTIONAL` / `EXISTS` / `MINUS` /
+aggregates / `COUNT` / `ASK` / `GRAPH ?g` holds **by construction** (differential
+battery: `crates/sparq-solid/tests/pattern_scope.rs`). Zero engine/core changes; the
+graph-granular enforcement walk is reused unchanged.
+
+- `ScopePattern::new(s, p, o)` / `::any()` — per-triple predicate, `None` = wildcard,
+  **term-identity** matching (no join variables, no value equality).
+- `GraphScope::allow_only(patterns)` (permission shape) / `::deny_within(patterns)`
+  (prohibition carving a hole); a triple is visible iff it matches ≥1 allow AND 0 deny
+  (**deny overrides allow**; empty allow grants nothing — fail-closed).
+- `masked_graph(&Graph, &GraphScope) -> Graph`; `masked_dataset(&Graph, &decisions)`
+  (explicit-decision assembly: absent from the map = absent from the dataset; a fully
+  masked graph is **omitted** — indistinguishable from absent).
+- `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
+  (a scope can only shrink the session's graph-level accessible set, never widen), then
+  `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
+  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
+  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
 
 ## Related skills
 

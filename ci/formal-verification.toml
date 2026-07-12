@@ -156,6 +156,21 @@ proves = ["crates/sparq-substrate/src/compare.rs"]
 nightly = true
 pr_gate = true
 
+[[suite]]
+id = "wac-oracle-escalation-corpus"
+name = "sparq-wac-oracle (.acl escalation corpus domain coverage)"
+crate = "sparq-wac-oracle"
+features = ""
+harnesses = ["domain_corpus_exhibits_a_surviving_escalation"]
+# The harness's proof cone is the static CORPUS plus the pure classifier fns
+# (naive_acl_guard + the proof-only allocation-free is_acl_shaped_ascii_noalloc,
+# equivalent to is_acl_shaped on the ASCII inputs the proof asserts) in the same
+# file — it never calls into sparq-solid's decision surface, so the cone is
+# exactly this file.
+proves = ["crates/sparq-wac-oracle/src/escalation_corpus.rs"]
+nightly = true
+pr_gate = true
+
 # ---------------------------------------------------------------------------
 # Scheduled formal lanes watched by the no-verdict alarm (formal-alarm.yml /
 # scripts/formal_lane_alarm.py). `max_verdict_age_hours` — the longest a lane may

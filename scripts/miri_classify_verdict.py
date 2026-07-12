@@ -32,7 +32,7 @@
 # Usage (in miri.yml):
 #   set -o pipefail
 #   NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo +<nightly> miri nextest run -p sparq-core \
-#       --partition count:<k>/12 --no-fail-fast \
+#       --partition count:<k>/24 --no-fail-fast \
 #       --message-format libtest-json-plus --message-format-version 0.1 \
 #     | tee miri-shard.jsonl | python3 scripts/miri_classify_verdict.py --shard <k>
 #
@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 
 TIMEOUT_REASON = "time limit exceeded"
@@ -147,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     # nextest never ran the tests (build break / miri sysroot failure / crash before emitting),
     # NOT a clean shard. Treat it as FATAL so a setup failure cannot masquerade as a pass.
     # (A shard legitimately assigned zero tests still emits nothing here — but every one of the
-    # 12 round-robin shards over sparq-core's ~130 tests receives tests, so an empty stream is a
+    # 24 round-robin shards over sparq-core's ~130 tests receives tests, so an empty stream is a
     # real failure signal, not an empty partition. If the partition scheme ever changes, revisit.)
     if not timed_out and not failed and n_ok == 0:
         print(f"::error title=Miri shard produced no test outcomes (shard {args.shard})::"
@@ -227,6 +228,23 @@ def _self_test() -> int:
         with open(good, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"type": "test", "event": "ok", "name": "a::x"}) + "\n")
         ck(main(["--shard", "Z", "--events", good]) == 0, "a real pass via main => exit 0")
+
+    # 7. [GPT-5.6] The workflow must keep every partition label and command in sync. This is the
+    # regression witness for sq-hytab: reverting the 24-way split to the 12-way layout that
+    # exhausted the job backstop makes this check fail before the nightly lane is trusted.
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/miri.yml").read_text(
+        encoding="utf-8"
+    )
+    expected_matrix = (
+        "shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, "
+        "17, 18, 19, 20, 21, 22, 23, 24]"
+    )
+    ck(expected_matrix in workflow, "workflow enumerates all 24 Miri shards")
+    ck(
+        workflow.count("${{ matrix.shard }}/24") == 4,
+        "workflow consistently labels, partitions, and classifies 24 shards",
+    )
+    ck("${{ matrix.shard }}/12" not in workflow, "stale 12-way partition wiring absent")
 
     if fails:
         for x in fails:

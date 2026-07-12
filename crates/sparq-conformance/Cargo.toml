@@ -118,7 +118,10 @@ rif-wg-core = ["sparq-reason/rif-xml", "dep:sparq-substrate", "sparq-substrate/n
 # rewriter is sound-but-FAIL-CLOSED (a query it cannot soundly rewrite is reported
 # as abstain/OutOfScope, never a guessed pass). When OFF the lane compiles to a
 # single self-SKIP `#[test]`. Pure-Rust, no new third-party deps.
-ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
+# [FABLE-5] sq-p6yb7: also forwards to `sparq-reason-ql/ql-consistency` so the
+# graduation predicate's condition (3) runs the DL-Lite_R violation-query
+# consistency check instead of holding every negative-axiom TBox unconditionally.
+ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental", "sparq-reason-ql/ql-consistency"]
 
 # [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL entailment-regime
 # EXPRESSIVITY ratchet (the crate-local `tests/el_suite.rs` runner). OPT-IN and OFF
@@ -141,6 +144,17 @@ ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
 # ABox-mechanism layer: `realize_graph` replaces `classify_graph` in the lane, routing
 # new realisation rows + the whole-ontology inconsistency verdict into the outcome mapping.
 el-suite = ["dep:sparq-reason-el", "sparq-reason-el/rbox", "sparq-reason-el/cdomain", "sparq-reason-el/abox"]
+
+# [FABLE-5] sq-wy3i6 (Phase E4) — the PARALLEL-saturation differential arm of the EL lane:
+# forwards `sparq-reason-el/par` and, per selected W3C EL case, additionally asserts that
+# `classify_graph_par` at thread counts 1/2/8 reproduces the sequential `classify_graph`
+# closure EXACTLY (term-level triple-set equality + the same unsatisfiable-class count).
+# This is the sq-wy3i6 acceptance oracle over the REAL conformance corpus — a concurrency
+# bug that drops or fabricates a derivation on any W3C EL case turns the whole lane red.
+# The ratchet floor itself is UNCHANGED (the pass/divergence accounting still runs on the
+# sequential engine); this feature only ADDS the differential assertion. Wired into the
+# ci.yml el-suite lane (`--features el-suite,el-suite-par`). Pure-Rust, no new deps.
+el-suite-par = ["el-suite", "sparq-reason-el/par"]
 
 # [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 **Direct-Semantics arm** of the
 # OWL WG export (the `inference::dl_suite` runner + the crate-local `tests/dl_suite.rs`
@@ -228,12 +242,36 @@ http-protocol = ["service-loopback"]
 # 200-empty, not a 404) reported separately and NEVER summed into the floor.
 federation-descriptors = ["service-loopback", "sparq-server/federation-descriptors"]
 
+# [FABLE-5] sq-iwulr — the GeoSPARQL geometry-function DIFFERENTIAL lane (the
+# crate-local `tests/geo_function_differential.rs` runner). OPT-IN and OFF by default
+# so the bare `cargo test -p sparq-conformance` and the default `--workspace` shards
+# never link the georust geometry stack — the scoreboard module's "stay free of
+# sparq-geo" constraint continues to hold for every DEFAULT build (and for all three
+# scoreboard/report binaries, which have no geo path at all); the coupling exists only
+# under this opt-in lane feature, exactly the pattern of the reasoner lanes above.
+# Pulls sparq-geo with `default-features = false`: the PURE geometry library (WKT
+# literals + the public `geof`/`geof::lex` functions as plain Rust) — no `engine`
+# feature, so no second engine surface rides in. The runner asserts every committed
+# geometry-function case (simple-features predicates, DE-9IM matrices, degree-unit
+# distance, buffer-membership) agrees with the OFFLINE-captured GEOS golden
+# truth-table in bench/geo/function-golden/ (oracle-agreement on the committed
+# corpus — NOT an OGC-completeness claim; the OGC ratchets live in sparq-geo).
+# When OFF the lane compiles to a single self-SKIP `#[test]`.
+geo = ["dep:sparq-geo"]
+
 [dependencies]
 # [OPUS-4.8] sq-ushvx — the embeddable in-process server (`serve` / `router` / `AppState`),
 # used ONLY by the `service-loopback` harness to stand up a real loopback SERVICE endpoint.
 # OFF by default (optional, behind `service-loopback`) so the default harness build never
 # links the async server stack.
 sparq-server = { path = "../sparq-server", optional = true }
+# [FABLE-5] sq-iwulr — the opt-in GeoSPARQL geometry library, used ONLY by the `geo`
+# differential lane to drive the PUBLIC string-level `geof::lex` functions against the
+# captured GEOS golden truth-table (bench/geo/function-golden/). OFF by default
+# (optional, behind `geo`) and `default-features = false` (pure geometry — no engine
+# feature) so the default harness build links zero geometry code — the lean opt-in
+# posture, and the scoreboard's no-geo-dep constraint stays true of default builds.
+sparq-geo = { path = "../sparq-geo", default-features = false, optional = true }
 # [OPUS-4.8] sq-ushvx — async runtime for the loopback server's accept loop. Same minimal
 # feature set the server tests use (rt-multi-thread + net + time + sync for the shutdown
 # signal). OFF by default (optional, behind `service-loopback`).

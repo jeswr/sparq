@@ -31,9 +31,13 @@ use std::path::{Path, PathBuf};
 // (`read_context_member` is NOT re-exported: since sq-oy1f.27 the compact lane
 // drives the native compact() oracle, so no test module uses it — the
 // `bench_jsonld` example imports it from the lib directly.)
+// [OPUS-4.8] sq-hmd7l.15 merge-reconcile: `dataset_to_nquads` is likewise NOT
+// re-exported. origin/main (sq-oy1f.29) retired the RDF-oracle frame lane — the
+// only test-binary consumer — for the native document-level framer, so no test
+// module references it; the `bench_jsonld` example still imports it from the lib
+// directly. It stays defined LIB-SIDE for that bench consumer.
 pub use sparq_conformance::jsonld_bench::{
-    dataset_to_nquads, json_ld_equal, jsonld_to_canonical_dataset, nquads_to_canonical_dataset,
-    sparq_json_to_serde,
+    json_ld_equal, jsonld_to_canonical_dataset, nquads_to_canonical_dataset, sparq_json_to_serde,
 };
 
 // [FABLE-5] sq-oy1f.40 — the six ratchet floors, re-exported from the LIB-SIDE
@@ -122,10 +126,10 @@ pub struct Entry {
     /// the input against. `None` for the toRdf/fromRdf/compact manifests.
     pub frame: Option<String>,
     /// [OPUS-4.8] sq-oy1f.19 — a NegativeEvaluationTest's expected JSON-LD
-    /// error code (`invalid frame`, `invalid @embed value`, …). Recorded so the
-    /// frame runner can SKIP the error-raising negatives sparq's TOTAL framer
-    /// does not model (it never raises the spec's frame-validation errors), the
-    /// same honesty posture the compact lane takes toward its negatives.
+    /// error code (`invalid frame`, `invalid @embed value`, …).
+    /// [FABLE-5] sq-oy1f.29: the native framer now RAISES the spec's
+    /// frame-validation errors, so the frame runner RUNS these negatives (pass
+    /// iff the raised code equals this expected code) instead of skipping them.
     pub expect_error_code: Option<String>,
     /// [SONNET-4.6] sq-kk1mq — `option.expandContext`: a path (relative to the
     /// suite root) to a context file. Forwarded to the native expand() oracle as
@@ -138,6 +142,12 @@ pub struct Entry {
     /// `true`) when the manifest entry does not set them.
     pub compact_arrays: Option<bool>,
     pub compact_to_relative: Option<bool>,
+    /// [FABLE-5] sq-oy1f.29 — `option.omitGraph` / `option.ordered` (frame-manifest
+    /// options). Forwarded to the native frame() oracle as
+    /// `FrameOptions.omit_graph` / `JsonLdOptions.ordered`; `None` when the manifest
+    /// entry does not set them (mode-dependent spec default / `false`).
+    pub omit_graph: Option<bool>,
+    pub ordered: Option<bool>,
 }
 
 /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -209,6 +219,9 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
         let compact_to_relative = opt
             .and_then(|o| o.get("compactToRelative"))
             .and_then(Value::as_bool);
+        // [FABLE-5] sq-oy1f.29 — frame-manifest options (None elsewhere).
+        let omit_graph = opt.and_then(|o| o.get("omitGraph")).and_then(Value::as_bool);
+        let ordered = opt.and_then(|o| o.get("ordered")).and_then(Value::as_bool);
         out.push(Entry {
             id,
             is_negative,
@@ -224,6 +237,8 @@ pub fn read_manifest(root: &Path, cat: &str) -> Result<Vec<Entry>, String> {
             expand_context_path,
             compact_arrays,
             compact_to_relative,
+            omit_graph,
+            ordered,
         });
     }
     Ok(out)
