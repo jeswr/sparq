@@ -536,6 +536,39 @@ impl<'g> Sim<'g> {
 /// signature-level counterpart of [`Sim::similarity`], for callers that cache
 /// signatures (e.g. all-pairs evaluation).
 pub fn weighted_jaccard(a: &Signature, b: &Signature) -> f64 {
+    let inter = weighted_intersection(a, b);
+    let union = a.total + b.total - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Weighted Sorensen-Dice coefficient of two prebuilt signatures:
+/// `2 * Σ min(wA, wB) / (Σ wA + Σ wB)`. Returns 0 when both totals are 0.
+pub fn dice_coefficient(a: &Signature, b: &Signature) -> f64 {
+    let denom = a.total + b.total;
+    if denom <= 0.0 {
+        0.0
+    } else {
+        2.0 * weighted_intersection(a, b) / denom
+    }
+}
+
+/// Weighted overlap (Szymkiewicz-Simpson) coefficient of two prebuilt signatures:
+/// `Σ min(wA, wB) / min(Σ wA, Σ wB)`. Returns 0 when either total is 0.
+pub fn overlap_coefficient(a: &Signature, b: &Signature) -> f64 {
+    let min_total = a.total.min(b.total);
+    if min_total <= 0.0 {
+        0.0
+    } else {
+        weighted_intersection(a, b) / min_total
+    }
+}
+
+// [GPT-5.6] sq-da2bz: share the canonical sorted merge across signature metrics.
+fn weighted_intersection(a: &Signature, b: &Signature) -> f64 {
     let mut inter = 0.0;
     let (mut i, mut j) = (0, 0);
     while i < a.elems.len() && j < b.elems.len() {
@@ -549,12 +582,7 @@ pub fn weighted_jaccard(a: &Signature, b: &Signature) -> f64 {
             }
         }
     }
-    let union = a.total + b.total - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
+    inter
 }
 
 #[cfg(test)]
@@ -572,6 +600,77 @@ mod tests {
 
     fn unweighted(g: &Graph) -> Sim<'_> {
         Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
+    }
+
+    fn explicit_signature(entries: &[((u8, Id, Id), f64)]) -> Signature {
+        let mut entries = entries.to_vec();
+        entries.sort_unstable_by_key(|&(elem, _)| elem);
+        let total = entries.iter().map(|(_, weight)| weight).sum();
+        let (elems, weights) = entries.into_iter().unzip();
+        Signature {
+            elems,
+            weights,
+            total,
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn signature_coefficients_identical_are_one() {
+        let sig = explicit_signature(&[((OUT, 10, 100), 1.5), ((IN, 20, 200), 2.5)]);
+
+        assert_close(dice_coefficient(&sig, &sig), 1.0);
+        assert_close(overlap_coefficient(&sig, &sig), 1.0);
+    }
+
+    #[test]
+    fn signature_coefficients_disjoint_are_zero() {
+        let a = explicit_signature(&[((OUT, 10, 100), 2.0)]);
+        let b = explicit_signature(&[((IN, 20, 200), 3.0)]);
+
+        assert_eq!(dice_coefficient(&a, &b), 0.0);
+        assert_eq!(overlap_coefficient(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn signature_coefficients_partial_overlap_are_weighted_and_symmetric() {
+        // A totals 3; B totals 4; their shared element contributes min(2, 1) = 1.
+        let a = explicit_signature(&[((OUT, 10, 100), 2.0), ((OUT, 20, 200), 1.0)]);
+        let b = explicit_signature(&[((OUT, 10, 100), 1.0), ((IN, 30, 300), 3.0)]);
+        let dice = dice_coefficient(&a, &b);
+        let overlap = overlap_coefficient(&a, &b);
+        let jaccard = weighted_jaccard(&a, &b);
+
+        assert_close(dice, 2.0 / 7.0);
+        assert_close(overlap, 1.0 / 3.0);
+        assert_close(jaccard, 1.0 / 6.0);
+        assert!(dice > jaccard, "Dice need not be at most Jaccard");
+        assert!(overlap >= jaccard);
+        assert!(jaccard >= 0.0);
+        assert_close(dice_coefficient(&b, &a), dice);
+        assert_close(overlap_coefficient(&b, &a), overlap);
+    }
+
+    #[test]
+    fn signature_coefficients_with_empty_signature_are_zero_and_finite() {
+        let empty = explicit_signature(&[]);
+        let nonempty = explicit_signature(&[((OUT, 10, 100), 2.0)]);
+
+        for value in [
+            dice_coefficient(&empty, &nonempty),
+            dice_coefficient(&nonempty, &empty),
+            overlap_coefficient(&empty, &nonempty),
+            overlap_coefficient(&nonempty, &empty),
+        ] {
+            assert_eq!(value, 0.0);
+            assert!(!value.is_nan());
+        }
     }
 
     #[cfg(feature = "multi-hop")]
