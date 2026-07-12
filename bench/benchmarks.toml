@@ -85,8 +85,8 @@ id          = "sparq-shaclc"
 name        = "SHACL Compact Syntax parse + residual-print throughput"
 category    = "scaling"
 measures    = "min-of-3 microseconds for strict parse, extended parse, and residual-print of a generated shapes corpus (metric_us lines)"
-invoke      = "cargo run -p sparq-shaclc --release --example bench_shaclc -- 2000"
-source      = "crates/sparq-shaclc/examples/bench_shaclc.rs"
+invoke      = "bench/shaclc/run.sh   # use --smoke for a small harness check"
+source      = "bench/shaclc/{run.sh,README.md}; crates/sparq-shaclc/examples/bench_shaclc.rs; crates/sparq-shaclc/src/lib.rs"
 dataset     = "synthetic shapes corpus generated in-process (deterministic; one representative shape per index); args = [shapes=2000]"
 quiet_box_sensitive = true
 featured    = false  # in-crate micro-bench for an opt-in capability crate; not a dashboard series
@@ -470,21 +470,6 @@ status      = "ok"
 # =============================================================================
 # INGEST / PARSE — load + dictionary + external-memory build throughput
 # =============================================================================
-
-# [GPT-5.6] PR #2136 — real public-API throughput coverage for the opt-in SHACL-C crate.
-[[benchmark]]
-id          = "shaclc-parse-throughput"
-name        = "SHACL Compact Syntax strict/extended parse throughput"
-category    = "parse"
-measures    = "best-of-samples MiB/s and elapsed microseconds over repeated parses of the committed positive strict, RDF 1.2, and shaclc-js extended fixture corpus; deterministic emitted-triple counts are asserted across every pass before timing is reported"
-invoke      = "bench/shaclc/run.sh   # use --smoke for one corpus pass"
-source      = "bench/shaclc/{run.sh,README.md}; crates/sparq-shaclc/examples/bench_parse.rs; crates/sparq-shaclc/src/lib.rs"
-dataset     = "committed crates/sparq-shaclc/tests/fixtures/{valid,rdf12,extended}/*.shaclc corpus; no generated or external data"
-quiet_box_sensitive = true
-pinning     = "fixture corpus plus SHACLC_PASSES and SHACLC_SAMPLES; pin both environment values for comparable runs"
-records_to  = "stdout TSV; timing and throughput are runtime-only, non-canonical, and not committed"
-featured    = false
-status      = "ok"
 
 [[benchmark]]
 id          = "cli-ingest"

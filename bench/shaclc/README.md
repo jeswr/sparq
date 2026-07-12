@@ -2,10 +2,10 @@
 
 # SHACL Compact Syntax parse throughput
 
-This benchmark parses the crate's committed positive fixture corpus through the public
-`sparq_shaclc::parse` API. The strict row covers the standard and RDF 1.2 fixtures; the extended
-row adds the shaclc-js extension fixtures. Every repetition must produce the same triple count
-before the runner reports timing, so parser or fixture failures suppress measurement output.
+This benchmark generates a deterministic shapes corpus, parses it through the public
+`sparq_shaclc::parse` API in strict and extended modes, and serialises the strict triples through
+the residual-consumption `write` API. A parse or write failure stops the run before that operation
+can report timing.
 
 Run the release benchmark from the repository root:
 
@@ -13,10 +13,9 @@ Run the release benchmark from the repository root:
 bench/shaclc/run.sh
 ```
 
-Use `--smoke` for a single-pass harness check. `SHACLC_PASSES` controls how many complete corpus
-passes make one sample, and `SHACLC_SAMPLES` controls the number of samples; the best elapsed time
-is reported. Pin both values when comparing runs.
+Use `--smoke` for a small harness check. `SHACLC_SHAPES` controls the generated corpus size; pin it
+when comparing runs. The in-crate driver reports the minimum elapsed time across its repetitions.
 
-The TSV columns are profile, parsed documents, input bytes, emitted triples, best elapsed
-microseconds, and MiB/s. Elapsed time and throughput are host-sensitive, non-canonical runtime
-measurements; do not commit observed values as performance claims.
+Output includes the corpus shape/byte counts plus strict parse, extended parse, and strict write
+`metric_us` rows. Elapsed times are host-sensitive, non-canonical runtime measurements; do not
+commit observed values as performance claims.
