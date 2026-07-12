@@ -18,6 +18,8 @@
 //!   `geof:boundary`, `geof:convexHull` — [`simplify`] (`geof:simplify`,
 //!   Douglas–Peucker), and [`buffer`] (`geof:buffer`, geo 0.33's `Buffer`;
 //!   metric radii via a local equirectangular frame).
+//! - [`max_x`] / [`min_x`] / [`max_y`] / [`min_y`] — the bounding-box
+//!   coordinates in the geometry's stored CRS.
 //! - [`metric_area`] / [`metric_length`] / [`metric_perimeter`] and
 //!   [`centroid`] — metric measurements and the mathematical centroid, using
 //!   the same local equirectangular frame for geographic geometries.
@@ -31,10 +33,9 @@
 //!   classify return an honest [`GeoError::Unsupported`]; see each function's
 //!   docs and the README for the supported matrix. [OPUS-4.8]
 //!
-//! The [`lex`] sub-module mirrors every function at the lexical level
-//! (wkt-literal strings in, values out) — the shape a SPARQL engine builtin
-//! receives. `crate::registry::geof_registry` packages these directly as a
-//! `sparq_engine::FunctionRegistry`, so they run inside SPARQL FILTER/BIND via
+//! The [`lex`] sub-module provides lexical-level WKT-string helpers for direct
+//! use. `crate::registry::geof_registry` parses geometry literals and invokes
+//! the typed functions in this module, so they run inside SPARQL FILTER/BIND via
 //! `sparq_engine::query_with_functions` (default-on `engine` cargo feature).
 //! (Code span, not an intra-doc link: `registry` is `engine`-gated, and this
 //! module doc is compiled in the engine-less build too — a link would break
@@ -519,6 +520,50 @@ de9im_relation!(
     /// `geof:rcc8ntppi` — non-tangential proper part inverse.
     rcc8_ntppi, RCC8_NTPPI_PATTERNS, ["TTTFFTFFT"]
 );
+
+// ---- Envelope and bounding-coordinate functions -----------------------------------
+
+fn bounding_box(g: &GeoGeometry) -> Result<geo_types::Rect<f64>, GeoError> {
+    g.geometry
+        .bounding_rect()
+        .ok_or_else(|| GeoError::Unsupported("empty geometry has no bounding box".to_string()))
+}
+
+/// `geof:maxX` — the maximum X (easting or longitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn max_x(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.max().x)
+}
+
+/// `geof:minX` — the minimum X (easting or longitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn min_x(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.min().x)
+}
+
+/// `geof:maxY` — the maximum Y (northing or latitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn max_y(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.max().y)
+}
+
+/// `geof:minY` — the minimum Y (northing or latitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn min_y(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.min().y)
+}
 
 // ---- Geometry-producing functions -------------------------------------------------
 
@@ -1255,12 +1300,8 @@ pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, G
 
 // ---- Lexical-level mirrors (the engine-builtin shape) ------------------------------
 
-/// Every `geof:` function at the LEXICAL level: arguments and results are
-/// `geo:wktLiteral` lexical forms (plus plain `f64` / `bool`), exactly what a
-/// SPARQL engine builtin sees after evaluating its argument expressions to
-/// literals. sparq-engine can register these one-to-one once it has an
-/// extension-function registry (the required API is tracked in beads —
-/// `bd list -l area:sparq-geo`).
+/// Lexical-level `geof:` helpers: arguments and geometry results are
+/// `geo:wktLiteral` lexical forms (plus plain `f64` / `bool`).
 pub mod lex {
     use super::Unit;
     use crate::literal::parse_wkt_literal;
@@ -1468,5 +1509,55 @@ pub mod lex {
     pub fn buffer(a: &str, radius: f64, unit_iri: &str) -> Result<String, GeoError> {
         Ok(super::buffer(&parse_wkt_literal(a)?, radius, Unit::from_iri(unit_iri)?)?
             .to_wkt_literal())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{max_x, max_y, min_x, min_y};
+    use crate::{parse_wkt_literal, GeoError, GeoGeometry};
+
+    type CoordinateAccessor = fn(&GeoGeometry) -> Result<f64, GeoError>;
+
+    fn assert_close(actual: Result<f64, GeoError>, expected: f64) {
+        let actual = actual.expect("bounding coordinate");
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn bounding_coordinates_distinguish_polygon_extrema() {
+        let polygon = parse_wkt_literal("POLYGON((0 0, 4 0, 4 3, 0 3, 0 0))")
+            .expect("polygon WKT");
+
+        assert_close(max_x(&polygon), 4.0);
+        assert_close(min_x(&polygon), 0.0);
+        assert_close(max_y(&polygon), 3.0);
+        assert_close(min_y(&polygon), 0.0);
+    }
+
+    #[test]
+    fn point_has_identical_minimum_and_maximum_coordinates() {
+        let point = parse_wkt_literal("POINT(2.5 -1.5)").expect("point WKT");
+
+        assert_close(max_x(&point), 2.5);
+        assert_close(min_x(&point), 2.5);
+        assert_close(max_y(&point), -1.5);
+        assert_close(min_y(&point), -1.5);
+    }
+
+    #[test]
+    fn empty_geometry_has_no_bounding_coordinates() {
+        let empty = parse_wkt_literal("GEOMETRYCOLLECTION EMPTY").expect("empty WKT");
+        let accessors: [CoordinateAccessor; 4] = [max_x, min_x, max_y, min_y];
+
+        for accessor in accessors {
+            assert!(matches!(
+                accessor(&empty),
+                Err(GeoError::Unsupported(_))
+            ));
+        }
     }
 }
