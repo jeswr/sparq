@@ -1,3 +1,5 @@
+/// <reference path="./seek-bzip.d.ts" />
+
 // [GPT-5.6] sq-epbw4 — shared browser decompression for the site and GUI.
 //
 // gzip and ZIP use browser-native DecompressionStream support. zstd and bzip2 have no
