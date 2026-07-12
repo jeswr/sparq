@@ -28,8 +28,9 @@ export default function JavascriptWasmSurfacePage() {
           <code className="font-mono text-foreground">@jeswr/sparq</code> wraps the Rust
           triplestore + SPARQL engine — compiled to a single ~886 KB (≈314 KB gzipped)
           wasm artifact — in an idiomatic{" "}
+          {/* [FABLE-5] persistent underline: distinguishable without color (link-in-text-block, sq-0rbfn) */}
           <a
-            className="text-primary underline-offset-4 hover:underline"
+            className="text-primary underline underline-offset-4"
             href="https://rdf.js.org/"
             target="_blank"
             rel="noopener noreferrer"

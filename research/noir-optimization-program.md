@@ -369,3 +369,99 @@ One bead per ranked opportunity, children referenced to epic `sq-uuvac`:
 | `sq-felqr` | 10 — quadratic ACIR expression growth (#4629, design-first) |
 | `sq-b0vpc` | 11 — BoundedVec capacity-assert slice (#5027) |
 | `sq-eesz3` | 12 — investigation on-ramps (#6624 / #6313 / #4972) |
+
+## 10. FRONT decomposition + program status (2026-07-10)
+
+> 🤖 **SPARQ agent** [FABLE-5] — architect pass for epic `sq-uuvac` (Fable
+> collaboration tier). This section reconciles the plan above with the shipped
+> state and re-specs the remaining beads for the implementation fleet. Nothing
+> above is retracted; where this section disagrees with §8–9, this section wins.
+
+### 10.1 Status (verified against GitHub + `bd` on 2026-07-10)
+
+Steps 1–2 of the §8 sequencing SHIPPED as four upstream draft PRs, all restyled
+to the maintainer's binding brevity feedback (2026-07-05):
+
+| PR | Opportunity (§7 row) | Bead | State 2026-07-10 |
+|---|---|---|---|
+| noir#13263 | 1 — div/mod by oversized constant (theme c) | `sq-3qwv1` done | draft open, `MERGEABLE`, no human review |
+| noir#13264 | 2 — truncate after AND mask (#8628) | `sq-9xhoa` in-progress | draft open, `MERGEABLE`, no human review |
+| noir#13265 | 3 — single-limb `to_bits`/`to_radix` | `sq-fwcuo` in-progress | draft open, `MERGEABLE`, no human review |
+| noir#13266 | 4 — dominating-bound range/`Lt` elision (#9463) | `sq-rxir8` in-progress | draft open, `MERGEABLE`, no human review |
+
+The pending gate on all four is @jeswr's author review (§6 protocol: only he
+flips draft → ready). jeswr's original #12780/#12781/#12927 also remain open
+with no maintainer engagement — their fate is the coordination pre-flight for
+the flagship bead. `sq-uuvac.1` closed as a duplicate of upstream #12794
+(already fixed in beta.22). The paper program (`sq-1j5ow` + children) stays
+deferred per the maintainer (P3, LOW priority).
+
+**Tracking correction:** the twelve §9 beads referenced this epic only in
+prose, so `sq-uuvac` falsely read "2/2 complete — eligible for close" while
+eight beads were open. All twelve are now wired as `bd` children of the epic,
+plus a new shepherd bead `sq-uuvac.2` (see §10.3). Visibility note: children
+under an epic do not surface in `bd ready` — drive this program by curated
+waves / enumerating the epic's children directly.
+
+### 10.2 Common acceptance protocol (every remaining implementation bead)
+
+The one load-bearing property of every bead is **circuit-semantics
+preservation**: a wrongly elided constraint *under-constrains* the produced
+circuit — in a proving system that is a correctness/soundness bug, not a perf
+bug. Acceptance is therefore mechanical and identical in shape across beads
+(each bead's `bd` acceptance field adds its specifics):
+
+1. `cargo test -p noirc_evaluator` green; SSA snapshot tests regenerated with
+   every diff justified in the PR.
+2. Differential execution on the focused fixture(s): `nargo execute --force`
+   vs `nargo execute --force-brillig` — identical witness/failure behavior.
+3. Corpus regression: recompile `~/noir-optim-workspace/corpus-zk` + `probes/`
+   with the patched compiler; any unexplained ACIR increase is a stop signal
+   (§8).
+4. `bb gates -s ultra_honk` before/after on the focused fixture — a win must
+   reproduce at gate level or the PR does not go up (§5.1; PR #10159 lesson).
+5. Compile-time sanity on `sha512_100_bytes` (the #12927 O(n²) lesson).
+6. Upstream etiquette per §6 **plus the maintainer's binding brevity feedback
+   (2026-07-04)**: 1–2-line upstream-style code comments; PR body = short
+   summary + small perf table + one-line caveat(s) + disclosure line, long
+   analysis at most in a collapsed `<details>` block. Draft, @jeswr tagged;
+   no agent arms anything — upstream merge is the only "arm".
+
+These criteria gate each change by tests + measurement; they are evidence of
+semantics preservation, not a formal proof of it.
+
+### 10.3 Fleet spec for the remaining beads
+
+Each row is mirrored into the bead's `bd` acceptance/notes fields so a fleet
+agent can pick it up cold. Worktree = fresh `~/noir-optim-workspace/wt-<bead>`
+off noir `master`; target files are pairwise DISJOINT except where a `bd dep`
+edge sequences them (§10.4).
+
+| Bead | Tier | Target (noir repo) | One-line scope + risk note |
+|---|---|---|---|
+| `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
+| `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
+| `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) |
+| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
+| `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in |
+| `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
+| `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream |
+| `sq-jj3ne` | opus | new `ssa/ir/dfg/` range-analysis module + its two consumer passes | flagship v1; dep-gated on `sq-jthy1` + `sq-rxir8` (shared consumer files) and on the #12780/#12927 coordination pre-flight |
+| `sq-uuvac.2` | haiku | none (existing PR branches only) | shepherd the four open drafts: triage feedback (escalate substantive objections to an opus bead, never rebut directly), rebase on conflict, close sibling beads on merge, refresh the baseline on a new noir pin |
+
+Tier rationale: every bead that *removes* constraints or rewrites merge logic
+is opus — under-constraining risk, and per the standing routing rule this
+ZK-adjacent soundness-sensitive work goes to Opus rather than cheaper tiers.
+Measure-first experiments, the scoped stdlib slice, and findings-only work are
+sonnet; pure monitoring is haiku. All upstream PRs are maintainer-gated by
+construction (@jeswr author review), so no fleet auto-arm exists anywhere in
+this program.
+
+### 10.4 Disjointness + dependency edges
+
+No two beads touch the same noir file except `sq-jj3ne`, whose consumers are
+exactly `sq-jthy1`'s pass (`checked_to_unchecked.rs`) and the #13266 elision
+pass (`sq-rxir8`) — hence the `bd dep` edges: `sq-jthy1` blocks `sq-jj3ne` and
+`sq-rxir8` blocks `sq-jj3ne` (NON-parallel with either). All other beads run
+in parallel worktrees with zero textual conflict, and the one-optimization-
+per-PR rule (§6) keeps upstream review independence intact.

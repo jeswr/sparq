@@ -49,7 +49,9 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Windows (S2R)** — `WindowSpec::time` half-open `[t0 + k·step, t0 + k·step + range)`
   time windows (tumbling, or overlapping when `step < range`) and `WindowSpec::count`
   CQL-style row windows; closure is driven by the `max_ts − max_delay` watermark, with
-  out-of-order tolerance and empty-window reporting.
+  out-of-order tolerance and empty-window reporting. The default-off `session_windows`
+  feature adds `WindowSpec::session(gap)`: maximal event-time runs split by an inactivity
+  gap greater than or equal to `gap`, with inclusive `[first.ts, last.ts]` bounds.
 - **Continuous queries (R2R)** — `ContinuousQuery` (SELECT), `ContinuousConstruct`
   (CONSTRUCT, stream-to-stream), and `ContinuousAsk` (ASK), each parsed **once** at
   `register` into a `sparq_engine::PreparedQuery` and re-run per closed window.

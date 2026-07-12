@@ -435,6 +435,12 @@ criteria = "safe-to-deploy"
 delta = "0.10.0 -> 0.10.1"
 notes = "Minor logging-based updated fixing a recent advisory for the crate."
 
+[[audits.bytecode-alliance.audits.rand_xorshift]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.0 -> 0.4.0"
+notes = "Minor updates for a new `rand` crate version, nothing awry."
+
 [[audits.bytecode-alliance.audits.sha1]]
 who = "Andrew Brown <andrew.brown@intel.com>"
 criteria = "safe-to-deploy"
@@ -458,6 +464,15 @@ who = "Pat Hickey <phickey@fastly.com>"
 criteria = "safe-to-deploy"
 version = "0.2.4"
 notes = "Implements a concurrency primitive with atomics, and is not obviously incorrect"
+
+[[audits.bytecode-alliance.audits.unarray]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.1.4"
+notes = """
+Crate is sound, albeit leaky, and not actively malicious. Probably not the best
+crate to use in practice but it's suitable for testing dependencies.
+"""
 
 [[audits.bytecode-alliance.audits.want]]
 who = "Pat Hickey <phickey@fastly.com>"
@@ -902,6 +917,12 @@ delta = "1.0.93 -> 1.0.94"
 notes = "Minor doc changes and clippy lint adjustments+fixes."
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
 
+[[audits.google.audits.quick-error]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-run"
+version = "1.2.3"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
 [[audits.google.audits.quote]]
 who = "Lukasz Anforowicz <lukasza@chromium.org>"
 criteria = "safe-to-deploy"
@@ -1342,6 +1363,12 @@ aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust
 who = "George Burgess IV <gbiv@google.com>"
 criteria = "safe-to-deploy"
 version = "0.1.0"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.wait-timeout]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-run"
+version = "0.2.0"
 aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
 
 [[audits.google.audits.winapi]]
@@ -2430,6 +2457,12 @@ criteria = "safe-to-deploy"
 delta = "0.1.0 -> 0.1.1"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
+[[audits.mozilla.audits.wait-timeout]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = "safe-to-run"
+delta = "0.2.0 -> 0.2.1"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
 [[audits.mozilla.audits.windows-link]]
 who = "Mark Hammond <mhammond@skippinet.com.au>"
 criteria = "safe-to-deploy"
@@ -2521,6 +2554,12 @@ who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
 delta = "0.5.13 -> 0.5.14"
 aggregated-from = "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
+
+[[audits.zcash.audits.rand_xorshift]]
+who = "Sean Bowe <ewillbefull@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.0"
+aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
 
 [[audits.zcash.audits.rustc_version]]
 who = "Jack Grigg <jack@electriccoin.co>"

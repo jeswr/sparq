@@ -845,3 +845,85 @@ fn recompress_same_src_dst_exits_2() {
     assert!(stderr.contains("dirs must differ"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Algebra-rewrite pass is LIT in this binary (sq-7d3dj.30.13) [FABLE-5]
+// ---------------------------------------------------------------------------
+
+/// [FABLE-5] (sq-7d3dj.30.13) COMPILE-TIME + behavioral tripwire that the CLI's
+/// `sparq-engine` dependency keeps `algebra-rewrite` enabled (Cargo.toml dep features,
+/// like `dp-planner`). `sparq_engine::rewrite` only exists under the feature, so if a
+/// future edit drops it from the dep line this test FAILS TO COMPILE in the per-crate
+/// lanes (`cargo test -p sparq-cli`). NB: under a whole-`--workspace` build, feature
+/// unification could satisfy this via a sibling crate — the per-crate CI lanes
+/// (coverage, feature-matrix) are where this tripwire is authoritative.
+///
+/// Behavioral half: the motivating SP2Bench q03-shape `FILTER(?v = <iri>)` must actually
+/// be REWRITTEN (constant folded into the pattern — the algebra changes), while a
+/// literal equality must be left VERBATIM (the sq-lr2ii avoidance contract: `=` on
+/// literals is value-equality, never substituted).
+#[test]
+fn algebra_rewrite_pass_is_lit_and_fires_on_iri_equality() {
+    use spargebra::SparqlParser;
+    let parse = |q: &str| SparqlParser::new().parse_query(q).expect("parse");
+    // (a) IRI equality — the rewrite MUST fire (algebra differs from the verbatim parse).
+    let iri_eq = "SELECT ?s WHERE { ?s <http://ex/p> ?v . FILTER(?v = <http://ex/target>) }";
+    let rewritten = sparq_engine::rewrite::rewrite_query(parse(iri_eq));
+    assert_ne!(
+        format!("{:?}", rewritten),
+        format!("{:?}", parse(iri_eq)),
+        "FILTER(?v = <iri>) should be constant-substituted by the rewrite pass"
+    );
+    // (b) literal equality — NEVER rewritten (value-equality; sq-lr2ii avoidance contract).
+    let lit_eq = "SELECT ?s WHERE { ?s <http://ex/p> ?v . FILTER(?v = 1) }";
+    let verbatim = sparq_engine::rewrite::rewrite_query(parse(lit_eq));
+    assert_eq!(
+        format!("{:?}", verbatim),
+        format!("{:?}", parse(lit_eq)),
+        "literal equality must be left verbatim (sq-lr2ii avoidance contract)"
+    );
+}
+
+/// [FABLE-5] (sq-7d3dj.30.13) End-to-end through the BUILT binary: the q03-shape query
+/// (`FILTER(?v = <iri>)`) returns exactly the correct rows — i.e. the rewritten plan the
+/// shipped CLI now executes is result-correct on the shape that motivated lighting it.
+#[test]
+fn query_iri_equality_filter_rows_correct_through_rewrite() {
+    let dir = scratch("rewrite-iri-eq");
+    let data = write(
+        &dir,
+        "data.nt",
+        "<http://ex/a> <http://ex/p> <http://ex/target> .\n\
+         <http://ex/b> <http://ex/p> <http://ex/other> .\n\
+         <http://ex/c> <http://ex/p> <http://ex/target> .\n",
+    );
+    let (code, stdout, stderr) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "SELECT ?s WHERE { ?s <http://ex/p> ?v . FILTER(?v = <http://ex/target>) } ORDER BY ?s",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("<http://ex/a>"), "row a expected: {stdout}");
+    assert!(stdout.contains("<http://ex/c>"), "row c expected: {stdout}");
+    assert!(!stdout.contains("<http://ex/b>"), "row b must be filtered out: {stdout}");
+    assert!(stdout.contains("2 row(s)"), "exactly two rows: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// [OPUS-4.8] (sq-7d3dj.30.20) COMPILE-TIME tripwire that the CLI's `sparq-engine` dependency
+/// keeps the SP2Bench-q07 `antijoin-static-decline` fix enabled (Cargo.toml dep features, like
+/// `algebra-rewrite`/`dp-planner`). `theta_antijoin_testing::early_declined` only exists under
+/// that feature, so if a future edit drops it from the dep line this test FAILS TO COMPILE in
+/// the per-crate lanes (`cargo test -p sparq-cli`) — the same authoritative-per-crate caveat as
+/// `algebra_rewrite_pass_is_lit_and_fires_on_iri_equality` above. It also asserts the counter
+/// starts at zero (a live, callable feature surface), never a stale value.
+#[test]
+fn antijoin_static_decline_is_lit() {
+    sparq_engine::theta_antijoin_testing::reset_stats();
+    assert_eq!(
+        sparq_engine::theta_antijoin_testing::early_declined(),
+        0,
+        "the antijoin-static-decline early-decline counter is live and reset-to-zero"
+    );
+}

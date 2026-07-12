@@ -155,6 +155,15 @@ export interface Workspace {
    */
   rulesDocs?: WorkspaceRulesDoc[];
   /**
+   * [FABLE-5] sq-ixc3.14 — the per-workspace FEDERATION egress allowlist: the only SPARQL
+   * endpoints a `SERVICE` clause may dial when the desktop GUI evaluates the query over the
+   * native engine (`host` / `host:port` / `*.suffix` entries, the same grammar as
+   * sparq-server's `--service-allow`). FAIL-CLOSED: absent or empty means every SERVICE
+   * endpoint is refused. Optional + backward-compatible: an older record simply omits it
+   * (no schema bump — purely additive, like `inference`).
+   */
+  serviceAllowlist?: string[];
+  /**
    * The schema version of this persisted record. Bumped if the on-disk shape changes so a
    * loader can migrate or discard an incompatible old record rather than crash.
    */
@@ -252,8 +261,24 @@ export function parseWorkspace(value: unknown): Workspace | null {
     inference: parseInferenceMode(v.inference),
     // [sq-glo5r] — backward-compatible: an older record without `rulesDocs` → empty array.
     rulesDocs: parseRulesDocs(v.rulesDocs),
+    // [FABLE-5] sq-ixc3.14 — backward-compatible: no `serviceAllowlist` → empty (fail-closed).
+    serviceAllowlist: parseServiceAllowlist(v.serviceAllowlist),
     schema: WORKSPACE_SCHEMA,
   };
+}
+
+/**
+ * [FABLE-5] sq-ixc3.14 — validate + normalise a persisted federation egress allowlist: keep
+ * only non-empty trimmed strings, drop everything else (a hand-edited or corrupt record must
+ * degrade toward FEWER reachable endpoints, never more — fail-closed).
+ */
+export function parseServiceAllowlist(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((e) => {
+    if (typeof e !== "string") return [];
+    const trimmed = e.trim();
+    return trimmed === "" ? [] : [trimmed];
+  });
 }
 
 function parseSource(value: unknown): WorkspaceSourceMeta | null {
@@ -653,4 +678,117 @@ export async function createWorkspaceStore(
   const kv = detectWebStorage();
   if (kv) return new WebWorkspaceStore(kv);
   return new MemoryWorkspaceStore();
+}
+
+// ---------------------------------------------------------------------------
+// (sq-9i1h9) Serialized per-workspace saves — out-of-order overwrite protection.
+// ---------------------------------------------------------------------------
+
+/**
+ * Serializes whole-workspace saves PER WORKSPACE so a slow OLDER save can never land after —
+ * and overwrite — a NEWER one. Obtain one via {@link createSerializedWorkspaceSaver} and route
+ * EVERY save for a given store through it.
+ */
+export interface SerializedWorkspaceSaver {
+  /**
+   * Enqueue a save of `ws`. Resolves when this state is durably written — or when it has been
+   * SUPERSEDED by a newer save for the same workspace that follows it in the same chain (each
+   * save writes the whole workspace, so the newer snapshot covers this one). Rejects only when
+   * this revision's own write fails (e.g. the localStorage quota is exhausted).
+   */
+  save(ws: Workspace): Promise<void>;
+}
+
+/**
+ * Build a {@link SerializedWorkspaceSaver} over an underlying whole-workspace `write` (normally
+ * a bound {@link WorkspaceStore}.save).
+ *
+ * WHY (sq-9i1h9). The GUI persists by firing `store.save(ws)` from every mutator without
+ * awaiting. On the async Tauri fs backend a save is a multi-await IPC sequence
+ * (ensureDir → writeTextFile → readIds → writeIds), so two un-serialized saves can interleave
+ * and an OLDER save can complete after a NEWER one — the on-disk file then holds the stale
+ * snapshot. (The web/memory backends write synchronously, so the race is specific to the async
+ * backend — which sq-w3dmj makes reachable.)
+ *
+ * HOW. Two cooperating mechanisms, per workspace id:
+ *   1. a PROMISE CHAIN — at most one underlying write is in flight per workspace, in enqueue
+ *      order, so writes can never interleave (a failed write does not wedge the chain);
+ *   2. a MONOTONIC REVISION COUNTER — each enqueued save takes the next revision; when a
+ *      queued save's turn arrives and a newer revision has since been requested, its write is
+ *      DROPPED (the newer whole-workspace snapshot that follows in the chain covers it).
+ */
+export function createSerializedWorkspaceSaver(
+  write: (ws: Workspace) => Promise<void>,
+): SerializedWorkspaceSaver {
+  /** Per-workspace tail of the save chain (the most recently enqueued step). */
+  const tails = new Map<string, Promise<void>>();
+  /** Per-workspace newest REQUESTED revision (assigned at enqueue time, monotonic). */
+  const latest = new Map<string, number>();
+
+  return {
+    save(ws: Workspace): Promise<void> {
+      const id = ws.id;
+      const revision = (latest.get(id) ?? 0) + 1;
+      latest.set(id, revision);
+      // Write only if this is STILL the newest requested revision when its turn arrives — a
+      // stale revision is dropped (see the revision-counter contract above).
+      const runIfCurrent = (): Promise<void> | undefined =>
+        latest.get(id) === revision ? write(ws) : undefined;
+      const prev = tails.get(id) ?? Promise.resolve();
+      // Chain after the previous save WHATEVER its outcome: an older save's failure must
+      // neither wedge nor fail the newer saves queued behind it.
+      const step = prev.then(runIfCurrent, runIfCurrent);
+      tails.set(id, step);
+      // Reset the per-id book-keeping once the chain fully drains (this step settled while
+      // still the tail), so deleted workspaces do not accumulate entries forever. The handler
+      // also keeps a fire-and-forget rejected tail from surfacing as an unhandled rejection;
+      // the CALLER's copy of `step` still rejects normally.
+      const gc = () => {
+        if (tails.get(id) === step) {
+          tails.delete(id);
+          latest.delete(id);
+        }
+      };
+      step.then(gc, gc);
+      return step;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// (sq-w3dmj) Save-failure classification — surfacing, not swallowing.
+// ---------------------------------------------------------------------------
+
+/**
+ * True when `err` is the browser's storage-quota-exhausted failure — the `QuotaExceededError`
+ * `DOMException` thrown by `localStorage.setItem` when a large workspace snapshot no longer
+ * fits (plus Firefox's legacy `NS_ERROR_DOM_QUOTA_REACHED` name). Checked structurally by
+ * `name` (not `instanceof DOMException`) so it works across realms and in Node tests.
+ */
+export function isQuotaExceededError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const name = (err as { name?: unknown }).name;
+  return name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED";
+}
+
+/**
+ * A short, honest, user-facing description of a failed workspace save, for surfacing in the
+ * GUI instead of swallowing the failure (sq-w3dmj): the quota case names the real limit (and
+ * that the desktop on-disk backend does not share it); anything else carries the underlying
+ * message when there is one.
+ */
+export function describeWorkspaceSaveError(err: unknown): string {
+  if (isQuotaExceededError(err)) {
+    return (
+      "workspace save failed: browser storage quota exceeded — the snapshot is too large for " +
+      "localStorage (the desktop app's on-disk backend has no such limit)"
+    );
+  }
+  const message =
+    typeof err === "object" &&
+    err !== null &&
+    typeof (err as { message?: unknown }).message === "string"
+      ? (err as { message: string }).message
+      : "";
+  return message ? `workspace save failed: ${message}` : "workspace save failed";
 }

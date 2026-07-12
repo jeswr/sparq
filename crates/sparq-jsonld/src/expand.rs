@@ -202,7 +202,7 @@ fn expand_map(
         let has_value = has_key_expanding_to(&active_context, element, "@value");
         let single_id = is_single_entry_expanding_to(&active_context, element, "@id");
         if !has_value && !single_id {
-            active_context = *active_context.previous_context.clone().unwrap();
+            active_context = (*active_context.previous_context.clone().unwrap()).clone();
         }
     }
 
@@ -379,12 +379,41 @@ fn expand_object(
                 add_value(reverse_map(result), &expanded_property, item);
             }
         } else {
-            add_value(result, &expanded_property, expanded_value);
+            // step 13.14 (JSON-LD 1.1 API): the forward-property add ALWAYS uses
+            // `asArray = true` (the reference `_addValue(..., propertyIsArray
+            // true)`), so an EMPTY expanded value still materialises the property
+            // as an empty array rather than being dropped. Only a `null` (`None`)
+            // expansion is dropped, and that already `continue`d above. This is
+            // what retains empty `@set`/`@list`/plain-array properties normatively
+            // (W3C expand/0004, 0014, 0015, 0016).
+            add_value_as_array(result, &expanded_property, expanded_value);
         }
     }
 
     // step 14: process deferred @nest keys into the same result.
     for nest_key in nests.clone() {
+        // [SONNET-4.6] sq-oy1f.45 — §5.1.2 step 14: apply any property-scoped context
+        // declared on the @nest-aliased term (tc037/tc038).  The context is applied with
+        // override_protected = true and propagate = true so that term definitions from the
+        // nest's scoped context remain visible when descending into child node objects
+        // (e.g. the `agent → @nest` alias in tc038 must be visible inside `aut`'s value).
+        let nest_ctx_and_base: Option<(Json, Option<String>)> = active_context
+            .term_definition(&nest_key)
+            .and_then(|td| td.context().cloned().map(|c| (c, td.base_url.clone())));
+        let nest_processed;
+        let nest_active: &ActiveContext = if let Some((sctx, sbase)) = &nest_ctx_and_base {
+            nest_processed = active_context.process_scoped(
+                sctx,
+                sbase.as_deref(),
+                true,  // override_protected: may redefine protected terms
+                true,  // propagate: keep context in child nodes (not a type-scoped ctx)
+                ctx.loader,
+                ctx.options,
+            )?;
+            &nest_processed
+        } else {
+            active_context
+        };
         for nv in as_array(element.get(&nest_key).cloned().unwrap_or_else(json_null)) {
             if !matches!(nv, Json::Obj(_)) || has_key_expanding_to(active_context, &nv, "@value") {
                 return Err(JsonLdError::new(E::InvalidNestValue));
@@ -392,7 +421,7 @@ fn expand_object(
             let mut inner_nests = Vec::new();
             expand_object(
                 ctx,
-                active_context,
+                nest_active,
                 type_scoped_context,
                 active_property,
                 &nv,
@@ -424,8 +453,14 @@ fn expand_keyword(
     match expanded_property {
         "@id" => match value {
             Json::Str(s) => {
-                if let Some(iri) = active_context.expand_iri(s, true, false) {
-                    set_obj(result, "@id", Json::Str(iri));
+                // [SONNET-4.6] sq-oy1f.45 — §5.1.2 step 13.4.1: "set result[@id] to the
+                // result of IRI expanding value" — the spec always stores the result,
+                // including null (a keyword-form string that is not a recognised keyword
+                // expands to null per §5.2 step 2).  W3C expand/0122 expects
+                // `{"@id": null}` for `@ignoreMe`, not an empty node object `{}`.
+                match active_context.expand_iri(s, true, false) {
+                    Some(iri) => set_obj(result, "@id", Json::Str(iri)),
+                    None => set_obj(result, "@id", json_null()),
                 }
             }
             Json::Arr(items) if frame_expansion => {
@@ -446,15 +481,57 @@ fn expand_keyword(
             _ => return Err(JsonLdError::new(E::InvalidIdValue)),
         },
         "@type" => {
-            // step 13.4.4: @type expands against the type-scoped context (vocab + relative).
-            let mut expanded_types = Vec::new();
-            for t in type_values(value, frame_expansion)? {
-                if let Some(iri) = type_scoped_context.expand_iri(&t, true, true) {
-                    expanded_types.push(Json::Str(iri));
+            // [FABLE-5] sq-oy1f.29 — frameExpansion keeps the framing @type PATTERN
+            // shapes: the wildcard `{}`, the match-none `[]`, and the default map
+            // `{"@default": …}` (json-ld11-framing §2.1/§2.3). Dropping them turned a
+            // constrained frame into the match-everything frame.
+            match value {
+                Json::Obj(m) if frame_expansion && m.is_empty() => {
+                    set_obj(result, "@type", Json::Arr(vec![Json::obj()]));
                 }
-            }
-            for t in expanded_types {
-                add_value(result, "@type", t);
+                Json::Obj(m)
+                    if frame_expansion && m.len() == 1 && m[0].0 == "@default" =>
+                {
+                    let defaults: Vec<Json> = as_array(m[0].1.clone())
+                        .iter()
+                        .filter_map(|t| {
+                            t.as_str()
+                                .and_then(|s| type_scoped_context.expand_iri(s, true, true))
+                                .map(Json::Str)
+                        })
+                        .collect();
+                    set_obj(
+                        result,
+                        "@type",
+                        Json::Arr(vec![Json::Obj(vec![(
+                            "@default".to_string(),
+                            Json::Arr(defaults),
+                        )])]),
+                    );
+                }
+                Json::Arr(items) if frame_expansion && items.is_empty() => {
+                    set_obj(result, "@type", Json::Arr(Vec::new()));
+                }
+                Json::Arr(items)
+                    if frame_expansion
+                        && items.len() == 1
+                        && matches!(&items[0], Json::Obj(m) if m.is_empty()) =>
+                {
+                    set_obj(result, "@type", Json::Arr(vec![Json::obj()]));
+                }
+                _ => {
+                    // step 13.4.4: @type expands against the type-scoped context
+                    // (vocab + relative).
+                    let mut expanded_types = Vec::new();
+                    for t in type_values(value, frame_expansion)? {
+                        if let Some(iri) = type_scoped_context.expand_iri(&t, true, true) {
+                            expanded_types.push(Json::Str(iri));
+                        }
+                    }
+                    for t in expanded_types {
+                        add_value(result, "@type", t);
+                    }
+                }
             }
         }
         "@graph" => {
@@ -505,8 +582,25 @@ fn expand_keyword(
             }
         }
         "@language" => match value {
-            Json::Str(_) => set_obj(result, "@language", value.clone()),
-            Json::Arr(_) if frame_expansion => set_obj(result, "@language", value.clone()),
+            // [FABLE-5] sq-oy1f.29 — language tags are normalised to lower case
+            // (§5.1.2 step 13.4.6 "Processors MAY normalize language tags to lower
+            // case"; the reference processors and the framing suite do).
+            Json::Str(s) => set_obj(result, "@language", Json::Str(s.to_lowercase())),
+            Json::Arr(items) if frame_expansion => {
+                let lowered: Vec<Json> = items
+                    .iter()
+                    .map(|i| match i {
+                        Json::Str(s) => Json::Str(s.to_lowercase()),
+                        other => other.clone(),
+                    })
+                    .collect();
+                set_obj(result, "@language", Json::Arr(lowered));
+            }
+            // [FABLE-5] sq-oy1f.29 — frameExpansion also admits the wildcard `{}`
+            // language pattern (framing value patterns, json-ld11-framing §2.2).
+            Json::Obj(m) if frame_expansion && m.is_empty() => {
+                set_obj(result, "@language", value.clone());
+            }
             _ => return Err(JsonLdError::new(E::InvalidLanguageTaggedString)),
         },
         "@direction" => match value {
@@ -643,7 +737,8 @@ fn expand_property_value(
                 let drop_lang =
                     lang == "@none" || active_context.expand_iri(&lang, false, true).as_deref() == Some("@none");
                 if !drop_lang {
-                    v.push(("@language".to_string(), Json::Str(lang.clone())));
+                    // [FABLE-5] sq-oy1f.29 — language tags normalise to lower case.
+                    v.push(("@language".to_string(), Json::Str(lang.to_lowercase())));
                 }
                 if let Some(d) = direction {
                     v.push(("@direction".to_string(), Json::Str(d.as_str().to_string())));
@@ -817,7 +912,8 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
                     _ => active_context.default_base_direction(),
                 };
                 if let Some(l) = language {
-                    result.push(("@language".to_string(), Json::Str(l)));
+                    // [FABLE-5] sq-oy1f.29 — language tags normalise to lower case.
+                    result.push(("@language".to_string(), Json::Str(l.to_lowercase())));
                 }
                 if let Some(d) = direction {
                     result.push(("@direction".to_string(), Json::Str(d.as_str().to_string())));
@@ -837,6 +933,22 @@ fn cleanup(
 ) -> Result<Option<Json>, JsonLdError> {
     let has = |m: &[(String, Json)], k: &str| m.iter().any(|(kk, _)| kk == k);
 
+    // step 19 (W3C JSON-LD 1.1 API §5.1.2): under a null or `@graph` active
+    // property, drop free-floating values — a value object (ANY map with
+    // `@value`, e.g. also carrying `@language`/`@type`/`@index`), a list object
+    // (`@list`), an empty map, or an `@id`-only node object. Checked BEFORE the
+    // value/list branches return so the drop reaches those shapes (W3C
+    // expand/0045, 0046). Reference: jsonld.js drops when the result contains
+    // `@value` or `@list`, not merely when those are the SOLE key.
+    let free_floating =
+        !frame_expansion && (active_property.is_none() || active_property == Some("@graph"));
+    if free_floating {
+        let only_id = members.len() == 1 && members[0].0 == "@id";
+        if members.is_empty() || has(&members, "@value") || has(&members, "@list") || only_id {
+            return Ok(None);
+        }
+    }
+
     // step 15: a value object.
     if has(&members, "@value") {
         const ALLOWED: &[&str] = &["@value", "@type", "@language", "@index", "@direction"];
@@ -846,23 +958,59 @@ fn cleanup(
         if has(&members, "@type") && has(&members, "@language") {
             return Err(JsonLdError::new(E::InvalidValueObject));
         }
-        let is_json = matches!(obj_get(&members, "@type"), Some(Json::Str(s)) if s == "@json");
+        // A value object's `@type` is a SINGLE value in the JSON-LD data model
+        // (unlike a node object's `@type`, which is an array). The general
+        // keyword-entry path (step 13.4.4) arrayifies every `@type`; collapse a
+        // single-element array back to a scalar here so the expanded value
+        // object matches the normative shape (W3C expand/0002, 0013, tjs15/16).
+        // Frame-expansion keeps arrays (a frame may match multiple types).
+        if !frame_expansion {
+            if let Some(slot) = members.iter_mut().find(|(k, _)| k == "@type") {
+                if let Json::Arr(a) = &slot.1 {
+                    if a.len() == 1 {
+                        slot.1 = a[0].clone();
+                    }
+                }
+            }
+        }
+        // [FABLE-5] sq-oy1f.29 — `@type: "@json"` may arrive as a kept single-element
+        // array under frameExpansion; recognise both shapes.
+        let is_json = match obj_get(&members, "@type") {
+            Some(Json::Str(s)) => s == "@json",
+            Some(Json::Arr(a)) if frame_expansion => {
+                matches!(a.as_slice(), [Json::Str(s)] if s == "@json")
+            }
+            _ => false,
+        };
         let v = obj_get(&members, "@value").unwrap();
         if !is_json {
-            if is_null(v) || matches!(v, Json::Arr(a) if a.is_empty()) {
+            // An empty-array `@value` is a match-none value PATTERN under
+            // frameExpansion (kept); outside framing the value object is dropped.
+            if is_null(v) || (!frame_expansion && matches!(v, Json::Arr(a) if a.is_empty())) {
                 return Ok(None);
             }
             if has(&members, "@language")
                 && !matches!(v, Json::Str(_))
-                && !(frame_expansion && matches!(v, Json::Arr(_)))
+                // [FABLE-5] sq-oy1f.29 — frameExpansion also admits the wildcard `{}`
+                // and alternative-array `@value` patterns alongside `@language`.
+                && !(frame_expansion && matches!(v, Json::Arr(_) | Json::Obj(_)))
             {
                 return Err(JsonLdError::new(E::InvalidLanguageTaggedValue));
             }
             if let Some(t) = obj_get(&members, "@type") {
-                let ok = match t {
-                    Json::Str(s) => is_absolute_iri(s) || is_blank_node(s),
-                    Json::Arr(_) if frame_expansion => true,
+                // [FABLE-5] sq-oy1f.29 — a frame value pattern's @type alternative may
+                // also be the wildcard `{}` or `@json`.
+                let type_ok = |e: &Json| match e {
+                    Json::Str(s) => {
+                        is_absolute_iri(s) || is_blank_node(s) || (frame_expansion && s == "@json")
+                    }
+                    Json::Obj(m) => frame_expansion && m.is_empty(),
                     _ => false,
+                };
+                let ok = match t {
+                    // Frame-expansion permits an array of types on a value object.
+                    Json::Arr(a) if frame_expansion => a.iter().all(type_ok),
+                    other => type_ok(other),
                 };
                 if !ok {
                     return Err(JsonLdError::new(E::InvalidTypedValue));
@@ -898,16 +1046,8 @@ fn cleanup(
         return Ok(None);
     }
 
-    // step 19: free-floating node drop under a null / @graph active property.
-    if !frame_expansion && (active_property.is_none() || active_property == Some("@graph")) {
-        if members.is_empty() {
-            return Ok(None);
-        }
-        if members.len() == 1 && members[0].0 == "@id" {
-            return Ok(None);
-        }
-    }
-
+    // step 19 (node object): the empty / `@id`-only free-floating drop already
+    // ran up-front (before the value/list branches) so it reaches every shape.
     Ok(Some(Json::Obj(members)))
 }
 
@@ -1083,6 +1223,32 @@ fn add_value(members: &mut Vec<(String, Json)>, key: &str, value: Json) {
         }
         None => members.push((key.to_string(), Json::Arr(vec![value]))),
     }
+}
+
+/// `addValue` with `asArray = true` (JSON-LD 1.1 API, Add Value algorithm step 1):
+/// ENSURE `key` maps to an array first, THEN add `value`. Unlike [`add_value`],
+/// this RETAINS the property when `value` is an empty array — the load-bearing
+/// difference for a term whose value expands to `[]` (a `@set`/`@list` container,
+/// or a plain empty-array property value), whose empty-array expansion is a
+/// normative, retained property (W3C expand/0004, 0015, 0016). Used on EVERY
+/// forward-property add (the reference `_addValue(..., propertyIsArray true)` is
+/// unconditional); a `null` (`None`) expansion is dropped by the caller before
+/// this is reached.
+fn add_value_as_array(members: &mut Vec<(String, Json)>, key: &str, value: Json) {
+    // step 1: seed an empty array at key if absent / non-array (folding any
+    // pre-existing scalar into it) — this is what makes an empty add retain.
+    match members.iter_mut().find(|(k, _)| k == key) {
+        Some((_, Json::Arr(_))) => {}
+        Some((_, other)) => {
+            let old = std::mem::replace(other, Json::Arr(vec![]));
+            if let Json::Arr(a) = other {
+                a.push(old);
+            }
+        }
+        None => members.push((key.to_string(), Json::Arr(vec![]))),
+    }
+    // step 2/3: add value (an array contributes each element; scalar appends).
+    add_value(members, key, value);
 }
 
 /// Prepends `value` to the array stored at `key`: the index-map steps place the (re-)expanded

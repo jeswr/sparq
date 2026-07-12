@@ -1,0 +1,7 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:rigidity:> .
+
+ex:Person ufo:rigidity ufo:Rigid.
+ex:Employee ufo:rigidity ufo:AntiRigid.
+ex:alicePerson ufo:holdsIn ex:w2.
+ex:Employee ufo:contingentFor ex:alice.

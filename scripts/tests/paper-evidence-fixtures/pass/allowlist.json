@@ -1,0 +1,5 @@
+{
+  "_comment": "PASS-fixture allowlist: exactly the one un-migrated canonical record. seed_count is the ceiling (shrink-only).",
+  "seed_count": 1,
+  "keys": ["demo.unmigrated_floor"]
+}

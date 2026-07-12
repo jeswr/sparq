@@ -256,10 +256,22 @@ Materialize the authorization view from the access-control documents, then enfor
   `governing_acl`/`scope`, which `WacDecision::acl_link_header()` turns into the FR-5
   `Link: rel="acl"` surface (above). **Honest scope:** Phase-1 implements
   the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
-  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk; it is NOT the
-  full WAC HTTP surface (FR-4's `POST /authz/*` on `sparq-server` is the separate sq-snopa.6
-  architecture call), and the `decide` `scope` is the ACL-*document* discovery scope, while
-  whether a grant within that ACL applies is the verdict the oracle computes.
+  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk. The **HTTP shell**
+  over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
+  `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
+  that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split). The
+  **ODRL lane on `/authz/*`** (sq-lrtc3.1 + sq-3mu76) has LANDED as `sparq-server`'s opt-in
+  `odrl-authz` feature — dataset-carried ODRL policies are fed through `materialize_odrl_policy`
+  (deny-overrides, fail-closed) before the access-controlled query runs, so an ODRL policy gates a
+  SPARQL query end-to-end over HTTP; since sq-3mu76 the advisory `/authz/decide` +
+  `/authz/wac-allow` run the same lane (read-scoped advertisement), so they never report an allow
+  the query lane would refuse to honour. The
+  **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
+  and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
+  was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
+  does NOT authenticate — it takes an already-resolved session, exactly as this library does. The
+  `decide` `scope` is the ACL-*document* discovery scope, while whether a grant within that ACL
+  applies is the verdict the oracle computes.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
@@ -281,7 +293,9 @@ Materialize the authorization view from the access-control documents, then enfor
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
   one-shot allow — so the granted agent is verified **per session**, not frozen to the
-  materializing party. `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`/`neq`) maps
+  materializing party. `odrl:recipient`/`odrl:assignee`
+  (`eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` — the set operators one head /
+  exception per member, [FABLE-5] sq-5fkpp) maps
   faithfully (recipient-of-data = session agent); an `odrl:dateTime` **inclusive** bound
   (`lteq` → `auth:notAfter`, `gteq` → `auth:notBefore`) maps to a **live-clock window**
   re-checked against `Session::now` per request ([OPUS-4.8] sq-0q7n — a lapsed window denies
@@ -414,7 +428,7 @@ table of expected `(agent, client, mode, resource) → Allow | Deny` decisions �
 harness asserts the engine reproduces every expected decision, reporting **all** mismatches
 at once. The module is **always compiled** (no feature gate; it depends only on the
 always-present ACP path). The scenario corpus is a single reusable source in
-`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 12 scenarios / 40 decisions),
+`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 13 scenarios / 45 decisions),
 consumed by `crates/sparq-solid/tests/conformance_acp.rs` (the parity test, plus a negative
 control asserting a wrong expectation is *reported*, not panicked) so a second test target —
 the differential oracle (`sq-t58w.7`) — can run the IDENTICAL scenarios without copy-paste.
@@ -472,7 +486,7 @@ semantics. A scenario is an `.acl`-document corpus (`AclBuilder`) plus a table o
 `(agent, client, mode, resource) → Allow | Deny` decisions; the harness asserts the engine
 reproduces every one, reporting all mismatches at once. Always compiled (no feature gate).
 The corpus is a single reusable source in `crates/sparq-solid/tests/common/`
-(`common::wac_corpus()`, 12 scenarios / 40+ decisions), consumed by
+(`common::wac_corpus()`, 13 scenarios / 51 decisions), consumed by
 `crates/sparq-solid/tests/conformance_wac.rs` (the parity test, a `run_via_podstore` parity
 test over the full `PodStore` method-form path, and a negative control) and reusable by a
 second test target — the differential oracle (`sq-t58w.7`) — without copy-paste. The
@@ -822,6 +836,37 @@ wrong-key / unresolvable-issuer list VC, or a verified graph with no `encodedLis
 status-authority `did:key`/`did:web` issuer DID via `VerifyingLiveStatusCheck::with_did_issuer(.., did_resolver,
 authority_did, ..)` (the `did` feature, same binding the admission gate uses). Research-grade, externally
 **UNAUDITED** (`sq-qhy4`): a verified issuer signature, NOT a privacy/unlinkability guarantee.
+
+## Pattern-scoped masking spike — [FABLE-5] sq-lrtc3.3 (opt-in `pattern-scope`)
+
+Sub-named-graph (triple-pattern / row-level) result masking: an ODRL-style target as a
+set of **allow/deny triple patterns** over a source graph, so a session can be granted
+*"the contacts graph except phone numbers"*. Design record (options analysis, ODRL
+vocabulary, production caching path, follow-up beads):
+`research/odrl-pattern-scoped-targets-2026-07.md`. Measured envelope:
+`bench/pattern-scope/` (work-box JSONs, non-canonical).
+
+**Mechanism — masked-subgraph materialization, NOT per-scan filtering.** A scoped graph
+is decoded, filtered, and rebuilt as a physical replica; the engine evaluates a dataset
+in which masked triples are **physically absent**, so equivalence with an oracle store
+(the source with those triples deleted) under SELECT / `OPTIONAL` / `EXISTS` / `MINUS` /
+aggregates / `COUNT` / `ASK` / `GRAPH ?g` holds **by construction** (differential
+battery: `crates/sparq-solid/tests/pattern_scope.rs`). Zero engine/core changes; the
+graph-granular enforcement walk is reused unchanged.
+
+- `ScopePattern::new(s, p, o)` / `::any()` — per-triple predicate, `None` = wildcard,
+  **term-identity** matching (no join variables, no value equality).
+- `GraphScope::allow_only(patterns)` (permission shape) / `::deny_within(patterns)`
+  (prohibition carving a hole); a triple is visible iff it matches ≥1 allow AND 0 deny
+  (**deny overrides allow**; empty allow grants nothing — fail-closed).
+- `masked_graph(&Graph, &GraphScope) -> Graph`; `masked_dataset(&Graph, &decisions)`
+  (explicit-decision assembly: absent from the map = absent from the dataset; a fully
+  masked graph is **omitted** — indistinguishable from absent).
+- `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
+  (a scope can only shrink the session's graph-level accessible set, never widen), then
+  `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
+  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
+  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
 
 ## Related skills
 

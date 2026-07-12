@@ -47,7 +47,15 @@ pyo3-build-config = "0.29"
 pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
 # `mmap` enables Graph::save / Graph::open (the out-of-core persisted-index path).
 sparq-core = { path = "../sparq-core", features = ["mmap"] }
-sparq-engine = { path = "../sparq-engine" }
+# [SONNET-4.6] sq-11664: enable the same planner/optimizer feature trio the CLI ships
+# (crates/sparq-cli/Cargo.toml) so the pip wheel executes the same rewritten plans the
+# CLI and the canonical benchmarks measure (sq-hmd7l.18 finding: wheel was 'rewrite-dark',
+# up to ~100× slower than engine-internal on rewrite-dependent queries, e.g. q03c).
+# sparq-py is a leaf wheel artifact — the same leaf/binary-crate rationale as sparq-cli
+# and sparq-server (sq-7d3dj.30.13): the shipped wheel should use the optimal planner,
+# the sparq-engine LIBRARY defaults stay OFF (library consumers choose explicitly).
+# These features add zero new dependencies and no `unsafe`.
+sparq-engine = { path = "../sparq-engine", features = ["dp-planner", "algebra-rewrite", "antijoin-static-decline"] }
 # Opt-in reasoning. Pulling it here is fine: sparq-py is a leaf crate, so the reason
 # crate never enters the engine/CLI/wasm dependency graphs through this edge.
 sparq-reason = { path = "../sparq-reason" }
@@ -66,10 +74,10 @@ spargebra.workspace = true
 # RecordBatch projection (one struct column per variable); `arrow-array`/`arrow-schema`
 # with their `ffi` feature give the C Data Interface (`FFI_ArrowArrayStream`) we hand to
 # pyarrow as a PyCapsule (no re-serialisation). Versions are workspace-pinned to match
-# sparq-arrow's arrow 55 exactly so the `RecordBatch` type is byte-identical across the edge.
+# sparq-arrow's arrow 59 exactly so the `RecordBatch` type is byte-identical across the edge.
 sparq-arrow = { path = "../sparq-arrow", features = ["arrow"], optional = true }
-arrow-array = { version = "55", features = ["ffi"], optional = true }
-arrow-schema = { version = "55", features = ["ffi"], optional = true }
+arrow-array = { version = "59", features = ["ffi"], optional = true }
+arrow-schema = { version = "59", features = ["ffi"], optional = true }
 
 [features]
 # [OPUS-4.8] sq-oy1f.20: JSON-LD is DEFAULT-ON in the Python wheel — the maintainer-
@@ -83,8 +91,27 @@ arrow-schema = { version = "55", features = ["ffi"], optional = true }
 # are untouched. Toggleable: `cargo build -p sparq-py --no-default-features` (and a
 # `--no-default-features` wheel) drops the oxjsonld parser; then `format="jsonld"`
 # fails closed (sparq-core rejects the unknown format rather than mis-parsing it).
-default = ["jsonld"]
+# [SONNET-4.6] sq-11664: the three planner/optimizer features the CLI ships are now
+# DEFAULT-ON for the wheel too (leaf/binary-crate rationale — sparq-engine LIBRARY
+# defaults stay OFF). Toggleable: `maturin build --no-default-features` (or
+# `--no-default-features --features jsonld`) produces a rewrite-dark wheel for
+# debugging; `--features dp-planner,algebra-rewrite,antijoin-static-decline` (all
+# in the default set) is a no-op on the default wheel.
+default = ["jsonld", "dp-planner", "algebra-rewrite", "antijoin-static-decline"]
 jsonld = ["sparq-core/jsonld"]
+# [SONNET-4.6] sq-11664: forwarding features for the planner trio. Each forwards the
+# corresponding `sparq-engine` opt-in; the engine LIBRARY default stays OFF (only this
+# leaf crate's Cargo.toml edge opts it in for the wheel).
+# `algebra-rewrite` — pre-execution FILTER(?v = <iri>) constant-substitution + !bound
+# anti-join pass (#1735 / sq-7d3dj.30.1); result-equivalent, zero new deps, no `unsafe`.
+algebra-rewrite = ["sparq-engine/algebra-rewrite"]
+# `dp-planner` — DPccp bushy join-order planner (#1733 / sq-7d3dj.30.5); result-
+# equivalent, zero new deps, no `unsafe`.
+dp-planner = ["sparq-engine/dp-planner"]
+# `antijoin-static-decline` — static early-decline fix for bare-`!bound` OPTIONAL
+# anti-join evaluation order (sq-7d3dj.30.20); bag-result-equivalent, zero new deps,
+# no `unsafe`.
+antijoin-static-decline = ["sparq-engine/antijoin-static-decline"]
 # [OPUS-4.8] sq-lt1ml (gh-910): `Graph.query_arrow(sparql) -> pyarrow.Table`. OFF by
 # default — the lean wheel pays nothing (no Arrow dependency, no extra code compiled).
 # A wheel built with `--features arrow` (the `arrow` PyPI extra is wired through this

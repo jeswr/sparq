@@ -18,13 +18,31 @@ pub(crate) mod substrate_join;
 // gated behind `substrate-join` (same feature, no new dep).
 #[cfg(feature = "substrate-join")]
 mod owl_delta_adj;
+// [FABLE-5] sq-6tykl.3 (epic sq-6tykl) — opt-in STRATIFIED DATALOG rules (RDFox-parity
+// track): a small native rule dialect with NOT (negation as failure) + AGGREGATE
+// (COUNT) atoms, a stratification checker, and a non-incremental per-stratum
+// evaluator on the shared substrate join kernels. Behind the `datalog` feature; when
+// off the whole module is cfg'd out (the lean-core posture, like `compiled-rules`).
+#[cfg(feature = "datalog")]
+pub mod datalog;
 #[cfg(feature = "d-entail")]
 pub mod dtype;
 #[cfg(feature = "explain")]
 pub mod explain;
 pub mod n3;
 mod owl;
+#[cfg(feature = "profile")]
+pub mod profile;
 mod rdfs;
+// [Kern] kern/quoted-triple-infer — opt-in QUOTED-TRIPLE (RDF 1.2 reifier) inference
+// for the OWL 2 RL profile: the reif-dtr destructure / reif-ctr construct rules, with
+// reif-ctr restricted to EXISTING triples and leaf-component terms so the Herbrand
+// base stays finite (termination argument in the module docs). Behind the
+// `quoted-triples` feature; when off the whole module is cfg'd out (the lean-core
+// posture, like `dtype` / `datalog`) and `Profile::OwlRl` closures are byte-identical
+// to before this module existed.
+#[cfg(feature = "quoted-triples")]
+mod reify;
 // [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the opt-in RIF-Core (monotone Horn) rule
 // front-end over the N3 chainer. Behind the `rif-core` feature; when off the whole
 // module is cfg'd out (the lean-core posture, like `dtype` / `explain`).
@@ -92,6 +110,43 @@ pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id; 3]>
         #[cfg(feature = "d-entail")]
         Profile::D => dtype::materialize_d(&dtype::Recognized::standard(), dict, triples),
     }
+}
+
+/// Materialize a closure and return opt-in rule instrumentation.
+#[cfg(feature = "profile")]
+pub fn materialize_profiled(
+    profile: Profile,
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+) -> (usize, profile::Report) {
+    materialize_profiled_with(profile::Profiler::new(), profile, dict, triples)
+}
+
+/// Materialize with a configured profiler, including its progress callback.
+#[cfg(feature = "profile")]
+pub fn materialize_profiled_with(
+    mut profiler: profile::Profiler,
+    profile: Profile,
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+) -> (usize, profile::Report) {
+    let added = match profile {
+        Profile::Rdfs => {
+            profiler.observe("RDFS rules", |ts| rdfs::materialize_rdfs(dict, ts), triples)
+        }
+        Profile::OwlRl => profiler.observe(
+            "OWL RL fixpoint rules",
+            |ts| owl::materialize_owl_rl(dict, ts),
+            triples,
+        ),
+        #[cfg(feature = "d-entail")]
+        Profile::D => profiler.observe(
+            "rdfD1",
+            |ts| dtype::materialize_d(&dtype::Recognized::standard(), dict, ts),
+            triples,
+        ),
+    };
+    (added, profiler.finish())
 }
 
 /// Standard RDF/RDFS vocabulary ids, interned once. Interning is idempotent — it returns

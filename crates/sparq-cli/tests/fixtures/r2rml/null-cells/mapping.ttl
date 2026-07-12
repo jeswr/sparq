@@ -1,0 +1,11 @@
+# [FABLE-5] (sq-lsp7k.8) R2RML NULL semantics over CSV (empty cell = NULL): a NULL in an
+# object map skips that triple only; a NULL in a column the subject template references
+# skips the whole row (no term is generated). The construct the W3C null test cases
+# (R2RMLTC0004*, R2RMLTC0008*) exercise, CSV-adapted.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+<#TriplesMap1> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "people" ] ;
+  rr:subjectMap [ rr:template "http://example.com/p/{id}" ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "name" ] ] ;
+  rr:predicateObjectMap [ rr:predicate ex:nick ; rr:objectMap [ rr:column "nick" ] ] .

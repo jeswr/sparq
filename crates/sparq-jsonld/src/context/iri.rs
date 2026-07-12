@@ -93,16 +93,28 @@ impl ActiveContext {
                 if prefix == "_" || suffix.starts_with("//") {
                     return Some(value.to_string());
                 }
-                // If the prefix is a term flagged `@prefix`, concatenate.
-                if let Some(pdef) = self.term_definitions.get(prefix) {
-                    if pdef.prefix {
-                        if let Some(piri) = &pdef.iri {
-                            return Some(format!("{}{}", piri, suffix));
+                // [SONNET-4.6] sq-oy1f.45 — a colon in a fragment (e.g. `#Test:2`) does
+                // NOT mark a compact-IRI prefix; the prefix must be a valid RFC 3986 URI
+                // scheme (ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )).  A non-scheme
+                // prefix (starting with `#`, containing non-scheme chars, etc.) means the
+                // value is a relative reference — fall through to base resolution (step 8).
+                // W3C expand/0109: `#Test:2` must resolve against the base, not be returned
+                // as-is as if it were an absolute IRI.
+                if !is_valid_scheme(prefix) {
+                    // Not a compact IRI (prefix is not a valid scheme); fall through to
+                    // vocab / base resolution.
+                } else {
+                    // If the prefix is a term flagged `@prefix`, concatenate.
+                    if let Some(pdef) = self.term_definitions.get(prefix) {
+                        if pdef.prefix {
+                            if let Some(piri) = &pdef.iri {
+                                return Some(format!("{}{}", piri, suffix));
+                            }
                         }
                     }
+                    // Otherwise the value already contains a valid scheme: treat as absolute IRI.
+                    return Some(value.to_string());
                 }
-                // Otherwise the value already contains a colon: treat it as an absolute IRI.
-                return Some(value.to_string());
             }
         }
         // step 7: a vocabulary reference with a `@vocab` mapping.
@@ -360,6 +372,28 @@ pub(crate) fn relativize_iri(base: &str, iri: &str) -> Option<String> {
     // absolute form.
     if b.scheme != r.scheme || b.authority != r.authority {
         return None;
+    }
+
+    // [FABLE-5] (sq-oy1f.27) Same-document references (RFC 3986 §4.4): when the
+    // paths agree, prefer a fragment-only reference (queries also agreeing) or a
+    // query reference over re-stating the last path segment — the forms the W3C
+    // compact suite expects for `#fragment` / `?query` targets.
+    if b.path == r.path && !r.path.is_empty() {
+        if b.query == r.query {
+            if let Some(f) = r.fragment {
+                return Some(format!("#{}", f));
+            }
+        }
+        if let Some(q) = r.query {
+            let mut s = format!("?{}", q);
+            if let Some(f) = r.fragment {
+                s.push('#');
+                s.push_str(f);
+            }
+            return Some(s);
+        }
+        // Target has no query: fall through to the path-based form (a bare
+        // fragment reference would wrongly inherit the base's query).
     }
 
     // Base "directory": path up to and including the last '/'.

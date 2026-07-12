@@ -1,0 +1,12 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ex: <http://example.org/> .
+
+ex:order42 a ex:Order ;
+  ex:status "submitted" ;
+  ex:customer ex:acme ;
+  ex:shippingAddress ex:acmeHq ;
+  ex:category ex:Hardware ;
+  ex:invoice "<p>Total: 42</p>"^^rdf:HTML .
+
+ex:acme a ex:Customer .
+ex:acmeHq ex:street "1 Coyote Way" ; ex:city "Tumbleweed" .

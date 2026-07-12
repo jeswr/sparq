@@ -107,6 +107,26 @@ engine instead (no compressed-file / HDT path — the drawer says so). A success
 `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
 workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
 
+For **federation** (`sq-ixc3.14`), a SERVICE-bearing SELECT/ASK in the Query tool routes to the
+native `query_service` command (behind the crate's opt-in `federation` feature, which forwards to
+`sparq-engine/service`): the live store's N-Quads snapshot is evaluated natively, joining remote
+SPARQL endpoints under the engine's **strict fail-closed egress allowlist** — a SERVICE clause may
+dial ONLY the per-workspace `Federation` control's entries (host / host:port / `*.suffix`, the
+same grammar as sparq-server's `--service-allow`); everything else, including public hosts, is
+refused pre-HTTP. The browser build labels SERVICE **native-only** (CORS) instead of pretending.
+
+For **usage control** (`sq-ixc3.15`), the **Policies (ODRL) tool** runs its whole round-trip in
+one native command (`odrl_preview`, behind the crate's opt-in `odrl` feature, pulling the
+research-track `sparq-policy` evaluator + `sparq-solid` enforcement store): author/validate a
+Turtle ODRL policy, evaluate a (party, action, target) request — decision + matched rules + unmet
+constraints — then run the SAME SPARQL query ungated AND per requester through `PodStore`'s
+**fail-closed** per-session named-graph gating (the one-shot `odrl-bridge` materialization path;
+the `*_conditional` variants with the bare-assignee widening hazard, bead `sq-9n1q4`, are not
+wired). A malformed policy materializes **nothing** — deny-everything with the parser's verbatim
+reason — and an `odrl:prohibition` visibly flips a previously visible named graph to hidden in
+that requester's pane. The browser build labels the tool **native-only** (the ODRL stack is not
+in the wasm bundle) instead of pretending.
+
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 

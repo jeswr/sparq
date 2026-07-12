@@ -1,0 +1,2 @@
+<http:p://example.org/s> <http://example.org/p> <http:&/exampol.erg/o> <http://example.org/g> .
+_:b2 <http://example.org/p> <http:&/exampol.erg/o> <001/XMLSchema#integer> .

@@ -1,0 +1,2 @@
+@prefix ex: <http://example.org/> .
+מממממhttp://www.w3.org/1999/02/22-rdf-synמממממממממממממממממממממממממממממממממממממממממממממ{ ex:a a ex:B } => { ex:a ex:type ex:B } .

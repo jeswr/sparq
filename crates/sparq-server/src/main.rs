@@ -77,6 +77,11 @@
 //!                             update (a slow update releases the single writer within S instead of
 //!                             holding it for the full --query-timeout). 0/unset = use --query-timeout
 //!                             [unset, env SPARQ_UPDATE_WHERE_TIMEOUT]
+//!   --no-adaptive-commit      [OPUS-4.8 sq-p7kk5] DISABLE adaptive group-commit (restore the always-
+//!                             windowed writer). Adaptive commit is ON by default: a serial interactive
+//!                             client commits in engine-time (µs) instead of paying the fixed group-commit
+//!                             window (ms); concurrent load still batches. FIFO/atomicity/durability
+//!                             unchanged. [on, env SPARQ_ADAPTIVE_COMMIT=0 to disable]
 //!   --max-body-bytes N        maximum request body in bytes              [1048576, env SPARQ_MAX_BODY_BYTES]
 //!   --max-concurrent N        maximum in-flight requests (429 beyond)    [32, env SPARQ_MAX_CONCURRENT]
 //!   --header-read-timeout S   [OPUS-4.8 sq-2gqr] slow-loris guard: max SECONDS a connection may take
@@ -108,6 +113,9 @@
 //!                             endpoint `POST /shacl/validate`: POST a shapes graph, the server validates
 //!                             its loaded data graph against it. Read-only. Off by default
 //!                                                                        [off, env SPARQ_SHACL=1]
+//!   --shacl-guard             [GPT-5.6 sq-lsp7k.2.4] reject violating UPDATE/GSP post-states
+//!                                                                        [off, env SPARQ_SHACL_GUARD=1]
+//!   --shacl-shapes FILE       shapes graph for guard mode [env SPARQ_SHACL_SHAPES]
 //!   --n3-patch                [OPUS-4.8 sq-hj4n] (feature `n3-patch`) enable the OPT-IN Solid N3-Patch
 //!                             (`text/n3`) dialect on the Graph-Store-Protocol `PATCH` method. The
 //!                             always-on `application/sparql-update` PATCH dialect needs no flag.
@@ -117,6 +125,18 @@
 //!                             query (the `K:<name>` keyword layer over canonical SPARQL), the server
 //!                             returns the CANONICAL SPARQL it expands to (it never executes it). Off
 //!                             by default                                 [off, env SPARQ_TERSE=1]
+//!   --templates               [FABLE-5 sq-lsp7k.10] (feature `templates`) serve the OPT-IN named
+//!                             parameterized-template REST surface: `GET /templates` lists,
+//!                             `PUT`/`GET`/`DELETE /templates/{name}` manage one definition,
+//!                             `POST /templates/{name}` invokes it with typed JSON arguments
+//!                             (fail-closed on unknown/missing/mistyped parameters). Template
+//!                             writes + UPDATE-template invocations are write-gated through the
+//!                             same sequenced-writer path as /sparql updates. Off by default
+//!                                                                        [off, env SPARQ_TEMPLATES=1]
+//!   --templates-file PATH     [FABLE-5 sq-lsp7k.10] (feature `templates`) durable template store:
+//!                             definitions load from PATH at startup (fail-closed) and every
+//!                             successful PUT/DELETE rewrites it atomically
+//!                                                                        [in-memory, env SPARQ_TEMPLATES_FILE]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -188,6 +208,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // surfaces here as a clean config error (the `?` turns the String into the boxed
     // error main returns -> a one-line message to stderr + non-zero exit), not a panic.
     let mut config = ServerConfig::from_env()?;
+    #[cfg(feature = "shacl")]
+    let mut shacl_shapes_path = std::env::var_os("SPARQ_SHACL_SHAPES").map(std::path::PathBuf::from);
     // [OPUS-4.8] sq-4w18: collect SERVICE egress allowlist entries from the CLI; they
     // are UNIONed with the SPARQ_SERVICE_ALLOW env baseline (already in `config`) + an
     // optional --service-allow-file, after the arg loop. An allowlist is additive, so
@@ -221,6 +243,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let secs: u64 = parse_flag(&mut args, "--update-where-timeout")?;
                 config.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
+            // [OPUS-4.8] sq-p7kk5: restore the always-windowed writer (disable adaptive
+            // group-commit). Adaptive commit is ON by default — a serial interactive client
+            // then commits in engine-time instead of paying the fixed group-commit window.
+            "--no-adaptive-commit" => config.adaptive_commit = false,
             "--max-body-bytes" => {
                 config.max_body_bytes = parse_flag(&mut args, "--max-body-bytes")?
             }
@@ -414,6 +440,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // loaded data graph against it. Read-only. Off by default (env SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             "--shacl" => config.shacl = true,
+            // [GPT-5.6] sq-lsp7k.2.4: post-state SHACL transaction guard + shapes source.
+            #[cfg(feature = "shacl")]
+            "--shacl-guard" => config.shacl_guard = true,
+            #[cfg(feature = "shacl")]
+            "--shacl-shapes" => {
+                let path = args.next().ok_or("--shacl-shapes requires a file path")?;
+                if path.is_empty() { return Err("--shacl-shapes must not be empty".into()); }
+                shacl_shapes_path = Some(std::path::PathBuf::from(path));
+            }
             // [OPUS-4.8] sq-hj4n (gh-916): OPT-IN Solid N3-Patch (text/n3) PATCH dialect on the
             // Graph-Store-Protocol graph route. The always-on application/sparql-update PATCH
             // dialect needs no flag; this enables the OPTIONAL text/n3 one. Off by default
@@ -425,6 +460,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (it never executes it). Off by default (env SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             "--terse" => config.terse = true,
+            // [FABLE-5] sq-lsp7k.10: OPT-IN named-parameterized-template REST surface — the
+            // /templates store (list / PUT-GET-DELETE one definition / POST-invoke with typed
+            // JSON arguments). Query invocations are read-gated; template writes and UPDATE
+            // invocations are write-gated through the same sequenced-writer path as /sparql
+            // updates. Off by default (env SPARQ_TEMPLATES=1); --templates-file PATH (env
+            // SPARQ_TEMPLATES_FILE) makes the store durable (fail-closed load at startup).
+            #[cfg(feature = "templates")]
+            "--templates" => config.templates = true,
+            #[cfg(feature = "templates")]
+            "--templates-file" => {
+                let v: String = parse_flag(&mut args, "--templates-file")?;
+                config.templates_file = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+            }
+            // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization
+            // surface — POST /authz/decide, /authz/wac-allow, /authz/query, a thin HTTP shell over
+            // the sparq-solid library authoriser. Fail-closed on every error path. Off by default
+            // (env SPARQ_SOLID_AUTHZ=1).
+            #[cfg(feature = "solid-authz")]
+            "--solid-authz" => config.solid_authz = true,
             // [OPUS-4.8] sq-2999l (gh-906): OPT-IN durable CDC change-stream at DIR. Enables both
             // RECORDING every committed update to the segmented, fsync'd append-only log AND the
             // Neptune-GetRecords-shaped poll endpoint GET /streams over it. Resumes the same stream
@@ -482,7 +536,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 // [OPUS-4.8] sq-r868: surface the SHACL validate endpoint flag (feature shacl).
                 let shacl = if cfg!(feature = "shacl") {
-                    " [--shacl]"
+                    " [--shacl] [--shacl-guard --shacl-shapes FILE]"
                 } else {
                     ""
                 };
@@ -495,6 +549,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // [OPUS-4.8] sq-vczh2: surface the OPT-IN terse-transpiler endpoint flag (feature terse).
                 let terse = if cfg!(feature = "terse") {
                     " [--terse]"
+                } else {
+                    ""
+                };
+                // [FABLE-5] sq-lsp7k.10: surface the OPT-IN template-surface flags (feature templates).
+                let templates = if cfg!(feature = "templates") {
+                    " [--templates] [--templates-file PATH]"
                 } else {
                     ""
                 };
@@ -513,11 +573,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
-                     [--query-timeout SECS] [--update-where-timeout SECS] [--header-read-timeout SECS] \
+                     [--query-timeout SECS] [--update-where-timeout SECS] [--no-adaptive-commit] [--header-read-timeout SECS] \
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{backup}{change_stream} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
@@ -572,6 +632,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => data_file = Some(other.to_string()),
         }
+    }
+
+    // [GPT-5.6] sq-lsp7k.2.4: load shapes once at startup, failing closed on bad input.
+    #[cfg(feature = "shacl")]
+    if let Some(path) = shacl_shapes_path {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("--shacl-shapes: cannot read {}: {e}", path.display()))?;
+        let format = match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+            "nt" => "ntriples", "nq" => "nquads", "trig" => "trig", _ => "turtle",
+        };
+        let shapes = Graph::load_str(&text, format)
+            .map_err(|e| format!("--shacl-shapes: failed to load {} as {format}: {e}", path.display()))?;
+        config.shacl_shapes = Some(sparq_server::ShaclShapes::new(shapes));
     }
 
     // [OPUS-4.8] sq-4w18: merge the --service-allow-file + --service-allow CLI entries
@@ -796,6 +869,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_decompress_ratio,
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
+    );
+    // [OPUS-4.8] sq-p7kk5: surface the write-path commit mode at startup.
+    eprintln!(
+        "write path: adaptive-group-commit={}",
+        if config.adaptive_commit { "on" } else { "off" }
     );
     // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps at startup (feature `brtpf`).
     #[cfg(feature = "brtpf")]

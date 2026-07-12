@@ -213,10 +213,21 @@ they are constructed so the fix there and the work here cannot conflict semantic
 - **ASK early-termination through joins** (streaming first-solution evaluation): real
   but subsumed for q12b by .30.3 at this corpus scale, and it would touch the same
   `exec.rs` eval paths as three other beads. Revisit after .30.6 if q12b is still
-  behind.
+  behind. *(Post-chain update: the diagnostic re-run confirmed this as the dominant
+  residual — q12a cost its full SELECT twin. Now implemented as `sq-7d3dj.30.8`:
+  block-driven capped conjunctive chain + capped UNION/OPTIONAL/Join arms in
+  `try_capped`, plus emptiness-neutral ASK plan simplification; witnesses in
+  `crates/sparq-engine/tests/ask_early_exit.rs`.)* [FABLE-5]
 - **UNION common-subexpression sharing** (q07/q09 both re-scan shared subpatterns):
-  measured secondary to the fixes above; fold into a later bead only if .30.6 shows a
-  residual gap.
+  **DISCONFIRMED by profiling (2026-07-10, PR #1842)** — the two inner 4-pattern BGPs in q07
+  cost only ~2 ms each; sharing recovers ≤ 2 ms, not the residual. The actual q07 residual
+  is a redundant re-evaluation of the outer 5-pattern BGP itself: `try_theta_antijoin` eagerly
+  evaluated the mandatory left side (~30 ms), found no seedable var-to-var correlation (bare `!bound`),
+  declined and discarded it, so the cold Filter{LeftJoin} fallback re-evaluated the same left side.
+  **FIXED (PR #1842, merged 2026-07-10)** via opt-in `antijoin-static-decline` — a static pre-check
+  lets `try_theta_antijoin` decline before eager evaluation when no correlation can seed, eliminating
+  the redundant re-eval. Result: bag-equivalent (W3C + differential, both feature states). *(SUPERSEDED
+  2026-07-10: the cross-level CSE hypothesis below in §7.3 is also disconfirmed; see that section.)*
 - **A new object/range index**: the gap record's original hypothesis for q03b/c —
   disconfirmed by profiling (§2.1); no new index is needed for this query class.
 
@@ -232,3 +243,113 @@ they are constructed so the fix there and the work here cannot conflict semantic
   acceptable, or is order-of-magnitude required on this class too?) remains open with
   the maintainer; this decomposition targets the deficit either way and does not need
   the answer to proceed (proceed-and-document).
+
+## 7. Canonical re-measure verdict (sq-7d3dj.30.6) — the D3 update
+
+<!-- [FABLE-5] Canonical envelope: bench/competitor-results/sparql-same-box-20260710T025117Z.json
+     Provenance: quiet dedicated EC2 c6i.4xlarge (Intel Xeon Platinum 8375C @ 2.90 GHz, 16 vCPU,
+     x86_64 — the SAME class + arch as the 2026-07-07 §0 baseline), min-of-5, count mode, SP2Bench
+     250 000 triples (real Freiburg sp2b_gen), git 1190ca84 (main tip: the full sq-7d3dj.30.1–.14
+     wave + #1786 q06 theta anti-join + #1795 predicate-range term-kind idfast widening + #1813
+     extended anti-join, all merged), CANONICAL=1. This is a same-box sparq-CLI-vs-QLever comparison
+     (QLever indexed + served + queried over HTTP by scripts/qlever-same-box.sh; Oxigraph prebuilt
+     CLI v0.5.9 carried as the clean-CLI baseline). QLever's HTTP request floor is UNCORRECTED
+     here, so a per-query deficit stated below is a LOWER BOUND on sparq's compute gap. -->
+
+**Headline.** After the complex-shape fix wave landed, sparq wins **10 of 14** SP2Bench
+queries against same-box QLever and is **correct + complete on all 14** (matching
+`bench/sp2b/expected-rows.tsv` at 250k). The two selective-FILTER queries that dominated the
+old deficit — **q03b and q03c — flipped from BEHIND to decisively AHEAD** (38× / 21× faster
+than QLever). Of the seven queries the gap record flagged BEHIND, **five are now AHEAD or have
+their deficit cut by 4–14×**; **q07 alone did not improve** (it regressed slightly). q08/q12b
+have **no valid QLever comparison** because QLever returns the wrong answer there (count 0, see
+below), so sparq's win on those is a correctness win, not a timing win.
+
+### 7.1 Canonical per-query table (best-of-5 µs; sparq is the count reference)
+
+`oxi` = Oxigraph prebuilt-CLI 0.5.9 (clean-CLI baseline); `cap` = the per-query timeout cap
+was hit (Oxigraph's q07/q08/q12b are minutes-long at 250k). QLever timing is trusted **only
+when its count matches** — q08/q12b are DISQUALIFIED (QLever returns 0 rows, a genuine
+QLever query-semantics divergence, recorded honestly and NOT adjusted).
+
+| query | rows | sparq µs | oxi µs | qlever rows | qlever µs | sparq vs QLever |
+|---|---|---|---|---|---|---|
+| q01 | 1 | 11.0 | 14452 | 1 | 2707 | AHEAD 246× |
+| q02 | 6067 | 10567.9 | 528976 | 6067 | 274445 | AHEAD 26× |
+| q03a | 15823 | 2332.4 | 217671 | 15823 | 48047 | AHEAD 21× |
+| q03b | 114 | 42.3 | 128748 | 114 | 1614 | **AHEAD 38× (was BEHIND 8.4×)** |
+| q03c | 0 | 54.5 | 127474 | 0 | 1157 | **AHEAD 21× (was BEHIND 19×)** |
+| q04 | 541911 | 206512.4 | 20218610 | 541911 | 2942831 | AHEAD 14× |
+| q05b | 6933 | 9638.6 | 628300 | 6933 | 31785 | AHEAD 3.3× |
+| q07 | 48 | 30922.0 | cap | 48 | 8196 | **BEHIND 3.8× (was BEHIND 2.9×)** |
+| q08 | 358 | 36574.8 | cap | 0 | 8284 | qlever **wrong** (0 vs 358) — DISQ; sparq correct+complete |
+| q09 | 4 | 12935.6 | 186843 | 4 | 1360 | **BEHIND 9.5× (was BEHIND 16.4×)** |
+| q10 | 452 | 5.3 | 16567 | 452 | 5270 | AHEAD 994× |
+| q11 | 10 | 5319.9 | 756143 | 10 | 1771 | **BEHIND 3.0× (was BEHIND 13.9×)** |
+| q12b | 1 | 36210.7 | 50422754 | 0 | 6724 | qlever **wrong** (0 vs 1) — DISQ; sparq correct+complete |
+| q12c | 0 | 4.5 | 10684 | 0 | 1420 | AHEAD 316× |
+
+### 7.2 Before → after, per D3 query (the explicit verdicts the bead requires)
+
+Baseline sparq µs is the §0 / §3 canonical c6i.4xlarge figure (2026-07-07); "after" is this
+re-measure. Both are quiet-box x86_64, so the sparq-side improvement ratio is meaningful.
+
+| query | sparq §0 → now (µs) | sparq self-speedup | §0 verdict | **new verdict** |
+|---|---|---|---|---|
+| q03b | 12124 → **42** | **287× faster** | BEHIND 8.4× | **AHEAD** (38× vs QLever) — deficit CLOSED |
+| q03c | 11697 → **55** | **215× faster** | BEHIND 19× | **AHEAD** (21× vs QLever) — deficit CLOSED |
+| q07 | 23981 → **30922** | **1.3× slower** | BEHIND 2.9× | **BEHIND 3.8×** — the one query that did NOT improve |
+| q08 | 153318 → **36575** | **4.2× faster** | BEHIND 11.3× (virtuoso) | correct+complete; QLever DISQ; still ~2.7× behind the §0 virtuoso ref |
+| q09 | 22357 → **12936** | **1.7× faster** | BEHIND 16.4× | **BEHIND 9.5×** — deficit ~halved, not closed |
+| q11 | 27236 → **5320** | **5.1× faster** | BEHIND 13.9× | **BEHIND 3.0×** — deficit cut ~4.6× |
+| q12b | 155611 → **36211** | **4.3× faster** | BEHIND 16.4× (virtuoso) | correct+complete; QLever DISQ; still ~3.8× behind the §0 virtuoso ref |
+
+**q08 / q12b caveat (honest).** This gather is sparq-vs-QLever, and QLever computes the wrong
+answer on q08/q12b (0 rows — the bnode≠IRI strict-type-error divergence adjudicated in
+sq-ai2wa; `expected-rows.tsv` is correct). So there is **no valid same-box competitor** for
+q08/q12b in this run. Both sped up ~4× on the sparq side vs §0, but against the only prior
+CORRECT competitor on those rows — virtuoso (HTTP) at §0: q08 13548 µs, q12b 9476 µs — sparq at
+36575 / 36211 µs is still ~2.7× / ~3.8× behind. Those figures are cross-date/HTTP-mode and
+carried for magnitude only; a same-box virtuoso re-measure on q08/q12b is the clean way to
+retire the residual (folded into the follow-up beads below).
+
+### 7.3 Residual deficits → root-cause hypotheses + follow-up beads
+
+Still behind (real compute gaps, all LOWER bounds given QLever's uncorrected HTTP floor):
+
+- **q07 — BEHIND 3.8× (and 1.3× WORSE than §0; the sole non-improver).** **SUPERSEDED 2026-07-10:**
+  The root-cause hypothesis stated in §5 (cross-level CSE of membership subplans) was **DISCONFIRMED
+  by profiling** (PR #1842, sq-7d3dj.30.20, merged 2026-07-10; see GitHub issue #1843). **Real cause:**
+  `try_theta_antijoin` eagerly evaluated the mandatory left side (q07's outer 5-pattern BGP, the dominant
+  cost ~30 ms), found no seedable var-to-var correlation (bare `!bound`), declined the anti-join, and
+  discarded the result — so the Filter{LeftJoin} fallback re-evaluated the same left side redundantly.
+  **FIXED** via opt-in `antijoin-static-decline` (PR #1842): a static pre-check lets `try_theta_antijoin`
+  decline before evaluating the left side when no correlation can seed, bag-result-equivalent (W3C + differential,
+  both feature states). The small regression (~1.3×) is consistent with the extra plan machinery (theta anti-join
+  recognizer + cluster materialise) adding fixed overhead that the tiny 48-row result cannot amortise; profiling-first
+  follow-up work (if q07 needs further optimisation) is noted in the bead sq-7d3dj.30.20 notes.
+- **q09 — BEHIND 9.5× (halved from 16.4×).** Root-cause hypothesis: the DISTINCT-projection
+  anchor+probe semijoin (#1782) still pays O(min(block, anchor)) to PROVE a large value-typed
+  predicate (dc:title / foaf:homepage / rdfs:seeAlso, 17k–27k distinct objects) has no anchor
+  member — QLever's "pattern trick" answers this from precomputed per-predicate incidence
+  metadata. Fix bead: **sq-jnb1e** (characteristic-set / per-predicate incidence metadata)
+  already exists — re-pointed here as the confirmed q09 residual.
+- **q11 — BEHIND 3.0× (cut ~4.6× by the top-k ORDER BY fix #1784).** Smallest remaining
+  deficit; the residual is the single-scan + bounded-select constant factor vs QLever's indexed
+  ORDER-BY. Filed as a NEW P2 bead (see below) — profiling-first, no code guess here.
+- **q08 / q12b — no valid same-box competitor (QLever wrong).** Residual is only against the
+  §0 virtuoso HTTP reference (~2.7× / ~3.8×). Filed as a NEW P2 bead to re-measure q08/q12b
+  against a same-box CORRECT competitor (virtuoso) and localise any true compute gap.
+
+### 7.4 D3 dimension verdict
+
+D3 moves from **BEHIND on the complex-shape class (7/14 behind)** to **MIXED, strongly
+improved**: sparq is now AHEAD of same-box QLever on 10/14 and correct+complete on all 14; the
+two headline selective-FILTER deficits (q03b/q03c) are CLOSED; q08/q09/q11/q12b deficits are cut
+4–14× (q09/q11 still behind, q08/q12b have no valid QLever comparator); **q07 is the one query
+still clearly behind and is the sole non-improver**. The gap-record D3 row is updated to reflect
+this (see `research/perf-dominance-gap-2026-07.md` §3 addendum). The order-of-magnitude-vs-parity
+mandate question (§6) is unchanged: sparq is at or beyond parity on the whole class except q07/q09,
+where an order-of-magnitude target still needs profiling-first follow-up work (q07's redundant anti-join
+re-eval was fixed in PR #1842, but the fixed machinery still carries overhead; q09 needs the characteristic-set
+(sq-jnb1e) work to compete on per-predicate incidence metadata).

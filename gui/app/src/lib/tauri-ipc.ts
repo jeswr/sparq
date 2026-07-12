@@ -4,17 +4,21 @@
 // NATIVE loader.
 //
 // The desktop target links the engine directly (gui/src-tauri/src/engine.rs) and exposes the
-// native loader over Tauri IPC: `load_path` (decode a disk file — incl. compressed + native-only
-// HDT) and `load_text` (decode a pasted / fetched document), both returning the whole dataset as
-// N-Quads for the in-tab store to merge. This module is the thin frontend bridge to those
-// commands plus the native file-open dialog.
+// native loader over Tauri IPC: `pick_rdf_files` (open the OS file dialog SERVER-SIDE + approve the
+// chosen paths), `load_path` (decode an approved disk file — incl. compressed + native-only HDT),
+// and `load_text` (decode a pasted / fetched document). The loaders return the whole dataset as
+// N-Quads for the in-tab store to merge. This module is the thin frontend bridge to those commands.
+//
+// [OPUS-4.8] sq-w2sod — the file dialog is now driven from Rust (`pick_rdf_files`), not from the
+// webview via `plugin:dialog|open`. The chosen paths are the ONLY ones `load_path` will load
+// (approved-path capability), so a webview script cannot forge a path to read; and every load
+// failure returns a single generic error (no OS/path detail) to close the FS-enumeration oracle.
 //
 // HOW IT STAYS STATIC-EXPORT-SAFE + DEPENDENCY-FREE. The Tauri shell sets `withGlobalTauri: true`
-// (gui/src-tauri/tauri.conf.json), which injects `window.__TAURI__` with `core.invoke` and the
-// registered plugins' globals (`dialog.open`). We read those off the runtime window — so the GUI
-// needs NO `@tauri-apps/*` npm dependency at all, and the hosted web build (where the global is
-// absent) simply sees `null` and uses the in-tab WASM loader instead. Feature-detected via
-// `isTauriRuntime()` from `@sparq/client`.
+// (gui/src-tauri/tauri.conf.json), which injects `window.__TAURI__` with `core.invoke`. We read
+// that off the runtime window — so the GUI needs NO `@tauri-apps/*` npm dependency at all, and the
+// hosted web build (where the global is absent) simply sees `null` and uses the in-tab WASM loader
+// instead. Feature-detected via `isTauriRuntime()` from `@sparq/client`.
 //
 // NO performance claim is made here. The native loader's advantage (threads, no ~2 GiB wasm-tab
 // ceiling, native-only HDT) is a capability statement, not a benchmarked number.
@@ -76,56 +80,28 @@ function tauriInvoke(): TauriInvoke | null {
 }
 
 /**
- * The RDF file extensions the native open dialog offers as a filter group. Includes the
- * compression suffixes the native loader streams (`.gz` / `.bz2` / `.zst`) and the native-only
- * HDT archive extensions — capabilities the web target fundamentally lacks.
- */
-export const RDF_FILE_EXTENSIONS = [
-  "ttl",
-  "nt",
-  "nq",
-  "trig",
-  "jsonld",
-  "json",
-  "hdt",
-  "gz",
-  "bz2",
-  "zst",
-  "zstd",
-] as const;
-
-/**
- * Open the native file picker for an RDF document, returning the chosen absolute path or `null`
- * (cancelled / not in a Tauri webview). Implemented by invoking the dialog plugin's `open`
- * COMMAND directly (`plugin:dialog|open`) over IPC — so the GUI needs no `@tauri-apps/plugin-
- * dialog` npm package, only the Rust-side plugin (`tauri_plugin_dialog::init()`) + the granted
- * `dialog:allow-open` capability. The native loader (`load_path`) then decodes each chosen file.
+ * Open the native file picker for an RDF document, returning the chosen absolute path(s) or an
+ * empty array (cancelled / not in a Tauri webview).
  *
- * (sq-eydh9) Returns an array of selected paths (multi-select, `multiple: true`). An empty array
- * means the user cancelled. On old desktop builds that return a single string the result is
- * normalised to a one-element array so callers never need to branch on the return type.
+ * [OPUS-4.8] sq-w2sod — this now invokes the app-defined `pick_rdf_files` command, which opens the
+ * OS file dialog SERVER-SIDE (in Rust) rather than from the webview. That is the security-relevant
+ * change: `pick_rdf_files` canonicalises each chosen path and records it in the native engine's
+ * APPROVED-PATH set, which is the ONLY thing the gated `load_path` command will subsequently read
+ * — so a webview script cannot forge a path to load; the user must physically pick the file. The
+ * returned strings are the canonical paths the caller threads back into `nativeLoadPath`.
+ *
+ * (sq-eydh9) Returns an array of selected paths (multi-select). An empty array means the user
+ * cancelled (or we are not in a Tauri webview).
  */
 export async function pickRdfFile(): Promise<string[]> {
   const invoke = tauriInvoke();
   if (!invoke) return [];
   try {
-    // The dialog plugin's `open` command returns the selected path(s) or null on cancel.
-    // `multiple: true` → string[] on confirm; the API can still return a plain string when
-    // a legacy Tauri build conflates single/multi, so we normalise to string[] either way.
-    const selected = await invoke<string | string[] | null>("plugin:dialog|open", {
-      options: {
-        multiple: true,
-        directory: false,
-        title: "Import RDF files into the workspace",
-        filters: [
-          { name: "RDF (incl. compressed + HDT)", extensions: [...RDF_FILE_EXTENSIONS] },
-          { name: "All files", extensions: ["*"] },
-        ],
-      },
-    });
-    if (selected === null) return [];
-    if (typeof selected === "string") return [selected];
-    return selected;
+    // `pick_rdf_files` returns the canonicalised, now-approved paths (an empty array on cancel).
+    // The filter/title live Rust-side so the webview no longer needs the `dialog:allow-open`
+    // capability nor an `@tauri-apps/plugin-dialog` npm package.
+    const selected = await invoke<string[] | null>("pick_rdf_files");
+    return selected ?? [];
   } catch {
     return [];
   }
@@ -134,8 +110,12 @@ export async function pickRdfFile(): Promise<string[]> {
 /**
  * Decode a disk file through the NATIVE loader (`load_path`): compressed streams + native-only
  * HDT + named-graph-preserving, off the main thread in the Rust engine. Returns the whole
- * dataset as N-Quads for the in-tab store to merge, or `null` if not in a Tauri webview. Throws
- * the native error string on a decode/parse failure (e.g. an HDT import in a lean build).
+ * dataset as N-Quads for the in-tab store to merge, or `null` if not in a Tauri webview.
+ *
+ * [OPUS-4.8] sq-w2sod — `path` MUST be one returned by {@link pickRdfFile} (i.e. a path the user
+ * picked through the native dialog, which the Rust side recorded as approved). Any other path — and
+ * any open/read/parse failure — throws the SAME generic error string (no OS detail, no path echo),
+ * so this cannot be used as a filesystem existence/permission oracle.
  */
 export async function nativeLoadPath(
   path: string,
@@ -167,6 +147,86 @@ export async function nativeLoadText(
 /** True when the native loader IPC path is available (we are inside a Tauri webview). */
 export function hasNativeLoader(): boolean {
   return isTauriRuntime();
+}
+
+/**
+ * [FABLE-5] sq-ixc3.14 — whether the native federated-query IPC path is available (we are
+ * inside a Tauri webview). Whether the desktop build actually COMPILED the `federation`
+ * feature is only knowable at invoke time: a lean build's `query_service` stub returns a loud
+ * rebuild-hint error, which surfaces through the result panel like any other run error.
+ */
+export function hasNativeFederation(): boolean {
+  return isTauriRuntime();
+}
+
+/**
+ * [FABLE-5] sq-ixc3.14 — evaluate a SERVICE-bearing SELECT/ASK over the NATIVE engine
+ * (`query_service`, gui/src-tauri/src/federation.rs): `dataset` is the live workspace store's
+ * whole-dataset N-Quads snapshot, `allow` the per-workspace federation egress allowlist the
+ * engine enforces STRICTLY (fail-closed: an endpoint off the list is refused pre-HTTP with the
+ * stable `SERVICE egress refused` marker — see lib/federation.ts). Returns the SPARQL 1.1 JSON
+ * results document, or `null` outside the desktop shell (the web target degrades honestly in
+ * the Query tool instead). Throws the native error string on refusal / parse / HTTP failure.
+ */
+export async function nativeServiceQuery(
+  dataset: string,
+  query: string,
+  allow: string[],
+): Promise<string | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<string>("query_service", { dataset, query, allow });
+}
+
+/**
+ * [FABLE-5] sq-ixc3.19 — structured EXPLAIN / EXPLAIN ANALYZE over the NATIVE engine
+ * (`explain_native`, gui/src-tauri/src/explain.rs): `dataset` is the live workspace store's
+ * whole-dataset N-Quads snapshot (the same wire as `query_service`), `analyze` executes
+ * (SELECT/ASK only) and measures REAL per-operator wall nanos — the datum the in-tab wasm
+ * engine fundamentally cannot provide (reads 0, no monotonic clock). Returns the typed plan
+ * tree as camelCase JSON (the sq-jbqh4 schema contract, parse with `parsePlanJson`), or
+ * `null` outside the desktop shell (the web target degrades honestly in the plan explorer).
+ * Never dials: under the `federation` build the command pins the STRICT EMPTY egress
+ * allowlist, so an ANALYZE of a SERVICE-bearing query is refused pre-HTTP (a thrown typed
+ * error, surfaced through the panel's error state). Throws the native error string on a
+ * dataset/query failure.
+ */
+export async function nativeExplain(
+  dataset: string,
+  query: string,
+  analyze: boolean,
+): Promise<string | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<string>("explain_native", { dataset, query, analyze });
+}
+
+/**
+ * [FABLE-5] sq-ixc3.15 — run the ODRL policy tool's whole native round-trip (`odrl_preview`,
+ * gui/src-tauri/src/odrl.rs): parse/validate the Turtle `policy`, evaluate the (action,
+ * target, requester) request per requester, materialize the policy through the odrl-bridge,
+ * and evaluate `query` once UNGATED over the raw `dataset` (TriG/N-Quads per `format`) plus
+ * once PER REQUESTER through PodStore's fail-closed per-session named-graph gating. Returns
+ * the preview object (see lib/odrl.ts for the mirrored shape), or `null` outside the desktop
+ * shell (the web target degrades honestly — the ODRL stack is not in the wasm bundle).
+ * Whether the desktop build compiled the `odrl` feature is only knowable at invoke time: a
+ * lean build's stub throws a loud rebuild-hint error, surfaced through the panel's error
+ * state. Throws the native error string on a dataset/query failure — but NEVER for a
+ * malformed policy or a missing grant, which are in-band fail-closed outcomes (deny-
+ * everything with a visible reason / zero rows).
+ */
+export async function nativeOdrlPreview(args: {
+  dataset: string;
+  format: string;
+  policy: string;
+  action: string;
+  target: string;
+  requesters: string[];
+  query: string;
+}): Promise<import("./odrl").OdrlPreviewResult | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<import("./odrl").OdrlPreviewResult>("odrl_preview", args);
 }
 
 /**

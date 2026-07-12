@@ -21,27 +21,49 @@ import {
   COMMON_PREFIXES,
   type SparqlBinding,
   type SparqlResults,
-  type SparqlTerm,
   type WasmStore,
   type WasmStoreCtor,
   type WorkspaceInferenceMode,
   type WorkspaceRulesDoc,
+  // [FABLE-5] sq-ixc3.19 — the typed EXPLAIN tree (the sq-jbqh4 camelCase schema
+  // contract) + its defensive parse; shared by the wasm / native / endpoint plan sources.
+  type PlanNode,
+  parsePlanJson,
 } from "@sparq/client";
 
 import { basePath } from "@/lib/base-path";
 import { SAMPLE_TURTLE, SAMPLE_FORMAT } from "@/data/sample-graph";
 import { type ExportFormat } from "@/lib/rdf-format";
 import {
+  hasNativeFederation,
   hasNativeLoader,
   nativeDiskUsage,
+  nativeExplain,
   nativeLoadPath,
   nativeLoadText,
+  nativeServiceQuery,
   type LoadedDocument,
 } from "@/lib/tauri-ipc";
+// [FABLE-5] sq-ixc3.14 — federated SERVICE routing: the pure detector + native-result parse +
+// fail-closed refusal classifier (see lib/federation.ts for the design note).
+import {
+  describeServiceRefusal,
+  parseServiceResults,
+  queryUsesService,
+  WEB_FEDERATION_MESSAGE,
+} from "@/lib/federation";
 // [OPUS-4.8] sq-tp1m (#757) — the tier-b W-reason wasm bundle loader: the REAL forward-chaining
 // RDFS / OWL 2 RL reasoner (crates/sparq-reason via sparq-reason-wasm), lazy-loaded so the lean
 // query engine pays nothing until a workspace turns inference on.
-import { loadReasoner, modeToProfile } from "@/lib/reason-wasm";
+import { loadReasoner, modeToProfile, type WasmReasoner } from "@/lib/reason-wasm";
+// [FABLE-5] sq-ixc3.20 — canonical triple identity for the inferred-fact affordance (the
+// entailed-key set the results views consult) + the shared N-Triples term writer (moved out
+// of this file so the click-to-explain path and the snapshot writer share ONE writer).
+import {
+  entailedKeysFromClosure,
+  termToNT,
+  tripleKeysOfNTriples,
+} from "@/lib/inferred-facts";
 
 /**
  * Internal sentinel thrown out of the streaming loop when the caller's {@link AbortSignal} fires,
@@ -94,7 +116,18 @@ export type QueryOutcome =
   | { kind: "ask"; value: boolean; rawJson: string }
   | { kind: "graph"; ntriples: string; tripleCount: number }
   | { kind: "update"; sizeAfter: number }
-  | { kind: "explain"; mode: "explain" | "analyze"; plan: string }
+  // [FABLE-5] sq-ixc3.19 — `tree` is the STRUCTURED plan (the sq-jbqh4 schema contract)
+  // when the source can produce one; `plan` keeps the text form (the lean-bundle
+  // fallback — exactly one of the two is populated, never a fabricated tree from text).
+  // `source` drives the wall-time honesty note: the in-tab wasm engine reads 0 nanos
+  // (no monotonic clock), only the desktop-native / endpoint sources measure real time.
+  | {
+      kind: "explain";
+      mode: "explain" | "analyze";
+      plan: string;
+      tree?: PlanNode;
+      source?: "wasm" | "native";
+    }
   | { kind: "cancelled" }
   | { kind: "error"; message: string };
 
@@ -148,6 +181,15 @@ export interface RunOptions {
   rowCap?: number;
   /** A cooperative cancel signal — checked between streamed batches (the Stop button). */
   signal?: AbortSignal;
+  /**
+   * [FABLE-5] sq-ixc3.19 — with mode `"explain"`/`"analyze"`, run the explain over the
+   * DESKTOP-NATIVE engine (the `explain_native` Tauri command) instead of the in-tab wasm
+   * engine: the only source that measures REAL per-operator wall nanos (wasm reads 0 — no
+   * monotonic clock). Snapshot semantics match federation (`query_service`): the whole
+   * (possibly reasoned) target store crosses as N-Quads. Web builds degrade to a clear
+   * error, never a silent wasm fallback mislabelled as native. Ignored for mode `"run"`.
+   */
+  native?: boolean;
 }
 
 /**
@@ -159,6 +201,16 @@ export const DEFAULT_ROW_CAP = 5_000;
 
 /** The batch size {@link streamQueryRows} pulls per cursor step (one batch held at a time). */
 const STREAM_BATCH_SIZE = 1_000;
+
+/**
+ * [FABLE-5] sq-ixc3.19 — the OPT-IN structured-explain bindings (the wasm crate's
+ * `explain-json` feature, enabled in the published bundle). Feature-detected at runtime so a
+ * lean bundle (which lacks the methods) degrades to the TEXT plan — never a fabricated tree.
+ */
+interface PlanCapableStore {
+  explainPlanJson(sparql: string): string;
+  explainPlanAnalyzeJson(sparql: string): string;
+}
 
 /** Where an import came from — drives the source kind recorded in the workspace metadata. */
 export type ImportKind = "file" | "url" | "paste";
@@ -322,6 +374,25 @@ export interface EngineContextValue {
    */
   setInferenceMode: (mode: WorkspaceInferenceMode) => void;
   /**
+   * [FABLE-5] sq-ixc3.20 — the canonical triple keys (see @/lib/inferred-facts) of every
+   * ENTAILED triple the ACTIVE closure added over the asserted base, or `null` when no
+   * closure is materialised (inference off / still loading / errored). This is what lets the
+   * results views mark an inferred row/edge and offer the why() affordance — membership is
+   * exact set difference (closure − base), never a heuristic, so an asserted fact can never
+   * carry the "inferred" affordance. Recomputed with the closure (same cache discipline).
+   */
+  entailedTripleKeys: () => ReadonlySet<string> | null;
+  /**
+   * [FABLE-5] sq-ixc3.20 — ONE derivation ("why?") of the triple `(s, p, o)` under the
+   * ACTIVE inference regime, as `sparq-reason`'s proof-tree JSON (parse with
+   * @/lib/proof-view `parseProofJson`; the string `"null"` means "not entailed"). `s`/`p`/`o`
+   * are N-Triples term strings (the @/lib/inferred-facts `termToNT` form). Runs the W-reason
+   * bundle's `why` (RDFS / OWL-RL) or `whyN3` (N3 rules) over the asserted base — a witness,
+   * not an enumeration of all derivations. Rejects honestly when inference is off, the
+   * engine is cold, or the synced bundle predates the explain surface.
+   */
+  explainWhy: (s: string, p: string, o: string) => Promise<string>;
+  /**
    * [sq-glo5r] Push the active workspace's N3 rules docs to the engine so the N3 closure is
    * rebuilt when rules change. Called by `N3RulesBridge` (on workspace rule mutations) and
    * directly by workspace lifecycle actions (workspace switch, initial restore) as belt-and-
@@ -330,12 +401,34 @@ export interface EngineContextValue {
    */
   setN3Rules: (docs: WorkspaceRulesDoc[]) => void;
   /**
+   * [FABLE-5] sq-ixc3.14 — push the active workspace's FEDERATION egress allowlist to the
+   * engine, so a SERVICE-bearing run hands the native `query_service` command exactly the
+   * endpoints the user allowlisted for THIS workspace. Kept in lockstep with the persisted
+   * workspace setting by `FederationBridge` (mirrors the inference-mode bridge). FAIL-CLOSED:
+   * until pushed (or when empty), every SERVICE endpoint is refused by the native engine.
+   */
+  setServiceAllowlist: (hosts: string[]) => void;
+  /**
+   * [FABLE-5] sq-ixc3.14 — whether the native federated-query IPC is available (inside the
+   * Tauri desktop shell). On the web build this is false and a SERVICE-bearing run degrades
+   * honestly (native-only) instead of hanging on CORS.
+   */
+  nativeFederationAvailable: boolean;
+  /**
    * [OPUS-4.8] sq-ixc3.13 — the whole-dataset N-QUADS snapshot of the live store (default graph +
    * every named graph), the save/open cache a workspace persists as its `dataSnapshot` (sq-atb0).
    * N-Quads (not the TriG `serializeStore` emits) because that is the workspace snapshot format,
    * and it agrees byte-for-byte with the "add to current" merge path. `null` before warm.
    */
   snapshotStore: () => string | null;
+  /**
+   * [FABLE-5] sq-ixc3.16 — the live store's CONTENT epoch: bumps whenever the base store's
+   * content changes (hydration / import / a successful SPARQL UPDATE). Already the internal
+   * signal the inference closure rebuilds on (sq-tp1m); exposed so an operational tool (the
+   * Streaming tool's workspace feed) can react to workspace updates without polling. Strictly
+   * monotone within a session; carries no content itself — pair with {@link snapshotStore}.
+   */
+  storeEpoch: number;
   /**
    * [OPUS-4.8] sq-lcd6e — REPLACE the live store with a restored workspace's persisted SNAPSHOT
    * (its whole-dataset N-Quads). This is the fix for the silent data-loss-on-relaunch: the warm
@@ -389,33 +482,9 @@ function classifyQuery(q: string): "select" | "ask" | "construct" | "describe" |
 const ALL_QUADS_QUERY =
   "SELECT ?s ?p ?o ?g WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
 
-const XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
-
-/** Escape a literal lexical form for an N-Triples/N-Quads double-quoted string. */
-function escapeNTLiteral(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
-}
-
-/**
- * Emit a single canonical N-Triples/N-Quads TERM (IRI / blank node / literal) from a SPARQL-JSON
- * term. Unlike `formatTerm` (a DISPLAY helper that abbreviates the datatype to `xsd:…`, which is
- * NOT valid N-Triples), this writes the FULL datatype IRI and escapes the lexical form, so the
- * re-load of the merged N-Quads parses losslessly.
- */
-function termToNT(t: SparqlTerm): string {
-  if (t.type === "uri") return `<${t.value}>`;
-  if (t.type === "bnode") return `_:${t.value}`;
-  // Literal.
-  const lex = `"${escapeNTLiteral(t.value)}"`;
-  if (t["xml:lang"]) return `${lex}@${t["xml:lang"]}`;
-  if (t.datatype && t.datatype !== XSD_STRING) return `${lex}^^<${t.datatype}>`;
-  return lex;
-}
+// [FABLE-5] sq-ixc3.20 — `termToNT` (the canonical N-Triples/N-Quads TERM writer for
+// SPARQL-JSON terms; full datatype IRI + escaped lexical form, unlike the display-only
+// `formatTerm`) now lives in @/lib/inferred-facts, shared with the click-to-explain path.
 
 /**
  * Serialise the WHOLE dataset of the live store (default graph + every named graph) to N-Quads,
@@ -583,6 +652,13 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const storeRef = React.useRef<WasmStore | null>(null);
   const ctorRef = React.useRef<WasmStoreCtor | null>(null);
 
+  // [FABLE-5] sq-ixc3.14 — the active workspace's FEDERATION egress allowlist, pushed by
+  // `setServiceAllowlist` (the FederationBridge / workspace lifecycle). A ref (not state):
+  // run() reads it imperatively at dispatch time and nothing re-renders on it. Starts EMPTY,
+  // so until a workspace pushes its setting the native engine refuses every SERVICE endpoint
+  // (fail-closed by construction).
+  const serviceAllowRef = React.useRef<string[]>([]);
+
   // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference regime + its materialised closure.
   const [inferenceMode, setInferenceModeState] = React.useState<WorkspaceInferenceMode>("off");
   const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus>({ kind: "off" });
@@ -591,6 +667,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // changes (warm / import / update) so a stale closure is rebuilt automatically.
   const reasonedStoreRef = React.useRef<WasmStore | null>(null);
   const reasonedKeyRef = React.useRef<string | null>(null);
+  // [FABLE-5] sq-ixc3.20 — the canonical keys of the triples the ACTIVE closure ADDED
+  // (closure − base), computed alongside the closure build and cached under the SAME
+  // `mode:epoch[:rulesHash]` key so it can never describe a different store than
+  // `reasonedStoreRef` (the guard in `entailedTripleKeys` checks the key, not just presence).
+  const entailedKeysRef = React.useRef<{ key: string; keys: Set<string> } | null>(null);
   // [OPUS-4.8] sq-tp1m — the SINGLE-FLIGHT slot for an in-flight closure build, keyed by the
   // same `mode:epoch`. Overlapping callers (the applyInferenceMode effect + a run(), or two
   // run()s) that request the same key while the first materialisation is still awaiting share
@@ -660,6 +741,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       reasonedStoreRef.current = null;
       reasonedKeyRef.current = null;
       reasonedBuildRef.current = null;
+      entailedKeysRef.current = null;
       storeEpochRef.current += 1;
       setStoreEpoch(storeEpochRef.current);
       const { size, graphs: gs } = summariseGraphs(store);
@@ -792,6 +874,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           // Closure = base triples + derived (so queries over the closure see both).
           const closure = baseNTriples + (derived.trim() ? "\n" + derived : "");
           const reasoned = Store.load(closure || " ", "ntriples");
+          // [FABLE-5] sq-ixc3.20 — the derived lines ARE the entailed set for N3 mode;
+          // reduce them to canonical keys for the inferred-fact affordance.
+          entailedKeysRef.current = { key, keys: tripleKeysOfNTriples(derived) };
           reasonedStoreRef.current = reasoned;
           reasonedKeyRef.current = key;
           return reasoned;
@@ -824,6 +909,13 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         const snapshot = storeToNQuads(base);
         const closure = reasoner.materialize(snapshot, "nquads", modeToProfile(mode));
         const reasoned = Store.load(closure, "ntriples");
+        // [FABLE-5] sq-ixc3.20 — entailed = closure − base at CANONICAL key level (the two
+        // texts come from different writers — Rust vs the JS termToNT — so identity is the
+        // decoded key, never the raw line; see @/lib/inferred-facts).
+        entailedKeysRef.current = {
+          key,
+          keys: entailedKeysFromClosure(closure, tripleKeysOfNTriples(snapshot)),
+        };
         reasonedStoreRef.current = reasoned;
         reasonedKeyRef.current = key;
         return reasoned;
@@ -850,6 +942,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (mode === "off") {
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
+        entailedKeysRef.current = null;
         setInferenceStatus({ kind: "off" });
         return;
       }
@@ -889,6 +982,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         if (gen !== inferenceGenRef.current) return;
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
+        entailedKeysRef.current = null;
         setInferenceStatus({
           kind: "error",
           message: err instanceof Error ? err.message : String(err),
@@ -904,6 +998,63 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const setInferenceMode = React.useCallback((mode: WorkspaceInferenceMode) => {
     setInferenceModeState(mode);
   }, []);
+
+  // [FABLE-5] sq-ixc3.14 — push the active workspace's federation egress allowlist. A plain
+  // ref write: the next SERVICE-bearing run() hands exactly this list to the native engine's
+  // strict fail-closed policy. Called by FederationBridge + the workspace lifecycle (switch /
+  // restore), mirroring setInferenceMode's lockstep discipline.
+  const setServiceAllowlist = React.useCallback((hosts: string[]) => {
+    serviceAllowRef.current = hosts;
+  }, []);
+
+  // [FABLE-5] sq-ixc3.20 — the entailed-key set of the ACTIVE materialised closure, or null.
+  // The key guard makes staleness impossible: the set is only handed out while it describes
+  // exactly the closure `run()` queries against (same `mode:epoch[:rulesHash]` key).
+  const entailedTripleKeys = React.useCallback((): ReadonlySet<string> | null => {
+    const cached = entailedKeysRef.current;
+    if (!cached || cached.key !== reasonedKeyRef.current) return null;
+    return cached.keys;
+  }, []);
+
+  // [FABLE-5] sq-ixc3.20 — one witness derivation of a clicked triple under the active
+  // regime, as proof-tree JSON. Runs over the ASSERTED base (the reasoner re-derives — the
+  // proof must bottom out in asserted facts, so the closure is never the input). The wasm
+  // reasoner is a stateless one-shot, so a click pays one materialisation-with-tracing; the
+  // GUI only offers the affordance on entailed facts, so this is on-demand, never per-row.
+  const explainWhy = React.useCallback(
+    async (s: string, p: string, o: string): Promise<string> => {
+      const base = storeRef.current;
+      if (!base) {
+        throw new Error("The engine is not ready yet — wait for the store to warm.");
+      }
+      const mode = inferenceMode;
+      if (mode === "off") {
+        throw new Error("Inference is off — there is no entailment regime to explain under.");
+      }
+      const reasoner = await loadReasoner();
+      // Feature-detect the explain surface (the published bundle has it; an older synced
+      // bundle degrades to this honest message rather than a `not a function` crash).
+      const missing = (name: string) =>
+        new Error(
+          `This reason bundle lacks the ${name} proof surface — rebuild it with the ` +
+            `explain feature (js: npm run build:reason-wasm).`,
+        );
+      if (mode === "n3") {
+        const whyN3 = (reasoner as Partial<WasmReasoner>).whyN3;
+        if (typeof whyN3 !== "function") throw missing("whyN3()");
+        const rulesText = n3RulesRef.current
+          .filter((d) => d.enabled !== false)
+          .map((d) => d.text)
+          .join("\n");
+        // The SAME combined rules + folded-base document the closure build feeds reasonN3.
+        return whyN3(rulesText + "\n" + storeToNTriples(base), s, p, o);
+      }
+      const why = (reasoner as Partial<WasmReasoner>).why;
+      if (typeof why !== "function") throw missing("why()");
+      return why(storeToNQuads(base), "nquads", modeToProfile(mode), s, p, o);
+    },
+    [inferenceMode],
+  );
 
   // [sq-glo5r] — push updated N3 rules to the engine; bumps rulesEpoch so the
   // applyInferenceMode effect fires and rebuilds the N3 closure when rules change.
@@ -1068,12 +1219,76 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       const t0 = performance.now();
       let outcome: QueryOutcome;
       try {
-        if (mode === "explain" || mode === "analyze") {
+        if (mode === "run" && (form === "select" || form === "ask") && queryUsesService(query)) {
+          // [FABLE-5] sq-ixc3.14 — FEDERATED path. The in-tab WASM engine cannot evaluate a
+          // SERVICE clause (no blocking cross-origin HTTP in a browser), so a SERVICE-bearing
+          // SELECT/ASK routes to the desktop shell's NATIVE engine over IPC: a whole-dataset
+          // N-Quads snapshot of the (possibly reasoned) target store + the query + the
+          // per-workspace egress allowlist, evaluated under the engine's STRICT fail-closed
+          // policy (an endpoint off the list is refused pre-HTTP — a typed error, never a
+          // hang). On the web build this degrades HONESTLY with the native-only message
+          // instead of running. The native call is not cooperatively cancellable; a Stop
+          // during flight surfaces as "cancelled" once the (transport-bounded) call returns.
+          if (!hasNativeFederation()) {
+            outcome = { kind: "error", message: WEB_FEDERATION_MESSAGE };
+          } else {
+            const dataset = storeToNQuads(target);
+            const json = await nativeServiceQuery(dataset, query, serviceAllowRef.current);
+            if (signal?.aborted) {
+              outcome = { kind: "cancelled" };
+            } else if (json === null) {
+              outcome = { kind: "error", message: WEB_FEDERATION_MESSAGE };
+            } else {
+              outcome = parseServiceResults(json, rowCap);
+            }
+          }
+        } else if (mode === "explain" || mode === "analyze") {
           // EXPLAIN renders the planner's chosen plan; EXPLAIN ANALYZE also EXECUTES it and
           // traces the per-operator work (the wasm `explain` / `explainAnalyze` bindings, which
           // mirror `sparq_engine::explain[_analyze]` and the server's `explain=plan|analyze`).
-          const plan = mode === "analyze" ? target.explainAnalyze(query) : target.explain(query);
-          outcome = { kind: "explain", mode, plan };
+          //
+          // [FABLE-5] sq-ixc3.19 — three-way source selection for the plan explorer:
+          //   * `native` (desktop only): the `explain_native` Tauri command over an N-Quads
+          //     snapshot of the SAME target store (federation's snapshot semantics) — the one
+          //     source with REAL per-operator wall nanos.
+          //   * structured wasm (`explainPlanJson` / `explainPlanAnalyzeJson`, present in the
+          //     published bundle): the typed tree; exact rows + q-error, nanos read 0 on wasm32.
+          //     For ANALYZE exactly ONE binding runs — the text and JSON analyze forms would
+          //     each execute the query, so calling both would double the measured work.
+          //   * text (a lean bundle without the explain-json feature): today's `<pre>` plan.
+          if (opts?.native) {
+            const json = await nativeExplain(
+              storeToNQuads(target),
+              query,
+              mode === "analyze",
+            );
+            if (signal?.aborted) {
+              outcome = { kind: "cancelled" };
+            } else if (json === null) {
+              outcome = {
+                kind: "error",
+                message:
+                  "Native EXPLAIN runs only in the desktop app — the hosted web build has no native engine. The in-tab EXPLAIN/ANALYZE still works (row counts and q-error are exact; wall times are unmeasured).",
+              };
+            } else {
+              outcome = { kind: "explain", mode, plan: "", tree: parsePlanJson(json), source: "native" };
+            }
+          } else {
+            const planCapable = target as WasmStore & Partial<PlanCapableStore>;
+            if (
+              typeof planCapable.explainPlanJson === "function" &&
+              typeof planCapable.explainPlanAnalyzeJson === "function"
+            ) {
+              const json =
+                mode === "analyze"
+                  ? planCapable.explainPlanAnalyzeJson(query)
+                  : planCapable.explainPlanJson(query);
+              outcome = { kind: "explain", mode, plan: "", tree: parsePlanJson(json), source: "wasm" };
+            } else {
+              const plan = mode === "analyze" ? target.explainAnalyze(query) : target.explain(query);
+              outcome = { kind: "explain", mode, plan, source: "wasm" };
+            }
+          }
         } else if (form === "ask") {
           const json = target.query(query);
           const parsed = JSON.parse(json) as SparqlResults;
@@ -1135,13 +1350,15 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           }
         }
       } catch (err) {
+        // [FABLE-5] sq-ixc3.14 — a native SERVICE egress REFUSAL (the engine's stable marker)
+        // is surfaced as the actionable fail-closed message (pointing at the per-workspace
+        // allowlist); every other error passes through unchanged. A Tauri command rejection is
+        // a plain string, so String(err) covers both shapes.
+        const raw = err instanceof Error ? err.message : String(err);
         outcome =
           err instanceof AbortError || signal?.aborted
             ? { kind: "cancelled" }
-            : {
-                kind: "error",
-                message: err instanceof Error ? err.message : String(err),
-              };
+            : { kind: "error", message: describeServiceRefusal(raw) ?? raw };
       }
       const latencyMs = performance.now() - t0;
       setLastLatencyMs(latencyMs);
@@ -1209,6 +1426,14 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setNativeLoaderAvailable(hasNativeLoader());
   }, []);
 
+  // [FABLE-5] sq-ixc3.14 — whether the native federated-query IPC is reachable (inside the
+  // Tauri shell). Same once-on-mount discipline as nativeLoaderAvailable, so the Query tool
+  // can label the SERVICE run location honestly without re-detecting per render.
+  const [nativeFederationAvailable, setNativeFederationAvailable] = React.useState(false);
+  React.useEffect(() => {
+    setNativeFederationAvailable(hasNativeFederation());
+  }, []);
+
   const value = React.useMemo<EngineContextValue>(
     () => ({
       status,
@@ -1226,11 +1451,16 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      storeEpoch,
       hydrateFromSnapshot,
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
+      entailedTripleKeys,
+      explainWhy,
       setN3Rules,
+      setServiceAllowlist,
+      nativeFederationAvailable,
     }),
     [
       status,
@@ -1248,11 +1478,16 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      storeEpoch,
       hydrateFromSnapshot,
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
+      entailedTripleKeys,
+      explainWhy,
       setN3Rules,
+      setServiceAllowlist,
+      nativeFederationAvailable,
     ],
   );
 

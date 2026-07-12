@@ -1,0 +1,6 @@
+{
+  "pr": 1753,
+  "bead": "sq-7d3dj.32.1",
+  "reason": "shrink_to_fit() added to the no-threads build_raw_perms body (the wasm path) after triples.dedup() so the SPO permutation Vec carries zero capacity slack. This adds one allocator-call instruction to the wasm binary, intentionally changing the feature-OFF bundle bytes. The change is correct and deliberate: heap_bytes() counts capacity(), so releasing the pre-dedup allocation is the goal. Size delta: ~+0.25% (~+3.5 KB), within the 2% bench.yml band.",
+  "author": "[SONNET-4.6]"
+}

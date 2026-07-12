@@ -1,0 +1,9 @@
+# [FABLE-5] (sq-lsp7k.8) Constant-valued term maps via the rr:subject / rr:predicate /
+# rr:object shortcuts (the construct the W3C R2RMLTC0007 family exercises), CSV-adapted.
+# Every row generates the SAME triple; the output graph still holds it once (set semantics).
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+<#TriplesMap1> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "student" ] ;
+  rr:subject ex:StudentRoster ;
+  rr:predicateObjectMap [ rr:predicate ex:source ; rr:object "csv import" ] .

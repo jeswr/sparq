@@ -30,6 +30,11 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import {
+  WORKSPACE_ACTIONS_CONTAINER_CLASS,
+  WORKSPACE_RENAME_BUTTON_CLASS,
+  WORKSPACE_DELETE_BUTTON_CLASS,
+} from "@/lib/workspace-actions-visibility";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useRegisterPaletteCommands } from "@/components/workbench/command-palette";
 import type { PaletteCommand } from "@/lib/palette-commands";
@@ -326,8 +331,20 @@ export function WorkspaceSwitcher() {
                         </span>
                       </button>
 
-                      {/* Rename + delete — shown on hover via group-hover */}
-                      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                      {/*
+                        (sq-ds9pg) Rename + delete — revealed on pointer hover (group-hover) AND on
+                        KEYBOARD FOCUS (group-focus-within). opacity-0 alone does NOT remove an
+                        element from the tab order, so a keyboard-only user tabbing through the row
+                        would land focus on these buttons while they were fully transparent — a WCAG
+                        2.1 AA 2.4.7 (Focus Visible) failure and a blind-Enter mis-activation hazard.
+                        group-focus-within:opacity-100 makes the whole action group visible the moment
+                        either button receives focus; the per-button focus-visible ring gives the
+                        required visible focus indicator.
+                      */}
+                      <div
+                        data-workspace-actions={ws.id}
+                        className={WORKSPACE_ACTIONS_CONTAINER_CLASS}
+                      >
                         <button
                           data-workspace-rename={ws.id}
                           onClick={(e) => {
@@ -335,7 +352,7 @@ export function WorkspaceSwitcher() {
                             setMode({ kind: "renaming", id: ws.id });
                             setInputValue(ws.name);
                           }}
-                          className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                          className={WORKSPACE_RENAME_BUTTON_CLASS}
                           aria-label={`Rename workspace ${ws.name}`}
                           title="Rename"
                         >
@@ -351,7 +368,7 @@ export function WorkspaceSwitcher() {
                               name: ws.name,
                             });
                           }}
-                          className="rounded p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+                          className={WORKSPACE_DELETE_BUTTON_CLASS}
                           aria-label={`Delete workspace ${ws.name}`}
                           title="Delete"
                         >

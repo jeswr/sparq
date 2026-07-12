@@ -5,7 +5,8 @@
 //   * a whole-engine failure (e.g. Fuseki load timeout) renders "failed", never blank;
 //   * per-query solution COUNT cross-check (✓ agree / DIFF) is shown;
 //   * canonical vs non-canonical provenance (host / scale / commit) is labelled.
-import { fmtNum, type SameBoxComparison } from "@/data/benchmarks";
+import { fmtNum } from "@/lib/fmt-num";
+import type { SameBoxComparison } from "@/data/benchmarks";
 
 export function SameBoxTable({ comparison }: { comparison: SameBoxComparison }) {
   const engines = comparison.engines;

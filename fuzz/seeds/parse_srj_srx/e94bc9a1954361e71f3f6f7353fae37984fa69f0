@@ -1,0 +1,8 @@
+</xml versio5/sparql-results#">
+  <head><variable name="s"/></head>
+  <lts#">
+  <he</head>
+  <results>
+    <result><binding name="s"><uri>http://example.org/s</uri></binding></result>
+  </results>
+</sparql>

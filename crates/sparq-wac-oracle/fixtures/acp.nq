@@ -1,0 +1,75 @@
+# [FABLE-5] sq-t999y — compact ACP decision corpus, derived from the
+# crates/sparq-solid/src/fixture.rs seed. ACP inheritance is CUMULATIVE (every
+# ancestor's memberAccessControl applies), so the root owner policy reaches
+# everywhere — the key WAC difference. Shapes: priv0 (owner-only), pub1 (public),
+# team2 (anyOf enumerated agents), friends3 (allOf agent+client pair), mixed4
+# (public + deny-overrides), origin5 (public noneOf carol -> conditional grant).
+<https://pod.ex/priv0/d0.ttl#it> <https://ex.dev/ns#title> "priv0 doc" <https://pod.ex/priv0/d0.ttl> .
+<https://pod.ex/pub1/d0.ttl#it> <https://ex.dev/ns#title> "pub1 doc" <https://pod.ex/pub1/d0.ttl> .
+<https://pod.ex/team2/d0.ttl#it> <https://ex.dev/ns#title> "team2 doc" <https://pod.ex/team2/d0.ttl> .
+<https://pod.ex/friends3/d0.ttl#it> <https://ex.dev/ns#title> "friends3 doc" <https://pod.ex/friends3/d0.ttl> .
+<https://pod.ex/mixed4/d0.ttl#it> <https://ex.dev/ns#title> "mixed4 doc" <https://pod.ex/mixed4/d0.ttl> .
+<https://pod.ex/origin5/d0.ttl#it> <https://ex.dev/ns#title> "origin5 doc" <https://pod.ex/origin5/d0.ttl> .
+# root .acr: alice everything, on the root itself (accessControl) AND all members (memberAccessControl)
+<https://pod.ex/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/> <https://pod.ex/.acr> .
+<https://pod.ex/.acr> <http://www.w3.org/ns/solid/acp#accessControl> <https://pod.ex/.acr#ctl-own> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#ctl-own> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/.acr#pol-own> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/.acr#m-own> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#m-own> <http://www.w3.org/ns/solid/acp#agent> <https://alice.ex/card#me> <https://pod.ex/.acr> .
+<https://pod.ex/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/.acr#ctl-ownm> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#ctl-ownm> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/.acr#pol-ownm> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-ownm> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-ownm> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-ownm> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#pol-ownm> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/.acr#m-ownm> <https://pod.ex/.acr> .
+<https://pod.ex/.acr#m-ownm> <http://www.w3.org/ns/solid/acp#agent> <https://alice.ex/card#me> <https://pod.ex/.acr> .
+# pub1/.acr: public read for members (alice keeps access via the root — cumulative)
+<https://pod.ex/pub1/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/pub1/> <https://pod.ex/pub1/.acr> .
+<https://pod.ex/pub1/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/pub1/.acr#ctl-pub> <https://pod.ex/pub1/.acr> .
+<https://pod.ex/pub1/.acr#ctl-pub> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/pub1/.acr#pol-pub> <https://pod.ex/pub1/.acr> .
+<https://pod.ex/pub1/.acr#pol-pub> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/pub1/.acr> .
+<https://pod.ex/pub1/.acr#pol-pub> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.ex/pub1/.acr#m-pub> <https://pod.ex/pub1/.acr> .
+<https://pod.ex/pub1/.acr#m-pub> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.ex/pub1/.acr> .
+# team2/.acr: bob + carol read/write (ACP has no groups; enumerate via anyOf)
+<https://pod.ex/team2/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/team2/> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/team2/.acr#ctl-team> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#ctl-team> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/team2/.acr#pol-team> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#pol-team> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#pol-team> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#pol-team> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.ex/team2/.acr#m-bob> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#m-bob> <http://www.w3.org/ns/solid/acp#agent> <https://bob.ex/card#me> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#pol-team> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.ex/team2/.acr#m-carol> <https://pod.ex/team2/.acr> .
+<https://pod.ex/team2/.acr#m-carol> <http://www.w3.org/ns/solid/acp#agent> <https://carol.ex/card#me> <https://pod.ex/team2/.acr> .
+# friends3/.acr: the native user/app PAIR — agent bob AND client app.ex (allOf)
+<https://pod.ex/friends3/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/friends3/> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/friends3/.acr#ctl-pair> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr#ctl-pair> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/friends3/.acr#pol-pair> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr#pol-pair> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr#pol-pair> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/friends3/.acr#m-agent> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr#m-agent> <http://www.w3.org/ns/solid/acp#agent> <https://bob.ex/card#me> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr#pol-pair> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/friends3/.acr#m-client> <https://pod.ex/friends3/.acr> .
+<https://pod.ex/friends3/.acr#m-client> <http://www.w3.org/ns/solid/acp#client> <https://app.ex> <https://pod.ex/friends3/.acr> .
+# mixed4/.acr: public read, but DENY dave (deny-overrides)
+<https://pod.ex/mixed4/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/mixed4/> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/mixed4/.acr#ctl-pub> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#ctl-pub> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/mixed4/.acr#pol-pub> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#pol-pub> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#pol-pub> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.ex/mixed4/.acr#m-pub> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#m-pub> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/mixed4/.acr#ctl-nodave> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#ctl-nodave> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/mixed4/.acr#pol-nodave> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#pol-nodave> <http://www.w3.org/ns/solid/acp#deny> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#pol-nodave> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.ex/mixed4/.acr#m-dave> <https://pod.ex/mixed4/.acr> .
+<https://pod.ex/mixed4/.acr#m-dave> <http://www.w3.org/ns/solid/acp#agent> <https://dave.ex/card#me> <https://pod.ex/mixed4/.acr> .
+# origin5/.acr: public read EXCEPT carol (noneOf -> conditional grant)
+<https://pod.ex/origin5/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/origin5/> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/origin5/.acr#ctl-nocarol> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr#ctl-nocarol> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/origin5/.acr#pol-nocarol> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr#pol-nocarol> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr#pol-nocarol> <http://www.w3.org/ns/solid/acp#anyOf> <https://pod.ex/origin5/.acr#m-pub> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr#m-pub> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr#pol-nocarol> <http://www.w3.org/ns/solid/acp#noneOf> <https://pod.ex/origin5/.acr#m-carol> <https://pod.ex/origin5/.acr> .
+<https://pod.ex/origin5/.acr#m-carol> <http://www.w3.org/ns/solid/acp#agent> <https://carol.ex/card#me> <https://pod.ex/origin5/.acr> .

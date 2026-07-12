@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 mod dataset;
 mod fuzz;
+mod update_fuzz;
 
 /// The query workload. Each exercises a different plan shape.
 const QUERIES: &[(&str, &str)] = &[
@@ -63,6 +64,18 @@ fn main() {
         let count: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
         let category = args.get(4).map(String::as_str).unwrap_or("all");
         fuzz::run(seed_start, count, category);
+        return;
+    }
+
+    // `sparq-bench update-fuzz --seed-start N --seed-count M` — SPARQL UPDATE
+    // differential vs Oxigraph (sq-3dyje.4): random ground-term update sequences
+    // through both sparq update paths + Oxigraph, canonical per-step compare.
+    if args.get(1).map(String::as_str) == Some("update-fuzz") {
+        let seed_start: u64 =
+            arg_val(&args, "--seed-start").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let count: u64 =
+            arg_val(&args, "--seed-count").and_then(|s| s.parse().ok()).unwrap_or(1000);
+        update_fuzz::run(seed_start, count);
         return;
     }
 

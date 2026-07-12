@@ -31,14 +31,32 @@ on:
   # lane (ci-select.yml maps the label to `--full`, which forces the perf gate to run).
   # The default types (opened/synchronize/reopened) are listed explicitly so adding the
   # label events does NOT drop `synchronize` (the push-to-PR trigger).
+  #
+  # [FABLE-5] (sq-6vshe.6 heavy-lane placement, MAINTAINER-DIRECTED) On a PR the `bench`
+  # job runs the FAST DETERMINISTIC form only — `ci-bench.sh --deterministic-only` — which
+  # hard-gates the byte-count / memory-layout ratchet (store/dict/wasm bytes; a pure
+  # function of the code, immune to shared-runner noise) but SKIPS every wall-clock timing
+  # loop + well-known / crate-example latency suite. Those NOISY, FLAKY timing benchmarks
+  # were dragging the merge queue and flapping the gate; they are RELOCATED to the nightly
+  # EC2 lane (bench-ec2.yml `nightly-full-bench`, cron), which publishes the full at-scale
+  # series to the benchmark-data branch the Pages dashboard reads. See the "Run benchmarks"
+  # step guard below and bench-ec2.yml.
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  # [OPUS-4.8] Merge queue: the perf gate must run on the queue's merge_group ref so
-  # the required ci-summary aggregates the benchmark check. The auto-push / baseline-
-  # commit / benchmark-data steps are all gated on push-to-main (see the step guards)
-  # — on merge_group github.ref is refs/heads/gh-readonly-queue/main/…, so (exactly as
-  # on a PR) they SKIP and only the perf gate computes + enforces the floor.
-  merge_group:
+  # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) merge_group REMOVED. The deterministic
+  # byte-count ratchet is a pure function of the code: it already ran + hard-gated on the
+  # PR head (--deterministic-only above), it re-runs on push-to-main below, and the
+  # merged-tree wasm-feature-OFF invariant is INDEPENDENTLY guarded on merge_group by
+  # vectorized-feature-off.yml's `artifact-exact-equality` leg (a dynamic same-run
+  # byte-identity build of the merged tree). So re-running this job on the ephemeral
+  # merge_group ref added NO protection while occupying a runner slot + adding the full
+  # timing suite's wall-clock to EVERY merge — the queue-drag this change removes. With
+  # the merge_group trigger gone, this job simply does not appear as a check-run on the
+  # merge_group ref, and `ci-summary / gate` (the single required check) aggregates only
+  # the siblings that DO run there — it never waits on a check that was never scheduled
+  # (the branch-protection required set is the single `gate` context, NOT this job by name;
+  # see docs/branch-protection.md). Correctness checks (build/test/clippy/conformance/
+  # coverage/CodeQL/supply-chain) all still run on merge_group and still gate.
   workflow_dispatch:
   # [SONNET-4.6] sq-mel85 (design §6.1): the nightly FULL-RUN BACKSTOP for change-based
   # selection. bench.yml previously had NO schedule trigger, so a PR that selection-
@@ -159,17 +177,26 @@ jobs:
       # is logged per CI run (see ci-bench.sh wasm_opt_bundle_bytes block).
       - name: Install binaryen (wasm-opt for shipped-size trend metric)
         run: sudo apt-get update -q && sudo apt-get install -y binaryen
-      # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN ONLY. On push to
-      # main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install these, so the
-      # ci-bench.sh suite hooks SKIP gracefully (each is guarded on `command -v <tool>`) and PR perf
-      # feedback stays lean (synthetic + operator + memory/bundle metrics only). The full SF/scale
-      # tiers are EC2/nightly (beads sq-uubq/xin1/8lgn/yc1q/z31u), NOT here.
+      # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN + `bench-full` PRs.
+      # On push to main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install
+      # these BY DEFAULT, so the ci-bench.sh suite hooks SKIP gracefully (each is guarded on
+      # `command -v <tool>`) and PR perf feedback stays lean (synthetic + operator + memory/bundle
+      # metrics only). The full SF/scale tiers are EC2/nightly (beads sq-uubq/xin1/8lgn/yc1q/z31u).
       #   g++ is preinstalled on ubuntu-latest (watdiv). default-jre = java (bsbm) + JRE for lubm's
       #   javac comes from default-jdk... but default-jre has NO javac, so install default-jdk for
       #   lubm's `javac` guard; libboost-all-dev = watdiv's Boost; raptor2-utils = lubm's `rapper`;
       #   unzip = bsbm's distribution unpack.
-      - name: Install well-known-suite toolchains (main only)
-        if: github.ref == 'refs/heads/main'
+      #
+      # [FABLE-5] sq-6vshe.6 heavy-lane placement: the per-PR bench lane is the LEAN form
+      # (synthetic + operator + the DETERMINISTIC byte-count ratchet — see the Hard-gate step
+      # below; that ratchet is UNCHANGED and always runs on PRs) — the multi-minute well-known
+      # suites are the demoted heavy work and stay off the per-PR default. The `bench-full` PR
+      # LABEL opts BACK IN: a perf-sensitive PR installs the suite toolchains here so the full
+      # well-known series runs pre-merge too (mirroring the `ci-full` / `fuzz-full` label pattern).
+      # NOTE: this only RELOCATES the noisy latency suites; the hard perf-gate ratchet (deterministic
+      # store/dict/wasm byte counts) is NEVER demoted — it gates every PR regardless of this label.
+      - name: Install well-known-suite toolchains (main + bench-full PRs)
+        if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'bench-full')
         run: sudo apt-get update && sudo apt-get install -y libboost-all-dev default-jdk raptor2-utils unzip
       # [OPUS-4.8] Per-suite generator-cache restore/save so the steady state does NO rebuild/refetch:
       # each suite's gen.sh/fetch.sh/run.sh build-once-and-cache their generator binary + the fixed
@@ -203,7 +230,20 @@ jobs:
           key: bench-dbpsb-${{ runner.os }}-${{ hashFiles('bench/dbpsb/fetch.sh') }}
       - name: Build release binaries
         run: cargo build --release -p sparq-cli -p sparq-bench
-      - name: Run benchmarks
+      # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) On a PR run ONLY the DETERMINISTIC byte-count
+      # metrics (`--deterministic-only`): the hard-gated store/dict/wasm bytes ratchet — a pure
+      # function of the code, seconds not minutes, immune to shared-runner noise. The full noisy
+      # timing suite (query latencies + well-known / crate-example suites + the parse timing metric)
+      # is RELOCATED to the nightly EC2 lane (bench-ec2.yml) so it no longer drags the merge queue or
+      # flaps the gate. On push-to-main / schedule / workflow_dispatch (NOT a PR) the FULL suite runs,
+      # so the auto-ratchet floor + the benchmark-data history (main-only steps below) stay continuous
+      # exactly as before — the per-commit trend on the Pages dashboard is unaffected. The two-line
+      # split keeps the emitted JSON path identical (bench-results.json) for every downstream step.
+      - name: Run benchmarks (PR — deterministic byte-count ratchet only)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci-bench.sh --deterministic-only 200000 bench-results.json
+      - name: Run benchmarks (full suite — main / schedule / dispatch)
+        if: github.event_name != 'pull_request'
         run: bash scripts/ci-bench.sh 200000 bench-results.json
       # [OPUS-4.8] HARD regression RATCHET on the gated metrics (store/dict bytes-per-{triple,term},
       # store_bytes_per_triple_small, wasm_bundle_bytes = DETERMINISTIC byte counts; parse_ns_per_byte =

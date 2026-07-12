@@ -117,6 +117,15 @@ proximity/slop, BM25 k1=1.2/b=0.75) or it is unfair. A real
 `bench/competitor-results/`; docker-based competitors are inherently gather-only on a Docker
 EC2 box (no Docker on the dev box), so they add zero recurring CI cost.
 
+The **same-box jena-text comparison harness** is `scripts/bench/fts-same-box.sh`
+([FABLE-5] sq-hmd7l.2, the `shacl-same-box.sh` template): it provisions a local Fuseki +
+jena-text (mem Lucene) over the SAME synthetic corpus, runs the **pinned** `text:query`
+translations in [`queries-jena-text/`](./queries-jena-text/README.md) (AND/OR/prefix/phrase
+result **sets** only; `near_slop2` is honestly untranslatable), cross-checks per-workload
+hit counts engine-vs-engine BEFORE any timing is trusted (`count_crosscheck` — mismatches
+recorded, never adjusted), and emits a canonical-competitor-results envelope
+(`canonical:false` off a quiet box). Gap record: `research/gap-fts-2026-07.md`.
+
 ## BEIR IR-quality axis (gather-only, sq-1fz0)
 
 The second design axis — **Recall@100 / nDCG@10** on a small BEIR cut (SciFact / TREC-COVID

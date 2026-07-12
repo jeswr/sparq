@@ -116,7 +116,8 @@ adaptive re-planning (`AdaptiveExecutor`) is behind the further `adaptive-replan
 
 [OPUS-4.8] sq-a35t / sq-vf7q / sq-7s4z / sq-gxx7 — flagged for Fable re-review."#
 )]
-#![forbid(unsafe_code)] // [OPUS-4.8] sq-a35t: crate has zero `unsafe`.
+#![forbid(unsafe_code)]
+// [OPUS-4.8] sq-a35t: crate has zero `unsafe`.
 // [OPUS-4.8] sq-gxx7: lock the crate-doc fix in. `rustdoc::broken_intra_doc_links` is a
 // rustdoc-only lint — it fires under `cargo doc`, NOT under `cargo build`/`clippy`/`test` — so
 // denying it keeps the existing build/clippy/test gates untouched while making a future broken
@@ -154,8 +155,8 @@ mod stream;
 // genuinely public item. Separate from the #474 `broken_intra_doc_links` gate (a method-doc lint).
 #[cfg(feature = "fedplan")]
 pub use descriptor::{
-    CharSet, ClassPartition, PredPartition, SourceDescriptor, SourceDescriptorBuilder, SourceId,
-    CS_NS, VOID_NS,
+    CharSet, ClassPartition, PredPartition, RetrievalCapability, SourceDescriptor,
+    SourceDescriptorBuilder, SourceId, CS_NS, RETRIEVAL_NS, VOID_NS,
 };
 #[cfg(feature = "fedplan")]
 pub use pattern::{Bgp, Term, TriplePattern, Var};
@@ -169,5 +170,8 @@ pub use stream::{
     blocking_hash_join, run_streaming, SpillStore, StreamJoin, StreamJoinOptions, Tuple,
 };
 // [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning surface.
+// [FABLE-5] sq-s5kd: + LatencyAggregation (per-source vs slowest-arm latency in cost).
 #[cfg(feature = "adaptive-replan")]
-pub use adaptive::{exec_oracle, AdaptiveExecutor, ReplanOutcome, ReplanPolicy, RuntimeStats};
+pub use adaptive::{
+    exec_oracle, AdaptiveExecutor, LatencyAggregation, ReplanOutcome, ReplanPolicy, RuntimeStats,
+};

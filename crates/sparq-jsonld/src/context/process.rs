@@ -114,7 +114,7 @@ pub(crate) fn process_inner(
 
     // step 3: when not propagating, remember the input context to revert to.
     if !propagate && result.previous_context.is_none() {
-        result.previous_context = Some(Box::new(active.clone()));
+        result.previous_context = Some(std::sync::Arc::new(active.clone()));
     }
 
     // step 4: normalise to an array of contexts.
@@ -132,7 +132,7 @@ pub(crate) fn process_inner(
             }
             let mut fresh = ActiveContext::new(active.original_base_url.as_deref());
             if !propagate {
-                fresh.previous_context = Some(Box::new(result.clone()));
+                fresh.previous_context = Some(std::sync::Arc::new(result.clone()));
             }
             result = fresh;
             continue;
@@ -405,7 +405,7 @@ pub(crate) fn create_term_definition(
     }
 
     // step 6: remove and remember any existing definition (for the protected check).
-    let previous_definition = active.term_definitions.remove(term);
+    let previous_definition = active.term_definitions_mut().remove(term);
 
     // steps 7–9: normalise the value to a map and record whether it was a simple term.
     let (value, simple_term) = match &raw {
@@ -486,15 +486,35 @@ pub(crate) fn create_term_definition(
                 return Err(JsonLdError::new(E::InvalidIriMapping));
             }
             def.iri = Some(expanded.clone());
-            // Round-trip check for compact / relative-IRI terms.
-            if term.find(':').is_some_and(|i| i > 0) || term.contains('/') {
+            // Round-trip check for compact / relative-IRI terms (JSON-LD 1.1 §4.2.2 step
+            // 14.3.3).  This check is ABSENT from the JSON-LD 1.0 algorithm — it was added
+            // in 1.1 to disallow inconsistent compact-IRI redefinitions.  In JSON-LD 1.0
+            // mode the check is skipped (W3C expand/0026 maps rdf:type→@type and
+            // expand/0071 remaps v:term→v:somethingElse — both VALID in 1.0).
+            // The check is also skipped when the IRI mapping is a keyword (e.g. `@type`):
+            // keywords are not IRIs, so the round-trip "expand term = IRI mapping" predicate
+            // cannot hold and the check would always fire spuriously.
+            // [FABLE-5] (sq-oy1f.27) The round-trip check applies to a term containing
+            // a colon "anywhere but as the first or last character" (§4.2.2 step
+            // 14.3.3) — a term ENDING in a colon (the `"prefix:"` declaration form,
+            // W3C compact/p003-p004) is a regular term, not a compact-IRI form.
+            if env.mode != ProcessingMode::JsonLd10
+                && !is_keyword(&expanded)
+                && (term.find(':').is_some_and(|i| i > 0 && i < term.len() - 1)
+                    || term.contains('/'))
+            {
                 defined.insert(term.to_string(), true);
                 let rt = expand_iri_in_context(active, term, false, true, local, defined, env)?;
                 if rt.as_deref() != Some(expanded.as_str()) {
                     return Err(JsonLdError::new(E::InvalidIriMapping));
                 }
             }
-            // Simple-term prefix flag.
+            // Simple-term prefix flag (§4.2.2 step 23): only a SIMPLE (string-valued)
+            // term whose IRI ends in a gen-delim is a prefix — deliberately in BOTH
+            // processing modes, matching jsonld.js and pyld (W3C compact/p001 pins the
+            // 1.0-mode half: an expanded term definition is not a prefix in 1.0 either;
+            // the one suite case that presumes 1.0-era prefixing, compact/0038, is an
+            // honest FAIL for REC-conformant processors — see the compact floor doc).
             if simple_term
                 && term.find(':').is_none()
                 && !term.contains('/')
@@ -599,8 +619,27 @@ fn create_reverse_definition(
             _ => return Err(JsonLdError::new(E::InvalidReverseProperty)),
         };
     }
+    // [SONNET-4.6] sq-oy1f.45 — §4.2.2 step 18: `@index` applies to `@container @index`
+    // terms including reverse properties (W3C expand/0131: a `@reverse` + `@container @index`
+    // + `@index "predicate"` combination).  The non-reverse path processes `@index` inside
+    // `finish_definition`, but `create_reverse_definition` returns early before reaching
+    // `finish_definition`.  Apply it here so the property-valued-index key is stored.
+    if let Some(idx) = value.get("@index") {
+        if env.mode == ProcessingMode::JsonLd10 || !def.container.iter().any(|m| m == "@index") {
+            return Err(JsonLdError::new(E::InvalidTermDefinition));
+        }
+        let Json::Str(is) = idx else {
+            return Err(JsonLdError::new(E::InvalidTermDefinition));
+        };
+        let is = is.clone();
+        match expand_iri_in_context(active, &is, false, true, local, defined, env)? {
+            Some(e) if is_absolute_iri(&e) => {}
+            _ => return Err(JsonLdError::new(E::InvalidTermDefinition)),
+        }
+        def.index = Some(is);
+    }
     def.reverse = true;
-    active.term_definitions.insert(term.to_string(), def);
+    active.term_definitions_mut().insert(term.to_string(), def);
     defined.insert(term.to_string(), true);
     Ok(())
 }
@@ -754,7 +793,7 @@ fn finish_definition(
         }
     }
 
-    active.term_definitions.insert(term.to_string(), def);
+    active.term_definitions_mut().insert(term.to_string(), def);
     defined.insert(term.to_string(), true);
     Ok(())
 }

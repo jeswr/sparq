@@ -199,5 +199,88 @@ This note pins **semantics and additivity**, nothing about privacy. In particula
   no deny-on-disagreement), `sq-l5og` (delegation invocation binding), `sq-wvne` (ZK
   privacy).
 
-See `research/solid-trust-graph-authz-design.md` §7 for the full, audited limitations
-list, and `crates/sparq-trust/README.md` for the PoC's honest scope.
+## 5. The certification-edge trust-graph closure (opt-in `cert-graph`, `sq-pfae.15`)
+
+The `trustx:Certification` vocabulary (`framework_vocab`, design record
+`research/trust-expression-spec.md` §3.4 / D4) says who vouches for whom, over what
+scope, in what window — but has **no pod-side evaluation**: admission consumes a flat
+`Vec<TrustRule>`. The `graph` module (behind the default-OFF **`cert-graph`** feature)
+adds `derive_effective_rules`: a **depth-bounded (v1: depth-1), attenuation-only,
+fail-closed** certification-edge closure that runs **AHEAD of** — and produces the rule
+set consumed **verbatim by** — the UNCHANGED admission gate (stratum 1 above). It changes
+**no** gate; it is a pure pre-processing step.
+
+### 5.1 The certification edge
+
+A `trustx:Certification` is modelled as a signed **edge** (`graph::Certification`): an
+authority (the **certifier** — a framework operator / a higher issuer) attests that a
+**certified issuer** is certified — `trustx:underFramework`, over `trustx:scope`, within
+`trustx:validFrom`/`validUntil` — to issue statements of that scope. A Trusted-List /
+DIATF-register entry **is** one such edge. The edge is admitted into the closure ONLY if
+a signature over its domain-separated `certification_message` (which binds the certifier,
+the certified issuer **and its key**, the scope, and the window) **verifies under the
+certifier's key** — a CHECKED signature, never a self-asserted `trustx:certifies` triple.
+
+### 5.2 The HARD invariant — attenuation-ONLY (a broadening bug is privilege escalation)
+
+Every derived rule satisfies `derived ⊆ (anchor ∩ cert scope ∩ validity window)`: a
+certification can only **NARROW**, never **WIDEN**, the certifier's own authority. Concretely:
+
+- **Anchor.** The certifier MUST be a **direct** anchor rule (`source` + matching key) in
+  the input `direct_rules` — only authority the pod already holds can be conferred. (This
+  is the depth bound made concrete: a *derived* rule is never re-used as an anchor, so the
+  closure is a single pass and cannot transitively chain.)
+- **Statement-type narrowing — target-set-CONTRAVARIANT, conformance-COVARIANT.** A SHACL
+  shape selects focus nodes by the **UNION** of its target predicates
+  (`sh:targetSubjectsOf` / `sh:targetObjectsOf` / `sh:targetNode` / `sh:targetClass` /
+  `sh:targetWhere`, and the implicit-class typing) and then requires each to satisfy every
+  **conformance** constraint (`sh:property` / `sh:minCount` / `sh:datatype` / …). These move
+  in OPPOSITE directions: adding a conformance constraint **narrows** the admitted set (fewer
+  nodes conform), but adding a target predicate **widens** it (more nodes are selected). So a
+  cert shape narrows the anchor **only** when — proven by a **root-anchored, injective
+  structural match** — its **selection/target set is a SUBSET** of the anchor's (targets may
+  only shrink) **AND** its **conformance-constraint set is a SUPERSET** of the anchor's
+  (constraints may only grow). Any **un-modelled selection predicate ⇒ fail-closed**
+  (contributes nothing). `AnyServiceScope` imposes no narrowing of its own and inherits the
+  anchor shape unchanged (never broadening it). Where narrowing cannot be *proven*, the edge
+  contributes **NOTHING** (design §3.4: undecidable containment ⇒ NOT contained ⇒ contributes
+  nothing — the fail-closed side).
+
+  > A prior version treated **any** injective structural superset as a narrowing ("⊇ as a
+  > constraint set ⇒ ⊆ as an admitted-node set"). That equivalence holds only for
+  > *conformance* constraints; it is **UNSOUND for target predicates**, where an extra
+  > `sh:targetSubjectsOf` triple is a **broadening**, not a narrowing. An escalated adversarial
+  > review (`sq-pfae.15`) found the bypass: a cert = anchor shape **+ an extra
+  > `sh:targetSubjectsOf schema:email`** was admitted as a "narrowing" and granted the
+  > certified issuer authority over `schema:email` the certifier never held. The containment
+  > check is now split into a contravariant target-set check and a covariant conformance
+  > check, and the additive-target case is denied `EdgeRejection::Broadening`.
+- **Resource-scope + freshness narrowing.** The derived rule keeps the anchor's resource
+  `scope` (a cert narrows *who* and *what-type*, never widens *where*) and freshness
+  `min(anchor.fresh_within, window)`.
+- **Time.** An expired / not-yet-valid / inverted-window (missing positive status) edge
+  ⇒ NOTHING (positive, existence-of-a-covering-window semantics; OWA/monotonicity, §3.3
+  D3).
+- **No cycle amplification.** A self-certifying edge, or one whose certified issuer already
+  anchors the certifier, is dropped — it can add no new authority and is the shape a cycle
+  would use to launder a broadening.
+- **Strict additivity.** Zero certifications (or none surviving the gate) ⇒ output is
+  `direct_rules` **byte-identical**; a `depth_bound` of `0` short-circuits identically.
+
+### 5.3 Honest scope
+
+`derive_effective_rules` makes **no** cryptographic-soundness, anonymity, or
+unlinkability claim. It is a **fail-closed attenuation** layer — a CHECKED certifier
+signature over a canonical message plus scope/time narrowing (framework trust is
+**anchored, not proven**, §7.2). It defeats a *broadening* or *forged-edge* escalation
+**given honest anchor keys**; the certifier's own key is still operator-/DID-asserted (the
+live forgery vector D′, `sq-pfae.3`), and the shared ZK signature primitive is externally
+**unaudited** (`sq-qhy4`; `sparq-mpc` semi-honest only). The load-bearing evidence is the
+adversarial edge-forgery matrix in
+`crates/sparq-trust/tests/certification_graph_e2e.rs` (forged / broadening / expired /
+revoked / cyclic / over-depth / meta-scope-escalation edges ALL deny + a positive
+end-to-end case).
+
+See `research/solid-trust-graph-authz-design.md` §7 and
+`research/trust-expression-spec.md` §7 for the full, audited limitations lists, and
+`crates/sparq-trust/README.md` for the PoC's honest scope.

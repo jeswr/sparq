@@ -18,14 +18,29 @@
 # a `safe=true` entry for a trigger/crate path is unreachable (steps 1-2 win
 # first), and the map-validity + audit tests forbid such an entry anyway.
 #
-# THREE VERDICT FORMS (design §4.2), nothing else:
-#   [[map]] pattern = "<glob>"  crates = ["a", "b"]   # attribute to consumer crates
-#   [[map]] pattern = "<glob>"  safe   = true         # PROVEN inert for the Rust matrix
+# VERDICT FORMS (design §4.2):
+#   [[map]] pattern = "<glob>"  crates  = ["a", "b"]  # attribute an OUT-OF-CRATE path
+#   [[map]] pattern = "<glob>"  safe    = true        # PROVEN inert for the Rust matrix
+#   [[map]] pattern = "<glob>"  readers = ["a", "b"]  # ADDITIONAL-READERS (sq-m4bxc)
 #   (an unmatched path falls through to the implicit mode=full default)
 # `pattern` is repo-relative POSIX; `dir/**` matches the dir or anything beneath
-# it, otherwise fnmatch. Every `crates` name must be a live workspace member and
-# every pattern root must exist on disk OR be a fetched/generated suite (the
-# map-validity test uses a git-ignore + scripts/fetch-*.sh allowlist, #1392).
+# it, otherwise fnmatch. Every `crates`/`readers` name must be a live workspace
+# member and every pattern root must exist on disk OR be a fetched/generated
+# suite (the map-validity test uses a git-ignore + scripts/fetch-*.sh allowlist,
+# #1392).
+#
+# ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — the ONE verdict form the
+# selector consults EVEN FOR A CRATE-OWNED PATH. `crates`/`safe` are consulted
+# only for a path that is neither a trigger nor inside a crate dir (steps 1-2 win
+# first); `readers` is different: it UNIONS the listed crates into the affected
+# set IN ADDITION to the path's normal prefix owner, without changing the
+# ownership verdict. It closes the case where crate R #[cfg(test)]-reads a
+# SIBLING crate O's committed input but a real `R -> O` cargo dep would be a
+# forbidden cycle (so no reverse-closure attribution can reach R). It is MONOTONE
+# / fail-safe: adding a `readers` entry can only ENLARGE the run set (it never
+# rescues an unowned/unmapped path from mode=full), so it never introduces an
+# unsound skip (§2). The out-of-crate-input audit (scripts/ci_audit_inputs.py)
+# treats a sibling read as covered iff the reader is listed here.
 
 # ---------------------------------------------------------------------------
 # [triggers] — INFORMATIONAL MIRROR of ci_select.py `_FULL_TRIGGERS` (§4.1).
@@ -75,6 +90,8 @@ wasm = [
   "sparq-shacl-wasm",
   "sparq-introspect",
   "sparq-solid",
+  # [FABLE-5] sq-98c: rlib-only wasm smoke — memmap2 target-gated out on wasm32.
+  "sparq-vectors",
 ]
 # [SONNET-4.6] sq-mel85: bench.yml `bench` job — the perf regression gate.
 # TRUE INVARIANT: every hard-gated metric measured on the PR/merge_group tier must have
@@ -87,6 +104,10 @@ wasm = [
 # ci-bench.sh measures them MAIN-tier-only (GITHUB_REF guards skip them on any non-main
 # ref); every main-tier event is mode=full. Push-to-main always runs mode=full.
 bench = ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"]
+# [FABLE-5] sq-0iqzw: fuzz.yml `differential-smoke` job — the PR-level BLOCKING
+# sparq-vs-Oxigraph differential regression windows (sparq-bench in-process
+# Oxigraph oracle): the engine under test + the harness/oracle crate itself.
+differential-smoke = ["sparq-core", "sparq-engine", "sparq-bench"]
 
 # ---------------------------------------------------------------------------
 # [[map]] — attribution of OUT-OF-CRATE inputs to the crates that read them.
@@ -114,10 +135,11 @@ crates = ["sparq-kb"]
 
 # W3C/RDF conformance corpus — FETCHED (gitignored) by scripts/fetch-conformance.sh
 # et al. into tests/w3c/. Read by sparq-conformance's suites via
-# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail).
+# env!("CARGO_MANIFEST_DIR")/../../tests/w3c/... (smoke/inference/jsonld/d-entail),
+# and by sparq-jsonld's crate-local W3C flatten harness (tests/flatten.rs).
 [[map]]
 pattern = "tests/w3c/**"
-crates = ["sparq-conformance"]
+crates = ["sparq-conformance", "sparq-jsonld"]
 
 # W3C ODRL test suite — FETCHED by scripts/fetch-odrl-suite.sh into
 # tests/odrl-test-suite/. Read by sparq-policy's odrl_test_suite.rs.
@@ -137,11 +159,67 @@ crates = ["sparq-engine", "sparq-introspect", "sparq-nlq", "sparq-sim", "sparq-v
 pattern = "bench/qlever-synthetic/**"
 crates = ["sparq-engine"]
 
+# [GPT-5.6] GeoSPARQL function golden fixtures read by sparq-conformance's
+# differential integration test.
+[[map]]
+pattern = "bench/geo/function-golden/**"
+crates = ["sparq-conformance"]
+
+# [GPT-5.6] OWL-RL golden-vector fixtures read by sparq-reason-diff's
+# differential integration test.
+[[map]]
+pattern = "bench/reason-diff/rl/**"
+crates = ["sparq-reason-diff"]
+
 # ZK-compose gate-count + SPARQL-feature catalog fixtures (committed JSON),
 # include_str!'d by sparq-zk-compose's gate_count/sparql_catalog tests.
 [[map]]
 pattern = "bench/zk-compose/**"
 crates = ["sparq-zk-compose"]
+
+# [FABLE-5] sq-0iqzw: the ADJUDICATED cross-engine divergence allowlist, read at
+# runtime by the sparq-bench differential fuzzer (crates/sparq-bench/src/fuzz.rs
+# DivergenceAllowlist, via an env!("CARGO_MANIFEST_DIR")-relative path) AND by its
+# unit test committed_allowlist_enables_exactly_the_adjudicated_classes. Editing an
+# adjudicated class must re-run sparq-bench (the comparator that consumes it).
+[[map]]
+pattern = "bench/differential-divergences.json"
+crates = ["sparq-bench"]
+
+# [FABLE-5] sq-tonhr.2: the COMMITTED cargo-fuzz seed corpus (fuzz/seeds/<target>/),
+# read via an env!("CARGO_MANIFEST_DIR")-relative path by sparq-conformance's parser
+# differential harness (tests/parser_differential.rs) as a known-tricky-input corpus
+# for the sparq-vs-oxttl line-syntax cross-check. The out-of-workspace fuzz/ crate
+# also consumes these seeds, but it is not a workspace member, so this map lists
+# the workspace-crate readers only (the fuzz lane itself is seeded via [lanes]).
+[[map]]
+pattern = "fuzz/seeds/**"
+crates = ["sparq-conformance"]
+
+# ---------------------------------------------------------------------------
+# ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read
+# across a boundary where a real cargo dep edge would be a forbidden CYCLE, so no
+# reverse-dependency closure can attribute them. Each is an AUDIT-PROVEN residual
+# that used to be backstopped only by the nightly FULL run (design §6.1); the
+# monotone union closes it directly. Listing the OWNER crate too is redundant
+# (prefix-ownership already covers it) but harmless and documents every reader.
+# ---------------------------------------------------------------------------
+
+# sparq-zk's #[cfg(test)] module include_str!s sparq-trust's shared secprop-ext
+# vocab (crates/sparq-zk/src/secprop.rs) to assert the two crates' sec-prop IRIs
+# agree. sparq-trust DEPENDS ON sparq-zk (crates/sparq-trust/Cargo.toml), so a
+# sparq-zk -> sparq-trust dep would be a cycle: additional-readers instead.
+[[map]]
+pattern = "crates/sparq-trust/ontologies/zkp-sparql/**"
+readers = ["sparq-zk", "sparq-trust"]
+
+# sparq-reason's compiled-vs-interpreted N3 equivalence + incremental tests read
+# sparq-solid's WAC/ACP/ODRL-spike rule corpus READ-ONLY from ../sparq-solid/rules
+# at runtime. sparq-solid DEPENDS ON sparq-reason (crates/sparq-solid/Cargo.toml),
+# so a sparq-reason -> sparq-solid dep would be a cycle: additional-readers instead.
+[[map]]
+pattern = "crates/sparq-solid/rules/**"
+readers = ["sparq-reason"]
 
 # ---------------------------------------------------------------------------
 # SAFE list — paths AUDIT-PROVEN inert for the Rust matrix (design §4.2). The
@@ -166,4 +244,15 @@ safe = true
 # The bead task database. Task-tracking only; no crate reads .beads/.
 [[map]]
 pattern = ".beads/**"
+safe = true
+
+# [FABLE-5] sq-63ups: the formal-verification manifest (proof suites -> verified
+# paths + the alarmed lanes). Consumed ONLY by the formal-verification.yml /
+# formal-alarm.yml workflows via scripts/fv_select.py / check-fv-manifest.py /
+# formal_lane_alarm.py — no workspace crate reads it, so it is inert for the Rust
+# test matrix. It is NOT inert for the FV workflow itself: scripts/fv_select.py
+# treats a change to this file as an FV full trigger (every pr_gate proof suite
+# runs on that PR), so this safe-listing weakens nothing.
+[[map]]
+pattern = "ci/formal-verification.toml"
 safe = true

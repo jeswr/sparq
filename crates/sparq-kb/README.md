@@ -18,14 +18,14 @@ sparq_kb::PKG_SHAPES     // shapes/pkg.shapes.ttl     — the SHACL write-time g
 sparq_kb::PKG_EXAMPLE    // examples/pkg-example.ttl  — a tiny instance file
 sparq_kb::PKG_FINDINGS   // ingest/agents-findings.ttl — the write-path-compiled tier
 sparq_kb::PKG_INSTANCES  // ingest/pkg-instances.ttl  — the Phase-1 ingested graph
+sparq_kb::PKG_TRUST_GRAPH_FINDINGS // ingest/trust-graph-findings.ttl — sq-7utko tier
 sparq_kb::vocab::*       // the pkg: IRIs as constants, pinned against the Turtle
 ```
 
 Dogfood the guardrails with sparq's own SHACL engine (opt-in `validate` feature):
-`cargo test -p sparq-kb --features validate` loads the ontology + example instances, runs
-`pkg.shapes.ttl` via `sparq-shacl`, and asserts the valid Findings/Tasks PASS while the
-deliberately invalid ones (missing source/confidence, out-of-enum status, stale edge) are
-REPORTED.
+`cargo test -p sparq-kb --features validate` loads the ontology + example instances,
+runs `pkg.shapes.ttl` via `sparq-shacl`, and asserts the valid Findings/Tasks PASS
+while the deliberately invalid ones (missing source/confidence, stale edge) are REPORTED.
 
 ## 🧪 Phase-1 ingestion PoC (`sq-2m6zm.2`)
 
@@ -91,27 +91,27 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and
   enforces a valid status / bounded priority / no-stale-edge on every `pkg:Task`.
-- **Literature ingestion + tiered dump** (`literature`/`literature-live`, `sq-2489d.5`/`sq-tzars.*`) — the
-  `[connector]→[extract]→[ground]→[SHACL gate]→[sidecar]` pipeline on **committed fixtures,
-  ZERO network in CI** (grounding **quarantines**, never drops; machine tier ≤ `secx:Conjectured`);
-  live (`literature-live`) adds a CORE v3 connector (paged search + retry + **fail-closed license**) and a subprocess-seam **live extractor** (record/replay preserved; defensive caps — confidence ≤ 0.7, never `Proven`, non-span justification rejected). `run_tiered` partitions emission into per-tier ARTIFACTS with **fail-closed** licence routing (unknown ⇒ restricted; metadata-only public projection).
+- **Literature ingestion + tiered dump** (`literature`/`literature-live`, `sq-2489d.5`/`sq-tzars.*`) —
+  `[connector]→[extract]→[ground]→[SHACL gate]→[sidecar]` on committed fixtures, ZERO network in CI;
+  live adds CORE v3 connector + fail-closed licence routing; `run_tiered` splits per-tier ARTIFACTS.
 - **Opt-in by construction** — default build is data + constants only; the
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
-- **Write-path authoring** (`sq-mztg8.2`) — author Findings in a compact, IRI-free
-  `*.yaml.ld`; a **deterministic** `yamlld_compile.py` expands them to typed PKG Turtle via the **guarded `V()`** (ambiguous concept TOKEN = hard error).
+- **Write-path authoring** (`sq-mztg8.2`) — author Findings in `*.yaml.ld`; `yamlld_compile.py`
+  expands them to PKG Turtle via the **guarded `V()`** (ambiguous TOKEN = hard error).
 - **NL-tool envelope** (`query` feature, `sq-ve5dy`) — `query::nl_tool` returns the
   **executed SPARQL + resolved IRIs + grounding confidence** (`pkg-query --json`) so the
   caller can verify the answer was not fabricated.
+- **Citation renderer** (`query` feature, `sq-2489d.11`) — `query::citations::render_citations`
+  renders `prov:wasDerivedFrom` sources as `[source]` citations; reports citation-resolution-rate
+  (target 1.0) + fabricated-count (target 0, MEASURED by the harness, not assumed).
 
 ## 📚 Learn more
 
-- Design records: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063), `research/
-  provenance-driven-genai-kb.md` (§4/§5 literature, `sq-2489d.5`) + `research/research-kb-program.md` (`sq-tzars`).
-- `ontology/pkg/PROVENANCE.md` — the per-term reuse + verified `skos:closeMatch`
-  alignment record; precedent: `crates/sparq-trust/ontologies/zkp-sparql/`.
-- Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion PoC `.2`; the **query-the-PKG** helper
-  + skill (`.claude/skills/query-pkg/SKILL.md`) `.3`; bd-bridge `.5`; write-path `sq-mztg8.2`.
+- Design records: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063), `research/provenance-driven-genai-kb.md`
+  (§4/§5 literature, `sq-2489d.5`) + `research/research-kb-program.md` (`sq-tzars`).
+- `ontology/pkg/PROVENANCE.md` — per-term reuse + `skos:closeMatch` alignment; precedent: `crates/sparq-trust/`.
+- Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion `.2`; **query-the-PKG** helper + skill `.3`; bd-bridge `.5`; write-path `sq-mztg8.2`.
 - `pkg-query --extra-graph <path>` loads extra Turtle alongside the PKG; its triples join
   `--close owl-rl` — the FO-KM benchmark seam (`sq-mztg8` Metric 1; `bench/fo-km/`).
 

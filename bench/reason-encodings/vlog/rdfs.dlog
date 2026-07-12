@@ -1,0 +1,49 @@
+# [FABLE-5] sq-hmd7l.30 — VLog RDFS Datalog encoding that REPRODUCES sparq's RDFS
+# closure of LUBM(1) EXACTLY (126732 triples, set-for-set — validated, no delta).
+#
+# 🤖 SPARQ agent. VLog (github.com/karmaresearch/vlog, Apache-2.0) is a general
+# Datalog engine, so a like-for-like closure comparison vs `sparq-cli reason … rdfs`
+# needs a Datalog program whose materialization reproduces sparq's closure COUNT.
+# This file is that validated artifact for the RDFS profile.
+#
+# EDB: the input N-Triples (LUBM ABox + Univ-Bench TBox) is bound to the ternary
+# predicate  TE(subject, predicate, object)  via edb.conf (EDB…_predname=TE). See
+# scripts/bench-adapters/vlog_adapter.py, which writes the edb.conf and runs `mat`.
+#
+# CLOSURE PREDICATE:  T(S,P,O)  accumulates the FULL materialized graph — the base
+# triples PLUS every entailed triple — so |T| (VLog's reported "Cardinality of T")
+# is directly comparable to sparq's self-reported closure count. The adapter reads
+# that cardinality as the closure size. VLog de-duplicates IDB tuples, matching
+# sparq's dedup'd materialization.
+#
+# ── RULE SET (exactly the 6 RDFS rules sparq applies; NO reflexivity/axiomatic) ──
+# sparq's `rdfs` profile deliberately OMITS rdfs4/6/8/10/13 (they would blanket every
+# term with rdfs:Resource / add reflexive subClassOf-self) — crates/sparq-reason/
+# src/rdfs.rs. To reproduce the count set-for-set we include ONLY rdfs2/3/5/7/9/11
+# and add NO reflexive or axiomatic triple. VALIDATED: an independent semi-naive
+# fixpoint of exactly these 6 rules over LUBM(1) is set-identical to sparq (0 diff
+# both directions) — see the harness cross-check in materialize-same-box.sh.
+#
+# vocabulary IRIs are written in full angle-bracket form; `rdf:type` etc. use VLog's
+# built-in rdf/rdfs prefix abbreviations (VLog Usage wiki).
+
+# base graph flows into the closure predicate.
+T(S,P,O) :- TE(S,P,O)
+
+# rdfs5 — subPropertyOf transitivity:  (p sp q),(q sp r) => (p sp r)
+T(P,rdfs:subPropertyOf,R) :- T(P,rdfs:subPropertyOf,Q), T(Q,rdfs:subPropertyOf,R)
+
+# rdfs11 — subClassOf transitivity:  (c sc d),(d sc e) => (c sc e)
+T(C,rdfs:subClassOf,E) :- T(C,rdfs:subClassOf,D), T(D,rdfs:subClassOf,E)
+
+# rdfs7 — subPropertyOf rewrite:  (p sp q),(s p o) => (s q o)
+T(S,Q,O) :- T(P,rdfs:subPropertyOf,Q), T(S,P,O)
+
+# rdfs2 — domain typing:  (p domain c),(s p o) => (s type c)
+T(S,rdf:type,C) :- T(P,rdfs:domain,C), T(S,P,O)
+
+# rdfs3 — range typing:  (p range c),(s p o) => (o type c)
+T(O,rdf:type,C) :- T(P,rdfs:range,C), T(S,P,O)
+
+# rdfs9 — subClassOf type inheritance:  (s type c),(c sc d) => (s type d)
+T(S,rdf:type,D) :- T(S,rdf:type,C), T(C,rdfs:subClassOf,D)

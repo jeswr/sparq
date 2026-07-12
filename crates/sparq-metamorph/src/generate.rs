@@ -17,13 +17,30 @@
 //!   subjects, so predicates over the optional variable hit **unbound-variable
 //!   errors**; and
 //! * the predicate grammar spans comparisons, arithmetic, `BOUND`/`COALESCE`
-//!   (unbound-tolerant forms), `STR`/`LANG`/`DATATYPE`/`isIRI`/`isLiteral`, and the
-//!   error-absorbing connectives `&&`/`||`/`!`.
+//!   (unbound-tolerant forms), the term-inspection functions
+//!   `STR`/`LANG`/`DATATYPE`/`isIRI`/`isLiteral`, and the error-absorbing connectives
+//!   `&&`/`||`/`!`.
 //!
 //! The grammar deliberately excludes everything that voids the metamorphic relations
 //! (TLP scope preconditions): no `RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE`
 //! (nondeterminism), no `EXISTS`/`NOT EXISTS` (spec ambiguity), and no blank nodes in
 //! the data (cross-engine label comparison is meaningless — see [`crate::differential`]).
+//!
+//! Grammar note: the term-inspection atoms are exactly the ones `predicate_atom`
+//! emits — `STR`, `LANG`, `DATATYPE`, `isIRI`, and `isLiteral`. The language-tagged
+//! literals (`"…"@fr`) the data mix emits are inspected by the `LANG(?v) = "fr"`
+//! atom, itself full three-outcome fuel: true on a lang-tagged literal, false on any
+//! other literal (`LANG` returns `""`), and a **type error** on an IRI. Any new
+//! function must be added in `predicate_atom` so this list, the TLP scope
+//! preconditions ([`crate::tlp`]), the exclusion list above, and the paper's §6.1
+//! grammar description (`site/papers/sparql-logic-bugs.typ`) stay in lockstep.
+//! [FABLE-5] sq-996jn (grammar note lineage: sq-b89wc)
+//!
+//! Seed-compatibility note: extending the grammar CHANGES the case a given seed
+//! produces (the SplitMix64 draw sequence shifts), so a recorded seed reproduces its
+//! case only against the generator version that produced it. Ledger entries stay
+//! evidentiary across grammar versions because [`crate::ledger`] requires the reduced
+//! `query` (and `data_ref`) inline — the seed is auxiliary repro, not the evidence.
 
 /// Minimal deterministic PRNG: SplitMix64. Chosen over a `rand` dependency because its
 /// output for a given seed is a *fixed function* specified by three constants — the
@@ -89,7 +106,7 @@ fn object_term(rng: &mut SplitMix64, i: u64) -> String {
 fn predicate_atom(rng: &mut SplitMix64) -> String {
     let k = rng.below(10);
     let m = rng.below(20);
-    match rng.below(10) {
+    match rng.below(12) {
         0 => format!("?v < {m}"),
         1 => format!("?v = {m}"),
         2 => format!("?v >= {k}"),
@@ -99,7 +116,12 @@ fn predicate_atom(rng: &mut SplitMix64) -> String {
         6 => format!("DATATYPE(?v) = <{XSD}#integer>"),
         7 => format!("STR(?v) = \"str{k}\""),
         8 => format!("?v + {k} < {m}"),
-        _ => format!("COALESCE(?w, {k}) < {m}"),
+        9 => format!("COALESCE(?w, {k}) < {m}"),
+        // sq-996jn: the atoms that inspect the language-tagged-literal fuel. LANG is
+        // three-outcome by itself (tag / "" / type error on an IRI); isLiteral mirrors
+        // isIRI (true/false only — ?v is always bound in the generated pattern).
+        10 => "isLiteral(?v)".to_string(),
+        _ => "LANG(?v) = \"fr\"".to_string(),
     }
 }
 
@@ -188,6 +210,31 @@ mod tests {
         assert!(a.data_ntriples.contains("<http://example.org/s0>"));
         assert!(a.pattern.contains("OPTIONAL"));
         assert!(!a.predicate.is_empty());
+    }
+
+    #[test]
+    fn predicate_grammar_reaches_every_term_inspection_atom() {
+        // Reachability witness for the term-inspection arms (sq-996jn added LANG +
+        // isLiteral): each atom must appear in some generated predicate within a
+        // bounded, deterministic seed range — in lockstep with the module-doc list.
+        let mut seen = [
+            ("STR(?v)", false),
+            ("LANG(?v) = \"fr\"", false),
+            ("DATATYPE(?v)", false),
+            ("isIRI(?v)", false),
+            ("isLiteral(?v)", false),
+        ];
+        for seed in 0..400 {
+            let case = generate_case(seed);
+            for (needle, hit) in seen.iter_mut() {
+                if case.predicate.contains(*needle) {
+                    *hit = true;
+                }
+            }
+        }
+        for (needle, hit) in seen {
+            assert!(hit, "atom {needle} never generated in seeds 0..400");
+        }
     }
 
     #[test]

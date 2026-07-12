@@ -388,6 +388,11 @@ impl TripleStore {
                     triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
                 radix_sort_rows(&mut v);
                 v.dedup();
+                // [SONNET-4.6 sq-7d3dj.32.1] Eliminate dedup capacity slack: after dedup the Vec
+                // retains its pre-dedup allocation.  shrink_to_fit realigns len == capacity so
+                // heap_bytes() (which counts capacity()) returns zero slack per permutation.
+                // ~8 B/triple recoverable at 10 M WatDiv across 6 perms.
+                v.shrink_to_fit();
                 (p, v)
             })
             .collect();
@@ -398,14 +403,21 @@ impl TripleStore {
         perms
     }
 
-    /// No-threads build of the permutation indexes (the feature-off sibling of `build_raw_perms`).
-    /// Deduplicates via the SPO ordering first (radix — no parallel sort to beat it here), then
-    /// maps the rest from the deduped array, reusing that array for the SPO slot. Kept
-    /// byte-identical to the historical body so the feature-off wasm bundle is unchanged.
+    /// No-threads build of the permutation indexes (wasm / no-rayon path). Deduplicates via
+    /// the SPO ordering first (radix — no parallel sort to beat it here), then maps the rest
+    /// from the deduped array, reusing that array for the SPO slot. [SONNET-4.6 sq-7d3dj.32.1]
+    /// shrink_to_fit added after dedup so the SPO slot carries zero capacity slack (the five
+    /// non-SPO perms are collected from the already-deduped iterator and are already exact).
+    /// The wasm bundle byte count changes from the historical value — declared in
+    /// bench/feature-off-declarations/ and bench/perf-baseline.json feature_off_exact.
     #[cfg(not(feature = "parallel"))]
     fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
         radix_sort_rows(&mut triples);
         triples.dedup();
+        // [SONNET-4.6 sq-7d3dj.32.1] Release the pre-dedup capacity so the SPO slot is
+        // exact-sized.  heap_bytes() counts capacity(); without this call it would count
+        // the full pre-dedup allocation even after duplicates are removed.
+        triples.shrink_to_fit();
 
         let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
             // Pre-sized exactly from the known triple count (the mapped iterator is
@@ -470,8 +482,10 @@ impl TripleStore {
             let path = dir.join(format!("perm{i}.bin"));
             if compressed && !rows.is_empty() {
                 // Unbuilt (empty) permutations stay raw-empty so `open` skips them by size.
+                // [FABLE-5] sq-7d3dj.32.2.7: `encode_emit` honours the emit-format config gate —
+                // `SPQCPRM1` by default, `SPQCPRM2` only when a `spqcprm2` build has opted in.
                 let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-                crate::compress::CompressedPerm::encode(&rows).write_to(&mut w)?;
+                crate::compress::CompressedPerm::encode_emit(&rows).write_to(&mut w)?;
                 std::io::Write::flush(&mut w)?;
             } else {
                 // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
@@ -561,9 +575,14 @@ impl TripleStore {
             // SAFETY: the file is owned by this store for its lifetime and is not mutated.
             let map = unsafe { memmap2::Mmap::map(&file)? };
             // FORMAT AUTO-DETECTION: a block-compressed file (written by `save_compressed`)
-            // starts with FILE_MAGIC; anything else is the original raw [u32;3] format.
-            // Compressed perms are served lazily — block-wise decode off the mapped file.
-            *slot = if map.len() >= 8 && map[..8] == crate::compress::FILE_MAGIC {
+            // starts with FILE_MAGIC (`SPQCPRM1`) or, for a `spqcprm2`-emitting build,
+            // FILE_MAGIC_V2 (`SPQCPRM2`); anything else is the original raw [u32;3] format.
+            // [FABLE-5] sq-7d3dj.32.2.7: both magics route to `from_mmap`, which re-checks the
+            // magic and picks the V1/V2 decode reader — a V1 file decodes byte-identically
+            // forever. Compressed perms are served lazily — block-wise decode off the mapped file.
+            *slot = if map.len() >= 8
+                && (map[..8] == crate::compress::FILE_MAGIC || map[..8] == crate::compress::FILE_MAGIC_V2)
+            {
                 PermData::Compressed(crate::compress::CompressedPerm::from_mmap(map)?)
             } else {
                 PermData::Mapped(map)
@@ -804,6 +823,32 @@ impl TripleStore {
         self.scan_with(pattern, perm, lead)
     }
 
+    /// [OPUS-4.8] (sq-7d3dj.30.4) Scans a SPECIFIC permutation `perm`, for callers that
+    /// need a particular SECONDARY column order rather than just a primary sort column
+    /// (e.g. the DISTINCT loose skip-scan wants the layout `[..bound.., P, J, ..]` so each
+    /// `P`-block is `J`-sorted). Returns `None` when `perm` is not built (e.g. the compact
+    /// index) or when the pattern's bound positions do not form a leading prefix of `perm`
+    /// (so a contiguous range scan is impossible). The returned rows are identical to what
+    /// `scan`/`scan_sorted` would yield had they chosen `perm` — only the choice differs.
+    pub fn scan_perm(&self, pattern: &Pattern, perm: Perm) -> Option<Scan<'_>> {
+        if !BUILT.contains(&perm) {
+            return None;
+        }
+        let order = perm.order();
+        let bound = |i: usize| pattern[i].is_some();
+        let total_bound = (0..3).filter(|&i| bound(i)).count();
+        let mut lead = 0;
+        while lead < 3 && bound(order[lead]) {
+            lead += 1;
+        }
+        // Every bound position must be within the leading prefix, else this permutation
+        // cannot answer the pattern with one contiguous range.
+        if lead != total_bound {
+            return None;
+        }
+        Some(self.scan_with(pattern, perm, lead))
+    }
+
     /// The inclusive [lo, hi] key bounds for a pattern's bound prefix in `perm` order.
     #[inline]
     fn bounds(pattern: &Pattern, perm: Perm, lead: usize) -> ([Id; 3], [Id; 3]) {
@@ -1008,6 +1053,62 @@ mod tests {
                 assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
             }
         }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.30.4) `scan_perm` returns the rows for a SPECIFIC built
+    /// permutation (with the pattern's bound positions as a leading prefix), and `None`
+    /// when the permutation is not built or the bound positions are not a prefix.
+    #[test]
+    fn scan_perm_selects_named_permutation() {
+        let triples: Vec<[Id; 3]> = vec![
+            [10, 1, 100],
+            [10, 2, 100],
+            [11, 1, 100],
+            [12, 1, 101],
+        ];
+        let store = TripleStore::from_triples(triples.clone());
+
+        // Fully-unbound: a built predicate-first permutation must be selectable, and its rows
+        // sorted in that permutation's column order. Which predicate-first perm is BUILT
+        // differs by index set: the default 6-perm build has PSO; the 3-perm `compact-index`
+        // build ({SPO, POS, OSP}) has POS instead — where `scan_perm(Perm::Pso)` correctly
+        // returns `None` because PSO is not built (the documented contract). [OPUS-4.8]
+        #[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
+        {
+            let scan = store.scan_perm(&[None, None, None], Perm::Pso).expect("PSO is built");
+            assert_eq!(scan.perm, Perm::Pso);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[0], t[2])); // predicate, subject, object
+            assert_eq!(spo, want, "PSO scan not sorted by (predicate, subject, object)");
+        }
+        #[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
+        {
+            // PSO is NOT built under compact-index → `scan_perm` declines it (the contract).
+            assert!(
+                store.scan_perm(&[None, None, None], Perm::Pso).is_none(),
+                "PSO is not built under compact-index; scan_perm must return None"
+            );
+            // POS IS built there and serves the fully-unbound pattern, sorted (predicate, object, subject).
+            let scan = store.scan_perm(&[None, None, None], Perm::Pos).expect("POS is built");
+            assert_eq!(scan.perm, Perm::Pos);
+            let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+            let mut want = triples.clone();
+            want.sort_by_key(|t| (t[1], t[2], t[0])); // predicate, object, subject
+            assert_eq!(spo, want, "POS scan not sorted by (predicate, object, subject)");
+        }
+
+        // Object bound: OSP places the object as the leading prefix → Some. (OSP is built in
+        // both the default and the compact index set.)
+        let obj = store.scan_perm(&[None, None, Some(100)], Perm::Osp).expect("OSP built");
+        assert!(obj.rows.iter().all(|r| obj.to_spo(r)[2] == 100), "OSP range must be object=100");
+        assert_eq!(obj.rows.len(), 3);
+
+        // Object bound but SPO does NOT put the bound object in the leading prefix → None.
+        assert!(
+            store.scan_perm(&[None, None, Some(100)], Perm::Spo).is_none(),
+            "SPO cannot serve an object-only bound pattern as a prefix range"
+        );
     }
 
     /// [OPUS-4.8 sq-7d3dj.31] Direct gate on the concurrent-N build's INDEPENDENT per-perm
@@ -1351,5 +1452,38 @@ mod tests {
         assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
         assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
         assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
+    }
+
+    /// [SONNET-4.6 sq-7d3dj.32.1] Each built raw-mode permutation Vec must carry zero
+    /// capacity slack after construction.  heap_bytes() uses capacity(), so any excess
+    /// inflates the reported B/triple; shrink_to_fit() (called in both build_raw_perms
+    /// bodies) must leave len == capacity.  The input has heavy duplicates so the pre-dedup
+    /// allocation is larger than the post-dedup len — without shrink_to_fit the test fails.
+    #[test]
+    fn build_raw_perms_no_capacity_slack() {
+        // Build a Vec with heavy duplicates to maximise pre/post-dedup slack.
+        // 4 unique triples repeated 100x each → capacity starts at 400, len after dedup = 4.
+        let unique: Vec<[Id; 3]> = vec![
+            [1, 1, 1],
+            [2, 2, 2],
+            [3, 3, 3],
+            [4, 4, 4],
+        ];
+        let mut triples: Vec<[Id; 3]> = Vec::with_capacity(400);
+        for _ in 0..100 {
+            triples.extend_from_slice(&unique);
+        }
+        let store = TripleStore::from_triples(triples);
+        for &perm in BUILT {
+            if let PermData::Owned(ref v) = store.perms[perm as usize] {
+                assert_eq!(
+                    v.len(),
+                    v.capacity(),
+                    "permutation {perm:?}: capacity ({}) > len ({}) — dedup slack not eliminated",
+                    v.capacity(),
+                    v.len(),
+                );
+            }
+        }
     }
 }

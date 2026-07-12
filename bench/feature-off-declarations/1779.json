@@ -1,0 +1,5 @@
+{
+  "pr": 1779,
+  "date": "2026-07-08",
+  "reason": "new `value-join` cargo feature entry in sparq-engine's Cargo.toml rehashes crate metadata, plus the verbatim extraction of eval_flat_conjunctive in always-compiled exec.rs (content-only; feature-OFF behavior byte-identical, verified by the default-feature test suite + conformance ratchet)"
+}

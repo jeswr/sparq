@@ -1,0 +1,5 @@
+# [GPT-5.6] Constant pattern: regression witness for per-row regex compilation.
+SELECT ?s WHERE {
+  ?s <urn:value> ?value .
+  FILTER(REGEX(STR(?value), "^row-[0-9]{8}-alpha$"))
+}

@@ -33,13 +33,25 @@ parallel = ["dep:rayon", "sparq-core/parallel"]
 # structure and hook is cfg'd out entirely (zero hot-path cost, byte-identical behavior,
 # zero wasm impact: sparq-reason is never in the wasm dependency graph anyway).
 explain = []
+# [GPT-5.6] sq-aej8u — opt-in instrumentation; all hooks are absent by default.
+profile = []
 # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — OPT-IN D-entailment (datatype / value-space,
 # RDF 1.1 Semantics §7-8): `Profile::D`, the rdfD1 datatype-typing materializer + the
 # correct typed value-space comparison (`dtype` module). NON-DEFAULT by design — when off
 # the `dtype` module + `Profile::D` variant are cfg'd out entirely (the lean default build
 # carries zero D-entailment code; the byte/bundle ratchets are unchanged, and sparq-reason
-# is never in the wasm dependency graph anyway). Pure-Rust, no new deps.
-d-entail = []
+# is never in the wasm dependency graph anyway).
+# [FABLE-5] sq-pbz04.6.3 (epic sq-pbz04.6, substrate seam 2): D-entailment's typed
+# numeric value-space keys now DELEGATE to the SHARED `sparq-substrate::numeric`
+# comparator (the same `Dec`/`Num`/`split_decimal`/`parse_xsd_f64` the SPARQL engine
+# FILTER path uses), so the reasoner and the engine can never diverge on numeric
+# value equality. Pulls the substrate `numeric` slice ONLY when `d-entail` is enabled
+# — it depends only on `sparq-core` (NOT `sparq-engine`), so the crate's sparq-core-only
+# dependency posture is preserved and no planner/serializer enters the bundle. The
+# integer subtype-range facets + the double/float lexical acceptance set STAY LOCAL
+# (facet validation is dtype-resident by design, per the design record §4 seam
+# decision) — see the module doc for the byte-identical-behaviour ledger.
+d-entail = ["sparq-substrate/numeric"]
 # [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — OPT-IN RIF-Core front-end: the W3C RIF
 # *Core* dialect (the MONOTONE Horn-rule common subset of RIF-BLD/PRD) as a rule
 # front-end over the existing N3 forward chainer. `rif::Document` validates a
@@ -75,7 +87,7 @@ rif-xml = ["rif-core", "dep:quick-xml"]
 # the substrate slice features moved from the dep declaration into this entry so each
 # substrate-* feature pulls ONLY its own slice — `substrate-compare` alone does not drag the
 # join kernels in, and vice versa. Same net feature set as before when this flag is on.)
-substrate-join = ["dep:sparq-substrate", "dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
+substrate-join = ["dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
 # [FABLE-5] sq-pbz04.1.2 (epic sq-pbz04.1, substrate seam 3) — OPT-IN: the reasoner-side
 # adoption of the SHARED SPARQL term total order. The `compare` module implements
 # `sparq_substrate::compare::CompareTerm` for the reasoner's term representation (a
@@ -91,7 +103,7 @@ substrate-join = ["dep:sparq-substrate", "dep:smallvec", "sparq-substrate/rows",
 # wasm dependency graph anyway. Pulls the substrate `compare` (total order + trait) and
 # `numeric` (the exact Num/Dec tower the f64-collapse recheck needs) slices ONLY when
 # enabled — NO new transitive crate.
-substrate-compare = ["dep:sparq-substrate", "sparq-substrate/compare", "sparq-substrate/numeric"]
+substrate-compare = ["sparq-substrate/compare", "sparq-substrate/numeric"]
 # [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582) — OPT-IN id-level COMPILED-rule
 # evaluation for the scoped N3 subset the Solid access-control rules use: `n3::compiled`
 # lowers N3 rule text (parsed ONCE by the existing `n3::parser`) to a rule IR whose
@@ -107,7 +119,38 @@ substrate-compare = ["dep:sparq-substrate", "sparq-substrate/compare", "sparq-su
 # entirely — the lean default build carries zero of it and the byte/bundle ratchets are
 # unchanged. Pulls the substrate `rows` + `join` slices ONLY when enabled — NO new
 # transitive crate (`sparq-core`/`smallvec`/`rustc-hash`/`regex` are already in-tree).
-compiled-rules = ["dep:sparq-substrate", "dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
+compiled-rules = ["dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
+# [FABLE-5] sq-6tykl.3 (epic sq-6tykl, RDFox-parity BIG ROCK, Phase 1) — OPT-IN
+# STRATIFIED DATALOG rules: a small native rule dialect (design record
+# research/stratified-datalog-rules.md — the maintainer's open question 4 resolved to a
+# native RDFox-modelled surface) with NOT (negation as failure) and AGGREGATE COUNT
+# atoms plus a minimal exact-numeric FILTER, a stratification CHECKER (programs with a
+# recursion cycle through NOT/AGGREGATE are rejected loudly — the checked replacement
+# for the N3 compiled path's caller-discipline stratification), and a non-incremental
+# per-stratum evaluator. Joins drive the SHARED `sparq-substrate::join` kernels (the
+# compiled-rules posture: NO third join implementation, only a thin layout adapter);
+# FILTER numerics delegate to the shared substrate `numeric` tower. Correctness oracle:
+# the in-module differential suite vs an independent naive substitution evaluator on
+# fixtures + seed-randomised graphs. NON-DEFAULT by design — when off the `datalog`
+# module is cfg'd out entirely (the lean default build carries zero of it; the
+# byte/bundle ratchets are unchanged, and sparq-reason is never in the wasm dependency
+# graph anyway). Pulls the substrate `rows` + `join` slices ONLY when enabled — NO new
+# transitive crate. Semi-naive per-stratum eval, SUM/MIN/MAX/AVG and incremental
+# maintenance are LATER PHASES, beaded from the design record.
+datalog = ["sparq-substrate/rows", "sparq-substrate/join"]
+# [Kern] kern/quoted-triple-infer (first increment) — OPT-IN QUOTED-TRIPLE (RDF 1.2
+# reifier) inference for the OWL 2 RL profile: the reif-dtr destructure / reif-ctr
+# construct bridge rules between `rdf:reifies` triple terms and the classic
+# rdf:subject/predicate/object vocabulary, with reif-ctr restricted to EXISTING
+# triples over leaf (non-triple-term) components so the Herbrand base stays FINITE
+# (termination + idempotency argument in src/reify.rs). NON-DEFAULT by design: the
+# bridge is a deliberate, non-normative entailment extension, so plain
+# `Profile::OwlRl` closures (and the committed inference-conformance ratchet) never
+# change unless a consumer opts in — and even when ON the layer is occurrence-guarded
+# (reify-free closures are byte-identical). No new deps, no new Profile variant.
+# `MaterializedOwlGraph` routes any base mentioning the reification vocabulary to its
+# documented Fallback mode (incremental == from-scratch parity preserved).
+quoted-triples = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -117,14 +160,20 @@ oxrdf.workspace = true
 rustc-hash.workspace = true
 rayon = { workspace = true, optional = true }
 # [OPUS-4.8] sq-yk6or: the SHARED evaluation substrate (epic sq-qonbz, merged #1300).
-# OPTIONAL: linked ONLY by the `substrate-join` / `substrate-compare` features, so the
-# default / lean build never pulls it. NO `default`, and NO slice features here — each
-# consumer feature above names exactly the slices it needs (`substrate-join` -> rows+join;
-# `substrate-compare` -> compare+numeric; [FABLE-5] sq-pbz04.1.2), so enabling one does not
-# drag the other's machinery in. It depends only on `sparq-core` (NOT `sparq-engine`), so
-# there is no dependency cycle and the reasoner does NOT pull the planner/serializers/
-# service into its (tier-b wasm) bundle.
-sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, optional = true }
+# [OPUS-4.8] sq-pbz04.5.1: this dep is now NON-OPTIONAL, carrying ONLY the `numeric` slice
+# (`default-features = false`) — the N3 chainer's exact `math:` arithmetic core is the shared
+# `numeric::Dec`/`Num` tower (seam-2 tower adoption, research §2), so the reasoner and the
+# SPARQL engine can never diverge on exact-decimal arithmetic. The deviation from "opt-in
+# feature throughout" is deliberate and argued in the record §2: sparq-reason is ITSELF the
+# opt-in surface and is NEVER in the wasm dependency graph; `numeric` is a leaf module already
+# compiled in every workspace build (the engine consumes it) and depends ONLY on `sparq-core`
+# (NOT `sparq-engine`), so no planner/serializer/service enters this reasoner's tier-b bundle
+# and there is no dependency cycle; and a feature-gated DUAL evaluator (private NumVal +
+# substrate path) would be worse — two arithmetic cores is exactly the divergence risk seam 2
+# exists to kill. The heavier `rows` / `join` / `compare` slices STAY behind the consumer
+# features above (each names exactly the slices it needs), so the base `numeric` slice never
+# drags the join/compare machinery in.
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, features = ["numeric"] }
 # [OPUS-4.8] sq-yk6or: the `Row`/`Key` SmallVec aliases the substrate join kernels operate on.
 # OPTIONAL: linked ONLY by `substrate-join`. Same crate sparq-substrate uses, so the row
 # representation is byte-identical across the engine, the substrate and this reasoner.
@@ -163,6 +212,15 @@ required-features = ["substrate-compare"]
 [[test]]
 name = "substrate_join_owl"
 required-features = ["substrate-join"]
+
+# [Kern] quoted-triple RL inference, end-to-end: Turtle 1.2 fixtures (reifiers,
+# annotation blocks, classic-reification data) through `Graph::parse_to_triples`,
+# asserting the destructure/construct closures, the opacity non-entailments, the
+# adversarial-cascade termination pin, idempotency, and `MaterializedOwlGraph`
+# Fallback parity. Compiled only with the feature it exercises.
+[[test]]
+name = "owl_reify"
+required-features = ["quoted-triples"]
 
 # [FABLE-5] sq-zgbso.3: the compiled-vs-text result-equivalence oracle (closure
 # set-equality vs `reason_n3` over the sparq-solid WAC/ACP/ODRL-spike rule corpus, read

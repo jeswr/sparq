@@ -52,6 +52,7 @@ fn run_stream(granularity: CommitGranularity, updates: &[(&str, &str)]) -> (usiz
             window: Duration::from_millis(120),
             max_batch: 4096,
             granularity,
+            ..WriterConfig::default()
         },
     );
     // Submit all but the last detached, then a sync submit to force the window to

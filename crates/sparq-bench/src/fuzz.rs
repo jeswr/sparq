@@ -9,19 +9,114 @@
 //! LIMIT early-termination) preserve SPARQL semantics. A mismatch prints a full
 //! deterministic repro (seed + query + the graph).
 //!
-//! ONE class is exempt from blind Oxigraph agreement: `=` / `!=` between literals of
-//! DIFFERENT comparison families (numeric vs string, xsd:integer vs `"s2"`, …).
-//! SPARQL 1.1 §17.4.1.7 makes such a comparison a TYPE ERROR (the row is filtered
-//! out); Oxigraph leniently resolves it to a boolean and KEEPS the row. sparq follows
-//! the spec (it passes all 15 W3C `sparql10/expr-equals` tests). For that shape the
-//! oracle re-derives the SPEC-CORRECT count itself (see `spec_filter_count`) and flags
-//! only a residual, genuine divergence — not Oxigraph's leniency. See bead sq-eibog.
+//! The ADJUDICATED cross-engine divergence classes are exempt from blind Oxigraph
+//! agreement — and they live machine-readably in `bench/differential-divergences.json`
+//! (bead sq-0iqzw), which this comparator CONSUMES (see `DivergenceAllowlist`):
+//!   * `cross-family-eq-type-error` (sq-eibog): `=` / `!=` between literals of
+//!     DIFFERENT comparison families (numeric vs string, xsd:integer vs `"s2"`, …).
+//!     SPARQL 1.1 §17.4.1.7 makes such a comparison a TYPE ERROR (the row is filtered
+//!     out); Oxigraph leniently resolves it to a boolean and KEEPS the row. sparq
+//!     follows the spec (it passes all 15 W3C `sparql10/expr-equals` tests). For that
+//!     shape the oracle re-derives the SPEC-CORRECT count itself (see
+//!     `spec_filter_count`) and flags only a residual, genuine divergence — not
+//!     Oxigraph's leniency.
+//!   * `bnode-iri-inequality` (sq-ai2wa): `=` / `!=` pairing a blank node with an
+//!     IRI — identity vs type-error reading (inert for this generator; see the JSON).
+//!
+//! A known-class mismatch is SKIPPED-WITH-COUNT (surfaced in the summary line); any
+//! mismatch outside the listed classes FAILS. A missing/empty allowlist runs STRICT.
 //!
 //! Usage: `sparq-bench fuzz <seed_start> <count> [category]`
 //! category ∈ { all (default) | bgp | filter | optional | union | minus | limit |
 //!              distinct | order } — lets a workflow shard the space across agents.
 
 use oxigraph::store::Store;
+
+// ── ADJUDICATED-DIVERGENCE ALLOWLIST (bead sq-0iqzw) ─────────────────────────────
+//
+// The adjudicated cross-engine divergence classes live machine-readably in
+// `bench/differential-divergences.json` (id + adjudication bead + spec clause). The
+// comparator CONSUMES that file: a mismatch inside a listed class is SKIPPED-WITH-
+// COUNT (surfaced in the summary line), anything else FAILS. Removing an entry from
+// the file re-enables the strict differential for that class, so the JSON — not this
+// code — is the source of truth for WHAT is adjudicated (the code only carries the
+// per-class detectors). A missing/unreadable/malformed file runs STRICT (toward
+// flagging, never toward skipping). [FABLE-5]
+
+struct DivergenceAllowlist {
+    /// sq-eibog: cross-family literal `=`/`!=` type errors (Oxigraph is lenient;
+    /// handled by the spec-re-derivation sub-oracle, NOT a blind skip).
+    cross_family_eq_type_error: bool,
+    /// sq-ai2wa: blank-node-vs-IRI `=`/`!=` (identity vs type-error reading).
+    bnode_iri_inequality: bool,
+    /// Where the allowlist was loaded from (for the summary line).
+    source: String,
+}
+
+impl DivergenceAllowlist {
+    fn strict(source: String) -> Self {
+        DivergenceAllowlist {
+            cross_family_eq_type_error: false,
+            bnode_iri_inequality: false,
+            source,
+        }
+    }
+
+    /// Load from `SPARQ_FUZZ_DIVERGENCES` (a CI/agent override), else the committed
+    /// repo default resolved relative to this crate's manifest (works from any cwd).
+    fn load() -> Self {
+        let path = std::env::var("SPARQ_FUZZ_DIVERGENCES").unwrap_or_else(|_| {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../bench/differential-divergences.json"
+            )
+            .to_string()
+        });
+        match std::fs::read_to_string(&path) {
+            Ok(s) => Self::from_json(&s, &path),
+            Err(e) => {
+                eprintln!(
+                    "warning: divergence allowlist {path} unreadable ({e}) — running \
+                     STRICT (every mismatch fails)"
+                );
+                Self::strict(path)
+            }
+        }
+    }
+
+    /// Parse the allowlist JSON. An unknown class id is IGNORED with a loud warning
+    /// (fail-STRICT: the comparator has no detector for it, so that class keeps
+    /// failing rather than being silently "absorbed" by nothing); malformed JSON is
+    /// also strict.
+    fn from_json(s: &str, source: &str) -> Self {
+        let mut out = Self::strict(source.to_string());
+        let v: serde_json::Value = match serde_json::from_str(s) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "warning: divergence allowlist {source} is not valid JSON ({e}) — \
+                     running STRICT"
+                );
+                return out;
+            }
+        };
+        for class in v["classes"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            match class["id"].as_str() {
+                Some("cross-family-eq-type-error") => out.cross_family_eq_type_error = true,
+                Some("bnode-iri-inequality") => out.bnode_iri_inequality = true,
+                Some(other) => eprintln!(
+                    "warning: divergence allowlist {source} lists unknown class id \
+                     {other:?} — no detector for it; that class stays STRICT"
+                ),
+                None => eprintln!(
+                    "warning: divergence allowlist {source} has a class without a \
+                     string `id` — ignored (strict)"
+                ),
+            }
+        }
+        out
+    }
+}
 
 /// Deterministic SplitMix64 — no clock/entropy, so every case is reproducible from
 /// its seed (`Date::now`/`rand` are unavailable in the wasm sibling crate too).
@@ -526,6 +621,32 @@ fn spec_filter_count(store: &Store, q: &str) -> Option<usize> {
     Some(kept)
 }
 
+/// sq-ai2wa detector — deliberately NARROW (never widen beyond the adjudication in
+/// bench/differential-divergences.json): the mismatching case must be the recognised
+/// single-variable constant `=`/`!=` FILTER shape AND pair a BLANK NODE on one side
+/// with an IRI on the other. The current generator emits no blank nodes and Oxigraph
+/// shares sparq's identity reading of non-literal `=`/`!=`, so this cannot fire
+/// today; it exists so generator/oracle growth (or an Oxigraph behaviour change)
+/// surfaces as an ADJUDICATED skip-with-count instead of a false positive. [FABLE-5]
+fn is_bnode_iri_inequality(store: &Store, q: &str) -> bool {
+    use oxigraph::model::Term;
+    let Some(f) = parse_eq_filter(q) else {
+        return false;
+    };
+    let Some(rhs) = parse_rhs_term(&f.rhs) else {
+        return false;
+    };
+    let Some(terms) = all_var_terms(store, q, &f) else {
+        return false;
+    };
+    terms.iter().any(|t| {
+        matches!(
+            (t, &rhs),
+            (Term::BlankNode(_), Term::NamedNode(_)) | (Term::NamedNode(_), Term::BlankNode(_))
+        )
+    })
+}
+
 /// Oxigraph's ordered sequence of a single projected variable, as term strings.
 // clippy: differential oracle pins oxigraph's legacy Store::query semantics
 #[allow(deprecated)]
@@ -561,8 +682,28 @@ fn check_ordered(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<(), St
 }
 
 pub fn run(seed_start: u64, count: u64, category: &str) {
+    // The adjudicated-divergence allowlist (bench/differential-divergences.json) —
+    // loaded ONCE; the active state is printed so every CI log shows exactly which
+    // classes were skip-with-count vs strict for this run.
+    let allow = DivergenceAllowlist::load();
+    println!(
+        "divergence allowlist ({}): cross-family-eq-type-error={} bnode-iri-inequality={}",
+        allow.source,
+        if allow.cross_family_eq_type_error {
+            "adjudicated (sq-eibog)"
+        } else {
+            "STRICT"
+        },
+        if allow.bnode_iri_inequality {
+            "adjudicated (sq-ai2wa)"
+        } else {
+            "STRICT"
+        },
+    );
     let mut checked = 0u64;
     let mut skipped_unsupported = 0u64;
+    let mut adjudicated_cross_family = 0u64;
+    let mut adjudicated_bnode_iri = 0u64;
     let mut full_mismatch = 0u64;
     let mut count_mismatch = 0u64;
     let mut first_repro: Option<String> = None;
@@ -668,15 +809,25 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         checked += 1;
 
         if sparq_full != oxi {
-            // Before flagging, absorb the ONE documented spec-divergence: Oxigraph's
-            // lenient cross-family `=`/`!=` (sq-eibog). If this is a constant equality
-            // filter over the mixed column, re-derive the SPEC-CORRECT count and flag
-            // only when sparq disagrees with THAT (a genuine bug), not with Oxigraph's
-            // lenient count. Any non-equality shape has `spec_filter_count == None` and
-            // keeps the strict Oxigraph differential.
-            match spec_filter_count(&store, &q) {
+            // Before flagging, consult the ADJUDICATED divergence classes loaded from
+            // bench/differential-divergences.json (a class absent from that file
+            // keeps the strict differential — the file is the source of truth).
+            //
+            // sq-eibog (cross-family `=`/`!=` type error) is NOT a blind skip: if
+            // this is a constant equality filter over the mixed column, re-derive the
+            // SPEC-CORRECT count and flag only when sparq disagrees with THAT (a
+            // genuine bug), not with Oxigraph's lenient count. Any non-equality shape
+            // has `spec_filter_count == None` and keeps the strict differential.
+            let spec = if allow.cross_family_eq_type_error {
+                spec_filter_count(&store, &q)
+            } else {
+                None
+            };
+            match spec {
                 Some(spec) if sparq_full == spec => {
-                    // sparq matches the spec; Oxigraph is lenient here — not a mismatch.
+                    // sparq matches the spec; Oxigraph is lenient here — the
+                    // adjudicated sq-eibog class. Skip WITH COUNT (summary line).
+                    adjudicated_cross_family += 1;
                 }
                 Some(spec) => {
                     full_mismatch += 1;
@@ -690,6 +841,12 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
                              (oxigraph={oxi}, lenient cross-family =/!=)"
                         ),
                     );
+                }
+                None if allow.bnode_iri_inequality && is_bnode_iri_inequality(&store, &q) => {
+                    // sq-ai2wa: bnode-vs-IRI `=`/`!=` — adjudicated identity-vs-type-
+                    // error ambiguity. Skip WITH COUNT (inert for this generator; see
+                    // the JSON entry).
+                    adjudicated_bnode_iri += 1;
                 }
                 None => {
                     full_mismatch += 1;
@@ -749,6 +906,7 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
 
     println!(
         "fuzz[{category}] seeds {seed_start}..{} : checked={checked} skipped(unsupported)={skipped_unsupported} \
+         adjudicated(cross-family-eq)={adjudicated_cross_family} adjudicated(bnode-iri)={adjudicated_bnode_iri} \
          full_mismatch={full_mismatch} count_mismatch={count_mismatch}",
         seed_start + count
     );
@@ -1048,6 +1206,81 @@ ex:n4 ex:val "s2" .
         // Pure-string column: spec and oxigraph AGREE (2), so no leniency to absorb.
         assert_eq!(spec_filter_count(&store, q).unwrap(), 2);
         assert_eq!(oxi_count(&store, q).unwrap(), 2);
+    }
+
+    /// The COMMITTED allowlist (bench/differential-divergences.json) must parse and
+    /// enable exactly the adjudicated classes — pins the JSON ids ⟷ this comparator's
+    /// detectors so neither can drift silently (sq-0iqzw). [FABLE-5]
+    #[test]
+    fn committed_allowlist_enables_exactly_the_adjudicated_classes() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../bench/differential-divergences.json"
+        );
+        let s = std::fs::read_to_string(path).expect("committed allowlist readable");
+        let a = DivergenceAllowlist::from_json(&s, path);
+        assert!(a.cross_family_eq_type_error, "sq-eibog class must be listed");
+        assert!(a.bnode_iri_inequality, "sq-ai2wa class must be listed");
+        // …and the file lists NOTHING this comparator lacks a detector for (an
+        // undetectable entry would be a claimed-but-unenforced allowlisting).
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        for c in v["classes"].as_array().expect("classes array") {
+            let id = c["id"].as_str().expect("string id");
+            assert!(
+                ["cross-family-eq-type-error", "bnode-iri-inequality"].contains(&id),
+                "class {id:?} in the committed file has no detector in fuzz.rs"
+            );
+            assert!(
+                c["bead"].as_str().is_some_and(|b| b.starts_with("sq-")),
+                "class {id:?} must cite its adjudication bead"
+            );
+        }
+    }
+
+    /// An empty / malformed / unknown-id allowlist means STRICT — the FILE, not this
+    /// binary, is the source of truth for what is adjudicated; anything the file
+    /// does not (recognisably) list fails the differential again.
+    #[test]
+    fn empty_or_malformed_allowlist_is_strict() {
+        let a = DivergenceAllowlist::from_json(r#"{"version":1,"classes":[]}"#, "test");
+        assert!(!a.cross_family_eq_type_error);
+        assert!(!a.bnode_iri_inequality);
+        let a = DivergenceAllowlist::from_json("not json", "test");
+        assert!(!a.cross_family_eq_type_error && !a.bnode_iri_inequality);
+        // An unknown id is ignored (no detector => that class stays strict), while a
+        // recognised sibling entry still applies.
+        let a = DivergenceAllowlist::from_json(
+            r#"{"classes":[{"id":"some-future-class"},{"id":"bnode-iri-inequality"}]}"#,
+            "test",
+        );
+        assert!(!a.cross_family_eq_type_error);
+        assert!(a.bnode_iri_inequality);
+    }
+
+    /// sq-ai2wa detector: fires ONLY for a bnode-vs-IRI `=`/`!=` pairing (the narrow
+    /// adjudicated class), never for literal comparisons (those are sq-eibog's spec
+    /// sub-oracle or a genuine bug) and never for non-equality shapes.
+    #[test]
+    fn bnode_iri_detector_is_narrow() {
+        let ttl = "@prefix ex: <http://ex/> .\nex:n0 ex:val _:b0 .\nex:n1 ex:val \"s1\" .\n";
+        let store = Store::new().unwrap();
+        store
+            .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
+            .unwrap();
+        let q_iri =
+            "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:val ?v FILTER(?v != ex:n0) }";
+        assert!(
+            is_bnode_iri_inequality(&store, q_iri),
+            "bnode-vs-IRI != must be detected"
+        );
+        let q_str =
+            "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:val ?v FILTER(?v != \"s2\") }";
+        assert!(
+            !is_bnode_iri_inequality(&store, q_str),
+            "a literal RHS is NOT the sq-ai2wa class"
+        );
+        let q_range = "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:age ?a FILTER(?a > 3) }";
+        assert!(!is_bnode_iri_inequality(&store, q_range));
     }
 
     /// Non-equality shapes are not recognised → the strict Oxigraph differential is

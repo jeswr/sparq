@@ -1,0 +1,18 @@
+# [FABLE-5] sq-a8anf — PINNED jena-geosparql rendering of the `within50km`
+# workload for scripts/bench/geo-same-box.sh. NOT a verbatim copy of
+# bench/geo/queries/within50km.rq — same root cause + rendering rationale as
+# within10km.rq: jena 5.4.0 geof:distance is planar SRS-native-unit Euclidean,
+# and its degree->metre unit conversion throws UnitsConversionException per
+# row, which a FILTER silently drops -> the wave-1 all-zero count (see
+# research/gap-geo-2026-07.md §6d). spatialF:nearby is Jena's documented
+# great-circle radius predicate on the same mean sphere as sparq's haversine;
+# verified count-equal to sparq's expected.tsv (1547) on the pinned 100k
+# corpus. Oracle: COUNT == sparq's expected.tsv `within50km` size before any
+# timing is trusted (counts-not-coordinates).
+PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
+PREFIX spatialF: <http://jena.apache.org/function/spatial#>
+PREFIX uom:      <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (spatialF:nearby(?wkt, "POINT(0 51)"^^geo:wktLiteral, 50000, uom:metre))
+}

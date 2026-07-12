@@ -1,0 +1,14 @@
+{
+  "_comment": "MISSING-ANCHOR fixture: the rust-anchor 'DEMO_RENAMED_FLOOR' does NOT exist in floors.rs (the const was renamed). MUST fail (a rename silently orphans the record; the gate catches it).",
+  "schemaVersion": 2,
+  "records": {
+    "demo.shacl_floor": {
+      "value": 98,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "source": "crates/demo/tests/floors.rs::DEMO_RENAMED_FLOOR",
+      "binding": { "kind": "rust-anchor", "file": "crates/demo/tests/floors.rs", "anchor": "DEMO_RENAMED_FLOOR" },
+      "note": "The bound anchor name no longer exists in the source (renamed)."
+    }
+  }
+}

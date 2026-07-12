@@ -286,7 +286,8 @@ export default function AssurancePage() {
           shows they were green on their <em>last scheduled run</em>, not on this exact
           commit. And the <Code>sparq-zk*</Code> / <Code>sparq-mpc</Code> crates are
           research scaffolds with no security guarantee yet — see{" "}
-          <a href="#what-green-does-not-mean" className="text-primary hover:underline">
+          {/* [FABLE-5] persistent underline: distinguishable without color (link-in-text-block, sq-0rbfn) */}
+          <a href="#what-green-does-not-mean" className="text-primary underline underline-offset-2">
             what green does not mean
           </a>
           .

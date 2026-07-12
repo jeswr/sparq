@@ -7,9 +7,8 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-Opt-in GeoSPARQL 1.0/1.1 core for the [sparq](https://github.com/jeswr/sparq) RDF
-engine: `geo:wktLiteral` / `geo:gmlLiteral` parsing, the `geof:` spatial functions,
-and an R-tree `GeoIndex` over sparq `Graph`s.
+Opt-in GeoSPARQL 1.0/1.1 core for [sparq](https://github.com/jeswr/sparq):
+geometry-literal parsing and serialisation, `geof:` functions, and an R-tree `GeoIndex`.
 
 A **separate crate** by design — no other sparq crate (nor the wasm build) depends on
 it, so spatial support is engaged only by adding `sparq-geo`. Geometry wraps the
@@ -63,7 +62,8 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   hand-derived assertions.
 - **WKT + GML, two serializations** — `geo:wktLiteral` and the GML Simple-Features
   profile of `geo:gmlLiteral` parse to the same `geo_types` + CRS and interoperate in
-  one `geof:` call. Beyond the GML-SF profile, a few real-world (non-SF) forms are
+  one `geof:` call. [GPT-5.6] `GeoGeometry::to_gml_literal` emits the six GML 3
+  Simple Features forms with CRS-preserving axis order. Beyond GML-SF, non-SF forms are
   parsed additively into the same 2-D model: `gml:Envelope` (-> bbox `Polygon`),
   arc-segment `gml:Curve` / `gml:Surface` (`gml:Arc` / `gml:ArcString` /
   `gml:CircularArcByCenterPoint`), **densified** to a polyline at a fixed `5°`-per-chord
@@ -83,8 +83,13 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   entry points stay W3C-conformant and untouched (a `geo:sfWithin` triple matches only
   asserted triples there), so default SPARQL semantics never change. A conformance
   ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
-- **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
-  graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
+- **R-tree `GeoIndex`** — packed-STR `rstar` build over all graphs, with antimeridian-safe windows,
+  incremental `apply_delta`, and opt-in prepared exact region scans via `topology_index`.
+- **Constant-geometry parse + prepared-relate caching** — geometry arguments resolve
+  through a small bounded per-thread cache keyed by the exact lexical form: a constant
+  `FILTER` polygon is parsed once per thread, not once per row (sq-lkrgi), and the
+  DE-9IM relations lazily add a `geo::PreparedGeometry` per REUSED operand (sq-hq8t5).
+  Results are byte-identical (differential-tested); parse failures are never cached.
 
 **Distance accuracy.** Metric units measure great-circle distance on the GRS80 mean
 sphere; point↔point and point↔extended geometry are exact haversine (spherical
@@ -106,7 +111,8 @@ upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 - **Spec** — GeoSPARQL 1.0/1.1; the implemented requirement subset is pinned by
   [`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs).
 - **Benchmark** — `cargo run --release -p sparq-geo --example bench_geo` (no figures
-  baked in here, per the repo's no-hard-coded-performance-numbers rule).
+  baked in here, per the repo's no-hard-coded-performance-numbers rule); its `query`
+  subcommand replays pinned `.rq` files (the Geographica family — `bench/geo/README.md`).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

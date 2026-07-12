@@ -65,6 +65,10 @@ match extract(&dict, &triples) {
   that cannot be mapped soundly without a declaration). Every arm has a diagnostic and a unit
   test; annotations, declarations, and ontology headers are recognised and ignored (they carry
   no ALCH-logical import).
+- **Forward RDF renderer** (`render`, bead sq-pbz04.4.7) — `render_to_triples(&Ontology, &mut Dict)`
+  maps the structural model back to OWL RDF triples (the inverse of `extract`), enabling
+  full-fragment round-trip testing (`RDF → extract → render → extract` ≡ same model) and
+  diagnostics via `render_to_turtle`. No extra deps; always compiled.
 
 **Profile checker (L2, bead sq-pbz04.4.2):** `profile::profiles(onto)` checks OWL 2 EL/QL/RL
 profile membership via a purely syntactic grammar walk (W3C OWL 2 Profiles §2/§3/§4), returning
@@ -92,8 +96,8 @@ classification; verdicts only for a pure ⊤-free EL+⊥ TBox with zero skipped 
 (always `Unknown` — DL-Lite_R consistency is the QL workstream's, not duplicated), or the
 **ALCH tableau** (complete for the fragment). `check::DirectChecker::entailment` decides
 premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
-(GCI / class-assertion / the fresh-class role-assertion trick + the record's desugarings);
-unencoded kinds abstain. A **blank-node individual in the conclusion is read EXISTENTIALLY**
+(GCI / class-assertion / the fresh-class trick, its sq-pbz04.4.9 role-subsumption lift for
+`SubObjectPropertyOf`, + the record's desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY**
 (sq-pbz04.4.13): a tree-shaped anonymous assertion set rolls up into an `∃`-class assertion
 decided soundly, and a non-rollable shape (shared / cyclic / nominal / free-root) abstains
 `ConclusionAnonymousIndividual` — never a skolem-constant `NotEntailed`. Every verdict carries its producing `Branch`; every guard fails

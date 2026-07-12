@@ -1,0 +1,30 @@
+# [FABLE-5] sq-a8anf — PINNED jena-geosparql rendering of the `within10km`
+# workload for scripts/bench/geo-same-box.sh. NOT a verbatim copy of
+# bench/geo/queries/within10km.rq: the standard GeoSPARQL form
+#   FILTER (geof:distance(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre) <= 10000)
+# is NON-EXECUTABLE on jena-geosparql 5.4.0 over bare-CRS84 wktLiterals. Jena's
+# geof:distance computes PLANAR Euclidean distance in the SRS's native units
+# (degrees for CRS84) and then unit-converts; degree->metre throws
+# UnitsConversionException ("Conversion between linear and non-linear units not
+# supported"), and inside a FILTER the per-row ExprEvalException silently drops
+# EVERY row — the wave-1 all-zero counts (root cause: UNITS; axis order and the
+# 3-arg function arity were verified correct — degree-unit distances match the
+# lon-lat deltas exactly, and geof_within agrees). See
+# research/gap-geo-2026-07.md §6d.
+# The rendering below uses Jena's documented great-circle radius predicate
+# spatialF:nearby(geom, geom, radius, unitsURI) — the SAME workload semantic
+# (great-circle metres on the IUGG/GRS80 mean sphere, the same sphere as
+# sparq's haversine), verified count-equal to sparq's expected.tsv (51) on the
+# pinned 100k corpus. Jena's index-accelerated path (spatial:withinCircle,
+# lat-lon arg order) is NOT usable on this corpus: it needs geo:hasGeometry
+# feature modelling the shared corpus does not have (its spatial index indexes
+# 0 items; follow-up bead sq-enfy3), so this is a filter scan on Jena's side.
+# Oracle: the COUNT must equal sparq's expected.tsv `within10km` size before
+# any timing is trusted (counts-not-coordinates).
+PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
+PREFIX spatialF: <http://jena.apache.org/function/spatial#>
+PREFIX uom:      <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (spatialF:nearby(?wkt, "POINT(0 51)"^^geo:wktLiteral, 10000, uom:metre))
+}

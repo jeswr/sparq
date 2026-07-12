@@ -4,11 +4,13 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
+pub mod complete;
 pub mod index;
 #[cfg(feature = "engine")]
 pub mod rewrite;
 pub mod tokenize;
 
+pub use complete::{Candidate, CandidateKind, CompletionIndex};
 pub use index::{Hit, TextIndex};
 pub use tokenize::Analyzer;
 #[cfg(feature = "engine")]

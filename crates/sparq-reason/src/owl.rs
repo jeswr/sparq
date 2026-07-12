@@ -38,7 +38,7 @@ use sparq_core::dict::{Dict, Id};
 const PAR_THRESHOLD: usize = 4096;
 
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
-const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+pub(crate) const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 struct Owl {
     same_as: Id,
@@ -516,7 +516,7 @@ impl ClassFeatureIdx {
         }
         self.lists_dirty = false;
         self.lists.clear();
-        for (&head, _) in self.first.iter() {
+        for &head in self.first.keys() {
             let mut members = Vec::new();
             let mut cur = head;
             for _ in 0..self.first.len() + 1 {
@@ -732,12 +732,35 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
     //   edges for the numeric tower of every datatype IRI that occurs), so the
     //   in-closure rules (rdfs9/11, scm-rng1/scm-dom1) see them;
     // - post: scm-eqc2 / scm-eqp2 (mutual subClassOf/subPropertyOf ⊢ equivalence) —
-    //   sound to run once because equivalence edges over already-mutual pairs feed
-    //   no further rule anything new (both subsumptions already hold).
+    //   sound to run once per closure pass because equivalence edges over
+    //   already-mutual pairs feed no OWL/RDFS rule anything new (both subsumptions
+    //   already hold). (They CAN feed reif-ctr — a reifier can name an equivalence
+    //   triple — which is why the reify loop below re-runs it after each round.)
     let pre = pre_monotone(dict, triples);
-    let main = owl_rl_closure(dict, triples);
-    let post = post_equivalences(dict, triples);
-    pre + main + post
+    let mut added = owl_rl_closure(dict, triples);
+    added += post_equivalences(dict, triples);
+    // [Kern] Quoted-triple (RDF 1.2 reifier) rules — see the `reify` module for the
+    // rule table, the finite-Herbrand-base restrictions, and the termination argument.
+    // Behind the opt-in `quoted-triples` feature (the reif-dtr/reif-ctr bridge is a
+    // deliberate, NON-normative entailment extension — off by default so plain
+    // `Profile::OwlRl` closures never change for data that happens to use the classic
+    // reification vocabulary). When ON, still occurrence-guarded (zero cost +
+    // byte-identical closure for reify-free data) and checked AFTER the main closure
+    // because RL rules can derive the trigger vocabulary. The loop ALTERNATES reify
+    // steps with the RL closure: destructured components feed the RL rules, and
+    // RL-derived triples can enable reif-ctr. Each round adds at least one triple over
+    // a finite Herbrand base, so the alternation terminates.
+    #[cfg(feature = "quoted-triples")]
+    if crate::reify::occurs(dict, triples) {
+        loop {
+            let n = crate::reify::step(dict, triples);
+            if n == 0 {
+                break;
+            }
+            added += n + owl_rl_closure(dict, triples) + post_equivalences(dict, triples);
+        }
+    }
+    pre + added
 }
 
 /// The XSD numeric-tower subsumptions (direct edges; rdfs11 closes them).

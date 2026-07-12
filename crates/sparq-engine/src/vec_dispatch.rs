@@ -132,6 +132,14 @@ pub(crate) fn record_chunk(morsel_rows: usize) {
     TL_ROWS_COLUMNAR.with(|c| c.set(c.get() + morsel_rows as u64));
 }
 
+/// Records `n` rows delegated to the scalar predicate in the hybrid tri-mask FILTER
+/// (sq-y5ew5). Called once per morsel by `columnar_filter` after the tri-mask pass.
+/// [SONNET-4.6]
+#[inline]
+pub(crate) fn record_delegated(n: usize) {
+    TL_ROWS_DELEGATED.with(|c| c.set(c.get() + n as u64));
+}
+
 /// Records one operator invocation that declined the columnar path.
 #[inline]
 pub(crate) fn record_decline() {

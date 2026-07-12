@@ -11,19 +11,23 @@ R2R per-window materialisation → R2S `RSTREAM`), the three `EvalMode`s (Rebuil
 PersistentDict / Delta), and the RSP-QL surface syntax + multi-window
 named-graph joins.
 
-## Why no competitor perf column (honest)
+## The bounded count-matched-replay comparison (honest)
 
-The natural RSP peers — **C-SPARQL, CQELS, RSP4J / YASPER** (and the
-**SRBench / CityBench / LSBench / RSPLab** harnesses) — are **service/runtime
-engines with wall-clock windows**: a window closes when *real time* passes.
-`sparq-rsp` is clock-free — a window closes when the *pushed-timestamp watermark*
-passes, so its output is a pure function of the `(triple, ts)` sequence with no
-scheduler, no real clock. **Any throughput head-to-head across the two is
-apples-to-oranges (different time model)** — it is the surface where a competitor
-*perf* column is least meaningful. So this suite has **no competitor perf
-column**. The honest comparison is **correctness / expressivity**, run as the
-SRBench correctness oracle below (the EYE role). Perf head-to-head is explicitly
-**out of scope**.
+The natural RSP peers — **C-SPARQL, CQELS, RSP4J / YASPER** — are service-engine
+frameworks whose deployed windows are **wall-clock**; `sparq-rsp` is clock-free (a
+window closes when the *pushed-timestamp watermark* passes), so a **raw**
+throughput head-to-head is apples-to-oranges. The adopted bounded protocol
+(`research/comparative-benchmarking-everything.md` §5.2, `sq-hmd7l.20`): drive
+RSP4J/YASPER in its **event-time** configuration with the **identical pinned
+timestamped replay** (`replay/*.ts.tsv`, exported from the oracle's in-code
+scripts), require **per-window result-count agreement** with the deterministic
+oracle FIRST, and only then admit timing rows — each carrying a
+**machine-attached time-model caveat** (`time_model_caveat` in the envelope, not
+just prose). Windows that cannot be count-matched are excluded and the exclusion
+reported. Count-comparable surface + first-read verdict:
+`research/gap-rsp-2026-07.md`; harness: `rsp4j_compare.py` (gate + envelope),
+`rsp4j/Rsp4jReplayRunner.java` + `gather-rsp4j.sh` (the gather-time engine leg),
+`rsp4j-smoke.sh` (fast no-JVM smoke incl. the replay-fidelity guard).
 
 ## The gate: per-window result-row counts (clock-free → deterministic)
 
@@ -80,8 +84,9 @@ window via `ContinuousMultiQuery` (cross-named-graph join, the RSP-QL `WINDOW
 - **`srbench_groupby_state`** — readings per US state per window (the join feeds
   a `GROUP BY` — aggregate-after-join expressivity).
 
-This is correctness/expressivity coverage only; the time model differs from a
-wall-clock RSP engine, so it carries **no perf comparison**.
+`srbench_join` is also the **count-comparable scenario** of the bounded RSP4J
+comparison above (SELECT of all pattern variables ⇒ row count = distinct joined
+bindings under both engines' set semantics).
 
 ## Advisory throughput (trend-only, NOT a gate)
 
@@ -99,12 +104,18 @@ gate. The fuller `EvalMode` head-to-head (1 M readings, all scenarios) lives in
 | `crates/sparq-rsp/examples/rsp_oracle.rs` | the TSV-emitting runner (the crate is isolated — not a `sparq-cli` dependency, so the runner is a crate example, like FTS's `bench_text`) |
 | `expected.tsv` | the deterministic per-window row-count gate (single-window × 3 EvalModes + SRBench oracle) |
 | `run.sh` | self-asserting entry point CI calls: run the example, assert every `*_rows` metric vs `expected.tsv`, forward the 3-column `<metric>\t<value>\t<unit>` hook contract |
+| `replay/*.ts.tsv` | the pinned timestamped replays (exports of the oracle's in-code scripts) both engines are driven from |
+| `rsp4j_compare.py` + `test_rsp4j_compare.py` | count-match gate + envelope emitter (+ replay-fidelity guard tests, stdlib-only) |
+| `rsp4j/Rsp4jReplayRunner.java` + `gather-rsp4j.sh` | gather-time RSP4J/YASPER replay driver (pinned build; never in CI) |
+| `rsp4j-smoke.sh` | fast no-JVM protocol smoke (fidelity guard + positive/negative gate paths) |
 
 ## Run it
 
 ```sh
 cargo build --release -p sparq-rsp --example rsp_oracle
 bench/rsp/run.sh                       # asserts + prints the metric TSV; exit 1 on any drift
+bench/rsp/rsp4j-smoke.sh               # bounded-comparison protocol smoke (python3 only)
+MVN=… bench/rsp/gather-rsp4j.sh        # gather-time: real RSP4J/YASPER count-match + envelope
 ```
 
 A divergence in `expected.tsv` means the RSP windowing / materialisation /
