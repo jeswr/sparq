@@ -9,4 +9,3 @@ contexts, retaining the terms needed by this registry's offline examples and tes
 | `activitystreams.jsonld` | <https://www.w3.org/ns/activitystreams> | W3C Software and Document License |
 | `credentials-v1.jsonld` | <https://www.w3.org/2018/credentials/v1> | W3C Software and Document License |
 | `did-v1.jsonld` | <https://www.w3.org/ns/did/v1> | W3C Software and Document License |
-

@@ -7,4 +7,3 @@ fails closed with the same error as `NoopLoader`.
 
 The crate is experimental, unpublished, and opt-in: consumers depend on it explicitly.
 See `contexts/PROVENANCE.md` for the source and licensing record of each bundled context.
-
