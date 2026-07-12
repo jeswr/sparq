@@ -230,6 +230,7 @@ impl McpServer {
             "introspect" => self.tool_introspect(&args),
             "shapes" => self.tool_shapes(&args),
             "stats" => self.tool_stats(),
+            "void" => self.tool_void(&args),
             #[cfg(feature = "nlq")]
             "ask" => self.tool_ask(&args),
             #[cfg(feature = "templates")]
@@ -320,6 +321,28 @@ impl McpServer {
             "namespaces": ix.vocabularies.distinct,
         });
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
+    }
+
+    /// `void`: W3C VoID dataset descriptor as deterministic N-Triples.
+    fn tool_void(&self, args: &Value) -> Result<String, String> {
+        let dataset_iri = match args.get("dataset") {
+            None => "urn:sparq:dataset",
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| "argument `dataset` must be a string".to_string())?,
+        };
+        let characteristic_sets = match args.get("characteristic_sets") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "argument `characteristic_sets` must be a boolean".to_string())?,
+        };
+        let ix = Introspection::build(&self.graph);
+        Ok(if characteristic_sets {
+            ix.to_void_with_cs(dataset_iri)
+        } else {
+            ix.to_void(dataset_iri)
+        })
     }
 
     /// `template_list` (feature `templates`): the registered named-template definitions
