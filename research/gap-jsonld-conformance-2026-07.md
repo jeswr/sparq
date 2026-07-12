@@ -18,7 +18,7 @@ compact 186→228, frame 61→92 — so several .22 cells are stale-low).
 
 **Runner:** `crates/sparq-jsonld/examples/jsonld_conformance.rs`
 
-```
+```sh
 scripts/fetch-jsonld-tests.sh && scripts/fetch-jsonld-framing-tests.sh
 cargo run -p sparq-jsonld --release --example jsonld_conformance             # table + fail listing
 cargo run -p sparq-jsonld --release --example jsonld_conformance -- --json   # machine-readable row
