@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 mod facets;
 pub use facets::{facets, FacetRequest, FacetResponse, PredicateValues};
+#[cfg(feature = "numeric-facets")]
+pub use facets::{NumericBucket, NumericFacet};
 use sparq_core::dict::{self, Id, TermParts, INLINE_BASE};
 use sparq_core::Graph;
 
