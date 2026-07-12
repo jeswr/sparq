@@ -16,7 +16,7 @@ use spargebra::term::NamedNodePattern;
 use spargebra::{Query, SparqlParser};
 use sparq_core::Graph;
 
-use crate::{enumerate_paths, PathMode, PathSpec, QueryResult};
+use crate::{enumerate_paths, PathMode, PathSpec, QueryResult, Via};
 
 #[derive(Debug)]
 struct ParsedPaths {
@@ -26,7 +26,7 @@ struct ParsedPaths {
     start: Option<Term>,
     end_var: Variable,
     end: Option<Term>,
-    via: NamedNode,
+    via: Via,
     max_length: Option<usize>,
 }
 
@@ -89,9 +89,9 @@ pub fn explain_paths(_graph: &Graph, src: &str) -> Result<String, String> {
         .max_length
         .map_or_else(|| "none".to_owned(), |n| n.to_string());
     Ok(format!(
-        "Paths mode={mode} cyclic={} via=<{}> maxLength={maximum}",
+        "Paths mode={mode} cyclic={} via={} maxLength={maximum}",
         parsed.cyclic,
-        parsed.via.as_str()
+        display_via(&parsed.via)
     ))
 }
 
@@ -124,7 +124,12 @@ fn parse_paths(src: &str) -> Result<ParsedPaths, String> {
     let end_var = parser.variable()?;
     let end = parser.optional_bound_iri(&prologue)?;
     parser.keyword("VIA")?;
-    let via = resolve_iri(&prologue, parser.next("IRI after VIA")?)?;
+    let via_token = parser.next("IRI or graph pattern after VIA")?;
+    let via = if via_token.starts_with('{') {
+        Via::Pattern(canonical_pattern(&prologue, via_token)?)
+    } else {
+        Via::Predicate(resolve_iri(&prologue, via_token)?)
+    };
     let max_length = if parser.consume_keyword("MAX") {
         parser.keyword("LENGTH")?;
         Some(
@@ -155,6 +160,31 @@ fn parse_paths(src: &str) -> Result<ParsedPaths, String> {
         via,
         max_length,
     })
+}
+
+fn display_via(via: &Via) -> String {
+    match via {
+        Via::Predicate(predicate) => format!("<{}>", predicate.as_str()),
+        Via::Pattern(pattern) => format!("{{ {pattern} }}"),
+    }
+}
+
+fn canonical_pattern(prologue: &str, token: &str) -> Result<String, String> {
+    let source = token
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or_else(|| "unterminated graph pattern after VIA".to_owned())?
+        .trim();
+    let query = SparqlParser::new()
+        .parse_query(&format!("{prologue} SELECT ?from ?to WHERE {{ {source} }}"))
+        .map_err(|error| format!("invalid graph pattern after VIA: {error}"))?;
+    let Query::Select { pattern, .. } = query else {
+        unreachable!()
+    };
+    let GraphPattern::Project { inner, .. } = pattern else {
+        return Err("invalid SELECT projection for PATHS VIA pattern".to_owned());
+    };
+    Ok(inner.to_string())
 }
 
 fn validate_prologue(prologue: &str) -> Result<(), String> {
@@ -216,6 +246,14 @@ fn tokenize(src: &str) -> Result<Vec<String>, String> {
             tokens.push(src[start..end].to_owned());
             continue;
         }
+        if ch == '{' {
+            let end = braced_group_end(src, start)?;
+            while chars.peek().is_some_and(|(index, _)| *index < end) {
+                chars.next();
+            }
+            tokens.push(src[start..end].to_owned());
+            continue;
+        }
         let mut end = start + ch.len_utf8();
         while let Some(&(index, c)) = chars.peek() {
             if c.is_whitespace() || c == '=' || c == '#' || c == '<' {
@@ -227,6 +265,52 @@ fn tokenize(src: &str) -> Result<Vec<String>, String> {
         tokens.push(src[start..end].to_owned());
     }
     Ok(tokens)
+}
+
+fn braced_group_end(src: &str, start: usize) -> Result<usize, String> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut iri = false;
+    let mut comment = false;
+    for (offset, ch) in src[start..].char_indices() {
+        if comment {
+            if ch == '\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if iri {
+            if ch == '>' {
+                iri = false;
+            }
+            continue;
+        }
+        match ch {
+            '#' => comment = true,
+            '<' => iri = true,
+            '\'' | '"' => quote = Some(ch),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(start + offset + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("unterminated graph pattern after VIA".to_owned())
 }
 
 struct Tokens<'a> {
