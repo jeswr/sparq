@@ -16,7 +16,12 @@
 //   3. Valid input  → `Ok(canonical_nquads_string)`
 //
 // For path 3 we additionally run `parse_nquads` on the output and assert the two
-// parses agree on the number of quads (round-trip stability for valid inputs).
+// parses agree on the number of DISTINCT quads (round-trip stability for valid
+// inputs). DISTINCT, not raw: an RDF dataset is a SET of quads, so RDFC-1.0
+// canonicalization correctly deduplicates a repeated input line — the randomized
+// lane caught the earlier raw-count assert on exactly that (a duplicated quad,
+// 5 parsed -> 4 canonical; sq-t8z0r / GH #1903). Distinct counts ARE preserved:
+// canonical blank-node relabelling is injective, so distinct quads stay distinct.
 //
 // INVARIANT: any input must produce `Ok(...)` or a clean `Err(...)` — never a panic,
 // unbounded work, OOB, integer-overflow abort (overflow-checks on in this profile), or UB.
@@ -32,13 +37,20 @@ fuzz_target!(|data: &[u8]| {
     // Exercise the combined parse + canonicalize path.
     if let Ok(canonical) = sparq_canon::canonicalize_nquads(&text) {
         // Round-trip stability: the canonical output must itself parse cleanly
-        // and yield the same number of quads as the input.
-        let input_quads = sparq_canon::parse_nquads(&text)
-            .map(|v| v.len())
-            .unwrap_or(0);
-        let canon_quads = sparq_canon::parse_nquads(&canonical)
-            .map(|v| v.len())
-            .unwrap_or(0);
+        // and yield the same number of DISTINCT quads as the input (datasets are
+        // sets — a duplicated input line is correctly deduplicated, sq-t8z0r).
+        let distinct = |src: &str| {
+            sparq_canon::parse_nquads(src)
+                .map(|v| {
+                    v.iter()
+                        .map(ToString::to_string)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                })
+                .unwrap_or(0)
+        };
+        let input_quads = distinct(&text);
+        let canon_quads = distinct(&canonical);
         // The canonical form must be idempotent: re-canonicalizing it must
         // produce the same string (RDFC-1.0 is deterministic + stable).
         let recanon = sparq_canon::canonicalize_nquads(&canonical);
@@ -47,10 +59,10 @@ fuzz_target!(|data: &[u8]| {
             Some(canonical.as_str()),
             "RDFC-1.0 canonicalization is not idempotent"
         );
-        // Quad count must be preserved across canonicalization.
+        // The DISTINCT quad count must be preserved across canonicalization.
         debug_assert_eq!(
             input_quads, canon_quads,
-            "quad count changed after canonicalization: {} -> {}",
+            "distinct quad count changed after canonicalization: {} -> {}",
             input_quads, canon_quads
         );
     }

@@ -261,7 +261,7 @@ impl<'a> Parser<'a> {
     // ---- lexing helpers ------------------------------------------------------
     fn ws(&mut self) {
         loop {
-            while self.i < self.s.len() && (self.s[self.i] as char).is_whitespace() {
+            while self.i < self.s.len() && is_ws_byte(self.s[self.i]) {
                 self.i += 1;
             }
             if self.i < self.s.len() && self.s[self.i] == b'#' {
@@ -298,7 +298,7 @@ impl<'a> Parser<'a> {
             return false;
         }
         self.s[self.i..end].eq_ignore_ascii_case(kw.as_bytes())
-            && self.s.get(end).is_none_or(|c| (*c as char).is_whitespace() || *c == b'<' || *c == b':')
+            && self.s.get(end).is_none_or(|c| is_ws_byte(*c) || *c == b'<' || *c == b':')
     }
 
     // ---- top level -----------------------------------------------------------
@@ -521,14 +521,14 @@ impl<'a> Parser<'a> {
         };
         if a_allowed && self.starts_with("a") {
             let j = self.i + 1;
-            if j >= self.s.len() || (self.s[j] as char).is_whitespace() || self.s[j] == b'<' {
+            if j >= self.s.len() || is_ws_byte(self.s[j]) || self.s[j] == b'<' {
                 self.i += 1;
                 return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
         }
         if !self.strict && self.starts_with("@a") {
             let j = self.i + 2;
-            if j >= self.s.len() || (self.s[j] as char).is_whitespace() {
+            if j >= self.s.len() || is_ws_byte(self.s[j]) {
                 self.i += 2;
                 return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
@@ -561,7 +561,7 @@ impl<'a> Parser<'a> {
             match c {
                 b'>' => return true,
                 b'<' => return false, // a second '<' — not inside any IRIREF
-                c if (c as char).is_whitespace() => return false,
+                c if is_ws_byte(c) => return false,
                 _ => j += 1,
             }
         }
@@ -577,7 +577,7 @@ impl<'a> Parser<'a> {
         let end = start + kw.len();
         if self.s[start..].starts_with(kw.as_bytes())
             && self.s.get(end).is_none_or(|c| {
-                (*c as char).is_whitespace() || matches!(c, b'.' | b';' | b',' | b')' | b']' | b'}')
+                is_ws_byte(*c) || matches!(c, b'.' | b';' | b',' | b')' | b']' | b'}')
             })
         {
             self.i = end;
@@ -773,10 +773,14 @@ impl<'a> Parser<'a> {
     fn read_pname_prefix(&mut self) -> Result<String, String> {
         // read up to ':' (dots are legal inside a prefix name: `e.g:`)
         let start = self.i;
-        while self.i < self.s.len() && self.s[self.i] != b':' && !(self.s[self.i] as char).is_whitespace() {
+        while self.i < self.s.len() && self.s[self.i] != b':' && !is_ws_byte(self.s[self.i]) {
             self.i += 1;
         }
-        let pfx = std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string();
+        // Unreachable on valid UTF-8 now that the scan only stops on ASCII bytes
+        // (always char boundaries), but the parser must REPORT, never panic.
+        let pfx = std::str::from_utf8(&self.s[start..self.i])
+            .map_err(|e| e.to_string())?
+            .to_string();
         if self.peek() != Some(b':') {
             return Err(format!("expected ':' after prefix name at byte {}", self.i));
         }
@@ -789,7 +793,7 @@ impl<'a> Parser<'a> {
         let mut tok = String::new();
         while self.i < self.s.len() {
             let c = self.s[self.i];
-            if (c as char).is_whitespace()
+            if is_ws_byte(c)
                 || matches!(c, b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^' | b'#')
             {
                 break; // '#' starts a comment — never part of an (unescaped) pname
@@ -959,7 +963,7 @@ impl<'a> Parser<'a> {
             }
             // utf-8 safe push
             let ch_len = utf8_len(c);
-            val.push_str(std::str::from_utf8(&self.s[self.i..self.i + ch_len]).unwrap());
+            val.push_str(std::str::from_utf8(&self.s[self.i..self.i + ch_len]).map_err(|e| e.to_string())?);
             self.i += ch_len;
         }
         // datatype / lang
@@ -1047,7 +1051,9 @@ impl<'a> Parser<'a> {
         if digits == 0 {
             return Err(format!("expected a number at byte {start}"));
         }
-        let txt = std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string();
+        let txt = std::str::from_utf8(&self.s[start..self.i])
+            .map_err(|e| e.to_string())?
+            .to_string();
         let dt = if is_double { XSD_DOUBLE } else if is_decimal { XSD_DECIMAL } else { XSD_INTEGER };
         Ok(Term::Lit(txt, dt.into(), None))
     }
@@ -1225,6 +1231,18 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
         joined.push('/');
     }
     format!("{prefix}{joined}{tail}")
+}
+
+/// Byte-level whitespace test for the byte-wise lexer — ONLY ASCII bytes count.
+/// In valid UTF-8 the byte values 0x85 / 0xA0 occur exclusively as CONTINUATION
+/// bytes of a multibyte character, yet read as U+0085 NEL / U+00A0 NBSP through
+/// `(byte as char).is_whitespace()`, which split token scans MID-character and
+/// panicked the `from_utf8` in `read_pname_prefix` (sq-t8z0r randomized-fuzz
+/// finding, GH #1903). Genuine non-ASCII whitespace (NEL / NBSP / U+2028 …) is
+/// not token whitespace in Turtle/N3 anyway, so restricting to ASCII both fixes
+/// the split and matches the spec. [FABLE-5]
+fn is_ws_byte(b: u8) -> bool {
+    b.is_ascii() && (b as char).is_whitespace()
 }
 
 fn utf8_len(b: u8) -> usize {

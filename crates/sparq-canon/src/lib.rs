@@ -488,6 +488,21 @@ mod tests {
     // [OPUS-4.8] sq-qcnn.14 — direct unit tests per public fn, asserting exact values.
     // One test per uncovered public fn; each assert is non-vacuous (flip a value → red).
 
+    /// [FABLE-5] sq-t8z0r / GH #1903 (randomized-fuzz finding): an RDF dataset is a
+    /// SET of quads, so a duplicated input line is deduplicated by RDFC-1.0
+    /// canonicalization — 3 parsed lines (one repeated) canonicalize to 2 quads.
+    /// Documents the set semantics the fuzz-harness invariant must respect.
+    #[test]
+    fn canonicalize_nquads_deduplicates_repeated_quads() {
+        let doc = "_:b0 <http://ex/p> \"x\" .\n<http://ex/s> <http://ex/p> \"y\" .\n_:b0 <http://ex/p> \"x\" .\n";
+        assert_eq!(parse_nquads(doc).unwrap().len(), 3, "the parse itself keeps duplicates");
+        let canon = canonicalize_nquads(doc).unwrap();
+        let canon_quads = parse_nquads(&canon).unwrap();
+        assert_eq!(canon_quads.len(), 2, "canonical form is a set: the duplicate collapses");
+        // Idempotence: re-canonicalizing the canonical form is a fixed point.
+        assert_eq!(canonicalize_nquads(&canon).unwrap(), canon);
+    }
+
     /// Direct test for `parse_nquads` (public wrapper). Asserts exact quad content,
     /// killing "return empty vec" / "skip error propagation" mutation classes.
     #[test]
