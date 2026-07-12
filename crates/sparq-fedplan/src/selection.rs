@@ -484,9 +484,15 @@ mod tests {
             .build();
         let both = TriplePattern::new(iri("http://ex/x"), iri("http://ex/p"), iri("http://ex/y"));
         let est = estimate_cardinality(&both, &degenerate);
-        assert!(est.is_finite(), "no division by zero on a degenerate partition");
+        assert!(
+            est.is_finite(),
+            "no division by zero on a degenerate partition"
+        );
         assert!(est >= 0.0, "estimate is floored at 0");
-        assert_eq!(est, 1.0, "triples.max(1)/(1*1) = 1 for an all-zero partition");
+        assert_eq!(
+            est, 1.0,
+            "triples.max(1)/(1*1) = 1 for an all-zero partition"
+        );
     }
 
     // ---- The open-predicate estimate is the source's total triples, floored at 1 even for
@@ -601,5 +607,121 @@ mod tests {
         assert_eq!(sel[0].candidates[0].source, 0);
         assert_eq!(sel[1].candidates.len(), 1);
         assert_eq!(sel[1].candidates[0].source, 1);
+    }
+
+    // [HAIKU-4.5] sq-2b7h7: postcondition test for estimate_cardinality non-negativity.
+    // This test sweeps all four (subject_bound, object_bound) combinations, plus the
+    // open-predicate and predicate-absent early returns, verifying that the result is
+    // always finite and >= 0.0 across all branches. It uses source stats where distinct
+    // counts >> triples to exercise the (true,true) .max(0.0) floor that prevents negative
+    // results from dividing by a large denominator.
+    // Mutation test: removing the .max(0.0) at line 199 or flipping .max(1) denominators
+    // causes this test to fail.
+    #[test]
+    fn estimate_cardinality_postcondition_finite_non_negative() {
+        // Helper to verify postcondition for any (s_bound, o_bound, source) combination.
+        let check = |tp: &TriplePattern, src: &SourceDescriptor, label: &str| {
+            let result = estimate_cardinality(tp, src);
+            assert!(
+                result.is_finite(),
+                "{}: result {} is not finite",
+                label,
+                result
+            );
+            assert!(result >= 0.0, "{}: result {} is negative", label, result);
+        };
+
+        // ---- Early return: open predicate (no predicate IRI).
+        let src = source_a(); // total_triples = 1000.
+        let open_pred = TriplePattern::new(var("s"), var("p"), var("o"));
+        check(&open_pred, &src, "open-predicate");
+
+        // ---- Early return: open predicate on empty source (floored at 1).
+        let empty_src = SourceDescriptor::builder(SourceId::new("empty")).build();
+        check(&open_pred, &empty_src, "open-predicate-empty");
+
+        // ---- (false, false): both subject and object unbound.
+        // With source_a: knows has 200 triples, 100 subjects, 80 objects.
+        let both_unbound =
+            TriplePattern::new(var("s"), iri("http://xmlns.com/foaf/0.1/knows"), var("o"));
+        check(&both_unbound, &src, "(false,false)");
+
+        // ---- (true, false): subject bound, object unbound.
+        let subj_bound = TriplePattern::new(
+            iri("http://ex/subject1"),
+            iri("http://xmlns.com/foaf/0.1/knows"),
+            var("o"),
+        );
+        check(&subj_bound, &src, "(true,false)");
+
+        // ---- (false, true): subject unbound, object bound.
+        let obj_bound = TriplePattern::new(
+            var("s"),
+            iri("http://xmlns.com/foaf/0.1/knows"),
+            iri("http://ex/object1"),
+        );
+        check(&obj_bound, &src, "(false,true)");
+
+        // ---- (false, true): object bound but distinct_objects unknown (0).
+        // This exercises the fallback to conservative `triples`.
+        let unknown_obj_src = SourceDescriptor::builder(SourceId::new("unknown_obj"))
+            .predicate(pred("http://ex/p", 100, 50, 0)) // objects unknown
+            .build();
+        let obj_bound_unknown =
+            TriplePattern::new(var("s"), iri("http://ex/p"), iri("http://ex/obj"));
+        check(
+            &obj_bound_unknown,
+            &unknown_obj_src,
+            "(false,true)-unknown-objects",
+        );
+
+        // ---- (true, true): both subject and object bound.
+        // This is the critical case that uses .max(0.0) to prevent negative results
+        // from very large denominators.
+        let both_bound = TriplePattern::new(
+            iri("http://ex/subject1"),
+            iri("http://xmlns.com/foaf/0.1/knows"),
+            iri("http://ex/object1"),
+        );
+        check(&both_bound, &src, "(true,true)");
+
+        // ---- (true, true) with SKEWED stats: many distinct subjects/objects.
+        // Creates a scenario where triples / (distinct_subjects * distinct_objects)
+        // would go very small or negative if not floored at 0.0.
+        // 10 triples with 1000 subjects and 1000 objects => result would be
+        // 10.0 / (1000.0 * 1000.0) = 0.00001, which is fine. But if the .max(1)
+        // on distinct counts were missing, intermediate division results could
+        // accumulate rounding errors.
+        let skewed_src = SourceDescriptor::builder(SourceId::new("skewed"))
+            .predicate(pred("http://ex/p", 10, 1000, 1000)) // many distinct terms
+            .build();
+        let skewed_both_bound =
+            TriplePattern::new(iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o"));
+        check(&skewed_both_bound, &skewed_src, "(true,true)-skewed");
+
+        // ---- (true, true) with DEGENERATE stats: all counts zero.
+        // This is floored to 1.0 / (1.0 * 1.0) = 1.0 by the .max(1) guards.
+        let degenerate_src = SourceDescriptor::builder(SourceId::new("degen"))
+            .predicate(pred("http://ex/p", 0, 0, 0)) // all zero
+            .build();
+        let degen_both_bound =
+            TriplePattern::new(iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o"));
+        check(&degen_both_bound, &degenerate_src, "(true,true)-degenerate");
+
+        // ---- Verify the actual value in the (true,true) skewed case is what we expect:
+        // 10.0 / (1000.0 * 1000.0) = 0.00001 (NOT floored to 0 here, since it's already positive).
+        let skewed_result = estimate_cardinality(&skewed_both_bound, &skewed_src);
+        assert_eq!(
+            skewed_result,
+            10.0 / (1000.0 * 1000.0),
+            "skewed result matches formula"
+        );
+
+        // ---- Verify the degenerate (true,true) case is exactly 1.0.
+        let degen_result = estimate_cardinality(&degen_both_bound, &degenerate_src);
+        assert_eq!(
+            degen_result, 1.0,
+            "degenerate (true,true) is 1.0/(1.0*1.0)=1.0"
+        );
     }
 }
