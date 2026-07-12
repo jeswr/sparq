@@ -4,9 +4,11 @@
 > Projects a SPARQL `SELECT` result (`sparq_engine::QueryResult`) into an Arrow
 > `RecordBatch` so query results flow into the dataframe / analytics / ML ecosystem
 > (Polars, DuckDB, pandas) without a CSV round-trip. Issue #910, bead `sq-v78l4`.
+>
+> [GPT-5.6] Bead `sq-lsp7k.16` adds the checked inverse, `from_record_batch`.
 
-**Opt-in / lean-core by construction.** This is a separate leaf crate, and the export
-itself sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
+**Opt-in / lean-core by construction.** This is a separate leaf crate, and Arrow
+import/export sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
 closure NEVER enters `sparq-core` / `sparq-engine` / the wasm bundle; nothing in the
 workspace default build depends on it. The default build of *this* crate pulls no Arrow
 code at all — only the dependency-free field-name constants and the schema docs.
@@ -14,7 +16,7 @@ code at all — only the dependency-free field-name constants and the schema doc
 ## 🚀 Quickstart
 
 ```rust,ignore
-use sparq_arrow::to_record_batch;
+use sparq_arrow::{from_record_batch, to_record_batch};
 use sparq_engine::{query, QueryResult};
 use sparq_core::Graph;
 
@@ -25,6 +27,9 @@ let result: QueryResult = query(&graph, "SELECT ?s ?o WHERE { ?s ?p ?o }")?;
 let batch = to_record_batch(&result)?;       // needs --features arrow
 assert_eq!(batch.num_columns(), 2);          // ?s, ?o
 assert_eq!(batch.schema().field(0).name(), "s");
+let restored = from_record_batch(&batch)?;
+assert_eq!(restored.vars, result.vars);
+assert_eq!(restored.rows, result.rows);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -48,6 +53,10 @@ one column of `Struct<kind, value, datatype, language, direction>` (all nullable
 
 An **unbound** binding is a `null` struct slot — distinct from a bound empty-string
 literal. `term_schema(&vars)` builds the schema without materialising rows.
+`from_record_batch(&batch)` validates that exact schema and reconstructs the variables,
+row order, unbound cells, and RDF terms. Invalid variable names, schemas, kinds, IRIs,
+blank-node labels, language tags, directions, triple terms, or incompatible literal
+metadata return `ArrowError`; they never panic or silently select a fallback term kind.
 
 ## 📚 Honest boundary / caveats
 
@@ -61,7 +70,7 @@ literal. `term_schema(&vars)` builds the schema without materialising rows.
 - **Triple terms are stringified** to N-Triples in `value` (`kind = "triple"`), not
   exploded into nested struct fields.
 - This is a **projection for transport**, not a canonical RDF serialisation: the Arrow
-  batch is not itself an RDF document (round-tripping from the five fields is trivial).
+  batch is not itself an RDF document. `from_record_batch` is its checked inverse.
 - **Python binding.** Issue #910 frames a `sparq-py` `Graph.query_arrow() ->
   pyarrow.Table` over this export; that PyO3 binding lives in the opt-in `arrow` feature
   of `sparq-py` (bead `sq-lt1ml`) — it reuses `to_record_batch` here and bridges the
