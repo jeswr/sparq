@@ -15,7 +15,11 @@ fn iri(d: &mut Dict, local: &str) -> Id {
 }
 
 fn int(d: &mut Dict, n: u64) -> Id {
-    d.intern_lit(&n.to_string(), "http://www.w3.org/2001/XMLSchema#integer", None)
+    d.intern_lit(
+        &n.to_string(),
+        "http://www.w3.org/2001/XMLSchema#integer",
+        None,
+    )
 }
 
 fn s(d: &mut Dict, v: &str) -> Id {
@@ -27,7 +31,10 @@ fn derived(d: &mut Dict, facts: &[[Id; 3]], src: &str) -> FxHashSet<[Id; 3]> {
     let p = parse_program(d, src).expect("parse");
     let closure = eval(d, facts, &p).expect("stratifiable");
     let inputs: FxHashSet<[Id; 3]> = facts.iter().copied().collect();
-    closure.into_iter().filter(|f| !inputs.contains(f)).collect()
+    closure
+        .into_iter()
+        .filter(|f| !inputs.contains(f))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -52,27 +59,25 @@ fn parse_basics_and_a_sugar() {
 #[test]
 fn parse_rejects_variable_predicate() {
     let mut d = Dict::new();
-    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?y] :- [?x, ?p, ?y] ."))
-        .unwrap_err();
+    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?y] :- [?x, ?p, ?y] .")).unwrap_err();
     assert!(e.contains("variable predicates"), "{e}");
 }
 
 #[test]
-fn parse_rejects_unimplemented_aggregate_functions_loudly() {
+fn parse_rejects_unknown_aggregate_functions() {
     let mut d = Dict::new();
     let e = parse_program(
         &mut d,
-        &format!("{P}[?x, ex:t, ?s] :- AGGREGATE([?x, ex:v, ?y] ON ?x BIND SUM(?y) AS ?s) ."),
+        &format!("{P}[?x, ex:t, ?s] :- AGGREGATE([?x, ex:v, ?y] ON ?x BIND MEDIAN(?y) AS ?s) ."),
     )
     .unwrap_err();
-    assert!(e.contains("SUM") && e.contains("not implemented"), "{e}");
+    assert!(e.contains("MEDIAN") && e.contains("unknown"), "{e}");
 }
 
 #[test]
 fn parse_rejects_unsafe_head_variable() {
     let mut d = Dict::new();
-    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?z] :- [?x, ex:p, ?y] ."))
-        .unwrap_err();
+    let e = parse_program(&mut d, &format!("{P}[?x, ex:q, ?z] :- [?x, ex:p, ?y] .")).unwrap_err();
     assert!(e.contains("unsafe rule") && e.contains("?z"), "{e}");
 }
 
@@ -193,7 +198,10 @@ fn stratify_rejects_negation_cycle_naming_the_predicate() {
     )
     .unwrap();
     let e = stratify(&d, &p).unwrap_err();
-    assert!(e.contains("NOT stratifiable") && e.contains("http://ex/win"), "{e}");
+    assert!(
+        e.contains("NOT stratifiable") && e.contains("http://ex/win"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -283,9 +291,7 @@ fn stratify_variable_class_reads_sit_above_every_class() {
     // And a variable-class HEAD feeding a negated class is rejected.
     let p2 = parse_program(
         &mut d,
-        &format!(
-            "{P}[?x, a, ?c] :- [?x, ex:says, ?c], NOT [?x, a, ex:Banned] ."
-        ),
+        &format!("{P}[?x, a, ?c] :- [?x, ex:says, ?c], NOT [?x, a, ex:Banned] ."),
     )
     .unwrap();
     assert!(stratify(&d, &p2).is_err());
@@ -314,8 +320,9 @@ fn eval_transitive_closure() {
              [?x, ex:reach, ?z] :- [?x, ex:reach, ?y], [?y, ex:edge, ?z] ."
         ),
     );
-    let want: FxHashSet<[Id; 3]> =
-        [[a, reach, b], [b, reach, c], [a, reach, c]].into_iter().collect();
+    let want: FxHashSet<[Id; 3]> = [[a, reach, b], [b, reach, c], [a, reach, c]]
+        .into_iter()
+        .collect();
     assert_eq!(got, want);
 }
 
@@ -351,8 +358,9 @@ fn eval_naf_absence_check_across_strata() {
              [?x, ex:unreach, \"y\"] :- [?x, a, ex:Node], NOT [?x, ex:reach, \"y\"] ."
         ),
     );
-    let want: FxHashSet<[Id; 3]> =
-        [[a, reach, y], [b, reach, y], [c, unreach, y]].into_iter().collect();
+    let want: FxHashSet<[Id; 3]> = [[a, reach, y], [b, reach, y], [c, unreach, y]]
+        .into_iter()
+        .collect();
     assert_eq!(got, want);
 }
 
@@ -370,7 +378,12 @@ fn eval_count_per_group_and_threshold_filter() {
         d.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
         iri(&mut d, "Hub"),
     );
-    let facts = vec![[g1, member, m1], [g1, member, m2], [g1, member, m3], [g2, member, m1]];
+    let facts = vec![
+        [g1, member, m1],
+        [g1, member, m2],
+        [g1, member, m3],
+        [g2, member, m1],
+    ];
     let got = derived(
         &mut d,
         &facts,
@@ -381,9 +394,107 @@ fn eval_count_per_group_and_threshold_filter() {
     );
     let three = int(&mut d, 3);
     let one = int(&mut d, 1);
-    let want: FxHashSet<[Id; 3]> =
-        [[g1, deg, three], [g2, deg, one], [g1, ty, hub]].into_iter().collect();
+    let want: FxHashSet<[Id; 3]> = [[g1, deg, three], [g2, deg, one], [g1, ty, hub]]
+        .into_iter()
+        .collect();
     assert_eq!(got, want);
+}
+
+#[test]
+fn sum_per_group() {
+    let mut d = Dict::new();
+    let (g1, g2, value, total) = (
+        iri(&mut d, "g1"),
+        iri(&mut d, "g2"),
+        iri(&mut d, "value"),
+        iri(&mut d, "total"),
+    );
+    let (one, two, five) = (int(&mut d, 1), int(&mut d, 2), int(&mut d, 5));
+    let facts = vec![[g1, value, one], [g1, value, two], [g2, value, five]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) ."
+        ),
+    );
+    let (three, five_out) = (int(&mut d, 3), int(&mut d, 5));
+    assert_eq!(
+        got,
+        [[g1, total, three], [g2, total, five_out]]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn min_max_preserve_input_term() {
+    let mut d = Dict::new();
+    let (g, value, min_p, max_p) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "min"),
+        iri(&mut d, "max"),
+    );
+    let low = d.intern_lit("1", "http://www.w3.org/2001/XMLSchema#long", None);
+    let high = d.intern_lit("9", "http://www.w3.org/2001/XMLSchema#short", None);
+    let facts = vec![[g, value, high], [g, value, low]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:min, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MIN(?x) AS ?v) .\n\
+         [?g, ex:max, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MAX(?x) AS ?v) ."
+        ),
+    );
+    assert_eq!(
+        got,
+        [[g, min_p, low], [g, max_p, high]].into_iter().collect()
+    );
+}
+
+#[test]
+fn avg_of_integers_is_decimal() {
+    let mut d = Dict::new();
+    let (g, value, avg) = (iri(&mut d, "g"), iri(&mut d, "value"), iri(&mut d, "avg"));
+    let (one, two) = (int(&mut d, 1), int(&mut d, 2));
+    let facts = vec![[g, value, one], [g, value, two]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!("{P}[?g, ex:avg, ?a] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND AVG(?v) AS ?a) ."),
+    );
+    let one_half = d.intern_lit("1.5", "http://www.w3.org/2001/XMLSchema#decimal", None);
+    assert_eq!(got, [[g, avg, one_half]].into_iter().collect());
+}
+
+#[test]
+fn empty_group_yields_no_row_for_sum() {
+    let mut d = Dict::new();
+    let got = derived(
+        &mut d,
+        &[],
+        &format!(
+            "{P}[ex:world, ex:total, ?s] :- AGGREGATE([?x, ex:value, ?v] BIND SUM(?v) AS ?s) ."
+        ),
+    );
+    assert!(got.is_empty());
+}
+
+#[test]
+fn non_numeric_value_fails_row() {
+    let mut d = Dict::new();
+    let (g, value, total) = (iri(&mut d, "g"), iri(&mut d, "value"), iri(&mut d, "total"));
+    let (two, text) = (int(&mut d, 2), s(&mut d, "not numeric"));
+    let facts = vec![[g, value, two], [g, value, text]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) ."
+        ),
+    );
+    assert_eq!(got, [[g, total, two]].into_iter().collect());
 }
 
 #[test]
@@ -401,7 +512,9 @@ fn eval_global_count_without_on() {
     let got = derived(
         &mut d,
         &facts,
-        &format!("{P}[ex:world, ex:total, ?c] :- AGGREGATE([?x, a, ex:Node] BIND COUNT(?x) AS ?c) ."),
+        &format!(
+            "{P}[ex:world, ex:total, ?c] :- AGGREGATE([?x, a, ex:Node] BIND COUNT(?x) AS ?c) ."
+        ),
     );
     let two = int(&mut d, 2);
     let want: FxHashSet<[Id; 3]> = [[w, total, two]].into_iter().collect();
@@ -432,7 +545,10 @@ fn eval_count_over_derived_predicate() {
     );
     // reach = {(a,b),(b,c),(a,c)} → 3 distinct matches.
     let three = int(&mut d, 3);
-    assert!(got.contains(&[w, nreach, three]), "count over DERIVED reach");
+    assert!(
+        got.contains(&[w, nreach, three]),
+        "count over DERIVED reach"
+    );
     assert_eq!(got.len(), 4); // 3 reach facts + the count fact
 }
 
@@ -520,7 +636,10 @@ fn eval_filter_is_fail_closed_on_non_numeric_operands() {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self, bound: u64) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) % bound
     }
 }
@@ -531,10 +650,15 @@ fn random_graph(d: &mut Dict, seed: u64, n: u64, e: u64) -> Vec<[Id; 3]> {
     let node = iri(d, "Node");
     let edge = iri(d, "edge");
     let seed_p = iri(d, "seed");
+    let weight = iri(d, "weight");
     let y = s(d, "y");
     let mut rng = Lcg(seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(1));
     let nodes: Vec<Id> = (0..n).map(|i| iri(d, &format!("n{i}"))).collect();
     let mut facts: Vec<[Id; 3]> = nodes.iter().map(|&x| [x, ty, node]).collect();
+    for &x in &nodes {
+        let v = int(d, rng.next(7) + 1);
+        facts.push([x, weight, v]);
+    }
     for _ in 0..e {
         let (i, j) = (rng.next(n) as usize, rng.next(n) as usize);
         facts.push([nodes[i], edge, nodes[j]]);
@@ -551,8 +675,10 @@ fn assert_differential(src: &str, seeds: std::ops::Range<u64>) {
         let program = parse_program(&mut d, src).expect("parse");
         let strat = stratify(&d, &program).expect("stratifiable");
         let facts = random_graph(&mut d, seed, 6, 9);
-        let engine: FxHashSet<[Id; 3]> =
-            eval(&mut d, &facts, &program).unwrap().into_iter().collect();
+        let engine: FxHashSet<[Id; 3]> = eval(&mut d, &facts, &program)
+            .unwrap()
+            .into_iter()
+            .collect();
         let reference = oracle::eval_naive(&mut d, &facts, &program, &strat);
         assert_eq!(
             engine, reference,
@@ -580,6 +706,29 @@ fn differential_count_threshold() {
             "{P}[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .\n\
              [?x, a, ex:Hub] :- [?x, ex:deg, ?c], FILTER(?c >= 2) .\n\
              [?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."
+        ),
+        0..25,
+    );
+}
+
+#[test]
+fn differential_sum_threshold() {
+    assert_differential(
+        &format!(
+            "{P}[ex:world, ex:total, ?s] :- AGGREGATE([?x, ex:weight, ?v] BIND SUM(?v) AS ?s) .\n\
+         [ex:world, ex:large, \"y\"] :- [ex:world, ex:total, ?s], FILTER(?s > 10) ."
+        ),
+        0..25,
+    );
+}
+
+#[test]
+fn differential_min_max_avg() {
+    assert_differential(
+        &format!(
+            "{P}[ex:world, ex:min, ?v] :- AGGREGATE([?x, ex:weight, ?n] BIND MIN(?n) AS ?v) .\n\
+         [ex:world, ex:max, ?v] :- AGGREGATE([?x, ex:weight, ?n] BIND MAX(?n) AS ?v) .\n\
+         [ex:world, ex:avg, ?v] :- AGGREGATE([?x, ex:weight, ?n] BIND AVG(?n) AS ?v) ."
         ),
         0..25,
     );
@@ -633,13 +782,15 @@ fn assert_semi_naive_equals_naive(src: &str, facts_of: &dyn Fn(&mut Dict) -> Vec
             .into_iter()
             .collect();
     assert_eq!(
-        semi, naive,
+        semi,
+        naive,
         "semi-naive/naive closure divergence ({} facts) program:\n{src}",
         facts.len()
     );
     let reference = oracle::eval_naive(&mut d, &facts, &program, &strat);
     assert_eq!(
-        semi, reference,
+        semi,
+        reference,
         "engine/oracle closure divergence ({} facts) program:\n{src}",
         facts.len()
     );

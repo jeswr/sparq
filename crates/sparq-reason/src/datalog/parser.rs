@@ -4,7 +4,7 @@
 //! decision). Constants are interned into the caller's [`Dict`] as they are parsed;
 //! every out-of-fragment construct is a loud error naming the construct.
 
-use super::{AggAtom, Atom, CmpOp, DTerm, Filter, Program, Rule};
+use super::{AggAtom, AggFunc, Atom, CmpOp, DTerm, Filter, Program, Rule};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::Dict;
 
@@ -268,17 +268,14 @@ impl Parser<'_> {
             return Err(self.err("expected `BIND` in AGGREGATE"));
         }
         self.skip_ws();
-        let func = self.name()?;
-        match func.to_ascii_uppercase().as_str() {
-            "COUNT" => {}
-            "SUM" | "MIN" | "MAX" | "AVG" => {
-                return Err(self.err(&format!(
-                    "AGGREGATE function `{func}` is not implemented in Phase 1 (COUNT only — \
-                     SUM/MIN/MAX/AVG are a beaded follow-up phase, see \
-                     research/stratified-datalog-rules.md)"
-                )))
-            }
-            _ => return Err(self.err(&format!("unknown AGGREGATE function `{func}`"))),
+        let func_name = self.name()?;
+        let func = match func_name.to_ascii_uppercase().as_str() {
+            "COUNT" => AggFunc::Count,
+            "SUM" => AggFunc::Sum,
+            "MIN" => AggFunc::Min,
+            "MAX" => AggFunc::Max,
+            "AVG" => AggFunc::Avg,
+            _ => return Err(self.err(&format!("unknown AGGREGATE function `{func_name}`"))),
         };
         self.skip_ws();
         self.expect(b'(')?;
@@ -287,11 +284,12 @@ impl Parser<'_> {
             return Err(self.err("expected a `?variable` as the AGGREGATE function argument"));
         }
         let cname = self.name()?;
-        let Some(&_counted) = local.slots.get(&cname) else {
+        let Some(&value_slot) = local.slots.get(&cname) else {
             return Err(self.err(&format!(
-                "AGGREGATE `COUNT(?{cname})`: the variable does not occur in the aggregate body"
+                "AGGREGATE `{func_name}(?{cname})`: the variable does not occur in the aggregate body"
             )));
         };
+        let value = (func != AggFunc::Count).then_some(value_slot);
         self.skip_ws();
         self.expect(b')')?;
         self.skip_ws();
@@ -320,6 +318,8 @@ impl Parser<'_> {
         let n_slots = local.slots.len();
         Ok((
             AggAtom {
+                func,
+                value,
                 body,
                 on,
                 out,
