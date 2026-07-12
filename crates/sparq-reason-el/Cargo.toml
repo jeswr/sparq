@@ -79,6 +79,18 @@ cdomain = ["dep:sparq-substrate", "sparq-substrate/numeric"]
 # (fail-closed). No new dependency — reuses oxrdf + rustc-hash.
 abox = []
 
+# [FABLE-5] sq-wy3i6 (Phase E4): PARALLEL saturation — `Classifier::classify_par` /
+# `classify_graph_par`, a deterministic bulk-synchronous parallel fixpoint over the SAME
+# CR1–CR6 (+`rbox` CR10/CR11) completion rules: each round the membership frontier is
+# partitioned across a bounded `std::thread::scope` worker pool that derives rule firings
+# against the round-start snapshot, then a sequential apply phase reuses the single-threaded
+# `add`/`add_link` machinery — so the derived-subsumption closure is IDENTICAL to the
+# single-threaded engine at every thread count (pinned by tests/par_differential.rs and the
+# sparq-conformance `el-suite-par` differential over the W3C EL cases). OFF by default so
+# the default build — and in particular the SINGLE-THREADED wasm port, where `std::thread`
+# cannot spawn — carries zero threading code. No new dependency (std scoped threads only).
+par = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).

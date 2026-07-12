@@ -142,6 +142,17 @@ ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
 # new realisation rows + the whole-ontology inconsistency verdict into the outcome mapping.
 el-suite = ["dep:sparq-reason-el", "sparq-reason-el/rbox", "sparq-reason-el/cdomain", "sparq-reason-el/abox"]
 
+# [FABLE-5] sq-wy3i6 (Phase E4) — the PARALLEL-saturation differential arm of the EL lane:
+# forwards `sparq-reason-el/par` and, per selected W3C EL case, additionally asserts that
+# `classify_graph_par` at thread counts 1/2/8 reproduces the sequential `classify_graph`
+# closure EXACTLY (term-level triple-set equality + the same unsatisfiable-class count).
+# This is the sq-wy3i6 acceptance oracle over the REAL conformance corpus — a concurrency
+# bug that drops or fabricates a derivation on any W3C EL case turns the whole lane red.
+# The ratchet floor itself is UNCHANGED (the pass/divergence accounting still runs on the
+# sequential engine); this feature only ADDS the differential assertion. Wired into the
+# ci.yml el-suite lane (`--features el-suite,el-suite-par`). Pure-Rust, no new deps.
+el-suite-par = ["el-suite", "sparq-reason-el/par"]
+
 # [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 **Direct-Semantics arm** of the
 # OWL WG export (the `inference::dl_suite` runner + the crate-local `tests/dl_suite.rs`
 # floors). OPT-IN and OFF by default so the bare `cargo test -p sparq-conformance`, the

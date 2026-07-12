@@ -90,19 +90,22 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   asserted/derived; `owl:differentFrom` is read off only from a derived nominal clash
   (`{a} ⊓ {b} ⊑ ⊥`) or asserted-inequality symmetry, and a `sameAs`/`differentFrom` coincidence is
   inconsistent. Unsupported key/NPA shapes stay counted skips (fail-closed).
+- **Parallel saturation** *(opt-in `par` feature, Phase E4)* — `Classifier::classify_par` /
+  `classify_graph_par` run the SAME rules as deterministic bulk-synchronous rounds on a bounded
+  `std::thread::scope` pool; the closure is **identical to single-threaded at every thread count**
+  (differential + determinism-stress + W3C-EL-corpus CI oracles). Default build stays wasm-safe.
 - **Honest fragment reporting** — class axioms outside the active fragment are counted in
   `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
   concrete-domain shapes; with it, only the unsupported remainder above.
 
 **Scope:** EL+⊥ + safe nominals/CR6 + self-restrictions/CR-Self (E1, default), EL+ role reasoning (E2, `rbox`), transitive
 reduction (E3, `hasse`), exact-numeric concrete domains (CR7–CR9, `cdomain`), ABox realisation +
-whole-ontology consistency (`abox`); concurrency is **E4**. Constructs outside EL entirely (union /
-complement / `allValuesFrom` / cardinality / multi-individual `oneOf`) are always skipped. The
-classifier is **single-threaded**. Enable with
-`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse", "cdomain", "abox"] }`. The
-`snomed_go_scale_bench` example (`--features rbox,hasse`) is a *relative* (dimensionless, no
-hard-coded ms) end-to-end scaling check confirming normalise + RBox + Hasse compose with no
-hidden quadratic.
+whole-ontology consistency (`abox`), parallel saturation (E4, `par` — **single-threaded by
+default**). Constructs outside EL entirely (union / complement / `allValuesFrom` / cardinality /
+multi-individual `oneOf`) are always skipped. Enable with
+`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse", "cdomain", "abox", "par"] }`. The
+`snomed_go_scale_bench` example (`--features rbox,hasse`) is a *relative* (dimensionless, no hard-coded
+ms) end-to-end scaling check confirming normalise + RBox + Hasse compose with no hidden quadratic.
 
 ## 📚 Learn more
 
