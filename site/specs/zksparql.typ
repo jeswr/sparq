@@ -411,10 +411,12 @@ implemented behaviour or is labelled a proposal:
   private;
 - *gate* — accepted by the query-side fragment gate (`sparq-zk::verify::fragment_query`), which
   re-derives the extended structure from the query text, and, for bounded paths, backed by the
-  realised `path_reach` circuit family (section 7.5) — but *not yet bound end-to-end*: the
-  manifest schema and verifier dispatch that tie an extended query to sub-proofs are in
-  progress, so the live stage-1 compose verifier still fails closed on every *gate* construct
-  until that work lands;
+  realised `path_reach` circuit family (section 7.5) — but *not yet bound end-to-end* in the
+  live verifier: the `manifest::CircuitId::PathReach` schema and a structural, fail-closed
+  `dispatch_fragment` routing gate that ties an extended query to its sub-proofs have landed
+  (#1661), behind the off-by-default `extended-fragment` feature, but end-to-end ACCEPT into the
+  default `verify_manifest` flow is still pending, so the live stage-1 compose verifier still
+  fails closed on every *gate* construct;
 - *proposal* — designed in the record, not yet in any gate.
 
 #table(
@@ -589,9 +591,11 @@ circuit identifier from the statement each sub-proof is bound to (section 10.3),
 out-of-bucket shape is a clean rejection, never a silently unprovable member.
 
 The bounded-depth path family `path_reach_d{k}` (section 7.5) is realised in `zk/compose` — as
-compiled `path_reach_d{depth}_k{graphs}_n{slots}` members over the same shape lattice — but is
-*not yet* a `manifest::CircuitId` member: binding it into the manifest schema and verifier
-dispatch is in progress (the *gate* tier of section 7.1). The compile-time depth is the
+compiled `path_reach_d{depth}_k{graphs}_n{slots}` members over the same shape lattice — and is
+now a `manifest::CircuitId::PathReach` member with a structural, fail-closed `dispatch_fragment`
+routing gate (both landed in #1661, behind the off-by-default `extended-fragment` feature);
+end-to-end ACCEPT into the default `verify_manifest` flow is still pending (the *gate* tier of
+section 7.1). The compile-time depth is the
 member's identity — a distinct depth is a distinct verification key — so a verifier learns the
 disclosed bound from which member it accepts; the `depth_bound` public input re-states it.
 
