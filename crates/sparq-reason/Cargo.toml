@@ -33,6 +33,8 @@ parallel = ["dep:rayon", "sparq-core/parallel"]
 # structure and hook is cfg'd out entirely (zero hot-path cost, byte-identical behavior,
 # zero wasm impact: sparq-reason is never in the wasm dependency graph anyway).
 explain = []
+# [GPT-5.6] sq-aej8u — opt-in instrumentation; all hooks are absent by default.
+profile = []
 # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — OPT-IN D-entailment (datatype / value-space,
 # RDF 1.1 Semantics §7-8): `Profile::D`, the rdfD1 datatype-typing materializer + the
 # correct typed value-space comparison (`dtype` module). NON-DEFAULT by design — when off
