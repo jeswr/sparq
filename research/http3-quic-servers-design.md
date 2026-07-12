@@ -1,19 +1,21 @@
 # HTTP/3 (QUIC) across all sparq HTTP servers — opt-in design (2026-07) [OPUS-4.8]
 
-Status: **design-for-review, maintainer-requested** (epic `sq-oprna`, P1). This
-record designs an **opt-in, feature-gated** HTTP/3 path for the two sparq HTTP
-servers — `sparq-server` (the query API) and `sparq-lws-core` (the Solid/LDP
-server) — decomposes it into disjoint child beads, and is honest about the
-maturity of the Rust HTTP/3 stack. The author is a SPARQ research agent; nothing
-here is implemented — it is a plan for the maintainer to review before any code
-lands.
+Status: **phase 1 implemented; downstream wiring remains design-for-review**
+(epic `sq-oprna`, P1). This record designs an **opt-in, feature-gated** HTTP/3
+path for the two sparq HTTP servers — `sparq-server` (the query API) and
+`sparq-lws-core` (the Solid/LDP server) — and decomposes it into disjoint child
+beads. The shared `sparq-http3` helper described in phase 1 now exists behind its
+default-off `server` feature (`sq-oprna.1`); neither application server enables
+or exposes HTTP/3 yet.
 
 ## 0. Honesty boundary (read first)
 
-- **No QUIC/HTTP/3 exists anywhere in the workspace today.** Verified:
-  `grep -rn 'quinn\|h3\|quic' crates/ --include=Cargo.toml` returns zero QUIC
-  hits (only `quick-xml`); every `h3` in source is a cryptographic 3-input hash
-  (`h3(...)` in `crates/sparq-zk/`) or a hypothesis label. This is greenfield.
+- **The transport helper exists, but neither server is wired to it.**
+  `sparq-http3` contains Quinn, h3/h3-quinn, the rustls configuration bridge,
+  and the generic axum dispatch loop behind its default-off `server` feature.
+  No default build pulls those dependencies, and `sparq-server` plus
+  `sparq-lws-core` still expose only their pre-existing transports until their
+  respective child beads land.
 - **The brief's transport premise is CORRECT with one refinement.**
   `sparq-server` is HTTP/1.1-**only** and terminates **plain HTTP** (no TLS at
   all) — confirmed. But `sparq-lws-core` is **not** HTTP/1.1-only: on its
@@ -30,9 +32,9 @@ lands.
   whole thing behind a default-off feature. External helper crates exist
   (`h3-axum`, `libhttp3`, `h3x`) but are early/thin — the design does **not**
   depend on them; it drives `h3` directly and dispatches into the shared
-  `axum::Router` via `tower::Service`. Version pins here are the versions
-  observed as current in July 2026 and are **starting points to resolve at
-  implementation time**, not asserted-exact.
+  `axum::Router` via `tower::Service`. The helper pins `h3` 0.0.8,
+  `h3-quinn` 0.0.10, and Quinn 0.11; `Cargo.lock` remains the authoritative
+  resolved dependency set.
 - **This is a work box (EC2).** No timings are canonical; none are quoted.
 
 ## 1. Problem framing
@@ -127,12 +129,12 @@ is a **separate** effort and does **not** come for free — so `sparq-server`'s
 
 ## 3. Design
 
-### 3.1 Shared plumbing — a small internal helper module
+### 3.1 Shared plumbing — implemented internal helper crate
 
 The two routers differ (monomorphic vs generic `<J,R,S>`), but **both final
-apps are `axum::Router`**. So the shared helper takes an **already-built
-`Router`** (sidestepping the generics) plus a QUIC config and runs the accept
-loop. Proposed shape (illustrative, not final):
+apps are `axum::Router`**. The shared helper takes an **already-built `Router`**
+(sidestepping the generics) plus a bound QUIC endpoint and runs the accept loop.
+The landed API is:
 
 ```rust
 // serve one h3 connection's requests by dispatching into a cloned axum Router
@@ -144,7 +146,7 @@ pub async fn serve_h3(
 
 pub fn quic_server_config(
     rustls_server_config: rustls::ServerConfig, // ALPN must include b"h3"
-) -> Result<quinn::ServerConfig, Http3Error>;
+) -> Result<quinn::ServerConfig, Http3ConfigError>;
 ```
 
 **Where the helper lives** — decision (proceed-and-document): a **new tiny
@@ -228,7 +230,8 @@ INVARIANT, ACCEPTANCE TEST, depends_on}. Security-adjacent QUIC/rustls wiring �
 `fable`; header/tests → `gpt`. Bead IDs are assigned at mint time; the sequence
 is the build order.
 
-1. **`sparq-http3` helper crate + `rustls→QuicServerConfig` bridge + generic
+1. **SHIPPED (`sq-oprna.1`): `sparq-http3` helper crate +
+   `rustls→QuicServerConfig` bridge + generic
    `serve_h3(endpoint, router, shutdown)` loop.** (crate: new `sparq-http3`;
    tier: `fable`.) INVARIANT: no default-workspace build pulls quinn/h3 (crate
    is only referenced under downstream `http3` features); the loop injects

@@ -15,8 +15,9 @@
 //!   Egenhofer (`geof:eh*`) and RCC8 (`geof:rcc8*`) families (the GeoSPARQL
 //!   1.0 Req 25/26 matrix patterns over the same machinery).
 //! - [`envelope`] / [`boundary`] / [`convex_hull`] — `geof:envelope`,
-//!   `geof:boundary`, `geof:convexHull` — and [`buffer`] (`geof:buffer`, geo
-//!   0.33's `Buffer`; metric radii via a local equirectangular frame).
+//!   `geof:boundary`, `geof:convexHull` — [`simplify`] (`geof:simplify`,
+//!   Douglas–Peucker), and [`buffer`] (`geof:buffer`, geo 0.33's `Buffer`;
+//!   metric radii via a local equirectangular frame).
 //! - [`metric_area`] / [`metric_length`] / [`metric_perimeter`] and
 //!   [`centroid`] — metric measurements and the mathematical centroid, using
 //!   the same local equirectangular frame for geographic geometries.
@@ -45,7 +46,7 @@ use geo::relate::IntersectionMatrix;
 use geo::{
     Area, BooleanOps, BoundingRect, Buffer, Centroid, Closest, ConvexHull, CoordsIter, Distance,
     Euclidean, Haversine, HaversineClosestPoint, Intersects, Length, LineIntersection, MapCoords,
-    Relate,
+    Relate, Simplify,
 };
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
@@ -538,6 +539,48 @@ pub fn convex_hull(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     }
     let points: MultiPoint<f64> = g.geometry.coords_iter().map(Point::from).collect();
     Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::Polygon(points.convex_hull()) })
+}
+
+/// `geof:simplify(geom, tolerance)` — Ramer–Douglas–Peucker simplification in
+/// the input CRS's coordinate space. The result preserves the CRS and retains
+/// only vertices from the input. As with `geo`'s [`Simplify`] implementation,
+/// polygon simplification is not topology-preserving and can produce an invalid
+/// polygon.
+///
+/// A non-positive tolerance returns `g` unchanged. Points, multipoints, and a
+/// two-vertex [`geo_types::Line`] are also unchanged because they have no
+/// removable vertices. `LineString`, `MultiLineString`, `Polygon`, and
+/// `MultiPolygon` delegate directly to `geo`'s Douglas–Peucker implementation.
+/// Rectangles, triangles, and geometry collections return
+/// [`GeoError::Unsupported`] because `geo` does not implement [`Simplify`] for
+/// those types. A positive tolerance must be finite. [GPT-5.6] sq-lsp7k.23
+pub fn simplify(g: &GeoGeometry, tolerance: f64) -> Result<GeoGeometry, GeoError> {
+    if tolerance <= 0.0 {
+        return Ok(g.clone());
+    }
+    if !tolerance.is_finite() {
+        return Err(GeoError::Unsupported(
+            "geof:simplify requires a finite tolerance".to_string(),
+        ));
+    }
+
+    let geometry = match &g.geometry {
+        Geometry::Point(_) | Geometry::MultiPoint(_) | Geometry::Line(_) => g.geometry.clone(),
+        Geometry::LineString(line) => Geometry::LineString(line.simplify(tolerance)),
+        Geometry::MultiLineString(lines) => Geometry::MultiLineString(lines.simplify(tolerance)),
+        Geometry::Polygon(polygon) => Geometry::Polygon(polygon.simplify(tolerance)),
+        Geometry::MultiPolygon(polygons) => Geometry::MultiPolygon(polygons.simplify(tolerance)),
+        other => {
+            return Err(GeoError::Unsupported(format!(
+                "geof:simplify is undefined for {}",
+                wkt_type_name(other)
+            )))
+        }
+    };
+    Ok(GeoGeometry {
+        crs: g.crs.clone(),
+        geometry,
+    })
 }
 
 /// `geof:boundary` — the simple-features boundary:
@@ -1310,6 +1353,11 @@ pub mod lex {
         /// `geof:centroid(?a)` -> wktLiteral point lexical form.
         centroid
     );
+
+    /// `geof:simplify(?a, ?tolerance)` -> wktLiteral lexical form.
+    pub fn simplify(a: &str, tolerance: f64) -> Result<String, GeoError> {
+        Ok(super::simplify(&parse_wkt_literal(a)?, tolerance)?.to_wkt_literal())
+    }
 
     /// `geof:getSRID(?a)` -> the geometry's CRS IRI (an `xsd:anyURI` value).
     pub fn get_srid(a: &str) -> Result<String, GeoError> {
