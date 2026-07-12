@@ -22,6 +22,14 @@ test.describe("forms-tool (desktop persona)", () => {
   });
 
   test("cardinality, widget switching and view/edit mode are functional", async ({ page }) => {
+    const title = page.locator('[data-form-field="Title"]');
+    const titleWidget = title.locator("[data-widget-switcher]");
+    await titleWidget.selectOption({ label: "TextAreaEditor" });
+    await title.getByRole("textbox", { name: "Title" }).fill("Edited with alternate widget");
+    await expect(titleWidget).toHaveValue("http://datashapes.org/dash#TextAreaEditor");
+    await expect(title.locator('[data-field-editor="textarea"]')).toBeVisible();
+    await expect(title.getByRole("textbox", { name: "Title" })).toHaveValue("Edited with alternate widget");
+
     const notes = page.locator('[data-form-field="Notes"]');
     await expect(notes.locator("textarea")).toHaveCount(1);
     await notes.locator("[data-add-value]").click();
@@ -43,5 +51,41 @@ test.describe("forms-tool (desktop persona)", () => {
     const request = page.locator('[data-tool-panel="forms"] p[role="status"]');
     await expect(request).toContainText("AuditableShape");
     await expect(request).toContainText("re-derive");
+  });
+
+  test("xsd:boolean numeric lexicals display and update canonically", async ({ page }) => {
+    await page.locator("[data-form-json-source]").evaluate((details: HTMLDetailsElement) => {
+      details.open = true;
+    });
+    const editor = page.getByRole("textbox", { name: "FormDescription JSON" });
+    const description = JSON.parse(await editor.inputValue());
+    const active = description.groups
+      .flatMap((group: { fields: { label: string; values: { term: { value: string } }[] }[] }) => group.fields)
+      .find((field: { label: string }) => field.label === "Active");
+    active.values[0].term.value = "1";
+    await editor.fill(JSON.stringify(description));
+    await page.locator("[data-load-form-json]").click();
+
+    const boolean = page.locator('[data-form-field="Active"] select[aria-label="Active"]');
+    await expect(boolean).toHaveValue("true");
+    await boolean.selectOption("false");
+    await expect(boolean).toHaveValue("false");
+  });
+
+  test("malformed field JSON reports a path and leaves the current form mounted", async ({ page }) => {
+    await page.locator("[data-form-json-source]").evaluate((details: HTMLDetailsElement) => {
+      details.open = true;
+    });
+    const malformed = {
+      focus: { kind: "iri", value: "urn:focus" },
+      mode: "edit",
+      shapes: [],
+      groups: [{ kind: "default", fields: [{}] }],
+    };
+    await page.getByRole("textbox", { name: "FormDescription JSON" }).fill(JSON.stringify(malformed));
+    await page.locator("[data-load-form-json]").click();
+    await expect(page.locator('[data-tool-panel="forms"] p[role="alert"]')).toContainText("groups[0].fields[0].path");
+    await expect(page.locator("[data-form-renderer]").first()).toBeVisible();
+    await expect(page.locator("[data-form-focus]")).toContainText("order42");
   });
 });

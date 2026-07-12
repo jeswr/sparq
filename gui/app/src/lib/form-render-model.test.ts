@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { parseFormDescription, termKey, type FormDescription, type FormField } from "./form-description.js";
-import { dashName, editorKind, emptyTermFor, viewerKind, widgetOptions } from "./form-render-model.js";
+import { dashName, editorKind, emptyTermFor, normalizeBooleanLexical, viewerKind, widgetOptions } from "./form-render-model.js";
 async function golden(name: string): Promise<FormDescription> {
   const url = new URL(`../../../../crates/sparq-forms/tests/fixtures/${name}.golden.json`, import.meta.url);
   return parseFormDescription(await readFile(url, "utf8"));
@@ -39,7 +39,34 @@ test("viewer and empty-term fallbacks cover the F2 core", () => {
   assert.equal(emptyTermFor(base, "http://datashapes.org/dash#BlankNodeEditor").kind, "bnode");
   assert.notEqual(termKey({ kind: "literal", value: "x", language: "en" }), termKey({ kind: "literal", value: "x", language: "no" }));
 });
+test("normalizes every valid xsd:boolean lexical form for the select control", () => {
+  assert.equal(normalizeBooleanLexical("true"), "true");
+  assert.equal(normalizeBooleanLexical("1"), "true");
+  assert.equal(normalizeBooleanLexical("false"), "false");
+  assert.equal(normalizeBooleanLexical("0"), "false");
+  assert.equal(normalizeBooleanLexical("TRUE"), "");
+});
 test("rejects malformed roots early", () => {
   assert.throws(() => parseFormDescription('{"mode":"edit","groups":[],"shapes":[]}'), /focus/);
   assert.throws(() => parseFormDescription('{"focus":{"kind":"iri","value":"urn:x"},"mode":"preview","groups":[],"shapes":[]}'), /mode/);
+});
+test("rejects malformed shapes, widgets, values and nested fields before React sees them", async () => {
+  const base = await golden("enum_nested");
+  const malformedShape = structuredClone(base) as unknown as Record<string, unknown>;
+  (malformedShape.shapes as Record<string, unknown>[])[0] = { via: "target-class" };
+  assert.throws(() => parseFormDescription(JSON.stringify(malformedShape)), /shapes\[0\]\.shape/);
+
+  const malformedWidget = structuredClone(base);
+  (malformedWidget.groups[0].fields[0].widget as unknown as Record<string, unknown>).editor_alternatives = "TextFieldEditor";
+  assert.throws(() => parseFormDescription(JSON.stringify(malformedWidget)), /editor_alternatives/);
+
+  const malformedValue = structuredClone(base);
+  (malformedValue.groups[0].fields[0].values as unknown[]) = [{}];
+  assert.throws(() => parseFormDescription(JSON.stringify(malformedValue)), /values\[0\]\.term/);
+
+  const malformedNested = structuredClone(base);
+  const nested = malformedNested.groups[0].fields.find((field) => field.label === "Shipping address")?.values[0]?.nested;
+  assert.ok(nested);
+  (nested.groups[0].fields[0] as unknown as Record<string, unknown>).multi = "yes";
+  assert.throws(() => parseFormDescription(JSON.stringify(malformedNested)), /nested.*multi/);
 });

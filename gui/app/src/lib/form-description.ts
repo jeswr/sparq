@@ -41,23 +41,135 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isTermRef(value: unknown): value is TermRef {
   return isRecord(value) &&
     (value.kind === "iri" || value.kind === "bnode" || value.kind === "literal" || value.kind === "triple") &&
-    typeof value.value === "string";
+    typeof value.value === "string" &&
+    (value.datatype === undefined || typeof value.datatype === "string") &&
+    (value.language === undefined || typeof value.language === "string");
+}
+function invalid(path: string, expectation: string): never {
+  throw new Error(`${path} ${expectation}`);
+}
+function assertOptionalString(value: unknown, path: string): void {
+  if (value !== undefined && typeof value !== "string") invalid(path, "must be a string");
+}
+function assertOptionalBoolean(value: unknown, path: string): void {
+  if (value !== undefined && typeof value !== "boolean") invalid(path, "must be a boolean");
+}
+function assertOptionalNumber(value: unknown, path: string): void {
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+    invalid(path, "must be a finite number");
+  }
+}
+function assertTerm(value: unknown, path: string): asserts value is TermRef {
+  if (!isTermRef(value)) invalid(path, "must be a term reference");
+}
+function assertStringArray(value: unknown, path: string): void {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    invalid(path, "must be an array of strings");
+  }
+}
+function assertTermArray(value: unknown, path: string): void {
+  if (!Array.isArray(value)) invalid(path, "must be an array of term references");
+  value.forEach((entry, index) => assertTerm(entry, `${path}[${index}]`));
+}
+function assertConstraints(value: unknown, path: string): asserts value is Constraints {
+  if (!isRecord(value)) invalid(path, "must be an object");
+  for (const key of ["datatype", "node_kind", "language_in"] as const) {
+    if (value[key] !== undefined) assertStringArray(value[key], `${path}.${key}`);
+  }
+  for (const key of ["class", "in_values"] as const) {
+    if (value[key] !== undefined) assertTermArray(value[key], `${path}.${key}`);
+  }
+  for (const key of ["min_inclusive", "max_inclusive", "min_exclusive", "max_exclusive", "root_class", "node_shape"] as const) {
+    if (value[key] !== undefined) assertTerm(value[key], `${path}.${key}`);
+  }
+  for (const key of ["min_count", "max_count", "min_length", "max_length"] as const) {
+    assertOptionalNumber(value[key], `${path}.${key}`);
+  }
+  for (const key of ["pattern", "pattern_flags"] as const) {
+    assertOptionalString(value[key], `${path}.${key}`);
+  }
+  for (const key of ["unique_lang", "single_line"] as const) {
+    assertOptionalBoolean(value[key], `${path}.${key}`);
+  }
+  if (value.or !== undefined) {
+    if (!Array.isArray(value.or)) invalid(`${path}.or`, "must be an array");
+    value.or.forEach((branch, index) => assertConstraints(branch, `${path}.or[${index}]`));
+  }
+}
+function assertWidget(value: unknown, path: string): asserts value is WidgetChoice {
+  if (!isRecord(value)) invalid(path, "must be an object");
+  assertOptionalString(value.editor, `${path}.editor`);
+  assertOptionalString(value.viewer, `${path}.viewer`);
+  assertOptionalBoolean(value.explicit, `${path}.explicit`);
+  assertOptionalNumber(value.score, `${path}.score`);
+  if (value.editor_alternatives !== undefined) {
+    assertStringArray(value.editor_alternatives, `${path}.editor_alternatives`);
+  }
+  if (value.viewer_alternatives !== undefined) {
+    assertStringArray(value.viewer_alternatives, `${path}.viewer_alternatives`);
+  }
+}
+function assertDescription(value: unknown, path: string): asserts value is FormDescription {
+  if (!isRecord(value)) invalid(path, "must be a JSON object");
+  assertTerm(value.focus, `${path}.focus`);
+  if (value.mode !== "view" && value.mode !== "edit") {
+    invalid(`${path}.mode`, 'must be "view" or "edit"');
+  }
+  assertOptionalString(value.role, `${path}.role`);
+  if (!Array.isArray(value.shapes)) invalid(`${path}.shapes`, "must be an array");
+  value.shapes.forEach((shape, index) => {
+    const shapePath = `${path}.shapes[${index}]`;
+    if (!isRecord(shape)) invalid(shapePath, "must be an object");
+    assertTerm(shape.shape, `${shapePath}.shape`);
+    assertOptionalString(shape.label, `${shapePath}.label`);
+    if (!(["target-node", "target-class", "applicable-to-class", "explicit"] as unknown[]).includes(shape.via)) {
+      invalid(`${shapePath}.via`, "must be a supported shape-selection reason");
+    }
+  });
+  if (value.shape !== undefined) assertTerm(value.shape, `${path}.shape`);
+  if (!Array.isArray(value.groups)) invalid(`${path}.groups`, "must be an array");
+  value.groups.forEach((group, groupIndex) => {
+    const groupPath = `${path}.groups[${groupIndex}]`;
+    if (!isRecord(group)) invalid(groupPath, "must be an object");
+    if (group.kind !== "default" && group.kind !== "declared" && group.kind !== "other") {
+      invalid(`${groupPath}.kind`, "must be default, declared, or other");
+    }
+    if (group.group !== undefined) assertTerm(group.group, `${groupPath}.group`);
+    assertOptionalString(group.label, `${groupPath}.label`);
+    assertOptionalNumber(group.order, `${groupPath}.order`);
+    if (!Array.isArray(group.fields)) invalid(`${groupPath}.fields`, "must be an array");
+    group.fields.forEach((field, fieldIndex) => {
+      const fieldPath = `${groupPath}.fields[${fieldIndex}]`;
+      if (!isRecord(field)) invalid(fieldPath, "must be an object");
+      if (field.property_shape !== undefined) assertTerm(field.property_shape, `${fieldPath}.property_shape`);
+      if (typeof field.path !== "string") invalid(`${fieldPath}.path`, "must be a string");
+      if (typeof field.label !== "string") invalid(`${fieldPath}.label`, "must be a string");
+      assertOptionalString(field.description, `${fieldPath}.description`);
+      assertOptionalNumber(field.order, `${fieldPath}.order`);
+      assertOptionalBoolean(field.inverse, `${fieldPath}.inverse`);
+      assertOptionalBoolean(field.required, `${fieldPath}.required`);
+      if (typeof field.multi !== "boolean") invalid(`${fieldPath}.multi`, "must be a boolean");
+      if (typeof field.editable !== "boolean") invalid(`${fieldPath}.editable`, "must be a boolean");
+      assertWidget(field.widget, `${fieldPath}.widget`);
+      assertConstraints(field.constraints, `${fieldPath}.constraints`);
+      if (!Array.isArray(field.values)) invalid(`${fieldPath}.values`, "must be an array");
+      field.values.forEach((formValue, valueIndex) => {
+        const valuePath = `${fieldPath}.values[${valueIndex}]`;
+        if (!isRecord(formValue)) invalid(valuePath, "must be an object");
+        assertTerm(formValue.term, `${valuePath}.term`);
+        if (formValue.nested !== undefined) {
+          assertDescription(formValue.nested, `${valuePath}.nested`);
+        }
+      });
+    });
+  });
 }
 
 /** Parses the exact JSON emitted by `sparq_forms::FormDescription`. */
 export function parseFormDescription(json: string): FormDescription {
   const value: unknown = JSON.parse(json);
-  if (!isRecord(value)) throw new Error("FormDescription must be a JSON object");
-  if (!isTermRef(value.focus)) throw new Error("FormDescription.focus must be a term reference");
-  if (value.mode !== "view" && value.mode !== "edit") throw new Error('FormDescription.mode must be "view" or "edit"');
-  if (!Array.isArray(value.shapes)) throw new Error("FormDescription.shapes must be an array");
-  if (!Array.isArray(value.groups)) throw new Error("FormDescription.groups must be an array");
-  for (const group of value.groups) {
-    if (!isRecord(group) || !Array.isArray(group.fields)) {
-      throw new Error("Every FormDescription group must contain a fields array");
-    }
-  }
-  return value as unknown as FormDescription;
+  assertDescription(value, "FormDescription");
+  return value;
 }
 
 export function termKey(term: TermRef): string {

@@ -1,5 +1,5 @@
 // [GPT-5.6] sq-lsp7k.1.2 — renderer dispatch over F1's chosen DASH widget IRIs.
-import type { FormField, FormMode, TermRef } from "./form-description.js";
+import type { FormField, FormMode, TermRef, WidgetChoice } from "./form-description.js";
 
 export type EditorKind = "text" | "lang-text" | "textarea" | "lang-textarea" | "boolean" |
   "date" | "datetime" | "enum" | "iri-ref" | "nested" | "blank-node";
@@ -40,9 +40,18 @@ export function viewerKind(widgetIri: string | undefined): ViewerKind {
   }
 }
 export function widgetOptions(field: FormField, mode: FormMode): string[] {
-  const selected = mode === "edit" ? field.widget.editor : field.widget.viewer;
-  const alternatives = mode === "edit" ? field.widget.editor_alternatives ?? [] : field.widget.viewer_alternatives ?? [];
+  return widgetChoiceOptions(field.widget, mode);
+}
+export function widgetChoiceOptions(widget: WidgetChoice, mode: FormMode): string[] {
+  const selected = mode === "edit" ? widget.editor : widget.viewer;
+  const alternatives = mode === "edit" ? widget.editor_alternatives ?? [] : widget.viewer_alternatives ?? [];
   return [...new Set([selected, ...alternatives].filter((value): value is string => !!value))];
+}
+/** Canonical control value for all four valid `xsd:boolean` lexical forms. */
+export function normalizeBooleanLexical(value: string): "true" | "false" | "" {
+  if (value === "true" || value === "1") return "true";
+  if (value === "false" || value === "0") return "false";
+  return "";
 }
 const XSD = "http://www.w3.org/2001/XMLSchema#";
 const RDF_LANG = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";

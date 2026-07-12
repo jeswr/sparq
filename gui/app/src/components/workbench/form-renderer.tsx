@@ -4,7 +4,7 @@ import * as React from "react";
 import { ChevronDown, ExternalLink, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { termKey, termLabel, type FormDescription, type FormField, type FormMode, type FormValue, type TermRef } from "@/lib/form-description";
-import { dashName, editorKind, emptyTermFor, viewerKind, widgetOptions } from "@/lib/form-render-model";
+import { dashName, editorKind, emptyTermFor, normalizeBooleanLexical, viewerKind, widgetChoiceOptions } from "@/lib/form-render-model";
 import { cn } from "@/lib/utils";
 const CONTROL = "h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60";
 
@@ -50,7 +50,9 @@ export function FormRenderer({ description, mode, onDescriptionChange, onModeReq
 
 function FieldRow({ field, mode, onChange }: { field: FormField; mode: FormMode; onChange: (field: FormField) => void }) {
   const editing = mode === "edit" && field.editable && !!field.widget.editor;
-  const options = React.useMemo(() => widgetOptions(field, editing ? "edit" : "view"), [field, editing]);
+  // The widget object is preserved when only values change. Depending on the whole field here
+  // would rebuild `options`, retrigger the selection effect, and erase a user's alternative.
+  const options = React.useMemo(() => widgetChoiceOptions(field.widget, editing ? "edit" : "view"), [field.widget, editing]);
   const automatic = editing ? field.widget.editor : field.widget.viewer;
   const [widget, setWidget] = React.useState(automatic ?? options[0] ?? "");
   React.useEffect(() => setWidget(automatic ?? options[0] ?? ""), [automatic, options]);
@@ -73,7 +75,7 @@ function EditorValue({ field, value, widget, onChange, onNestedChange }: { field
   const kind = editorKind(widget); const term = value.term; const update = (next: string) => onChange({ ...term, value: next });
   if (kind === "nested" && value.nested) return <div className="rounded-md border bg-background p-2" data-nested-form><p className="mb-2 truncate font-mono text-[10px] text-muted-foreground">{term.kind === "bnode" ? `_:${term.value}` : term.value}</p><FormRenderer description={value.nested} mode="edit" showToolbar={false} onDescriptionChange={onNestedChange} /></div>;
   if (kind === "enum") { const allowed = field.constraints.in_values ?? []; return <select className={CONTROL} value={termKey(term)} onChange={(event) => { const selected = allowed.find((candidate) => termKey(candidate) === event.currentTarget.value); if (selected) onChange(selected); }} aria-label={field.label}>{allowed.map((candidate) => <option key={termKey(candidate)} value={termKey(candidate)}>{termLabel(candidate)}</option>)}</select>; }
-  if (kind === "boolean") return <select className={CONTROL} value={term.value} onChange={(event) => update(event.currentTarget.value)} aria-label={field.label}><option value="true">True</option><option value="false">False</option></select>;
+  if (kind === "boolean") return <select className={CONTROL} value={normalizeBooleanLexical(term.value)} onChange={(event) => update(event.currentTarget.value)} aria-label={field.label}><option value="true">True</option><option value="false">False</option></select>;
   if (kind === "lang-text" || kind === "lang-textarea") return <div className="grid gap-1.5 sm:grid-cols-[minmax(0,1fr)_6rem]">{kind === "lang-textarea" ? <textarea className={cn(CONTROL, "h-20 py-1.5")} value={term.value} onChange={(event) => update(event.currentTarget.value)} aria-label={field.label} /> : <input className={CONTROL} value={term.value} onChange={(event) => update(event.currentTarget.value)} aria-label={field.label} />}<input className={CONTROL} value={term.language ?? ""} onChange={(event) => onChange({ ...term, language: event.currentTarget.value })} aria-label={`${field.label} language`} placeholder="lang" /></div>;
   if (kind === "textarea") return <textarea className={cn(CONTROL, "h-20 py-1.5")} value={term.value} onChange={(event) => update(event.currentTarget.value)} aria-label={field.label} />;
   const type = kind === "date" ? "date" : kind === "datetime" ? "datetime-local" : "text";
