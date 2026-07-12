@@ -119,6 +119,7 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
 - **No incremental maintenance** — inserts/deletes re-evaluate; DRed/FBF-grade
   maintenance across strata is the BIG follow-up phase and must be SEQUENCED with the
   deletion-maintenance bead sq-6tykl.4 (same-crate collision, per the epic note).
+  *(Since shipped as Phase 3, sq-4foq0 — see §6 item 3 and `datalog::incr`.)*
 - **No CLI/`MaterializedGraph` wiring** — library API only.
 - The `datalog` feature is not yet in `scripts/coverage.sh`'s per-crate measurement
   (sparq-reason is measured default-features, so the module doesn't regress the floor;
@@ -130,8 +131,15 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    joins (the `n3::compiled` `join_steps` discipline); measure before claiming.
 2. **SUM/MIN/MAX/AVG aggregate functions** (sq-citho) — value slot on `AggAtom`, substrate `Num`
    tower for input values, overflow semantics decided against SPARQL's.
-3. **Incremental maintenance under insert/delete across strata** (sq-4foq0, blocked by sq-6tykl.4) — counting/DRed for
-   positive strata, rederivation at stratum boundaries; SEQUENCE with sq-6tykl.4.
+3. **Incremental maintenance under insert/delete across strata** (sq-4foq0) — SHIPPED:
+   `MaterializedProgram` in `datalog::incr` — DRed (delete-and-rederive) for positive strata,
+   stratum-boundary rederivation for `NOT`/`AGGREGATE` strata, predicate-level stratum
+   skipping, differential-pinned against from-scratch `eval` on randomized insert/delete
+   sequences. DRed over counting: counting is unsound under recursion without derivation-depth
+   tracking. v1 honest scope: per-affected-stratum set/index bookkeeping is O(visible input)
+   (no persistent deletable index); the incrementality is delta-driven rule-firing work,
+   measured by deterministic counters. FBF-style over-deletion limits await the sq-6tykl.4
+   deletion-heavy benchmark (profile first).
 4. **External-engine differential arm** (sq-xzb9p) — the same fixtures run through Soufflé (or
    crepe) in an optional CI lane; requires a cargo-vet/tooling decision.
 5. **Fragment extensions** (sq-a7bmo) — `NOT` over conjunctions / `NOT EXISTS ?v IN`, FILTER

@@ -494,6 +494,23 @@ pub enum SpatialQuery<'a> {
     BboxIntersects { arg_wkt: &'a str },
 }
 
+/// A request for an EXACT-certified candidate set — see
+/// [`SpatialProvider::candidates_exact`]. Separate from [`SpatialQuery`] on
+/// purpose: a `SpatialQuery` names a WINDOW the provider may over-approximate,
+/// while a `SpatialExactQuery` names the precise PREDICATE the certification is
+/// about, so "exact" is never ambiguous about which relation was certified.
+/// [FABLE-5] (sq-lk3aw.4)
+#[cfg(feature = "spatial-exact-pushdown")]
+#[cfg_attr(docsrs, doc(cfg(feature = "spatial-exact-pushdown")))]
+#[derive(Debug, Clone)]
+pub enum SpatialExactQuery<'a> {
+    /// `geof:sfWithin(?g, region)` — equivalently `geof:sfContains(region, ?g)`
+    /// (Simple Features defines `contains(a, b) ⇔ within(b, a)`): the geometry
+    /// variable's binding lies within the constant `region`. `region_wkt` is the
+    /// constant geometry's lexical form (a `geo:wktLiteral` value).
+    WithinRegion { region_wkt: &'a str },
+}
+
 /// A spatial index the engine can push a recognised `geof:` FILTER into.
 ///
 /// Implemented by sparq-geo over its `GeoIndex`; installed per-query via
@@ -553,6 +570,41 @@ pub trait SpatialProvider: Send + Sync {
         dict_ptr: usize,
     ) -> Option<std::sync::Arc<rustc_hash::FxHashSet<sparq_core::dict::Id>>> {
         let _ = dict_ptr;
+        None
+    }
+
+    /// An EXACT-certified candidate set, or `None` for "no exact certification"
+    /// (the default — the engine then uses the superset [`candidates`](Self::candidates)
+    /// + residual-FILTER path, always correct). [FABLE-5] (sq-lk3aw.4)
+    ///
+    /// EXACTNESS CONTRACT (STRICTLY stronger than `candidates`' superset contract —
+    /// a wrong `Some` here silently returns WRONG query answers):
+    ///
+    /// * `Some(v)` CERTIFIES that `v` is EXACTLY the set of INDEXED
+    ///   geometry-variable bindings (the WKT-literal `Term`s for which
+    ///   [`is_indexed`](Self::is_indexed) is `true`) that satisfy `query` — no
+    ///   false positives AND no false negatives among the indexed universe. On
+    ///   the strength of that certificate the engine MAY skip the residual
+    ///   `geof:` FILTER for rows whose binding is in `v`; a false positive would
+    ///   ADD a wrong row to the query answer (the superset path's false
+    ///   positives are harmless only because the residual FILTER removes them —
+    ///   here it will not run).
+    /// * "Satisfy" means: the registered `geof:` extension function for the
+    ///   certified predicate, applied to that binding and the query constant,
+    ///   evaluates to `true`. The provider asserts its exact refinement agrees
+    ///   with the function-registry semantics it is deployed with (sparq-geo
+    ///   pins that equivalence in its `topology_index` tests).
+    /// * The certificate says NOTHING about a binding that is NOT indexed: the
+    ///   engine still routes every not-indexed binding through the residual
+    ///   `geof:` FILTER (never drops it, never keeps it unjudged), exactly as
+    ///   the superset path does.
+    /// * Return `None` on ANY doubt (unparsable constant, non-geographic CRS, a
+    ///   predicate the index cannot decide exactly, …) — declining is always
+    ///   sound; the engine falls back to `candidates`.
+    #[cfg(feature = "spatial-exact-pushdown")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "spatial-exact-pushdown")))]
+    fn candidates_exact(&self, query: &SpatialExactQuery) -> Option<Vec<Term>> {
+        let _ = query;
         None
     }
 }
