@@ -1039,12 +1039,13 @@ pub const SUITES: &[Suite] = &[
                       entailment-regime conformance claim)",
         note: "EXTENSION ratchet — the pr:QL sparql11/entailment cases that pass ALL SIX \
                graduation conditions (CQ-shape gate + intensional guard, total TBox capture, \
-               zero consistency-relevant axioms, default-graph dataset, the regime-coincidence \
-               guard, and empirical result-equivalence to the W3C oracle through the REAL \
-               rewrite_production + engine), pinned as an exact named-case list; every \
-               non-graduated case is held with an exhaustive reason taxonomy \
+               the consistency condition [zero negative axioms OR the sq-p6yb7 DL-Lite_R \
+               violation-query check proves the KB consistent], default-graph dataset, the \
+               regime-coincidence guard, and empirical result-equivalence to the W3C oracle \
+               through the REAL rewrite_production + engine), pinned as an exact named-case \
+               list; every non-graduated case is held with an exhaustive reason taxonomy \
                (permanently-outside / pending-gate / pending-capture / pending-consistency / \
-               pending-coincidence / oracle-divergent), never faked as a pass",
+               inconsistent-kb / pending-coincidence / oracle-divergent), never faked as a pass",
     },
     // [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL classification ratchet
     // (runner lives crate-local in `sparq-conformance/tests/el_suite.rs`, behind the

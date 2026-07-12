@@ -118,7 +118,10 @@ rif-wg-core = ["sparq-reason/rif-xml", "dep:sparq-substrate", "sparq-substrate/n
 # rewriter is sound-but-FAIL-CLOSED (a query it cannot soundly rewrite is reported
 # as abstain/OutOfScope, never a guessed pass). When OFF the lane compiles to a
 # single self-SKIP `#[test]`. Pure-Rust, no new third-party deps.
-ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
+# [FABLE-5] sq-p6yb7: also forwards to `sparq-reason-ql/ql-consistency` so the
+# graduation predicate's condition (3) runs the DL-Lite_R violation-query
+# consistency check instead of holding every negative-axiom TBox unconditionally.
+ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental", "sparq-reason-ql/ql-consistency"]
 
 # [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL entailment-regime
 # EXPRESSIVITY ratchet (the crate-local `tests/el_suite.rs` runner). OPT-IN and OFF

@@ -12,9 +12,11 @@
 //! no intensional schema-vocabulary atom (the §5 B6 guard, applied here until it
 //! lands in the gate itself under sq-pbz04.3.1); (2) the DL-Lite_R TBox is
 //! TOTALLY captured (`fully_captured()` from sq-pbz04.3.3 — zero skipped, zero
-//! unrecognised schema vocabulary); (3) ZERO consistency-relevant (negative /
-//! disjointness) axioms — no consistency check exists, so their presence means
-//! possible under-approximation; (4) default-graph dataset only; (5) the
+//! unrecognised schema vocabulary); (3) the consistency condition — ZERO
+//! consistency-relevant (negative/disjointness) axioms OR (sq-p6yb7) the
+//! DL-Lite_R violation-query consistency check proves the KB CONSISTENT (an
+//! INCONSISTENT verdict holds at `inconsistent-kb`, an UNKNOWN one at
+//! `pending-consistency` — both fail-closed); (4) default-graph dataset only; (5) the
 //! REGIME-COINCIDENCE guard holds — all body terms distinguished, or no
 //! existential-generating inclusions (`exists_super` empty) — because the crate
 //! computes CERTAIN ANSWERS while W3C entailment-regime solution mappings bind
@@ -296,8 +298,10 @@ mod gated {
             println!("  held {}: {}", label, count);
         }
         println!(
-            "  pending-consistency bucket size: {} (a DL-Lite_R consistency-check bead \
-             is warranted iff non-zero — design record §8)",
+            "  pending-consistency bucket size: {} (the DL-Lite_R consistency check \
+             landed in sq-p6yb7 — this bucket now holds ONLY structurally-uncaptured \
+             negative axioms, e.g. owl:complementOf; it measured ZERO before the check \
+             landed, so the sq-p6yb7 upgrade graduates no case at this rdf-tests pin)",
             pending_consistency
         );
 

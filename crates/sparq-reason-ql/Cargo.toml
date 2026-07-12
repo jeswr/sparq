@@ -49,6 +49,17 @@ default = []
 # reuses spargebra + oxrdf + rustc-hash.
 experimental = []
 
+# [FABLE-5] sq-p6yb7 (design record research/owl2-ql-cq-gate-broadening.md §8): DL-Lite_R KB
+# CONSISTENCY CHECKING by violation-query composition — for each captured negative inclusion
+# (owl:disjointWith / owl:propertyDisjointWith, see `TBox::neg_incl`) compose the boolean
+# violation CQ, rewrite it with the EXISTING PerfectRef machinery (hence the `experimental`
+# dependency), and evaluate it over the data: the KB is INCONSISTENT iff some violation query
+# matches. Fail-closed: a TBox that is not fully captured (or carries a structurally-uncaptured
+# negative axiom, e.g. owl:complementOf) yields Unknown, never a guessed Consistent. OFF by
+# default (double opt-in preserved: dep + feature), so neither the default build nor a bare
+# `experimental` build carries the checker. No new dependency.
+ql-consistency = ["experimental"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
