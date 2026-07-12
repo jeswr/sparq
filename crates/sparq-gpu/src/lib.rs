@@ -56,6 +56,30 @@ pub fn hash32(mut x: u32) -> u32 {
     x
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{hash32, EMPTY_KEY};
+
+    // [GPT-5.6] sq-pz5rf: Exercise the mixer directly, including values around
+    // the hash-table sentinel and a bounded sample of the full u32 domain.
+    #[test]
+    fn hash32_is_deterministic_and_total_for_sampled_inputs() {
+        let edge_inputs = [
+            0,
+            1,
+            u32::MAX,
+            u32::MAX - 1,
+            u32::MAX / 2,
+            EMPTY_KEY - 2,
+            EMPTY_KEY - 1,
+        ];
+
+        for input in edge_inputs.into_iter().chain(0..10_000) {
+            assert_eq!(hash32(input), hash32(input), "input {input}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // WGSL kernels
 // ---------------------------------------------------------------------------
