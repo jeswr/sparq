@@ -64,6 +64,7 @@ opt-in sparq-mcp (templates, text — named-template invocation + BM25 text sear
 opt-in sparq-mpc (insecure-test-rng)
 opt-in sparq-nlq (citations — provenance-join + citations + answer-qualification)
 opt-in sparq-nlq (nlq-endpoint — configurable OpenAI-compatible endpoint client)
+opt-in sparq-nlq (query-policy — parsed algebra policy + result-form classification)
 opt-in sparq-policy (count-enforcement)
 opt-in sparq-policy (decision-report)
 opt-in sparq-policy (secprop-leftoperands — ODRL security-property profile)
