@@ -1,0 +1,18 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:disposition:> .
+
+ex:w a ufo:World.
+
+ex:impactStatement a ufo:Proposition;
+    ufo:subj ex:glass;
+    ufo:pred ex:struckBy;
+    ufo:obj ex:hammer;
+    ufo:holdsIn ex:w.
+
+ex:fragility a ufo:Disposition;
+    ufo:inheresIn ex:glass;
+    ufo:triggerCondition ex:impactStatement;
+    ufo:manifestsIn ex:breaking;
+    ufo:existsIn ex:w.
+
+ex:breaking a ufo:Manifestation.
