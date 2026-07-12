@@ -494,4 +494,47 @@ mod tests {
         assert!(lines
             .contains(&"<http://ex.org/b> <http://ex.org/knows> <http://ex.org/a> .".to_string()));
     }
+
+    #[test]
+    fn diff_multisets_argument_swap_antisymmetry() {
+        // INVARIANT: swapping arguments to diff_multisets swaps the two output halves.
+        // Given sorted multisets A and B, if diff_multisets(&A, &B) == (a_only, b_only),
+        // then diff_multisets(&B, &A) == (b_only, a_only).
+        // Test with two sorted N-Triples-line multisets: shared lines, unique lines, and
+        // duplicated lines to exercise multiplicity.
+
+        // Sorted multiset A: includes line1 (unique to A), line2 x2 (shared with B but A has 2),
+        // and line3 (unique to A).
+        let a = v(&[
+            "<http://ex.org/type> <http://ex.org/p> <http://ex.org/A> .",
+            "<http://ex.org/shared> <http://ex.org/p> <http://ex.org/common> .",
+            "<http://ex.org/shared> <http://ex.org/p> <http://ex.org/common> .",
+            "<http://ex.org/unique_a> <http://ex.org/p> <http://ex.org/1> .",
+        ]);
+
+        // Sorted multiset B: includes line2 x1 (shared with A but B has 1), line4 x2 (unique to B),
+        // and line5 (unique to B).
+        let b = v(&[
+            "<http://ex.org/other> <http://ex.org/p> <http://ex.org/B> .",
+            "<http://ex.org/other> <http://ex.org/p> <http://ex.org/B> .",
+            "<http://ex.org/shared> <http://ex.org/p> <http://ex.org/common> .",
+            "<http://ex.org/unique_b> <http://ex.org/p> <http://ex.org/2> .",
+        ]);
+
+        // Compute diff_multisets(&A, &B) -> (a_only, b_only)
+        let (a_only, b_only) = diff_multisets(&a, &b);
+
+        // Compute diff_multisets(&B, &A) -> (b_only_swapped, a_only_swapped)
+        let (b_only_swapped, a_only_swapped) = diff_multisets(&b, &a);
+
+        // Assert the swap-antisymmetry property: the halves are swapped.
+        assert_eq!(
+            a_only, a_only_swapped,
+            "diff_multisets(&A, &B) first output should equal diff_multisets(&B, &A) second output"
+        );
+        assert_eq!(
+            b_only, b_only_swapped,
+            "diff_multisets(&A, &B) second output should equal diff_multisets(&B, &A) first output"
+        );
+    }
 }
