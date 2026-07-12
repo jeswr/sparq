@@ -251,7 +251,7 @@ fn closure_non_interference(tally: &mut Tally, profile: Profile) {
     let ctx = format!("non-interference/{}", profile_name(profile));
     let base_closure = closure_lines(profile, BASE);
     let combined_closure = closure_lines(profile, &format!("{BASE}\n{QUOTED_OVERLAY}"));
-    let overlay = parsed_lines(QUOTED_OVERLAY);
+    let overlay = closure_lines(profile, QUOTED_OVERLAY);
 
     // The committed expected answer pins closure(base) byte-exactly.
     let expected = match profile {
