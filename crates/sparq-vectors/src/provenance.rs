@@ -3,14 +3,14 @@
 //! KGE trainer consumes (provenance-driven GenAI-KB **Phase 4**, design
 //! `research/provenance-driven-genai-kb.md` §USE-1 / §5 Phase 4, epic `sq-2489d`).
 //!
-//! [OPUS-4.8] sq-2489d.4. This **mirrors [`crate::shacl_priors`]** (the P2 SHACL/OWL prior
+//! [OPUS-4.8] sq-2489d.4. This **mirrors `crate::shacl_priors`** (the P2 SHACL/OWL prior
 //! extractor): a small, **read-only** reader keyed by graph term ids that consumes only
 //! `sparq-core`'s public id-scan API. It does **not** redefine the provenance model — it
 //! consumes the same `pkg:confidence` / `pkg:assurance` / `prov:wasDerivedFrom` terms the
 //! Phase-1 join (`sparq-nlq`'s `provenance` module) reads and the Phase-3 DQV terms `pkg.ttl`
 //! declares. Crucially it does this **without pulling the engine** (unlike the SPARQL-backed
 //! Phase-1 join): the `structure` feature stays lean — this reader is a direct id-level scan,
-//! exactly like [`crate::shacl_priors`]'s `functional_properties` axiom reader.
+//! exactly like `crate::shacl_priors`'s `functional_properties` axiom reader.
 //!
 //! # What `w(t)` combines (design §USE-1)
 //!
@@ -118,7 +118,7 @@ impl Default for WeightConfig {
 /// This is the input to [`ProvenanceWeights::weight_of`].
 ///
 /// Built by a single id-level scan of the graph (no engine, no SPARQL) — the same shape as
-/// [`crate::shacl_priors`]'s `functional_properties` axiom reader.
+/// `crate::shacl_priors`'s `functional_properties` axiom reader.
 #[derive(Clone, Debug, Default)]
 pub struct ProvenanceWeights {
     /// `pkg:confidence` decimal of each subject id (`0..1`), when asserted and parseable.

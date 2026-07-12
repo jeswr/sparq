@@ -34,10 +34,22 @@
 //! negatives, uniform-random negatives}` — training a fresh model per cell on the *same* split and
 //! reporting filtered metrics + the long-tail breakdown per cell. The **scoring model** is the
 //! [`ModelKind`](crate::train::ModelKind) on [`EvalConfig::train`]; it is the same for all four
-//! cells of a single run so the deltas isolate the prior. A gUFO-prior cell is structurally present
-//! as an **ablation axis the harness can already toggle** ([`AblationCell::gufo_prior`]) so the
-//! later gUFO-prior phase wires straight in; at this stage the prior is a no-op
-//! (`gufo_prior = false` everywhere) and the gUFO slice establishes the **baseline**.
+//! cells of a single run so the deltas isolate the prior.
+//!
+//! # The gUFO-prior axis (wired, default OFF) — [FABLE-5] kern/ufo-priors
+//!
+//! The gUFO-prior axis ([`AblationCell::gufo_prior`], toggled by [`EvalConfig::gufo_prior`]) is now
+//! **wired**: when ON, the [`crate::ufo_priors`] reader mines the UFO-**provable** disjointness
+//! mask (kind-partition + identity-provider propagation + nature partition, all fail-closed), feeds
+//! it into the P3 [`DisjointnessOracle`](crate::taxonomy::DisjointnessOracle), and the filtered
+//! ranking applies it as the **serve-time hard mask**: a candidate whose `rdf:type` is provably
+//! disjoint from the relation's declared `rdfs:domain`/`rdfs:range` class is dropped from the
+//! ranking pool. This is **answer-safe** (design §6.A): on a UFO-consistent graph a true answer's
+//! types are never disjoint from the relation's declared signature, so only provably-wrong
+//! distractors are removed — per query the filtered rank can only improve or stay equal, a property
+//! the tests assert. Training is untouched (the mask is serve-time only; a train-time repulsion
+//! term remains a tracked follow-up). The axis is **default OFF** and, when OFF, the mask is never
+//! even constructed — the baseline stays byte-identical (asserted by the no-op tests below).
 //!
 //! # The model axis is load-bearing (adversarial-review finding)
 //!
@@ -301,9 +313,10 @@ pub struct AblationCell {
     pub closure: bool,
     /// Type-constrained negatives (vs uniform-random)? (the type-negative prior).
     pub type_constrained: bool,
-    /// The gUFO prior — an **ablation axis the harness already exposes** for the later phase. At
-    /// this stage it is always `false` (the prior is a no-op); the field exists so the gUFO-prior
-    /// phase wires straight into the matrix without changing the harness shape.
+    /// The gUFO prior — **wired** ([FABLE-5] kern/ufo-priors): mirrors [`EvalConfig::gufo_prior`].
+    /// When `true` the UFO-provable disjointness mask ([`crate::ufo_priors`]) was applied to the
+    /// serve-time candidate pool of every ranking in this cell; when `false` (the default) the
+    /// mask was never constructed and the cell is the byte-identical baseline.
     pub gufo_prior: bool,
     /// The RDF 1.2 **quoted-terms visibility axis** ([`TermScope`]) — always `false` in
     /// [`run_ablation`] (the matrix trains with the byte-stable [`TermScope::IriBlank`] default;
@@ -331,6 +344,7 @@ fn filtered_rank(
     splits: &Splits,
     triple: [Id; 3],
     side: Side,
+    ufo_mask: Option<&UfoMask>,
 ) -> Option<u32> {
     let [h, r, t] = triple;
     // The held-out true score must be computable.
@@ -357,6 +371,16 @@ fn filtered_rank(
         // Filter: skip OTHER known-true triples (they are correct answers, not distractors).
         if splits.is_true(&cand) {
             continue;
+        }
+        // [FABLE-5] kern/ufo-priors: the gUFO-prior serve-time hard mask (only under
+        // `EvalConfig::gufo_prior`, else `None` and this arm is byte-identical to the baseline).
+        // Drops a candidate whose type is PROVABLY disjoint from the relation's declared
+        // domain/range class — answer-safe (see `UfoMask::provably_excluded`; the held-out
+        // answer was already skipped above, so it can never be masked).
+        if let Some(mask) = ufo_mask {
+            if mask.provably_excluded(r, side, c) {
+                continue;
+            }
         }
         let Some(cs) = model.score(cand[0], cand[1], cand[2]) else {
             continue; // candidate not scorable (no row) → cannot outrank
@@ -392,6 +416,7 @@ fn evaluate(
     model: &TrainedModel,
     splits: &Splits,
     long_tail_threshold: u32,
+    ufo_mask: Option<&UfoMask>,
 ) -> (Metrics, LongTail) {
     let mut acc = MetricAcc::default();
     let mut head_acc = MetricAcc::default();
@@ -399,7 +424,7 @@ fn evaluate(
 
     for &triple in &splits.test {
         for side in [Side::Head, Side::Tail] {
-            if let Some(rank) = filtered_rank(model, splits, triple, side) {
+            if let Some(rank) = filtered_rank(model, splits, triple, side, ufo_mask) {
                 acc.add(rank);
                 let answer = match side {
                     Side::Head => triple[0],
@@ -475,6 +500,16 @@ pub struct EvalConfig {
     pub split_seed: u64,
     /// Long-tail frequency threshold (an answer entity with train-freq ≤ this is "long-tail").
     pub long_tail_threshold: u32,
+    /// [FABLE-5] kern/ufo-priors — the gUFO-prior ablation switch. **Default `false`** (the
+    /// byte-identical baseline: the UFO mask is never constructed and no ranking changes). When
+    /// `true`, the UFO-provable disjointness mask ([`crate::ufo_priors`]) is applied to every
+    /// ranking's candidate pool as the answer-safe serve-time hard mask (see the module docs).
+    pub gufo_prior: bool,
+    /// The namespace the graph mints the gUFO meta-vocabulary under — only read when
+    /// [`gufo_prior`](Self::gufo_prior) is on. Defaults to the canonical
+    /// [`GUFO_NS`](crate::ufo_priors::GUFO_NS); the synthetic gUFO slice uses `http://ex/gufo#`.
+    /// An explicit caller declaration, never a heuristic guess (no silent fallback).
+    pub gufo_ns: &'static str,
 }
 
 impl EvalConfig {
@@ -487,7 +522,91 @@ impl EvalConfig {
             valid_frac: 0.1,
             split_seed: seed ^ 0xF00D,
             long_tail_threshold: 2,
+            // Default OFF: the gUFO prior is opt-in per run; with it off the harness is the
+            // byte-identical pre-wiring baseline. [FABLE-5] kern/ufo-priors
+            gufo_prior: false,
+            gufo_ns: crate::ufo_priors::GUFO_NS,
         }
+    }
+}
+
+// ---- The gUFO serve-time mask ([FABLE-5] kern/ufo-priors) ---------------------------------------
+
+/// The serve-time UFO mask of one (possibly closed) eval graph: the UFO-augmented
+/// [`DisjointnessOracle`] plus the id-level lookups the ranking loop needs (candidate `rdf:type`s
+/// and per-relation declared `rdfs:domain`/`rdfs:range` classes). Built ONCE per closure arm, and
+/// ONLY when [`EvalConfig::gufo_prior`] is on — the OFF path never constructs it.
+///
+/// [`DisjointnessOracle`]: crate::taxonomy::DisjointnessOracle
+struct UfoMask {
+    /// `DisjointnessOracle::mine` (owl axioms) + the UFO-proven pairs absorbed on top.
+    oracle: crate::taxonomy::DisjointnessOracle,
+    /// Entity id → its asserted/entailed `rdf:type` class ids.
+    types_of: FxHashMap<Id, Vec<Id>>,
+    /// Relation id → declared `rdfs:domain` class ids.
+    domain_of: FxHashMap<Id, Vec<Id>>,
+    /// Relation id → declared `rdfs:range` class ids.
+    range_of: FxHashMap<Id, Vec<Id>>,
+}
+
+impl UfoMask {
+    /// Build the mask from `graph`, mining the gUFO vocabulary under `ns`.
+    fn build(graph: &Graph, ns: &str) -> UfoMask {
+        let priors = crate::ufo_priors::UfoPriors::mine_with_namespace(graph, ns);
+        let mut oracle = crate::taxonomy::DisjointnessOracle::mine(graph);
+        priors.augment_oracle(&mut oracle);
+
+        let iri = |s: &str| oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s));
+        let rdf_type = graph.id_of(&iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"));
+        let domain = graph.id_of(&iri("http://www.w3.org/2000/01/rdf-schema#domain"));
+        let range = graph.id_of(&iri("http://www.w3.org/2000/01/rdf-schema#range"));
+
+        let mut types_of: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut domain_of: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut range_of: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        for [s, p, o] in graph.iter_ids() {
+            if !(is_embeddable(graph, s, TermScope::IriBlank)
+                && is_embeddable(graph, o, TermScope::IriBlank))
+            {
+                continue;
+            }
+            if Some(p) == rdf_type {
+                types_of.entry(s).or_default().push(o);
+            } else if Some(p) == domain {
+                domain_of.entry(s).or_default().push(o);
+            } else if Some(p) == range {
+                range_of.entry(s).or_default().push(o);
+            }
+        }
+        UfoMask {
+            oracle,
+            types_of,
+            domain_of,
+            range_of,
+        }
+    }
+
+    /// Is candidate `c` **provably excluded** from the `(r, side)` ranking — i.e. does some
+    /// declared query-side class of `r` (its `rdfs:range` for a tail ranking, `rdfs:domain` for a
+    /// head ranking) stand provably disjoint from some `rdf:type` of `c`?
+    ///
+    /// ANSWER-SAFE: on a UFO-consistent graph a true answer of `(h, r, ?)` is typed by `r`'s
+    /// declared range (an RDFS entailment), so none of its types can be provably disjoint from
+    /// that range — only provably-wrong distractors return `true`. A relation with no declared
+    /// signature, or a candidate with no types, excludes nothing (the open-world default).
+    /// Structurally, the held-out answer itself is never even tested (the ranking loop skips it
+    /// before the mask), so no metric can lose its true answer even on an inconsistent graph.
+    fn provably_excluded(&self, r: Id, side: Side, c: Id) -> bool {
+        let query_classes = match side {
+            Side::Head => self.domain_of.get(&r),
+            Side::Tail => self.range_of.get(&r),
+        };
+        let (Some(query_classes), Some(cand_types)) = (query_classes, self.types_of.get(&c)) else {
+            return false;
+        };
+        query_classes
+            .iter()
+            .any(|&q| cand_types.iter().any(|&t| self.oracle.is_disjoint(q, t)))
     }
 }
 
@@ -529,6 +648,15 @@ pub fn run_ablation(
         let graph = &closed.graph;
         let splits = Splits::split(graph, cfg.train_frac, cfg.valid_frac, cfg.split_seed);
 
+        // [FABLE-5] kern/ufo-priors: the gUFO serve-time mask, built ONCE per closure arm and
+        // ONLY when the axis is explicitly on — with it off (the default) no UFO code runs and
+        // the run is byte-identical to the pre-wiring baseline (asserted by tests).
+        let ufo_mask = if cfg.gufo_prior {
+            Some(UfoMask::build(graph, cfg.gufo_ns))
+        } else {
+            None
+        };
+
         for type_constrained in [false, true] {
             let mode = if type_constrained {
                 crate::structure::SamplingMode::TypeConstrained
@@ -546,12 +674,13 @@ pub fn run_ablation(
             let (model, report) = train(&train_graph, &train_tc, tcfg);
 
             // Rank over the FULL entity pool and filter against ALL splits (filtered protocol).
-            let (metrics, long_tail) = evaluate(&model, &splits, cfg.long_tail_threshold);
+            let (metrics, long_tail) =
+                evaluate(&model, &splits, cfg.long_tail_threshold, ufo_mask.as_ref());
 
             cells.push(AblationCell {
                 closure,
                 type_constrained,
-                gufo_prior: false,
+                gufo_prior: cfg.gufo_prior,
                 // The quoted-terms axis is NOT toggled by this matrix — the cell reports the
                 // template's scope verbatim (`false` for every preset, whose default is the
                 // byte-stable `IriBlank`); the dedicated paired runner `run_quoted_ablation`
@@ -908,7 +1037,9 @@ pub fn run_weight_ablation(
             tcfg.seed = seed;
             tcfg.weight_mode = mode;
             let (model, _report) = train(&train_graph, &train_tc, tcfg);
-            let (metrics, _long_tail) = evaluate(&model, &splits, template.long_tail_threshold);
+            // The weight ablation isolates the provenance axis; the gUFO mask stays off here.
+            let (metrics, _long_tail) =
+                evaluate(&model, &splits, template.long_tail_threshold, None);
             metrics
         };
 
@@ -1013,7 +1144,9 @@ pub fn run_quoted_ablation(
             tcfg.seed = seed;
             tcfg.term_scope = scope;
             let (model, _report) = train(&train_graph, &train_tc, tcfg);
-            let (metrics, _long_tail) = evaluate(&model, &splits, template.long_tail_threshold);
+            // This paired runner isolates the triple-term visibility axis; the gUFO mask stays off.
+            let (metrics, _long_tail) =
+                evaluate(&model, &splits, template.long_tail_threshold, None);
             metrics
         };
 
@@ -1669,7 +1802,7 @@ ex:c ex:rel ex:y .
         let rel = g.id_of(&iri("http://ex/rel")).unwrap();
         let x = g.id_of(&iri("http://ex/x")).unwrap();
         // Rank (a rel ?) with answer x: y must be FILTERED (it is also a true tail of a).
-        let rank = filtered_rank(&model, &s, [a, rel, x], Side::Tail).unwrap();
+        let rank = filtered_rank(&model, &s, [a, rel, x], Side::Tail, None).unwrap();
         // With y filtered, only x and the remaining distractors remain; rank is bounded by the pool.
         assert!(rank >= 1);
         // Sanity: the all_true set indeed contains (a rel y).
@@ -1696,8 +1829,91 @@ ex:c ex:rel ex:y .
             assert!(c.metrics.queries > 0, "cell produced no scorable queries");
             assert!(c.report.loss_decreased(), "cell model did not learn");
         }
-        // The gUFO-prior ablation axis exists and is OFF at this stage (baseline phase).
+        // The gUFO-prior ablation axis is DEFAULT-OFF: an EvalConfig::small run is the baseline.
         assert!(cells.iter().all(|c| !c.gufo_prior));
+    }
+
+    // ---- gUFO-prior axis ([FABLE-5] kern/ufo-priors) --------------------------------------------
+
+    #[test]
+    fn gufo_prior_on_a_gufo_free_graph_is_byte_identical_to_off() {
+        // The honest no-op (mirrors the provenance-weighting convention): over a graph carrying
+        // NO gUFO annotations the mined priors are empty, the mask drops nothing, and the ON and
+        // OFF arms must be BYTE-IDENTICAL — exact f64 equality, not approximate.
+        let ttl = synthetic_relational_ttl(120, 3);
+        let off = EvalConfig::small(5);
+        let mut on = off;
+        on.gufo_prior = true;
+        let a = run_ablation(&ttl, "turtle", off).unwrap();
+        let b = run_ablation(&ttl, "turtle", on).unwrap();
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.metrics.queries, y.metrics.queries);
+            assert_eq!(x.metrics.mrr, y.metrics.mrr, "byte-identical MRR");
+            assert_eq!(x.metrics.hits1, y.metrics.hits1);
+            assert_eq!(x.metrics.hits3, y.metrics.hits3);
+            assert_eq!(x.metrics.hits10, y.metrics.hits10);
+            assert_eq!(x.long_tail.tail.mrr, y.long_tail.tail.mrr);
+        }
+        assert!(a.iter().all(|c| !c.gufo_prior) && b.iter().all(|c| c.gufo_prior));
+    }
+
+    #[test]
+    fn gufo_prior_off_is_deterministic_and_default() {
+        // The OFF arm reads no entropy and constructs no mask: two identical runs are identical,
+        // and EvalConfig::small defaults the axis off (the byte-identical baseline).
+        let cfg = EvalConfig::small(17);
+        assert!(!cfg.gufo_prior, "the gUFO prior must be DEFAULT-OFF");
+        let ttl = synthetic_gufo_ttl(60, 4);
+        let a = run_ablation(&ttl, "turtle", cfg).unwrap();
+        let b = run_ablation(&ttl, "turtle", cfg).unwrap();
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.metrics.mrr, y.metrics.mrr);
+            assert_eq!(x.metrics.queries, y.metrics.queries);
+        }
+    }
+
+    #[test]
+    fn gufo_prior_mask_is_answer_safe_and_never_hurts_a_rank() {
+        // The load-bearing answer-safety property, asserted end-to-end: the mask only REMOVES
+        // provably-wrong distractors from each ranking, so with the SAME trained model (training
+        // is untouched) every query's filtered rank can only improve or stay equal — per cell,
+        // MRR/Hits@k(ON) >= MRR/Hits@k(OFF) and the query count is unchanged. On the gUFO slice
+        // (three gufo:Kinds: Person/Organisation/Course, roles/phases under Person) the mask must
+        // also actually BITE (some rank strictly improves) — Person ⊥ Course is UFO-proven, so
+        // person candidates drop out of enrolledIn tail rankings.
+        let ttl = synthetic_gufo_ttl(120, 3);
+        let off = EvalConfig::small(3);
+        let mut on = off;
+        on.gufo_prior = true;
+        on.gufo_ns = "http://ex/gufo#"; // the slice's explicit (non-canonical) gUFO namespace
+        let a = run_ablation(&ttl, "turtle", off).unwrap();
+        let b = run_ablation(&ttl, "turtle", on).unwrap();
+        let mut bit = false;
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(
+                x.metrics.queries, y.metrics.queries,
+                "the mask never changes WHICH queries are scorable"
+            );
+            assert!(
+                y.metrics.mrr >= x.metrics.mrr,
+                "answer-safety: masking provably-wrong distractors can never lower MRR \
+                 (cell closure={} tc={}: on={} off={})",
+                x.closure,
+                x.type_constrained,
+                y.metrics.mrr,
+                x.metrics.mrr
+            );
+            assert!(y.metrics.hits1 >= x.metrics.hits1);
+            assert!(y.metrics.hits3 >= x.metrics.hits3);
+            assert!(y.metrics.hits10 >= x.metrics.hits10);
+            if y.metrics.mrr > x.metrics.mrr {
+                bit = true;
+            }
+        }
+        assert!(
+            bit,
+            "on a gUFO-annotated slice the mask must actually remove distractors"
+        );
     }
 
     #[test]
@@ -1998,7 +2214,7 @@ ex:c ex:rel ex:y .
                 "preset must default OFF"
             );
             let (model, report) = train(&train_graph, &tc, cfg);
-            let (metrics, _) = evaluate(&model, &splits, 2);
+            let (metrics, _) = evaluate(&model, &splits, 2, None);
             (splits, model, report, metrics)
         };
 
