@@ -66,3 +66,7 @@ sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine" }
 # [GPT-5.6] Property generators for schema/shape/null-mask invariants.
 proptest = "1"
+
+[[example]]
+name = "arrow_interop"
+required-features = ["arrow"]
