@@ -32,7 +32,8 @@
 //! BLOCKING, CPU-bound library (no async I/O — it computes against in-RAM indexes). Running an engine
 //! call directly on a tokio worker would block the reactor. So every engine call here is dispatched
 //! to a blocking thread via [`tokio::task::spawn_blocking`], mirroring the in-tree off-reactor
-//! precedent ([`crate::redis_replay`]'s dedicated-thread pattern + the verifier's `net.rs`). The
+//! precedent (`redis_replay`'s dedicated-thread pattern + the verifier's `net.rs`, both compiled out
+//! of the default build so named as code spans here). The
 //! [`Graph`] lives behind `Arc<Mutex<Graph>>`; the `Arc` is cloned into the blocking closure, which
 //! locks + runs the engine call there. (A dedicated-OS-thread / actor owning the `Graph` and serving
 //! ops over an mpsc channel is the production upgrade — see the follow-up — but `spawn_blocking`
