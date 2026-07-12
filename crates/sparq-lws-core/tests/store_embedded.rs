@@ -626,7 +626,9 @@ async fn concurrent_same_child_creates_commit_exactly_one_untorn_record() {
         }));
     }
     for h in handles {
-        h.await.unwrap().expect("create_child on a present container succeeds");
+        h.await
+            .unwrap()
+            .expect("create_child on a present container succeeds");
     }
 
     assert_eq!(
@@ -668,13 +670,14 @@ async fn concurrent_delete_if_empty_vs_create_child_never_leaves_a_torn_state() 
         let container = "https://pod.example/dir/";
         let child = "https://pod.example/dir/item";
         sparq.put_meta(parent, m("kp")).await.unwrap();
-        sparq.create_child(parent, container, m("kc")).await.unwrap();
+        sparq
+            .create_child(parent, container, m("kc"))
+            .await
+            .unwrap();
 
         let deleter = {
             let sparq = sparq.clone();
-            tokio::spawn(
-                async move { sparq.delete_meta_if_empty(container, Some(parent)).await },
-            )
+            tokio::spawn(async move { sparq.delete_meta_if_empty(container, Some(parent)).await })
         };
         let creator = {
             let sparq = sparq.clone();
@@ -705,7 +708,11 @@ async fn concurrent_delete_if_empty_vs_create_child_never_leaves_a_torn_state() 
                     vec![child.to_string()],
                     "round {round}"
                 );
-                assert_eq!(parent_children, vec![container.to_string()], "round {round}");
+                assert_eq!(
+                    parent_children,
+                    vec![container.to_string()],
+                    "round {round}"
+                );
             }
             (outcome, created_ok) => panic!(
                 "round {round}: TORN interleaving — delete={outcome:?}, create_ok={created_ok} \
