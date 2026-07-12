@@ -4755,6 +4755,22 @@ fn eval_flat_conjunctive(
         // STILL runs and does the exact refinement, so the result is unchanged — the
         // pushdown only shrinks how many rows the exact `geof:` check examines.
         if let Some(pd) = recognise_spatial(f) {
+            // [FABLE-5] (sq-lk3aw.4) EXACT-candidate pushdown first: when the provider
+            // CERTIFIES the exact indexed answer set AND every surviving row is
+            // certified, the residual `geof:` FILTER is provably an identity on `b` —
+            // skip it (the `continue`). Any other outcome keeps the residual FILTER:
+            // `Partial` already restricted the rows (the residual judges the remaining
+            // not-indexed bindings), `Declined` falls back to the superset pushdown,
+            // unchanged. Soundness argument: see `apply_spatial_pushdown_exact`.
+            #[cfg(feature = "spatial-exact-pushdown")]
+            match apply_spatial_pushdown_exact(graph, &mut b, &pd) {
+                ExactPushdown::AllCertified => continue,
+                ExactPushdown::Partial => {}
+                ExactPushdown::Declined => {
+                    apply_spatial_pushdown(graph, &mut b, &pd);
+                }
+            }
+            #[cfg(not(feature = "spatial-exact-pushdown"))]
             apply_spatial_pushdown(graph, &mut b, &pd);
         }
         #[cfg(feature = "id-filter-fastpath")]
@@ -5670,6 +5686,8 @@ pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters:
 const GEOF_DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/distance";
 const GEOF_SF_WITHIN: &str = "http://www.opengis.net/def/function/geosparql/sfWithin";
 const GEOF_SF_INTERSECTS: &str = "http://www.opengis.net/def/function/geosparql/sfIntersects";
+#[cfg(feature = "spatial-exact-pushdown")]
+const GEOF_SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";
 
 /// A recognised pushable spatial FILTER: the geometry variable to restrict, plus an
 /// OWNED description of the index query (so it outlives the borrowed algebra). The
@@ -5681,7 +5699,17 @@ struct SpatialPushdown {
 
 enum SpatialKind {
     DistanceWithin { point_wkt: String, radius: f64, unit_iri: String, inclusive: bool },
-    BboxIntersects { arg_wkt: String },
+    BboxIntersects {
+        arg_wkt: String,
+        /// [FABLE-5] (sq-lk3aw.4) `true` iff the recognised FILTER is the
+        /// WITHIN-REGION orientation — `geof:sfWithin(?g, REGION)` or its Simple
+        /// Features converse `geof:sfContains(REGION, ?g)` — the one predicate an
+        /// installed provider may certify EXACTLY via
+        /// [`SpatialProvider::candidates_exact`](crate::SpatialProvider::candidates_exact).
+        /// `false` (sfIntersects) keeps the superset + residual-FILTER path.
+        #[cfg(feature = "spatial-exact-pushdown")]
+        within_region: bool,
+    },
 }
 
 /// The `geo:wktLiteral` lexical form of a constant operand, if it is one. (The engine
@@ -5768,7 +5796,29 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
                 if let (Expression::Variable(v), Some(arg)) = (&cargs[0], wkt_const(&cargs[1])) {
                     return Some(SpatialPushdown {
                         geo_var: v.clone(),
-                        kind: SpatialKind::BboxIntersects { arg_wkt: arg.to_string() },
+                        kind: SpatialKind::BboxIntersects {
+                            arg_wkt: arg.to_string(),
+                            #[cfg(feature = "spatial-exact-pushdown")]
+                            within_region: iri == GEOF_SF_WITHIN,
+                        },
+                    });
+                }
+            }
+            // [FABLE-5] (sq-lk3aw.4) `geof:sfContains(REGION, ?g)` — the constant-region-
+            // FIRST operand order. Simple Features defines `contains(a, b) ⇔ within(b, a)`,
+            // so this is the SAME within-region pushdown as `sfWithin(?g, REGION)` with the
+            // operands swapped: `within(?g, REGION) ⟹ intersects(?g, REGION) ⟹ their AABBs
+            // intersect`, hence the bbox candidate superset is valid for it too. Previously
+            // this orientation was never recognised and never pushed down at all.
+            #[cfg(feature = "spatial-exact-pushdown")]
+            if iri == GEOF_SF_CONTAINS && cargs.len() == 2 {
+                if let (Some(arg), Expression::Variable(v)) = (wkt_const(&cargs[0]), &cargs[1]) {
+                    return Some(SpatialPushdown {
+                        geo_var: v.clone(),
+                        kind: SpatialKind::BboxIntersects {
+                            arg_wkt: arg.to_string(),
+                            within_region: true,
+                        },
                     });
                 }
             }
@@ -5791,7 +5841,7 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
         SpatialKind::DistanceWithin { point_wkt, radius, unit_iri, inclusive } => {
             SpatialQuery::DistanceWithin { point_wkt, radius: *radius, unit_iri, inclusive: *inclusive }
         }
-        SpatialKind::BboxIntersects { arg_wkt } => SpatialQuery::BboxIntersects { arg_wkt },
+        SpatialKind::BboxIntersects { arg_wkt, .. } => SpatialQuery::BboxIntersects { arg_wkt },
     };
     let Some(cands) = idx.candidates(&query) else { return false };
     // Map the candidate TERMS to dictionary ids for an O(1) membership test on the
@@ -5836,6 +5886,102 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
         })
     });
     true
+}
+
+/// [FABLE-5] (sq-lk3aw.4) Outcome of the EXACT-candidate spatial pushdown attempt.
+#[cfg(feature = "spatial-exact-pushdown")]
+enum ExactPushdown {
+    /// No exact certification happened (not the within-region shape, no provider,
+    /// unbound variable, or the provider declined): NOTHING was touched — the caller
+    /// runs the superset pushdown + residual FILTER exactly as before.
+    Declined,
+    /// Rows were restricted to `certified-exact ∪ not-indexed`, but at least one
+    /// surviving row's binding is NOT certified (outside the indexed universe): the
+    /// residual FILTER MUST still run — it is an identity on the certified rows and
+    /// the SOLE judge of the not-indexed ones.
+    Partial,
+    /// Every surviving row's binding is in the provider's certified-exact set: the
+    /// residual FILTER is provably an identity and may be skipped.
+    AllCertified,
+}
+
+/// [FABLE-5] (sq-lk3aw.4) EXACT-candidate spatial pushdown: for a recognised
+/// WITHIN-REGION FILTER (`geof:sfWithin(?g, REGION)` / `geof:sfContains(REGION, ?g)`),
+/// restrict `b`'s rows to the provider's CERTIFIED-EXACT answer set (keeping every
+/// not-indexed binding) and report whether the residual `geof:` FILTER may be skipped.
+///
+/// EXACTNESS / SOUNDNESS ARGUMENT — why skipping the residual FILTER is safe, and
+/// ONLY on [`ExactPushdown::AllCertified`]:
+///
+/// * [`SpatialProvider::candidates_exact`](crate::SpatialProvider::candidates_exact)
+///   returning `Some(v)` CERTIFIES that `v` is EXACTLY the set of INDEXED geometry
+///   bindings for which the recognised predicate evaluates to `true` — no false
+///   positives and no false negatives, but ONLY over the indexed universe
+///   ([`SpatialProvider::is_indexed`](crate::SpatialProvider::is_indexed)). The
+///   certificate says NOTHING about a binding the index never saw.
+/// * The retain below keeps a row iff its binding is (a) in the certified set — an
+///   indexed TRUE row the residual FILTER would also keep — or (b) NOT indexed — a
+///   row the certificate does not cover, kept for the residual FILTER to judge,
+///   exactly as the superset path keeps it. An indexed row NOT in the certified set
+///   is an indexed FALSE row the residual FILTER would drop: dropping it here is the
+///   same verdict, taken earlier.
+/// * If every surviving row entered via (a), the residual FILTER would keep each of
+///   them (all certified TRUE), so running it cannot change the multiset — it is an
+///   IDENTITY and skipping it is result-identical (`AllCertified`). This includes the
+///   empty relation.
+/// * If ANY surviving row entered via (b), skipping the residual FILTER could admit a
+///   false positive (a not-indexed binding that does NOT satisfy the predicate) — a
+///   SOUNDNESS bug. So the residual runs (`Partial`): an identity on the (a)-rows and
+///   the judge of the (b)-rows, keeping the result byte-identical to the post-hoc
+///   plan while the exact restriction still shrank the residual's input.
+///
+/// The certificate is trusted the same way `candidates`' superset contract is: the
+/// provider asserts its exact refinement agrees with the registered `geof:` function
+/// semantics (sparq-geo pins that equivalence in its `topology_index` tests).
+#[cfg(feature = "spatial-exact-pushdown")]
+fn apply_spatial_pushdown_exact(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown) -> ExactPushdown {
+    let SpatialKind::BboxIntersects { arg_wkt, within_region: true } = &pd.kind else {
+        return ExactPushdown::Declined;
+    };
+    let Some(col) = b.col(&pd.geo_var) else { return ExactPushdown::Declined };
+    let Some(idx) = spatial::active() else { return ExactPushdown::Declined };
+    let query = crate::SpatialExactQuery::WithinRegion { region_wkt: arg_wkt };
+    let Some(exact) = idx.candidates_exact(&query) else { return ExactPushdown::Declined };
+    // A certified term absent from the graph dict can never bind here, so dropping it
+    // keeps `exact_ids` exactly the certified answers that can appear in `b` (mirrors
+    // the superset path's `cand_ids` mapping).
+    let exact_ids: FxHashSet<Id> = exact.iter().filter_map(|t| graph.id_of(t)).collect();
+    let mut all_certified = true;
+    // Same two retain branches as `apply_spatial_pushdown` (id-level fast path when the
+    // provider vouches its id universe is fresh for THIS dict, per-row fallback
+    // otherwise), same keep verdict in both: certified (a) or not-indexed (b).
+    let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
+    if let Some(indexed) = idx.indexed_ids(dict_ptr) {
+        b.rows.retain(|row| {
+            let id = row[col];
+            if exact_ids.contains(&id) {
+                return true; // (a) certified TRUE — the residual FILTER would keep it too
+            }
+            let keep = !indexed.contains(&id); // (b) keep not-indexed for the residual FILTER
+            all_certified &= !keep;
+            keep
+        });
+    } else {
+        let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
+        b.rows.retain(|row| {
+            let id = row[col];
+            if exact_ids.contains(&id) {
+                return true;
+            }
+            let keep = *verdict.entry(id).or_insert_with(|| match term_of_id(graph, id) {
+                Some(t) => !idx.is_indexed(&t),
+                None => true, // no term (synthetic / unbound) — the index can't rule it out
+            });
+            all_certified &= !keep;
+            keep
+        });
+    }
+    if all_certified { ExactPushdown::AllCertified } else { ExactPushdown::Partial }
 }
 
 /// The graph-dictionary term for `id`, if any. (A standalone helper so the spatial
