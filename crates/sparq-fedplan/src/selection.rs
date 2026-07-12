@@ -489,6 +489,67 @@ mod tests {
         assert_eq!(est, 1.0, "triples.max(1)/(1*1) = 1 for an all-zero partition");
     }
 
+    // [GPT-5.6] sq-2b7h7: sweep the estimator's finite, non-negative postcondition
+    // across every binding branch and both early returns. The zero-count probe makes
+    // the denominator guards observable; the high-distinct-count source exercises a
+    // both-bound estimate far below one without allowing it to become negative.
+    #[test]
+    fn estimate_cardinality_is_finite_and_non_negative_across_branches() {
+        let high_distinct = SourceDescriptor::builder(SourceId::new("high-distinct"))
+            .total_triples(2)
+            .predicate(pred("http://ex/p", 1, 1_000_000, 2_000_000))
+            .build();
+        let zero_distinct = SourceDescriptor::builder(SourceId::new("zero-distinct"))
+            .predicate(pred("http://ex/p", 1, 0, 0))
+            .build();
+
+        let cases = [
+            (
+                "neither term bound",
+                TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+                &high_distinct,
+            ),
+            (
+                "subject bound",
+                TriplePattern::new(iri("http://ex/s"), iri("http://ex/p"), var("o")),
+                &high_distinct,
+            ),
+            (
+                "object bound",
+                TriplePattern::new(var("s"), iri("http://ex/p"), iri("http://ex/o")),
+                &high_distinct,
+            ),
+            (
+                "both terms bound",
+                TriplePattern::new(iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o")),
+                &high_distinct,
+            ),
+            (
+                "open predicate",
+                TriplePattern::new(var("s"), var("p"), var("o")),
+                &high_distinct,
+            ),
+            (
+                "predicate absent",
+                TriplePattern::new(var("s"), iri("http://ex/absent"), var("o")),
+                &high_distinct,
+            ),
+            (
+                "zero-count denominator guard",
+                TriplePattern::new(iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o")),
+                &zero_distinct,
+            ),
+        ];
+
+        for (branch, pattern, source) in cases {
+            let estimate = estimate_cardinality(&pattern, source);
+            assert!(
+                estimate.is_finite() && estimate >= 0.0,
+                "{branch} returned an invalid estimate: {estimate}"
+            );
+        }
+    }
+
     // ---- The open-predicate estimate is the source's total triples, floored at 1 even for
     //      an empty source (this is also the `estimate_cardinality` fallback for a non-IRI
     //      predicate position).
