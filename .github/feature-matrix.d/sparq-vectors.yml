@@ -105,3 +105,12 @@
   crate: "sparq-vectors"
   features: "spqv-provenance"
   test: true
+
+# [GPT-5.6] sq-lsp7k.25: per-vector opaque metadata persisted in `.spqv` v4 and attached to exact
+# search hits without affecting ranking. The integration suite is feature-gated and otherwise
+# compiles empty, so this dedicated leg is its CI executor. Compose with `spqv-provenance` to cover
+# the v4 header's optional provenance block as well as tagged/untagged round-trip behavior.
+- name: "sparq-vectors (metadata-sidecar — per-vector tags on exact search)"
+  crate: "sparq-vectors"
+  features: "metadata-sidecar,spqv-provenance"
+  test: true

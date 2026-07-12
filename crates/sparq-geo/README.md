@@ -49,7 +49,7 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
 
 ## ✨ Features
 
-- **OGC conformance scoreboard** — 39 `geof:` IRIs cover topology, measurements, centroid, geometry/set operations, and `getSRID`. A self-written executable probe
+- **OGC conformance scoreboard** — 40 `geof:` IRIs cover topology, measurements, centroid, simplification, geometry/set operations, and `getSRID`. A self-written executable probe
   per OGC requirement ([`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs))
   scores **30 / 30** of the standard's R1–R30 taxonomy — OGC never shipped an executable
   ETS, and the GPL academic compliance benchmark cannot be vendored into this MIT tree,
@@ -98,8 +98,8 @@ projection distortion. Remaining approximation: interior-of-segment↔interior-o
 pairs (bounded by vertex arc spacing; uncommon for typical GeoSPARQL geometries).
 `uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` and the metric
 area/length/perimeter functions use one local equirectangular frame; undefined
-dimensions are errors, and `geof:centroid` preserves the input CRS. [GPT-5.6]
-sq-lsp7k.18. Line/polygon
+dimensions are errors, and `geof:centroid` preserves the input CRS. `geof:simplify`
+uses coordinate-space Douglas–Peucker, retains input vertices, and preserves CRS. [GPT-5.6] sq-lsp7k.18 / sq-lsp7k.23. Line/polygon
 set-subtraction is rolled in-crate over `i_overlay`; a `LineString` difference is proposed
 upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 
