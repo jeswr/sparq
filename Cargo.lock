@@ -4865,6 +4865,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "proptest",
+ "spargebra",
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
