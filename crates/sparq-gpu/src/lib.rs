@@ -639,3 +639,42 @@ impl Gpu {
 // The WGSL result-buffer bindings above are written through the kernels' result
 // arrays; bind-group layout note: `inputs` occupy bindings 0..k, the result
 // buffer binding k, the uniform params binding k+1 — matching each shader.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash32_determinism() {
+        // Test fixed edge inputs for bit-identical purity
+        let edge_inputs = [
+            0,
+            1,
+            u32::MAX,
+            u32::MAX - 1,
+            u32::MAX / 2,
+            EMPTY_KEY - 1, // sentinel-adjacent
+        ];
+
+        for &x in &edge_inputs {
+            let hash1 = hash32(x);
+            let hash2 = hash32(x);
+            assert_eq!(
+                hash1, hash2,
+                "hash32 must be pure: hash32({:x}) != hash32({:x})",
+                x, x
+            );
+        }
+
+        // Test bounded range for totality (no panic) and determinism
+        for x in 0..10_000 {
+            let hash1 = hash32(x);
+            let hash2 = hash32(x);
+            assert_eq!(
+                hash1, hash2,
+                "hash32 must be pure: hash32({:x}) != hash32({:x})",
+                x, x
+            );
+        }
+    }
+}
