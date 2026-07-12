@@ -1,4 +1,4 @@
-//! `geo:gmlLiteral` lexical forms -> CRS-tagged geometries. [OPUS-4.8] sq-zy0
+//! `geo:gmlLiteral` lexical forms <-> CRS-tagged geometries. [OPUS-4.8] sq-zy0
 //!
 //! GeoSPARQL (1.0 §8.5.2 / 1.1 §8.8) defines a second geometry serialization
 //! datatype, `geo:gmlLiteral`, whose lexical form is a **GML geometry element**
@@ -76,6 +76,7 @@ use geo_types::{
 };
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use std::fmt::Write;
 
 // [OPUS-4.8] quick-xml 0.40 removed `BytesText::unescape()` and deprecated
 // `Attribute::unescape_value()`. Both used to decode + resolve the XML
@@ -118,6 +119,131 @@ pub fn parse_gml_literal(lex: &str) -> Result<GeoGeometry, GeoError> {
     // EPSG:4326 is LAT/LONG; normalise to internal long/lat exactly as WKT does.
     let geometry = if crs == Crs::Epsg4326 { swap_xy(geometry) } else { geometry };
     Ok(GeoGeometry { crs, geometry })
+}
+
+// ---- GeoGeometry -> GML 3 Simple Features ---------------------------------
+
+/// Serialises a CRS-tagged geometry to the GML 3 Simple Features profile.
+/// [GPT-5.6] sq-i3wb5
+pub(crate) fn serialize_gml_literal(value: &GeoGeometry) -> String {
+    // Internal geographic coordinates are always longitude/latitude. GML uses
+    // the declared CRS axis order, so reverse the parser's EPSG:4326 swap.
+    let geometry = if value.crs == Crs::Epsg4326 {
+        swap_xy(value.geometry.clone())
+    } else {
+        value.geometry.clone()
+    };
+
+    let mut output = String::new();
+    write_geometry(&mut output, &geometry, Some(&value.crs));
+    output
+}
+
+fn write_geometry(output: &mut String, geometry: &Geometry<f64>, root_crs: Option<&Crs>) {
+    match geometry {
+        Geometry::Point(point) => write_point(output, point, root_crs),
+        Geometry::Line(line) => {
+            write_linestring(output, &[line.start, line.end], root_crs);
+        }
+        Geometry::LineString(line) => write_linestring(output, &line.0, root_crs),
+        Geometry::Polygon(polygon) => write_polygon(output, polygon, root_crs),
+        Geometry::MultiPoint(points) => {
+            write_start(output, "MultiPoint", root_crs);
+            for point in points {
+                output.push_str("<gml:pointMember>");
+                write_point(output, point, None);
+                output.push_str("</gml:pointMember>");
+            }
+            output.push_str("</gml:MultiPoint>");
+        }
+        Geometry::MultiLineString(lines) => {
+            write_start(output, "MultiCurve", root_crs);
+            for line in lines {
+                output.push_str("<gml:curveMember>");
+                write_linestring(output, &line.0, None);
+                output.push_str("</gml:curveMember>");
+            }
+            output.push_str("</gml:MultiCurve>");
+        }
+        Geometry::MultiPolygon(polygons) => {
+            write_start(output, "MultiSurface", root_crs);
+            for polygon in polygons {
+                output.push_str("<gml:surfaceMember>");
+                write_polygon(output, polygon, None);
+                output.push_str("</gml:surfaceMember>");
+            }
+            output.push_str("</gml:MultiSurface>");
+        }
+        Geometry::GeometryCollection(collection) => {
+            write_start(output, "MultiGeometry", root_crs);
+            for child in collection {
+                output.push_str("<gml:geometryMember>");
+                write_geometry(output, child, None);
+                output.push_str("</gml:geometryMember>");
+            }
+            output.push_str("</gml:MultiGeometry>");
+        }
+        Geometry::Rect(rect) => write_polygon(output, &rect.to_polygon(), root_crs),
+        Geometry::Triangle(triangle) => {
+            write_polygon(output, &triangle.to_polygon(), root_crs);
+        }
+    }
+}
+
+fn write_start(output: &mut String, name: &str, root_crs: Option<&Crs>) {
+    write!(output, "<gml:{name}").expect("writing to a String cannot fail");
+    if let Some(crs) = root_crs {
+        output.push_str(" xmlns:gml=\"http://www.opengis.net/gml/3.2\" srsName=\"");
+        output.push_str(&quick_xml::escape::escape(crs.iri()));
+        output.push('"');
+    }
+    output.push('>');
+}
+
+fn write_point(output: &mut String, point: &Point<f64>, root_crs: Option<&Crs>) {
+    write_start(output, "Point", root_crs);
+    output.push_str("<gml:pos>");
+    write_coord(output, point.0);
+    output.push_str("</gml:pos></gml:Point>");
+}
+
+fn write_linestring(output: &mut String, coords: &[Coord<f64>], root_crs: Option<&Crs>) {
+    write_start(output, "LineString", root_crs);
+    output.push_str("<gml:posList>");
+    write_coords(output, coords);
+    output.push_str("</gml:posList></gml:LineString>");
+}
+
+fn write_polygon(output: &mut String, polygon: &Polygon<f64>, root_crs: Option<&Crs>) {
+    write_start(output, "Polygon", root_crs);
+    output.push_str("<gml:exterior>");
+    write_ring(output, polygon.exterior());
+    output.push_str("</gml:exterior>");
+    for ring in polygon.interiors() {
+        output.push_str("<gml:interior>");
+        write_ring(output, ring);
+        output.push_str("</gml:interior>");
+    }
+    output.push_str("</gml:Polygon>");
+}
+
+fn write_ring(output: &mut String, ring: &LineString<f64>) {
+    output.push_str("<gml:LinearRing><gml:posList>");
+    write_coords(output, &ring.0);
+    output.push_str("</gml:posList></gml:LinearRing>");
+}
+
+fn write_coords(output: &mut String, coords: &[Coord<f64>]) {
+    for (index, coord) in coords.iter().enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        write_coord(output, *coord);
+    }
+}
+
+fn write_coord(output: &mut String, coord: Coord<f64>) {
+    write!(output, "{} {}", coord.x, coord.y).expect("writing to a String cannot fail");
 }
 
 // ---- Stage 1: XML -> a small geometry DOM ----------------------------------

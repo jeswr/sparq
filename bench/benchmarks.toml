@@ -78,6 +78,22 @@ pinning     = "generator deterministic (fixed xorshift seed); pin nodes/avg_degr
 records_to  = "stdout (metric_us lines); not a committed regression number"
 status      = "ok"
 
+# [FABLE-5] sq-tonhr.6: the opt-in sparq-shaclc SHACL Compact Syntax surface
+# (rdf-shuttle-generated strict/extended parsers + the residual printer).
+[[benchmark]]
+id          = "sparq-shaclc"
+name        = "SHACL Compact Syntax parse + residual-print throughput"
+category    = "scaling"
+measures    = "min-of-3 microseconds for strict parse, extended parse, and residual-print of a generated shapes corpus (metric_us lines)"
+invoke      = "cargo run -p sparq-shaclc --release --example bench_shaclc -- 2000"
+source      = "crates/sparq-shaclc/examples/bench_shaclc.rs"
+dataset     = "synthetic shapes corpus generated in-process (deterministic; one representative shape per index); args = [shapes=2000]"
+quiet_box_sensitive = true
+featured    = false  # in-crate micro-bench for an opt-in capability crate; not a dashboard series
+pinning     = "generator deterministic; pin the shapes count for comparable numbers"
+records_to  = "stdout (metric_us lines); not a committed regression number"
+status      = "ok"
+
 [[benchmark]]
 id          = "sparq-bench-fuzz"
 name        = "Differential fuzzer vs Oxigraph"
