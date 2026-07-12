@@ -15,6 +15,51 @@
 // arm of `compare_terms`' Numeric branch — proptest immediately shrinks to
 // `(NaN, 0.0)` as the antisymmetry witness.
 
+// [GPT-5.6] sq-vpsap — Pin the fallible Dec order directly, including negative
+// mantissas whose ordering reverses if an implementation accidentally compares magnitudes.
+#[cfg(feature = "numeric")]
+mod dec_order {
+    use proptest::prelude::*;
+    use sparq_substrate::numeric::Dec;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn negative_cross_scale_pair_orders_by_signed_value() {
+        let minus_one_point_five = Dec {
+            mant: -15,
+            scale: 1,
+        };
+        let minus_two = Dec { mant: -2, scale: 0 };
+
+        assert_eq!(
+            minus_one_point_five.cmp(minus_two),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            minus_two.cmp(minus_one_point_five),
+            Some(Ordering::Less)
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn negative_mantissa_cmp_is_reflexive_and_antisymmetric(
+            a_mant in (-(i64::MAX as i128))..=0_i128,
+            a_scale in 0_u32..=6,
+            b_mant in (-(i64::MAX as i128))..=0_i128,
+            b_scale in 0_u32..=6,
+        ) {
+            let a = Dec { mant: a_mant, scale: a_scale };
+            let b = Dec { mant: b_mant, scale: b_scale };
+            let ab = a.cmp(b).expect("bounded scale alignment cannot overflow");
+
+            prop_assert_eq!(a.cmp(a), Some(Ordering::Equal));
+            prop_assert_eq!(b.cmp(b), Some(Ordering::Equal));
+            prop_assert_eq!(b.cmp(a), Some(ab.reverse()));
+        }
+    }
+}
+
 #[cfg(all(feature = "compare", feature = "numeric"))]
 mod order_numeric {
     use proptest::prelude::*;
