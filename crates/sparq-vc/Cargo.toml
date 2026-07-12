@@ -64,3 +64,4 @@ did-web = ["dep:serde_json"]
 # Sign-then-verify round-trip tests parse N-Triples fixtures.
 oxttl.workspace = true
 hex = "0.4"
+proptest = "1"
