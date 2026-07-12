@@ -26,6 +26,8 @@ Add the dependency (HDT is a separate, native-only crate):
 [dependencies]
 sparq-core = "0.1"            # default features include `parallel` (native)
 sparq-hdt  = "0.1"            # OPTIONAL — only if you load .hdt archives
+# To filter an HDT during its SPO decode instead of building the full Graph:
+# sparq-hdt = { version = "0.1", features = ["load-filter"] }
 oxrdf      = { version = "0.3", features = ["rdf-12"] }  # for Term/NamedNode at call sites
 ```
 
@@ -180,6 +182,19 @@ pub fn fork(&self) -> Graph               // mutable structural fork (Arc-shares
 ```rust
 pub fn load(path: impl AsRef<Path>) -> Result<Graph, Error>         // sniffs .hdt.gz/.hdt.zst/.hdt.bz2
 pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error>   // any buffered source
+
+// [GPT-5.6] sq-lsp7k.24 — opt-in `load-filter`; None means wildcard. Filtering
+// runs during the one-shot SPO walk and only accepted triples' terms enter the
+// returned Graph. An all-None pattern is identical to load_reader.
+#[cfg(feature = "load-filter")]
+pub type TriplePattern = (
+    Option<oxrdf::NamedOrBlankNode>, // subject
+    Option<oxrdf::NamedNode>,        // predicate
+    Option<oxrdf::Term>,             // object
+);
+#[cfg(feature = "load-filter")]
+pub fn load_reader_filtered<R: BufRead>(reader: R, pattern: &TriplePattern) -> Result<Graph, Error>
+
 pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT header metadata as a Graph
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
 // also: load_reader_via_upstream (differential oracle), graph_from_hdt, graph_from_reader
@@ -236,7 +251,15 @@ assert_eq!(g.named.len(), 1);          // each named graph is its own sub-Graph
 ```rust
 let g    = sparq_hdt::load("dataset.hdt")?;        // .hdt / .hdt.gz / .hdt.zst / .hdt.bz2 (by magic bytes)
 let meta = sparq_hdt::header("dataset.hdt")?;      // VoID stats / provenance as a queryable Graph
-// from memory: sparq_hdt::load_reader(std::io::Cursor::new(bytes))?
+let bytes = std::fs::read("dataset.hdt")?;
+// from memory: sparq_hdt::load_reader(std::io::Cursor::new(bytes.clone()))?
+// Predicate-filtered from memory (needs `load-filter`; None is a wildcard):
+let pattern: sparq_hdt::TriplePattern = (
+    None,
+    Some(oxrdf::NamedNode::new("http://www.w3.org/2000/01/rdf-schema#label")?),
+    None,
+);
+let labels = sparq_hdt::load_reader_filtered(std::io::Cursor::new(bytes), &pattern)?;
 // WRITE back (opt-in `write` feature): sparq_hdt::save(&g, "out.hdt.gz")?;
 //   (currently a temp-N-Triples round-trip through the wrapped builder — see
 //    sparq-hdt/UPSTREAM.md for the queued in-memory-builder contribution)
@@ -593,6 +616,11 @@ cargo build -p sparq-cli --features serialize-rdf
   zero code into the wasm build. Compression containers are detected by **magic bytes, not
   file extension**, so a mislabeled `.hdt` still loads; all three (`gz`/`zst`/`bz2`) decode
   in a streaming fashion.
+- **HDT triple-pattern loading is separately opt-in.** Enable `sparq-hdt`'s
+  `load-filter` feature for `TriplePattern` and `load_reader_filtered`. The
+  decoder still validates and decodes the archive dictionary, but rejected
+  triples are not accumulated, interned into the result, or indexed; result
+  memory therefore follows the matches rather than the full triple set.
 - **HDT format coverage:** standard v1.0 layout only (FourSectionDictionary / Plain Front
   Coding + BitmapTriples, SPO order) as emitted by hdt-cpp / hdt-java. Exotic submission
   layouts are rejected with an error.

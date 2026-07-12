@@ -38,6 +38,18 @@ mod write;
 #[cfg(feature = "write")]
 pub use write::save;
 
+/// A subject/predicate/object filter for opt-in HDT loading.
+///
+/// `None` is a wildcard. Subjects use [`oxrdf::NamedOrBlankNode`], predicates
+/// use [`oxrdf::NamedNode`], and objects use [`oxrdf::Term`], matching the RDF
+/// term kinds allowed in each triple position.
+#[cfg(feature = "load-filter")]
+pub type TriplePattern = (
+    Option<oxrdf::NamedOrBlankNode>,
+    Option<oxrdf::NamedNode>,
+    Option<oxrdf::Term>,
+);
+
 /// The error type for HDT loading.
 #[derive(Debug)]
 pub enum Error {
@@ -204,6 +216,38 @@ pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
     // [OPUS-4.8] Default path is the direct decoder (H1–H4): it never builds the
     // upstream wavelet matrix / OP-index that a one-shot SPO load throws away.
     with_hdt_stream(reader, |r| decode::graph_from_reader(r))
+}
+
+/// Loads only the triples matching `pattern` from an HDT archive.
+///
+/// Filtering happens during the one-shot SPO walk, before the result's
+/// dictionary and permutation indexes are built. Consequently, terms used only
+/// by rejected triples are not interned into the returned [`Graph`]. An
+/// all-wildcard pattern is exactly equivalent to [`load_reader`]. Compressed HDT
+/// containers are detected and streamed as in [`load_reader`].
+///
+/// # Example
+///
+/// ```no_run
+/// use oxrdf::NamedNode;
+/// use sparq_hdt::TriplePattern;
+///
+/// let predicate = NamedNode::new("http://xmlns.com/foaf/0.1/knows")?;
+/// let pattern: TriplePattern = (None, Some(predicate), None);
+/// let file = std::io::BufReader::new(std::fs::File::open("dataset.hdt")?);
+/// let graph = sparq_hdt::load_reader_filtered(file, &pattern)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "load-filter")]
+pub fn load_reader_filtered<R: BufRead>(
+    reader: R,
+    pattern: &TriplePattern,
+) -> Result<Graph, Error> {
+    // Preserve the existing loader byte-for-byte for the wildcard identity case.
+    if pattern.0.is_none() && pattern.1.is_none() && pattern.2.is_none() {
+        return load_reader(reader);
+    }
+    with_hdt_stream(reader, |r| decode::graph_from_reader_filtered(r, pattern))
 }
 
 /// Loads via the WRAPPED `hdt` crate's full `Hdt::read` (which builds the query

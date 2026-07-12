@@ -4685,6 +4685,7 @@ dependencies = [
  "crc",
  "flate2",
  "hdt",
+ "oxrdf 0.3.3",
  "proptest",
  "rayon",
  "serde_json",
