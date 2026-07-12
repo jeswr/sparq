@@ -1,0 +1,29 @@
+# Feature-matrix fragment for `sparq-conformance`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [FABLE-5]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+#
+# NOTE: most of sparq-conformance's opt-in lanes (jsonld-suite, d-entail, rif-*,
+# el-suite, dl-direct, ql-experimental, service/http-protocol/federation-descriptors)
+# are deliberately NOT legs here — they need fetched W3C fixtures and/or the loopback
+# server stack and run in ci.yml's dedicated conformance jobs instead. Only HERMETIC
+# lanes (committed fixtures, no network, no fetch step) belong in this file.
+
+# sparq-conformance: the GeoSPARQL geometry-function differential vs the captured
+# GEOS golden truth-table (bench/geo/function-golden/, COMMITTED — fully hermetic:
+# no fetch step, no network; GEOS itself is never run in CI). Exercises the
+# `tests/geo_function_differential.rs` lane the sq-vya1 guard requires a leg for.
+# [FABLE-5] sq-iwulr
+- name: "sparq-conformance (geo)"
+  crate: "sparq-conformance"
+  features: "geo"
+  test: true
