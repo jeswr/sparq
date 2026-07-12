@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sparq_serve::{ApplyUpdates, GenerationRing, PodId, WriteError, Writer, WriterConfig};
+use sparq_serve::{
+    ApplyUpdates, CommitGranularity, GenerationRing, PodId, WriteError, Writer, WriterConfig,
+};
 
 /// Snapshot = the log of applied updates, in application order.
 type Log = Vec<String>;
@@ -1163,4 +1165,171 @@ fn restore_failure_keeps_writer_alive_and_store_intact() {
         2,
         "both restore attempts ran on the writer thread"
     );
+}
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] (sq-bdaw5) Commit hook: the per-publish observation seam that lets a
+// change-stream recorder ride the writer thread instead of serialising submitters.
+// ---------------------------------------------------------------------------
+
+/// The chained-pairs + ack-ordering invariant: the hook fires exactly once per
+/// published generation, ON the writer thread, with `(predecessor, published)`
+/// pairs that CHAIN gapless — and a submitter's ack happens-after the hook, so
+/// by the time `submit` returns its generation's pair is already observed.
+/// (Mutation witness: knock out the `hook` call in the writer's `commit` and
+/// `pairs` stays empty — every assertion below goes red.)
+#[test]
+fn commit_hook_fires_once_per_publish_with_chained_pairs_before_ack() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let pairs: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pairs_hook = pairs.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            adaptive_commit: true, // serial submits: one generation each, no window wait
+            ..WriterConfig::default()
+        },
+        move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
+            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+        },
+    );
+
+    for (i, u) in ["a", "b", "c"].iter().enumerate() {
+        let n = writer.submit(u.to_string(), pods(&["pod:a"])).unwrap();
+        assert_eq!(n, i as u64 + 1);
+        // Ack happens-after the hook: the pair for THIS generation is already recorded.
+        assert!(
+            pairs.lock().unwrap().iter().any(|&(_, to)| to == n),
+            "submit({u}) acked before its commit hook ran"
+        );
+    }
+    drop(writer);
+
+    // Exactly one hook fire per published generation, chained gapless from gen 0.
+    assert_eq!(*pairs.lock().unwrap(), vec![(0, 1), (1, 2), (2, 3)]);
+}
+
+/// A batch whose every update failed publishes nothing — and must not fire the
+/// hook (there is no new generation to report; a change-stream record for it
+/// would be a non-forward append the log rejects).
+#[test]
+fn commit_hook_not_fired_when_nothing_publishes() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let fires = Arc::new(AtomicUsize::new(0));
+    let fires_hook = fires.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+        move |_: &sparq_serve::Generation<Log>, _: &sparq_serve::Generation<Log>| {
+            fires_hook.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    let err = writer
+        .submit("fail:nope".to_string(), pods(&["pod:a"]))
+        .unwrap_err();
+    assert_eq!(err, WriteError::Rejected("nope".to_string()));
+    assert_eq!(
+        fires.load(Ordering::SeqCst),
+        0,
+        "an all-failed batch publishes nothing, so the hook must not fire"
+    );
+
+    writer.submit("ok".to_string(), pods(&["pod:a"])).unwrap();
+    assert_eq!(fires.load(Ordering::SeqCst), 1);
+}
+
+/// A RESTORE publish must NOT fire the commit hook (the restored snapshot does
+/// not share the predecessor's writer lineage — a lineage-diffing recorder must
+/// never be handed the pair). Commits after the restore chain FROM the restored
+/// generation, so the skipped publish is visible to the recorder as an explicit
+/// discontinuity, never a silently-diffed-through one.
+#[test]
+fn commit_hook_not_fired_for_restore_publish() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let restores = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let restore_fails = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let pairs: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pairs_hook = pairs.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::with_restore_control(&forks, &restores, &restore_fails),
+        WriterConfig {
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+        move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
+            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+        },
+    );
+
+    writer.submit("a".to_string(), pods(&["pod:a"])).unwrap(); // gen 1: hook fires
+    let restored = writer
+        .restore(vec!["fresh".to_string()])
+        .unwrap()
+        .expect("restore ok"); // gen 2: published, hook NOT fired
+    assert_eq!(restored, 2);
+    writer.submit("b".to_string(), pods(&["pod:a"])).unwrap(); // gen 3: hook fires
+    drop(writer);
+
+    assert_eq!(
+        *pairs.lock().unwrap(),
+        vec![(0, 1), (2, 3)],
+        "commit publishes fire the hook; the restore publish (gen 2) must not"
+    );
+}
+
+/// Under `CommitGranularity::CommuteGroup` every published commuting run fires
+/// the hook once — the mock's default `footprint` is `Barrier`, so one window's
+/// batch degrades to one generation per update, and the pairs still chain.
+#[test]
+fn commit_hook_fires_per_commute_group() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let pairs: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pairs_hook = pairs.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            window: Duration::from_millis(200), // wide window: all submissions share one batch
+            granularity: CommitGranularity::CommuteGroup,
+            ..WriterConfig::default()
+        },
+        move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
+            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+        },
+    );
+
+    // Queue three fire-and-forget updates, then a sync one; barriers split the
+    // (single) window into one generation per update.
+    writer.submit_detached("a".to_string(), pods(&["pod:a"])).unwrap();
+    writer.submit_detached("b".to_string(), pods(&["pod:a"])).unwrap();
+    writer.submit_detached("c".to_string(), pods(&["pod:a"])).unwrap();
+    let last = writer.submit("d".to_string(), pods(&["pod:a"])).unwrap();
+    drop(writer);
+
+    let pairs = pairs.lock().unwrap();
+    assert_eq!(
+        pairs.len() as u64,
+        last,
+        "one hook fire per published generation (one per barrier-split group)"
+    );
+    // The pairs chain gapless from generation 0 regardless of batching splits.
+    for (i, &(from, to)) in pairs.iter().enumerate() {
+        assert_eq!(from, i as u64, "pair {i} chains from the previous publish");
+        assert_eq!(to, i as u64 + 1);
+    }
 }

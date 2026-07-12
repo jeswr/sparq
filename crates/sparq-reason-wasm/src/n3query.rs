@@ -10,8 +10,9 @@
 //!
 //! This module is the pure `N3-query-rule -> CONSTRUCT-string` translator. It is deliberately
 //! FAIL-CLOSED: a query rule whose premise uses an N3 builtin (`math:`/`string:`/`list:`/
-//! `log:`/`time:`), or any term that a plain SPARQL BGP cannot faithfully express (a quoted
-//! `{ … }` formula or a first-class `( … )` list), is REJECTED with a clear error rather than
+//! `log:`/`time:`), or any term this compat path cannot yet faithfully express as a plain
+//! SPARQL BGP (a quoted `{ … }` formula, a first-class `( … )` list, or a quoted
+//! `<< s p o >>` triple term), is REJECTED with a clear error rather than
 //! silently mistranslated into a triple-pattern match (which would return WRONG answers). The
 //! deferred surface is tracked as a follow-up bead and documented in the package README.
 
@@ -86,8 +87,8 @@ fn render_bgp(rows: &[[Term; 3]]) -> Result<String, String> {
 
 /// Render one N3 term as a SPARQL term. `Blank` maps to a fresh-but-consistent variable so a
 /// blank shared between premise and conclusion carries its binding through the CONSTRUCT (a
-/// SPARQL template blank would NOT — it mints a fresh node per solution). `Formula`/`List` are
-/// rejected: no faithful BGP rendering exists.
+/// SPARQL template blank would NOT — it mints a fresh node per solution). `Formula`/`List`/
+/// `Triple` are rejected: no verified faithful BGP rendering exists on this path yet.
 fn render_term(t: &Term) -> Result<String, String> {
     match t {
         Term::Iri(iri) => Ok(format!("<{}>", escape_iri(iri))),
@@ -112,6 +113,16 @@ fn render_term(t: &Term) -> Result<String, String> {
         Term::List(_) => Err(
             "compat query filter: a first-class `( … )` list term in the query is not supported \
              by the v1 SPARQL-CONSTRUCT compat path (see the package README / follow-up bead)."
+                .to_string(),
+        ),
+        // FAIL-CLOSED like Formula/List: a faithful rendering would require the engine's
+        // SPARQL quoted-triple-pattern surface to be verified end-to-end through this
+        // CONSTRUCT compat path first — reject rather than risk a silent mistranslation.
+        // [FABLE-5]
+        Term::Triple(_) => Err(
+            "compat query filter: a quoted `<< s p o >>` triple term in the query is not \
+             supported by the v1 SPARQL-CONSTRUCT compat path (see the package README / \
+             follow-up bead)."
                 .to_string(),
         ),
     }
@@ -252,7 +263,7 @@ mod tests {
     }
 
     /// A blank in the query maps to a consistent variable (shared premise/conclusion binding),
-    /// and a formula/list term is rejected fail-closed.
+    /// and a formula/list/quoted-triple term is rejected fail-closed.
     #[test]
     fn blank_maps_to_var_and_formula_list_rejected() {
         assert_eq!(
@@ -262,6 +273,13 @@ mod tests {
         );
         assert!(render_term(&Term::Formula(vec![])).is_err());
         assert!(render_term(&Term::List(vec![])).is_err());
+        // RDF 1.2 quoted-triple term (GH #2012): fail-closed on this path. [FABLE-5]
+        assert!(render_term(&Term::Triple(Box::new([
+            Term::Iri("http://ex/s".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/o".into()),
+        ])))
+        .is_err());
     }
 
     /// IRI escaping neutralises IRIREF-forbidden characters.

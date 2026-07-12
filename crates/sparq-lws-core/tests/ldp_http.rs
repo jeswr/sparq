@@ -354,7 +354,9 @@ async fn get_negotiates_jsonld_from_stored_turtle() {
 }
 
 #[tokio::test]
-async fn get_with_unacceptable_accept_is_406() {
+async fn get_with_unknown_accept_falls_back_to_turtle() {
+    // An Accept naming no producible type degrades to the Solid default (text/turtle) rather than
+    // failing the read with a 406.
     let h = Harness::new().await;
     h.request(
         "PUT",
@@ -369,6 +371,33 @@ async fn get_with_unacceptable_accept_is_406() {
             "/alice/data",
             None,
             &[("accept", "image/png")],
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(
+        get.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+        "text/turtle"
+    );
+}
+
+#[tokio::test]
+async fn get_with_explicit_q_zero_refusal_is_406() {
+    // The only remaining 406: the client explicitly refused (q=0) every producible type.
+    let h = Harness::new().await;
+    h.request(
+        "PUT",
+        "/alice/data",
+        Some("text/turtle"),
+        Body::from(TURTLE),
+    )
+    .await;
+    let get = h
+        .request_with(
+            "GET",
+            "/alice/data",
+            None,
+            &[("accept", "text/turtle;q=0, application/ld+json;q=0")],
             Body::empty(),
         )
         .await;

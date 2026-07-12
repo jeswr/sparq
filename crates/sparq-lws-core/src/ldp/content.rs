@@ -10,6 +10,9 @@
 //! M2: content negotiation (an `Accept`-driven serialisation choice) + re-serialisation between the
 //! two RDF formats now land here ([`negotiate_accept`] + [`serialize_triples`]). The JSON-LD
 //! `noRemoteContextLoader` SSRF posture (oxjsonld is local-only by construction) ports favourably.
+//! The Solid read path is hardened via [`negotiate_accept_with_profile`]: q-values, the JSON-LD
+//! `profile` parameter (expanded vs compacted, surfaced in [`NegotiatedFormat`]), and an `Accept`
+//! naming no producible type degrading to `text/turtle` (the Solid default) instead of a 406.
 //! Still M2-next: N-Triples/N-Quads/N3 read formats.
 
 use oxjsonld::{JsonLdParser, JsonLdSerializer};
@@ -145,21 +148,96 @@ pub fn serialize_triples(format: RdfFormat, triples: &[Triple]) -> Result<Vec<u8
     }
 }
 
-/// Negotiate the response RDF format from an `Accept` header against the formats this server can
-/// produce (Turtle + JSON-LD).
+/// A JSON-LD document form requested via the `Accept` header's `profile` media-type parameter
+/// ([JSON-LD 1.1 IANA registration](https://www.w3.org/TR/json-ld11/#iana-considerations)).
 ///
-/// Returns the best acceptable [`RdfFormat`], or `None` when the client explicitly accepts neither
-/// (the caller then responds 406). An ABSENT or `*/*` Accept defaults to the resource's stored
-/// format (`stored`) — the most faithful, zero-cost response. Quality values (`q=`) are honoured:
-/// the highest-q acceptable type wins, ties broken in the header's order.
+/// Only the two READ-relevant document forms are honoured: `expanded` and `compacted`. Other
+/// registered profile IRIs (`flattened`, `framed`, …) are ignored — per the registration a profile
+/// parameter is a client *preference* a server may decline, never an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonLdProfileParam {
+    /// `http://www.w3.org/ns/json-ld#expanded`
+    Expanded,
+    /// `http://www.w3.org/ns/json-ld#compacted`
+    Compacted,
+}
+
+impl JsonLdProfileParam {
+    /// Extract the first honoured document form from a `profile` parameter VALUE (the part after
+    /// `profile=`), deterministically.
+    ///
+    /// The value is a (usually quoted) whitespace-separated list of profile IRIs; the FIRST one
+    /// that names an honoured form wins (client order = client preference). Unknown IRIs are
+    /// skipped. IRIs match the canonical registration exactly (IRIs are case-sensitive) — matched
+    /// via [`oxjsonld::JsonLdProfile::from_iri`] so the accepted spellings stay pinned to the
+    /// vendored JSON-LD implementation, not a hand-copied string.
+    fn from_param_value(value: &str) -> Option<Self> {
+        value
+            .trim()
+            .trim_matches('"')
+            .split_ascii_whitespace()
+            .find_map(|iri| match oxjsonld::JsonLdProfile::from_iri(iri) {
+                Some(oxjsonld::JsonLdProfile::Expanded) => Some(Self::Expanded),
+                Some(oxjsonld::JsonLdProfile::Compacted) => Some(Self::Compacted),
+                _ => None,
+            })
+    }
+}
+
+/// The outcome of [`negotiate_accept_with_profile`]: the chosen response format, plus — when that
+/// format is JSON-LD and the winning explicit `application/ld+json` range carried a recognised
+/// `profile` parameter — the requested document form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NegotiatedFormat {
+    /// The RDF format the response body should be serialised in.
+    pub format: RdfFormat,
+    /// The JSON-LD document form the client asked for, when [`Self::format`] is
+    /// [`RdfFormat::JsonLd`] and an explicit `application/ld+json` range carried one. `None`
+    /// otherwise (including a JSON-LD choice reached via an `application/*` / `*/*` wildcard —
+    /// wildcard ranges carry no honoured profile). The serialiser currently emits the streaming
+    /// (expanded-compatible) document form regardless; this field lets the handler echo the
+    /// selected profile and honour `compacted` output once the serialiser can produce it.
+    pub jsonld_profile: Option<JsonLdProfileParam>,
+}
+
+/// Negotiate the response RDF format from an `Accept` header against the formats this server can
+/// produce (Turtle + JSON-LD). Thin wrapper over [`negotiate_accept_with_profile`] (the single
+/// `Accept` decision point) that drops the JSON-LD profile detail.
+pub fn negotiate_accept(accept: Option<&str>, stored: RdfFormat) -> Option<RdfFormat> {
+    negotiate_accept_with_profile(accept, stored).map(|n| n.format)
+}
+
+/// Negotiate the response RDF format (and JSON-LD document form) from an `Accept` header against
+/// the formats this server can produce (Turtle + JSON-LD).
+///
+/// - An ABSENT `Accept` means "no preference": the resource's stored format (`stored`) — the most
+///   faithful, zero-cost response (as does `*/*`, which covers both producible types).
+/// - Quality values (`q=`) are honoured: the highest-q acceptable type wins; a q-tie prefers the
+///   stored format (cheapest); range ties break in the header's order.
+/// - The `application/ld+json` `profile` parameter is honoured deterministically: the profile of
+///   the best-q explicit `ld+json` range is surfaced (first-listed range wins q-ties), reduced to
+///   the first honoured document form in its value.
+/// - A PRESENT header that names/covers NO producible type (blank, or only unrecognised types like
+///   `text/html`) falls back to `text/turtle` — the Solid default representation — rather than
+///   failing the read (never a 406, never a 500).
+/// - `None` (⇒ the caller's 406) is returned ONLY when the client EXPLICITLY refused every
+///   producible type it covered (all applicable ranges at `q=0`) — serving a representation the
+///   client q=0-refused would violate RFC 7231 §5.3.1.
 ///
 /// This is a deliberately small, dependency-free `Accept` parser sufficient for the two RDF media
-/// types the server serves; it is NOT a general RFC 7231 content-negotiation engine.
-pub fn negotiate_accept(accept: Option<&str>, stored: RdfFormat) -> Option<RdfFormat> {
-    let raw = match accept {
-        None => return Some(stored),
-        Some(s) if s.trim().is_empty() => return Some(stored),
-        Some(s) => s,
+/// types the server serves; it is NOT a general RFC 7231 content-negotiation engine (in
+/// particular, parameters are split on `;`, so a quoted parameter value containing `;` — which no
+/// registered profile IRI does — would mis-parse).
+pub fn negotiate_accept_with_profile(
+    accept: Option<&str>,
+    stored: RdfFormat,
+) -> Option<NegotiatedFormat> {
+    // ABSENT header — "no preference": the stored format, byte-identical to the stored bytes.
+    let Some(raw) = accept else {
+        return Some(NegotiatedFormat {
+            format: stored,
+            jsonld_profile: None,
+        });
     };
 
     // Track the best q for each producible type, plus the matching type-range wildcards. A `text/*`
@@ -172,6 +250,11 @@ pub fn negotiate_accept(accept: Option<&str>, stored: RdfFormat) -> Option<RdfFo
     let mut q_app_star: Option<f32> = None; // covers JSON-LD only
     let mut q_any: Option<f32> = None; // covers both
 
+    // The profile carried by the BEST explicit `application/ld+json` range seen so far. Updated
+    // only on a STRICTLY greater q, so the first-listed range wins q-ties — deterministic, and
+    // consistent with `bump`, under which a later equal-q range changes nothing.
+    let mut jsonld_profile: Option<JsonLdProfileParam> = None;
+
     fn bump(slot: &mut Option<f32>, q: f32) {
         *slot = Some(slot.unwrap_or(0.0).max(q));
     }
@@ -179,23 +262,48 @@ pub fn negotiate_accept(accept: Option<&str>, stored: RdfFormat) -> Option<RdfFo
     for part in raw.split(',') {
         let mut it = part.split(';');
         let media = it.next().unwrap_or("").trim().to_ascii_lowercase();
-        // Parse an optional q-value; default 1.0; clamp to [0,1]; a malformed q is treated as 0
-        // (RFC 7231 §5.3.1 — an unparseable weight is not "accepted").
+        // Parse the parameters: an optional q-value (default 1.0; clamp to [0,1]; a malformed q is
+        // treated as 0 — RFC 7231 §5.3.1, an unparseable weight is not "accepted") and an optional
+        // `profile` (media-type parameter names are case-insensitive; the IRI value is not).
         let mut q: f32 = 1.0;
+        let mut profile: Option<JsonLdProfileParam> = None;
         for param in it {
-            let p = param.trim();
-            if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")) {
-                q = v.trim().parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0);
+            let Some((name, value)) = param.split_once('=') else {
+                continue;
+            };
+            match name.trim().to_ascii_lowercase().as_str() {
+                "q" => q = value.trim().parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0),
+                "profile" => profile = JsonLdProfileParam::from_param_value(value),
+                _ => {}
             }
         }
         match media.as_str() {
             "text/turtle" => bump(&mut q_turtle, q),
-            "application/ld+json" => bump(&mut q_jsonld, q),
+            "application/ld+json" => {
+                if q_jsonld.is_none_or(|cur| q > cur) {
+                    jsonld_profile = profile;
+                }
+                bump(&mut q_jsonld, q);
+            }
             "text/*" => bump(&mut q_text_star, q),
             "application/*" => bump(&mut q_app_star, q),
             "*/*" => bump(&mut q_any, q),
             _ => {}
         }
+    }
+
+    // A header that named/covered NO producible type — blank, or only unrecognised media types
+    // (`text/html`, `application/xml`, …). Solid default: degrade to Turtle, don't fail the read.
+    if q_turtle.is_none()
+        && q_jsonld.is_none()
+        && q_text_star.is_none()
+        && q_app_star.is_none()
+        && q_any.is_none()
+    {
+        return Some(NegotiatedFormat {
+            format: RdfFormat::Turtle,
+            jsonld_profile: None,
+        });
     }
 
     // Resolve each concrete type's effective weight: an explicit q wins; else the most specific
@@ -204,14 +312,23 @@ pub fn negotiate_accept(accept: Option<&str>, stored: RdfFormat) -> Option<RdfFo
     let jsonld = q_jsonld.or(q_app_star).or(q_any).unwrap_or(0.0);
 
     if turtle <= 0.0 && jsonld <= 0.0 {
-        return None; // 406 — the client accepts neither producible type.
+        return None; // 406 — the client EXPLICITLY refused (q=0) every covered producible type.
     }
     // Highest q wins; on a tie prefer the resource's stored format (cheapest, most faithful).
-    Some(match stored {
+    let format = match stored {
         RdfFormat::Turtle if turtle >= jsonld => RdfFormat::Turtle,
         RdfFormat::JsonLd if jsonld >= turtle => RdfFormat::JsonLd,
         _ if turtle >= jsonld => RdfFormat::Turtle,
         _ => RdfFormat::JsonLd,
+    };
+    Some(NegotiatedFormat {
+        format,
+        // The profile is only meaningful for a JSON-LD response, and only when JSON-LD won via an
+        // explicit `application/ld+json` range (a wildcard win carries no honoured profile).
+        jsonld_profile: match format {
+            RdfFormat::JsonLd => jsonld_profile,
+            RdfFormat::Turtle => None,
+        },
     })
 }
 
@@ -230,11 +347,25 @@ mod tests {
             Some(RdfFormat::Turtle)
         );
         assert_eq!(
-            negotiate_accept(Some(""), RdfFormat::JsonLd),
+            negotiate_accept(None, RdfFormat::JsonLd),
             Some(RdfFormat::JsonLd)
         );
         assert_eq!(
             negotiate_accept(Some("*/*"), RdfFormat::Turtle),
+            Some(RdfFormat::Turtle)
+        );
+    }
+
+    #[test]
+    fn blank_accept_falls_back_to_turtle_the_solid_default() {
+        // A PRESENT-but-blank Accept is treated as naming no producible type: the Solid default
+        // (text/turtle), even when the stored format is JSON-LD.
+        assert_eq!(
+            negotiate_accept(Some(""), RdfFormat::JsonLd),
+            Some(RdfFormat::Turtle)
+        );
+        assert_eq!(
+            negotiate_accept(Some("   "), RdfFormat::JsonLd),
             Some(RdfFormat::Turtle)
         );
     }
@@ -280,12 +411,31 @@ mod tests {
     }
 
     #[test]
-    fn unacceptable_accept_is_none_406() {
+    fn unrecognised_accept_falls_back_to_turtle_not_406() {
+        // An Accept naming only types the server can't produce degrades to the Solid default
+        // (text/turtle) — the read never fails over an exotic Accept.
         assert_eq!(
             negotiate_accept(Some("application/xml"), RdfFormat::Turtle),
+            Some(RdfFormat::Turtle)
+        );
+        assert_eq!(
+            negotiate_accept(Some("text/html"), RdfFormat::JsonLd),
+            Some(RdfFormat::Turtle)
+        );
+    }
+
+    #[test]
+    fn explicit_q_zero_refusal_of_every_covered_type_is_none_406() {
+        // The ONLY remaining 406: the client covered our producible types and explicitly refused
+        // them all with q=0 — serving one anyway would violate the client's stated refusal.
+        assert_eq!(
+            negotiate_accept(
+                Some("text/turtle;q=0, application/ld+json;q=0"),
+                RdfFormat::Turtle
+            ),
             None
         );
-        assert_eq!(negotiate_accept(Some("text/html"), RdfFormat::JsonLd), None);
+        assert_eq!(negotiate_accept(Some("*/*;q=0"), RdfFormat::JsonLd), None);
     }
 
     #[test]

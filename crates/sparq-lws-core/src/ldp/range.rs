@@ -1,24 +1,32 @@
 // AUTHORED-BY Claude Opus 4.8
-//! Single-range `Range: bytes=…` request handling (RFC 9110 §14).
+//! `Range: bytes=…` request handling (RFC 9110 §14 and RFC 7233 §4.1).
 //!
 //! Pure value logic: given a `Range` header value and the resource length, compute the satisfied
-//! byte interval (for a 206 + `Content-Range`), decide it is unsatisfiable (416), or decide the
-//! header should be ignored and the full body returned (200).
-//!
-//! Scope (M2 slice): a SINGLE byte range only — `bytes=a-b`, `bytes=a-` (open-ended), and
-//! `bytes=-n` (suffix). MULTIPART/multiple ranges (`multipart/byteranges`) are M2-next: a request
-//! that lists more than one range is treated as "ignore the header, return 200 full" (a spec-allowed
-//! response — a server MAY ignore a Range header), never a wrong partial. A syntactically invalid
-//! Range is likewise ignored (RFC 9110 §14.2: "an invalid ranges-specifier … the recipient … MUST
-//! ignore the Range header field").
+//! byte interval(s), decide it is unsatisfiable (416), or decide the header should be ignored and
+//! the full body returned (200). Multipart framing is also pure value logic.
+
+// [GPT-5.6] Multipart parsing and framing extension.
+/// Boundary used by [`encode_multipart`].
+pub const MULTIPART_BOUNDARY: &str = "sparq-lws-byte-boundary";
+
+/// An inclusive byte interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    /// First byte offset.
+    pub start: u64,
+    /// Last byte offset.
+    pub end: u64,
+}
 
 /// The outcome of evaluating a `Range` header against a resource of known length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RangeOutcome {
     /// No (usable) Range — serve the full body with 200.
     Full,
     /// A single satisfiable range `[start, end]` inclusive — serve 206 + `Content-Range`.
     Satisfied { start: u64, end: u64 },
+    /// Multiple satisfiable, non-overlapping ranges, ordered by their start offset.
+    Multipart(Vec<ByteRange>),
     /// The range was syntactically valid but cannot be satisfied for this length — 416.
     Unsatisfiable,
 }
@@ -33,10 +41,34 @@ impl RangeOutcome {
     }
 }
 
+/// Encode a `multipart/byteranges` body using a stable boundary.
+#[must_use]
+pub fn encode_multipart(body: &[u8], content_type: &str, ranges: &[ByteRange]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for range in ranges {
+        out.extend_from_slice(format!("--{MULTIPART_BOUNDARY}\r\n").as_bytes());
+        out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+        out.extend_from_slice(
+            format!(
+                "Content-Range: bytes {}-{}/{}\r\n\r\n",
+                range.start,
+                range.end,
+                body.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&body[range.start as usize..=range.end as usize]);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(format!("--{MULTIPART_BOUNDARY}--\r\n").as_bytes());
+    out
+}
+
 /// Evaluate a `Range` header value against a resource of `len` bytes.
 ///
 /// Only `bytes` ranges are understood; any other unit is ignored (→ [`RangeOutcome::Full`]). See the
-/// module docs for the single-range scope.
+/// Invalid single ranges retain the historical behavior of being ignored. Invalid multi-range
+/// requests fail closed as unsatisfiable.
 pub fn evaluate(range: Option<&str>, len: u64) -> RangeOutcome {
     let raw = match range {
         None => return RangeOutcome::Full,
@@ -49,9 +81,33 @@ pub fn evaluate(range: Option<&str>, len: u64) -> RangeOutcome {
         None => return RangeOutcome::Full,
     };
 
-    // Multiple ranges are out of scope for this slice — ignore the header (return full, never wrong).
     if specs.contains(',') {
-        return RangeOutcome::Full;
+        if len == 0 {
+            return RangeOutcome::Unsatisfiable;
+        }
+        let mut ranges = Vec::new();
+        for spec in specs.split(',') {
+            match parse_interval(spec.trim(), len) {
+                Ok(Some(range)) => ranges.push(range),
+                Ok(None) => {}
+                Err(()) => return RangeOutcome::Unsatisfiable,
+            }
+        }
+        if ranges.is_empty() {
+            return RangeOutcome::Unsatisfiable;
+        }
+        ranges.sort_unstable_by_key(|range| range.start);
+        if ranges.windows(2).any(|pair| pair[1].start <= pair[0].end) {
+            return RangeOutcome::Unsatisfiable;
+        }
+        if ranges.len() == 1 {
+            let range = ranges[0];
+            return RangeOutcome::Satisfied {
+                start: range.start,
+                end: range.end,
+            };
+        }
+        return RangeOutcome::Multipart(ranges);
     }
 
     let spec = specs.trim();
@@ -125,6 +181,54 @@ pub fn evaluate(range: Option<&str>, len: u64) -> RangeOutcome {
         // `bytes=-` — both empty: malformed ⇒ ignore.
         (true, true) => RangeOutcome::Full,
     }
+}
+
+fn parse_interval(spec: &str, len: u64) -> Result<Option<ByteRange>, ()> {
+    let (first, last) = spec.split_once('-').ok_or(())?;
+    let first = first.trim();
+    let last = last.trim();
+    if len == 0 || (first.is_empty() && last.is_empty()) {
+        return Err(());
+    }
+    let last_index = len - 1;
+    let range = match (first.is_empty(), last.is_empty()) {
+        (true, false) => {
+            let suffix: u64 = last.parse().map_err(|_| ())?;
+            if suffix == 0 {
+                return Ok(None);
+            }
+            ByteRange {
+                start: len.saturating_sub(suffix),
+                end: last_index,
+            }
+        }
+        (false, true) => {
+            let start: u64 = first.parse().map_err(|_| ())?;
+            if start > last_index {
+                return Ok(None);
+            }
+            ByteRange {
+                start,
+                end: last_index,
+            }
+        }
+        (false, false) => {
+            let start: u64 = first.parse().map_err(|_| ())?;
+            let requested_end: u64 = last.parse().map_err(|_| ())?;
+            if start > requested_end {
+                return Err(());
+            }
+            if start > last_index {
+                return Ok(None);
+            }
+            ByteRange {
+                start,
+                end: requested_end.min(last_index),
+            }
+        }
+        (true, true) => unreachable!(),
+    };
+    Ok(Some(range))
 }
 
 #[cfg(test)]
@@ -203,9 +307,14 @@ mod tests {
     }
 
     #[test]
-    fn multiple_ranges_are_ignored_not_wrong() {
-        // Out of scope for this slice — must NOT return a wrong single partial; return full.
-        assert_eq!(evaluate(Some("bytes=0-1,3-4"), 10), RangeOutcome::Full);
+    fn multiple_ranges_are_returned_in_order() {
+        assert_eq!(
+            evaluate(Some("bytes=3-4,0-1"), 10),
+            RangeOutcome::Multipart(vec![
+                ByteRange { start: 0, end: 1 },
+                ByteRange { start: 3, end: 4 },
+            ])
+        );
     }
 
     #[test]

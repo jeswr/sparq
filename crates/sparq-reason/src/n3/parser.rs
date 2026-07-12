@@ -6,6 +6,8 @@
 //! - literals: `"s"`, `"s"^^<dt>`, `"s"@lang`, integers, decimals, doubles, `true`/`false`
 //! - `_:blank`, `?var` (universally-quantified N3 variables)
 //! - `{ … }` formulae (graph terms), `( … )` collections (RDF lists)
+//! - `<< s p o >>` / `<<( s p o )>>` RDF-star quoted-triple TERMS (nested,
+//!   variables anywhere; both spellings are one [`Term::Triple`] value)
 //! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs),
 //!   `is EXPR of` (inverse predicate) and `has EXPR`
 //! - paths (`!`/`^`, also in predicate position), inverted predicates (`<-`),
@@ -188,6 +190,14 @@ fn collect_blanks_term(t: &Term, into_formulae: bool, out: &mut std::collections
                 collect_blanks_term(m, into_formulae, out);
             }
         }
+        // Quoted triples are TRANSPARENT structure (like lists): a premise
+        // blank inside `<< … >>` is a rule-scoped existential and becomes a
+        // matching variable. [FABLE-5]
+        Term::Triple(t) => {
+            for m in t.iter() {
+                collect_blanks_term(m, into_formulae, out);
+            }
+        }
         _ => {}
     }
 }
@@ -209,6 +219,11 @@ fn rewrite_term(t: &mut Term, into_formulae: bool, f: &impl Fn(&mut Term)) {
         }
         Term::List(ms) => {
             for m in ms.iter_mut() {
+                rewrite_term(m, into_formulae, f);
+            }
+        }
+        Term::Triple(tr) => {
+            for m in tr.iter_mut() {
                 rewrite_term(m, into_formulae, f);
             }
         }
@@ -637,6 +652,15 @@ impl<'a> Parser<'a> {
     fn atom(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.ws();
         match self.peek() {
+            // `<<` opens an RDF-star / RDF 1.2 quoted-triple term — never a valid
+            // IRIREF prefix (`<` is excluded inside an IRIREF), so one byte of
+            // lookahead disambiguates. [FABLE-5]
+            Some(b'<') if self.s.get(self.i + 1) == Some(&b'<') => {
+                if self.strict {
+                    return Err("quoted triples are not Turtle 1.1".into());
+                }
+                self.read_quoted_triple(out)
+            }
             Some(b'<') => {
                 let iri = self.read_iriref()?;
                 if let Some(q) = self.quantified(&iri) {
@@ -1096,6 +1120,37 @@ impl<'a> Parser<'a> {
             return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
         }
         Ok(Term::Formula(triples))
+    }
+
+    /// An RDF-star / RDF 1.2 quoted-triple term: `<< s p o >>` or the RDF 1.2
+    /// triple-term spelling `<<( s p o )>>` (the `(` must FOLLOW `<<` with no
+    /// whitespace — `<< (1 2) :p :o >>` keeps its list subject). Both forms
+    /// produce the same first-class [`Term::Triple`] value; components may be
+    /// any N3 term, including variables and nested quoted triples. NOTE: N3
+    /// itself has not pinned RDF-star syntax (see GH #2012); this follows the
+    /// classic RDF-star reading where `<< s p o >>` IS the triple term — it is
+    /// NOT expanded into RDF 1.2's `rdf:reifies` reifier sugar. [FABLE-5]
+    fn read_quoted_triple(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
+        self.enter()?;
+        self.i += 2; // the caller verified `<<`
+        // RDF 1.2 triple-term form: the literal token `<<(` (no whitespace).
+        let paren = self.s.get(self.i) == Some(&b'(');
+        if paren {
+            self.i += 1;
+        }
+        let s = self.term(out)?;
+        let p = self.term(out)?;
+        let o = self.term(out)?;
+        if paren && !self.eat(b')') {
+            return Err(format!("expected ')' closing a <<( … )>> triple term at byte {}", self.i));
+        }
+        self.ws();
+        if !self.s[self.i..].starts_with(b">>") {
+            return Err(format!("expected '>>' closing a quoted triple at byte {}", self.i));
+        }
+        self.i += 2;
+        self.depth -= 1;
+        Ok(Term::Triple(Box::new([s, p, o])))
     }
 
     fn read_collection(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
