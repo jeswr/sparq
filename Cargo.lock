@@ -4754,6 +4754,7 @@ dependencies = [
 name = "sparq-metamorph"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "serde",
  "serde_json",
  "sparq-core",
