@@ -821,7 +821,7 @@ fn conforms_to_all(
 
 /// `data` expanded with `extra` triples as a fresh `Graph`. Interns both the data
 /// (re-read from its dictionary) and the extra triples into a new dictionary.
-fn expand_graph(data: &Graph, extra: &[Triple]) -> Graph {
+pub(crate) fn expand_graph(data: &Graph, extra: &[Triple]) -> Graph {
     let view = GraphView::new(data);
     let base = view.triples(None, None, None).into_iter().map(|[s, p, o]| {
         Triple {

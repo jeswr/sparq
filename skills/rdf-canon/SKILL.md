@@ -102,7 +102,8 @@ if you want them without canonicalizing.
 
 ## Errors — fail closed
 
-`CanonError` has four variants:
+`CanonError` is `#[non_exhaustive]` (variants have been added ungated as the
+crate grew — keep a wildcard arm) and has five variants:
 
 - `TripleTerm` — the dataset contains an RDF 1.2 triple term as an object; these
   are outside W3C RDFC-1.0's data model, so the **standard** paths fail closed.
@@ -112,6 +113,12 @@ if you want them without canonicalizing.
   it: they require blank-node-free (ground) triple terms and fail closed
   otherwise. The variant itself is always present (not feature-gated), so
   matching on `CanonError` is identical in both feature states.
+- `TripleTermDepthExceeded` — a triple term nests deeper than the crate-wide
+  `MAX_TRIPLE_TERM_DEPTH` bound (128). Only the opt-in profile's entry points
+  construct it: they pre-check depth **iteratively** before any recursive
+  descent (HNDQ gossip, relabelling, serialization — and oxrdf's own
+  `Drop`/`Clone` recurse), so adversarially deep nesting fails closed instead
+  of risking a stack overflow. Ungated, like `NestedBlankNode`.
 - `Canonicalization(String)` — `rdf-canon` rejected the dataset. This includes
   the **HNDQ call-limit guard**: RDFC-1.0 has pathological-input blow-ups, so a
   poison graph trips the limit and fails closed rather than running unbounded.

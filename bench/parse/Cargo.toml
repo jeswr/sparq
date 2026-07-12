@@ -43,6 +43,13 @@ rayon = "1"
 # Match the production CLI environment: sparq-cli ingest runs under mimalloc.
 mimalloc = "0.1"
 
+[features]
+# [FABLE-5] (sq-tonhr.2) Compiles the DEMO candidate parser row (a serial oxttl
+# wrapper) into the pluggable candidate registry (src/candidate.rs) — the slot an
+# rdf-shuttle generated parser (sq-tonhr.8/.9) drops into. OFF by default: the
+# default build has zero candidate rows and byte-for-byte unchanged output.
+candidate-demo = []
+
 [dev-dependencies]
 # [OPUS-4.8] (sq-ghjc) Test-only: PARSE the dependency-free `--json` emit back to
 # assert it is valid JSON with the documented shape. The emit itself stays

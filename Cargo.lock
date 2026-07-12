@@ -4661,6 +4661,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sparq-core",
+ "sparq-engine",
  "wasm-bindgen-test",
 ]
 
