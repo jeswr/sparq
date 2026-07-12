@@ -167,6 +167,45 @@ in-memory store, no TLS (Node/proxy terminates it), no notifications, no PoP, no
 OIDC network → a Solid pod that round-trips LDP CRUD + WAC. This is a genuinely
 useful artifact and the correct v1 scope.
 
+### 5.4 Feature tiers — full vs core-Solid (maintainer-requested 2026-07-12)
+
+Both the **native** Solid server and the **wasm/npm** distribution must be
+buildable in **two tiers**, so the pure Solid protocol can be exercised in
+isolation from the SPARQL query surface (cleaner, faster, smaller-surface
+testing):
+
+- **`full`** — LDP + WAC **plus the SPARQL query/update endpoint** (the `/sparql`
+  route over the embedded engine). The default for the shipped server and the
+  default npm bundle.
+- **`core`** — **pure Solid protocol only**: LDP verbs + WAC + notifications where
+  applicable, with the SPARQL endpoint route **compiled out**. No `sparq-engine`
+  query endpoint surface; smaller wasm object; a protocol-conformance test target
+  with no query-engine confound.
+
+**Mechanism — one shared cargo feature on `sparq-lws-core`:**
+`sparql-endpoint` (**default-on**), gating **only** the SPARQL endpoint route
+registration in `build_router` + its handler module (query/update HTTP surface).
+It is **orthogonal** to the `wasm` feature (§5.1): the two compose into four
+build points, of which we ship the useful three —
+
+| Build | features | ships as |
+| --- | --- | --- |
+| native full | `sparql-endpoint` (default) | the `solid-server` binary (default) |
+| native core | `--no-default-features` (or without `sparql-endpoint`) | `solid-server` core / a `core` CI test target |
+| wasm full | `wasm,sparql-endpoint` | `@sparq/solid-server` (default bundle) |
+| wasm core | `wasm` (no `sparql-endpoint`) | `@sparq/solid-server` **core** variant / a `build:lws-wasm-core` script |
+
+INVARIANT: `sparql-endpoint` gates **route + handler only** — the `Store`'s own
+SPARQL-backed methods (used internally by LDP/WAC where relevant) are unaffected;
+LDP/WAC behaviour is byte-identical between tiers. Feature-**off** build must be
+byte-stable vs the always-compiled surface (cf the feature-off-wasm-drift trap).
+The npm package selects the tier at **build time** (two wasm artifacts), not at
+runtime, to keep the core bundle genuinely smaller. `startSolidServer(opts)` in
+the Node host loads whichever artifact the consumer installed; the bin advertises
+the active tier in `--version`/startup log. This split is the acceptance surface
+for cleaner testing: a `core`-tier smoke test asserts the `/sparql` route returns
+404/is-absent while LDP CRUD + WAC still round-trip.
+
 ## 6. Recommendation
 
 1. **Feasible only in reduced scope; ship that.** New `sparq-lws-wasm` crate +
