@@ -82,6 +82,13 @@ pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph,
 // graphs come out in first-occurrence document order (deterministic).
 pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String>
 
+// [FABLE-5] sq-tonhr.2 — load_dataset with a base IRI for the document's relative
+// IRIs (the DATASET companion to load_str_with_base): named graphs preserved,
+// SERIAL parse (base-relative docs are small — manifests, W3C test actions; the
+// rdf-trig conformance lane drives this). N-Quads has no relative IRIs (base
+// ignored); non-dataset formats defer to load_str_with_base.
+pub fn load_dataset_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String>
+
 // Streaming from any reader (e.g. a decompression stream) — serial.
 pub fn load_reader<R: std::io::Read>(reader: R, format: &str) -> Result<Graph, String>
 
@@ -526,7 +533,7 @@ cargo build -p sparq-cli --features serialize-rdf
   `"ntriples"`/`"n-triples"`/`"nt"`/`"application/n-triples"`,
   `"nquads"`/`"n-quads"`/`"nq"`/`"application/n-quads"`, `"trig"`/`"application/trig"`
   (and the `"jsonld"`/`"json-ld"`/`"application/ld+json"` set when the `jsonld` feature is
-  on). `parse_to_triples` (and the `_with_base` variants), `load_dataset`/`load_dataset_serial`
+  on). `parse_to_triples` (and the `_with_base` variants), `load_dataset`/`load_dataset_with_base`/`load_dataset_serial`
   gate on these explicit alias sets: any unknown/typo'd string returns
   `Err("unknown RDF format \"…\" (known: …)")` naming the bad format — it does **not**
   silently fall back to Turtle/TriG (the old `_ =>` catch-all was removed in sq-m2pc /
