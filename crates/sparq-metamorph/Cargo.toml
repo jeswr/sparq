@@ -53,4 +53,3 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [[bench]]
 name = "metamorph_throughput"
 harness = false
-required-features = ["protocol-drivers"]
