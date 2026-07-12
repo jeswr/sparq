@@ -7,6 +7,8 @@
 
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
+#[cfg(feature = "multi-hop")]
+use rustc_hash::FxHashSet;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern;
 use sparq_core::Graph;
@@ -50,6 +52,12 @@ pub struct SimConfig {
     /// exactly-scored result and scored by the predicate-profile Jaccard. `false`
     /// restores the strict v1 behaviour (only neighbor-level evidence is returned).
     pub profile_fallback: bool,
+    /// Maximum structural-neighborhood depth. The default `1` preserves the original
+    /// adjacent-triple signature exactly. Values greater than `1` expand breadth-first,
+    /// retaining first-hop elements at full weight and attenuating hop `h` by
+    /// `0.5^(h - 1)`. A value of `0` is treated as `1`.
+    #[cfg(feature = "multi-hop")]
+    pub depth: usize,
 }
 
 impl Default for SimConfig {
@@ -60,9 +68,15 @@ impl Default for SimConfig {
             exclude_predicates: Vec::new(),
             max_pair_frequency: 10_000,
             profile_fallback: true,
+            #[cfg(feature = "multi-hop")]
+            depth: 1,
         }
     }
 }
+
+/// Fixed per-hop attenuation used by the `multi-hop` feature.
+#[cfg(feature = "multi-hop")]
+const MULTI_HOP_ATTENUATION: f64 = 0.5;
 
 /// Edge direction within a signature element (outgoing: the entity is the subject;
 /// incoming: the entity is the object). Direction is part of the element — "directs
@@ -109,6 +123,8 @@ pub struct Sim<'g> {
     excluded: Vec<Id>,
     max_pair_frequency: usize,
     profile_fallback: bool,
+    #[cfg(feature = "multi-hop")]
+    depth: usize,
     /// |G| as f64, the IDF numerator.
     n_triples: f64,
 }
@@ -135,6 +151,8 @@ impl<'g> Sim<'g> {
             excluded,
             max_pair_frequency: cfg.max_pair_frequency,
             profile_fallback: cfg.profile_fallback,
+            #[cfg(feature = "multi-hop")]
+            depth: cfg.depth.max(1),
             n_triples: graph.len().max(1) as f64,
         }
     }
@@ -169,6 +187,17 @@ impl<'g> Sim<'g> {
     }
 
     fn signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
+        #[cfg(feature = "multi-hop")]
+        if self.depth > 1 {
+            return self.expanded_signature_of_id_mode(id, keep_neighbor);
+        }
+
+        self.one_hop_signature_of_id_mode(id, keep_neighbor)
+    }
+
+    /// The original depth-1 implementation stays on its own path so the default feature
+    /// state and `depth = 1` retain byte-identical floating-point operations and ordering.
+    fn one_hop_signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
         let mut elems: Vec<(u8, Id, Id)> = Vec::new();
         // Outgoing: (id, p, o) — one contiguous SPO range.
         let scan = self.graph.store.scan(&[Some(id), None, None]);
@@ -191,6 +220,74 @@ impl<'g> Sim<'g> {
         let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
         let total = weights.iter().sum();
         Signature { elems, weights, total }
+    }
+
+    /// Breadth-first expansion for the opt-in `multi-hop` feature. Each layer scans in
+    /// canonical id order; previously visited nodes are not reintroduced by backtracking.
+    /// When several paths produce one element, the nearest (largest) weight wins.
+    #[cfg(feature = "multi-hop")]
+    fn expanded_signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
+        let mut element_weights: FxHashMap<(u8, Id, Id), f64> = FxHashMap::default();
+        let mut visited: FxHashSet<Id> = FxHashSet::default();
+        visited.insert(id);
+        let mut frontier = vec![id];
+        let mut attenuation = 1.0;
+
+        for hop in 1..=self.depth {
+            let mut next_frontier = Vec::new();
+            for center in frontier {
+                let outgoing = self.graph.store.scan(&[Some(center), None, None]);
+                for row in outgoing.rows.iter() {
+                    let [_, p, neighbor] = outgoing.to_spo(row);
+                    if !self.is_excluded(p) && (hop == 1 || !visited.contains(&neighbor)) {
+                        let elem = (OUT, p, if keep_neighbor { neighbor } else { NO_ID });
+                        let weight = self.weight(p) * attenuation;
+                        element_weights
+                            .entry(elem)
+                            .and_modify(|current| *current = current.max(weight))
+                            .or_insert(weight);
+                    }
+                    if !self.is_excluded(p) && !visited.contains(&neighbor) {
+                        next_frontier.push(neighbor);
+                    }
+                }
+
+                let incoming = self.graph.store.scan(&[None, None, Some(center)]);
+                for row in incoming.rows.iter() {
+                    let [neighbor, p, _] = incoming.to_spo(row);
+                    if !self.is_excluded(p) && (hop == 1 || !visited.contains(&neighbor)) {
+                        let elem = (IN, p, if keep_neighbor { neighbor } else { NO_ID });
+                        let weight = self.weight(p) * attenuation;
+                        element_weights
+                            .entry(elem)
+                            .and_modify(|current| *current = current.max(weight))
+                            .or_insert(weight);
+                    }
+                    if !self.is_excluded(p) && !visited.contains(&neighbor) {
+                        next_frontier.push(neighbor);
+                    }
+                }
+            }
+
+            if next_frontier.is_empty() {
+                break;
+            }
+            next_frontier.sort_unstable();
+            next_frontier.dedup();
+            visited.extend(next_frontier.iter().copied());
+            frontier = next_frontier;
+            attenuation *= MULTI_HOP_ATTENUATION;
+        }
+
+        let mut weighted: Vec<((u8, Id, Id), f64)> = element_weights.into_iter().collect();
+        weighted.sort_unstable_by_key(|&(elem, _)| elem);
+        let (elems, weights): (Vec<_>, Vec<_>) = weighted.into_iter().unzip();
+        let total = weights.iter().sum();
+        Signature {
+            elems,
+            weights,
+            total,
+        }
     }
 
     /// Weighted Jaccard similarity of two terms' structural signatures, in `[0, 1]`:
@@ -390,6 +487,26 @@ impl<'g> Sim<'g> {
     /// `(direction, predicate)` elements (neighbor = [`NO_ID`]), weighted like
     /// a [`SignatureMode::Predicates`] signature.
     fn profile_of(&self, sig: &Signature) -> Signature {
+        #[cfg(feature = "multi-hop")]
+        if self.depth > 1 {
+            let mut role_weights: FxHashMap<(u8, Id, Id), f64> = FxHashMap::default();
+            for (&(direction, predicate, _), &weight) in sig.elems.iter().zip(&sig.weights) {
+                role_weights
+                    .entry((direction, predicate, NO_ID))
+                    .and_modify(|current| *current = current.max(weight))
+                    .or_insert(weight);
+            }
+            let mut weighted: Vec<((u8, Id, Id), f64)> = role_weights.into_iter().collect();
+            weighted.sort_unstable_by_key(|&(elem, _)| elem);
+            let (elems, weights): (Vec<_>, Vec<_>) = weighted.into_iter().unzip();
+            let total = weights.iter().sum();
+            return Signature {
+                elems,
+                weights,
+                total,
+            };
+        }
+
         let mut elems: Vec<(u8, Id, Id)> =
             sig.elems.iter().map(|&(d, p, _)| (d, p, NO_ID)).collect();
         elems.sort_unstable();
@@ -414,7 +531,7 @@ impl<'g> Sim<'g> {
     }
 }
 
-/// Weighted Jaccard of two prebuilt signatures — `Σ w over A∩B / Σ w over A∪B` by a
+/// Weighted Jaccard of two prebuilt signatures — `Σ min(wA, wB) / Σ max(wA, wB)` by a
 /// single merge of the two sorted element lists; 0 when the union is empty. The
 /// signature-level counterpart of [`Sim::similarity`], for callers that cache
 /// signatures (e.g. all-pairs evaluation).
@@ -426,7 +543,7 @@ pub fn weighted_jaccard(a: &Signature, b: &Signature) -> f64 {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                inter += a.weights[i];
+                inter += a.weights[i].min(b.weights[j]);
                 i += 1;
                 j += 1;
             }
@@ -455,6 +572,77 @@ mod tests {
 
     fn unweighted(g: &Graph) -> Sim<'_> {
         Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
+    }
+
+    #[cfg(feature = "multi-hop")]
+    fn multi_hop_unweighted(g: &Graph, depth: usize) -> Sim<'_> {
+        Sim::with_config(
+            g,
+            SimConfig {
+                idf: false,
+                depth,
+                profile_fallback: false,
+                ..SimConfig::default()
+            },
+        )
+    }
+
+    #[cfg(feature = "multi-hop")]
+    #[test]
+    fn default_depth_pins_original_signature_and_similarity() {
+        let g = graph(":a :p :b . :twin :p :b . :b :q :c .");
+        let sim = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                profile_fallback: false,
+                ..SimConfig::default()
+            },
+        );
+        let p = g.id_of(&iri("p")).unwrap();
+        let b = g.id_of(&iri("b")).unwrap();
+        let signature = sim.signature(&iri("a")).unwrap();
+
+        assert_eq!(signature.elems, vec![(OUT, p, b)]);
+        assert_eq!(signature.weights, vec![1.0]);
+        assert_eq!(signature.total_weight(), 1.0);
+        assert_eq!(sim.similarity(&iri("a"), &iri("twin")), 1.0);
+    }
+
+    #[cfg(feature = "multi-hop")]
+    #[test]
+    fn depth_two_chain_has_exact_attenuated_signature() {
+        let g = graph(":a :p :b . :b :q :c .");
+        let sim = multi_hop_unweighted(&g, 2);
+        let mut expected = vec![
+            (
+                (
+                    OUT,
+                    g.id_of(&iri("p")).unwrap(),
+                    g.id_of(&iri("b")).unwrap(),
+                ),
+                1.0,
+            ),
+            (
+                (
+                    OUT,
+                    g.id_of(&iri("q")).unwrap(),
+                    g.id_of(&iri("c")).unwrap(),
+                ),
+                0.5,
+            ),
+        ];
+        expected.sort_unstable_by_key(|&(elem, _)| elem);
+        let signature = sim.signature(&iri("a")).unwrap();
+        let actual: Vec<_> = signature
+            .elems
+            .iter()
+            .copied()
+            .zip(signature.weights.iter().copied())
+            .collect();
+
+        assert_eq!(actual, expected);
+        assert_eq!(signature.total_weight(), 1.5);
     }
 
     #[test]
