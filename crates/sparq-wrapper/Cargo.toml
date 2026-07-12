@@ -17,9 +17,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # [GPT-5.6] sq-1rg2q: proposed rdfjs/wrapper parity remains explicitly opt-in.
+# [SONNET-4.6] sq-1rg2q.2: typed focus kinds + bound node factories.
 default = []
 proposed-distinct = []
 proposed-cardinality = []
+proposed-focus-kinds = []
 
 [dependencies]
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }

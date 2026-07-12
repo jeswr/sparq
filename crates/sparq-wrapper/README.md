@@ -5,7 +5,7 @@ store, follow predicates, and convert literal values without handling raw
 dictionary IDs or triples. The crate is opt-in; `sparq-core` and
 `sparq-engine` do not depend on it.
 
-> Model: GPT-5.6 [GPT-5.6] (sq-1rg2q M1).
+> Model: GPT-5.6 [GPT-5.6] (sq-1rg2q M1); Sonnet-4.6 [SONNET-4.6] (sq-1rg2q.2).
 
 ## 🚀 Quickstart
 
@@ -49,6 +49,10 @@ the explicit raw-graph escape hatch.
 - `proposed-cardinality` adds required/optional singular traversal with typed
   cardinality errors based on rdfjs/wrapper draft PR #89. This proposal is not
   landed upstream.
+- `proposed-focus-kinds` adds typed focus kinds (`SubjectNode`, `PredicateNode`,
+  `ObjectNode`) and a `BoundFactory` that manufactures them from a borrowed store.
+  The sealed `IntoSubject` trait enforces at compile time that a `Literal` cannot
+  appear in the subject position. Source: rdfjs/wrapper PRs #83-#87.
 - All crate features are off by default, and the dependency on `sparq-core`
   disables its default features to keep this capability isolated.
 

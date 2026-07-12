@@ -1,6 +1,10 @@
 #![doc = include_str!("../README.md")]
 
 // [GPT-5.6] sq-1rg2q M1: a small, opt-in object view over sparq-core's real Graph.
+// [SONNET-4.6] sq-1rg2q.2: proposed typed focus kinds and bound node factories.
+
+#[cfg(feature = "proposed-focus-kinds")]
+pub mod proposed;
 
 use oxrdf::vocab::{rdf, xsd};
 use oxrdf::{Literal, NamedNode, Term};
@@ -198,6 +202,16 @@ impl fmt::Debug for Node<'_> {
 }
 
 impl<'g> Node<'g> {
+    /// Constructs a node from a raw graph reference and focus term.
+    ///
+    /// This is a crate-internal constructor used by the `proposed::typed_focus`
+    /// module so that typed node wrappers can delegate traversal without
+    /// duplicating the lookup logic.
+    #[cfg(feature = "proposed-focus-kinds")]
+    pub(crate) fn from_raw(graph: &'g Graph, focus: Term) -> Self {
+        Self { graph, focus }
+    }
+
     /// Returns the wrapped focus term.
     pub fn focus(&self) -> &Term {
         &self.focus

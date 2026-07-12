@@ -1,6 +1,6 @@
 ---
 name: rdf-wrapper
-description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result and typed-cardinality proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
+description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, and typed-focus-kinds proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
 ---
 
 # Use sparq-wrapper
@@ -62,13 +62,14 @@ Typed accessors are strict:
 All return `Result<_, AccessError>`; do not silently coerce a mismatched RDF
 datatype.
 
-Two explicitly experimental features implement proposals that remain unlanded
+Three explicitly experimental features implement proposals that remain unlanded
 in rdfjs/wrapper:
 
 ```toml
 sparq-wrapper = { version = "0.1", features = [
   "proposed-distinct",
   "proposed-cardinality",
+  "proposed-focus-kinds",
 ] }
 ```
 
@@ -77,6 +78,21 @@ term once ([issue #25](https://github.com/rdfjs/wrapper/issues/25),
 [draft PR #88](https://github.com/rdfjs/wrapper/pull/88)).
 `proposed-cardinality` adds `Node::required_out` / `optional_out` and typed
 `CardinalityError` data ([draft PR #89](https://github.com/rdfjs/wrapper/pull/89)).
+`proposed-focus-kinds` adds typed focus kinds based on rdfjs/wrapper draft PRs
+#83-#87: `SubjectNode`, `PredicateNode`, and `ObjectNode` carry their RDF
+positional legality in the type; a sealed `IntoSubject` trait ensures that a
+`Literal` cannot be passed to `BoundFactory::subject` at compile time.
+
+```rust
+use sparq_wrapper::proposed::typed_focus::BoundFactory;
+
+// factory borrows the store once; nodes share the borrow with zero cloning.
+let factory = BoundFactory::from_store(&store);
+let alice = factory.subject(NamedNode::new("http://example.org/alice")?);
+let bob   = factory.subject(NamedNode::new("http://example.org/bob")?);
+let knows = NamedNode::new("http://example.org/knows")?;
+for friend in alice.out(&knows) { println!("{}", friend.focus()); }
+```
 
 SHACL-to-Rust struct generation is not part of M1. Reuse `sparq-shacl`'s
 `ShapesModel` for that work; do not invent a second SHACL parser.
