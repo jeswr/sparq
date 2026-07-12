@@ -19,6 +19,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub const VOID_NS: &str = "http://rdfs.org/ns/void#";
 /// The served characteristic-set vocabulary namespace (`scs:`).
 pub const CS_NS: &str = "http://sparq.dev/ns/cs#";
+/// The served retrieval-capability vocabulary namespace (`sret:`) — the sparq
+/// extension vocab a source uses to declare, alongside its VoID partitions, whether it
+/// exposes a GenAI retrieval endpoint (vector and/or text) and a declared cardinality
+/// hint. Consumed by the planner as a STATIC, advisory hint only. [FABLE-5] sq-222my.
+pub const RETRIEVAL_NS: &str = "http://sparq.dev/ns/retrieval#";
 
 /// A stable identifier for a federated source (conventionally its endpoint URL). Used
 /// as the deterministic tie-break key throughout the planner.
@@ -82,6 +87,64 @@ pub struct CharSet {
     pub avg_multiplicity: Vec<f64>,
 }
 
+/// A source's declared **GenAI retrieval capability** ([FABLE-5] sq-222my): whether the
+/// federated source exposes a vector (ANN) and/or text retrieval endpoint, plus its
+/// declared per-request cardinality hint (the result-set size the endpoint typically
+/// returns, e.g. its default top-k).
+///
+/// ## Answer-safety invariant (load-bearing)
+///
+/// This is **advisory planner metadata only** — a STATIC hint the planner may use to
+/// order source selection. A wrong or absent value can reorder which sources are
+/// contacted first, but can **never** change the set of triples that answers a BGP
+/// (the same discipline as the answer-safe cardinality estimators). This bead only
+/// defines and round-trips the field; `selection.rs` consumes it in a follow-up
+/// (sq-lhcot) and must uphold the same invariant.
+///
+/// Served under the [`RETRIEVAL_NS`] vocab next to the VoID partitions:
+///
+/// ```ntriples
+/// <src> sret:retrievalCapability _:r .
+/// _:r a sret:RetrievalCapability .
+/// _:r sret:vectorEndpoint "true"^^xsd:boolean .
+/// _:r sret:textEndpoint "false"^^xsd:boolean .
+/// _:r sret:cardinalityHint "1000"^^xsd:integer .   # optional
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalCapability {
+    /// The source exposes a vector (ANN) retrieval endpoint.
+    pub vector: bool,
+    /// The source exposes a text (keyword / full-text) retrieval endpoint.
+    pub text: bool,
+    /// Declared per-request result-cardinality hint (e.g. the endpoint's default
+    /// top-k), `None` when the source declares none. Advisory only.
+    pub cardinality_hint: Option<u64>,
+}
+
+impl RetrievalCapability {
+    /// Serialises this capability to the N-Triples fragment a source serves alongside
+    /// its VoID document — the inverse of the [`SourceDescriptor::from_void_nt`] parse
+    /// path (`parse ∘ serialize = identity`, tested). Deterministic byte output.
+    pub fn to_void_nt(&self, source_iri: &str) -> String {
+        const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+        const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+        let mut out = String::new();
+        out.push_str(&format!(
+            "<{source_iri}> <{RETRIEVAL_NS}retrievalCapability> _:ret .\n\
+             _:ret <{RDF_TYPE}> <{RETRIEVAL_NS}RetrievalCapability> .\n\
+             _:ret <{RETRIEVAL_NS}vectorEndpoint> \"{}\"^^<{XSD_BOOLEAN}> .\n\
+             _:ret <{RETRIEVAL_NS}textEndpoint> \"{}\"^^<{XSD_BOOLEAN}> .\n",
+            self.vector, self.text
+        ));
+        if let Some(k) = self.cardinality_hint {
+            out.push_str(&format!(
+                "_:ret <{RETRIEVAL_NS}cardinalityHint> \"{k}\"^^<{XSD_INTEGER}> .\n"
+            ));
+        }
+        out
+    }
+}
+
 /// A federated source's full descriptor: capability set + skew-aware statistics, as
 /// mined from the served VoID + `scs:` document. The capability sets (`authorities`,
 /// predicate keys, class keys) drive **recall-safe** HiBISCuS pruning; the counts and
@@ -112,6 +175,10 @@ pub struct SourceDescriptor {
     /// positions is disabled (recall-safe). Predicate-position pruning still applies
     /// because the predicate partition set IS the complete predicate capability set.
     authorities_complete: bool,
+    /// The source's declared GenAI retrieval capability, `None` (the default) when the
+    /// source declares none. ADVISORY ONLY — see [`RetrievalCapability`]'s
+    /// answer-safety invariant. [FABLE-5] sq-222my.
+    retrieval: Option<RetrievalCapability>,
 }
 
 /// Builder for a [`SourceDescriptor`] (the typed construction path; the parse path
@@ -123,6 +190,7 @@ pub struct SourceDescriptorBuilder {
     classes: FxHashMap<String, ClassPartition>,
     char_sets: Vec<CharSet>,
     authorities_complete: bool,
+    retrieval: Option<RetrievalCapability>,
 }
 
 impl SourceDescriptor {
@@ -135,6 +203,7 @@ impl SourceDescriptor {
             classes: FxHashMap::default(),
             char_sets: Vec::new(),
             authorities_complete: false,
+            retrieval: None,
         }
     }
 
@@ -175,6 +244,13 @@ impl SourceDescriptor {
     /// The served characteristic sets.
     pub fn char_sets(&self) -> &[CharSet] {
         &self.char_sets
+    }
+
+    /// The source's declared GenAI retrieval capability, `None` (the default) when the
+    /// source declares none. ADVISORY ONLY — reordering hint, never an answer signal
+    /// (see [`RetrievalCapability`]). [FABLE-5] sq-222my.
+    pub fn retrieval(&self) -> Option<&RetrievalCapability> {
+        self.retrieval.as_ref()
     }
 
     /// Whether the descriptor's IRI-authority capability set is complete (every
@@ -272,6 +348,13 @@ impl SourceDescriptorBuilder {
         self
     }
 
+    /// Declares the source's GenAI retrieval capability (see [`RetrievalCapability`]
+    /// for the answer-safety invariant). Absent unless called. [FABLE-5] sq-222my.
+    pub fn retrieval(mut self, r: RetrievalCapability) -> Self {
+        self.retrieval = Some(r);
+        self
+    }
+
     /// Declares the IRI-authority capability set **complete**: authority pruning of
     /// subject/object positions becomes active for this source. Use only when the
     /// descriptor truly enumerates every authority the source can mint (e.g. a
@@ -304,6 +387,7 @@ impl SourceDescriptorBuilder {
             char_sets: self.char_sets,
             authorities,
             authorities_complete: self.authorities_complete,
+            retrieval: self.retrieval,
         }
     }
 }
@@ -323,6 +407,7 @@ impl SourceDescriptor {
         use oxrdf::{NamedOrBlankNode, Term as OxTerm};
         let v = |local: &str| format!("{VOID_NS}{local}");
         let cs = |local: &str| format!("{CS_NS}{local}");
+        let ret = |local: &str| format!("{RETRIEVAL_NS}{local}");
 
         // Collect blank-node partition rows: bnode label -> (predicate -> objects).
         let mut bn: FxHashMap<String, FxHashMap<String, Vec<OxTerm>>> = FxHashMap::default();
@@ -350,6 +435,13 @@ impl SourceDescriptor {
         }
 
         let mut builder = SourceDescriptor::builder(id).total_triples(total_triples);
+
+        // [FABLE-5] sq-222my: accumulated retrieval capability. Several declaration
+        // nodes (or duplicate statements on one node) merge DETERMINISTICALLY —
+        // endpoint flags OR together, the hint takes the max — so the result is
+        // independent of blank-node iteration order. Advisory metadata only: nothing
+        // below feeds it into any partition/char-set/authority state.
+        let mut retrieval: Option<RetrievalCapability> = None;
 
         for props in bn.values() {
             // --- void:propertyPartition: keyed by void:property.
@@ -416,7 +508,39 @@ impl SourceDescriptor {
                     avg_multiplicity: preds.iter().map(|(_, m)| *m).collect(),
                     subjects,
                 });
+                continue;
             }
+            // --- sret:RetrievalCapability ([FABLE-5] sq-222my): the source's declared
+            //     GenAI retrieval endpoints + cardinality hint. Advisory only.
+            let is_ret = props
+                .get(RDF_TYPE)
+                .map(|o| o.iter().any(|t| iri_eq(t, &ret("RetrievalCapability"))))
+                .unwrap_or(false);
+            if is_ret {
+                let node = RetrievalCapability {
+                    vector: props
+                        .get(&ret("vectorEndpoint"))
+                        .map(|o| any_bool_true(o))
+                        .unwrap_or(false),
+                    text: props
+                        .get(&ret("textEndpoint"))
+                        .map(|o| any_bool_true(o))
+                        .unwrap_or(false),
+                    cardinality_hint: props.get(&ret("cardinalityHint")).and_then(|o| max_u64(o)),
+                };
+                retrieval = Some(match retrieval.take() {
+                    None => node,
+                    Some(acc) => RetrievalCapability {
+                        vector: acc.vector || node.vector,
+                        text: acc.text || node.text,
+                        cardinality_hint: acc.cardinality_hint.max(node.cardinality_hint),
+                    },
+                });
+            }
+        }
+
+        if let Some(r) = retrieval {
+            builder = builder.retrieval(r);
         }
 
         Ok(builder.build())
@@ -454,6 +578,20 @@ fn first_f64(os: &[oxrdf::Term]) -> Option<f64> {
         oxrdf::Term::Literal(l) => l.value().parse::<f64>().ok(),
         _ => None,
     })
+}
+
+/// Whether ANY object is a boolean-true literal (`"true"` or the `"1"` lexical form of
+/// `xsd:boolean`). Used for the deterministic OR-merge of duplicate retrieval-endpoint
+/// statements. [FABLE-5] sq-222my.
+fn any_bool_true(os: &[oxrdf::Term]) -> bool {
+    os.iter()
+        .any(|t| matches!(t, oxrdf::Term::Literal(l) if matches!(l.value(), "true" | "1")))
+}
+
+/// The MAX over every numeric object — the deterministic merge of duplicate
+/// cardinality-hint statements. [FABLE-5] sq-222my.
+fn max_u64(os: &[oxrdf::Term]) -> Option<u64> {
+    os.iter().filter_map(as_u64).max()
 }
 
 /// The IRI **authority** (scheme + `://` + host[:port]) of an absolute IRI, e.g.
@@ -666,7 +804,10 @@ _:st2 <http://sparq.dev/ns/cs#avgMultiplicity> "2.0"^^<http://www.w3.org/2001/XM
 <http://s/> <http://rdfs.org/ns/void#triples> "300"^^<http://www.w3.org/2001/XMLSchema#integer> .
 "#;
         let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), nt).unwrap();
-        assert_eq!(d.total_triples, 500, "dataset total is the max of the served values");
+        assert_eq!(
+            d.total_triples, 500,
+            "dataset total is the max of the served values"
+        );
     }
 
     // ---- The builder DROPS a characteristic set with `subjects == 0` (degenerate, mirrors
@@ -841,6 +982,185 @@ _:st2 <http://sparq.dev/ns/cs#avgMultiplicity> "2.0"^^<http://www.w3.org/2001/XM
             .build();
         assert_eq!(d.star_subjects(&["http://ex/a".into()]), 0);
         assert_eq!(d.star_cardinality(&["http://ex/a".into()]), 0.0);
+    }
+
+    // ============================================================================
+    // [FABLE-5] sq-222my — optional per-source retrieval-capability descriptor
+    // (vector/text retrieval endpoints + declared cardinality hint). PLANNER-ONLY
+    // advisory metadata: answer-safety demands it can NEVER change which triples
+    // answer a BGP — this bead only defines + round-trips the field (selection.rs
+    // is untouched; a follow-up wires the ordering hint).
+    // ============================================================================
+
+    /// A base served-VoID document with NO retrieval capability — the "today" document.
+    const BASE_NT: &str = r#"<http://s/> <http://rdfs.org/ns/void#triples> "300"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://s/> <http://rdfs.org/ns/void#propertyPartition> _:p1 .
+_:p1 <http://rdfs.org/ns/void#property> <http://xmlns.com/foaf/0.1/knows> .
+_:p1 <http://rdfs.org/ns/void#triples> "200"^^<http://www.w3.org/2001/XMLSchema#integer> .
+_:p1 <http://rdfs.org/ns/void#distinctSubjects> "100"^^<http://www.w3.org/2001/XMLSchema#integer> .
+"#;
+
+    // ---- The field DEFAULTS TO ABSENT: a builder-built descriptor never given a
+    //      retrieval capability, and a parsed document that serves none, both report
+    //      `retrieval() == None`.
+    #[test]
+    fn retrieval_defaults_to_none() {
+        let built = SourceDescriptor::builder(SourceId::new("http://s/")).build();
+        assert!(built.retrieval().is_none(), "builder default is None");
+        let parsed = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), BASE_NT).unwrap();
+        assert!(
+            parsed.retrieval().is_none(),
+            "a document without the vocab parses to None"
+        );
+    }
+
+    // ---- parse ∘ serialize = identity: every shape of the capability (flags on/off,
+    //      hint present/absent) survives `to_void_nt` → `from_void_nt` unchanged.
+    #[test]
+    fn retrieval_round_trips_serialize_parse() {
+        let shapes = [
+            RetrievalCapability {
+                vector: true,
+                text: false,
+                cardinality_hint: Some(1000),
+            },
+            RetrievalCapability {
+                vector: false,
+                text: true,
+                cardinality_hint: None,
+            },
+            RetrievalCapability {
+                vector: true,
+                text: true,
+                cardinality_hint: Some(0),
+            },
+            RetrievalCapability {
+                vector: false,
+                text: false,
+                cardinality_hint: None,
+            },
+        ];
+        for cap in shapes {
+            let doc = format!("{BASE_NT}{}", cap.to_void_nt("http://s/"));
+            let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), &doc).unwrap();
+            assert_eq!(
+                d.retrieval(),
+                Some(&cap),
+                "parse(serialize(cap)) == cap for {cap:?}"
+            );
+            // And the serialize side of the identity: re-serialising the parsed value
+            // is byte-identical to the original fragment.
+            assert_eq!(
+                d.retrieval().unwrap().to_void_nt("http://s/"),
+                cap.to_void_nt("http://s/"),
+                "serialize(parse(serialize(cap))) == serialize(cap)"
+            );
+        }
+    }
+
+    // ---- The builder path carries the capability too (typed construction parity with
+    //      the parse path).
+    #[test]
+    fn retrieval_builder_sets_field() {
+        let cap = RetrievalCapability {
+            vector: true,
+            text: true,
+            cardinality_hint: Some(42),
+        };
+        let d = SourceDescriptor::builder(SourceId::new("S"))
+            .retrieval(cap.clone())
+            .build();
+        assert_eq!(d.retrieval(), Some(&cap));
+    }
+
+    // ---- ANSWER-SAFETY / byte-identical-behaviour: adding the retrieval fragment to a
+    //      document changes NOTHING else about the parsed descriptor — every existing
+    //      accessor (total triples, partitions, char sets, authorities) reads the same
+    //      with or without it. The capability is advisory metadata only.
+    #[test]
+    fn absent_or_present_retrieval_leaves_descriptor_behaviour_identical() {
+        let cap = RetrievalCapability {
+            vector: true,
+            text: false,
+            cardinality_hint: Some(7),
+        };
+        let with = format!("{BASE_NT}{}", cap.to_void_nt("http://s/"));
+        let today = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), BASE_NT).unwrap();
+        let extended = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), &with).unwrap();
+        assert_eq!(today.total_triples, extended.total_triples);
+        assert_eq!(
+            today
+                .predicate("http://xmlns.com/foaf/0.1/knows")
+                .unwrap()
+                .triples,
+            extended
+                .predicate("http://xmlns.com/foaf/0.1/knows")
+                .unwrap()
+                .triples
+        );
+        assert_eq!(today.declares_any_class(), extended.declares_any_class());
+        assert_eq!(today.char_sets().len(), extended.char_sets().len());
+        assert_eq!(
+            today.authorities_complete(),
+            extended.authorities_complete()
+        );
+        assert_eq!(
+            today.may_hold_authority("http://anything.example/x"),
+            extended.may_hold_authority("http://anything.example/x")
+        );
+        // The ONLY observable difference is the advisory field itself.
+        assert!(today.retrieval().is_none());
+        assert_eq!(extended.retrieval(), Some(&cap));
+    }
+
+    // ---- DETERMINISTIC merge when a served document (out of spec but possible) carries
+    //      SEVERAL retrieval-capability nodes: endpoint flags OR together and the hint
+    //      takes the max — independent of blank-node iteration order.
+    #[test]
+    fn retrieval_multiple_declarations_merge_deterministically() {
+        let a = RetrievalCapability {
+            vector: true,
+            text: false,
+            cardinality_hint: Some(10),
+        };
+        let b = RetrievalCapability {
+            vector: false,
+            text: true,
+            cardinality_hint: Some(99),
+        };
+        let doc = format!(
+            "{BASE_NT}{}{}",
+            a.to_void_nt("http://s/"),
+            b.to_void_nt("http://s/")
+        );
+        let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), &doc).unwrap();
+        assert_eq!(
+            d.retrieval(),
+            Some(&RetrievalCapability {
+                vector: true,
+                text: true,
+                cardinality_hint: Some(99),
+            })
+        );
+    }
+
+    // ---- A retrieval node with NO recognised statements still parses (all-default:
+    //      no endpoints, no hint) rather than erroring — recall-safe leniency.
+    #[test]
+    fn retrieval_bare_typed_node_parses_to_defaults() {
+        let doc = format!(
+            "{BASE_NT}<http://s/> <http://sparq.dev/ns/retrieval#retrievalCapability> _:r .\n\
+             _:r <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://sparq.dev/ns/retrieval#RetrievalCapability> .\n"
+        );
+        let d = SourceDescriptor::from_void_nt(SourceId::new("http://s/"), &doc).unwrap();
+        assert_eq!(
+            d.retrieval(),
+            Some(&RetrievalCapability {
+                vector: false,
+                text: false,
+                cardinality_hint: None,
+            })
+        );
     }
 
     // ---- Accessors line up: `predicate`/`has_predicate`/`class`/`has_class`/`id` read back
