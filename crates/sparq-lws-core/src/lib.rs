@@ -65,6 +65,7 @@ pub mod auth_cache;
 mod auth_wasm_native_tests;
 pub mod authz;
 pub mod body_limit;
+mod clock;
 pub mod error;
 /// Provider-issued WebIDs hosted OUTSIDE the pod — the identity host (the RSS adaptation of
 /// prod-solid-server `decisions/0020`; design in `docs/design/webid-outside-pod.md`). The id-docs

@@ -34,8 +34,6 @@ pub mod sparql;
 // storage layer (where the timestamp is written + read), dependency-free — see the module doc.
 pub mod timestamp;
 
-use std::time::SystemTime;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use oxrdf::NamedNode;
@@ -416,7 +414,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
             etag,
             // Stamp the write instant so `If-Modified-Since` sees a real Last-Modified: a re-write
             // bumps it, so a later conditional GET correctly re-serves the changed representation.
-            last_modified: Some(SystemTime::now()),
+            last_modified: Some(crate::clock::now()),
         };
         self.sparq
             .put_meta(iri, meta.clone())
@@ -456,7 +454,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
             etag,
             // Stamp the create instant (see `write`) — the new child's Last-Modified for
             // `If-Modified-Since`.
-            last_modified: Some(SystemTime::now()),
+            last_modified: Some(crate::clock::now()),
         };
         match self
             .sparq

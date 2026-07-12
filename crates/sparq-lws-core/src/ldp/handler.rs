@@ -2128,13 +2128,13 @@ async fn generate_unique<S: Store>(
     as_container: bool,
 ) -> Result<String, ServerError> {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let prefix = stem.unwrap_or("resource");
     let suffix = if as_container { "/" } else { "" };
     // Seed with a coarse timestamp so names are unique across process restarts too.
-    let seed = SystemTime::now()
+    let seed = crate::clock::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);

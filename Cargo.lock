@@ -5015,6 +5015,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
+ "js-sys",
  "mimalloc",
  "object_store",
  "oxjsonld",
@@ -5042,6 +5043,23 @@ dependencies = [
  "tower",
  "tower-http 0.7.0",
  "url",
+]
+
+[[package]]
+name = "sparq-lws-wasm"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-executor",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "http",
+ "oxrdf 0.3.3",
+ "sparq-lws-core",
+ "tower",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

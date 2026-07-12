@@ -242,7 +242,7 @@ pub async fn reconcile_orphans<S: SparqClient + ?Sized, B: BlobStore + ?Sized>(
     // 2. The physically-stored blobs.
     let stored = blob.list().await.map_err(ReconcileError::ListBlobs)?;
 
-    let now = SystemTime::now();
+    let now = crate::clock::now();
     let mut report = ReconcileReport {
         scanned: stored.len(),
         ..Default::default()
