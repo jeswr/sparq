@@ -1,0 +1,27 @@
+# The BASE graph (fixture 2) — NO quoted triples. Its RDFS / OWL 2 RL closures
+# are byte-pinned in expected/base_rdfs_closure.nt / expected/base_owlrl_closure.nt
+# and must be UNAFFECTED by the quoted_overlay.ttl quoted triples referring to it.
+#
+# Derivations (each expected/*.nt line beyond the 9 asserted triples):
+#   RDFS  — rdfs2 (domain):      :alice rdf:type :Employee
+#           rdfs3 (range):       :acme  rdf:type :Company
+#           rdfs7 (subprop):     :alice :affiliatedWith :acme
+#           rdfs9 (subclass):    :alice rdf:type :Person
+#   OWL RL (additionally)
+#         — prp-trp (transitive): :acme :partOf :conglomerate
+#           prp-inv (inverse):    :acme :employs :alice
+@prefix : <urn:sparq:qto:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+:worksFor rdfs:domain :Employee ;
+          rdfs:range :Company ;
+          rdfs:subPropertyOf :affiliatedWith .
+:Employee rdfs:subClassOf :Person .
+:partOf a owl:TransitiveProperty .
+:employs owl:inverseOf :worksFor .
+
+:alice :worksFor :acme .
+:acme :partOf :megacorp .
+:megacorp :partOf :conglomerate .
