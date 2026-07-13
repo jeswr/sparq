@@ -75,6 +75,23 @@ for row in &answer.result.rows {                  // Vec<Vec<Option<oxrdf::Term>
 
 ## Key APIs
 
+The internal `sparq-acbench` audience-capability matrix exposes its implemented
+GenAI-retrieval catalogue as typed data. Approximate rows are proposals only;
+exact graph execution or provenance validates what is answered or cited:
+
+```rust
+use sparq_acbench::{AnswerSafety, GENAI_RETRIEVAL_EXPRESSIBILITY};
+
+for row in GENAI_RETRIEVAL_EXPRESSIBILITY {
+    println!("{}: {}/{} ({:?})", row.capability, row.provider_crate,
+             row.provider_feature, row.answer_safety);
+    assert!(matches!(row.answer_safety,
+        AnswerSafety::ApproximateProposes | AnswerSafety::ExactValidates));
+}
+```
+
+<!-- [GPT-5.6] sq-oti9m: public catalogue maintenance note. -->
+
 `sparq-introspect`:
 
 ```rust

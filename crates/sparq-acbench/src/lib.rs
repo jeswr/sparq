@@ -333,6 +333,70 @@ pub struct ExpressibilityEntry {
     pub expressibility: Expressibility,
 }
 
+/// How a GenAI-retrieval capability participates in an answer-safe pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerSafety {
+    /// An approximate signal proposes candidates; it does not establish an answer.
+    ApproximateProposes,
+    /// An exact graph operation validates or emits the grounded result.
+    ExactValidates,
+}
+
+/// One implemented capability in the GenAI-retrieval expressibility catalogue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenAiRetrievalExpressibilityEntry {
+    /// Stable, human-readable capability name.
+    pub capability: &'static str,
+    /// Workspace crate that implements the capability.
+    pub provider_crate: &'static str,
+    /// Declared Cargo feature that exposes the capability.
+    ///
+    /// `default` means the capability is available whenever the opt-in provider crate itself is
+    /// selected; it does not make that crate part of the default engine.
+    pub provider_feature: &'static str,
+    /// The capability's role in the answer-safety boundary.
+    pub answer_safety: AnswerSafety,
+}
+
+/// Implemented GenAI-retrieval capabilities used by the audience-capability matrix.
+///
+/// Approximate ANN and fusion signals only propose candidates. Generated queries are parsed and
+/// executed by the exact engine, while citations are emitted only from provenance asserted in the
+/// graph. Every provider pair below names a crate and Cargo feature declared in this workspace.
+/// [GPT-5.6] `sq-oti9m` keeps this catalogue data-only and independent of workload execution.
+pub const GENAI_RETRIEVAL_EXPRESSIBILITY: [GenAiRetrievalExpressibilityEntry; 5] = [
+    GenAiRetrievalExpressibilityEntry {
+        capability: "vec:nearest ANN-in-SPARQL",
+        provider_crate: "sparq-vectors",
+        provider_feature: "vec-predicate",
+        answer_safety: AnswerSafety::ApproximateProposes,
+    },
+    GenAiRetrievalExpressibilityEntry {
+        capability: "filtered ANN by type",
+        provider_crate: "sparq-vectors",
+        provider_feature: "filtered-ann",
+        answer_safety: AnswerSafety::ApproximateProposes,
+    },
+    GenAiRetrievalExpressibilityEntry {
+        capability: "hybrid text+vector fusion",
+        provider_crate: "sparq-vectors",
+        provider_feature: "default",
+        answer_safety: AnswerSafety::ApproximateProposes,
+    },
+    GenAiRetrievalExpressibilityEntry {
+        capability: "NL→SPARQL",
+        provider_crate: "sparq-nlq",
+        provider_feature: "live",
+        answer_safety: AnswerSafety::ExactValidates,
+    },
+    GenAiRetrievalExpressibilityEntry {
+        capability: "provenance-carrying citation",
+        provider_crate: "sparq-nlq",
+        provider_feature: "citations",
+        answer_safety: AnswerSafety::ExactValidates,
+    },
+];
+
 /// The three access-control models supported by the benchmark.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AcModel {
@@ -1005,4 +1069,82 @@ pub fn oracle_acp(request: &Request, intents: &[IntentRow]) -> Decision {
 #[must_use]
 pub fn oracle_odrl(request: &Request, intents: &[IntentRow]) -> Decision {
     oracle::evaluate_odrl(request, intents)
+}
+
+#[cfg(test)]
+mod expressibility_tests {
+    use super::{AnswerSafety, GenAiRetrievalExpressibilityEntry, GENAI_RETRIEVAL_EXPRESSIBILITY};
+
+    const VECTORS_MANIFEST: &str = include_str!("../../sparq-vectors/Cargo.toml");
+    const NLQ_MANIFEST: &str = include_str!("../../sparq-nlq/Cargo.toml");
+
+    fn feature_is_declared(manifest: &str, feature: &str) -> bool {
+        manifest
+            .lines()
+            .skip_while(|line| line.trim() != "[features]")
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with('['))
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name.trim()))
+            .any(|name| name == feature)
+    }
+
+    #[test]
+    fn genai_retrieval_expressibility_catalogue_is_complete_and_grounded() {
+        const EXPECTED: [GenAiRetrievalExpressibilityEntry; 5] = [
+            GenAiRetrievalExpressibilityEntry {
+                capability: "vec:nearest ANN-in-SPARQL",
+                provider_crate: "sparq-vectors",
+                provider_feature: "vec-predicate",
+                answer_safety: AnswerSafety::ApproximateProposes,
+            },
+            GenAiRetrievalExpressibilityEntry {
+                capability: "filtered ANN by type",
+                provider_crate: "sparq-vectors",
+                provider_feature: "filtered-ann",
+                answer_safety: AnswerSafety::ApproximateProposes,
+            },
+            GenAiRetrievalExpressibilityEntry {
+                capability: "hybrid text+vector fusion",
+                provider_crate: "sparq-vectors",
+                provider_feature: "default",
+                answer_safety: AnswerSafety::ApproximateProposes,
+            },
+            GenAiRetrievalExpressibilityEntry {
+                capability: "NL→SPARQL",
+                provider_crate: "sparq-nlq",
+                provider_feature: "live",
+                answer_safety: AnswerSafety::ExactValidates,
+            },
+            GenAiRetrievalExpressibilityEntry {
+                capability: "provenance-carrying citation",
+                provider_crate: "sparq-nlq",
+                provider_feature: "citations",
+                answer_safety: AnswerSafety::ExactValidates,
+            },
+        ];
+
+        assert_eq!(
+            GENAI_RETRIEVAL_EXPRESSIBILITY.len(),
+            5,
+            "the catalogue count pins the five GenAI-retrieval additions"
+        );
+        assert_eq!(
+            GENAI_RETRIEVAL_EXPRESSIBILITY, EXPECTED,
+            "every authoritative GenAI-retrieval capability must be present exactly once"
+        );
+
+        for entry in GENAI_RETRIEVAL_EXPRESSIBILITY {
+            let manifest = match entry.provider_crate {
+                "sparq-vectors" => VECTORS_MANIFEST,
+                "sparq-nlq" => NLQ_MANIFEST,
+                other => panic!("catalogue references an unknown provider crate: {other}"),
+            };
+            assert!(
+                feature_is_declared(manifest, entry.provider_feature),
+                "{}/{} is not a declared workspace crate/feature pair",
+                entry.provider_crate,
+                entry.provider_feature
+            );
+        }
+    }
 }
