@@ -45,7 +45,8 @@ use sparq_algos::{
     degree_centrality, degree_centrality_normalized, Direction, top_k,
     betweenness_centrality, closeness_centrality, core_number,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
-    is_acyclic, strongly_connected_components, topological_sort,
+    is_acyclic, num_strongly_connected_components, strongly_connected_components,
+    topological_sort,
 };
 
 // Project the RDF graph onto a directed node graph.
@@ -75,6 +76,7 @@ let k    = num_communities(&comm);                         // distinct community
 
 // --- Directed topology ---
 let scc   = strongly_connected_components(&g);             // dense component id per node
+let scc_k = num_strongly_connected_components(&scc);       // number of components
 let dag   = is_acyclic(&g);                                 // false for any directed cycle
 let order = topological_sort(&g)?;                         // canonical DAG order; Err on cycle
 ```
@@ -99,6 +101,7 @@ let order = topological_sort(&g)?;                         // canonical DAG orde
 | `label_propagation(&g, LabelPropConfig)` | heuristic community labels (`Vec<usize>`) |
 | `num_communities(&labels)` | distinct community count |
 | `strongly_connected_components(&g)` | directed SCC id per node; requires `topology` |
+| `num_strongly_connected_components(&labels)` | directed SCC count; requires `topology` |
 | `is_acyclic(&g)` | whether the directed graph has no cycle; requires `topology` |
 | `topological_sort(&g)` | canonical `Result<Vec<usize>, CycleError>`; requires `topology` |
 
@@ -137,3 +140,4 @@ let order = topological_sort(&g)?;                         // canonical DAG orde
   RAM (CSR forward + reverse adjacency keyed by dense `u32` node indices); it does not
   reference the source graph after building, except `term()` which needs the dict.
 - Opt-in, workspace v0.1.0, `#![forbid(unsafe_code)]`. [OPUS-4.8] pending re-review.
+  [GPT-5.6] `sq-awq7n` added the SCC count accessor.

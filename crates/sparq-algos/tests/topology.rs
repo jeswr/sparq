@@ -4,7 +4,8 @@
 
 use proptest::prelude::*;
 use sparq_algos::{
-    is_acyclic, strongly_connected_components, topological_sort, CycleError, NodeGraph,
+    is_acyclic, num_strongly_connected_components, strongly_connected_components, topological_sort,
+    CycleError, NodeGraph,
 };
 use sparq_core::Graph;
 
@@ -30,6 +31,36 @@ fn directed_cycle_and_isolated_node_have_two_components() {
     );
     assert_eq!(strongly_connected_components(&graph), vec![0, 0, 0, 1]);
     assert_eq!(topological_sort(&graph), Err(CycleError));
+}
+
+/// [GPT-5.6] sq-awq7n: value-pins the dense-label count, including its empty-input
+/// sentinel. The reciprocal d/e pair is the second SCC; a one-way edge would instead
+/// make d and e separate singleton SCCs, as `one_way_edge_does_not_merge_strong_components`
+/// verifies below.
+#[test]
+fn strongly_connected_component_count_handles_two_three_and_zero() {
+    let two_components = build(
+        r#"
+<http://e/a> <http://p/edge> <http://e/b> .
+<http://e/b> <http://p/edge> <http://e/c> .
+<http://e/c> <http://p/edge> <http://e/a> .
+<http://e/d> <http://p/edge> <http://e/e> .
+<http://e/e> <http://p/edge> <http://e/d> .
+"#,
+    );
+    let two_labels = strongly_connected_components(&two_components);
+    assert_eq!(num_strongly_connected_components(&two_labels), 2);
+
+    let three_components = build(
+        r#"
+<http://e/a> <http://p/edge> <http://e/a> .
+<http://e/b> <http://p/edge> <http://e/b> .
+<http://e/c> <http://p/edge> <http://e/c> .
+"#,
+    );
+    let three_labels = strongly_connected_components(&three_components);
+    assert_eq!(num_strongly_connected_components(&three_labels), 3);
+    assert_eq!(num_strongly_connected_components(&[]), 0);
 }
 
 #[test]

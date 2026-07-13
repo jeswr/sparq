@@ -115,6 +115,13 @@ pub fn strongly_connected_components(g: &NodeGraph) -> Vec<usize> {
     densify_roots(&component_root)
 }
 
+/// [GPT-5.6] sq-awq7n: Returns the number of strongly connected components in a
+/// labelling produced by `strongly_connected_components` (dense ids, so this is
+/// `max + 1`, or `0` for an empty labelling).
+pub fn num_strongly_connected_components(labels: &[usize]) -> usize {
+    labels.iter().copied().max().map_or(0, |m| m + 1)
+}
+
 fn discover(
     node: usize,
     indices: &mut [usize],
