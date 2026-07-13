@@ -148,6 +148,25 @@ pub struct Hit {
     pub score: f32,
 }
 
+/// Corpus statistics for one analyzed index token. [GPT-5.6] sq-rviwn
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TermStats {
+    /// Number of indexed documents containing the token.
+    pub doc_count: usize,
+    /// Total number of token occurrences across those documents.
+    pub total_tf: u32,
+    /// BM25 inverse document frequency used by this index's scoring paths.
+    pub idf: f32,
+}
+
+/// The BM25 inverse-document-frequency formula shared by every scoring path.
+/// [GPT-5.6] sq-rviwn
+fn bm25_idf(document_count: usize, document_frequency: usize) -> f32 {
+    let n = document_count as f32;
+    let df = document_frequency as f32;
+    ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+}
+
 /// A BM25 inverted index over the string literals of a sparq [`Graph`]'s
 /// dictionary (see the module docs for design and maintenance).
 ///
@@ -363,6 +382,27 @@ impl TextIndex {
     /// Number of distinct tokens.
     pub fn token_count(&self) -> usize {
         self.postings.len()
+    }
+
+    /// Returns corpus statistics for exactly one analyzed token.
+    ///
+    /// `token` is normalized with this index's [`Analyzer`], exactly as indexed
+    /// text is. Input that analyzes to zero or multiple tokens, or whose token
+    /// has no postings, returns `None`. Lookup is exact: this method does not
+    /// expand query-prefix syntax such as `*`. [GPT-5.6] sq-rviwn
+    pub fn term_stats(&self, token: &str) -> Option<TermStats> {
+        let mut tokens = tokenize_with(token, self.analyzer).into_iter();
+        let token = tokens.next()?;
+        if tokens.next().is_some() {
+            return None;
+        }
+        let rows = self.postings.get(token.as_str())?;
+        let doc_count = rows.len();
+        Some(TermStats {
+            doc_count,
+            total_tf: rows.iter().map(|(_, tf)| tf).sum(),
+            idf: bm25_idf(self.docs.len(), doc_count),
+        })
     }
 
     /// A rough estimate of the index's heap footprint in bytes (for
@@ -669,8 +709,7 @@ impl TextIndex {
                 .postings
                 .get(term)
                 .expect("fuzzy signatures are derived from posting keys");
-            let df = rows.len() as f32;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let idf = bm25_idf(self.docs.len(), rows.len());
             for &(id, tf) in rows {
                 let dl = self.docs[&id] as f32;
                 let tf = tf as f32;
@@ -927,8 +966,7 @@ impl TextIndex {
         // doc id -> (accumulated score, number of query terms present).
         let mut acc: FxHashMap<Id, (f32, u32)> = FxHashMap::default();
         for rows in &lists {
-            let df = rows.len() as f32;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let idf = bm25_idf(self.docs.len(), rows.len());
             for &(id, tf) in rows {
                 let dl = self.docs[&id] as f32;
                 let tf = tf as f32;
