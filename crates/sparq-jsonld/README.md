@@ -6,7 +6,8 @@ Context Processing, Expansion, Flattening, Compaction, Framing, and RDF
 
 [JSON-LD 1.1]: https://www.w3.org/TR/json-ld11/
 
-> Model: Sonnet 4.6 (sq-90mu3) extending Opus 4.8 scaffold. Flag for re-review with Fable.
+> [GPT-5.6] Build-out status reconciled in `sq-ci15w`; implementation provenance remains
+> recorded on the individual algorithms.
 > Epic `sq-oy1f` (design record `research/jsonld-1.1-design.md`).
 
 ## 🚀 Quickstart
@@ -93,9 +94,16 @@ Compaction** (`compact::compact` / `compact::compact_expanded`): scoped
 against the W3C **expected** documents (the normative oracle; see
 `sparq-conformance`'s `floors::compact` for the honest fail/skip buckets).
 
-The remaining modules (`frame`, `to_rdf`, `api`) are documented stubs, filled by
-dependency-ordered follow-on beads. The crate is `publish = false` until the
-pipeline is real.
+Beads `sq-oy1f.27` / `.29` add the document-level **Framing Algorithm**
+(`frame::frame` / `frame::frame_expanded`): frame matching and value patterns,
+`@embed`, `@explicit` / `@default`, named graphs, list re-emission, and framing error
+validation. Its pinned W3C framing lane passes all 92 cases against the normative
+document oracle; that complete lane is not a blanket conformance claim for remote
+loading, HTML extraction, or other JSON-LD surfaces.
+
+Only `to_rdf` and `api` remain documented stubs. `publish = false` is the crate's
+current internal-release posture, not an indication that compaction or framing is
+unimplemented.
 
 ## 📚 Learn more
 
